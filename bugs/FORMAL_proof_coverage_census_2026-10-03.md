@@ -1,5 +1,77 @@
 # FORMAL_proof_coverage_census_2026-10-03: 60 functions from THIS repository, both backends, with proofs on
 
+**§0.7 is new (2026-10-04, `work/formal21-5`): §0.2's table is RE-MEASURED on
+this tree, and the honest headline is that it is not comparable — the sample
+moved, so only the per-item method and the two families are.** Phase A only, no
+Lean, 60 items in **1 s**:
+
+```console
+$ python3 tools/memslot.py --gb 8 --label pb -- python3 -u \
+      tools/formal_proof_breadth.py --no-check --arch arm64 -j 2 -t 1 \
+      --ledger bugs/sweeps/proof_breadth_2026-10-04_f21-5-arm64-phaseA.jsonl
+60/60 verdicts in 1s
+```
+
+| | §0.2 (`…_harness-filter-phaseA.jsonl`) | this tree | comparable? |
+|---|---:|---:|---|
+| `codegen-refused` | 32 | **31** | **no** |
+| `proof-refused` | 13 | **14** | **no** |
+| reached the proof layer | 25 | **29** | **no** |
+| items in common with §0.2's ledger | | **28 of 60** | |
+
+**28 of 60 is the whole finding, and §0.6's own warning is what it instantiates:**
+the sample is round-robin over sorted paths, this repository's own file list
+grew, and so twelve of the examples are different files. A census whose sample
+moved is two censuses, and the tool says so itself ("only 10 of its 45 repo
+idents still exist and 22 of its 41 files are no longer sampled at all"). So the
+counts above are **not** a delta and are not offered as one; the ledger is
+committed so the numbers are checkable rather than quoted.
+
+**What IS comparable, because it is asked per item off the tool's own emitted
+source rather than off a sample** — §0.2's method, §0's:
+
+| §0's item | §0.2 recorded | this tree, arm64 |
+|---|---|---|
+| `gimple_codegen.py:_selfhost_syms` | `'_out.sort()' is a method call on a value` | **the same message**, at `:611` (`:69` then `:1036`, the sample's tie-break having moved again) |
+| `formal/arm64_proof_gen.py:_step_branch_index` | the image would bind `enumerate`, which nothing provides | **not in this tree's sample** — 45 repo candidates, and this one is not among the 60 selected; the §0 claim about it is neither confirmed nor contradicted here |
+
+**And §0.3's `proof-crash` is still exactly what §0.3 recorded**, which is worth
+stating because a crash is a fact about a tree and trees move:
+
+```console
+$ python3 -c "…compile_formal(prove=True, check=False)…"
+sum_range   -> RAISED ValueError unsupported cbz taken continuation to 0x100000330
+either      -> .tmp/sr/either  proof: .tmp/sr/either_proof.lean
+```
+
+One line, no Lean, both examples. **`either.mojo`'s `(kernel) excessive memory
+consumption` is therefore NOT a proof-generation failure** — the generator writes
+its 6 910 lines on this tree — so §0.3's second row is a LEAN-side fact about
+`either_proof.lean`'s elaboration, and the integrator's budget is what decides
+it, not a worker. `sum_range`'s crash is already filed and claimed by another
+worker (`bugs/FORMAL_sum_range_generation_refused_and_it_is_not_an_expected_
+failure.md`, `formal21-6`), so nothing is filed here: it is re-measured, not
+rediscovered.
+
+**The family mix moved, which is the one comparison a reader can make by eye.**
+§0.2's largest family was `print(flush=…)` at 9 of 32, closed by §0.4; today's
+largest is **`+` on two strings at 10 of 31**, with `'%'` on a string at 4, a
+field access through a value at 5, a number compared with a string at 3, and a
+method call on a value at 2. The `+` family is the string-value-model row, so the
+census's top codegen cause is now the same one the sweep's 170-file row is
+(`bugs/FORMAL_sweep_work_map_2026-10-04_b10.md` §3.1), and it is a
+value-model project rather than a patch.
+
+**And a negative measurement, because a change that adds a refusal has to say
+what it cost**: this branch's work adds `model.container_escape_sites` (a
+container read after a call — `bugs/FORMAL_a_returned_container_read_after_a_
+call_is_a_frame_reuse.md`), and **0 of today's 60 items reach it**, so this
+census's numbers are unmoved by it.
+
+**§0.7 (2026-10-04, `work/formal21-5`) is the re-measurement and it is below
+§0.6's paragraph; read it for the committed ledger and for the two items §0
+asked about by name.**
+
 **§0.6 is new (2026-10-04, `work/formal19-4`): §0.2's "a module global with
 storage but no initializer" family is 0, and it was a MISDIAGNOSIS rather than a
 capability — `None` is a word on this path and `_static_word` had no arm for

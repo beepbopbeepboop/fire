@@ -29,7 +29,6 @@ Two cases, both measured with the binary's own RUSAGE_CHILDREN peak:
 built `./mojoc` (`make mojoc`). Run the `fire` case through tools/memslot.py.
 """
 import os
-import resource
 import subprocess
 import sys
 

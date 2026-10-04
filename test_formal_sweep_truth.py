@@ -28,6 +28,7 @@ says so and skips without it. The units are the census and the classifier.
 
     python3 test_formal_sweep_truth.py [-v]
 """
+import ast
 import io
 import os
 import re
@@ -40,6 +41,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "tools"))
 
 import formal_sweep as S
+import formal_sweep_causes as C
 from formal import lean as L
 
 LIB = os.path.join(HERE, "lib")
@@ -452,6 +454,178 @@ class TestCensusReport(unittest.TestCase):
                           f"FORMAL_CENSUS={mode!r} on {lines!r} printed "
                           f"{buf.getvalue()!r}, which does not contain "
                           f"{expect!r}")
+
+
+# ── 3b. a host-import row that rests on a DEAD import ────────────────────────
+#
+# `not-answerable/host-import` is the largest class in the sweep, and the
+# question a reader asks of a row is "which module" — which is what
+# `tools/formal_sweep_causes.py --host` exists to answer. The second question,
+# "do the blocked files even USE it", is the `uses` column, and for a module
+# whose names cannot be read (`zlib` is built into the interpreter, so there is
+# no source here to parse) that column used to print `?` for every file in the
+# row. `?` is honest, and it is also how a 29-file row of DEAD IMPORTS sat in
+# the ranking for five sweeps with nobody looking at it.
+#
+# The measurement, on `bugs/sweeps/sweep-arm-10.txt` (the 2026-10-04 arm64 run,
+# 710 files): three files in this repository import `zlib` —
+# `gimple_codegen.py`, `mojo/middle/types.py`, `mojo/middle/coro.py` — and NOT
+# ONE of them reads anything from it. `gimple_codegen.py`'s only other mention
+# is a comment over a table of `mojo_zlib_*` RUNTIME symbols; `types.py`'s and
+# `coro.py`'s are comments and docstrings that say the tree deliberately does
+# NOT use `zlib.crc32`. `mojo/middle/coro.py` even has the sentence "`#`
+# `_crc32_str`, NOT `zlib.crc32` (stubbed self-hosted — see its doc)`". So the
+# row was 29 files of import CLOSURE behind three dead lines, and a
+# `formal/hostmods/zlib.mojo` — the "project to argue about" the queue's own
+# work map called it — would have moved ZERO of them.
+#
+# Same shape, three more rows: `resource` (2 files, both of which spell
+# `resource.getrusage(resource.RUSAGE_CHILDREN)` inside the STRING of a child
+# program they write out, never in code), `sysconfig` (`fire.py`, which the work
+# map already recorded as "imports it and never uses it"), and `traceback`
+# (1 file).
+#
+# What the four have in common is that the row is ENTIRELY dead imports, which
+# is what makes them this test's subject rather than a list: a dead import in a
+# file whose row has real users costs nothing (`signal` has five, so
+# `test_memslot.py`'s dead one is invisible and is left alone), while a row that
+# is nothing but dead imports is a row of work that is not work.
+
+# The four, and the census of what is left, printed rather than asserted.
+_DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig", "traceback")
+# Modules with no readable names that STILL have users, so their rows are real:
+# `itertools` (>=3 files spell it), `builtins` (>=2), `atexit` (1, through
+# `test_ab_native.py`'s `atexit.register`). Asserted to still have users, so a
+# future reader cannot extend this section to "every module with no readable
+# names" by accident.
+_ROWS_WITH_REAL_USERS = ("itertools", "builtins", "atexit")
+_SKIP_DIRS = {".git", "build", "bugs", "cas", ".tmp", "stage1", "stage2",
+              "stage3", "formal_sweep_cache", "__pycache__"}
+
+
+def _repo_py_files():
+    """Every `.py` this repository's own sweep covers, in sorted order.
+
+    The same walk `tools/formal_sweep.py` does over the repository's own source,
+    minus the directories that are not part of it. `formal/hostmods` is excluded
+    because a host module is SUPPOSED to name the modules it models.
+    """
+    out = []
+    for dirpath, dirnames, filenames in os.walk(HERE):
+        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
+        for name in sorted(filenames):
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, name)
+            rel = os.path.relpath(path, HERE)
+            if rel.startswith("formal" + os.sep + "hostmods"):
+                continue
+            out.append((rel, path))
+    return sorted(out)
+
+
+def _imports_of(path):
+    """The module names `path` has an actual IMPORT STATEMENT for.
+
+    From the AST, and that is the point: a word search for `zlib` over
+    `test_runtime_dylib.py` finds `_OPTIONAL_UNITS = ('sqlite3', 'zlib', 'ssl',
+    'ncurses')` and `tools/suite.py` finds `'runtime/fire_zlib.h'`, and
+    `tools/formal_sweep.py`'s own docstring names the module — none of which is
+    an import, and a check that counted them would report a dead import in
+    every file that mentions a module by name.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            tree = ast.parse(f.read(), filename=path)
+    except (OSError, SyntaxError):
+        return []
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            out.extend(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            out.append(node.module)
+    return out
+
+
+class TestHostImportRowsAreNotDeadImports(unittest.TestCase):
+    def test_the_premise_each_row_is_unbuildable(self):
+        """Each of the four names has no Mojo source and no front-end transform.
+
+        The property below says "this repository does not import a module it
+        cannot build without reading it", and that is only worth anything if the
+        modules really are unbuildable. So the premise is asked of the build's
+        own wording rather than trusted, and it is asked for all four at once
+        because a name that gains a `formal/hostmods/` model stops being this
+        test's subject — which is a reason to be told, not a reason to be quiet.
+        """
+        import formal.imports as I
+        for name in _DEAD_ROW_MODULES:
+            with self.subTest(module=name):
+                self.assertIsNone(C._host_model_source(name),
+                                  f"`{name}` has a model at "
+                                  f"{C._host_model_source(name)!r}, so importing "
+                                  f"it builds and this section does not apply "
+                                  f"to it any more")
+                self.assertFalse(I.is_frontend_provided(name),
+                                 f"`{name}` is provided by the front end, so it "
+                                 f"resolves without a source and is not a "
+                                 f"host-import refusal")
+                self.assertIn("which is a host module (CPython standard "
+                              "library)",
+                              I.unresolvable_import_error("x.py", name),
+                              f"the build no longer refuses `{name}` with the "
+                              f"host-module wording, so the row this section is "
+                              f"about does not exist")
+
+    def test_no_file_imports_one_of_them_and_reads_nothing(self):
+        """No `.py` of this repository imports one of the four and reads nothing.
+
+        The reader is `tools/formal_sweep_causes.py::_host_mentions_module`, the
+        same one the ranking's `uses` fallback asks, so the test and the report
+        cannot disagree about what a use is — and it answers by AST, which is
+        what makes a comment or a string about a module not count as a use of
+        it (`tools/mem_slope.py` carries `resource.getrusage(...)` in the source
+        of a child program it writes; that is text, not a call).
+        """
+        dead = []
+        for rel, path in _repo_py_files():
+            for imported in _imports_of(path):
+                if imported.split(".")[0] not in _DEAD_ROW_MODULES:
+                    continue
+                if C._host_mentions_module(path, imported.split(".")[0]) is False:
+                    dead.append(f"{rel}: imports `{imported}` and reads nothing "
+                                f"from it")
+        self.assertEqual(
+            dead, [],
+            "a host-import row that is nothing but dead imports, which is a row "
+            "of work that is not work. Each of these was a sweep row whose "
+            "every file was stopped by an import nothing used:\n  "
+            + "\n  ".join(dead))
+
+    def test_the_other_rows_still_have_users(self):
+        """The rows NOT in this section still have files that read the module.
+
+        A check over the four names above cannot see a fifth, and the way it
+        gets extended by accident is by widening the list. So the three rows
+        that share their shape and are NOT dead imports are asserted to have
+        users — which is the statement that keeps them out.
+        """
+        users = {}
+        for rel, path in _repo_py_files():
+            for imported in _imports_of(path):
+                top = imported.split(".")[0]
+                if top not in _ROWS_WITH_REAL_USERS:
+                    continue
+                if C._host_mentions_module(path, top):
+                    users.setdefault(top, []).append(rel)
+        for name in _ROWS_WITH_REAL_USERS:
+            with self.subTest(module=name):
+                self.assertTrue(
+                    users.get(name),
+                    f"no file of this repository reads `{name}`, so its row is "
+                    f"dead imports like the four above and belongs in "
+                    f"_DEAD_ROW_MODULES rather than in this list")
 
 
 # ── 4. the sweep's reach split, and the system-module-call class ─────────────

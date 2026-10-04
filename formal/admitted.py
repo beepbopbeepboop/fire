@@ -83,6 +83,7 @@ is refused by `contract_text_is_scoped`, because an admission wider than the
 answer is a claim about a host nobody checked.
 """
 
+import collections
 import os
 import re
 import sys
@@ -1021,7 +1022,12 @@ _SCOPE_RE = re.compile(r"(?m)^(end)(?:[ \t]+([A-Za-z_][\w'.]*))?[ \t]*$")
 #: The key a site lands under when no declaration starts above it.  A named
 #: sentinel rather than a silently dropped site: the alternative loses a count,
 #: and a count that is short because a site found no owner is indistinguishable
-#: in the output from a count that is right.
+#: in the output from a count that is right.  It is also a FINDING — a hit with
+#: no theorem above it is a top-level tactic script, or a declaration head
+#: `_DECL_RE` does not match, and both are shapes somebody has to read rather
+#: than a theorem to work on.  (This was `<file scope>` when the floor sweep
+#: wrote it; one name for one condition, and the longer one says what the
+#: condition is.)
 UNATTRIBUTED = "<no declaration above the site>"
 
 
@@ -1099,24 +1105,38 @@ def _declarations(code: str) -> list:
     return out
 
 
-def library_trust_by_declaration(lean_dir: str) -> dict:
-    """`library_trust`'s `axiom_tactic` sites, attributed to a DECLARATION.
+def _attribution(lean_dir: str) -> dict:
+    """`{module: {declaration: record}}` — the ONE attribution walk.
 
-    `{module: {qualified_name: (count, (lines…))}}`.  This is the direction the
-    module-level census cannot give: `library_trust` says how many sites a
-    FILE has, and a file is not something a reader can fix — a theorem is.  The
-    ceiling the library-trust test pins is per module because that is the number
-    a merge moves; this is the number a replacement moves, and it is what makes
-    "these four theorems are now kernel-checked" a checkable claim rather than
-    a sentence in a commit message.
+    A record, not a tuple, because the three consumers want three different
+    projections of the same fact and each of them used to grow its own walk:
 
-    Names are QUALIFIED (`DylibExport.backward_branch_run_none`), because the
-    consumer of this is a `#print axioms` line and Lean's spelling is the
-    qualified one.
+      * `count` and `lines` are what `library_trust_by_declaration` publishes —
+        the count a completeness check compares against `library_trust`'s, and
+        the site lines `native_decide_declarations` and `#print axioms` need;
+      * `line` is where the declaration starts, which is what makes the
+        attribution a WORK LIST rather than another count;
+      * `kinds` is the per-kind and per-TACTIC split (`native_decide` against
+        `bv_decide`), which is what decides which of a theorem's sites is worth
+        attempting: a closed arithmetic goal has a kernel-checked spelling
+        standing next to it and a `∀ w, … ≠ …` bit-pattern lemma does not.
 
-    Raises rather than guessing if the namespace nesting does not balance: a
-    scanner that mis-nested would attribute sites to the wrong theorems, and a
-    wrong attribution is worse than no census because it is a census.
+    `is_public` is carried for the reason `_declarations` reports it: a
+    `private` declaration's sites are sites, and only `#print axioms` cannot
+    name one.
+
+    The attribution RULE is "the last declaration that started at or before the
+    site", which is the declaration a site is inside for well-formed source
+    because Lean declarations do not nest. Its two limits are reported rather
+    than absorbed: a site before the first declaration is `UNATTRIBUTED`, and a
+    site in a `where` clause is attributed to the head it hangs off (in this
+    project a `where` body is a field or a lemma over the same statement, so
+    counting it against the head is the honest reading; in a file where `where`
+    held an unrelated proof it would not be, and the file would be worth
+    reading).
+
+    Raises rather than guessing if the namespace nesting does not balance — see
+    `_declarations`.
     """
     census = library_trust(lean_dir)
     out = {}
@@ -1124,21 +1144,130 @@ def library_trust_by_declaration(lean_dir: str) -> dict:
         path = os.path.join(lean_dir, mod + ".lean")
         try:
             with open(path, encoding="utf-8") as f:
-                code = lean_code_regions(f.read())
+                raw = f.read()
         except OSError:
             continue
+        code = lean_code_regions(raw)
+        lines = code.split("\n")
         decls = _declarations(code)
+        # `(start_line, name)` in file order, so the owner of a site is a walk
+        # with a POINTER rather than a fresh scan per site: the rule is "the last
+        # declaration at or before this line", the sites arrive in order, and a
+        # rescan per site is a census whose cost is the square of the corpus.
+        heads = [(dline, name) for dline, name, _public in decls]
         per = {}
-        for site in kinds["axiom_tactic"][1]:
-            owner = UNATTRIBUTED
-            for line, name, _public in decls:
-                if line <= site:
-                    owner = name
-                else:
-                    break
-            per.setdefault(owner, []).append(site)
-        out[mod] = {name: (len(lines), tuple(lines))
-                    for name, lines in sorted(per.items())}
+        for kind, (_count, sites) in kinds.items():
+            at = 0          # each kind's own lines start at the top again
+            for site in sites:
+                while at + 1 < len(heads) and heads[at + 1][0] <= site:
+                    at += 1
+                owner = heads[at][1] if at < len(heads) \
+                    and heads[at][0] <= site else UNATTRIBUTED
+                rec = per.setdefault(
+                    owner, {"count": 0, "lines": (), "line":
+                            heads[at][0] if owner != UNATTRIBUTED else 1,
+                            "kinds": {"axiom": 0, "sorry": 0,
+                                      "axiom_tactic": 0}})
+                rec["kinds"][kind] += 1
+                if kind == "axiom_tactic":
+                    rec["count"] += 1
+                    rec["lines"] = rec["lines"] + (site,)
+        # The per-TACTIC split, counted with each tactic's own pattern rather
+        # than derived from `_TACTIC_RE`, so the split is a measurement and the
+        # check that the two sum to the total has something to disagree with.
+        for name, rec in per.items():
+            for tactic in AXIOM_TACTICS:
+                hits = [ln for ln in rec["lines"]
+                        if re.search(r"(?<![\w.'])" + tactic + r"(?![\w'])",
+                                     lines[ln - 1])]
+                if hits:
+                    rec["kinds"][tactic] = len(hits)
+        out[mod] = per
+    return out
+
+
+def library_trust_by_declaration(lean_dir: str) -> dict:
+    """`{module: {qualified_name: (count, (lines…))}}` — the census attributed.
+
+    **The other direction from `library_trust`, and the one that makes its number
+    actionable.** `library_trust` reports SITES because a count with no location
+    is a number nobody can act on; this reports how many of them each THEOREM
+    owns, because the ceiling `test_formal_admitted.py` pins is per MODULE and
+    the work is per proof.  `bugs/FORMAL_native_decide_axiom.md` item 2 is this
+    function: "the ceiling can be lowered per theorem rather than per file",
+    which needs the theorem to be named before anything can be lowered.
+
+    A PROJECTION of `_attribution`, and kept in this shape for the two consumers
+    that read a two-tuple: `test_formal_axioms.py`'s per-declaration arithmetic
+    and `native_decide_declarations`' site lines. `declaration_tally` below is
+    the same record in the shape a work list wants.
+
+    Names are QUALIFIED (`DylibExport.backward_branch_run_none`), because the
+    consumer of this is a `#print axioms` line and Lean's spelling is the
+    qualified one.
+    """
+    return {mod: {name: (rec["count"], rec["lines"])
+                  for name, rec in per.items()}
+            for mod, per in _attribution(lean_dir).items()}
+
+
+def declaration_tally(lean_dir: str) -> dict:
+    """`{module: [(name, line, kinds)]}` — the attribution as a WORK LIST.
+
+    `library_trust_by_declaration` in the shape a CEILING wants: a count and
+    where its sites are.  This is the shape `bugs/FORMAL_native_decide_axiom.md`
+    items 2 and 3 want — where the theorem starts, and how its sites split by
+    tactic — because "these four theorems are now kernel-checked" is a claim
+    somebody has to be able to act on, and the difference between a `native_decide`
+    on a closed `UInt64` goal and a `bv_decide` on a `∀ w, …` bit-pattern lemma
+    is the difference between a replacement with a spelling and one without.
+
+    Only declarations that OWN at least one site are listed, and the sort is by
+    site count descending then by line, so the head of the list is what to work
+    on. A module with no sites is an empty list rather than absent, so a caller
+    can tell "nothing here" from "the module is not in the census".
+
+    The same `_attribution` record as `library_trust_by_declaration`, projected
+    again rather than walked again — the completeness check in
+    `test_formal_admitted.py` compares both projections against the same
+    `library_trust` counts, which is what would fail if they ever stopped being
+    the same walk.
+    """
+    out = {}
+    for mod, per in _attribution(lean_dir).items():
+        rows = [(name, rec["line"], rec["kinds"]) for name, rec in per.items()]
+        rows.sort(key=lambda r: (-r[2]["axiom_tactic"], -r[2]["sorry"], r[1]))
+        out[mod] = rows
+    return out
+
+
+def library_trust_by_declaration_lines(lean_dir: str, top: int = 6) -> list:
+    """`declaration_tally` as report lines, biggest first, `top` per module.
+
+    What makes the per-theorem number a WORK LIST rather than another count: each
+    line names a theorem, where it starts, and how many axiom-carrying sites its
+    own proof has. `top` is a parameter rather than a constant because the reader
+    is a report and the writer is a ceiling — the full table is always available
+    from `declaration_tally`, and a truncated one must never be the only way to
+    see a site.
+    """
+    out = []
+    for mod, rows in sorted(declaration_tally(lean_dir).items()):
+        if not rows:
+            continue
+        shown = rows[:top]
+        parts = []
+        for name, line, kinds in shown:
+            bits = ",".join(f"{k}={kinds[k]}" for k in
+                            ("axiom_tactic", "sorry", "axiom") if kinds[k])
+            mix = ",".join(f"{t}={kinds[t]}" for t in AXIOM_TACTICS
+                           if kinds.get(t))
+            if mix:
+                bits += " (" + mix + ")"
+            parts.append(f"{name}@{line} [{bits}]")
+        more = "" if len(rows) <= top else f", +{len(rows) - top} more"
+        out.append(f"{mod}: {len(rows)} declaration(s) with a hit; "
+                   + "; ".join(parts) + more)
     return out
 
 
@@ -1151,21 +1280,19 @@ def native_decide_declarations(lean_dir: str) -> dict:
     in this tree has been a CLOSED proposition over literals, which `decide`
     discharges and the KERNEL checks.  So this is the census a reader can act on
     where `library_trust_by_declaration` is the census a reader can only count.
+
+    It reads the per-TACTIC split off the same record as the other two
+    projections rather than re-reading the file and re-searching for the string,
+    so a site this reports and a site `declaration_tally` counts are the same
+    site by construction.
     """
     out = {}
-    for mod, per in library_trust_by_declaration(lean_dir).items():
-        raw = os.path.join(lean_dir, mod + ".lean")
-        with open(raw, encoding="utf-8") as f:
-            code = lean_code_regions(f.read()).split("\n")
-        hits = {}
-        for name, (_n, lines) in per.items():
-            at = [ln for ln in lines if "native_decide" in code[ln - 1]]
-            if at:
-                hits[name] = tuple(at)
+    for mod, per in _attribution(lean_dir).items():
+        hits = {name: rec["lines"] for name, rec in per.items()
+                if rec["kinds"].get("native_decide")}
         if hits:
             out[mod] = hits
     return out
-
 
 def lean_dir(root: str) -> str:
     """The hand-written Lean library directory for a checkout.

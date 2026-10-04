@@ -888,6 +888,93 @@ def test_a_value_with_no_published_operation_says_so(
               f"does not exist: {text.strip()[-400:]}")
 
 
+def test_the_imported_spelling_of_a_call_through_a_value_says_the_same(
+        tmpdir, _shared, verbose):
+    """`from mylib import thing` then `thing.get(t, k)` — the SAME fact.
+
+    **The two spellings are one construct, and this is the test that says the
+    messages cannot come apart.** `mylib.thing.get(t, k)` has been refused by
+    `model.dylib_value_member_refusal` since 2026-10-04, with the repair read off
+    the module's own export table. The imported spelling reached
+    `module_global_refusal`'s generic arm instead, which says "this name's value
+    is a real global with nowhere to live" — **false of it**, because `thing` is
+    a published function and `from mylib import thing; thing()` builds and runs.
+    What cannot cross is the function USED AS A VALUE, and a reader sent looking
+    for a `__DATA` slot for it is looking for the one name in the program that
+    needs none.
+
+    The control is the second half of the row: the message must NOT claim the
+    name has nowhere to live, which is the sentence this replaces.
+    """
+    prog = ("from mylib import thing\n\n"
+            "def main():\n"
+            "  t = thing()\n"
+            "  printf(\"[%s]@@\", thing.get(t, \"k\"))\n"
+            "  return 0\n")
+    root = os.path.join(tmpdir, "value_member_imported")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": THING, "prog.mojo": prog})
+    for arch in ARCHES:
+        text = build_expecting_refusal(root, "prog", arch)
+        check("thing_get" in text and "thing_len" in text and "VALUE" in text
+              and "imported from `mylib`" in text,
+              f"{arch}: the imported spelling must name the same operations the "
+              f"dotted one does and say the same thing about the value: "
+              f"{text.strip()[-400:]}")
+        check("nowhere to live" not in text,
+              f"{arch}: the refusal still claims the imported name's value is a "
+              f"global with nowhere to live, and it is a published FUNCTION "
+              f"whose CALLING lowers: {text.strip()[-400:]}")
+
+
+def test_an_imported_function_with_no_published_operation_says_so(
+        tmpdir, _shared, verbose):
+    """`from mylib import thing` then `thing.get(t, k)` with no `thing_*`.
+
+    The empty-list half again, for the imported spelling: a repair that does not
+    exist is the same defect as a false sentence, and the prefix rule is only
+    falsifiable if this case exists.
+    """
+    prog = ("from mylib import thing\n\n"
+            "def main():\n"
+            "  t = thing()\n"
+            "  printf(\"%d@@\", thing.get(t, 1))\n"
+            "  return 0\n")
+    root = os.path.join(tmpdir, "value_member_imported_bare")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": BARE, "prog.mojo": prog})
+    for arch in ARCHES:
+        text = build_expecting_refusal(root, "prog", arch)
+        check("publishes no function whose name begins `thing_`" in text,
+              f"{arch}: a module with no operation published beside the value "
+              f"must be reported as publishing none, in the imported spelling "
+              f"too: {text.strip()[-400:]}")
+
+
+def test_an_imported_name_the_module_does_not_publish_keeps_the_old_arm(
+        tmpdir, _shared, verbose):
+    """`from mylib import missing` — the generic arm is the honest report here.
+
+    The control that keeps the new arm from over-claiming, and it is the same
+    discipline `dylib_value_member_refusal` states: it answers only when the
+    module DOES publish the name, because a name nothing publishes is a name the
+    boundary does not have, and "a function used as a value" would be a claim
+    about a function that does not exist.
+    """
+    prog = ("from mylib import missing\n\n"
+            "def main():\n"
+            "  printf(\"%d@@\", missing.get(1))\n"
+            "  return 0\n")
+    root = os.path.join(tmpdir, "value_member_imported_missing")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": THING, "prog.mojo": prog})
+    for arch in ARCHES:
+        text = build_expecting_refusal(root, "prog", arch)
+        check("is one of that module's published FUNCTIONS" not in text,
+              f"{arch}: a name the module does not publish was reported as one "
+              f"of its published functions: {text.strip()[-400:]}")
+
+
 def test_a_module_attribute_read_is_refused_as_an_attribute(
         tmpdir, _shared, verbose):
     """`mylib.ITEMS` — the refusal names the ATTRIBUTE, not the module.
@@ -1570,6 +1657,12 @@ TESTS = [
      test_a_spine_link_that_resolves_to_nothing_is_an_attribute_read),
     ("a call through a VALUE a module publishes names the operations",
      test_a_call_through_a_value_a_module_publishes_is_refused_by_name),
+    ("the IMPORTED spelling of a call through a value says the same",
+     test_the_imported_spelling_of_a_call_through_a_value_says_the_same),
+    ("an imported function with no published operation is reported as having none",
+     test_an_imported_function_with_no_published_operation_says_so),
+    ("an imported name the module does not publish keeps the old arm",
+     test_an_imported_name_the_module_does_not_publish_keeps_the_old_arm),
     ("a value with no published operation is reported as having none",
      test_a_value_with_no_published_operation_says_so),
     ("a published constant reads in EVERY position, including a store's value",

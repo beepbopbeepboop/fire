@@ -12418,6 +12418,14 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
     # `_unit_field_annotations` rather than read twice, so a field name two
     # structs declare differently is dropped by ONE rule and not by two.
     unit_fields = _unit_field_annotations(structs_by_name)
+    # …and which of THIS unit's functions hand back a container of their own, for
+    # the same reason and because it is read once per function below. It is a
+    # fixpoint over the unit's own names (`model.functions_returning_containers`),
+    # so a call to a host module is never in it — `os.listdir` `malloc`s, and that
+    # is the difference between a blob that outlives the call and one that does
+    # not. Measured once per unit rather than per function: the answer is the same
+    # for every function in the module and it costs a walk of every body.
+    returns_container = M.functions_returning_containers(functions)
     unstored: list = []
     for fn in functions:
         shape = M.function_param_shape(fn)
@@ -12809,6 +12817,14 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # so is its opposite at a site whose operand is a word the arithmetic
         # table simply does not carry.
         dialect_operands = {}
+        # …and the operation's own BRACKET, for the same key and the same reason,
+        # and for the class whose missing fact IS the bracket: a
+        # `pop.cast_to_builtin[_type=__mlir_type.index]` is refused because the
+        # result type is a dialect object, which is FALSE of a `_type=` this path
+        # classifies as one word (`model.mlir_result_clause`). The bracket is
+        # `call.func` itself, so there is nothing to look up and nothing that can
+        # disagree with the node the message is about.
+        dialect_brackets = {}
         for call in M.iter_nodes(fn.body):
             if not isinstance(call, F.CallExpr) or not call.args:
                 continue
@@ -12821,6 +12837,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 continue
             dialect_operands.setdefault(id(root), M.mlir_operand_declared_type(
                 call.args[0], dialect_ctx, unit_fields, struct_names))
+            if isinstance(call.func, F.SubscriptExpr):
+                dialect_brackets.setdefault(id(root), call.func)
         for sub in M.iter_nodes(fn.body):
             if isinstance(sub, F.IdentExpr):
                 # `exempt_roots` is the OTHER half of the rule the arm below
@@ -12839,7 +12857,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                     first_mlir = bracketed.get(id(sub)) \
                         or M.mlir_dialect_refusal(
                             sub.name, dialect_ops.get(id(sub)),
-                            dialect_operands.get(id(sub)))
+                            dialect_operands.get(id(sub)),
+                            dialect_brackets.get(id(sub)))
 
                 continue
             if not isinstance(sub, (F.SubscriptExpr, F.MemberExpr)):
@@ -13457,7 +13476,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # all rather than being the only one.
                 why = M.mlir_dialect_refusal(name,
                                              dialect_ops.get(id(node)),
-                                             dialect_operands.get(id(node)))
+                                             dialect_operands.get(id(node)),
+                                             dialect_brackets.get(id(node)))
                 raise CodegenError(f"{fn.name}: {why}" if fn.name else why)
             gslot = M.module_slot(name)
             if gslot is not None:
@@ -13539,12 +13559,28 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # (`TABLE = [1,2,3]`, laid out in that library's `__DATA`) has
                 # to be told it is a constant and not a variable, and the
                 # manifest is the only place that fact exists.
-                raise CodegenError(M.module_global_refusal(
+                # …and a name the module publishes as a FUNCTION is a third
+                # kind again, and it is the one whose generic sentence is false:
+                # `from os import environ` then `environ.get(k)` was refused as
+                # "this name's value is a real global with nowhere to live",
+                # while `environ()` lowers and runs — the name crosses, and what
+                # cannot is the FUNCTION USED AS A VALUE. The dotted spelling of
+                # the same program has said so since 2026-10-04
+                # (`model.dylib_value_member_refusal`), so this asks that
+                # question through the same published-name table before falling
+                # through to the generic arm, which is the honest report for a
+                # name the module does not publish at all.
+                _why = M.imported_function_as_a_value_refusal(
+                    name, getattr(sym, "module", None) or "", fn.name,
+                    _module_published_names(getattr(sym, "module", None),
+                                            link_line))
+                raise CodegenError(_why or M.module_global_refusal(
                     name, sym, fn.name,
                     *_published_shape(getattr(sym, "module", None), link_line)))
             raise CodegenError(M.unresolved_name_refusal(
                 name, fn.name, _why_unplaced(node, fn, frame_slots)))
         _refuse_variadic_reads(functions, fn, shape)
+        _refuse_returned_container_blobs(fn, returns_container)
         unstored.append(_unstored_read(fn, placed, frame_slots))
     # Raised LAST, and that ordering is the design rather than an accident of
     # where the call landed. A read-before-store is a SYMPTOM — the name has a
@@ -13767,6 +13803,35 @@ def _why_unplaced(node, fn, frame_slots: dict) -> str:
     return ("the module-level symbol table is empty for this unit, and the "
             "reading function declares no local or parameter by that "
             "spelling")
+
+
+def _refuse_returned_container_blobs(fn, returns_container) -> None:
+    """Refuse a READ of a handed-back container that comes after another call.
+
+    **A wrong answer, refused rather than emitted**, which is the whole of this
+    function. Measured on both architectures: the values are right immediately
+    after the call and wrong after the caller's NEXT call, and the two machines
+    disagree about what wrong looks like — arm64 reads the later function's
+    scratch whole, x86-64 reads a mix of the two frames. CPython answers the
+    same in both, so there is no answer to be right about.
+
+    It sits beside `_refuse_variadic_reads` because that is the other place in
+    this function where a decidable static fact decides what a callee may do with
+    its own storage, and because both are asked per function at the end of the
+    name walk, where a refusal costs one message.
+
+    **The check is at the READ and not at the callee's RETURN**, and that is the
+    design rather than a limitation: a returned container the caller reads before
+    it calls anything else is sound, this tree has a dozen of those on purpose
+    (`formal/hostmods/struct.mojo`'s `unpack_from` is one, and its docstring
+    records the measurement), and refusing the return would refuse a module for a
+    use its own author measured as correct. `returns_container` is
+    `model.functions_returning_containers`' answer over THIS image; a call to
+    another image is not in it, which is why `os.listdir` — `malloc`s, and says
+    so — is untouched.
+    """
+    for line, what in M.container_escape_sites(fn, returns_container):
+        raise CodegenError(M.returned_container_refusal(fn, line, what))
 
 
 def _refuse_variadic_reads(functions: list, fn, shape) -> None:

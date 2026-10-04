@@ -237,6 +237,85 @@ Two cases in `test_formal_module_attr.py` pin it on a module of the test's own,
 including the empty half — a value with no `thing_*` beside it must be reported
 as publishing no operation rather than handed a repair that does not exist.
 
+## 5a. 2026-10-04 (`work/formal21-5`): the FROM-IMPORT spelling got a false sentence, and it is fixed
+
+**§5's repair existed for the DOTTED spelling (`os.environ.get(k)`) and the
+imported spelling (`from os import environ` then `environ.get(k)`) never got
+it.** Both are one construct — a published FUNCTION used as a value — and only
+one of them said so:
+
+    # before, both architectures, byte-identical wording
+    $ python3 fire.py build --formal --no-prove -o .tmp/x a.mojo   # the dotted one
+    build: os.environ.get(): `os.environ` is not a module with a library on this
+    link line — `environ` is a FUNCTION of `os`, so `os.environ.get()` is a call
+    through a VALUE …
+
+    $ python3 fire.py build --formal --no-prove -o .tmp/x b.mojo   # from os import environ
+    build: main: 'environ' is imported from `os`, and it is a module-level name of
+    another module. … What it cannot publish is a VARIABLE … So this name's value
+    is a real global with nowhere to live …
+
+**The second sentence is FALSE, and it is false in the way this document is
+about.** `environ` IS published — the very message in §5 lists it — and
+`from os import environ; environ()` builds and runs on both architectures
+(measured: `environ_count(environ())` answers 49 on this machine's environment).
+The name crosses; what cannot cross is the function USED AS A VALUE. "This
+name's value is a real global with nowhere to live" sends a reader looking for a
+`__DATA` slot for the one name in the program that needs none, which is the
+defect `formal/model.py::module_attribute_refusal`'s own docstring records for
+`sys.argv`.
+
+**The fix is one reader and one repair list, and both spellings now go through
+them.** `model.imported_function_as_a_value_refusal` asks the same question the
+dotted arm asks — *is this name one the module publishes as a FUNCTION?* — off
+the same `dylib_export_tables` walk the emitter's own call resolution takes, and
+`_value_operations_repair` builds the "`environ_*` are the operations on it"
+list in ONE place, so the two messages cannot drift. The third arm's guard is
+that it answers only when the module DOES publish the name: a name nothing
+publishes is a name the boundary does not have, and "a function used as a value"
+would be a claim about a function that does not exist.
+
+    # after
+    build: main: 'environ' is imported from `os`, and it is one of that module's
+    published FUNCTIONS — importing it and CALLING it lowers today
+    (`os.environ(...)` or `environ(...)`), so the import is not what is refused.
+    What is refused is an OPERATION on it: a function is not a value this path
+    can place, so `environ.…` is a call through a VALUE and there is no symbol
+    for it to bind. … the operations on it are published as FUNCTIONS of `os`,
+    and those beginning `environ_` are they: environ_clear, environ_copy, …
+
+**Three cases measured, all on both architectures** (`os.environ.get(k)`,
+`os.environ[k]` and `os.environ[k] = v`, all three after
+`from os import environ`): all three were the false sentence and all three are
+now this one. **The row's verdict still does not move** — 4 files off the
+`os.environ` refusal and 0 to `pass` — because these are the SPELLINGS a file has
+to be rewritten into, which is what §2 measured and what §3's two-line rewrites
+still are.
+
+**The cause table's own comment is corrected with it**, because the two rows it
+separates are no longer the two spellings:
+`tools/formal_sweep_causes.py`'s `a module's ATTRIBUTE read as a value` row is
+now where the imported spelling lands too, and **measured on the 2026-10-04
+arm64 log no file moves** — the bare row's one file is `std/time`'s
+`'CompilationTarget'`, and a TYPE is pre-empted by `model.is_type_name` before
+either arm.
+
+**Tests: `test_formal_module_attr.py` 33/33** (was 30), three new cases — the
+imported spelling with its operations, the empty-list half for it, and the
+control that a name the module does NOT publish keeps the old arm. Each fails
+when its subject is broken (disabling the new arm reds the first).
+
+**What this does not touch**: the exported slot and the bare value read are
+unchanged and are `FORMAL_module_state_no_storage.md` §(2)/(4)'s, and
+`environb` is still unmodelled — one word on why it is not next: the bytes view
+has the same blob, the same layout and the same operations as the `str` view,
+and **no file in this repository spells `os.environb` at all** (measured: zero
+hits over every `.py`/`.mojo`), so it is a name rather than a gap. What it would
+need is for the distinction to be observable, and on this path a `str` and a
+`bytes` are the same `char *` — so "modelled" would mean adding a second
+spelling of one blob, which is the kind of change that costs a reader more than
+it answers.
+
 ## 6. Reproducing this
 
 ```sh

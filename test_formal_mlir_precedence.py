@@ -424,6 +424,49 @@ CLASSIFIED = [
      "    return __mlir_op.`dialect.of.mine`[value=value](value)\n",
      "`dialect.of.mine` is a dialect OPERATION, and this path has no "
      "lowering table", "applied ELEMENTWISE"),
+# The RESULT side of the same disease, and it is the one
+    # `std/builtin/simd_length.mojo:76` reaches:
+    # `__mlir_op.`pop.cast_to_builtin`[_type=__mlir_type.index](value._mlir_value)`.
+    # The class's sentence said "that bracket holds a DIALECT object … rather
+    # than a value … so the result's width and element type are a fact it has
+    # no source for", which is FALSE here: `index` is in `MLIR_WORD_TYPE_NAMES`,
+    # so this build READS it and holds it in one word. The elementwise branch
+    # was fixed for exactly this on 2026-10-04 (`mlir_operand_clause`) and the
+    # typed-result branch was not, so both rows below are one branch over.
+    #
+    # The needle is the clause's own words and the `absent` is the sentence the
+    # clause replaces: a message that reported the result type AND still claimed
+    # it had no source for it would be self-contradictory, and a reword that
+    # dropped the class's own opening would be a different regression.
+    ("a_word_result_type_says_the_result_is_not_what_is_missing",
+     "def put(self, value: Int):\n"
+     "    self._mlir_value = __mlir_op.`pop.cast_to_builtin`[\n"
+     "        _type=__mlir_type.index\n"
+     "    ](value._mlir_value)\n",
+     "Its bracket's result type is '__mlir_type.index', which this path holds "
+     "in ONE 64-bit word", "are a fact it has no source for"),
+    # …and the VECTOR spelling of the same bracket is the third answer, which is
+    # a different fact again: there the missing thing is a REPRESENTATION of N
+    # lanes, not a type and not the operand. A message that said "the result is
+    # not what is missing" here would be claiming an N-lane result is a word.
+    ("a_vector_result_type_says_the_lanes_are_what_is_missing",
+     "def put(self, value: Int):\n"
+     "    self._mlir_value = __mlir_op.`pop.cast_to_builtin`[\n"
+     "        _type=__mlir_type.`!kgen.simd<4, ui32>`\n"
+     "    ](value._mlir_value)\n",
+     "Its bracket's result type is "
+     "'__mlir_type.`!kgen.simd<4, ui32>`', which is an N-LANE VECTOR and not a "
+     "word at all", "so the RESULT is not what is missing here"),
+    # A bracket with NO `_type=` keeps the class's own sentence, which is the
+    # control: the clause fires where there is a type to read and nowhere else.
+    # `mask=` is in the corpus's bracket vocabulary (`MLIR_TYPED_RESULT_OPS`'s
+    # own comment lists it) and is not a type, so reading it as one would be the
+    # name-keyed mistake.
+    ("a_bracket_with_no_type_attribute_keeps_the_class_sentence",
+     "def masked(value) -> Int:\n"
+     "    return __mlir_op.`pop.aligned_alloc`[mask=__mlir_type.index](value)\n",
+     "the result's width and element type are a fact it has no source for",
+     "Its bracket's result type"),
 ]
 
 # (name, source, expected stdout or None). The other guard, and it is a BUILD
