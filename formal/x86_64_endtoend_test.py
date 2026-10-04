@@ -1304,6 +1304,696 @@ flag: it jumps, and the address it lands on is a literal supplied by the decode
 branch, so the instruction after it is not the one at `m + length`."""
 
 
+# ── THE ABSTRACT MACHINE ──────────────────────────────────────────────────────
+#
+# What the path tree decides a branch BY, and why it has to decide one.
+#
+# A path tree walks every branch outcome, and `_emit_stack_floor_guard` puts two
+# conditional branches in EVERY prologue of EVERY program image, so a guarded
+# function doubled the number of paths through it: the corpus went from one path
+# per program to 94 on `wide_recv`, which is past what a proof can be spent on
+# and was refused by `_MAX_CHAIN_STEPS`. Both of the guard's conditions are
+# settled by arithmetic over the initial state, so walking both arms is work for
+# an answer already known:
+#
+#   JNE done   has the floor word been parked already?  In the ENTRY function the
+#              word reads 0 -- `X86State.init`'s memory is a constant zero
+#              function, which is `x86_init_mem_reads_zero` -- so the branch is
+#              NOT taken.  In a CALLEE it is what the entry's guard parked, which
+#              is non-zero for every input because `X86State.init`'s stack
+#              pointer is the LITERAL 0xfffffffffffffff0 and not a function of
+#              the input, so the whole comparison is over Python integers.
+#
+#   JAE ok     is SP still above the floor?  SP on a path is a sum of literal
+#              frame movements, so this is `sp_now >= sp_floor` on two literals.
+#
+# So: this section computes the machine's state as the tree walks, and `_tree`
+# asks it at every `jcc`. Nothing here is a proof. Every decision it produces is
+# emitted by `emit_terminates` as a `have hdec{k} : x86_cond … = …` whose proof
+# has NO `sorry` in it, which is the property that makes the analysis safe to
+# have at all: **a decision that is wrong makes Lean REJECT the file rather than
+# admit a false claim.** A gap in the table below costs the two arms being walked
+# again — which is the state this work started from — and never soundness.
+#
+# What it must therefore never do is guess. An instruction whose effect is not in
+# the table wipes the whole state; a store whose ADDRESS is not a literal drops
+# the memory model, because a store anywhere can land on the word a later read
+# looks at.
+
+_U64 = 1 << 64
+
+#: `X86State.init`'s stack pointer (`lib/ProofLib.lean`), as a literal. It is
+#: read here rather than recomputed: the whole reason a callee's guard is
+#: decidable is that this is a constant rather than a function of the input.
+_INIT_RSP = 0xFFFFFFFFFFFFFFF0
+
+#: Register indices, from `lib/X86.lean::x86_get_reg`'s own `match`. Named
+#: because the number 4 for the stack pointer is otherwise a bare literal in
+#: four places, and `x86_get_reg 4` is the model's spelling of `s.rsp`.
+_R_AX, _R_CX, _R_DX, _R_BX = 0, 1, 2, 3
+_R_SP, _R_BP, _R_SI, _R_DI = 4, 5, 6, 7
+
+
+def _u64(v):
+    """`v` as the 64-bit unsigned integer the model's `UInt64` holds."""
+    return v % _U64
+
+
+def _msb(v):
+    """`x86_msb`: sign bit of a 64-bit unsigned value."""
+    return v >= 0x8000000000000000
+
+
+class _Abs:
+    """What this emitter knows about the machine at ONE point on ONE path.
+
+    Every slot is a Python `int` holding an exact 64-bit unsigned value, or
+    `None` for "not known". It is a CONSTANT PROPAGATION over the instruction
+    forms in `_abs_step`, not an interpreter of the program: the tree needs
+    three questions answered (`is the flag set?`, `what is in that register?`,
+    `what does that address hold?`) and this is the least machinery that answers
+    them without guessing.
+
+    `bases` and `loads` are not values but a record of what the walk DID, and
+    `_tracked` reads them to decide which facts a decided branch's proof needs:
+    a register that was the base of a store and a register that was loaded FROM
+    an address are exactly the two ways a later proof comes to depend on this
+    step.
+    """
+
+    __slots__ = ("regs", "flags", "writes", "mem_ok", "bases", "loads",
+                 "broken", "flag_regs", "store_regs")
+
+    def __init__(self):
+        # `X86State.init`: every register 0, RSP the literal above, and the
+        # FLAGS all clear. RDI is the program's input and stays unknown for the
+        # whole walk, which is correct -- it is `n`, the one thing the theorem
+        # is quantified over.
+        self.regs = [0] * 16
+        self.regs[_R_DI] = None
+        self.regs[_R_SP] = _INIT_RSP
+        self.flags = {"zf": False, "cf": False, "sf": False, "of_": False}
+        #: Every 8-byte store on this path, oldest first, as `(address, value)`
+        #: with `value` possibly `None`. Not a map, because a later store at the
+        #: same address must SHADOW an earlier one and a map that kept the first
+        #: would answer with a value the machine overwrote.
+        self.writes = []
+        self.mem_ok = True
+        #: Register indices this walk has used as a memory-operand BASE.
+        self.bases = set()
+        #: `(register, address)` for every LOAD, so a later proof that needs the
+        #: register's value can name the cell it came from.
+        self.loads = []
+        #: Addresses whose value this walk has been unable to answer for, and
+        #: will not try again. See `load`: it is what makes a cell usable as a
+        #: CHAIN rather than only at one step.
+        self.broken = set()
+        #: `(register, address)` for every STORE, the mirror of `loads`: a cell
+        #: fact states what the cell HOLDS, and that is this register's value at
+        #: that step.
+        self.store_regs = []
+        #: Registers the LAST flag-setting instruction read. A `jcc` consults
+        #: `zf`/`cf`, so this is how `_tracked` learns which registers a decided
+        #: branch's proof is going to ask the value facts for — and, through
+        #: `loads`, which memory cell each of them was read from.
+        self.flag_regs = set()
+
+    def copy(self):
+        other = _Abs.__new__(_Abs)
+        other.regs = list(self.regs)
+        other.flags = dict(self.flags)
+        other.writes = list(self.writes)
+        other.mem_ok = self.mem_ok
+        other.bases = set(self.bases)
+        other.loads = list(self.loads)
+        other.broken = set(self.broken)
+        other.flag_regs = set(self.flag_regs)
+        other.store_regs = list(self.store_regs)
+        return other
+
+    # ── registers ──
+    def get(self, i):
+        """`x86_get_reg`, including its `_ => 0` arm for an index past 15."""
+        return self.regs[i] if 0 <= i < 16 else 0
+
+    def put(self, i, v):
+        if 0 <= i < 16:
+            self.regs[i] = None if v is None else _u64(v)
+
+    # ── flags ──
+    def flag(self, name):
+        return self.flags[name]
+
+    def set_flags(self, zf, sf, cf, of_):
+        self.flags = {"zf": zf, "sf": sf, "cf": cf, "of_": of_}
+
+    # ── memory ──
+    def store(self, addr, val, base=None, src=None):
+        """One 8-byte write, as `mem_write_bytes … addr val 8`.
+
+        `base` is the register the ADDRESS came from and `src` the one the VALUE
+        did; neither is a value, and both are recorded because `_tracked` needs
+        to know which registers and which cells a later proof will ask about.
+        """
+        if base is not None:
+            self.bases.add(base)
+        if src is not None:
+            self.store_regs.append((src, addr))
+        if addr is None:
+            # An unknown address can be the address of anything, including a
+            # word a later read asks about, so the memory model is dropped
+            # rather than the single write being skipped.
+            self.writes = []
+            self.mem_ok = False
+            return
+        self.writes.append((_u64(addr), None if val is None else _u64(val)))
+
+    def load(self, addr, reg=None):
+        """The 8 bytes at `addr`, or None if that is not known.
+
+        **A cell this walk could not answer for once, it never answers for again**
+        — that is `broken`, and it is what makes a cell usable as a CHAIN rather
+        than only at one step. A cell written with an unknown value and then
+        written again with a known one would otherwise be answerable at step `k`
+        and not at `k - 1`, and the per-step facts `emit_terminates` emits would
+        then have a hole in the middle of a chain nothing can fill: the fact at
+        `k` reduces one step and hands the rest to the fact at `k - 1`.
+
+        The rule is per ADDRESS and not the coarser "some unknown store sits at
+        or below this address", because the coarse rule loses a whole memory
+        model for nothing: `wide_recv`'s callee stores through `rbx`, which is a
+        pointer the walk cannot follow, and one such store invalidates every
+        register read from a STACK slot above it — the struct's own frame — which
+        is most of them, and with them every later decision. Measured: with the
+        coarse rule `wide_recv` reached 7 leaves; with this one, 1.
+
+        An unknown ADDRESS still costs every cell, because a store anywhere can
+        land on any word: that is `mem_ok`, and it is why the guard's trap arm
+        becomes undecidable once a frame is addressed through a pointer rather
+        than through `rsp`/`rbp`.
+        """
+        if addr is None or not self.mem_ok:
+            return None
+        addr = _u64(addr)
+        if addr in self.broken:
+            return None
+        val = 0                         # `X86State.init`'s memory: all zero
+        for a, v in reversed(self.writes):
+            if a == addr:
+                val = v
+                break
+            if a < addr + 8 and addr < a + 8:
+                # Partial overlap: the value would be a mixture of two writes
+                # and this model cannot say which bytes. Cannot happen while
+                # every store is eight bytes wide, and is here for the day one
+                # is not.
+                val = None
+                break
+        if val is None:
+            self.broken.add(addr)
+            return None
+        if reg is not None:
+            self.loads.append((reg, addr))
+        return val
+
+    def wipe(self):
+        """Everything a form outside `_abs_step`'s table may have changed."""
+        self.regs = [None] * 16
+        self.flags = {"zf": None, "cf": None, "sf": None, "of_": None}
+        self.writes = []
+        self.mem_ok = False
+        self.bases = set()
+        self.loads = []
+        self.store_regs = []
+        self.flag_regs = set()
+
+
+def _abs_step(prev, form, raw, addr, length):
+    """The abstract state AFTER `form` at `addr`.
+
+    `prev` is left alone: every node of the tree gets its own state, because a
+    fork's two arms start from the same state and diverge from there, and the
+    tree keeps both. `None` in, `None` out — there is no state to copy from an
+    unknown one, and a caller that has none must not be handed a guess.
+
+    **Nothing here raises.** A form outside the table, or one whose bytes are
+    shorter than the decode below needs, wipes the state instead: this runs
+    inside `_tree`, so an exception would take the whole emitter down rather than
+    leave one branch undecided, which is the outcome this section is for.
+    """
+    if prev is None:
+        return None
+    st = prev.copy()
+    # The forms that change nothing this section tracks. `jmp`/`jcc` do not
+    # touch a register or a flag, and `movq xmm, r64` writes an XMM register,
+    # which nothing here reads.
+    if form in ("jcc_rel32", "jcc_rel8", "jmp_rel32", "jmp_rel8",
+                "movq_xmm_rm64"):
+        return st
+    if form == "call_rel32":
+        # The return address the model pushes is `UInt64.ofNat (m + 5)` -- the
+        # same literal `_tree` reads off the encoding for the address the
+        # callee's `ret` will pop, which is what makes the two agree.
+        rsp = st.get(_R_SP)
+        if rsp is None:
+            st.wipe()
+            return st
+        st.store(_u64(rsp - 8), addr + 5, _R_SP)          # the value is a literal
+        st.put(_R_SP, rsp - 8)
+        return st
+    if form == "ret":
+        rsp = st.get(_R_SP)
+        st.put(_R_SP, None if rsp is None else rsp + 8)
+        return st
+    if form == "leave":
+        rbp = st.get(_R_BP)
+        st.put(_R_BP, st.load(rbp, _R_BP))
+        st.put(_R_SP, None if rbp is None else rbp + 8)
+        return st
+    if form == "push_r64":
+        rsp = st.get(_R_SP)
+        st.store(None if rsp is None else _u64(rsp - 8), st.get(_R_BP), _R_SP,
+                 _R_BP)
+        st.put(_R_SP, None if rsp is None else rsp - 8)
+        return st
+    if form in ("alu_ri32:sub_rsp", "alu_ri32:add_rsp"):
+        st.flag_regs = {_R_SP}
+        # `48 81 ec id` / `48 81 c4 id`: the immediate is a SIGN-EXTENDED
+        # int32 the model turns into a `UInt64`, so it is taken mod 2^64 here
+        # too rather than subtracted as a Python negative.
+        imm = _u64(int.from_bytes(raw[3:7], "little", signed=True))
+        rsp = st.get(_R_SP)
+        down = form.endswith("sub_rsp")
+        if down:
+            res = None if rsp is None else _u64(rsp - imm)
+            st.put(_R_SP, res)
+            # `x86_flags_sub`, and its `cf` is the unsigned comparison the
+            # guard's `JAE` is decided on.
+            st.set_flags(None if res is None else res == 0,
+                         None if res is None else _msb(res),
+                         None if (rsp is None or imm is None) else rsp < imm,
+                         None if None in (rsp, imm, res)
+                         else (_msb(rsp) != _msb(imm)
+                               and _msb(res) != _msb(rsp)))
+        else:
+            res = None if rsp is None else _u64(rsp + imm)
+            st.put(_R_SP, res)
+            # `x86_flags_add`, whose `cf` is `res < a`.
+            st.set_flags(None if res is None else res == 0,
+                         None if res is None else _msb(res),
+                         None if (rsp is None or imm is None) else res < rsp,
+                         None if None in (rsp, imm, res)
+                         else (_msb(rsp) == _msb(imm)
+                               and _msb(res) != _msb(rsp)))
+        return st
+    if form == "cqo":
+        # `REX 99`: two bytes and NO ModRM, so it is handled before the ModRM
+        # decode below — which reads `raw[2]` and would raise on it. RDX is the
+        # sign extension of the whole 64-bit RAX, not of its low word (`cqo`'s
+        # own row in `_SUCCS` says which of the two this is).
+        a = st.get(_R_AX)
+        st.put(_R_DX, None if a is None else (_u64(-1) if _msb(a) else 0))
+        return st
+    if form == "mov_rm64_imm32":
+        st.put(_R_AX, int.from_bytes(raw[3:7], "little", signed=True))
+        return st
+    if form == "movzx_r64_r8":
+        a = st.get(_R_AX)
+        st.put(_R_AX, None if a is None else a & 0xFF)
+        return st
+    if form == "movsx_r64_r8":
+        # `REX 0F BE /r`: FOUR bytes with the two-byte escape in the middle, so
+        # the ModRM is `raw[3]` and not `raw[2]` — the same off-by-one
+        # `_resolve`'s own branch for this form records, and reading `raw[2]`
+        # here would take the `0xBE` opcode for a ModRM.
+        modrm = raw[3]
+        rex = raw[0] if raw[0] & 0xF0 == 0x40 else 0
+        dst = ((modrm >> 3) & 7) + (8 if rex & 4 else 0)
+        a = st.get((modrm & 7) + (8 if rex & 1 else 0))
+        if a is None:
+            st.put(dst, None)
+        else:
+            b = a & 0xFF
+            st.put(dst, _u64(b | 0xFFFFFFFFFFFFFF00) if b & 0x80 else b)
+        return st
+
+    if len(raw) < 3:
+        # A form with no ModRM byte that is not handled above. Wiping rather than
+        # raising is the point: `_abs_step` runs inside the TREE walk, so an
+        # IndexError here would take the whole emitter down rather than leave
+        # one branch undecided.
+        st.wipe()
+        return st
+    # A REX byte is `0x40..0x4F` and nothing else, so the test is the HIGH NIBBLE
+    # and not "byte zero": `test rdi, rdi` is `85 FF`, whose first byte is the
+    # OPCODE, and reading it as a REX would extend both of its ModRM fields by
+    # eight and decide the flag about R15 instead.
+    rex = raw[0] if raw[0] & 0xF0 == 0x40 else 0
+    modrm = raw[2]
+    reg, rm = (modrm >> 3) & 7, modrm & 7
+    # `x86_rex_r` and `x86_rex_b`: the model's own decoders, applied to the same
+    # REX byte `_resolve` applies them to, so the two cannot disagree about
+    # which register a ModRM field names.
+    rex_r, rex_b = (8 if rex & 4 else 0), (8 if rex & 1 else 0)
+    mod = modrm >> 6
+    dst, src = reg + rex_r, rm + rex_b
+    # The address of a memory operand. `Int.ofNat v.toNat + disp` then `.toNat`
+    # is the model's own spelling, and `Int.toNat` of a negative `Int` is 0 —
+    # so a displacement that carries the address below zero is a read of 0
+    # here, which is what the model does rather than a guess.
+    def _addr(base, disp=0):
+        if base is None:
+            return None
+        v = base + disp
+        return _u64(v if v >= 0 else 0)
+
+    def _disp(raw_off, wide):
+        if wide:
+            return int.from_bytes(raw[raw_off:raw_off + 4], "little", signed=True)
+        return raw[raw_off] - 256 if raw[raw_off] > 127 else raw[raw_off]
+
+    if form == "mov_r64_rm64_reg":
+        st.put(dst, st.get(src))
+        return st
+    if form == "mov_rm64_r64_reg":
+        st.put(src, st.get(dst))
+        return st
+    if form == "lea_r64_rip":
+        # `lea` computes its address from the END of the instruction, which is
+        # what `length` is for: `_resolve` says the displacement counts from
+        # `m + 7`, and the seven is this form's length rather than a constant
+        # written twice.
+        st.put(dst, (addr + length + _disp(3, True)) % _U64)
+        return st
+    if form == "lea_r64_rm64_disp32":
+        st.put(dst, _addr(st.get(src), _disp(3, True)))
+        return st
+    if form in _MEMORY_DISP_FORMS:
+        wide = form.endswith("disp32")
+        load = form in _LOAD_MEMORY_FORMS
+        base = _R_SP if "sib" in form else src
+        a = _addr(st.get(base), 0 if mod == 0 else _disp(3, wide))
+        if load:
+            st.put(dst, st.load(a, dst))
+        else:
+            st.store(a, st.get(dst), base, dst)
+        return st
+    if form in _SIB_STORE_WITH_DISP_FORMS:
+        # The SIB byte puts the displacement one byte further out, which is why
+        # these two are their own rows in `_resolve` and are here too.
+        st.store(_addr(st.get(_R_SP), _disp(4, form.endswith("disp32"))),
+                 st.get(dst), _R_SP, dst)
+        return st
+    if form == "mov_r64_rm64_sib":
+        st.put(dst, st.load(st.get(_R_SP), dst))
+        return st
+    if form == "mov_rm64_r64_sib":
+        st.store(st.get(_R_SP), st.get(dst), _R_SP, dst)
+        return st
+    if form == "alu_rr:test":
+        a, b = st.get(src), st.get(dst)
+        if a is None or b is None:
+            st.set_flags(None, None, False, False)
+            return st
+        res = a & b
+        st.flag_regs = {src, dst}
+        # `x86_flags_logic`: ZF and SF from the result, CF and OF CLEARED. The
+        # guard's `JNE` is this, and the "cleared" half is why the decision does
+        # not need the operands to be equal -- only their AND to be non-zero.
+        st.set_flags(res == 0, _msb(res), False, False)
+        return st
+    if form in ("alu_rr:cmp", "alu_rr:add", "alu_rr:sub"):
+        st.flag_regs = {src, dst}
+        a, b = st.get(src), st.get(dst)
+        if a is None or b is None:
+            st.set_flags(None, None, None, None)
+            if form != "alu_rr:cmp":
+                st.put(src, None)
+            return st
+        res = _u64(a - b) if form != "alu_rr:add" else _u64(a + b)
+        # `x86_flags_sub`: `cf` is the UNSIGNED `a < b`, which is the guard's
+        # `JAE` read the other way round, and `of_` is the signed overflow.
+        st.set_flags(res == 0, _msb(res), a < b,
+                     _msb(a) != _msb(b) and _msb(res) != _msb(a))
+        if form != "alu_rr:cmp":
+            st.put(src, res)
+        return st
+    if form in ("alu_rr:and", "alu_rr:or", "alu_rr:xor"):
+        st.flag_regs = {src, dst}
+        a, b = st.get(src), st.get(dst)
+        if a is None or b is None:
+            st.put(src, None)
+            st.set_flags(None, None, False, False)
+            return st
+        res = {"alu_rr:and": a & b, "alu_rr:or": a | b,
+               "alu_rr:xor": a ^ b}[form]
+        st.put(src, res)
+        st.set_flags(res == 0, _msb(res), False, False)
+        return st
+    if form in ("alu_ri32:add_reg", "alu_ri32:sub_reg", "alu_ri32:and"):
+        st.flag_regs = {src}
+        a = st.get(src)
+        imm = _u64(int.from_bytes(raw[3:7], "little", signed=True))
+        if a is None:
+            st.put(src, None)
+            st.set_flags(None, None, None, None)
+            return st
+        if form.endswith("and"):
+            res = a & imm
+            st.set_flags(res == 0, _msb(res), False, False)
+        elif form.endswith("add_reg"):
+            res = _u64(a + imm)
+            st.set_flags(res == 0, _msb(res), res < a,
+                         _msb(a) == _msb(imm) and _msb(res) != _msb(a))
+        else:
+            res = _u64(a - imm)
+            st.set_flags(res == 0, _msb(res), a < imm,
+                         _msb(a) != _msb(imm) and _msb(res) != _msb(a))
+        st.put(src, res)
+        return st
+    if form == "alu_ri8:cmp":
+        st.flag_regs = {src}
+        a = st.get(src)
+        imm = _u64(raw[3] - 256 if raw[3] > 127 else raw[3])
+        if a is None:
+            st.set_flags(None, None, None, None)
+            return st
+        res = _u64(a - imm)
+        st.set_flags(res == 0, _msb(res), a < imm,
+                     _msb(a) != _msb(imm) and _msb(res) != _msb(a))
+        return st
+    if form.startswith("shift_imm8:"):
+        st.flag_regs = {src}
+        a = st.get(src)
+        # The count is the byte at `m + 3`, which the model clamps at 64. A count
+        # this section will not reproduce exactly makes the DESTINATION unknown
+        # rather than a wrong number — the count is a byte of the image, not
+        # something to round.
+        n = raw[3]
+        if a is None or n > 31:
+            st.put(src, None)
+            st.flags = dict(st.flags, zf=None, sf=None)
+            return st
+        op = form.split(":")[1]
+        if op == "shl":
+            res = _u64(a << n)
+        elif op == "shr":
+            res = a >> n
+        else:
+            # `x86_sign_extend32` first — bit 31 across the top word — and then
+            # the logical shift, so the two are one expression here and not two.
+            res = (_u64(0xFFFFFFFF00000000) if _msb(a & 0xFFFFFFFF) else a) >> n
+        st.put(src, res)
+        # The shifts write ZF and SF and LEAVE CF and OF ALONE — the whole
+        # difference from every other flag-setting row, and the reason a `jcc`
+        # after a shift is decided from the flags the shift did NOT touch.
+        st.flags = dict(st.flags, zf=res == 0, sf=_msb(res))
+        return st
+    if form == "imul_r64_r64":
+        a, b = st.get(dst), st.get(src)
+        st.put(dst, None if a is None or b is None else _u64(a * b))
+        return st                      # and no flags, which is the model's row
+    if form == "setcc":
+        # `x86_set_reg` writes 1 or 0, zero-extended — the two values the model
+        # narrows to (`x86_trunc32_zero`, `x86_trunc32_one`). The destination is
+        # the bare `modrm & 7` and carries NO REX.B, which is `_resolve`'s own
+        # reading of this row and the one this follows.
+        v = _abs_cond(raw[1] - 0x90, st)
+        st.put(rm, None if v is None else (1 if v else 0))
+        return st
+    st.wipe()
+    return st
+
+
+def _abs_cond(cc, abs_):
+    """`x86_cond cc` over the abstract state: True, False, or None.
+
+    The condition codes are the model's own (`lib/X86.lean`'s `match`, nibble for
+    nibble), transcribed once. `cc` is the OPCODE NIBBLE, not the backend's
+    `COND_*` constant, which is the trap `x86_cond`'s own comment warns about:
+    the two are different permutations and reading one as the other evaluates
+    the wrong condition — which would not be caught here, because the emitted
+    `have` is proved against `x86_cond` and would simply fail.
+    """
+    zf, cf, sf, of_ = (abs_.flag(k) for k in ("zf", "cf", "sf", "of_"))
+
+    def both(a, b):
+        return None if a is None or b is None else (a and b)
+
+    def either(a, b):
+        return None if a is None or b is None else (a or b)
+
+    def neg(a):
+        return None if a is None else (not a)
+
+    if cc == 0:
+        return of_
+    if cc == 1:
+        return neg(of_)
+    if cc == 2:
+        return cf
+    if cc == 3:
+        return neg(cf)               # ae / nb / nc
+    if cc == 4:
+        return zf
+    if cc == 5:
+        return neg(zf)               # ne / nz
+    if cc == 6:
+        return either(cf, zf)
+    if cc == 7:
+        return both(neg(cf), neg(zf))
+    if cc == 8:
+        return sf
+    if cc == 9:
+        return neg(sf)
+    if cc == 10:
+        return zf
+    if cc == 11:
+        return neg(zf)
+    if cc == 12:
+        return None if sf is None or of_ is None else sf != of_
+    if cc == 13:
+        return None if sf is None or of_ is None else sf == of_
+    if cc == 14:
+        return None if sf is None or of_ is None else (zf or sf != of_)
+    return None if sf is None or of_ is None or zf is None else (
+        not zf and sf == of_)
+
+
+#: What a decided branch's proof has to unfold, per form on the path.
+#:
+#: These are the definitions the form's SUCCESSOR expression (`_SUCCS`) mentions,
+#: so the set is derived from the same table the successor is transcribed from
+#: and a form that needs one it does not list fails to close — visibly, with no
+#: `sorry` to hide it. The point of listing them per form rather than passing one
+#: global set is the size of the `simp`: the whole set on every decision is what
+#: made the closing `simp` unaffordable, and Lean warns about every argument it
+#: does not use, so an over-broad set is both slow and noisy.
+_SIMP_FORMS = {
+    "push_r64": ("x86_get_reg", "mem_write_bytes"),
+    "alu_ri32:sub_rsp": ("x86_get_reg", "x86_flags_sub"),
+    "alu_ri32:add_rsp": ("x86_get_reg", "x86_flags_add"),
+    "mov_rm64_imm32": (),
+    "alu_ri32:add_reg": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_flags_add"),
+    "alu_ri32:sub_reg": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_flags_sub"),
+    "alu_ri32:and": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_flags_logic"),
+    "alu_ri8:cmp": ("x86_get_reg", "x86_flags_sub"),
+    "mov_r64_rm64_reg": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_rex_r"),
+    "mov_rm64_r64_reg": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_rex_r"),
+    "lea_r64_rm64_disp32": ("x86_get_reg", "x86_set_reg", "x86_rex_b"),
+    "lea_r64_rip": ("x86_set_reg", "UInt64.ofNat"),
+    "mov_r64_rm64_sib": ("x86_get_reg", "x86_set_reg", "mem_read_bytes"),
+    "mov_rm64_r64_sib": ("x86_get_reg", "x86_set_reg", "mem_write_bytes"),
+    "mov_r64_rm64_disp8": ("x86_get_reg", "x86_set_reg", "mem_read_bytes"),
+    "mov_r64_rm64_disp32": ("x86_get_reg", "x86_set_reg", "mem_read_bytes"),
+    "mov_r64_rm64_nodisp": ("x86_get_reg", "x86_set_reg", "mem_read_bytes"),
+    "mov_rm64_r64_disp8": ("x86_get_reg", "x86_set_reg", "mem_write_bytes"),
+    "mov_rm64_r64_disp32": ("x86_get_reg", "x86_set_reg", "mem_write_bytes"),
+    "mov_rm64_r64_nodisp": ("x86_get_reg", "x86_set_reg", "mem_write_bytes"),
+    "mov_rm64_r64_sib_disp8": ("x86_get_reg", "x86_set_reg", "mem_write_bytes"),
+    "mov_rm64_r64_sib_disp32": ("x86_get_reg", "x86_set_reg", "mem_write_bytes"),
+    "movzx_r64_r8": ("UInt64.ofNat",),
+    "movsx_r64_r8": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_sign_extend8"),
+    "alu_rr:add": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_rex_r",
+                   "x86_flags_add"),
+    "alu_rr:sub": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_rex_r",
+                   "x86_flags_sub"),
+    "alu_rr:and": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_rex_r",
+                   "x86_flags_logic"),
+    "alu_rr:or": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_rex_r",
+                  "x86_flags_logic"),
+    "alu_rr:xor": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_rex_r",
+                   "x86_flags_logic"),
+    "alu_rr:cmp": ("x86_get_reg", "x86_rex_b", "x86_rex_r", "x86_flags_sub"),
+    "alu_rr:test": ("x86_get_reg", "x86_rex_b", "x86_rex_r", "x86_flags_logic"),
+    "shift_imm8:shl": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "UInt64.ofNat"),
+    "shift_imm8:shr": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "UInt64.ofNat"),
+    "shift_imm8:sar": ("x86_get_reg", "x86_set_reg", "x86_rex_b",
+                       "x86_trunc32", "x86_sign_extend32"),
+    "imul_r64_r64": ("x86_get_reg", "x86_set_reg", "x86_rex_b"),
+    "cqo": ("x86_cqo",),
+    "setcc": ("x86_get_reg", "x86_set_reg", "x86_trunc32"),
+    "call_rel32": ("UInt64.ofNat", "mem_write_bytes"),
+    "ret": ("mem_read_bytes",),
+    "leave": ("mem_read_bytes",),
+}
+
+#: What every decided branch's proof needs whatever the path: the condition
+#: itself (the goal is about `x86_cond`) and the flag accessor the
+#: flag-setting instructions' successors mention — `x86_flags_*` compute `sf`
+#: and `of_` with it, and `simp` folds the whole record whether it wants to or
+#: not.
+_DECISION_SIMP = ("x86_cond", "x86_msb")
+
+
+#: `X86State.init`'s register file, as the emitter's `hval0` states it: every
+#: register 0 except RSP (the literal stack pointer) and RDI (the program's
+#: input, which is the one thing the theorem is quantified over and so is NOT a
+#: literal). Built from an `_Abs` rather than written out, so it cannot drift
+#: from the walk's own starting state.
+_INIT_FACTS = {r: v for r, v in enumerate(_Abs().regs) if v is not None}
+
+#: `X86State`'s register FIELD names, in `x86_get_reg`'s order.
+#:
+#: The per-step facts below are stated about `s{r}.<field>` rather than about
+#: `x86_get_reg s{r} i`, and that is not cosmetic: a fact in the `x86_get_reg`
+#: spelling cannot be applied to the arithmetic a successor builds on a register
+#: read, because the successor's own `x86_get_reg` is simplified to the field
+#: projection BEFORE the hypothesis is matched — measured, `simp [hs1, hval0]`
+#: left `(X86State.init n E).rsp - 8 = …` in the goal and `decide` failed on it
+#: with "Expected type must not contain free variables". Stated as the
+#: projection, it rewrites. The order is `x86_get_reg`'s own `match`, so the two
+#: cannot come to disagree about which field is which register.
+_REG_FIELDS = ("rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+               "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15")
+
+
+def _decision_simp(forms, path):
+    """The `simp` argument list for a decision taken on `path` at `forms`.
+
+    `path` is this path's own equations — the branch's `hs{k}` plus the per-step
+    `hval` fact that states the fields the decision reads — and `forms` are the
+    instructions that produced them. Both halves are needed and neither is
+    enough: the equations without the definitions stay a nest of records, and
+    the definitions without the equations never fire.
+
+    **`mem_read_bytes` is NOT in the set, and that is measured.** The value of a
+    memory cell comes from the `hval` facts, and a `simp` able to unfold the read
+    itself will unfold it BEFORE it matches the hypothesis that states it,
+    leaving an `ite` chain no later tactic can use. The library lemma
+    `x86_init_mem_reads_zero` looks necessary for the same reason — the initial
+    state's zeroed memory IS the floor word's value at the entry guard — and is
+    not, because `hval0` states that value over `i0` and is proved with
+    `[i0, X86State.init, mem_read_bytes]`, which is the one place the read is
+    unfolded on purpose.
+    """
+    names = set(_DECISION_SIMP)
+    for form in forms:
+        names.update(n for n in _SIMP_FORMS.get(form, ())
+                     if n not in ("mem_read_bytes", "mem_write_bytes"))
+    return ", ".join(list(path) + sorted(names))
+
+
 def _shapes(code, insns):
     """`[(insn, resolved_form, raw)]`, splitting the two `mov` opcodes into
     their shapes.  A form not in `_FORMS` is left alone, and the caller reports
@@ -1362,21 +2052,48 @@ class _Node:
     "leaves" (none, and NOT stepped: the run is at this instruction and the
     image ends there — see `_tree`'s `call_rel32`).
 
+    `cond` is a `jcc`'s DECIDED condition — True, False, or None for the two
+    arms `by_cases` splits between. A decided `jcc` has ONE kid, the one its
+    condition selects, and `emit_terminates` emits the decision as a proved fact
+    instead of a `by_cases`; see the abstract machine above for why the guard's
+    two branches are settled rather than walked.
+
+    `k` is this node's index in the emitted chain — `s{k}` is the state its step
+    starts in — and it is stamped by `_index` over the FINISHED tree rather than
+    by a counter inside `emit_terminates`' walk, which reads it off the node
+    instead of keeping its own. One number, not two: the walk cannot come to
+    disagree with the build about which step is which, and `_tracked` — the
+    pre-pass that decides how many per-step value facts to emit — has the same
+    numbers before the walk runs at all. `abs` is the abstract machine's state as
+    this instruction is about to run, and `after` the state it leaves, which is
+    what `hval{k+1}` is about.
+
     `halt` is set by `_leaf_halts` and is the index of this leaf's disjunct in
-    `emit_terminates`' statement, or None for a node that is not a leaf. It
-    lives on the node rather than in a counter beside the walk so the two
-    traversals cannot come to disagree about which leaf is which: the statement
-    is written before the walk runs, so it has to know the leaves in advance,
-    and two counters incremented in step are two answers to one question.
+    `emit_terminates`' statement, or None for a node that is not a leaf. It lives
+    on the node rather than in a counter beside the walk so the two traversals
+    cannot come to disagree about which leaf is which: the statement is written
+    before the walk runs, so it has to know the leaves in advance, and two
+    counters incremented in step are two answers to one question.
     """
     __slots__ = ("insn", "form", "raw", "addr", "kind", "state", "succ", "kids",
-                 "halt")
+                 "halt", "cond", "k", "abs", "after", "write")
 
     def __init__(self, insn, form, raw, addr, kind, state, succ):
         self.insn, self.form, self.raw, self.addr = insn, form, raw, addr
         self.kind, self.state, self.succ = kind, state, succ
         self.kids = []
         self.halt = None
+        self.cond = None
+        self.k = None
+        self.abs = None
+        #: The abstract state AFTER this instruction, which is the state the
+        #: emitted `hval{k+1}` is about — `abs` is the one BEFORE it, and the
+        #: two are one step apart, which is the step the fact closes.
+        self.after = None
+        #: `(address, value)` if THIS instruction stored, else None. Read off
+        #: the abstract machine's own write list rather than off a table of
+        #: which forms are stores, so the two cannot disagree about it.
+        self.write = None
 
 
 class _NoTree(ValueError):
@@ -1433,12 +2150,43 @@ def _tree(code, info, shapes):
     What is left of the budget bounds PYTHON's stack, not the program: `build`
     is one Python frame per instruction, so the honest limit is the interpreter's
     own recursion limit less what the caller already occupies.
+
+    **A BRANCH WHOSE CONDITION IS SETTLED IS NOT SPLIT.**  `abs_` is the abstract
+    machine's state on this path (see the section above), and a `jcc` whose flags
+    it knows is followed into the ONE arm its condition selects, with the
+    decision recorded on the node for `emit_terminates` to prove. Without it
+    every guarded prologue doubled the paths through it, because the stack-floor
+    guard puts two conditional branches in every prologue of every image — which
+    is what `_MAX_CHAIN_STEPS` had to be measured against.
+
+    **The step index is stamped on the FINISHED tree, by `_index`, in the walk's
+    own order**, and `emit_terminates` reads it off the node instead of counting
+    for itself. Both halves are load-bearing: `build` walks a node's children
+    before handing the node back, so numbering as the tree is built is
+    post-order and would make `s3` name different steps in the two; and
+    `_tracked` needs the numbers before the walk starts, because it decides how
+    many per-step value facts a decided branch's proof will need.
     """
     base, entry = info["base_addr"], info["func_offset"]
     by_addr = {base + i.offset: (i, f, r) for i, f, r in shapes}
     deep = max(256, sys.getrecursionlimit() - 200)
 
-    def build(addr, state, depth, seen, rets):
+    def done(node, abs_, after=None):
+        """Record the incoming state and this step's store, and hand the node back.
+
+        NOT the step index: `build` creates a node and then walks its children,
+        so numbering here would be post-order while the emitter's walk is
+        pre-order, and the two would disagree about which step is `s3`. The
+        index is stamped by `_index` over the finished tree, in the walk's own
+        order.
+        """
+        node.abs = abs_
+        node.after = after
+        if after is not None and len(after.writes) > len(abs_.writes):
+            node.write = after.writes[-1]
+        return node
+
+    def build(addr, state, abs_, depth, seen, rets):
         if depth > deep or addr in seen:
             return None
         seen = seen | {addr}
@@ -1446,6 +2194,10 @@ def _tree(code, info, shapes):
         if got is None:
             return None
         insn, form, raw = got
+        # What the machine holds AFTER this instruction, which is what a `jcc`
+        # reads: the flags `x86_cond` consults are the ones this instruction
+        # left behind, not the ones the state it started in carried.
+        after = _abs_step(abs_, form, raw, addr, insn.length)
         if form in ("jcc_rel32", "jcc_rel8"):
             off = (int.from_bytes(raw[2:6], "little", signed=True)
                    if form == "jcc_rel32"
@@ -1455,21 +2207,37 @@ def _tree(code, info, shapes):
             n = 6 if form == "jcc_rel32" else 2
             nxt = addr + n
             node = _Node(insn, form, raw, addr, "jcc", state, nxt)
-            taken = build(addr + n + off, None, depth + 1, seen, rets)
-            fell = build(nxt, None, depth + 1, seen, rets)
-            if taken is None or fell is None:
+            cc = raw[1] - 0x80
+            dec = _abs_cond(cc, after)
+            if dec is None:
+                taken = build(addr + n + off, None, after, depth + 1, seen, rets)
+                fell = build(nxt, None, after, depth + 1, seen, rets)
+                if taken is None or fell is None:
+                    return None
+                # `by_cases h : P` presents the `P` case FIRST, so the taken path
+                # must be kids[0] or each arm gets the other's address.
+                node.kids = [taken, fell]
+                return done(node, abs_, after)
+            # DECIDED.  One arm, and the arm its condition selects — `kids[0]`
+            # is the branch target, so `dec` is exactly the index. The other arm
+            # is never BUILT, which is the point: the guard's trap arm is a
+            # `call exit(2)` out of the image, and building it is what put a
+            # halt-address disjunct in every example's theorem and a second
+            # copy of the whole chain below it in the file.
+            kid = build(addr + n + off if dec else nxt, None, after,
+                        depth + 1, seen, rets)
+            if kid is None:
                 return None
-            # `by_cases h : P` presents the `P` case FIRST, so the taken path
-            # must be kids[0] or each arm gets the other's address.
-            node.kids = [taken, fell]
-            return node
+            node.cond = dec
+            node.kids = [kid]
+            return done(node, abs_, after)
         if form in ("jmp_rel32", "jmp_rel8"):
             off = (int.from_bytes(raw[1:5], "little", signed=True)
                    if form == "jmp_rel32"
                    else int.from_bytes(raw[1:2], "little", signed=True))
             node = _Node(insn, form, raw, addr, "jmp", state, addr + off)
-            node.kids = [build(addr + off, None, depth + 1, seen, rets)]
-            return None if node.kids[0] is None else node
+            node.kids = [build(addr + off, None, after, depth + 1, seen, rets)]
+            return None if node.kids[0] is None else done(node, abs_, after)
         if form == "call_rel32":
             # **A CALL THAT LEAVES THE IMAGE IS A LEAF**, and which call that is
             # in practice is the guard's: the stack-floor guard's `exit` goes to a
@@ -1573,11 +2341,11 @@ def _tree(code, info, shapes):
                 # is that report with the measurement behind it.
                 node = _Node(insn, form, raw, addr, "leaves", state, addr)
                 node.kids = []
-                return node
+                return done(node, abs_, after)
             node = _Node(insn, form, raw, addr, "jmp", state, target)
-            node.kids = [build(target, None, depth + 1, frozenset(),
+            node.kids = [build(target, None, after, depth + 1, frozenset(),
                               rets + (addr + 5,))]
-            return None if node.kids[0] is None else node
+            return None if node.kids[0] is None else done(node, abs_, after)
         if form == "ret":
             # A `ret` is the end of the RUN only when there is nothing to return
             # to: `X86State.init` gives a stack of zeroes, so the OUTERMOST
@@ -1620,7 +2388,7 @@ def _tree(code, info, shapes):
             # cycle, and the caller's `seen` cannot cross a frame boundary.
             if rets:
                 node = _Node(insn, form, raw, addr, "ret", state, rets[-1])
-                kid = build(rets[-1], None, depth + 1, seen, rets[:-1])
+                kid = build(rets[-1], None, after, depth + 1, seen, rets[:-1])
                 if kid is None:
                     # Its own reason, and not `None`: a continuation that does
                     # not walk is a different thing from a body that loops, and
@@ -1634,14 +2402,15 @@ def _tree(code, info, shapes):
                         "the callee's ret returns into the caller and the "
                         "continuation does not walk")
                 node.kids = [kid]
-                return node
-            return _Node(insn, form, raw, addr, "ret", state, None)
+                return done(node, abs_, after)
+            return done(_Node(insn, form, raw, addr, "ret", state, None),
+                        abs_, after)
         node = _Node(insn, form, raw, addr, "seq", state, addr + insn.length)
-        node.kids = [build(addr + insn.length, None, depth + 1, seen, rets)]
-        return None if node.kids[0] is None else node
+        node.kids = [build(addr + insn.length, None, after, depth + 1, seen, rets)]
+        return None if node.kids[0] is None else done(node, abs_, after)
 
     try:
-        root = build(entry, "i0", 0, frozenset(), ())
+        root = build(entry, "i0", _Abs(), 0, frozenset(), ())
     except RecursionError:
         # One Python frame per instruction, so a straight line longer than the
         # interpreter's own limit cannot be walked at all.  `None` is the answer
@@ -1651,6 +2420,7 @@ def _tree(code, info, shapes):
         return None
     if root is None:
         return None
+    _index(root)
     return root
 
 
@@ -1681,29 +2451,32 @@ _NO_TREE_CHARS = {"form": None, "call": 60, "loops": 0, "size": 0}
 #:
 #: so ~15 s per 1000 lines on the two that are measured, and 2000 steps is
 #: roughly 10 000 lines and two and a half minutes -- inside `PROOF_WALL_S`
-#: (1500 s) with room, and 4.4x the worst tree in the corpus that is not
-#: `wide_recv`.
+#: (1500 s) with room.
 #:
-#: **`wide_recv` is what the bound is for, and the reason is a rule rather than a
-#: number.** The stack-floor guard puts two conditional branches in every
-#: prologue, and a path tree walks every branch outcome, so the file is
-#: `2^(branches on the path)` times what it was: `wide_recv`'s five functions
-#: take it from one path to 94. Attempting that costs 1500 s of wall and then
-#: reports a FAILURE whose message is about the clock, which is B21's lesson
-#: arriving from the other side -- "an unaffordable attempt reported as a
-#: FAILURE is worse than an admitted gap, because the failure is 20 minutes that
-#: say nothing and the gap is one number". So the tree is refused, BY NAME and
-#: with its size in the line, which is what the gap is.
+#: **What the bound is for, now that the guard is decided.** It was `wide_recv`:
+#: the stack-floor guard put two conditional branches in every prologue, a path
+#: tree walked every branch outcome, and five guarded functions took it from one
+#: path to 94 leaves and 12 241 step equations -- past the bound, and past what a
+#: proof can be spent on, since attempting it costs 1500 s of wall and then
+#: reports a FAILURE whose message is about the clock (B21's lesson arriving
+#: from the other side: an unaffordable attempt reported as a FAILURE is worse
+#: than an admitted gap, because the failure is 25 minutes that say nothing and
+#: the gap is one number). So the tree is refused, BY NAME and with its size in
+#: the line, which is what the gap is.
 #:
-#: **The fix that makes this bound unnecessary is not a bigger bound.** It is for
-#: the emitter to decide the guard's own two branches statically rather than walk
-#: both arms: they are decided by facts the emitter can compute (the floor word
-#: is 0 in `X86State.init`'s memory, so the first `JNE` is not taken; and the
-#: stack pointer is a sum of literal frame sizes, so the `JAE` is taken whenever
-#: the path is inside `model.STACK_FLOOR_BUDGET_BYTES`). See
-#: `bugs/FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_image.md` §
-#: "what is left", which is where that is written down with its two Lean
-#: obligations.
+#: The guard's own branches are now DECIDED (the abstract machine above), which
+#: is what that refusal's own docstring said was the fix and is not a bigger
+#: bound: `wide_recv` is one path of 150 steps again and elaborates in 162 s.
+#: The bound stays, because the doubling it was measured against is still what
+#: any branch the machine cannot settle does — `twoifs` and `elif3` are four
+#: leaves each and `deepif` three, every one of them a branch on the program's
+#: INPUT, and a program with four input-dependent branches is 16 paths whatever
+#: else is true of it.
+#:
+#: The table above is the BEFORE state and is kept as it is, because the ratio
+#: is the claim: the same fixtures are now 1, 1, 4 and 1 leaves — `ret42`,
+#: `SOURCE`, `bittest`, `wide_recv` — by `emit_terminates` alone, which is
+#: Lean-free and takes a second over the whole corpus.
 _MAX_CHAIN_STEPS = 2000
 
 
@@ -1733,6 +2506,144 @@ def _paths(node, acc=None):
     for kid in node.kids:
         yield from _paths(kid, list(acc))
     acc.pop()
+
+
+def _index(root):
+    """Stamp every node with its step index, in the walk's order.
+
+    The order IS the one `emit_terminates`' walk uses — this node, then `kids[0]`,
+    then `kids[1]`, which is `_paths`' order too — and that has to be said rather
+    than assumed: `_tree` builds a node's children BEFORE handing the node back,
+    so numbering as the tree is built would be post-order, and `s3` would name a
+    different step in the two. It is a third traversal of the same shape as
+    `_leaf_halts`' and for the same reason: the statement is written before the
+    walk runs, so the numbers have to exist before it does.
+
+    It runs on the FINISHED tree, which is what makes it agree with the walk:
+    a node the build discarded is not here to be numbered.
+    """
+    counter = [0]
+
+    def visit(node):
+        node.k = counter[0]
+        counter[0] += 1
+        for kid in node.kids:
+            visit(kid)
+
+    visit(root)
+    return counter[0]
+
+
+def _tracked(root):
+    """`(regs, cells, upto)` for the per-step value facts a proof will need.
+
+    `regs` is every register a decided branch's proof can come to read, and
+    `cells` every address it can come to read memory from; `upto` is the last
+    step index any decided branch sits at, so `emit_terminates` emits value
+    facts for steps `1 … upto` and none after — the facts exist to feed a
+    decision, and a path with no decision past a point pays for none.
+
+    **Where the sets come from is the whole of it, and it is the abstract
+    machine's own record rather than a guess.** A register enters `regs` because
+    something used it as a memory base or loaded a cell into it, and a cell
+    enters `cells` because a tracked register was loaded from it. Anything a
+    decided condition reads therefore has a fact by construction, which is the
+    property that keeps a MISSING conjunct from turning into a failed file:
+    `hval`'s proof reduces one step and hands the rest to the previous fact, so a
+    field nothing states is left in the goal unsolved.
+
+    `rsp` and `rbp` are in `regs` whatever else is, because they are what the
+    prologue moves and what every frame store is addressed through.
+
+    It is a PRE-PASS over the finished tree, and it has to be: the facts are
+    emitted per step, while the walk goes, so the walk needs to know the whole
+    set before it emits the first one. The walk order is the tree order — the
+    same recursion, `kids[0]` then `kids[1]` — so a fact emitted on one arm is
+    never one another arm needed, and the step indices it reads (`node.k`, stamped
+    by `_tree`) are the same ones the walk uses.
+    """
+    regs, cells = {_R_SP, _R_BP}, set()
+    upto = -1
+
+    loads, stores = [], []
+
+    def visit(node):
+        nonlocal upto
+        a = node.abs
+        if a is not None:
+            regs.update(a.bases)
+            loads.extend(a.loads)
+            stores.extend(a.store_regs)
+            if node.cond is not None:
+                upto = max(upto, node.k)
+                # **The registers this decision reads are the ones its FLAGS came
+                # from**, which `_abs_step` recorded as `flag_regs` — not every
+                # register on the path, and not "the ones that happen to be
+                # known". A register that was merely loaded is not in the set
+                # unless a decision consults it, which is what keeps the facts
+                # small: the stack words a callee loads its ARGUMENTS from are
+                # read by no decided condition anywhere on the path.
+                regs.update(a.flag_regs)
+        for kid in node.kids:
+            visit(kid)
+
+    visit(root)
+    # **A tracked register's own source cell is tracked too, and that is not
+    # tidiness.** A fact states a register's value at every step, and a fact is
+    # derived from the previous one; so a register that is unknown at step `k-1`
+    # and known at `k` — loaded at `k` from a cell whose value the walk DOES know
+    # — leaves the chain a hole unless that cell has a fact too. Measured:
+    # `wide_recv` states `s51.rbx = <literal>` where `s50.rbx` is unknown, and
+    # `decide` fails on it with "Expected type must not contain free variables".
+    # **The two sets are a FIXED POINT, and neither can be had without the
+    # other.** A tracked register needs a fact for its own source cell, because a
+    # register that is unknown at one step and known at the next is loaded, and
+    # a fact reduces one step and hands the rest to the previous fact. A tracked
+    # cell needs a fact for the register that was STORED into it, for the same
+    # reason — and the register that was stored may be one nothing has tracked
+    # yet. Measured on `wide_recv`: `s25.rbp` is right, `s24.rax` is not in any
+    # fact, and a cell written from it makes `decide` fail with "Expected type
+    # must not contain free variables". Two rounds are not enough in general, so
+    # this iterates; it terminates because both sets are finite.
+    for _ in range(len(_REG_FIELDS) + 1):
+        before = (frozenset(regs), frozenset(cells))
+        cells.update(c for r, c in loads if r in regs)
+        regs.update(r for r, c in stores if c is not None and c in cells)
+        if before == (frozenset(regs), frozenset(cells)):
+            break
+    return sorted(regs), sorted(cells), upto
+
+
+def _abs_peel(node, cells):
+    """The `rw`s that take THIS step's store off each tracked cell.
+
+    A store is at `(address, value)` — the abstract machine's own record of it —
+    and a cell is one of the addresses `_tracked` says a decision may read. Three
+    cases, all from the library and all with a side condition Lean can decide,
+    because the address is a LITERAL by the time this runs: the store lands
+    exactly on the cell (`mem_read_bytes_write_same`, which reads the value back
+    and masks it to `lowMask 8`), or it is wholly above the cell
+    (`mem_read_bytes_write_above`), or wholly below (`…_below`). A partial
+    overlap cannot arise: every store on this path is eight bytes wide, so two
+    of them either coincide or are disjoint.
+
+    Nothing is returned for a step that did not store, which is the common case
+    on a path: the cell's value is then the previous fact's, verbatim.
+    """
+    if node.write is None:
+        return []
+    addr, _val = node.write
+    out = []
+    for c in cells:
+        if addr == c:
+            out.append("mem_read_bytes_write_same _ %d _" % c)
+        elif addr + 8 <= c:
+            out.append("mem_read_bytes_write_above _ %d _ 8 8 %d (by decide)"
+                       % (addr, c))
+        elif c + 8 <= addr:
+            out.append("mem_read_bytes_write_below _ %d _ 8 8 %d (by decide)"
+                       % (addr, c))
+    return out
 
 
 def _leaf_halts(node, acc=None):
@@ -1965,8 +2876,10 @@ def emit_terminates(path):
         raise _NoTree(
             "size",
             "%d step equations over %d leaves, past the %d this emitter can "
-            "prove (the stack-floor guard doubles every path; see "
-            "_MAX_CHAIN_STEPS)" % (steps, len(leaves), _MAX_CHAIN_STEPS))
+            "prove (every branch it cannot settle doubles the paths through "
+            "it; the stack-floor guard's own two are settled, so this is the "
+            "program's; see _MAX_CHAIN_STEPS)"
+            % (steps, len(leaves), _MAX_CHAIN_STEPS))
     # Every node in the tree, which is an upper bound on the length of any one
     # path and so on the depth the closing `simp` at each `ret` will need.  Both
     # arms of a fork are counted, which over-counts; the option is a limit, so
@@ -2001,6 +2914,10 @@ def emit_terminates(path):
     # information.
     halts = _leaf_halts(root)
     n_disjuncts = len(halts)
+    # What the per-step value facts have to state, and how far they run. Both
+    # come off the finished tree (`_tracked`), because they are about the whole
+    # path and the walk emits them one step at a time.
+    regs, cells, upto = _tracked(root)
 
     def _disjunct(i):
         addr = halts[i]
@@ -2029,22 +2946,30 @@ def emit_terminates(path):
     out.append("  have hb := all_bytes")
     out.append("  let i0 : X86State := X86State.init n %d" % entry)
 
-    counter = [0]
     # Whether this path has returned out of a callee and back into its caller.
     # Read at the closing `hrip`, where it decides whether the exit-slot read is
     # attempted in full or admitted — see there for why crossing a frame is what
     # makes the difference.
     crossed = [False]
 
-    def walk(node, state, ind, cases, rules, hs_in=None, hs_path=()):
+    def walk(node, state, ind, cases, rules, hs_in=None, hs_path=(),
+             fs_path=()):
         """Emit one node and, for a branch, both of its children.
 
-        `cases` are the `by_cases` hypotheses in scope at this point; `rules`
-        the `x86_exec_go_exit_step` applications that reduce the run so far, in
-        order, which is what the closing `rw` replays.
+        `cases` are the `by_cases`/decided hypotheses in scope at this point;
+        `rules` the `x86_exec_go_exit_step` applications that reduce the run so
+        far, in order, which is what the closing `rw` replays.
+
+        `fs_path` is the FORM of every step walked so far on this path, and it
+        is what sizes a decided branch's `simp`: the set of definitions to
+        unfold is read off the path's own instructions rather than passed whole
+        (see `_SIMP_FORMS`).
         """
-        k = counter[0]
-        counter[0] = k + 1
+        # The step index is the NODE's, stamped by `_tree`. It used to be a
+        # counter kept here, which was a second answer to the same question the
+        # build was already answering — and the build is where `_tracked` reads
+        # it from, before this walk exists.
+        k = node.k
         # A `ret` with a successor is returning into a CALLER; one without is
         # the outermost `ret`, which pops the zero `X86State.init` leaves on the
         # stack and so ends the run at the exit sentinel. `_tree` tells them
@@ -2059,6 +2984,78 @@ def emit_terminates(path):
 
         def emit(line):
             out.append(pad + line if line else "")
+
+        def emit_value_facts(node, name, index, forms):
+            """The step's own `hval`, if a decided branch on this path will need it.
+
+            **Why there is a fact per STEP and not one `simp` over the chain.** A
+            decision is about `x86_cond cc s{k}`, and `s{k}` is a single nested term
+            `s1 = {i0 with …}, s2 = {s1 with …}, …` — so the direct proof is one
+            `simp` over every successor equation on the path, and that is what this
+            emitter emitted first. It works to about 30 steps and then stops being
+            affordable, superlinearly: measured on `wide_recv`, one such `simp` at
+            step 41 cost a few seconds and the same one at step 131 was still running
+            at `PROOF_WALL_S` (1500 s), with `mem_write_bytes`'s `ite` chain and the
+            nested `Int.ofNat … + disp` addresses being re-normalised at every one
+            of the 131 levels. The file was 1500 s of wall and then a FAILURE about
+            the clock, which is the trade `bugs/FORMAL_x86_64_end_to_end_proof.md`
+            calls B21 from the wrong side — a worse report than the refusal it
+            replaced.
+
+            So the values are stated ONE STEP AT A TIME instead: `hval{k}` is about
+            `s{k}`, and its proof uses `hs{k}` — which describes `s{k}` in terms of
+            `s{k-1}` — plus `hval{k-1}`. Each is a projection reduction over one
+            record update and the literal arithmetic on the result, so the whole
+            chain costs what one step costs times the number of steps. Measured on
+            `wide_recv`: the 131 facts plus the decision they feed elaborate in 62 s,
+            where the single `simp` they replace did not finish in 1500 s.
+
+            `upto` bounds it: nothing after the last decided branch on the path is
+            emitted, and a path with no decided branch emits none at all.
+            """
+            if index > upto:
+                return
+            st = node.after
+            conj = []
+            for r in regs:
+                v = st.get(r) if st is not None else None
+                if v is not None:
+                    conj.append("%s.%s = %d" % (name, _REG_FIELDS[r], v))
+            for c in cells:
+                v = st.load(c) if st is not None else None
+                if v is not None:
+                    conj.append("mem_read_bytes %s.mem %d 8 = %d" % (name, c, v))
+            if not conj:
+                return
+            emit("have hval%d : %s := by"
+                 % (index, " ∧\n      ".join(conj)))
+            # The four accessors are always in: a register read in a successor
+            # is `x86_get_reg s{k} (rm + x86_rex_b rex)` until BOTH are reduced,
+            # and which of them a given step needs is that step's own row.
+            simp = ["hs%d" % index, "hval%d" % (index - 1), "x86_get_reg",
+                    "x86_set_reg", "x86_rex_b", "x86_rex_r"]
+            simp += [n for n in _SIMP_FORMS.get(forms[-1], ())
+                     if n not in ("mem_read_bytes", "mem_write_bytes")]
+            emit("  simp [%s]" % ", ".join(dict.fromkeys(simp)))
+            # A store at this step is PEELLED off the cells the facts track, with
+            # the library's own disjointness lemma and a side condition Lean can
+            # decide because the address is a literal by then — which is what one
+            # more step of unfolding buys, and what the whole chain would have
+            # cost if it were the chain's job.
+            peel = _abs_peel(node, cells)
+            if peel:
+                emit("  <;> rw [%s]" % ", ".join(peel))
+                # …and the previous fact AGAIN, because the peel has just
+                # produced the read it states: the `simp` above could not use it,
+                # since at that point the term was still `mem_read_bytes
+                # (mem_write_bytes …)`, and a fact rewrites only the term it is
+                # stated about. Emitted ONLY here — a second `simp` with the same
+                # set on a goal the first one already closed is a "simp made no
+                # progress" error, which is the same shape as a fact that says
+                # nothing.
+                emit("  <;> simp [hval%d]" % (index - 1))
+            emit("  <;> decide")
+
 
         def emit_disjunct(i):
             """Pick disjunct `i` of the statement: `right` past each one above.
@@ -2165,6 +3162,7 @@ def emit_terminates(path):
         emit("have hs%d : %s = %s := by" % (k + 1, nxt, succ))
         emit("  rw [h%d] at hstep%d" % (k, k))
         emit("  exact Option.some.inj hstep%d" % k)
+        emit_value_facts(node, nxt, k + 1, fs_path + (node.form,))
         # `x86_exec_go_exit_step`'s second argument is `h_not_exit : s_k.rip ≠
         # exit`, and `s_k` is the state this step STARTS in -- which the
         # PREVIOUS step's successor equation describes.  So this uses `hs_k`,
@@ -2187,14 +3185,51 @@ def emit_terminates(path):
             # successor's own flags produces a hypothesis that never rewrites
             # anything, and the next step's `rip` stays an `if`.
             cc = node.raw[1] - 0x80
-            emit("by_cases hc%d : x86_cond %d %s = true" % (k, cc, state))
             both = rules + [step_rule]
-            emit("\u00b7")
-            walk(node.kids[0], nxt, ind + 1, cases + ["hc%d" % k], both,
-                 "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),))
-            emit("\u00b7")
-            walk(node.kids[1], nxt, ind + 1, cases + ["hc%d" % k], both,
-                 "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),))
+            if node.cond is None:
+                emit("by_cases hc%d : x86_cond %d %s = true" % (k, cc, state))
+                emit("\u00b7")
+                walk(node.kids[0], nxt, ind + 1, cases + ["hc%d" % k], both,
+                     "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
+                     fs_path + (node.form,))
+                emit("\u00b7")
+                walk(node.kids[1], nxt, ind + 1, cases + ["hc%d" % k], both,
+                     "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
+                     fs_path + (node.form,))
+                return
+            # **THE DECIDED ARM, and it is emitted as a PROOF.**  `_tree` settled
+            # this condition from the abstract machine, so only one arm was built
+            # and only one arm is emitted; what says the other arm is unreachable
+            # is this fact, and it is proved.
+            #
+            # There is no `try` and no `sorry` anywhere in it, and that is the
+            # whole safety argument for having a static analysis at all: a
+            # decision the abstract machine gets WRONG leaves a goal that is
+            # false, and Lean rejects the file. It cannot become a `sorry` on a
+            # side condition and a claim about the machine's future at once, so
+            # the emitter cannot quietly start proving things that are not true.
+            #
+            # `hs_path` alone: it already ends at `hs{k}`, the equation that
+            # describes `state` — the state the goal names — because the tail
+            # call above appended it before recursing. `hs{k+1}` describes the
+            # SUCCESSOR, which is emitted after this and is not in scope here.
+            emit("have hdec%d : x86_cond %d %s = %s := by"
+                 % (k, cc, state, "true" if node.cond else "false"))
+            # The forms that size this `simp` are the FLAG SETTER's, not the
+            # branch's: `hs{k}`'s right-hand side is a record whose `zf`/`cf`
+            # fields are `(x86_flags_sub s{k-1} …).zf`, so without the setter's
+            # own definitions the goal stops at exactly that — measured, and the
+            # fix is one entry of the form table away.
+            emit("  simp [%s]" % _decision_simp(
+                fs_path[-1:], ["hs%d" % k, "hval%d" % (k - 1)] if k else ["i0"]))
+            emit("  <;> decide")
+            # …and the hypothesis joins the `simp` sets below, exactly as a
+            # `by_cases` hypothesis would: the successor's `rip` is an `if` on
+            # this very condition, and without it every later step on this path
+            # would be proving an `if`.
+            walk(node.kids[0], nxt, ind, cases + ["hdec%d" % k], both,
+                 "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
+                 fs_path + (node.form,))
             return
 
         if node.kind == "ret" and node.succ is None:
@@ -2281,9 +3316,23 @@ def emit_terminates(path):
             return
 
         walk(node.kids[0], nxt, ind, cases, rules + [step_rule],
-             "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),))
+             "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
+             fs_path + (node.form,))
 
-    walk(root, "i0", 1, [], [], None, ())
+    if upto >= 0:
+        # `hval0`: the initial state's own field values, which is where the whole
+        # chain of `hval`s bottoms out. This is the ONE place `mem_read_bytes` is
+        # unfolded on purpose — `X86State.init`'s memory is `fun _ => 0`, so the
+        # cell facts the decisions need start here as literals rather than as
+        # reads.
+        conj = ["i0.%s = %d" % (_REG_FIELDS[r], v)
+                for r in regs if (v := _INIT_FACTS.get(r)) is not None]
+        conj += ["mem_read_bytes i0.mem %d 8 = 0" % c for c in cells]
+        out.append("  have hval0 : %s := by" % " ∧\n      ".join(conj))
+        out.append("    simp [i0, X86State.init, x86_get_reg, mem_read_bytes]")
+        out.append("    <;> decide")
+
+    walk(root, "i0", 1, [], [], None, (), ())
     return "\n".join(out) + "\n"
 
 

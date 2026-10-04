@@ -2546,6 +2546,20 @@ class TestX86EndToEndEmitter(unittest.TestCase):
                         else source)
             return E.emit_terminates(path)
 
+    @staticmethod
+    def _emitted_path(name):
+        """`emit_terminates` on one file of `formal/examples/`, by name.
+
+        Needed because the fixtures above are no longer interchangeable: the guard
+        being settled means a trap leaf now takes a program that reaches a call
+        out of the image for its own sake, and a multi-leaf theorem takes a
+        program with input-dependent branches. Emission is Lean-free and takes
+        milliseconds, so a real example is the cheap fixture.
+        """
+        import formal.x86_64_endtoend_test as E
+        return E.emit_terminates(
+            os.path.join(E.HERE, "examples", name + ".mojo"))
+
     def test_the_return_is_a_named_fact_and_the_step_uses_it(self):
         text = self._emitted()
         self.assertIn("hpop", text,
@@ -2791,13 +2805,24 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         stops AT the call; stepping it would move `rip` to the callee, where the
         model has no instruction and the chain would be proving a step the runner
         cannot take. Pinned on the TEXT because it is the difference between a
-        theorem and a wrong one, and nothing else in the file would say so."""
-        text = self._emitted()
+        theorem and a wrong one, and nothing else in the file would say so.
+
+        **The fixture is `subscript_var` and no longer `SOURCE`, and that is the
+        point of the change rather than an accident of it.** The guard's trap
+        arm used to be a leaf in every example, because the guard's own two
+        branches were walked rather than settled; now they are settled (both
+        guards in this corpus are provably not taken), so a trap leaf needs a
+        program whose path reaches a call out of the image for some OTHER
+        reason — `subscript_var`'s subscript reaches the allocator. `SOURCE`
+        crosses a frame but no such call, and the case below asserts that too, so
+        a fixture change cannot quietly stop testing the trap."""
+        text = self._emitted_path("subscript_var")
         found = list(re.finditer(r"have (hhalt\d+) : (s\d+)\.rip = (\d+) := by\n"
                                  r"[ ]*simp only \[(hs\d+)\]", text))
-        self.assertGreaterEqual(len(found), 2,
-                                "this chain crosses a callee's guard, so it has "
-                                "a trap leaf per arm of the fork above it")
+        self.assertEqual(len(found), 1,
+                         "this program's one path ends at the allocator, which "
+                         "is out of the image, so it has exactly one trap leaf: "
+                         f"{len(found)}")
         for m in found:
             self.assertNotEqual(m.group(2), "s0",
                                 "the halt state is the one the walk reached the "
@@ -2805,20 +2830,95 @@ class TestX86EndToEndEmitter(unittest.TestCase):
             self.assertEqual(m.group(4), "hs" + m.group(2)[1:],
                              "the halt fact is proved from the successor "
                              f"equation that defines {m.group(2)}")
+            # NO step: the call is where the run stops, so the file must not
+            # contain a step lemma application for its address.
+            self.assertNotIn("x86_step_call_rel32 s%s rc %s" % (m.group(2),
+                                                                m.group(3)),
+                             text,
+                             "the trap arm is a HALT and not a step: the runner "
+                             "stops at `st.rip = exit` before it steps")
+
+    def test_the_guards_branches_are_settled_and_not_walked(self):
+        """What replaced the doubling, on the fixture that used to show it.
+
+        `SOURCE` crosses a frame, so its emitted file used to contain SIXTEEN
+        leaves — the guard puts two conditional branches in each of the two
+        prologues, and every combination of the four arms was walked — and its
+        theorem was a sixteen-way disjunction over halt addresses. Both guards
+        are now decided (four `hdec`s, each a PROVED fact), so the file has one
+        leaf and the theorem is the exit sentinel alone.
+
+        Every pin here is on the TEXT, which is what makes this a check that can
+        run: the thing it covers is a Lean proof of 11 s, and
+        `formal/x86_64_endtoend_test.py`'s own entry point is 43 of those.
+        """
+        text = self._emitted()
+        decisions = re.findall(r"have (hdec\d+) : (x86_cond \d+ s\d+) = (true|false)"
+                               r" := by\n[ ]*simp \[([^\]]*)\][^\n]*\n[ ]*<;> decide",
+                               text)
+        self.assertEqual(len(decisions), 4,
+                         "two per guarded prologue — the branch that parks the "
+                         "floor word and the one that checks it — and this chain "
+                         "crosses a frame, so two prologues: four. "
+                         f"Got {decisions}")
+        for name, cond, value, simp in decisions:
+            # The decision's OWN proof, which is the two lines after its `have`:
+            # `text.count("sorry")` would be the wrong question (the step side
+            # conditions beside it are guarded on purpose) and so would a window
+            # wide enough to reach the next `have`.
+            body = re.search(r"have %s [^\n]*\n(?:[^\n]*\n){0,3}" % re.escape(name),
+                             text)
+            self.assertIsNotNone(
+                body, f"{name} is a `have ... := by` with three proof lines and "
+                "no fourth, so this regex cannot find it")
+            self.assertNotIn("sorry", body.group(0),
+                             f"{name} is a decision, and a decision with a "
+                             "`sorry` in it is a claim the emitter could not "
+                             "prove — which is how a wrong static analysis would "
+                             "become a wrong theorem rather than a failed file")
+            self.assertIn("hval", simp,
+                          f"{name}'s proof reads the per-step value facts, so it "
+                          "is ONE step of unfolding and not the whole chain: "
+                          f"{simp}")
+        self.assertNotIn("hhalt", text,
+                         "a decided guard has no trap leaf, so no halt-address "
+                         "fact and no disjunct naming a call out of the image")
+        self.assertEqual(text.count("by_cases"), 0,
+                         "every branch on this path is settled, so there is "
+                         "nothing left to split on")
+        self.assertEqual(text.count("\u2228"), 0,
+                         "one leaf, one disjunct: the theorem is back to 'the "
+                         "run reaches the exit pc'")
+
+    def test_a_body_that_needs_a_fork_still_splits_it(self):
+        """The control for the row above, and the reason it is not a coverage
+        loss: a branch on the INPUT is not decidable, and its two arms are walked
+        and its two leaves named. `twoifs` is two nested `if`s on `n`, which
+        lower to three conditional branches."""
+        text = self._emitted_path("twoifs")
+        self.assertEqual(text.count("by_cases"), 3,
+                         "the three conditional branches of the program itself "
+                         "are input-dependent, so none of them can be settled")
+        self.assertGreaterEqual(text.count("hdec"), 2,
+                                "…while the guard's own two branches on the same "
+                                "path are settled")
 
     def test_no_arm_of_the_theorem_proves_a_disjunct_no_leaf_names(self):
         """Each arm selects ONE disjunct, and it is the leaf's own.
 
         `right` past each disjunct above, then `left` (and no `left` on the last
-        one, which is not a choice) \u2014 so the number of `right`s an arm emits is
+        one, which is not a choice) — so the number of `right`s an arm emits is
         its leaf's index. A wrong index is a proof of a claim the run does not
-        make and Lean would accept it, so it is pinned here."""
-        text = self._emitted()
+        make and Lean would accept it, so it is pinned here.
+
+        `twoifs` and not `SOURCE`: `SOURCE` has one path now that its guard's
+        branches are settled, and one leaf makes this a vacuous row. `twoifs`
+        has four — two per arm of the program's own two conditional branches."""
+        text = self._emitted_path("twoifs")
         arms = re.findall(r"\n((?:[ ]*right\n)*)(?:[ ]*left\n)?"
                           r"[ ]*have h(?:rip|halt\d*) :", text)
         self.assertGreaterEqual(len(arms), 4,
-                                "this chain has a leaf per arm of the two forks "
-                                "the guard's prologue puts in it")
+                                "twoifs has a leaf per arm of its two forks")
         reached = sorted(len(re.findall("right", a)) for a in arms)
         self.assertEqual(reached, list(range(len(arms))),
                          "each leaf must reach a DIFFERENT disjunct, and between "
@@ -2827,12 +2927,19 @@ class TestX86EndToEndEmitter(unittest.TestCase):
     def test_a_tree_too_large_to_prove_is_refused_by_name_not_attempted(self):
         """The bound, exercised at a bound small enough to hit.
 
-        `wide_recv` is what it is for \u2014 12 241 step equations over 94 leaves,
-        because the guard's two branches per prologue multiply every path \u2014 and
-        the alternative to refusing is 1500 s of wall followed by a FAILURE
-        whose message is about the clock. So the refusal is a `_NoTree` with a
-        kind of its own, it keeps its numbers in the one line the screen shows,
-        and it is counted apart from the three older outcomes.
+        `wide_recv` is what it was for — 12 241 step equations over 94 leaves,
+        because the guard's two branches per prologue multiplied every path — and
+        the alternative to refusing is 1500 s of wall followed by a FAILURE whose
+        message is about the clock. So the refusal is a `_NoTree` with a kind of
+        its own, it keeps its numbers in the one line the screen shows, and it is
+        counted apart from the three older outcomes.
+
+        **The bound stays after the guard's branches were settled**, because the
+        doubling is what any branch the machine CANNOT settle does, and a program
+        with four input-dependent conditionals is 16 paths whatever else is true
+        of it (`twoifs`, `elif3` and `deepif` are four, four and three leaves).
+        The fixture is lowered to hit the bound rather than the corpus raising it
+        to be hit, so this row is about the refusal and not about a number.
         """
         import formal.x86_64_endtoend_test as E
         code, info, insns, shapes = self._source_plan()
@@ -2930,34 +3037,60 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
     example, and the failure message says which of the two things moved — the
     guard left the prologue, or the guard's branches were decided — because
     those are the only two ways this number can change and a reader needs to
-    know which one it was. It also pins the multiplier the same doc measures,
-    since a guard that grew a THIRD branch would double the paths again and a
-    corpus that suddenly emits 30 000-step files is the same class of surprise.
+    know which one it was.
+
+    It also pins the corpus's path-tree census, which is where the second of
+    those two was noticed from: the guard's own two branches ARE decided on this
+    tree (`work/formal22-guard-branches`), so the leaves left are the program's
+    own conditionals and `wide_recv` emits at last. The pin is therefore on the
+    AFTER numbers, over the whole corpus rather than over three examples, and it
+    is one implementation of one concern — the decision itself is pinned on the
+    emitted TEXT by `TestX86EndToEndEmitter`'s
+    `test_the_guards_branches_are_settled_and_not_walked`, and the size refusal
+    that `wide_recv` used to be is pinned on a fixture lowered to hit it in
+    `TestX86EndToEndEmitter::test_a_tree_too_large_to_prove_is_refused_by_name_
+    not_attempted`, since no corpus example reaches it any more.
 
     Lean-free by construction: `_plan` and `_tree` are text, and nothing here
     emits a proof. That is the point — a 100-second proof is a very expensive
     way to learn that a number moved.
     """
 
-    #: The doc's own table, in the units it uses: (example, leaves, steps).
-    TREES = (("formal/examples/ret42.mojo", 4, 58),
-             ("formal/examples/bittest.mojo", 10, 457),
-             # …and the one that is past what a proof can be, so the number is
-            # the REFUSAL and the refusal must say which bound it broke.
-             ("formal/examples/wide_recv.mojo", 94, 12241))
+    #: The doc's own AFTER table, in the units it uses: (example, leaves,
+    #: steps). The guard's own two branches are decided, so a program that
+    #: writes no conditional of its own is one path however many functions it has
+    #: — which is the whole change, and the reason `ret42` (one function) and
+    #: `wide_recv` (five) are both 1 here where they were 4 and 94. `bittest` is
+    #: the one with a conditional of its own, so it is 4.
+    TREES = (("formal/examples/ret42.mojo", 1, 16),
+             ("formal/examples/bittest.mojo", 4, 220),
+             ("formal/examples/wide_recv.mojo", 1, 150))
+
+    #: …and the corpus TOTAL, which is the doc's after-table's own row ("corpus
+    #: leaves / step equations … 69 / 2 718"). A per-example table cannot see a
+    #: program that gained a branch, so the total is the row that does, and it
+    #: is the number the doc quotes.
+    TOTAL = (69, 2718)
 
     def _corpus(self):
         return sorted(glob.glob(os.path.join(HERE, "formal", "examples",
                                               "*.mojo")))
 
-    def test_the_guard_multiplies_every_path_and_the_numbers_hold(self):
-        """Three programs, three path counts, and the one that is too big.
+    def test_the_guard_is_no_longer_in_these_numbers_and_they_hold(self):
+        """Three programs' path counts, and the corpus total they add up to.
 
-        `ret42` is ONE function and `wide_recv` is five, and the leaves go 4 ->
-        94 between them. That ratio is the whole subject of this class: the
-        guard's two branches per prologue are walked, so each guarded function
-        on a path doubles the number of paths through it, and there is no way to
-        share the two arms of a fork whose arms converge.
+        This row used to be the multiplier: the guard's two branches per prologue
+        were WALKED, so each guarded function on a path doubled the paths through
+        it and `wide_recv` was 94 leaves and 12 241 steps — refused as too large
+        to prove. Its branches are now settled by arithmetic over the initial
+        state, so what is left is `2^(branches on the path)` over the program's
+        OWN conditionals, and the same three programs are 1, 4 and 1.
+
+        The size refusal this row used to exercise on `wide_recv` is pinned where
+        it still exists, on a fixture lowered to hit `_MAX_CHAIN_STEPS`
+        (`TestX86EndToEndEmitter`'s "a tree too large to prove is refused by
+        name"), so the bound keeps a test without needing a corpus example to be
+        too big again.
         """
         import formal.x86_64_endtoend_test as E
 
@@ -2974,21 +3107,39 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
                     (want_leaves, want_steps),
                     f"{path}: the path tree moved to {len(leaves)} leaves / "
                     f"{sum(len(x) for x in leaves)} steps, the table says "
-                    f"{want_leaves}/{want_steps}. A guard that grew a third "
-                    f"branch, or a program that grew a function, moves this — "
-                    f"and `wide_recv` crossing "
-                    f"{E._MAX_CHAIN_STEPS} is what turns the whole example into "
-                    f"a refusal")
-        # …and the one that is refused refuses BY NAME, with its own size in the
-        # sentence. A bare "too large" would be a bound with no reading.
-        with self.assertRaises(E._NoTree) as raised:
-            E.emit_terminates(os.path.join(HERE, "formal", "examples",
-                                           "wide_recv.mojo"))
-        self.assertEqual(raised.exception.kind, "size")
-        self.assertIn("stack-floor guard", str(raised.exception),
-                      "the size refusal must name the CAUSE — the guard is "
-                      "what makes the number large, and a bound without the "
-                      "cause is a number nobody can act on")
+                    f"{want_leaves}/{want_steps}. A program that grew a "
+                    f"conditional, or a guard that grew a third branch, moves "
+                    f"this — and an example crossing "
+                    f"{E._MAX_CHAIN_STEPS} is what turns into a refusal")
+
+        # …and the whole corpus, because three examples cannot see a program that
+        # was added. The ten recursive examples and the two `idiv` ones build no
+        # tree at all (a backward call, and no step lemma for `group3:idiv`), so
+        # they are counted as declines rather than as zero-leaf trees.
+        leaves_total = steps_total = trees = 0
+        declined = []
+        for path in self._corpus():
+            stem = os.path.basename(path)[:-5]
+            try:
+                code, info, _insns, shapes = E._plan(path)
+                root = E._tree(code, info, shapes)
+            except (E._NoTree, ValueError) as e:
+                declined.append("%s: %s" % (stem, e))
+                continue
+            if root is None:
+                declined.append(stem + ": no tree")
+                continue
+            found = list(E._paths(root))
+            leaves_total += len(found)
+            steps_total += sum(len(x) for x in found)
+            trees += 1
+        self.assertEqual(
+            (leaves_total, steps_total), self.TOTAL,
+            f"the corpus is {trees} path trees totalling {leaves_total} leaves "
+            f"/ {steps_total} steps, the doc's after-table says "
+            f"{self.TOTAL[0]}/{self.TOTAL[1]}; a conditional added to a "
+            f"corpus example moves this, and the {len(declined)} that build no "
+            f"tree are: {declined}")
 
     def test_every_value_theorem_refusal_is_the_guard_and_not_the_program(self):
         """The claim, over the whole corpus: `call_rel32` is in EVERY refusal.
