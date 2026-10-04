@@ -225,6 +225,14 @@ def _base_name(obj):
 
 MLIR_DIALECT_PREFIX = "__mlir_"
 
+# The two dialect ROOTS the operand-type reader has to recognise by name, split
+# out of `MLIR_DIALECT_PREFIX` because the `__mlir_` prefix alone does not
+# separate them: a TYPE names a type and an ATTRIBUTE names an attribute, and
+# `mlir_cmp_predicate_op` must accept only the latter as a predicate. Both are
+# the corpus's own spellings (`__mlir_type.index`, `__mlir_attr.`#…<eq>``).
+MLIR_DIALECT_TYPE_PREFIX = "__mlir_type."
+MLIR_ATTR_ROOT = "__mlir_attr"
+
 # ── A dialect OPERATION, classified by what it DENOTES ──────────────────────
 #
 # `mlir_dialect_refusal` used to answer every `__mlir_op` with one sentence —
@@ -496,6 +504,273 @@ MLIR_UNGUARDED_OPS = {
                                "not a value any image holds"),
 }
 
+# ── The OPERAND's DECLARED type, which is the fact every arithmetic arm needs ──
+#
+# `bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md` §
+# Correction measured the thing this section exists for: counted by OPERATION
+# NAME, the corpus's arithmetic sites look scalar (38 sites over 27 operations,
+# the names read `add`/`sub`/`mul`/`cmp`), and a table keyed on the name that
+# emitted `a + b` for `pop.add` would be RIGHT for 9 of them and WRONG for 26.
+# The 26 are `std/simd.mojo`, whose own source documents the operation it
+# applies to — "a new vector whose element at position `i` is computed as
+# `self[i] + rhs[i]`" — over a field declared
+# `var _mlir_value: Self._mlir_type`, where `_mlir_type` is a `comptime`
+# built from `__mlir_type[`!kgen.simd<`, …]`. So the name settles
+# elementWISE-ness and the OPERAND settles word-or-N-lanes, and the operand is
+# only ever stated in the SOURCE: as a parameter annotation, a local
+# annotation, or a struct field's declaration.
+#
+# Everything below reads a DECLARATION and nothing else. That is the discipline
+# `_declared_bool_locals` established for `pop.select` (whose guard is the same
+# kind of fact — "does the source say this word holds 0 or 1") and it is
+# deliberate for the same reason: a value's provenance is not a declaration, so
+# a comparison, a cast or a call result establishes nothing here and is left
+# refused. A reader that could answer from a KIND instead would be able to
+# answer about a `char *`, which is the wrong answer this whole backend exists
+# to prevent.
+#
+# LEAF-MOST, like every other table in this section, so both architectures and
+# the build pass that lowers the operation cannot disagree about what a dialect
+# operand denotes.
+
+# The dialect types this path holds in ONE 64-bit word, by their declared
+# spelling after the `__mlir_type.` prefix and the backticks are removed.
+#
+# **One name, and that is a measurement rather than an undercount.**
+# `__mlir_type.index` is pointer-sized and signed, which is every property the
+# arithmetic below needs (a truncating division, an arithmetic right shift, a
+# signed comparison). `!kgen.scalar<uiN>` is a single scalar too and is
+# deliberately NOT here: an N-bit unsigned integer held in a word wraps at 2^N,
+# so `a + b` over two `ui8` is not the 64-bit add this path emits — answering
+# it would be a wrong answer, and the doc's own count of the 9 word-typed
+# sites calls `!kgen.scalar<ui8>` word-typed, which this corrects rather than
+# repeats.
+MLIR_WORD_TYPE_NAMES = frozenset(("index",))
+
+# A VECTOR type: N lanes, never a word. Decided on the type's own spelling, so
+# it is structural rather than per-site — the same property of the NAME that
+# makes `MLIR_VECTOR_OPS_PREFIX` safe to key on and `MLIR_ELEMENTWISE_OPS`
+# unsafe to.
+MLIR_VECTOR_TYPE_PREFIXES = ("!kgen.simd<", "!kgen.masked<")
+
+# The names a method's receiver travels under, including the source-level
+# alias `Self`. Recognised so that `<receiver>.<field>` can be read as a field
+# of this function's own struct without resolving which struct that is — the
+# field table below is keyed on the field and refuses a name two structs
+# declare differently, so an owner-free read is not a guess.
+MLIR_SELF_TYPE_NAMES = frozenset(("self", "this", "Self"))
+
+# The elementwise operations this path REWRITES when the operand's declared type
+# is one word, and the ordinary operator each denotes. Rewriting to the
+# ordinary spelling rather than adding an instruction selection is the whole of
+# the design, and it is the reason `bugs/FORMAL_mlir_dialect_refusal_is_false_
+# of_the_word_valued_ops.md`'s "each arm must select instructions from the
+# decisions the two backends already SHARE" is satisfied by construction: `+`,
+# `-`, `*`, `//`, `%`, `&`, `>>` already go through `common_type`,
+# `cmp_signed` and `shift_signedness` in both emitters, so an arm here that
+# re-decided any of them would be a second copy of an answer that exists.
+#
+# The divisors and the shift are the two rows that needed MEASURING rather than
+# reading, because this path's own `//` and `%` are NOT Python's:
+#
+#     f(-7, 2)  on `__mlir_type.index` parameters   CPython
+#       a // b        -3                            -4
+#       a %  b        -1                             1
+#       a >> b        -2   (arithmetic)              -2
+#
+# so `//` is a TRUNCATING division and `%` a remainder carrying the dividend's
+# sign — which is exactly `index.divs` and `pop.rem`, and exactly what the
+# machine does. `pop.floordiv` is therefore NOT in this table and is the
+# clearest entry that is missing on purpose: FLOOR division is the other
+# semantics, and rewriting it to this path's `//` would be wrong for every
+# negative operand. `pop.div` is absent for the other half of the same
+# question — the name does not say which of the two it is, and a table that
+# picked one would be the name-keyed table § Correction is about.
+MLIR_WORD_ARITH_OPS = {
+    "index.add": ("binary", "+"),
+    "index.sub": ("binary", "-"),
+    "index.mul": ("binary", "*"),
+    "index.divs": ("binary", "//"),
+    "index.and": ("binary", "&"),
+    "index.shrs": ("binary", ">>"),
+    "pop.add": ("binary", "+"),
+    "pop.sub": ("binary", "-"),
+    "pop.mul": ("binary", "*"),
+    "pop.rem": ("binary", "%"),
+    "pop.neg": ("unary", "-"),
+}
+
+# The COMPARISON operations: the operation name says nothing and the whole of
+# the answer is in the bracket. Kept apart from `MLIR_WORD_ARITH_OPS` because
+# the predicate has to be read first, and a table that read the name and
+# ignored the bracket would answer `eq` and `ne` the same way — a wrong answer
+# rather than a refusal, which is the sentence `MLIR_UNGUARDED_OPS["pop.cmp"]`
+# and `MLIR_TYPED_RESULT_OPS["index.cmp"]` already refuse.
+MLIR_CMP_OPS = frozenset(("pop.cmp", "index.cmp"))
+
+# A bracketed dialect predicate, and the ordinary comparison it denotes.
+#
+# **The set is closed on purpose and it is SIGNED.** `slt`/`sle`/`sgt`/`sge` say
+# what they are; `lt`/`le`/`gt`/`ge` are the unsigned spelling of the same four
+# in the corpus, and they are answered because an `index` operand is a SIGNED
+# 64-bit integer whatever the predicate is called — the operand's declared type,
+# not the predicate, is what fixes the comparison. `ult`/`ule`/`ugt`/`uge` are
+# deliberately absent: this path's `<` is signed (measured, same program as the
+# divisors above), there is no unsigned spelling to rewrite to, and answering an
+# unsigned predicate with a signed comparison is the wrong answer in the exact
+# shape this section is arranged to prevent. One `ult` site is in the corpus
+# (`std/_plugin/selector.mojo`) and it stays refused.
+MLIR_CMP_PRED_OPS = {
+    "eq": "==", "ne": "!=",
+    "lt": "<", "le": "<=", "gt": ">", "ge": ">=",
+    "slt": "<", "sle": "<=", "sgt": ">", "sge": ">=",
+}
+
+
+def mlir_type_kind(ann):
+    """`'word'`, `'vector'`, or None — what a DECLARED dialect type denotes.
+
+    Three answers rather than two, and None is the common one: a spelling this
+    path cannot classify claims nothing, which is the direction a refusal has
+    to fail in. A `comptime` ALIAS (`Self._mlir_type`, which is how 26 of the
+    corpus's arithmetic sites spell their operand) is one of the Nones, and it
+    is the case the whole design turns on — the alias resolves to a vector, so
+    answering it from the spelling `Self._mlir_type` would be a scalar add of
+    two vector-typed words.
+
+    The spelling is normalised by removing the `__mlir_type.` prefix and a pair
+    of surrounding backticks, because the corpus writes the same type three
+    ways: `__mlir_type.index`, ``__mlir_type.`!kgen.simd<4, ui32>` `` and
+    `!kgen.simd<4, ui32>`.
+    """
+    if not isinstance(ann, str):
+        return None
+    text = ann.strip()
+    if text.startswith(MLIR_DIALECT_TYPE_PREFIX):
+        text = text[len(MLIR_DIALECT_TYPE_PREFIX):]
+    if len(text) >= 2 and text[0] == "`" and text[-1] == "`":
+        text = text[1:-1]
+    if text in MLIR_WORD_TYPE_NAMES:
+        return "word"
+    for prefix in MLIR_VECTOR_TYPE_PREFIXES:
+        if text.startswith(prefix):
+            return "vector"
+    return None
+
+
+def mlir_operand_declared_type(expr, names, fields, struct_names=()):
+    """The DECLARED type spelling of a dialect operation's OPERAND, or None.
+
+    `names` is `{name: annotation or None}` for the names ONE function binds —
+    its parameters, its annotated locals and its receiver — `fields` is
+    `{field: annotation}` over the structs of the unit, keeping only a field
+    name exactly one struct declares, and `struct_names` is the set of struct
+    names the unit DECLARES. `None` is the answer for every shape nothing in
+    the source states: a call result, a subscript, a comparison, an arithmetic
+    expression, a field read through a base nothing types, and a field two
+    structs declare differently.
+
+    **A field read is only read off a base this can TYPE**, and that is the
+    whole of the member half's safety argument. `self._mlir_value` is the shape
+    six of the corpus's nine word-typed sites are written in, and it is read
+    from `MLIR_SELF_TYPE_NAMES` — a receiver is `self`, and `self` is a
+    receiver because of where it is spelled, not because of an annotation.
+    Beyond that the base must be a name this function declares as a STRUCT OF
+    THIS UNIT (`a: Vec` reading `a.v`). The rule is not tidiness: measured on
+    this tree, `SIMDLength___init__(out self, value: Int)` writing
+    `__mlir_op.`pop.cast_to_builtin`[…](value._mlir_value)` had `_mlir_value`
+    read off `SIMDLength`'s own field table and claimed `__mlir_type.index` for
+    an operand that is an `Int`'s dialect value — a fact about the field NAME
+    rather than about the field the source wrote.
+    """
+    if isinstance(expr, F.IdentExpr):
+        return names.get(expr.name)
+    if isinstance(expr, F.MemberExpr) and isinstance(expr.obj, F.IdentExpr):
+        base = expr.obj.name
+        if base in MLIR_SELF_TYPE_NAMES:
+            return fields.get(expr.member)
+        ann = names.get(base)
+        if not isinstance(ann, str) or not struct_names:
+            return None
+        owner = annotation_base_name(ann) or ann.split(".")[0]
+        if owner not in struct_names:
+            return None
+        return fields.get(expr.member)
+    return None
+
+
+def mlir_cmp_predicate_op(bracket):
+    """The ordinary comparison a bracketed dialect PREDICATE denotes, or None.
+
+    `bracket` is the `F.SubscriptExpr` a `pop.cmp`/`index.cmp` is spelled with,
+    and the answer comes from a CLOSED set (`MLIR_CMP_PRED_OPS`) read out of
+    the `pred=` attribute's own spelling — `#index.cmp_predicate<eq>` and
+    `#kgen.cmp_pred<ne>` are the two dialects' two spellings of the same
+    vocabulary, and both appear in the corpus.
+
+    None for everything else, and each of the None answers is a different
+    refusal: an attribute this path does not recognise, a bracket with no
+    `pred=` at all, a `pred=` whose value is not a dialect attribute (a
+    comptime name or a call is a fact this build cannot read), and a predicate
+    outside the closed set — which includes every UNSIGNED one, because the
+    ordinary comparison is signed and there is no unsigned spelling to rewrite
+    to.
+    """
+    if not isinstance(bracket, F.SubscriptExpr):
+        return None
+    value = None
+    for attr in getattr(bracket, "attrs", None) or []:
+        if isinstance(attr, (tuple, list)) and len(attr) == 2 and attr[0] == "pred":
+            if value is not None:
+                return None               # two `pred=`: no single answer
+            value = attr[1]
+    if not isinstance(value, F.MemberExpr):
+        return None
+    if not isinstance(value.obj, F.IdentExpr) \
+            or value.obj.name != MLIR_ATTR_ROOT:
+        return None
+    member = value.member
+    if not (isinstance(member, str) and member.startswith("`")
+            and member.endswith("`") and len(member) >= 2):
+        return None
+    spelling = member[1:-1]
+    start = spelling.find("<")
+    if start < 0 or not spelling.endswith(">"):
+        return None
+    return MLIR_CMP_PRED_OPS.get(spelling[start + 1:-1])
+
+
+def mlir_operand_clause(operand) -> str:
+    """One sentence about an OPERAND whose DECLARED type this build read.
+
+    The sentence is what keeps `mlir_dialect_op_refusal` from becoming false at
+    a site the operand type IS established for, which is the disease that
+    document is about and the one this function's existence creates: "this
+    path has no lowering table that establishes the operand type" is untrue of
+    `pop.add` over a declared `__mlir_type.index`, and untrue of `pop.add` over
+    a declared `!kgen.simd<4, ui32>` in a different direction. Two answers and a
+    None, because a sentence about the OPERAND that also claimed something
+    about the OPERATION would be false of every operation this path declines for
+    a reason other than its operands — which is most of them: `pop.cmp` over a
+    word is missing its PREDICATE, not its operand type, and the clause says
+    nothing about the operation on purpose.
+
+    The word clause therefore stops where the fact stops: it says the result is
+    something this path's only value can hold, and the OPERATION's own missing
+    piece is the refusal text's own business.
+    """
+    kind = mlir_type_kind(operand)
+    if kind == "word":
+        return (f" Its operand is declared {operand!r}, which is ONE 64-bit "
+                f"word here — a signed, pointer-sized integer — so whatever "
+                f"this operation denotes is something this path's only value "
+                f"can hold.")
+    if kind == "vector":
+        return (f" Its operand is declared {operand!r}, which is an N-LANE "
+                f"VECTOR and not a word at all, so the element width and the "
+                f"lane count are facts this path has no source for.")
+    return ""
+
 
 def mlir_dialect_op_name(node):
     """The dialect operation `node` spells, or None if it spells none.
@@ -590,7 +865,7 @@ def mlir_effects_all_lowered(body) -> bool:
     return lowered == roots
 
 
-def mlir_dialect_op_refusal(op: str) -> str:
+def mlir_dialect_op_refusal(op: str, operand: str = None) -> str:
     """Why this path refuses the dialect OPERATION `op`, by what it denotes.
 
     Four sentences for four different facts, because ONE sentence over all of
@@ -601,11 +876,24 @@ def mlir_dialect_op_refusal(op: str) -> str:
     its OPERANDS, and 26 of the 38 sites measured have a vector operand, so
     asserting it would be the same over-claim in a new place.
 
-    The order is effect, unguarded, elementwise, then an honest fallback for an
-    operation nobody classified. Every branch is ARCH-FREE and the tables are in
-    this module, so the two backends cannot disagree about what a dialect
-    operation denotes — the failure mode this file's design exists to prevent,
-    and the one a per-emitter copy of these tables would walk into."""
+    **Except where `operand` says otherwise**, which is the one thing that
+    changed when the operand's DECLARED type became readable
+    (`mlir_operand_declared_type`). With the type in hand the refusal can no
+    longer say "this path has no lowering table that establishes the operand
+    type" at a site where the type IS established — so `mlir_operand_clause`
+    appends what the declaration actually says, and the sentence that used to
+    cover the class unconditionally now covers only the sites nothing in the
+    source states a type for. That is the same disease one step further in: a
+    diagnostic that cannot see a fact it now has. `operand` is the annotation
+    SPELLING (or None), never a kind, because a message that quotes the
+    reader's own declaration is the only one that can be checked against it.
+
+    The order is effect, unguarded, typed-result, elementwise, then an honest
+    fallback for an operation nobody classified. Every branch is ARCH-FREE and
+    the tables are in this module, so the two backends cannot disagree about
+    what a dialect operation denotes — the failure mode this file's design
+    exists to prevent, and the one a per-emitter copy of these tables would
+    walk into."""
     if op in MLIR_EFFECT_OPS:
         return (
             f"`{op}` is a dialect OPERATION and denotes NO VALUE: it is an "
@@ -623,7 +911,8 @@ def mlir_dialect_op_refusal(op: str) -> str:
             f"path, but it cannot be GUARDED here: {MLIR_UNGUARDED_OPS[op]}. "
             f"A deliberate deferral, not an impossibility: the operation is "
             f"nameable and its operands are values, so what is missing is the "
-            f"fact its result depends on — not a representation of the result"
+            f"fact its result depends on — not a representation of the result."
+            + mlir_operand_clause(operand)
         )
     if op in MLIR_TYPED_RESULT_OPS:
         return (
@@ -634,7 +923,8 @@ def mlir_dialect_op_refusal(op: str) -> str:
             f"than a value. This path's only value is a 64-bit word, so the "
             f"result's width and element type are a fact it has no source for. "
             f"A deliberate deferral, not an impossibility: read the bracket at "
-            f"the use site instead"
+            f"the use site instead."
+            + mlir_operand_clause(operand)
         )
     if op in MLIR_ELEMENTWISE_OPS:
         return (
@@ -644,9 +934,20 @@ def mlir_dialect_op_refusal(op: str) -> str:
             f"the operation's name: for a scalar operand both architectures "
             f"already emit the same computation for the ORDINARY spelling of "
             f"this one, and for a SIMD operand the result is a vector of N "
-            f"lanes, which is not a word at all. This path has no lowering "
-            f"table that establishes the operand type, which is the missing "
-            f"piece. A deliberate deferral, not an impossibility"
+            f"lanes, which is not a word at all."
+            + mlir_operand_clause(operand)
+            + ("" if mlir_type_kind(operand) is not None else
+               " Nothing in the source states a type for this operand, and a "
+               "DECLARATION is what this path reads, so establishing one is "
+               "the missing piece.")
+            + ("" if mlir_type_kind(operand) != "word" else
+               " What is missing is therefore the OPERATION rather than the "
+               "type: this path rewrites a dialect operation to the ordinary "
+               "spelling only where the ordinary spelling computes the same "
+               "thing, and this one is not among them — `pop.floordiv` is the "
+               "clearest omission, because FLOOR division is the other "
+               "semantics from this path's `//`, which truncates (measured).")
+            + " A deliberate deferral, not an impossibility"
         )
     if op.startswith(MLIR_VECTOR_OPS_PREFIX):
         return (
@@ -684,7 +985,8 @@ def mlir_dialect_op_refusal(op: str) -> str:
     # declared type first, which is the next step that document names.
 
 
-def mlir_dialect_refusal(name: str, op: str = None) -> str:
+def mlir_dialect_refusal(name: str, op: str = None,
+                         operand: str = None) -> str:
     """The refusal for a bare `__mlir_*` name that no template rule covers.
 
     `__mlir_op` is the one the template set does not list, and it is the one
@@ -700,6 +1002,12 @@ def mlir_dialect_refusal(name: str, op: str = None) -> str:
     back to naming the `__mlir_` prefix and saying what is missing for the
     family, which is all a caller with only the root name can honestly say.
 
+    `operand` is the operation's first operand's DECLARED type spelling, when
+    the call site could read one (`mlir_operand_declared_type`). It changes no
+    CLASS — the census in `mlir_dialect_op_refusal` is unchanged by it — and
+    only lets the message report a type this build established instead of
+    saying it has none.
+
     The alternative to refusing by name at all was worse and was measured: an
     unrecognised `__mlir_*` name has no binding, so `formal/build.py`'s name
     check refused it as "no home", which names a SYMPTOM of the register
@@ -707,7 +1015,7 @@ def mlir_dialect_refusal(name: str, op: str = None) -> str:
     construct. Both of those files lost their place in the sweep's coverage for
     a reason that is about MLIR."""
     if op is not None:
-        return mlir_dialect_op_refusal(op)
+        return mlir_dialect_op_refusal(op, operand)
     return (
         f"{name} is an MLIR dialect construct: this path has no MLIR, so it "
         f"lowers a Mojo program to a Mach-O image whose only value is a "
