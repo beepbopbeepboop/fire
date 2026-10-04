@@ -18243,6 +18243,101 @@ def receiver_target_names(target, receivers) -> list:
     return []
 
 
+# Node types that are NOT statements and still hold some: a compound
+# statement's own container is not itself a statement of the enclosing block, but
+# its list fields are full of them. Measured over the 712 `.py`/`.mojo` files of
+# this repository and the stdlib — every non-statement node type with a LIST
+# field that holds a statement directly, which is the whole of the set:
+#
+#   FunctionDef.body   68 974      a nested def, and a method of a nested class
+#   ExceptHandler.body  1 880      `except E:` / `finally:` arms
+#   MatchCase.body        253      `case p:` arms
+#   StructDef.fields      383      a class body's field declarations
+#
+# and no non-statement node type with a SCALAR field holding one, which is the
+# fact the descent below depends on. `LambdaExpr` is in the set although the
+# corpus never puts one there: `LambdaExpr.body` is typed `object`, so a lambda
+# whose body parses as a statement list is representable, and a walk that cannot
+# see it would lose an assignment silently rather than loudly. Its other list
+# fields hold strings, so descending into it costs nothing.
+#
+# `tools/formal_field_walk_differential.py` is what keeps this tuple honest: it
+# compares the walk against `iter_nodes` per struct over the whole corpus, and
+# the first version of this walk, without the tuple, was caught by it on four
+# structs — `fire_compiler.py`'s `TestSuite` (a nested class inside a method),
+# `std/iter`'s `_ChainedIterator` (an `except` arm) and two more.
+_STATEMENT_CONTAINERS = (F.FunctionDef, F.StructDef, F.MatchCase,
+                         F.ExceptHandler, F.LambdaExpr, F.Module)
+
+
+def _is_statement_node(node) -> bool:
+    """True when `node` is a STATEMENT, by the parser's own naming convention.
+
+    `fire_compiler.py` has no base class for statements — `ExprStmt`,
+    `AssignStmt`, `ComptimeIfStmt` and the rest are independent dataclasses — so
+    "is this a statement" is a NAME question, and this is the one place it is
+    asked. The suffix rather than an enumerated set, deliberately: a node type
+    added later is a statement by construction and belongs in the walk, while an
+    enumerated set is a list somebody has to remember to edit, and the only way
+    it is discovered to be out of date is that a field stopped being found.
+
+    A FALSE POSITIVE is harmless and a false negative is not, and that asymmetry
+    is what the choice rests on: yielding and descending into a non-statement is
+    what `iter_nodes` does everywhere anyway, so naming one a statement costs
+    nothing; missing a statement hides an assignment, and a hidden assignment is
+    two real fields aliased into one slot.
+    """
+    return hasattr(node, "__dataclass_fields__") \
+        and type(node).__name__.endswith("Stmt")
+
+
+def iter_statement_nodes(node):
+    """Every STATEMENT in a statement tree, and nothing else.
+
+    The descent is through LIST- and TUPLE-valued fields, through statement
+    nodes and through `_STATEMENT_CONTAINERS`, and it stops at the first node
+    that is neither — which is the whole of the saving. A statement's
+    sub-statements are always reached through a list (`IfStmt.then_body`,
+    `ForStmt.body`, `TryStmt.handlers`, `MatchStmt.cases`; an `ExprStmt` is a
+    leaf), while its EXPRESSIONS hang off scalar fields and off the arguments of
+    expression nodes, and an expression subtree cannot contain a statement. So a
+    walk that stays inside statements reaches every assignment and visits none
+    of the expressions, and the two walks agree by construction rather than by
+    luck.
+
+    **The precondition is a corpus result and the differential is what keeps it
+    one.** Over the 712 `.py`/`.mojo` files of this repository and the stdlib:
+    every sub-statement is reached through a list field of a statement or of a
+    `_STATEMENT_CONTAINERS` node, and there is no statement behind a scalar
+    field anywhere. That is also why the walk is safe against a node type added
+    later: a new STATEMENT is a `…Stmt` and is yielded, a new CONTAINER is the
+    one thing that needs the tuple above edited, and the differential says so
+    rather than a field quietly disappearing from a struct.
+
+    This is the third caller's complaint about `struct_receiver_stores`, at 2.05 s
+    of the 3.4 s left in a `myinterpreter.py` build: that derivation visits
+    6 160 632 nodes to find the few thousand assignments it exists for, and it is
+    asked once per (struct, question), so the walk multiplies by every struct in
+    the module.
+    """
+    if isinstance(node, (list, tuple)):
+        for x in node:
+            yield from iter_statement_nodes(x)
+        return
+    names = _node_subtree_fields(node) if hasattr(node, "__dataclass_fields__") \
+        else None
+    if names is None:
+        return
+    if _is_statement_node(node):
+        yield node
+    elif not isinstance(node, _STATEMENT_CONTAINERS):
+        return
+    for name in names:
+        value = getattr(node, name, None)
+        if isinstance(value, (list, tuple)):
+            yield from iter_statement_nodes(value)
+
+
 def struct_receiver_stores(struct_def, receivers) -> set:
     """Every `<receiver>.<name>` ANY method of this struct stores into.
 
@@ -18250,10 +18345,26 @@ def struct_receiver_stores(struct_def, receivers) -> set:
     answer by, and the reason it is asked over the WHOLE struct rather than
     over one method: `__init__` writes `self.helper` and `size` reads it back,
     so the read's own method carries no evidence either way.
+
+    **A STATEMENT walk and not `iter_nodes`, and the reader is
+    `iter_statement_nodes` because an assignment is a statement.** This is the
+    last per-node cost in this derivation, and it is asked 2 245 times over
+    `myinterpreter.py` — once per (struct, question) — so the walk multiplies by
+    every struct in the module. `_assignment_targets` decides whether a node is
+    an assignment at all, so every expression node the full walk visits is a node
+    this one looks at and rejects; that was 6 160 632 nodes for the few thousand
+    assignments found, 2.05 s of the build's remaining 3.4 s.
+
+    The obvious cheaper move — test the node's CLASS once instead of calling
+    `_assignment_targets` per node — was measured and is NOT what is here: it
+    bought 2.11 s → 2.05 s, inside the run-to-run noise, because the cost was
+    never the call. Reaching the assignments through ~8x fewer nodes is what
+    moved it, and it needs a corpus measurement to be sound at all, which is
+    `tools/formal_field_walk_differential.py`'s job.
     """
     out = set()
     for method in struct_methods(struct_def):
-        for node in iter_nodes(getattr(method, "body", None)):
+        for node in iter_statement_nodes(getattr(method, "body", None)):
             for target in _assignment_targets(node):
                 out.update(receiver_target_names(target, receivers))
     return out
