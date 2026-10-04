@@ -12953,7 +12953,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 why = M.static_initializer_refusal_reason(gslot)
                 if why is not None:
                     raise CodegenError(
-                        M.global_value_refusal(name, fn.name, why))
+                        M.global_value_refusal(name, fn.name, why, gslot))
                 # The other half of the same discipline, and it is a different
                 # question: a slot the MODULE BODY fills has an initializer that
                 # RUNS rather than one the linker lays out, so "has an

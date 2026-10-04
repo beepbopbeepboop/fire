@@ -1,5 +1,27 @@
 # FORMAL_proof_coverage_census_2026-10-03: 60 functions from THIS repository, both backends, with proofs on
 
+**§0.6 is new (2026-10-04, `work/formal19-4`): §0.2's "a module global with
+storage but no initializer" family is 0, and it was a MISDIAGNOSIS rather than a
+capability — `None` is a word on this path and `_static_word` had no arm for
+it.** Both of the family's items are re-measured per item with
+`tools/formal_proof_breadth.py --show`, off the tool's own emitted source rather
+than re-selected:
+
+| item | §0.2's class | now |
+|---|---|---|
+| `formal/arm64_proof_gen.py:_step_branch_index` | a module global with storage but no initializer | the image would bind `enumerate`, which nothing provides |
+| `gimple_codegen.py:_selfhost_syms` | the same | `'_out.sort()' is a method call on a value` |
+
+Both are one ROW along rather than to `pass`, which is §3's own warning ("a file's
+terminal cause is the FIRST refusal") and not a new measurement. What the census
+gains is that a 2-item family was not a family at all: `_STEP_CONDS`'s first
+entry is `(None, 0xd65f03c0)` and `_SELFHOST_SIGS` holds `NoneType`-shaped
+values, and the reason string `static_initializer_refusal_reason` picked —
+**"one of its elements is computed by a call"** — is false of a program with no
+call in it. The full account, and the second false clause found beside it, is
+`bugs/FORMAL_module_state_no_storage.md`'s Status at the head;
+`test_formal_globals.py` is 54/54 with the two new rows.
+
 **Status: §0 is new and it CORRECTS this census. Twenty-eight of its 39
 `codegen-refused` items emitted a program the source does not have — the synthesised `main`
 hands every parameter the startup stub's integer, so a function that uses a

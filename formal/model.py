@@ -31175,6 +31175,17 @@ def _is_container_literal(value) -> bool:
     return isinstance(value, (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr))
 
 
+# The names a `None` VALUE is spelled with, read as a bare name because that is
+# how Python's parser leaves it: `None` in a container literal arrives as
+# `IdentExpr("None")`, not as `F.NoneLiteral`, and `_static_word` had no arm for
+# either — so a module-level table whose first element is `None` was reported as
+# having an element "computed by a call". `NoneType` is here because it is the
+# same value under its type name and a corpus that writes `NoneType` writes the
+# same program; `Ellipsis` is deliberately NOT, because this path has no word for
+# it and `...` as a container element should keep being refused.
+_NONE_SPELLINGS = frozenset(("None", "NoneType"))
+
+
 def _static_initializer(value):
     """The `init` tuple for a module-level binding's value, or `("unknown", _)`.
 
@@ -31497,13 +31508,38 @@ def _static_word(node):
     `int` is never a `str` here, so the test is exact. A bytes literal is
     deliberately NOT a string element: it is a numeric buffer rather than text,
     and nothing in this path reads one out of a container as a NUL-terminated
-    string."""
+    string.
+
+    **`None` is the fourth, and it is the word 0.** Both emitters already lower
+    a `None` to zero — `arm64_codegen._emit_expr`'s `F.NoneLiteral` arm is
+    `movz xd #0` and `x86_64_codegen`'s twin is the same constant — and the two
+    SPELLINGS of it are the same word and are accepted as the same word
+    everywhere else that reads one (`struct_init_shapes`'s own note says so:
+    "`None` as a bare name, which is how Python's parser leaves it, and
+    `NoneLiteral`, are the same word"). So a container literal holding `None` has
+    a word for that element like any other.
+
+    It did not, and the cost was a misdiagnosis rather than a gap: measured on
+    this tree, `TBL = [(None, 7), (3, 9)]` read by a function was refused as
+    **"one of its elements is computed by a call"** — about a literal, with no
+    call anywhere in it — and the same refusal is what
+    `tools/formal_proof_breadth.py`'s census records for
+    `formal/arm64_proof_gen.py`'s `_STEP_CONDS` (50 entries, the first of them
+    `(None, 0xd65f03c0)`) and for `gimple_codegen.py`'s `_SELFHOST_SIGS`. The
+    element `_static_word` could not answer for was `None`, and the reason
+    string picked by `static_initializer_refusal_reason` was the closest of its
+    four rather than the right one.
+    """
     if isinstance(node, F.StringLiteral) and not getattr(node, "is_bytes", 0):
         return node.value
     if isinstance(node, F.BoolLiteral):
         return 1 if node.value else 0
     if isinstance(node, F.IntLiteral):
         return _int_literal_value(node)
+    if isinstance(node, F.NoneLiteral):
+        return 0
+    if isinstance(node, F.IdentExpr) and node.name in _NONE_SPELLINGS:
+        return 0
     if isinstance(node, F.UnaryOp) and node.op in ("-", "+"):
         n = _static_word(node.operand)
         if isinstance(n, (str, StaticNestedBlob)):
@@ -31642,7 +31678,8 @@ def module_slot_unreadable_refusal(slot, fn) -> str:
                           " records the design")
 
 
-def global_value_refusal(name: str, fn_name: str, why: str) -> str:
+def global_value_refusal(name: str, fn_name: str, why: str,
+                         slot=None) -> str:
     """The refusal for a module-level value this path cannot give an initializer.
 
     Reached only for a name that HAS a `__DATA` slot — so the message says the
@@ -31651,7 +31688,22 @@ def global_value_refusal(name: str, fn_name: str, why: str) -> str:
     live, which was true of none of them: `G = 5` with `global G` in one function
     now has exactly the storage it needs, and a reader sent to look for a data
     section that already exists would not find the thing that actually blocks
-    their program."""
+    their program.
+
+    **Why the name has a slot is read off the slot and not assumed**, because
+    there are two reasons and only one of them is a writer — and this sentence
+    was the second false diagnostic `GlobalSlot.mutable`'s own comment records
+    having already been fixed once, in the MANIFEST, while the refusal kept it.
+    Measured on this tree: `TBL = [(None, 7), (3, 9)]` read by a function was
+    refused with "it is one of the module-global slots in this image's `__DATA`,
+    because a function writes it through `global TBL`" — and no function writes
+    `TBL`, in this program or in any other. The slot is there because its value
+    is a CONTAINER BLOB the linker places, which makes the name a CONSTANT with
+    a home; saying "a function writes it" sends a reader looking for a writer
+    that does not exist, and away from the element of the literal that is not a
+    word. `collect_global_slots` is the only function that holds both the
+    statements and the bodies, which is why `mutable` is a field on the slot
+    rather than something derived here."""
     who = f"{fn_name}: " if fn_name else ""
     detail = {
         "computed_element": (
@@ -31680,13 +31732,27 @@ def global_value_refusal(name: str, fn_name: str, why: str) -> str:
             "a value it cannot compute has no initializer to write into the "
             "slot"),
     }.get(why, "")
+    if slot is not None and not getattr(slot, "mutable", False):
+        why_has_a_slot = (
+            f"because its value is static DATA this image holds, a container "
+            f"blob whose first word is the count, so the slot holds its "
+            f"address and nothing writes it: {name!r} is a CONSTANT with a "
+            f"home and not a variable")
+    elif getattr(slot, "filled_by_body", False):
+        why_has_a_slot = (
+            f"because the module's own top-level statements store it, which "
+            f"this path compiles into the synthetic function the startup stub "
+            f"enters and that function is the entry, so the store runs before "
+            f"anything reads the slot")
+    else:
+        why_has_a_slot = (
+            f"because a function writes it through `global {name}`")
     return (f"{who}{name!r} has storage here — it is one of the module-global "
-            f"slots in this image's `__DATA`, because a function writes it "
-            f"through `global {name}` — but that storage has no initializer: "
-            f"{detail}. A slot is eight bytes of static storage, so its value "
-            f"has to be known before the program runs; one that is not would "
-            f"read as the zero an unwritten slot gives, which is a plausible "
-            f"wrong number rather than a refusal")
+            f"slots in this image's `__DATA`, {why_has_a_slot} — but that "
+            f"storage has no initializer: {detail}. A slot is eight bytes of "
+            f"static storage, so its value has to be known before the program "
+            f"runs; one that is not would read as the zero an unwritten slot "
+            f"gives, which is a plausible wrong number rather than a refusal")
 
 
 def build_data_image(table: dict, base: int) -> GlobalDataImage:
