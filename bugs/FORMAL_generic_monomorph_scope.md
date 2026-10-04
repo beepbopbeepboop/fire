@@ -4,6 +4,15 @@
 2026-10-03 on `work/formal15-generic-monomorph` and these are its measured
 remainders, not a proposal · **Layer:** 1/5 of the formal work
 
+**§9 and §9a are DONE (2026-10-03 `formal25-3`, 2026-10-04 `formal18-4`), so
+read §9a before §1**: §1a says §1's construct was unmeasurable until §9 was
+fixed, and §1a is still true — §9a removed the LIBRARY half of the same wall,
+which was a third bug underneath it and is named there. What is left is §1a
+itself (a name resolution, and an ABI decision), §2 (a dotted application), §3
+(comptime-valued parameters), §4 (a type declared in the consumer), §8 (trait
+bounds), and the cross-module-library half filed as
+`bugs/FORMAL_a_library_calling_another_modules_template_instantiation.md`.
+
 The mechanism itself is `formal/monomorph.py` and its two call sites in
 `formal/imports.py` (`instantiation_demands`, `imported_instantiations`); the
 contract it implements is `doc/ABI.md` §Generics. What follows is what it
@@ -343,14 +352,106 @@ apply` is the differential on both, with TWO instantiations in one file (prints 
 then 1) because the failure this must not have is the two collapsing onto one
 symbol; its `lib=None` option is the one-file shape, which no case had.
 
-### 9a What is NOT fixed: the LIBRARY half, and why half of it is worse than none
+### 9a FIXED 2026-10-04 (`formal18-4`): the LIBRARY half, and the two things behind it
 
-A module that applies its own template **and is built as a dylib** is still
-refused, with the same message. `compile_formal_dylib` re-parses each source and
-never calls `_imported_structs`, so `imported_instantiations` — which mutates
-`stmts` — is not on that path at all; the two halves that would fix it are
-`build_module_dylib`'s `mine` (the demand set, which `own_templates` empties) and
-a rewrite of the call sites in the statements `compile_formal_dylib` parses
+**Status: DONE.** `016d938f` and `c466b3ee` on `work/formal18-4`. The measured
+refusal, on both architectures and with the message this section quotes:
+
+```
+build: main.mojo imports 'pairlib', which cannot be built either: pairlib.mojo:
+`Pair[…](…) calls a name this unit does not compile, so the brackets cannot be
+bound … so a call arriving here asked for none
+```
+
+is gone, and `pairlib.mojo` — which declares `struct Pair[T]`, applies it at
+`Pair[Int]`, and publishes `make_pair` — builds as a dylib, runs, and answers
+7 on arm64 and on x86-64. The three changes, one per reader, and each of them a
+function that already existed for the executable path:
+
+  * **`monomorph.own_demands`** is the own demand set as a NAME, and
+    `build_module_dylib` merges it into `mine` **before `demands_key`**. That
+    position is the substance of the first half: the own instantiations change
+    what the library publishes, so they belong in the artifact's identity
+    exactly as an importer's demand does, and a library built for its own
+    `Pair[Int]` must not share a path with one built for its own `Pair[Bool]`.
+    `test_formal_monomorph.py`'s "two demand sets are two libraries" is what
+    that key is for, and the own half now feeds it.
+  * **`compile_formal_dylib(statements={path: stmts})`** — the same seam
+    `compile_formal`'s own `stmts` parameter is, and for the same reason: the
+    rewrite is on the AST (`rewrite_instantiation_calls`), and publishing a
+    rewritten COPY of the module would have had to reproduce its prefix, its
+    line numbers and its error text, and the file on disk would stop being what
+    the library was built from. `build_module_dylib` parses ONCE and hands the
+    result over, so a module that needs the rewrite pays no second parse and
+    `{}` means "parse here" for every other caller.
+  * **the library's sources are a MERGED struct table for every source's
+    preparation**, which this section did not know about and which is a bug in
+    its own right — see below.
+
+**The thing behind it, and it is the reason this was not a two-line change: a
+library compiled from SEVERAL sources could not use a struct declared in another
+one.** `_prepare_functions` runs once per source with that source's own
+declarations, which is right for an executable (there is only one) and wrong
+here for every fact that is a property of the IMAGE — the frame-holder analysis
+that writes `fn._frame_slots`, and the method dispatch table. Measured, both
+architectures, `libx.mojo` declaring `Thing` and `liby.mojo` writing `t.v = 7`:
+
+```
+formal dylib: use_it: 't.v' is a field access through 't', and this path has no
+way to say what 't' holds … Bind the base from a constructor whose declaration
+THIS IMAGE can see (`x = S()`)
+```
+
+— with `libx.mojo` one file above it on the same command line. The emitter was
+meanwhile handed the MERGED `library_structs`, so two halves of one build
+disagreed about one image. The instantiated declaration arrives as a SECOND
+source of the library, so §9a could not land without this.
+
+The merge is dropped again the moment the analysis has had it, PER FILE, and
+that is not tidiness: `_method_exports` derives a method's module qualifier from
+the file its struct was declared in, so a per-file table carrying its siblings'
+declarations publishes `Thing.get` under the prefix of the file that USES it —
+a library that builds, links, and then fails to load with "Symbol not found"
+for a method it does export. A ONE-source library is untouched: the merge is
+empty and the filter a no-op, so every module dylib `build_module_dylib` builds
+is byte-identical to what it was until it has an instantiation to publish.
+
+**Tests.** `test_formal_dylib.py`'s "a library source can use a sibling
+source's struct" is the merge on its own — both architectures, both field
+shapes (one field is the value, two is a frame address), and the export
+qualifier pinned per file. `test_formal_monomorph.py`'s "a module that applies
+its own template publishes it" is §9a — a CPython differential, TWO
+instantiations in one library so the two cannot collapse onto one symbol, plus
+the manifest's `pairlib_Pair_1_T_3_Int_get_first`, which is the half that says
+the mechanism ran rather than having been inlined.
+
+**Two stale rows this fixed, which is the other half of the answer.**
+`test_formal_run.py` was RED on `master` over `struct Box[T: AnyType, U:
+AnyType]` + `Box[Int, Int](7)`: §9 — the module that both DECLARES and APPLIES
+a template — made that program build, and two rows still expected the refusal
+it no longer owes. Measured RED with this change reverse-applied, so they were
+this change's consequence and not a second defect. One is now an answer row (7,
+both backends), and one is deleted because `refuse_without:` cannot be said
+about a program that builds; its twin assertion survives on the row that puts a
+VALUE in the bracket, which still refuses and still asserts the absence of the
+same two sentences. `test_formal_run.py` is 997/997.
+
+**What is still open on the LIBRARY side, and it is a different piece of work:**
+a library that applies ANOTHER module's template (`libb` calling `liba`'s
+`Pair[Int]`) is still refused, and the refusal's last sentence — "so this call
+is one that asked for none" — is FALSE about it: the demand is computed, the
+dependency publishes the instantiation, and only the call-site rewrite and the
+declaration are missing. Measured, both architectures, with the reason and the
+exact next step:
+`bugs/FORMAL_a_library_calling_another_modules_template_instantiation.md`.
+
+**The original text, which is what the fix had to satisfy:** a module that
+applies its own template **and is built as a dylib** is refused, with the same
+message. `compile_formal_dylib` re-parses each source and never calls
+`_imported_structs`, so `imported_instantiations` — which mutates `stmts` — is
+not on that path at all; the two halves that would fix it are
+`build_module_dylib`'s `mine` (the demand set, which `own_templates` empties)
+and a rewrite of the call sites in the statements `compile_formal_dylib` parses
 itself. Compiling the instantiation into the library **without** the rewrite is
 the trap above with a stranger message, which is why it is not done here.
 
