@@ -1,10 +1,68 @@
 # An unannotated parameter receiving disagreeing types still prints wrong for every pair except int/str
 
-**State: OPEN, measured, not fixed.** This is the remainder of
-`bugs/CODEGEN_polymorphic_unannotated_param_vacuous_unanimity.md` (deleted by
-its fix), which covered the vacuous-unanimity SIGSEGV. That defect is fixed and
-this is not a regression from it — see "Not a regression" below, which is the
-first thing to establish before working on this.
+## Status 2026-10-02 — the 2 hard GCC errors are GONE and 2 more pairs are
+## right; 29 of 36 remain wrong, and they are the three rows below
+
+### Closed: the compile failures, and the `char *` half of the pointer group
+
+A container literal at a call site contributed NO observation to Pass 1.3d's
+unanimity contract, so `f(2.5)` + `f([1, 2])` saw `{'double'}` alone and
+resolved the slot to `double` — the doc's "sharpest of the three" GCC error.
+The same hole on the `char *` side is the pointer group's silent half:
+`char * f(char *)` plus a list argument is `mojo_print` strlen'ing the list
+HEADER's bytes, which is where this doc's `'\x90\x1a\x93\x04\x01'` row comes
+from. `void *` is now recorded for a container literal at a call site
+(`mojo/backend_gimple/module_gen.py`, in the walk that already special-cases
+an `IntLiteral` there and gives the reason `_arg_scalar_type` must not be
+widened), which is the shape that pass's own whitelist
+(`len(types) != 1 or not (_has_dbl or _has_cs)`) already rejects — so the slot
+drops to the `int64_t` box.
+
+Measured over this doc's whole matrix (36 ORDERED pairs of
+`{int, float, str, bytes, list, None}`, `def f(x): print(x)`), through
+`driver.compile_program` as the "Suite-bucket note" below requires:
+
+| tree | correct | hard GCC error | wrong value |
+|---|---|---|---|
+| HEAD | 5 | 2 | 29 |
+| after the fix | **7** | **0** | 29 |
+
+Two pairs moved to correct — `str`+`list` and `list`+`str` — and **no pair went
+correct-to-wrong**, checked cell by cell over the whole matrix rather than
+only on the cells that moved. Note the base is 5/36 here, not this doc's
+recorded 7/36: the tree drifted, so 5 is the number a re-measurement on this
+branch should be compared against.
+
+**One caution for whoever reads the table.** A pair that prints the raw bytes
+of a pointer is a WRONG ANSWER, not a compile failure, and the two are easy to
+conflate in a harness: `subprocess.run(..., text=True)` raises
+`UnicodeDecodeError` on it. The first version of that matrix counted every
+exception as a compile failure and reported "12 GCC errors, 8 remaining" —
+all eight of which were `bytes` pairs printing raw bytes. The numbers above
+classify `CalledProcessError` (a real gcc failure) separately from everything
+else.
+
+### Still open, unchanged: float, None, and the bytes/list tags
+
+Both remaining GCC errors are gone, so the doc's "Start with the 2 GCC errors,
+not the 20 silent wrong answers" advice is spent; what is left is the three
+rows of "Where", in the order the doc gives them:
+
+1. **float** (7 pairs, largest by user impact). `f(2.5)` + `f(1)` prints `2` —
+   the IEEE-754 bits read as an integer. The doc's own analysis stands: what
+   is missing is a `mojo_box_new(double)` at the call site that KNOWS the
+   argument is a double, so the callee can tell a float from an int that
+   shares its bits. `mojo_cstr_or_int_str` cannot do it — it would stringify
+   the bit pattern — which is also why the fix above deliberately stops at the
+   box.
+2. **bytes / list** (the pointer group minus the two pairs just fixed). The
+   value survives; what is missing is the runtime tag, and this commit's
+   change makes the requirement sharper rather than smaller: the slot is now
+   the `int64_t` box for exactly these pairs, so `print` must decide from
+   `_tagged_dyn_` / `mojo_is_registered_list` whether the word is a container,
+   a boxed string, or a plain int.
+3. **None** last, for the reason the doc gives: one bit destroyed at the
+   boxing site.
 
 ## What I ran
 

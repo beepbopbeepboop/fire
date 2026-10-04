@@ -719,6 +719,177 @@ def main():
     print(e(4, 5))
 """, "9\n")
 
+    # `print(...)` inside a LAMBDA body emitted no separator and no newline:
+    # `print` is a statement-level builtin whose separators live only in
+    # `gen._gen_print`, and a lambda's body is an EXPRESSION, so the lifted
+    # function wrapped it in `ReturnStmt` and the generic call path claimed it
+    # instead — `mojo_print(<one value>)`, full stop. Three prints came out as
+    # `ABC` on one line for CPython's `A\nB\nC\n`, exit 0. Compared against
+    # CPython rather than a literal, because the separator and the line ending
+    # are the whole subject.
+    test_gimple_matches_cpython("gimple_print_in_lambda_body_terminates", """\
+def main():
+    a = lambda: print("A")
+    a()
+    b = lambda x: print("B")
+    b(1)
+    c = lambda x: print(x, "|", x)
+    c("C")
+    h = lambda s: print(s + "!")
+    h("hello")
+main()
+""")
+
+    # An untyped LAMBDA parameter is physically `int64_t` whatever it is
+    # handed (`mojo_fnptr_call_N` widens every argument), so a string arrives
+    # with its pointer bits and nothing recorded -- and `print(x)` in the body
+    # fell through to the generic `%ld` arm and printed the ADDRESS. `_lower_
+    # LambdaExpr` now asks the runtime's own discriminator, gated on a call
+    # site of this very lambda that was seen passing a `char *`, which is
+    # positive evidence and not "no evidence" (a bare integer is
+    # pointer-shaped in `[2^31, 2^47)`, so an ungated discriminator would
+    # trade one wrong answer for another). The `a(42)` line is the gate: an
+    # ordinary integer must still print as an integer.
+    test_gimple_matches_cpython("gimple_lambda_param_str_and_int_both", """\
+def main():
+    a = lambda x: print(x)
+    a(42)
+    a("s")
+main()
+""")
+
+    # The same shape through a nested `def`, which the cross-call evidence
+    # collector could not see at all: `all_functions` is the module's
+    # top-level statement list, so a `def` inside a function body has no entry
+    # in the callee table the call sites are matched against. The evidence
+    # was collected and dropped. Both the direct spelling and the FORWARDED
+    # one (`inner(n)` with `n` the enclosing's own untyped parameter), because
+    # the second needs the interprocedural fixed point and the first does not
+    # — a fix that only handled the first would look complete.
+    test_gimple_matches_cpython("gimple_nested_def_param_str_and_int", """\
+def outer(n):
+    def inner(s):
+        print(s)
+    inner(n)
+    inner(7)
+    return 0
+
+def main():
+    outer("A")
+    outer(3)
+main()
+""")
+
+    # A CAPTURING lambda inside a NESTED `def`: the env struct's field types
+    # and the stores that fill them disagreed. The int case was the loud one
+    # -- an `int s;` field filled with `_t4 = (int64_t)s; _env->s = _t4;`,
+    # which `-fgimple` rejects ("non-trivial conversion in 'var_decl'"), so
+    # the whole program FAILED TO BUILD rather than merely printing wrong.
+    #
+    # The lambda is RETURNED, which is what forces the env: a lambda that
+    # never escapes is beta-reduced into its call site instead
+    # (`gimple_capturing_lambda_inlined_at_call`, above).
+    test_gimple_matches_cpython("gimple_capturing_lambda_in_nested_def_env", """\
+def outer():
+    s = 9
+    return (lambda: s)
+
+def use(fn):
+    return fn()
+
+def main():
+    print(use(outer()))
+main()
+""")
+
+    # The OTHER two capture kinds, pinned for BUILDABILITY rather than for
+    # their printed value. Every env-fill arm used to hard-code the scalar
+    # coercion as `(int64_t)`, so `char *` and `MojoList *` fields stored a
+    # raw word against a pointer field -- a second non-trivial conversion, and
+    # one that cost this program its build entirely. The VALUES they still
+    # print wrong (a pointer decimal) are a SEPARATE gap and they are not
+    # env-field questions: the callable comes back out of a function into an
+    # unannotated `int64_t` parameter, which loses its return type at the
+    # `mojo_fnptr_call_N` boundary. That is
+    # bugs/CODEGEN_callable_return_type_lost_at_more_hops.md — the same hop
+    # `use(<callable>)` is at the bottom of
+    # `gimple_nested_def_capturing_lambda_call_is_typed` below, which pins the
+    # hop one level in (the factory's own `outer()()`) and passes.
+    # `test_gimple_execution` is the honest assertion for that: it fails on a
+    # gcc error, which is what this case is about.
+    test_gimple_execution("gimple_capturing_lambda_nested_def_ptr_kinds_build", """\
+def outer_str():
+    t = 'x'
+    return (lambda: t)
+
+def outer_list():
+    u = [1, 2]
+    return (lambda: u)
+
+def use(fn):
+    return fn()
+
+def main():
+    print(use(outer_str()))
+    print(use(outer_list()))
+    return 0
+main()
+""", expected_return=0)
+
+    # The same three capture kinds with the factory DEFINED INSIDE a function,
+    # which is where the env was already right and the callable's RETURN TYPE
+    # was not: `_return_callable_ret_types` is recorded by the return site
+    # under `gen.current_func_name`, and for a nested `def` that is the LIFTED
+    # symbol (`main_outer_str`), while the call site spells the bare
+    # `outer_str`. The lookup found nothing, so the call went through the
+    # homogenized `mojo_fnptr_call_0` and `sprintf("%ld", ...)` rendered a
+    # `char *` as its own decimal address. The `double` row then needed the
+    # runtime half as well — `mojo_fnptr_call_dN`'s bound-method arm called
+    # through the `int64_t` signature and so read the garbage register a
+    # double return leaves behind — which is why this is a `matches_cpython`
+    # over all three kinds and not an int-only case.
+    #
+    # `use(<callable>)` is deliberately NOT here: routing the callable through
+    # an unannotated parameter loses the return type one hop further out,
+    # which is bugs/CODEGEN_callable_return_type_lost_at_more_hops.md and is
+    # what `gimple_capturing_lambda_nested_def_ptr_kinds_build` above still
+    # pins for buildability only.
+    test_gimple_matches_cpython("gimple_nested_def_capturing_lambda_call_is_typed", """\
+def main():
+    def outer_int():
+        s = 9
+        return (lambda: s)
+
+    def outer_str():
+        t = 'x'
+        return (lambda: t)
+
+    def outer_dbl():
+        u = 9.5
+        return (lambda: u)
+
+    def outer_nocapture():
+        return (lambda: 3)
+
+    print(outer_int()())
+    print(outer_str()())
+    print(outer_dbl()())
+    print(outer_nocapture()())
+main()
+""")
+
+    # Two arguments through a slot that may hold a string: the discriminator
+    # arm used to print its own answer immediately and `continue` WITHOUT
+    # appending to the resolved-argument list, so the pair came out SWAPPED
+    # and the `' '` separator landed on the wrong one (`two1` for `1 two`).
+    test_gimple_matches_cpython("gimple_print_two_args_one_may_hold_str", """\
+def main():
+    b = lambda x, y: print(x, y)
+    b(1, "two")
+    b("one", 2)
+main()
+""")
+
     # A variadic lambda's `*args` really is a sequence: len(), iteration and
     # indexing all read the packed list, and the ZERO-argument call packs an
     # empty one rather than passing a stray scalar.
@@ -7482,6 +7653,43 @@ def show(rows):
 def main():
     show([[1, 2], [3, 4]])
 """, "1\n2\n3\n4\n")
+
+    # The STRING spelling of the line above, which is where the same program
+    # was wrong. The OUTER loop already carried the nested element ctype
+    # across the call boundary (`_param_elem_types` / `_nested_elem_types`
+    # from `note_list_literal`), so `row` was correctly a `MojoList *` — but
+    # the target of a loop never inherited the iterable's OWN nested element
+    # type, so the INNER loop's target fell to the `int64_t` default and read
+    # its elements with `mojo_list_get_int`: `show([["a", "b"]])` printed the
+    # strings' heap addresses. The integer spelling passed only because
+    # `int64_t` is what that default already is, which is why this went
+    # unnoticed. Compared against CPython, and with `len()` and a `print` of
+    # the row itself so the fix has to be a real element type rather than a
+    # shape that happens to print.
+    test_gimple_matches_cpython("gimple_for_over_nested_list_param_of_str", """\
+def show_str(rows):
+    for row in rows:
+        for cell in row:
+            print(cell)
+
+def collect_str(rows):
+    out = []
+    for row in rows:
+        for cell in row:
+            out.append(cell)
+    return out
+
+def show_int(rows):
+    for row in rows:
+        for cell in row:
+            print(cell)
+
+def main():
+    show_str([["a", "bb"], ["c"]])
+    print(collect_str([["x", "y"], ["z"]]))
+    show_int([[1, 2], [3, 4]])
+main()
+""")
 
     # bugs/hard/CODEGEN_function_scoped_import_module_not_inlined.md: a
     # cross-module constructor call whose only field-type evidence is an

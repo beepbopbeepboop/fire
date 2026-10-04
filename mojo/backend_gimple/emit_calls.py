@@ -4754,6 +4754,63 @@ def _lambda_site(node) -> str:
     return f"line {_l}" if _l else "an unknown line"
 
 
+def _env_field_value(gen, name: str, field_ctype: str,
+                     src_text: str = None, src_ctype: str = None) -> str:
+    """The value to STORE into a closure env's `name` field, coerced to the
+    FIELD's declared ctype. One implementation, because the two env-fill
+    loops (the variadic lambda's and the closing lambda's) plus each one's
+    default-argument arm each hand-rolled the coercion, and each got it
+    differently right.
+
+    The bug this replaces: every site hard-coded `(int64_t)` for the scalar
+    case, with `double` the only exception spelled out. So a capture whose
+    field is `int` -- `int s;`, from `s = 9` in the enclosing scope -- was
+    stored as `_t4 = (int64_t)s; _env->s = _t4;`, and `-fgimple` rejects a
+    GIMPLE assignment whose RHS is not already the assigned variable's exact
+    type: a hard `non-trivial conversion in 'var_decl'` BUILD FAILURE for the
+    whole program, out of `def outer(): s = 9; return (lambda: s)`. `char` and
+    `_Bool` fields fail the same way.
+
+    The FIELD's ctype is the destination because the field's declaration is
+    what the struct says, and `ci.captures` (which
+    `gimple_ctypes._env_field_ctype` reads, and which the typedef is built
+    from) is where it comes from. The SOURCE is the local's own declared type,
+    read LIVE here rather than from the list `_lower_LambdaExpr` snapshotted
+    while scanning for captures: this store is emitted after `gen.var_types`
+    has been restored to the enclosing function's, and the typedef before it,
+    so the two can otherwise disagree about the same field.
+
+    A POINTER field on its own says nothing about what belongs in it: a
+    by-VALUE capture of a pointer wants the local's VALUE, and a by-REFERENCE
+    capture wants its ADDRESS. The local's OWN C type is the only thing that
+    tells them apart -- a third behaviour ("always coerce", "always take the
+    address") is wrong in one of the two, and both were real:
+    `sorted(d, key=lambda k: d[k])` (a by-VALUE `MojoDict *` capture stored as
+    `&d`, so the body read the first 8 bytes of the local's own address) and
+    benchmarks/memory/bench_heap_parallel's `{mut checksum}` (a scalar name
+    coerced against an `int64_t *` temp).
+
+    `src_text`/`src_ctype` are for a capture whose value is a default
+    ARGUMENT expression evaluated here (`lambda e, self=self: ...`), where
+    there is no local to read a type from and `lower_expr` has already
+    produced one."""
+    _ft = _as_str(field_ctype)
+    if src_text is not None:
+        return gen._coerce_to_type(_as_str(src_ctype or 'int64_t'), _ft, src_text)
+    if _ft.endswith(' *'):
+        _local_t = _as_str(gen.var_types.get(name, 'int64_t'))
+        if _local_t.endswith(' *'):
+            return gen._coerce_to_type(_local_t, _ft, name)
+        box = gen._new_temp(_ft)
+        gen._emit(f'  {box} = ({_ft}) &{name};')
+        return box
+    _src_t = _as_str(gen.var_types.get(name, 'int64_t'))
+    if _src_t == _ft:
+        return name
+    return gen._coerce_to_type(_src_t, _ft, name)
+
+
+
 def _lower_LambdaExpr(gen, node) -> tuple:
     """Lift a lambda expression to a top-level C function.
 
@@ -4815,6 +4872,26 @@ def _lower_LambdaExpr(gen, node) -> tuple:
 
     # Build a synthetic FunctionDef whose body is `return <lambda.body>`
     syn_body = [gimple_ctypes.ReturnStmt(value=node.body)]
+    # ...except for `print(...)`, the one STATEMENT-level builtin reachable
+    # from a lambda's expression body. `print`'s separators and its trailing
+    # newline live ONLY in `gen._gen_print`, which the statement dispatcher
+    # (`_gen_stmt_ExprStmt`) is the sole route into; a lambda body wrapped in
+    # `ReturnStmt` is an expression, so the generic call path took it instead
+    # and every lambda print came out with no `' '` between arguments and no
+    # line ending — `lambda: print("A")` three times over printed `ABC` on one
+    # line for CPython's `A\nB\nC\n`, exit 0.
+    #
+    # The value of a `print` call is `None` in Python, and the lambda returns
+    # its body's value, so the honest lowering is "do the statement, then
+    # return None" rather than a `return` of the (never observed) print
+    # result. `_gen_print`'s own per-argument ladder also replaces the
+    # generic path's `mojo_str_from_int` coercion, which is what printed a
+    # lambda's `int64_t` string parameter as a raw pointer decimal.
+    if (isinstance(node.body, gimple_ctypes.CallExpr)
+            and isinstance(node.body.func, gimple_ctypes.IdentExpr)
+            and gen._ident_call_name(node.body.func) == 'print'):
+        syn_body = [gimple_ctypes.ExprStmt(value=node.body),
+                    gimple_ctypes.ReturnStmt(value=gimple_ctypes.NoneLiteral())]
     # Lambda params are (pname, default_value) not (pname, type_ann).
     # Strip defaults so _gen_lifted_closure doesn't try to resolve them as types.
     # Plain unpack loop, NOT `[(p, None) for p, _ in node.params]` — a
@@ -4865,6 +4942,63 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     for pname, default in node.params:
         if isinstance(default, gimple_ctypes.IdentExpr) and default.name in gen.var_types:
             captures.append((pname, gen.var_types[default.name]))
+
+    # A lambda's own parameter is physically `int64_t` whatever it is handed
+    # (`_gen_lifted_closure`'s definition types an unannotated one that way,
+    # and the `mojo_fnptr_call_N` convention widens every argument to
+    # `int64_t` to pass it), so a string handed to one arrives as its pointer
+    # bits with nothing recorded anywhere -- and `print(x)` in the body then
+    # fell through to the generic `%ld` arm and printed the ADDRESS.
+    #
+    # The evidence is collected HERE because this is the only point at which
+    # it exists: the enclosing scope's AST is still in hand
+    # (`gen._cur_func_body`), and the lambda's own body has not been lowered
+    # yet. A module-level pass cannot do it -- a lambda is lifted here, at
+    # emission time, which is AFTER every call site of it was emitted -- and
+    # deferring it to the call site is impossible for the same reason.
+    #
+    # Positive evidence only, the same rule the module pass's equivalent
+    # collector follows (`expr_provably_str`: a str literal, or a `%`/`+`
+    # chain with one). Silence means silence; nothing is inferred from the
+    # body, and NO C SIGNATURE changes -- the slot stays `int64_t` and the
+    # consumer asks the runtime's discriminator
+    # (`_is_may_hold_str_param` -> `mojo_cstr_or_int_str`), whose documented
+    # bound is the bound the whole `_int64_may_hold_str` table already
+    # accepts.
+    _may_str: set = set()
+    _caller = getattr(gen, 'current_func_name', '') or ''
+    _local = _gld.bound_local_name(gen, node)
+    _cbody = getattr(gen, '_cur_func_body', None)
+    if _cbody and _local and _local != '?':
+        _lpns = _gld._param_names(node)
+        _nparams = len(node.params)
+        for _cn in _gld._walk_body(_cbody):
+            if (not isinstance(_cn, gimple_ctypes.CallExpr)
+                    or not isinstance(_cn.func, gimple_ctypes.IdentExpr)
+                    or _as_str(_cn.func.name) != _local):
+                continue
+            # Index-walks, not an `enumerate` unpack: a two-element for-target
+            # unpack boxes both slots on the self-hosted path, which is why the
+            # file's own `_lower_fnptr_call_value` comment says to index
+            # `_ap[0]` / `_ap[1]` instead of unpacking them.
+            _cargs = _cn.args or []
+            for _cai in range(len(_cargs)):
+                if _cai >= _nparams:
+                    break
+                if _cai >= len(_lpns):
+                    break
+                if gimple_exprtypes.expr_provably_str(_cargs[_cai]):
+                    _may_str.add(_lpns[_cai])
+    if _may_str:
+        _mi = getattr(gen, '_int64_may_hold_str', None)
+        if _mi is None:
+            _mi = {}
+            gen._int64_may_hold_str = _mi
+        # Named local, not a chained `setdefault(...).update(...)`: the
+        # intermediate has no static type self-hosted (the `_scalar_obs`
+        # loop in module_gen.py splits its own out for this reason).
+        _mset = _mi.setdefault(lifted_name, set())
+        _mset.update(_may_str)
 
     # A lambda that reads an ENCLOSING FUNCTION'S LOCAL cannot be lifted to a
     # top-level C function as-is: there is no env to read it from, and the
@@ -5014,6 +5148,19 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     saved_closure_envs   = dict(gen._closure_envs)
     saved_func_decl_glob = set(gen._func_declared_globals)
     saved_func_decl_nonlocal = set(gen._func_declared_nonlocals)
+    # `_gen_lifted_closure` -> `_reset_func` OVERWRITES these with the lifted
+    # body's own statement list and parameter set, and this function restored
+    # every other piece of per-function state around the lift without them —
+    # so after the first `f = lambda ...` in a function, every LATER
+    # statement in that function was analysed against the LAMBDA's body
+    # instead of the function's. `lambdareduce`'s escape / candidate /
+    # bound-local scans all answer from `gen._cur_func_body`, so a second
+    # lambda in the same function was never recognised as one: its
+    # `_bound_local` stamp was not written, it was not beta-reduced at its
+    # call site, and the enclosing function's own later statements were
+    # judged for escape against the wrong node list.
+    saved_cur_body        = gen._cur_func_body
+    saved_cur_params      = gen._cur_func_params
 
     # Expose outer closure info so the lambda body can resolve calls to parent
     # nested functions (e.g. compile_one_object) via their lifted C names with
@@ -5138,6 +5285,8 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     gen._closure_envs           = saved_closure_envs
     gen._func_declared_globals  = saved_func_decl_glob
     gen._func_declared_nonlocals = saved_func_decl_nonlocal
+    gen._cur_func_body           = saved_cur_body
+    gen._cur_func_params         = saved_cur_params
 
     gen._lambda_parts.append(body_code)
     gen._lambda_parts.append('')
@@ -5280,14 +5429,9 @@ def _lower_LambdaExpr(gen, node) -> tuple:
                 _src = _default_src.get(_cn)
                 if _src is not None:
                     _st, _sv = gen.lower_expr(_src)
-                    _cv = (gen._coerce_to_type(_st, _ct, _sv) if _ct.endswith(' *')
-                           else gen._new_val('int64_t', f'(int64_t){_sv}'))
-                elif _ct.endswith(' *'):
-                    _cv = gen._coerce_to_type(gen.var_types.get(_cn, 'int64_t'), _ct, _cn)
-                elif _ct == 'double':
-                    _cv = gen._new_val('double', f'(double){_cn}')
+                    _cv = _env_field_value(gen, _cn, _ct, _sv, _st)
                 else:
-                    _cv = gen._new_val('int64_t', f'(int64_t){_cn}')
+                    _cv = _env_field_value(gen, _cn, _ct)
                 gen._emit(f'  {_envp}->{_cn} = {_cv};')
             _env_void = gen._new_val('void *', f'(void *){_envp}')
         _fnv = gen._new_temp('void *')
@@ -5353,43 +5497,15 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     # this reference site) rather than from an enclosing local (value = the
     # variable).
     _default_src = {pn: dv for pn, dv in node.params if dv is not None}
+    # `_env_field_value` -- whose docstring carries the pointer branch's
+    # reasoning and the two real programs that pinned it.
     for _cn, _ct in _env_fields:
         _src = _default_src.get(_cn)
         if _src is not None:
             _st, _sv = gen.lower_expr(_src)
-            _cv = (gen._coerce_to_type(_st, _ct, _sv) if _ct.endswith(' *')
-                   else gen._new_val('int64_t', f'(int64_t){_sv}'))
-        elif _ct.endswith(' *'):
-            # The env FIELD is a pointer, which on its own says nothing about
-            # what belongs in it: two different captures both land here, and the
-            # local's OWN C type is the only thing that tells them apart.
-            #
-            #   * local is itself a pointer (`MojoDict * d`) — a by-VALUE
-            #     capture of a pointer. The field is the same pointer type, so
-            #     it wants the local's VALUE. Storing `&d` here instead makes
-            #     the body read `_env->d` as the first 8 bytes of the address
-            #     of the local: stack garbage, so every lookup through it is
-            #     wrong and it segfaults about half the time. Found by
-            #     `sorted(d, key=lambda k: d[k])`, whose lambda captures `d`.
-            #   * local is a scalar (`int64_t checksum`, `{mut checksum}`) — a
-            #     capture taken BY REFERENCE, and the field is a pointer TO the
-            #     local. Coercing the bare name emitted `_t8 = checksum;`
-            #     against an `int64_t *` temp, a non-trivial conversion in
-            #     'var_decl' and a hard error
-            #     (benchmarks/memory/bench_heap_parallel).
-            #
-            # Neither the field's type nor "always coerce" nor "always take the
-            # address" is right; branching on the local's type is.
-            _local_t = gen.var_types.get(_cn, 'int64_t')
-            if _local_t.endswith(' *'):
-                _cv = gen._coerce_to_type(_local_t, _ct, _cn)
-            else:
-                _cv = gen._new_temp(_ct)
-                gen._emit(f'  {_cv} = ({_ct}) &{_cn};')
-        elif _ct == 'double':
-            _cv = gen._new_val('double', f'(double){_cn}')
+            _cv = _env_field_value(gen, _cn, _ct, _sv, _st)
         else:
-            _cv = gen._new_val('int64_t', f'(int64_t){_cn}')
+            _cv = _env_field_value(gen, _cn, _ct)
         gen._emit(f'  {_envp}->{_cn} = {_cv};')
     _fnv = gen._new_temp('void *')
     gen._emit(f'  {_fnv} = {gen._c_fnaddr_helper(lifted_name)} ();')

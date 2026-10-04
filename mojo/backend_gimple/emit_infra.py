@@ -59,7 +59,7 @@ from ownership_check import _block_terminates
 from mojo.middle.infra_infer import *  # noqa: F401,F403
 from mojo.middle.infra_infer import (
     _FC_SEP, _POINTER_CTOR_NAMES, _as_ident_node, _as_int, _as_member_node, _as_set,
-    _as_str, _block_terminates, _closure_info_for_ident, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _list_elements_ok, _lambda_owned, _compute_closure_candidates, _compute_scoped_closure_candidates, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
+    _as_str, _block_terminates, _closure_info_for_ident, _generator_value_ctype_for_next, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _list_elements_ok, _lambda_owned, _compute_closure_candidates, _compute_scoped_closure_candidates, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
     _function_has_reachable_fallthrough, _infer_param_types, _infer_return_type, _is_free_eligible_function, _is_known_field, _known_field_type,
     _pair_key, _prepass_list_elem, _ptr_slot_in_range, _resolve_member_expr_type, _resolve_type, _scan_container_elems,
     _seed_addressed_locals, _type_of
@@ -4995,6 +4995,15 @@ def _gen_print(gen, args: list, kwargs: list = None):
     # a restored docstring value printed its address, and any Token built
     # from it carried that same wrong value into `.value`.
     resolved_parts = []
+    # `(word, boxed text)` pairs whose release is owed once the WHOLE print
+    # has been emitted, because the argument loop below no longer prints the
+    # discriminator's answer as it goes (see the `_is_may_hold_str_param`
+    # arm). `mojo_cstr_or_int_str` returns a string BORROWED (the very same
+    # address) but hands back an integer as a pooled heap block the caller
+    # now owns -- `mojo_cstr_or_int_release`'s contract, and doc/MEMORY.html
+    # "Transient keys". Holding several at once is fine: `mojo_print` copies
+    # out of each, and the block is still owned by nobody else in between.
+    _cstr_held: list = []
     for _pi, (atype, aval) in enumerate(parts):
         # A DYNAMIC tagged nested-generator-tuple element (see
         # _lower_IdentExpr's _tagged_dyn_src branch): the real kind is only
@@ -5070,15 +5079,19 @@ def _gen_print(gen, args: list, kwargs: list = None):
             if _pi < len(args) and _is_may_hold_str_param(gen, args[_pi]):
                 _rv = gen._call_expr('char *', 'mojo_cstr_or_int_str',
                                      [('int64_t', aval)])
-                gen._emit(f'  {print_fn} ({_rv});')
-                # REQUIRED, not optional: a boxed string comes back borrowed
-                # (the very same address) but an integer comes back as a
-                # pooled heap block this print now owns (see
-                # `mojo_cstr_or_int_release`'s contract and doc/MEMORY.html
-                # "Transient keys"). `mojo_print` copies out of it, so the
-                # release goes straight after the call.
-                gen._emit_call('void', '', 'mojo_cstr_or_int_release',
-                               [('int64_t', aval), ('char *', _rv)])
+                # CONVERT, do not print. This branch used to emit
+                # `print_fn` here and `continue` WITHOUT appending to
+                # `resolved_parts`, so a print with a second argument came
+                # out with the two SWAPPED and the `' '` separator
+                # attached to the wrong one: `print(x, y)` in a lambda
+                # called `b(1, "two")` printed `two1`. Every other arm of
+                # this loop only rewrites the pair and lets the ONE loop
+                # below print it in order; this one has to do the same, and
+                # the release the boxed integer's pooled block needs
+                # becomes a deferred pair (below) instead of a call made
+                # between two arguments.
+                _cstr_held.append((aval, _rv))
+                resolved_parts.append(('char *', _rv))
                 continue
             real = gen._get_actual_type(atype, aval)
             if real == 'char *':
@@ -5194,6 +5207,13 @@ def _gen_print(gen, args: list, kwargs: list = None):
             gen._emit(f'  free ({t});')
         if i < len(parts) - 1:
             _emit_literal_print(' ', print_fn)
+    # Index-walk, not a two-element for-target unpack: that boxes both slots
+    # on the self-hosted path (`_lower_fnptr_call_value`'s own comment gives
+    # the rule for the same shape).
+    for _ch_i in range(len(_cstr_held)):
+        gen._emit_call('void', '', 'mojo_cstr_or_int_release',
+                       [('int64_t', _cstr_held[_ch_i][0]),
+                        ('char *', _cstr_held[_ch_i][1])])
     _emit_literal_print('\\n', print_fn)
 
 

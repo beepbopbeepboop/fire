@@ -7068,6 +7068,10 @@ char *mojo_repr_list_bools(MojoList *l) {
    1 str, 2 double) — passed in rather than sniffed, because a double and an
    int are indistinguishable in the raw slot. */
 static char *_mojo_repr_pairlist(MojoList *l, int _kind) {
+    /* A list that brought its own per-slot kinds is described by them
+       (see _mojo_repr_defers_to_kinds). */
+    char *_dk = _mojo_repr_defers_to_kinds(l);
+    if (_dk) return _dk;
     if (!l) return "[]";
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup("[");
@@ -7112,6 +7116,10 @@ static char *_mojo_repr_pairlist(MojoList *l, int _kind) {
    and the tuple one printed as `[[5, 0], [5, 1], [5, 2]]`. Hardcoding `[`
    here also misreported a tuple of int lists. */
 static char *_mojo_repr_intlists(MojoList *l) {
+    /* A list that brought its own per-slot kinds is described by them
+       (see _mojo_repr_defers_to_kinds). */
+    char *_dk = _mojo_repr_defers_to_kinds(l);
+    if (_dk) return _dk;
     int _is_tup = l && mojo_is_tuple(l);
     if (!l) return _is_tup ? "()" : "[]";
     int64_t _n = mojo_list_len(l);
@@ -7168,8 +7176,18 @@ char *mojo_repr_list_pairs_d(MojoList *l) { return _mojo_repr_pairlist(l, 2); }
    address, faulted inside mojo_read_type_tag_safe (`[(1.5, 2)]` SIGSEGV'd).
    The codegen has the pattern statically (`_tuple_slot_types`, recorded for
    every tuple literal whose slots are not all one type), which is what routes
-   here. */
+   here.
+
+   A value that recorded its OWN per-slot kinds is described by those instead
+   (see _mojo_repr_defers_to_kinds, like every other helper here). `kinds` is
+   the CALLER's description of the INNER slots, which is only the right
+   description when every element really is an inner list — and for a value
+   that is itself a heterogeneous tuple (`([[1, 2], 3], 4)`) it is not, so the
+   scalar slot was rendered by the `mojo_is_registered_list` fallback as
+   `<object at 0x4>`. */
 char *mojo_repr_list_slotkinds(MojoList *l, const char *kinds) {
+    char *_dk = _mojo_repr_defers_to_kinds(l);
+    if (_dk) return _dk;
     int _is_tup = l && mojo_is_tuple(l);
     if (!l) return _is_tup ? "()" : "[]";
     int64_t _n = mojo_list_len(l);

@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG
 import dataclasses
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _signed_int64
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _signed_int64
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
 # Whether a node's CLASS is a dataclass, cached beside the field names for
 # the same reason and on the same key. `dataclasses.is_dataclass` is a pure
@@ -1432,3 +1432,31 @@ def _used_idents_deep(node) -> set[str]:
             for s in hbody:
                 base |= _used_idents_deep(s)
     return base
+
+def expr_provably_str(e) -> bool:
+    """Recursive, pure. Is `e` an expression whose Python runtime value is
+    provably a `str`?
+
+    Sound transitive closure over the two string-producing binary operators:
+    `%`-format yields str whenever the FORMAT (LHS) is a str literal, and `+`
+    yields str whenever EITHER operand is a str (`str.__add__` rejects a
+    non-str operand, so a literal str on either side proves both sides are
+    str — which is what disambiguates this from list/tuple concatenation).
+
+    Lives here, in the shared middle layer, rather than in the GIMPLE module
+    pass that first needed it, because it is asked from two of them: the
+    cross-call "this untyped slot may hold a string" evidence collector, and
+    `_lower_LambdaExpr`, which runs at EMISSION time and so cannot reach
+    anything the module pass computed. A predicate this load-bearing — every
+    answer widens a parameter's evidence — must have exactly one
+    implementation, or the two callers can disagree about whether a `char *`
+    was observed and the disagreement is invisible."""
+    if isinstance(e, (StringLiteral, TstringLiteral)):
+        return True
+    if isinstance(e, BinaryOp):
+        if e.op == '%':
+            return expr_provably_str(e.left)
+        if e.op == '+':
+            return (expr_provably_str(e.left)
+                    or expr_provably_str(e.right))
+    return False

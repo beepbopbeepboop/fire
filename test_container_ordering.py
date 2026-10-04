@@ -363,6 +363,40 @@ CASES = [
         "def main() -> Int:",
         "    print(le({1, 2}, {1, 2}), le({1, 2}, {1, 3}), le({1}, {1, 2}))",
         "    return 0")),
+
+    # `None` on either side of `==` / `!=` keeps Python's answers, which is
+    # the half the ordering refusal above must NOT disturb -- `None == None`
+    # is True by identity, and `None == 0` is False because both
+    # `NoneType.__eq__` and `int.__eq__` return NotImplemented and the answer
+    # falls through to identity. That last one used to compare the word 0
+    # against the word 0 (`None` lowers to a NULL `char *`) and answer True.
+    ("none-eq-identity", _p(
+        "def main() -> Int:",
+        "    print(None == None)",
+        "    print(None != None)",
+        "    print(None == 0)",
+        "    print(None != 0)",
+        "    print(None == 1)",
+        "    print(None != 1)",
+        "    print(None == 1.5)",
+        "    return 0")),
+    # ...and the missing-key guard the `x == None` NULL-pointer test exists
+    # for, in both directions and through an unannotated local, so the
+    # "this side provably cannot be None" gate cannot be widened past the
+    # pointer case.
+    ("none-eq-missing-key", _p(
+        "def main() -> Int:",
+        '    d = {"k": "v"}',
+        '    print(d.get("MISSING") == None)',
+        '    print(d.get("MISSING") != None)',
+        '    print(d.get("k") == None)',
+        '    print(d.get("k") != None)',
+        '    y = d.get("k")',
+        "    print(y == None)",
+        '    z = d.get("MISSING")',
+        "    print(z == None, z != None)",
+        "    print(None == d.get('k'), None == [1], [1] == None)",
+        "    return 0")),
 ]
 
 # The REFUSAL cases, kept apart because they have no stdout to compare: their
@@ -474,6 +508,50 @@ REFUSALS = [
     ("refuse-list-str", _p(
         "def main() -> Int:",
         '    print([1] < "a")',
+        "    return 0")),
+    # A `None` LITERAL on either side of an ordering operator. No operand
+    # here is a container, so the per-slot kind machinery above cannot see
+    # it at all: `None` has no lowering kind of its own and the generic
+    # numeric tail claimed the operator, making `None < 1` the C comparison
+    # `0 < 1`. Seven plausible, stable, repeatable and meaningless verdicts
+    # from a program CPython refuses on its first line -- exit 0, no
+    # diagnostic. One case per operator, plus the reflexive pair and the
+    # str/container sides, so a fix cannot satisfy `<` by breaking `<=`.
+    ("refuse-none-lt-int", _p(
+        "def main() -> Int:",
+        "    print(None < 1)",
+        "    return 0")),
+    ("refuse-none-le-int", _p(
+        "def main() -> Int:",
+        "    print(None <= 1)",
+        "    return 0")),
+    ("refuse-none-gt-int", _p(
+        "def main() -> Int:",
+        "    print(None > 1)",
+        "    return 0")),
+    ("refuse-none-ge-int", _p(
+        "def main() -> Int:",
+        "    print(None >= 1)",
+        "    return 0")),
+    ("refuse-none-lt-none", _p(
+        "def main() -> Int:",
+        "    print(None < None)",
+        "    return 0")),
+    ("refuse-none-gt-none", _p(
+        "def main() -> Int:",
+        "    print(None > None)",
+        "    return 0")),
+    ("refuse-int-lt-none", _p(
+        "def main() -> Int:",
+        "    print(1 < None)",
+        "    return 0")),
+    ("refuse-none-lt-str", _p(
+        "def main() -> Int:",
+        '    print(None < "a")',
+        "    return 0")),
+    ("refuse-none-lt-list", _p(
+        "def main() -> Int:",
+        "    print(None < [1])",
         "    return 0")),
 ]
 

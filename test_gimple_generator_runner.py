@@ -442,6 +442,175 @@ def test_generator_matches_cpython(name: str, mojo_src: str, cpython_src: str):
         _FAIL += 1
 
 
+def run_next_return_position_tests():
+    # `next(<generator>)` in a function's RETURN position used to be typed as
+    # the scalar BOX, so the enclosing function declared `int64_t h(void)` and
+    # a yielded `char *` came back through an `int64_t` return slot as its own
+    # address -- printed in decimal, exit 0, no diagnostic. Every OTHER
+    # consumption shape was already correct (`for x in mk()`, `list(mk())`,
+    # `r = next(mk())`), which is exactly why this survived: the value is read
+    # correctly everywhere and only the enclosing function's SIGNATURE is
+    # wrong.
+    #
+    # The test MUST cover a non-`int64_t` yield: `yield 7` passed before the
+    # fix and would prove nothing. `int64_t` survives it only by accident --
+    # it happens to be the return type's own representation.
+    test_generator_matches_cpython(
+        "generator_next_in_return_position_keeps_the_yield_ctype",
+        """\
+def gi():
+    yield 7
+
+def gs():
+    yield 'q'
+
+def gf():
+    yield 1.5
+
+def h_i():
+    return next(gi())
+
+def h_s():
+    return next(gs())
+
+def h_f():
+    return next(gf())
+
+def main():
+    print(h_i())
+    print(h_s())
+    print(h_f())
+main()
+""", """\
+def gi():
+    yield 7
+
+def gs():
+    yield 'q'
+
+def gf():
+    yield 1.5
+
+def h_i():
+    return next(gi())
+
+def h_s():
+    return next(gs())
+
+def h_f():
+    return next(gf())
+
+def main():
+    print(h_i())
+    print(h_s())
+    print(h_f())
+main()
+""")
+
+    # The same shape one step later -- `r = next(g); return r` -- which is the
+    # local-bound variant and needs the pre-pass that seeds a body's own
+    # locals, not the call's own type. Kept as its own case because a fix for
+    # only the direct spelling looks complete.
+    test_generator_matches_cpython(
+        "generator_next_bound_to_a_local_then_returned",
+        """\
+def gs():
+    yield 'q'
+
+def h():
+    r = next(gs())
+    return r
+
+def main():
+    print(h())
+main()
+""", """\
+def gs():
+    yield 'q'
+
+def h():
+    r = next(gs())
+    return r
+
+def main():
+    print(h())
+main()
+""")
+
+    # A generator METHOD's handle, and the 2-argument `default` form, pinned
+    # TOGETHER with the top-level one so a fix cannot make one right by making
+    # the others wrong. The method form is a different registry
+    # (`_generator_method_api`, keyed by (struct, method)) from the top-level
+    # one (`_generator_api`, keyed by function name), so they can disagree.
+    test_generator_matches_cpython(
+        "generator_next_return_position_method_and_default",
+        """\
+class Box:
+    def __init__(self):
+        self.n = 0
+
+    def render(self):
+        yield "a"
+        yield "b"
+
+
+def gen():
+    yield "t"
+
+
+def use_meth(b):
+    return next(b.render())
+
+
+def use_top():
+    return next(gen())
+
+
+def use_def():
+    return next(gen(), "d")
+
+
+def main():
+    b = Box()
+    print(use_meth(b))
+    print(use_top())
+    print(use_def())
+main()
+""", """\
+class Box:
+    def __init__(self):
+        self.n = 0
+
+    def render(self):
+        yield "a"
+        yield "b"
+
+
+def gen():
+    yield "t"
+
+
+def use_meth(b):
+    return next(b.render())
+
+
+def use_top():
+    return next(gen())
+
+
+def use_def():
+    return next(gen(), "d")
+
+
+def main():
+    b = Box()
+    print(use_meth(b))
+    print(use_top())
+    print(use_def())
+main()
+""")
+
+
 def run_next_method_tests():
     test_generator_stdout("generator_next_method_values_and_shared_cursor", """\
 def counter():
@@ -929,6 +1098,7 @@ def run_tests():
     run_lambda_capture_tests()
     run_mixed_yield_kind_tests()
     run_next_method_tests()
+    run_next_return_position_tests()
     # Cluster E (bugs/CODEGEN_generator_function_Lib_ipaddress.md): a
     # generator method that CALLS the result of a `@property` getter
     # (`self._address_class(x)` -- `_address_class` is a @property returning

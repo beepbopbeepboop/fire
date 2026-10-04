@@ -1,5 +1,120 @@
 # A function that returns containers of more than one kind: the call site and the loop target
 
+## Status 2026-10-02 — item (1) is WRITTEN AND MEASURED and NOT landed, because
+## landing it alone turns this doc's own refusal into a C++ error two levels out
+
+### The typing defect is real and the fix for it is a dozen lines
+
+Item (1) below ("the loop target's type is not looked up") is confirmed, and
+the overlay this doc describes resolves it. `_generator_yield_ctype`
+(`mojo/middle/exprtypes.py`) types each `yield <expr>` through
+`_infer_simple_expr_ctype`, which resolves a bare name via `known`; a name a
+`for` binds is in neither, so `yield line` got the `int64_t` default and the
+same-type check saw `char *` against it. `generator_api[name]['value_ctype']`
+is the answer, and it is already registered at that point — `_rows`'s api
+entry reads `{'base': '__mgco__rows', 'value_ctype': 'char *', ...}` while
+`render` is being compiled.
+
+The shape this doc's "Next step 3" calls "independent and safe on its own" is
+this one:
+
+```python
+def _rows(items):
+    for line in items:
+        yield line
+
+def build_section(name):
+    def render():
+        yield ''
+        yield f'{name}:'
+        for line in _rows(['a', 'b']):
+            yield line
+    return render
+```
+
+The landed-shaped implementation was `_generator_for_bound_ctypes(fn,
+generator_api, generator_method_api, self_struct_name)` in
+`mojo/middle/exprtypes.py` — a `_walk_own_body` pre-pass that maps each
+`for <name> in <generator>(...)`'s single-name target to the delegate's
+registered `value_ctype`, overlaid onto a COPY of `known` at the top of
+`_generator_yield_ctype`. Two details are load-bearing and both were measured:
+
+* `ForStmt.target` is the PARSER's convention, not a node: a bare name is a
+  `str`, a parenthesised target is a one-element list of `str`. Handling only
+  `IdentExpr` finds nothing.
+* The overlay must WIN over an existing `known` entry, not defer to it:
+  `declared` already reaches `_generator_yield_ctype` carrying the loop
+  target as the `int64_t` box default (`{'line': 'int64_t'}`), so a
+  `setdefault`-shaped overlay changes nothing at all.
+
+With it, all three of `render`'s yields type `char *` and the generator
+compiles.
+
+### Why it is still not landed
+
+Because what it exposes is worse than the refusal it removes, and that is the
+doc's own "Why this was not landed" argument, confirmed rather than refuted.
+The refusal this doc was filed for was NAMED
+(`render: every 'yield' must carry a value …`). Past it, on a 12-line
+distilled repro whose yields all AGREE from the start — so nothing about the
+yield-type overlay is involved, and this is reachable on a pristine tree
+today:
+
+```python
+def _nums(items):
+    for v in items:
+        yield v
+
+def outer():
+    def render():
+        yield 0
+        for v in _nums([1, 2]):
+            yield v
+    return render
+
+def main():
+    for x in outer()():
+        print(x)
+main()
+```
+
+`render` is a cpp-path generator; `_nums` is A3 stack-switch-compiled
+(`__mgco__nums_start`). `_cpp_iterable_is_delegatable_generator_call` tests
+membership in `gen._all_generator_names`, which this doc's own item (2)
+already identified as the POST-DESUGAR name set — and it is
+`['render']`, with `_nums` absent. So the loop falls out of the delegate arm
+into the GENERIC iterable lowering, which emits, into the companion `.cpp`:
+
+```cpp
+extern "C" MojoGenerator *__mgco__nums_start (int64_t);
+...
+for (auto v : __mgco__nums_start([&]() -> MojoList * { ... }())) {
+```
+
+a C++ range-based `for` over a `MojoGenerator *`, and g++ answers with
+`'begin' was not declared in this scope` plus two dozen
+`std::ranges::__access::begin` notes — a C++ error in the standard library's
+own headers, for a program whose refusal used to name the generator.
+
+`_supported_generators` DOES contain `_nums`, so the arm that would have
+driven it correctly is reachable; item (2) below (consult `_generator_api` as
+well) is what routes it there. And `_cpp_for_generator_delegate` still has to
+survive an A3 delegate across the C/C++ boundary, which is the same feature
+gap as the capture work. So the honest order is unchanged and now has a
+measurement behind it: fix the generic fall-through first, THEN (1)+(2).
+
+### The one-line thing that would make (1) landable today
+
+With (1) landed and (2) not, the same range-for is reached through the
+delegate arm's absence in a different way; what both need is a refusal
+instead. The cheapest correct version is for
+`_cpp_iterable_is_delegatable_generator_call` to also answer True for a name
+in `gen._generator_api` (this doc's item (2)), so `_cpp_for_generator_delegate`
+either drives it or raises its own named
+`_UnsupportedGeneratorShape` — never the generic range-for. That is a
+two-line change; whether it lands green depends on the A3/C++ ABI question
+above, which is why it is not done here.
+
 ## What was run
 
 ```sh

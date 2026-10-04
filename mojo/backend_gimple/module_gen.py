@@ -62,10 +62,10 @@ import mojo.middle.coro as gimple_gen_coro
 # in the wrong direction. Same rule and same precedent as
 # `emit_funcs._struct_method_qualifier`'s function-local
 # `from mojo.middle.module_shared import module_qualifier`.
-from mojo.middle.exprtypes import _walk_ast
+from mojo.middle.exprtypes import _walk_ast, expr_provably_str as _gmi_expr_provably_str
 import gimple_codegen
 import mojo.backend_gimple.emit_funcs as _ggf_dup
-from mojo.middle.closures import discover_closures
+from mojo.middle.closures import discover_closures, closure_lifted_name
 import mojo.backend_gimple.device_select as _gmi_device_select
 import mojo.middle.offload as _gmi_offload
 import mojo.backend_gimple.device_glue as _gmi_device_glue
@@ -1506,29 +1506,16 @@ def _gmi_emit_closure_recursive(self, func_parts: list, _emitted_closures: set,
         func_parts.extend(self._lambda_parts)
         self._lambda_parts = []
 
-
-
-
-def _gmi_expr_provably_str(e) -> bool:
-    """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
-    comptime`'s docstring. Recursive, pure. Is `e` an expression whose
-    Python runtime value is provably a str? Sound transitive closure over
-    the two string-producing binary operators: `%`-format yields str
-    whenever the FORMAT (LHS) is a str literal, and `+` yields str
-    whenever EITHER operand is a str (str.__add__ rejects non-str
-    operands, so a literal str on either side proves both sides are str —
-    disambiguating this from list/tuple concatenation)."""
-    if isinstance(e, (StringLiteral, TstringLiteral)):
-        return True
-    if isinstance(e, BinaryOp):
-        if e.op == '%':
-            return _gmi_expr_provably_str(e.left)
-        if e.op == '+':
-            return (_gmi_expr_provably_str(e.left)
-                    or _gmi_expr_provably_str(e.right))
-    return False
-
-
+# `_gmi_expr_provably_str` is NOT defined here: it is
+# `mojo.middle.exprtypes.expr_provably_str`, imported above under that local
+# spelling so this file's own call sites read unchanged. This module carried a
+# byte-for-byte copy of it from the mojo/middle restructure, which is exactly
+# the duplication that shared predicate exists to prevent -- its two callers
+# here (the `_gmi_prefold_toplevel_comptime` str-evidence collector and
+# `_lower_LambdaExpr`'s untyped-slot check) widen a parameter's evidence, so a
+# second implementation could disagree with `emit_calls.py`'s about whether a
+# `char *` was observed, and that disagreement is invisible.
+#
 # The compiler-internal dispatch/type-table globals (`_STMT_DISPATCH` etc.)
 # that get a bare `MojoDict *` / `MojoList *` / `MojoSet *` module-global field
 # rather than the boxed `int64_t` convention. Membership is
@@ -6990,6 +6977,43 @@ def gen_module_impl(self, stmts):
                                        gimple_ctypes.BoolLiteral,
                                        gimple_ctypes.NoneLiteral)):
                         st = 'int64_t'
+                    elif isinstance(a, (gimple_ctypes.ListExpr,
+                                        gimple_ctypes.DictExpr,
+                                        gimple_ctypes.SetExpr,
+                                        gimple_ctypes.TupleExpr,
+                                        gimple_ctypes.Comprehension)):
+                        # A CONTAINER literal is the one argument shape that
+                        # is provably a POINTER and still contributes nothing
+                        # above, so a slot reached from `f(2.5)` and
+                        # `f([1, 2])` observed only `{'double'}` — unanimous,
+                        # and the parameter declared `double f(double)` while
+                        # the list's `MojoList *` went to a `double` formal:
+                        # "pointer value used where a floating-point was
+                        # expected", a hard GCC error and no binary at all.
+                        # The same hole with `char *` instead of `double` is
+                        # worse, because it is silent: `char * f(char *)` plus
+                        # a list argument is `mojo_print` over the list
+                        # HEADER's bytes.
+                        #
+                        # `void *` is the shape that makes both vetoes, and it
+                        # is deliberately a string this pass's own whitelist
+                        # (`len(types) != 1 or not (_has_dbl or _has_cs)`)
+                        # already rejects: one non-scalar member in the set
+                        # drops the slot to the `int64_t` box, which is the
+                        # same answer every other disagreeing pair gets and
+                        # the one the `_tagged_dyn_` machinery is built for.
+                        # Recorded HERE rather than in `_arg_scalar_type` for
+                        # the reason the IntLiteral arm above gives: that
+                        # function's four other consumers each whitelist its
+                        # answers differently.
+                        #
+                        # The pointer is real information and is NOT
+                        # discarded: `mojo_list_set_kinds`/`_elem_types`
+                        # already record the container's element type for the
+                        # call-site walk, and the printed value being a
+                        # pointer decimal here is the same class this doc's
+                        # remaining rows describe.
+                        st = 'void *'
                 if st:
                     # Split the chained `_scalar_obs.setdefault(callee, {})
                     # .setdefault(pnames[i], set()).add(st)` into typed
@@ -7158,6 +7182,168 @@ def gen_module_impl(self, stmts):
                 resolved_type = 'double' if _has_dbl else 'char *'
                 self._inferred_param_types.setdefault(callee, {})[pname] = resolved_type
 
+    # The same "this untyped int64_t slot PROVABLY may hold a string"
+    # property, for the callable kind the tables above cannot see at all: a
+    # `def` NESTED in another function's body.
+    #
+    # It is invisible for a structural reason. `all_functions` is the
+    # module's top-level statement list, and `_free_params` / `_fn_by_name` /
+    # `_caller_bodies` are all built from it, so a nested `def` has no entry
+    # in any of the three. Its call sites WERE reachable -- `_calls_in_stmts`
+    # descends into a nested body from the enclosing function's own entry --
+    # so the evidence was collected and then dropped at the
+    # `_free_params.get(callee)` lookup, one line above.
+    #
+    # The consequence was an untyped parameter that a real string was passed
+    # into, printed as its own pointer decimal:
+    #     def outer():
+    #         def inner(s):
+    #             print(s)
+    #         inner("A")
+    # `s` is physically `int64_t` (`_gen_lifted_closure` types a parameter with
+    # no annotation that way whatever it is handed), `_actual_types` has
+    # nothing to say about it inside the lifted body, and `_gen_print` fell
+    # through to the generic `%ld` arm.
+    #
+    # This is the one place in the pipeline that still has the whole module's
+    # AST in hand: when the lifted closure's body is emitted the evidence is
+    # gone, so it is collected here and keyed by the name the C function
+    # ACTUALLY GETS -- `ClosureInfo.lifted_name`, which is also what
+    # `gen.current_func_name` is while that body is lowered, which is what
+    # `_is_may_hold_str_param` asks with. Keying by the source name would
+    # record a fact nobody can look up.
+    #
+    # Deliberately narrow, in three ways, each of which is the difference
+    # between this and a new guess:
+    #   * POSITIVE evidence only -- a call site whose argument type is
+    #     positively `char *`. `_arg_scalar_type` answers that for a string
+    #     literal and (with `deep_str`) for a provably-str expression, and is
+    #     silence for anything it cannot prove, exactly as for a top-level
+    #     callee. The scope it is given is the one the call site is really
+    #     inside, so an `IdentExpr` argument resolves against the right
+    #     function's locals.
+    #   * IT CHANGES NO C SIGNATURE. Nothing here resolves a parameter to
+    #     `char *`; the slot stays `int64_t` and the consumer asks the
+    #     runtime's own discriminator (`mojo_cstr_or_int_str`), whose
+    #     documented bound -- an int64 in `[2^31, 2^47)` reads as a pointer --
+    #     is the bound this whole table already accepts.
+    #   * ANNOTATED parameters are skipped, the same rule the loop above
+    #     applies: a real annotation is real evidence, so the slot never needs
+    #     the discriminator.
+    def _gmi_scope_bodies(body, outer_lifted: str) -> list:
+        """(compiled-under name, body) for `body` and every `def` nested in
+        it, at any depth. The name is what `_arg_scalar_type(caller_name, ...)`
+        has to be given for a call inside that scope: the enclosing function's
+        OWN name for a top-level `def`, its lifted `<outer>_<name>` for a
+        nested one. Getting it wrong is how an `IdentExpr` argument would
+        resolve against an unrelated function's locals."""
+        out = [(outer_lifted, body)]
+        for _n in _walk_ast(body):
+            if not isinstance(_n, FunctionDef):
+                continue
+            _nf = _as_funcdef_node(_n)
+            if (getattr(_nf, 'is_async', False)
+                    and not getattr(_nf, 'is_generator', False)):
+                continue
+            out.extend(_gmi_scope_bodies(_as_list(_nf.body),
+                                         closure_lifted_name(outer_lifted,
+                                                             _as_str(_nf.name))))
+        return out
+
+    _gmi_scopes: list = [(_TOPLEVEL_CALLER, stmts)]
+    for _cs_s in all_functions:
+        if isinstance(_cs_s, FunctionDef):
+            _cs_fn = _as_funcdef_node(_cs_s)
+            _gmi_scopes.extend(_gmi_scope_bodies(_as_list(_cs_fn.body),
+                                                 _as_str(_cs_fn.name)))
+    # PARALLEL LISTS, not tuples indexed positionally through a for-target
+    # unpack: on the self-hosted path a multi-element `for` target erases
+    # each element to int64_t (`discover_closures` and `lambdareduce` both
+    # document that trap at length, and `_walk_own_body`'s own comment
+    # records the generator variant of it), so a `(owner, src, lifted, …)`
+    # tuple would arrive here with boxed strings that never compare equal to
+    # the name they should and a silent no-op in the compiled compiler.
+    _gmi_own: list = []
+    _gmi_src: list = []
+    _gmi_lift: list = []
+    _gmi_pn: list = []
+    _gmi_def: list = []
+    for _gscope_i in range(len(_gmi_scopes)):
+        _scope_ent = _gmi_scopes[_gscope_i]
+        _scope_name = _as_str(_scope_ent[0])
+        _scope_body = _scope_ent[1]
+        for _lsc in _walk_ast(_scope_body):
+            if not isinstance(_lsc, FunctionDef):
+                continue
+            _lsf = _as_funcdef_node(_lsc)
+            if (getattr(_lsf, 'is_async', False)
+                    and not getattr(_lsf, 'is_generator', False)):
+                continue
+            _lpn: list = []
+            _lpar = _as_list(_lsf.params) or []
+            for _lp_i in range(len(_lpar)):
+                _lpp = _as_str(_lpar[_lp_i][0])
+                _lpt = _lpar[_lp_i][1]
+                if _lpp.startswith('*'):
+                    continue
+                if _lpt is not None:
+                    continue                    # respect explicit annotation
+                _lpn.append(_lpp)
+            if not _lpn:
+                continue
+            _lname = _as_str(_lsf.name)
+            _gmi_own.append(_scope_name)
+            _gmi_src.append(_lname)
+            _gmi_lift.append(closure_lifted_name(_scope_name, _lname))
+            _gmi_pn.append(_lpn)
+            _gmi_def.append(_lsf)
+    _gmi_rec: dict = {}
+    for _gscope_i in range(len(_gmi_scopes)):
+        _scope_ent = _gmi_scopes[_gscope_i]
+        _scope_name = _as_str(_scope_ent[0])
+        _scope_body = _scope_ent[1]
+        _gmi_calls: list = []
+        self._calls_in_stmts(_scope_body, _gmi_calls)
+        for _gcall in _gmi_calls:
+            if not isinstance(_gcall.func, IdentExpr):
+                continue
+            _gcallee = _as_str(_gcall.func.name)
+            # The def's OWN scope wins over a same-named one elsewhere: two
+            # unrelated functions can each nest a `helper`, and the enclosing
+            # scope is what says which of them this call site means.
+            # The def's OWN scope wins over a same-named one elsewhere: two
+            # unrelated functions can each nest a `helper`, and the enclosing
+            # scope is what says which of them this call site means. Index
+            # walks over the parallel lists above, never a for-target unpack
+            # (see their own note).
+            _gmatch = -1
+            for _gni in range(len(_gmi_src)):
+                if _as_str(_gmi_src[_gni]) != _gcallee:
+                    continue
+                if _gmatch < 0:
+                    _gmatch = _gni
+                if _as_str(_gmi_own[_gni]) == _scope_name:
+                    _gmatch = _gni
+                    break
+            if _gmatch < 0:
+                continue
+            _glift = _as_str(_gmi_lift[_gmatch])
+            _gpn = _gmi_pn[_gmatch]
+            _gargs = _as_list(_gcall.args) or []
+            _gslot = _gmi_rec.setdefault(_glift, set())
+            for _gi in range(len(_gargs)):
+                if _gi >= len(_gpn):
+                    break
+                if _arg_scalar_type(_scope_name, _gargs[_gi], deep_str=True) != 'char *':
+                    continue
+                _gslot.add(_gpn[_gi])
+    for _grk in _gmi_rec:
+        # `setdefault` into a NAMED local, then merge into it: the chained
+        # `d.setdefault(k, set()).update(...)` form has no static type on its
+        # intermediate result self-hosted, which is why the `_scalar_obs`
+        # loop above splits its own out (see its comment).
+        _grk_names = self._int64_may_hold_str.setdefault(_grk, set())
+        _grk_names.update(_gmi_rec[_grk])
     # Pass 1.3d-struct: the same unanimity-over-call-sites contract as the
     # loop above, for a REGISTERED STRUCT pointer.
     #
@@ -7195,7 +7381,8 @@ def gen_module_impl(self, stmts):
     # `gimple_dynamic_attribute_real_storage_and_attributeerror`). A method
     # call, by contrast, has exactly one lowering — the struct's own mangled
     # method — so there is nothing for the name-based fallback to get right.
-# Past 1.3d proper: propagate the may-hold-a-string property out of the
+
+    # Past 1.3d proper: propagate the may-hold-a-string property out of the
     # slots recorded above. It is one property of a VALUE, and a value is not
     # confined to the slot it arrived in -- `y = x` copies it, `return x`
     # publishes it to every caller, and a caller hands its own property to the
@@ -7238,12 +7425,41 @@ def gen_module_impl(self, stmts):
     _rets: dict = {}         # fname -> [returned expression nodes]
     _copies: dict = {}       # fname -> [(target name, source name)]
     _params: dict = {}       # fname -> [param names in order]
+    # A nested `def`'s C name, per OWNING scope: source name -> lifted name.
+    # The fixed point below resolves a call site by looking its callee up in
+    # `_params`, so a call to a nested `def` — spelled with the SOURCE name
+    # at the call site, emitted under the LIFTED name — has to be recorded
+    # under the latter, and it has to be the enclosing scope's entry: two
+    # unrelated functions can each nest a `helper`.
+    _nested_lifted: dict = {}
+    for _gni in range(len(_gmi_src)):
+        _gown = _as_str(_gmi_own[_gni])
+        _gsrc = _as_str(_gmi_src[_gni])
+        _glift = _as_str(_gmi_lift[_gni])
+        _gpair = _nested_lifted.setdefault(_gown, {})
+        _gpair[_gsrc] = _glift
+
+    def _gmi_param_names(params) -> list:
+        # A plain loop, not a comprehension with a two-element for-target
+        # unpack: both halves of that idiom are individually documented traps
+        # on the self-hosted path (a comprehension's target unpack boxes both
+        # slots -- `discover_closures`' `self_/moa/` example -- and this
+        # file's own `_record_param_elem` comment repeats it).
+        out = []
+        par = _as_list(params) or []
+        for i in range(len(par)):
+            pn = _as_str(par[i][0])
+            if pn.startswith('*'):
+                continue
+            out.append(pn)
+        return out
+
     for _fname, _fn in _fn_by_name.items():
-        _params[_fname] = [_as_str(_pn) for _pn, _pt in (_fn.params or [])
-                           if not _as_str(_pn).startswith('*')]
+        _params[_fname] = _gmi_param_names(_fn.params)
         _calls[_fname] = []
         _rets[_fname] = []
         _copies[_fname] = []
+        _fname_rename = _nested_lifted.get(_fname, {})
         for _nd in _walk_ast(_fn.body):
             if (isinstance(_nd, gimple_ctypes.AssignStmt)
                     and isinstance(_nd.target, IdentExpr)
@@ -7254,9 +7470,44 @@ def gen_module_impl(self, stmts):
                 if _nd.value is not None:
                     _rets[_fname].append(_nd.value)
             elif (isinstance(_nd, gimple_ctypes.CallExpr)
-                    and isinstance(_nd.func, gimple_ctypes.IdentExpr)
-                    and _as_str(_nd.func.name) in _fn_by_name):
-                _calls[_fname].append((_as_str(_nd.func.name),
+                    and isinstance(_nd.func, gimple_ctypes.IdentExpr)):
+                _cname = _as_str(_nd.func.name)
+                if _cname not in _fn_by_name and _cname not in _fname_rename:
+                    continue
+                _calls[_fname].append((_fname_rename.get(_cname, _cname),
+                                       list(_nd.args or [])))
+    # The same four tables for every nested `def`, which the loop above cannot
+    # see: its body IS reached (the walk descends into it) but it is credited
+    # to the enclosing function, and its own name is in neither `_fn_by_name`
+    # nor `_params`. One fixed point, fed both — not a second one.
+    # Index-walk, NOT a tuple-unpack `for` target: a multi-element unpack
+    # in a for target erases each element to int64_t on the self-hosted
+    # path (the trap `discover_closures` and `lambdareduce` each
+    # document at length), and a boxed name never compares equal.
+    for _gni in range(len(_gmi_src)):
+        _glift = _as_str(_gmi_lift[_gni])
+        _gpn = _gmi_pn[_gni]
+        _params[_glift] = list(_gpn)
+        _calls[_glift] = []
+        _rets[_glift] = []
+        _copies[_glift] = []
+        _glift_rename = _nested_lifted.get(_glift, {})
+        _gdef = _gmi_def[_gni]
+        for _nd in _walk_ast(_as_list(_gdef.body)):
+            if (isinstance(_nd, gimple_ctypes.AssignStmt)
+                    and isinstance(_nd.target, IdentExpr)
+                    and isinstance(_nd.value, IdentExpr)):
+                _copies[_glift].append((_as_str(_nd.target.name),
+                                        _as_str(_nd.value.name)))
+            elif isinstance(_nd, gimple_ctypes.ReturnStmt):
+                if _nd.value is not None:
+                    _rets[_glift].append(_nd.value)
+            elif (isinstance(_nd, gimple_ctypes.CallExpr)
+                    and isinstance(_nd.func, gimple_ctypes.IdentExpr)):
+                _cname = _as_str(_nd.func.name)
+                if _cname not in _fn_by_name and _cname not in _glift_rename:
+                    continue
+                _calls[_glift].append((_glift_rename.get(_cname, _cname),
                                        list(_nd.args or [])))
 
     def _expr_may(fname, expr) -> bool:
