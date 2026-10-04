@@ -1437,6 +1437,35 @@ def _host_tier(name: str):
         return ""
 
 
+def _host_verdict_label(name: str) -> str:
+    """What this table's `tier` column prints for `name`, from ONE accessor.
+
+    A module with a source is WRITTEN, which is a third state and not a missing
+    one: it is in neither tier because `HOST_MODELLED`'s rule is "a name LEAVES
+    here by being WRITTEN" and `HOST_ADMITTED`'s is "a name is here iff it has a
+    source", and its import resolves before either set is consulted. So the
+    column prints `written` for those, and `host_module_tier`'s `''` — which is
+    ambiguous between "written" and "nobody classified it" — is not read here at
+    all.
+
+    **It used to be read here, and inferred from `formal/hostmods/`.** That is a
+    THIRD definition of the same fact: a name this repository answers with a
+    sibling `.py`, or with a package `__init__.mojo` outside `formal/hostmods/`,
+    came out `UNTIERED` — which is a defect claim about a module that is
+    answered. `formal.imports.host_module_verdict` is the one classification,
+    every answer named, and this is a label over it rather than a second answer.
+    """
+    try:
+        from formal.imports import host_module_verdict
+        answer, _detail = host_module_verdict(name)
+    except Exception:                                   # noqa: BLE001
+        return "UNTIERED"
+    # `unclassified` is the answer that means "CPython ships it and no tier says
+    # which kind of name it is", and it is what this table has always printed as
+    # UNTIERED with the refusal's own words spelled out underneath the row.
+    return "UNTIERED" if answer == "unclassified" else answer
+
+
 def _host_use_names(path: str, module: str, declared):
     """The declared names of `module` this file binds, as a set.
 
@@ -1534,24 +1563,34 @@ def host_rank(log_path):
             "files": len(files),
             "uses": uses,
             "mentions": mentions,
-            "names": names.most_common(8),
+            # Sorted by (count, name) and not left to `most_common`, which
+            # breaks a TIE in insertion order — and the insertion order comes
+            # out of a `set` of names read from a `dict`, so two runs of the
+            # same log printed `module_from_spec x4, spec_from_file_location x4`
+            # and then the other way round (measured, same tree, same log). A
+            # column that reorders itself between runs is a table nobody can
+            # read as a diff, which is the same reason the `example` row below
+            # is sorted rather than taken first.
+            "names": sorted(names.items(), key=lambda kv: (-kv[1], kv[0]))[:8],
             "declared_known": declared is not None,
             "declared": declared or (),
             "tier": _host_tier(mod),
+            "verdict": _host_verdict_label(mod),
             "model": _host_model_source(mod),
-            # IN NO TIER is only a DEFECT when there is no model: a module that
-            # has been WRITTEN is in no tier by design (`HOST_MODELLED`'s rule is
-            # "a name LEAVES here by being WRITTEN", `HOST_ADMITTED`'s is "a name
-            # is here iff it has a source"), and its import resolves before
-            # either set is consulted. `os`, `sys` and `re` are in no tier for
-            # that reason and are not mis-diagnosed; `datetime` and `builtins`
-            # are in no tier because nobody classified them, and every file that
-            # wants one is told it is a CPython standard-library module this
-            # tree has no source or tier for — a name with no owner and no next
-            # step, which is the state worth printing. The WORDS of that are
-            # asked for rather than written here, for the reason
-            # `_host_refusal_clause` states.
-            "untiered": not _host_tier(mod) and not _host_model_source(mod),
+            # IN NO TIER is only a DEFECT when the name is UNCLASSIFIED, which
+            # is what `host_module_verdict` says rather than what the absence of
+            # a tier entry says: a module that has been WRITTEN is in no tier by
+            # design (`HOST_MODELLED`'s rule is "a name LEAVES here by being
+            # WRITTEN", `HOST_ADMITTED`'s is "a name is here iff it has a
+            # source"), and its import resolves before either set is consulted.
+            # `os`, `sys` and `re` are in no tier for that reason and are not
+            # mis-diagnosed; `datetime` and `builtins` are in no tier because
+            # nobody classified them, and every file that wants one is told it is
+            # a CPython standard-library module this tree has no source or tier
+            # for — a name with no owner and no next step, which is the state
+            # worth printing. The WORDS of that are asked for rather than written
+            # here, for the reason `_host_refusal_clause` states.
+            "untiered": _host_verdict_label(mod) == "UNTIERED",
             # ONE of the files the row blocked, and the subject of the note
             # printed under it. Sorted, so the note names the same file on every
             # run of the same log — a row whose note quoted a different file each
@@ -1568,12 +1607,9 @@ def print_host_table(table, minimum, lines=0, files_all=0):
         if r["files"] < minimum:
             continue
         # A module with a source is WRITTEN, which is a third state and not a
-        # missing one: it is in neither tier because `HOST_MODELLED`'s rule is
-        # "a name LEAVES here by being WRITTEN" and `HOST_ADMITTED`'s is "a name
-        # is here iff it has a source", and its import resolves before either
-        # set is consulted. Printing it as UNTIERED would report `os` and `sys`
-        # as mis-diagnosed.
-        tier = r["tier"] or ("written" if r["model"] else "UNTIERED")
+        # missing one, and the label comes from `formal.imports.host_module_verdict`
+        # so this table and the build cannot answer differently about one name.
+        tier = r["verdict"]
         model = r["model"] or "—"
         uses = r["uses"] if r["declared_known"] else (
             "?" if r["mentions"] is None

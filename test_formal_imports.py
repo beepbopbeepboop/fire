@@ -1827,19 +1827,27 @@ def test_no_unclassified_stdlib_name_is_imported_by_anything(tmpdir, _shared):
     unconditional, so the invariant is still checked on a checkout without it.
     """
     import sys as _sys
-    # "In no tier" is not the whole of it, and the difference is 20-odd names
-    # that are answered: a name this tree has WRITTEN leaves its tier (see the
-    # rule on `HOST_MODELLED`), so `os`, `sys` and `os._syscalls` answer
-    # `host_module_tier` with `''` while being the three most-imported modules
-    # in the corpus. So the set is the doc's own -- no tier AND no module --
-    # resolved through the resolver rather than through a path spelling, which
-    # is what makes `os._syscalls` (a submodule of an answered package) count as
-    # answered.
+    # The set is asked of ONE accessor now, and that is the point of this
+    # revision: "in no tier AND no module" used to have to be spelled here, by
+    # pairing `host_module_tier` with `resolve_module_path`, because
+    # `host_module_tier`'s `''` cannot say which of the two it means -- a name
+    # this tree has WRITTEN leaves its tier (see the rule on `HOST_MODELLED`), so
+    # `os`, `sys` and `os._syscalls` answer `''` while being the three
+    # most-imported modules in the corpus. Three consumers had grown three ways
+    # of telling those apart (this one, `tools/formal_sweep_causes.py`'s
+    # `formal/hostmods/` path check, and `tools/formal_host_import_wall.py`'s),
+    # and
+    # `formal/imports.py::host_module_verdict` is now the one classification
+    # with every outcome named. So `unclassified` is a NAME this tree can say
+    # rather than an absence a reader has to infer.
+    #
+    # `probe` still matters even though the accessor resolves: it is what makes
+    # the resolver answer with the same nearest-first roots the build uses.
     probe = os.path.join(HERE, "formal", "arm64.py")
     unclassified = {n for n in _sys.stdlib_module_names
-                    if not I.host_module_tier(n)
-                    and not I.resolve_module_path(n, relative_to=probe,
-                                                 project_root=probe)}
+                    if I.host_module_verdict(n, relative_to=probe,
+                                             project_root=probe)[0]
+                    == "unclassified"}
     check(len(unclassified) > 100,
           f"precondition: only {len(unclassified)} CPython standard-library "
           "names are in no tier, so this row is about the names in no tier "
@@ -1877,6 +1885,120 @@ def test_no_unclassified_stdlib_name_is_imported_by_anything(tmpdir, _shared):
           "classifies, so nothing here can say whether the module is "
           f"reachable and the file's host-import row has no verdict: "
           f"{consumers[:10]}")
+
+
+def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
+        tmpdir, _shared):
+    """`host_module_verdict`: the six answers, one row each, and the partition.
+
+    `host_module_tier` answers a MEMBERSHIP question and its `''` is ambiguous in
+    the one direction a report cares about: a name this tree has WRITTEN leaves
+    its tier (`HOST_MODELLED`'s own rule), so `os`, `sys` and `os._syscalls`
+    answer `''` and are the three most-imported modules in the corpus, while the
+    standard-library names nobody classified answer `''` too. Three consumers
+    had grown three ways of telling those apart —
+    `test_no_unclassified_stdlib_name_is_imported_by_anything` paired the tier
+    with `resolve_module_path`, `tools/formal_sweep_causes.py` inferred it from a
+    `formal/hostmods/` path existing (which is a third definition again: it
+    misses a repository sibling and a package outside that directory), and
+    `tools/formal_host_import_wall.py` paired both with `is_cpython_stdlib`. One
+    classification, every answer named, is what makes a report's `''` mean one
+    thing.
+
+    Each row below is a REAL name in this tree, and the `detail` half is checked
+    where there is one: `written` and `admitted` are the two answers that answer
+    "then what provides it", so an empty path for either would be a row that
+    names a state and withholds the file.
+
+    The partition is the part that is worth having. Over every name CPython
+    ships, the verdict is one of the five answers that are statements about the
+    target or about this tree, and `not-a-module` is unreachable for them — so
+    the classification of the standard library is COMPLETE, which is the closed
+    invariant that replaces this file's earlier `count > 100` placeholder. The
+    `unclassified` count is still asserted to be large, so this row stays about
+    the names in no tier; what changed is that they are a NAMED answer rather
+    than an absence a reader has to infer.
+    """
+    import sys as _sys
+    probe = os.path.join(HERE, "formal", "arm64.py")
+
+    def verdict(name):
+        return I.host_module_verdict(name, relative_to=probe,
+                                     project_root=probe)
+
+    rows = (
+        # name, the answer, what makes it that one, and the detail it carries
+        ("dataclasses", "front-end",
+         "a compile-time transform, so there is no source and nothing to link"),
+        ("os", "written", "formal/hostmods/os/__init__.mojo answers it"),
+        ("os._syscalls", "written",
+         "a SUBMODULE of a written package, which is why the answer has to go "
+         "through the resolver rather than through the name's top component"),
+        ("subprocess", "admitted",
+         "a source AND `@admitted` contracts for the operations whose answer is "
+         "a host fact"),
+        ("copy", "modelled", "in HOST_MODELLED and unwritten: a gap with an "
+                             "owner"),
+        ("asyncio", "unreachable",
+         "in HOST_UNREACHABLE: an event loop and a thread are objects this "
+         "image does not have"),
+        ("binascii", "unclassified",
+         "CPython ships it, no source here, no tier: the queue "
+         "`FORMAL_stdlib_module_names_are_not_classified.md` carries"),
+        ("definitely_not_a_real_module_9f3a", "not-a-module",
+         "nothing here provides it and CPython does not ship it — a typo, or a "
+         "gap in this repository, which `tools/formal_sweep.py` classes as "
+         "`not-answerable/unresolved-import`"),
+    )
+    for name, want, why in rows:
+        answer, detail = verdict(name)
+        check(answer == want,
+              f"{name} is {answer!r} and this row is about it being {want!r} "
+              f"({why}) — a `detail` of {detail!r}")
+        if want in ("written", "admitted"):
+            check(detail.endswith(".mojo") and os.path.isfile(detail),
+                  f"{name} answers {want!r} and its detail {detail!r} is not "
+                  "a source file, so the answer names a state and withholds "
+                  "the file that provides it")
+        else:
+            check(detail == "",
+                  f"{name} answers {want!r} and carries detail {detail!r}; "
+                  "only written and admitted name a file")
+
+    # The empty name, and the one answer it must give rather than raising: a
+    # caller that asks about nothing should not have to guard the call.
+    check(verdict("") == ("not-a-module", ""),
+          f"the empty name answers {verdict('')!r}")
+
+    # THE PARTITION, over everything CPython ships.
+    tally = {}
+    for name in _sys.stdlib_module_names:
+        answer, _detail = verdict(name)
+        tally[answer] = tally.get(answer, 0) + 1
+        check(answer != "not-a-module",
+              f"CPython ships {name}, so no verdict can say nothing here "
+              "provides it — that answer is the TYPO sentence's, and it is "
+              "false of a standard-library module")
+        if answer in ("modelled", "unreachable"):
+            # The rule `HOST_MODELLED` states and this file's other rows pin: a
+            # name LEAVES a tier by being WRITTEN, because an entry left behind
+            # a module that answers it is a false statement about the target
+            # rather than a conservative one. Asserting it here is what makes
+            # `written` and the two claim tiers disjoint rather than
+            # order-dependent.
+            check(I.resolve_module_path(name, relative_to=probe,
+                                        project_root=probe) is None,
+                  f"{name} is {answer!r} AND has a source, so it is in a tier "
+                  "and answered at once — remove the stale entry or the source")
+    for answer in tally:
+        check(answer in ("front-end", "written", "admitted", "modelled",
+                         "unreachable", "unclassified"),
+              f"the verdict {answer!r} is not one of the six answers, so a "
+              "report reading it has a seventh case nobody documented")
+    check(tally.get("unclassified", 0) > 100,
+          f"precondition: only {tally.get('unclassified', 0)} CPython "
+          "standard-library names are unclassified, so this row is about the "
+          "unclassified names only if there are many of them")
 
 
 def test_mojo_source_beats_host_module(tmpdir, _shared):
@@ -3850,6 +3972,8 @@ TESTS = [
      test_the_exclusion_table_does_not_change_the_export_set),
     ("the largest swept file is classified in a bounded time",
      test_a_swept_stdlib_file_is_classified_in_a_bounded_time),
+    ("every name has one named verdict, and no answer is an absence",
+     test_every_name_has_one_named_verdict_and_no_answer_is_an_absence),
 ]
 
 

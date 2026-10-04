@@ -56,19 +56,26 @@ itself uses, and the reason is not tidiness:
     or `try` bodies — a conditional import is not on the link line. That
     exclusion is the measurement and not an accident: an `ast`-based walk
     called `traceback` a 38-file row when the backend's own reader says 0.
-  * **`formal.imports.resolve_module_path`** for whether a name has a source
-    here, resolved with the same `relative_to`/`project_root` the build uses,
-    so `formal/hostmods/` is among its roots and a file's own neighbourhood
-    answers the way it does at build time.
+  * **`formal.imports.host_module_verdict`** for what a name IS — the one
+    classification in the tree, with every outcome named. It is asked with the
+    same `relative_to`/`project_root` the build uses, so `formal/hostmods/` is
+    among its roots and a file's own neighbourhood answers the way it does at
+    build time. Its `'written'` answer is why this tool does not keep its own
+    "is it a wall" test: a name with a source is answered, and `''` from
+    `host_module_tier` cannot say so.
 
 ## What a WALL is
 
-A name in a file's closure is a wall when it has **no source this backend can
-compile** and it is a name the TARGET cannot answer by itself: a tier entry, or
-a CPython standard-library module (`formal.imports.is_cpython_stdlib`, the
-interpreter's own oracle) that no tier classifies yet. The second half is what
-makes the `tier` column say `unclassified` rather than `modelled`, and it is
-the queue `bugs/FORMAL_stdlib_module_names_are_not_classified.md` carries.
+Four of the six answers `host_module_verdict` can give, and the two that are not
+walls are the whole rule: a name this tree has a SOURCE for is **written** (and
+answered), and a name CPython does not ship is **not-a-module** — a typo, or a
+gap in this repository, which `tools/formal_sweep.py` classes as
+`not-answerable/unresolved-import`. The four that remain are `modelled` (a gap
+with an owner), `unreachable` (a permanent fact about the target), `admitted`
+(answers under a declared contract) and `unclassified` — CPython ships it and no
+tier says which of the two it is, which is the queue
+`bugs/FORMAL_stdlib_module_names_are_not_classified.md` carries and what the
+`tier` column prints as `unclassified`.
 
 Nothing here builds anything, and no Lean runs: the question is what a file
 IMPORTS, which is decidable from source, and a build would answer a different
@@ -170,17 +177,23 @@ def walls_of(path: str, unmodelled=frozenset(), seen=None) -> frozenset:
 def _is_wall(name: str) -> bool:
     """Whether an UNRESOLVED name is a wall rather than a typo or a gap.
 
-    Two questions, asked in the place that uses each: `host_module_tier` answers
-    "has this tree CLASSIFIED the name", and `is_cpython_stdlib` answers "does
-    CPython ship it". A name that is neither is an unclassified standard-library
-    module — a wall with no tier, which the `tier` column prints as
-    `unclassified` and which is a real row rather than a false one.
+    **A DELEGATION, and it used to be a fourth definition.** This started as
+    two questions asked here — `host_module_tier` for "has this tree classified
+    the name" and `is_cpython_stdlib` for "does CPython ship it" — and
+    `formal/imports.py::host_module_verdict` is now the one place that classifies
+    a name, with every outcome named. The reason it has to be one place is that
+    the empty answer was ambiguous: a name this tree has WRITTEN leaves its tier,
+    so `''` means both "answered" and "nobody classified it", and three
+    consumers had grown three ways of telling those apart.
+
+    Only two answers are walls, and the two that are not are the point: a name
+    this tree has a source for is answered, and a name CPython does not ship is
+    a typo or a gap in this repository — which `tools/formal_sweep.py` reports
+    as `not-answerable/unresolved-import`, a different class that a wall table
+    counting it would misattribute to the target.
     """
-    if I.is_frontend_provided(name) or I._is_inert_module(name):
-        return False
-    if I.host_module_tier(name):
-        return True
-    return bool(I.is_cpython_stdlib(name))
+    answer, _detail = I.host_module_verdict(name)
+    return answer in ("modelled", "unreachable", "admitted", "unclassified")
 
 
 def _sweep_host_lines(sweep_path: str):
@@ -311,7 +324,7 @@ def main(argv=None) -> int:
             continue
         table.append({
             "name": name,
-            "tier": I.host_module_tier(name) or "unclassified",
+            "tier": I.host_module_verdict(name)[0],
             "reach": len(info["reach"]),
             "alone": len(info["alone"]),
             "sweep": sweep_count.get(name, 0),
