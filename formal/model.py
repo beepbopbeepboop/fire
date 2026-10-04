@@ -5807,8 +5807,8 @@ def frame_order_operand_refusal(op: str, operand, struct_names) -> str | None:
     )
 
 
-def non_container_element_refusal(op: str, spelled: str,
-                                  function: str) -> str:
+def non_container_element_refusal(op: str, spelled: str, function: str,
+                                  evidence: str = None) -> str:
     """Why an ELEMENT of a value that is not a container is refused. A refusal.
 
     The third arm of the family `frame_container_operand_refusal` and
@@ -5851,14 +5851,31 @@ def non_container_element_refusal(op: str, spelled: str,
     assignment all get this answer and the two architectures cannot disagree
     about which bases qualify.
 
-    `op` is the only thing that varies between those call sites — `a subscript`,
-    `a slice` — and it is a parameter rather than a constant so the message says
-    which of them the reader is looking at, for the same reason
+    **`evidence` is the DECLARED half, and it is the same refusal.** A base no
+    statement of the function bound — a PARAMETER, which is the case
+    `own_shape_kind` has nothing to say about by construction — that the
+    declaration calls an integer (`def f(e: Int): return e[0]`) is the same
+    construct with the answer written down instead of inferred, and it is
+    refused here rather than by a message of its own: one construct, one
+    sentence, and the alternative is two diagnostics for one mistake that differ
+    only in which line of the source they blame. Measured before either existed,
+    on both architectures and byte-identical: that call answered the blob
+    header's neighbour (7 where the caller held 53) and CPython raises
+    `TypeError`, so there is no reading of it that is right. The clause is
+    passed rather than derived because the two callers have it in different
+    shapes — `own_shape_kind` has a NAME, the declaration has TEXT — and
+    interpolating one of them into the other's wording is how a message ends up
+    claiming a binding that did not happen.
+
+    `op` is the only other thing that varies between the call sites — `a
+    subscript`, `a slice` — and it is a parameter rather than a constant so the
+    message says which of them the reader is looking at, for the same reason
     `frame_container_operand_refusal` takes one.
     """
+    bound = evidence or f"a value this function bound to an integer"
     return (
         f"{op} of `{spelled}` asks for a container element, and `{spelled}` "
-        f"is a value this function bound to an integer. Every container "
+        f"is {bound}. Every container "
         f"lowering starts by reading eight bytes at offset 0 of its base and "
         f"calling the result a COUNT — that is the blob's header word — and "
         f"then reads or writes at `base + 8 + 8k`, so the element address "
@@ -10778,6 +10795,29 @@ def receiver_declared_is_pointer(fn, expr, decls: dict) -> bool | None:
     receiver declared `SIMD[…]` is not a pointer at all, and only the second
     question tells them apart.
     """
+    ann, inner_is_pointer = _receiver_declared_annotation(fn, expr, decls)
+    if ann is None:
+        return None if not inner_is_pointer else True
+    base = annotation_base_name(ann)
+    if base is None:
+        return None
+    return base in POINTER_TYPE_CTORS
+
+
+def _receiver_declared_annotation(fn, expr, decls: dict):
+    """`(annotation_text, pointee_known)` — what THIS image declares for a receiver.
+
+    One reader for the annotation, because two readers of it are two answers:
+    `receiver_declared_is_pointer` above asks whether it names a pointer and
+    `subscript_base_lowering` asks whether it names an INTEGER (an integer has
+    no elements, so `n[0]` on one is a refusal rather than a container walk), and
+    the second question has to be asked about the same text the first one was.
+    Split out of the first rather than written twice beside it.
+
+    `pointee_known` is the MemberExpr half's own answer: a field whose
+    POINTEE this image established is a pointer even when its declared text is
+    absent, because the candidate table answered about it directly.
+    """
     ann = None
     if isinstance(expr, F.IdentExpr) and fn is not None:
         for p in (list(getattr(fn, "params", None) or [])):
@@ -10793,20 +10833,229 @@ def receiver_declared_is_pointer(fn, expr, decls: dict) -> bool | None:
     elif isinstance(expr, F.MemberExpr):
         inner, _why = _member_pointee(fn, expr, decls, {})
         ann = _member_declared_text(fn, expr, decls)
-        if ann is None and inner is not None:
-            return True
+        return (ann, inner is not None)
     elif isinstance(expr, F.CallExpr):
         ann = _rhs_declared_text(fn, expr, decls, {})
     if not isinstance(ann, str) or not ann.strip():
+        return (None, False)
+    return (ann, False)
+
+
+def _parameter_position(fn, name):
+    """`fn`'s 0-based position of the parameter spelled `name`, or None.
+
+    POSITION and not the name, because a parameter list can hold the same name
+    twice (`def f(p, p)` is not source anyone writes, but a comprehension's
+    `for` variable and a parameter can collide) and the CALL SITE counts
+    arguments, not names. `_frame_argument_slots` in `formal/build.py` reads the
+    same list for the same reason.
+    """
+    for i, p in enumerate(list(getattr(fn, "params", None) or [])):
+        if (p[0] if isinstance(p, (tuple, list)) else p) == name:
+            return i
+    return None
+
+
+def parameter_call_site_pointers(fn, name, decls: dict, functions: dict,
+                                 structs_by_name: dict = None, seen=()):
+    """Which of the two subscript conventions this image uses for one
+    unannotated parameter of `fn` — `("load", width, signed, spellings)`,
+    `("disagree", groups)` or `None`.
+
+    `None` means "nothing to decide on" and the caller keeps the container
+    reading: no call site in this image, only the callee's own recursion, or
+    every site answering with the container walk itself. `groups` is
+    `{(shape, width): [call spelling, …]}`.
+
+    **What an unannotated parameter means is a property of the IMAGE and not of
+    the callee, and this is the function that says so.** Until it existed the
+    only thing that chose between the two conventions was whether the callee's
+    own declaration spelled a pointer type, so the same function indexed memory
+    when the author wrote the annotation and walked a `[count][e…]` blob when
+    the author did not — and nothing anywhere said the answer had changed.
+    Measured on both architectures, byte-identical, the annotation the only
+    difference:
+
+        def _fill_ann(p: Pointer[Int64]): p[1] = 42    # b[1] == 42
+        def _fill_u(p):               p[1] = 43       # b[2] == 43
+
+    a bias of one WHOLE ELEMENT, so `p[0]` reads `b[1]` and `p[-1]` reads
+    neither word. `bugs/FORMAL_a_subscript_of_an_unannotated_pointer_parameter_
+    reads_the_next_word.md` and `bugs/FORMAL_a_subscript_through_an_untyped_
+    PARAMETER_is_a_blob_element_and_through_an_annotated_pointer_is_a_word.md`
+    are that measurement, from the two ends.
+
+    **It is the CONVENTION that travels, not the pointee, and it has to be.**
+    A blob and a raw buffer are the same value on this path — `POINTEES_REFUSED`
+    says it in as many words: "a list is a BLOB on this path — a frame whose
+    FIRST word is its count" — so `var b: Pointer[Int64] = malloc(…)` followed
+    by `b[0] = count` names the identical type whether the buffer is a
+    `[count][e…]` container or eight scratch words, and the caller's own
+    subscript on that name cannot tell them apart either. Reading the POINTEE
+    would therefore answer "memory" for both, and would silently move every
+    container that reaches a helper through an untyped parameter one element
+    towards its count word — the same silent-wrong-answer shape, pointed the
+    other way. So what a call site contributes is the answer this module already
+    gives for that name **in the caller**: `subscript_base_lowering(caller,
+    arg, …)`, the same function, asked about the argument in the function that
+    holds it. One value, one convention, wherever it is named — which is the
+    invariant, and it is checkable because both sides are in this image.
+
+    Ask it once more and the recursion is `f`'s parameter ← an argument in `g` ←
+    `g`'s parameter ← an argument in `h`, so `seen` carries the chain and a
+    pair already being derived contributes no observation rather than looping.
+
+    **The cost on this corpus is zero, measured.**
+    `tools/formal_untyped_param_subscript_census.py` asks THIS function over the
+    459 `.mojo` files of this repository and the stdlib: 284 subscripts read an
+    unannotated parameter and **not one of them has a call site whose argument
+    this image reads as memory**, so every one of them keeps the container
+    reading. The change can only alter a program whose call sites already say
+    something, which is what makes it landable without a sweep.
+
+    A call from ANOTHER image is not visible here, so an exported function's
+    unannotated parameter keeps the container reading for a caller this build
+    never read. Carrying a parameter's kind across the boundary is the dylib
+    manifest's job, beside `frame_params`, the way a cross-image frame holder's
+    is carried now, and it is the one half of this that is still open.
+    """
+    if fn is None or not isinstance(name, str) or not name:
         return None
-    base = annotation_base_name(ann)
-    if base is None:
+    callee = getattr(fn, "name", None)
+    if not callee or not functions:
         return None
-    return base in POINTER_TYPE_CTORS
+    if declared_parameter_annotation(fn, name) is not None:
+        return None                      # the declaration already decided
+    position = _parameter_position(fn, name)
+    if position is None:
+        return None
+    key = (id(fn), name)
+    if key in seen:
+        return None                      # a cycle, not a contradiction
+    seen = tuple(seen) + (key,)
+    groups: dict = {}
+    for caller in (functions or {}).values():
+        for site in iter_nodes(getattr(caller, "body", None) or []):
+            if not isinstance(site, F.CallExpr) \
+                    or not isinstance(site.func, F.IdentExpr) \
+                    or site.func.name != callee:
+                continue
+            args = list(getattr(site, "args", None) or [])
+            if position >= len(args):
+                # A call that does not reach this position says nothing about
+                # what the parameter holds, and reading the ones that do as
+                # though they spoke for it would be a claim about a call that is
+                # not there.
+                continue
+            arg = args[position]
+            if caller is fn and isinstance(arg, F.IdentExpr) \
+                    and arg.name == name:
+                # RECURSION passing the parameter on to itself: the same word,
+                # the same ignorance. Not evidence of a second convention, and
+                # treating it as one would refuse every recursive helper whose
+                # entry call is in another image.
+                continue
+            shape, width, signed, _why = subscript_base_lowering(
+                caller, arg, decls, functions, structs_by_name or decls, seen)
+            if shape is None:
+                continue                  # that site says nothing about it
+            groups.setdefault((shape, width, bool(signed)),
+                              []).append(call_spelling(site))
+    if len(groups) > 1:
+        return ("disagree", groups)
+    if not groups:
+        return None
+    (shape, width, signed), spellings = next(iter(groups.items()))
+    if shape != "load":
+        # The container walk at every site: the answer this module already
+        # gives, reached the long way round.
+        return None
+    return ("load", width, signed, spellings)
+
+
+def declared_parameter_annotation(fn, name):
+    """The annotation `fn`'s OWN parameter list gives `name`, or None.
+
+    Narrow on purpose, and narrow in the direction that matters: this is the
+    declaration that `parameter_call_site_pointers` stands down for, so it reads
+    the parameter list and nothing else. A `var x: T` in the body is a
+    different question (`_only_declared`) and a local bound from a caller is a
+    third.
+    """
+    for p in (list(getattr(fn, "params", None) or [])):
+        if isinstance(p, (tuple, list)) and p and p[0] == name \
+                and len(p) > 1 and isinstance(p[1], str) and p[1].strip():
+            return p[1]
+    return None
+
+
+def call_spelling(call) -> str:
+    """`f(2, 3)` — a call as the source spells it, for a refusal that quotes it.
+
+    The callee goes through `expr_spelling` and not `call.func.name`, because a
+    call whose name has to be looked through — `f[1](2, 3)` — has no `.name` on
+    its func node, and a diagnostic that raises while quoting the call sites it
+    exists to quote turns the safety check into the crash.
+    """
+    parts = [expr_spelling(a) for a in (call.args or [])]
+    for k, v in (call.kwargs or []):
+        parts.append(f"{k}={expr_spelling(v)}")
+    return f"{expr_spelling(call.func)}({', '.join(parts)})"
+
+
+def parameter_pointee_disagreement_refusal(callee, name, groups) -> str:
+    """One parameter reached with two SUBSCRIPT CONVENTIONS.
+
+    `frame_holder_disagreement_refusal` one layer down and the same rule — a
+    parameter's being an X is a property of the WHOLE image, not of one call
+    site — so the wording, the "phrased from BOTH sides" discipline and the
+    reason for refusing rather than picking are all that function's. Both sides
+    are named, because either call site can be the one the reader is standing at
+    and a message naming the wrong one of the pair sends them to a call that is
+    fine.
+
+    `groups` is `{(shape, width, signed): [call spelling, …]}`. The container
+    walk is `blob`; a memory read is `load` at a width.
+
+    The measured wrong answers this replaces, both on both architectures and both
+    a whole ELEMENT out rather than wild:
+
+        def _fill(p) -> int:  p[0] = 43        # b + 8  (blob walk)
+        var b: Pointer[Int64] = malloc(16)
+        b[0] = 3                                # b + 0  (declared pointer)
+        _fill(b)                                # b[1] == 43, not b[0]
+
+    and with two widths rather than two conventions the difference is a SCALE:
+    `Pointer[Int64]` gives `p + i*8` and `Pointer[UInt8]` gives `p + i*1`, and one
+    callee cannot emit both.
+    """
+    sides = []
+    for key, spellings in sorted(groups.items(), key=lambda kv: kv[0]):
+        shape, width = key[0], key[1]
+        what = ("a CONTAINER walk — element i at `base + 8 + i*8`, bounds-checked "
+                "against whatever word is at offset 0"
+                if shape != "load" else
+                f"a memory read — element i at `base + i*{width}`, no check")
+        sides.append(f"{what} at {' and '.join(spellings)}")
+    return (f"{callee}()'s parameter {name!r} is subscripted, and this image "
+            f"reaches it two ways that mean different addresses — "
+            f"{' and '.join(sides)}. One parameter, two kinds of value: the "
+            f"subscript convention is chosen per parameter, so `{name}[i]` would "
+            f"be compiled as one reading and reached as the other at one of "
+            f"these calls, and the offset between them is a whole ELEMENT rather "
+            f"than a wild address — so the wrong answer reads like a plausible "
+            f"one. Measured on both architectures: an unannotated parameter "
+            f"reached with a `Pointer[Int64]` wrote `b[2]` where the annotated "
+            f"spelling wrote `b[1]`, and the container walk's bounds check "
+            f"trapped in a raw exit(1) syscall that does not flush stdio, so "
+            f"the caller lost every line it had printed. Give {name!r} one kind "
+            f"of value at every call site, or declare it — `Pointer[Int64]` at "
+            f"the declaration makes the reading unambiguous without changing a "
+            f"single call")
 
 
 def subscript_base_lowering(fn, obj, decls: dict, functions: dict = None,
-                            structs_by_name: dict = None):
+                            structs_by_name: dict = None, seen=()):
     """`(shape, width, signed, why)` — `(None, None, None, why)` to refuse.
 
     WHAT `obj[i]` READS, for a base that is not a string and not a dict key —
@@ -10848,15 +11097,52 @@ def subscript_base_lowering(fn, obj, decls: dict, functions: dict = None,
         bounds check against whatever word is at offset 0 of an address is never
         the answer, so this is a diagnostic rather than a number.
 
-    What is deliberately NOT refused: a base whose kind nothing establishes. The
-    blob reading is a guess there, and it is a guess the corpus depends on — an
-    unannotated parameter is a word, and a word is an integer on this path, so
+## What an unannotated parameter means — the question this function used to
+    ## leave open, and the answer it now derives
+
+    Until this was decided, an unannotated parameter meant "blob" by default,
+    and the ONLY thing that chose between the two conventions was whether the
+    callee's own declaration spelled a pointer type. So the same callee, handed
+    the same pointer, indexed memory or walked a `[count][e…]` blob depending on
+    a line of the DECLARATION, and nothing anywhere said the answer had changed.
+    Measured on both architectures, byte-identical, with the annotation the only
+    difference:
+
+        def _fill_ann(p: Pointer[Int64]): p[1] = 42   ->  b[1] == 42
+        def _fill_u(p):                p[1] = 43      ->  b[2] == 43
+
+    The offset is a whole ELEMENT, so the wrong answer reads like a plausible
+    one: `p[0]` is `b[1]`, and `p[-1]` is neither. The blob walk also emits the
+    count check, so storing into a buffer whose count word was never written
+    traps in a raw `exit(1)` syscall — which does not flush stdio, so a program
+    that printed before the call loses every buffered line and looks like a
+    CALLER-side frame bug.
+
+    **The answer is now derived from the image, and it is the same fact either
+    way**: `parameter_call_site_pointers` asks what every call site of the
+    callee in this image passes, with the real `pointer_pointee` and the caller
+    as its `fn`. One pointee agreed on → the pointer reading, at the same width
+    the annotated spelling would have given. Call sites that do not agree →
+    `parameter_pointee_disagreement_refusal`, which is
+    `frame_holder_disagreement_refusal` one layer down and the same rule: a
+    parameter's being an X is a property of the whole image, and either call
+    site can be the one the reader is standing at, so both are named.
+
+    What it costs, measured with `tools/formal_untyped_param_subscript_census.py`
+    over the 459 `.mojo` files of this repository and the stdlib: **nothing**.
+    284 subscripts read an unannotated parameter and not one of them has a call
+    site that passes a pointer-typed argument, so every one of them keeps the
+    container reading. A callee no call site in this image reaches — an exported
+    host-module function, a dylib's own entry — keeps it too, which is where
+    the CROSS-image half lives: carrying a parameter's kind in the dylib manifest
+    beside `frame_params`, the way a cross-image frame holder's is carried now.
+
+    ## What is deliberately NOT refused: a base whose kind nothing establishes
+
+    The blob reading is a guess there, and it is a guess the corpus depends on —
     "refuse every unestablished base" would refuse every `p[i]` where `p` came
-    from a caller. Measured over the 395 `.mojo` files of the sweep corpus that
-    is ~2 200 sites whose base is a word, most of them `List`/`Fence`/SIMD
-    type-parameter subscripts that are refused further down the same path
-    anyway. The remaining wrong-number case — a base that IS an address and
-    says nothing — is recorded, with the number, in that bug doc.
+    from a caller whose argument this image cannot place. The census above is
+    the number that decides it, and it is why the fallback stays.
     """
     how, why = dereference_lowering(fn, obj, decls, functions, structs_by_name,
                                     index_scaled=True)
@@ -10892,6 +11178,52 @@ def subscript_base_lowering(fn, obj, decls: dict, functions: dict = None,
                 f"little-endian word, and 97 is the byte. Declaring the pointee "
                 f"— `var p: Pointer[UInt8]`, or a parameter annotated "
                 f"`Pointer[Int32]` — is what makes it answerable")
+    # The base's own DECLARED type says it is a number. An integer has no
+    # elements, so the container reading is not a guess here and no annotation a
+    # reader could add would change it. It is the one shape the corpus does not
+    # reach (measured: 0 of the 198 subscripts whose base a declaration calls a
+    # non-pointer declare an integer — they are `SIMD[…]`, `Span`, `Some`,
+    # `Tuple`, `List[Int]`, all real containers), which is why the rule asks
+    # about `INT_TYPE_CTORS` alone and not about "not a pointer".
+    #
+    # The MESSAGE is `non_container_element_refusal`',s, because this is that
+    # construct: a local bound to an integer is refused by the emitters from
+    # `own_shape_kind` before this line is reached, and a PARAMETER declared
+    # `Int` — which `own_shape_kind` has nothing to say about, by construction —
+    # would otherwise get a second diagnostic for the same mistake, differing
+    # only in which line of the source they blame.
+    ann, _inner_pointer = _receiver_declared_annotation(fn, obj, decls)
+    base = annotation_base_name(ann) if ann else None
+    if base in INT_TYPE_CTORS:
+        return (None, None, None, non_container_element_refusal(
+            "a subscript", spelled(obj),
+            getattr(fn, "name", None) or "<module>",
+            f"declared {ann!r}, which is an integer"))
+    # An UNANNOTATED PARAMETER, whose kind the callee cannot see and the IMAGE
+    # can: every call site of `fn` in this image is in `functions`, so the
+    # pointer reading is derived from what is actually passed rather than from
+    # whether the author remembered an annotation. `parameter_call_site_pointers`
+    # is where the derivation and the measurement live; it returns None — and so
+    # this arm falls through to the container reading — whenever the call sites
+    # say nothing, which on this corpus is every one of them.
+    if isinstance(obj, F.IdentExpr):
+        derived = parameter_call_site_pointers(fn, obj.name, decls, functions,
+                                               structs_by_name)
+        if derived is not None:
+            if derived[0] == "disagree":
+                return (None, None, None,
+                        parameter_pointee_disagreement_refusal(
+                            getattr(fn, "name", "?") or "this function",
+                            obj.name, derived[1]))
+            _shape, width, signed, sites = derived
+            return ("load", width, signed,
+                    f"this image reads its argument as MEMORY at "
+                    f"{' and '.join(sites)} — a declared pointer, subscripted at "
+                    f"the pointee's width — so `{obj.name}[i]` is "
+                    f"`{obj.name} + i*{width}` here too: one value, one "
+                    f"convention, wherever the name is written. Measured: with "
+                    f"the annotation the callee got this reading and without it "
+                    f"the container walk, a bias of one whole ELEMENT")
     return ("blob", 8, False, None)
 
 
