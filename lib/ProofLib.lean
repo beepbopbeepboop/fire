@@ -2215,6 +2215,30 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
   else
     none
 
+/-- Run exactly `n` steps of the execution loop `arm64_go` implements.
+
+`arm64_go`'s loop body is ONE step plus the pc-advance rule, and that rule is
+the whole of what makes a straight-line instruction sequence advance:
+`arm64_step` leaves `pc` alone for every instruction that does not branch, so
+the loop supplies `pc + 4` when the step left it unchanged. `arm64_go` needs
+that rule only inside its own fuel recursion, which cannot be asked for a fixed
+number of steps — `arm64_go s code 1` is `none`, not "the state after one
+instruction" — so a caller that wants exactly `n` instructions (a differential
+harness comparing one instruction against the hardware, a single-step
+counterexample) had to write the loop body out again and hope it agreed.
+
+It is the same three lines here, and `arm64_go_steps` below is the proof that it
+is. `none` means `arm64_step` refused the instruction at `s.pc`, which is a
+different thing from running out of steps: `n = 0` is `some s` whatever `s` is,
+and that asymmetry is what lets a caller tell the two apart. -/
+def arm64_steps (s : Arm64State) (code : Nat → UInt8) (n : Nat) : Option Arm64State :=
+  match n with
+  | 0 => some s
+  | n + 1 =>
+    match arm64_step s code with
+    | none => none
+    | some s' => arm64_steps (if s'.pc = s.pc then { s' with pc := s.pc + 4 } else s') code n
+
 /-- Execute ARM64 instructions until the program terminates or fuel runs out.
 
 Sequential instructions in `arm64_step` do not modify `pc`; the loop
@@ -2263,6 +2287,37 @@ def arm64_go_exit (st : Arm64State) (code : Nat → UInt8) (exit : Nat) (fuel : 
 
 def arm64_exec_go_exit (s : Arm64State) (code : Nat → UInt8) (exit : Nat) (fuel : Nat) : Option Arm64State :=
   arm64_go_exit s code exit fuel
+
+/-- `arm64_go`'s loop body IS one `arm64_steps`, and this is the statement of
+it.  The pc-advance rule (`st'.pc = st.pc` → `pc + 4`) is written out in three
+functions in this file — here, in `arm64_go`, and in `arm64_go_exit` — and a
+rule that has to be stated rather than proved is a rule that will drift, so it
+is proved for the two loops that share the pc-advance.  The same drift is the
+reason `tools/formal_model_fuzz.py` cannot ask `arm64_go` for a fixed number of
+steps and has to ask `arm64_steps` for the model's side of the comparison. -/
+theorem arm64_go_eq_steps (st : Arm64State) (code : Nat → UInt8) (fuel : Nat)
+    (h1 : fuel ≠ 0)
+    (h2 : ¬ (code st.pc = 0xd65f03c0 ∧ st.pc = st.x30.toNat)) :
+    arm64_go st code fuel
+      = (arm64_steps st code 1).bind (fun st'' => arm64_go st'' code (fuel - 1)) := by
+  rw [arm64_go]
+  simp only [h1, h2, ↓reduceIte, arm64_steps]
+  cases h : arm64_step st code <;> rfl
+
+theorem arm64_go_exit_eq_steps (st : Arm64State) (code : Nat → UInt8)
+    (exit : Nat) (fuel : Nat) (h1 : fuel ≠ 0) (h2 : st.pc ≠ exit) :
+    arm64_go_exit st code exit fuel
+      = (arm64_steps st code 1).bind (fun st'' => arm64_go_exit st'' code exit (fuel - 1)) := by
+  rw [arm64_go_exit]
+  simp only [h1, h2, ↓reduceIte, arm64_steps]
+  cases h : arm64_step st code <;> rfl
+
+/-- `arm64_steps s code 0` is `s`: asking for no steps is not a refusal.  The
+asymmetry with `arm64_steps s code (n+1) = none` when `arm64_step` declines is
+what lets a caller of the former tell "ran out of instructions" from "the model
+could not step this one". -/
+@[simp] theorem arm64_steps_zero (s : Arm64State) (code : Nat → UInt8) :
+    arm64_steps s code 0 = some s := rfl
 
 /-!
 ## Call and return
