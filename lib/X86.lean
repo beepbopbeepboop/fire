@@ -1601,19 +1601,31 @@ theorem x86_step_sar_imm8 (s : X86State) (code : Nat → UInt8) (m : Nat)
     One model arm covers all seven digits and both widths, selecting on `op` for
     the width and on `digit` for the operation, so the same argument as the
     shifts applies: one theorem would state the whole `if` chain and every
-    caller would re-derive which arm it is in.  Three theorems here because
-    three digits are the three the backend emits for these shapes in the corpus
-    -- `add rax, imm32`, `and rbx, imm32` and `cmp rax, imm8`.
+    caller would re-derive which arm it is in.  Four theorems here because
+    four digits are the four the backend emits for these shapes -- `add rax,
+    imm32`, `sub r10, imm32` (the stack-floor guard's budget subtraction, in
+    EVERY guarded prologue), `and rbx, imm32` and `cmp rax, imm8`.  That last
+    one is the measurement that matters for the table: the guard put `sub` in
+    every image on 2026-10-03 (`e11f066d`) and no `sub` row existed, so
+    `formal/x86_64_endtoend_test.py::_plan` refused every function in the
+    corpus by name.  A "three digits are enough" list that nothing measures is
+    how that happened.
 
     `83` versus `81` is not only the immediate's width, it is the LENGTH: the
     model's `endAddr` is `rip + 7` for the 32-bit form and `rip + 4` for the
     8-bit one, so a successor that said `m + 4` for `81` would be a proof of a
     four-byte instruction.  That is B6's shape, one level down.
 
-    `cmp` is different in kind from the other two: digit 7 takes the branch that
-    computes the subtraction and sets flags WITHOUT writing the result back, so
-    its successor mentions no register at all.  A theorem copied from `add`
-    would claim one. -/
+    `cmp` is different in kind from the other three: digit 7 takes the branch
+    that computes the subtraction and sets flags WITHOUT writing the result
+    back, so its successor mentions no register at all.  A theorem copied from
+    `add` would claim one.
+
+    `sub` and `cmp` are the two ends of one model arm: digit 5 writes the
+    difference back and digit 7 does not, and the flags are the SAME
+    `x86_flags_sub` on the same three arguments in both.  They are separate
+    theorems because the register write is not something `simp` can be asked
+    to drop -- the successor is the whole statement. -/
 
 /-- `add r64, imm32` (REX.W 81 /0 id, mod=3). -/
 theorem x86_step_add_ri32 (s : X86State) (code : Nat → UInt8) (m : Nat)
@@ -1629,6 +1641,33 @@ theorem x86_step_add_ri32 (s : X86State) (code : Nat → UInt8) (m : Nat)
         sf := (x86_flags_add s (x86_get_reg s (rm + x86_rex_b rex)) (UInt64.ofInt (read_i32_le code (m + 3))) ((x86_get_reg s (rm + x86_rex_b rex)) + UInt64.ofInt (read_i32_le code (m + 3)))).sf,
         cf := (x86_flags_add s (x86_get_reg s (rm + x86_rex_b rex)) (UInt64.ofInt (read_i32_le code (m + 3))) ((x86_get_reg s (rm + x86_rex_b rex)) + UInt64.ofInt (read_i32_le code (m + 3)))).cf,
         of_ := (x86_flags_add s (x86_get_reg s (rm + x86_rex_b rex)) (UInt64.ofInt (read_i32_le code (m + 3))) ((x86_get_reg s (rm + x86_rex_b rex)) + UInt64.ofInt (read_i32_le code (m + 3)))).of_ } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
+        x86_flags_sub,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm]
+
+/-- `sub r64, imm32` (REX.W 81 /5 id, mod=3).
+
+    The exact sibling of `x86_step_add_ri32` with `x86_flags_sub` in place of
+    `x86_flags_add`, and it exists because of the measurement rather than because
+    the model was missing it: digit 5 was in the model, `x86_flags_sub` was in
+    the model, and `alu_ri8:cmp`'s theorem already used both -- the arithmetic
+    was DEAD CODE for a form the backend emits in every prologue
+    (`formal/x86_64_codegen.py::_emit_stack_floor_guard`'s `SUB R10, BUDGET`),
+    so every function in the corpus was declined by name for want of a row. -/
+theorem x86_step_sub_ri32 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x81)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_digit : (modrm.toNat >>> 3) &&& 7 = 5)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some { x86_set_reg s (rm + x86_rex_b rex) ((x86_get_reg s (rm + x86_rex_b rex)) - UInt64.ofInt (read_i32_le code (m + 3))) with
+        rip := m + 7,
+        zf := (x86_flags_sub s (x86_get_reg s (rm + x86_rex_b rex)) (UInt64.ofInt (read_i32_le code (m + 3))) ((x86_get_reg s (rm + x86_rex_b rex)) - UInt64.ofInt (read_i32_le code (m + 3)))).zf,
+        sf := (x86_flags_sub s (x86_get_reg s (rm + x86_rex_b rex)) (UInt64.ofInt (read_i32_le code (m + 3))) ((x86_get_reg s (rm + x86_rex_b rex)) - UInt64.ofInt (read_i32_le code (m + 3)))).sf,
+        cf := (x86_flags_sub s (x86_get_reg s (rm + x86_rex_b rex)) (UInt64.ofInt (read_i32_le code (m + 3))) ((x86_get_reg s (rm + x86_rex_b rex)) - UInt64.ofInt (read_i32_le code (m + 3)))).cf,
+        of_ := (x86_flags_sub s (x86_get_reg s (rm + x86_rex_b rex)) (UInt64.ofInt (read_i32_le code (m + 3))) ((x86_get_reg s (rm + x86_rex_b rex)) - UInt64.ofInt (read_i32_le code (m + 3)))).of_ } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
         x86_flags_sub,
@@ -1922,6 +1961,41 @@ theorem x86_step_lea_rm64_disp32 (s : X86State) (code : Nat → UInt8)
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
         h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_rm_ne, h_reg,
+        h_dst, h_dst_lt]
+
+/-- `lea r64, [rip + disp32]` (REX.W 8D /r, mod=00, rm=101).
+
+    The one addressing mode with NO base register: the address is `endAddr +
+    disp`, and `endAddr` is the address AFTER the whole instruction -- 7 bytes
+    here, `rip + 3` for the ModRM plus the 4-byte displacement the mode carries.
+    That is the whole difference from `x86_step_lea_rm64_disp32` above and the
+    whole reason it cannot be that theorem: applying a `base + disp` statement
+    to this encoding does not fail, it proves a claim about `lea r, [r11]`.
+
+    `rm = 5` is carried as a HYPOTHESIS rather than fixed in the statement
+    because it is what selects the mode, in `x86_mem_addr`'s `ripRel` and here;
+    it also makes the `rm ≠ 4` exclusion the disp32 sibling needs unnecessary,
+    since `5 ≠ 4` already, and a hypothesis that cannot fail is a hypothesis
+    nobody has to justify.
+
+    Like the sibling, `lea` writes the TRUNCATED address to a register and reads
+    no memory, which is why `x86_mem_addr` appears in the `simp` set with no
+    `mem_read_bytes` beside it. -/
+theorem x86_step_lea_r64_rip (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg dst : Nat) (disp : Int)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8d)
+    (h_b2 : code (m + 2) = modrm)
+    (h_disp : read_i32_le code (m + 3) = disp)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 0) (h_rm : modrm.toNat &&& 7 = 5)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
+    x86_step s code = some { x86_set_reg s dst
+        (UInt64.ofNat ((Int.ofNat m + 3 + 4 + disp).toNat % 18446744073709551616)) with
+        rip := m + 3 + 4 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_reg,
         h_dst, h_dst_lt]
 
 /-- `mov qword [rsp + 0], r64` (REX.W 89 /r, ModRM mod=00 rm=100, SIB 24: scale
