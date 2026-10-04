@@ -658,17 +658,29 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             and (name in gen._global_var_types or _imp_fields is not None):
         # WHICH module's `_<mod>_globals.<name>` field this read must load, in
         # strict precedence order:
-        #   1. the module this one imported the name FROM, when it imported it.
-        #      Nothing can be more authoritative than that: the from-import is
-        #      THIS module's own source statement, and the recorded home is a
-        #      module whose struct provably declares the field.
-        #   2. this one's own struct whenever this module declares the name
-        #      (the `_owned_here` routing argument above), and the OWNING
-        #      module's struct otherwise -- `_module_global_field_type` is the
-        #      authoritative test because `_module_globals[mod]` is the exact
-        #      list the typedef, the initializer and the accessor were all
-        #      generated from, which is the same reasoning
-        #      `_lower_MemberExpr`'s `submod.GLOBAL` branch already rests on.
+        #   1. THIS module's own struct, whenever it declares the name (the
+        #      `_owned_here` routing argument above). A later
+        #      `from b import N` followed by a module-level `N = 'a-side'`
+        #      rebinds the name in THIS module's namespace -- Python
+        #      semantics -- so the bare read is this module's field and not
+        #      `b`'s, and no record of an earlier statement outranks a later
+        #      assignment. `_gmi_scan_imported_global_homes` is gated on the
+        #      same fact (`_own_global_var_types`) and is right to leave the
+        #      name alone, but a record that exists anyway must still lose
+        #      here: putting the imported home FIRST printed 'b-side' where
+        #      CPython prints 'a-side'
+        #      (test_gimple_runner.py's
+        #      `own_module_global_beats_the_imported_homonym`).
+        #   2. the module this one imported the name FROM, when it imported it
+        #      and did not redeclare it. The from-import is THIS module's own
+        #      source statement, and the recorded home is a module whose
+        #      struct provably declares the field.
+        #   3. the OWNING module's struct by the shared name-keyed map.
+        #      `_module_global_field_type` is the authoritative test because
+        #      `_module_globals[mod]` is the exact list the typedef, the
+        #      initializer and the accessor were all generated from, which is
+        #      the same reasoning `_lower_MemberExpr`'s `submod.GLOBAL` branch
+        #      already rests on.
         #
         # Arm 2 is also the whole difference between compiling and not
         # compiling for every FROM-IMPORTED global read bare.
@@ -691,14 +703,13 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # own field, and a name nobody declares (owner None) is untouched, so
         # both cost one dict-free `is None` comparison and nothing else.
         _read_mod = gen._current_module_ctx or "root"
-        if _imp_fields is not None:
+        _read_types = gen._module_global_field_type(_read_mod, name)
+        if _read_types is None and _imp_fields is not None:
             _read_types = _imp_fields
             _read_mod = _imp_home
-        else:
-            _read_types = None
+        elif _read_types is None:
             _owner_s = _as_str(_global_owner_mod) if _global_owner_mod is not None else ''
-            if _owner_s and _owner_s != _read_mod \
-                    and gen._module_global_field_type(_read_mod, name) is None:
+            if _owner_s and _owner_s != _read_mod:
                 _read_types = gen._module_global_field_type(_owner_s, name)
                 if _read_types is not None:
                     _read_mod = _owner_s
