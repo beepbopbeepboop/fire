@@ -3145,7 +3145,23 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     """
     from formal import monomorph as MM            # lazy — pulls the middle tier
     here = os.path.abspath(source_path)
-    mine = (demands or {}).get(here) or {}
+    mine = dict((demands or {}).get(here) or {})
+    # …plus what this module asks of the templates IT DECLARES, and this is
+    # §9a of `bugs/FORMAL_generic_monomorph_scope.md`: `instantiation_demands`
+    # below is asked with `own_templates=`, which empties the own set on purpose
+    # (a local specialisation covers a FUNCTION template), so the one demand set
+    # no importer could see was this module's own and a library that APPLIES its
+    # own struct template was refused with "`Pair` calls a name this unit does
+    # not compile … so a call arriving here asked for none" — a sentence about
+    # an importer, asked of a file with no importer in it.
+    #
+    # It is merged HERE and not at the call to `_instantiated_sources`, because
+    # this line is what the artifact's IDENTITY is computed from: the own
+    # instantiations change what the library publishes, so they belong in
+    # `dkey` exactly as an importer's do, and a library built for its own
+    # `Pair[Int]` must not share a path with one built for its own `Pair[Bool]`.
+    for _tmpl, _args in MM.own_demands(module_source_text(source_path)).items():
+        mine[_tmpl] = sorted(set(mine.get(_tmpl, [])) | set(_args))
     dkey = MM.demands_key(mine)
     key = (arch, here, dkey)
     if key in _BUILT:
@@ -3377,9 +3393,33 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
             # library never emitted — so it goes through them instead.
             extra_sources, extra_prefixes = _instantiated_sources(
                 source_path, mine, prefix)
+            # The OTHER half of the same demand, and the one this path could not
+            # do before: the declaration is an extra source, so the library
+            # carries the instantiated body, but this module's OWN call site
+            # still spells `Pair[Int]` and `compile_formal_dylib` re-parses each
+            # source itself. So the rewrite is handed to it as the statements to
+            # compile — the same shape `compile_formal(stmts=…)` takes on the
+            # executable path, and for the same reason: the AST is the only
+            # channel on which a bracket can be rewritten without corrupting a
+            # comment, a docstring or a `` `…` `` literal (`rewrite_instantiation_
+            # calls`' own docstring).
+            #
+            # Restricted to the templates this module DECLARES, because those
+            # are the only ones whose instantiation this library publishes; a
+            # demand an IMPORTER placed in `mine` for a template this module
+            # does not declare belongs to the library that declares it, and its
+            # mangled name here would name a symbol nothing on this link line
+            # has. It is a FILTER rather than a separate derivation, so the name
+            # comes out of the `made` this library's own instantiation came out
+            # of — one mangler, one table, and a name a rewritten call site and a
+            # published definition cannot disagree about.
+            own_names = set(MM.template_names(module_source_text(source_path)))
+            own_demap = {(t, a): m for t, m, a, _p in extra_sources
+                         if t in own_names}
             result = compile_formal_dylib(
                 [source_path] + [p for _t, _m, _a, p in extra_sources],
                 output=out, prove=False, check=False,
+                statements=_rewritten_own_statements(source_path, own_demap),
                 module_prefixes=dict(
                     {source_path: prefix}, **extra_prefixes),
                 link_dylibs=dep_dylibs, arch=arch,
@@ -3434,6 +3474,46 @@ def _instantiated_sources(source_path: str, wanted: dict, prefix: str) -> tuple:
         return [], {}
     made, _failed = MM.instantiate_all(module_source_text(source_path), wanted)
     return made, {p: prefix for _t, _m, _a, p in made}
+
+
+def _rewritten_own_statements(source_path: str, demap: dict) -> dict:
+    """`{source_path: stmts}` for `compile_formal_dylib`, or `{}`.
+
+    The module's own top-level statements with its own instantiation CALL SITES
+    rewritten to the mangled names — the call-site half of
+    `_instantiated_sources`, which publishes the declaration half. Neither is
+    useful alone and the pair is what "the declaration and the rewrite stay one
+    table" means: a declaration with no rewrite is a module that publishes
+    `Pair_1_T_3_Int` and then calls `Pair`, and a rewrite with no declaration is
+    a call to a symbol nothing emitted.
+
+    **A FRESH parse, and never the memoised `module_statements` list mutated in
+    place** — which is the half that is easy to get wrong here, because the
+    executable path's twin (`_own_instantiations`) does mutate its caller's list
+    and could. `module_statements` is keyed on `(path, content digest)` and hands
+    the SAME list to every reader in the process, so a rewrite left in it is
+    visible to the next build of the same module — and the rewrite is not a
+    function of the source alone when the demand came from an IMPORTER: build
+    one library for a consumer that asks `liba`'s template at `Pair[Int]` and the
+    next for a consumer that asks at `Pair[String]`, and the second reads a call
+    site already bound to the first's instantiation, with nothing in it declaring
+    that name. The executable path cannot hit that because its statements come
+    from `parse_module` on the file it was handed, which nothing else holds; this
+    one costs one extra parse of a source the library build was going to parse
+    anyway, because the statements it returns REPLACE that parse rather than
+    sitting beside it (`formal/build.py::_formal_module_functions`'s `stmts=`).
+
+    `{}` for an empty `demap`, so the common case — a module that applies none of
+    its own templates — parses exactly where it always did and this function
+    costs a dict lookup.
+    """
+    if not demap:
+        return {}
+    from formal import monomorph as MM            # lazy — pulls the middle tier
+    from formal.build import parse_module         # lazy — cycle
+    stmts = parse_module(module_source_text(source_path), filename=source_path)
+    MM.rewrite_instantiation_calls(stmts, demap)
+    return {source_path: stmts}
 
 
 def imported_instantiations(source_path: str, stmts: list,
@@ -3562,13 +3642,14 @@ def _own_instantiations(consumer_src: str, source_path: str, demap: dict,
     if they ever are not.
     """
     from formal import monomorph as MM            # lazy — pulls the middle tier
-    own = MM.demands(consumer_src, MM.template_names(consumer_src), own=())
-    if not own:
+    wanted = MM.own_demands(consumer_src)
+    if not wanted:
         return {}
-    made, _failed = MM.instantiate_all(consumer_src, own)
+    made, _failed = MM.instantiate_all(consumer_src, wanted)
+    for key, mangled in MM.demap_from(made).items():
+        demap.setdefault(key, mangled)
     out: dict = {}
-    for base, mangled, args, gen_path in made:
-        demap.setdefault((base, args), mangled)
+    for _base, mangled, _args, gen_path in made:
         if mangled in out:
             continue
         stmts.extend(module_statements(gen_path))

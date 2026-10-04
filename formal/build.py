@@ -1983,7 +1983,9 @@ def _admitted_calls(source_path: str, admitted: list) -> dict:
 
 def _formal_module_functions(source_path: str, link_dylibs: list = None,
                              arch: str = "arm64", fmt: str = None,
-                             link_manifests: list = None) -> tuple[str, list]:
+                             link_manifests: list = None,
+                             stmts: list = None,
+                             extra_structs: list = None) -> tuple[str, list]:
     """The functions and structs of a MODULE, for the library build.
 
     `link_dylibs` is the program's dependency set: a module's own build has to
@@ -1997,16 +1999,39 @@ def _formal_module_functions(source_path: str, link_dylibs: list = None,
     `link_manifests` is `load_dylib_manifests`'s answer for `link_dylibs`,
     passed in so the late frame checks can read a per-parameter frame-holder
     contract off the link line without re-reading every manifest once per source
-    file of the library."""
+    file of the library.
+
+    `stmts` REPLACES the parse, and it exists for one caller: a module that
+    applies its own generic template needs its instantiation call sites rewritten
+    to the mangled names before this runs, and the rewrite is on the AST
+    (`formal/monomorph.py::rewrite_instantiation_calls`), so there is nothing to
+    hand over except statements — a text rewrite would have to re-implement the
+    tokenizer's knowledge to leave a comment or an `` `…` `` literal alone.
+    `formal/imports.py::build_module_dylib` parses and rewrites exactly once and
+    passes the result here, so a module that needs it pays no second parse and a
+    module that does not reaches the same one line below. `None` means "read the
+    file", which is every other caller and every module with no own demand.
+
+    `extra_structs` are declarations this image carries but THIS FILE does not
+    declare, handed to `_prepare_functions` as its own `extra_structs`. The
+    executable path fills that parameter with what its imports bring, and
+    `compile_formal_dylib` fills it with the library's OTHER sources, because
+    both are the same fact: the frame-holder analysis and the method dispatch
+    table are properties of the IMAGE, and a library's image is compiled from
+    several files. `compile_formal_dylib` filters them back out of what it
+    returns, because the module qualifier it derives for a method's export is a
+    property of the file that declared the struct — see its own note there.
+    """
     try:
         with open(source_path) as f:
             source = f.read()
     except OSError as e:
         raise FormalBuildError(f"cannot read {source_path}: {e}")
-    try:
-        stmts = parse_module(source, filename=source_path)
-    except SyntaxError as e:
-        raise FormalBuildError(f"{source_path}: parse error: {e}")
+    if stmts is None:
+        try:
+            stmts = parse_module(source, filename=source_path)
+        except SyntaxError as e:
+            raise FormalBuildError(f"{source_path}: parse error: {e}")
     # A module with no top-level functions is NOT an error here. binary_heap
     # and a third of std/ are struct-only, and they used to be rejected with
     # "no top-level functions" — which was not merely premature but wrong: the
@@ -2037,7 +2062,7 @@ def _formal_module_functions(source_path: str, link_dylibs: list = None,
     # `__init_offsets` section (Mach-O) or `.init_array` (ELF) entry pointing at
     # it.
     functions, structs, symbols, slots = _prepare_functions(
-        stmts, synthetic=False, as_dylib=True,
+        stmts, synthetic=False, extra_structs=extra_structs, as_dylib=True,
         source_path=source_path)
     # The other of the two call sites of `check_frame_field_blob_premises`, and
     # for the same reason: this is the dylib path, it has no import resolution
@@ -18177,7 +18202,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                          test_input: int = 10, prove: bool = True,
                          check: bool = True, module_prefixes: dict = None,
                          link_dylibs: list = None, arch: str = "arm64",
-                         fmt: str = "macho", reexports: dict = None) -> dict:
+                         fmt: str = "macho", reexports: dict = None,
+                         statements: dict = None) -> dict:
     """Compile `source_paths` into one dylib for `arch`.
 
     `arch`/`fmt` select the CODEGEN and the container, exactly as
@@ -18196,6 +18222,19 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     re-exports produces a NAMESPACE library (see `_namespace_library`) instead
     of an error, because its API is real and its definitions live in the
     submodules already on its link line.
+
+    `statements` is `{source path: parsed statements}` — a per-source override
+    for what this function would otherwise parse out of the file, and it exists
+    for ONE construct: a module that applies its OWN generic template needs its
+    `Pair[Int]` call sites rewritten to the mangled names before the code is
+    emitted (`formal/monomorph.py::rewrite_instantiation_calls`), and the rewrite
+    is on the AST, so the caller hands the rewritten statements over rather than
+    the caller publishing a rewritten FILE — a generated copy would have to
+    reproduce the module's own prefix, its line numbers and its error text, and
+    the file on disk would stop being what the library was built from.
+    `formal/imports.py::build_module_dylib` is that caller; the executable path's
+    equivalent is `compile_formal`'s own `stmts` parameter, and this is the same
+    seam. A path absent from the map is parsed here, exactly as before.
     """
     if not source_paths:
         raise FormalBuildError("at least one source file is required")
@@ -18331,12 +18370,70 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         for local, pair in _import_aliases(
                 _module_statements(source_path)).items():
             library_aliases.setdefault(local, pair)
+    # The library's struct declarations, MERGED and attributed, and both halves
+    # are load-bearing.
+    #
+    # **The merge is what every source's PREPARATION has to see.** A library is
+    # one image compiled from several sources, and `_prepare_functions` is run
+    # once per source with that source's own declarations — which is right for
+    # an executable, where there is only one, and wrong here for every fact
+    # that is a property of the LIBRARY: the frame-holder analysis
+    # (`_frame_receivers`, which is what writes `fn._frame_slots`) and the
+    # method dispatch table both ask "which structs does this image declare",
+    # and per source the answer was a subset. Measured, and the refusal names
+    # the LINK LINE's sibling rather than the construct:
+    #
+    #     libx.mojo   struct Thing:  var v: Int
+    #                  def get(self) -> Int: return self.v
+    #     liby.mojo   def use_it() -> Int:
+    #                      var t = Thing()
+    #                      t.v = 7            # refused: "'t.v' is a field
+    #                      return t.get()     #   access through 't', and this
+    #                                        #   path has no way to say what
+    #                                        #   't' holds"
+    #
+    # …while `codegen.compile(structs=library_structs)` was handed BOTH, so the
+    # emitter's table and the analysis that laid the frames out disagreed about
+    # one image. `_prepare_functions`' own `extra_structs` parameter is the seam
+    # for it — the executable path fills it with the declarations its imports
+    # bring (`_imported_structs`), and a library's other sources are the same
+    # fact. `setdefault` first declaration wins, which is `_prepare_functions`'
+    # own precedence rule (a file's own declaration beats an extra of the same
+    # name) and the same one `imported_struct_defs` states.
+    #
+    # **The attribution is what keeps `_method_exports` honest.** That function
+    # derives a method's module qualifier from the FILE its struct was declared
+    # in, so a per-file table carrying a sibling's declarations would publish
+    # `Thing.get` under the wrong module's prefix — a library that builds, links
+    # and then fails to load with "Symbol not found" for a method it does
+    # export. So `structs_by_file` is filtered back to the structs each file
+    # DECLARES, and the merge is dropped again the moment the analysis has had
+    # it. Both are one table read (`module_statements` is content-keyed and
+    # memoised, and `build_module_dylib` has parsed the module already) and no
+    # extra parse.
+    #
+    # **A ONE-source library is untouched**: the merge is empty, the filter is a
+    # no-op, and every module dylib `formal/imports.py` builds is one source
+    # until it has an instantiation to publish.
+    library_declared: dict = {}
+    library_extra: list = []
+    if len(source_paths) > 1:
+        for source_path in source_paths:
+            for st in _module_statements(source_path):
+                if isinstance(st, F.StructDef) and st.name not in library_declared:
+                    library_declared[st.name] = source_path
+                    library_extra.append(st)
     library_structs: list = []
     for source_path in source_paths:
         module, functions, module_source, file_structs, file_slots, \
             file_constants = \
             _formal_module_functions(source_path, link_dylibs, arch=arch,
-                                     fmt="macho", link_manifests=linked)
+                                     fmt="macho", link_manifests=linked,
+                                     stmts=(statements or {}).get(source_path),
+                                     extra_structs=library_extra)
+        if library_declared:
+            file_structs = [st for st in file_structs
+                            if library_declared.get(st.name) == source_path]
         structs_by_file[source_path] = file_structs
         library_structs.extend(file_structs)
         for name, value in file_constants.items():

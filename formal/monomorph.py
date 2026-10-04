@@ -582,6 +582,56 @@ def demands(consumer_src: str, templates, own=()) -> dict:
                               templates, own)
 
 
+def own_demands(module_src: str) -> dict:
+    """`{template: [(type arg, …), …]}` — what `module_src` asks of the
+    templates `module_src` ITSELF declares.
+
+    `own=()` is the whole of it, and it is `demands`' own parameter rather than
+    a separate rule: `demands` skips the consumer's own templates because a
+    call to a generic this unit compiles is answered by the local-specialisation
+    machinery (`_specialization_of` → `comptime.specialization_name`), and that
+    is true of a FUNCTION template (`def twice[T]` beside `twice[Int](n)`) and
+    FALSE of a STRUCT template, whose instantiation is emitted under a mangled
+    name nothing had emitted. So the own set is empty for the caller that wants
+    it skipped and this function for the two that want it asked
+    (`formal/imports.py::_own_instantiations` for an executable,
+    `build_module_dylib` for a library), and there is one definition of the set
+    rather than a rule in each.
+
+    Measured, one file, both architectures, a struct template applied beside its
+    own declaration:
+
+        struct Pair[T]:
+            var first: T
+        def make() -> Int:
+            var a = Pair[Int]()
+            a.first = 7
+            return a.first
+        #   executable: builds and answers 7
+        #   LIBRARY:   refused — "`Pair` calls a name this unit does not
+        #              compile … so a call arriving here asked for none"
+
+    The library half is `build_module_dylib`'s, and it needs this set in two
+    places — the artifact's identity (`demands_key`, so two libraries for the
+    same source and different own instantiations cannot share a path) and the
+    rewrite of this module's own call sites — which is why it is a function and
+    not a line in one of them.
+    """
+    return demands(module_src, template_names(module_src), own=())
+
+
+def demap_from(made) -> dict:
+    """`{(base, (type arg, …)): mangled}` from `instantiate_all`'s FIRST list.
+
+    The one reader of that tuple shape into a rewrite table, because the shape
+    carries `base` and `args` — the spelling the CALL SITE used — and recovering
+    either from the mangled name would be a second mangling rule to keep in step
+    with `monomorphize.mangle`.  Both callers need the same table and both get
+    it from the `made` they already have, so neither re-derives a name.
+    """
+    return {(base, tuple(args)): mangled for base, mangled, args, _p in made}
+
+
 def demands_key(wanted: dict) -> str:
     """A short, stable digest of a demand set — part of an artifact's identity.
 
