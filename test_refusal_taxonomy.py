@@ -495,6 +495,16 @@ CAUSE_SAMPLES = [
     ("print() cannot classify the argument's type",
      "print() cannot tell whether SubscriptExpr is a string or a number on "
      "this path"),
+    # The OTHER `print` refusal, whose question is different: the kind is known
+    # (a word, and a word prints as a number) and the word is not a value at all.
+    # Cut from `formal/model.py::returnless_value_refusal`'s own f-string rather
+    # than from a sweep log, for the reason `…_b10.md` §5.1 gives — a log is an
+    # artifact and this row must fail on a reword of the sentence it classifies
+    # rather than reading as a cause that blocks nothing.
+    ("a printed value that is not a value: the callee returns nothing",
+     "print() is asked to render the value of g(…), and g returns nothing: "
+     "CPython evaluates that call to `None` and prints `None`, and a value on "
+     "this path is one 64-bit word with no way to say `no value`"),
     # A REAL message, not a constructed one: `test_llm/dumb_gemm.mojo` is
     # `[0.0] * (m * k)` three times over, and it is the file whose
     # "print() cannot classify" row this replaced. Pinned here so a rewording

@@ -6,21 +6,27 @@ when it is unclassified and is not a container") together with an epilogue that
 does not write the return register (`formal/arm64_codegen.py::_emit_epilogue`
 emits the scratch teardown, the frame restore and `RET`, and nothing else), so
 nothing in the pair knows the callee returns nothing.
-**Status: NOT FIXED, and §4 step 0 is now DONE — with a number ten times §0's,
-which moves the recommendation against the refusal (§0a).** The fix remains a
-decision about what this path does with `None`; the census that was the missing
-input is `tools/formal_returnless_census.py`, and it says direction (a) as §2
-states it would reach **510 call sites across 22 files, 456 of them in
-`formal/hostmods/argparse.mojo`** — a host module the gate builds today. So
-§4's steps 1 and 4 (the two counts, before and after) are now the decisive
-measurement and they are the integrator's, not a worker's.**
+**Status: PARTIAL, and the half that is OBSERVABLE is FIXED (2026-10-04,
+`formal/model.py` + both emitters).** `print` of a call to a function of this
+module that returns nothing — and of a local every one of whose bindings is such
+a call — is now REFUSED on both architectures, with a message that names the
+callee, says what CPython answers (`None`) and says what this path would have
+printed instead. §0b is what landed and §0b's measurement is the one §4 step 1
+was waiting for: **the refusal reaches 0 call sites in 379 files** (§0a counted
+510, all of them at positions where nothing observes the value), so the two
+gate counts §4 asked for are no longer the decisive measurement — the position
+the rule is asked at is.
+**What is left is §0b's "What is still not fixed": the positions where nothing
+OBSERVES the value (an operand, an argument, a returned, an assigned-then-never-
+read local), which need either a liveness pass or direction (b) below.**
 
 **Re-measured 2026-10-03 (`work/formal18-1`): §2's objection to direction (a) —
 "the blast radius is unmeasured" — is now measured, and it came out the other
 way. §0's census said "much narrower than §2 feared"; §0a says ten times wider,
 because §0's number was a floor produced by name-keying and by counting one
 position (`argument of a call`) out of seven. §2's conclusion is unchanged and
-its reason is now a measurement rather than an argument.
+its reason is now a measurement rather than an argument — and §0b is what shows
+the objection and the measurement are both about the wrong POSITION.**
 
 Found 2026-10-03 on `work/formal17-fuzz-continue-a` by `tools/formal_fuzz.py`,
 on the `strings` mix, seeds 0-3 — and, worth saying because it is unusual,
@@ -33,6 +39,155 @@ The full program and the reduced program are both in
 `.tmp/fz/sweep/strings/findings.json` in the worktree it was found in.
 
 ---
+
+## 0b. What landed (2026-10-04): the observation, refused — and the measurement §4 step 1 was waiting for
+
+**The refusal, on BOTH architectures, for both shapes.**
+
+```console
+$ python3 tools/memslot.py --gb 8 --label rn -- python3 fire.py build --formal \
+      --no-prove -o .tmp/rn/x .tmp/rn/p.mojo
+build: print() is asked to render the value of g(…), and g returns nothing:
+CPython evaluates that call to `None` and prints `None`, and a value on this
+path is one 64-bit word with no way to say `no value` — the epilogue writes no
+return register, so the word printed here would be whatever g's last instruction
+left there, which is a number nothing in the source wrote (measured on BOTH
+architectures from this source: CPython printed `None` where this path printed
+`0`). Refused rather than emitted, because a plausible number is worse than a
+refusal. Give g a `return`, or do not use its value
+```
+
+`--backend=x86_64` gives the same sentence (the refusal is one f-string in
+`formal/model.py`, asked from both emitters — §4 step 3's requirement, and the
+reason it is not two copies of the rule). `v = g(1, 2); print(v)` is refused
+with the same words, and the message names `g` rather than `v`, because the
+callee is what the reader has to change.
+
+### The measurement, and why it is the answer to §4 step 1 rather than a substitute for it
+
+§4 step 1 wanted `compile_stdlib.py`'s `U` count and
+`build_stdlib_dylib.py`'s `skip <module>:` count, as a PROXY for "will a refusal
+asked at every consumed value regress the build". §0a answered the question
+behind the proxy and the answer was 510 sites, which is why §2(a) looked
+unaffordable. **The proxy is the wrong question, because it counts positions
+rather than divergences**: a local assigned a return-less call and never read is
+not an observable divergence at all — §0a says so of its own 203 `assigned` rows
+— while §1's shape is observable the moment it is printed.
+
+So the rule is asked at the position where a value this path cannot carry
+becomes TEXT (`_print_call` in each emitter, the one choke point each has for a
+printed operand), and over this repository, `formal/hostmods/` and all 252 files
+of `../new-modular/Mojo/stdlib/std` — **379 files parsed, 0 sites**:
+
+| the refusal's own rule, at an observation position | sites |
+|---|---:|
+| a direct `print(f(…))` / `printf(fmt, f(…))` where `f` returns nothing and declares no return type | **0** |
+| a `print(x)` where `x`'s every binding in the function is such a call | **0** |
+| …and the same walk with the "declares a return type" half switched OFF (i.e. what the rule would reach if a declaration did not settle it) | 1 |
+
+and the one is `scripts/stage2_mojo_interpreter.mojo:154`,
+`print(c_code)` after `c_code = stage2_compile(mojo_file)` — which declares
+`-> AnyType` and returns `None` on every branch, so the declared-type half of the
+rule (`model.fn_declares_a_return`, delegating to the existing
+`declared_returns_a_value`) is what keeps it out. **A declared return type is out
+of scope by the doc's own rule and it costs exactly one known site**, which is
+the trade §0a's census could not see because it counted all seven positions.
+
+**Two real builds behind the syntactic census**, because a census is a parse and
+a walk and this rule runs in the emitters:
+
+| what | verdict |
+|---|---|
+| `python3 test_formal_hostmods_census.py` — every `formal/hostmods` module as a translation unit, both backends | **64/64 rows build** (that is §0a's `argparse.mojo` 456 rows and `re.mojo`'s 5, as BUILDS rather than as census rows) |
+| `python3 test_formal_argparse.py` | **PASS=9 FAIL=0** — `argparse.mojo` itself, built and run |
+| `python3 test_formal_run.py` | PASS=961 FAIL=**2**, and both reds are pre-existing and unrelated (`bugs/FORMAL_test_formal_run_rows_red_on_master_2026-10-04.md`) |
+
+### What is in the code, and why it is shaped this way
+
+* **`formal/model.py::fn_returns_a_value` / `fn_declares_a_return` /
+  `function_returns_a_value`** — the ONE reader of "does a call to this produce a
+  value", in `model.py` because both emitters and the census have to agree and
+  this file is where every other arch-free rule lives. `tools/formal_
+  returnless_census.py`'s two private copies now DELEGATE to it (they were the
+  same question in a second implementation, which is the defect the census's own
+  header complains about in §0's name-keyed census), and the census's report is
+  unchanged, so the measurement that sized this and the refusal that answers it
+  cannot drift apart.
+* **`ValueKinds._no_value_calls` + `_note_no_value_call` + `no_value_callee_of`**
+  — the evidence for the `v = g(); print(v)` shape, in the same shape and with
+  the same tombstone discipline as `_ctor_calls` and `_dict_inits` beside it,
+  with ONE difference that the docstring states: a RETRACTION always wins and a
+  claim never does, because the question is about the name as a whole ("every
+  binding of `v` here is a call that produces no value") rather than about a
+  site. `v = g(); v = 5; print(v)` prints 5, as CPython does, and that is a
+  `CASES` row rather than a comment.
+* **`ValueKinds.returns_a_value`** — the same fact about the function the table
+  is built for, so the emitter can ask about a callee without a second reader.
+* **`_callee_returns_value` in both emitters** — the hook, and it is a hook for
+  the same reason `_callee_kind` is: the answer is about ANOTHER function, which
+  is the emitter's question. Its default for a name that is not a function of
+  this unit is True, the safe direction, so a linked module's export (no body
+  here to read) changes nothing.
+* **`tools/formal_sweep_causes.py` gets a row** for the new message
+  (`a printed value that is not a value: the callee returns nothing`, keyed on
+  the two clauses that state the fact), with its sample cut from
+  `model.py`'s own f-string — the discipline `…_b10.md` §5.1 states, so a reword
+  fails `test_refusal_taxonomy.py` instead of emptying a row into `other
+  refusal`. 61 causes → 62, 229 checks → 231.
+
+### What is still not fixed, and it is the whole of what is left
+
+1. **The positions where nothing observes the value.** §0a's other buckets:
+   203 `assigned`, 142 `operand`, 81 `returned`, 78 `argument of a call`. None of
+   them is an observable divergence on its own, and a refusal at any of them is a
+   refusal of ordinary code — `x = _fld(rec, 1)` is correct Python and CPython
+   never complains. Asking there needs a LIVENESS pass to tell "assigned and
+   never read" from "assigned and printed through a path this walk did not
+   see", and this path has none. The operand case is a different defect again:
+   CPython raises `TypeError` (`None + 1`), so refusing it replaces a silent
+   wrong answer with a refusal of a program CPython also refuses — defensible,
+   but it is a decision about what a wrong-but-computable operand should say, not
+   a patch.
+2. **Direction (b), representing `None`.** Unchanged by any of this: a
+   distinguished word makes every USE correct rather than only the observed ones
+   (`if g():` is right by accident today, `x is None` and `x == None` are not),
+   and it is a change to the value model, both emitters' return paths, and
+   `lib/ProofLib.lean` if the proofs are to keep checking. Still a project.
+3. **The epilogue could at least be deterministic.** Both images answered `0`
+   here and the doc is careful to say the word is "whatever the callee's last
+   instruction left in the return register" — which is not guaranteed to be 0.
+   Writing a defined value would remove that instability WITHOUT making it
+   CPython's answer, so it is not in this change: it alters every proof
+   generator's step lemma for the epilogue, and a wrong-but-stable 0 is still a
+   wrong answer. Worth doing with (2), not instead of it.
+
+### Reproducing §0b
+
+```console
+$ cat .tmp/rn/p.mojo
+def g(a, b):
+    w = 1
+
+def main() -> Int32:
+    print(g(1, 2))
+    print(5)
+    return 0
+$ python3 tools/memslot.py --gb 8 --label rn -- python3 fire.py build --formal \
+      --no-prove -o .tmp/rn/x .tmp/rn/p.mojo          # and --backend=x86_64
+build: print() is asked to render the value of g(…), and g returns nothing: …
+$ python3 -c 'exec(open(".tmp/rn/p.mojo").read().replace("-> Int32","")); main()'
+None
+5
+$ python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_value_model.py
+formal value model: PASS=77 FAIL=0
+```
+
+The observation census of §0b's table is a scratch script in the worktree that
+wrote this section (`.tmp/rn/obs_census.py`), and it is left there rather than
+promoted for the reason `tools/formal_returnless_census.py`'s header gives for
+its own limits: it is a parse and a walk over two shapes, and the rule it
+measures now has its own reader in `formal/model.py` that a tool could call. That
+tool is the obvious next thing to write and it is not this section's job.
 
 ## 0. The census §2 asked for, over the repository AND the stdlib
 
@@ -275,19 +430,31 @@ holds, and because a refusal is a sentence a reader can act on where `0` is not.
    sites in 22 files, 456 of them in `formal/hostmods/argparse.mojo`.** The
    difference from "direction (a) reaches four stdlib files" and "direction (a)
    reaches none" is 456 rows in a file the gate builds.
-1. Measure `compile_stdlib.py`'s `FAILED: N (E expected, U unexpected)` and
-   `build_stdlib_dylib.py`'s `skip <module>:` count on master, and keep them.
-2. Add to `formal/model.py` a refusal with the shape of
-   `print_kind_refusal`, asked where a call's VALUE is consumed as a value and
-   the callee is a function of this module whose `_returns` set is empty and
-   whose declaration states no return type. Name the callee and say that CPython
-   returns `None` and this path has no representation for it — the same wording
-   discipline `string_concat_refusal` uses, and for the same reason: a reader
-   told only "cannot tell" goes looking for something to look at.
-3. Ask it from BOTH backends' single choke point for a call's value, or the two
-   will drift the way `_is_dict_subscript` and `is_dict_expr` did.
-4. Re-run the two counts from step 1. If either went up by more than the rows
-   that are genuinely `None`-printing, the answer is (b), not (a).
+1. ~~**Measure `compile_stdlib.py`'s `FAILED: N` and `build_stdlib_dylib.py`'s
+   `skip <module>:` count on master, and keep them.**~~ **NOT NEEDED, and §0b
+   says why**: those counts are a PROXY for "does a refusal asked at every
+   consumed value regress the build", and §0b measures the thing itself — the
+   rule at the one position where a value this path cannot carry becomes TEXT
+   reaches **0 sites in 379 files**, and the two real builds behind it
+   (`test_formal_hostmods_census.py` 64/64 rows build, `test_formal_argparse.py`
+   PASS=9) cover the 461 candidate rows §0a found in `formal/hostmods/`. A
+   worker who wants the gate counts as well now has a change whose blast radius
+   is knowable in advance, which is what step 1 was for.
+2. ~~**Add to `formal/model.py` a refusal with the shape of
+   `print_kind_refusal`…**~~ **DONE** (§0b): `model.returnless_value_refusal`,
+   asked from `_print_call` in both emitters, naming the callee, saying CPython
+   returns `None`, and saying what this path has instead — the wording discipline
+   `string_concat_refusal` uses. **One reader of the rule**
+   (`model.function_returns_a_value`) and one message, so the census and the
+   refusal cannot answer "does this function return" differently.
+3. ~~**Ask it from BOTH backends' single choke point for a call's value**~~ **DONE**
+   (§0b): both emitters' `_print_call`, over `model.returnless_value_refusal`.
+4. ~~**Re-run the two counts from step 1.**~~ **SUPERSEDED** by step 1 above.
+5. **What is next, and it is not a patch**: the positions §0b's list of what is
+   left names — an operand, an argument, a `return`, an assigned-and-never-read
+   local — each of which needs a liveness pass this path does not have, and
+   direction (b), which is a change to the value model, both emitters' return
+   paths and `lib/ProofLib.lean` at once.
 
 ## 5. A second thing this found, about the fuzzer itself
 

@@ -467,6 +467,25 @@ CAUSES = (
      (("compares two values this path can only call numbers",),)),
     ("print() cannot classify the argument's type",
      (("cannot tell whether",),)),
+    # The OTHER `print` refusal, and it is a DIFFERENT question rather than a
+    # second wording of the row above: the argument's KIND is known (it is a
+    # word, and a word prints as a number), and what is wrong is that the word is
+    # not a value at all — it is the leftover of a callee that returns nothing,
+    # where CPython prints `None`
+    # (`bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_
+    # yields_None.md`). It needs its own row because a file refused here is
+    # refused by a DECISION with a remedy (`return` something, or do not use the
+    # callee's value), which is what `other refusal` — the bucket this table
+    # exists to empty — cannot say, and because it will not be confused with the
+    # kind-unknown row: the two messages share no clause, which is why both
+    # markers are listed rather than one borrowed from the other.
+    #
+    # The markers are the FACT and the CONSTRUCT, and both are stated in
+    # `formal/model.py::returnless_value_refusal`'s own f-string, which is where
+    # `test_refusal_taxonomy.py`'s sample for this row is cut from.
+    ("a printed value that is not a value: the callee returns nothing",
+     (("CPython evaluates that call to `None`",),
+      ("is asked to render the value of",))),
     # A REPETITION whose count this path cannot read at compile time. It is its
     # own row and not `other refusal` for the reason the `==` row above gives:
     # `xs * n` is a construct this backend now LOWERS (both architectures, a

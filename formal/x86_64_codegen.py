@@ -3323,6 +3323,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             if isinstance(a, F.StringLiteral):
                 frags.append(M.print_literal(a))
                 continue
+            # A value this path cannot carry is refused HERE rather than
+            # rendered: `print(g(1, 2))` for a `g` with no `return` printed
+            # whatever `g`'s epilogue left in the return register (measured `0`
+            # on BOTH architectures, where CPython printed `None`), and a printed
+            # `None` is the shape this path has no representation for. The
+            # decision is `ValueKinds.no_value_callee_of` and the words are
+            # `model.returnless_value_refusal`, both shared with arm64.
+            callee = self._vkinds.no_value_callee_of(a)
+            if callee is not None:
+                raise CodegenError(M.returnless_value_refusal(callee))
             kind = self._expr_str_kind(a)
             if kind == M.STR_KIND:
                 frags.append("%s")
@@ -7442,6 +7452,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 ctor_field_value=self._ctor_field_value_for(name),
             callee_is_dict=lambda callee: self._callee_is_dict(
                 callee, stack | {name}),
+            callee_returns_value=self._callee_returns_value,
             dict_names=DICT_TYPE_NAMES,
             param_kind=self._param_kinds.for_function(name))
         self._vkinds_cache[name] = vk
@@ -7793,6 +7804,26 @@ ctor_field_value=self._ctor_field_value_for(name),
                                    DICT_TYPE_NAMES):
             return True
         return self._vkinds_for(name, fn, stack).return_is_dict
+
+    def _callee_returns_value(self, name):
+        """Whether a call to the local function `name` produces a value at all.
+
+        arm64's `_callee_returns_value` over the same shared reader, and for the
+        same reason the dict-ness hook above is duplicated in that shape and not
+        in its logic: the answer has to be the same on both machines or a
+        construct is printed here and refused there. `model.function_returns_a_
+        value` decides it — a `return` with a value at any depth of the body, a
+        declared return type, or a `yield` — and NO STACK, because walking one
+        body for its first value-returning `return` cannot recurse where
+        `_callee_kind`'s kind question does.
+
+        True for a name that is not a function of this unit, which leaves every
+        caller with the answer it had: a linked module's export has no body here
+        to read, and a refusal asked about it would be a refusal about a
+        function this backend never saw.
+        """
+        fn = self._functions.get(name)
+        return True if fn is None else M.function_returns_a_value(fn)
 
     def _callee_kind(self, name, stack):
         """What a call to the local function `name` produces, or None."""
