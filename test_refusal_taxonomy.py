@@ -401,6 +401,39 @@ CAUSE_SAMPLES = [
      "debug_assert[…](…) calls a name this unit does not compile, so the "
      "brackets cannot be bound. A comptime specialization's brackets are the "
      "generic's comptime parameters"),
+    # The corpus's LARGEST row, and it had no row at all until 2026-10-04: 170 of
+    # the 710 files on the b10 sweep, 55% of every codegen finding in the tree,
+    # every one of them this one sentence. The ranking reported them as
+    # `other refusal` — the bucket `tools/formal_sweep_causes.py`'s own docstring
+    # defines as "nobody has looked" — which is the defect §5 of
+    # `bugs/FORMAL_sweep_work_map_2026-10-04_b10.md` is about.
+    #
+    # TWO samples, not one, because `classify_message` sees only the message and
+    # one sample is one proof its marker matches. They are the row's two ends: the
+    # stdlib's own `FormatStruct(writer, "Allocation")` (111 of the 170) and a
+    # repository file's `now()` through `time`. Both are cut from
+    # `formal/model.py::imported_callee_refusal`'s f-string rather than from a
+    # sweep log, so a reword of that f-string has to be made here too rather than
+    # leaving a sample of a sentence nothing emits.
+    #
+    # The marker deliberately is NOT the sentence that used to follow these two
+    # clauses. "spell it as `name[<a type>](…)`" is ADVICE, and `work/formal19-1`
+    # deletes it because it is wrong about correct Mojo — a bare template call is
+    # the spelling the stdlib uses — so a marker keyed on it would have taken 170
+    # files silently back to `other refusal` the day that branch landed. What is
+    # left is the FACT: the call has to bind a symbol the module does not export.
+    ("a call to a name the defining module does not export",
+     "`FormatStruct` is called, and it is imported from `std.format._utils`, so "
+     "the call has to bind a symbol `std.format._utils` exports. That module does "
+     "not export it, and the reason is `doc/ABI.md`'s export rule rather than "
+     "anything about this call: a name with a leading `_` is private, a generic "
+     "template is not one symbol but one per instantiation"),
+    ("a call to a name the defining module does not export",
+     "main: `now` is called, and it is imported from `time`, so the call has to "
+     "bind a symbol `time` exports. That module does not export it, and the reason "
+     "is `doc/ABI.md`'s export rule rather than anything about this call: a name "
+     "with a leading `_` is private, a generic template is not one symbol but one "
+     "per instantiation"),
     ("a field of a field: a frame slot holds one word, not a struct",
      "self._dict._table._ctrl reads a field of a field through the receiver"),
     ("a field of a nested frame that the struct does not declare",
