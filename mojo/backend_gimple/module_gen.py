@@ -2047,6 +2047,19 @@ def gen_module_impl(self, stmts):
     # closure with more than one module defining free functions.
     self._local_top_level_func_names = {
         _as_funcdef_node(s).name for s in stmts if isinstance(s, FunctionDef)}
+    # The same set of statements, by identity rather than by name — read only
+    # by `_record_home_def_return_type`, and needed because the NAME set cannot
+    # answer the question that publisher asks. Every return-type inference pass
+    # below walks `all_functions` (= these `stmts` + the flat transitive
+    # closure), so it visits sibling modules' definitions of the same bare
+    # name; "is this statement MINE" is the only question that decides which
+    # module's answer belongs under a per-definition key, and only identity
+    # answers it. `stmts` holds these objects for this gen's lifetime (and
+    # `_all_transitive_stmts_ordered` holds them unit-wide), so the IDs cannot
+    # be recycled under a later allocation — the same argument
+    # `_struct_cname_by_id` / `_all_transitive_stmts_ids` rest on.
+    self._local_top_level_func_stmt_ids = {
+        id(s) for s in stmts if isinstance(s, FunctionDef)}
 
     for _s in stmts:
         if isinstance(_s, FunctionDef):
@@ -4896,6 +4909,8 @@ def gen_module_impl(self, stmts):
             continue
         if isinstance(s, FunctionDef) and s.return_type is not None:
             self.func_return_types[s.name] = self._resolve_type(s.return_type)
+            _ggf_dup._record_home_def_return_type(
+                self, s, s.name, self.func_return_types[s.name])
         _s_pts = None
         if isinstance(s, FunctionDef) and s.params:
             if gimple_ctypes._params_have_vararg(s.params):
@@ -5193,6 +5208,8 @@ def gen_module_impl(self, stmts):
             if _as_s_p1.name == 'main' and inferred == 'void':
                 inferred = 'int64_t'
             self.func_return_types[_as_s_p1.name] = inferred
+            _ggf_dup._record_home_def_return_type(
+                self, s, _as_s_p1.name, inferred)
             self.var_types.clear()
             self.current_func_name = _saved_fcn_p1
 
@@ -7761,6 +7778,7 @@ def gen_module_impl(self, stmts):
             self.var_types = _saved_vt_23e
             self._scan_scratch_top = _scratch_mark_23e
             self.func_return_types[s.name] = inferred
+            _ggf_dup._record_home_def_return_type(self, s, s.name, inferred)
 
     for s in all_functions:
         if isinstance(s, FunctionDef):
@@ -8019,14 +8037,16 @@ def gen_module_impl(self, stmts):
         except AttributeError:
             pass
 
-    for _p3b_s in all_functions:
-        if isinstance(_p3b_s, FunctionDef) and _p3b_s.return_type is None:
+    for _p3b_raw in all_functions:
+        if isinstance(_p3b_raw, FunctionDef) and _p3b_raw.return_type is None:
             # `_as_funcdef_node` — see the identical fix + comment at the
             # earlier `for s in all_functions:` return-type-inference
             # passes above: `all_functions` is a heterogeneous statement
             # list, so its element type is opaque int64_t regardless of
-            # the isinstance filter.
-            _p3b_s = _as_funcdef_node(_p3b_s)
+            # the isinstance filter. The RAW loop var is kept in `_p3b_raw`
+            # for `_record_home_def_return_type`'s identity test below,
+            # which is the one thing here that must see the original node.
+            _p3b_s = _as_funcdef_node(_p3b_raw)
             _saved_vt_3b = self.var_types
             _saved_fcn_3b = self.current_func_name
             self.current_func_name = _p3b_s.name
@@ -8056,6 +8076,8 @@ def gen_module_impl(self, stmts):
             self._scan_scratch_top = _scratch_mark_3b
             self.current_func_name = _saved_fcn_3b
             self.func_return_types[_p3b_s.name] = inferred
+            _ggf_dup._record_home_def_return_type(
+                self, _p3b_raw, _p3b_s.name, inferred)
 
     def _flatten_resolved_conditionals(_root_list):
         _out = []

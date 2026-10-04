@@ -2814,6 +2814,22 @@ class GimpleGen:
         # no call sites and froze int64_t: two different overload suffixes
         # for one symbol — "implicit declaration of function" at g++).
         self._home_def_param_types: dict[str, list] = {}  # _pair_key(sanitized-home-qualifier, fn-name) -> [param ctypes]
+        # _pair_key(sanitized home-module qualifier, fn name) -> return ctype —
+        # the RETURN-type twin of the store just added, and written for the same
+        # reason with the same key, writer discipline and reader order, because
+        # `func_return_types` is keyed by the BARE name and a whole-translation-
+        # unit closure routinely has several modules each defining a function of
+        # one bare name with DIFFERENT return types (`mojo/middle/offload.py`'s
+        # `_mentions(...) -> bool` against `mojo/backend_gimple/elab_intu.py`'s
+        # unannotated `_mentions(ann)` -> `MojoList *`). One bare slot holds one
+        # arbitrary module's answer, so the other module's call sites read the
+        # wrong type: `assignment to 'MojoList *' from 'int' makes pointer from
+        # integer without a cast`. Only a unit that DEFINES the name writes here
+        # (`_record_home_def_return_type`), only `_func_csym` reads it, and it
+        # reads it keyed by the very qualifier that call site built its symbol
+        # from — so both halves of one mangled symbol name the same definition.
+        # See bugs/CODEGEN_two_private_functions_of_one_name_share_one_return_type.md.
+        self._home_def_return_types: dict[str, str] = {}
         # module name -> (path, source_text, parsed stmts), parsed once.
         self._imported_src_cache: dict = {}
         # Directories added via a literal `sys.path.insert(N, "literal")` seen
