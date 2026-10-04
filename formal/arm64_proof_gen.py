@@ -581,6 +581,41 @@ def _truth_go(e, param: str, env: dict, vtypes: dict, call_types: dict,
     return f"({_expr_go(e, param, env, vtypes, call_types, scope)} \u2260 0)"
 
 
+def _ternary_go(e, param: str, env: dict, vtypes: dict, call_types: dict,
+                scope, value_go, cond_go, result_type=None) -> str:
+    """`a if c else b` as a VALUE: `(if <c is true> then <a> else <b>)`.
+
+    **One renderer for the untyped and the typed model, with the two readers
+    injected.** The construct is one question — "which of these two words is
+    this one" — and the two models differ only in what a value is (a raw word,
+    or a word extended at a declared width), so a second copy of this function
+    would be a second answer to that question, and the failure mode of two
+    answers is the one this file exists to prevent: a model that computes
+    something other than what the machine computes, which Lean accepts as long
+    as the generator can find a closing tactic.
+
+    **The CONDITION is a proposition, not a word**, and it goes through the
+    same `_cmp_go` / `_expr_bool_go_t` the enclosing `if` uses, for two reasons
+    that are one reason: a comparison must be rendered at its own signedness
+    (`n > 3` is a signed test on a signed `n`, and rendering it unsigned states
+    a comparison the machine does not perform — `_cmp_go`'s docstring is the
+    measured false theorem), and a non-comparison is a test against zero, which
+    is Python's truthiness rule and what `_emit_truthy_word` implements on both
+    backends. Rendering the condition with `value_go` instead would put a `1`
+    or `0` where a proposition belongs, and `if 1 != 0 then … else …` is a model
+    of a program that always takes the then-arm.
+
+    `result_type` is the typed model's one addition: the SELECTED word is
+    carried at the arms' common type, exactly as every arithmetic operator in
+    `_expr_go_t` wraps its result.
+    """
+    cond = cond_go(e.condition, param, env, vtypes, call_types, scope)
+    then = value_go(e.then_val, param, env, vtypes, call_types, scope)
+    other = value_go(e.else_val, param, env, vtypes, call_types, scope)
+    term = f"(if {cond} then {then} else {other})"
+    return term if result_type is None else _t_wrap(term, result_type)
+
+
 def _entry_env(fn, arity: int, typed: bool = False,
                vtypes: dict = None) -> dict:
     """The environment the ENTRY's parameters are rendered in.
@@ -837,6 +872,16 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
             f"rather than a model of it")
     if isinstance(e, Call):
         return _call_go(e, param, env, scope, _expr_go)
+    if isinstance(e, F.TernaryExpr):
+        # A conditional expression is a VALUE here, not control flow, and it is
+        # the same function `_stmts_go`'s `IfStmt` arm builds for an `if` — the
+        # two were separate refusals of one construct. `vtypes or {}` is not
+        # defensive noise: `_call_go` calls this renderer back with three
+        # arguments, so a ternary nested in a call's argument arrives here with
+        # no type tables, and `_cmp_go` reads them
+        # (`_expr_bool_go`'s docstring is the measured `AttributeError`).
+        return _ternary_go(e, param, env, vtypes or {}, call_types or {},
+                           scope, _expr_go, _cmp_go)
     if isinstance(e, (F.MemberExpr, F.SubscriptExpr)):
         _no_value_model(e, "struct field read" if isinstance(e, F.MemberExpr)
                         else "list subscript")
@@ -1070,6 +1115,16 @@ def _expr_go_t(e, param: str, env: dict, vtypes: dict, call_types: dict,
         return _call_go(e, param, env, scope,
                         lambda a, p, en: _expr_go_t(a, p, en, vtypes,
                                                     call_types, scope))
+    if isinstance(e, F.TernaryExpr):
+        # The same renderer as the untyped arm's, at the operands' COMMON type
+        # — which is the one thing the typed model adds, and the reason it
+        # cannot be the untyped arm's term: a `var a: Int8 = 1 if c else 2` is a
+        # value the machine keeps sign-extended at 8 bits, and `(if c then 1
+        # else 2)` unwrapped is not that word.
+        t = common_type(infer_expr(e.then_val, vtypes, call_types),
+                        infer_expr(e.else_val, vtypes, call_types))
+        return _ternary_go(e, param, env, vtypes, call_types, scope,
+                           _expr_go_t, _expr_bool_go_t, result_type=t)
     if isinstance(e, (F.MemberExpr, F.SubscriptExpr)):
         _no_value_model(e, "struct field read" if isinstance(e, F.MemberExpr)
                         else "list subscript")
@@ -2027,7 +2082,47 @@ def _expr_ast(e, scope=None) -> str:
     if isinstance(e, Call):
         return (f'(MojoExpr.call "{_call_name(e)}" '
                 f'({_expr_ast(e.args[0], scope)}))')
+    if isinstance(e, F.TernaryExpr):
+        # `MojoExpr` has no conditional form, and this arm REFUSES rather than
+        # falling through to the `MojoExpr.int 0` below: the bridge exists to
+        # cross-check the model against an independent evaluation of the source,
+        # so a placeholder here is not a gap in the proof but a bridge that
+        # agrees with a model about a DIFFERENT program — the same fabrication
+        # `_expr_go`'s `String` arm documents. `MojoStmt.ifstmt` carries an `if`,
+        # but this is an EXPRESSION: there is nowhere in `MojoExpr` to put one.
+        #
+        # Refusing is what makes the CALLER drop the bridge rather than emit it,
+        # and dropping is the right answer here rather than refusing the proof:
+        # `x86_64_proof_gen._ast_value` probes this function for exactly that
+        # (`_ast_model_cannot_state` is the arm64 half of the same decision), and
+        # the model's half of the two layers can already state the construct.
+        # Adding the constructor instead is a `lib/ProofLib.lean` change, which
+        # invalidates every cached proof verdict —
+        # `bugs/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`
+        # §"Why closing it is not a patch" item 1, and the reason this is a
+        # refusal rather than a library edit.
+        raise NotImplementedError(_ternary_ast_gap_message())
     return "MojoExpr.int 0"
+
+
+def _ternary_ast_gap_message() -> str:
+    """Why the AST bridge cannot state a conditional expression, for both ends.
+
+    One string, because both ends raise it: `_expr_ast` here, and the callers
+    that turn a raise into "the bridge is omitted". The message names the limit
+    (`MojoExpr` has no conditional constructor) rather than the node, so a
+    reader is sent to the library and not to the parser.
+    """
+    return ("eval_eq_mojo: `MojoExpr` has no conditional form, so a "
+            "conditional expression (`a if c else b`) in a value position "
+            "cannot be stated in the AST model the bridge cross-checks "
+            "against; the bridge is omitted for this function and its "
+            "correctness rests on the machine value flow and the run tests. "
+            "The gap is a constructor in `lib/ProofLib.lean` plus an arm in "
+            "`evalExpr`, not a shape this generator can translate "
+            "(`MojoStmt.ifstmt` is a STATEMENT, and an expression has nowhere "
+            "to put one). See "
+            "`bugs/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`")
 
 
 def _ast_bridge_gaps(fn, resolvable) -> list:
@@ -2167,6 +2262,80 @@ def _ast_gap_message(gaps: list) -> str:
               "about a function that calls nothing but itself. "
               "`bugs/FORMAL_ast_bridge_carries_one_argument_per_call.md` has "
               "the measurement and the two routes.")
+
+
+def _ast_model_cannot_state(fn) -> str:
+    """Why the untyped AST model cannot state `fn`'s body, or `''` when it can.
+
+    **One predicate for three decisions**, which used to be three reads of
+    `_range_loop_pattern` and could have been a fourth read of anything else:
+    whether `eval_eq_mojo` is emitted, whether `ast_def` is built at all, and
+    whether the call-gap check runs. They are one decision — "is there an AST
+    to cross-check the model against" — and a caller that answers it one way
+    and another caller the other way produces a file whose `ast` value is
+    emitted and never used, or a bridge theorem over an `ast` that was never
+    written.
+
+    Two shapes, and the second is new:
+
+      * a `for`-range accumulator loop. `MojoStmt` has no loop form at all, so
+        there is no `MojoFunc` to write and nothing to cross-check.
+      * **a conditional expression in a value position.** The MODEL can state
+        `a if c else b` (`_ternary_go`), and `MojoExpr` cannot, because
+        `if` in this library is a `MojoStmt` and an expression has nowhere to
+        put one. So the model's half of the two layers is real and the bridge's
+        is absent, which is a stated gap rather than a reason to refuse the
+        proof: `bugs/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`
+        records the measurement that a ternary was 37 of 60 generated programs'
+        refusals, and refusing a proof the machine half can carry over the AST
+        model's missing constructor would be refusing it for the wrong reason.
+
+    The search is over the STATEMENTS the AST renders (`_stmts_ast`'s
+    vocabulary) rather than over every node, so a ternary in a position the AST
+    never reaches — the bound of a `for` this predicate has already answered
+    for, a `while` body — does not cost a bridge that was there before.
+    """
+    if _range_loop_pattern(fn) is not None:
+        return "a for-range loop (`MojoStmt` has no loop form)"
+
+    def mentions_ternary(node) -> bool:
+        if isinstance(node, F.TernaryExpr):
+            return True
+        for name in getattr(node, "__dataclass_fields__", ()) or ():
+            if name in ("line", "col"):
+                continue
+            child = getattr(node, name, None)
+            if isinstance(child, list):
+                if any(mentions_ternary(c) for c in child):
+                    return True
+            elif child is not None and not isinstance(
+                    child, (str, int, float, bool)):
+                if mentions_ternary(child):
+                    return True
+        return False
+
+    def statements(stmts) -> bool:
+        """The `_stmts_ast` vocabulary BY IDENTITY, so what is searched and what
+        would be rendered are the same set of statements — the aliases at the top
+        of this file (`Return`, `Assign`, …) are the classes, and matching on
+        `type(...).__name__` against those ALIASES rather than against the class
+        names (`ReturnStmt`, `AssignStmt`) matches nothing at all, which is a
+        predicate that silently answers "the AST can state this" for every
+        program."""
+        for st in stmts or []:
+            if isinstance(st, (Return, Assign, AugAssign, VarDecl, ExprStmt)):
+                if mentions_ternary(getattr(st, "value", None)):
+                    return True
+            elif isinstance(st, IfStmt):
+                cond, then_body, else_body = _if_expand(st)
+                if (mentions_ternary(cond) or statements(then_body)
+                        or statements(else_body)):
+                    return True
+        return False
+
+    if statements(getattr(fn, "body", None) or []):
+        return "a conditional expression (`MojoExpr` has no conditional form)"
+    return ""
 
 
 def _stmts_ast(stmts, scope=None) -> list:
@@ -4890,6 +5059,112 @@ def _unfollowable_calls(code: bytes, base: int, func_entry: int,
         kind = ("opaque" if not (func_entry <= tgt < end) else "intralocal")
         out.append({"kind": kind, "pc": pc, "target": tgt, "func_end": end})
     return out
+
+
+def _unmodelled_instruction(word: int):
+    """`(name, why)` for an instruction word `arm64_step` has no branch for.
+
+    Named off the ENCODING, because a name table is a second thing to keep
+    right and the encoding is the fact: this is called only on a word
+    `_step_branch_index` has already rejected, so the question is which
+    instruction it is, and A64's fixed fields answer that without a table.
+
+    The three this emitter is measured to produce:
+
+      * **`CSEL`** — A64 "Conditional Select (register)" is `sf 110101000 0` in
+        bits 31..21, i.e. `(w >> 21) & 0x7ff == 0x4d4` (measured: the word
+        `arm64_codegen.py::_emit_csel_ternary` writes for `1 if n > 3 else 0` is
+        `0x9a801020`). `CSET` is the same instruction with Rn = Rm = XZR, which
+        the step table HAS at index 30, so it never reaches here.
+      * **`STUR` / `LDUR`** — the unscaled forms, `(w & 0xffc00000)` equal to
+        `0xf8000000` or `0xf8400000`: the 9-bit displacement a scaled
+        12-bit-offset access cannot express, which in practice means a NEGATIVE
+        frame offset (measured: `0xf81a83a0` is `stur x0, [x29, #-0x58]`, and
+        `#-0x58` is exactly what a spill below the frame base needs).
+        `bugs/FORMAL_arm64_instruction_coverage.md` lists this pair as the one
+        instruction whose emission carried a real bug, and the step table still
+        has no arm for it.
+      * anything else: `None`, and the caller says so rather than guessing.
+    """
+    if ((word >> 21) & 0x7ff) == 0x4d4:
+        return ("CSEL",
+                "the branchless select the code emitter uses for `a if c else "
+                "b`, and for a flag-preserving `and`/`or`. The semantic model "
+                "states the conditional expression (`_ternary_go`), so what is "
+                "missing here is the machine half, and the measurement is "
+                "`bugs/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_"
+                "cannot_claim_it.md`.")
+    top = word & 0xffc00000
+    if top in (0xf8000000, 0xf8400000):
+        which = "STUR" if top == 0xf8000000 else "LDUR"
+        return (which,
+                f"the unscaled (9-bit displacement) form, which is how a "
+                f"frame access at a NEGATIVE offset is reached; the step table "
+                f"has arms for the scaled `STR`/`LDR` and not for these, and "
+                f"`bugs/FORMAL_arm64_instruction_coverage.md` lists the pair "
+                f"as uncovered.")
+    return (None, "")
+
+
+def _cfg_decomposition_refusal(name: str, code: bytes, base: int,
+                               func_entry: int) -> str:
+    """Why the universal theorem could not be decomposed, naming the cause.
+
+    `_gen_universal_e2e_cfg` answers `None` for four different reasons and the
+    caller reported one sentence for all of them, which is the `refuse_without:`
+    defect `test_formal_run.py`'s own note on a reworded refusal describes: a
+    reader sent to fix "this function shape" has nothing to look at.
+
+    **A conditional expression is why this got worse before it got better.**
+    `a if c else b` used to be refused by the semantic model, which named the
+    construct; the model states it now (`_ternary_go`), so the refusal moved
+    downstream to the machine half, where the block's runs certificate cannot be
+    built because the instruction the emitter chose is one `arm64_step` has no
+    branch for. Same program, same outcome (no proof) — and a message that
+    names the instruction and the doc that measures it.
+
+    **What it will not do is attribute the cause to the ternary.** The step
+    table's gaps are not all the ternary's: an unscaled spill is the other one
+    this emitter reaches, and it has nothing to do with a conditional
+    expression. So each word is named off its own encoding
+    (`_unmodelled_instruction`) and only the CSEL case mentions `_ternary_go`.
+
+    The search is over the range the walk itself uses — the entry to the last
+    `RET` — because that is the range whose words the certificates are built
+    from. A word outside it is not in the way, and naming one would send the
+    reader to an instruction nothing here executes.
+    """
+    words = {base + i: int.from_bytes(code[i:i + 4], "little")
+             for i in range(0, len(code) - len(code) % 4, 4)}
+    rets = [pc for pc, w in words.items() if w == 0xd65f03c0 and pc >= func_entry]
+    func_end = (max(rets) + 4) if rets else max(words, default=func_entry) + 4
+    for pc in sorted(p for p in words if func_entry <= p < func_end):
+        w = words[pc]
+        if _step_branch_index(w) is not None:
+            continue
+        what, why = _unmodelled_instruction(w)
+        named = f"{what} ({w:#010x})" if what else f"an instruction ({w:#010x})"
+        return (
+            f"universal theorem: CFG decomposition unsupported for this "
+            f"function shape, and the cause is the instruction at {pc:#x} in "
+            f"{name}'s own code: it is {named}, which has no branch in "
+            f"`arm64_step`, and a block's runs certificate cannot be built "
+            f"without one. "
+            + (why + " " if why else
+               "It is not one this path names; the word is above and the step "
+               "table (`_STEP_CONDS`, cross-checked against `arm64_step` by "
+               "`check_step_conds`) has no row for it. ")
+            + "`_STEP_CONDS` deliberately carries no row for an unmodelled "
+              "word: a row with no model branch is a certificate about a "
+              "function that takes no step. The other reasons this walk returns "
+              "None are a shape with no `RET`, a block whose runs certificate "
+              "is empty, and a fixed-fuel caller whose budget is below the "
+              "instruction count.")
+    return ("universal theorem: CFG decomposition unsupported for this function "
+            "shape, and every instruction in its own code has a step, so the "
+            "cause is not an unmodelled word: the walk returns None for a shape "
+            "with no `RET`, an empty block runs certificate, or a constant-fuel "
+            "caller whose budget is below the instruction count")
 
 
 def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
@@ -8317,6 +8592,11 @@ def generate_arm64_proof(prog, code, info) -> str:
         fn = prog.functions[0]
         func_name = fn.name
     param = fn.params[0][0] if fn.params else "n"
+    # WHY THE AST MODEL CANNOT STATE THIS BODY, or `''` when it can: read ONCE
+    # here because three decisions below are that one question (emit the bridge,
+    # build `ast`, run the call-gap check) and three reads of it is how they
+    # come to disagree. See `_ast_model_cannot_state`.
+    ast_cannot = _ast_model_cannot_state(fn)
     # The entry function's ARGUMENTS, as one fact read once.  `arity` is what
     # `mojo`, `eval_eq_mojo`, every run test and the universal theorem are
     # stated at; `enames` are their binder names; `evalues` are the concrete
@@ -8504,14 +8784,16 @@ def generate_arm64_proof(prog, code, info) -> str:
     elif _dec_while_pattern(fn) is not None:
         eval_eq_mojo_section = _gen_dec_while_block(
             func_name, fn.params[0][0], _kind_name(fn.body[0].condition))
-    elif _range_loop_pattern(fn) is not None:
-        # The ProofLib AST-eval model has no loop form, so the bridge is
-        # omitted; correctness follows from the machine value flow (the loop
-        # contract) and the concrete run tests.
+    elif ast_cannot:
+        # The untyped AST model has no form for this body, so the bridge is
+        # omitted and correctness follows from the machine value flow (the loop
+        # contract, the value flow) and the concrete run tests. `ast_cannot`
+        # NAMES the shape, so the note in the generated file says which gap
+        # this is rather than a generic one.
         eval_eq_mojo_section = (
-            "/- For-range loop: the untyped AST-eval bridge is omitted "
-            "(the AST model has no loop form); correctness follows from the "
-            "loop contract and the run tests. -/\n"
+            f"/- {ast_cannot[0].upper()}{ast_cannot[1:]}: the untyped AST-eval "
+            "bridge is omitted; correctness follows from the machine value "
+            "flow and the run tests. -/\n"
         )
     else:
         if eval_eq_mojo_proof is None:
@@ -8667,15 +8949,14 @@ def generate_arm64_proof(prog, code, info) -> str:
     _resolvable = (({func_name} if arity <= 1 else set())
                    | {spelling for spelling, lean
                       in _admitted_calls_map.items() if lean})
-    # …and only where the AST is going to be EMITTED. A `for`-range program
-    # gets `ast_def = ""` and its bridge omitted (the untyped AST model has no
-    # loop form), so nothing it contains can make a claim that is false — and
-    # refusing there would turn a proof that typechecks into a refusal, which
-    # is the opposite of what this check is for. `sum_range`'s `range(n)` is
-    # the measured case: caught by the check, refused, and worth 2 holes on
-    # both architectures.
-    _gaps = (_ast_bridge_gaps(fn, _resolvable)
-             if _range_loop_pattern(fn) is None else [])
+    # …and only where the AST is going to be EMITTED. A body the AST model
+    # cannot state (`ast_cannot`, read once above) gets `ast_def = ""` and its
+    # bridge omitted, so nothing it contains can make a claim that is false —
+    # and refusing there would turn a proof that typechecks into a refusal,
+    # which is the opposite of what this check is for. `sum_range`'s `range(n)`
+    # is the measured loop case: caught by the check, refused, and worth 2
+    # holes on both architectures.
+    _gaps = [] if ast_cannot else _ast_bridge_gaps(fn, _resolvable)
     if _gaps:
         raise NotImplementedError(_ast_gap_message(_gaps))
 
@@ -8687,8 +8968,8 @@ def generate_arm64_proof(prog, code, info) -> str:
     # refusal above could say what the limit is. Nothing between the old site
     # and here reads `ast_def` — it is used once, in the assembly at the end of
     # this function.
-    if _range_loop_pattern(fn) is not None:
-        ast_def = ""  # the AST model has no loop form; the bridge is omitted
+    if ast_cannot:
+        ast_def = ""  # the AST model cannot state this body; no bridge
     else:
         ast_stmts = ", ".join(_stmts_ast(fn.body, _vscope))
         ast_def = ('def ast : MojoFunc := MojoFunc.mk "%s" %s ([%s])'
@@ -8767,8 +9048,8 @@ def generate_arm64_proof(prog, code, info) -> str:
     if universal_text is not None:
         universal_section = _opaque_note + universal_text
     else:
-        raise NotImplementedError(
-            "universal theorem: CFG decomposition unsupported for this function shape")
+        raise NotImplementedError(_cfg_decomposition_refusal(
+            func_name, code, base_addr, func_entry_addr))
 
     if trunc_defs:
         trunc_defs_section = (
