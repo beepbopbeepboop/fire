@@ -3186,15 +3186,26 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                         self._compr_append_elem(offset, cap)
                 else:
                     self._emit_expr(op)
-                    self._emit_star_splice(offset, cap)
+                    self._emit_star_splice(offset, cap,
+                                           self._is_dict_subscript(op))
             else:
                 self._emit_expr(el)
                 self._compr_append_elem(offset, cap)
 
         self._emit_blob_base(offset, Reg.RAX)
 
-    def _emit_star_splice(self, res_offset: int, cap: int) -> None:
+    def _emit_star_splice(self, res_offset: int, cap: int,
+                          is_dict: bool = False) -> None:
         """RAX = source blob; append every element into the result.
+
+        `is_dict` is `M.walk_stride`'s question about the SOURCE and it decides
+        the element address below, for the reason `_emit_compr_gen` asks the same
+        question about a comprehension's iterable: a splice binds ONE thing per
+        COUNT, and a dict's COUNT is a PAIR, so `[*d]` at the element stride read
+        `k0, v0, k1` and built a list of keys and values — `[10, 1, 20]` where
+        CPython builds `[10, 20, 30]`, exit 0. The default is `False` so a caller
+        with no opinion gets the list stride, which is what every non-dict
+        source wants.
 
         The x86-64 twin of arm64's `_emit_star_splice`, and the register
         choice is the whole difficulty. The loop has to carry a source base,
@@ -3246,7 +3257,9 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._emit_jcc_bool(Reg.R8, COND_NE, done)
         self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.RSP, 32))      # base
         self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 0))       # i
-        self._emit_elem_addr(Reg.R11, Reg.RAX, Reg.RDI)
+        self._emit_elem_addr(Reg.R11, Reg.RAX, Reg.RDI,
+                             header=M.BLOB_HEADER_BYTES,
+                             scale=M.walk_shift(is_dict))
         self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RDI, 0))
         self._compr_append_elem(res_offset, cap)
         self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RSP, 0))
@@ -6942,39 +6955,44 @@ preference.
         """
         self._emit_subscript_addr(target)             # RAX = &elem
         self._push_slot(Reg.RAX)                      # [rsp] = elem address
-        # The base is read straight into R12 and NOT pushed: the one slot on
+        # The base is read straight into R11 and NOT pushed: the one slot on
         # the stack has to be the element address, and a second push here put
         # the base where the pop expected the address — `del a[0]` then
         # recovered index 2 out of `&elem[0]`, shifted nothing and printed
         # `2 10`, which is the pre-fix arm64 answer on this architecture.
         self._emit_expr(target.obj)                   # RAX = base
-        self.asm.emit(encode_mov_r64_r64(Reg.R12, Reg.RAX))       # base
-        self.asm.emit(encode_mov_r64_rm64(Reg.R13, Reg.R12, 0))   # count
-        self._pop_slot(Reg.R14)                       # R14 = element address
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))       # R11 = base
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))   # R10 = count
+        self._pop_slot(Reg.R9)                        # R9 = element address
         # i = (elem - (base + 8)) >> 3
-        self.asm.emit(encode_mov_r64_r64(Reg.R15, Reg.R12))
-        self.asm.emit(encode_add_r64_imm8(Reg.R15, 8))
-        self.asm.emit(encode_sub_r64_r64(Reg.R14, Reg.R15))
-        self.asm.emit(encode_shift_r64_imm8(">>", Reg.R14, 3))
-        self.asm.emit(encode_add_r64_imm8(Reg.R14, 1))            # j = i + 1
+        self.asm.emit(encode_mov_r64_r64(Reg.R8, Reg.R11))
+        self.asm.emit(encode_add_r64_imm8(Reg.R8, 8))
+        self.asm.emit(encode_sub_r64_r64(Reg.R9, Reg.R8))
+        self.asm.emit(encode_shift_r64_imm8(">>", Reg.R9, 3))
+        self.asm.emit(encode_add_r64_imm8(Reg.R9, 1))              # R9 = j = i+1
         self._while_counter += 1
         wid = self._while_counter
         fn = self.func_name
         loop_label = f"{fn}_dlsi{wid}"
         end_label = f"{fn}_dlse{wid}"
         self.asm.label(loop_label)
-        self.asm.emit(encode_cmp_r64_r64(Reg.R14, Reg.R13))
+        self.asm.emit(encode_cmp_r64_r64(Reg.R9, Reg.R10))
         self._emit_jcc(COND_AE, end_label)            # j >= count → done
-        self._emit_elem_addr(Reg.R12, Reg.R14, Reg.R15)
-        self.asm.emit(encode_mov_r64_rm64(Reg.R9, Reg.R15, 0))     # elem[j]
-        self.asm.emit(encode_sub_r64_imm8(Reg.R15, 8))
-        self.asm.emit(encode_mov_rm64_r64(Reg.R15, 0, Reg.R9))     # elem[j-1]
-        self.asm.emit(encode_add_r64_imm8(Reg.R14, 1))
+        self._emit_elem_addr(Reg.R11, Reg.R9, Reg.R8)              # R8 = &elem[j]
+        # TWO registers, because the address and the value are different words:
+        # loading the value into the address register and then subtracting 8
+        # from IT produced `&elem[j-1] - (elem[j] - 8)` as the store address,
+        # which for `xs = [10, 11]; del xs[0]` is 3 — a store to address 3 and
+        # a SIGSEGV (measured on x86-64 after the register remap below; arm64
+        # has one register fewer to spare here and never had the shape).
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.R8, 0))      # elem[j]
+        self.asm.emit(encode_sub_r64_imm8(Reg.R8, 8))              # &elem[j-1]
+        self.asm.emit(encode_mov_rm64_r64(Reg.R8, 0, Reg.RAX))
+        self.asm.emit(encode_add_r64_imm8(Reg.R9, 1))
         self._emit_jmp(loop_label)
         self.asm.label(end_label)
-        self.asm.emit(encode_sub_r64_imm8(Reg.R13, 1))
-        self.asm.emit(encode_mov_rm64_r64(Reg.R12, 0, Reg.R13))
-        self._pop_slot(Reg.RAX)                       # release elem address
+        self.asm.emit(encode_sub_r64_imm8(Reg.R10, 1))
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
 
     def _emit_del_dict_key(self, target) -> None:
         """`del d[k]` — scan for the key, then shift the pairs over it.
@@ -6987,9 +7005,9 @@ preference.
         base_key = self._del_base_key(target.obj)
         self._emit_expr(target.index)                 # RAX = key
         self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.RAX))   # R10 = key
-        self._load_var(base_key, Reg.R12)             # R12 = blob
-        self.asm.emit(encode_mov_r64_rm64(Reg.R13, Reg.R12, 0))   # count
-        self._emit_mov_imm(Reg.R14, 0)                # R14 = i
+        self._load_var(base_key, Reg.R11)             # R11 = blob
+        self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.R11, 0))   # RCX = count
+        self._emit_mov_imm(Reg.RDX, 0)                # RDX = i
         self._if_counter += 1
         iid = self._if_counter
         fn = self.func_name
@@ -7001,9 +7019,9 @@ preference.
         shd_label = f"{fn}_ddk{iid}_shd"
         end_label = f"{fn}_ddk{iid}_end"
         self.asm.label(loop_label)
-        self.asm.emit(encode_cmp_r64_r64(Reg.R14, Reg.R13))
+        self.asm.emit(encode_cmp_r64_r64(Reg.RDX, Reg.RCX))
         self._emit_jcc(COND_AE, miss_label)           # i >= count → not found
-        self._emit_elem_addr(Reg.R12, Reg.R14, Reg.R9, header=8, scale=4)
+        self._emit_elem_addr(Reg.R11, Reg.RDX, Reg.R9, header=8, scale=4)
         self.asm.emit(encode_mov_r64_rm64(Reg.R9, Reg.R9, 0))       # key_i
         self.asm.emit(encode_cmp_r64_r64(Reg.R9, Reg.R10))
         # SETcc then a TEST before the Jcc: a bare Jcc after a SETcc reads
@@ -7019,24 +7037,26 @@ preference.
         self._emit_jcc_bool(Reg.R8, COND_E, next_label)
         self._emit_jmp(found_label)
         self.asm.label(next_label)
-        self.asm.emit(encode_add_r64_imm8(Reg.R14, 1))
+        self.asm.emit(encode_add_r64_imm8(Reg.RDX, 1))
         self._emit_jmp(loop_label)
         self.asm.label(found_label)
-        self.asm.emit(encode_add_r64_imm8(Reg.R14, 1))            # j = i + 1
+        self.asm.emit(encode_add_r64_imm8(Reg.RDX, 1))            # j = i + 1
         self.asm.label(shift_label)
-        self.asm.emit(encode_cmp_r64_r64(Reg.R14, Reg.R13))
+        self.asm.emit(encode_cmp_r64_r64(Reg.RDX, Reg.RCX))
         self._emit_jcc(COND_AE, shd_label)            # j >= count → done
-        self._emit_elem_addr(Reg.R12, Reg.R14, Reg.R9, header=8, scale=4)
+        self._emit_elem_addr(Reg.R11, Reg.RDX, Reg.R9, header=8, scale=4)
+        # R10 and RSI as the two halves of pair `j`: R10 held the NEEDLE, which
+        # the scan has already matched, and RSI is this lowering's own scratch.
         self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R9, 0))     # key_j
-        self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R9, 8))     # value_j
+        self.asm.emit(encode_mov_r64_rm64(Reg.RSI, Reg.R9, 8))     # value_j
         self.asm.emit(encode_sub_r64_imm8(Reg.R9, 16))             # pair j-1
         self.asm.emit(encode_mov_rm64_r64(Reg.R9, 0, Reg.R10))
-        self.asm.emit(encode_mov_rm64_r64(Reg.R9, 8, Reg.R11))
-        self.asm.emit(encode_add_r64_imm8(Reg.R14, 1))
+        self.asm.emit(encode_mov_rm64_r64(Reg.R9, 8, Reg.RSI))
+        self.asm.emit(encode_add_r64_imm8(Reg.RDX, 1))
         self._emit_jmp(shift_label)
         self.asm.label(shd_label)
-        self.asm.emit(encode_sub_r64_imm8(Reg.R13, 1))
-        self.asm.emit(encode_mov_rm64_r64(Reg.R12, 0, Reg.R13))
+        self.asm.emit(encode_sub_r64_imm8(Reg.RCX, 1))
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.RCX))
         self._emit_jmp(end_label)
         self.asm.label(miss_label)
         self._emit_call_exit(1)
@@ -7061,31 +7081,31 @@ preference.
             raise CodegenError(
                 "del slice with step is not supported on the formal x86-64 "
                 "path")
-        self._load_var(name, Reg.R12)                 # R12 = blob
-        self.asm.emit(encode_mov_r64_rm64(Reg.R13, Reg.R12, 0))   # count
-        self._push_slot(Reg.R13)                      # [rsp] = count
+        self._load_var(name, Reg.R11)                 # R11 = blob
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))   # count
+        self._push_slot(Reg.R10)                      # [rsp] = count
         if start is None:
-            self._emit_mov_imm(Reg.R14, 0)
+            self._emit_mov_imm(Reg.RCX, 0)            # RCX = start
         else:
             self._emit_expr(start)                    # RAX = start
-            self.asm.emit(encode_mov_r64_r64(Reg.R14, Reg.RAX))
-            self._emit_slice_bound_normalize(Reg.R14, 0)
-        self._push_slot(Reg.R14)                      # [rsp] = start
+            self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.RAX))
+            self._emit_slice_bound_normalize(Reg.RCX, 0)
+        self._push_slot(Reg.RCX)                      # [rsp] = start
         # TWO pushes above, so TWO pops here — the omitted `stop` included.
         # Popping only one of them left `start` where the count was, so
         # `del lst[-2:]` removed [2, 2) and printed the list unchanged; and a
         # third pop underflows the frame and leaves RSP 16 bytes high for the
         # rest of the function, which is its own silent corruption.
         if stop is None:
-            self._pop_slot(Reg.R14)                   # start
-            self._pop_slot(Reg.R15)                   # count
-            self.asm.emit(encode_mov_r64_r64(Reg.R13, Reg.R15))  # stop = count
+            self._pop_slot(Reg.RCX)                   # start
+            self._pop_slot(Reg.R10)                   # count
+            self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.R10))  # stop = count
         else:
             self._emit_expr(stop)                     # RAX = stop
-            self.asm.emit(encode_mov_r64_r64(Reg.R13, Reg.RAX))
-            self._emit_slice_bound_normalize(Reg.R13, 16)
-            self._pop_slot(Reg.R14)                   # start
-            self._pop_slot(Reg.R15)                   # count
+            self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))  # RDX = stop
+            self._emit_slice_bound_normalize(Reg.RDX, 16)
+            self._pop_slot(Reg.RCX)                   # start
+            self._pop_slot(Reg.R10)                   # count
         self._while_counter += 1
         wid = self._while_counter
         fn = self.func_name
@@ -7100,42 +7120,42 @@ preference.
         # `del b[1:3]` on a four-element list into `del b[1:4]`, which removes
         # three elements and then reads the fourth out of a three-element
         # blob.
-        self.asm.emit(encode_cmp_r64_r64(Reg.R15, Reg.R13))
+        self.asm.emit(encode_cmp_r64_r64(Reg.R10, Reg.RDX))
         self._emit_jcc(COND_A, keep_hi)
-        self.asm.emit(encode_mov_r64_r64(Reg.R13, Reg.R15))   # stop = count
+        self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.R10))       # stop = count
         self.asm.label(keep_hi)
         # stop = max(stop, start)  (empty when stop <= start)
-        self.asm.emit(encode_cmp_r64_r64(Reg.R13, Reg.R14))
+        self.asm.emit(encode_cmp_r64_r64(Reg.RDX, Reg.RCX))
         self._emit_jcc(COND_AE, keep_lo)              # stop >= start → keep
-        self.asm.emit(encode_mov_r64_r64(Reg.R13, Reg.R14))   # stop = start
+        self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RCX))       # stop = start
         self.asm.label(keep_lo)
         # n_del = stop - start; nothing to do when it is 0
-        self.asm.emit(encode_mov_r64_r64(Reg.R8, Reg.R13))
-        self.asm.emit(encode_sub_r64_r64(Reg.R8, Reg.R14))
-        self._emit_jcc_bool(Reg.R8, COND_E, skip_label)
+        self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RDX))
+        self.asm.emit(encode_sub_r64_r64(Reg.RSI, Reg.RCX))
+        self._emit_jcc_bool(Reg.RSI, COND_E, skip_label)
         # The bound EXPRESSIONS may have written the base and the count, so
         # both come back from the name rather than from the registers. `stop`
-        # is in R13 through all of this and the count moves to R15, which is
-        # why the copy loop below does not reload it into R13 and lose it.
-        self._load_var(name, Reg.R12)                 # base
-        self.asm.emit(encode_mov_r64_rm64(Reg.R15, Reg.R12, 0))   # count
+        # is in RDX through all of this and the count moves to R10, which is
+        # why the copy loop below does not reload it into RDX and lose it.
+        self._load_var(name, Reg.R11)                 # base
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))   # count
         # copy [stop, count) → [start, start + (count - stop))
-        self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.R13))       # j = stop
+        self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.RDX))        # j = stop
         self.asm.label(loop_label)
-        self.asm.emit(encode_cmp_r64_r64(Reg.R9, Reg.R15))
+        self.asm.emit(encode_cmp_r64_r64(Reg.R9, Reg.R10))
         self._emit_jcc(COND_AE, mend_label)            # j >= count → done
-        self._emit_elem_addr(Reg.R12, Reg.R9, Reg.R11)
-        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))   # elem[j]
-        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.R9))
-        self.asm.emit(encode_sub_r64_r64(Reg.R11, Reg.R13))       # j - stop
-        self.asm.emit(encode_add_r64_r64(Reg.R11, Reg.R14))       # + start
-        self._emit_elem_addr(Reg.R12, Reg.R11, Reg.R11)
-        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
+        self._emit_elem_addr(Reg.R11, Reg.R9, Reg.RAX)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RAX, 0))    # elem[j]
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R9))
+        self.asm.emit(encode_sub_r64_r64(Reg.RAX, Reg.RDX))       # j - stop
+        self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.RCX))       # + start
+        self._emit_elem_addr(Reg.R11, Reg.RAX, Reg.RAX)
+        self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 0, Reg.R8))
         self.asm.emit(encode_add_r64_imm8(Reg.R9, 1))
         self._emit_jmp(loop_label)
         self.asm.label(mend_label)
-        self.asm.emit(encode_sub_r64_r64(Reg.R15, Reg.R8))        # count -= n
-        self.asm.emit(encode_mov_rm64_r64(Reg.R12, 0, Reg.R15))
+        self.asm.emit(encode_sub_r64_r64(Reg.R10, Reg.RSI))       # count -= n
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
         self.asm.label(skip_label)
 
     def _emit_slice_bound_normalize(self, reg: Reg, count_off: int) -> None:
@@ -7548,7 +7568,10 @@ preference.
             # address computed next is relative to it.
             self._emit_setcc_bool(Reg.R8, "setae")
             self._emit_jcc_bool(Reg.R8, COND_NE, false_label)
-            self._emit_elem_addr(Reg.R11, Reg.RAX, Reg.RDI)
+            self._emit_elem_addr(Reg.R11, Reg.RAX, Reg.RDI,
+                                 header=M.BLOB_HEADER_BYTES,
+                                 scale=M.walk_shift(
+                                     self._is_dict_subscript(gen.iterable)))
             self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RDI, 0))
 
             from mojo.middle.boundnames import _lbn_target_names

@@ -401,6 +401,22 @@ KNOWN_DIVERGENCES = {
     "str_subscript": (
         "`s[i]` is a byte, not a one-character string (bugs/"
         "FORMAL_string_value_model.md)"),
+    # Added by the fuzz-5 sweep, for the `--mix sets` family it added with it.
+    # `formal/model.py`'s blob-layout comment says the whole of the value model
+    # for a set in one line — "A set lowers as a list" — and that line is why
+    # `len` and membership agree with CPython while `for x in s` does not: the
+    # blob is insertion-ordered and CPython's is hash-ordered. Measured on both
+    # architectures for `{3, 1, 2}`: `3 1 2` where CPython prints `1 2 3`, exit 0.
+    #
+    # Generated ON PURPOSE, like `str_subscript` and for the same reason: the
+    # corpus is the only thing that can notice the day the model changes, and a
+    # set family that avoided iteration would report the same clean tally either
+    # way. The neutraliser rewrites the walk's source into a list literal of the
+    # same elements, which keeps the walk and drops the set-ness — the same
+    # "same arity, same operand types" discipline every other row uses.
+    "set_order": (
+        "a set lowers as a LIST, so it iterates in INSERTION order where CPython "
+        "iterates in hash order (bugs/FORMAL_set_value_model.md)"),
 }
 
 # The constructs that make a feature marker true. Checked against the minimised
@@ -412,6 +428,11 @@ FEATURE_PATTERNS = {
     # pattern tuple is how this table says "handled specially", and keeping the
     # KEY is what lets the neutraliser and the summary find it by name.
     "str_subscript": (),
+    # `set_order` is decided by `features_of`, not by a pattern: a walk over a
+    # LIST is right and a walk over a SET is the divergence, and only the
+    # BINDING says which. The empty pattern tuple is how this table says
+    # "handled specially".
+    "set_order": (),
 }
 
 # How to take one known construct out of a program WITHOUT changing its shape:
@@ -428,6 +449,14 @@ NEUTRALISERS = {
     # non-negative one could not take the very programs it is most often asked
     # about apart.
     "str_subscript": [(r"print\((\w+)\[(-?\d+)\]\)", r"print(1)")],
+    # The set LITERAL becomes a list literal of the same elements, in the same
+    # (insertion) order — which is the whole neutralisation, because a walk over
+    # a list is insertion-ordered on both engines. The walk itself is left
+    # alone: deleting the line that walks would take the program's control flow
+    # with it, and the module docstring is explicit that a neutraliser which
+    # changes the shape teaches nothing.
+    "set_order": [(r"(?m)^(\s*)(\w+) *= *\{([^{}:]*(?:,\s*[^{}:]*)*)\} *$",
+                   r"\1\2 = [\3]")],
 }
 
 # The CPython side of the SAME TEXT.  A `def`'s annotations are evaluated when
@@ -1245,6 +1274,49 @@ MIXES = {
                ("str_startswith", 3), ("str_endswith", 2), ("str_lstrip", 2),
                ("str_meth_len", 2), ("if", 3), ("print", 2)),
     "fstrings": (("str_interp", 5), ("assign", 2), ("print", 2)),
+    # ── the four families the fuzz-5 sweep added ──
+    #
+    # Each is here because the CORPUS could not produce the construct at all,
+    # and each was PROBED ON BOTH ARCHITECTURES before it was written down, for
+    # the reason `§2.1`'s nine families give: a mix that measures a refusal
+    # spends its budget re-deriving `bugs/FORMAL_known_limits.md`.
+    #
+    #   comps     the comprehension walks and the `*` splice — the OTHER TWO
+    #             walks that bind one thing per count, beside `for k in d` and
+    #             `k in d`.  §3.10: both were hardcoded to the element stride
+    #             on both backends, so `[k for k in d]` built `[k0, v0, k1]` and
+    #             exited 0, and the COUNT of the result was right, so the only
+    #             dict-comprehension family the corpus had (`dict_comp_count`,
+    #             which measures `len` and a trip count) could not see it.  Every
+    #             observation in this mix WALKS its result, and says so.
+    #   refs      aliasing and mutation through a REFERENCE: two names for one
+    #             blob, a write through the second read through the first, a
+    #             write through a struct field's blob, a write through a
+    #             PARAMETER across a call, a straight-line `del`, and the ORDER
+    #             a walk over a table yields.  The classic place for a silent
+    #             miscompile — a blob is a frame ADDRESS, so every one of these
+    #             is the question whether a second name resolves to the same
+    #             address or to a copy, and a copy is a correct-looking answer.
+    #   objs      a class whose `__init__` takes ARGUMENTS, `__len__` as a
+    #             dunder reached through a builtin rather than through a method
+    #             call, and nested data in a struct field.  `define_class` has
+    #             always built `C()` with two fields set to constants, so the
+    #             constructor's own argument passing was reachable from no mix.
+    #   sets      a set, which `formal/model.py` lowers as a LIST — so `len` and
+    #             membership agree with CPython and the ITERATION ORDER does not.
+    #             That divergence is `KNOWN_DIVERGENCES`' `set_order` and it is
+    #             generated on purpose, for the reason `str_subscript` is.
+    "comps": (("comp_walk", 6), ("comp_cond", 5), ("comp_dict_pair", 4),
+              ("star_splice", 4), ("comp_nested", 4), ("assign", 2),
+              ("if", 2), ("print", 2)),
+    "refs": (("alias_pair", 5), ("alias_field", 4), ("container_field", 4),
+             ("mutate_param", 4), ("del_key", 3), ("iter_order", 4),
+             ("assign", 2), ("if", 2), ("print", 2)),
+    "objs": (("ctor_args", 5), ("dunder_len", 4), ("obj_nested_read", 4),
+             ("obj_new", 2), ("field_read", 2), ("method_call", 2),
+             ("assign", 2), ("print", 2)),
+    "sets": (("set_build", 4), ("set_len", 3), ("set_in", 4), ("set_iter", 5),
+             ("assign", 2), ("if", 2), ("print", 2)),
 }
 
 #: mix -> (a pattern the mix must still PRODUCE, why it must).
@@ -1298,6 +1370,10 @@ MAX_ARGFUNCS = 3
 #: must not end `main` (a `return` in `main` truncates the program there and
 #: every statement after it is dead code on both engines).
 MAX_TRYFUNCS = 2
+#: `mutate_param_stmt`'s helpers. One per program is the point: the family is
+#: about a REFERENCE crossing a call, and a program that spells a new helper for
+#: every call site measures the definition instead.
+MAX_MUTFNS = 1
 
 
 class Gen:
@@ -1340,6 +1416,8 @@ class Gen:
         self.variadics = []   # (name, fixed arity) `*rest` defs
         self.classes = []     # (name, fields, methods) definitions
         self.objs = []        # (var, class name, fields, methods) instances
+        self.ctorclasses = []  # (name, fields, ctor params) classes WITH ctor args
+        self.sets = []        # (name, elements) set locals of ints
         self.fields = []      # field names, inside a method body
         self.funcs = []       # (name, [parameter names])
         self.decls = []       # (name, initial value text) for the preamble
@@ -1571,13 +1649,23 @@ class Gen:
             "try_finally", "try_finally_loop", "try_finally_return",
             "arg_define", "arg_call", "slice_read", "slice_step",
             "unpack_bind", "unpack_dict", "big_int", "big_shift", "chain_cmp",
-            "str_interp", "variadic_define", "variadic_call")
+            "str_interp", "variadic_define", "variadic_call",
+            "ctor_args", "dunder_len", "obj_nested_read",
+            "alias_pair", "alias_field", "container_field", "mutate_param",
+            "del_key", "iter_order",
+            "comp_walk", "comp_cond", "comp_dict_pair", "star_splice",
+            "comp_nested",
+            "set_build", "set_len", "set_in", "set_iter")
         if budget <= 0 and kind in ("if", "while", "for", "call",
                                     "nested_call", "recursion",
                                     "list_in_loop", "dict_iter",
                                     "tuple_iter", "loop_nested",
                                     "loop_else", "closure_def",
-                                    "try_finally", "try_finally_loop"):
+                                    "try_finally", "try_finally_loop",
+                                    "comp_walk", "comp_cond",
+                                    "comp_dict_pair", "star_splice",
+                                    "comp_nested", "set_iter",
+                                    "iter_order"):
             # A walk is a LOOP: it is what `budget` exists to bound, since a
             # nest of them is a nest of stack frames rather than a nest of
             # branches. Folding one into an assignment keeps the depth of the
@@ -1671,6 +1759,16 @@ class Gen:
         elif kind in ("obj_new", "field_read", "field_cmp", "field_write",
                       "method_call", "method_call_in_arg"):
             self.object_stmt(indent, kind)
+        elif kind in ("ctor_args", "dunder_len", "obj_nested_read"):
+            self.ctor_stmt(indent, kind)
+        elif kind in ("alias_pair", "alias_field", "container_field",
+                      "mutate_param", "del_key", "iter_order"):
+            self.ref_stmt(indent, kind)
+        elif kind in ("comp_walk", "comp_cond", "comp_dict_pair",
+                      "star_splice", "comp_nested"):
+            self.comp_stmt(indent, kind)
+        elif kind in ("set_build", "set_len", "set_in", "set_iter"):
+            self.set_stmt(indent, kind)
         elif kind in ("loop_else", "loop_nested"):
             self.loop_else_stmt(indent, kind)
         elif kind in ("try_finally", "try_finally_loop", "try_finally_return"):
@@ -3413,6 +3511,870 @@ class Gen:
         self.emit(indent, f'print({prefix}{quote}v={{{literal}}} '
                           f'{quote})')
 
+    # ── the comprehension walks, and a `*` splice ──
+    #
+    # Four of these existed nowhere in the corpus, and the shape they share is
+    # the one this ledger's §3.10 is about: a comprehension generator and a `*`
+    # splice bind ONE THING PER COUNT, exactly as `for k in d` and `k in d` do,
+    # and the first two asked `model.walk_stride` whether the source is a pair
+    # blob while these two had the element stride hardcoded on BOTH backends.
+    # `[k for k in d]` built `[k0, v0, k1]` and exited 0.
+    #
+    # **And the count of the result was right** — three PAIRS and three WORDS
+    # are the same number — so the only dict-comprehension family the corpus had
+    # (`dict_comp_count`, which measures `len` and a trip count) could not see
+    # it, and no sweep of `containers` reported it either. Every observation
+    # below therefore WALKS its result and accumulates it. `len` is printed too,
+    # because it is what the corpus used to print and a family that stops
+    # printing it would stop measuring the property that hid the bug.
+    def comp_stmt(self, indent, kind):
+        if kind == "comp_nested":
+            self.comp_nested_stmt(indent)
+            return
+        if kind == "star_splice":
+            self.star_splice_stmt(indent)
+            return
+        if kind == "comp_walk":
+            self.comp_walk_stmt(indent, cond=False)
+            return
+        if kind == "comp_cond":
+            self.comp_walk_stmt(indent, cond=True)
+            return
+        # `comp_dict_pair`: a DICT comprehension, whose generator walk is the
+        # same code and whose RESULT is a pair blob — so a fix that taught only
+        # the list arm would leave this one reading values as keys.
+        if not self.dicts:
+            self.build_dict()
+        ints = [src for src, kind, _k in self.dicts if kind == "int"]
+        if not ints:
+            self.build_ordered_dict()
+            ints = [src for src, kind, _k in self.dicts if kind == "int"]
+        if not ints:
+            return
+        self.comp_dict_pair_stmt(indent, self.rng.choice(ints))
+
+    def _comp_target_pool(self):
+        """A name to walk a comprehension's RESULT with, and its accumulator.
+
+        The result is a blob with no initializer, so it joins neither `lists`
+        nor `dicts` — a `list_read` that subscripted it would need a length the
+        source does not state, and a `dict_read` needs keys. It is observed the
+        two ways a run-time-built blob can be: `len` and a walk.
+        """
+        acc = self.declare(self.fresh("w"), "0")
+        self.words.append(acc)
+        return self.fresh("t"), acc
+
+    def _walk_result(self, indent, result, target, str_target=False):
+        """`for t in <result>` plus the observable, which depends on the KIND.
+
+        A STRING element cannot be accumulated — `(acc + k)` is CPython's
+        TypeError, so a family that accumulated one would be an oracle failure
+        on every program — and it cannot be `print`ed either, because a `char *`
+        formatted as a word prints an address. `len(k)` is the observation that
+        works for a string and it is the stronger one: it needs the target's KIND
+        to be a string, so a stride that read a VALUE would print that value's
+        length rather than the key's. The int branch accumulates, which is what
+        turns a wrong element into a wrong NUMBER instead of a wrong line.
+        """
+        t = self.fresh("w")
+        self.emit(indent, f"for {target} in {result}:")
+        self.loop_depth += 1
+        if str_target:
+            self.emit(indent + 1, f"print(len({target}))")
+        else:
+            acc = self.declare(self.fresh("w"), "0")
+            self.emit(indent + 1, f"{acc} = ({acc} + {target}) & 0xFFFF")
+            self.loop_depth -= 1
+            self.emit(indent, f"print({acc})")
+            self.words.append(acc)
+            return acc
+        self.loop_depth -= 1
+        _ = t
+        return None
+
+    def comp_walk_stmt(self, indent, cond=False, as_dict=False):
+        """`[<target> for <target> in <blob>]` and the walk of its result."""
+        # A STRING-keyed dict is NOT a source here. Its comprehension target has
+        # no KIND on this path, so `len(k)` inside the result's walk is refused
+        # on both backends with a sentence false about the source — the filed
+        # gap `FORMAL_a_comprehension_target_over_a_string_keyed_dict_is_an_int`
+        # — and a family that is a third refusals measures the refusal. It is a
+        # kind rule to add, not a family to write around.
+        pool = [(src, "int") for src, kind, _k in self.dicts if kind == "int"]
+        pool += [(src, "int") for src, _n in self.lists]
+        pool += [(src, "int") for src, _n in self.tuples]
+        if not pool:
+            self.build_dict()
+            self.build_dict()
+            pool = [(src, "int") for src, kind, _k in self.dicts
+                    if kind == "int"]
+            if not pool:
+                self.build_ordered_dict()
+                pool = [(name, "int") for name, kind, _k in self.dicts
+                        if kind == "int"]
+                if not pool:
+                    return
+        src, kind = self.rng.choice(pool)
+        target = self.fresh("k")
+        clause = f" if {target} > 15" if cond else ""
+        if as_dict:
+            result = self.fresh("E")
+            self.emit(indent, f"{result} = {{{target}: 1 for {target} in "
+                              f"{src}{clause}}}")
+            # The result is a PAIR blob, so the walk over it is the `for`-in
+            # walk — the one that already asked `walk_stride`. Reading it here
+            # measures both halves at once.
+            self.emit(indent, f"print(len({result}))")
+            self._walk_result(indent, result, self.fresh("k"), str_target=False)
+            return
+        result, _acc = self._comp_target_pool()
+        self.emit(indent, f"{result} = [{target} for {target} in {src}{clause}]")
+        self.emit(indent, f"print(len({result}))")
+        self._walk_result(indent, result, target, str_target=False)
+
+    def comp_dict_pair_stmt(self, indent, src):
+        """`{k: 1 for k in d}` over an INTEGER-keyed dict, walked."""
+        target = self.fresh("k")
+        result = self.fresh("E")
+        self.emit(indent, f"{result} = {{{target}: 1 for {target} in {src}}}")
+        self.emit(indent, f"print(len({result}))")
+        t2 = self.fresh("k")
+        acc = self.declare(self.fresh("w"), "0")
+        self.emit(indent, f"for {t2} in {result}:")
+        self.loop_depth += 1
+        self.emit(indent + 1, f"{acc} = ({acc} + {t2}) & 0xFFFF")
+        self.loop_depth -= 1
+        self.emit(indent, f"print({acc})")
+        self.words.append(acc)
+
+    def comp_nested_stmt(self, indent):
+        """A comprehension over a list OF LISTS — nested data, and the
+        generator whose ELEMENT is a subscript of the target.
+
+        `[r[0] for r in rows]` is three shapes at once: an outer walk over a
+        list blob, a subscript whose base is a loop target (so its element kind
+        comes from the TARGET rather than from a binding statement), and an
+        element expression that is itself a read of the frame. `print` of that
+        subscript is refused on both backends ("cannot tell whether
+        SubscriptExpr is a string or a number"), so the result is bound to a
+        local first — which is the same discipline every other reader of a
+        subscript here follows.
+        """
+        nrows = self.rng.randint(2, 3)
+        ncols = self.rng.randint(2, 3)
+        rows = [[self.rng.randint(1, 40) for _ in range(ncols)]
+                for _ in range(nrows)]
+        # NESTED brackets, one per row — a flat list of every element would be a
+        # different program, and `r[0]` over a flat list is an int where the
+        # comprehension wants a blob.
+        literal = "[" + ", ".join("[" + ", ".join(str(v) for v in r) + "]"
+                                  for r in rows) + "]"
+        name = self.declare(self.fresh("R"), literal)
+        col = self.rng.randrange(ncols)
+        target = self.fresh("r")
+        result, acc = self._comp_target_pool()
+        self.emit(indent, f"{result} = [{target}[{col}] for {target} in {name}]")
+        # `len` of the OUTER table, which answers: the outer list's own count
+        # word is what `len` reads, and nothing has to be inferred about what
+        # its elements hold.
+        self.emit(indent, f"print(len({name}))")
+        self.emit(indent, f"print(len({result}))")
+        t2 = self.fresh("v")
+        self.emit(indent, f"for {t2} in {result}:")
+        self.loop_depth += 1
+        self.emit(indent + 1, f"{acc} = ({acc} + {t2}) & 0xFFFF")
+        self.loop_depth -= 1
+        self.emit(indent, f"print({acc})")
+        # The INNER lists, read into locals so a later family can walk them.
+        # There is deliberately NO `len(inner)` here: a subscript of a list of
+        # lists has no element kind on this path — the outer list's elements are
+        # LISTS and the table does not say what a list's elements are — so
+        # `len(inner)` is REFUSED on both backends with "classified as 'int'"
+        # (filed as `FORMAL_len_of_a_subscript_of_a_list_of_lists_is_an_int`).
+        # A family that is a third refusals measures the refusal, so the inner
+        # read is here as an ALIAS for the nested-data question and the element
+        # read is the observable.
+        #
+        # The name holding the inner list does NOT join `words`: it holds a blob,
+        # and the trailing observation prints every word in one `print` — a blob
+        # there is either a refusal or an address, and the family is not about
+        # either. It joins `lists`, so a later `star_splice` or `comp_walk` can
+        # walk it, which is the nested-data question one step further.
+        for i in range(min(2, nrows)):
+            inner = self.declare(self.fresh("w"), "[]")
+            self.emit(indent, f"{inner} = {name}[{i}]")
+            elem = self.declare(self.fresh("w"), "0")
+            self.emit(indent, f"{elem} = {inner}[{col}]")
+            self.emit(indent, f"print({elem})")
+            self.words.append(elem)
+            self.lists.append((inner, ncols))
+
+    def star_splice_stmt(self, indent):
+        """`[*xs]` and `[*d]` — the other one-thing-per-count walk.
+
+        A different emitter entirely (`_emit_star_splice`) with the same
+        contract, and it was the second site the §3.10 fix had to touch, so it
+        is in the corpus for the same reason the comprehension is.
+        """
+        if self.dicts and self.rng.random() < 0.5:
+            src, kind, _keys = self.rng.choice(self.dicts)
+            if kind == "str":
+                src, _n = self.rng.choice(self.lists) if self.lists else (None, 0)
+                if src is None:
+                    self.list_stmt(indent, "list_build")
+                    return
+        elif self.lists:
+            src, _n = self.rng.choice(self.lists)
+        else:
+            self.list_stmt(indent, "list_build")
+            return
+        result, acc = self._comp_target_pool()
+        self.emit(indent, f"{result} = [*{src}]")
+        self.emit(indent, f"print(len({result}))")
+        t2 = self.fresh("v")
+        self.emit(indent, f"for {t2} in {result}:")
+        self.loop_depth += 1
+        self.emit(indent + 1, f"{acc} = ({acc} + {t2}) & 0xFFFF")
+        self.loop_depth -= 1
+        self.emit(indent, f"print({acc})")
+
+    # ── aliasing, and mutation through a REFERENCE ──
+    #
+    # The classic place for a silent miscompile: a blob is a frame ADDRESS, so
+    # every question here is whether a second name for it resolves to the same
+    # address or to a copy, and a copy is a correct-looking answer. CPython
+    # aliases by construction (`b = a` binds the same object) and answers every
+    # family below through the ORIGINAL name after a write through the second.
+    #
+    # The observable in every family is a read through the OTHER name, never a
+    # read through the one that was written: `b[0] = 9; print(b[0])` is right
+    # under both a copy and an alias.
+    def ref_stmt(self, indent, kind):
+        if kind == "alias_pair":
+            self.alias_pair_stmt(indent)
+            return
+        if kind == "alias_field":
+            self.alias_field_stmt(indent)
+            return
+        if kind == "container_field":
+            self.container_field_stmt(indent)
+            return
+        if kind == "mutate_param":
+            self.mutate_param_stmt(indent)
+            return
+        if kind == "del_key":
+            self.del_stmt(indent)
+            return
+        self.iter_order_stmt(indent)
+
+    def alias_pair_stmt(self, indent):
+        """`b = a` then a write through `b`, read back through `a`."""
+        pool = ([("list", n, name) for name, n in self.lists]
+                + [("tuple", n, name) for name, n in self.tuples])
+        if not pool:
+            self.list_stmt(indent, "list_build")
+            return
+        kindname, n, src = self.rng.choice(pool)
+        alias = self.fresh("A")
+        idx = self.rng.randrange(n)
+        if kindname == "tuple":
+            # A tuple is IMMUTABLE, so the write is a TypeError in the oracle
+            # and the family above cannot include one. Kept in `pool` for the
+            # READ half below and nothing else.
+            self.emit(indent, f"{alias} = {src}")
+            self.emit(indent, f"print({alias}[{idx}])")
+            self.emit(indent, f"print(len({alias}))")
+            return
+        # Declared in the preamble as well as assigned in the body, with the
+        # SAME LENGTH: `self.lists` below makes this name a source for every
+        # later list family, and a name that is only ever bound inside one
+        # branch is an UnboundLocalError in the oracle wherever a later
+        # statement picks it (`del_stmt` did exactly that).
+        self.declare(alias, "[" + ", ".join(["0"] * n) + "]")
+        self.emit(indent, f"{alias} = {src}")
+        self.emit(indent, f"{alias}[{idx}] = {self.rng.randint(1, 90)}")
+        tmp = self.declare(self.fresh("w"), "0")
+        self.emit(indent, f"{tmp} = {src}[{idx}]")
+        self.emit(indent, f"print({tmp})")
+        self.words.append(tmp)
+        self.emit(indent, f"print(len({src}))")
+        self.emit(indent, f"print(len({alias}))")
+        # Two names, one write, one more write through the FIRST name, read
+        # through the second: a copy answers the original and an alias answers
+        # the second write, and only the second write tells them apart.
+        self.emit(indent, f"{src}[{idx}] = {self.rng.randint(1, 90)}")
+        tmp2 = self.declare(self.fresh("w"), "0")
+        self.emit(indent, f"{tmp2} = {alias}[{idx}]")
+        self.emit(indent, f"print({tmp2})")
+        self.words.append(tmp2)
+        # A subscript is never printed straight: `print(a[0])` is refused on
+        # both backends ("cannot tell whether SubscriptExpr is a string or a
+        # number"). Every reader of an element goes through a local.
+        self.lists.append((alias, n))
+
+    def alias_field_stmt(self, indent):
+        """A container in a struct FIELD, aliased to a local and written
+        through the local.
+
+        `h.xs` is a frame offset, so this asks the harder half of the question
+        a local alias asks: whether the alias is the field's own blob or a copy
+        of it made when the field was read. The observable is the read through
+        the FIELD after the write through the ALIAS, and then a second write
+        through the field read back through the alias — one direction cannot tell
+        an alias from a copy, because both answer the name that was written.
+        """
+        cls = self.blob_class("list")
+        if cls is None:
+            self.object_stmt(indent, "obj_new")
+            return
+        name, blob, scalar, _kind, _n, methods = cls
+        var = self.blob_instance(name, blob, scalar, methods, indent)
+        if var is None:
+            return
+        alias = self.fresh("A")
+        tmp = self.declare(self.fresh("w"), "0")
+        self.declare(alias, "[" + ", ".join(["0"] * self.n_of(name, blob)) + "]")
+        self.emit(indent, f"{alias} = {var}.{blob}")
+        self.emit(indent, f"{alias}[0] = {self.rng.randint(1, 90)}")
+        self.emit(indent, f"{tmp} = {var}.{blob}[0]")
+        self.emit(indent, f"print({tmp})")
+        self.emit(indent, f"print(len({var}.{blob}))")
+        self.emit(indent, f"print(len({alias}))")
+        self.words.append(tmp)
+        self.lists.append((alias, self.n_of(name, blob)))
+        # The other direction: write through the FIELD, read through the alias.
+        self.emit(indent, f"{var}.{blob}[0] = {self.rng.randint(1, 90)}")
+        tmp2 = self.declare(self.fresh("w"), "0")
+        self.emit(indent, f"{tmp2} = {alias}[0]")
+        self.emit(indent, f"print({tmp2})")
+        self.words.append(tmp2)
+
+    def n_of(self, cname, blob):
+        """What a subscript INDEX of the blob FIELD of `cname`'s class may be.
+
+        A count for a list field and the KEY LIST for a dict field — both "an
+        integer the source wrote", and a generator that spelled a dict key as an
+        index would read a slot where the program means to look one up.
+        """
+        for name, field, _s, _kind, n, _m in getattr(self, "blobclasses", []):
+            if name == cname and field == blob:
+                return n
+        return 2
+
+    def container_field_stmt(self, indent):
+        """A DICT in a struct field, subscripted through the receiver.
+
+        The list-field half of this is `obj_nested_read_stmt`; this is the pair
+        blob half, and it is a different question rather than a second sample of
+        the same one: a dict field's subscript is a KEY SCAN over a pair blob,
+        so it is the shape where `model.walk_stride`'s other half — the one the
+        `for`-in walk asks — is being asked by a SUBSCRIPT instead. A list
+        field's subscript is an index and the two do not share a lowering.
+        """
+        cls = self.blob_class("dict")
+        if cls is None:
+            self.object_stmt(indent, "obj_new")
+            return
+        name, blob, scalar, _kind, keys, methods = cls
+        var = self.blob_instance(name, blob, scalar, methods, indent)
+        if var is None:
+            return
+        key = self.rng.choice(keys)
+        tmp = self.declare(self.fresh("w"), "0")
+        self.emit(indent, f"{tmp} = {var}.{blob}[{key}]")
+        self.emit(indent, f"print({tmp})")
+        self.emit(indent, f"print(len({var}.{blob}))")
+        self.words.append(tmp)
+        # The MISS as well as the hit, because the two exits of a key scan are
+        # the two ways it can be wrong and a corpus whose subscripts all hit
+        # cannot tell them apart — the argument the ledger's §3.1 makes about
+        # membership, reached through a field this time.
+        absent = str(int(self.rng.choice(keys)) + 100)
+        self.emit(indent, f"print(1 if {absent} in {var}.{blob} else 0)")
+        # The WALK, which is where a pair stride in a field would show: printed
+        # one key per line, because an accumulator over the keys is commutative
+        # and blind to order (`iter_order_stmt` says why at length).
+        target = self.fresh("k")
+        self.emit(indent, f"for {target} in {var}.{blob}:")
+        self.loop_depth += 1
+        self.emit(indent + 1, f"print({target})")
+        self.loop_depth -= 1
+
+    def mutate_param_stmt(self, indent):
+        """A HELPER that writes through a list parameter, read back in `main`.
+
+        The reference crosses a CALL this time, which is the frame boundary a
+        local alias does not cross: the parameter is the callee's own slot and
+        the blob's address has to survive the call. `xs[i] = v` is the write
+        that works on both backends; `xs.append(v)` is REFUSED for a parameter
+        receiver (the capacity is the number of append SITES in the function
+        that BUILT the list, and a helper is not that function) so it is not
+        generated here — a family that is half refused measures the refusal.
+        """
+        helper = self.rng.choice(self.mutfns) if getattr(
+            self, "mutfns", None) else None
+        if helper is None:
+            helper = self.define_mutfns()
+            if helper is None:
+                self.new_word(indent)
+                return
+        name, _n = helper
+        n = self.rng.randint(2, 3)
+        items = ", ".join(str(self.rng.randint(1, 40)) for _ in range(n))
+        xs = self.declare(self.fresh("L"), "[" + items + "]")
+        idx = self.rng.randrange(n)
+        tmp = self.declare(self.fresh("w"), "0")
+        self.emit(indent, f"{tmp} = {name}({xs}, {idx}, "
+                          f"{self.rng.randint(1, 90)})")
+        self.emit(indent, f"print({tmp})")
+        self.emit(indent, f"print(len({xs}))")
+        self.words.append(tmp)
+        self.lists.append((xs, n))
+
+    def define_mutfns(self):
+        """The module-level helpers `mutate_param_stmt` calls.
+
+        Defined ONCE per program and reused, because a program that spells a
+        new helper for every call site measures the definition rather than the
+        call, and `MAX_MUTFNS` keeps the pair blob of defs inside the frame the
+        corpus means to measure.
+        """
+        if getattr(self, "mutfns", None):
+            return self.rng.choice(self.mutfns)
+        if self.defined >= MAX_FUNCS:
+            return None
+        self.defined += 1
+        name = self.fresh("mu")
+        p, i, v = (self.fresh("p") for _ in range(3))
+        # The helper PRINTS nothing and RETURNS the element. `len(p)` of an
+        # unannotated PARAMETER is refused on both backends ("the source does
+        # not say what this operand holds") and `print(p[i])` is refused as a
+        # subscript ("cannot tell whether SubscriptExpr is a string or a
+        # number"), so a helper that observed its own parameter would be a
+        # family that is always refused. Returning the word it wrote puts the
+        # observation on the CALLER's side of the call, where the name is a
+        # local and `print(<call>)` lowers.
+        lines = [f"def {name}({p}, {i}, {v}):", f"    {p}[{i}] = {v}",
+                 f"    return {p}[{i}]"]
+        self.defs.extend(lines)
+        self.mutfns = [(name, 0)]
+        return self.mutfns[0]
+
+    def del_stmt(self, indent):
+        """`del d[k]` and `del xs[i]`, then `len` of what is left.
+
+        NOT `del` inside a loop: CPython raises `RuntimeError: dictionary
+        changed size during iteration` and this path has no exception values, so
+        the oracle would fail and the program would measure nothing. The
+        straight-line `del` is a real lowering on both backends and `len` after
+        it is the observable that sees a `del` that removed nothing.
+        """
+        if self.dicts and self.rng.random() < 0.5:
+            var, kind, keys = self.rng.choice(self.dicts)
+            key = self.rng.choice(keys)
+            self.emit(indent, f"del {var}[{key}]")
+            self.emit(indent, f"print(len({var}))")
+            # Read the deleted key back: a `del` that only decremented the
+            # count answers a count and a miss at the same time.
+            self.emit(indent, f"print(1 if {key} in {var} else 0)")
+            return
+        if not self.lists:
+            self.list_stmt(indent, "list_build")
+            return
+        name, n = self.rng.choice(self.lists)
+        idx = self.rng.randrange(n)
+        self.emit(indent, f"del {name}[{idx}]")
+        # The LENGTH and nothing else. An element read after a `del` is not a
+        # differential program at all: CPython's `del xs[0]` COMPACTS, so index
+        # `n-1` is an IndexError there, while this path leaves the blob's length
+        # alone — a real divergence (filed as
+        # `FORMAL_a_del_of_a_list_element_does_not_compact.md`) and one this
+        # corpus must not walk into, because a CPython failure is an oracle
+        # failure and a sweep that generates them measures its own generator.
+        self.emit(indent, f"print(len({name}))")
+
+    def iter_order_stmt(self, indent):
+        """The ORDER a walk over a table yields, not merely how many keys.
+
+        A dict is a pair blob and CPython's `for k in d` is insertion-ordered
+        for a table whose keys are all distinct and non-colliding, so a table
+        built in a NON-monotonic order is the shape where insertion order and
+        sorted order disagree — and a walk that reorders cannot be seen by
+        `len`.
+
+        **Each key is PRINTED, not accumulated**, and that is the whole
+        measurement. `(acc + k)` over the same keys is commutative: a walk that
+        yields `k0, v0, k1` and one that yields `k0, k1, k2` over a table whose
+        values sum to their keys produce the SAME accumulator, so an
+        accumulating observation is blind to order — which is what this family
+        and the corpus's own `dict_iter` were both doing. It is the same trap as
+        §3.10's, one level up: there the COUNT was right and the content was
+        wrong, and here the SUM is right and the order is wrong.
+        """
+        ints = [src for src, kind, _k in self.dicts if kind == "int"]
+        if not ints:
+            self.build_ordered_dict()
+            ints = [src for src, kind, _k in self.dicts if kind == "int"]
+            if not ints:
+                return
+        src = self.rng.choice(ints)
+        target = self.fresh("k")
+        self.emit(indent, f"print(len({src}))")
+        self.emit(indent, f"for {target} in {src}:")
+        self.loop_depth += 1
+        self.emit(indent + 1, f"print({target})")
+        self.loop_depth -= 1
+
+    def build_ordered_dict(self):
+        """An INTEGER-keyed table whose literal is NOT in ascending order.
+
+        The keys are DISTINCT and drawn from a spread, so CPython's insertion
+        order and any sorted order disagree: this is what makes the walk's
+        ORDER observable, which is the whole subject of the family.
+        """
+        name = self.fresh("D")
+        keys = self.rng.sample(range(1, 60), self.rng.randint(2, 4))
+        values = [self.rng.randint(0, 40) for _ in keys]
+        literal = "{" + ", ".join(f"{k}: {v}" for k, v in zip(keys, values)) + "}"
+        self.declare(name, literal)
+        self.dicts.append((name, "int", [str(k) for k in keys]))
+        return name, "int", [str(k) for k in keys]
+
+    # ── a class whose CONSTRUCTOR takes arguments, and `__len__` ──
+    #
+    # `define_class`'s `__init__` takes NO parameters and assigns literals, so
+    # every class program in the corpus has been `C()` with two fields set to
+    # constants: the constructor's own ARGUMENT passing — a parameter read in
+    # `__init__`, a field bound from it, a call site that spells it — was
+    # reachable from no mix. It is a frame-receiver question like any other (the
+    # receiver is the frame being constructed and the parameters arrive in the
+    # callee's own slots), and it is measured on both backends with and without
+    # a method reading the fields back.
+    #
+    # `__len__` is here for the same reason: it is a DUNDER reached through a
+    # builtin rather than through a method call, so the spelling `len(obj)` is a
+    # different lowering from `obj.size()` and neither generated the other. It
+    # needs TWO fields, because a one-field struct's receiver IS its field
+    # (`model.struct_fits_one_word`) and arm64 then refuses a method that
+    # stores it — a true refusal about that shape and a family that measured it
+    # instead of the dunder.
+    def ctor_stmt(self, indent, kind):
+        if kind == "obj_nested_read":
+            self.obj_nested_read_stmt(indent)
+            return
+        if not self.ctorclasses:
+            if not self.define_ctor_class():
+                self.new_word(indent)
+                return
+        cname, fields, params, methods = self.rng.choice(self.ctorclasses)
+        args = ", ".join(self.int_expr(1) for _ in params)
+        var = self.fresh("c")
+        self.emit(indent, f"{var} = {cname}({args})")
+        # Every field read goes through a LOCAL: `print(obj.field)` is refused on
+        # both backends ("cannot tell whether MemberExpr is a string or a
+        # number"), which is why `define_class`'s own readers do it too.
+        for field in fields:
+            tmp = self.declare(self.fresh("w"), "0")
+            self.emit(indent, f"{tmp} = ({var}.{field}) & 0xFFFF")
+            self.emit(indent, f"print({tmp})")
+            self.words.append(tmp)
+        if kind == "dunder_len":
+            self.emit(indent, f"print(len({var}))")
+            # The dunder twice, because a `__len__` that reads a field the
+            # caller then overwrote is the shape where the receiver's frame and
+            # the callee's own slots disagree.
+            self.emit(indent, f"{var}.{fields[0]} = "
+                              f"{self.rng.randint(0, 40)}")
+            self.emit(indent, f"print(len({var}))")
+            return
+        # A method reading the fields back, which is the second half of the
+        # constructor question: the argument the constructor stored and the one
+        # a method computes from the field have to be the same word.
+        mname, mparams = self.rng.choice(methods)
+        margs = ", ".join(self.int_expr(1) for _ in mparams)
+        tmp = self.declare(self.fresh("w"), "0")
+        self.emit(indent, f"{tmp} = ({var}.{mname}({margs})) & 0xFFFF")
+        self.emit(indent, f"print({tmp})")
+        self.words.append(tmp)
+
+    def ctor_args(self, cname):
+        """The argument list a CONSTRUCTION of `cname` needs, as text.
+
+        Empty for `define_class`'s shape and one-or-two integers for
+        `define_ctor_class`'s. Every construction site spells its class through
+        here rather than through `C()`, because a class whose `__init__` takes
+        a parameter and a call site that spells none is a `TypeError` in the
+        oracle — and an oracle that fails is a program the sweep counts as a
+        generator error instead of measuring.
+        """
+        for name, _fields, params, _methods in self.ctorclasses:
+            if name == cname:
+                return ", ".join(self.int_expr(1) for _ in params)
+        return ""
+
+    def define_ctor_class(self):
+        """A module-level class whose `__init__` takes 1..2 int parameters.
+
+        Module level, like `define_class`, because a `class` inside `main` is
+        refused on both backends ("'self' has no home" — the reading function
+        declares no local by that spelling). The fields are assigned FROM the
+        parameters, which is the whole subject: a field bound to a constant is
+        `define_class`'s shape and is already covered.
+        """
+        if len(self.classes) >= MAX_CLASSES:
+            return None
+        name = self.fresh("K")
+        fields = [self.fresh("g") for _ in range(self.rng.randint(2, 3))]
+        params = [self.fresh("a") for _ in range(self.rng.randint(1, 2))]
+        lines = [f"class {name}:",
+                 f"    def __init__(self, {', '.join(params)}):"]
+        # EVERY field is assigned. A field no parameter reached and no literal
+        # covered is never written, and `self.<that field>` is an AttributeError
+        # in CPython — an oracle failure, not a finding — so the parameters cover
+        # a PREFIX of the fields and the rest take literals. The prefix is what
+        # makes the constructor's ARGUMENT passing observable: the fields after
+        # it are the control a reader can tell from the ones that moved.
+        #
+        # The right-hand side is the BARE parameter, and that is a limit of the
+        # path rather than a style choice: this build inlines a constructor body
+        # by substituting the caller's expression for each parameter and lowering
+        # what is left as a sequence of `self.<field> = …` stores, so
+        # `self.g = (a) & 0xFFFF` is refused with "a read of 'a' in the
+        # right-hand side — a name the `__init__` binds or takes, which this body
+        # does not substitute for a construction argument. Only a bare parameter
+        # has the caller's own expression standing in for it at the construction
+        # site" (measured on both architectures). Every call site masks its
+        # argument (`int_expr`), so the field still holds a small word.
+        for i, f in enumerate(fields):
+            if i < len(params):
+                lines.append(f"        self.{f} = {params[i]}")
+            else:
+                lines.append(f"        self.{f} = "
+                             f"{self.rng.randint(0, 40)}")
+        methods = []
+        for _ in range(self.rng.randint(1, 2)):
+            mname = self.fresh("m")
+            mparams = [self.fresh("q") for _ in range(self.rng.randint(0, 2))]
+            sig = ", ".join(["self"] + mparams)
+            lines.append(f"    def {mname}({sig}):")
+            lines.append("        return ("
+                         + " + ".join(f"self.{f}" for f in fields)
+                         + (f" + {mparams[0]}" if mparams else "")
+                         + ") & 0xFFFF")
+            methods.append((mname, mparams))
+        # `__len__` reads a field it did not construct, which is the shape the
+        # dunder family needs and the only reason this class carries one: a
+        # class without it makes `len(obj)` a refusal on both backends.
+        lines.append("    def __len__(self):")
+        lines.append(f"        return self.{fields[0]} & 0x7")
+        self.defs.extend(lines)
+        self.classes.append((name, fields, methods))
+        self.ctorclasses.append((name, fields, params, methods))
+        return True
+
+    def define_blob_class(self, kind=None):
+        """A module-level class with a LIST in one field, built by `__init__`.
+
+        A separate generator rather than a flag on `define_class` because that
+        one is `classes` mix's corpus and a flag would change every recorded row
+        for that mix — `make_program` seeds on the mix NAME, so a corpus that
+        changed under a name that did not is a row that no longer reproduces.
+
+        The list has to be in the CONSTRUCTOR: `h.xs = [1, 2]` over a field the
+        constructor bound to an integer is REFUSED on both backends ("`h.xs` is
+        declared 'int', which is an integer"), so a family that wrote a list into
+        an int field would measure a refusal rather than nested data. The
+        declared-then-assigned spelling is the one both engines accept, and the
+        field's declared type is what makes it a container.
+        """
+        if len(self.classes) >= MAX_CLASSES:
+            return None
+        name = self.fresh("H")
+        blob = self.fresh("b")
+        scalar = self.fresh("f")
+        # A LIST field or a DICT field, and the difference is not cosmetic: the
+        # two are different blob layouts (one word per count against a pair per
+        # count), so a field holding one is a different lowering from a field
+        # holding the other, and a SUBSCRIPT of a dict field is a key scan where
+        # a subscript of a list field is an index.
+        kind = kind or self.rng.choice(["list", "dict"])
+        n = self.rng.randint(2, 3)
+        if kind == "list":
+            init = "[" + ", ".join(str(self.rng.randint(1, 40))
+                                    for _ in range(n)) + "]"
+        else:
+            keys = [str(v) for v in self.rng.sample(range(1, 40), n)]
+            init = "{" + ", ".join(f"{k}: {self.rng.randint(100, 140)}"
+                                   for k in keys) + "}"
+            n = keys
+        lines = [f"class {name}:", "    def __init__(self):",
+                 f"        self.{blob} = {init}",
+                 f"        self.{scalar} = {self.rng.randint(0, 40)}"]
+        methods = []
+        for _ in range(self.rng.randint(1, 2)):
+            mname = self.fresh("m")
+            mparams = [self.fresh("q") for _ in range(self.rng.randint(0, 2))]
+            sig = ", ".join(["self"] + mparams)
+            lines.append(f"    def {mname}({sig}):")
+            head = f"self.{blob}[0]" if kind == "list" else f"self.{blob}[{n[0]}]"
+            lines.append("        return ("
+                         + " + ".join([head, f"self.{scalar}"]
+                                      + ([f"{mparams[0]}"] if mparams else []))
+                         + ") & 0xFFFF")
+            methods.append((mname, mparams))
+        self.defs.extend(lines)
+        self.classes.append((name, [blob, scalar], methods))
+        self.blobclasses = getattr(self, "blobclasses", [])
+        self.blobclasses.append((name, blob, scalar, kind, n, methods))
+        return True
+
+    def obj_nested_read_stmt(self, indent):
+        """A class whose field holds a LIST, read and written through `self`.
+
+        Nested data in the shape that has no container analogue: the inner blob
+        lives in the RECEIVER's frame rather than in the caller's, so the
+        subscript's address is base-relative twice over. `print(h.xs[0])` is
+        refused, so the element goes through a local first, and `len(h.xs)` is
+        the observation that needs the field's kind to be a container.
+        """
+        cls = self.blob_class("list")
+        if cls is None:
+            self.object_stmt(indent, "obj_new")
+            return
+        name, blob, scalar, _kind, n, methods = cls
+        var = self.blob_instance(name, blob, scalar, methods, indent)
+        if var is None:
+            return
+        idx = self.rng.randrange(n)
+        tmp = self.declare(self.fresh("w"), "0")
+        self.emit(indent, f"{tmp} = {var}.{blob}[{idx}]")
+        self.emit(indent, f"print({tmp})")
+        self.emit(indent, f"print(len({var}.{blob}))")
+        self.words.append(tmp)
+        # The write through the receiver, then the read back: a store that
+        # reached a copy answers the old value here and is otherwise invisible.
+        self.emit(indent, f"{var}.{blob}[{idx}] = {self.rng.randint(1, 90)}")
+        tmp2 = self.declare(self.fresh("w"), "0")
+        self.emit(indent, f"{tmp2} = {var}.{blob}[{idx}]")
+        self.emit(indent, f"print({tmp2})")
+        self.words.append(tmp2)
+        # A METHOD reading the field's element, which is the other half: the
+        # load is relative to the callee's receiver, a frame ADDRESS for a
+        # multi-field struct.
+        mname, mparams = self.rng.choice(methods)
+        margs = ", ".join(self.int_expr(1) for _ in mparams)
+        tmp3 = self.declare(self.fresh("w"), "0")
+        self.emit(indent, f"{tmp3} = ({var}.{mname}({margs})) & 0xFFFF")
+        self.emit(indent, f"print({tmp3})")
+        self.emit(indent, f"print(len({var}.{blob}))")
+        self.words.append(tmp3)
+
+    def blob_class(self, kind=None):
+        """A blob-field class of the requested KIND, defined on first use.
+
+        `kind` is None for "either", which is what a family with no opinion
+        about the layout asks for. Asking for a kind the program has none of
+        DEFINES one rather than returning None, because a family that gave up
+        would silently stop measuring its subject; the class count is bounded by
+        `MAX_CLASSES`, so a program that asks too often keeps the first one.
+        """
+        have = getattr(self, "blobclasses", None) or []
+        if kind is not None:
+            same = [c for c in have if c[3] == kind]
+            if same:
+                return self.rng.choice(same)
+        elif have:
+            return self.rng.choice(have)
+        # The class is DEFINED for the requested kind rather than for whatever
+        # the draw would have produced: a family that asked for a list field and
+        # got a dict one back would measure the wrong layout and say nothing
+        # about the one it named.
+        if not self.define_blob_class(kind):
+            return None
+        have = getattr(self, "blobclasses", [])
+        if kind is not None:
+            same = [c for c in have if c[3] == kind]
+            if same:
+                return self.rng.choice(same)
+        return self.rng.choice(have) if have else None
+
+    def blob_instance(self, cname, blob, scalar, methods, indent=1):
+        """A local holding an instance of `cname`, constructed once per program.
+
+        The preamble copy and the body's construction are the same call, for the
+        reason `object_stmt`'s `obj_new` gives: an object the program only
+        sometimes constructs is an AttributeError in CPython. Reusing the
+        instance rather than making a new one per statement keeps the family
+        measuring the REFERENCE rather than the constructor.
+        """
+        for var, name, _f, _m in self.objs:
+            if name == cname:
+                return var
+        var = self.fresh("h")
+        self.declare(var, f"{cname}()")
+        self.emit(indent, f"{var} = {cname}()")
+        self.objs.append((var, cname, [blob, scalar], methods))
+        return var
+
+    # ── a SET, which lowers as a LIST ──
+    #
+    # `formal/model.py` says it in one line at the blob-layout comment ("A set
+    # lowers as a list"), and that line is the WHOLE of the value model for a
+    # set: no hashing, no buckets, no probe sequence — an insertion-ordered blob
+    # of distinct words. So `len` and membership agree with CPython and ITERATION
+    # ORDER does not, for any table whose CPython order is not its insertion
+    # order. That divergence is `KNOWN_DIVERGENCES`' `set_order` and it is
+    # generated ON PURPOSE, for the reason `str_subscript` is: the corpus is the
+    # only thing that can notice the day the model changes.
+    #
+    # The elements are DISTINCT small integers, so a `set` literal has no
+    # duplicates to disagree about and `len` is the count of elements rather
+    # than the count of a literal CPython de-duplicated.
+    def set_stmt(self, indent, kind):
+        if kind == "set_build" or not self.sets:
+            name = self.fresh("S")
+            n = self.rng.randint(2, 4)
+            elems = self.rng.sample(range(1, 30), n)
+            literal = "{" + ", ".join(str(v) for v in elems) + "}"
+            # Bound ONCE, in the preamble, and never rebound by the body — the
+            # discipline `build_dict` states and for the same class of reason:
+            # `model._note_dict_init` keeps the initializer a name was bound to
+            # and a SECOND literal for the same name retracts it, so a program
+            # that spells the same table twice has no answerable element kind.
+            # A set is a list with the same rule, and the cost is the same: the
+            # table exists from the first statement of `main` whichever way the
+            # branch went. That is the conservative direction for an oracle.
+            self.declare(name, literal)
+            self.sets.append((name, elems))
+            return
+        name, elems = self.rng.choice(self.sets)
+        if kind == "set_len":
+            self.emit(indent, f"print(len({name}))")
+            return
+        if kind == "set_in":
+            # A member and a NON-member, because the two exits of a scan are the
+            # two ways it can be wrong and a corpus whose membership tests all
+            # hit cannot tell them apart — the argument `FORMAL_known_limits.md`
+            # §3.1's x86-64 membership bug makes.
+            needle = (self.rng.choice(elems) if self.rng.random() < 0.6
+                      else self.rng.choice([v for v in range(40, 60)]))
+            self.emit(indent, f"print(1 if {needle} in {name} else 0)")
+            return
+        # set_iter: the ORDER. Each element is PRINTED in the loop, NOT
+        # accumulated — `(acc + x)` is commutative over a set's elements, so an
+        # accumulating observation is blind to order, and this is the one family
+        # in the corpus whose subject IS order. The count is printed beside it
+        # because the count is the part that DOES agree, and that is exactly why
+        # it hid the dict-walk defect in §3.10.
+        target = self.fresh("s")
+        self.emit(indent, f"print(len({name}))")
+        self.emit(indent, f"for {target} in {name}:")
+        self.loop_depth += 1
+        self.emit(indent + 1, f"print({target})")
+        self.loop_depth -= 1
+
+
     # ── a class, and the frame receiver it makes ──
     #
     # Spelled `class`, not `struct`, and with TWO fields minimum: a one-field
@@ -3486,11 +4448,30 @@ class Gen:
             # preamble and the first assignment agree — an object the program
             # only sometimes constructs is an AttributeError in CPython and
             # whatever the slot held on this path.
-            self.declare(var, f"{name}()")
-            self.emit(indent, f"{var} = {name}()")
+            #
+            # The ARITY is the class's own: `--mix objs` defines a class whose
+            # `__init__` takes parameters (`define_ctor_class`), and spelling
+            # `K1()` for one is a TypeError in the oracle — a generator error
+            # on every program the mix produced, which is the shape
+            # `cpython_answer` returns `("error", …)` for and which a sweep
+            # would report as a generator error rather than as a finding.
+            ctor = self.ctor_args(name)
+            self.declare(var, f"{name}({ctor})")
+            self.emit(indent, f"{var} = {name}({ctor})")
             self.objs.append((var, name, fields, methods))
             return
-        var, _cname, fields, methods = self.rng.choice(self.objs)
+        # Only an object whose fields are WORDS. `define_blob_class` puts a
+        # LIST or a DICT in one field, and `(h.xs) & 0xFFFF` is CPython's
+        # TypeError — so a reader that picked a blob-field class would fail in
+        # the oracle rather than measure anything. The blob-field families
+        # (`obj_nested_read_stmt`, `alias_field_stmt`,
+        # `container_field_stmt`) are the readers for those classes.
+        wordy = [o for o in self.objs
+                 if o[1] not in {c[0] for c in getattr(self, "blobclasses", [])}]
+        if not wordy:
+            self.new_word(indent)
+            return
+        var, _cname, fields, methods = self.rng.choice(wordy)
         if kind == "field_read":
             # Through a WORD, never straight into `print`.  `print(obj.field)`
             # is refused on both architectures with "print() cannot tell
@@ -3561,6 +4542,19 @@ class Gen:
         if "classes" in self.mix:
             for _ in range(self.rng.randint(1, 2)):
                 self.define_class()
+        # The `objs` mix's classes, defined HERE rather than by the body: a
+        # `class` inside `main` is refused on both backends ("'self' has no
+        # home"), so a class the body constructs has to be at module level, and
+        # the body may construct it before any statement of its own has run.
+        if "ctor_args" in self.mix or "dunder_len" in self.mix:
+            if not self.define_ctor_class():
+                for _ in range(self.rng.randint(0, 1)):
+                    self.define_class()
+        # The `objs` mix needs an INSTANCE to write a container field on, and
+        # `object_stmt`'s `obj_new` makes one lazily — so the first
+        # `container_field` / `obj_nested_read` statement defines the class it
+        # belongs to. The one here is the ordinary `classes` shape, which is
+        # what those two families read a field through.
         # The two families that need a module-level binding BEFORE `main` runs,
         # emitted here rather than by the body: a dict comprehension and a
         # `import` the body will use, and a first global so `global_read` has
@@ -4183,14 +5177,33 @@ def main():
 # only read the bare one would attribute nothing at all.
 STR_ASSIGN = re.compile(r"^ *(\w+) *(?::[^=\n]*)?= *\"", re.M)
 
+# The same shape for a SET literal, for `features_of`'s `set_order` row and for
+# the reason that row cannot be a plain pattern: a walk over a list bound to the
+# same spelling is right on both engines, so only the binding says which. The
+# closing brace is what distinguishes `{1, 2}` from a dict literal `{1: 2}` —
+# both are `= {…}` textually and they are different value models, and a
+# neutraliser that rewrote a DICT literal into a list would take a dict's
+# subscript down with it.
+SET_ASSIGN = re.compile(r"^ *(\w+) *= *\{[^{}:]*(?:,\s*[^{}:]*)*\} *$", re.M)
+
 
 def features_of(source):
     """The known-divergent constructs the text uses."""
     strs = STR_ASSIGN.findall(source)
+    sets = SET_ASSIGN.findall(source)
     out = set()
     for name, pats in FEATURE_PATTERNS.items():
         if name == "str_subscript":
             if any(re.search(r"\b%s\s*\[" % re.escape(n), source) for n in strs):
+                out.add(name)
+            continue
+        if name == "set_order":
+            # A walk over a SET, and only over a set: the name has to be one a
+            # set literal bound, because a walk over a list bound to the same
+            # spelling is right on both engines and blaming it would forgive a
+            # real disagreement.
+            if any(re.search(r"\bfor\s+\w+\s+in\s+%s\s*:" % re.escape(n),
+                             source) for n in sets):
                 out.add(name)
             continue
         if any(re.search(p, source) for p in pats):

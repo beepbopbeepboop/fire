@@ -1257,6 +1257,103 @@ CASES = [
      "    del a[1:3]\n"
      "    sys.stdout.write(\"%d %d %d\" % (a[0], a[1], a[2]))\n"
      "    return 0\n"),
+    # ── `del` DESTROYED A VARIABLE, because the lowering used the registers
+    # the allocator hands to variables ──
+    #
+    # Every other `del` row above puts the container and the observation in the
+    # same statement or reads the container back, so none of them can see a
+    # LOCAL that the `del` overwrote.  These three do: two integers flank the
+    # container, the `del` runs, and the two integers are printed afterwards.
+    #
+    # `CALLEE_SAVED` is (RBX, R12, R13, R14, R15) and it is the WHOLE of the
+    # allocator's pool, so a local in one of them is destroyed by any lowering
+    # that uses one as scratch — and all three `del` lowerings did, holding a
+    # blob base, a count and an index across a loop.  Measured on x86-64 only,
+    # exit 0, no diagnostic:
+    #
+    #     def main() -> Int32:
+    #         a = 11
+    #         xs = [0]
+    #         b = 22
+    #         del xs[0]
+    #         print(a, b)      # x86-64: 11 0     arm64 and CPython: 11 22
+    #         return 0
+    #
+    # `b`'s home was R13, which the list lowering loaded with the blob's COUNT
+    # and then decremented; with the list declared BEFORE both integers the home
+    # was R12 and the value printed was the blob's ADDRESS (13095839192 above),
+    # so the same defect answers a number or an address depending only on the
+    # order the declarations happen to be allocated in.  arm64 was never
+    # affected: its local file stops at X9 and these lowerings use X10-X15,
+    # which is the whole reason the property is stated as "outside CALLEE_SAVED"
+    # rather than as a list of registers.
+    #
+    # One row per lowering, because they are three different algorithms (as the
+    # three rows above already say) and a fix that repaired one and left the
+    # other two would pass a single row.
+    ("del_list_index_keeps_the_locals_around_it",
+     "def main():\n"
+     "    var a = 11\n"
+     "    var xs = [0]\n"
+     "    var b = 22\n"
+     "    del xs[0]\n"
+     "    printf(\"%d %d\", a, b)\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    a = 11\n"
+     "    xs = [0]\n"
+     "    b = 22\n"
+     "    del xs[0]\n"
+     "    sys.stdout.write(\"%d %d\" % (a, b))\n"
+     "    return 0\n"),
+    # The container FIRST, so the locals land on the other two callee-saved
+    # registers and the destroyed value is an ADDRESS rather than a count.  The
+    # pair of rows is the measurement: one defect, two wrong answers.
+    ("del_list_index_after_the_container_keeps_the_locals",
+     "def main():\n"
+     "    var xs = [0]\n"
+     "    var a = 11\n"
+     "    var b = 22\n"
+     "    del xs[0]\n"
+     "    printf(\"%d %d\", a, b)\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    xs = [0]\n"
+     "    a = 11\n"
+     "    b = 22\n"
+     "    del xs[0]\n"
+     "    sys.stdout.write(\"%d %d\" % (a, b))\n"
+     "    return 0\n"),
+    ("del_dict_key_keeps_the_locals_around_it",
+     "def main():\n"
+     "    var a = 11\n"
+     "    var d = {1: 5, 2: 6}\n"
+     "    var b = 22\n"
+     "    del d[1]\n"
+     "    printf(\"%d %d\", a, b)\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    a = 11\n"
+     "    d = {1: 5, 2: 6}\n"
+     "    b = 22\n"
+     "    del d[1]\n"
+     "    sys.stdout.write(\"%d %d\" % (a, b))\n"
+     "    return 0\n"),
+    ("del_list_slice_keeps_the_locals_around_it",
+     "def main():\n"
+     "    var a = 11\n"
+     "    var xs = [0, 5, 6]\n"
+     "    var b = 22\n"
+     "    del xs[0:1]\n"
+     "    printf(\"%d %d\", a, b)\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    a = 11\n"
+     "    xs = [0, 5, 6]\n"
+     "    b = 22\n"
+     "    del xs[0:1]\n"
+     "    sys.stdout.write(\"%d %d\" % (a, b))\n"
+     "    return 0\n"),
     # A tuple target NESTED inside another tuple target.  The outer unpack
     # only checks top-level arity, so the inner pair is a second emitter with
     # its own register discipline — and `tuple_target_in_a_constructor_body_
@@ -2050,6 +2147,69 @@ def run_refusal(name, mojo_src, needle, tmpdir, verbose):
     return True, ""
 
 
+def static_del_scratch_check():
+    """No `_emit_del_*` lowering may name a register `CALLEE_SAVED` holds.
+
+    The behavioural rows above are what pin the fix; this is what keeps the class
+    closed, because the class is a REGISTER ALLOCATION fact and the four rows
+    only say that four particular programs came out right.  `CALLEE_SAVED` is
+    the allocator's entire pool, so a lowering that uses one of those registers
+    as scratch silently destroys whichever local lives there — a wrong answer
+    with no diagnostic, on one architecture only, in a program whose `del`
+    happens to sit between two unrelated assignments.
+
+    A SOURCE check rather than a build check because the property is about the
+    text of the emitter: there is no program that fails to build, and the
+    cheapest witness is reading the three functions.  The functions are named
+    explicitly rather than matched by a prefix, so a fourth `del` lowering that
+    arrives later is not silently unchecked — the list and the check have to be
+    updated together, and the failure says so.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "formal", "x86_64_codegen.py")
+    with open(path) as f:
+        lines = f.read().splitlines()
+    wanted = ("_emit_del_list_index", "_emit_del_dict_key",
+              "_emit_del_list_range")
+    # `formal/x86_64.py` is the single definition of the pool, imported rather
+    # than restated, so this check cannot pass against a stale copy of it.
+    from formal.x86_64 import CALLEE_SAVED
+    banned = {r.name for r in CALLEE_SAVED}
+    problems = []
+    for fn in wanted:
+        start = None
+        for i, line in enumerate(lines):
+            if line.startswith(f"    def {fn}("):
+                start = i
+                break
+        if start is None:
+            problems.append(f"{fn}: no such method in x86_64_codegen.py")
+            continue
+        end = len(lines)
+        for j in range(start + 1, len(lines)):
+            if lines[j].startswith("    def "):
+                end = j
+                break
+        body = "\n".join(lines[start:end])
+        # Only the CODE lines: a docstring is allowed to name the registers it
+        # deliberately does not use, and this file's comments do exactly that.
+        code = "\n".join(ln for ln in lines[start:end]
+                         if not ln.strip().startswith("#"))
+        for reg in sorted(banned):
+            for m in ("Reg." + reg, '"' + reg + '"'):
+                if m in code:
+                    problems.append(
+                        f"{fn}: names {reg}, which CALLEE_SAVED hands to a "
+                        f"local ({banned})")
+                    break
+    if problems:
+        return False, ("; ".join(sorted(set(problems)))
+                       + " — add the new lowering to `static_del_scratch_"
+                         "check`'s `wanted` and give it scratch outside "
+                         "CALLEE_SAVED")
+    return True, ""
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -2074,6 +2234,17 @@ def main():
         wanted = [c for c in wanted if c[0][0] in args.cases]
 
     passed = failed = 0
+    # The static half always runs and costs nothing: a `cases` subset is a
+    # build-economy argument, not a reason to stop checking that the three `del`
+    # lowerings still avoid the allocator's registers.
+    ok, detail = static_del_scratch_check()
+    if ok:
+        passed += 1
+        print("  PASS  del_lowerings_use_no_allocator_register")
+    else:
+        failed += 1
+        print(f"  FAIL  del_lowerings_use_no_allocator_register: {detail}")
+
     with tempfile.TemporaryDirectory() as tmpdir:
         for (name, mojo_src, third), is_refusal in wanted:
             try:

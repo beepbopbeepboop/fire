@@ -60,7 +60,9 @@ CANONICAL_ELEM_TYPES = (F.IntLiteral, F.BoolLiteral, F.StringLiteral)
 # The count is a PAIR count for a dict, which is why scanning one at the
 # element stride only ever reaches the first half of it (slot i of a pair blob
 # alternates key, value). `walk_stride` is the rule that keeps a walk over a
-# blob — a `for` target, a membership test — from making that mistake.
+# blob — a `for` target, a membership test, a comprehension generator, a `*`
+# splice — from making that mistake, and it enumerates those four consumers
+# because a consumer it does not name is one nobody audits.
 
 BLOB_HEADER_BYTES = 8      # the i64 count
 ELEM_STRIDE = 8            # list element / pair slot stride
@@ -75,10 +77,22 @@ def walk_stride(is_dict: bool) -> int:
     a pair blob and a walk over it steps by the pair.  At the element stride a
     walk alternates keys and values, which is wrong in two ways at once: it
     binds half the values, and bounded by the pair count it can only ever see
-    half the dict.  Every walk that yields ONE THING per count asks this, which
-    is a `for x in …` target and a `x in …` membership needle and nothing else;
-    the emitters that also want the address of pair `i`'s VALUE want
+    half the dict.  Every walk that yields ONE THING per count asks this; the
+    emitters that also want the address of pair `i`'s VALUE want
     `pair_value_offset` and are not asking this question.
+
+    **There are FOUR consumers, and the list used to name two of them**, which is
+    the whole reason the other two drifted: a `for x in …` target, a `x in …`
+    membership needle, a comprehension generator's iterable, and a `*` splice's
+    operand.  The last two were hardcoded to the element stride on BOTH
+    backends while this function and both `for`-in walkers read it, so
+    `[k for k in d]` and `[*d]` built `[k0, v0, k1]` and exited 0 — and the
+    COUNT of the result was right, because three PAIRS and three WORDS are the
+    same number, so a measurement that looked only at `len` agreed with CPython
+    on the buggy programs.  The finding and its four sites are
+    `bugs/FORMAL_fuzz_ledger.md` §3.10.  So this docstring enumerating its
+    consumers is load-bearing rather than decorative: a consumer not named here
+    is a consumer that will not be audited.
     """
     return PAIR_STRIDE if is_dict else ELEM_STRIDE
 
