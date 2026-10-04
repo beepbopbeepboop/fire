@@ -136,7 +136,7 @@ class TestRefusingModule(unittest.TestCase):
 
     def _name(self, msg, importer):
         key, _exact, stem = P.refusing_module(
-            msg, self.probe / importer, _rel(self.probe))
+            msg, self.probe / importer, _rel(self.probe), self.probe)
         return key, stem
 
     def test_the_chain_prefix_still_names_its_bare_basename(self):
@@ -184,11 +184,35 @@ class TestRefusingModule(unittest.TestCase):
         self.assertEqual(self._name(msg, "std/os/path/path.mojo")[0],
                          "std/os/fstat.mojo")
         _key, _exact, stem = P.refusing_module(
-            msg, self.probe / "std/ffi/__init__.mojo", _rel(self.probe))
+            msg, self.probe / "std/ffi/__init__.mojo", _rel(self.probe),
+            self.probe)
         self.assertIsNone(_exact,
                           "`..fstat` from std/ffi resolves to nothing, so the "
                           "group must stay unrewritable rather than guess")
         self.assertEqual(stem, "fstat")
+
+    def test_a_module_outside_the_copy_is_not_a_target(self):
+        """THE REAL STDLIB IS ONLY EVER READ, and this is where that is enforced.
+
+        The scope this tool takes by default is this repository's own `*.py`,
+        which is measured against ITSELF and never rewritten — and for such an
+        importer the resolver's answer is a path in the real stdlib. That path
+        EXISTS, so an `is_file()` check passes, and the next thing the walk does
+        is `write_text` over it. The measured run this fix came from had exactly
+        that shape available to it.
+        """
+        real = STDLIB / "std" / "format" / "_utils.mojo"
+        self.assertTrue(real.is_file(), "the real stdlib must be where it says")
+        importer = pathlib.Path(HERE) / "tools" / "formal_chain_probe.py"
+        _key, exact, stem = P.refusing_module(
+            EXPORT_GATE["std/format/_utils.mojo"][1], importer,
+            _rel(self.probe), self.probe)
+        self.assertIsNone(exact,
+                          f"a path outside the copy must not be actionable, or "
+                          f"the stub step writes the real stdlib ({real})")
+        self.assertEqual(stem, "_utils",
+                         "the basename half of the answer is still available, "
+                         "and `stub_targets` will look for it INSIDE the copy")
 
 
 @unittest.skipUnless(STDLIB.is_dir(), f"no stdlib at {STDLIB}")
@@ -205,7 +229,7 @@ class TestStubTargets(unittest.TestCase):
 
     def _targets(self, msg, importer):
         key, exact, stem = P.refusing_module(
-            msg, self.probe / importer, _rel(self.probe))
+            msg, self.probe / importer, _rel(self.probe), self.probe)
         return key, P.stub_targets(
             {"exact": exact, "stem": stem, "members": []}, self.probe)
 

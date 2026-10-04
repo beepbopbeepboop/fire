@@ -87,6 +87,13 @@ import sys
 
 HERE = pathlib.Path(__file__).resolve().parent.parent
 FIRE = str(HERE / "fire.py")
+# `formal.imports.resolve_module_path` below is the build's own resolver, and
+# this tool is run as `python3 tools/formal_chain_probe.py`, which puts `tools/`
+# on sys.path and NOT the repository root. Without this the import fails, the
+# resolution returns None, and every export-gate group falls back to a basename
+# — which is the whole bug, silently back.
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
 DEFAULT_ROUNDS = 9
 BUILD_TIMEOUT = 120
 
@@ -104,16 +111,24 @@ _CHAIN_PREFIX_RE = re.compile(r"([\w./]+\.mojo): ")
 _EXPORT_GATE_RE = re.compile(r"is imported from `([^`]+)`")
 
 
-def _resolve_module(name, importer):
-    """Where the build's own resolver puts module `name`, or None.
+def _resolve_module(name, importer, probe):
+    """Where module `name` lives INSIDE the copy, or None.
 
     `formal.imports.resolve_module_path` rather than a path rule written here,
     because it is the resolver the builds that produced these messages used: it
     knows that `std.math` is `std/math/__init__.mojo` and that `..fstat` is
     relative to the importing FILE, and a second spelling rule in this tool
-    would be a second thing to keep right. None on any failure — an unresolvable
-    name leaves its group unrewritable, which is the honest outcome and not a
-    reason to guess a path.
+    would be a second thing to keep right.
+
+    **A path outside `probe` is None**, and that is a safety property rather
+    than a tidiness one. The resolver is pointed at the real stdlib by
+    `MOJO_STDLIB`, which this process sets for its BUILDS and not for itself, so
+    an unfiltered answer names a file in `../new-modular/Mojo/stdlib` — which
+    exists, so a naive `is_file()` check passes, and the next thing the tool does
+    is `write_text` over it. This module's contract is that the real stdlib is
+    only ever read, so a resolution the walk may not act on is discarded here and
+    the group falls back to the basename search, which only ever looks inside the
+    copy.
     """
     if not name or not importer:
         return None
@@ -122,10 +137,15 @@ def _resolve_module(name, importer):
         found = resolve_module_path(name, relative_to=str(importer))
     except Exception:
         return None
-    return pathlib.Path(found).resolve() if found else None
+    if not found:
+        return None
+    found = pathlib.Path(found).resolve()
+    if under_stdlib(found, probe) is None:
+        return None
+    return found
 
 
-def refusing_module(msg, importer, rel):
+def refusing_module(msg, importer, rel, probe):
     """Which module refused, as `(group key, exact file or None, stem)`.
 
     `exact` is the one file to rewrite when the resolver could place the module;
@@ -138,7 +158,8 @@ def refusing_module(msg, importer, rel):
 
     `rel` renders a path relative to the copy, for the printed group key and the
     example line, so a reader sees `std/format/_utils.mojo` rather than an
-    absolute path under `.tmp`.
+    absolute path under `.tmp`. `probe` is the copy's root, which is what decides
+    whether a resolution is one this tool may act on (`_resolve_module`).
     """
     chain = _CHAIN_PREFIX_RE.findall(msg)
     if chain:
@@ -149,7 +170,7 @@ def refusing_module(msg, importer, rel):
         return NO_MODULE, None, ""
     name = m.group(1)
     stem = name.rsplit(".", 1)[-1]
-    exact = _resolve_module(name, importer)
+    exact = _resolve_module(name, importer, probe)
     if exact is None:
         return name, None, stem
     return rel(exact) or str(exact), exact, stem
@@ -263,6 +284,15 @@ def main() -> int:
     scope = [probe / under_stdlib(p, stdlib) if under_stdlib(p, stdlib) else p
              for p in scope]
     env = dict(os.environ, MOJO_STDLIB=str(probe))
+    # …and for THIS process, so `formal.imports.resolve_module_path` — which the
+    # walk imports, not the builds — places a module inside the copy on its LAST
+    # pass too (`module_loader`, which reads STDLIB_PATH once at import). It is
+    # belt to `_resolve_module`'s filter rather than the thing that makes
+    # resolution land in the copy: a stdlib module resolves against the roots
+    # walked up from the importing file's own directory, and those are inside the
+    # copy by construction. It is set here, before the first import, because that
+    # is the only time it can be.
+    os.environ["MOJO_STDLIB"] = str(probe)
 
     print(f"stdlib copy: {probe}")
     print(f"scope: {len(scope)} file(s); {args.rounds} round(s) on "
@@ -280,7 +310,7 @@ def main() -> int:
                 crashed.append((path, msg))
                 continue
             key, exact, stem = refusing_module(
-                msg, path, lambda p: under_stdlib(p, probe))
+                msg, path, lambda p: under_stdlib(p, probe), probe)
             group = groups.get(key)
             if group is None:
                 # First answer wins the placement. Two files in the same scope
