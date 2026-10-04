@@ -6,6 +6,22 @@ files** — that is the finding, and it is the answer to the question the sweep
 cannot answer. What is left open is the chain, link by link, with an owner per
 link.
 
+**Status (2026-10-04, `work/formal21-6`: nothing left to do here, and the reason
+is worth one line.** Round 2 of this scope
+(`FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md`, `sweep20:std-os-io-2`)
+re-measured it on a DIFFERENT package set — round 2 drops `sys` and `time` and
+adds `python` and `_gpu` — and found the whole chain gone: **zero** of the 43
+refusals name `binary_heap.mojo`, `tile.mojo` or `builtin_slice.mojo`, and
+every one of them is one of TWO features (`formal19-1`'s bare-call inference and
+`formal16-2`'s constants-only module). **§2's table below is therefore a
+HISTORICAL reading of a chain that no longer exists**, kept because it is what
+told the next worker where to look; the owners it names are still the owners, and
+the one link of it that could have been this claim's to move (`List.clear`,
+link 1′) is `formal18-2`'s and never was this scope's. The one open item round 2
+left for the INSTRUMENT — §6 item 1 there, "cannot rank this scope's causes" — is
+closed as of this branch (`tools/formal_sweep.py::refusing_module`, with `uses:`
+measured for the row that read NOT MEASURED on 21 of 22 groups).
+
 **Status (2026-10-03, second pass — the chain has MOVED and two of its three
 links now point at closed or mis-owned work).** Re-measured on this tree, both
 architectures, the same 46 files, one `fire.py build --formal --no-prove` each
