@@ -613,6 +613,14 @@ def _resolved_export_entry(gen, module: str, name: str, info):
     _out['c_parameters'] = _cparams
     _out['signature'] = (_ret + ' ' + _as_str(name) + ' ('
                          + (', '.join(_cparams) or 'void') + ')')
+    # WHETHER `_ret` was measured or defaulted, because a consumer must be able
+    # to tell. An unannotated `def make(n): return Thing(n)` has no annotation
+    # for `_resolve_type` to read, so `_ret` is the `int64_t` fallback and the
+    # DEFINING module's own emission recorded the truth (`Thing *`, from the
+    # `return` statement's own type) under the mangled name. A default is not
+    # evidence, and `register_imported_symbol` must not let one overwrite a
+    # measurement -- see its own comment and the bug doc named there.
+    _out['c_return_type_is_default'] = not _fn.return_type
     return _out
 
 def register_imported_symbol(gen, name: str, info: dict,
@@ -652,8 +660,31 @@ def register_imported_symbol(gen, name: str, info: dict,
     else:
         _info['original_name'] = _orig
     _as_dict(gen.imported_symbols)[_sk] = _info
+    # `func_return_types` is the CALL SITE's answer, and the defining module's
+    # own emission has usually already recorded a MEASURED one under the
+    # mangled name (and propagated it here). So a `c_return_type` that
+    # `_resolved_export_entry` marked as its own `int64_t` fallback is
+    # recorded in `imported_symbols` -- where `_func_mangleable` and
+    # `_func_csym` want it -- and NOT written over that measurement.
+    #
+    # Without the guard: `import lm.mid` + `lm.mid.make(7)`, where
+    # `def make(n): return Thing(n)` is UNANNOTATED. The entry's default
+    # `int64_t` reached `func_return_types['make']`, the call site minted
+    # `int64_t _t2` for a `Thing *` return, and gcc rejected the whole
+    # translation unit:
+    #
+    #   lm/main.py:4:7: error: assignment to 'int64_t' from 'Thing *'
+    #   makes integer from pointer without a cast
+    #
+    # measured, and it is the shape `test_link_mode.py`'s
+    # `test_transitive_struct_method_is_not_variadic_stubbed` and
+    # `test_unannotated_param_with_disagreeing_call_sites` build. Found while
+    # merging the ten bugs4 branches: bugs4-1 added this registration (for a
+    # DIFFERENT bug -- a bare `import <sibling>` recorded no member, so the
+    # re-dispatched bare call found nothing and emitted a weak 0-returning
+    # stub), and master, which had no such registration, was green.
     _c_ret = _info.get('c_return_type')
-    if _c_ret:
+    if _c_ret and not _info.get('c_return_type_is_default'):
         gen.func_return_types[_sk] = _c_ret
     _c_params = _info.get('c_parameters')
     if write_param_types and _c_params is not None:
