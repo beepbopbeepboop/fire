@@ -42,6 +42,14 @@ sys.path.insert(0, os.path.join(HERE, "tools"))
 import formal_sweep as S
 from formal import lean as L
 
+# The measured per-module closure census, from the file whose subject is the
+# trust boundary. Imported rather than copied because a pinned number in two
+# places is a number with two answers the first time one of them is updated —
+# and `test_formal_admitted.py` owns it, being the module that owns what a proof
+# is allowed to rest on. A cross-test import of this shape is already how
+# `test_formal_admitted.py` gets its own helpers.
+from test_formal_admitted import AXIOM_CLOSURE  # noqa: E402
+
 LIB = os.path.join(HERE, "lib")
 
 
@@ -1616,6 +1624,153 @@ class TestLeanLaunchEstate(unittest.TestCase):
 # `_effective_digest` is the fix: this module's own bytes AND every
 # `LIBRARY_MODULES` name its `import` lines name, transitively. These cases are
 # pure file-content arithmetic, so nothing here runs Lean.
+class TestAxiomClosureCensus(unittest.TestCase):
+    """What a proof in `lib/` actually RESTS ON, which no text scan can read.
+
+    `bugs/FORMAL_native_decide_axiom.md` named this the measurement a text
+    census cannot make and left it unrun, and it is the number FORMAL.md §7
+    publishes in row 10. It also named the wrong AXIOM: Lean 4.32.2's
+    `native_decide`/`bv_decide` each declare a fresh axiom per USE, named after
+    the declaration and the tactic (`t32s_t8s._native.bv_decide.ax_1_5`), and
+    `#print axioms` over all 375 theorems in `lib/` reports `Lean.ofReduceBool`
+    for NONE of them. So this file is where "the axiom is not the one we
+    published" is measured rather than argued, and where the two disagreements
+    between the site census and the closure census are pinned:
+
+    * `text_only` — the site's OWN text names a decide tactic and its closure has
+      no such axiom. A losing tactic alternative is still text, so
+      `library_trust`'s 751 is an overcount at theorem granularity, and each of
+      these rows is a place where replacing a site would have changed nothing.
+    * `closure_only` — no site in the text and an axiom in the closure, because
+      it is reached THROUGH another theorem. `library_trust` cannot see these at
+      all, which is the whole argument for measuring the closure.
+
+    Skipped without Lean, which is this file's own stated rule ("nothing here
+    runs Lean except where a case says so and skips without it"), so the
+    Lean-free halves — the scanner, the classifier and the `#print axioms`
+    parser — live in `test_formal_admitted.py` and cost nothing.
+    """
+
+    def setUp(self):
+        self.lean = _lean()
+        if not self.lean:
+            self.skipTest("lean not installed (see ./lean-toolchain)")
+
+    def test_the_closure_census_says_what_the_text_census_cannot(self):
+        import time
+
+        from formal import admitted as A
+        lib = A.lean_dir(HERE)
+        started = time.monotonic()
+        census = A.theorem_axiom_census(self.lean, lib)
+        summary = A.axiom_census_summary(census, lib)
+        elapsed = time.monotonic() - started
+
+        # The launcher's bound is the report, never the exit code: a census that
+        # was killed part-way has answered for a PREFIX of the theorems, and
+        # every count below would then be an undercount read as a pass.
+        for mod, asked in census["asked"].items():
+            self.assertIsNone(asked["exceeded"],
+                              f"{mod}: the census was cut short — "
+                              f"{asked['exceeded']} — so its counts are a "
+                              f"prefix and not a verdict")
+            self.assertEqual(asked["answered"], asked["asked"],
+                             f"{mod}: Lean answered for {asked['answered']} of "
+                             f"{asked['asked']} theorems it was asked about; "
+                             f"an unanswered theorem is neither clean nor "
+                             f"reaching, and reporting it as clean is how this "
+                             f"reads as a pass")
+
+        for mod, want in AXIOM_CLOSURE.items():
+            self.assertIn(mod, summary, f"{mod} is missing from the census")
+            got = summary[mod]
+            self.assertEqual(
+                (got["answered"], len(got["reaches"]), len(got["clean"]),
+                 len(got["text_only"]), len(got["closure_only"]),
+                 len(got["of_reduce_bool"])),
+                want,
+                f"{mod}: the closure census moved. asked/reaches/clean/"
+                f"text_only/closure_only/ofReduceBool = "
+                f"{(got['answered'], len(got['reaches']), len(got['clean']), len(got['text_only']), len(got['closure_only']), len(got['of_reduce_bool']))}, "
+                f"the table says {want}. A rise in `reaches` is sites being "
+                f"added; a fall in `clean` is a proof that stopped being "
+                f"kernel-checked. Either way the table moves with the commit.")
+
+        # The four columns PARTITION each module, which is the property that
+        # makes "asked == answered" enough: a theorem Lean did not answer for is
+        # in none of them, so a census that lost one would show up as a column
+        # that does not add up rather than as a clean row.
+        for mod, got in summary.items():
+            self.assertEqual(
+                len(got["reaches"]) + len(got["clean"]) + len(got["text_only"])
+                + len(got["closure_only"]),
+                got["answered"],
+                f"{mod}: the four closure columns do not partition the "
+                f"theorems answered for — a row is in two of them or in none, "
+                f"and either way one of the numbers published above is not "
+                f"about anything")
+
+        # The correction itself, as a FAILURE rather than a comment: if the
+        # toolchain ever goes back to one global `Lean.ofReduceBool`, the name
+        # this project publishes becomes right again and the classifier in
+        # `formal/admitted.py` stops matching — so both facts are asserted from
+        # the measured run rather than from a docstring.
+        every_site = [a for rows in census["axioms"].values()
+                      for axioms in rows.values() for a in axioms
+                      if A.axiom_site_tactic(a)]
+        self.assertTrue(every_site,
+                        "no theorem in lib/ reaches a decide axiom, so the "
+                        "whole mechanism this file measures is gone (or the "
+                        "classifier no longer matches Lean's spelling)")
+        self.assertTrue(all(A.axiom_site_tactic(a) in A.AXIOM_TACTICS
+                            for a in every_site),
+                        f"lib/ introduces a `._native.` axiom for a tactic "
+                        f"outside AXIOM_TACTICS: "
+                        f"{sorted({a for a in every_site if A.axiom_site_tactic(a) not in A.AXIOM_TACTICS})[:5]}; "
+                        f"the census would silently under-report it")
+        self.assertEqual(sum(len(v["of_reduce_bool"]) for v in summary.values()),
+                         0,
+                         "a theorem now reports Lean.ofReduceBool; the name "
+                         "FORMAL.md row 10 publishes is back in force and "
+                         "`axiom_site_tactic` needs to know about both")
+        self.assertLess(elapsed, 120,
+                        f"the whole-lib census took {elapsed:.0f}s; it is one "
+                        f"Lean run per module and has to stay affordable, or "
+                        f"nobody runs it and the table rots")
+
+    def test_the_source_and_the_closure_disagree_in_both_directions(self):
+        """The join is the finding, so it is asserted as a finding.
+
+        Both halves non-empty is the property. A census that only ever found one
+        direction would be indistinguishable from a text scan that happens to
+        agree with itself, and either direction going empty is a change in what
+        `lib/` proves rather than in how it is measured.
+        """
+        from formal import admitted as A
+        lib = A.lean_dir(HERE)
+        summary = A.axiom_census_summary(
+            A.theorem_axiom_census(self.lean, lib), lib)
+        text_only = {m: v["text_only"] for m, v in summary.items()
+                     if v["text_only"]}
+        closure_only = {m: v["closure_only"] for m, v in summary.items()
+                        if v["closure_only"]}
+        self.assertTrue(text_only, "no theorem has a site its closure does "
+                                   "not back, so the site census is exact at "
+                                   "theorem granularity — which the 751-site "
+                                   "table would then be measuring")
+        self.assertTrue(closure_only, "no theorem reaches a decide axiom "
+                                      "except through its own text, so the "
+                                      "closure census adds nothing over "
+                                      "`library_trust` and need not exist")
+        self.assertTrue(any("arm64_cset" in q for rows in closure_only.values()
+                            for q in rows),
+                        "the measured `closure_only` rows no longer include "
+                        "the `arm64_cset_*` trio, which is the clearest "
+                        "example in the tree: three theorems whose source "
+                        "names no tactic and whose closure carries "
+                        "`arm64_flag_eq._native.bv_decide.ax_1_7` through it")
+
+
 class TestOleanCurrency(unittest.TestCase):
     """`_effective_digest`: a module's own bytes AND its imports', transitively.
 

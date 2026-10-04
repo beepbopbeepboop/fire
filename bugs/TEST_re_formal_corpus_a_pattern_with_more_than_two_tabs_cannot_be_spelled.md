@@ -4,11 +4,12 @@
 2026-10-04 on `master` at `3c3516db` · **Layer:** not the formal backend at all —
 the capability exists and answers correctly
 
-Found while running the formal test files for
-`bugs/FORMAL_sweep20_std_collections_2.md` §5.4. It is **not** caused by that
-branch's change: measured identical with `master`'s `formal/imports.py`
-restored, and the failure is an `assert` in the test's own helper that runs
-before any build.
+Found while running the 57 formal test files that
+`bugs/FORMAL_sweep20_std_collections_2.md` §5.4 ran for its import-resolution
+fix; that doc is deleted with its fix and the provenance is the symptom, not the
+doc. It is **not** caused by that branch's change: measured identical with
+`master`'s `formal/imports.py` restored, and the failure is an `assert` in the
+test's own helper that runs before any build.
 
 ## 1. What is red, and where
 

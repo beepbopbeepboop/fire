@@ -107,8 +107,7 @@ are 8x apart — `formal/model.py::CONTAINER_BUDGET` is the smaller, and is the
 one a program has to fit to build on both — so a literal between the two
 ceilings is refused by one machine and lowered by the other BY DESIGN. That
 keeps the `REFUSAL-DIVERGES` prefix and its per-architecture suffixes, and adds
-`-FRAME-BUDGET` so a tally can subtract it
-(`bugs/FORMAL_the_two_architectures_have_different_container_budgets.md`).
+`-FRAME-BUDGET` so a tally can subtract it.
 
 A fourth, for the families whose message makes a claim ABOUT CPython — "CPython
 raises UnboundLocalError for that program" is a promise the interpreter can be
@@ -2831,8 +2830,13 @@ def frame_budget_divergence(results, refusals):
     `REFUSAL-DIVERGES` prefix and its per-architecture suffixes, the program is
     still saved, and `report` still prints both machines' answers. What changes is
     that a tally can subtract this class and be left with the parity findings
-    that are about the language. Filed as
-    `bugs/FORMAL_the_two_architectures_have_different_container_budgets.md`.
+    that are about the language.
+
+    Pinned by `test_formal_fuzz.py::check_frame_budget` (both emitters read the
+    model's constants, the needle below is the model's own message,
+    `CONTAINER_BUDGET` is the minimum, and the corpus's blob is past the smaller
+    ceiling and inside the larger one) and by the two `classify` rows either side
+    of this one, which are red under the un-refined classifier.
     """
     if not refusals:
         return False

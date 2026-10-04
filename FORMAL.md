@@ -477,16 +477,27 @@ has **no Lean `axiom` and no `opaque`** anywhere; everything is assumed in the
 **That sentence is about the SOURCE TEXT, and a theorem's transitive closure is a
 different question.** `native_decide` and `bv_decide` close a goal by compiling
 and running a decision procedure rather than by producing a term the kernel
-checks, so every theorem proved with one depends on Lean's `Lean.ofReduceBool`
-axiom and `#print axioms` reports it — which `OPUS.md` §1 already says about a
-generated theorem.  There are no `axiom` declarations and no `sorry` in any of the
-five `lib/` modules, and 749 proof sites go through one of those two tactics; both
+checks, so every theorem proved with one depends on an axiom `#print axioms`
+reports.  There are no `axiom` declarations and no `sorry` in any of the
+five `lib/` modules, and 751 proof sites go through one of those two tactics; both
 halves are counted by `test_formal_admitted.py` (`LIBRARY_TRUST`, a hard 0 for the
 first two and a ceiling for the third, because that number is a debt being paid
 down in a file several branches edit).  Neither tactic can prove a FALSE
 statement — it evaluates and answers — so this is row 10 below about where the
 trust SITS, not about whether it holds, and
 `bugs/FORMAL_native_decide_axiom.md` carries the replacement plan.
+
+**And the axiom is NOT `Lean.ofReduceBool`, which is what this section used to
+say.**  Lean 4.32.2 gives each use its own axiom, named after the declaration and
+the tactic — `t32s_t8s._native.bv_decide.ax_1_5` — and a `#print axioms` census over
+all 375 theorems in `lib/` reports `Lean.ofReduceBool` for **none** of them
+(`AXIOM_CLOSURE`, measured 2026-10-04).  So the number the SITE census cannot give
+is now measured: of 375 theorems, **53 reach a decide axiom and 304 are
+kernel-checked**, the 751 sites belong to those 53, five theorems name a decide
+tactic in their own text and reach no axiom at all, and thirteen reach one through
+another theorem and name none.  A reader grepping a proof's axiom list for
+`Lean.ofReduceBool` finds nothing and concludes the proof is kernel-checked, which
+is how a wrong name becomes a wrong conclusion.
 
 | # | where | what is trusted |
 |---|---|---|
@@ -498,7 +509,7 @@ trust SITS, not about whether it holds, and
 | 6 | `formal/arm64_proof_gen.py:6910` | every extern call step (`True := by trivial`) |
 | 7 | `formal/arm64_proof_gen.py:4077,4258,4790,4797,4875,4891,5089` | `all_goals (first \| done \| sorry)` CFG leaves — 13 sorries in 9 of 43 arm64 proofs, owned by `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md` |
 | 8 | FORMAL.md §7a | **the ADMITTED HOST CONTRACTS**: one `sorry` per `@admitted(...)` in a `formal/hostmods/` module, counted by the same census as every other hole, named per file by a `trust:` line, and classified by `tools/formal_sweep.py` as `built-with-admitted-contracts`. 19 of them across `concurrent.futures`, `ctypes`, `subprocess` and `threading`. `fcntl` admits nothing and is not among them; the figure was 15 and the list did name `fcntl`, until the audit of 2026-10-04 found both stale. This is the FIRST row here that is about the HOST rather than about this compiler's own code: it is a claim about a second process, a thread and a dynamic loader, declared in the Mojo source and checked for scope AND checked for TRUTH — every contract is probed against CPython or the OS, and fifteen of the nineteen were found asserting something the host does not do. The policy is §7a; the per-contract assumptions are in each module's own `@admitted` text, and `bugs/FORMAL_trust_audit_2026-10-04.md` is the audit that corrected them |
-| 10 | `lib/ProofLib.lean`, `lib/Contracts.lean`, `lib/X86.lean` | 749 `native_decide`/`bv_decide` sites, whose proofs reach `Lean.ofReduceBool` rather than the kernel — the largest admitted assumption in the model, and the one §7's preamble used to leave out of the inventory entirely. Counted, not hidden, and owned by `bugs/FORMAL_native_decide_axiom.md` |
+| 10 | `lib/ProofLib.lean`, `lib/Contracts.lean`, `lib/X86.lean` | 751 `native_decide`/`bv_decide` sites, and **53 of `lib/`'s 375 theorems reach an axiom because of them** — the largest admitted assumption in the model, and the one §7's preamble used to leave out of the inventory entirely. The axiom is per-use (`t32s_t8s._native.bv_decide.ax_1_5`), NOT `Lean.ofReduceBool`, which this row used to name and which no theorem in `lib/` reaches. Counted, not hidden, owned by `bugs/FORMAL_native_decide_axiom.md`. The site figure was 744 and rose to 746 when `formal/admitted.py::lean_code_regions` learned that a `'` after an identifier character is a prime: the apostrophe in `clang's` at `lib/ProofLib.lean:1392` had been blanking 187 lines of code including two `bv_decide` sites, so **the earlier 749 was an undercount wearing a total's clothes** |
 | 9 | ~~`lib/ProofLib.lean:895`~~ | **REMOVED 2026-09-28.** This row said "All per-node lemmas currently admit". Read, they do not: all seven `evalExpr_*` lemmas are `rfl`, which is the whole content of each statement, and `lib/ProofLib.lean` contains no `sorry` or `admit` at all. The section comment above them said the same false thing and said so in the present tense; both are corrected. The trust that remains is row 4 — `rfl` proves the unfolding of `evalExpr`, not that `evalExpr` is what the machine runs. |
 
 **The two holes in the mechanism that checks this** were both closed in the

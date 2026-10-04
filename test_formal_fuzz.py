@@ -394,8 +394,9 @@ CLASSIFIER_CASES = [
     # and is the one a program must fit to build on both), so any literal
     # between the two ceilings lands here, BY DESIGN, and a tally that counts
     # it as a capability difference hides the parity findings that are not
-    # designed — filed as
-    # `bugs/FORMAL_the_two_architectures_have_different_container_budgets.md`.
+    # designed. The budgets are `formal/model.py::ARM64_CONTAINER_BUDGET` and
+    # `X86_64_CONTAINER_BUDGET`, the smaller is `CONTAINER_BUDGET`, and
+    # `frame_budget_phrase()` is the one sentence that states all three.
     # The two rows below are the pair that matters and they are red under the
     # un-refined classifier in both directions: the class is added when the
     # refusal IS the frame message, and NOT added when it is anything else, so
