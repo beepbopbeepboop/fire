@@ -20,6 +20,7 @@ import os
 import re
 import subprocess
 import shutil
+import tempfile
 import platform
 import threading
 
@@ -716,9 +717,44 @@ def build_executable(input_file: str, src: str, output: str = None,
                      work_dir: str = None, quiet: bool = False,
                      auto_gpu: bool = True) -> bool:
     """Compile Mojo source to executable using GIMPLE codegen."""
-    basename = os.path.splitext(os.path.basename(input_file))[0] or 'main'
-    if work_dir is not None:
-        basename = os.path.join(work_dir, basename)
+    stem = os.path.splitext(os.path.basename(input_file))[0] or 'main'
+    # Every intermediate this function writes is named off `basename`, and
+    # before this change `basename` was a bare module basename — so all six of
+    # them landed in the process's CWD. Two builds of two modules that share a
+    # basename (`a/gen.py` and `b/gen.py`, or the same `foo.py` in two temp
+    # trees) both wrote `gen.ci` / `gen.o` / `gen_gen.cpp` / `gen_gen.o` into
+    # one shared directory and neither took a lock, and `tools/suite.py` runs
+    # jobs `-j18` out of a common checkout, so that is a wrong-artifact race the
+    # gate can reach and not only a human. It also littered: a
+    # `test_py314_full.py` sweep from the repository root left
+    # `grammar_snippet_gen.cpp` there, which is how two such files got
+    # committed before .gitignore covered the other five intermediates.
+    #
+    # The scratch now goes in its OWN directory beside the artifact the caller
+    # asked for (`output`, else the input file's own directory), created
+    # uniquely per build so two builds cannot collide even inside one
+    # directory, and removed on every return path below — success and failure
+    # alike — because the `.ci`/`.o`/`_gen.cpp` pairing is a compile step's
+    # private scratch and nothing outside this function reads it.
+    scratch_parent = os.path.dirname(os.path.abspath(output or input_file))
+    try:
+        os.makedirs(scratch_parent, exist_ok=True)
+        basename = os.path.join(
+            tempfile.mkdtemp(prefix=f'.{stem}.', suffix='.build',
+                             dir=scratch_parent), stem)
+    except OSError as e:
+        print(f"Error building: cannot create a scratch directory beside "
+              f"{output or input_file}: {e}", file=sys.stderr)
+        return False
+    # Where the executable goes when the caller named none. NOT `basename`:
+    # that is the compile scratch now, and an artifact written into a
+    # directory this function deletes on the way out would be deleted with it.
+    # `work_dir` survives only as this one thing — it existed to move
+    # `basename`, which is now derived from `output`, and both in-tree callers
+    # passed a `work_dir` that already CONTAINED their `output`, so the
+    # parameter had one meaning in the three places that set it and a second in
+    # the fourth that did not, which is how the fourth got this wrong.
+    exe_default = os.path.join(work_dir, stem) if work_dir else stem
     # Default to a debuggable unoptimized build; -O*/-g* on the command line override.
     # -ftrivial-auto-var-init=zero: matches Makefile's stage2/mojo build (see
     # its own comment there for the full story) — the generated .ci reads
@@ -882,7 +918,7 @@ def build_executable(input_file: str, src: str, output: str = None,
                 extra_objs.append(_co)
 
         # Link executable with CPython runtime
-        exe_file = output if output else basename
+        exe_file = output if output else exe_default
         # Get Python library path
         try:
             configdir = subprocess.run(
@@ -970,6 +1006,15 @@ def build_executable(input_file: str, src: str, output: str = None,
         import traceback
         traceback.print_exc(file=sys.stderr)
         return False
+
+    finally:
+        # The scratch directory goes on EVERY path out of here — the nine
+        # `return False`s above included. A build that dies at the link step
+        # leaves a 40 MB `.ci` behind in whatever directory the artifact was
+        # asked for, which is the litter half of the same bug as the CWD
+        # half. `ignore_errors` because a scratch we cannot remove must not
+        # turn a successful build into a failed one.
+        shutil.rmtree(os.path.dirname(basename), ignore_errors=True)
 
 def main():
     # Pull -O*/-g* codegen flags and --backend out of argv first so they

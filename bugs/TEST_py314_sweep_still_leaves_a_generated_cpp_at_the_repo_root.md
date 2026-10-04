@@ -45,12 +45,16 @@ landing in the process's CWD — which for a sweep started at the repository roo
 is the repository root. `--out` relocates the sweep's own writes; nothing
 relocates a build's generated C++.
 
-The real fix is not the sweep's: `fire.py`'s `build_executable` writes every
-intermediate into the process's CWD and only `test_module_cache.py` and
-`jit/arm64.py` pass `work_dir` — `fire.py`'s own `build` command does not. That
-is filed, with the collision hazard it creates, as
-`bugs/CODEGEN_fire_py_writes_build_intermediates_into_the_cwd.md`, and it is a
-compiled-path change, so it owes a full `make gate`.
+The real fix was never the sweep's, and it has landed: `fire.py`'s
+`build_executable` wrote every one of its intermediates — `.ci`, `.o`,
+`_runtime.o`, `_gen.cpp`, `_gen.o` — into the process's CWD, and only
+`test_module_cache.py` and `jit/arm64.py` passed `work_dir`; `fire.py`'s own
+`build` command did not. They now go in a private scratch DIRECTORY derived
+from `output` (falling back to the input file's own directory), created
+uniquely per build so two same-basename builds cannot collide even inside one
+directory, and removed on every return path — which also removed the collision
+hazard, not just the litter. Pinned by `test_selfhost.py`'s
+`build_scratch_is_private_and_removed`.
 
 What landed here is the cheap half: `*_gen.cpp` is in `.gitignore`, beside the
 `*.ci` and `*.o` entries that already covered the other three intermediates,
@@ -58,9 +62,13 @@ so this file can no longer be the one that turns a build into a commit. Two
 such files had already been committed — `update_file_gen.cpp` and
 `generate_sre_constants_gen.cpp`, both by `e98ea1f8` — and both are removed.
 
-Dropping `cwd=HERE` in `py314_harness._build_uncached` is still worth doing on
-its own: it is one keyword and it makes the harness leave nothing behind. But
-do not record §4.1 as closed on the strength of it.
+Keep `cwd=HERE` in `py314_harness._build_uncached`. It used to be the only
+thing standing between the sweep and a dirtied repository root, and the advice
+here was to drop it; that advice is now wrong twice over. The intermediates
+follow `-o out_path`, which is a `tempfile.mkstemp` path, so they are created
+and removed under TMPDIR whatever the CWD is. And `cwd=HERE` is what lets
+`fire.py build` resolve the compiler's own relative imports, so dropping it
+would trade a stray `.cpp` for a build that cannot find `gimple_codegen`.
 
 ## How to confirm the fix
 
