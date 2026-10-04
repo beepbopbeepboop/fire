@@ -123,6 +123,59 @@ def lower_expr(gen, node) -> tuple[str, str]:
     return 'int', t
 
 
+# The operators whose result is PROVABLY a plain Python integer when every
+# operand is: arithmetic and bitwise only. `//`, `%` (string), `**`, `in`,
+# `is`, `and`/`or`, `:=` and every comparison are excluded — a comparison's
+# result is already a `_Bool` which `_mark_known_int`'s type test rejects,
+# and each of the others is dispatched before the arithmetic sites this table
+# guards. `%` appears here BECAUSE its string form is already gone by the
+# arithmetic tail: what reaches it is numeric modulo. `~` is the UNARY
+# complement only (it is the sole member with no binary spelling), and `-`
+# serves both spellings.
+_INT_ARITH_OPS = frozenset(('+', '-', '*', '/', '&', '|', '^', '~', '<<', '>>', '%'))
+
+
+def _mark_known_int(gen, operand_vals: list, res_type: str,
+                    res_val: str) -> None:
+    """Record `res_val` in `gen._int_word_vals` when every value in
+    `operand_vals` is already recorded there and `res_type` is a plain
+    integer.
+
+    `_lower_IntLiteral` seeds that set with integer LITERALS, which is enough
+    for `d[3000000000] = 1` and for a local bound from one — but not for the
+    computed keys the same program goes on to write. `d[base + 1]` and
+    `d[-1]` were still SIGSEGVs, because the result of the arithmetic was a
+    fresh temp nothing had ever recorded, so the dict site handed it to
+    `mojo_boxed_is_str` — a RANGE test that calls every positive int64 in
+    [2^31, 2^47) a pointer, so `mojo_dict_set_int_kw(d, 3000000001, 1)`
+    became a `strcmp` of address 3000000001 (at -O0, -O2 and under ASan
+    alike). See bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md.
+
+    The two kinds of producer are here rather than spelled out at each site,
+    and both reduce to the same statement — an integer operation on integers,
+    or a coercion of an integer to an integer, yields an integer — which is
+    what makes the table monotone-safe to extend:
+
+    * **Sound.** The `res_type` test rejects every lowering whose C type could
+      hold a pointer, so a marked value cannot be a string; and a value only
+      enters the set through an operation that cannot reinterpret its
+      operands' bits. The UNSOUND direction — marking a value that IS a
+      pointer — is what `k = "s"` must not do, and that is
+      `_track_pointer_actual_type`'s `discard`, not this function's problem.
+    * **Fail-safe.** A miss is a miss: the value falls back to the runtime's
+      own discriminator, i.e. exactly today's behaviour. A wrongly-narrowed
+      producer costs a missed optimisation, never a crash — which is why this
+      can be added to one operation at a time.
+    """
+    if res_type not in ('int', 'int64_t'):
+        return
+    _iwv = gen._int_word_vals
+    for _v in operand_vals:
+        if _v not in _iwv:
+            return
+    _iwv.add(res_val)
+
+
 def _lower_IntLiteral(gen, node) -> tuple[str, str]:
     value = _signed_int64(_as_intlit_node(node).value)
     if -0x80000000 <= value <= 0x7FFFFFFF:
@@ -988,6 +1041,17 @@ def _lower_UnaryOp(gen, node) -> tuple[str, str]:
         actual_ot = 'int64_t'
         actual_ov = ip
     t = gen._new_val(actual_ot, f"{c_op}{actual_ov}")
+    # `-n` / `~n` on a value already known to be an integer is another
+    # integer, which is what makes `d[~neg]` a dict write instead of a
+    # `strcmp` of an address in [2^31, 2^47) (see `_mark_known_int`). The
+    # table has both, and `-` is spelled by both the unary and the binary
+    # operator, so one membership test covers them. Note the operand tested
+    # is `actual_ov`, not `ov`: the pointer-coercion arm above REPLACES it
+    # with a fresh `(int64_t)` cast temp, which is in nobody's set — so a
+    # `-<char *>` (which exists only so the runtime-dispatch for-loop's dead
+    # dict branch compiles) is correctly NOT marked.
+    if c_op in _INT_ARITH_OPS:
+        _mark_known_int(gen, [actual_ov], actual_ot, t)
     return actual_ot, t
 
 
@@ -4010,10 +4074,25 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     if lt != arith_type and arith_type not in ('_Bool',) and not arith_type.endswith(' *'):
         ct = gen._new_temp(arith_type)
         gen._safe_coerce_emit(lt, arith_type, lv, ct)
+        # Carry the KNOWN-INTEGER record across the widening cast, for the
+        # same reason `_track_pointer_actual_type` carries the pointer one
+        # across an assignment: the cast does not change the value, and
+        # losing the record here is what left `d[base + 1]` crashing. This is
+        # the operand `base + 1` loses — the literal `1` lowers to the
+        # INT64_T temp `_t3 = 1LL` by exactly this block, and the record
+        # names the literal text `1`, so without the carry the arithmetic
+        # tail below sees an unknown operand and marks nothing. Guarded on
+        # the SOURCE type being a plain integer too, because a
+        # `char *`/`MojoList *` operand joined to a scalar is the boxed-
+        # pointer-reinterpretation case that must NOT be marked.
+        if lt in ('int', 'int64_t'):
+            _mark_known_int(gen, [lv], arith_type, ct)
         lv = ct
     if rt != arith_type and arith_type not in ('_Bool',) and not arith_type.endswith(' *'):
         ct = gen._new_temp(arith_type)
         gen._safe_coerce_emit(rt, arith_type, rv, ct)
+        if rt in ('int', 'int64_t'):
+            _mark_known_int(gen, [rv], arith_type, ct)
         rv = ct
     if op in ('==', '!=', '<', '>', '<=', '>=') and lt.endswith(' *') != rt.endswith(' *'):
         ip_l = gen._new_temp('int64_t')
@@ -4066,6 +4145,16 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         return 'char *', t
     t = gen._new_temp(res_type)
     gen._emit(f"  {t} = {lv} {c_op} {rv};")
+    # `lv {c_op} rv` on two values already PROVEN to be integers is another
+    # integer: the `_int_word_vals` producer this closes is `d[base + 1]` /
+    # `d[i * 2]` / `d[n >> 3]`, whose results were fresh temps nothing had
+    # recorded, so the dict site handed them to the runtime's range-only
+    # `mojo_boxed_is_str` and a key in [2^31, 2^47) became a `strcmp` of an
+    # address (SIGSEGV). Both operands must be known — one known operand
+    # beside a pointer-typed one is a pointer expression, not arithmetic, and
+    # every such shape has already returned above. See `_mark_known_int`.
+    if c_op in _INT_ARITH_OPS:
+        _mark_known_int(gen, [lv, rv], res_type, t)
     return res_type, t
 
 
@@ -4443,6 +4532,15 @@ def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         ti = gen._new_val('int64_t', f"(int64_t){rv}")
         rv = ti
     t = gen._new_val('int64_t', f"__mojo_floordiv ({lv}, {rv})")
+    # `//` on two known integers is another integer, exactly as in the
+    # arithmetic tail — but this lowering is dispatched from `_lower_binary`
+    # BEFORE that tail, so it needs its own producer or `d[6000000000 // 2]`
+    # keeps crashing (the operands here are the pointer-coercion temps when
+    # either side was a pointer, which are in nobody's set, so the type test
+    # in `_mark_known_int` and the guard on the ORIGINAL operand types are
+    # both load-bearing).
+    if lt in ('int', 'int64_t') and rt in ('int', 'int64_t'):
+        _mark_known_int(gen, [lv, rv], 'int64_t', t)
     return 'int64_t', t
 
 

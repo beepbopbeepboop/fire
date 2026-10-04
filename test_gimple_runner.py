@@ -5965,6 +5965,69 @@ def main():
 main()
 """, "1\n2\nTrue\nFalse\n7\n7\n")
 
+    # A COMPUTED large integer key: `d[base + 1]`, `d[i * 3]`, `d[-1]`,
+    # `d[~n]`, `d[base << 1]`, `d[n % 4]`, `d[6000000000 // 2]`. These were
+    # still SIGSEGVs after the literal-key fix above, for the same reason it
+    # was needed and one step further on: every one of these keys is a FRESH
+    # TEMP holding an arithmetic result, so nothing in `gen._int_word_vals`
+    # named it and the dict site fell back to the `_kw` twin and the
+    # range-only `mojo_boxed_is_str`. `mojo_dict_set_int_kw(d, 3000000001,
+    # 1)` is a `strcmp` of address 3000000001.
+    #
+    # Three producers are covered, because there are three distinct losses
+    # between the literal and the key: the arithmetic result itself, the
+    # operand-WIDENING cast the arithmetic tail emits before it (`base + 1`
+    # lowers its literal `1` to an `int64_t` temp through exactly that block,
+    # which is why a two-operand rule alone marks nothing), and the unary
+    # spelling. See `_mark_known_int`.
+    #
+    # The string half is the soundness contract and is why this is not just a
+    # list of integers: the SAME `+` on two `char *` operands must stay a
+    # `mojo_str_cat`, and the resulting key must still be FOUND. A producer
+    # that marked a pointer would turn these into a silent wrong answer, which
+    # this codebase rates as worse than the crash it replaces.
+    #
+    # `echo(base + 1)` is the SECOND consumer of the same table (an annotated
+    # `str` parameter, which `_emit_call` either stringifies or hands to
+    # `mojo_cstr_or_int_str`); `gimple_annotated_str_param_given_a_non_str`
+    # above covers it for a literal and a plain local.
+    test_gimple_stdout("gimple_dict_key_computed_is_still_an_integer", """\
+def echo(s: str):
+    print(s)
+
+def main():
+    d = {}
+    base = 3000000000
+    d[base + 1] = "add"
+    print(d[base + 1])
+    print(base + 1 in d)
+    i = 7
+    d[i * 3] = "mul"
+    print(d[i * 3])
+    d[i - 2] = "sub"
+    print(d[i - 2])
+    d[-1] = "neg"
+    print(d[-1])
+    n = -3000000000
+    d[~n] = "invert"
+    print(d[~n])
+    d[base << 1] = "shift"
+    print(d[base << 1])
+    m = 10
+    d[m % 4] = "mod"
+    print(d[m % 4])
+    d[6000000000 // 2] = "floordiv"
+    print(d[6000000000 // 2])
+    echo(base + 1)
+    s = {}
+    a = "foo"
+    b = "bar"
+    s[a + b] = 1
+    print(s[a + b])
+    print(s["foo" + "bar"])
+main()
+""", "add\nTrue\nmul\nsub\nneg\ninvert\nshift\nmod\nfloordiv\n3000000001\n1\n1\n")
+
     # The CONSTRUCTOR half of the same cross-call struct contract
     # (the ctor-direction cross-call struct contract in `module_gen.py`'s
     # constructor observation pass). The receiver
