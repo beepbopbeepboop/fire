@@ -8,12 +8,11 @@ landed.
 **Status: the STATICALLY decidable half is FIXED (2026-10-03,
 `0340e4fc`); what is left is a range whose emptiness is a RUN-TIME fact.**
 
-Found 2026-10-03 while fixing
-`bugs/FORMAL_for_range_over_an_empty_range_overwrites_a_preassigned_counter.md`,
-whose fix moved the loop's store so that an empty range does not bind its
-target. That fix opened this: the analysis still counts the target as defined
-when it cannot prove the range is non-empty, so a name nothing else stores is
-read out of a register nothing wrote.
+Found 2026-10-03 while fixing the empty-range counter bug (that doc is deleted
+with its fix, `0340e4fc`), whose fix moved the loop's store so that an empty
+range does not bind its target. That fix opened this: the analysis still counts
+the target as defined when it cannot prove the range is non-empty, so a name
+nothing else stores is read out of a register nothing wrote.
 
 ## What is wrong
 
