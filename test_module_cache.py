@@ -189,7 +189,23 @@ def test_stage2_3_dylib_and_cas(wd):
         # of pure per-module dead weight. Gating the cluster on "this module can
         # reach it" is measured and filed as
         # bugs/PERF_generic_repr_helpers_emitted_into_every_module.md.
-        check("stage2: client object is tiny (<9KB)", sz < 9216, f"{sz} bytes")
+        #
+        # 9216 -> 10240 (2026-10-03, merging the ten bugs4 branches): 9216 ->
+        # 9416 on this exact client, +200. The growth is the dict repr's own
+        # per-module material, from `bugs4-6`'s one-store-of-every-value-kind
+        # work, and it is the same KIND of thing the three entries above record
+        # rather than bodies landing in the client: two new `static` helpers in
+        # the always-emitted preamble (`_mojo_dict_val_repr`, which asks the
+        # dict's recorded repr for a struct slot, and `_mojo_repr_none`), plus
+        # three rows in `_mojo_repr_dict`'s value-kind chain (the `kind == 4`
+        # None row, the untagged-zero row, and the `kind == 5` struct row, which
+        # `_mojo_cat_dict_val` became). Read off the generated C by diffing the
+        # emitted `static` set against master's: exactly those two names are
+        # new. Bumped by two 1024 increments rather than one, because the rule
+        # this ladder follows is "clear the number and keep the teeth": 9416
+        # would clear 10240 with 824 to spare, which is the same margin the
+        # 11264 entry above was written for.
+        check("stage2: client object is tiny (<9KB)", sz < 10240, f"{sz} bytes")
     finally:
         os.remove(os.path.join(RUNTIME, 's2lib.mojo'))
 
@@ -738,8 +754,17 @@ def test_reflected_struct_import(wd):
         # module.md; not landed with the merge because its failure mode is a
         # link error on the self-host closure, which only `make bootstrap` can
         # clear.
+        #
+        # 11264 -> 12288 (2026-10-03, merging the ten bugs4 branches), for
+        # stage2's reason and by the same two increments: this client carries
+        # the dict-repr additions too plus the per-struct
+        # `_mojo_elem_repr_<Sn>` shims `reflect_emitted` names, and 11600 needs
+        # a ceiling above it that still has teeth (11264 would not clear it at
+        # all). The invariant is unchanged: what grew is the always-emitted
+        # generic-repr preamble, which is CALLS into the runtime plus the small
+        # walkers above it, not bodies belonging to this client.
         check("reflect: client object is tiny — bodies live in the dylib",
-              sz < 11264, f"{sz} bytes")
+              sz < 12288, f"{sz} bytes")
     finally:
         os.remove(libpath)
 
