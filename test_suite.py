@@ -3124,6 +3124,23 @@ UNREGISTERED = {
     'test_formal_fnmatch.py': _FORMAL_SUITE_REASON,
     'test_formal_frame_return_overloads.py': _FORMAL_SUITE_REASON,
     'test_formal_libc_symbol.py': _FORMAL_SUITE_REASON,
+    # CHEAP and wants a REGISTRATION rather than an excuse, by CLAUDE.md's cost
+    # rule: `python3 test_formal_chain_probe.py` is 12 cases, no builds and no
+    # Lean, and 0.29 s measured 2026-10-04 (its only cost is two `copytree` calls
+    # of the stdlib, one per class, and it asserts on the list of paths
+    # `stub_targets` WOULD rewrite rather than writing them). It is listed here
+    # rather than registered because this branch's task is a sweep scope and
+    # says not to touch the registry. Exact next step:
+    # `test('formal-chain-probe', [PY, 'test_formal_chain_probe.py'], ...)` in
+    # the `check` bucket beside `formal-sweep-truth`, which covers the other
+    # instrument's truthfulness.
+    'test_formal_chain_probe.py': (
+        'Runs no build and no Lean: 12 cases over the two shapes of "module X '
+        'refused" and the choice of which group to rewrite next. 0.29 s '
+        'measured, so it wants a registration by CLAUDE.md\'s cost rule; listed '
+        'here because this branch is a sweep scope and is not touching the '
+        'registry. Next step: test(\'formal-chain-probe\', [PY, '
+        '\'test_formal_chain_probe.py\'], ...) beside \'formal-sweep-truth\'.'),
     # The same shape as the group above and CHEAP like `formal-hostmods-census`
     # below: measured 2026-10-03, `python3 test_formal_list_splat.py` is 5
     # cases x 2 backends = 10 builds plus one CPython oracle each, ~7 s

@@ -126,13 +126,21 @@ def _rel(probe):
 class TestRefusingModule(unittest.TestCase):
     """The two shapes name a module, and the export-gate one names it exactly."""
 
-    def setUp(self):
-        self.probe = pathlib.Path(HERE) / ".tmp" / "chain-probe-test"
-        shutil.rmtree(self.probe, ignore_errors=True)
-        shutil.copytree(STDLIB, self.probe)
+    # One copy per CLASS, not per test: the stdlib is ~700 files and four
+    # `copytree` calls of it are the only thing in this file that costs
+    # anything. Nothing here writes to the copy — `stub_targets` returns the
+    # paths it would rewrite and the test asserts on the LIST — so one copy
+    # serves every case in the class.
+    probe = pathlib.Path(HERE) / ".tmp" / "chain-probe-test"
 
-    def tearDown(self):
-        shutil.rmtree(self.probe, ignore_errors=True)
+    @classmethod
+    def setUpClass(cls):
+        shutil.rmtree(cls.probe, ignore_errors=True)
+        shutil.copytree(STDLIB, cls.probe)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.probe, ignore_errors=True)
 
     def _name(self, msg, importer):
         key, _exact, stem = P.refusing_module(
@@ -219,13 +227,21 @@ class TestRefusingModule(unittest.TestCase):
 class TestStubTargets(unittest.TestCase):
     """What gets rewritten: exactly the file that refused, or nothing."""
 
-    def setUp(self):
-        self.probe = pathlib.Path(HERE) / ".tmp" / "chain-probe-test"
-        shutil.rmtree(self.probe, ignore_errors=True)
-        shutil.copytree(STDLIB, self.probe)
+    # One copy per CLASS, not per test: the stdlib is ~700 files and four
+    # `copytree` calls of it are the only thing in this file that costs
+    # anything. Nothing here writes to the copy — `stub_targets` returns the
+    # paths it would rewrite and the test asserts on the LIST — so one copy
+    # serves every case in the class.
+    probe = pathlib.Path(HERE) / ".tmp" / "chain-probe-test"
 
-    def tearDown(self):
-        shutil.rmtree(self.probe, ignore_errors=True)
+    @classmethod
+    def setUpClass(cls):
+        shutil.rmtree(cls.probe, ignore_errors=True)
+        shutil.copytree(STDLIB, cls.probe)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.probe, ignore_errors=True)
 
     def _targets(self, msg, importer):
         key, exact, stem = P.refusing_module(
