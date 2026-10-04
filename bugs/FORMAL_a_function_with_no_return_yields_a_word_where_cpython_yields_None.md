@@ -100,7 +100,7 @@ a walk and this rule runs in the emitters:
 |---|---|
 | `python3 test_formal_hostmods_census.py` — every `formal/hostmods` module as a translation unit, both backends | **64/64 rows build** (that is §0a's `argparse.mojo` 456 rows and `re.mojo`'s 5, as BUILDS rather than as census rows) |
 | `python3 test_formal_argparse.py` | **PASS=9 FAIL=0** — `argparse.mojo` itself, built and run |
-| `python3 test_formal_run.py` | PASS=961 FAIL=**2**, and both reds are pre-existing and unrelated (`bugs/FORMAL_test_formal_run_rows_red_on_master_2026-10-04.md`) |
+| `python3 test_formal_run.py` | PASS=962 FAIL=**1**, and that one red is pre-existing and unrelated: `_collect_receiver_frame_escapes` reads `node.target` off a `VarDecl` and raises `AttributeError`, in another claim's area and filed as `bugs/FORMAL_a_one_field_mutators_frame_escape_reader_crashes_on_a_var_decl.md` |
 
 ### What is in the code, and why it is shaped this way
 

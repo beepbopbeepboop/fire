@@ -26214,6 +26214,28 @@ def construction_arity_refusal(name: str, got: int, summary: str,
     told the reader of `LaunchError(Exception)` — a docstring and no fields —
     to "give the fields explicitly", which is advice about a class whose
     missing fields are not the problem."""
+    # THE BASE CLAUSE, and it is asked FIRST because a class whose fields are
+    # short because of a base this image cannot see is a different program from
+    # one whose fields are short because the call under-fills them: the first is
+    # fixed by making the base visible and the second by naming the fields, and
+    # the sentence below each one is advice for the other case. The parameter was
+    # plumbed in with the merge that computes it and its sentence went missing
+    # from both arms, so a reader of `class MyErr(Widget): """no fields at
+    # all"""` was told to "give the fields explicitly" about a class whose
+    # missing fields are not the problem — which is the failure this docstring
+    # was written to prevent, and `test_formal_run.py`'s
+    # `constr_refuse_an_undeclared_base_by_name` is the row that caught it.
+    if bases:
+        spelled = ", ".join(repr(b) for b in bases)
+        return (f"constructing {name} with {got} argument(s) does not match "
+                f"its fields ({summary}), and the reason is not the call: "
+                f"{name} derives from {spelled}, which this image does not "
+                f"declare, so the fields {spelled} would have contributed "
+                f"cannot be named here and the field list this call is checked "
+                f"against is {name}'s own. Make the base visible to this image "
+                f"(declare it in a module this unit compiles, or replace the "
+                f"inheritance), which is the same program with a layout this "
+                f"path can compute")
     if not missing:
         return (f"constructing {name} with {got} argument(s) does not match "
                 f"its fields ({summary}), and {name} declares no `__init__` "
