@@ -5902,8 +5902,8 @@ BOTH_ARCH_CASES = [
     # stayed a compare of two ADDRESSES, which is CPython's INHERITED identity
     # `__eq__` and answers "are these the same object" — and two calls are two
     # objects).  Nothing refused the wrong answer: it was a silent 0 on both
-    # machines, which is
-    # `bugs/FORMAL_eq_dispatch_two_call_operands_are_not_a_frame_address.md`.
+    # machines, and the fix is `_rewrite_eq_on_frame_receivers` consulting
+    # `_call_frame_structs` — measured there, on both architectures.
     #
     # The function that dispatches it binds NOTHING, which is the whole shape:
     # the rewrite used to skip any function with no frame-valued name in it, and
@@ -5936,6 +5936,45 @@ BOTH_ARCH_CASES = [
      "def main(n: Int) -> Int:\n"
      "    printf(\"eq=%d\", 1 if mk(1) == mk(2) else 0)\n"
      "    return 0\n", 0, "eq=1"),
+    # …and the shape that was the OTHER HALF of that construct and was refused
+    # for a month afterwards, which is why the row above is not the whole of it.
+    # `mk(1) == mk(2)` alone leaves the holder check nothing to disagree about;
+    # adding one unrelated `q = A(0, 0)` binding takes the rewrite past its
+    # guard, the rewrite fires, and `_check_holder_agreements` then has to
+    # recognise BOTH call operands as the frame addresses their declared return
+    # type says they are.  While it did not, this build was REFUSED by name
+    # (`frame_holder_disagreement_refusal`) — the safe direction, so not a
+    # wrong answer, and it hid the fact that the second position was the whole
+    # of the remaining work.  Both halves are here because either one alone
+    # passes while the other regresses: the first is a wrong ANSWER (an address
+    # compare says "same object" for two `mk` calls, so it printed 0 where
+    # CPython says True) and the second is a REFUSAL, and a table with only the
+    # first cannot see a change that turns one into the other.  The second half
+    # is what closed the second refusal: `formal/build.py`'s
+    # `_returned_frame_construction` makes a construction-returning function
+    # frame-returning, so a caller reserves a block for the call's result and
+    # `_argument_is_frame_address` sees `mk(1)` for what it is.
+    ("both_arch_eq_dispatch_through_two_call_operands_beside_a_frame",
+     "struct A:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "    def __eq__(self, other: A) -> Bool:\n"
+     "        return True\n"
+     "\n"
+     "def mk(v: Int) -> A:\n"
+     "    var a = A()\n"
+     "    a.x = v\n"
+     "    a.y = v\n"
+     "    return a\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var q = A()\n"
+     "    q.x = 0\n"
+     "    q.y = 0\n"
+     "    printf(\"eq=%d %d\", 1 if mk(1) == mk(2) else 0,\n"
+     "           1 if q == mk(2) else 0)\n"
+     "    return 0\n", 0, "eq=1 1"),
     # …and the case that used to REFUSE a function read as a value, in the
     # group whose docstring says a construct the two backends once disagreed
     # about belongs here.  A function value is its entry ADDRESS

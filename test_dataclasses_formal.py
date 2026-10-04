@@ -570,7 +570,8 @@ def main(n):
 # method ran) and 0 (the operator stayed a compare of two addresses, and two
 # calls are two objects) — and nothing said anything when it printed 0, on
 # either architecture.
-# (`bugs/FORMAL_eq_dispatch_two_call_operands_are_not_a_frame_address.md`.)
+# (`test_formal_run.py`'s `both_arch_eq_dispatch_through_two_call_operands`, the
+# same construct without the decorator.)
 OWN_EQ_TWO_CALL_OPERANDS = """
 from dataclasses import dataclass
 
