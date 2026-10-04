@@ -188,20 +188,28 @@ _FORMS = {
     # for the second, so a successor that said one length for both would be a
     # proof of a different instruction.  `cmp` is the one whose successor names
     # no register at all -- digit 7 sets the flags and discards the result.
+    #
+    # `sub` is here for the reason the guard is in every prologue
+    # (`formal/x86_64_codegen.py::_emit_stack_floor_guard`: `SUB R10, BUDGET`,
+    # one per function) and not for a corpus example: the arithmetic it needs
+    # was already the `else` arm of `_resolve`'s own branch below, DEAD for this
+    # form, which is what `x86_step_cmp_ri8`'s theorem was using it for.  So the
+    # row is a name plus the `else` arm and the encoding is `x86_step_add_ri32`'s.
     "alu_ri32:add_reg": ("x86_step_add_ri32", False,
                          ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
                           "rm"]),
-    "alu_ri32:and": ("x86_step_and_ri32", False,
-                     ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
-                      "rm"]),
     # `sub r64, imm32` on a GENERAL register: the same encoding as `add` with
-    # digit 5 instead of 0, so the same side-condition list, and the only member
-    # of this family whose flags come from `x86_flags_sub` AND write the result
-    # back (`cmp` is the other, and it discards it).  The backend emits it for
-    # the stack-floor guard's budget subtraction in every prologue.
+    # digit 5 instead of 0, hence the same side-condition list, and the only
+    # member of this family whose flags come from `x86_flags_sub` AND whose
+    # successor writes the register back (`cmp` is the other, and it discards
+    # the result).
     "alu_ri32:sub_reg": ("x86_step_sub_ri32", False,
                          ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
                           "rm"]),
+
+    "alu_ri32:and": ("x86_step_and_ri32", False,
+                     ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
+                      "rm"]),
     "alu_ri8:cmp": ("x86_step_cmp_ri8", False,
                     ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
                      "rm"]),
@@ -289,21 +297,30 @@ _FORMS = {
     "lea_r64_rm64_disp32": ("x86_step_lea_rm64_disp32", False,
                             ["rip", "b0", "b1", "b2", "disp32", "rex", "w",
                              "mod", "rm", "rm_ne", "reg", "dst", "dst_lt"]),
-    # The RIP-relative mode of the same instruction: `mod = 00` with `rm = 101`,
-    # where the r/m field is not a register but the instruction pointer, so the
-    # displacement counts from the END of the instruction and there is no `rm`
-    # argument to supply.  It is a separate row rather than another mode of the
-    # one above for the reason `_shapes`' own comment gives: a name that does not
-    # say which mode it is is how an unmapped shape used to be satisfied by
-    # whichever lemma shared its name.
+    # The RIP-relative mode, which is a LOAD-shaped form with the same concrete
+    # `dst` and the same truncation -- and the same condition list as
+    # `lea_r64_rm64_disp32` MINUS `rm_ne`, because `rm = 5` is the mode and
+    # `5 ≠ 4` is not a hypothesis anybody has to discharge.  Everything else,
+    # `rm` included, is the same list: the lemma's own hypothesis order, and
+    # `_FORMS`'s header is right that a row whose length disagrees with its
+    # lemma's is a proof failure rather than a silent gap.  Measured: dropping
+    # `rm` shifted `dst_lt` into the position of the lemma's last hypothesis,
+    # the application elaborated with eleven metavariables, and the generated
+    # file reported `Type mismatch` with both records printed in full and
+    # neither naming the form -- on the FIRST `lea` in every image.
     #
-    # Two producers, so one row closes both: the stack-floor guard's
+    # A separate row rather than another mode of the one above, for the reason
+    # `_shapes`' own comment gives: a name that does not say which mode it is is
+    # how an unmapped shape used to be satisfied by whichever lemma shared its
+    # name.  Two producers, so one row closes both: the stack-floor guard's
     # `lea r11, [rip+&floor]` in every prologue with an entry, and
     # `_emit_global_init`'s RIP-relative `lea` for every address-valued module
-    # global.
+    # global.  Here the r/m field is not a register at all but the instruction
+    # pointer, so the displacement counts from the END of the instruction and
+    # there is no `rm` argument to supply.
     "lea_r64_rip": ("x86_step_lea_r64_rip", False,
-                    ["rip", "b0", "b1", "b2", "disp32", "rex", "w",
-                     "mod", "rm", "reg", "dst", "dst_lt"]),
+                    ["rip", "b0", "b1", "b2", "disp32", "rex", "w", "mod",
+                     "rm", "reg", "dst", "dst_lt"]),
     "mov_rm64_r64_reg": ("x86_step_mov_rm64_r64_reg_st", False,
                          ["rip", "b0", "b1", "b2", "rex", "w", "mod",
                           "reg", "rm"]),
@@ -476,9 +493,10 @@ _SUCCS = {
     # `add_reg`'s row with `-` and `($fs)`: digit 5 rather than digit 0, the same
     # `81` encoding and therefore the same length, and the same immediate
     # expression for the same reason the row above states it.  The flags are
-    # `$fs` — `x86_flags_sub` — which is the SAME placeholder the `cmp` row
-    # below uses; that row is flags-only, this one also writes the register, and
-    # the two differ in exactly that.
+    # `$fs` — `x86_flags_sub` — which is the model's digit-5 arm and the same
+    # `else` arm of `_resolve` that the `cmp` row below uses; that row is
+    # flags-only, this one also writes the register, and the two differ in
+    # exactly that.
     "alu_ri32:sub_reg":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ((x86_get_reg $s "
         "($rm + x86_rex_b $rex)) - $imm) with rip := $next, zf := ($fs).zf, "
@@ -493,9 +511,15 @@ _SUCCS = {
         "{ $s with rip := $next, zf := ($fs).zf, sf := ($fs).sf, "
         "cf := ($fs).cf, of_ := ($fs).of_ }",
     "mov_rm64_imm32": "{ $s with rax := $imm, rip := $next }",
-    "alu_ri32:add":
-        "{ x86_flags_add $s $s.rax $imm ($s.rax + $imm) with "
-        "rax := $s.rax + $imm, rip := $next }",
+    # No `alu_ri32:add` row, and its absence is a measurement rather than an
+    # oversight: `_shapes` renames the decoder's `alu_ri32:add`/`alu_ri32:sub`
+    # to `..._rsp` or `..._reg` by the ModRM byte (ModRM c4 is `add rsp`,
+    # anything else is `add r64`), so since that split landed this key has been
+    # unreachable -- the successor for `add rax, imm32` is `mov_rm64_imm32`'s
+    # neighbourhood and not this.  A row nobody can reach is a second, stale
+    # statement of a model's semantics, which is the thing `_SUCCS`' own header
+    # warns about; `test_formal_sweep_truth.py` now asserts the two tables hold
+    # exactly the same keys, so the next one cannot be added silently.
     "mov_r64_rm64_reg":
         "{ x86_set_reg $s ($reg + x86_rex_r $rex) "
         "(x86_get_reg $s ($rm + x86_rex_b $rex)) with rip := $next }",
@@ -561,9 +585,14 @@ _SUCCS = {
     # nor the byte.
     #
     # `Int.ofNat ($m + 7)` verbatim, because this row is compared against the
-    # lemma's own conclusion by `exact Option.some.inj` and nothing rewrites
-    # between them; a `UInt64.ofNat m + 7` here is a different term and the step
-    # comes back unproved.
+    # lemma's own conclusion by `exact Option.some.inj` and nothing rewrites in
+    # between: the model's own term is `↑m + 3 + 4 + disp` (`x86_mem_addr` builds
+    # its return length as `sibExtra + dispN`), which is the same NUMBER and a
+    # different TERM, and a successor stating the model's spelling comes back
+    # unproved against a lemma stating the length.  Measured both ways: writing
+    # `m + 3 + 4` here and there closes by `rfl` too, but it makes the table a
+    # copy of how the model happens to spell a length rather than a copy of what
+    # the instruction does, and the two sides then have to be changed together.
     "lea_r64_rip":
         "{ x86_set_reg $s $dst (UInt64.ofNat ((Int.ofNat ($m + 7) + $disp).toNat "
         "% 18446744073709551616)) with rip := $next }",
@@ -771,7 +800,7 @@ _BYTES = "first | native_decide | simp [read_i32_le, read_i8, hb]"
 
 
 def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
-             length=1, rip=None):
+             length=1, rip=None, code_name="rc"):
     """`(call, succ)` for one instruction: the step lemma applied at `addr`, and
     the successor expression its conclusion has.
 
@@ -783,6 +812,20 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
     model says it reads it out of memory — a `ret` that returns into a caller.
     The caller then proves the value separately and rewrites the step with it, so
     the step is still the model's; see `emit_terminates`.
+
+    `code_name` is the NAME of the code function in the generated file, because a
+    successor may quote the model's own reader (`UInt64.ofInt (read_i32_le rc
+    (m + 3))` for the digit-immediate forms, the shift count's clamp likewise)
+    and the name it quotes has to be the one the file defines.  It was the
+    literal `rc` — which is what every emitter in this file defines — and that is
+    exactly what made `formal/x86_64_model_coverage_test.py`'s SUCCESSOR check
+    unable to see any form that reads an immediate: its generated file defines
+    one `scode_i` PER FORM and binds it as `code`, so the successor's `rc` was an
+    unbound auto-implicit variable and the claim compared the model stepped at
+    one encoding against a successor reading a DIFFERENT one.  `sub r10, 0x780000`
+    is what exposed it, and the failure it reported — "the emitter's successor
+    disagrees with the model's step" — was the right report about a claim that
+    was not the one anybody meant to make.
     """
     lemma, takes_imm, conds = _FORMS[form]
     imm = int.from_bytes(raw[3:7], "little", signed=True) if takes_imm else None
@@ -890,9 +933,9 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         # form nor the byte -- in a file with one instruction per step, so it
         # names nothing at all about which instruction failed.
         if form == "alu_ri8:cmp":
-            imm = "(UInt64.ofInt (read_i8 (rc %d)))" % (addr + 3)
+            imm = "(UInt64.ofInt (read_i8 (%s %d)))" % (code_name, addr + 3)
         else:
-            imm = "(UInt64.ofInt (read_i32_le rc %d))" % (addr + 3)
+            imm = "(UInt64.ofInt (read_i32_le %s %d))" % (code_name, addr + 3)
         a = "(x86_get_reg $s (%d + x86_rex_b $rex))" % rm
         if form == "alu_ri32:add_reg":
             res = "(%s + %s)" % (a, imm)
@@ -912,10 +955,17 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
             res = "(%s &&& %s)" % (a, imm)
             extra_succ["$fl"] = "x86_flags_logic $s %s" % res
         else:
+            # `alu_ri32:sub_reg` (digit 5, the stack-floor guard's `SUB R10,
+            # BUDGET`) and `alu_ri8:cmp` (digit 7, which computes the same
+            # subtraction and throws it away) are the model's ONE digit-immediate
+            # subtraction, so they share the arm; they differ in `_SUCCS`, which
+            # is where the difference between writing the result back and not
+            # writing it back lives.
             res = "(%s - %s)" % (a, imm)
             extra_succ["$fs"] = "x86_flags_sub $s %s %s %s" % (a, imm, res)
         extra_succ.update({"$rex": str(rex), "$rm": str(rm),
                            "$imm": imm})
+
     elif form.startswith("shift_imm8:"):
         # `REX.W C1 /digit ib`, so the ModRM is `raw[2]` as for every other
         # one-byte opcode, and the `digit` is its REG field -- the operation,
@@ -929,8 +979,8 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         # substituting the number here would state a different thing for any
         # count outside 0..63.  `rc` is this file's name for what the lemma
         # calls `code`.
-        sh = "UInt64.ofNat (if (rc %d).toNat ≥ 64 then 64 else (rc %d).toNat)" % (
-            addr + 3, addr + 3)
+        sh = ("UInt64.ofNat (if (%s %d).toNat ≥ 64 then 64 else (%s %d).toNat)"
+              % (code_name, addr + 3, code_name, addr + 3))
         a = "(x86_get_reg $s (%d + x86_rex_b $rex))" % rm
         res = {"shl": "(%s <<< %s)" % (a, sh), "shr": "(%s >>> %s)" % (a, sh),
                "sar": "(x86_sign_extend32 %s >>> %s)" % (a, sh)}[
@@ -1037,6 +1087,24 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         dst = reg + (8 if rex & 4 else 0)
         extra_args = " %d %d %d %d" % (rex, modrm, reg, dst)
         extra_succ = {"$rex": str(rex), "$reg": str(reg), "$dst": str(dst)}
+    elif form == "lea_r64_rip":
+        # `REX.W 8D /r` with ModRM mod=00 rm=101: the address is measured from the
+        # END of the instruction, so there is no base register to read out of the
+        # ModRM and the displacement is four bytes at `m + 3` even though `mod = 0`.
+        # That is the whole reason this is its own branch rather than the shared
+        # memory one below, which reads `mode = 0` as "no displacement" and would
+        # hand the lemma `rm = 5` as the base -- a claim about `lea r, [r11]`.
+        #
+        # `dst` is the concrete destination for the reason `lea_r64_rm64_disp32`
+        # carries one: `x86_set_reg` is a `match` on its index, and the successor
+        # names `$dst` on both sides so the step is `rfl` rather than a `match`.
+        rex, modrm = raw[0], raw[2]
+        reg = (modrm >> 3) & 7
+        dst = reg + (8 if rex & 4 else 0)
+        disp = int.from_bytes(raw[3:7], "little", signed=True)
+        extra_args = " %d %d %d %d (%d)" % (rex, modrm, reg, dst, disp)
+        extra_succ = {"$rex": str(rex), "$reg": str(reg), "$dst": str(dst),
+                      "$disp": str(disp)}
     elif form in _SIB_STORE_WITH_DISP_FORMS:
         # `mov qword [rsp + disp], r64`: ModRM `4_` (mod=1 or 2, rm=4), the SIB
         # byte at `m + 3`, and the DISPLACEMENT at `m + 4` -- one byte further
@@ -1112,7 +1180,7 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         extra_succ = {"$rex": str(rex), "$reg": str(reg), "$rm": str(rm)}
         extra_succ.update(dst_succ)
         extra_succ.update(disp_succ)
-    call = "%s %s rc %d%s" % (lemma, prev, addr, extra_args)
+    call = "%s %s %s %d%s" % (lemma, prev, code_name, addr, extra_args)
     if takes_imm:
         # Parenthesised, always, not only when negative.  Lean's application is
         # left-associative, so an unparenthesised negative literal swallows the
@@ -1193,15 +1261,30 @@ _MEM_MODE = {0: "nodisp", 1: "disp8", 2: "disp32"}
 #: cannot drift apart: adding a load mode to one without the other produced a
 #: call with a `dst` argument the lemma does not take, which reads as an arity
 #: error naming neither the form nor the instruction.
+#:
+#: `lea_r64_rip` is the mode with no base register, so its branch above reads the
+#: displacement itself -- which is why it is here for the `dst` and NOT in
+#: `_MEMORY_DISP_FORMS` below for the displacement: that tuple's branch reads
+#: `mod = 0` as "no displacement", and this mode carries four bytes of it.
 _LOAD_MEMORY_FORMS = ("mov_r64_rm64_disp8", "mov_r64_rm64_disp32",
                       "mov_r64_rm64_nodisp", "lea_r64_rm64_disp32",
                       "lea_r64_rip")
 
-#: The memory-operand shapes `_resolve` supplies arguments for.  The two SIB
-#: ones are absent deliberately: they have their own `_resolve` branches above,
-#: because a SIB byte puts the displacement one byte further out and its base is
-#: read from the SIB rather than from the ModRM's rm field.
-_MEMORY_DISP_FORMS = _LOAD_MEMORY_FORMS + (
+#: The memory-operand shapes `_resolve` supplies arguments for IN ITS SHARED
+#: BRANCH.  The two SIB ones are absent deliberately: they have their own
+#: `_resolve` branches above, because a SIB byte puts the displacement one byte
+#: further out and its base is read from the SIB rather than from the ModRM's rm
+#: field.
+#:
+#: So is `lea_r64_rip`, and the reason is the same kind of thing: it is in
+#: `_LOAD_MEMORY_FORMS` (its lemma takes the concrete `dst`) but its four bytes
+#: of displacement sit under `mod = 0`, which the shared branch reads as "no
+#: displacement" -- the trap `_shapes`'s `_rip` suffix names a mode for.  The
+#: exclusion is a named tuple and the tuple is DERIVED, so a new load shape still
+#: cannot be added to one of the two and forgotten in the other.
+_OWN_DISPLACEMENT_BRANCH = ("lea_r64_rip",)
+_MEMORY_DISP_FORMS = tuple(f for f in _LOAD_MEMORY_FORMS
+                           if f not in _OWN_DISPLACEMENT_BRANCH) + (
     "mov_rm64_r64_disp8", "mov_rm64_r64_nodisp", "mov_rm64_r64_disp32")
 
 #: The SIB-addressed stores WITH a displacement.  Not in `_MEMORY_DISP_FORMS`
@@ -1342,6 +1425,7 @@ def _tree(code, info, shapes):
     """
     base, entry = info["base_addr"], info["func_offset"]
     by_addr = {base + i.offset: (i, f, r) for i, f, r in shapes}
+    traps = set(info.get("compiler_traps") or ())
     deep = max(256, sys.getrecursionlimit() - 200)
 
     def build(addr, state, depth, seen, rets):
@@ -1377,6 +1461,36 @@ def _tree(code, info, shapes):
             node.kids = [build(addr + off, None, depth + 1, seen, rets)]
             return None if node.kids[0] is None else node
         if form == "call_rel32":
+            # **A CALL TO THE COMPILER'S OWN TRAP IS NOT A CONTINUATION**, and
+            # it is not one because the address is not in this body: the
+            # stack-floor guard's `exit` goes to a `__TEXT,__stubs` trampoline
+            # outside every function, and `build` declines anything it cannot
+            # decode -- so a tree that followed it returned None and the whole
+            # function came back as "body loops, or branches out of the
+            # function", a message naming two reasons when there is one.
+            #
+            # The cost of that is not one function: `e11f066d` put the guard in
+            # every prologue, so EVERY x86-64 image has one and the refusal was
+            # every example in the corpus, for want of two step lemmas and then
+            # for want of this.
+            #
+            # It is a `trap` node with no children, and what the emitter writes
+            # for one is a chain that ends with an ADMITTED closing `hrip`.  That
+            # is the honest shape and not a convenience: the machine really does
+            # leave the program here (it exits with status 2), and the model has
+            # no bytes for the stub, so "the run reaches the exit pc" is not
+            # something this chain can show on this path.  Admitting one named
+            # fact is a number the report prints; declining the tree is the whole
+            # theorem for every function in the corpus.
+            #
+            # Matched on the CALL's own address, not its target: `compiler_traps`
+            # is what `formal/x86_64_codegen.py` appends from `_emit_call_exit`,
+            # and `_program_externs` above subtracts it by address for the same
+            # reason.  An image with no such key -- a dylib, or an emitter that
+            # predates it -- is read as having none, which leaves the refusal
+            # exactly where it was rather than inventing a trap.
+            if addr in traps:
+                return _Node(insn, form, raw, addr, "trap", state, None)
             # A CALL IS A JUMP, and the tree has to follow the TARGET.  It used
             # to fall through to `addr + length`, which is the instruction after
             # the call -- and the model's successor says `rip := (Int.ofNat m + 5
@@ -1868,6 +1982,34 @@ def emit_terminates(path):
             emit("\u00b7")
             walk(node.kids[1], nxt, ind + 1, cases + ["hc%d" % k], both,
                  "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),))
+            return
+
+        if node.kind == "trap":
+            # The stack-floor guard's trap, and the end of this PATH -- not the
+            # end of the run, which is what the closing fact would have to say.
+            # The machine exits the process with status 2 from here and the model
+            # has no bytes for the `__TEXT,__stubs` trampoline the `call` goes
+            # to, so `s.rip = 0` is not derivable on this path and is not true of
+            # it either.
+            #
+            # So it is admitted, and it is NOT named `hrip`: `hrip` is this
+            # emitter's name for the exit sentinel at a `ret`, and a reader --
+            # including `test_a_chain_that_crossed_a_frame_is_admitted_at_the_
+            # closing_read`, which takes the FIRST `have hrip` in the emitted
+            # text and reads the rest as that one fact's proof -- needs the two
+            # to be different facts.  It used to be `hrip`, and with the guard in
+            # every prologue the trap's is emitted first, so that test was
+            # reading the wrong block.
+            #
+            # `htrap{k}` is the same admission and the same shape as the crossed
+            # `hrip` above: one named hole, which `admitted_facts` counts and the
+            # report prints, against every function in the corpus coming back as
+            # "no tree" for it.
+            emit("have htrap%d : %s.rip = 0 := by" % (k, nxt))
+            emit("  all_goals sorry")
+            full = rules + [step_rule, "x86_exec_go_exit_at (by decide) htrap%d" % k]
+            emit("rw [%s]" % ",\n    ".join(full))
+            emit("simp")
             return
 
         if node.kind == "ret" and node.succ is None:
