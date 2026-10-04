@@ -12,8 +12,10 @@ struct's body, and an asker inside a per-FUNCTION loop pays it once per
 function: `#functions × #methods × body size` instead of
 `#structs × #methods × body size`.
 
-That is the shape `bugs/PERF_formal_build_recomputes_a_per_struct_census_on_every_ask.md`
-measured (43 508 redundant derivations on `myinterpreter.py`, 33 s of a 97 s
+That is the shape the 2026-10-02 per-struct census measured (its doc is
+deleted with the fix; this file and
+`bugs/PERF_struct_field_names_is_still_asked_once_per_function.md` are what
+is left of the family) (43 508 redundant derivations on `myinterpreter.py`, 33 s of a 97 s
 build) and its fix is the module-level tables `formal/build.py` derives once and
 threads: `framed_struct_names`, `one_field_struct_names`, the `wide` table. Two
 per-function askers survived that, both found by the measurement in

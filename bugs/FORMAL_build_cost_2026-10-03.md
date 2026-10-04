@@ -98,9 +98,9 @@ same, and so is the ceiling: 115.2 MB.
 ## 2. How the numbers were taken, and why not with `cProfile`
 
 **cProfile's TIME column ranks call counts, not time.** A function called 7
-million times inflates until it looks like the cost.
-`bugs/PERF_formal_build_recomputes_a_per_struct_census_on_every_ask.md`
-measured this and left the correction; it is still true, and it decided the
+million times inflates until it looks like the cost. The 2026-10-02 per-struct
+census doc measured this and left the correction (deleted with its fix; §3.1
+below is the measurement it led to); it is still true, and it decided the
 tool: the ranking below is `time.perf_counter` around candidate entry points,
 with `cProfile` used only for its call counts and for the shape of the call
 tree. The harness:
@@ -550,10 +550,13 @@ table changed the answer" as a question about which path ran.
 
 ## 7. What this doc supersedes
 
-`bugs/PERF_formal_build_recomputes_a_per_struct_census_on_every_ask.md` and
-`bugs/PERF_struct_field_split_asked_once_per_function.md` both describe the same
-redundancy from 2026-10-02, with the same two candidate fixes and the same
-warning that a memo across `_prepare_functions` needs an invalidation argument.
+Two 2026-10-02 docs described this same redundancy with the same two candidate
+fixes and the same warning that a memo across `_prepare_functions` needs an
+invalidation argument. Both were deleted with their fixes — the first with §3
+and §6.1 here, the second with `model.iter_statement_nodes` — and the shape they
+measured is still visible in
+`bugs/PERF_struct_field_names_is_still_asked_once_per_function.md`, which is the
+one member of the family still open.
 **Both candidate fixes in those docs are now measured and rejected in favour of
 threading:** the per-struct field set does not drift (§3.1, 0 of 7 788), so the
 invalidated memo is not needed — but the cheaper still needs the loop's

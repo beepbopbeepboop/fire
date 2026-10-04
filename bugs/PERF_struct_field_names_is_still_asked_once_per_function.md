@@ -2,8 +2,8 @@
 
 **Area:** `formal/build.py` — `_one_word_sole_field_chain` / `_sole_field_name`.
 Found 2026-10-04 on `work/bugs5-1` while pinning the family of per-struct
-redundancies that `bugs/PERF_formal_build_recomputes_a_per_struct_census_on_every_ask.md`
-measured; the new check is `test_formal_per_struct_asks.py`, whose third case is
+redundancies the 2026-10-02 per-struct census measured (that doc is deleted
+with its fix); the new check is `test_formal_per_struct_asks.py`, whose third case is
 this residue.
 
 **Status: measured, named, and PINNED as a number. Not fixed** — it is six call

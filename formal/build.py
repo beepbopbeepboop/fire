@@ -8050,8 +8050,8 @@ def _seed_one_word_bindings(fn, structs_by_name, functions, holders, hstruct,
         # DECLARED PARAMETER per function (`M.struct_is_framed` derives the field
         # count by walking every method body of the struct, twice): 21 of them on
         # a 20-function module, and the shape
-        # `bugs/PERF_formal_build_recomputes_a_per_struct_census_on_every_ask.md`
-        # measured. The `one_field` operand is asked either way — it was the
+        # the 2026-10-02 per-struct census measured. The `one_field` operand is
+        # asked either way — it was the
         # second one — so the table still answers without a walk.
         if not M.one_field_answer(pst, one_field):
             continue
@@ -9452,8 +9452,8 @@ def _bound_receiver_structs(fn, framed, functions=(), owner=None,
     # one-field struct: 22 whole-struct walks became 0. `one_field_answer` with no
     # table still asks the predicate, so a caller without module context is
     # unaffected, and the shape is the one
-    # `bugs/PERF_formal_build_recomputes_a_per_struct_census_on_every_ask.md`
-    # measured — one level below the one-field table that doc's fix installed.
+    # the 2026-10-02 per-struct census measured — one level below the one-field
+    # table its fix installed.
     covered = framed.get(owner.name) if owner is not None else None
     owner_framed = (covered is owner if covered is not None
                     else owner is not None
