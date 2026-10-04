@@ -4889,9 +4889,14 @@ def _collect_receiver_frame_escapes(fn, owner, structs_by_name,
     of anything else is not this finding: a parameter's frame belongs to the
     CALLER (and copying its address into the cell is a no-op the write-back
     already performs), and a word is not a frame at all. A store of the address
-    of a frame a CALLEE returned is the same escape and is not decided here;
-    `struct_constructor_sites` is the table that decides it for a construction,
-    and a frame-returning callee's block is the caller's own trailing word.
+    of a frame a CALLEE returned (`self.inner = mk(v)`) is the same escape, and
+    it is decided by another rule: measured on `work/formal21-1`, every spelling
+    of it outside a constructor is refused by `_collect_receiver_rebinds` with
+    the receiver-rebinding sentence, and inside a constructor
+    `model.init_body_stores` refuses the body as one it does not inline. So the
+    shape left for THIS check is the construction one, which is also the shape a
+    module boundary can reach — the two refusals a program meets both happen
+    before any code is emitted.
     """
     if owner is None:
         return
