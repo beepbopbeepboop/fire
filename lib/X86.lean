@@ -115,6 +115,47 @@ def x86_set_xmm (s : X86State) (i : Nat) (v : UInt64) : X86State :=
   | 6 => {s with xmm6 := v} | 7 => {s with xmm7 := v}
   | _ => s
 
+/-! ### A register write does not change memory
+
+**Every state-valued wrapper in this file needs one of these, and none had one.**
+A structure projection reduces through a `match` application only if the `match`
+is unfolded first, so `(x86_set_reg s i v).mem` and `(x86_flags_sub s a b r).mem`
+are both stuck — and everything those functions were built from comes along,
+including the sixteen register fields.
+
+That is not a cost, it is a correctness problem for the one consumer that wants
+the memory alone.  `formal/x86_64_endtoend_test.py` proves a read at a `ret` by
+EVALUATING it (`simp only` over the path's successor equations, then
+`native_decide`), and `native_decide` refuses a term with a free variable in it.
+`X86State.init` puts the program's input in `rdi`, so on any chain long enough to
+contain a register write the evaluated term still mentions the input and the
+evaluation is refused — measured, `const2` at 16 steps, where the read is at the
+initial stack and the answer is 0.
+
+These are the missing statements: the memory is UNCHANGED, and a simplifier
+turns each of them into `s.mem` without unfolding anything, so the projection
+walks the whole chain down to `X86State.init`'s `fun _ => 0`.  Plain theorems
+rather than `@[simp]` ones on purpose: this file has 744 `bv_decide` step lemmas
+whose proofs `simp`, and five new unconditional rewrite rules in the default set
+is a blast radius this file has no reason to accept for facts the one consumer
+asks for by name.
+
+`x86_set_reg` and `x86_set_xmm` need `split` because they are `match`es; the
+three `x86_flags_*` are `rfl` because they are `{s with …}` outright.  All five
+are here because the emitter's successor table quotes every one of them (read
+off `_SUCCS` for the `x86_` names it applies to a state), and a wrapper without
+one of these puts the whole register file — `rdi`, and so the program's input —
+back into a term `native_decide` refuses. -/
+theorem x86_set_reg_mem (s : X86State) (i : Nat) (v : UInt64) :
+    (x86_set_reg s i v).mem = s.mem := by
+  unfold x86_set_reg
+  split <;> rfl
+
+theorem x86_set_xmm_mem (s : X86State) (i : Nat) (v : UInt64) :
+    (x86_set_xmm s i v).mem = s.mem := by
+  unfold x86_set_xmm
+  split <;> rfl
+
 /-! ## REX prefix -/
 
 def x86_is_rex (b : UInt8) : Bool := b.toNat ≥ 64 && b.toNat ≤ 79
@@ -307,6 +348,21 @@ def x86_flags_add (s : X86State) (a b res : UInt64) : X86State :=
 
 def x86_flags_sub (s : X86State) (a b res : UInt64) : X86State :=
   { s with zf := res = 0, sf := x86_msb res, cf := a < b, of_ := x86_msb a != x86_msb b && (x86_msb res != x86_msb a) }
+
+/-- …and so is the memory, which is the other two thirds of the statement.  See
+    "A register write does not change memory" above for why this has to be
+    written down rather than left to `iota`: it is the `match` wrappers that
+    block the projection, and a simplifier that has one of these in its set
+    walks a memory read down a whole path of successor equations instead of
+    stopping at the first register write. -/
+theorem x86_flags_logic_mem (s : X86State) (res : UInt64) :
+    (x86_flags_logic s res).mem = s.mem := rfl
+
+theorem x86_flags_add_mem (s : X86State) (a b res : UInt64) :
+    (x86_flags_add s a b res).mem = s.mem := rfl
+
+theorem x86_flags_sub_mem (s : X86State) (a b res : UInt64) :
+    (x86_flags_sub s a b res).mem = s.mem := rfl
 
 /-- Evaluate a condition code against the flags.
 
