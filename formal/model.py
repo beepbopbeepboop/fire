@@ -5557,6 +5557,19 @@ BUILTIN_VALUE_METHODS = {
     # on this path, so the blob's capacity is a compile-time bound — the count
     # of append sites in the function — and the store is checked against it.
     "append": "list_append",
+    # `list.clear()`: the count word is the blob's header, so emptying a list is
+    # ONE store of zero at offset 0 of it. `std/collections/binary_heap.mojo`'s
+    # `clear`, and it is the whole of that method:
+    #
+    #     def clear(mut self):
+    #         self._data.clear()
+    #
+    # It is in this table and not in a backend's own because the two
+    # architectures would otherwise have two `clear` lowerings that can agree
+    # today and drift, and because the KIND GUARD below is a model decision —
+    # `append`'s guard is capacity and lives in the emitter, which is the
+    # reason that arm says why its own does not.
+    "clear": "list_clear",
     # `f.write(s)`: a text-mode write of a C string to a file descriptor.
     # `open(...)` already lowers to the C library's `open`, so the receiver
     # IS a descriptor and this is `write(fd, s, strlen(s))`.
@@ -5564,6 +5577,17 @@ BUILTIN_VALUE_METHODS = {
     # `f.close()`: the C library's `close` on the same descriptor.
     "close": "file_close",
 }
+
+#: The receiver kind a `BUILTIN_VALUE_METHODS` entry REQUIRES, for the ones
+#: whose guard is a kind rather than a fact an emitter has. One table and one
+#: reader (`_shape_guarded_refusal`) rather than a branch per method, and it is
+#: empty for `append`/`write`/`close` because their guards are CAPACITY and
+#: FILE-DESCRIPTOR-ness respectively — `append`'s emitter guard and
+#: `VALUE_METHOD_RECEIVERS`'s. `clear` is the case that needs one: storing zero
+#: at offset 0 of a word that is not a blob's header writes zero into whatever
+#: address that word holds, so it is honest only on a receiver established to be
+#: a list.
+BUILTIN_VALUE_METHOD_LIST_KINDS = frozenset({"clear"})
 
 # ── Methods on a string ───────────────────────────────────────────────────
 #
@@ -6291,6 +6315,106 @@ def non_container_element_refusal(op: str, spelled: str, function: str,
         f"`[1, 2, 3]`), or take the container as a PARAMETER of {function}, "
         f"where the caller's value decides and the subscript is answered for "
         f"its callers too"
+    )
+
+
+#: The kinds a CONTAINER OPERATION cannot be lowered against when its base is a
+#: struct FIELD. `None` is deliberately absent, and its absence is the whole of
+#: the narrowing this family is for: an unclassified slot is a word this image
+#: cannot read, and refusing it would refuse every `h.xs[i]` on a field whose
+#: declaration is in another module.
+#:
+#: `FRAME_KIND` is absent too, and for a different reason — a field whose
+#: declared type is a framed struct of this module holds an ADDRESS, and reading
+#: that as a container is a wrong ANSWER rather than a fault, which is its own
+#: defect and not this one:
+#: `bugs/FORMAL_a_subscript_of_a_field_declared_a_framed_struct_is_a_wrong_answer.md`.
+NON_CONTAINER_SLOT_KINDS = (INT_KIND, TYPE_KIND)
+
+
+def slot_container_operand_refusal(op: str, base_kind, spelled_base: str,
+                                   function: str) -> str | None:
+    """Why {op} of a struct FIELD whose kind is a scalar is refused, or None.
+
+    **The FIELD half of `non_container_element_refusal` and
+    `frame_container_operand_refusal`, and the one both of those are
+    deliberately blind to.** Both are BARE-NAME-only, and each says why: `h.x` is
+    a 64-bit field and reading it as a blob is what a declared `List` field is
+    FOR. That reasoning is right about a field whose DECLARED type says nothing,
+    and it is how a slot that says it holds a number reached the blob walk:
+
+        struct S:
+            var n: Int = 5
+        var s = S()
+        printf("%d", s.n[0])          # a subscript of the integer 5
+
+    Measured on this tree before the fix, and the two architectures disagreed
+    about the same source file, which is the worst failure mode this backend has:
+
+    | | arm64 | x86-64 |
+    |---|---|---|
+    | `var n: Int = 5` | refused — "subscript base must be a list/tuple name or literal … (got IntLiteral)" | **SIGSEGV, exit 139** |
+    | `var d: DType = 5` | the same refusal | **SIGSEGV, exit 139** |
+    | `var d: DType` + `__init__(out self, v: DType)`, `S(DType.int32)` | **SIGSEGV, exit 139** | **SIGSEGV, exit 139** |
+
+    CPython refuses all three (`TypeError: 'int' object is not subscriptable`),
+    so every row is a program no reader would write on purpose — which is the
+    point: the answer is a refusal on both machines and one machine was
+    dereferencing a `5`.  The arm64 message is also false about the file: the
+    source says `s.n`, and `s.n` IS a field.  It names the node its gate was
+    handed, which by then is the slot's materialized default, so the literal in
+    the sentence is a residue of the rewrite rather than anything the reader
+    wrote.  commit f0df70b2.
+
+    **Why the kind and not the base's SPELLING is the gate**, and why `None` is
+    excluded from `NON_CONTAINER_SLOT_KINDS`, is measured rather than argued.
+    Every `X.<field>[i]` in the 610-file stdlib corpus was classified by its
+    field's declared type:
+
+    | declared kind | sites |
+    |---|---|
+    | nothing reachable in the file (a module attribute, or a struct from another module) | 2 446 |
+    | a POINTER (`Pointer` / `OptionalPointer`) | 85 |
+    | a declared name this path has no kind for | 66 |
+    | a container (`List` / `Dict` / `Tuple` / `Array` / `Optional` / …) | 37 |
+    | a string | 1 |
+    | a framed struct of the module | 7 |
+    | **an integer or a type tag** | **0** |
+
+    So the refusal costs the corpus nothing, and the permissive `None` is what
+    the other 2 446 sites get — which is the right answer for them: an
+    unclassified slot is a word, a word is a container as far as this path can
+    tell, and the corpus's untyped parameter and module-attribute subscripts are
+    the bulk of the language.
+
+    `op` is the parameter `non_container_element_refusal` takes and for its
+    reason: one message, said four ways, so a read, a store, an augmented
+    assignment, a slice, a membership test and a for-in iteration all answer
+    with the same sentence and the two backends cannot part company.
+    """
+    if base_kind not in NON_CONTAINER_SLOT_KINDS:
+        return None
+    what = ("an integer" if base_kind == INT_KIND
+            else "a TYPE TAG — a hash of a type's name — which is a number")
+    return (
+        f"{op} of `{spelled_base}` asks for a container element, and "
+        f"`{spelled_base}` is a struct field declared to hold {what}. Every "
+        f"container lowering starts by reading eight bytes at offset 0 of its "
+        f"base and calling the result a COUNT — that is the blob's header word "
+        f"— and then reads or writes at `base + 8 + 8k`, so the element "
+        f"address here is the number in the slot itself plus 8. Measured on "
+        f"BOTH architectures, this builds, links, and then dies of SIGSEGV "
+        f"(exit 139) at run time with the build green, because it reads through "
+        f"a number rather than through an address into anything. A frame slot is "
+        f"ONE word: a subscript needs a pointer plus a stride and there is "
+        f"nothing in the slot to compute a stride from, which is why this is a "
+        f"refusal rather than a cheaper index. The base's declared type is what "
+        f"this refusal names, and it is a DECLARATION: `{spelled_base}` is not "
+        f"classified because the image could not read it, it is classified as "
+        f"this because the source says so. What the same source can do instead: "
+        f"index a container it holds (`xs[i]`), or take that container as a "
+        f"PARAMETER of {function}, where the caller's value decides and the "
+        f"subscript is answered for its callers too"
     )
 
 
@@ -12071,10 +12195,30 @@ def _shape_guarded_refusal(method, receiver_kind, dotted, receiver_is_fd,
         return (f"{dotted}() {MLIR_BOOL_METHODS[method]}")
     if method in BUILTIN_VALUE_METHODS:
         # `append`, whose guard is in the backend: `_scan_list_caps` has the
-        # function in hand and can compute the blob's capacity, and a name the
-        # scan drops refuses there with a message about CAPACITY — which is the
+        # function in hand and can compute the capacity, and a name the scan
+        # drops refuses there with a message about CAPACITY — which is the
         # thing a reader has to fix. Refusing here would be both less accurate
         # and one more thing to keep in step between two architectures.
+        #
+        # `clear` is the other half and its guard IS a kind, so it is asked
+        # here: storing zero at offset 0 of a word that is not a blob's header
+        # writes zero into whatever address that word holds. A receiver this
+        # image cannot establish to be a list therefore refuses, which is the
+        # same default the whole kind model runs on and the reason the arm is a
+        # table and not a flag.
+        if method in BUILTIN_VALUE_METHOD_LIST_KINDS:
+            if is_list_kind(receiver_kind):
+                return None
+            holds = (repr(receiver_kind) if receiver_kind
+                     else "a word of unknown contents")
+            return (f"{dotted}() lowers to one store of zero at offset 0 of "
+                    f"its receiver, and that offset is a container's COUNT — so "
+                    f"the store empties a list and writes into whatever address "
+                    f"anything else holds. {dotted}'s receiver is {holds}, and "
+                    f"this path will not read an arbitrary word as a blob's "
+                    f"header. Bind a list to a name and call the method on the "
+                    f"name, or give the field a `List[…]` declaration so the "
+                    f"receiver's kind is stated")
         return None
     holds = repr(receiver_kind) if receiver_kind else "a word of unknown contents"
     return (f"{dotted}() is a method call on a value, and this backend "
@@ -15214,6 +15358,31 @@ def _kind_of_simple(e) -> str | None:
         if e.op == "not":
             return INT_KIND
         return _kind_of_simple(e.operand)
+    if isinstance(e, F.MemberExpr) and type_value_tag(e) is not None:
+        # `DType.int32` — a type named as a VALUE, which is one 63-bit TAG and
+        # so `TYPE_KIND`. Asked with `type_value_tag`, the ONE reader both
+        # backends' member arms use for exactly this expression, so a third
+        # answer cannot appear here.
+        #
+        # It was missing, and the consequence was a downstream one rather than a
+        # cosmetic one: `declared_type_kind` classifies a field DECLARED `DType`
+        # as a tag, so `struct S { var d: DType }` knows the slot holds a tag —
+        # but `S(DType.int32)` puts the tag there through `__init__`, and
+        # `ValueKinds._constructed_field_kind` requires the constructor
+        # argument's own kind to be EVIDENCE ("a bare name is asked of
+        # `own_shape_kind` and a call result is refused by `_own_shape_of`'s
+        # filter"). The argument is this expression, it classified as None, and
+        # so the slot's kind was unestablished. Measured on both backends,
+        # `struct S { var d: DType; var t: Int }` with
+        # `def __init__(out self, v: DType): self.d = v`, called as
+        # `S(DType.int32)`, and `printf("%d", s.d[0])` then built, ran and died
+        # of SIGSEGV (exit 139) — the container lowering reading a count out of
+        # the tag. Same class as the `DTYPE_TYPE_NAMES` row's own note ("one
+        # value, two kinds, decided by where the name is written"), one level
+        # further in: there the field and the local disagreed, here the field
+        # and the CONSTRUCTOR ARGUMENT do.
+        # commit f0df70b2's row 3.
+        return TYPE_KIND
     return None
 
 
@@ -27249,6 +27418,44 @@ def one_word_nested_frame_structs(decls: dict) -> dict:
         if nested is not None:
             out[name] = nested
     return out
+
+
+def struct_construction_yields_frame_address(struct_def, decls: dict) -> bool:
+    """Whether constructing this struct puts a FRAME ADDRESS in the name.
+
+    Two shapes, and the second is the one this function exists for:
+
+      * a struct with a frame of its own — the construction reserves a block and
+        the value IS that block's address (`struct_constructor_sites`);
+      * **a ONE-FIELD struct whose sole field holds a placed nested frame** —
+        there is no object, so there are no slots of its own to reserve and the
+        value the caller receives is the NESTED frame's address.
+        `struct_constructor_site_bytes` reserves the nested block alone and says
+        why in its own words ("that struct's own 8 bytes are not reserved,
+        because there is no object: the VALUE is the nested frame's address"),
+        and both backends' `_emit_fresh_one_word` bring that frame up and hand
+        back its address.
+
+    It is asked by `formal/build.py::_value_may_be_a_frame`, which is the ONE
+    recogniser in that file for "can this value put a frame in a name", and the
+    second shape used to be missing from it: `struct_is_framed` is False for
+    every one-field struct, so `var b = Box()` was not a frame value and the
+    checks that ask the question refused the program —
+    `check_one_word_frame_receivers` with "nothing in this function has put a
+    frame there: `b` was built by `Box()`, whose construction fills the WORD
+    rather than the frame that word will hold" — about a construction that has
+    filled the frame since `4af77b16`. Two rows of `test_formal_run.py` were red
+    on the tree for it (`one_word_holder_reads_the_frame_its_constructor_brought_
+    up` and `two_one_word_constructions_get_two_different_frames`).
+
+    Both shapes read `struct_is_framed` / `one_word_sole_field_frame` rather than
+    a second opinion about either, because a disagreement here is a load at
+    address 0 rather than a wrong message.
+    """
+    if struct_def is None:
+        return False
+    return (struct_is_framed(struct_def)
+            or one_word_sole_field_frame(struct_def, decls or {}) is not None)
 
 
 def struct_constructor_site_bytes(struct_def, decls: dict) -> int:

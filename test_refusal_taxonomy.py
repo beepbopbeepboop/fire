@@ -85,6 +85,21 @@ SAMPLES = [
     ("name has two disagreeing shapes",
      "x.y cannot be placed: this name holds a frame address in more than one "
      "shape, and the shapes do not agree"),
+    # The container-operand family: a container operation whose base is a word
+    # ESTABLISHED not to be a container.  Three rows because the BASE is what
+    # tells a reader which of them to look at, and because the field row is new
+    # (`model.slot_container_operand_refusal`) — the two others were already
+    # being filed as "other refusal", which is the thing this table exists to
+    # prevent.  Each sample is the opening clause of a real message.
+    ("container operation on a scalar slot",
+     "a subscript of `s.n` asks for a container element, and `s.n` is a struct "
+     "field declared to hold an integer"),
+    ("container operation on a non-container",
+     "a subscript of `a` asks for a container element, and `a` is a value this "
+     "function bound to an integer"),
+    ("container operation on a frame address",
+     "xs is a CONTAINER operation on a Opt FRAME ADDRESS, and a frame is not a "
+     "container"),
     # The two shapes the message above was ALSO matching, before
     # `formal/model.py`'s `member_read_without_a_field` told the two apart: it
     # printed "more than one shape … the shapes do not agree" for a SINGLE

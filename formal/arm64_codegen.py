@@ -2893,6 +2893,7 @@ dylib_exports: list = None, globals_base: int = None,
             # summing a four-field struct gave 99 on arm64 and 53 on x86-64.
             self._refuse_frame_container_operand("a for-in iteration", it)
             self._refuse_non_container_operand("a for-in iteration", it)
+            self._refuse_slot_container_operand("a for-in iteration", it)
             self._refuse_string_iteration("a for-in iteration", it)
             tnames = _lbn_target_names(stmt.target) if isinstance(
                 stmt.target, str) else []
@@ -4682,6 +4683,33 @@ ctor_field_value=self._ctor_field_value_for(name),
         raise CodegenError(M.non_container_element_refusal(
             op, M.spelled(obj), self.func_name or "<module>"))
 
+    def _refuse_slot_container_operand(self, op: str, obj) -> None:
+        """Raise if `obj` is a struct FIELD whose kind is an integer or a tag.
+
+        **The FIELD sibling of the two above, and the one they are both blind
+        to by design.** `_refuse_frame_container_operand` and
+        `_refuse_non_container_operand` are BARE-NAME-only, each saying why:
+        `h.x` is a 64-bit field and reading it as a blob is what a declared
+        `List` field is FOR. That is right about a field whose declared type
+        says nothing and it is how `s.n[0]` — `s.n` declared `Int` — reached
+        the blob walk on one architecture and a SIGSEGV on the other.
+        `model.slot_container_operand_refusal` has the measurement, the
+        three-row table and the corpus census that says the gate is the KIND
+        and that `None` stays out of it.
+
+        Asked at the same four choke points as its two siblings, so a read, a
+        store, an augmented assignment, a slice, a membership test and a for-in
+        iteration all get this answer and the two architectures cannot come to
+        disagree about which bases qualify.
+        """
+        if not isinstance(obj, F.MemberExpr):
+            return
+        why = M.slot_container_operand_refusal(
+            op, self._expr_str_kind(obj), M.spelled(obj),
+            self.func_name or "<module>")
+        if why is not None:
+            raise CodegenError(why)
+
     def _emit_subscript_addr(self, e: F.SubscriptExpr,
                              for_store: bool = False) -> None:
         """X0 = &obj[index]. Blob path bounds-checkes (exit 1 on OOB).
@@ -4707,6 +4735,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         remember to clear is a flag that survives an exception path."""
         self._refuse_frame_container_operand("a subscript", e.obj)
         self._refuse_non_container_operand("a subscript", e.obj)
+        self._refuse_slot_container_operand("a subscript", e.obj)
         if M.is_external_call_template(e):
             # The ONE place an `external_call[...]` is a subscript that is not
             # the callee of a call, and `M.multi_index_refusal_for` above (and
@@ -5376,6 +5405,8 @@ ctor_field_value=self._ctor_field_value_for(name),
                or M.string_identity_method(method))
         if how == "list_append":
             self._emit_list_append(e)
+        elif how == "list_clear":
+            self._emit_list_clear(e)
         elif how == "file_write":
             self._emit_file_write(e)
         elif how == "file_close":
@@ -5806,6 +5837,41 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.label(done)
         self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 32))
         _emit_add_imm(self.asm, 31, 31, 48)
+
+    def _emit_list_clear(self, e: F.CallExpr) -> None:
+        """`xs.clear()` — one store of zero at offset 0 of the blob.
+
+        The blob is `[count:i64][elem0]…`, so its COUNT is offset 0 and
+        emptying it is exactly that one store; the elements past the count are
+        already unreachable and nothing walks them. It is `List.clear` in
+        `std/collections/binary_heap.mojo` and nothing else, and it is here
+        rather than as a rewrite because the store is the whole method — there
+        is no loop and no capacity to compute.
+
+        **No capacity check, and that is the difference from `append`.** An
+        append needs room the compile-time scan cannot find for a blob it did
+        not see built, which is why `_emit_list_append` refuses rather than
+        growing one; a clear needs no room at all, so the receiver may be any
+        word this image has established to be a list — which is what
+        `model.BUILTIN_VALUE_METHOD_LIST_KINDS` gates, and the guard is a KIND
+        precisely because a zero written at offset 0 of an arbitrary word is a
+        store into whatever address that word holds.
+
+        The receiver is emitted first and the base recomputed into X9, the
+        register discipline `_emit_list_append` and `_emit_block_store` both
+        use: evaluating a receiver can be anything, and both clobber X9.
+
+        Returns 0, for `non_container_element_refusal`'s reason and
+        `_emit_list_append`'s: `list.clear` returns None, and nothing in the
+        language can tell that from a zero."""
+        if e.args or e.kwargs:
+            raise CodegenError(
+                f"list.clear() takes no arguments on this path "
+                f"(got {len(e.args or []) + len(e.kwargs or [])})")
+        self._emit_expr(e.func.obj)                     # X0 = the blob base
+        self.asm.emit(encode_mov_zr_xn(9, 0))
+        self.asm.emit(encode_movz_xd_imm(0, 0))         # count = 0
+        self.asm.emit(encode_str_xt_xn_imm(0, 9, 0))
 
     def _emit_list_append(self, e: F.CallExpr) -> None:
         """`xs.append(v)` — store v at the blob's count and bump the count.
@@ -6908,6 +6974,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # the measurement, which is a wrong answer rather than a crash.
         self._refuse_frame_container_operand("a membership test", right)
         self._refuse_non_container_operand("a membership test", right)
+        self._refuse_slot_container_operand("a membership test", right)
         if type(right) not in (F.IdentExpr, F.CallExpr, F.ListExpr,
                                F.TupleExpr, F.MemberExpr, F.SubscriptExpr,
                                F.SliceExpr, F.Comprehension, F.SetExpr,
@@ -7668,6 +7735,25 @@ ctor_field_value=self._ctor_field_value_for(name),
             # subtree up at the offset the layout chose.
             self._emit_frame_nested((nested, site[1], ()))
             self._emit_frame_defaults(nested, site[1])
+            # …and the nested struct's OWN nested frames' ADDRESSES, which is
+            # the third step and the one whose absence was a NULL SLOT. The
+            # frame-valued sole field used to stop after the two above, on the
+            # reasoning that its own address is the result — which is true and
+            # says nothing about the frames INSIDE it. A `nested` whose own
+            # typed-nested field holds a frame had that field's slot left at the
+            # zero `_emit_frame_defaults` just wrote, so the first read through
+            # it was a load at address 0: measured, both architectures,
+            # `struct Deep: x, y` / `struct Inner: a, b, d: Deep` /
+            # `struct Outer: n: Inner` with `o.n.d.x = 5` built, ran and died of
+            # SIGSEGV (exit 139), while the depth-1 and depth-2 reads of the same
+            # three structs answered correctly.
+            # `bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
+            # frame.md` §2 has the disassembly.
+            #
+            # AFTER the defaults above, not before: the slot this stores into is
+            # one of the slots they wrote, and the framed path orders it the
+            # same way for the same reason (`_emit_frame_positional`).
+            self._emit_frame_nested_addresses((nested, site[1], ()))
             # …and the ADDRESS last, because every store above left something
             # else in X0. An address materialized once and then overwritten is a
             # null pointer, which is the bug this case exists to close.
@@ -9137,6 +9223,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         argument for lowering the suffix case later."""
         self._refuse_frame_container_operand("a slice", obj)
         self._refuse_non_container_operand("a slice", obj)
+        self._refuse_slot_container_operand("a slice", obj)
         sreason = M.string_slice_refusal(
             self._expr_str_kind(obj), M.spelled(obj))
         if sreason is not None:

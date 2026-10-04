@@ -829,6 +829,128 @@ CASES = [
      "    o.n.put(7)\n"
      '    sys.stdout.write("%d %d %d" % (o.n.a, o.n.b, o.n.get() * 10 + o.n.a))\n'
      "    return 0\n"),
+    # The row above with `Out`'s `pad` DELETED, so `n` is the struct's ONLY
+    # field — and with it the whole shape changes, because a struct of one
+    # field has no frame of its own: its receiver IS that field, and
+    # `model.struct_constructor_site_bytes` reserves the NESTED block alone
+    # because "there is no object: the VALUE is the nested frame's address".
+    # `o.n` is therefore `o`, and `o.n.a` is ONE load at `o + 8·slot(a)` — not
+    # the two-hop read a "the first hop was thrown away" reading of the symptom
+    # suggests, and not the field access of a plain word either.  Before the
+    # fix BOTH backends refused the read by name with
+    #
+    #     main: 'o.a' is a field access through 'o', and this path has no way
+    #     to say what 'o' holds … Bind the base from a constructor whose
+    #     declaration THIS IMAGE can see (`x = S()`)
+    #
+    # about a constructor they had just compiled and could see perfectly well:
+    # the holder analysis seeded the METHOD receiver of such a struct
+    # (`_frame_receivers`) and had no case for the LOCAL, so the word the
+    # constructor put an address in was still classified as a plain word.
+    # commit 03e3b7b6.
+    #
+    # The `put(7)` is the METHOD-call half and the reads are the direct half,
+    # so the two shapes that share the word are both here: with only the call
+    # the program already built, which is why the row looked like a working
+    # family rather than a broken one.
+    ("one_field_struct_whose_only_field_is_a_nested_frame",
+     "struct In:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def put(out self, v: Int) -> Int:\n"
+     "        self.a = v\n"
+     "        return self.a\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.a\n"
+     "\n"
+     "struct Out:\n"
+     "    var n: In\n"
+     "\n"
+     "def main(k):\n"
+     "    var o = Out()\n"
+     "    o.n.put(7)\n"
+     '    printf("%d %d %d", o.n.a, o.n.b, o.n.get() * 10 + o.n.a)\n'
+     "    return 0\n",
+     "class In:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "\n"
+     "    def put(self, v):\n"
+     "        self.a = v\n"
+     "        return self.a\n"
+     "\n"
+     "    def get(self):\n"
+     "        return self.a\n"
+     "\n"
+     "class Out:\n"
+     "    def __init__(self):\n"
+     "        self.n = In()\n"
+     "\n"
+     "import sys\n"
+     "\n"
+     "def main():\n"
+     "    o = Out()\n"
+     "    o.n.put(7)\n"
+     '    sys.stdout.write("%d %d %d" % (o.n.a, o.n.b, o.n.get() * 10 + o.n.a))\n'
+     "    return 0\n"),
+    # The same shape TWO NESTED LEVELS DOWN, and it is its own row because it
+    # fails a different way: the row above reads slots the nested frame already
+    # had, while this one reads a frame the nested frame itself holds, and the
+    # one-word construction used to bring that grandchild's DEFAULTS up and
+    # never store its ADDRESS (`_emit_fresh_one_word` stopped after
+    # `_emit_frame_nested` + `_emit_frame_defaults` on the reasoning that its
+    # own address is the result, which says nothing about the frames inside
+    # it).  The slot stayed at the zero those defaults wrote, so the first read
+    # through it was a load at address 0: measured on both architectures,
+    # `o.n.d.x = 5` built, ran and died of SIGSEGV, exit 139, while `o.n.a` and
+    # `o.n.d.y` answered correctly in the same program.
+    ("one_field_struct_whose_only_field_is_a_nested_frame_two_levels_down",
+     "struct Deep:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "struct In:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var d: Deep\n"
+     "\n"
+     "struct Out:\n"
+     "    var n: In\n"
+     "\n"
+     "def main(k):\n"
+     "    var o = Out()\n"
+     "    o.n.a = 7\n"
+     "    o.n.d.x = 5\n"
+     "    o.n.d.y = 6\n"
+     '    printf("%d %d %d %d", o.n.a, o.n.b, o.n.d.x, o.n.d.y)\n'
+     "    return 0\n",
+     "class Deep:\n"
+     "    def __init__(self):\n"
+     "        self.x = 0\n"
+     "        self.y = 0\n"
+     "\n"
+     "class In:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "        self.d = Deep()\n"
+     "\n"
+     "class Out:\n"
+     "    def __init__(self):\n"
+     "        self.n = In()\n"
+     "\n"
+     "import sys\n"
+     "\n"
+     "def main():\n"
+     "    o = Out()\n"
+     "    o.n.a = 7\n"
+     "    o.n.d.x = 5\n"
+     "    o.n.d.y = 6\n"
+     '    sys.stdout.write("%d %d %d %d" % (o.n.a, o.n.b, o.n.d.x, o.n.d.y))\n'
+     "    return 0\n"),
     ("nested_frame_chain_three_levels",
      "struct In:\n"
      "    var v: Int\n"
@@ -1407,6 +1529,57 @@ CASES = [
      "def main():\n"
      "    widen(300)\n"
      "    return 0\n"),
+     # `List.clear()` reached through a ONE-FIELD struct's sole field, which is
+
+    # `std/collections/binary_heap.mojo`'s `clear` and the row that file's build
+    # reaches next.  The identity is correct (`self._data` IS `self`), so what
+    # the emitter sees is `self.clear()` with the receiver's KIND established
+    # from the field's declared type — which is why this is a one-store lowering
+    # and not a rewrite: the blob's COUNT is its first word, and emptying a list
+    # is a store of zero there.
+    #
+    # The numbers are the assertion and they are not weak: `after 0` is only
+    # reachable if the store landed in the blob the caller's local points at, and
+    # `before 3` is only reachable if it did not already.
+    #
+    # `bugs/FORMAL_binary_heap_mojo_after_the_len_value.md` §3a row 1.
+    ("list_clear_through_a_one_word_structs_sole_field",
+     "struct Wrap:\n"
+     "    var _data: List[Int]\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self._data = [5, 6, 7]\n"
+     "\n"
+     "    def clear(mut self):\n"
+     "        self._data.clear()\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return len(self._data)\n"
+     "\n"
+     "def main(k):\n"
+     "    var w = Wrap()\n"
+     '    printf("before %d", w.size())\n'
+     "    w.clear()\n"
+     '    printf(" after %d", w.size())\n'
+     "    return 0\n",
+     "class Wrap:\n"
+     "    def __init__(self):\n"
+     "        self._data = [5, 6, 7]\n"
+     "\n"
+     "    def clear(self):\n"
+     "        self._data.clear()\n"
+     "\n"
+     "    def size(self):\n"
+     "        return len(self._data)\n"
+     "\n"
+     "import sys\n"
+     "\n"
+     "def main():\n"
+     "    w = Wrap()\n"
+     '    sys.stdout.write("before %d" % w.size())\n'
+     "    w.clear()\n"
+     '    sys.stdout.write(" after %d" % w.size())\n'
+     "    return 0\n"),
 ]
 
 
@@ -1548,6 +1721,96 @@ REFUSALS = [
      "    printf(\"%d\", 1)\n"
      "    return 0\n",
      "the element width is the undecided part"),
+    # A SUBSCRIPT OF A FRAME SLOT, and this group is where the disagreement
+    # lived: `s.n` on a field declared `Int` was REFUSED on arm64 and SIGSEGV'd
+    # (exit 139) on x86-64, and with the field constructor-established BOTH
+    # machines crashed.  CPython refuses all three (`TypeError: 'int' object is
+    # not subscriptable`), so the correct answer is a refusal on both and one
+    # machine was dereferencing a `5`.
+    #
+    # The needle is the BASE'S SPELLING and not the refusal's wording, because
+    # the wording was the defect in the first half: arm64 refused at an emitter
+    # gate that reports the node it was HANDED, and by then `s.n` had been
+    # rewritten to the slot's materialized class-level default, so the message
+    # said "got IntLiteral" about a source that says `s.n`.  A reader sent to
+    # look for an `IntLiteral` in a file that has none is the C5 failure this
+    # project's diagnostics exist to stop.
+    # commit f0df70b2.
+    ("subscript_of_a_slot_declared_an_int_refused_identically",
+     "struct S:\n"
+     "    var n: Int = 5\n"
+     "    var t: Int = 6\n"
+     "\n"
+     "def main():\n"
+     "    var s = S()\n"
+     '    printf("%d", s.n[0])\n'
+     "    return 0\n",
+     "a subscript of `s.n` asks for a container element"),
+    # The same shape with a `DType` field, which is a TYPE TAG rather than an
+    # integer and therefore a different word in the message — so the needle here
+    # is the KIND clause and it is a separate row for that reason rather than
+    # for the shape.
+    ("subscript_of_a_dtype_slot_refused_identically",
+     "struct S:\n"
+     "    var d: DType = 5\n"
+     "    var t: Int = 6\n"
+     "\n"
+     "def main():\n"
+     "    var s = S()\n"
+     '    printf("%d", s.d[0])\n'
+     "    return 0\n",
+     "is a struct field declared to hold a TYPE TAG"),
+    # …and the one that CRASHED ON BOTH, which is its own row because it is the
+    # only one of the three whose kind is not established by a DECLARATION: the
+    # slot holds a tag because the CONSTRUCTOR put one there, so
+    # `struct_field_kind`'s third door has to be open for it.
+    # `ValueKinds._constructed_field_kind` requires the constructor argument's
+    # own kind to be evidence, and `DType.int32` classified as nothing — the
+    # same "one value, two kinds, decided by where the name is written" the
+    # `DTYPE_TYPE_NAMES` row records one level out, moved one level further in.
+    # `_kind_of_simple` asks `type_value_tag` for it now.
+    ("subscript_of_a_constructor_established_dtype_slot_refused_identically",
+     "struct S:\n"
+     "    var d: DType\n"
+     "    var t: Int\n"
+     "\n"
+     "    def __init__(out self, v: DType):\n"
+     "        self.d = v\n"
+     "        self.t = 7\n"
+     "\n"
+     "def main():\n"
+     "    var s = S(DType.int32)\n"
+     '    printf("%d", s.d[0])\n'
+     "    return 0\n",
+     "is a struct field declared to hold a TYPE TAG"),
+    # The other direction of the `clear` row above, and the one that says the
+    # KIND guard is load-bearing rather than decorative: the same `clear()` on a
+    # field whose value the constructor takes from a PARAMETER.  The store is
+    # one word at offset 0 of the receiver, so on a word this image cannot
+    # establish to be a list's header it writes zero into whatever address that
+    # word holds — which is a silent wrong answer in a program that runs.
+    #
+    # The receiver's kind is `'int'` and not `None` because
+    # `ValueKinds`'s default for an unannotated word is an integer, and the
+    # message names that rather than shrugging: the reader is looking at a
+    # `List[Int]` declaration two lines above and the sentence has to explain why
+    # it is not being used.
+    ("clear_of_a_receiver_this_image_cannot_call_a_list_refused_identically",
+     "struct Wrap:\n"
+     "    var _data: List[Int]\n"
+     "\n"
+     "    def __init__(out self, xs: List[Int]):\n"
+     "        self._data = xs\n"
+     "\n"
+     "    def clear(mut self):\n"
+     "        self._data.clear()\n"
+     "\n"
+     "def main(k):\n"
+     "    var xs = [5, 6, 7]\n"
+     "    var w = Wrap(xs)\n"
+     "    w.clear()\n"
+     "    return 0\n",
+     "lowers to one store of zero at offset 0 of its receiver"),
 ]
 
 # The other direction, and it is a PER-PLATFORM limit rather than a shared one,

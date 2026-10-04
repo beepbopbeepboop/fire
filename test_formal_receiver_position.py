@@ -485,6 +485,88 @@ DIFF_CASES = [
      '    print("v=%d" % b.get(), end="")\n'
      "    return 0\n\n"
      "main()\n"),
+    # A ONE-FIELD holder's method reading the nested frame, and the two rows
+    # this replaces in `REFUSALS` were STALE — which the tree itself was saying,
+    # because `test_formal_run.py` asserted the opposite of both of them about
+    # the same `Box` (`one_word_holder_reads_the_frame_its_constructor_brought_up`
+    # requires it to build and answer 0).  The refusal was written when `Box()`
+    # emitted a word of zeros, so `self.inner.v` was a load at address 0 and
+    # SIGSEGV (exit 139, measured on both architectures) is what the rule was
+    # written to prevent.  `4af77b16` gave that struct's construction the frame
+    # it holds — `model.struct_constructor_site_bytes` reserves the nested block
+    # alone "because there is no object: the VALUE is the nested frame's
+    # address" — and the crash the rule existed for stopped happening while the
+    # rule kept firing.
+    #
+    # The refusal was unreachable through the ONE recogniser that answers "can
+    # this value put a frame in a name": `_value_may_be_a_frame` asked
+    # `struct_is_framed`, which is False for every one-field struct, so a local
+    # bound from `Box()` was not a frame value however `Box()` was lowered.  It
+    # is asked `model.struct_construction_yields_frame_address` now, and both
+    # backends build these and answer CPython: 0 for the read, because a fresh
+    # `Opt` holds zeros, and 5 for the store-then-read, which is the write half
+    # reaching the same word.  The numbers are the assertion — a lowering that
+    # left the word null, or that read the wrong slot, produces neither.
+    # commit 03e3b7b6.
+    ("one_field_holder_reads_the_frame_its_constructor_brought_up",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n\n"
+     "struct Box:\n"
+     "    var inner: Opt\n\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.v\n\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     '    printf("v=%d", b.get())\n'
+     "    return 0\n",
+     "import sys\n\n"
+     "class Opt:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.has = 0\n\n"
+     "class Box:\n"
+     "    def __init__(self):\n"
+     "        self.inner = Opt()\n"
+     "    def get(self):\n"
+     "        return self.inner.v\n\n"
+     "def main():\n"
+     "    b = Box()\n"
+     '    sys.stdout.write("v=%d" % b.get())\n'
+     "    return 0\n\n"
+     "main()\n"),
+    # …and the same one WRITTEN through before the read, so the row is not only
+    # "a fresh frame reads as zeros": the store lands in the frame the
+    # construction reserved and the method reads it back out.
+    ("a_store_through_a_one_field_holders_own_frame_is_read_back",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n\n"
+     "struct Box:\n"
+     "    var inner: Opt\n\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.v\n\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    b.inner.v = 5\n"
+     '    printf("v=%d", b.get())\n'
+     "    return 0\n",
+     "import sys\n\n"
+     "class Opt:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.has = 0\n\n"
+     "class Box:\n"
+     "    def __init__(self):\n"
+     "        self.inner = Opt()\n"
+     "    def get(self):\n"
+     "        return self.inner.v\n\n"
+     "def main():\n"
+     "    b = Box()\n"
+     "    b.inner.v = 5\n"
+     '    sys.stdout.write("v=%d" % b.get())\n'
+     "    return 0\n\n"
+     "main()\n"),
 ]
 
 # ── the refusals ────────────────────────────────────────────────────────────
@@ -797,54 +879,16 @@ REFUSALS = [
      "    return Box().get()\n",
      "`Box().get(…)` cannot be lowered"),
 
-    # A ONE-FIELD holder's method reading the nested frame NOTHING built. The
-    # same `Box` as the row above and the same ten lines without the
-    # construction, and the difference is the whole of it: a one-word struct's
-    # receiver IS its field's storage, `model.one_word_sole_field_frame` made
-    # that storage an ADDRESS, and `Box()` fills the WORD rather than the frame
-    # the word will hold — so `self.inner.v` is a load at address 0. Measured on
-    # both architectures as SIGSEGV, exit 139, with no output at all.
-    #
-    # CPython raises `AttributeError` for this program (`Box` has no attribute
-    # `inner`), so there is no number to be differential against and a REFUSAL
-    # is the whole of the answer — which is why this is in this table and not
-    # in the differential one. The needle is the middle of the sentence, so a
-    # refusal that lost its repair would still fail the row.
-    ("refuse_a_one_field_holder_reading_a_frame_nothing_built",
-     "struct Opt:\n"
-     "    var v: Int\n"
-     "    var has: Int\n\n"
-     "struct Box:\n"
-     "    var inner: Opt\n\n"
-     "    def get(self) -> Int:\n"
-     "        return self.inner.v\n\n"
-     "def main() -> int:\n"
-     "    var b = Box()\n"
-     "    return b.get()\n",
-     "reads Box's only field 'inner', a slot whose declared type is the "
-     "framed struct Opt, and nothing in this function has put a frame there"),
-
-    # THE SAME CONSTRUCT WRITTEN THROUGH instead of read, which is the write
-    # half of the pair and used to be answered by a DIFFERENT rule — one that
-    # named `b.v` where the source says `b.inner.v`, so the refusal pointed at
-    # an expression the reader never wrote. It is pinned here because a rule that
-    # took the read half over must not have lost the write half with it, and
-    # because the repair this one names (`b.inner = Opt()` before the call) is
-    # the repair for both.
-    ("refuse_a_store_through_a_one_field_holders_unbuilt_frame",
-     "struct Opt:\n"
-     "    var v: Int\n"
-     "    var has: Int\n\n"
-     "struct Box:\n"
-     "    var inner: Opt\n\n"
-     "    def get(self) -> Int:\n"
-     "        return self.inner.v\n\n"
-     "def main() -> int:\n"
-     "    var b = Box()\n"
-     "    b.inner.v = 5\n"
-     "    return b.get()\n",
-     "reads Box's only field 'inner', a slot whose declared type is the "
-     "framed struct Opt, and nothing in this function has put a frame there"),
+    # A ONE-FIELD holder's method reading the nested frame NOTHING built, and
+    # the WRITE half through it, used to be two rows HERE and are now two
+    # differential rows above (`one_field_holder_reads_the_frame_its_constructor_
+    # brought_up` and `a_store_through_a_one_field_holders_own_frame_is_read_
+    # back`).  They were removed from this table rather than reworded because
+    # the refusal had become unreachable, not inaccurate: `Box()` brings the
+    # frame up (4af77b16), so there is nothing left for the rule to forbid, and
+    # `test_formal_run.py` was already asserting the opposite answer about the
+    # same struct.  A `refuse:` row here would have pinned the wrong thing on
+    # both architectures at once.
 ]
 
 # ── the comptime ABI, now on BOTH architectures ────────────────────────────
