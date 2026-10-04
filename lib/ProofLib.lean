@@ -3879,6 +3879,182 @@ theorem while_lt_exit_contract
   simpa using key ((arm64_reg b st).toNat - (arm64_reg r st).toNat) st hpc
     (by rfl) hPst fuel hfuel
 
+/-- A BOTTOM-TESTED loop contract: the same induction as
+`while_lt_exit_contract`, for the loop shape this backend's `for`-range
+lowering emits — the body, the counter increment and the comparison in ONE
+block, whose conditional back edge targets its own start.
+
+The differences from the top-tested shape, and each is forced by where the
+comparison sits:
+
+* there is no condition PREFIX, so `cond` is gone and the run from the loop top
+  to the branch IS the body;
+* the branch's TAKEN edge is the loop again, so `q` (the exit predicate) holds
+  on the FALL edge: `if q then exitBpc else checkPc`, which is
+  `while_lt_exit_contract`'s polarity with the two targets swapped;
+* a loop-top state whose counter has already reached the bound would run the
+  body once more before the test could fire, so the contract carries
+  `arm64_reg r st < arm64_reg b st` as a hypothesis and inducts on
+  `1 ≤ (b - r).toNat` rather than on the difference alone. -/
+theorem while_lt_exit_contract_bottom
+    (code : Nat → UInt8) (exit checkPc cbzPc exitBpc : Nat)
+    (q : Arm64State → Bool) (r b : Nat)
+    (model : Arm64State → UInt64)
+    (bodyex ex : Arm64State → Arm64State)
+    (mb me : Nat)
+    (P : Arm64State → Prop)
+    (hP_pc : ∀ (st : Arm64State) (pc : Nat), P st → P { st with pc := pc })
+    (hP_body : ∀ st, st.pc = checkPc → P st → P (bodyex st))
+    (hstep : ∀ st, st.pc = cbzPc →
+      arm64_step st code = some (if q st then
+        ({ st with pc := checkPc } : Arm64State) else ({ st with pc := exitBpc } : Arm64State)))
+    (hbodyRun : ∀ st, st.pc = checkPc → arm64_runs code mb st = some (bodyex st))
+    (hbodyMid : ∀ st, st.pc = checkPc →
+      ∀ u, u < mb → ∀ su, arm64_runs code u st = some su → su.pc ≠ exit)
+    (hbodyPc : ∀ st, st.pc = checkPc → (bodyex st).pc = cbzPc)
+    (hbodyR : ∀ st, st.pc = checkPc → arm64_reg r (bodyex st) = arm64_reg r st + 1)
+    (hbodyB : ∀ st, st.pc = checkPc → arm64_reg b (bodyex st) = arm64_reg b st)
+    (hbodyFlag : ∀ st, st.pc = checkPc →
+      (q (bodyex st) = true ↔ (arm64_reg r (bodyex st) < arm64_reg b (bodyex st))))
+    (hbodyModel : ∀ st, st.pc = checkPc →
+      (arm64_reg r st < arm64_reg b st) → model (bodyex st) = model st)
+    (hexRun : ∀ st, st.pc = exitBpc → P st → arm64_runs code me st = some (ex st))
+    (hexMid : ∀ st, st.pc = exitBpc →
+      ∀ u, u < me → ∀ su, arm64_runs code u st = some su → su.pc ≠ exit)
+    (hexPc : ∀ st, st.pc = exitBpc → P st → (ex st).pc = exit)
+    (hexX0 : ∀ st, st.pc = exitBpc →
+      ¬ (arm64_reg r st < arm64_reg b st) → (ex st).x0 = model st)
+    (hmodelPc : ∀ st pc, model { st with pc := pc } = model st)
+    (hcbzExit : cbzPc ≠ exit) (hCheckPc : checkPc ≠ cbzPc) (hExitBpc : exitBpc ≠ cbzPc) :
+    ∀ (st : Arm64State) (fuel : Nat),
+      (mb + me + 3) *
+        ((arm64_reg b st).toNat - (arm64_reg r st).toNat) + (mb + me + 3) ≤ fuel →
+      st.pc = checkPc → (arm64_reg r st < arm64_reg b st) → P st →
+      ∃ s, arm64_go_exit st code exit fuel = some s ∧ s.x0 = model st := by
+  have u64_lt_toNat {a c : UInt64} (h : a < c) : a.toNat < c.toNat := by
+    rw [UInt64.lt_iff_toNat_lt] at h
+    exact h
+  have toNat_lt_u64 {a c : UInt64} (h : a.toNat < c.toNat) : a < c := by
+    rw [UInt64.lt_iff_toNat_lt]
+    exact h
+  have key : ∀ (k : Nat) (st : Arm64State), st.pc = checkPc →
+      1 ≤ k → (arm64_reg b st).toNat - (arm64_reg r st).toNat = k → P st →
+      ∀ fuel, (mb + me + 3) * k + (mb + me + 3) ≤ fuel →
+      ∃ s, arm64_go_exit st code exit fuel = some s ∧ s.x0 = model st := by
+    intro k
+    induction k with
+    | zero =>
+      intro st hpc hk1 hk hPst fuel hfuel
+      omega
+    | succ k ih =>
+      intro st hpc hk1 hk hPst fuel hfuel
+      have hltst : arm64_reg r st < arm64_reg b st := by
+        exact toNat_lt_u64 (show (arm64_reg r st).toNat < (arm64_reg b st).toNat by
+          omega)
+      have hglue1 := rec1_glue_gen code exit mb (fuel - mb) st (bodyex st)
+        (hbodyRun st hpc) (hbodyMid st hpc)
+      rw [show mb + (fuel - mb) = fuel from by omega] at hglue1
+      rw [hglue1]
+      have hbp : (bodyex st).pc = cbzPc := hbodyPc st hpc
+      have hpcne : (bodyex st).pc ≠ exit := by rw [hbp]; exact hcbzExit
+      by_cases hgo : ¬ q (bodyex st) = true
+      · -- the test says STOP: the fall edge leaves the loop from here.
+        have hstep' := hstep (bodyex st) hbp
+        have hjump : ({ bodyex st with pc := exitBpc } : Arm64State).pc ≠
+            (bodyex st).pc := by rw [hbp]; exact hExitBpc
+        have hcbz := go_exit_cbz_fall (bodyex st) code exit (fuel - mb - 1)
+          (q (bodyex st) = true)
+          ({ bodyex st with pc := checkPc }) ({ bodyex st with pc := exitBpc })
+          hstep' hgo hjump hpcne
+        rw [show (fuel - mb - 1) + 1 = fuel - mb from by omega] at hcbz
+        rw [hcbz]
+        have hPe : P ({ bodyex st with pc := exitBpc } : Arm64State) :=
+          hP_pc (bodyex st) exitBpc (hP_body st hpc hPst)
+        have hglue3 := rec1_glue_gen code exit me (fuel - mb - 1 - me)
+          ({ bodyex st with pc := exitBpc }) (ex { bodyex st with pc := exitBpc })
+          (hexRun _ (by rfl) hPe) (hexMid _ (by rfl))
+        rw [show me + (fuel - mb - 1 - me) = fuel - mb - 1 from by omega] at hglue3
+        rw [hglue3]
+        have hexpc : (ex { bodyex st with pc := exitBpc }).pc = exit :=
+          hexPc _ (by rfl) hPe
+        rw [arm64_go_exit_hit _ code exit (fuel - mb - 1 - me) (by omega) hexpc]
+        refine ⟨ex { bodyex st with pc := exitBpc }, rfl, ?_⟩
+        have hge : ¬ (arm64_reg r { bodyex st with pc := exitBpc } <
+                     arm64_reg b { bodyex st with pc := exitBpc }) := by
+          rw [arm64_reg_pc, arm64_reg_pc]
+          exact fun hlt => hgo ((hbodyFlag st hpc).mpr hlt)
+        have hex0 := hexX0 _ (by rfl) hge
+        rw [hex0, hmodelPc (bodyex st) exitBpc, hbodyModel st hpc hltst]
+      · -- the test says AGAIN: the taken edge is the loop top, one iteration on.
+        have hq : q (bodyex st) = true := Classical.byContradiction hgo
+        have hstep' := hstep (bodyex st) hbp
+        have hjump : ({ bodyex st with pc := checkPc } : Arm64State).pc ≠
+            (bodyex st).pc := by rw [hbp]; exact hCheckPc
+        have hcbz := go_exit_cbz_taken (bodyex st) code exit (fuel - mb - 1)
+          (q (bodyex st) = true)
+          ({ bodyex st with pc := checkPc }) ({ bodyex st with pc := exitBpc })
+          hstep' hq hjump hpcne
+        rw [show (fuel - mb - 1) + 1 = fuel - mb from by omega] at hcbz
+        rw [hcbz]
+        have hltstnat : (arm64_reg r st).toNat < (arm64_reg b st).toNat :=
+          u64_lt_toNat hltst
+        have hle : (arm64_reg r st).toNat + 1 ≤ (arm64_reg b st).toNat :=
+          Nat.succ_le_of_lt hltstnat
+        have hb264 : (arm64_reg b st).toNat < 2^64 := UInt64.toNat_lt (arm64_reg b st)
+        have hlt264 : (arm64_reg r st).toNat + 1 < 2^64 := by omega
+        have hrb : arm64_reg r (bodyex st) = arm64_reg r st + 1 := hbodyR st hpc
+        have hbb : arm64_reg b (bodyex st) = arm64_reg b st := hbodyB st hpc
+        have hadd : (arm64_reg r st + 1).toNat = (arm64_reg r st).toNat + 1 := by
+          rw [UInt64.toNat_add, show (1 : UInt64).toNat = 1 from by rfl]
+          exact Nat.mod_eq_of_lt hlt264
+        have hrb2 : (arm64_reg r (bodyex st)).toNat = (arm64_reg r st).toNat + 1 := by
+          rw [hrb, hadd]
+        have hltb : (arm64_reg r st).toNat + 1 < (arm64_reg b st).toNat := by
+          have hltb' := u64_lt_toNat ((hbodyFlag st hpc).mp hq)
+          rw [hbb] at hltb'
+          rw [hrb2] at hltb'
+          exact hltb'
+        have hk1' : 1 ≤ k := by
+          -- `hk` reads the difference and the flag reads the order, and the
+          -- one step that needs both is written with `Nat`'s own shape rather
+          -- than `omega`: the two UInt64 equalities that also stand in this
+          -- context (`hrb`, `hbb`) are not linear facts `omega` can read.
+          have hB : (arm64_reg b st).toNat
+              = k + 1 + (arm64_reg r st).toNat :=
+            (Nat.sub_eq_iff_eq_add (a := (arm64_reg b st).toNat)
+              (b := (arm64_reg r st).toNat) (c := k + 1)
+              (Nat.le_of_lt hltstnat)).mp hk
+          have hltb' : (arm64_reg r st).toNat + 1
+              < k + 1 + (arm64_reg r st).toNat := by
+            rw [← hB]
+            exact hltb
+          omega
+        have hrem0 : (arm64_reg b (bodyex st)).toNat -
+            (arm64_reg r (bodyex st)).toNat = k := by
+          rw [hbb, hrb2, ← Nat.sub_sub, hk]
+          omega
+        have hrem : (arm64_reg b { bodyex st with pc := checkPc }).toNat -
+            (arm64_reg r { bodyex st with pc := checkPc }).toNat = k := by
+          simp only [arm64_reg_pc]
+          exact hrem0
+        have hfuel'' : (mb + me + 3) * k + (mb + me + 3) + (mb + me + 3) ≤ fuel := by
+          have hx := hfuel
+          rw [Nat.mul_succ] at hx
+          exact hx
+        have hfuel' : (mb + me + 3) * k + (mb + me + 3) ≤ fuel - mb - 1 := by
+          omega
+        have hPb : P { bodyex st with pc := checkPc } :=
+          hP_pc (bodyex st) checkPc (hP_body st hpc hPst)
+        obtain ⟨s, hs, hx0⟩ := ih _ (by rfl) hk1' hrem hPb _ hfuel'
+        refine ⟨s, hs, ?_⟩
+        rw [hx0, hmodelPc (bodyex st) checkPc, hbodyModel st hpc hltst]
+  intro st fuel hfuel hpc hlt hPst
+  have hk1 : 1 ≤ (arm64_reg b st).toNat - (arm64_reg r st).toNat := by
+    have hltnat : (arm64_reg r st).toNat < (arm64_reg b st).toNat := u64_lt_toNat hlt
+    omega
+  simpa using key ((arm64_reg b st).toNat - (arm64_reg r st).toNat) st hpc
+    hk1 (by rfl) hPst fuel hfuel
+
 /-- **A push pair does not disturb a slot above `sp`.**  Reading `sp + j`
     (`j < 2^63`) after the two-store push at `sp - 16` and `(sp - 16) + 8`
     returns the value from the old memory.  This is the frame-preservation

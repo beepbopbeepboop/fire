@@ -1581,6 +1581,107 @@ class TestLoopContractBlocks(unittest.TestCase):
                              f"{sorted(cited - defined)}")
 
 
+class TestBottomTestedRangeLoop(unittest.TestCase):
+    """A `for … in range(…)` loop, whose back edge is a CONDITIONAL branch.
+
+    The same program raised
+
+        ValueError: unsupported cbz taken continuation to 0x100000330
+
+    out of the proof generator, on arm64, and the doc that recorded it
+    (`bugs/FORMAL_sum_range_generation_refused_and_it_is_not_an_expected_failure.md`)
+    had no `EXPECTED_FAILURES` entry for it — an UNEXPECTED failure of the
+    `formal` suite job.
+
+    The cause is a shape, not a missing case: `arm64_codegen`'s `_emit_while`
+    puts a `for`-range loop's emptiness test in a PREHEADER and leaves the
+    back edge as the body block's own conditional branch, so the loop top is a
+    `cbz`-kinded block whose TAKEN edge targets its OWN start.  The generator's
+    loop discovery asked for the other shape (a `b` block branching to a `cbz`
+    block), which that preheader has not produced since it landed, so
+    `_gen_range_loop` matched nothing and the walk had no contract to apply at
+    the re-entry.
+
+    Three things are pinned here, and the first is the regression itself:
+
+    * the program GENERATES a proof, on arm64;
+    * the generated proof carries the bottom-tested loop contract, so the
+      back edge was discharged rather than refused;
+    * the loop top on the IMAGE is the self-looping block, so a change in the
+      emitter that moves the test back above the body is caught here rather
+      than silently reducing the contract to no match.
+    """
+
+    SOURCE = ("def sum_range(n):\n"
+              "  total = 0\n"
+              "  for i in range(n):\n"
+              "    total += i\n"
+              "  return total\n")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="a2-bottomloop-")
+        cls.proof, cls.error = _generate(cls.tmp, cls.SOURCE, "bottomloop")
+        cls.result = None
+        if cls.error is None:
+            import formal.build as fb
+            src = os.path.join(cls.tmp, "bottomloop.mojo")
+            cls.result = fb.compile_formal(src, arch="arm64",
+                                           output=os.path.join(cls.tmp,
+                                                               "bottomloop2.aout"),
+                                           prove=False, check=False)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_it_generates(self):
+        self.assertIsNone(self.error, self.error)
+        self.assertIsNotNone(self.proof)
+
+    def test_the_proof_carries_the_bottom_tested_loop_contract(self):
+        text = open(self.proof).read()
+        self.assertIn("while_lt_exit_contract_bottom", text,
+                      "no bottom-tested loop contract in the proof: the "
+                      "back edge was discharged by something else, or by "
+                      "nothing")
+        self.assertIn("_ltb_loop", text,
+                      "the contract is applied nowhere: the walk reached the "
+                      "re-entry without it")
+
+    def test_the_loop_top_is_a_self_looping_conditional_block(self):
+        """The premise the contract is generated from, measured on the image.
+
+        `_cfg_blocks` is the partition the generator reads, so this is the
+        generator's own view and not a re-derivation of it.  The countdown
+        shape (`TestLoopContractBlocks` above) is a `b` block branching to a
+        `cbz` block; this row is the other one, and the emitter picks between
+        them.
+        """
+        import formal.arm64_proof_gen as G
+        info = self.result["info"]
+        code = self.result["code"]
+        base = info["base_addr"]
+        words = {base + i: int.from_bytes(code[i:i + 4], "little")
+                 for i in range(0, len(code) - len(code) % 4, 4)}
+        entry = info["func_offset"]
+        rets = [pc for pc, w in words.items() if w == 0xd65f03c0 and pc >= entry]
+        blocks = G._cfg_blocks(words, entry, max(rets) + 4)
+        self_loop = [b for b in blocks if b["kind"] == "cbz"
+                     and len(b["instrs"]) > 1
+                     and b["targets"][1] == b["start"]]
+        self.assertTrue(
+            self_loop,
+            "no block whose conditional back edge targets its own start, so "
+            "this program is no longer the shape the bottom-tested contract "
+            "is written for -- the row above would then pass for the wrong "
+            "reason")
+        # The contract's `cbz_start` is that block's start, so the walk's
+        # `taken == ctx["loop_contract"]["cbz_start"]` test is what fires.
+        self.assertNotIn("unsupported cbz taken continuation",
+                         open(self.proof).read())
+
+
 class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
     """An `exit` the COMPILER emits is not an `exit` the PROGRAM makes.
 
