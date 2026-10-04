@@ -2,7 +2,7 @@
 
 **Area:** `tools/formal_proof_breadth.py` (`BUILTIN_NAMES`) and, for each name in
 it, whichever emitter is the one that would have to lower it ·
-**found by** `bugs/FORMAL_an_unlowered_callee_is_refused_by_a_link_audit.md`
+**found by** `the link audit's naming of an unlowered callee (landed in ee704916)`
 §"Measured over a real corpus", whose naming half is fixed and whose BUILTIN
 half is not · **both architectures** · **filed 2026-10-04, NOT fixed**
 
@@ -39,7 +39,7 @@ for each of `max` / `min` / `bool` / `divmod` / `chr` / `ord` / `float` /
 Seven unlowered of the eight the deleted doc names, and `abs` still lowered, so
 that doc's `abs(x)` measurement is confirmed stale rather than merely reported
 as such. Every refusal is the sentence landed for
-`bugs/FORMAL_an_unlowered_callee_is_refused_by_a_link_audit.md`, and every one
+`the link audit's naming of an unlowered callee (landed in ee704916)`, and every one
 is refused on BOTH machines with identical words, so this is a shared-pipeline
 gap and not a codegen divergence.
 

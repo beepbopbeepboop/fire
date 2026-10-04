@@ -35,7 +35,7 @@ class ConformanceError(Exception):
 # file used to carry its own two copies of that regex; one reader of one rule is
 # the point: `head_match` counts brackets to its match, so a parameter whose
 # type is a type application is one parameter and not two
-# (`bugs/FORMAL_a_generic_structs_parameters_are_never_bound.md` §0a carries
+# (`the variadic bracket arity and the `len(<display>)` fold (landed in e72a5f93)` §0a carries
 # the before/after and `std/collections/type_dict.mojo` as the case).
 
 

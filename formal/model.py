@@ -29317,7 +29317,7 @@ def fold_literal_expr(node, names=None, bound=()):
     expression rather than of the expression itself, and it is here because the
     value the corpus's class bodies compute is `len(<the literal an
     instantiation supplied>)` — a closed-form function of a constant, and the
-    one thing `bugs/FORMAL_a_generic_structs_parameters_are_never_bound.md` §5
+    one thing `the variadic bracket arity and the `len(<display>)` fold (landed in e72a5f93)` §5
     item 2 measured as missing. `bound` is the names the ENCLOSING SCOPE binds,
     so a `len` that is a field, a bracket parameter or a module symbol refuses
     rather than being read as the builtin; a reader with a scope passes it and a

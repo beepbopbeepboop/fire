@@ -1089,7 +1089,7 @@ CASES = [
      "    printf(\"%d\", show())\n"
      "    return 0\n", 0, "3"),
 
-    # THE FOLD, and the one shape `bugs/FORMAL_a_generic_structs_parameters_are_never_bound.md`
+    # THE FOLD, and the one shape `the variadic bracket arity and the `len(<display>)` fold (landed in e72a5f93)`
     # §5 item 2 measured as the whole of what was left: `len(<a display the
     # instantiation supplied>)` is a closed-form function of a constant, and
     # `fold_literal_expr` — the ONE folder — now has that arm. The two rows
@@ -18500,7 +18500,7 @@ ONE_FIELD_MUTATOR_CASES = [
     # field of `Opt` read through a local whose only classification was "a
     # word" — and both machines REFUSED it by name, with a message about an
     # expression the source does not contain
-    # (`bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_frame.md`).
+    # (`the one-word outer over a nested frame (landed in 22e8f57d)`).
     #
     # The answer is the two-hop read and it needs no new table: `Box`'s word IS
     # the address of the `Opt` frame the construction site reserved for it

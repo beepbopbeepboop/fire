@@ -310,7 +310,7 @@ tree.
   filed separately**: `self.t[i]` on a `DType`-annotated field is a SIGSEGV on
   x86-64 with the field annotated `Int` as well, and a SIGSEGV on BOTH
   architectures when the field is constructor-established — see
-  `FORMAL_a_subscript_on_a_frame_slot_is_a_pointer_dereference_and_the_two_backends_disagree.md`.
+  `the shared refusal for a subscript on a proven-scalar base.md`.
   That is not a consequence of this row (measured identical with and without it);
   it is what the item's "takes a new branch on a shape the corpus uses" was
   pointing at, and the branch it takes is the one that dereferences the slot.

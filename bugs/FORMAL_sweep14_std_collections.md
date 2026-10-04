@@ -148,7 +148,7 @@ VARIADIC parameter whose arity is not knowable without the instantiation.
 `d62016d6` gives the shape its own refusal naming the real premise (parameters
 are not bound; `doc/ABI.md` §Generics + no monomorphizer) instead of the
 un-carriable repair. **The wall itself is a project and is filed**:
-`FORMAL_a_generic_structs_parameters_are_never_bound.md`, with the family's
+`the variadic bracket arity and the `len(<display>)` fold.md`, with the family's
 size.
 
 This file also has a second wall behind the first — `TypeDict` is a generic

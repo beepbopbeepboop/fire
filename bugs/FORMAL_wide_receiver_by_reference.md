@@ -1904,7 +1904,7 @@ In }` with nothing else — is refused on both backends, with a message that nam
 `o.a`, a field the source never writes (`formal/model.py`'s one-word-receiver
 rewrite collapses `o.n` into `o`, and then `o.a` is a one-hop field access
 through `o`, whose only slot holds a FRAME ADDRESS). Filed as
-`FORMAL_a_one_field_struct_whose_only_field_is_a_nested_frame.md`.
+`the one-word outer over a nested frame.md`.
 
 **And this did not move the RETURNED-frame failures, which were already red.**
 (The three counts are stale as of 2026-10-03 and are corrected above; measured

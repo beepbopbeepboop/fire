@@ -3,7 +3,7 @@
 **Area:** `test_formal_sweep.py` (the dyld-probe fixture group),
 `test_formal_libc_symbol.py` (the `retkind` census) · **filed 2026-10-04, NOT
 fixed** · found while landing the naming half of
-`FORMAL_an_unlowered_callee_is_refused_by_a_link_audit.md`
+`the link audit's naming of an unlowered callee.md`
 
 Two tests in the formal backend's own area are red on `master`, neither is in
 `bugs/` and neither is claimed. They are filed together because the thing worth
@@ -60,7 +60,7 @@ class of drift one row over.
 
 Both fixes are small, and the reason they are not made is worth recording
 rather than the fixes themselves: this pass was inside
-`bugs/FORMAL_an_unlowered_callee_is_refused_by_a_link_audit.md`, whose scope is
+`the link audit's naming of an unlowered callee (landed in ee704916)`, whose scope is
 a message's wording, and the honest reading of both failures is that they were
 ALREADY red and have nothing to do with it. Both were measured to predate the
 change by reversing it and re-running:

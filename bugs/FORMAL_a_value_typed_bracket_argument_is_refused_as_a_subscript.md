@@ -3,7 +3,7 @@
 **Area:** `formal/monomorph.py::type_arg_text` (the refusal), and for the fix
 whichever layer decides what a bracket ARGUMENT may be ·
 **found by** closing
-`bugs/FORMAL_a_generic_structs_parameters_are_never_bound.md` (deleted with its
+`the variadic bracket arity and the `len(<display>)` fold (landed in e72a5f93)` (deleted with its
 fix), whose own use site is the reproducer · **both architectures** (the reader
 is shared and pre-codegen) · **filed 2026-10-04, NOT fixed**
 
