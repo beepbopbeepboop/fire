@@ -351,6 +351,51 @@ template-only module ever builds, and its docstring says why ("the only way to m
 to publish the template under its base name, and that is a run-time wrong answer rather than a
 build error"). Whoever takes this row has to answer that test, not route around it.
 
+#### §4.1 ANSWERED 2026-10-04, on `work/formal18-export-gate`: (a) and (b) are one rule, and it moves 3 files
+
+`formal/imports.py::library_free_edges` decides it per edge and both decision sites act on it
+(`build_module_dylib` for a dependency, `_resolve_imports` for the program's own imports), and
+`doc/ABI.md` §Generics now carries the rule under "When a module dylib is built at all". The
+test above was **answered, not routed around**: it is restated as two — one that a program
+importing a template and calling nothing builds, runs, and produces **no library at all** for
+the module, and one that a BARE call to one of those names is still refused, naming the call
+and the spelling that would bind. The export-set pin is untouched and still says a template is
+never published under its base name, so the property the old test existed to protect is intact;
+what changed is that a module nobody binds a concrete name from is no longer refused for
+having no boundary symbol.
+
+**All 163 re-measured**, one `fire.py build --formal --no-prove` per file (`--no-prove`, so no
+lean runs; the two architectures produce the same refusal, §2.2's standing measurement):
+
+| verdict | files | terminal cause |
+|---|---|---|
+| **BUILT** | **3** | `std/_gpu/host/__init__.mojo`, `std/compile/__init__.mojo`, `std/os/path/__init__.mojo` |
+| moved off the gate, still refused | 128 | **121 a bare call to a name the defining module cannot export**; 7 something else |
+| still at the gate | 32 | `std/sys/_io.mojo` (17) and a `constants.mojo` (13) — "declares no function and no type at all, only module-level constants" — plus 2 misfiled by the probe's own regex, which are bare calls too |
+
+**So the map's prediction holds and its destination row was one layer too far out.** The probe
+above lifted the refusal for *every* module the gate refused and so also removed the refusal a
+bare call gets; with the gate fixed and the bare call still refused, the first thing a build
+meets is the bare call. It is 121 of the 128, and it is **one feature**: a call whose type
+arguments are INFERABLE from its arguments, spelled `FormatStruct(writer, "Allocation")`
+(68 files, `std/memory/alloc.mojo:450` against `std/format/_utils.mojo:287`'s
+`struct FormatStruct[T: Writer, o: MutOrigin]`), `dealloc(allocation^)` (29, `alloc.mojo:99`
+against its own `:904`), `is_negative(value)` (12), `PhiloxRandom(seed)` (6), `align_up(x)` (3),
+three singles. `std/memory/alloc.mojo` carries the first two and is in nearly every stdlib
+file's closure, which is why those two rows are large and why they do not overlap in the FILE
+list — the walk stops at the first refusal.
+
+The doc is **`FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`**, and
+the part of it that matters beyond the count is that `imported_callee_refusal`'s next step —
+"spell it as `widen[<a type>](…)`" — is **wrong about correct Mojo** for all 121.
+
+The 32 that stay at the gate are the **constants-only** family this map's §4.1 called
+permanent, and they are still permanent: `_io.mojo` and `constants.mojo` declare no function
+and no type, so there is no boundary symbol for any edge, and the importer needs their VALUES
+out of a `__DATA` a dylib would have had to publish
+(`FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` §3's wall 1½ — claimed, and not
+this row's to answer).
+
 ### 4.2 The 43-file Optional row is a value-model decision, and it is claimed
 
 `std/builtin/builtin_slice.mojo`'s `self.step.or_else()`, one line, 43 files. `None` and a

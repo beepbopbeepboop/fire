@@ -63,11 +63,15 @@ What fails is **two hard-coded expectations of the old spelling**, and one doc:
   number." — the second half is still true and the first is now false, so §6 is
   asserting a spelling no code produces. §1 of the same doc also writes
   "`Pair_Int` is what the boundary symbol has to be" in three places.
+* **`doc/ABI.md` §Generics says it too**: "The mangling is `monomorphize.mangle`
+  — `Pair_Int`, one underscore-joined suffix — which is what the compiled path's
+  `Elaborator` computes and what its objects are named." So the stale spelling
+  is stated in the ABI CONTRACT, which is the one document a consumer reads to
+  learn what the boundary symbol is.
 
-`doc/ABI.md` §Generics illustrates the mangling as
-`Generic__method__<mangled-type-args>` rather than by example, so it is not
-wrong — but nothing in the tree now states the spelling in one place, which is
-what made the staleness cost two tests.
+`doc/ABI.md` §Generics's other example (`Generic__method__<mangled-type-args>`)
+is illustrative and not wrong, so nothing in it has to change beyond the sentence
+that names the mangler's output.
 
 ## 3. The exact next step
 
@@ -78,7 +82,8 @@ what made the staleness cost two tests.
    should look the symbol up as
    `formal.model.abi_method_symbol(prefix, mangled_struct_name, method)` for
    the same reason.
-2. Correct §6 of `bugs/FORMAL_generic_monomorph_scope.md` (and §1's three
+2. Correct the `Pair_Int` sentences in `doc/ABI.md` §Generics, in §6 of
+   `bugs/FORMAL_generic_monomorph_scope.md` and in that doc's §1 (three
    `Pair_Int` mentions) to the injective spelling, and say WHERE it is stated —
    one sentence, so the next reader is sent to `monomorphize.mangle` rather than
    to a string in a bug doc.

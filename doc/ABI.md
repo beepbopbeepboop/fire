@@ -310,6 +310,30 @@ The compiled (GIMPLE) path continues to monomorphize generics inline in its
 codegen rather than through this module's demand set; the two are different
 engines on different backends and share the mangling and the substitution.
 
+### When a module dylib is built at all: per EDGE, not per module
+
+**2026-10-04, `formal/imports.py::library_free_edges`.** A module dylib exists
+so that something on an import edge can bind a symbol in it, so whether it is
+built is a question about the EDGE and not about the module. An edge that binds
+no name the dependency could publish as one boundary symbol gets no library:
+`from .binary_heap import BinaryHeap` binds a template, and since a template is
+never published under its base name (above), that edge cannot bind a symbol
+whatever `binary_heap.mojo` exports. Measured cost of asking per module instead:
+163 swept files, 162 of which named nothing the refusing module declares — they
+import a package that re-exports one template.
+
+Four things keep a library on an edge, and each is a binder the import statement
+does not enumerate: a bare `import m` (so `m.f(…)` is possible), `from m import *`
+(the export set is a fact about a library that does not exist yet), a `from m
+import …` inside a function body, and a **demanded instantiation** — that last
+one is why `Pair[Int]()` still builds the library that publishes `Pair_Int`.
+
+A bare call to one of these names is still a refusal, and it is refused at the
+call: `widen(3)` names no instantiation, so no spelling of it has a callee.
+Naming the callee and the rule is the message's job
+(`formal/model.py::imported_callee_refusal`), because the alternative — a
+library that was never built — leaves the link-time bind audit to explain it.
+
 ## Stability
 
 This contract is versioned with the reflection-table schema. A change to any row

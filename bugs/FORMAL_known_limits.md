@@ -503,6 +503,46 @@ the trait-bound check — are listed with the reason each is not a third line of
 the same commit in **`bugs/FORMAL_generic_monomorph_scope.md`**, which is the
 single home for them from here.
 
+### §1.2, RE-MEASURED 2026-10-04: the gate is a PER-EDGE question, so this family
+### is 3 files instead of 163 — and what is behind it is 121 BARE CALLS
+
+`work/formal18-export-gate` made the export gate per EDGE
+(`formal/imports.py::library_free_edges`, `doc/ABI.md` §Generics "When a module
+dylib is built at all"): an edge that binds no name the dependency could publish
+as one boundary symbol gets no library, and the four binders that keep one are a
+bare `import`, a star import, a function-local `from`, and a **demanded
+instantiation**. Four facts about this family change, and none of them is that
+the limits above were wrong:
+
+* **The family is 3 files, not 163.** All 163 re-measured (one
+  `fire.py build --formal --no-prove` per file, no lean): **3 BUILD**, 128 move
+  off `binary_heap.mojo`'s gate and are still refused, 32 stay at the gate
+  against `std/sys/_io.mojo` (17) and a `constants.mojo` (13) — the
+  constants-only rows this section already calls **permanent and not work**.
+* **The 128 are 121 bare calls to a template whose type arguments are INFERABLE
+  from the call's arguments** — `FormatStruct(writer, "Allocation")` (68,
+  `std/memory/alloc.mojo:450`), `dealloc(allocation^)` (29, `:99`),
+  `is_negative(value)` (12), `PhiloxRandom(seed)` (6), `align_up(x)` (3). One
+  feature, and it is not this section's: the doc is
+  **`FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`**.
+  `std/memory/alloc.mojo` carries the first two and is in nearly every stdlib
+  file's closure, which is why those two are large.
+* **The "a bare call still names no instantiation, so no trie entry can mean it"
+  clause above is now the load-bearing limit rather than a footnote**, and its
+  next step is wrong about correct Mojo for all 121: Mojo lets an inferrable
+  type argument be omitted, the stdlib omits it in these places, and
+  `imported_callee_refusal`'s "spell it as `Name[<a type>](…)`" would send a
+  reader to edit working stdlib. That is why the bare call is still refused and
+  why the sentence is the thing to fix with the feature.
+* **The template is still never published under its base name**, and the two pins
+  that say so survive unchanged: `test_formal_imports.py`'s
+  `a generic template is not exported under its base name` (the export set is
+  empty) and its new `a bare call to a template is refused by the export rule`.
+  What was reversed — and was answered rather than routed around, in the same
+  commit — is the third pin, `a module exporting only a generic template is
+  refused`, which existed to stop exactly the thing this row needed. Its
+  replacement asserts the new rule and the absence of any library.
+
 ## 1.3 One of the 30 should not be in the family at all
 
 `std/gpu/host/nvidia/tma.mojo` is refused because it "imports `.`", and the
