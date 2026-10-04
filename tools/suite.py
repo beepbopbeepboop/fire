@@ -588,6 +588,11 @@ MEASURED_PEAK_GB = {
     # have been a permanent UNREGISTERED entry for a test that costs less than
     # `formal-core-hostmods`'s 25 s.
     'formal-monomorph':      (0.1,  'measured'),   # 9 s, 11 cases
+    # …and `formal-optional`, which the branch that wrote the file declared
+    # rather than registered (its own task forbade the registry) and this merge
+    # registers.  Same measurement, same instrument: 11.4-13.0 s and 0.1 GB for
+    # 22 cases on two backends.
+    'formal-optional':       (0.1,  'measured'),
     # …and the five the estate check caught on the formal6 merge (2026-10-03),
     # which is the largest it has ever named at once: the eleven branches that
     # merge brought in landed five test FILES with no registration and no
@@ -2885,6 +2890,27 @@ test('formal-monomorph', [PY, 'test_formal_monomorph.py'],
             'monomorphize.py', 'elaborate.py', 'reflect.py'] + FORMAL_BUILD_INPUTS,
      desc="a generic's instantiations are its boundary symbols, differentially")
 
+# `Optional[T]`'s NICHE representation — `formal/model.py`'s
+# `optional_none_word`, which is what makes `None` a word rather than an absence,
+# and `formal/build.py`'s `apply_optional_none_representation`, which is where
+# the obligation becomes real on a read.  `proofs` rather than `check` on what it
+# is ABOUT, for `formal-monomorph`'s reason: it builds and executes a formal
+# image per case on both architectures.
+#
+# Registered here rather than left in `test_suite.py`'s `UNREGISTERED`, where the
+# branch that wrote it put it because THAT branch's task said not to touch the
+# registry — and the entry said so itself, with this row as its next step.  A
+# declared test is a test no gate runs, and this one is 22 cases x 2 backends of
+# build-and-run against CPython plus the niche table's own properties and a
+# cross-read of `lib/ProofLib.lean`'s `optionalNoneWord` as failures.
+# Measured 2026-10-04 under `tools/memslot.py --gb 8`: 11.4-13.0 s, 0.1 GB peak.
+test('formal-optional', [PY, 'test_formal_optional.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_optional.py', 'formal/model.py', 'formal/build.py',
+            'formal/arm64_codegen.py', 'formal/x86_64_codegen.py',
+            'lib/ProofLib.lean'] + FORMAL_BUILD_INPUTS,
+     desc="Optional[T]'s niche: truthiness, unwrap and the calls that refuse")
+
 # ── the five the estate check named on the formal6 merge, 2026-10-03 ─────────
 # The same check, the same hole, and the largest it has named at once: the eleven
 # branches that merge brought in landed five test FILES
@@ -3186,6 +3212,17 @@ BUCKETS = {
               # picture; the reason to name a cheap test in two buckets is the
               # reason `x86-examples` is named in two.
               'formal-read-before-store', 'formal-receiver-spelling',
+              # …and the two that arrived with their own modules in this merge
+              # batch and were in no bucket at all.  `formal-shlex` runs the
+              # host-import census's cheapest reachable row (61 re-splits and
+              # 1142 answers against CPython) and `formal-optional` is 22 cases
+              # of build-and-run on two backends; 40 s and 13 s measured, and
+              # NEITHER runs Lean, which is the only reason they can be in the
+              # everyday loop at all.  What they protect is a representation:
+              # a shell-quoting module that drops an unsafe byte, and a `None`
+              # that is a word rather than an absence — both are programs that
+              # build, run and answer wrongly.
+              'formal-shlex', 'formal-optional',
               # …and the third file the estate check named (2026-10-04, on the
               # merge of the formal20 batch), measured at 0.08 s and 0.03 GB —
               # the cheapest thing registered in this bucket by an order of
@@ -3261,6 +3298,13 @@ BUCKETS = {
                # against CPython cost seconds, and a shell-quoting module nobody
                # runs is the hole the check exists to close.
                'formal-shlex',
+               # …and `formal-optional`, whose 22 cases on two backends cost
+               # 11.4-13.0 s and no Lean — the `formal-admitted` class, and in
+               # `check` for that reason rather than only in `proofs`.  What it
+               # protects is `None` being a WORD: a niche representation is the
+               # difference between an absent value and a value, and a wrong one
+               # is a program that runs and answers the wrong thing.
+               'formal-optional',
                # …and the two that arrived with the formal3 batch and were in
                # NO bucket and NO `UNREGISTERED`, which is what the estate check
                # in `suite-self-test` was reporting — and it is a FAIL on a test
@@ -3340,6 +3384,10 @@ BUCKETS = {
                 # one should decide where it lives.
                 'formal-admitted', 'formal-fcntl', 'formal-math',
                 'formal-shutil', 'formal-stat', 'formal-glob',
+                # …and `formal-optional`, named here for `formal-shutil`'s
+                # reason: it is in `check` (above) for the cost, and `proofs` is
+                # where the whole formal picture is.
+                'formal-optional',
                 # …and `formal-field-walk`, named in `check` above and here for
                 # `formal-read-before-store`'s reason: `proofs` is where the
                 # whole formal picture is, and expansion schedules a test once

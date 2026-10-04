@@ -2723,6 +2723,25 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_truthy_word(expr.right)
             self.asm.label(join)
             return
+        # An `Optional` is the FOURTH lowering, asked before the kind table
+        # because the kind cannot carry it: an `Optional[Bool]` is INT_KIND and
+        # `TRUTHY_NONZERO` would call `Some(False)` falsy and a `None` whose
+        # niche is not 0 truthy. Mojo's own `Optional.__bool__` is "does this
+        # Optional HAVE a value" (`std/collections/optional.mojo:449`), so the
+        # test is `word != niche` — a 0/1, not a word, because the payload
+        # cannot be left in place. arm64's `_emit_truthy_word` carries the same
+        # note and must keep the same answer.
+        ann = self._optional_receiver_annotation(expr)
+        payload = M.optional_payload_annotation(ann)
+        if payload is not None:
+            niche, why = M.optional_none_word(payload, self._structs)
+            if niche is None:
+                raise CodegenError(why)
+            self._emit_expr(expr)
+            self._emit_mov_imm(Reg.R11, niche)
+            self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R11))
+            self._emit_setcc_bool(reg, "setne")
+            return
         how = M.truthy_lowering(self._expr_str_kind(expr), expr)
         self._emit_expr(expr)
         if reg is not Reg.RAX:
@@ -3592,6 +3611,22 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
     def _emit_value_method(self, e, method: str) -> None:
         """`recv.method(...)` where `recv` is a value."""
         obj = e.func.obj if isinstance(e.func, F.MemberExpr) else None
+        # An `Optional` unwrap, asked FIRST: `UNWRAP_METHODS` in
+        # `formal/model.py` refuses these four names by name, and its own note
+        # says the refusal stands in for a representation that did not exist.
+        # It does now — `optional_unwrap_lowering` is it, and it hands back the
+        # niche WITH the lowering so the compare and the empty word cannot come
+        # apart. An `Optional` whose payload has no niche raises that refusal
+        # here, with the message that names the payload type.
+        if method in M.OPTIONAL_METHOD_LOWERINGS:
+            ann = self._optional_receiver_annotation(obj)
+            if M.optional_payload_annotation(ann) is not None:
+                how, word = M.optional_unwrap_lowering(method, ann,
+                                                       self._structs)
+                if how is None:
+                    raise CodegenError(word)
+                self._emit_optional_unwrap(e, how, word)
+                return
         reason = M.value_method_refusal(
             method, self._method_recv_kind(e), _dotted(e.func),
             receiver_is_fd=self._expr_is_fd(obj),
@@ -7797,6 +7832,76 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         return ctor_field_value
 
+    def _optional_receiver_annotation(self, expr):
+        """The `Optional[...]` annotation a method RECEIVER is declared with.
+
+        arm64's `_optional_receiver_annotation`, word for word and for the same
+        reasons: the word an `Optional` is empty at is a fact about the payload
+        TYPE and nothing about the value says which type it is, so this reads
+        the DECLARATION (a receiver field, a parameter's annotation, a local's
+        own `var`, a frame slot's field). The two copies have to agree because
+        the representation is shared and the wrong answer is a silent one: an
+        x86-64 that read `Optional[Bool]`'s niche as an arm64 that read
+        `Optional[Int]`'s would compile, run, and disagree about whether the
+        value was empty.
+        """
+        owner = M.method_owner_struct(
+            self._structs, getattr(self._cur_fn, "name", None))
+        if isinstance(expr, F.IdentExpr):
+            ann = M.param_annotation(self._cur_fn, expr.name)
+            if ann is None:
+                ann = getattr(self._cur_fn, M.OPTIONAL_RECEIVER_TYPES,
+                              {}).get(expr.name)
+            if ann is None:
+                ann = M.optional_local_declared_annotation(self._cur_fn,
+                                                           expr.name)
+            return ann
+        if isinstance(expr, F.MemberExpr) and isinstance(expr.obj, F.IdentExpr):
+            if owner is not None and expr.obj.name in M.struct_receivers(owner):
+                return M.frame_slot_declared_annotation([owner], expr.member,
+                                                        self._structs)
+            slot = self._slot_declared_annotation(expr)
+            return slot[0] if slot else None
+        return None
+
+    def _emit_optional_unwrap(self, e, how: str, niche: int) -> None:
+        """`recv.or_else(d)` / `recv.unsafe_value()` on an `Optional` receiver.
+
+        arm64's `_emit_optional_unwrap` lowered, from the SAME representation
+        (`formal/model.py`'s `optional_none_word`), and the shape here is a
+        BRANCH rather than arm64's CSEL because this backend already has the
+        branch-and-label machinery `_emit_ternary` uses and a branch does not
+        evaluate the default when the value is present. That is a difference of
+        instruction, not of meaning: `or_else`'s default is an argument, so both
+        forms agree with the source.
+
+        The niche goes through `_emit_mov_imm` because it is not always a small
+        constant — `Optional[Int32]`'s empty word is `1 << 32`, which is past
+        `cmp`'s imm32 field, and a `cmp` truncated to 32 bits would compare a
+        different word from the one the value carries.
+        """
+        recv = e.func.obj
+        if how == M.OPTIONAL_UNWRAP_PAYLOAD:
+            if e.args or e.kwargs:
+                raise CodegenError(
+                    f"{_dotted(e.func)}() takes no argument on the formal "
+                    f"x86-64 path (got {len(e.args) + len(e.kwargs)})")
+            self._emit_expr(recv)
+            return
+        if len(e.args) != 1 or e.kwargs:
+            raise CodegenError(
+                f"{_dotted(e.func)}() takes exactly one argument on the formal "
+                f"x86-64 path — the default (got {len(e.args) + len(e.kwargs)})")
+        self._if_counter += 1
+        some_label = f"{self.func_name}_opt{self._if_counter}_some"
+        self._emit_expr(recv)
+        self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.RAX))
+        self._emit_mov_imm(Reg.R11, niche)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R10, Reg.R11))
+        self._emit_jcc(COND_NE, some_label)
+        self._emit_expr(e.args[0])
+        self.asm.label(some_label)
+
     def _slot_declared_annotation(self, expr):
         """`(annotation, kind)` a frame slot's field DECLARES, or None.
 
@@ -8434,9 +8539,17 @@ ctor_field_value=self._ctor_field_value_for(name),
         # `model.dereference_lowering` and not `model.value_method_refusal`,
         # because the refusal cannot see the function and so cannot see a
         # declared pointee — which is the whole of the pointer value model.
+        # The `Optional` exception, asked BEFORE the dereference intercept
+        # because `unsafe_value` is in BOTH tables and it reads the receiver's
+        # WORD rather than an address. arm64's copy of this arm carries the same
+        # note, and the two must agree: an arch that answers `unsafe_value` on
+        # an `Optional` and the other that refuses it is the two-machines-one-
+        # language failure this backend exists to prevent.
         if isinstance(e.func, F.MemberExpr) \
                 and e.func.member in M.DEREFERENCE_TRY_NAMES \
-                and self._expr_str_kind(e.func.obj) != M.STR_KIND:
+                and self._expr_str_kind(e.func.obj) != M.STR_KIND \
+                and M.optional_payload_annotation(
+                    self._optional_receiver_annotation(e.func.obj)) is None:
             self._emit_dereference(e, e.func.member)
             return
         # A method on a plain VALUE is not a call to a symbol spelled

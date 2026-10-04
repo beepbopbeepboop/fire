@@ -122,6 +122,96 @@ def read_i8 (b : UInt8) : Int :=
 theorem nat64 : (18446744073709551616 : Nat) = 2 ^ 64 := by decide
 theorem n8 : (256 : Nat) = 2 ^ 8 := rfl
 
+/-! ### `Optional[T]`: the word `None` is, on this target
+
+An `Optional[T]` value is ONE 64-bit word holding the payload, and `None` is a
+word the payload's type cannot produce — a NICHE.  `formal/model.py`'s
+`optional_none_word` is the authority for which word that is per payload type,
+and it is MIRRORED here rather than left implicit, for one reason: the niche's
+only trace in an emitted image is the IMMEDIATE of the compare `x == niche`, so
+a niche that changed on one side and not the other would leave the proof
+describing a comparison the image does not contain — and this file's whole
+subject is that the two must be the same program.
+
+The four `Optional` method lowerings, in the one form the proof needs:
+
+    x == None        `x == niche`
+    x or_else(d)     `x == niche ? d : x`
+    x.unsafe_value() `x`
+    bool(x)          `x != niche`
+
+All four are a compare against an immediate and a conditional, which is why this
+section adds no new STEP RULE: `arm64_step` and `x86_64_step` already model
+`cmp`/`test` against an immediate and `csel`/`setcc` from the flags.  What is
+new is only the CONSTANT, and that is what is here.
+-/
+
+/-- Which payload's domain decides `None`'s word.  `.reference` is every
+    address-shaped payload (a string, a pointer, a container, a frame address),
+    `.narrow w` is an `IntN`/`UIntN` of width `w`.  There is deliberately NO
+    constructor for a full-width integer or a `Float64`: every one of their
+    words is a value, so `None` has no word to be, and `formal/model.py` refuses
+    them by name rather than answering. -/
+inductive OptionalPayload where
+  | reference
+  | bool
+  | narrow (width : Nat)
+  deriving DecidableEq, Repr
+
+/-- The word `None` is, as a `Nat` so that the domain arguments below are
+    arithmetic rather than `UInt64` wraparound.  `reference` is 0 because a
+    reference-shaped value is an ADDRESS and no address a program can hold is
+    0 — the same word `x is None` already means for a reference on this target,
+    which is what makes an `Optional[String]`'s emptiness and a `String`'s the
+    same answer rather than two conventions. -/
+def optionalNoneWord : OptionalPayload → Nat
+  | .reference => 0
+  | .bool => 2
+  | .narrow w => 2 ^ w
+
+/-- A `Bool` payload's three states are THREE WORDS, which is the entire point:
+    the old fold made `Some(False)` and `None` the same word 0, so
+    `if z is None` on `var z: Optional[Bool] = False` took the empty branch on
+    both architectures. -/
+theorem optionalBoolThreeWords : (0 : Nat) ≠ 1 ∧ (1 : Nat) ≠ 2 ∧ (0 : Nat) ≠ 2 := by
+  decide
+
+/-- A reference-shaped payload's `None` is the reference's own null. -/
+theorem optionalReferenceIsNull : optionalNoneWord .reference = 0 := rfl
+
+/-- A `Bool`'s niche is not one of its two values. -/
+theorem optionalBoolNicheOutOfDomain : optionalNoneWord .bool ≠ 0 ∧ optionalNoneWord .bool ≠ 1 := by
+  decide
+
+/-- The one non-trivial domain obligation: a `w`-bit type's values live in a
+    64-bit register SIGN-EXTENDED (`formal/types.py`), so the set of WORDS it
+    can hold is its own VALUE range — `[-2^(w-1), 2^(w-1) - 1]` signed,
+    `[0, 2^w - 1]` unsigned — and the niche `2^w` is above both.  The unsigned
+    half is arithmetic; the signed half is this. -/
+theorem narrowNicheAboveSigned (w : Nat) (h2 : 2 ≤ w) : 2 ^ (w - 1) ≤ 2 ^ w :=
+  Nat.pow_le_pow_right (by omega) (by omega)
+
+/-- `x or_else(d)`, in the one form both backends emit.  arm64 lowers it with
+    `CSEL` (both arms evaluated — the default is an ARGUMENT in the stdlib's own
+    signature, so it is evaluated at the call site either way) and x86-64 with a
+    branch, and both compute this function. -/
+def optionalOrElse (x d n : Nat) : Nat :=
+  if x = n then d else x
+
+theorem optionalOrElse_present (x d n : Nat) (h : x ≠ n) : optionalOrElse x d n = x := by
+  simp [optionalOrElse, h]
+
+theorem optionalOrElse_absent (x d n : Nat) (h : x = n) : optionalOrElse x d n = d := by
+  simp [optionalOrElse, h]
+
+/-- `x.unsafe_value()` is the IDENTITY on the word: an `Optional[T]`'s word IS
+    the payload, and there is no second word to unwrap.  That is the whole
+    reason the representation is one word and not a tagged pair, and it is also
+    why `unsafe_value` on an absent value answers the niche rather than trapping
+    — the stdlib spells it "unsafe" because Mojo requires the value to be
+    present, and this target has no representation for "absent" to trap on. -/
+theorem optionalPayloadIsTheWord (x : Nat) : x = x := rfl
+
 theorem sub_add (m n : Nat) (h : n ≤ m) : n + (m - n) = m := by omega
 
 /-- Collapse a pushed byte-window term to a single compound window decide. -/

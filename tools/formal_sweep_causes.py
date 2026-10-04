@@ -227,20 +227,33 @@ CAUSES = (
     # ABOVE the two rows below it, and for a reason that is a fact about the
     # messages rather than about this construct: they are all one family — a
     # representation the target does not have — and the broad ones end with a
-    # sentence the specific ones also contain. 20 files on BOTH architectures,
-    # every one of them `std/builtin/builtin_slice.mojo`'s `self.step.or_else()`,
-    # and the module docstring's `uses:` column reads 0 of 20 name anything it
-    # declares, because the refusal is about `builtin_slice`'s own line rather
-    # than about the importing file. So this row is one value-model change
-    # (Optional needs a niche, a discriminant or a tag word) whose OWN doc is
-    # `bugs/FORMAL_stdlib_optional_needs_a_representation.md`. The FALSE-reason
-    # half of it was the construction family's, and that doc is deleted: the same
-    # line used to refuse with "constructing Slice with 3 argument(s)" — a
-    # three-field construction that the source never wrote, because `Slice` is a
-    # call to a declared `__init__` — and now refuses with a true one, so what is
-    # left here is the representation question alone.
-    ("Optional unwrap: `None` and a value are one word, with no tag",
-     (("is an Optional unwrap",),)),
+    # sentence the specific ones also contain.
+    #
+    # **THE LABEL AND THE DOC CHANGED ON 2026-10-04, and both were wrong.** The
+    # row was "`None` and a value are one word, with no tag", which said the
+    # representation does not exist; it does. `formal/model.py`'s
+    # `optional_none_word` gives `None` a word the payload's type cannot
+    # produce — 0 for every reference-shaped payload, 2 for a `Bool`, `1 << w`
+    # for a narrow integer — and `Some(0)` and `None` are no longer the same
+    # word (measured before: `var z: Optional[Int] = 0; if z is None:` printed
+    # the empty branch on both architectures). What is left in this row is the
+    # PAYLOAD TYPES with no niche at all — `Int`, `Int64`, `UInt`, `UInt64`,
+    # `Float64`, an unstated payload, a struct of another module — which need
+    # the tagged TWO-WORD value, plus the receivers that state no type at all.
+    # Its own doc moved with it.
+    #
+    # TWO markers, because there are now TWO live sentences and one of them
+    # quotes the type name: `UNWRAP_METHODS` says "is an Optional unwrap" (the
+    # receiver's type is not stated) and `optional_unwrap_refusal` / 
+    # `optional_no_niche_refusal` say "is an `Optional[...]`" (it is stated, and
+    # names the payload). A row matching only the first would have gone quiet
+    # on the second while still reading as one that blocks something — the
+    # "a cause whose marker matches no live message is a cause that blocks
+    # nothing" failure this file's own module docstring names.
+    ("Optional unwrap: the payload type has no niche, or the receiver states none",
+     (("is an Optional unwrap",),
+      ("is an `Optional` unwrap",),
+      ("is an `Optional[",))),
     ("value with no representation on this path",
      (("has no representation on this path",),
       ("has no representation for",))),
