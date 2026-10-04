@@ -1195,7 +1195,7 @@ theorem toNat_sub_one (n : UInt64) (h : n ≠ 0) : (n - 1).toNat = n.toNat - 1 :
   have h2 : n.toNat - 1 < 2^64 := by omega
   calc
     (2^64 - (1 : UInt64).toNat + n.toNat) % 2^64 = (2^64 - 1 + n.toNat) % 2^64 := by
-      have h1 : (1 : UInt64).toNat = 1 := by native_decide
+      have h1 : (1 : UInt64).toNat = 1 := by rfl
       rw [h1]
     _ = (2^64 + (n.toNat - 1)) % 2^64 := by omega
     _ = ((2^64 % 2^64) + ((n.toNat - 1) % 2^64)) % 2^64 := by rw [Nat.add_mod]
@@ -1224,7 +1224,7 @@ theorem toNat_sub_two (n : UInt64) (h0 : n ≠ 0) (h1 : n ≠ 1) : (n - 2).toNat
   have h2 : n.toNat - 2 < 2^64 := by omega
   calc
     (2^64 - (2 : UInt64).toNat + n.toNat) % 2^64 = (2^64 - 2 + n.toNat) % 2^64 := by
-      have h2nat : (2 : UInt64).toNat = 2 := by native_decide
+      have h2nat : (2 : UInt64).toNat = 2 := by rfl
       rw [h2nat]
     _ = (2^64 + (n.toNat - 2)) % 2^64 := by omega
     _ = ((2^64 % 2^64) + ((n.toNat - 2) % 2^64)) % 2^64 := by rw [Nat.add_mod]
@@ -2220,7 +2220,7 @@ theorem arm64_step_bl (s : Arm64State) (code : Nat → UInt8) (w : UInt32)
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -2401,10 +2401,10 @@ theorem arm64_step_add_reg (s : Arm64State) (code : Nat → UInt8) (rd rn xm : N
     arm64_step s code = some (arm64_set_reg rd s (arm64_reg_or_sp rn s + arm64_reg xm s)) := by
   have hne_ret : arm64_read_insn code s.pc ≠ 0xd65f03c0 := by
     intro he; rw [he] at h_opc
-    exact absurd h_opc (by native_decide)
+    exact absurd h_opc (by decide)
   have hne_mov : ¬ (arm64_read_insn code s.pc &&& 0xffe00000 = 0x2a00fa00) := by
     intro t; rw [h_opc] at t
-    exact absurd t (by native_decide)
+    exact absurd t (by decide)
   unfold arm64_step
   rw [if_neg hne_ret, if_neg hne_mov, if_pos h_opc, h_rd, h_rn, h_xm]
 
@@ -2417,13 +2417,13 @@ theorem arm64_step_sub_reg (s : Arm64State) (code : Nat → UInt8) (rd rn xm : N
     arm64_step s code = some (arm64_set_reg rd s (arm64_reg_or_sp rn s - arm64_reg xm s)) := by
   have hne_ret : arm64_read_insn code s.pc ≠ 0xd65f03c0 := by
     intro he; rw [he] at h_opc
-    exact absurd h_opc (by native_decide)
+    exact absurd h_opc (by decide)
   have hne_mov : ¬ (arm64_read_insn code s.pc &&& 0xffe00000 = 0x2a00fa00) := by
     intro t; rw [h_opc] at t
-    exact absurd t (by native_decide)
+    exact absurd t (by decide)
   have hne_add : ¬ (arm64_read_insn code s.pc &&& 0xffe00000 = 0x8b000000) := by
     intro t; rw [h_opc] at t
-    exact absurd t (by native_decide)
+    exact absurd t (by decide)
   unfold arm64_step
   rw [if_neg hne_ret, if_neg hne_mov, if_neg hne_add, if_pos h_opc, h_rd, h_rn, h_xm]
 
@@ -2436,20 +2436,20 @@ theorem arm64_step_mul (s : Arm64State) (code : Nat → UInt8) (rd rn xm : Nat)
     arm64_step s code = some (arm64_set_reg rd s (arm64_reg rn s * arm64_reg xm s)) := by
   have hne_ret : arm64_read_insn code s.pc ≠ 0xd65f03c0 := by
     intro he; rw [he] at h_opc
-    exact absurd h_opc (by native_decide)
-  have hM : (0xffe07c00 : UInt32) &&& 0xffe00000 = 0xffe00000 := by native_decide
+    exact absurd h_opc (by decide)
+  have hM : (0xffe07c00 : UInt32) &&& 0xffe00000 = 0xffe00000 := by decide
   have hsub : arm64_read_insn code s.pc &&& 0xffe00000 = 0x9b000000 := by
     have := congrArg (fun x => x &&& (0xffe00000 : UInt32)) h_opc
     rwa [UInt32.and_assoc, hM] at this
   have hne_mov : ¬ (arm64_read_insn code s.pc &&& 0xffe00000 = 0x2a00fa00) := by
     intro t; rw [hsub] at t
-    exact absurd t (by native_decide)
+    exact absurd t (by decide)
   have hne_add : ¬ (arm64_read_insn code s.pc &&& 0xffe00000 = 0x8b000000) := by
     intro t; rw [hsub] at t
-    exact absurd t (by native_decide)
+    exact absurd t (by decide)
   have hne_sub : ¬ (arm64_read_insn code s.pc &&& 0xffe00000 = 0xcb000000) := by
     intro t; rw [hsub] at t
-    exact absurd t (by native_decide)
+    exact absurd t (by decide)
   unfold arm64_step
   rw [if_neg hne_ret, if_neg hne_mov, if_neg hne_add, if_neg hne_sub, if_pos h_opc,
       h_rd, h_rn, h_xm]
@@ -2473,18 +2473,18 @@ theorem arm64_step_cmp_sp_reads_sp (s : Arm64State) (code : Nat → UInt8) (pc :
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = 0xeb1003ff) :
     arm64_step s code
       = some { s with nzcv := arm64_subs_flags s.sp (arm64_reg 16 s) } := by
-  have hne_ret : (0xeb1003ff : UInt32) ≠ 0xd65f03c0 := by native_decide
+  have hne_ret : (0xeb1003ff : UInt32) ≠ 0xd65f03c0 := by decide
   have hne_mov : ¬ ((0xeb1003ff : UInt32) &&& 0xffe00000 = 0x2a00fa00) := by
-    intro t; exact absurd t (by native_decide)
+    intro t; exact absurd t (by decide)
   have hne_add : ¬ ((0xeb1003ff : UInt32) &&& 0xffe00000 = 0x8b000000) := by
-    intro t; exact absurd t (by native_decide)
+    intro t; exact absurd t (by decide)
   have hne_sub : ¬ ((0xeb1003ff : UInt32) &&& 0xffe00000 = 0xcb000000) := by
-    intro t; exact absurd t (by native_decide)
+    intro t; exact absurd t (by decide)
   have hne_mul : ¬ ((0xeb1003ff : UInt32) &&& 0xffe07c00 = 0x9b007c00) := by
-    intro t; exact absurd t (by native_decide)
+    intro t; exact absurd t (by decide)
   have hne_neg : ¬ ((0xeb1003ff : UInt32) &&& 0xfffffc1f = 0xcb0003e0) := by
-    intro t; exact absurd t (by native_decide)
-  have hcmp : (0xeb1003ff : UInt32) &&& 0xffe00000 = 0xeb000000 := by native_decide
+    intro t; exact absurd t (by decide)
+  have hcmp : (0xeb1003ff : UInt32) &&& 0xffe00000 = 0xeb000000 := by decide
   unfold arm64_step
   rw [hpc, hread, if_neg hne_ret, if_neg hne_mov, if_neg hne_add, if_neg hne_sub,
       if_neg hne_mul, if_neg hne_neg, if_pos hcmp]
@@ -2499,20 +2499,20 @@ theorem arm64_step_and_xzr_reads_zero (s : Arm64State) (code : Nat → UInt8)
     (hread : arm64_read_insn code pc = 0x8a0103e0) :
     arm64_step s code
       = some (arm64_set_reg 0 s ((0 : UInt64) &&& arm64_reg 1 s)) := by
-  have hne_ret : (0x8a0103e0 : UInt32) ≠ 0xd65f03c0 := by native_decide
+  have hne_ret : (0x8a0103e0 : UInt32) ≠ 0xd65f03c0 := by decide
   have hne_mov : ¬ ((0x8a0103e0 : UInt32) &&& 0xffe00000 = 0x2a00fa00) := by
-    intro t; exact absurd t (by native_decide)
+    intro t; exact absurd t (by decide)
   have hne_add : ¬ ((0x8a0103e0 : UInt32) &&& 0xffe00000 = 0x8b000000) := by
-    intro t; exact absurd t (by native_decide)
+    intro t; exact absurd t (by decide)
   have hne_sub : ¬ ((0x8a0103e0 : UInt32) &&& 0xffe00000 = 0xcb000000) := by
-    intro t; exact absurd t (by native_decide)
+    intro t; exact absurd t (by decide)
   have hne_mul : ¬ ((0x8a0103e0 : UInt32) &&& 0xffe07c00 = 0x9b007c00) := by
-    intro t; exact absurd t (by native_decide)
+    intro t; exact absurd t (by decide)
   have hne_neg : ¬ ((0x8a0103e0 : UInt32) &&& 0xfffffc1f = 0xcb0003e0) := by
-    intro t; exact absurd t (by native_decide)
+    intro t; exact absurd t (by decide)
   have hne_cmp : ¬ ((0x8a0103e0 : UInt32) &&& 0xffe00000 = 0xeb000000) := by
-    intro t; exact absurd t (by native_decide)
-  have hand : (0x8a0103e0 : UInt32) &&& 0xffe00000 = 0x8a000000 := by native_decide
+    intro t; exact absurd t (by decide)
+  have hand : (0x8a0103e0 : UInt32) &&& 0xffe00000 = 0x8a000000 := by decide
   unfold arm64_step
   rw [hpc, hread, if_neg hne_ret, if_neg hne_mov, if_neg hne_add, if_neg hne_sub,
       if_neg hne_mul, if_neg hne_neg, if_neg hne_cmp, if_pos hand]
@@ -3975,7 +3975,7 @@ theorem work_step_mov (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   rw [if_neg hne_ret, if_pos h]; try dsimp; try rfl; try simp
 
 /-- Per-instruction step: `work_step_add_reg`. -/
@@ -3986,7 +3986,7 @@ theorem work_step_add_reg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w 
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   rw [if_neg hne_ret, if_neg hne_2, if_pos h]; try dsimp; try rfl; try simp
 
@@ -3998,7 +3998,7 @@ theorem work_step_sub_reg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w 
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_pos h]; try dsimp; try rfl; try simp
@@ -4011,7 +4011,7 @@ theorem work_step_mul (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4025,7 +4025,7 @@ theorem work_step_neg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4040,7 +4040,7 @@ theorem work_step_cmp_reg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w 
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4056,7 +4056,7 @@ theorem work_step_and (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4073,7 +4073,7 @@ theorem work_step_eor (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4091,7 +4091,7 @@ theorem work_step_add_imm32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4110,7 +4110,7 @@ theorem work_step_add_imm64 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4130,7 +4130,7 @@ theorem work_step_sub_imm32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4151,7 +4151,7 @@ theorem work_step_sub_imm64 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4173,7 +4173,7 @@ theorem work_step_cmp_imm (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w 
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4206,7 +4206,7 @@ theorem work_step_ldr_uoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4266,7 +4266,7 @@ theorem work_step_str_uoff32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) 
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4312,7 +4312,7 @@ theorem work_step_adrp (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4345,7 +4345,7 @@ theorem work_step_stp (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4379,7 +4379,7 @@ theorem work_step_ldp_post (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4416,7 +4416,7 @@ theorem work_step_movz (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
     unfold arm64_step
     rw [hpc, hread]
     have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-      intro t; rw [t] at h; exact absurd h (by native_decide)
+      intro t; rw [t] at h; exact absurd h (by decide)
     have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
     have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
     have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4447,7 +4447,7 @@ theorem work_step_movz (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
     unfold arm64_step
     rw [hpc, hread]
     have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-      intro t; rw [t] at h; exact absurd h (by native_decide)
+      intro t; rw [t] at h; exact absurd h (by decide)
     have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
     have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
     have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4484,7 +4484,7 @@ theorem work_step_orr (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4524,7 +4524,7 @@ theorem work_step_movk (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
     unfold arm64_step
     rw [hpc, hread]
     have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-      intro t; rw [t] at h; exact absurd h (by native_decide)
+      intro t; rw [t] at h; exact absurd h (by decide)
     have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
     have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
     have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4558,7 +4558,7 @@ theorem work_step_movk (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
     unfold arm64_step
     rw [hpc, hread]
     have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-      intro t; rw [t] at h; exact absurd h (by native_decide)
+      intro t; rw [t] at h; exact absurd h (by decide)
     have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
     have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
     have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4598,7 +4598,7 @@ theorem work_step_movn32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w :
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4639,7 +4639,7 @@ theorem work_step_movn64 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w :
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4681,7 +4681,7 @@ theorem work_step_cset (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4733,7 +4733,7 @@ theorem work_step_str_uoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4791,7 +4791,7 @@ theorem work_step_ldp_off (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w 
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4836,7 +4836,7 @@ theorem work_step_orn (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4882,7 +4882,7 @@ theorem work_step_br (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UIn
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -4929,7 +4929,7 @@ theorem work_step_svc (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -5005,7 +5005,7 @@ theorem work_step_cbz (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
@@ -5055,7 +5055,7 @@ theorem work_step_cbnz (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by native_decide)
+    intro t; rw [t] at h; exact absurd h (by decide)
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide

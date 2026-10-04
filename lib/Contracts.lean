@@ -333,6 +333,6 @@ theorem spec_triple_ne_identity :
     ¬ SpecIsIdentity (fun n => n * 3) := by
   intro h
   -- 7 * 3 = 21 and 21 ≠ 7, and both are closed facts about `UInt64`
-  exact absurd (h 7) (by native_decide)
+  exact absurd (h 7) (by decide)
 
 end Contracts

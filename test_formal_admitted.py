@@ -882,8 +882,19 @@ def _exit_status_claims():
 # on already trusts, and it was not counted anywhere: FORMAL.md §7's "no axiom and
 # no opaque anywhere" is true of the SOURCE TEXT and not of a theorem's
 # transitive closure, because `native_decide` and `bv_decide` close a goal
-# through `Lean.ofReduceBool`.  `bugs/FORMAL_native_decide_axiom.md` carries the
-# `#print axioms` measurement that needs a Lean run.
+# through a generated axiom rather than through the kernel.
+#
+# **The axiom is not `Lean.ofReduceBool`, and the earlier version of this comment
+# said it was.**  On the pinned 4.32.2 `ofReduceBool` is deprecated ("in-kernel
+# native reduction is deprecated; assert native evaluations with axioms
+# instead") and each USE of either tactic elaborates to a fresh axiom named after
+# the declaration that used it — `work_step_mov._native.native_decide.ax_1_1`.
+# Measured, with the before/after sets in `bugs/FORMAL_native_decide_axiom.md`.
+# So `bugs/FORMAL_native_decide_axiom.md`'s "Expected output: …
+# `Lean.ofReduceBool` appearing is the confirmation" would have read a library
+# that reaches an axiom at every one of these sites as CLEAN, and the census
+# below is what replaced it.  `formal/lean.py::GENERATED_AXIOM_RE` is the shape
+# that is actually matched.
 #
 # The first two rows are equalities and the third is a CEILING, and the asymmetry
 # is the point rather than an inconsistency.  An `axiom` or a `sorry` appearing
@@ -894,13 +905,78 @@ def _exit_status_claims():
 # while teaching nobody anything; a ceiling fails when the number RISES, which is
 # the direction that matters, and reports the figure on every run so the debt is
 # visible while it is being paid.
+#
+# **The figure fell from 751 to 688 on 2026-10-04**, and the 63 sites that went
+# are named in `NATIVE_DECIDE_REPLACED` below rather than only in a commit
+# message.  All 63 were CLOSED propositions over literals — `¬ (0xd65f03c0 &&
+# & 0xffe00000 = 0x2a00fa00)`, `(1 : UInt64).toNat = 1` — which `decide`
+# discharges in microseconds and the KERNEL checks; `native_decide` was
+# compiling a decision procedure to C and asserting the result, which on this
+# toolchain means a generated axiom per use rather than `Lean.ofReduceBool`.
+# What is left is 682 `bv_decide` in `ProofLib`, 3 in `X86`, and 3
+# `native_decide` that are genuinely MODEL EVALUATION
+# (`NATIVE_DECIDE_ALLOWED`).  **751, not the 749 this table pinned until
+# 2026-10-04**: the census's own scanner mis-read an identifier's apostrophe as
+# a character literal and hid two sites — see `lean_code_regions`.
 LIBRARY_TRUST = {
     # module    axiom  sorry  axiom_tactic ceiling (see the note above)
-    "Contracts": (0, 0, 1, 1),
-    "ProofLib": (0, 0, 744, 744),
+    "Contracts": (0, 0, 0, 0),
+    "ProofLib": (0, 0, 685, 685),
     "Refine": (0, 0, 0, 0),
-    "X86": (0, 0, 4, 4),
+    "X86": (0, 0, 3, 3),
     "work": (0, 0, 0, 0),
+}
+
+
+# The three `native_decide` sites left in `lib/`, each with the reason it cannot
+# be a `decide`.
+#
+# This table is a RATCHET in the same direction `LIBRARY_TRUST` is, and it is
+# tighter than that one in the way that matters: `LIBRARY_TRUST` is a per-MODULE
+# ceiling, so it would take 685 new `native_decide` sites to notice anything, and
+# every one of them could be a closed fact `decide` closes in microseconds.  This
+# one says WHICH DECLARATION may carry one, so a `native_decide` added anywhere
+# else — including to one of the 43 declarations that used to carry several and
+# now carry none — fails by name.
+#
+# All three are in `namespace DylibExport` and all three evaluate the machine
+# model at a GROUND image: `runExport … = none` with a concrete `DylibImage`, and
+# `InImage` over one.  That is the one shape `decide` cannot take, because the
+# decision is `arm64_step`'s whole decode chain over a `Arm64State`, and the
+# kernel has to reduce it; `decide` would be correct and enormously slower than
+# the compiled path.  The three file's own docstrings say so at 5587 (`it cannot
+# decide with `n` free`, i.e. what is wanted here is that it CAN).
+NATIVE_DECIDE_ALLOWED = {
+    "ProofLib": {
+        "DylibExport.Semantics_refutable":
+            "`runExport` over the empty 0-byte image is `none`; the goal is "
+            "one `arm64_step` over a ground `Arm64State`, which `decide` would "
+            "have to reduce in the kernel.",
+        "DylibExport.backward_branch_in_image":
+            "`InImage backward_branch_image backward_branch_export` is a "
+            "decidable test over a ground export table.",
+        "DylibExport.backward_branch_run_none":
+            "`runExport backward_branch_image … 0 = none`, and the file's own "
+            "docstring (5587) records that this is the ground case "
+            "`native_decide` is there for.",
+    },
+}
+
+
+# What the 63 replaced sites were, in ONE place, so the ceiling's fall is
+# attributable rather than merely smaller.  A number with no list is the failure
+# mode `tools/suite.py`'s count-checked `expect=` markers were built against.
+#
+# Both halves are the same shape and the same fix: `decide` for a bit-pattern
+# fact over `UInt32` literals (61 of 63), `rfl` for `(1 : UInt64).toNat = 1` and
+# its `2` sibling, which are definitional and which `decide` also closes — `rfl`
+# because it reaches NO axiom at all where `decide` reaches `propext` and
+# `Quot.sound`.  Measured per shape in `bugs/FORMAL_native_decide_axiom.md`.
+NATIVE_DECIDE_REPLACED = {
+    "ProofLib": 61,      # 34 `absurd h`, 17 `absurd t`, 3 `absurd h_opc`,
+                         # 5 closed `have`s, 2 `.toNat` facts
+    "Contracts": 1,      # `spec_triple_ne_identity`: `¬ (n * 3) 7 = 7`
+    "X86": 1,            # `lowMask_eight`: eight `|||`/`<<<` on `UInt64`
 }
 
 
@@ -1053,6 +1129,53 @@ def test_every_contract_points_at_its_own_declaration(tmpdir=None):
                   f"own `@admitted(` line")
 
 
+def check_the_stripper_sees_every_declaration(mod, raw):
+    """No declaration header at the start of a line may be BLANKED by the stripper.
+
+    `lean_code_regions` is what makes the census a census — it removes comments
+    and string contents so a count is of code and not of prose — and a stripper
+    that removes CODE is worse than no stripper, because every number downstream
+    is then quietly short.  That happened, and the instrument's own arithmetic
+    could not see it: reading an identifier's apostrophe (`fieldTag_inj'`, and
+    about forty more in `lib/`) as the opening of a `Char` literal blanks
+    everything to the next apostrophe in the FILE, which lands inside an
+    unrelated docstring, and from there the scanner is inside a string it
+    invented.  Measured on `lib/` before the fix: **74 declaration headers that
+    start at the beginning of a line were blanked as if they were prose** — 62 in
+    `ProofLib`, 11 in `Refine`, 1 in `Contracts` — among them
+    `private def stmtsSize` and the `end` that closes a `mutual`, and the
+    `axiom_tactic` count was 749 where it is 751.
+
+    A column-0 declaration header cannot be inside a comment in practice — `-`
+    and `/-` are not identifier characters, so the only way is a `/-! -/` block
+    whose interior happens to start at column 0 — and where it does happen this
+    reports it by name rather than absorbing it, because "the scanner hides real
+    code" is the claim this file exists to make impossible.
+    """
+    stripped = A.lean_code_regions(raw).split("\n")
+    raw_lines = raw.split("\n")
+    lost = [i + 1 for i, line in enumerate(raw_lines)
+            if _DECL_HEADER_RE.match(line) and not _DECL_HEADER_RE.match(stripped[i])]
+    check(not lost,
+          f"lib/{mod}.lean: the comment/string stripper blanked "
+          f"{len(lost)} declaration header(s) that start at the beginning of a "
+          f"line — at {lost[:10]} — so `lean_code_regions` is inside a comment "
+          f"or a string literal it invented and the census above is an "
+          f"under-count:\n    "
+          + "\n    ".join(f"{ln}: {raw_lines[ln - 1].strip()[:70]}"
+                          for ln in lost[:6]))
+
+
+# A declaration header at the start of a line: the attributes and modifiers that
+# may precede it, then the keyword and whitespace.  `A._DECL_RE` is the same
+# shape; this one is anchored so it can be applied line by line, which is what
+# the stripper comparison needs.
+_DECL_HEADER_RE = re.compile(
+    r"^(?:@\[[^\]\n]*\][ \t]*(?:\n|\Z))?"
+    r"(?:private\s+|protected\s+|noncomputable\s+)*"
+    r"(?:theorem|lemma|def|abbrev|instance|example)\s")
+
+
 def test_the_library_trust_counts_are_pinned(tmpdir=None):
     """`lib/`: no `axiom`, no `sorry`, and an axiom-carrying tactic count.
 
@@ -1109,7 +1232,9 @@ def test_the_library_trust_counts_are_pinned(tmpdir=None):
           + "\n    ".join(grown) + "\n  FEWER THAN THE CEILING:\n    "
           + "\n    ".join(shrank))
     # The scanner's own limits, asserted rather than assumed: the delimiter it
-    # does not handle and the axiom-carrying tactic it would not count.
+    # does not handle, the axiom-carrying tactic it would not count, and — the
+    # one that was WRONG until 2026-10-04 — how much of the file it is looking
+    # at.
     for mod in census:
         with open(os.path.join(lib, mod + ".lean"), encoding="utf-8") as f:
             raw = f.read()
@@ -1122,6 +1247,29 @@ def test_the_library_trust_counts_are_pinned(tmpdir=None):
               f"lib/{mod}.lean uses a construct the trust census does not "
               f"count (`exact_decide`, `implemented_by` or `unsafe`); extend "
               f"`AXIOM_TACTICS`/the regexes in formal/admitted.py first")
+        check_the_stripper_sees_every_declaration(mod, raw)
+    # A `Char` literal in `lib/`, which is what makes the scanner's
+    # character-literal branch reachable at all.  It is not a ban on the literal;
+    # it is the statement that the branch is UNREACHABLE today, so the rule the
+    # bug fixed (`a `'` after an identifier character is a prime, not an opening
+    # quote`) is the whole of the behaviour there is.  The day somebody writes
+    # `'x'` this fails and the ambiguity has to be thought about rather than
+    # inherited.
+    chared = []
+    for mod in sorted(census):
+        with open(os.path.join(lib, mod + ".lean"), encoding="utf-8") as f:
+            for i, line in enumerate(f.read().split("\n"), start=1):
+                for m in re.finditer(r"(?<![A-Za-z0-9_'])'(\\.|[^\\'])'", line):
+                    chared.append(f"lib/{mod}.lean:{i} {m.group(0)!r}")
+    check(not chared,
+          "lib/ now contains a `Char` literal, which makes "
+          "`formal/admitted.py::lean_code_regions`'s character-literal branch "
+          "reachable for the first time and gives an apostrophe in an "
+          "identifier (`fieldTag_inj'`, forty-odd of them) two possible "
+          "meanings:\n    " + "\n    ".join(chared)
+          + "\n    The scanner resolves it by requiring the preceding character "
+            "to be a non-identifier, which is Lean's own rule; check the "
+            "resolution against this file before trusting the census again.")
     # VACUITY, which is the third way a Lean declaration can assert nothing and
     # the only one of the three that a text scan decides.  `formal/lean.py::
     # vacuous_declarations` finds the two shapes it knows: a `def` whose declared
@@ -1158,6 +1306,193 @@ def test_the_library_trust_counts_are_pinned(tmpdir=None):
     return True, (f"0 axiom, 0 sorry and 0 vacuous across {len(census)} lib/ "
                   f"module(s) and {len(A.all_contracts())} emitted contract(s); "
                   f"{total} native_decide/bv_decide site(s), within the ceiling")
+
+
+def test_the_library_trust_is_attributed_to_a_declaration(tmpdir=None):
+    """Every tactic site belongs to a named theorem, and no site is lost.
+
+    The census above counts SITES per MODULE, which is the right granularity for
+    a ceiling — a merge moves a module's number — and the wrong one for a
+    REPLACEMENT, because a module is not something anybody fixes.  This is the
+    other direction, and it is what makes "these theorems are kernel-checked
+    now" a claim the tree can check: `library_trust_by_declaration` attributes
+    every site to the declaration whose proof it is in, namespaced the way Lean
+    spells it, so a `#print axioms` line can be generated from the census
+    (`test_formal_axioms.py` does).
+
+    Both directions are asserted because both failure modes are silent.  A site
+    that finds no declaration above it lands under `A.UNATTRIBUTED` — a named
+    sentinel rather than a dropped count, since a dropped count is
+    indistinguishable in the output from a right one — and an attribution whose
+    total disagrees with `library_trust`'s is a scanner that has started
+    skipping proofs.
+    """
+    lib = A.lean_dir(HERE)
+    per_mod = A.library_trust(lib)
+    per_decl = A.library_trust_by_declaration(lib)
+    lost = []
+    for mod in sorted(per_mod):
+        by_line = per_decl.get(mod, {})
+        summed = sum(count for count, _lines in by_line.values())
+        counted = per_mod[mod]["axiom_tactic"][0]
+        if summed != counted:
+            lost.append(f"{mod}: {counted} site(s) in the module census and "
+                        f"{summed} attributed to declarations")
+        if A.UNATTRIBUTED in by_line:
+            lost.append(f"{mod}: {by_line[A.UNATTRIBUTED][1]} site(s) have no "
+                        f"declaration above them")
+    check(not lost,
+          "the tactic-site census and its per-declaration attribution "
+          "disagree:\n    " + "\n    ".join(lost))
+    named = sum(len(v) for v in per_decl.values())
+    return True, (f"{sum(k['axiom_tactic'][0] for k in per_mod.values())} "
+                  f"site(s) attributed to {named} declaration(s) across "
+                  f"{len(per_decl)} module(s), none unattributed")
+
+
+def test_native_decide_is_only_where_decide_cannot_go(tmpdir=None):
+    """`native_decide` may appear in exactly the three theorems that evaluate
+    the model, and in no others — anywhere, ever.
+
+    This is the ratchet `LIBRARY_TRUST` cannot be.  That table is per MODULE, so
+    it would take 685 new `native_decide` sites before it noticed anything, and
+    it cannot tell a closed bit-pattern fact — which `decide` discharges in
+    microseconds and the kernel checks — from a `runExport` over a ground image,
+    which is the one thing here `decide` cannot do.  Both were `native_decide` in
+    `lib/` until 2026-10-04: 63 of the 64 in `ProofLib` plus `Contracts`' one and
+    `X86`'s one were closed facts, and they are now `decide`/`rfl`, which reach
+    no generated axiom at all.  A 64th closed fact arriving as `native_decide`
+    would push `LIBRARY_TRUST`'s module counts UP and fail — but only after it had
+    also been merged, and the message would say a module grew rather than which
+    theorem did.
+
+    So the declaration is named, and both directions are failures: a site in a
+    table row the tree cannot find is a stale marker (the same failure
+    `tools/suite.py` reports for an `expect=` that starts passing), and a site
+    outside the table is the thing this exists to catch.  Every remaining
+    `bv_decide` is deliberately NOT in here — `bv_decide`'s subject is a
+    `∀ w, …` over a 32-bit word, where bit-blasting is the only tool there is.
+    """
+    lib = A.lean_dir(HERE)
+    live = A.native_decide_declarations(lib)
+    bad = []
+    for mod in sorted(NATIVE_DECIDE_ALLOWED):
+        for name, why in sorted(NATIVE_DECIDE_ALLOWED[mod].items()):
+            at = live.get(mod, {}).get(name)
+            if at is None:
+                bad.append(f"{mod}.{name}: {why} — and the declaration now has "
+                           f"no `native_decide` site, so this row is a marker "
+                           f"for a debt that is PAID. Delete the row and say so "
+                           f"in the commit.")
+            elif len(at) != 1:
+                bad.append(f"{mod}.{name}: {why} — and it now has {len(at)} "
+                           f"`native_decide` sites at {at}, so the row's reason "
+                           f"is being asked to cover more than the one site it "
+                           f"was written for")
+    for mod in sorted(live):
+        for name, at in sorted(live[mod].items()):
+            if name not in NATIVE_DECIDE_ALLOWED.get(mod, {}):
+                bad.append(
+                    f"{mod}.{name} at {at}: a `native_decide` site in a "
+                    f"declaration NATIVE_DECIDE_ALLOWED does not name. If it is "
+                    f"a closed fact over literals, `decide` closes it and the "
+                    f"KERNEL checks it — measured, `decide` on "
+                    f"`¬ (0xd65f03c0 &&& 0xffe00000 = 0x2a00fa00)` reaches only "
+                    f"propext and Quot.sound, and `(1 : UInt64).toNat = 1` by "
+                    f"`rfl` reaches none at all. If it is not, say why here and "
+                    f"why `decide` cannot.")
+    check(not bad,
+          "the `native_decide` ratchet does not match lib/:\n    "
+          + "\n    ".join(bad))
+    total = sum(len(v) for m in live.values() for v in m.values())
+    return True, (f"{total} native_decide site(s), all in "
+                  f"{sum(len(v) for v in live.values())} named model-evaluation "
+                  f"theorem(s); the other "
+                  f"{sum(k['axiom_tactic'][0] for k in A.library_trust(lib).values()) - total}"
+                  f" site(s) are bv_decide over a quantified word")
+
+
+def test_the_replaced_native_decide_count_is_what_it_claims(tmpdir=None):
+    """FOUR copies of the same number, and every one of them has to agree.
+
+    The 751 `native_decide`/`bv_decide` sites `lib/` carried on 2026-10-03 are
+    in four places — FORMAL.md §7's row 10 (as published prose), this file's
+    `LIBRARY_TRUST` ceiling, this file's `NATIVE_DECIDE_REPLACED`, and the live
+    census — and the debt being paid down is only visible if they move together.
+    `_formal_md_inventory` below exists for exactly the same reason about §7a's
+    nineteen contracts, and it exists because §7a's table once said `subprocess`
+    admits 7 and `fcntl` 1 against a tree that admits 12 and 0, with nothing in
+    the tree able to notice.  So row 10 publishes BOTH figures — the number it
+    started from and the number it is at — and this requires
+
+        published_before - published_now == sum(NATIVE_DECIDE_REPLACED)
+        published_now                       == the live census
+        per-module LIBRARY_TRUST ceilings    == the live per-module census
+
+    A replacement cannot be landed without the document moving, and the document
+    cannot claim a replacement the tree does not have.  That is the whole point:
+    a smaller number with nothing saying where it went is a number nobody can
+    re-derive, which is what the original audit of this row found.
+    """
+    before, replaced_doc, after, why = _formal_md_row10_axiom_tactic()
+    check(not why, why)
+    census = A.library_trust(A.lean_dir(HERE))
+    replaced = sum(NATIVE_DECIDE_REPLACED.values())
+    bad = []
+    if replaced_doc != replaced:
+        bad.append(f"FORMAL.md §7 row 10 publishes {replaced_doc} replacement(s) "
+                   f"and NATIVE_DECIDE_REPLACED claims {replaced}")
+    if before - after != replaced:
+        bad.append(f"FORMAL.md §7 row 10 publishes total {before} and remaining "
+                   f"{after}, a fall of {before - after}, and "
+                   f"NATIVE_DECIDE_REPLACED claims {replaced} replacement(s)")
+    live = sum(k["axiom_tactic"][0] for k in census.values())
+    if live != after:
+        bad.append(f"FORMAL.md §7 row 10 publishes {after} site(s) remaining "
+                   f"and lib/ has {live}")
+    for mod in sorted(LIBRARY_TRUST):
+        want = LIBRARY_TRUST[mod][3]
+        got = census[mod]["axiom_tactic"][0]
+        if got != want:
+            bad.append(f"{mod}: the pinned ceiling is {want} and lib/ has {got}")
+    check(not bad,
+          "the axiom-carrying tactic count is in four places and they "
+          "disagree:\n    " + "\n    ".join(bad))
+    return True, (f"FORMAL.md row 10, LIBRARY_TRUST, NATIVE_DECIDE_REPLACED and "
+                  f"lib/ all say total {before}, replaced {replaced}, remaining "
+                  f"{after}, across {len(LIBRARY_TRUST)} module(s)")
+
+
+def _formal_md_row10_axiom_tactic():
+    """`(total, replaced, remaining, why)` as FORMAL.md §7's row 10 publishes.
+
+    Read out of the document for the reason `_formal_md_inventory` gives, and
+    the shape is found by STRUCTURE rather than by a line number, because §7
+    grows rows above row 10 and a row number is not a stable handle.  All THREE
+    figures have to be present and LABELLED, and `why` is returned rather than a
+    guess made when they are not: a row that published only what it is at could
+    not say what it fell from, which is the whole reason this reads the document
+    rather than comparing against a copy of it.
+    """
+    path = os.path.join(HERE, "FORMAL.md")
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    row = re.search(r"^\|\s*10\s*\|.*$", text, re.M)
+    if not row:
+        return 0, 0, 0, ("FORMAL.md §7 has no row 10, so the published "
+                        "axiom-tactic figure cannot be checked against the "
+                        "tree")
+    line = row.group(0)
+    found = re.search(r"total \*\*(\d+)\*\*, replaced \*\*(\d+)\*\*, "
+                      r"remaining \*\*(\d+)\*\*", line)
+    if not found:
+        return 0, 0, 0, (
+            "FORMAL.md §7's row 10 does not publish its three figures as "
+            "`total **N**, replaced **N**, remaining **N**`, so what the "
+            f"axiom-tactic debt fell by cannot be checked against the tree.  "
+            f"The row currently reads {line[:200]!r}.")
+    g = found.groups()
+    return int(g[0]), int(g[1]), int(g[2]), ""
 
 
 # ── the inventory FORMAL.md publishes ─────────────────────────────────────────
@@ -2450,6 +2785,12 @@ PURE = [("the emitted Lean is inert where nothing is admitted",
          test_every_contract_points_at_its_own_declaration),
         ("the Lean library's trust counts are pinned",
          test_the_library_trust_counts_are_pinned),
+        ("every tactic site belongs to a named theorem",
+         test_the_library_trust_is_attributed_to_a_declaration),
+        ("native_decide is only where decide cannot go",
+         test_native_decide_is_only_where_decide_cannot_go),
+        ("the replaced native_decide count is what it claims",
+         test_the_replaced_native_decide_count_is_what_it_claims),
         ("FORMAL.md's inventory is the census",
          test_the_formal_md_inventory_agrees)]
 
