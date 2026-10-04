@@ -10880,10 +10880,10 @@ def parameter_call_site_pointers(fn, name, decls: dict, functions: dict,
         def _fill_u(p):               p[1] = 43       # b[2] == 43
 
     a bias of one WHOLE ELEMENT, so `p[0]` reads `b[1]` and `p[-1]` reads
-    neither word. `bugs/FORMAL_a_subscript_of_an_unannotated_pointer_parameter_
-    reads_the_next_word.md` and `bugs/FORMAL_a_subscript_through_an_untyped_
-    PARAMETER_is_a_blob_element_and_through_an_annotated_pointer_is_a_word.md`
-    are that measurement, from the two ends.
+    neither word. `tools/formal_untyped_param_subscript_census.py` is the census
+    that decided the cost of fixing it, and
+    `test_formal_run.py`'s `both_arch_an_untyped_parameter_indexes_the_same_
+    pointer_as_an_annotated_one` is the regression.
 
     **It is the CONVENTION that travels, not the pointee, and it has to be.**
     A blob and a raw buffer are the same value on this path — `POINTEES_REFUSED`

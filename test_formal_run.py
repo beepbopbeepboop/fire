@@ -7247,12 +7247,10 @@ BOTH_ARCH_CASES = [
      "    printf(\"%ld\", (n + 48) & ~31)\n"
      "    return 0\n", 0, "32"),
     # ONE POINTER, TWO SPELLINGS, and the callee that reads it the same way
-    # from each — the answered half of the pair in `SUBSCRIPT_CASES`, and the
-    # cheapest regression anybody could have written for
-    # `bugs/FORMAL_a_subscript_through_an_untyped_PARAMETER_is_a_blob_element_
-    # and_through_an_annotated_pointer_is_a_word.md`, which is what its own §next
-    # step 3 asks for: a helper with an annotated parameter and one without,
-    # called on the SAME pointer, both storing, both read back.
+    # from each — the answered half of the pair in `SUBSCRIPT_CASES`. The
+    # cheapest regression anybody could have written for this: a helper with an
+    # annotated parameter and one without, called on the SAME pointer, both
+    # storing, both read back.
     #
     # Both helpers store `43` at index 1 of a `Pointer[Int64]` buffer. The
     # annotated one writes `b + 8`; the unannotated one used to write `b + 16`

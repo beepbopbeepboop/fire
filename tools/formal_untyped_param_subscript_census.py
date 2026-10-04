@@ -4,13 +4,14 @@ module's own call sites pass to it.
 
     python3 tools/formal_untyped_param_subscript_census.py
 
-**The measurement `bugs/FORMAL_a_subscript_through_an_untyped_PARAMETER_is_a_blob_
-element_and_through_an_annotated_pointer_is_a_word.md` §next-step 1 asks for,
-and the one that decides whether a call site's own answer for its argument can
-replace the callee's annotation as the thing that chooses `p + i*width` over
+**The measurement that decided whether a call site's own answer for its argument
+can replace the callee's annotation as the thing that chooses `p + i*width` over
 `p + 8 + i*8`.** Within one image every call site of the callee is in the same
 function tree, so the fact the callee cannot see — what its caller already does
-with that name — IS derivable.
+with that name — IS derivable, and this is what it costs: over the 459 `.mojo`
+files of this repository and the stdlib, 3 713 subscripts read an unannotated
+parameter and none of them changes answer, because not one has a call site whose
+argument this image reads as memory.
 
 It asks `formal/model.py`'s `parameter_call_site_pointers` — the real function,
 with the real `subscript_base_lowering` and the real `pointer_pointee` behind
@@ -19,18 +20,21 @@ differently, and nothing here re-implements a decision:
 
   * **BECOMES-LOAD** — every call site reads its argument as MEMORY, so the
     parameter is memory too and the callee's subscript moves from `base + 8 +
-    i*8` to `base + i*width`. This is the bug the change fixes.
+    i*8` to `base + i*width`. This is the shape that was a silent wrong answer.
   * **DISAGREE** — the call sites read it two ways, which is
     `frame_holder_disagreement_refusal`'s shape one layer down: one parameter,
     two kinds of value, and any single answer is wrong somewhere.
   * **UNCHANGED** — no call site to ask, only the callee's own recursion, or
-    every site reading it as a container already. The container reading is the
-    answer `tools/formal_unstated_base_subscript_census.py` measured as not
-    refusable.
+    every site reading it as a container already.
 
 The `caller` column prints how the caller itself indexes that name, which is
 the invariant the answer is drawn from: one value, one convention, wherever the
 name is written.
+
+Its sibling `tools/formal_unstated_base_subscript_census.py` counts every
+subscript that takes the container reading on a base nothing establishes, which
+is the question this one narrows: that one is the exposure, this one is the
+part of it a parameter accounts for.
 
 No build, no Lean and no sweep, for the reason
 `tools/formal_unstated_base_subscript_census.py` gives: a sweep answers "does

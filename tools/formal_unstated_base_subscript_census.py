@@ -4,15 +4,14 @@ and what the base is.
 
     python3 tools/formal_unstated_base_subscript_census.py
 
-**The question `bugs/FORMAL_a_subscript_of_an_unannotated_pointer_parameter_
-reads_the_next_word.md` needs answered before anything is changed.**
-`formal/model.py`'s `subscript_base_lowering` routes `obj[i]` three ways: a
-`load` at the pointee's width when the base is established to be a pointer, a
-refusal when it is a pointer whose pointee has no width, and — for every base
-whose kind nothing establishes — the **blob** reading, where element `i` is at
-`base + 8 + 8*count`. That third answer is right for a list and WRONG BY ONE
-WHOLE ELEMENT for a word that happens to hold an address: the blob's first word
-is its count, and an address has no count there.
+**The exposure `formal/model.py`'s `subscript_base_lowering` fallback rests on,
+and the number a change to that fallback has to beat.** The rule routes `obj[i]`
+three ways: a `load` at the pointee's width when the base is established to be a
+pointer, a refusal when it is a pointer whose pointee has no width, and — for
+every base whose kind nothing establishes — the **blob** reading, where element
+`i` is at `base + 8 + 8*count`. That third answer is right for a list and WRONG BY
+ONE WHOLE ELEMENT for a word that happens to hold an address: the blob's first
+word is its count, and an address has no count there.
 
 Its own docstring states the trade and then declines to measure it:
 
@@ -37,6 +36,20 @@ classifications, so the exposure is at most what is printed here and at least th
 `kind is NOTHING` subset, which is the part nothing else in the image speaks for.
 The split by base KIND is the useful half: a `list:…` base is the blob reading
 being RIGHT, and only the others are the guess.
+
+**What was done with it, and it is the narrow half.** A base that IS an address
+and says nothing is now decided by the IMAGE rather than by a default:
+`model.parameter_call_site_pointers` asks this same `subscript_base_lowering`
+about each call site's ARGUMENT in the CALLER, so an unannotated parameter
+inherits the convention the value already has everywhere it is named, and call
+sites that do not agree are refused by name.
+`tools/formal_untyped_param_subscript_census.py` is the census for that half, and
+what it measured is why the narrow rule was landable without a sweep: over the
+same 459 files, **3 713 subscripts read an unannotated parameter and not one of
+them changes answer**, because not one has a call site whose argument the image
+reads as memory. The blanket refusal this doc's exposure rules out is still
+ruled out, and the exposure is the reason: it is three orders of magnitude more
+sites than the narrow rule touches, and none of them is wrong today.
 """
 import collections
 import os
