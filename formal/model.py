@@ -18276,9 +18276,300 @@ def attach_field_evidence(struct_defs, evidence) -> None:
     model about a struct they were handed, with no unit in hand: a width that
     depended on a caller-supplied argument could differ between the build pass
     and the codegen pass, which is the one divergence this shared model exists
-    to make impossible (see this module's docstring)."""
+    to make impossible (see this module's docstring).
+
+    `struct_defs` is the unit's OWN declarations, which is also what the
+    INHERITANCE resolution below needs: a base can only contribute fields if
+    this unit declares it, so the table it resolves against is exactly the
+    list this function is given. That is why the two are attached together and
+    not by two callers in two places — a struct whose evidence was attached
+    without its inherited fields, or the reverse, is a struct measured two
+    different ways depending on which caller got there first."""
     for st in struct_defs or []:
         setattr(st, "_field_evidence", evidence)
+    attach_inherited_fields(struct_defs)
+
+
+# ── INHERITANCE: the fields a struct has because a BASE declares them ──────
+#
+# A class body's fields are not the class's fields. `class Sub(Base)` has
+# Base's storage as well as its own, every reader of this file agrees, and for
+# two rounds nothing here did: `struct_field_names` walked the OWN body, so a
+# base's fields were in no layout, in no arity and in no slot index — and the
+# three symptoms that follow are all silent. A construction's arity refused
+# with "no fields at all" for a class that inherits them; a field read through
+# the subclass was refused with a sentence claiming the program raises an
+# AttributeError, which is false of a program that inherits the field; and a
+# subclass that declared none of its own measured as a ONE-WORD struct, so it
+# got the convention (`self` IS the field) that the base's methods — compiled
+# from the base's own declaration — do not agree with.
+#
+# **THE ORDER IS CPython's dataclass order and it is load-bearing**: the base's
+# fields first, its own after. Which value lands in which slot is decided by
+# the order, so this is not "prepend the base's names" as a convenience but the
+# one order the language has. A name the subclass REDECLARES keeps the base's
+# position and the subclass's initializer, which is what CPython's generated
+# `__init__` does with it (`dataclass_transform.inheritance_refusal` says so
+# where the dataclass path refuses a base for the other reason it has).
+#
+# **A base this image does not declare contributes nothing, and the two
+# messages that used to describe the result as the subclass's own fault now
+# name it.** 1217 of the 1223 `class X(Y)` declarations in this repository and
+# the stdlib name a base declared nowhere near them — a Mojo trait
+# (`Copyable`, `Sized`), a Python builtin (`dict`, `int`, `str`), or a CPython
+# exception — and none of those has positional instance fields for a
+# constructor to fill, so contributing nothing is right. What is NOT right is
+# reporting the consequence as if the class had no base at all, which is what
+# `construction_arity_refusal` and `member_read_without_a_field` did.
+CPYTHON_EXCEPTION_BASES = frozenset({
+    # Every class CPython's `builtins` defines as an exception, and nothing
+    # else. Generated from the interpreter this compiler runs on —
+    # `[n for n, v in vars(builtins).items() if isinstance(v, type) and
+    # issubclass(v, BaseException)]` — because the answer is a fact about
+    # CPython rather than about this backend, and a hand-kept list of the ones
+    # somebody remembered is a list that goes stale silently.
+    #
+    # They are here at all because of ONE field every one of them has:
+    # `BaseException.__new__` fills `args` from the caller's arguments, so
+    # `raise ValueError("boom")` carries its message with no declaration
+    # anywhere in the subclass. Modelling that as a field is what gives the
+    # message a SLOT: a class whose body is a docstring and nothing else has
+    # nowhere to put one otherwise, and the construction was refused for
+    # exactly that (`bugs/FORMAL_an_exception_constructed_with_its_message_has_
+    # no_field_to_hold_it.md`, whose fix this is).
+    "ArithmeticError", "AssertionError", "AttributeError",
+    "BaseException", "BaseExceptionGroup", "BlockingIOError",
+    "BrokenPipeError", "BufferError", "BytesWarning",
+    "ChildProcessError", "ConnectionAbortedError", "ConnectionError",
+    "ConnectionRefusedError", "ConnectionResetError",
+    "DeprecationWarning", "EOFError", "EncodingWarning",
+    "EnvironmentError", "Exception", "ExceptionGroup",
+    "FileExistsError", "FileNotFoundError", "FloatingPointError",
+    "FutureWarning", "GeneratorExit", "IOError", "ImportError",
+    "ImportWarning", "IndentationError", "IndexError",
+    "InterruptedError", "IsADirectoryError", "KeyError",
+    "KeyboardInterrupt", "LookupError", "MemoryError",
+    "ModuleNotFoundError", "NameError", "NotADirectoryError",
+    "NotImplementedError", "OSError", "OverflowError",
+    "PendingDeprecationWarning", "PermissionError",
+    "ProcessLookupError", "PythonFinalizationError", "RecursionError",
+    "ReferenceError", "ResourceWarning", "RuntimeError",
+    "RuntimeWarning", "StopAsyncIteration", "StopIteration",
+    "SyntaxError", "SyntaxWarning", "SystemError", "SystemExit",
+    "TabError", "TimeoutError", "TypeError", "UnboundLocalError",
+    "UnicodeDecodeError", "UnicodeEncodeError", "UnicodeError",
+    "UnicodeTranslateError", "UnicodeWarning", "UserWarning",
+    "ValueError", "Warning", "ZeroDivisionError",
+    "_IncompleteInputError",
+})
+
+# What a base from that table contributes. ONE entry, and it is a field rather
+# than anything cleverer because `args` is where CPython puts the message: a
+# `raise E(msg)` fills it, and `str(e)` reads it. A subclass that DECLARES
+# `args` itself (`formal/x86_64_decode.py`'s `DecodeError`) keeps its own
+# declaration and its own position, which is CPython's behaviour for a
+# re-declared field and one name rather than two slots for one word.
+BUILTIN_EXCEPTION_FIELDS = ("args",)
+
+
+def builtin_base_fields(base: str) -> tuple:
+    """The instance fields a base THIS IMAGE does not declare contributes.
+
+    Empty for everything but CPython's exception hierarchy, and that is the
+    whole of the rule rather than a first case: a Mojo trait (`Copyable`,
+    `Sized`, `RegisterPassable`) is a compile-time protocol with no instance
+    storage, and a builtin container (`dict`, `list`, `str`) is a word this path
+    already represents whole. Neither has a positional field list for a
+    constructor to fill, so there is nothing to merge and inventing something
+    would change a layout on the strength of a name."""
+    if base in CPYTHON_EXCEPTION_BASES:
+        return BUILTIN_EXCEPTION_FIELDS
+    return ()
+
+
+def _merged_field_names(struct_def, by_name: dict, memo: dict,
+                        active: set) -> tuple:
+    """`(names, unresolved bases, inherited defaults)` — the recursion.
+
+    `memo` is keyed by `id`, because two StructDefs can share a name across
+    modules and the table this resolves against is the unit's, so a name is
+    not an identity. `active` is the cycle guard: `class A(B)` / `class B(A)`
+    parses, and a fixpoint over a cycle has to answer something rather than
+    recurse forever — it answers no fields, which is the conservative
+    direction, since a cycle contributes storage nobody can order.
+
+    The defaults are the base's class-level initializer nodes, because a
+    subclass that adds no field of its own still gets the base's defaults:
+    `struct_field_default` reads this after the class body and finds nothing
+    there for an inherited name. Substituting 0 instead would be a wrong
+    answer rather than a refusal — `Base.x = 5` / `class Sub(Base): pass` /
+    `Sub().x` is 5 in CPython — so the node travels with the name."""
+    key = id(struct_def)
+    if key in memo:
+        return memo[key]
+    if key in active:
+        return ((), (), {})
+    active.add(key)
+    inherited, unresolved, defaults = [], [], {}
+    for base in (getattr(struct_def, "bases", None) or []):
+        if not isinstance(base, str):
+            continue
+        declared = by_name.get(base)
+        if declared is None:
+            fields = builtin_base_fields(base)
+            inherited.extend(fields)
+            if not fields:
+                unresolved.append(base)
+            continue
+        base_inherited, base_unresolved, base_defaults = _merged_field_names(
+            declared, by_name, memo, active)
+        unresolved.extend(base_unresolved)
+        # The base's WHOLE merged list, not its own body: a grand-parent's
+        # fields are this struct's fields too, and taking the base's merged
+        # list is what makes the order base-of-base first without this
+        # function knowing how deep the chain goes.
+        inherited.extend(base_inherited)
+        inherited.extend(_own_field_names(declared))
+        for name, node in base_defaults.items():
+            defaults.setdefault(name, node)
+        for node in struct_fields(declared):
+            fname = struct_field_name(node)
+            if isinstance(fname, str):
+                defaults.setdefault(fname, getattr(node, "value", None))
+    active.discard(key)
+    merged, seen = [], set()
+    for name in inherited:
+        if name not in seen:
+            seen.add(name)
+            merged.append(name)
+    for name in _own_field_names(struct_def):
+        if name not in seen:
+            seen.add(name)
+            merged.append(name)
+    memo[key] = (tuple(merged), tuple(unresolved), defaults)
+    return memo[key]
+
+
+def attach_inherited_fields(struct_defs) -> None:
+    """Resolve every struct in `struct_defs`'s BASES, in place.
+
+    Attached rather than passed down for the reason `attach_field_evidence`
+    gives: the two backends ask the model about a struct they were handed. What
+    is attached is `(merged field names, bases this unit does not declare, the
+    bases' default nodes)`, and each is consumed by name —
+    `struct_field_names` by the first, `struct_unresolved_bases` by the two
+    refusals that have to stop describing an undeclared base as a subclass with
+    no fields, and `struct_field_default` by the third."""
+    by_name = {}
+    for st in struct_defs or []:
+        name = getattr(st, "name", None)
+        if isinstance(name, str) and name not in by_name:
+            by_name[name] = st
+    memo = {}
+    for st in struct_defs or []:
+        merged, unresolved, defaults = _merged_field_names(
+            st, by_name, memo, set())
+        setattr(st, "_merged_field_names", merged)
+        setattr(st, "_unresolved_bases", unresolved)
+        setattr(st, "_inherited_field_defaults", defaults)
+
+
+def struct_merged_field_names(struct_def):
+    """This struct's field names WITH its bases', or None if never resolved.
+
+    None is "no answer", not "no fields": a struct nothing called
+    `attach_inherited_fields` for keeps the pre-merge reading of its own body,
+    which is what every caller did before the merge existed and what a module
+    parsed outside `parse_module` still gets."""
+    return getattr(struct_def, "_merged_field_names", None)
+
+
+def struct_unresolved_bases(struct_def) -> tuple:
+    """The bases this struct names that no declaration in its unit answers.
+
+    A trait, a builtin container, or a class from a module this image cannot
+    read — none of which has instance fields to merge, and each of which is a
+    fact a refusal about the struct's fields must not hide."""
+    return getattr(struct_def, "_unresolved_bases", None) or ()
+
+
+def struct_declared_bases(struct_defs, struct_def) -> tuple:
+    """The bases of `struct_def` that `struct_defs` DECLARES, in order.
+
+    The second half of the inheritance story and the one the layout refusal
+    needs: a base's METHODS are compiled against the BASE's layout, so a
+    subclass whose own layout is not the base's cannot have them, and that is a
+    fact about two declarations rather than about one. A base outside
+    `struct_defs` contributes no fields and no methods this image can see, so
+    it is not in this list — see `builtin_base_fields` for why that is right."""
+    out = []
+    for base in (getattr(struct_def, "bases", None) or []):
+        for other in struct_defs or []:
+            if getattr(other, "name", None) == base:
+                out.append(other)
+                break
+    return tuple(out)
+
+
+def struct_inherited_layout_conflicts(struct_defs, struct_def) -> list:
+    """`[base]` for every base whose METHODS this struct cannot have.
+
+    **The merge makes the layout right and the CALL still wrong, and this is
+    the question about that.** `attach_inherited_fields` puts a base's fields
+    in a subclass's layout, so `sub.x` reads the right slot. But a method is
+    compiled against the layout of the class that DECLARED it — `self` is the
+    field for a one-field struct and the address of a frame for a wider one —
+    and it is dispatched by NAME, because a call site carries no receiver type
+    to check. So `Base.get()` called on a `Sub` whose own fields pushed it over
+    the one-word line hands the callee a FRAME ADDRESS where it expects the
+    field: the callee reads the address as the value, and the program builds,
+    runs, and prints a number nobody wrote. That is the quiet third symptom,
+    and it is the one the merge alone would have introduced.
+
+    A conflict is exactly one shape, and it is the shape where the two
+    conventions differ. Two framed structs agree — the subclass's slots are the
+    base's slots followed by its own, so every index the base's methods compute
+    is the same word in both — and two one-word structs agree for the same
+    reason. What cannot work is a base of one word receiving a frame address,
+    which is `struct_is_framed` disagreeing.
+
+    **A base that declares no METHOD is not a conflict**, and narrowing it that
+    way is what keeps this a diagnosis instead of a veto. The hazard is a
+    compiled function being handed the wrong representation, so a base with
+    nothing compiled from it cannot produce one: `struct Base: var a: Int` +
+    `struct Child(Base): var b: Int` measures as one word against a frame and
+    answers correctly, because `Child.rank` and `Base.rank` are class constants
+    and no method of `Base` is ever called (`test_formal_run.py`'s
+    `comptime_attribute_through_the_class_name_is_the_base_value`, which this
+    refusal used to take over — and taking over a case that computes the right
+    answer is the failure mode the sweep's classification calls `codegen`)."""
+    out = []
+    for base in struct_declared_bases(struct_defs, struct_def):
+        if not struct_methods(base):
+            continue
+        if struct_is_framed(struct_def) and not struct_is_framed(base):
+            out.append(base)
+    return out
+
+
+def inherited_layout_refusal(sub, base) -> str:
+    """A subclass whose base's methods are compiled for a different layout."""
+    return (
+        f"{sub.name} inherits from {base.name}, and the two do not agree on "
+        f"what a receiver IS: {base.name} has {struct_field_summary(base)}, so "
+        f"its methods read `self` as the receiver's single word, while "
+        f"{sub.name} has {struct_field_summary(sub)}, so its receiver is the "
+        f"address of a frame. A method is compiled against the layout of the "
+        f"class that DECLARES it and a call site carries no receiver type to "
+        f"check with, so a {base.name} method called on a {sub.name} is handed "
+        f"a frame address where it expects the field: it would read the "
+        f"address as the value, and the program would build, run, and print a "
+        f"number the source never wrote. Give {sub.name} the same shape as "
+        f"{base.name} — a subclass that adds no field of its own inherits the "
+        f"layout exactly — or keep {base.name} a plain struct and pass it as a "
+        f"field"
+    )
+
 
 
 def iter_struct_defs(node):
@@ -18775,7 +19066,29 @@ def struct_field_names(struct_def) -> list:
     That remains the conservative direction — see the note above
     `struct_class_constants` — and it is why a reported width is an UPPER
     BOUND whenever the evidence is missing, which is why every refusal that
-    quotes one also quotes the names it counted."""
+    quotes one also quotes the names it counted.
+
+    **THE BASE'S FIELDS ARE IN THIS LIST, base-first** (`attach_inherited_fields`
+    is where they are resolved and `CPYTHON_EXCEPTION_BASES` is why a base this
+    image does not declare can still contribute a field). This function used to
+    answer for the class body alone, and every reader below it — the width, the
+    arity, the slot index, the frame defaults — inherited that answer, so the
+    whole representability decision was made about a subclass's own fields
+    while the program had a base's. The derivation of the OWN half is
+    `_own_field_names`, unchanged; the merge is one pass over the two lists."""
+    merged = struct_merged_field_names(struct_def)
+    if merged is not None:
+        return list(merged)
+    return _own_field_names(struct_def)
+
+
+def _own_field_names(struct_def) -> list:
+    """The field names the class BODY declares, with no base merged in.
+
+    What `struct_field_names` returns for a struct nothing resolved the
+    inheritance of, and the second half of what it returns for one that did.
+    Split out so the merge has a name for the thing it merges onto rather than
+    reaching into the middle of the derivation above."""
     split = _split_declaration(struct_def)
     if split is None:
         return _pre_rule_field_names(struct_def)
@@ -18977,17 +19290,29 @@ def struct_is_one_field(struct_def) -> bool:
 # The argument conventions that say "this method may change the object its
 # receiver names", as `param_convs` actually spells them.
 #
-# **NOT the surface syntax, and the difference is load-bearing.** The parser
-# folds `inout self` to `mut`, so the string `"inout"` never reaches
-# `param_convs` and an entry for it can never match; it was here until
-# 2026-10-03 and is a lie about the parser's vocabulary rather than a safety
-# net. `var self` and `owned self` fold to `"owned"`, which is deliberately NOT
-# in the list: 195 of the 196 methods in the corpus that declare a non-mutating
-# convention are readers, where `owned` is right, and the one that is a writer is
-# a question about the language's argument model rather than about this path —
-# `bugs/FORMAL_a_var_self_receiver_on_a_one_field_struct_drops_its_store.md`,
-# which also carries the measurement. Kept as a tuple because adding an entry is
-# a decision about the language's conventions, not a detail of the walk below.
+# **NOT the surface syntax, and the difference is load-bearing.** `fire_compiler.py`'s
+# `_CONV_CANON` collapses the spellings onto one canonical string — `inout self`
+# to `mut`, `borrowed self` to `read`, `var self` to `owned` — so `"inout"` never
+# reaches `param_convs` and an entry for it can never match; it was here until
+# 2026-10-03 and is a lie about the parser's vocabulary rather than a safety net.
+#
+# **`owned` is deliberately NOT in the list**, and the measurement that decided it
+# is over this repository's and the stdlib's 690 `.py`/`.mojo` files: 17 methods
+# of a ONE-FIELD struct store that struct's own field, and 13 of them declare
+# `mut` — the convention that makes `receiver_writeback_name` hand the receiver
+# back. Exactly one declares `var self`
+# (`std/python/python_object.mojo`'s `PythonObject.steal_data`, whose file is a
+# host-import this backend never answers), and three declare a plain `self`.
+# Adding `owned` would therefore make ~195 READERS write-back candidates, and for
+# a one-field struct the write-back IS the receiver — so every reader that
+# already returns something would start failing `mutating_receiver_return_refusal`
+# instead. Whether `var self` MAY change the receiver it names is a question
+# about the language's argument model; this path has no representation for
+# ownership transfer either way, so it refuses by name
+# (`RECEIVER_CONVENTION_NAMES`) and says which word of source fixes it.
+#
+# Kept as a tuple because adding an entry is a decision about the language's
+# conventions, not a detail of the walk below.
 MUTATING_RECEIVER_CONVENTIONS = ("out", "mut")
 
 
@@ -19081,6 +19406,16 @@ def one_field_dropped_receiver_stores(fn, owner):
     they run in the frame the object is being built in — which is where CPython
     runs them, and the reason the same source is correct there.
 
+    **`__post_init__` is not in the answer for the other reason, and its absence
+    was a wrong refusal.** CPython calls that hook at the end of the generated
+    `__init__`, and this path never calls it at all — `dataclass_transform`'s
+    `post_init_refusal` says so and refuses the class for it — so a store inside
+    one cannot reach the caller whichever convention the receiver declares. The
+    rule used to report it anyway, and the dataclass refusal lost its pre-emption:
+    `test_dataclasses_formal.py`'s `post_init_is_refused_with_its_reason` was
+    reading a one-field receiver message for a hook the file is refused for
+    before, and the diagnosis it got named the wrong construct.
+
     Returns `[(field, convention)]` — the field stored and the receiver's
     convention as the source spelled it, `None` for a plain `self` — or `[]` when
     the method is not at risk.
@@ -19094,8 +19429,12 @@ def one_field_dropped_receiver_stores(fn, owner):
     conv = (getattr(fn, "param_convs", None) or {}).get(recv)
     if (conv or "") in MUTATING_RECEIVER_CONVENTIONS:
         return []                      # the write-back delivers the store
-    if method_member_name(owner, fn) == "__init__":
-        return []                      # inlined at the construction site
+    if method_member_name(owner, fn) in ("__init__", "__post_init__"):
+        # `__init__` is INLINED at the construction site, so its stores run
+        # where CPython runs them; `__post_init__` is never called here at all.
+        # Same exclusion, two different reasons, both about there being no CALL
+        # for a write-back to travel along.
+        return []
     field = struct_sole_field_name(owner)
     if field is None:
         return []
@@ -22055,7 +22394,16 @@ def struct_field_default(struct_def, name,
     when the READ is substituted. It is a parameter rather than a global
     because a declaration is not a fact about itself: answering it needs the
     image's other declarations, and the three readers below that have no table
-    get exactly the literal-only answer they got before."""
+    get exactly the literal-only answer they got before.
+
+    **AN INHERITED name is answered from the BASE's initializer**, which
+    `attach_inherited_fields` carried over with the name. `Base.x = 5` /
+    `class Sub(Base): pass` / `Sub().x` is 5 in CPython, and a subclass that
+    declares nothing of its own is exactly the case where the class body has no
+    node to read — so the `(DEFAULT_NONE, None)` this used to return, a zero
+    word, was a wrong answer rather than a missing one. A name the subclass
+    re-declares is answered from the subclass's own body above, which is
+    CPython's rule for a re-declared field."""
     for field in struct_fields(struct_def):
         if struct_field_name(field) == name:
             value = getattr(field, "value", None)
@@ -22063,6 +22411,13 @@ def struct_field_default(struct_def, name,
                 return class_constant_word(name, value)
             kind, payload = class_constant_word_in(structs_by_name, value)
             return (kind, name if kind == DEFAULT_OPAQUE else payload)
+    inherited = getattr(struct_def, "_inherited_field_defaults", None) or {}
+    if name in inherited:
+        value = inherited[name]
+        if structs_by_name is None:
+            return class_constant_word(name, value)
+        kind, payload = class_constant_word_in(structs_by_name, value)
+        return (kind, name if kind == DEFAULT_OPAQUE else payload)
     return (DEFAULT_NONE, None)
 
 
@@ -23560,7 +23915,7 @@ def construction_init_body_refusal(name: str, why: str) -> str:
 
 
 def construction_arity_refusal(name: str, got: int, summary: str,
-                               missing=()) -> str:
+                               missing=(), bases=()) -> str:
     """A construction whose arguments do not cover every field of this struct.
 
     Named with both counts and the field list, because "wrong number of
@@ -23574,7 +23929,26 @@ def construction_arity_refusal(name: str, got: int, summary: str,
     repair: a field WITH a declared default is filled from it, so
     `Config(7)` on `width = 80, height = 24` is a program and this is not
     that.  `bugs/FORMAL_dataclass_partial_construction.md` records the
-    measurement and why the two cannot share an answer."""
+    measurement and why the two cannot share an answer.
+
+    `bases` is the bases this unit does not declare, and it is the clause that
+    keeps the message honest about WHY the field list is short. A class with a
+    base it inherits its fields from and a class that declares none are the
+    same refusal with opposite repairs: the first is fixed by making the base
+    visible, the second by declaring the fields. The sentence this replaces
+    told the reader of `LaunchError(Exception)` — a docstring and no fields —
+    to "give the fields explicitly", which is advice about a class whose
+    missing fields are not the problem."""
+    if bases and summary == "no fields at all":
+        return (f"constructing {name} with {got} argument(s), and {name} "
+                f"derives from {', '.join(repr(b) for b in bases)}, which this "
+                f"image does not declare — so the fields it inherits are not "
+                f"in {name}'s layout and there is no slot to put an argument "
+                f"in. A subclass's fields are its BASE's fields followed by "
+                f"its own (the order CPython's generated `__init__` takes "
+                f"them), and this path can only place a word in a slot it can "
+                f"name. Declare {bases[0]} in this module, or declare the "
+                f"fields on {name} itself")
     if not missing:
         return (f"constructing {name} with {got} argument(s) does not match "
                 f"its fields ({summary}), and {name} declares no `__init__` "
@@ -23960,7 +24334,9 @@ def struct_construction_plan(struct_def, call, decls: dict,
         # nowhere to put an argument at all.  Asked BEFORE the field binding so
         # the message is about the shape rather than about a keyword that could
         # not have been matched to a field list this struct does not have.
-        return (None, construction_arity_refusal(name, len(args), summary))
+        return (None, construction_arity_refusal(
+            name, len(args), summary,
+            bases=struct_unresolved_bases(struct_def)))
     if not args and not kwargs and not shapes:
         # The existing shape, for a struct that declares no constructor at all:
         # every field at its own default, and every placed nested frame brought
@@ -24246,7 +24622,8 @@ def _construction_field_bindings(struct_def, args, kwargs, slots, summary: str):
     two in the words."""
     if len(args) > len(slots):
         return (None, construction_arity_refusal(
-            struct_def.name, len(args), summary))
+            struct_def.name, len(args), summary,
+            bases=struct_unresolved_bases(struct_def)))
     bound = {}
     for arg, field in zip(args, slots):
         bound[field] = arg
@@ -24263,7 +24640,8 @@ def _construction_field_bindings(struct_def, args, kwargs, slots, summary: str):
                    struct_def, f)]
     if missing:
         return (None, construction_arity_refusal(
-            struct_def.name, len(args), summary, missing=missing))
+            struct_def.name, len(args), summary, missing=missing,
+            bases=struct_unresolved_bases(struct_def)))
     return ({f: bound.get(f) for f in slots}, None)
 
 
@@ -26801,6 +27179,29 @@ def member_read_without_a_field(chain, holder, name, candidates) -> str:
         )
     if len(candidates) == 1:
         st = candidates[0]
+        # A base this unit does not declare makes the sentence below FALSE, and
+        # a false sentence sends the reader to the wrong line. `Sub(Base)` where
+        # `Base` is a trait, a builtin, or a class from a module this image
+        # cannot read inherits whatever fields that base has, so `s.x` is a
+        # field read in CPython too and the program is NOT raising here. What is
+        # missing is the base's DECLARATION, which is a different repair
+        # entirely — and the merge (`attach_inherited_fields`) is what turned
+        # this from a fact about every subclass into a fact about the bases this
+        # image cannot read.
+        undeclared = struct_unresolved_bases(st)
+        if undeclared:
+            return (
+                f"{chain} is a field of {holder}, and {st.name} has no field "
+                f"{name!r}: its {struct_field_summary(st)}. It derives from "
+                f"{', '.join(repr(b) for b in undeclared)}, which this image "
+                f"does not declare, so the fields it inherits are not in the "
+                f"layout this path can see — and it is NOT an AttributeError "
+                f"in the program, because CPython inherits them. Declare "
+                f"{undeclared[0]} in this module, or declare {name!r} on "
+                f"{st.name} itself. Refused rather than read a word it cannot "
+                f"place: a frame slot holds one 64-bit word and there is no "
+                f"`k` to read"
+            )
         return (
             f"{chain} is a field of {holder}, and {st.name} has no field "
             f"{name!r}: its {struct_field_summary(st)}. In Python this is an "

@@ -2122,6 +2122,11 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     # rather than about the image, so it belongs with this group rather than
     # with the construct checks that only an executable's codegen can answer.
     check_dataclass_constructs(stmts, functions, by_name)
+    # …and AFTER the dataclass check, which is the ordering this block's own
+    # rule asks for: a `@dataclass class C(A)` is refused for the dataclass
+    # reason whatever its layout is, so the layout refusal must not pre-empt it
+    # with the less specific of the two facts about the same class.
+    check_inherited_layouts(_own_structs(structs))
     check_module_symbols(functions, by_name,
                          imported_module_names=imported_module_names,
                          link_line=link_line,
@@ -6389,6 +6394,35 @@ def check_frame_field_blob_premises(structs) -> None:
         writes = M.struct_field_container_writes(st)
         if writes:
             raise CodegenError(M.frame_field_premise_refusal(st))
+
+
+def check_inherited_layouts(structs) -> None:
+    """A subclass whose base's METHODS are compiled for a different layout.
+
+    **The other half of the base-field merge, and the half that has to be a
+    REFUSAL.** `model.attach_inherited_fields` puts a declared base's fields in
+    a subclass's slots, base first, which is what makes `sub.x` read the right
+    word. A method is not fixed by that: it is compiled against the layout of
+    the class that DECLARES it (`self` IS the field for a one-field struct, and
+    is the address of a frame for a wider one), and it is dispatched by NAME
+    because a call site carries no receiver type to check with. So a base of
+    one word whose subclass added a field is handed a FRAME ADDRESS where the
+    callee expects the field — it reads the address as the value, and the
+    program builds, runs and prints a number the source never wrote.
+
+    Called from `_run_late_checks` beside `check_frame_field_blob_premises` and
+    for the same measured reason: this is a fact about the FILE's declarations,
+    and a file that imports a CPython host module is out of reach whatever its
+    classes say, so raising it earlier would move those files' sweep
+    classification off `not-answerable/host-import` and onto `codegen`.
+
+    Cheap when there is nothing to do — `struct_declared_bases` is a scan of the
+    unit's structs per base, and a file whose classes declare no base pays one
+    empty pass — and it runs on every build, which is why the question lives in
+    one model function rather than in a caller."""
+    for st in structs or []:
+        for base in M.struct_inherited_layout_conflicts(structs, st):
+            raise CodegenError(M.inherited_layout_refusal(st, base))
 
 
 def check_dataclass_constructs(stmts: list, functions: list,

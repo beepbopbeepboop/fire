@@ -11,6 +11,15 @@ anything else fell through to a recursion-only branch.  The consequence was
 that the arm64 corpus had **no proof at all** for any program with a call, and
 a `sorry` census over generated files was measuring nothing.
 
+**And one family of programs that has no call in it at all**: `TestBitTestBranches`
+below covers `if n & 8:`, whose condition lowers to a single `TBZ`. A bit test
+writes no register and sets no flags, so the branch-condition value flow every
+other conditional branch gets from its `CSET` does not exist for it, and the
+generator used to refuse rather than emit a proposition about a register that
+says nothing about the condition. It is in this file because the thing being
+pinned is the same thing: what the generator emits for a program the corpus had
+no proof for.
+
 These tests pin the fix and the three defects that were behind it:
 
   * a call no longer raises, and the emitted proof states what the machine model
@@ -423,6 +432,30 @@ class TestGeneratorSource(unittest.TestCase):
                           f"{entry} handed the AST bridge a one-argument list, "
                           f"so its second parameter evaluates to 0")
 
+    def test_the_step_table_and_the_model_are_the_same_set(self):
+        """`_STEP_CONDS` and `arm64_step`, checked two ways, because one is not
+        enough.
+
+        `check_step_conds` compares SETS and is called by
+        `generate_arm64_proof`, so every proved build enforces it; `audit_step_table`
+        also checks that the two ORDERS agree per overlapping pair, and it is the
+        one that reads `lib/ProofLib.lean` as TEXT. Both existed and the second was
+        reading a branch condition out of a COMMENT above the TBZ case, which put
+        `test_formal.py` in a state where it raised before generating a single
+        proof for every example it has — see
+        `bugs/FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md`.
+
+        The regression this pins is the one whose fix was to REMOVE a row:
+        `CSEL` is emitted by `arm64_codegen.py` at six sites and is in neither the
+        table nor the model, and a row in one without the other is a generator
+        describing an effect the function it is proving takes no step for."""
+        import formal.arm64_proof_gen as G
+        G.check_step_conds(os.path.join(HERE, "lib", "ProofLib.lean"))
+        notes = G.audit_step_table(os.path.join(HERE, "lib", "ProofLib.lean"))
+        self.assertIsInstance(notes, list)
+        for note in notes:
+            self.assertIn("shadows entry", note)
+
     def test_adrp_step_uses_simpa(self):
         """An ADRP's result reads the program counter, so the library lemma
         takes `pc` as a parameter while `_step_rhs` writes `s.pc`; `exact`
@@ -589,6 +622,131 @@ class TestRegister31(unittest.TestCase):
                          "this generator need the helper in them too")
         self.assertIn("arm64_reg 31 s", G._step_rhs(0x8b1003e0, 2),
                       "`_step_rhs`'s ADD-register arm changed shape")
+
+
+# Lean's `=` and `\u2260`, spelled once so the pattern and the expectation
+# below cannot be two different characters.
+BIT_TEST_EQ, BIT_TEST_NE = "=", "\u2260"
+
+BIT_TESTS = {
+    # name: (source, the instruction it must lower to)
+    "bit_tbz": ("def f(n):\n    x = 0\n    if n & 8:\n        x = x + 1\n"
+                "    return x\n", 52),
+    "bit_tbnz": ("def f(n):\n    x = 0\n    if not (n & 4):\n        x = x + 2\n"
+                 "    return x\n", 53),
+    # `&` is commutative and the lowering accepts either order, so the mask on
+    # the left is the same instruction with the operands the other way round.
+    "bit_commuted": ("def f(n):\n    x = 0\n    if 16 & n:\n        x = x + 4\n"
+                    "    return x\n", 52),
+}
+
+
+class TestBitTestBranches(unittest.TestCase):
+    """An `if` whose condition is a BIT TEST is provable, and proves the bit.
+
+    These three programs used to end the generator in
+    `ValueError: unsupported: branch condition value flow (frame/flag
+    unavailable)`. The refusal was right — a conditional branch's source-level
+    proposition was read out of the CSET that wrote the tested register, and
+    `TBZ`/`TBNZ` write no register and set no flags — but the way out was not to
+    keep refusing: the branch's own condition IS the proposition, one bit of one
+    register, and `lib/ProofLib.lean`'s `arm64_step` already states it that way
+    for `0x36000000` / `0x37000000`.
+
+    Nothing here runs Lean. What is pinned is that the generator PRODUCES the
+    proof and that the proposition it emits is the bit test — a generator that
+    emitted an `hcond` about the whole register would typecheck and prove
+    something false, which is the `either`/`both` failure mode
+    `bugs/FORMAL_arm64_known_proof_gaps.md` exists to prevent. The Lean half is
+    `formal/examples/bittest.mojo`, which `test_formal.py` runs.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="a2-bittest-")
+        cls.proofs = {}
+        cls.errors = {}
+        for name, (src, _idx) in BIT_TESTS.items():
+            p, err = _generate(cls.tmp, src, name)
+            cls.proofs[name] = p
+            cls.errors[name] = err
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_a_bit_test_condition_generates_a_proof(self):
+        for name in BIT_TESTS:
+            self.assertIsNone(self.errors[name],
+                              f"{name}: proof generation raised "
+                              f"{self.errors[name]}")
+
+    def test_the_condition_proved_is_the_bit_test_not_the_whole_register(self):
+        """`((arm64_reg r s >>> bit) &&& 1) = 0` — the model's own spelling.
+
+        The whole-register form (`arm64_reg r s = 0`) is what the CBZ arm
+        emits, and it is FALSE for a bit test: `n = 8` satisfies one and not the
+        other. A proof about it would typecheck, which is exactly why the shape
+        is asserted rather than merely generated."""
+        for name, (_src, idx) in BIT_TESTS.items():
+            with open(self.proofs[name]) as fh:
+                text = fh.read()
+            self.assertIn("hcond_", text,
+                          f"{name}: no source-condition proposition was emitted")
+            m = re.search(r"hcond_\d+ : \(*\(arm64_reg (\d+) s_\d+ >>> "
+                          r"UInt64\.ofNat (\d+)\) &&& 1\) (=|" + re.escape(BIT_TEST_NE) + ") 0",
+                          text)
+            self.assertIsNotNone(
+                m, f"{name}: the emitted hcond is not a bit test")
+            self.assertEqual(m.group(1), "0",
+                             f"{name}: the tested register is the one the "
+                             f"lowering put the operand in")
+            self.assertEqual(
+                m.group(3),
+                BIT_TEST_EQ if idx == 52 else BIT_TEST_NE,
+                f"{name}: the polarity is the INSTRUCTION's, and a TBZ taken "
+                f"test is the bit being CLEAR")
+
+    def test_the_displacement_is_read_at_this_family_s_own_width(self):
+        """`imm14`, not `imm19`: bits 19..23 are the bit number here.
+
+        A 19-bit read folds the BIT into the displacement's sign bit, so the
+        `hb` fact the step lemma carries is false about the word and everything
+        proved from it is a proof about a different instruction."""
+        for name in BIT_TESTS:
+            with open(self.proofs[name]) as fh:
+                text = fh.read()
+            self.assertRegex(
+                text, r"have hb : .*>>> 5 &&& 16383 &&& 8192",
+                f"{name}: the sign-extend decision is not over the 14-bit "
+                f"immediate")
+
+    def test_the_branch_target_is_the_sign_extended_imm14(self):
+        """`_branch_target` decodes TBZ/TBNZ, and its target is the model's.
+
+        Measured by round trip rather than by reading: the encoder is asked for
+        a backward displacement and the decoder has to land on the address the
+        encoder was told about. The imm14 arm was MISSING while the block
+        scanner already classified these as `cbz`-kinded, so `targets` was
+        `[pc + 4, None]` and every consumer of the taken edge was handed a
+        `None`."""
+        import struct as _struct
+
+        from formal.arm64 import encode_tbz_xn_bit, encode_tbnz_xn_bit
+        import formal.arm64_proof_gen as G
+        pc = 0x1000
+        words = {}
+        for enc, idx in ((encode_tbz_xn_bit, 52), (encode_tbnz_xn_bit, 53)):
+            for delta in (32, -32, 4, -4):
+                word = _struct.unpack("<I", enc(3, 5, delta))[0]
+                words[pc] = word
+                self.assertEqual(
+                    G._step_branch_index(word), idx,
+                    "the step table does not recognise the encoded bit test")
+                self.assertEqual(
+                    G._branch_target(words, pc), pc + delta,
+                    f"imm14 decode: word 0x{word:08x} should branch to "
+                    f"{pc + delta}, not {G._branch_target(words, pc)}")
 
 
 class TestCallProofs(unittest.TestCase):

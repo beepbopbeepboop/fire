@@ -25,13 +25,14 @@ import re
 import struct
 
 import fire_compiler as F
+# `model` for `entry_arity` / `entry_arg_values` -- the ONE reader of what the
+# startup stub passes the entry function, so the proof's entry state and the
+# binary's registers are two renderings of one list.  `formal/types.py` imports
+# the same module, so this costs nothing that was not already being loaded.
+# ONE name for it, not two: this file said both `model` and `model as M`, and a
+# second spelling of one module is a second place for the two to disagree.
 from formal import model
 from formal.arm64_codegen import var_register_map, _SCRATCH
-# `model` for `entry_arg_values` -- the ONE reader of what the startup stub
-# passes the entry function, so the proof's entry state and the binary's
-# registers are two renderings of one list.  `formal/types.py` imports the same
-# module, so this costs nothing that was not already being loaded.
-from formal import model as M
 from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
                           used_narrow_types, lean_trunc_defs, lean_trunc_name,
@@ -519,7 +520,7 @@ def _cmp_go(e, param: str, env: dict, vtypes: dict, call_types: dict,
             j = "\u2227" if k == "and" else "\u2228"
             return (f"({_truth_go(e.left, param, env, vtypes, call_types, scope)} {j} "
                     f"{_truth_go(e.right, param, env, vtypes, call_types, scope)})")
-    return _expr_bool_go(e, param, env, scope)
+    return _expr_bool_go(e, param, env, vtypes, call_types, scope)
 
 
 def _truth_go(e, param: str, env: dict, vtypes: dict, call_types: dict,
@@ -729,11 +730,24 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
         f"about the source")
 
 
-def _expr_bool_go(e, param: str, env: dict, scope=None) -> str:
-    """Translate a Mojo expression to a Lean Bool term for conditions."""
+def _expr_bool_go(e, param: str, env: dict, vtypes: dict = None,
+                  call_types: dict = None, scope=None) -> str:
+    """Translate a Mojo expression to a Lean Bool term for conditions.
+
+    **`vtypes` and `call_types` are THREADED, and leaving them out was a crash
+    rather than a gap.** `_cmp_go`'s fallback lands here for anything that is
+    not a comparison, and this function used to call `_expr_go` with neither —
+    so a nested COMPARISON (`if not (n < 4):`, where the `not` makes the
+    operand a value and the value is a compare) reached `_cmp_go` a second time
+    with `vtypes = None`, and `types.infer_expr`'s `IdentExpr` arm did
+    `vtypes.get(...)` on it. Measured on `if not (n < 4): x = x + 2` inside a
+    three-branch function: `AttributeError: 'NoneType' object has no attribute
+    'get'`, out of `generate_arm64_proof`, on both the current tree and its
+    parent — and a raised exception is what the sweep classes `backend-crash`,
+    the one verdict this project reserves for compiler bugs."""
     if isinstance(e, BinOp):
-        l = _expr_go(e.left, param, env, scope=scope)
-        r = _expr_go(e.right, param, env, scope=scope)
+        l = _expr_go(e.left, param, env, vtypes, call_types, scope)
+        r = _expr_go(e.right, param, env, vtypes, call_types, scope)
         k = _lean_op(e.op)
         cmp = {"<=": "≤", "<": "<", ">": ">", ">=": "≥", "=": "=", "!=": "≠"}
         if k in cmp:
@@ -742,7 +756,7 @@ def _expr_bool_go(e, param: str, env: dict, scope=None) -> str:
             return f"({l} ≠ 0 ∧ {r} ≠ 0)"
         if k == "or":
             return f"({l} ≠ 0 ∨ {r} ≠ 0)"
-    return f"({_expr_go(e, param, env, scope=scope)} ≠ 0)"
+    return f"({_expr_go(e, param, env, vtypes, call_types, scope)} ≠ 0)"
 
 
 def _stmts_go(stmts, param: str, env: dict, fname: str, loop_counter: list,
@@ -1539,7 +1553,7 @@ def _entry_arity(fn) -> int:
     stub's argument values), and two spellings of "how many parameters" is two
     chances for the model and the theorem to be stated about different functions.
     """
-    return M.entry_arity(fn)
+    return model.entry_arity(fn)
 
 
 def _entry_arg_names(arity: int) -> list:
@@ -2277,16 +2291,35 @@ _STEP_CONDS = [
     # getting that wrong would mean a branch to the wrong address, silently.
     (0xff000000, 0x36000000),
     (0xff000000, 0x37000000),
-    # CSEL is NOT here, and the row that was is removed rather than left:
-    # `arm64_step` has no CSEL branch either, and `check_step_conds` (called by
-    # `generate_arm64_proof`, so by EVERY proved arm64 build) requires the two to
-    # be the same set. An entry here with no branch in the model is not a gap in
-    # a check — it is a generator that would describe a CSEL's effect while the
-    # function being proved takes no step at all for that word, which is a proof
-    # about a different function. The check is right and the row was wrong.
+    # CSEL is EMITTED and UNMODELLED, and saying so here is the point of this
+    # comment: `arm64_codegen.py` calls `encode_csel_xd_xm_cond` at six sites
+    # (6394, 6396, 6410, 6412, 8998, 9008 — a ternary is a CSEL), so a reader of
+    # this table cannot conclude from its absence that the instruction is unused.
+    #
+    # The row that was here is removed rather than left, and that is the correct
+    # direction: `arm64_step` has no CSEL branch either, and `check_step_conds`
+    # (called by `generate_arm64_proof`, so by EVERY proved arm64 build) requires
+    # the two to be the same set. An entry here with no branch in the model is not
+    # a gap in a check — it is a generator that would describe a CSEL's effect
+    # while the function being proved takes no step at all for that word, which
+    # is a proof about a different function. The check is right and the row was
+    # wrong. (`work/formal13-3`'s commit that added it violated its own stated
+    # premise in the very message that introduced it.)
+    #
+    # **WHAT IS STILL MISSING is the model branch, and what blocks it is not the
+    # three lines of Lean.** Measured 2026-10-03, both halves of the old reason
+    # re-measured rather than quoted: the three-line `arm64_step` branch BUILDS
+    # (the branch plus the `work_step_csel` the row needs), and with it a
+    # CSEL-carrying export fails the same way a THREE-BRANCH FUNCTION fails —
+    # `_gen_run_cert`'s certificate exceeds `formal/lean.py`'s `PROOF_WALL_S` —
+    # and the control is that the same three branches spelled as ordinary
+    # comparisons fail identically. So the wall is the certificate's size and not
+    # the instruction, which changes the ORDER of the work: the certificate is
+    # the defect to fix first (`bugs/FORMAL_a_three_branch_certificate_exceeds_
+    # the_lean_bound.md` has the measurement and the next step), and the CSEL row
+    # is a three-line change once it is gone.
     # `bugs/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`
-    # has the measurement and the exact next step, which is the three-line
-    # `arm64_step` branch this row was written in anticipation of.
+    # carries the rest.
 ]
 
 
@@ -2972,35 +3005,21 @@ def audit_step_table(lean_path: str) -> list:
     ruling out only "the earlier entries" would be unsound, and why this
     per-pair check is the right one to enforce.
     """
-    import re as _re
     with open(lean_path) as fh:
-        body = fh.read()
-    body = body[body.index("def arm64_step"):]
-    body = body[:body.index("\n\n")]
-    # COMMENTS ARE NOT BRANCHES, and reading them as branches is not a
-    # hypothetical: `arm64_step`'s own note about where the TBZ case is placed
-    # writes the condition out in full -- "because `(insn &&& 0xff000000) =
-    # 0x36000000` is specific" -- so the regex counted `0x36000000` twice, the
-    # sets were equal, and the comparison `sorted(model) != sorted(table)`
-    # failed with `only in ProofLib []` and `only in _STEP_CONDS []`, naming
-    # nothing.  `test_formal.py` calls this before it builds anything, so the
-    # whole arm64 formal corpus -- the job registered as `formal`, with no
-    # `expect=` and no `disabled=` -- could not run at all.
-    #
-    # A LINE comment is dropped rather than a block comment being tracked,
-    # because `arm64_step`'s body has no block comment inside it: the two
-    # `/-` markers in the extracted text are the docstring of the definition
-    # that FOLLOWS it, which the `\n\n` cut already excludes.  A block comment
-    # added inside the body later would be caught rather than silently
-    # misread, because a line that opens or closes one is not a branch line and
-    # is left alone.
-    body = "\n".join(l for l in body.split("\n")
-                     if "--" not in l and "/-" not in l and "-/" not in l)
+        src = fh.read()
     full = 0xFFFFFFFF
-    model = [(int(m, 0), int(b, 0)) for m, b in
-             _re.findall(r"insn &&& (0x[0-9a-fA-F]+|\d+)\) = (0x[0-9a-fA-F]+|\d+)", body)]
-    for m in _re.findall(r"insn = (0x[0-9a-fA-F]+)\s*then", body):
-        model.insert(0, (full, int(m, 0)))
+    # `_decoder_branch_conds` and NOT a second `findall` over the same text, and
+    # the difference is a red this file carried from 2026-10-03: that regex was
+    # UNANCHORED, so it read a branch condition out of the COMMENT above the
+    # TBZ case ("(insn &&& 0xff000000) = 0x36000000 is specific (top byte 0x36
+    # ...)") as though it were a second branch, the model list came out one
+    # entry longer than `_STEP_CONDS` with no entry in either list unique to
+    # one side, and `audit_step_table` raised on every run — which takes
+    # `test_formal.py` down before it generates a single proof, so the arm64
+    # proof suite was not running at all. A comment that quotes the condition it
+    # is reasoning about is a thing the model should be able to say.
+    model = [(full if m is None else m, b)
+             for m, b in _decoder_branch_conds(src)]
     table = [(full if msk is None else msk, base) for msk, base in _STEP_CONDS]
     if sorted(model) != sorted(table):
         only_model = [e for e in model if e not in table]
@@ -3062,6 +3081,33 @@ def _step_facts(w: int, idx: int) -> tuple:
             facts.append(f"have h{j} : \u00ac ({lhs}) := by native_decide")
     return facts, ", ".join(f"h{j}" for j in range(len(_STEP_CONDS))
                             if f"have h{j} :" in " ".join(facts))
+
+
+def _bit_test_condtxt(reg: int, state: str, w: int, bidx: int) -> str:
+    """The proposition a TBZ (52) / TBNZ (53) word takes, as Lean text.
+
+    **The TAKEN case, which is what every `_condtxt` in this file is.** `TBZ`
+    branches when the bit is CLEAR and `TBNZ` when it is SET, and the bit is
+    bits 19..23 (b5) of the word — the same field `lib/ProofLib.lean`'s
+    `arm64_step` reads and the one the encoder writes, so the proposition here
+    is the model's own test rather than a re-derivation of it.
+
+    One function because the word appears in two propositions that must agree:
+    the `hcbz` step lemma (`if <taken test> then …`) and the `hcond` about the
+    SOURCE condition (`(<taken test>) ↔ ¬(<source condition>)`). Two spellings
+    that could differ are how a proof gets stated about an instruction other
+    than the one emitted — which is the failure mode
+    `bugs/FORMAL_arm64_known_proof_gaps.md` records for `either`/`both`.
+
+    The bit is masked to `= 0` / `≠ 0` on `((x >>> b) &&& 1)` rather than
+    compared against a literal `1`, because `arm64_step` states it that way
+    (`if ((arm64_reg rn s >>> UInt64.ofNat bit) &&& 1) = 0 then …`) and a
+    proposition about a different expression is one `simp` away from proving
+    something true about nothing.
+    """
+    bit = (w >> 19) & 0x1f
+    test = f"((arm64_reg {reg} {state} >>> UInt64.ofNat {bit}) &&& 1)"
+    return f"{test} {'= 0' if bidx == 52 else '≠ 0'}"
 
 
 def loop_test(words: dict, pc: int):
@@ -3359,7 +3405,7 @@ def _sp_stores(words: dict, instrs, sp_off: int, stores: list) -> int:
 
 
 def _branch_target(words: dict, pc: int):
-    """Absolute target pc of a B/BL/CBZ/CBNZ/B.cond at pc, or None."""
+    """Absolute target pc of a B/BL/CBZ/CBNZ/B.cond/TBZ/TBNZ at pc, or None."""
     w = words.get(pc)
     if w is None:
         return None
@@ -3375,6 +3421,23 @@ def _branch_target(words: dict, pc: int):
     if idx in (16, 17, 51):  # CBZ / CBNZ / B.cond -- all three use imm19<<5
         imm19 = (w >> 5) & 0x7ffff
         signed = imm19 - (1 << 19) if imm19 & 0x40000 else imm19
+        return pc + signed * 4
+    if idx in (52, 53):
+        # TBZ / TBNZ: imm14 at bits 5..18, NOT imm19 — the b5 form puts the BIT
+        # NUMBER in bits 19..23, which is why reading imm19 here would fold the
+        # bit number into the displacement. Sign-extended from bit 13 of its own
+        # field, which is what `lib/ProofLib.lean`'s `arm64_step` case for
+        # `0x36000000` / `0x37000000` does, so the generator's target and the
+        # model's next pc are the same pc.
+        #
+        # This arm was MISSING, and the block scanner classifies these as the
+        # `cbz` kind on the strength of it — so a bit test got `targets =
+        # [pc + 4, None]`, and every consumer of the taken edge (`hcbz`'s
+        # `if … then {s with pc := taken}`, the taken arm's state, and the
+        # contract's exit step) was handed a `None` and raised. The build and
+        # the model were both fine; this decode was missing.
+        imm14 = (w >> 5) & 0x3fff
+        signed = imm14 - (1 << 14) if imm14 & 0x2000 else imm14
         return pc + signed * 4
     return None
 
@@ -3403,8 +3466,12 @@ def _cfg_blocks(words: dict, func_entry: int, func_end: int):
         tgt = _branch_target(words, pc)
         if tgt is not None and func_entry <= tgt < func_end:
             starts.add(tgt)
-        # fall-through after a conditional branch is also a start
-        if idx in (14, 15, 16, 17, 51) and pc + 4 < func_end:
+        # fall-through after a conditional branch is also a start. 52/53 are
+        # TBZ/TBNZ: two-way, pc + 4 on the fallthrough, so leaving them out
+        # merged the instruction after a bit test into the bit test's own
+        # block — which is a CFG that does not match the machine, and every
+        # consumer of these blocks reads the machine.
+        if idx in (14, 15, 16, 17, 51, 52, 53) and pc + 4 < func_end:
             starts.add(pc + 4)
 
     blocks = []
@@ -3633,7 +3700,11 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
         return None
     for k, pc in enumerate(run_pcs):
         idx = _step_branch_index(words[pc])
-        if idx in (14, 15, 16, 17, 51) and k != m - 1:
+        # 52/53 (TBZ/TBNZ) are conditional branches like 16/17/51, and this
+        # refusal is what keeps a run from being composed ACROSS one: the
+        # `_sr_` lemma chain would claim a straight line where the machine
+        # takes two edges.
+        if idx in (14, 15, 16, 17, 51, 52, 53) and k != m - 1:
             return None
         if idx == 0 and k != m - 1:
             return None
@@ -5725,19 +5796,26 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             r = w & 0x1f
             i = (block["instrs"][-1] - base) // 4
             cbz_pc = block["instrs"][-1]
-            # The three branch-on-something forms share a block shape and NOT a
+            # The four branch-on-something forms share a block shape and NOT a
             # condition.  CBZ tests a register against zero, CBNZ tests it
             # against non-zero -- note the `= 0` this used to emit was simply
-            # wrong for CBNZ -- and B.cond tests the FLAGS, so its condition
-            # mentions `nzcv` and names no register at all.  The backend now
-            # lowers comparisons to `cmp` + B.cond rather than `cmp` + `cset` +
-            # CBZ, so this is the common case, not a corner.
+            # wrong for CBNZ -- B.cond tests the FLAGS, so its condition
+            # mentions `nzcv` and names no register at all, and TBZ/TBNZ test
+            # ONE BIT of a register.  The backend now lowers comparisons to
+            # `cmp` + B.cond rather than `cmp` + `cset` + CBZ, so this is the
+            # common case, not a corner.
             _bidx = _step_branch_index(w)
-            if _bidx == 51:
+            # ONE function for the bit test, because the word is in two places:
+            # the proposition `hcbz` states and the `hcond` about the source
+            # condition. Two spellings of "bit b of register r" that could
+            # disagree is how a proof ends up about a different instruction.
+            if _bidx in (52, 53):
+                _condtxt = _bit_test_condtxt(r, s_cur, w, _bidx)
+            elif _bidx == 51:
                 _condtxt = (f"arm64_matches_condition {w & 0xf} "
                             f"{s_cur}.nzcv = true")
             elif _bidx == 17:
-                _condtxt = f"arm64_reg {r} {s_cur} \u2260 0"
+                _condtxt = f"arm64_reg {r} {s_cur} ≠ 0"
             else:
                 _condtxt = f"arm64_reg {r} {s_cur} = 0"
             hpcb_proof = _pc_fact_lookup(s_cur)
@@ -5820,18 +5898,30 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 _fls = [_fl_map.get(c) for c in _cset_conds(_cset_blk, words)]
                 _fls = [f for f in _fls if f is not None]
                 _fl = _fl_map.get(_cnd)
-                if not _Xs or _fl is None:
-                    raise ValueError("unsupported: branch condition value flow (frame/flag unavailable)")
-                else:
-                    # For a nested condition, unfolding every prior block in this
-                    # one proof term exceeds the kernel's recursion limit.  Emit a
-                    # per-prior-block register fact (each unfolding one block in
-                    # its own term) and reference it here instead.  The register
-                    # carrying a condition variable is the one the codegen
-                    # allocated (`_var_regs`).
-                    _prior_blocks = (ctx.get("flow_blocks") or [bi])[:-1]
-                    _hpriors = []
-                    if _prior_blocks:
+                # A BIT TEST is the fourth question and the only one with no
+                # flag half at all: `TBZ`/`TBNZ` read one bit of a register and
+                # branch, so there is no cset that wrote the register (the
+                # search above finds nothing and falls back to this block) and
+                # no flags for `_fl_map` to name — which is why both guards
+                # below used to refuse it. Neither guard is about the bit test:
+                # `_fl is None` is the absence of a flag lemma, and `_Xs` empty
+                # is a path that spills nothing, so there are no frame reads to
+                # rewrite. What the proof needs is only that the register's
+                # value reduces along this block's own chain, which is the same
+                # work the other three do.
+                _is_bit_test = _bidx in (52, 53)
+                # For a nested condition, unfolding every prior block in this
+                # one proof term exceeds the kernel's recursion limit.  Emit a
+                # per-prior-block register fact (each unfolding one block in
+                # its own term) and reference it here instead.  The register
+                # carrying a condition variable is the one the codegen
+                # allocated (`_var_regs`).  Hoisted ABOVE the guard because the
+                # bit test needs those facts too: its register is a scratch
+                # copy of a condition VARIABLE, so `arm64_reg r` only reduces
+                # once the variable's own register is pinned.
+                _prior_blocks = (ctx.get("flow_blocks") or [bi])[:-1]
+                _hpriors = []
+                if _prior_blocks:
                         _vars = [v for v in _var_regs
                                  if re.search(rf"\b{re.escape(v)}\b", _src)]
                         # A `for i in range(…)` loop head compares the counter
@@ -5866,6 +5956,24 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                   f"mem_read_after_write_u64_ne, mem_read_two_writes_same, UInt64.add_zero]")
                                 A(f"{IND}  all_goals try rfl")
                                 _hpriors.append(_hp)
+                if not _is_bit_test and (not _Xs or _fl is None):
+                    raise ValueError("unsupported: branch condition value flow (frame/flag unavailable)")
+
+                def _rw_spills(tolerant, line_instrs, cur_instrs, state):
+                    """The `rw` that resolves this path's spill reads, if any.
+
+                    Emitted only when there IS a read to resolve. A path that
+                    spills nothing — which is every path of a bit-test
+                    condition whose operands are already in registers — has an
+                    empty rewrite list, and `rw []` is a rewrite with no lemmas:
+                    it closes no goal and reads in the generated file as a
+                    mistake rather than as "nothing to do here"."""
+                    rws = _hcond_mem_rws(line_instrs, cur_instrs, words, state)
+                    if rws:
+                        A(f"{IND}  {'try rw' if tolerant else 'rw'} "
+                          f"[{', '.join(rws)}]")
+
+                if _src is not None:
                     _hcond_stmt = (f"({_condtxt}) ↔ ¬({_src})" if _hcond_neg
                                   else f"({_condtxt}) ↔ ({_src})")
                     A(f"{IND}have hcond_{bi} : {_hcond_stmt} := by")
@@ -5892,7 +6000,9 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}  rw [hsid_{bi}]")
                         A(f"{IND}  simp only [arm64_reg_pc]")
                         A(f"{IND}  simp only [{', '.join(list(def_names) + _cs_defs + _hpriors + ['arm64_reg', 'arm64_set_reg', 'arm64_subs_flags', 'arm64_matches_condition'])}]")
-                        A(f"{IND}  try rw [{', '.join(_hcond_mem_rws(_all_instrs, blocks[bi]['instrs'] + blocks[_cset_bi]['instrs'], words, _init))}]")
+                        _rw_spills(True, _all_instrs,
+                                   blocks[bi]['instrs'] + blocks[_cset_bi]['instrs'],
+                                   _init)
                         A(f"{IND}  by_cases h : ({_src}) <;> simp ["
                           + _simp_list("h", _fls, "Arm64State.init", _tw_defs)
                           + "] <;> bv_decide")
@@ -5904,7 +6014,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}  rw [hsid_{bi}]")
                         A(f"{IND}  simp only [arm64_reg_pc]")
                         A(f"{IND}  simp only [{', '.join(list(def_names) + _hpriors + ['arm64_reg', 'arm64_set_reg', 'arm64_subs_flags', 'arm64_matches_condition'])}]")
-                        A(f"{IND}  rw [{', '.join(_hcond_mem_rws(blocks[bi]['instrs'], blocks[bi]['instrs'], words, _pb_state))}]")
+                        _rw_spills(False, blocks[bi]['instrs'],
+                                   blocks[bi]['instrs'], _pb_state)
                         A(f"{IND}  by_cases h : ({_src}) <;> simp ["
                           + _simp_list("h", _fls, "Arm64State.init", _tw_defs)
                           + "] <;> bv_decide")
@@ -5913,7 +6024,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                             A(f"{IND}  rw [{', '.join(_hsid)}]")
                             A(f"{IND}  simp only [arm64_reg_pc]")
                         A(f"{IND}  simp only [{', '.join(list(_bdefs) + ['arm64_reg', 'arm64_set_reg', 'arm64_subs_flags', 'arm64_matches_condition'])}]")
-                        A(f"{IND}  rw [{', '.join(_hcond_mem_rws(_all_instrs, blocks[bi]['instrs'], words, _init))}]")
+                        _rw_spills(False, _all_instrs, blocks[bi]['instrs'],
+                                   _init)
                         A(f"{IND}  by_cases h : ({_src}) <;> simp ["
                           + _simp_list("h", _fls, "Arm64State.init", _tw_defs)
                           + "] <;> bv_decide")
@@ -6917,6 +7029,24 @@ def _gen_step_lemmas(name: str, code: bytes, base: int) -> str:
         if idx in (16, 17):  # CBZ / CBNZ branch on arm64_reg rn s = 0
             rn = w & 0x1f
             tactics.append(f"by_cases hp : arm64_reg {rn} s = 0 <;> simp [hp]")
+        if idx in (52, 53):
+            # TBZ / TBNZ branch on ONE BIT, and the split has to be on the bit
+            # test itself for the reason the two arms above give: `arm64_step`
+            # is an `if`, and `simp` does not reduce an `if` whose condition it
+            # cannot decide. Left alone the goal is a negation of an `if` whose
+            # `some` is on BOTH arms, and nothing closes it — what closes it is
+            # that the condition is one of two values.
+            #
+            # **The split is on `= 0` for BOTH encodings**, and that is the CBZ
+            # comment's reason again: `simp` rewrites the model's `… &&& 1 ≠ 0`
+            # into `… &&& 1 = 0`, so a hypothesis spelled in TBNZ's own sense
+            # stops matching the goal it was made for. Measured: a `≠ 0`
+            # hypothesis left all three of this example's branches open.
+            rn = w & 0x1f
+            bit = (w >> 19) & 0x1f
+            tactics.append(
+                f"by_cases hp : ((arm64_reg {rn} s >>> {bit}) &&& 1) = 0"
+                f" <;> simp [hp]")
         blocks.append(
             f"theorem {name}_step_ok_{i} (s : Arm64State) (h : s.pc = {pc}) :\n"
             f"  arm64_step s {name}_code ≠ none := by\n"
@@ -7007,16 +7137,30 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
             tactics.append(
                 f"have hc : ((({w} : UInt32) >>> 12 &&& 15) {opn} 1).toNat = {cst} "
                 f":= by native_decide")
-        if idx in (14, 16, 17, 51):
+        if idx in (14, 16, 17, 51, 52, 53):
             # decide the sign-extend branch on the offset before simp; the
             # fact must be phrased over the masked immediate exactly as it
             # appears after simp normalizes the model term
+            #
+            # **The mask is per FAMILY and the bit test's is 14 bits, not 19.**
+            # B.cond/CBZ/CBNZ put imm19 at bits 5..23; TBZ/TBNZ put imm14 there
+            # and spend bits 19..23 on the bit number, so a 19-bit mask reads
+            # the BIT as part of the displacement's sign bit and decides the
+            # wrong branch — a `hb` that is false about the word, from which
+            # everything downstream is a proof of something else. That is why
+            # the numbers are spelled out here rather than derived from a
+            # table the two families do not share.
             if idx == 14:
                 immv = w & 0x03ffffff
                 lhs = f"(({immv} : UInt32) &&& (33554432 : UInt32))"
+                sign_mask = 0x02000000
+            elif idx in (52, 53):
+                lhs = f"(({w} : UInt32) >>> 5 &&& 16383 &&& 8192)"
+                sign_mask = 0x2000
             else:
                 lhs = f"(({w} : UInt32) >>> 5 &&& 524287 &&& 262144)"
-            if w & ((0x02000000) if idx == 14 else 0x00040000):
+                sign_mask = 0x00040000
+            if w & sign_mask:
                 tactics.append(f"have hb : \u00ac ({lhs} = 0) := by native_decide")
             else:
                 tactics.append(f"have hb : ({lhs}) = 0 := by native_decide")
@@ -7063,6 +7207,18 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
             # branch itself did not typecheck — the failure named the model's
             # `if`, with nothing pointing at the branch's polarity.
             tactics.append(f"by_cases hp : s.x{rn} = 0")
+            tactics.append(
+                f"all_goals simp [hp, arm64_reg, arm64_set_reg]")
+        elif idx in (52, 53):
+            # TBZ / TBNZ. The same shape as the CBZ arm above, on the bit test
+            # instead of the whole register, and with `hb` already decided above
+            # — the 14-bit mask, which is this family's own immediate width.
+            rn = w & 0x1f
+            bit = (w >> 19) & 0x1f
+            tactics.append("unfold arm64_step")
+            tactics.append(f"simp [h, hinsn, {fact_names}, hb]")
+            tactics.append(
+                f"by_cases hp : ((s.x{rn} >>> {bit}) &&& 1) = 0")
             tactics.append(
                 f"all_goals simp [hp, arm64_reg, arm64_set_reg]")
         else:
@@ -7964,7 +8120,7 @@ def generate_arm64_proof(prog, code, info) -> str:
     # function's proof): both are the startup stub's argument values, and
     # `formal/build.py` is the one that widens the list to the arity in every
     # real build, so the padding here is the belt to that suspenders.
-    evalues = M.entry_arg_values(
+    evalues = model.entry_arg_values(
         info.get("entry_args", test_input), arity)
     tinput = test_input if arity <= 1 else ", ".join(str(v) for v in evalues)
     # The `callFunc` the AST layer is given, which has to know the admitted
@@ -8648,7 +8804,7 @@ def _frame_methods(prog, code: bytes, info: dict):
         if not rets:
             continue
         end = max(rets) + 4
-        if any(_step_branch_index(words[pc]) in (14, 15, 16, 17, 51)
+        if any(_step_branch_index(words[pc]) in (14, 15, 16, 17, 51, 52, 53)
                for pc in words if entry <= pc < end):
             continue                      # a branch: not the leaf shape
         mach = _frame_slot_accesses(words, entry, end)

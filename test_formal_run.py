@@ -2842,6 +2842,62 @@ CASES = [
      "    printf(\"a=%d\", c.get())\n"
      "    return 0\n",
      "refuse:is not a receiver this path hands back", None),
+    # ── `var self` is a SPELLING this path does not hand back either ────────
+    #
+    # The same rule, one corpus site over, and the pair is a DECISION rather
+    # than two independent facts: `formal/model.py`'s
+    # `MUTATING_RECEIVER_CONVENTIONS` holds `out` and `mut` and NOT `owned`,
+    # which is what `var self` and `owned self` both fold to in the parser. The
+    # corpus is what settled that, measured over 690 `.py`/`.mojo` files with
+    # the rule's own recogniser: 17 methods of a ONE-FIELD struct store that
+    # struct's own field, and 13 of them declare `mut`. Exactly ONE declares
+    # `var self` — `std/python/python_object.mojo`'s `PythonObject.steal_data`
+    # — and its file is a host-import the sweep never answers, so nothing this
+    # path can build changes.
+    #
+    # So the refusal names the convention it read rather than only saying "not
+    # handed back", and the needle below is that name: a message which said
+    # nothing about `var self` would send the reader to look for a one-field
+    # receiver problem, and the fix is one word of source.
+    ("refuse_a_one_field_store_through_a_var_self_receiver",
+     "class Holder:\n"
+     "    def __init__(self):\n"
+     "        self._obj_ptr = 7\n"
+     "\n"
+     "    def steal_data(var self):\n"
+     "        var ptr = self._obj_ptr\n"
+     "        self._obj_ptr = 0\n"
+     "        return ptr\n"
+     "\n"
+     "    def peek(var self):\n"
+     "        return self._obj_ptr\n"
+     "\n"
+     "def main(n):\n"
+     "    h = Holder()\n"
+     "    printf(\"p=%d\", h.steal_data())\n"
+     "    return 0\n",
+     "refuse:`var self` is not a receiver this path hands back", None),
+    # The other half of the decision, and the row that says it is not a blanket
+    # "a `var self` receiver is refused": 195 of the corpus's 196 methods with a
+    # NON-mutating convention are READERS, where `owned`/`var self` is exactly
+    # right. Adding `owned` to the list would make every one of them a
+    # write-back candidate, and for a one-field struct the write-back IS the
+    # receiver — so `mutating_receiver_return_refusal` would start firing on
+    # every reader that already returns something, which is what the corpus
+    # measurement above is counting against. This row is the readers' side of
+    # that trade: `var self` builds, and answers CPython.
+    ("both_arch_a_one_field_reader_through_a_var_self_receiver_still_builds",
+     "class Holder:\n"
+     "    def __init__(self, v):\n"
+     "        self._obj_ptr = v\n"
+     "\n"
+     "    def peek(var self):\n"
+     "        return self._obj_ptr\n"
+     "\n"
+     "def main(n):\n"
+     "    h = Holder(41)\n"
+     "    printf(\"p=%d\", h.peek())\n"
+     "    return 0\n", 0, "p=41"),
 ]
 
 # ── what a method on a VALUE means, per RECEIVER KIND ──────────────────────
@@ -9867,6 +9923,50 @@ CONSTRUCTION_CASES = [
      "    if p.get(0) != 0 or p.get(1) != 0:\n"
      "        return 20 + p.get(0)\n"
      "    return 7\n", 7, None),
+    # ── an EXCEPTION constructed with its message ──────────────────────────
+    #
+    # CPython's `BaseException.__new__` fills `args` from the caller's
+    # arguments, so `raise E("boom")` carries the message with nothing declared
+    # in `E` — which is why every exception class in CPython can be raised with
+    # a message and why this path's field list used to have nowhere to put one:
+    # a class whose body is a docstring derives NO fields, so the construction
+    # was refused for the arity. `formal/model.py`'s `CPYTHON_EXCEPTION_BASES`
+    # is the fix: a base from that table contributes `args`, base first, so the
+    # message lands in the slot CPython puts it in.
+    #
+    # The exit status is 1 and the output empty, and both are what this path
+    # documents for a `raise` (`formal`'s has no unwinder: a raise flushes the
+    # enclosing `finally` clauses and exits). What this row pins is that the
+    # BUILD accepts the construction at all — before the merge this was a
+    # refusal on both architectures, byte for byte.
+    ("constr_an_exception_carries_its_message",
+     "struct Plain5(Exception):\n"
+     "    \"\"\"no fields at all\"\"\"\n"
+     "\n"
+     "def boom5():\n"
+     "    raise Plain5(\"the message\")\n"
+     "\n"
+     "def main(n):\n"
+     "    try:\n"
+     "        boom5()\n"
+     "    except:\n"
+     "        pass\n"
+     "    return 0\n", 1, None),
+    # The same with a field of its own, which is the boundary the doc measured:
+    # `args` is inherited FIRST, so the message goes where CPython puts it and
+    # the subclass's own field keeps its own default — `Plain6("m").tag` is 0 in
+    # CPython, not "m".
+    ("constr_an_exception_with_a_field_takes_the_message_in_args",
+     "struct Plain6(Exception):\n"
+     "    var tag: int = 0\n"
+     "\n"
+     "def make6() -> Int:\n"
+     "    var e = Plain6(\"the message\")\n"
+     "    return e.tag\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"tag=%d\", make6())\n"
+     "    return 0\n", 0, "tag=0"),
 ]
 
 # ── a one-field HOLDER's CONSTRUCTOR store: which refusal answers it ──
@@ -10913,6 +11013,87 @@ CONSTRUCTION_REFUSALS = [
      "    var b = bytes(3)\n"
      "    return 0\n",
      "refuse:constructing bytes is refused on this path", None),
+    # ── INHERITANCE: the fields a class has because a BASE declares them ────
+    #
+    # `formal/model.py`'s `attach_inherited_fields` merges a declared base's
+    # fields into the subclass's layout, base first. These four rows are the
+    # three things that merge is FOR, plus the one thing it cannot do.
+    #
+    # (1) The layout itself. Before, `s.x` through a subclass was refused with
+    # a sentence claiming the program raises an AttributeError — false, because
+    # the class INHERITS `x`. The program below is the reduction the merge was
+    # written for, and it answers CPython on both architectures.
+    ("constr_inherit_a_field_through_the_subclass",
+     "class Base2:\n"
+     "    def __init__(self):\n"
+     "        self.x = 7\n"
+     "\n"
+     "    def get(self):\n"
+     "        return self.x\n"
+     "\n"
+     "class Sub2(Base2):\n"
+     "    pass\n"
+     "\n"
+     "def main(n):\n"
+     "    s = Sub2()\n"
+     "    s.x = n\n"
+     "    printf(\"x=%d\", s.get())\n"
+     "    return 0\n", 0, "x=10"),
+    # (2) The ORDER, which is what decides which value lands in which slot and
+    # is CPython's dataclass order: the base's fields first, the subclass's
+    # after. Both classes are two-or-more fields wide on purpose — see the
+    # refusal row below for why a one-word base cannot be in this picture.
+    ("constr_inherit_the_bases_fields_before_its_own",
+     "class Base3:\n"
+     "    x: int\n"
+     "    z: int\n"
+     "\n"
+     "class Sub3(Base3):\n"
+     "    y: int\n"
+     "\n"
+     "def main(n):\n"
+     "    s = Sub3(1, 2, 3)\n"
+     "    printf(\"x=%d z=%d y=%d\", s.x, s.z, s.y)\n"
+     "    return 0\n", 0, "x=1 z=2 y=3"),
+    # (3) A base this image does not declare. The refusal used to say "no
+    # fields at all" and told the reader to declare the fields, which is advice
+    # about a class whose missing fields are not the problem: it INHERITS them.
+    # The needle is the base's NAME, because that is what the reader has to go
+    # and look for.
+    ("constr_refuse_an_undeclared_base_by_name",
+     "class MyErr(Widget):\n"
+     "    \"\"\"no fields at all\"\"\"\n"
+     "\n"
+     "def boom():\n"
+     "    raise MyErr(\"the message\")\n"
+     "\n"
+     "def main(n):\n"
+     "    try:\n"
+     "        boom()\n"
+     "    except:\n"
+     "        pass\n"
+     "    return 0\n",
+     "refuse:derives from 'Widget', which this image does not declare", None),
+    # (4) What the merge CANNOT do, and the reason this is a refusal and not a
+    # gap in the merge: a method is compiled against the layout of the class
+    # that DECLARES it, and a call site carries no receiver type to check with,
+    # so a base whose receiver IS its field cannot receive a subclass whose own
+    # fields pushed it over the one-word line. Left alone this reads a frame
+    # ADDRESS as the field's value — a wrong answer rather than a missing one.
+    ("constr_refuse_a_subclass_whose_base_methods_would_change_layout",
+     "class Base4:\n"
+     "    def __init__(self):\n"
+     "        self.x = 7\n"
+     "\n"
+     "class Sub4(Base4):\n"
+     "    def __init__(self):\n"
+     "        self.y = 1\n"
+     "\n"
+     "def main(n):\n"
+     "    s = Sub4()\n"
+     "    printf(\"x=%d y=%d\", s.x, s.y)\n"
+     "    return 0\n",
+     "refuse:do not agree on what a receiver IS", None),
 ]
 
 
@@ -12117,6 +12298,63 @@ WAVE6_TRUTHY_CASES = [
      "    v = 0 - 3\n"
      "    printf(\"%d\", v)\n"
      "    return 0\n", 0, "-3"),
+    # ── a NEGATIVE CONSTANT beside a DECLARED UNSIGNED operand ────────────
+    #
+    # The four rows above are about a flexible value whose context says
+    # NOTHING about its sign: `cmp_signed` resolves `None` to the signed
+    # default, which is what makes them answer. This pair is the case that
+    # resolution cannot reach, because here the context DOES say — `x: UInt32`
+    # is a declared unsigned type, `common_type` treats the flexible operand as
+    # neutral, and the declared type is what decides. So `(0 - 3) < x` compares
+    # 0xFFFF...FD against 7 with unsigned condition codes and answers FALSE
+    # where CPython answers TRUE.
+    #
+    # `formal/types.py`'s `_negative_constant_type` is the fix and the ONE
+    # reader of the question: a value the build can FOLD and knows to be
+    # negative cannot be unsigned, whichever of the two spellings wrote it.
+    # Both rows below are that one rule on the two shapes it applies to, and
+    # the `x < …` half of each is the direction a "fix" that only ever
+    # special-cased the left operand would get backwards.
+    ("both_arch_a_negated_folded_constant_beside_a_declared_unsigned_operand_is_signed",
+     "def main(n):\n"
+     "    x: UInt32 = 7\n"
+     "    printf(\"%d %d %d\", 1 if -(1 + 2) < x else 0, 1 if x < -(1 + 2) else 0,"
+     " 1 if -(1 + 2) == x else 0)\n"
+     "    return 0\n", 0, "1 0 0"),
+    # The BINARY spelling of the same value, which is the row the reduction of
+    # this family stopped at: `(0 - 3)` folds negative through `fold_literal_expr`
+    # rather than through the unary rule, and both spellings must land in the same
+    # place. It is here as the regression guard for the second reader of the one
+    # folder, not as a row that was ever wrong.
+    ("both_arch_a_folded_negative_beside_a_declared_unsigned_operand_is_signed",
+     "def main(n):\n"
+     "    x: UInt32 = 7\n"
+     "    printf(\"%d %d %d\", 1 if (0 - 3) < x else 0, 1 if x < (0 - 3) else 0,"
+     " 1 if (0 - 3) == x else 0)\n"
+     "    return 0\n", 0, "1 0 0"),
+    # `~` is the OTHER unary spelling and the folder folds it, so the rule
+    # reaches it without a second test: `~3` is -4. Before, only `-` with a
+    # bare `IntLiteral` operand was answered, which is why `-3` was right and
+    # `-(1 + 2)` was not — the same value, two answers.
+    ("both_arch_a_bit_not_of_a_constant_beside_a_declared_unsigned_operand_is_signed",
+     "def main(n):\n"
+     "    x: UInt32 = 7\n"
+     "    printf(\"%d %d %d\", 1 if ~3 < x else 0, 1 if x < ~3 else 0,"
+     " 1 if ~3 == x else 0)\n"
+     "    return 0\n", 0, "1 0 0"),
+    # …and the guard, which is the row that decides the fix is a SIGN and not a
+    # blanket "constants are signed": a POSITIVE constant beside a declared
+    # unsigned operand takes that operand's type, and `x: UInt8 = 200` read as
+    # a SIGNED byte would be -56 — so this row answers 1 unsigned and 0 signed,
+    # and it is the row a fix that made every foldable operand signed 64-bit
+    # would move. (CPython cannot express the case — it has no `UInt8` — so the
+    # row asserts what the language says rather than what CPython prints, which
+    # is what makes it a guard on the promotion and not an oracle.)
+    ("both_arch_a_positive_constant_beside_a_declared_unsigned_operand_is_unsigned",
+     "def main(n):\n"
+     "    x: UInt8 = 200\n"
+     "    printf(\"%d\", 1 if (0 + 100) < x else 0)\n"
+     "    return 0\n", 0, "1"),
 ]
 
 

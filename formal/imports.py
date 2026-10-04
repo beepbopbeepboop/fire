@@ -2250,13 +2250,21 @@ def _attach_declared_census(struct_def, declaring_path: str) -> None:
     when the module is compiled as the ENTRY) is not overwritten by an importer's
     view — and two modules' evidence for one struct is not a thing that can
     happen anyway, since the walk is keyed by declaring path.
+
+    **The whole module's structs, not just this one**, and that is the
+    inheritance resolution's requirement rather than tidiness: a base
+    contributes its fields only if the table it is resolved against declares it
+    (`model.attach_inherited_fields`), so passing one struct would answer every
+    class in the module as if it had no base at all. The walk asks once per
+    struct it collects, so the resolution runs more than once over the same
+    module; it is idempotent, and the guard above keeps the first answer.
     """
     if getattr(struct_def, "_field_evidence", None) is not None:
         return
     from formal import model as M
-    M.attach_field_evidence([struct_def],
-                            M.unit_field_evidence(
-                                module_statements(declaring_path)))
+    stmts = module_statements(declaring_path)
+    M.attach_field_evidence(list(M.iter_struct_defs(stmts)),
+                            M.unit_field_evidence(stmts))
 
 
 def declared_kinds(path: str) -> dict:
