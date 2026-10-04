@@ -1225,3 +1225,55 @@ def encode_cvttsd2si_r64_xmm(dst: Reg, xmm: int) -> bytes:
     # XMM's number as if it were the GPR's.
     rex = _rex(w=1, r=1 if dst.value >= 8 else 0, b=1 if xmm >= 8 else 0)
     return bytes([0xF2, rex, 0x0F, 0x2C, _modrm(3, dst.value & 7, xmm)])
+
+
+def encode_and_r8_r8(dst: Reg, src: Reg) -> bytes:
+    """and r/m8, r8 — 20 /r, the byte-wise AND with dst in r/m.
+
+    Needed only by the floating compare, and needed for a reason that is worth
+    the one instruction it exists for: `UCOMISD` reports an ORDERED equality as
+    `ZF=1 and PF=0`, and no single SETcc reads the conjunction. So `a == b` on
+    two doubles is `SETE` and `SETNP` and this one instruction, and `a != b` is
+    the same conjunction under `OR`. The 8-bit width is not a choice: `SETcc`
+    writes only a byte, so a 64-bit AND would read the REST of the register —
+    whatever the previous expression left in it — as part of the value.
+    """
+    assert isinstance(dst, Reg) and isinstance(src, Reg)
+    # No REX when neither register needs one: `20 /r` is two bytes for AL/CL and
+    # `40 20 /r` is the same instruction with a null REX, which assembles and is
+    # one byte longer than the reference — and a byte-identity differential
+    # against `clang -arch x86_64` would then fail on an encoding that is
+    # correct. This file's encoders are the short form wherever the short form
+    # exists, which is why `_rex` is called only when it has a bit to set.
+    enc = []
+    if dst.value >= 8 or src.value >= 8:
+        enc.append(_rex(r=1 if src.value >= 8 else 0,
+                        b=1 if dst.value >= 8 else 0))
+    enc += [0x20, _modrm(3, src.value & 7, dst.value & 7)]
+    return bytes(enc)
+
+
+def encode_or_r8_r8(dst: Reg, src: Reg) -> bytes:
+    """or r/m8, r8 — 08 /r. The `!=` half of `encode_and_r8_r8`'s conjunction."""
+    assert isinstance(dst, Reg) and isinstance(src, Reg)
+    enc = []
+    if dst.value >= 8 or src.value >= 8:
+        enc.append(_rex(r=1 if src.value >= 8 else 0,
+                        b=1 if dst.value >= 8 else 0))
+    enc += [0x08, _modrm(3, src.value & 7, dst.value & 7)]
+    return bytes(enc)
+
+
+def encode_setnp(reg: Reg) -> bytes:
+    """setnp r/m8 — 1 when PF=0, i.e. when the last compare was ORDERED.
+
+    The one flag that distinguishes "the two doubles are equal" from "one of
+    them is a NaN": both set ZF, and only the unordered case sets PF. Without
+    it `a == b` is `sete`, which calls a NaN equal to every number.
+    """
+    return _setcc(reg, COND_NP)
+
+
+def encode_setp(reg: Reg) -> bytes:
+    """setp r/m8 — the negation of `encode_setnp`: 1 when the compare was UNORDERED."""
+    return _setcc(reg, COND_P)

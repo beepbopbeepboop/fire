@@ -191,6 +191,16 @@ CASES += [(f"cvttsd2si %xmm{xmm}, %{dst.name.lower()}",
 CASES += [(f"movq %xmm{xmm}, %{dst.name.lower()}",
            lambda r=dst, x=xmm: X.encode_movq_r64_xmm(r, x))
           for (dst, xmm) in ((R["RAX"], 0), (R["R9"], 7), (R["RDI"], 3))]
+# The two byte-wise ALU ops the floating compare needs, because `UCOMISD`
+# reports ordered equality as `ZF=1 and PF=0` and no SETcc reads the
+# conjunction.  Both the no-REX form (AL/CL, two bytes) and a REX.B one, since a
+# null REX byte is the same instruction one byte longer and a byte-identity
+# differential would fail on the longer encoding.
+CASES += [("andb %cl, %al", lambda: X.encode_and_r8_r8(R["RAX"], R["RCX"])),
+          ("orb %cl, %al", lambda: X.encode_or_r8_r8(R["RAX"], R["RCX"])),
+          ("andb %r9b, %r8b", lambda: X.encode_and_r8_r8(R["R8"], R["R9"])),
+          ("setnp %al", lambda: X.encode_setnp(R["RAX"])),
+          ("setp %cl", lambda: X.encode_setp(R["RCX"]))]
 
 
 def main() -> int:

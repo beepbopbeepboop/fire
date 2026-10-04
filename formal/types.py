@@ -133,6 +133,26 @@ DICT_TYPE_NAMES = frozenset({"Dict", "dict"})
 # table that answers differently for two spellings of the same program.
 BOOL_TYPE_NAMES = frozenset({"Bool", "bool"})
 
+# Annotations that name an IEEE-754 BINARY64 — a `double` — and nothing else.
+#
+# **binary64 only, and the exclusion is the interesting half.**  `Float32` is
+# four bytes with a different exponent bias and `float16`/`bfloat16` are two
+# bytes each; their bit patterns are not sub-patterns of a double's, so a 64-bit
+# word holding one is not a `double` and reading it as one is a wrong answer
+# rather than an approximation.  This path has one FP instruction family
+# (scalar double), so the honest vocabulary is the spellings that MEAN that
+# family.  `Float16`/`Float32` and the `float8_*`/`float4_*`/`float6_*` dtypes
+# are therefore NOT here: they stay unclassified, which routes them into the
+# pre-existing refusal with a reason about their declared type rather than
+# producing an integer where a half-precision value should be.  See
+# `bugs/FORMAL_float_binary64_only.md`.
+#
+# Both spellings are here, for the reason `TYPE_NAMES` carries both `int` and
+# `Int` and `STRING_TYPE_NAMES` both `String` and `str`: they are one
+# declaration written two ways, and a vocabulary that knew one of them would
+# give two different answers to the same program.
+FLOAT_TYPE_NAMES = frozenset({"Float64", "float64"})
+
 
 def parse_type_name(s):
     """Parse a fire_compiler type-annotation string; None if unknown/None."""
