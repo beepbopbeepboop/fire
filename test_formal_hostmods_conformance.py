@@ -706,7 +706,9 @@ def build_cases(spec):
         if bound is None:
             stats["model spelling cannot express the call"] += 1
             continue
-        if entry.strings_only and any(not isinstance(v, str) for v in bound):
+        if entry.strings_only and any(
+                not isinstance(v, str) for slot, v in enumerate(bound)
+                if slot not in entry.filled):
             stats["argument is not a str where one is required"] += 1
             continue
         if spec.ascii_only and any(isinstance(v, str) and not v.isascii()
@@ -796,6 +798,12 @@ class Fn:
         # `None` means "use it as it is".
         self.oracle = oracle
         self.strings_only = kind in ("s", "t")
+        # Which slots `bind` filled from the TEMPLATE rather than from the
+        # call. Read by the caller right after `bind`, which is why it is not
+        # part of `bind`'s answer: a parameter the template fills in is not the
+        # call's business, and holding `html.escape(s, quote=1)` to "every
+        # argument is a str" would reject the case over a `1` nobody passed.
+        self.filled = set()
 
     def bind(self, args, keywords):
         """The model's arguments, or None when the spelling cannot carry them.
@@ -819,11 +827,27 @@ class Fn:
         values = dict(keywords)
         if len(args) > len(self.params):
             return None
-        for name, value in zip(self.params, args):
+        names = []
+        for param in self.params:
+            # `name=value` is a parameter CPython DEFAULTS and the model
+            # requires, so the template supplies it and the call need not:
+            # `html.escape(s)` against `html.escape(s, quote)`. Written this way
+            # rather than as a second mechanism because the thing being recorded
+            # is "the model's parameter list, and which of them this template
+            # fills in itself", and that is one list.
+            if "=" in param:
+                name, _, default = param.partition("=")
+                names.append(name)
+                if name not in values:
+                    values[name] = int(default)
+                    self.filled.add(len(names) - 1)
+            else:
+                names.append(param)
+        for name, value in zip(names, args):
             values[name] = value
-        if any(name not in values for name in self.params):
+        if any(name not in values for name in names):
             return None
-        return [values[name] for name in self.params]
+        return [values[name] for name in names]
 
 
 # ── the module table ───────────────────────────────────────────────────────
@@ -1023,49 +1047,95 @@ MODULES = [
         "shape, and `compile` has nowhere to live; both are counted.",
         ascii_only=True,
     ),
+    Spec(
+        "html",
+        _hostmod("html"),
+        {
+            "escape": (S1, "html.escape(%s, %s)", ["s", "quote=1"],
+                       None, None),
+        },
+        "**Two cases, and the smallest table in this file**, which is the point "
+        "of `--list` printing the sizes: CPython's `test_html.py` builds its "
+        "vectors in a loop over pairs it assembles at run time, so two literals "
+        "is what it has. `quote` is CPython's default `True`; the model's "
+        "`escape` spells it as a REQUIRED int (`html.mojo`'s own docstring says "
+        "why), so the template carries the 1 and the case is `escape(s)` with "
+        "CPython's default. A two-case table is still worth having: it is the "
+        "only thing in this tree that would notice `&` being expanded twice.",
+    ),
 ]
 
 # Every module that models a stdlib module and is NOT in `MODULES`, with the
 # measured reason. `--list` prints this; it is the work queue for this file and
 # it is a fact about the corpus, not an intention.
 NOT_YET = [
-    ("stat", "test_stat.py calls `self.statmod.filemode(st_mode)` — a loop "
+    ("stat", "test_stat.py calls `self.statmod.filemode(st_mode)` -- a loop "
              "variable, so there is no literal call. `test_formal_stat.py` "
              "already walks all 65,536 modes, which dominates any harvest."),
     ("glob", "`has_magic`/`escape` have no literal call in test_glob.py, and "
              "every `glob(...)` case needs a fixture tree the model reaches "
              "through `os.listdir`; `test_formal_glob.py` owns that corpus."),
     ("hashlib", "test_hashlib.py builds its vectors with `array`/`unhexlify`, "
-                "not literals; `test_formal_hashlib.py` owns the digests."),
-    ("json", "test_json/ is a package with 18 files and the model has `loads`, "
-             "`dumps` and a scanner; needs the byte-string value model worked "
-             "out before it can be driven at all."),
+                "not literals, and the model's `md5(data, n)` wants a BYTE "
+                "BUFFER, which has no representation on this path; "
+                "`test_formal_hashlib.py` owns the digests."),
+    ("json", "test_json/ is a package with 18 files, and the model's surface is "
+             "`loads`/`dumps` over a byte string plus a scanner -- the same "
+             "byte-string value model `hashlib` is blocked on. CPython's inputs "
+             "are literals, so the OUTPUT is the problem, not the cases."),
+    ("shutil", "4 literal cases, all `copyfile`, and every one of them copies a "
+               "real file; the model's `which(cmd, path)` is pure and CPython's "
+               "`test_shutil.py` drives it through a temporary PATH, so there "
+               "is no literal call to harvest. `test_formal_shutil.py` owns it."),
+    ("tempfile", "CPython's cases drive `mkstemp`/`NamedTemporaryFile` over real "
+                 "temporary directories and build their names at run time; the "
+                 "11 harvested calls are all zero-argument ones over those."),
+    ("io", "`io.DEFAULT_BUFFER_SIZE` is a CONSTANT and the model spells it as a "
+           "zero-argument function; `test_io.py` has no literal call to it."),
+    ("pathlib", "the model exports path COMPONENTS (`head`, `tail`, `as_posix`, "
+                "`is_dot`, `is_sep`), not `PurePosixPath`; `test_pathlib/` is a "
+                "package of eight files whose cases construct paths, and its "
+                "two literal hits are `PurePath(...)` constructions."),
+    ("ctypes", "test_ctypes/ is a package, and the model's surface is a byte "
+               "LAYOUT description rather than anything CPython's suite calls."),
+    ("dataclasses", "test_dataclasses/ is a package of six files and the model "
+                    "has no `@dataclass`; every harvested call is over a "
+                    "decorator this path refuses."),
+    ("threading", "`test_threading.py`'s calls take a lock or a thread; the "
+                  "model's `validate_timeout` answers a STATUS for a number "
+                  "and that file never passes one as a literal."),
+    ("contextlib", "the model ships `closing` and nothing else, and "
+                   "`test_contextlib.py` has no literal call to it."),
+    ("fcntl", "`test_fcntl.py` operates on real descriptors; the model's "
+              "`flock`/`getfd`/`setfd` need one, and no case is a literal."),
+    ("typing", "`TYPE_CHECKING` is the whole surface and CPython's "
+               "`test_typing.py` does not call it."),
+    ("concurrent.futures", "the model's surface is a STATUS-returning `Future` "
+                           "and CPython's suite is `test_concurrent_futures.py`, "
+                           "which builds real executors and threads."),
     ("ast", "the model is a TOKENIZER (`tokenize`, `token_bound`, `parse`, "
             "`parse_reason`, `token_name`) and CPython's `test_ast.py` "
             "exercises `ast.parse`/`literal_eval`/`dump`, which it does not "
             "have; the suite for what it does have is `test_tokenize.py`, and "
             "every case in that one drives `generate_tokens` through a "
             "`StringIO`, so there is no literal call to harvest either."),
-    ("re", "1768 literal cases, and CPython's pattern language is far larger "
-           "than the subset `formal/hostmods/re.mojo` implements; the selection "
-           "rule has to be the module's own docstring, which is a project of its "
-           "own."),
-    ("enum", "two literal cases, both `Enum(...)` over a computed member list."),
+    ("enum", "two literal cases, both `Enum(...)` over a computed member list; "
+             "the model's surface is a single `Enum` function whose argument "
+             "shape is unmeasured."),
     ("sys", "`sys.byteorder` and friends are read as constants, not called."),
     ("os", "test_os.py's cases are filesystem operations, not pure functions."),
     ("time", "test_time.py's literals are `strftime` formats, and `strftime` is "
-             "absent from the model (`bugs/FORMAL_time_struct_shaped_answers.md`)."),
+             "absent from the model "
+             "(`bugs/FORMAL_time_struct_shaped_answers.md`)."),
     ("platform", "no literal calls; the answer is a property of the machine."),
     ("argparse", "CPython's cases are `parse_args` over argv LISTS and "
                  "SystemExit, and a list cannot cross a dylib boundary."),
-    ("collections", "owned by another worker's claim (`module:platform+fnmatch+"
-                    "collections-rest`)."),
-    ("fnmatch", "owned by another worker's claim."),
+    ("collections", "owned by another worker's claim "
+                    "(`module:platform+fnmatch+collections-rest`)."),
+    ("fnmatch", "owned by another worker's claim "
+                "(`module:platform+fnmatch+collections-rest`)."),
     ("subprocess", "owned by another worker's claim "
                    "(`sweep12:hostmods-subprocess`)."),
-    ("ctypes", "no test file as a single module (test_ctypes/ is a package)."),
-    ("dataclasses", "no test file as a single module (test_dataclasses/ is a "
-                    "package), and `@dataclass` has no representation."),
 ]
 
 
