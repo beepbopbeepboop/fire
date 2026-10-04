@@ -3446,8 +3446,6 @@ def imported_instantiations(source_path: str, stmts: list,
         if dep:
             paths.append(dep)
     paths.extend(linked_paths or ())
-    if not paths:
-        return {}
     demap: dict = {}
     out: dict = {}
     for dep in paths:
@@ -3466,8 +3464,76 @@ def imported_instantiations(source_path: str, stmts: list,
                                              project_root or source_path):
                     _attach_declared_census(st, gen_path)
                     out.setdefault(st.name, st)
+    out.update(_own_instantiations(consumer, source_path, demap,
+                                   project_root or source_path, stmts))
     if demap:
         MM.rewrite_instantiation_calls(stmts, demap)
+    return out
+
+
+def _own_instantiations(consumer_src: str, source_path: str, demap: dict,
+                        project_root: str, stmts: list) -> dict:
+    """`{mangled name: StructDef}` for the templates THIS module declares and
+    THIS module applies — the one demand set the loop above cannot see — and
+    the instantiated BODIES, appended to `stmts`.
+
+    `instantiation_demands` is asked about every module this file IMPORTS, and
+    for the module itself it is asked with `own_templates`, which deliberately
+    EXCLUDES the file's own templates: `formal/monomorph.py::demands` states the
+    reason, and the reason is right for a FUNCTION template — `twice[Int](n)`
+    beside `def twice[T]` binds through `comptime.specialization_name`, which is
+    a call specialisation and needs no declaration — and wrong for a STRUCT
+    template. `Pair[Int]()` beside `struct Pair[T]` is a call to a name this unit
+    does not compile, because the name a struct instantiation is emitted under is
+    the mangled one and nothing emitted it: `_callee_defs(functions)` is a table
+    of FUNCTIONS, so the bracketed scan refused it by name. Measured on a
+    twenty-line program, both architectures, one field or two:
+
+        struct Box[T]:
+            var v: T
+        def main(n: Int) -> Int:
+            var b = Box[Int]()          # `Box[…](…) calls a name this unit does
+            return b.v                  #    not compile` — arm64 and x86-64
+
+    So the same derivation the imported half runs, with `own=()` and this file's
+    own templates, and it goes through `instantiate_all` and
+    `rewrite_instantiation_calls` exactly as the imported half does — the
+    declaration and the rewrite are still one table, which is the property
+    `imported_instantiations` is built around.
+
+    **The instantiated source is APPENDED to `stmts`, and that is the half the
+    imported set does not need.** An imported template's body is compiled into
+    the library that declares it, and this unit only needs its declaration to
+    lay a field out and to name a method call. An own template's body has
+    nowhere else to be compiled: this image is the whole compilation unit, so a
+    declaration without its methods produced a program that constructed the
+    struct, read and wrote its fields, and then failed on the first METHOD call
+    with the link audit's sentence — a message about the link line where the
+    construct is `a.get()`. `publish_source` already wrote the instantiated
+    text, so appending its statements is reading a file this function caused to
+    be written, and it is the same text the dylib path compiles as an extra
+    source (`_build_module_dylib`'s `extra_sources`).
+
+    **It is additive to `demap` and never overrides it.** An imported template
+    and an own template cannot be the same name in one module — a local
+    definition shadows an import, and `imported_struct_defs` states that
+    precedence — so the two sets are disjoint, and `setdefault` keeps that true
+    if they ever are not.
+    """
+    from formal import monomorph as MM            # lazy — pulls the middle tier
+    own = MM.demands(consumer_src, MM.template_names(consumer_src), own=())
+    if not own:
+        return {}
+    made, _failed = MM.instantiate_all(consumer_src, own)
+    out: dict = {}
+    for base, mangled, args, gen_path in made:
+        demap.setdefault((base, args), mangled)
+        if mangled in out:
+            continue
+        stmts.extend(module_statements(gen_path))
+        for st in module_struct_defs(gen_path, project_root):
+            _attach_declared_census(st, gen_path)
+            out.setdefault(st.name, st)
     return out
 
 

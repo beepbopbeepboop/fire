@@ -152,11 +152,15 @@ def build_pair_case(tmpdir, arch, name="mm_pair", lib=PAIR_LIB,
     real import: `from pairlib import Pair` resolves to a sibling source, which
     `formal/imports.py::resolve_module_path` handles by search root rather than
     by anything a test had to arrange. `extra` adds more files to the same tree,
-    for the cases that need a package beside the library.
+    for the cases that need a package beside the library. `lib=None` writes no
+    library at all, which is the ONE-FILE shape — the case where this module is
+    both the library and the consumer, and where nothing has to cross a boundary
+    for the instantiation to be needed.
     """
     root = os.path.join(tmpdir, f"{name}_{arch}")
     os.makedirs(root)
-    files = {libname: lib, "main.mojo": prog}
+    files = {"main.mojo": prog} if lib is None else {
+        libname: lib, "main.mojo": prog}
     files.update(extra or {})
     write_tree(root, files)
     out = os.path.join(root, f"main.{arch}.aout")
@@ -264,6 +268,64 @@ def test_a_generic_function_template_is_instantiated_too(tmpdir):
         got = run_pair_case(tmpdir, arch, "mm_fn", lib, prog, cpython,
                             libname="fnlib.mojo")
         check(got == "42\n", f"[{arch}] printed {got!r}, expected 42")
+
+
+def test_a_struct_template_the_module_declares_can_itself_apply(tmpdir):
+    """`struct Box[T]` and `Box[Int]()` in ONE file — the shape that was
+    refused by name, on both architectures, for every struct template.
+
+    `formal/monomorph.py::demands` deliberately SKIPS a consumer's own
+    templates, and `formal/imports.py::instantiation_demands` passes
+    `own_templates` for the same reason: a call to a generic this unit compiles
+    is answered by the local-specialisation machinery
+    (`_specialization_of` → `comptime.specialization_name`). That is TRUE of a
+    FUNCTION template — `def twice[T]` beside `twice[Int](n)` builds today, and
+    is its own case below — and FALSE of a STRUCT template, which is a call to a
+    name the unit does not compile: `_callee_defs(functions)` is a table of
+    functions, and the instantiation is emitted under a mangled name nothing had
+    emitted. So the one demand set no caller could see was the module's own:
+
+        build: Box[…](…) calls a name this unit does not compile, so the
+        brackets cannot be bound …
+
+    with a `return` the program never wrote. Two instantiations in one file,
+    because the failure this change must not have is the two collapsing onto one
+    symbol: `Box[Int]` and `Box[Bool]` are two concrete structs, and a program
+    that prints 7 then 1 has bound both.
+    """
+    src = ("struct Box[T]:\n"
+           "    var v: T\n"
+           "\n"
+           "    def get(self) -> T:\n"
+           "        return self.v\n"
+           "\n"
+           "def main():\n"
+           "    var a = Box[Int]()\n"
+           "    var b = Box[Bool]()\n"
+           "    a.v = 7\n"
+           "    b.v = True\n"
+           "    print(a.get())\n"
+           "    print(b.get())\n")
+    cpython = ("class Box:\n"
+               "    def __init__(self):\n"
+               "        self.v = 0\n"
+               "\n"
+               "    def get(self):\n"
+               "        return self.v\n"
+               "\n"
+               "def main():\n"
+               "    a = Box()\n"
+               "    b = Box()\n"
+               "    a.v = 7\n"
+               "    b.v = True\n"
+               "    print(a.get())\n"
+               "    print(int(b.get()))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_own", None, src, cpython)
+        check(got == "7\n1\n",
+              f"[{arch}] printed {got!r}, which is neither CPython's answer nor "
+              f"anything this case wrote down")
 
 
 def test_a_package_reexport_attributes_the_demand_to_the_defining_module(
@@ -1483,6 +1545,8 @@ TESTS = [
      test_a_generic_struct_template_is_instantiated_at_the_importers_type),
     ("a generic function template is instantiated too",
      test_a_generic_function_template_is_instantiated_too),
+    ("a struct template the module declares can itself apply",
+     test_a_struct_template_the_module_declares_can_itself_apply),
     ("a package re-export attributes the demand to the defining module",
      test_a_package_reexport_attributes_the_demand_to_the_defining_module),
     ("an instantiation agrees with the concrete struct of the same shape",
