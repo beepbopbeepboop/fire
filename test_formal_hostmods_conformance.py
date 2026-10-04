@@ -5,9 +5,12 @@ r"""Every `formal/hostmods` module, against CPython's OWN regression tests.
     python3 test_formal_hostmods_conformance.py --cases <group>
     python3 test_formal_hostmods_conformance.py --dump-cases <group> <file>
 
-Groups are named after the module: `posixpath`, `textwrap`, `struct`,
-`shlex`, `math`. With no argument, all of them. Every group builds and RUNs an
-image on BOTH backends.
+Groups are named after the module: `posixpath`, `textwrap`, `struct`, `shlex`,
+`math`, `re`, `html`. With no argument, all of them. Every group builds and RUNs
+an image on BOTH backends, and `--list` prints the registry with the number of
+cases each module's suite actually yielded -- 113 for `posixpath`, 184 for `re`,
+and 2 for `html`, which are the three numbers that say what this file is worth
+per module.
 
 WHY THIS FILE EXISTS, AND WHY IT IS NOT ANOTHER `test_formal_<module>.py`
 -------------------------------------------------------------------------
@@ -113,15 +116,37 @@ a counted reason when the model's spelling cannot express CPython's call:
 not a pass: the counts are printed and `--list` reports them, so a function that
 stops being harvestable is visible.
 
-WHY NOT ALL TWENTY-SIX MODULES
-------------------------------
-Because the cases have to exist. `test_formal_stat.py` is a case table with
-65,547 rows built by a loop, which is strictly more than any harvest of
-`test_stat.py` could be (`test_stat.py` calls `self.statmod.filemode(st_mode)` —
-a loop variable, so there is no literal call to harvest at all). `glob`,
-`hashlib`, `json`, `ast`, `enum`, `sys`, `os`, `time`, `platform`, `re` and
-`argparse` are listed in `NOT_YET` with the measured reason for each, and
-`--list` prints that table. Adding a module is one entry in `MODULES`.
+WHY NOT EVERY MODULE, WHICH IS `NOT_YET` AND NOT AN APOLOGY
+-----------------------------------------------------------
+Because the cases have to EXIST, and for most of the remaining modules they do
+not -- which is a measurement rather than a preference. `test_formal_stat.py`
+is a case table with 65,547 rows built by a loop, which is strictly more than
+any harvest of `test_stat.py` could be: that file calls
+`self.statmod.filemode(st_mode)`, a loop variable, so there is no literal call
+to harvest at all. `hashlib` and `json` want a byte BUFFER, which this path has
+no representation for. `ast`'s model is a tokenizer and CPython's `test_ast.py`
+is about a surface it does not have.
+
+`NOT_YET` accounts for **every** `formal/hostmods` module that is not in
+`MODULES`, with the measured reason for each, and `--list` prints it in full --
+including the three that another worker's claim owns, which are listed as owned
+rather than as absent, because a queue that pretends a claimed module is
+unclaimed is a queue two workers will enter. Adding a module is one entry in
+`MODULES`.
+
+WHAT THIS FILE HAS ALREADY PAID FOR
+------------------------------------
+Three model defects, none of which a hand-picked corpus was reaching:
+
+  * `posixpath.expanduser("~root")` answered `~root/` where CPython answers
+    `/var/root/`, because the function claimed the password database was out of
+    reach. It was not; `getpwnam` binds and `pw_dir` is one 64-bit load.
+  * `struct.calcsize` was a table of the seventeen formats this repository's
+    own callers use, so CPython's `calcsize('iii')` and `calcsize('l')`
+    answered 0. It is a parser for the grammar now.
+  * `re.mojo` refused `(?x) a` while answering "matched" for the same pattern
+    with `re.VERBOSE()`, which is the same feature twice and one of the two
+    spellings refused.
 """
 import argparse
 import ast
@@ -660,10 +685,20 @@ def cpython_answer(module, fn, args, keywords):
 def build_cases(spec):
     """The case table for `spec`: harvested, filtered, and answered.
 
-    Returns `(cases, stats, stats_detail)`. `stats` counts what was dropped and
-    why, per reason; nothing is dropped silently, because a filter that
-    discards cases quietly is a filter whose coverage nobody can reason about.
+    Returns `(cases, stats, missing)`. `stats` counts what was dropped and why,
+    per reason; nothing is dropped silently, because a filter that discards
+    cases quietly is a filter whose coverage nobody can reason about.
+
+    The module's own SOURCE is checked first, and it is checked rather than
+    assumed because a table for a module whose `.mojo` has been renamed is
+    vacuous in a way nothing downstream would notice: the image builds without
+    it (the driver imports the module by name and the resolver finds whatever
+    it finds), CPython answers every case, and the group reports its case count
+    as coverage of a module nobody is looking at.
     """
+    check(os.path.isfile(spec.source),
+          f"{spec.name}: the table names {spec.source!r} and there is no such "
+          f"file, so every case here would be coverage of nothing")
     cases = []
     stats = {"no argument": 0, "argument not a constant": 0,
              "bytes argument has no representation": 0,
@@ -781,7 +816,6 @@ class Fn:
 
     def __init__(self, spec, name):
         entry = spec.fns.get(name)
-        self.spec = spec
         self.name = name
         if entry is None:
             return

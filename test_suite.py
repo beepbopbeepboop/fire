@@ -3398,6 +3398,28 @@ UNREGISTERED = {
     # mem='tiny', deps=['preflight'], extra=['test_formal_hostmods_census.py',
     # 'formal'] + FORMAL_BUILD_INPUTS, desc='every formal/hostmods module
     # builds as a program on both backends, and x86-64 is a subset of arm64')`.
+    # NOT the group reason above, and the reason is the SHAPE: this one
+    # harvests its cases out of CPython's own regression suites at run
+    # time, so what it covers depends on which interpreter is running it,
+    # and a corpus that moves with the interpreter is a fact about the box
+    # rather than about the tree. Measured 2026-10-04 on
+    # work/formal24-hostmods-conformance, `python3 tools/memslot.py --gb 8
+    # -- python3 test_formal_hostmods_conformance.py`: **59 s wall, 0.1 GB
+    # peak, 7 modules x 2 backends, 348 cases** -- cheap by the cost rule in
+    # CLAUDE.md, so it wants a REGISTRATION rather than this excuse, and
+    # the row belongs to whoever registers it. Exact next step: `test(
+    # 'formal-hostmods-conformance', [PY,
+    # 'test_formal_hostmods_conformance.py'], mem='tiny', deps=['preflight'],
+    # extra=['test_formal_hostmods_conformance.py', 'formal'] +
+    # FORMAL_BUILD_INPUTS, desc='every host module against CPython\'s OWN
+    # regression tests, the case table generated from them')`.
+    'test_formal_hostmods_conformance.py': 'The host-module CONFORMANCE '
+        'table: every module in `formal/hostmods` whose CPython counterpart '
+        'ships a regression suite, driven over the cases GENERATED from '
+        'that suite rather than a hand-picked corpus, with CPython in this '
+        'process as the oracle and both backends compared against each '
+        'other first. Cheap (59 s, 0.1 GB measured) and green, so it wants '
+        'registering rather than listing; the row is spelled out above.',
     'test_formal_hostmods_census.py': 'The host-module census: every '
         '`formal/hostmods` module built as a program on BOTH backends, asserting '
         'that x86-64 is a SUBSET of arm64 — the one divergence a per-backend '
