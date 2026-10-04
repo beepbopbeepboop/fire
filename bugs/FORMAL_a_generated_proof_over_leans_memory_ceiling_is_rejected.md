@@ -231,6 +231,19 @@ cache stubbed, which is the only way to test it deterministically: the two rows
 must carry the same class and opposite flags, and the summary must count the
 replayed one.
 
+**…and the same commit left that file's OTHER case red, which is repaired
+2026-10-04 (`work/formal23-1`).** `Verdict` grew a ninth field, and
+`test_the_report_says_when_the_two_architectures_mean_different_things`
+constructs eight `Verdict`s positionally without it, so the case raised
+`TypeError: Verdict.__new__() missing 1 required positional argument: 'cached'`
+on every run — `Ran 16 tests … FAILED (errors=1)`, for a file that is the
+instrument this very section landed. Worth recording because it is the shape
+CLAUDE.md's `expect=` discipline exists to catch and this one slipped past it:
+**a new field on a record a test constructs by hand is a red in the test that
+constructs it**, and the fix is eight `False`s, one per row, because none of those
+rows is a replayed verdict. `python3 test_formal_proof_breadth.py` is `OK` again
+(16 tests).
+
 **What this does NOT do:** it does not make a replayed verdict fail, and it
 does not re-check `either`. `either` is still red for the reason in §1, and the
 measurement that says so is a fresh run with `cached=False` in the ledger.

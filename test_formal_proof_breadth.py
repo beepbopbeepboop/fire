@@ -480,19 +480,19 @@ class TestClassifier(unittest.TestCase):
         results = [
             V("x.py:1:f", "arm64", "codegen-refused",
               "'A' has no home: this module declares no module-level name",
-              "build", 0.1, None, 0),
+              "build", 0.1, None, 0, False),
             V("x.py:1:f", "x86_64", "codegen-refused",
               "'%' is refused when the left operand is a string", "build", 0.1,
-              None, 0),
+              None, 0, False),
             V("y.py:2:g", "arm64", "codegen-refused", "the same words",
-              "build", 0.1, None, 0),
+              "build", 0.1, None, 0, False),
             V("y.py:2:g", "x86_64", "codegen-refused", "the same words",
-              "build", 0.1, None, 0),
+              "build", 0.1, None, 0, False),
             V("z.py:3:h", "arm64", "proof-refused",
               "model: a ListExpr has no value in the semantic model", "generate",
-              0.1, None, 0),
+              0.1, None, 0, False),
             V("z.py:3:h", "x86_64", "proof-emitted", "phase A only: 100 lines",
-              "generate", 0.1, None, 100),
+              "generate", 0.1, None, 100, False),
         ]
         text = B.report(results, ["arm64", "x86_64"])
         self.assertIn("DIFFERENT CONSTRUCTS", text)
@@ -510,10 +510,10 @@ class TestClassifier(unittest.TestCase):
         # the generators and not a disagreement about a construct either.
         both = [V("w.py:4:k", "arm64", "proof-emitted",
                   "phase A only: 5348 lines of proof written", "generate", 0.1,
-                  None, 5348),
+                  None, 5348, False),
                 V("w.py:4:k", "x86_64", "proof-emitted",
                   "phase A only: 524 lines of proof written", "generate", 0.1,
-                  None, 524)]
+                  None, 524, False)]
         self.assertIn("architectures agree on the refusal",
                       B.report(both, ["arm64", "x86_64"]),
                       "a proof-length difference is not a construct "
