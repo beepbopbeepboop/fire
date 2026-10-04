@@ -120,6 +120,14 @@ ADMITTED_COUNTS = {
     "posixpath": 0,
     "platform": 0,
     "re": 0,
+    # `quote` is a scan over bytes a string already is plus a substitution, and
+    # every one of the 1142 answers `test_formal_shlex.py` compares with
+    # CPython is computed rather than looked up — so there is no host fact left
+    # over to admit, which is what the zero is measuring and the same row
+    # `html` and `glob` carry for the same reason. `split`/`join`/`shlex` are
+    # absent from the module and refused by name, so the module's surface is
+    # one function and that function decides everything.
+    "shlex": 0,
     "shutil": 0,
     "stat": 0,
     "struct": 0,
