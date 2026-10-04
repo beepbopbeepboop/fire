@@ -945,10 +945,12 @@ MODULE_GLOBAL_CASES = [
     # rule that only knew the first would be green here and wrong on the shape
     # most real code writes.
     #
-    # `{"a": 7, "b": 9}` rather than `{}` because the READ is the capability:
-    # a dict STORE of a key the blob does not hold is the dict-INSERT wall
-    # (`bugs/FORMAL_a_dict_store_of_an_absent_key_exits_1.md`), which is a
-    # different construct and is not what this row is about.
+    # `{"a": 7, "b": 9}` rather than `{}` because the READ is the capability
+    # this row is about. A dict STORE of a key the blob does not hold used to
+    # be a separate wall; it is not any more — that is CPython's INSERT, the
+    # pair blob is reserved for it (`formal/model.py`'s `dict_store_capacity`)
+    # and `test_formal_run.py` carries the cases — so the spelling here is
+    # chosen for the read and not to dodge a store.
     ("a_dict_field_read_through_its_method",
      "class Loader:\n"
      "    seen: dict\n"

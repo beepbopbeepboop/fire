@@ -213,8 +213,13 @@ Deliberately absent, each for a stated reason:
     key scan that misses, and the miss signal on this path is `exit(1)` with
     nothing printed; `xs.append(v)` inside a loop overflows the blob's
     capacity, which is the number of append SITES in the function that built
-    it. Both are limits with a diagnostic rather than defects, and both are
-    measured: `bugs/FORMAL_a_dict_store_of_a_new_key_is_a_run_time_miss.md`.
+    it. Both are limits with a diagnostic rather than defects, and the append
+    one was measured as such. The dict half is no longer a limit: `d[k] = v`
+    for an absent key is CPython's INSERT, the pair blob is reserved at the
+    literal for the pairs it wrote plus one per store SITE
+    (`formal/model.py`'s `dict_store_capacity`), and the two stores the
+    `containers` mix generates here are therefore programs the corpus
+    measures.
   * a variadic `printf` with more than five operands — arm64 refuses a variadic
     call whose arguments pass the register file, so a program with more than
     seven of them is not a two-architecture case at all. The stack-argument
@@ -1403,9 +1408,9 @@ class Gen:
             # more than it was. Before that it was a key scan that missed and
             # stopped the program having printed nothing, which is why the
             # `containers` mix stayed on the half that worked and reported the
-            # limit as a `MISMATCH-*` finding on every program that contained it
-            # (`bugs/FORMAL_a_dict_store_of_a_new_key_is_a_run_time_miss.md`,
-            # deleted with the fix).
+            # limit as a `MISMATCH-*` finding on every program that contained
+            # it. (The doc that recorded that limit is deleted with the fix,
+            # which is the repository's rule for a fixed bug.)
             key = (self.absent_key(key_kind) if self.rng.random() < 0.5
                    else self.rng.choice(keys))
             self.emit(indent, f"{var}[{key}] = {self.rng.randint(0, 40)}")

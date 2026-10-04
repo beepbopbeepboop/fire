@@ -233,9 +233,10 @@ no build cache.
 
 **The corpus cannot produce:** a function with no `return` (§3.3), string
 concatenation or a length-dependent string method (refused, with the measurement
-in the refusal — `model.string_concat_refusal`), a dict grown by a subscript
-store of a new key (`bugs/FORMAL_a_dict_store_of_a_new_key_is_a_run_time_miss.md`),
-an `append` inside a loop (a blob's capacity is the number of append SITES and
+in the refusal — `model.string_concat_refusal`), a dict store of a new key
+(NOW GENERATED and measured: `d[k] = v` is CPython's INSERT on both backends,
+`formal/model.py`'s `dict_store_capacity`, so this row was removed from the
+list rather than worked around), an `append` inside a loop (a blob's capacity is the number of append SITES and
 every execution counts), a name bound by TWO dict literals
 (`model._note_dict_init` retracts the initializer, so a `for` over such a dict
 has no answerable key kind — 15 of 40 programs until the mix was changed to bind
