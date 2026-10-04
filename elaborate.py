@@ -15,7 +15,8 @@ import re
 import subprocess
 
 import monomorphize as mm
-from fire_compiler import py_tokenize, Parser, FunctionDef, StructDef, TraitDef
+from fire_compiler import (py_tokenize, Parser, FunctionDef, StructDef,
+                          TraitDef, split_top_level_commas)
 from gimple_codegen import _mojo_type
 
 
@@ -27,9 +28,12 @@ class ConformanceError(Exception):
     method, or its signature differs). The message is the compile error a user
     sees."""
 
-_FN_HEAD = re.compile(r'\b(?:fn|def)\s+(\w+)\s*\[([^\]]*)\]')
-# Generalized head matching a `fn` or `struct` template with `[type params]`.
-_HEAD = re.compile(r'\b(?:fn|def|struct)\s+(\w+)\s*\[([^\]]*)\]')
+# The generic head is `monomorphize.head_match`, which finds it with BRACKETS
+# BALANCED rather than with a `[^\]]*` class -- a parameter whose type is itself
+# a type application (`keys: List[T]`, `width: SIMD[dtype, width]`) puts a `]`
+# inside the parameter list, and every reader below wants the whole list. This
+# file used to carry its own two copies of that regex; one reader of one rule is
+# the point (`bugs/MONOMORPH_a_bracket_in_a_template_parameter_annotation_is_not_matched.md`).
 
 
 def _bracket_depth_by_line(module_src: str) -> list[int]:
@@ -194,11 +198,15 @@ def type_param_names(template_src: str):
     `struct Box[T, U]` -> ['T', 'U']. Skips the positional-only / keyword-only
     separators (`/`, `//`, `*`, `**`), which are not parameter names — see
     `_is_param_marker` for why the marker test is by character."""
-    m = _HEAD.search(template_src)
+    m = mm.head_match(template_src)
     if not m:
         return []
+    # `split_top_level_commas`, not `split(',')`: the parameter list may contain
+    # a bracketed type argument of its own (`keys: SIMD[Tuple[Int, Int], 4]`),
+    # and a plain split cuts that parameter in half and reports a type
+    # parameter named `Int]` -- one reader of the parameter list, asked once.
     return [p.strip().split(':')[0].strip()
-            for p in m.group(2).split(',')
+            for p in split_top_level_commas(m.params)
             if p.strip() and not _is_param_marker(p.strip())]
 
 
@@ -222,11 +230,11 @@ def type_param_defaults(template_src: str):
 
     Only the text is returned; whether it is USABLE as a concrete argument is
     `_default_type_arg`'s question, and it is deliberately narrow."""
-    m = _HEAD.search(template_src)
+    m = mm.head_match(template_src)
     if not m:
         return {}
     out = {}
-    for p in m.group(2).split(','):
+    for p in split_top_level_commas(m.params):
         p = p.strip()
         if not p or _is_param_marker(p) or '=' not in p:
             continue
@@ -313,11 +321,11 @@ def bind_type_args(template_src: str, type_args):
 def parse_bounds(template_src: str):
     """Map each type-parameter name to its trait bound name (or None) from a
     generic's `[...]` head: `fn f[T: Stringable]` -> {'T': 'Stringable'}."""
-    m = _HEAD.search(template_src)
+    m = mm.head_match(template_src)
     if not m:
         return {}
     bounds = {}
-    for p in m.group(2).split(','):
+    for p in split_top_level_commas(m.params):
         p = p.strip()
         if not p or _is_param_marker(p):
             continue
@@ -547,7 +555,7 @@ def _code_only(template_src: str) -> str:
     s = re.sub(r'"""[\s\S]*?"""', ' ', template_src)
     s = re.sub(r"'''[\s\S]*?'''", ' ', s)
     s = re.sub(r'(?m)#.*$', ' ', s)
-    m = _HEAD.search(s)
+    m = mm.head_match(s)
     if m:
         s = s[:m.start()] + ' ' * (m.end() - m.start()) + s[m.end():]
     return s
@@ -647,7 +655,7 @@ def infer_struct_type_args(module_src: str, struct_name: str, arg_ctypes):
     `myinterpreter.MojoOverloadSet` states for parameter types it cannot use."""
     # The TEMPLATE for the `[...]` head, the MODULE for the struct's methods.
     # `type_param_names` and `erased_only_params` both read the head, and
-    # `_HEAD.search` finds the FIRST generic in the text it is given — which for
+    # `head_match` finds the FIRST generic in the text it is given — which for
     # a module like `std/format/_utils.mojo` is some other struct entirely.
     # `erased_only_params` additionally needs the whole struct body, which is
     # exactly the template.

@@ -764,6 +764,107 @@ def test_two_demand_sets_are_two_libraries(tmpdir):
                   f"{sorted(exports)}")
 
 
+def test_a_bracketed_parameter_annotation_instantiates(tmpdir):
+    """`keys: List[T]` is a parameter, and every instantiation of it used to be
+    a file that does not parse.
+
+    The head matcher's character class was "not a bracket", so it stopped at
+    `List[T]`'s `]`, `monomorphize_source` cut the head there and left `]:`
+    behind:
+
+        struct Box[T: AnyType, keys: List[T]]:      ->  struct Box_1_…_x005D]:
+        parse error: Unexpected RBRACKET(']')
+
+    which is the worst of the three failure directions — the instantiation is
+    produced, substituted correctly, and cannot be compiled. It is not an exotic
+    shape either: it is `std/collections/type_dict.mojo` (every one of whose
+    parameters is a value) and `SIMD[…]` in any numeric template.
+
+    **The assertion that was missing everywhere is that the emitted source
+    PARSES** — the mangled name was already right, so a test that checked only
+    the name passed against a definition no compiler would accept. Hence
+    `Parser(py_tokenize(out)).parse_module()` here, and the substitution is
+    checked as well because a head that ends in the right place still has to
+    substitute INSIDE the annotation.
+    """
+    from formal import monomorph as MM
+    import fire_compiler as F
+    src = ("struct Box[T: AnyType, keys: List[T]]:\n"
+           "    var items: List[T]\n"
+           "\n"
+           "    def size(self) -> Int:\n"
+           "        return len(self.items)\n")
+    mangled, concrete = MM.instantiate(src, "Box", ("Int", "[1, 2, 3]"))
+    check(concrete.startswith(f"struct {mangled}:"),
+          f"the definition was not renamed and its parameter list not dropped: "
+          f"{concrete!r}")
+    check(concrete.rstrip().endswith("return len(self.items)"),
+          f"the body was cut with the head: {concrete!r}")
+    check("List[Int]" in concrete,
+          f"a type parameter inside another parameter's ANNOTATION was not "
+          f"substituted: {concrete!r}")
+    try:
+        mod = F.Parser(F.py_tokenize(concrete)).parse_module()
+    except Exception as exc:                        # noqa: BLE001
+        raise TestFailure(
+            f"the instantiation does not parse, which is the whole defect: "
+            f"{exc!r}\n{concrete!r}") from None
+    check(any(getattr(s, "name", None) == mangled for s in mod),
+          f"the parser did not read the instantiated name back: "
+          f"{[getattr(s, 'name', None) for s in mod]}")
+
+    # THE CONTROL, so the fix cannot be "the parameter list ends at the first
+    # `]`" all over again, and the NESTED case, because a matcher that counts
+    # one level is a matcher with the same bug one level down.
+    import elaborate as E
+    check(E.type_param_names("struct Box[T: AnyType, keys: List[T]]:\n"
+                             "    pass\n") == ["T", "keys"],
+          "the parameter reader stops at the `]` inside `List[T]`")
+    check(E.type_param_names(
+        "struct Box[T, keys: SIMD[Tuple[Int, Int], 4]]:\n    pass\n")
+        == ["T", "keys"],
+        "a bracketed type argument carrying its own comma splits the parameter "
+        "in half (`split(',')` rather than a top-level split)")
+    check(E.parse_bounds("struct Box[T: AnyType, keys: List[T]]:\n    pass\n")
+          == {"T": "AnyType", "keys": "List[T]"},
+          "the trait bound of a parameter whose type is a type application is "
+          "read from a truncated list")
+
+    # …and the multi-line form `type_dict.mojo` writes, whose parameters carry
+    # a trailing comma, a `//` separator and a `*values` marker. This is the
+    # real declaration, transcribed: every parameter of that struct is a VALUE,
+    # so the `keys: List[T]` line is not an edge case there but the middle of
+    # the parameter list, and before the fix `type_param_names` returned
+    # `['T', 'Trait', 'keys']` — it stopped at that `]` and lost `*values`.
+    typed_dict = ("struct TypeDict[\n"
+                 "    T: Equatable & Movable,\n"
+                 "    Trait: type_of(AnyType),\n"
+                 "    //,\n"
+                 "    keys: List[T],\n"
+                 "    *values: Trait,\n"
+                 "](TrivialRegisterPassable):\n"
+                 "    var items: List[T]\n"
+                 "\n"
+                 "    def get(self) -> Int:\n"
+                 "        return len(Self.keys) + len(self.items)\n")
+    check(E.type_param_names(typed_dict) == ["T", "Trait", "keys", "*values"],
+          f"std/collections/type_dict.mojo's parameter list is not read whole: "
+          f"{E.type_param_names(typed_dict)}")
+    mangled_td, concrete_td = MM.instantiate(
+        typed_dict, "TypeDict", ("Int", "AnyType", "[1,2,3]", "String"))
+    check("len([1,2,3])" in concrete_td,
+          f"`len(Self.keys)` was not folded with the argument the "
+          f"instantiation supplied: {concrete_td!r}")
+    try:
+        F.Parser(F.py_tokenize(concrete_td)).parse_module()
+    except Exception as exc:                        # noqa: BLE001
+        raise TestFailure(f"the TypeDict instantiation does not parse: "
+                          f"{exc!r}\n{concrete_td!r}") from None
+    check(concrete_td.startswith(f"struct {mangled_td}("),
+          f"the declaration's base class and parameter list were lost: "
+          f"{concrete_td!r}")
+
+
 def test_a_stated_mangled_spelling_is_the_one_the_mangler_produces(tmpdir):
     """No `doc/` or `bugs/` file may state a mangled spelling the mangler does
     not produce.
@@ -895,6 +996,8 @@ TESTS = [
      test_a_value_typed_bracket_is_not_read_as_a_type),
     ("two demand sets are two libraries",
      test_two_demand_sets_are_two_libraries),
+    ("a bracketed parameter annotation instantiates",
+     test_a_bracketed_parameter_annotation_instantiates),
     ("a stated mangled spelling is the one the mangler produces",
      test_a_stated_mangled_spelling_is_the_one_the_mangler_produces),
 ]

@@ -1,17 +1,52 @@
 # FORMAL_a_generic_structs_parameters_are_never_bound: `Self.<param>` in a class body has no value, and the two places that read it say so for the wrong reason
 
-**Status: the DIAGNOSTIC is fixed (`d62016d6`). THE WALL HAS MOVED — a
-monomorphizer now exists (`formal/monomorph.py`, 2026-10-03) and it DOES bind
-a value parameter, so §5's option (1) is no longer missing and §5's "do not
-start (2) for this row" is no longer the right advice. What is left is
-measured, it is three limits rather than one project, and the FIRST of the
-three is a one-line regex bug filed as
-`bugs/MONOMORPH_a_bracket_in_a_template_parameter_annotation_is_not_matched.md`
-— so this row's next step is that fix, not a monomorphizer.** Re-measured
-2026-10-03 on `work/formal18-1`.
+**Status: the DIAGNOSTIC is fixed (`d62016d6`) and so is the FIRST of the three
+limits §0 measured (2026-10-04): a parameter whose declared TYPE is itself a
+type application now instantiates, and the instantiation PARSES — which is the
+assertion that was missing everywhere.**
+**What is left is a comptime evaluator that can fold `len(<a literal>)` over a
+substituted parameter, and the variadic half of the arity check; §"What is left"
+is both, with the measurement for each.** Re-measured 2026-10-03 on
+`work/formal18-1`; the bracket fix is on `work/formal19-1`.
 
 Found by sweeping `std/collections` for `sweep14:std-collections`; see
 `FORMAL_sweep14_std_collections.md` §4.2.
+
+---
+
+## 0a. The bracket fix, 2026-10-04: `keys: List[T]` instantiates, and the
+## emitted file parses
+
+`bugs/MONOMORPH_a_bracket_in_a_template_parameter_annotation_is_not_matched.md`
+is fixed, and its fix is in the place all five copies of the rule could read —
+`monomorphize.head_match`, which finds a generic head with its brackets
+**balanced** instead of stopping at the first `]` (`elaborate.py`'s two private
+copies of that regex are gone, and its three parameter-list readers now split on
+`fire_compiler.split_top_level_commas` rather than `split(',')`, because a
+parameter may contain a bracketed type argument of its own).
+
+| | before | after |
+|---|---|---|
+| `instantiate` on `struct Box[T: AnyType, keys: List[T]]` | emits `struct Box_1_…_x005D]:` — `parse error: Unexpected RBRACKET(']')` on both backends | emits `struct Box_1_…_x005D]:` → **parses**, with `List[Int]` substituted inside the annotation |
+| `type_param_names` on `std/collections/type_dict.mojo`'s `TypeDict` | `['T', 'Trait', 'keys']` — stopped at `List[T]`'s `]` and lost `*values` | `['T', 'Trait', 'keys', '*values']` |
+| `parse_bounds` on the same | the same truncation | `{'T': 'Equatable & Movable', 'Trait': 'type_of(AnyType)', 'keys': 'List[T]', '*values': 'Trait'}` |
+| `instantiate` on `TypeDict[Int, AnyType, [1,2,3], String]` | refused (arity, because the parameter list was truncated to three) | emits a concrete `TypeDict_…` that parses, with `len(Self.keys)` folded to `len([1,2,3])` |
+
+The third row is the one that matters for this document: **`TypeDict`'s whole
+API is compile-time and every one of its parameters is a value**, so the
+`keys: List[T]` line is not an edge case there, it is the middle of the
+parameter list. The refusal this doc is about (`Self.length reads a comptime
+class attribute … and what it reads is 'keys', a PARAMETER of Box`) is now
+reached with the parameter actually BOUND — which is what §0 measured as missing
+and what §5's option (1) asked for.
+
+Verified with `test_formal_monomorph.py` (13 PASS), `test_formal_imports.py`
+(70 PASS), `test_module_cache.py` (147 PASS), `test_dual_cpp_elaboration.py`
+(6 PASS), `test_closure_capture_comptime_func_params.py` (4 PASS),
+`test_comptime_bracket_params.py` (5 PASS). **This is a change to the compiled
+path's shared monomorphizer and its full `make gate` is owed and was not run
+here** (this worker is light); the integrator's gate is the check that matters
+for it.
 
 ---
 
@@ -219,45 +254,87 @@ quotes the family as a bound and not as a file count.
 
 **It is a monomorphizer, or something narrower.** The two halves:
 
-1. **Bind the parameter values at the instantiation site.** Every
-   `C[args]` / `C[T=…, args]` in an importing unit would compile the struct
-   again with `Self.<param>` substituted. This is the same project
-   `FORMAL_binary_heap_mojo_after_the_len_value.md` §2 costs at (a) a
-   monomorphizer, (b) a mangling function, (c) CAS keying by
-   `(template-id, type args, comptime params)`, (d) a naming decision for
-   `ReflectedFn.display_name` — **weeks**, and `doc/ABI.md` §Generics already
-   makes each instantiation the boundary symbol, so the ABI is ready and only the
-   compiler is not.
+1. ~~**Bind the parameter values at the instantiation site.**~~ **BUILT**
+   (`formal/monomorph.py`, 2026-10-03), and its one gap — a parameter whose
+   annotation is a type application — is closed (§0a). The rest of what that
+   half was cost at is also done or not needed: the mangling is
+   `monomorphize.mangle` (`(b)`), `demands_key` carries the type arguments so
+   two demand sets are two artifacts (`c`), and the instantiation is published
+   under the mangled name rather than `ReflectedFn.display_name` (`d`).
 2. **A comptime evaluator** that can run `len(list)`, `try_index` and `.or_else`
-   over a parameter-supplied list. This alone is NOT enough and should not be
-   started for this row: `TypeDict`'s value is a *function of the instantiation
-   arguments*, and an evaluator that can fold `len([1,2,3])` still cannot say
-   which list it was handed, because the class body never learns it.
+   over a parameter-supplied list. **This is now the whole of what is left,
+   and §0a is what made it reachable**: the class body now learns WHICH list it
+   was handed, because `instantiate` wrote it there. The warning this section
+   used to carry — "an evaluator that can fold `len([1,2,3])` still cannot say
+   which list it was handed, because the class body never learns it" — no longer
+   applies.
 
-**Do not start (2) for this row.** The refusal is correct and the diagnostic now
-says why; what is missing is (1), and (2) without (1) moves 0 files.
+   **So the next step is a folder, and it is a narrow one.** The value the
+   corpus wants folded is `len(<a literal the instantiation supplied>)`, which is
+   the ONE shape §0a's table ends on (`len(Self.keys)` → `len([1,2,3])` in the
+   emitted concrete body). `formal/comptime_runner.py` is where a comptime
+   expression is evaluated today; the question a taker has to answer is whether
+   its evaluator can fold `len` over a literal LIST — a closed-form function of
+   a constant — which is a much smaller thing than "`try_index` and `.or_else`
+   over a parameter-supplied list", and is what `TypeDict`'s `length` and
+   `_index` need before anything else does.
+
+3. **The variadic half of the arity check** (`*values: Trait`). Every element of
+   `args` is one type argument, so a use site that writes one argument per
+   VALUE — `TypeDict[T=Int, Trait=AnyType, [1,2,3], Int, String, Float64]` — is
+   refused for arity where the declaration says `*values`. The message is the
+   right shape (a refusal, not a guess — `type_arg_text`'s rule) and the fix is
+   `type_arg_text` growing a variadic form: the first `n - k` arguments after the
+   declared ones are the variadic ones, and the rest is the identity of the
+   instantiation. §"what is not covered" in
+   `bugs/FORMAL_generic_monomorph_scope.md` is where the ABI half of it belongs.
+
+## What is left, in one line each
+
+* a comptime folder for `len(<literal list>)` over a substituted parameter
+  (§5 item 2) — `formal/comptime_runner.py` is the place to look;
+* the variadic arity rule (§5 item 3);
+* `make gate` for the shared-engine change in §0a, which is the integrator's.
 
 ## 6. Reproducing
 
-```sh
-export PATH=/opt/homebrew/bin:$PATH
-mkdir -p .tmp/ptd && cat > .tmp/ptd/m.mojo <<'EOF'
+The bracket fix, which is §0a — write `.tmp/ptd/m.mojo` as:
+
+```python
 struct Box[T: AnyType, keys: List[T]]:
     comptime length = len(keys)
 
     def size(self) -> Int:
         return Self.length
-EOF
-python3 fire.py build --formal --no-prove -o .tmp/ptd/m.aout .tmp/ptd/m.mojo
-python3 fire.py build --formal --no-prove --backend=x86_64 \
-  -o .tmp/ptd/m.x86 .tmp/ptd/m.mojo
+```
 
-# and the stdlib file
-python3 fire.py build --formal --no-prove -o .tmp/td \
-  ../new-modular/Mojo/stdlib/std/collections/type_dict.mojo
+then
 
-# the tests
-python3 test_formal_run.py comptime_binding_reading_a_struct_parameter_is_its_own_refusal \
-  comptime_binding_reading_a_variadic_parameter_is_its_own_refusal \
-  comptime_binding_with_a_literal_value_still_builds
+```sh
+export PATH=/opt/homebrew/bin:$PATH
+python3 -c "import formal.monomorph as MO, fire_compiler as F; \
+    src = open('.tmp/ptd/m.mojo').read(); \
+    name, out = MO.instantiate(src, 'Box', ('Int', '[1, 2, 3]')); \
+    print(out); F.Parser(F.py_tokenize(out)).parse_module(); print('PARSES')"
+python3 -c "import elaborate as E; \
+    print(E.type_param_names(open('../new-modular/Mojo/stdlib/std/collections/type_dict.mojo').read()))"
+python3 tools/memslot.py --gb 8 --label mm -- python3 test_formal_monomorph.py
+```
+
+and the refusal that is still there, with the parameter now bound:
+
+```console
+$ python3 fire.py build --formal --no-prove -o .tmp/ptd/m.aout .tmp/ptd/m.mojo
+build: Self.length reads a `comptime` class attribute of Box, whose value is
+`len(keys)` — and what it reads is 'keys', a PARAMETER of Box. …
+```
+
+and the three rows that pin the refusal and its control, which still pass with
+the substitution in place:
+
+```sh
+python3 tools/memslot.py --gb 8 --label t -- \
+  python3 test_formal_run.py comptime_binding_reading_a_struct_parameter_is_its_own_refusal \
+    comptime_binding_reading_a_variadic_parameter_is_its_own_refusal \
+    comptime_binding_with_a_literal_value_still_builds
 ```
