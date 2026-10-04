@@ -9133,6 +9133,64 @@ def main():
             print(f"FAIL  {name}: expected {want!r}, got {out!r}")
             _FAIL += 1
     _test_cross_module_ctor_param_types_every_field()
+
+    # A constructor PARAMETER is not a FIELD. The cross-module constructor
+    # evidence above (`_xmod_ctor_field_hints`) records a literal argument's
+    # ctype under "<qualifier>::<struct>::<name>", and the defining gen
+    # applied that key straight into its own `struct_field_types` — which
+    # MINTS the entry when it is not already there. So `def __init__(self,
+    # tokens): self.toks = tokens` gave the struct a second field named
+    # `tokens`, never assigned by anything, and every generated accessor
+    # answered for it: `getattr(obj, 'tokens')` returned that unwritten slot
+    # (an empty container, because that is what a container field is
+    # initialised to) where CPython raises `AttributeError`. Exit 0, no
+    # diagnostic, and a plausible-looking wrong value.
+    #
+    # The assertion has to be the AttributeError and not the struct text: of
+    # the three symptoms (the typedef, the generated getattr, the field dump)
+    # only the AttributeError is one a user can observe, and only it
+    # distinguishes "the field is absent" from "the field is there and
+    # happens to be empty". Every constructor parameter is a candidate, which
+    # is why the fixture has two per class.
+    def _test_imported_ctor_param_is_not_a_field():
+        global _PASS, _FAIL, _TIMEOUT
+        name = "imported_ctor_param_is_not_a_field"
+        defn = ("class Zorp:\n"
+                "    def __init__(self, tokens, more):\n"
+                "        self.toks = tokens\n"
+                "        self.other = more\n")
+        use = ("from xmodctor4_defn import Zorp\n"
+               "\n"
+               "def main():\n"
+               "    z = Zorp([9], [1])\n"
+               "    print(z.toks)\n"
+               "    print(z.other)\n"
+               "    for name in ('tokens', 'more'):\n"
+               "        try:\n"
+               "            print(getattr(z, name))\n"
+               "        except AttributeError:\n"
+               "            print('AttributeError')\n"
+               "\n"
+               "main()\n")
+        try:
+            out = _compile_two_files_do_imports_and_run(
+                'xmodctor4_defn.py', defn, 'xmodctor4_use.py', use)
+        except subprocess.TimeoutExpired as e:
+            print(f"TIMEOUT {name}: {e}")
+            _TIMEOUT += 1
+            return
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        want = "[9]\n[1]\nAttributeError\nAttributeError\n"
+        if out == want:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected {want!r}, got {out!r}")
+            _FAIL += 1
+    _test_imported_ctor_param_is_not_a_field()
     # CODEGEN_same_bare_name_struct_collision_across_modules:
     # two REAL classes sharing a bare name across two modules. The single
     # string this codegen used as a struct's C identity was the bare
@@ -9797,11 +9855,13 @@ print(str(d))
     # qualifier. A merge or a wrong qualifier shows up here as a field or a
     # symbol the user never wrote, with no gcc error at all.
     #
-    # Scoped to the five selfhost names rather than "only the user's fields",
-    # because the cross-module registration has a SEPARATE defect of its own
-    # (an `__init__` parameter name leaking in as a field — see
-    # `bugs/CODEGEN_imported_class_gets_ctor_params_as_fields.md`), and an
-    # assertion about that would be red for a reason this test is not about.
+    # The field set is asserted EXACTLY, not against a hand-listed subset of
+    # names to exclude: the cross-module constructor-evidence pass used to key
+    # its hints on the constructor's PARAMETER name, which minted a field the
+    # class never assigns (`tokens` here), so an "only the five selfhost names
+    # are absent" assertion stayed green through that defect. The only field
+    # the fixture assigns is `toks`, so `fields - {'__mojo_type_id', 'toks'}`
+    # empty is the whole claim and needs no exclusion list.
     def _parser_struct_and_symbols():
         global _PASS, _FAIL
         with tempfile.TemporaryDirectory() as wd:
@@ -9819,14 +9879,13 @@ print(str(d))
                                   filename=entry)
         m = re.search(r'typedef struct Parser \{(.*?)\} Parser;', c, re.S)
         fields = set(re.findall(r'\b(\w+);', m.group(1))) if m else set()
-        merged = sorted(fields & {'_tok', '_pos', '_filename',
-                                  '_pending_decs', '_known_traits'})
+        extra = sorted(fields - {'__mojo_type_id', 'toks'})
         syms = sorted({s for s in re.findall(r'\b(\w*Parser_\w+)\s*\(', c)})
         bad_syms = [s for s in syms if s.startswith('fire_compiler_')]
-        if merged or bad_syms or 'toks' not in fields \
+        if extra or bad_syms or 'toks' not in fields \
                 or not any(s.endswith('_Parser_peek') for s in syms):
             print("FAIL  user_struct_named_parser_emits_its_own_layout_and_qualifier: "
-                  f"fields={sorted(fields)} merged={merged} symbols={syms}")
+                  f"fields={sorted(fields)} unexpected={extra} symbols={syms}")
             _FAIL += 1
         else:
             print("PASS  user_struct_named_parser_emits_its_own_layout_and_qualifier")

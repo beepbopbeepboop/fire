@@ -3315,15 +3315,54 @@ def gen_module_impl(self, stmts):
             # field deeper: parse the target module's OWN source (it has not
             # been compiled yet) to find the constructor's param names, then
             # record each literal argument's ctype under
-            # "<home-qualifier>::<struct>::<param>", for the defining
+            # "<home-qualifier>::<struct>::<FIELD>", for the defining
             # temp_gen to apply directly into its own struct_field_types.
+            #
+            # The key's last segment is the FIELD each constructor parameter
+            # FEEDS, not the parameter's own name, and the two are not the
+            # same thing: `def __init__(self, tokens): self.toks = tokens`
+            # is the ordinary spelling of a class whose field is named after
+            # what it holds. Keying on the parameter minted a FIELD the class
+            # does not have — `struct_field_types` grows it, so the struct
+            # typedef, the generated `_mojo_getattr_`/`_mojo_setattr_` and
+            # the field dump all answer for an attribute that was never
+            # assigned — and `getattr(obj, '<param>')` returned that
+            # never-written slot instead of raising. Exit 0, no diagnostic,
+            # and the value was a plausible-looking empty container because
+            # that is what an unwritten container slot is initialised to.
+            #
+            # So the walk reads the `self.<field> = <param>` assignments, and
+            # a parameter that feeds NO field records nothing: there is no
+            # field for the argument's type to be evidence about, which is
+            # the same reason the same-module `_ctor_init_params` pass has
+            # always keyed on real field names reached through an assignment.
+            # ONE parameter can feed SEVERAL fields (`self.s = s` plus
+            # `self.n = s`), and every one of them is the same value, so the
+            # answer is a LIST of fields per parameter and the hint is
+            # recorded once per field — that is the same coverage the
+            # `cross_module_ctor_param_types_every_field` case pins, and
+            # keying on one field per parameter would have narrowed it.
+            # Source order, no dedup: `self.n = s` twice is one hint applied
+            # to the same field, which the conflict rule then sees as
+            # agreement rather than as a disagreement with itself.
             def _xf_struct_init_params(_xfm, _xfs):
+                """[(param_name, [field, ...])] for the struct's `__init__`."""
                 for _xfstmt in _xg_parse_mod(_xfm):
                     if isinstance(_xfstmt, StructDef) and _as_str(_xfstmt.name) == _xfs:
                         for _xfmeth in _xfstmt.methods:
                             if _as_str(_xfmeth.name) == '__init__':
                                 _xfnames = gimple_ctypes._param_names_stripped(_xfmeth.params)
-                                return [n for n in _xfnames if n != 'self']
+                                _xfout = {n: [] for n in _xfnames if n != 'self'}
+                                for _xfn in _walk_ast(_xfmeth.body):
+                                    if not isinstance(_xfn, AssignStmt):
+                                        continue
+                                    _xff = _gmi_self_member(_xfn.target)
+                                    if not _xff or not isinstance(_xfn.value, IdentExpr):
+                                        continue
+                                    _xfv = _as_str(_xfn.value.name)
+                                    if _xfv in _xfout and _xff not in _xfout[_xfv]:
+                                        _xfout[_xfv].append(_xff)
+                                return [(n, _xfout[n]) for n in _xfout]
                         return None
                 return None
 
@@ -3437,7 +3476,13 @@ def gen_module_impl(self, stmts):
                     _xfct = _xf_lit_ctype(_xfa)
                     if not _xfct:
                         continue
-                    _xf_record(_xf_key_base + '::' + _xf_pnames[_xfi], _xfct)
+                    # `_xf_pnames[_xfi][1]` is the list of FIELDS this argument
+                    # feeds, and empty when the parameter feeds no field at
+                    # all — then the argument's type is not evidence about
+                    # any field, so there is nothing to record. See
+                    # `_xf_struct_init_params`'s own docstring.
+                    for _xf_fld in _xf_pnames[_xfi][1]:
+                        _xf_record(_xf_key_base + '::' + _xf_fld, _xfct)
 
         for _mc_iter in sorted(modules_to_compile):
             # FRESH `_mn` local, NOT `module_name = _as_str(module_name)`:
