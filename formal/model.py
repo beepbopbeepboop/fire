@@ -33577,6 +33577,39 @@ def member_access_refusal(expr, fn_name, frame_holders) -> str:
         member_base_text(expr) in (frame_holders or ()))
 
 
+def aug_assign_target_refusal(got: str) -> str:
+    """The fallback for an augmented-assignment target that is not a NAME, a
+    member of a receiver, or a subscript — ONE sentence for both backends.
+
+    A `MemberExpr` target that is not a frame slot of this function is a
+    DIFFERENT question and has its own refusal, the one above: the real premise
+    there is the binding of the base, and this message would say "not a plain
+    name" about an expression that is not the problem. So the two are kept apart
+    on purpose, and this one is only reachable for a node type with no lowering
+    at all.
+
+    Both backends reach it, and they used to spell it differently — arm64 "must
+    be a plain name", x86-64 "must be a plain name on the formal x86-64 path" —
+    which is the same class of defect
+    `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
+    function.md` is about: one construct, two sentences, and a reader has to
+    guess which machine wrote it. The architecture is not named, for the reason
+    `member_access_refusal` does not name one either: the two backends are ONE
+    language implementation and a message that says which of them refused is a
+    difference in this function rather than in the backend.
+
+    `got` is the node's class name, and it is in the message because "this path
+    cannot lower that" without saying WHAT is the sentence every reader has to
+    go read the source for.
+    """
+    return (
+        f"an augmented assignment target on this path must be a plain name, a "
+        f"field of a receiver this function holds, or a subscript (got {got}); "
+        f"a member whose receiver is not a frame slot of this function is "
+        f"refused by `field_access_refusal` instead, because the question there "
+        f"is the binding of the base rather than the shape of the target")
+
+
 # ── A member read through a LITERAL base: no storage, so no field ────────────
 #
 # The one member base that needs no classification to rule out, and the two

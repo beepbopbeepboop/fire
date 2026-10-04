@@ -2195,8 +2195,8 @@ dylib_exports: list = None, globals_base: int = None,
                 name = stmt.target.name
                 self._check_comptime_target(name, "augmented assignment")
             else:
-                raise CodegenError(
-                    "augmented assignment target must be a plain name")
+                raise CodegenError(M.aug_assign_target_refusal(
+                    type(stmt.target).__name__))
             # fire tokens carry `+=`/`|=`/`^=`/…; the encoder table wants
             # the bare operator — same set `_emit_binop`'s ALU map accepts.
             op = stmt.op[:-1] if stmt.op.endswith('=') and stmt.op != '==' \

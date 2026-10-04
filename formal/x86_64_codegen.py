@@ -2082,21 +2082,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 # A receiver FIELD of a by-reference struct is a real store
                 # (`mov [holder + 8*slot], value`), and it is the whole reason
                 # a method's effect is visible to its caller. Any other
-                # MemberExpr target is a field of an object formal has no
-                # model for: evaluate both sides and drop the store (the same
-                # compile-only reading a MemberExpr load gets).
+                # MemberExpr target is a field of an object formal has no model
+                # for, and it is refused rather than dropped — see
+                # `_frame_member_slot` and `_refuse_member_target`, which is
+                # where both halves of that are written down.
                 if isinstance(stmt.target, F.MemberExpr):
-                    key = _member_slot_key(stmt.target)
-                    # `_frame_nested_slots` is here for the same reason the
-                    # load side has its own branch: a nested key is not in
-                    # `_frame_slots`, so without it `o.inner.a = 1` would fall
-                    # into the "no model for this object" reading below and be
-                    # DROPPED — the program would build, run, and return a
-                    # number the source never wrote.  arm64 routes every name
-                    # through `_store_var` and would have stored it, so this is
-                    # also the divergence the pair must not have.
-                    if key is not None and (key in self._frame_slots
-                                            or key in self._frame_nested_slots):
+                    key = self._frame_member_slot(stmt.target)
+                    if key is not None:
                         self._emit_expr(stmt.value)
                         self._store_var(key, Reg.RAX)
                         # …and the slot's VALUE KIND has to be recorded, the
@@ -2110,27 +2102,17 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                         # thing this pair is not allowed to do.
                         self._note_binding(key, stmt.value)
                         return
-                    # REFUSED, not dropped.  This used to evaluate both sides
-                    # and return, which is a SILENTLY DISCARDED STORE: the
-                    # program built, ran, and the write was simply not there.
-                    # arm64's `_store_var` had no slot either and fell through
-                    # to `mov x19, src`, so the two architectures disagreed
-                    # about the same source — one dropped it, one put it in a
-                    # register the next function reads as its first parameter.
-                    # Wave 5's rule exactly: on x86-64 a missing branch is a
-                    # dropped store, not a wrong value.  The words are the
-                    # shared model's, so both arches print the same line — and
-                    # both spell the BASE (`a[0]`, not `…`), because the base is
-                    # what the sentence is about.
-                    #
-                    # The base is EMITTED first, which is what a base that is
-                    # itself unanswerable needs to say so rather than being
-                    # reported as an unclassifiable field; arm64's arm at the
-                    # same shape gives the reason in full
-                    # (`model.member_access_refusal`).
-                    self._emit_expr(M.member_base_node(stmt.target))
-                    raise CodegenError(M.member_access_refusal(
-                        stmt.target, self.func_name, self._frame_holders))
+                    # REFUSED, not dropped, and the refusal is the shared one.
+                    # This used to evaluate both sides and return, which was a
+                    # SILENTLY DISCARDED STORE: the program built, ran, and the
+                    # write was simply not there. arm64's `_store_var` had no
+                    # slot either and fell through to `mov x19, src`, so the two
+                    # architectures disagreed about the same source — one
+                    # dropped it, one put it in a register the next function
+                    # reads as its first parameter. Wave 5's rule exactly: on
+                    # x86-64 a missing branch is a dropped store, not a wrong
+                    # value.
+                    self._refuse_member_target(stmt.target)
                 raise CodegenError(
                     f"assignment to {type(stmt.target).__name__} is not "
                     f"lowered on the formal x86-64 path; only a plain name "
@@ -2451,6 +2433,56 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._flush_pending_finally()
         self._emit_call_exit(1)
 
+    def _frame_member_slot(self, node):
+        """The frame slot `node` names, or None having refused the access.
+
+        THE question this backend asks about a member TARGET, asked in one
+        place, because three sites ask it — the store side of an assignment,
+        the read-modify-write of an augmented assignment, and a tuple
+        assignment's target — and the third site used to ask it differently and
+        say something false.
+
+        A member target has exactly two answers here. It is a field of a frame
+        this function holds — a by-reference struct's slot, at depth one in
+        `_frame_slots` or deeper in `_frame_nested_slots` — and then the load
+        and the store are a memory access on the slot's name. Or it is a field
+        of something this path has no model for, and that is the shared model's
+        `member_access_refusal`: the refusal names the BASE and says the path
+        cannot say what the base holds, which is the real premise.
+
+        The depth arm is not optional: a nested key is not in `_frame_slots`, so
+        without it `o.inner.a = 1` fell into the second answer and the store was
+        DROPPED — the program built, ran, and returned a number the source never
+        wrote. That was this backend; arm64 routes every name through
+        `_store_var` and would have stored it, so it was also a divergence.
+
+        Returning None rather than refusing here is what lets the store sites
+        keep their own control flow (the assignment site emits the value
+        first), and it is `_refuse_member_target` below that raises — with the
+        base emitted first, which is what a base that is ITSELF unanswerable
+        needs so it says so rather than being reported as an unclassifiable
+        field.
+        """
+        key = _member_slot_key(node)
+        if key is not None and (key in self._frame_slots
+                                or key in self._frame_nested_slots):
+            return key
+        return None
+
+    def _refuse_member_target(self, node) -> None:
+        """The ONE refusal for a member target this function cannot store to.
+
+        The words are the shared model's, so both architectures print the same
+        line — and both spell the BASE (`a[0]`, not `…`), because the base is
+        what the sentence is about.
+        """
+        # The base is EMITTED first, which is what a base that is itself
+        # unanswerable needs to say so rather than being reported as an
+        # unclassifiable field.
+        self._emit_expr(M.member_base_node(node))
+        raise CodegenError(M.member_access_refusal(
+            node, self.func_name, self._frame_holders))
+
     def _emit_aug_assign(self, stmt) -> None:
         op = stmt.op[:-1] if stmt.op.endswith("=") and stmt.op != "==" \
             else stmt.op
@@ -2472,18 +2504,41 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             return
         if isinstance(stmt.target, F.IdentExpr):
             name = stmt.target.name
-        elif isinstance(stmt.target, F.MemberExpr) \
-                and _member_slot_key(stmt.target) in (
-                    self._frame_slots.keys() | self._frame_nested_slots.keys()):
-            # `self.count += 1` on a by-reference receiver. No new code: the
-            # load and the store below go through `_load_var`/`_store_var`,
-            # which already turn a frame slot into a memory access, so the whole
-            # accumulator dance is unchanged.
-            name = _member_slot_key(stmt.target)
+        elif isinstance(stmt.target, F.MemberExpr):
+            # `self.count += 1` on a by-reference receiver, and it is the SAME
+            # question the assignment site asks — `_frame_member_slot`, the one
+            # place this backend decides it — so there is no second answer to
+            # keep in step. No new code below: the load and the store go through
+            # `_load_var`/`_store_var`, which already turn a frame slot into a
+            # memory access, so the whole accumulator dance is unchanged.
+            #
+            # This site used to have its own narrower test (`key in
+            # _frame_slots or key in _frame_nested_slots`, the same pair) and a
+            # node-type refusal for everything else, so the two architectures
+            # disagreed about one source file for a reason that was about the
+            # SPELLING rather than the program. Measured, with
+            # `gen.temp_counter += 1` — which is what
+            # `mojo/backend_gimple/emit_infra.py:2983` writes:
+            #
+            #   arm64   'gen.temp_counter' is a field access through 'gen', and
+            #           this path has no way to say what 'gen' holds. …
+            #   x86_64  augmented assignment target must be a plain name on the
+            #           formal x86-64 path (got MemberExpr)
+            #
+            # The second sentence is FALSE about the file — a MemberExpr target
+            # is lowered here, when the member is a frame slot, and the real
+            # premise is the BINDING OF THE BASE — and the same program written
+            # `gen.temp_counter = 1` or `gen.temp_counter, x = 1, 2` already
+            # produced arm64's sentence on BOTH machines. Filed as
+            # `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_
+            # same_function.md`.
+            key = self._frame_member_slot(stmt.target)
+            if key is None:
+                self._refuse_member_target(stmt.target)
+            name = key
         else:
-            raise CodegenError(
-                "augmented assignment target must be a plain name on the "
-                f"formal x86-64 path (got {type(stmt.target).__name__})")
+            raise CodegenError(M.aug_assign_target_refusal(
+                type(stmt.target).__name__))
         # The same refusal `_emit_binop` makes, asked HERE because an augmented
         # assignment is a separate emitter that never went through it. That is
         # not a hypothetical: `s += t` built, ran, and printed `[]` on arm64
@@ -6890,9 +6945,11 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if isinstance(el, F.IdentExpr):
             return el.name
         if isinstance(el, F.MemberExpr):
-            key = _member_slot_key(el)
-            if key is None or (key not in self._frame_slots
-                               and key not in self._frame_nested_slots):
+            key = self._frame_member_slot(el)
+            if key is None:
+                # No base emitted first: a tuple target is not part of a
+                # program the way a store's own target is, and the refusal's
+                # base is the same one the sentence names.
                 raise CodegenError(M.member_access_refusal(
                     el, self.func_name, self._frame_holders))
             return key
