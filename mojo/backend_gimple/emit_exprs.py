@@ -124,14 +124,15 @@ def lower_expr(gen, node) -> tuple[str, str]:
 
 
 # The operators whose result is PROVABLY a plain Python integer when every
-# operand is: arithmetic and bitwise only. `//`, `%` (string), `**`, `in`,
-# `is`, `and`/`or`, `:=` and every comparison are excluded — a comparison's
-# result is already a `_Bool` which `_mark_known_int`'s type test rejects,
-# and each of the others is dispatched before the arithmetic sites this table
-# guards. `%` appears here BECAUSE its string form is already gone by the
-# arithmetic tail: what reaches it is numeric modulo. `~` is the UNARY
-# complement only (it is the sole member with no binary spelling), and `-`
-# serves both spellings.
+# operand is: arithmetic and bitwise only. A comparison is excluded — its
+# result is already a `_Bool`, which `_mark_known_int`'s type test rejects —
+# and `in`, `is`, `and`/`or` and `:=` are excluded because each is dispatched
+# before the arithmetic sites this table guards. `%` appears here BECAUSE its
+# string form is already gone by the arithmetic tail: what reaches it is
+# numeric modulo. `//` is NOT here: it is dispatched even earlier, so it
+# carries its own producer at `_lower_floordiv`. `~` is the UNARY complement
+# only (the sole member with no binary spelling), and `-` serves both
+# spellings.
 _INT_ARITH_OPS = frozenset(('+', '-', '*', '/', '&', '|', '^', '~', '<<', '>>', '%'))
 
 
@@ -4535,10 +4536,12 @@ def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     # `//` on two known integers is another integer, exactly as in the
     # arithmetic tail — but this lowering is dispatched from `_lower_binary`
     # BEFORE that tail, so it needs its own producer or `d[6000000000 // 2]`
-    # keeps crashing (the operands here are the pointer-coercion temps when
-    # either side was a pointer, which are in nobody's set, so the type test
-    # in `_mark_known_int` and the guard on the ORIGINAL operand types are
-    # both load-bearing).
+    # keeps crashing. The guard is on `lt`/`rt`, which the two pointer-
+    # coercion arms above deliberately leave UNCHANGED (they rebind only
+    # `lv`/`rv`, to fresh `(int64_t)` casts): a boxed pointer reaches here as
+    # a `char *`/`T *` operand whose address floor-divided is not an integer,
+    # and its coercion temp is in nobody's set anyway, so the pair of tests
+    # cannot both pass for one.
     if lt in ('int', 'int64_t') and rt in ('int', 'int64_t'):
         _mark_known_int(gen, [lv, rv], 'int64_t', t)
     return 'int64_t', t
