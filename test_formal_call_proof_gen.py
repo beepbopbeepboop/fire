@@ -1926,6 +1926,138 @@ class TestStructFieldHasNoValueInTheModel(unittest.TestCase):
                                 "gap: %s" % (arch, err))
 
 
+class TestTheReturnFrameReadsX30ThroughAMaterialisedAddress(unittest.TestCase):
+    """`count` and `pow2`, declared rather than discovered, with the address
+    named.
+
+    Two `formal/examples/*.mojo` files were UNDECLARED reds of the `formal` job
+    until 2026-10-04: they are in neither `test_formal.py::EXPECTED_FAILURES` nor
+    its x86-64 table, so nothing was expected, nothing was reported, and two of
+    the corpus's heaviest examples had no proving case.  That is the hole the
+    marker discipline exists to close, and closing it is this class.
+
+    **The address is the failure, and the doc's first hypothesis was not it.**
+    Measured on arm64 (`python3 fire.py build --formal --backend=arm64
+    -o .tmp/count.aout formal/examples/count.mojo`, ~2 min, through
+    `formal/lean.py::run_lean`'s bounds), `count` fails with FIVE errors at two
+    sites, and the informative one is `rfl`:
+
+        count_proof.lean:5330:16: error: Tactic `rfl` failed: The left-hand side
+          mem_read_u64 (mem_write_u64 … (UInt64.ofNat 4294968008 -
+            (UInt64.ofNat 4294968008 % 4096 - ((if False then … else …) * 4096 +
+              UInt64.ofNat 8))).toNat (st.sp - UInt64.ofNat 1984))
+            (st.sp - UInt64.ofNat 8).toNat
+        is not definitionally equal to the right-hand side st.x30
+
+    That is the RETURN FRAME's `x30` read, and the slot was written through an
+    ADRP/ADD-materialised pointer — the `arm64_set_reg 17 s (page(pc) +
+    1024 * 4096)` successor earlier in the same file — so the read's address is
+    a LITERAL rather than `sp - K`, and the `mem_read_after_write_u64_slot` peel
+    in the `simp only` set has no `sp - K` to match.  The emitter chose that
+    address because it IS `sp - 1984`; nothing emitted says so, and that is the
+    missing lemma.
+
+    **The `(if False then UInt64.ofNat 1024 - UInt64.ofNat (2 ^ 21) else …)` in
+    the middle of the address is a dead arm and NOT the cause.** It is the ADRP
+    page-offset guard with its condition already decided (`1024 >= 2^20` is
+    false), `simp` normalises it, and the tactic that fails is `rfl` — so the
+    doc's reading of it as "the thing to explain" was wrong, and this class says
+    so where the next reader will look.
+
+    Lean-free by construction: it reads the GENERATED proof's text and
+    `test_formal.py`'s table, and it builds both programs with proof generation
+    OFF to establish that the gap is in the PROOF layer and not in codegen.
+    """
+
+    #: The two shapes the generated proof must carry for this doc's failure to be
+    #: the one it is: the epilogue's x30 read (`hx30fr_`, the fact whose `rfl`
+    #: fails) and the adrp-materialised register write that feeds it.  Both are
+    #: read off the TEXT, so this stays Lean-free — the frame OFFSET (`1984`)
+    #: is not in the file at all, it appears only in the goal Lean prints after
+    #: `simp` has rewritten the literal address, which is the point.
+    X30_READ = "hx30fr_"
+    ADRP = "arm64_set_reg 17"
+
+    STEMS = ("count", "pow2")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="x30frame-")
+        cls.proofs, cls.errors, cls.built = {}, {}, {}
+        import formal.build as fb
+        for stem in cls.STEMS:
+            src = os.path.join(os.getcwd(), "formal", "examples",
+                               stem + ".mojo")
+            with open(src) as f:
+                text = f.read()
+            cls.proofs[stem], cls.errors[stem] = _generate(cls.tmp, text, stem)
+            for arch in ("arm64", "x86_64"):
+                dst = os.path.join(cls.tmp, "%s-%s.mojo" % (stem, arch))
+                with open(dst, "w") as f:
+                    f.write(text)
+                try:
+                    fb.compile_formal(dst, arch=arch, output=os.path.join(
+                        cls.tmp, "%s-%s.aout" % (stem, arch)),
+                        prove=False, check=False)
+                    cls.built[(stem, arch)] = None
+                except Exception as e:        # noqa: BLE001
+                    cls.built[(stem, arch)] = f"{type(e).__name__}: {e}"
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_both_are_marked_with_the_address_in_the_reason(self):
+        import test_formal as T
+        for stem in self.STEMS:
+            self.assertIn(stem, T.EXPECTED_FAILURES,
+                          "%s is an UNMARKED failure of the `formal` suite job: "
+                          "the next session reads the marker list, does not "
+                          "find it, and re-derives this" % stem)
+            reason = T.EXPECTED_FAILURES[stem]
+            self.assertIn("sp -", reason,
+                          "%s: the marker does not say the read is at a frame "
+                          "slot, which is what makes it unpeelable: %r"
+                          % (stem, reason))
+            self.assertIn("materialis", reason,
+                          "%s: the marker does not say the address is "
+                          "materialised (adrp/add), which is the whole of the "
+                          "gap: %r" % (stem, reason))
+
+    def test_the_generated_proof_carries_the_materialised_address(self):
+        """The measurement the markers state, read off the generated text.
+
+        If the emitter ever stops materialising that address — a frame-slot
+        store it can canonicalise, say — the markers go stale, `test_formal.py`
+        reports them, and this fails first with the reason spelled out."""
+        for stem in self.STEMS:
+            path = self.proofs[stem]
+            self.assertIsNotNone(
+                path, "%s generated no proof at all, so the marker is naming "
+                      "a generation refusal and this class is measuring "
+                      "something else: %s" % (stem, self.errors[stem]))
+            with open(path) as f:
+                text = f.read()
+            self.assertIn(self.X30_READ, text,
+                          "%s: the proof carries no %s, so the epilogue's x30 "
+                          "read is not the fact that fails any more and this "
+                          "class is measuring something else"
+                          % (stem, self.X30_READ))
+            self.assertIn(self.ADRP, text,
+                          "%s: no adrp-materialised register write in the "
+                          "proof, so the address is no longer a literal and "
+                          "the gap this names has moved" % stem)
+
+    def test_both_programs_build_on_both_backends(self):
+        """Which side of the boundary each example is on: the program is
+        code-generator-clean and the gap is in the PROOF layer, so a marker that
+        said "the backend cannot lower this" would be wrong."""
+        for key, err in sorted(self.built.items()):
+            self.assertIsNone(err, "%s does not build with proofs off (%s), so "
+                                "the gap is not the one the marker names"
+                                % (key, err))
+
+
 class TestBottomTestedRangeLoop(unittest.TestCase):
     """A `for … in range(…)` loop, whose back edge is a CONDITIONAL branch.
 
