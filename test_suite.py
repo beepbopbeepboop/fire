@@ -1912,6 +1912,106 @@ def test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root():
           not stray, f'{stray}')
 
 
+# ── the per-child-budget residue: file -> how many literals it still spells ──
+#
+# The census `test_no_stale_per_child_budget_is_left_as_a_literal` walks, kept
+# as DATA so the check that reads it can be a ratchet instead of a prohibition.
+# Read the reasoning there and the per-file reading in
+# `bugs/TEST_stale_per_child_timeout_literals.md`; converting a file means
+# deleting its row here in the same commit, which is the only thing that makes
+# the number a measure of progress rather than a number.
+#
+# It is a per-file list rather than a regex over `timeout=[0-9]+` because the
+# question at a site is which KIND of child it is — a COMPILE, a LINK, a RUN, a
+# sweep, or none of the four — and that is not decidable from the text. Measured
+# 2026-10-04 with python3 3.14: 205 sites over 57 files, after this tree's
+# `test_formal_sweep.py` (7) and `test_formal_libc_symbol.py` (1) were converted.
+# That is this predicate's census — a `timeout=` KEYWORD read off the AST, over
+# `is_test_file_name`, which is EITHER spelling and so also holds the two
+# `formal/*_test.py` and the one `scripts/*_test.py` — and it is smaller than
+# the doc's 217-over-63 for two measurable reasons: a grep counts a `timeout=NN`
+# that is not a call keyword at all, and it walks `build/` and the other derived
+# trees this one skips.
+STALE_PER_CHILD_BUDGETS = {
+    'formal/x86_64_endtoend_test.py': 1,
+    'formal/x86_64_model_test.py': 1,
+    'scripts/bootstrap_full_test.py': 1,
+    'test_ab_native.py': 2,
+    'test_arm64_emission.py': 1,
+    'test_async_runtime_scaffold.py': 1,
+    'test_async_void_return.py': 5,
+    'test_async_with_lock_guard.py': 5,
+    'test_closure_capture_comptime_func_params.py': 2,
+    'test_comptime_bracket_params.py': 1,
+    'test_comptime_parity.py': 4,
+    'test_container_equality.py': 3,
+    'test_container_membership.py': 3,
+    'test_container_ordering.py': 3,
+    'test_coro_detached_async.py': 4,
+    'test_coro_future_await.py': 4,
+    'test_coro_nested_async_capture.py': 5,
+    'test_coro_runtime.py': 1,
+    'test_coro_scoreboard.py': 2,
+    'test_dict_tuple_key.py': 3,
+    'test_formal_admitted.py': 7,
+    'test_formal_argparse.py': 6,
+    'test_formal_cross_module.py': 2,
+    'test_formal_dylib.py': 2,
+    'test_formal_external_call.py': 1,
+    'test_formal_frame_return_overloads.py': 1,
+    'test_formal_imports.py': 4,
+    'test_formal_link_accounting.py': 2,
+    'test_formal_proof_breadth.py': 3,
+    'test_formal_runtime_link.py': 1,
+    'test_formal_specialization.py': 2,
+    'test_formal_sweep_cache_key.py': 2,
+    'test_formal_sys.py': 2,
+    'test_formal_tempfile.py': 3,
+    'test_formal_x86_64_dylib.py': 3,
+    'test_general_mutable_closure_capture.py': 2,
+    'test_gimple.py': 51,
+    'test_gimple_async_runner.py': 11,
+    'test_import_integration.py': 4,
+    'test_link_mode.py': 2,
+    'test_metal_codegen.py': 9,
+    'test_mixed_cpp_link.py': 1,
+    'test_mutable_async_capture.py': 5,
+    'test_nested_async_generic.py': 5,
+    'test_nonlocal.py': 2,
+    'test_ptr_registry.py': 2,
+    'test_python_source_mut_capture.py': 1,
+    'test_re_formal.py': 1,
+    'test_runtime_dylib.py': 1,
+    'test_selfhost.py': 1,
+    'test_selfhost_memory.py': 1,
+    'test_stdlib.py': 1,
+    'test_struct_formal.py': 1,
+    'test_taskgroup.py': 4,
+    'test_transitive_closure_capture.py': 5,
+    'test_x86_64_containers.py': 1,
+    'test_x86_64_decode.py': 1,
+}
+
+#: Files where a per-child literal is the SUBJECT rather than residue, with the
+#: reason each one is. Both are about admission and scheduling: a budget there
+#: is the thing under test, and converting one to `RUN_TIMEOUT_S` would make a
+#: self-test take hours and destroy what it asserts. Stated here rather than
+#: filtered, because a filter for "looks like a budget test" is a guess.
+BUDGET_IS_THE_SUBJECT = ('test_memslot.py', 'test_suite.py')
+BUDGET_SUBJECT_WHY = {
+    'test_memslot.py':
+        "p.wait(timeout=10) is testing that admission refuses an over-budget "
+        "request within a known window, and the sandbox jobs deliberately use "
+        "small budgets so the self-test finishes; RUN_TIMEOUT_S would make it "
+        "take hours and assert nothing",
+    'test_suite.py':
+        "the same subject from the runner's side — a driver under a cap, a "
+        "timeout that must be reported as its own class — plus the four "
+        "assertions that keep this file's own checks honest, whose windows are "
+        "what they are asserting about",
+}
+
+
 def test_no_stale_per_child_budget_is_left_as_a_literal():
     """A file that adopted the shared per-child budgets must not still spell one.
 
@@ -1999,6 +2099,77 @@ def test_no_stale_per_child_budget_is_left_as_a_literal():
           f'{len(literals)} site(s): ' + ', '.join(sorted(literals)[:12]))
     print(f'      budgets: {len(importers)} files on the shared constants, '
           f'{len(literals)} stale literal(s)')
+
+    # ── the rest of the corpus, as a RATCHET ────────────────────────────────
+    #
+    # The three checks above are scoped to files that IMPORT `exec_budget`,
+    # which is the set where "literal" is unambiguously wrong — and that scoping
+    # is also the hole: a file avoids the check forever by not importing, which
+    # is exactly what `test_gimple_runner.py` did (ten literals, no import)
+    # while its sibling `test_gimple_generator_runner.py` had the import and
+    # four literals anyway. So the other direction is asked here, over EVERY
+    # test file, and it is a ratchet rather than a prohibition:
+    # `STALE_PER_CHILD_BUDGETS` below is the census, and it has to match the
+    # walk EXACTLY — a file that is converted loses its row (or fails, if the
+    # count is stale), and a file that grows a literal appears in the diff and
+    # fails. That is what makes the residue shrink without making 56 files red
+    # on the day the rule is written.
+    #
+    # Converting a file is per-file reading, not a substitution: `test_gimple.py`
+    # mixes a 300 s `fire.py build` with a 30 s run of the executable it
+    # produced, and a site whose right answer is "none of these three" (a
+    # SIGTERM drain window, a host-tool probe) is named at the site rather than
+    # forced into a constant that does not describe it. The census, the
+    # exemptions and that reasoning are in
+    # `bugs/TEST_stale_per_child_timeout_literals.md`.
+    residue, subject = {}, {}
+    for rel in _test_files_in_repo():
+        path = os.path.join(HERE, rel)
+        try:
+            with open(path, 'r', errors='replace') as f:
+                tree = ast.parse(f.read(), filename=rel)
+        except (OSError, SyntaxError):
+            continue
+        n = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for kw in node.keywords:
+                if (kw.arg == 'timeout' and isinstance(kw.value, ast.Constant)
+                        and isinstance(kw.value.value, int)):
+                    n += 1
+        if not n:
+            continue
+        (subject if rel in BUDGET_IS_THE_SUBJECT else residue)[rel] = n
+
+    check('budgets: the residue census is the residue',
+          residue == STALE_PER_CHILD_BUDGETS,
+          'the census and the walk disagree. Converted a file? drop its row. '
+          'Added a literal? add the file with its count and read its call '
+          'sites. Difference: '
+          + '; '.join(
+              f'{k}: census {STALE_PER_CHILD_BUDGETS.get(k, 0)} vs walk '
+              f'{v}' for k, v in sorted(residue.items())
+              if STALE_PER_CHILD_BUDGETS.get(k) != v)
+          + ' | census-only: '
+          + ', '.join(sorted(set(STALE_PER_CHILD_BUDGETS) - set(residue))))
+    check('budgets: a file where the budget is the SUBJECT still has one',
+          sorted(subject) == sorted(BUDGET_IS_THE_SUBJECT),
+          'the exemption list and the files that actually carry literals '
+          'disagree: walk '
+          + repr(sorted(subject)) + ' vs declared '
+          + repr(sorted(BUDGET_IS_THE_SUBJECT)))
+    for rel in BUDGET_IS_THE_SUBJECT:
+        check(f'budgets: {rel} says why a literal is its subject',
+              len(BUDGET_SUBJECT_WHY.get(rel, '')) >= 40,
+              'the reason is what tells the next reader this is not residue')
+    check('budgets: the residue is not allowed to GROW',
+          len(residue) <= len(STALE_PER_CHILD_BUDGETS),
+          f'{len(residue)} files carry a literal against a census of '
+          f'{len(STALE_PER_CHILD_BUDGETS)}')
+    print(f'      budgets: {sum(residue.values())} literal(s) in '
+          f'{len(residue)} unconverted file(s), {sum(subject.values())} in '
+          f'{len(subject)} where the budget is the subject')
 
 
 def test_missing_fanout_item_is_a_named_failure():

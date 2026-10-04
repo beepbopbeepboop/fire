@@ -64,8 +64,12 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRE = os.path.join(HERE, "fire.py")
-BUILD_TIMEOUT = 300
-RUN_TIMEOUT = 60
+# The per-child budgets are `exec_budget`'s, for the reason its docstring gives:
+# a wall clock sized for "much more than a tiny program needs" fires on a loaded
+# machine, and a timeout inside a test file is reported as an ordinary FAIL of
+# the COMPILER. This file used to spell its own (300 and 60), which is the same
+# number in a place no reader can check against the others.
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 # The record terminator, for the reason every other formal test file gives
 # (`test_formal_dylib.py` states it): a separator this suite can read back
@@ -113,8 +117,12 @@ def rosetta():
     if sys.platform != "darwin":
         return None
     try:
+        # A host probe, not compiled code: `arch` running `/usr/bin/true`, whose
+        # answer is whether this host can run an x86-64 image at all. The RUN
+        # budget because it is the cheapest child in this file, and a comment
+        # because the same number as an image run would otherwise be ambiguous.
         p = subprocess.run(["arch", "-x86_64", "/usr/bin/true"],
-                           capture_output=True, timeout=60)
+                           capture_output=True, timeout=RUN_TIMEOUT_S)
         return p.returncode == 0
     except Exception:
         return False
@@ -124,7 +132,7 @@ def build(src, out, arch):
     cmd = [sys.executable, FIRE, "build", "--formal", "--no-prove",
            "--backend=" + arch, "-o", out, src]
     p = subprocess.run(cmd, capture_output=True, text=True,
-                       timeout=BUILD_TIMEOUT, cwd=HERE)
+                       timeout=COMPILE_TIMEOUT_S, cwd=HERE)
     return p.returncode, (p.stderr or p.stdout or "")
 
 
@@ -142,9 +150,9 @@ def run(out, arch):
         argv = ["arch", "-x86_64", out]        # Rosetta 2
     try:
         p = subprocess.run(argv, capture_output=True, text=True,
-                           timeout=RUN_TIMEOUT)
+                           timeout=RUN_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        return 124, "", f"the image did not finish within {RUN_TIMEOUT}s"
+        return 124, "", f"the image did not finish within {RUN_TIMEOUT_S}s"
     return p.returncode, p.stdout, p.stderr
 
 
