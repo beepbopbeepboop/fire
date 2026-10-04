@@ -768,6 +768,38 @@ MODULE_GLOBAL_CASES = [
 # asks the RIGHT operand's `__eq__` when the left one's returns NotImplemented,
 # and this path has no representation for NotImplemented to be returned as.
 REFUSALS = [
+    # A `DType`-ANNOTATED FRAME SLOT is a TYPE, and the kind table now says so.
+    # `S` has ONE field, so `self` IS `self.d` (`one_word_receiver_kind`), and
+    # `len(self)` is `len()` of a type tag. Before the `DType` row this was
+    # "classified as 'int', and an integer has no length" -- a sentence about a
+    # value the declaration says is a type, on both architectures. Nothing is
+    # newly refused: `len()` of a tag has no answer either way, and the two
+    # rows that exist for it (`len_refusal`'s TYPE_KIND row and
+    # `frame_slot_value_refusal`'s) are both about the same refusal.
+    #
+    # The default is the literal `5` rather than `DType.int32` on purpose: a
+    # field with no materializable class-level default gets no kind at all
+    # (`struct_field_kind`'s gate), so the row has to be one the gate opens.
+    #
+    # The needle is the new `frame_slot_value_refusal` row rather than
+    # `len_refusal`'s, because this spelling is read as a FRAME SLOT (`self.d`
+    # is a load at `base + 8k`) and so goes through the slot table. The sentence
+    # names the DECLARED type, which is the whole of what the row adds: the
+    # integer row used to answer here, and it is about a value the declaration
+    # says is a type.
+    ("a_dtype_annotated_field_is_not_an_integer",
+     "struct S:\n"
+     "    var d: DType = 5\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        printf(\"len=%d\", len(self.d))\n"
+     "        return 0\n"
+     "\n"
+     "def main(n):\n"
+     "    var s = S()\n"
+     "    s.size()\n"
+     "    return 0\n",
+     "is not a string and not a container, so there is no length of it"),
     # THE GATE that `a_dict_subscript_is_the_kind_of_the_pair_under_that_key`
     # earns by being answered: unanimity is over the pairs under ONE KEY, so a
     # literal that spells the same key twice with values of two kinds has no

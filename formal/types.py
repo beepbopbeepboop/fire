@@ -81,6 +81,21 @@ TYPE_NAMES = {
 # segfault with a plausible-looking format.
 STRING_TYPE_NAMES = frozenset({"String", "str", "StringLiteral", "StringSlice"})
 
+# Annotations that name the TYPE OF A TYPE. `DType` is the only spelling the
+# corpus writes, and one is the right number here: this is not a family whose
+# members can be derived by shape, it is the single annotation whose value on
+# this path is a TYPE TAG (`model.TYPE_KIND`, `model.type_tag`). It is a set
+# rather than the bare string for the reason the two tables above are sets —
+# `declared_type_kind` reads three vocabularies and a fourth that existed only
+# inline would be the one that drifts.
+#
+# Why it is needed at all: a `var d: DType` field was UNCLASSIFIED, so `len(self.d)`
+# and `self.d[i]` were refused by the machinery that refuses a word whose kind
+# nothing states, and `print(self.d)` refused too — while the same tag bound to a
+# LOCAL (`t = DType.int32`) was already `TYPE_KIND` and answered. One value, two
+# kinds, decided by where the name is written.
+DTYPE_TYPE_NAMES = frozenset({"DType"})
+
 # Annotations that name a DICT, and the third member of the same vocabulary
 # beside the two above. Kept here rather than in `model.py` because the same
 # discipline applies: a name that means "a string" and a name that means "a

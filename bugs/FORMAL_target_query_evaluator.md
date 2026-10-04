@@ -29,6 +29,44 @@ the language lets a query be written, not in a coverage number. The residue is
 unchanged and is still the residue: Blocker 1's two permanent refusals and the
 `-mcpu=` feature of item 4.**
 
+**Re-measured 2026-10-03 a second time (`work/formal16-8`): the gate this
+document names is no longer the one that fires, and the one that does belongs to
+another claim.** The table below says all three rows are stopped by "the dylib
+export rule … a module that declares only a GENERIC struct template exports
+nothing an importer can bind". That is no longer what happens. Measured today,
+arm64, `python3 fire.py build --formal --no-prove -o .tmp/info.out
+<stdlib>/std/sys/info.mojo`:
+
+    build: info.mojo imports 'std.collections.string.string_span', which cannot
+    be built either: binary_heap.mojo: BinaryHeap.pop() both changes its
+    receiver and returns a value, and a formal value is one 64-bit word …
+
+**So the import chain gets one module further than this document records**, and
+the export rule this document points a reader at no longer fires first — the
+blocker is now a body-level refusal inside `binary_heap.mojo`, whose subject is
+`formal/model.py`'s `receiver_writeback_name` and which
+`test_formal_run.py`'s `one_field_mutator_with_a_return_value_is_refused` pins.
+**A planner who measured the gate this document names would measure the wrong
+thing**, which is the whole reason this correction is here rather than left for
+the next reader to discover.
+
+What that changes about the two open items, and it changes nothing else:
+
+* **item 1 (the `comptime`-type-binding site vocabulary)** is still deliberately
+  not done, for the reason this document already measured — doing it moves two
+  files off the findings list, makes one of them WORSE (`variadics.mojo` gets a
+  message about a shape the source did not use), and builds nothing. It is now
+  also behind THREE blockers rather than two, so the bargain has not improved.
+* **item 4 (a per-CPU input for `target_has_feature`)** is still the only item on
+  the list that could ever let the 37-file family build, still a feature rather
+  than a fix, and now behind three blockers: the mutator-return shape above, the
+  `!kgen.target` type binding, and `_current_target()`'s own body.
+* **item 2 (the import diagnostic)** is closed and was closed on 2026-09-30.
+* **`target_has_query_evaluator`'s own landing evidence is unchanged**:
+  `python3 test_formal_target_queries.py` is 32/0 today, including the four §5
+  checks and the two §4 ones, so nothing about the evaluator regressed while the
+  gate in front of its consumer moved.
+
 **Updated 2026-10-03: this document's own rows are no longer reachable, and its
 item 1 is closed by a message rather than by a new site kind.** Both measured on
 this tree (`python3 tools/formal_sweep.py -j 3 -t 120 <the three files>`, arm64):

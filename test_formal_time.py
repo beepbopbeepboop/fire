@@ -644,6 +644,18 @@ def f(p: Pointer[P3]) -> int:
   p.value() = 1
   return 0
 """, "a STRUCT"),
+    # The needle is the sentence's OPERATIVE clause and not its framing, and
+    # for these two rows it is also the clause that tells them APART: both
+    # messages open with "the two have to agree about the element size", so a
+    # needle taken from the framing would match either row and stop measuring
+    # which condition refused. What is left is the clause each one actually
+    # turns on — `unscaled` cannot establish the offset as an integer at all,
+    # `widthmismatch` establishes a scale and it is the wrong width — which is
+    # the property `STORE_REFUSALS`'s own comment above asks for. Checked by
+    # hand on 2026-10-03: this program is still refused on arm64 and on
+    # x86-64, both with these clauses and both with the
+    # `p` is declared 'Pointer[Int64]', which is not a pointer to a 8-byte
+    # element` sentence that names the declaration at fault.
     ("unscaled", """\
 def f(p: Pointer[Int64], k) -> int:
   var q: Pointer[Int64] = p + k

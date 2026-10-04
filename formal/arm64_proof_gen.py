@@ -35,7 +35,8 @@ from formal import model as M
 from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
                           used_narrow_types, lean_trunc_defs, lean_trunc_name,
-                          parse_type_name, _range_args, uses_typed_model)
+                          mask_of, parse_type_name, _range_args,
+                          uses_typed_model)
 
 # Fallback leaf word for structured value-flow obligations the generator
 # cannot yet close automatically.  It is assembled from two halves because a
@@ -139,6 +140,55 @@ def _uint64_lit(v: int) -> str:
     if v < 0:
         v += 1 << 64
     return f"(UInt64.ofNat {v})"
+
+
+def _str_addr_term(e, scope) -> str:
+    """A string literal's value, as the address of its interned bytes.
+
+    THE value of a string on this path, and the reason this is a function
+    rather than a `return "(0 : UInt64)"` three lines below `_expr_go`: a string
+    is a bare `char *`, and the pointer it holds is the address the emitter gave
+    that text's bytes.  `info["str_addrs"]` is that address, and it is read off
+    the SCOPE because the scope is what both backends' generators already thread
+    through every renderer.
+
+    **What the fabricated `0` cost, measured on both architectures.** It is not
+    a hole, it is a proof of something FALSE, and `bugs/FORMAL_string_value_
+    model.md` names the rule the rest of this file already follows ("a stated
+    gap costs a program its proof, and a fabricated model costs it a proof of
+    something FALSE"):
+
+      * `def main(n) -> Int: return "small"` — the model says the program
+        returns 0 and the machine returns the address of `small`, so the
+        end-to-end theorem is false and **Lean rejects the proof** (measured:
+        four `is false` obligations on arm64). The program is correct; the
+        model was not.
+      * `def main(n) -> Int: printf("hi\\n"); return 5` — `printf`'s format
+        string is an extern call's argument, and the emitted
+        `{name}_pre_arg_0 : run_x0 … = 0` is false for the same reason. So
+        **no program containing a `printf` with a literal format proved at all**,
+        on either backend: `print(42)` passed because an integer argument is a
+        machine word the model does have.
+
+    A literal whose text is not in the table is REFUSED, not defaulted.  That is
+    the one case where the honest answer and the old answer differ in the other
+    direction — and it is reachable only from a caller that has no image to read
+    (a generator unit test), because a string the program contains is a string
+    the emitter interned.  Answering 0 there would be exactly the fabrication
+    above, in the one place nobody would notice it.
+    """
+    table = getattr(scope, "str_addrs", None)
+    addr = (table or {}).get(F.decoded_literal(e))
+    if addr is None:
+        raise NotImplementedError(
+            f"model: the string literal {F.decoded_literal(e)!r} is not in "
+            f"this image's intern table, so its value — the address of its "
+            f"bytes — is not a number this generator can state. Answering 0 "
+            f"would be a statement about the source rather than a model of it: "
+            f"a string on this path is a bare `char *`, and every theorem that "
+            f"compared the model's 0 against the machine's address was FALSE "
+            f"and Lean rejected the proof")
+    return _uint64_lit(addr)
 
 
 def _always_returns(stmts) -> bool:
@@ -348,11 +398,21 @@ class _Scope(dict):
     `admitted` is empty on every program that reaches no admitted contract, so
     every existing path behaves exactly as it did — which is what keeps the
     cached proofs in `~/.gmojo` describing the same files.
+
+    `str_addrs` is the image's INTERN TABLE (decoded text → the address of that
+    string's bytes) and rides here for the same reason, with the same shape: a
+    `str_addrs` reaching a value renderer is what lets it say a string literal's
+    value is that ADDRESS instead of a fabricated `0`, and an empty one is what
+    makes it refuse rather than guess.  The reasons it has to be the scope and
+    not a thirteenth argument are the two above: `_expr_go`, `_cmp_go`,
+    `_truth_go` and `_expr_ast` all already take the scope, and this is the
+    same class of "the image knows, the source does not" fact as `admitted`.
     """
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.admitted = {}
+        self.str_addrs: dict = {}
 
 
 def _call_go(e, param: str, env: dict, scope, render) -> str:
@@ -588,11 +648,20 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
     if isinstance(e, Bool):
         return "(1 : UInt64)" if e.value else "(0 : UInt64)"
     if isinstance(e, String):
-        return "(0 : UInt64)"
+        return _str_addr_term(e, scope)
     if isinstance(e, Unary):
         op = _expr_go(e.operand, param, env, vtypes, call_types, scope)
         if e.op == "-":
             return f"(0 - {op})"
+        if e.op == "~":
+            # `~` is BITWISE complement and `not` is the logical one, so the two
+            # get different answers here.  Reading `~x` as `x = 0` modelled
+            # `not` for a program whose machine answer is MVN (arm64) / NOT
+            # (x86-64) -- and the run test caught it, because the run tests are
+            # `native_decide` over the machine model.  `^^^` is the spelling
+            # `^` already uses and `UInt64.xor` is 64-bit, so the whole
+            # complement is one term with no library helper.
+            return f"({op} ^^^ 0xFFFFFFFFFFFFFFFF)"
         return f"(if {op} = 0 then (1 : UInt64) else (0 : UInt64))"
     if isinstance(e, BinOp):
         l = _expr_go(e.left, param, env, vtypes, call_types, scope)
@@ -827,12 +896,22 @@ def _expr_go_t(e, param: str, env: dict, vtypes: dict, call_types: dict,
     if isinstance(e, Bool):
         return "(1 : UInt64)" if e.value else "(0 : UInt64)"
     if isinstance(e, String):
-        return "(0 : UInt64)"
+        return _str_addr_term(e, scope)
     if isinstance(e, Unary):
         op = _expr_go_t(e.operand, param, env, vtypes, call_types, scope)
         t = infer_expr(e, vtypes, call_types)
         if e.op == "-":
             return _t_wrap(f"(0 - {op})", t)
+        if e.op == "~":
+            # At the DECLARED WIDTH, which is not the same thing as at 64: a
+            # 32-bit `~x` is `t32s (x ^^^ 0xFFFFFFFF)`, and writing the 64-bit
+            # mask there would only be saved by `_t_wrap`'s masking commuting
+            # with a low mask -- one coincidence, not one rule.  The machine
+            # complements 64 bits and then truncates (`_emit_trunc` after MVN /
+            # NOT), so the mask is the operand's own width and the wrapper says
+            # how the narrow result is read back.
+            return _t_wrap(
+                f"({op} ^^^ 0x{mask_of(resolve(t)):x})", t)
         return f"(if {op} = 0 then (1 : UInt64) else (0 : UInt64))"
     if isinstance(e, BinOp):
         l = _expr_go_t(e.left, param, env, vtypes, call_types, scope)
@@ -1717,6 +1796,7 @@ def _go_defs_for(prog, fn, tc: dict) -> list:
     # uses, so the model cannot substitute one contract for the callee the code
     # actually calls.
     scope.admitted = dict(getattr(prog, "admitted_calls", None) or {})
+    scope.str_addrs = dict((tc or {}).get("str_addrs") or {})
     tc = dict(tc or {})
     tc["fns"] = scope
     out = []
@@ -1791,7 +1871,7 @@ def _go_simp_lemmas(fn) -> list:
     return out
 
 
-def _expr_ast(e) -> str:
+def _expr_ast(e, scope=None) -> str:
     """Translate a Mojo expression to a ProofLib MojoExpr term.
 
     The `Call` arm keeps exactly one argument, and that is NOT a choice:
@@ -1800,6 +1880,12 @@ def _expr_ast(e) -> str:
     `_ast_bridge_gaps` is what keeps this honest — every caller of the bridge
     asks it first, so `e.args[0]` below is reached only for a call that can be
     stated.
+
+    `scope` is the `_Scope` every value renderer in this file already takes, and
+    the AST bridge needs it for the same reason `_expr_go` does: the `String`
+    arm below is the same word the model binds, so the two have to be built
+    from one reader (`_str_addr_term`) or `eval_eq_mojo` compares an address
+    against a placeholder.
     """
     if isinstance(e, Var):
         return f'MojoExpr.var "{e.name}"'
@@ -1808,15 +1894,29 @@ def _expr_ast(e) -> str:
     if isinstance(e, Bool):
         return f"MojoExpr.bool {str(e.value).lower()}"
     if isinstance(e, String):
-        return 'MojoExpr.var ""'
+        # `MojoExpr.var ""` was this arm, and it is the same fabrication as
+        # `_expr_go`'s: a string literal is not a read of a variable named "",
+        # it is a word holding the address of the literal's bytes. The AST
+        # exists to CROSS-CHECK the model, so a placeholder here and a real
+        # value there is a bridge that cannot be proved — and with the model
+        # fixed this has to be fixed with it, in one reader.
+        return f"MojoExpr.int {_str_addr_term(e, scope)}"
     if isinstance(e, Unary):
-        opname = "neg" if e.op == "-" else "not"
-        return f'(MojoExpr.unop "{opname}" ({_expr_ast(e.operand)}))'
+        # `~` and `not` are different operators, so they get different NAMES:
+        # `evalExpr` reads `"not"` as the logical one (`if x = 0 then 1 else 0`)
+        # and `"bnot"` as the bitwise complement (`^^^` every bit).  Spelling `~`
+        # `not` here is what made `eval_eq_mojo` agree with a model that was
+        # itself wrong -- the bridge compared two renderings of `not` for a
+        # program whose machine answer is MVN/NOT, and agreed about a different
+        # program than the one that ran.
+        opname = {"-": "neg", "~": "bnot"}.get(e.op, "not")
+        return f'(MojoExpr.unop "{opname}" ({_expr_ast(e.operand, scope)}))'
     if isinstance(e, BinOp):
         return (f'(MojoExpr.binop "{_lean_op(e.op)}" '
-                f'({_expr_ast(e.left)}) ({_expr_ast(e.right)}))')
+                f'({_expr_ast(e.left, scope)}) ({_expr_ast(e.right, scope)}))')
     if isinstance(e, Call):
-        return f'(MojoExpr.call "{_call_name(e)}" ({_expr_ast(e.args[0])}))'
+        return (f'(MojoExpr.call "{_call_name(e)}" '
+                f'({_expr_ast(e.args[0], scope)}))')
     return "MojoExpr.int 0"
 
 
@@ -1959,26 +2059,32 @@ def _ast_gap_message(gaps: list) -> str:
               "the measurement and the two routes.")
 
 
-def _stmts_ast(stmts) -> list:
-    """Translate a Mojo statement list to ProofLib MojoStmt terms."""
+def _stmts_ast(stmts, scope=None) -> list:
+    """Translate a Mojo statement list to ProofLib MojoStmt terms.
+
+    `scope` is `_expr_ast`'s, for `_expr_ast`'s reason: a string literal in the
+    AST is the same word the model binds, and both are built from
+    `_str_addr_term`.
+    """
     parts = []
     for st in stmts:
         if isinstance(st, Return):
-            parts.append(f"MojoStmt.return ({_expr_ast(st.value)})")
+            parts.append(f"MojoStmt.return ({_expr_ast(st.value, scope)})")
         elif isinstance(st, IfStmt):
             _c0, _tb0, _eb0 = _if_expand(st)
-            tb = ", ".join(_stmts_ast(_tb0))
-            eb = ", ".join(_stmts_ast(_eb0))
-            parts.append(f"MojoStmt.ifstmt ({_expr_ast(_c0)}) ([{tb}]) ([{eb}])")
+            tb = ", ".join(_stmts_ast(_tb0, scope))
+            eb = ", ".join(_stmts_ast(_eb0, scope))
+            parts.append(f"MojoStmt.ifstmt ({_expr_ast(_c0, scope)}) ([{tb}]) ([{eb}])")
         elif isinstance(st, Pass):
             parts.append("MojoStmt.pass")
         elif isinstance(st, Assign):
-            parts.append(f'MojoStmt.assign "{_target_name(st)}" ({_expr_ast(st.value)})')
+            parts.append(f'MojoStmt.assign "{_target_name(st)}" '
+                         f'({_expr_ast(st.value, scope)})')
         elif isinstance(st, AugAssign):
             # Faithful desugar: `x op= e` is `x = x op e`.
             parts.append(f'MojoStmt.assign "{_target_name(st)}" '
                          f'(MojoExpr.binop "{_lean_op(st.op.rstrip(chr(61)))}" (MojoExpr.var "{_target_name(st)}") '
-                         f'({_expr_ast(st.value)}))')
+                         f'({_expr_ast(st.value, scope)}))')
         elif isinstance(st, VarDecl):
             # The same desugar, for the same reason: `MojoStmt` has no
             # declaration form and it should not grow one. The AST exists to
@@ -1991,15 +2097,16 @@ def _stmts_ast(stmts) -> list:
             # source had two, and the cross-check compared a model of a
             # different program against itself and found nothing.
             parts.append(f'MojoStmt.assign "{_target_name(st)}" '
-                         f'({_expr_ast(st.value)})')
+                         f'({_expr_ast(st.value, scope)})')
         elif isinstance(st, ExprStmt):
-            parts.append(f"MojoStmt.exprstmt ({_expr_ast(st.value)})")
+            parts.append(f"MojoStmt.exprstmt ({_expr_ast(st.value, scope)})")
         elif isinstance(st, WhileStmt):
             if st.else_body:
                 raise NotImplementedError(
                     "ast model: while-else needs the generic loop contract")
-            body = ", ".join(_stmts_ast(st.body))
-            parts.append(f"MojoStmt.while ({_expr_ast(st.condition)}) ([{body}])")
+            body = ", ".join(_stmts_ast(st.body, scope))
+            parts.append(f"MojoStmt.while ({_expr_ast(st.condition, scope)}) "
+                         f"([{body}])")
         elif isinstance(st, (ForStmt, Break, Continue)):
             raise NotImplementedError(
                 f"ast model: {type(st).__name__} needs the generic loop "
@@ -2129,7 +2236,10 @@ _STEP_CONDS = [
     (0xffff0fe0, 0x9a9f07e0),  # 30 CSET
     (0xffe00000, 0xF9000000),  # 31 STR unsigned offset
     (0xffc00000, 0xA9400000),  # 32 LDP offset
-    (0xffe00000, 0x0A200000),  # 33 ORN register
+    # 33 is ORN (SHIFTED REGISTER), the only ORN an image can contain -- it is
+    # `MVN`'s encoding. See `_WORK_STEP`'s note for why the index is unchanged
+    # and the condition is not the one that was here.
+    (0xffe0fc00, 0xAA200000),  # 33 ORN (shifted register) = MVN's encoding
     (0xfffffc1f, 0xD61F0000),  # 34 BR
     (0xffe0001f, 0xD4000001),  # 35 SVC
     (0xffe0fc00, 0x13001c00),  # 36 SXTB
@@ -2389,11 +2499,17 @@ def _step_rhs(w: int, idx: int):
         return (f"some (arm64_set_reg {d2} (arm64_set_reg {d1} s "
                 f"(mem_read_u64 s.mem {addr}.toNat)) "
                 f"(mem_read_u64 s.mem ({addr} + 8).toNat))")
-    if idx == 33:  # ORN register
-        rn = (w >> 10) & 0x1f
+    if idx == 33:  # ORN (shifted register): Rd = Rn OR (NOT Rm)
+        # OR NOT inverts the SECOND source, and `Rn` is bits [9:5] / `Rm` is
+        # bits [20:16] (the assembler gives `orn x0, x1, x2` = 0xaa220020).
+        # This arm read `Rn` from [14:10] and complemented it, which is not the
+        # encoding of any instruction -- and for the one ORN this backend emits,
+        # `MVN Rd, Rm` (the alias for `ORN Rd, ZR, Rm`), it answers all ones
+        # instead of `~Rm`.
+        rn = (w >> 5) & 0x1f
         rm = (w >> 16) & 0x1f
-        return (f"some (arm64_set_reg {rd} s ((arm64_reg {rn} s) ^^^ "
-                f"(0xffffffffffffffff : UInt64) ||| arm64_reg {rm} s))")
+        return (f"some (arm64_set_reg {rd} s (arm64_reg {rn} s ||| "
+                f"((arm64_reg {rm} s) ^^^ 0xffffffffffffffff)))")
     if idx == 34:  # BR Xn
         rn = (w >> 5) & 0x1f
         return f"some {{ s with pc := (arm64_reg {rn} s).toNat }}"
@@ -2565,9 +2681,9 @@ def _step_rhs_generic(idx: int):
         addr = f"(s.sp + UInt64.ofNat ({_I12} * 8))"
         return (f"some (arm64_set_reg {_RN} (arm64_set_reg {_RD} s "
                 f"(mem_read_u64 s.mem {addr}.toNat)) (mem_read_u64 s.mem ({addr} + 8).toNat))")
-    if idx == 33:
-        return (f"some (arm64_set_reg {_RD} s ((arm64_reg {_RT2} s) ^^^ "
-                f"(0xffffffffffffffff : UInt64) ||| arm64_reg {_RM} s))")
+    if idx == 33:  # ORN (shifted register): Rd = Rn OR (NOT Rm)
+        return (f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s ||| "
+                f"((arm64_reg {_RM} s) ^^^ (0xffffffffffffffff : UInt64))))")
     if idx == 34:
         return f"some {{ s with pc := (arm64_reg {_RN} s).toNat }}"
     if idx == 35:
@@ -2634,7 +2750,14 @@ _WORK_STEP = [
     (30, "work_step_cset", [(0xffff0fe0, 0x9a9f07e0)]),
     (31, "work_step_str_uoff", [(0xffe00000, 0xf9000000)]),
     (32, "work_step_ldp_off", [(0xffc00000, 0xa9400000)]),
-    (33, "work_step_orn", [(0xffe00000, 0x0a200000)]),
+    # ORN (SHIFTED REGISTER), which is the only ORN `formal/arm64.py` emits and
+    # therefore the only one an image can contain.  `0x0a200000` -- what this
+    # entry said until the ORN arm was corrected -- is ORN (IMMEDIATE): bit 30
+    # is what separates the two classes, and no lowering here builds an `if`-bit
+    # mask in an ORN, so the old entry matched nothing and every `~x` was an
+    # unmodelled word (`_step_branch_index` returned `None`, so the block's run
+    # certificate could not be built and proof generation refused the program).
+    (33, "work_step_orn", [(0xffe0fc00, 0xaa200000)]),
     (34, "work_step_br", [(0xfffffc1f, 0xd61f0000)]),
     (35, "work_step_svc", [(0xffe0001f, 0xd4000001)]),
 ]
@@ -7169,7 +7292,7 @@ def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
                      extern_calls: list, externs: list, fn,
                      admitted_model: bool = False,
                      admitted_names: list = None, arity: int = 1,
-                     entry_values: list = None) -> tuple:
+                     entry_values: list = None, scope=None) -> tuple:
     """Structured verification for programs that call extern symbols.
 
     The execution is split at each extern call site:
@@ -7228,7 +7351,28 @@ def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
             # At run time the function's parameter holds the test input, so a
             # variable argument (e.g. `exit(n)`) evaluates to that value.
             env = {param: f"(UInt64.ofNat {test_input})"} if fn.params else {}
-            arg = _expr_go(call_ast.args[0], param, env)
+            try:
+                arg = _expr_go(call_ast.args[0], param, env, scope=scope)
+            except NotImplementedError:
+                # The model has no term for this argument, so there is nothing
+                # to compare the machine's argument register against. Emitting
+                # the theorem anyway is what this used to do, and it is the one
+                # shape that made a proof FALSE rather than absent: the model's
+                # value for a string literal was a fabricated `0`, and
+                # `run_x0 … = 0` is a claim about a register that holds the
+                # literal's address. A NOTE plus the theorems that ARE decidable
+                # — the reachability of the call and the `BL` step itself — is
+                # the same answer the sibling run test gives for the same reason
+                # (see the `_opaque` suppression in `generate_arm64_proof`).
+                blocks.append(
+                    f"/- NO ARGUMENT THEOREM for the `{sym}` call at "
+                    f"{bl:#x}: the semantic model cannot state what this "
+                    f"argument's value is, and a theorem comparing the "
+                    f"machine's argument register against a term the model "
+                    f"invented would be a claim about nothing. What is still "
+                    f"proved below is that the run REACHES the call, for every "
+                    f"input, and what the `BL` instruction itself does. -/\n")
+                arg = None
         arg_term = f"run_x0 {prev} {name}_code {bl} 200000"
         if arg is not None and not returns:
             # The exit code is the argument passed to the non-returning extern.
@@ -7857,7 +8001,19 @@ def generate_arm64_proof(prog, code, info) -> str:
                   for g in prog.functions}
     vtypes = function_var_types(fn, call_types)
     is_typed = uses_typed_model(fn, call_types)
-    tc = {"typed": is_typed, "vtypes": vtypes, "call_types": call_types}
+    # The image's INTERN TABLE, read off the emitter's own map (`info`
+    # publishes it; see `formal/arm64_codegen.py`'s `str_addrs`). It rides in
+    # `tc` for `_scope_of`'s reason — the scope is what every value renderer
+    # already takes, and a string literal's value is the address of its bytes,
+    # which is a fact about the IMAGE and not about the source. `_go_defs_for`
+    # puts it on the `_Scope` it builds, and the AST bridge and the extern
+    # argument theorem below read it from the same object, so the model, the
+    # AST and the machine-facing statement cannot disagree about what a string
+    # is.
+    tc = {"typed": is_typed, "vtypes": vtypes, "call_types": call_types,
+          "str_addrs": dict(info.get("str_addrs") or {})}
+    _vscope = _Scope()
+    _vscope.str_addrs = tc["str_addrs"]
     # The fixed-width truncator helpers (t8u/t8s/.../t32s) and the
     # SXTW-after-SXTB/SXTH idempotency lemmas live in ProofLib (single source of
     # truth, shared definitionally by arm64_step and the typed model).  The
@@ -8019,7 +8175,7 @@ def generate_arm64_proof(prog, code, info) -> str:
             func_name, code, base_addr, test_input, extern_calls, externs, fn,
             arity=arity, entry_values=evalues,
             admitted_model=_admitted_model,
-            admitted_names=_admitted_used_names)
+            admitted_names=_admitted_used_names, scope=_vscope)
     elif not externs:
         run_test = _gen_runs_test(func_name, code, base_addr, test_input,
                                   info["labels"].get(func_name, base_addr),
@@ -8152,7 +8308,7 @@ def generate_arm64_proof(prog, code, info) -> str:
     if _range_loop_pattern(fn) is not None:
         ast_def = ""  # the AST model has no loop form; the bridge is omitted
     else:
-        ast_stmts = ", ".join(_stmts_ast(fn.body))
+        ast_stmts = ", ".join(_stmts_ast(fn.body, _vscope))
         ast_def = ('def ast : MojoFunc := MojoFunc.mk "%s" %s ([%s])'
                    % (func_name, _param_list_lean(fn), ast_stmts))
 

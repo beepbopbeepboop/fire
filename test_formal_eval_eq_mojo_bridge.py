@@ -348,5 +348,260 @@ class TestTheBridgeBindsEveryParameter(unittest.TestCase):
             "cannot say what a two-parameter function takes")
 
 
+# `~` is BITWISE and `not` is LOGICAL, and one spelling for both was a MODEL
+# bug rather than a codegen one: the generator rendered `~x` as
+# `if x = 0 then 1 else 0`, which is `not`, so every program using `~` had a
+# source model that is a model of a different program.  Nothing caught it
+# because both sides of the bridge made the SAME mistake -- `evalExpr` evaluated
+# `unop "not"` the same way -- so `eval_eq_mojo` agreed, about a program nobody
+# ran.  The bug that measured this was filed as
+# FORMAL_the_semantic_model_renders_a_bitwise_not_as_a_logical_one and is FIXED,
+# so its doc is deleted per CLAUDE.md and the commit that landed this is the
+# record.  The fix carries four sites (three in the generator, one in
+# `lib/ProofLib.lean`) and has to carry all four, because a fix that lifted only
+# the `_go` halves would make `eval_eq_mojo` FALSE for every program using `~`.
+#
+# The machine half turned out to need a fifth change, which that bug's "what is
+# NOT the cause" asserted was not needed ("`~` lowers to ORN/NOT, and both are
+# in the step tables"): `arm64_step`'s ORN arm matched `0x0A200000`, which is ORN
+# (IMMEDIATE), while the codegen emits ORN (SHIFTED REGISTER) at `0xAA200000`
+# as `MVN`'s alias -- so the word `~x` lowers to fell through every arm, and
+# proof generation for ANY program containing `~` was refused with "CFG
+# decomposition unsupported for this function shape".  The arm's body had the
+# two source operands the wrong way round as well (`NOT Rn OR Rm` rather than
+# `Rn OR NOT Rm`), which no emitted word had ever reached.  Both are pinned
+# below, from the encoder's own bytes.
+BITNOT_PROGRAM = "def main(n):\n    return ~n\n"
+# The doc's own reproducer, one function and no call: the `& ~31` align idiom
+# this repository uses in three places, which is where the wrong model was
+# found.
+BITNOT_ALIGN_PROGRAM = "def main(n):\n    return (n + 48) & ~31\n"
+
+
+def _typed_model(source, root_name):
+    """The `_go` text a TYPED function produces (fixed-width `vtypes`).
+
+    `generate_arm64_proof` is what asks the typed question, through
+    `types.uses_typed_model`; this asks the same two tables directly so the
+    typed half can be read without compiling anything.
+    """
+    import formal.arm64_proof_gen as G
+    from formal.build import parse_module
+    from formal.types import (DEFAULT_INT_TYPE, function_var_types,
+                              parse_type_name, resolve)
+    from types import SimpleNamespace
+    import fire_compiler as F
+
+    fns = [f for f in parse_module(source) if isinstance(f, F.FunctionDef)]
+    call_types = {g.name: resolve(parse_type_name(g.return_type) or DEFAULT_INT_TYPE)
+                  for g in fns}
+    root = next((f for f in fns if f.name == root_name), fns[-1])
+    tc = {"typed": True, "vtypes": function_var_types(root, call_types),
+          "call_types": call_types}
+    prog = SimpleNamespace(functions=fns, externs=[])
+    return "\n\n".join(G._go_defs_for(prog, root, tc))
+
+
+def _models(source, root_name):
+    """The UNtyped `_go` text, which is the other of the two model paths."""
+    from test_formal_call_proof_gen import _models as untyped
+    return untyped(source, root_name)
+
+
+class TestBitwiseNotIsNotLogicalNot(unittest.TestCase):
+    """The SOURCE half: the model of `~x`, and the AST that has to agree with it.
+
+    Each row is one of the four sites, and they are four separate readers of one
+    decision -- so the test is four rows rather than one, because a fix that
+    lifted three of them leaves a model that is wrong in a way no single
+    assertion can name.
+    """
+
+    def test_the_untyped_model_complements_every_bit(self):
+        got = _models(BITNOT_PROGRAM, "main")
+        self.assertIn("n ^^^ 0xFFFFFFFFFFFFFFFF", got,
+                      f"the model of `~n` is not a bitwise complement:\n{got}")
+        self.assertNotIn("if n = 0 then", got,
+                         f"the model of `~n` is a LOGICAL not:\n{got}")
+
+    def test_a_typed_complement_is_taken_at_the_declared_width(self):
+        """32-bit `~x` is `t32s (x ^^^ 0xffffffff)`, not a 64-bit complement.
+
+        The width matters and it is not a detail: a 32-bit `~x` that were
+        modelled at 64 bits would agree with the machine only after the mask
+        commuted with the truncator, which is one coincidence rather than one
+        rule, and the machine's own lowering is "complement 64 bits, then
+        `_emit_trunc` to the operand's declared type".
+        """
+        got = _typed_model("def f(n: Int32):\n    return ~n\n", "f")
+        self.assertIn("t32s ((t32s n) ^^^ 0xffffffff)", got,
+                      f"a 32-bit `~n` is not complemented at its own width:\n{got}")
+        got16 = _typed_model("def f(n: UInt16):\n    return ~n\n", "f")
+        self.assertIn("t16u ((t16u n) ^^^ 0xffff)", got16,
+                      f"a 16-bit `~n` is not complemented at its own width:\n{got16}")
+
+    def test_the_ast_names_bnot_and_leaves_not_logical(self):
+        """`~` and `not` get different OPERATOR NAMES, so `evalExpr` can differ.
+
+        Overloading one spelling for both is what made the bridge agree with a
+        wrong model: both sides computed `not` for a program whose machine
+        answer is MVN/NOT.
+        """
+        import formal.arm64_proof_gen as G
+        from formal.build import parse_module
+        import fire_compiler as F
+
+        fns = [f for f in parse_module("def f(n):\n    return ~n\ndef g(n):\n"
+                                       "    return not n\n")
+               if isinstance(f, F.FunctionDef)]
+        self.assertEqual(G._expr_ast(fns[0].body[0].value),
+                         '(MojoExpr.unop "bnot" (MojoExpr.var "n"))')
+        # The logical one keeps its name, because every condition in the corpus
+        # spells it and `evalExpr`'s `"not"` arm is `if x = 0 then 1 else 0`.
+        self.assertEqual(G._expr_ast(fns[1].body[0].value),
+                         '(MojoExpr.unop "not" (MojoExpr.var "n"))')
+
+    def test_eval_expr_renders_bnot_as_a_complement(self):
+        """The LIBRARY half, in both places that have to know about it.
+
+        `evalExpr`'s evaluation and the `evalExpr_unop` lemma are two
+        statements of the same function, and the lemma is what
+        `evalFunc_eq_mojo_all` is built from -- so a `bnot` arm added to one and
+        not the other makes the library not typecheck, which is the cheap
+        failure, rather than prove something false, which is not.
+        """
+        lib = _read(PROOFLIB)
+        self.assertRegex(
+            lib,
+            r'\| MojoExpr\.unop "bnot" operand => evalExpr callFunc operand env \^\^\^ '
+            r'\(0xFFFFFFFFFFFFFFFF : UInt64\)',
+            "`evalExpr` does not evaluate `unop \"bnot\"` as a bitwise "
+            "complement; it falls through to the identity arm and the model's "
+            "`~n` is `n`")
+        self.assertRegex(
+            lib, r'\| "bnot" => evalExpr callFunc operand env \^\^\^ '
+                r'\(0xFFFFFFFFFFFFFFFF : UInt64\)',
+            "`evalExpr_unop` does not state `bnot` either, so the congruence "
+            "and `evalFunc_eq_mojo_all` chain describes a different function "
+            "than `evalExpr` defines")
+
+    def test_the_orn_the_codegen_emits_is_the_orn_the_model_matches(self):
+        """The machine half, from the encoder's own bytes.
+
+        Asked of the words `formal/arm64.py` actually produces rather than of a
+        literal, because the two disagreed once already: the model matched
+        `0x0A200000` (ORN immediate) and the codegen emits `0xAA200000` (ORN
+        shifted register), so an `~x` was an unmodelled word and
+        `_step_branch_index` answered `None` for it. The second half of the
+        assertion is the OPERAND ORDER, which is what makes the modelled
+        complement `~Rm` and not all ones.
+        """
+        import struct
+        import formal.arm64_proof_gen as G
+        from formal.arm64 import encode_orn_xd_xn_xm, encode_mvn_xd_xn
+
+        word = struct.unpack("<I", encode_mvn_xd_xn(0, 5))[0]
+        self.assertEqual(word, 0xAA2503E0,
+                         f"`encode_mvn_xd_xn(0, 5)` is {word:#010x}, not the "
+                         f"0xAA2503E0 the assembler gives for `mvn x0, x5` "
+                         f"(measured: clang assembles `mvn x0, x1` to "
+                         f"0xAA2103E0, which is this encoding with Rm = 1). If "
+                         f"the encoder moved, the row below is asserting about "
+                         f"a word no image contains")
+        idx = G._step_branch_index(word)
+        self.assertEqual(
+            idx, 33,
+            f"`arm64_step` has no branch for the word `~x` lowers to "
+            f"({word:#010x}): _step_branch_index says {idx}. That is the "
+            f"unmodelled-word case -- proof generation refuses the whole "
+            f"program -- and it is not a missing ARM feature, it is the "
+            f"immediate/shifted-register encoding being confused")
+        rhs = G._step_rhs(word, idx)
+        # `Rn` is bits [9:5] = 31 (the zero register, which `arm64_reg` reads as
+        # 0) and `Rm` is bits [20:16] = 5: OR NOT inverts the SECOND source, so
+        # the complement belongs on register 5 and register 31 must not be the
+        # one being complemented.
+        self.assertIn("arm64_reg 31 s ||| ((arm64_reg 5 s) ^^^ 0xffffffffffffffff)",
+                      rhs,
+                      f"the modelled ORN puts the complement on the wrong "
+                      f"source operand: {rhs}")
+        # …and the ORN (immediate) encoding, which the model used to match, is
+        # still not an ORN shifted register -- which is what makes a future
+        # re-introduction visible rather than silent.
+        self.assertIsNone(
+            G._step_branch_index(0x0A200000 | 0x000003E0),
+            "`0x0A200000` is being matched as a shifted-register ORN again")
+        self.assertIsNotNone(
+            G._step_branch_index(struct.unpack(
+                "<I", encode_orn_xd_xn_xm(0, 7, 9))[0]),
+            "`encode_orn_xd_xn_xm` emits a word the step table does not match, "
+            "so a general ORN is unmodelled even though `MVN` is not")
+
+
+class TestBitwiseNotTheRunTestTypechecks(unittest.TestCase):
+    """The teeth: `~n`'s run test `machine(n) = mojo n`, on BOTH backends.
+
+    A `native_decide` run test is an evaluation of the model over the real
+    instruction bytes, so it is the one assertion that cannot be satisfied by
+    two wrong renderings of the same source. Before the fix it could not even be
+    reached on arm64 (proof generation refused the program), and on the x86-64
+    generator the same program's run test is what reported `is false` (the bug doc
+    is deleted with its fix; the commit that landed this is the record).
+
+    Skipped, loudly, when Lean or `lib/ProofLib.olean` is absent -- and that is
+    a real gap in this file's coverage, because the fix it checks cannot be
+    verified any other way: the text rows above would all pass against a model
+    that no program could be proved about.
+    """
+
+    PROGRAMS = {"bnot": BITNOT_PROGRAM, "bnot_align": BITNOT_ALIGN_PROGRAM}
+
+    @classmethod
+    def setUpClass(cls):
+        lean = _lean()
+        if not lean or not os.path.isfile(
+                os.path.join(HERE, "lib", "ProofLib.olean")):
+            raise unittest.SkipTest(
+                "no Lean / no lib/ProofLib.olean: skipping the run-test "
+                "typecheck. Run `make prooflib` (or `python3 tools/suite.py "
+                "prooflib`) first -- every assertion below is about Lean "
+                "accepting the generated run test, and none of it runs without "
+                "it.")
+        from formal.lean import check_proof_cached
+        cls.tmp = tempfile.mkdtemp(prefix="bnot-lean-")
+        cls.results = {}
+        for name, src in cls.PROGRAMS.items():
+            for arch in ("arm64", "x86_64"):
+                p, err = _generate(cls.tmp, src, f"{name}_{arch}", arch=arch)
+                if err:
+                    cls.results[(name, arch)] = (False, err, 0)
+                    continue
+                ok, detail, _cached, n = check_proof_cached(p, repo_root=HERE)
+                cls.results[(name, arch)] = (ok, detail, n)
+
+    @classmethod
+    def tearDownClass(cls):
+        if hasattr(cls, "tmp"):
+            shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_every_program_generates_and_its_run_test_typechecks(self):
+        for (name, arch), (ok, detail, n) in sorted(self.results.items()):
+            with self.subTest(program=name, arch=arch):
+                self.assertTrue(
+                    ok,
+                    f"{name} on {arch}: {detail}\n\nThe run test is the only "
+                    f"assertion here that cannot be satisfied by the model and "
+                    f"the AST agreeing about the wrong program: a `native_decide` "
+                    f"over `arm64_step`/`x86_step` and the emitted bytes. If it "
+                    f"says `is false`, one of the two is not what the machine "
+                    f"does.")
+                self.assertLessEqual(n, 2,
+                                     f"{name} on {arch}: the proof admits {n} "
+                                     f"`sorry`; the x86-64 generator's two "
+                                     f"designed trust boundaries are the only "
+                                     f"two this project admits, and the arm64 "
+                                     f"file admits none")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

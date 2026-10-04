@@ -275,7 +275,7 @@ one cause with two symptoms, so the counts are items, not verdicts.
 | **4** | `lean-rejected` | `admitted` | **the dec1 recursion family** — `count`, `pow2`, `sqsum` (and `fact`, `sum`, which the stride did not select). One cause, measured on all five: the code generator now **reloads x30 from the frame**, so the generator's "x30 is unchanged here" obligation is true and no longer `rfl`. `bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md`. |
 | 1 | `lean-rejected` | `admitted` | `fib` — a documented gap (`test_formal.py`'s `EXPECTED_FAILURES`), tree recursion's `FrameOk` window. |
 | 1 | `proof-refused` | `admitted` | `model: a TernaryExpr has no value in the semantic model` — `formal/arm64_proof_gen.py::_no_value_model` refusing by name, and **the x86-64 generator CATCHING the same refusal and emitting its documented placeholder**, so the program builds there against a model that is not the source's. The two architectures degrade differently for one gap. |
-| **1** | `proof-refused` | **`lean-rejected`** | **`~x` modelled as a logical `not`.** `formal/macho_linker.py:236`'s `& ~31`: the machine computes 64 (as CPython does) and the model's `~31` is `if 31 = 0 then 1 else 0`, i.e. 0 — so `mojo 5 = 0` and x86-64's own `native_decide` run test reports `main_result 5 = mojo 5 is false`. **A wrong model, caught by the teeth.** `bugs/FORMAL_the_semantic_model_renders_a_bitwise_not_as_a_logical_one.md`. |
+| **1** | `proof-refused` | **`lean-rejected`** | **`~x` modelled as a logical `not`.** `formal/macho_linker.py:236`'s `& ~31`: the machine computes 64 (as CPython does) and the model's `~31` is `if 31 = 0 then 1 else 0`, i.e. 0 — so `mojo 5 = 0` and x86-64's own `native_decide` run test reports `main_result 5 = mojo 5 is false`. **A wrong model, caught by the teeth.** FIXED: `~` is a bitwise complement in both the model (`formal/arm64_proof_gen.py`) and the AST bridge's name (`evalExpr`'s `unop "bnot"` arm in `lib/ProofLib.lean`), so this row is kept as the measurement that found it and its doc is deleted with the fix. |
 | 1 | `proof-refused` | `admitted` | a zero-argument call (`cas.py:133 reset_stats`), the same `MojoExpr.call` limit as row 1 — arm64 reaches it as a second-function call; before this branch it was an `IndexError` out of `_expr_ast`. **Fixed** (§5.2). |
 | 1 | `admitted` | — | `sum_range`: a `for`-range program, whose AST model has no loop form, so the bridge is omitted and the machine value flow carries it. Correct, and the emitted file says so. |
 
@@ -344,8 +344,13 @@ are unchanged.
 * **`~x` is modelled as a logical `not`, on both architectures** — a wrong model
   that `native_decide` has been catching. The fix needs `lib/ProofLib.lean` (a
   `unop "bnot"` arm), so it invalidates every cached proof verdict and wants the
-  whole formal suite behind it rather than one example:
-  `bugs/FORMAL_the_semantic_model_renders_a_bitwise_not_as_a_logical_one.md`.
+  whole formal suite behind it rather than one example. **LANDED**: the arm is
+  in `lib/ProofLib.lean`, `formal/arm64_proof_gen.py` renders `~` as the
+  bitwise complement rather than as `x = 0`, `_expr_ast` spells it `"bnot"` so
+  the bridge and the model cannot disagree about it again, and the executed
+  rows are `test_formal_run.py`'s three `both_arch_bitwise_not_*` cases. Kept
+  here because it is the one row in this census that was a WRONG MODEL rather
+  than a hole, and that is the distinction the next reader needs.
 * **x86-64's placeholder model.** A `TernaryExpr`/`ListExpr`/`TupleExpr` is
   refused by name on arm64 and silently replaced by a documented placeholder on
   x86-64, so an x86-64 proof can pass against a model that is not the source's.

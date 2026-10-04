@@ -33,7 +33,8 @@ raise CodegenError naming the construct rather than silently miscompiling.
 from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
                           parse_type_name, mask_of, TYPE_NAMES,
-                          STRING_TYPE_NAMES, DICT_TYPE_NAMES)
+                          STRING_TYPE_NAMES, DICT_TYPE_NAMES,
+                          DTYPE_TYPE_NAMES)
 from formal.x86_64 import *  # noqa: F401,F403 — encoders, Reg, Assembler
 
 import fire_compiler as F
@@ -955,6 +956,15 @@ class X86_64Codegen:
                 self.asm.labels[f.name]
                 for f in M.module_body_functions(functions)
                 if f.name in self.asm.labels],
+            # The INTERN TABLE, keyed by DECODED text — the same map, from the
+            # same `_intern_string`, for the same reason as on arm64: a string
+            # literal's value is the address of its bytes, and the label
+            # spelling (`str_<emission counter>`) is not derivable from the
+            # text, so the address has to be published rather than recomputed.
+            "str_addrs": {
+                text: self.asm.labels[label]
+                for text, label in self._str_intern.items()
+                if label in self.asm.labels},
         }
         return code, info
 
@@ -7147,11 +7157,13 @@ ctor_field_value=self._ctor_field_value_for(name),
                 name = expr.name
                 if owner is not None and name in M.struct_receivers(owner):
                     return M.one_word_receiver_kind(
-                        owner, TYPE_NAMES, STRING_TYPE_NAMES, structs)
+                        owner, TYPE_NAMES, STRING_TYPE_NAMES, structs,
+                        DTYPE_TYPE_NAMES)
                 cands = frame_candidates.get(name)
                 if cands:
                     return M.one_word_receiver_kind(
-                        cands[0], TYPE_NAMES, STRING_TYPE_NAMES, structs)
+                        cands[0], TYPE_NAMES, STRING_TYPE_NAMES, structs,
+                        DTYPE_TYPE_NAMES)
                 return None
             if isinstance(expr, F.MemberExpr):
                 # ONE level only.  `a.b.c` is a load of a load and the outer
@@ -7168,12 +7180,12 @@ ctor_field_value=self._ctor_field_value_for(name),
                     return None
                 return M.frame_slot_field_kind(
                     cands, expr.member, TYPE_NAMES, STRING_TYPE_NAMES,
-                    structs)
+                    structs, DTYPE_TYPE_NAMES)
             if isinstance(expr, F.CallExpr) and isinstance(expr.func,
                                                             F.IdentExpr):
                 return M.one_word_receiver_kind(
                     structs.get(expr.func.name), TYPE_NAMES,
-                    STRING_TYPE_NAMES, structs)
+                    STRING_TYPE_NAMES, structs, DTYPE_TYPE_NAMES)
             return None
 
         return kind_of_slot
@@ -7305,7 +7317,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         if ann is None:
             return None
         return (ann, M.declared_type_kind(ann, TYPE_NAMES, STRING_TYPE_NAMES,
-                                          self._structs))
+                                          self._structs,
+                                          dtype_names=DTYPE_TYPE_NAMES))
 
     def _aliased_export(self, name: str):
         """The manifest export a bare callee reaches THROUGH an import alias.

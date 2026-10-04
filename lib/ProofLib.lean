@@ -853,6 +853,14 @@ def evalExpr (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : Str
   | MojoExpr.var name => env name
   | MojoExpr.unop "neg" operand => (0 : UInt64) - evalExpr callFunc operand env
   | MojoExpr.unop "not" operand => if evalExpr callFunc operand env = 0 then 1 else 0
+  -- **`~` is BITWISE, and gets its own operator rather than being spelled `not`.**
+  -- Python's `~` complements every bit and its `not` is the logical one; the two
+  -- are different functions, and overloading one spelling for both made the
+  -- model answer `if x = 0 then 1 else 0` for `~x` -- a model of `not` for a
+  -- program whose machine answer is MVN/NOT.  The generator emits `"bnot"`
+  -- for `~` and `"not"` for `not`, so the operator NAME carries the difference
+  -- and the catch-all arm below stays the identity for anything else.
+  | MojoExpr.unop "bnot" operand => evalExpr callFunc operand env ^^^ (0xFFFFFFFFFFFFFFFF : UInt64)
   | MojoExpr.unop _ operand => evalExpr callFunc operand env
   | MojoExpr.binop "+" l r => evalExpr callFunc l env + evalExpr callFunc r env
   | MojoExpr.binop "-" l r => evalExpr callFunc l env - evalExpr callFunc r env
@@ -997,10 +1005,13 @@ theorem evalExpr_unop (callFunc : String → UInt64 → UInt64) (op : String) (o
   match op with
   | "neg" => (0 : UInt64) - evalExpr callFunc operand env
   | "not" => if evalExpr callFunc operand env = 0 then 1 else 0
+  | "bnot" => evalExpr callFunc operand env ^^^ (0xFFFFFFFFFFFFFFFF : UInt64)
   | _ => evalExpr callFunc operand env := by
   by_cases h : op = "neg"; · subst h; rfl
   · by_cases h' : op = "not"; · subst h'; rfl
-    · simp [evalExpr, h, h']
+    · by_cases hb : op = "bnot"
+      · subst hb; rfl
+      · simp [evalExpr, h, h', hb]
 
 /-- Evaluate a binary operator expression.  Proved by case analysis on the operator. -/
 theorem evalExpr_binop (callFunc : String → UInt64 → UInt64) (op : String) (l r : MojoExpr) (env : String → UInt64) :
@@ -1914,12 +1925,32 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let s' := arm64_set_reg d1 s val1
     let s'' := arm64_set_reg d2 s' val2
     some s''
-  -- ORN Xd, Xn, Xm: 0x0A200000
-  else if (insn &&& 0xffe00000) = 0x0A200000 then
+  -- ORN Xd, Xn, Xm (shifted register, LSL #0): 0xAA200000
+  --
+  -- **The encoding this arm used to match, `0x0A200000`, is ORN (IMMEDIATE)** --
+  -- bit 30 is what separates a logical immediate from a logical shifted
+  -- register, and the emitter never emits the immediate form, so an `ORN` word
+  -- in any image fell through every arm here and `arm64_step` answered `none`.
+  -- `0xAA200000` is what `formal/arm64.py`'s `encode_orn_xd_xn_xm` emits, and
+  -- what the assembler gives for `orn x0, x1, xzr` (measured against clang).
+  -- The mask pins `shift = LSL` and `imm6 = 0` because the body below reads
+  -- `Rn` and `Rm` out of the shifted-register field positions and has no shift
+  -- to apply; `0xffe0fc00` is exactly "these bits are 0" and leaves Rd/Rn/Rm.
+  --
+  -- **And the body had the two source operands the wrong way round.** ORN is
+  -- "OR NOT": `Rd = Rn OR (NOT Rm)`, because the op bit inverts the SECOND
+  -- source. It read `NOT Rn OR Rm`, which is the encoding of neither ORN nor
+  -- anything else, and `MVN Rd, Rm` -- the one ORN this backend emits, as its
+  -- alias for `ORN Rd, ZR, Rm` -- would have come out as all ones.
+  -- `Rn` is bits [9:5] and `Rm` is bits [20:16] (measured: the assembler gives
+  -- `orn x0, x1, x2` = 0xaa220020, whose [9:5] is 1 and [20:16] is 2). It read
+  -- `Rn` from [14:10], which is the shift amount's low bits -- a field a
+  -- shifted register does not use for anything else, and one that is zero here.
+  else if (insn &&& 0xffe0fc00) = 0xAA200000 then
     let rd := (insn &&& 0x1f).toNat
-    let rn := ((insn >>> 10) &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
     let rm := ((insn >>> 16) &&& 0x1f).toNat
-    some (arm64_set_reg rd s ((arm64_reg rn s) ^^^ (0xffffffffffffffff : UInt64) ||| arm64_reg rm s))
+    some (arm64_set_reg rd s (arm64_reg rn s ||| ((arm64_reg rm s) ^^^ (0xffffffffffffffff : UInt64))))
   -- BR Xn: 0xD61F0000
   else if (insn &&& 0xfffffc1f) = 0xD61F0000 then
     let rn := ((insn >>> 5) &&& 0x1f).toNat
@@ -4800,8 +4831,8 @@ theorem work_step_ldp_off (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w 
 /-- Per-instruction step: `work_step_orn`. -/
 theorem work_step_orn (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
-    (h : (w &&& 0xffe00000) = 0xa200000) :
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s ((arm64_reg (((w >>> 10) &&& 0x1f).toNat) s) ^^^ (0xffffffffffffffff : UInt64) ||| arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
+    (h : (w &&& 0xffe0fc00) = 0xaa200000) :
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s ||| ((arm64_reg (((w >>> 16) &&& 0x1f).toNat) s) ^^^ (0xffffffffffffffff : UInt64)))) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -4884,7 +4915,7 @@ theorem work_step_br (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UIn
   have hne_31 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
   have hne_32 : ¬ ((w &&& 0xffe00000) = 0xf9000000) := by intro t; bv_decide
   have hne_33 : ¬ ((w &&& 0xffc00000) = 0xa9400000) := by intro t; bv_decide
-  have hne_34 : ¬ ((w &&& 0xffe00000) = 0x0a200000) := by intro t; bv_decide
+  have hne_34 : ¬ ((w &&& 0xffe0fc00) = 0xaa200000) := by intro t; bv_decide
   have hne_bcond : ¬ ((w &&& 0xff000000) = 0x54000000) := by intro t; bv_decide
   have hne_tbz : ¬ ((w &&& 0xff000000) = 0x36000000) := by intro t; bv_decide
   have hne_tbnz : ¬ ((w &&& 0xff000000) = 0x37000000) := by intro t; bv_decide
@@ -4931,7 +4962,7 @@ theorem work_step_svc (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
   have hne_31 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
   have hne_32 : ¬ ((w &&& 0xffe00000) = 0xf9000000) := by intro t; bv_decide
   have hne_33 : ¬ ((w &&& 0xffc00000) = 0xa9400000) := by intro t; bv_decide
-  have hne_34 : ¬ ((w &&& 0xffe00000) = 0x0a200000) := by intro t; bv_decide
+  have hne_34 : ¬ ((w &&& 0xffe0fc00) = 0xaa200000) := by intro t; bv_decide
   have hne_35 : ¬ ((w &&& 0xfffffc1f) = 0xd61f0000) := by intro t; bv_decide
   have hne_bcond : ¬ ((w &&& 0xff000000) = 0x54000000) := by intro t; bv_decide
   have hne_tbz : ¬ ((w &&& 0xff000000) = 0x36000000) := by intro t; bv_decide
@@ -5006,7 +5037,7 @@ theorem work_step_cbz (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
   have hne_31 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
   have hne_32 : ¬ ((w &&& 0xffe00000) = 0xf9000000) := by intro t; bv_decide
   have hne_33 : ¬ ((w &&& 0xffc00000) = 0xa9400000) := by intro t; bv_decide
-  have hne_34 : ¬ ((w &&& 0xff000000) = 0x0a200000) := by intro t; bv_decide
+  have hne_34 : ¬ ((w &&& 0xffe0fc00) = 0xaa200000) := by intro t; bv_decide
   rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5,
       if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10,
       if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15,
@@ -5056,7 +5087,7 @@ theorem work_step_cbnz (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
   have hne_31 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
   have hne_32 : ¬ ((w &&& 0xffe00000) = 0xf9000000) := by intro t; bv_decide
   have hne_33 : ¬ ((w &&& 0xffc00000) = 0xa9400000) := by intro t; bv_decide
-  have hne_34 : ¬ ((w &&& 0xff000000) = 0x0a200000) := by intro t; bv_decide
+  have hne_34 : ¬ ((w &&& 0xffe0fc00) = 0xaa200000) := by intro t; bv_decide
   rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5,
       if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10,
       if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15,
@@ -6644,7 +6675,10 @@ theorem evalExpr_congr (callFunc : String → UInt64 → UInt64) (e : MojoExpr)
       · by_cases hop' : op = "not"
         · subst hop'
           simp only [evalExpr, ih h]
-        · simp only [evalExpr, hop', ih h]
+        · by_cases hopb : op = "bnot"
+          · subst hopb
+            simp only [evalExpr, ih h]
+          · simp only [evalExpr, hop', hopb, ih h]
   | binop op l r ihl ihr =>
       have hl : evalExpr callFunc l env = evalExpr callFunc l env' := ihl h
       have hr : evalExpr callFunc r env = evalExpr callFunc r env' := ihr h
