@@ -1389,8 +1389,8 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
         # binds.  Read from `stmts`, so it must be asked BEFORE any rewrite
         # turns `Pair[Int]()` into the concrete `Pair_Int()` — afterwards the
         # brackets are gone and the answer would be empty.
-        from formal.imports import (instantiation_demands,
-                                    module_source_text)
+        from formal.imports import (check_library_free_calls, instantiation_demands,
+                                    library_free_edges, module_source_text)
         demands = {}
         for mod, path in resolved:
             for other, wanted in instantiation_demands(
@@ -1400,7 +1400,20 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
                 for tmpl, args in wanted.items():
                     merged[tmpl] = sorted(set(merged.get(tmpl, [])) | set(args))
                 demands[other] = merged
+        # The same PER-EDGE rule the recursion applies to its own imports
+        # (`formal/imports.py::library_free_edges`), asked here for the program's
+        # OWN imports rather than left to the first level of the closure below.
+        # It is the same question asked twice because these are two different
+        # edges — a program's `from pkg import Tmpl` is not `pkg/__init__.mojo`'s
+        # — and one answer for both would either exempt an edge that binds a
+        # concrete name or refuse one that binds nothing.
+        library_free = library_free_edges(source_path, stmts,
+                                          project_root=source_path,
+                                          demands=demands)
+        check_library_free_calls(source_path, stmts, library_free)
         for mod, path in resolved:
+            if os.path.abspath(path) in library_free:
+                continue
             try:
                 dylib = build_module_dylib(mod, path, out_dir, arch,
                                            project_root=source_path,
