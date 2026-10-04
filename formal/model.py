@@ -3168,14 +3168,23 @@ def _cfg_int_literal(e) -> object:
     return e.value if isinstance(e, F.IntLiteral) else None
 
 
-def _range_is_nonempty(args) -> bool:
-    """Whether a `range(...)` call with LITERAL arguments yields an item.
+def _range_is_nonempty(args, consts=None) -> bool:
+    """Whether a `range(...)` call yields an item.
 
     Exactly CPython's own emptiness rule, including the step's sign — `range(5,
     0)` and `range(0, 5, -1)` are both empty and getting either wrong would
     drop an edge the program really has. Returns None ("cannot tell") for
-    anything that is not a `range` of 1-3 integer literals, so the caller
-    keeps the zero-iteration path.
+    anything it cannot decide, so the caller keeps the zero-iteration path.
+
+    **`consts` is the second source of evidence, and it is `_cfg_int_value`'s
+    rather than a second reader of its own**: a `range` whose bound is a NAME
+    decided by the preheader (`k = 0` then `range(0, k)`) is a fact about the
+    program, exactly as `i = 0` then `while i < 3:` is. It is what
+    `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`'s
+    option 2 asks for — "the emptiness as a predicate, carried along every
+    edge" — and what is left decided only at RUN time (a bound this path cannot
+    state as a literal, a parameter among them) is recorded as that doc's
+    residual rather than guessed.
 
     **The step's sign needs the NEGATION folded here**, because the parser does
     not keep `-1` as a negative literal: it is `UnaryOp('-', IntLiteral(1))`
@@ -3195,7 +3204,13 @@ def _range_is_nonempty(args) -> bool:
         return None
     vals = []
     for a in args:
-        v = _cfg_int_literal(a)
+        # `_cfg_int_value` and not `_cfg_int_literal`: an argument the PREHEADER
+        # decided (`k = 0` then `range(0, k)`) is as much a fact about the
+        # program as the literal written beside it, and reading the two with
+        # different readers is how the table and the call would answer the same
+        # `range` differently. It is also the only reader here that knows about
+        # a name, so `consts` is its argument rather than a second lookup.
+        v = _cfg_int_value(a, consts)
         if v is None and isinstance(a, F.UnaryOp) and a.op == "-":
             v = _cfg_int_literal(getattr(a, "operand", None))
             if v is not None:
@@ -3214,7 +3229,52 @@ def _range_is_nonempty(args) -> bool:
     return len(range(start, stop, step)) > 0
 
 
-def _for_target_never_binds(stmt) -> bool:
+# The three answers, named once so a caller cannot answer "probably not" with a
+# `False` and be indistinguishable from a decided "never".
+_ALWAYS_RUNS = "always"
+_NEVER_RUNS = "never"
+_MAYBE_RUNS = "maybe"
+
+
+def _for_emptiness(s, consts=None) -> str:
+    """`'always'` / `'never'` / `'maybe'` — whether this `for`'s ITERABLE
+    yields a value.
+
+    **One reader for the two questions a `for` asks, and neither of them is the
+    graph's.** "Did the body run at least once" is `_loop_body_always_runs`, and
+    "is the target bound afterwards" is `_for_target_defs`; the second is
+    `'always'` or `'never'` and the first is `'always'`, so a reader that
+    answered one of them and not the other is a graph and a walk disagreeing
+    about the same loop.
+
+    It is decidable for a literal sequence (`[1, 2]`, `"ab"`) and for a `range`
+    whose arguments `_range_is_nonempty` can decide — from the literals in the
+    call, plus whatever `consts` (`_preheader_literals`' table) has decided about
+    a name. `range` is the one call this reads because CPython's own emptiness
+    rule is a closed-form function of its three arguments. Everything else is
+    `'maybe'`, which is the answer that keeps the zero-iteration edge and the
+    header's definition: both are the safe direction for a loop whose emptiness
+    is a run-time fact, and both are recorded as the residual of
+    `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
+    """
+    it = getattr(s, "iterable", None)
+    if isinstance(it, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        return _ALWAYS_RUNS if getattr(it, "elements", None) else _NEVER_RUNS
+    if isinstance(it, F.StringLiteral):
+        return _ALWAYS_RUNS if it.value else _NEVER_RUNS
+    if isinstance(it, F.CallExpr) and not (getattr(it, "kwargs", None) or []):
+        func = getattr(it, "func", None)
+        if isinstance(func, F.IdentExpr) and func.name == "range":
+            verdict = _range_is_nonempty(list(getattr(it, "args", None) or []),
+                                         consts)
+            if verdict is True:
+                return _ALWAYS_RUNS
+            if verdict is False:
+                return _NEVER_RUNS
+    return _MAYBE_RUNS
+
+
+def _for_target_never_binds(stmt, consts=None) -> bool:
     """Whether this `for` provably produces NO value, so it never binds its
     target — which is CPython's rule, not an optimisation:
 
@@ -3237,24 +3297,19 @@ def _for_target_never_binds(stmt) -> bool:
     to refuse. `read_before_store`'s `for` arm asks here before it counts the
     target as a definition.
 
-    Only a range whose emptiness is DECIDABLE here, and it is the same decision
-    `_range_is_nonempty` makes for the zero-iteration edge — an unknown bound
-    (`range(0, k)`) keeps the target defined, which is a real loss (see
-    `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`)
+    The emptiness is read through `_for_emptiness`, so it is `'never'` for a
+    literal sequence and for a `range` the PREHEADER decides as well as one it
+    writes out (`k = 0` then `range(0, k)`) — an emptiness this build cannot
+    decide keeps the target defined, which is a real loss
+    (`bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`)
     and the safe direction: keeping a definition can only let through a program
     whose range happened to be non-empty, where dropping it would refuse a
     program CPython runs.
     """
-    it = getattr(stmt, "iterable", None)
-    if not isinstance(it, F.CallExpr) or getattr(it, "kwargs", None):
-        return False
-    func = getattr(it, "func", None)
-    if not (isinstance(func, F.IdentExpr) and func.name == "range"):
-        return False
-    return _range_is_nonempty(list(getattr(it, "args", None) or [])) is False
+    return _for_emptiness(stmt, consts) == _NEVER_RUNS
 
 
-def _loop_target_defs(stmt) -> set:
+def _loop_target_defs(stmt, consts=None) -> set:
     """The names a `for`'s HEADER defines — its target, unless the loop
     provably yields no value at all.
 
@@ -3262,9 +3317,12 @@ def _loop_target_defs(stmt) -> set:
     it and `read_before_store`'s per-block walk fills its running `live` set
     with it, and they have to agree: the fixpoint intersects the first and the
     walk reads the second, so a shape the two answered differently would be
-    accepted or refused according to which one reached it first.
+    accepted or refused according to which one reached it first. Both pass the
+    preheader's literals when they have them (`_build_cfg` does, the walk does
+    not) and a name the two would decide differently is a loop whose emptiness
+    depends on a value only one of them can see.
     """
-    if _for_target_never_binds(stmt):
+    if _for_target_never_binds(stmt, consts):
         return set()
     return _store_names(getattr(stmt, "target", None))
 
@@ -3488,8 +3546,14 @@ def _loop_body_always_runs(s, consts=None) -> bool:
     built from the statement tree has no such information: both the empty
     `for` and the never-true `while` look like the same edge. So this asks the
     narrow question that IS decidable — a literal-true condition, a non-empty
-    literal sequence, a `range` of literals that is not empty — and answers
-    False for everything else, which keeps the zero-iteration path.
+    literal sequence, a `range` that is not empty — and answers False for
+    everything else, which keeps the zero-iteration path.
+
+    A `for`'s half of it is `_for_emptiness`'s `'always'`, read with the same
+    `consts`, so the zero-iteration edge and the header's definition of the loop
+    target are decided by ONE reader of the iterable: a `range(0, k)` that
+    `consts` says is non-empty loses that edge, and the same one says the
+    target is bound.
 
     The asymmetry is the whole design: dropping that edge can only ever REMOVE
     a refusal, and only when the body provably ran, so this cannot introduce a
@@ -3517,17 +3581,10 @@ def _loop_body_always_runs(s, consts=None) -> bool:
             return True
         return _literal_truth(cond, consts) is True
     if kind in ("ForStmt", "ComptimeForStmt"):
-        it = getattr(s, "iterable", None)
-        if isinstance(it, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-            return bool(getattr(it, "elements", None))
-        if isinstance(it, F.StringLiteral):
-            return bool(it.value)
-        if isinstance(it, F.CallExpr):
-            func = getattr(it, "func", None)
-            if (isinstance(func, F.IdentExpr) and func.name == "range"
-                    and not (getattr(it, "kwargs", None) or [])):
-                return bool(_range_is_nonempty(list(it.args or [])))
-        return False
+        # One reader with `_for_target_defs`'s other half: "always runs" is
+        # `_for_emptiness`'s `'always'`, and the iterable shapes it reads are
+        # the ones this arm used to spell out for itself.
+        return _for_emptiness(s, consts) == _ALWAYS_RUNS
     return False
 
 
@@ -3747,6 +3804,31 @@ def _build_cfg(body) -> tuple:
                 body_exits = run(loop_body, loops, [head.index],
                                  facts=loop_held)
                 loops.pop()
+                # THE LOOP'S TARGET IS BOUND WHENEVER THE BODY IS REACHED, which
+                # is a fact about the BODY's entry and not about the header's
+                # definitions — so it is seeded here, where the body opens,
+                # rather than left to the header's `defs`. The two answers differ
+                # on the one shape that matters: a loop whose emptiness is
+                # `'maybe'` binds its target on the header's exit edge as well
+                # (a name read after `for i in range(0, k)` is a definition,
+                # because dropping it would refuse a program CPython runs), while
+                # a loop decided `'never'` binds it nowhere — and a body whose
+                # head test can never pass still reads its target legally, which
+                # the seed keeps right. `seed` rather than `defs` because the
+                # header is a different block and this is a binding that happens
+                # on the edge INTO the body; see `_Block.seed`.
+                if frame["first"] is not None and kind != "WhileStmt":
+                    blocks[frame["first"]].seed |= _store_names(
+                        getattr(s, "target", None))
+                # One preheader read for both of the loop's questions: what the
+                # iterable yields on ENTRY (`_loop_body_always_runs`, which
+                # decides whether the header reaches the join at all) and what it
+                # binds afterwards (`_loop_target_defs`, below). Asking twice
+                # would be two walks of the same graph for one answer, and they
+                # have to be the same walk — a value the first can see and the
+                # second cannot is a loop whose body and whose target disagree
+                # about the same `range`.
+                loop_consts = _preheader_literals(blocks, head.index, entry)
                 # The LATCH is the node the loop is in only because its body
                 # ran at least once, and it is what keeps "the condition failed
                 # immediately" (the `head` -> join edge below) apart from "the
@@ -3769,13 +3851,25 @@ def _build_cfg(body) -> tuple:
                 # Emitted with this loop POPPED, so a `break` inside it is the
                 # enclosing loop's rather than this one's.
                 exit_from = [latch.index]
-                if not _loop_body_always_runs(
-                        s, _preheader_literals(blocks, head.index, entry)):
+                if not _loop_body_always_runs(s, loop_consts):
                     exit_from.append(head.index)
                     # The header's exit edge IS "the condition failed", the same
                     # fact the `else` clause carries and for the same reason.
                     if loop_key:
                         false_exits.setdefault(head.index, loop_key)
+                # …and on that same edge the loop binds NOTHING that only the
+                # iteration could bind, when the preheader decided the iterable
+                # is empty. This is the one place `_cfg_block_defs`'s own answer
+                # (which sees only the literals written in the call) is refined
+                # with what the path into the loop decided, and it is applied by
+                # REMOVING the header's definition rather than by asking
+                # `_cfg_block_defs` again: the header block already exists and
+                # holds exactly the statements this loop wrote. A name the
+                # preheader does not have keeps the header's definition, which
+                # is the safe direction — see
+                # `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
+                if _for_target_never_binds(s, loop_consts):
+                    head.defs -= _store_names(getattr(s, "target", None))
                 else_body = getattr(s, "else_body", None)
                 if else_body:
                     pending = run(else_body, loops, exit_from,
