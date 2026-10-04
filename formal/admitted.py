@@ -20,7 +20,8 @@ raises — and every operation whose ANSWER is an external fact is declared an
 admitted contract.  The declaration is written in the Mojo source itself, as an
 `@admitted("<what it assumes of the host>")` decorator:
 
-    @admitted("the child's exit status, an integer in 0..255")
+    @admitted("the child's exit status word: 0..255 for a normal exit, or -N "
+              "for a death by signal N")
     def run(argv: str, capture: int) -> int:
         ...
 
@@ -29,6 +30,15 @@ it back out of the parsed source, publishes it in three places that must agree
 (the generated Lean, the build's `trust:` line, and `tools/formal_sweep.py`'s
 class), and counts it.  `test_formal_admitted.py` pins the count per module, so
 a new admitted contract cannot land without the number moving.
+
+The example above is the SECOND version of that sentence.  The first said "an
+integer in 0..255" and was false of CPython, which reports `-N` for a child
+killed by signal N; fourteen of the nineteen contracts were false in some such
+way and every instrument this module had — the count, the scope rule, the
+emitted declaration, the inertness check — was green on all of them, because
+each decides FORM and none of them asks whether an assumption is true.  That is
+what `test_formal_admitted.py`'s `truth` group is for, and
+`bugs/FORMAL_trust_audit_2026-10-04.md` is the audit with the table.
 
 WHY `sorry` AND NOT `axiom`
 ---------------------------
@@ -50,6 +60,16 @@ which the existing census counts with no new machinery, and which `#print
 axioms` reports as depending on `sorryAx` like every other hole in this tree.
 The task's "a named `axiom` (or a theorem proved by `sorry`/`admit`)" is the
 second of those, and it is the one this project's own rule selects.
+
+WHAT THE WORD IS
+----------------
+`UInt64 -> UInt64` is not CPython's return type, and `Contract.docstring` says so
+in every generated declaration.  For most of these operations CPython returns
+`None`, a `Popen`, a `CompletedProcess`, a pair, a `Future` or a `bool`, so the
+declaration is a claim about what THIS MODEL answers to the question the caller
+asked.  That sentence is stamped in one place rather than written into nineteen
+decorator texts: it is a fact about the shape of the declaration, not an
+assumption, and the decorator stays the only place an assumption is written.
 
 WHAT IS NOT ADMITTED
 --------------------
