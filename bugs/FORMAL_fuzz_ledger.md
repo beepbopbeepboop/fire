@@ -40,11 +40,11 @@ magnitude of the 3-4 GB line.
 bugs fixed, five limits filed, and eight defects in the tool itself. §2.1 adds
 **5100 programs over 41 more sweeps**, THREE more fixes and three more tool
 defects, and §2.1a one more sweep of 100 programs and one more fix. §2.3 adds
-**900 programs over 11 sweeps**, TWO more fixes (§3.10's dict-walk stride and
+**1020 programs over 13 sweeps**, TWO more fixes (§3.10's dict-walk stride and
 §3.11's `del` register clobber), one new `KNOWN_DIVERGENCES` row
 (`set_order`, owned by `bugs/FORMAL_set_value_model.md`), one new limit filed
 (`FORMAL_a_comprehension_target_over_a_string_keyed_dict_is_an_int.md`) and TWO
-more tool defects — so the whole file is **11312 programs over 78 sweeps** and
+more tool defects — so the whole file is **11432 programs over 80 sweeps** and
 **fourteen** tool defects. The last three rows of §2.3 are the OLD mixes on a
 fresh seed range, which is what says this session's two fixes did not cost the
 corpus anything it already had.
@@ -261,16 +261,31 @@ named under each.
 | 2026-10-04 | `refs` | `fuzz5` | 9200-9299 | 100 | 96 match, 4 refusal (`==`/`!=`, `true=8`) | nothing |
 | 2026-10-04 | `sets` | `fuzz5` | 9000-9099, `--max-min-steps 30` | 100 | 34 match, 66 `KNOWN:set_order`, 0 findings | nothing — every disagreement attributed |
 | 2026-10-04 | `sets` | `fuzz5` | 9200-9299, `--max-min-steps 30` | 100 | 34 match, 66 `KNOWN:set_order`, 0 findings | nothing |
+| 2026-10-04 | `refs` | `fuzz5` | 9300-9399 | 100 | 100 match | nothing |
+| 2026-10-04 | `comps` | `fuzz5` | 9300-9319, `--stmts 30 50` | 20 | 1 match, 19 `REFUSAL-DIVERGES-FRAME-BUDGET-X86` | the container-budget pair again (§3.5.3) — and the cost |
 | 2026-10-04 | `containers` | `fuzz5` | 9200-9299 | 100 | 100 match | nothing — the old mixes on a fresh range: two fixes cost the corpus nothing it had |
 | 2026-10-04 | `lists` | `fuzz5` | 9200-9299 | 100 | 100 match | nothing |
 | 2026-10-04 | `classes` | `fuzz5` | 9200-9299 | 100 | 100 match | nothing |
 
 **The two ranges are worth reading together, because agreeing with each other is
-the measurement.** Every mix's tally on 9200-9299 is identical to its tally on
-9000-9099 (100, 100, 99+1 vs 96+4, 34+66) except `refs`, whose two ranges reach
-the same four `==`/`!=` refusals at different indexes. A mix whose tallies track
-across disjoint ranges is measuring the MIX; one that does not is measuring its
-seed, and §1's warning is the other direction.
+the measurement.** `comps`, `objs` and `sets` score identically on both ranges
+(100, 100, 34+66), and `refs` reaches the same `==`/`!=` refusals at different
+indexes on each (99+1 and 96+4) plus a clean 100 on the third. A mix whose
+tallies track across disjoint ranges is measuring the MIX; one that does not is
+measuring its seed, and §1's warning is the other direction.
+
+**The `--stmts 30 50` row is the SPILL axis and it costs 143 s a program** — 20
+programs in 2865 s, the slowest row in this file and 70x the same mix at the
+default body (§2.1 records `chains` at 400 s for 100 as "the widest body in this
+table", so `comps` at this width is worse). 19 of its 20 are
+`REFUSAL-DIVERGES-FRAME-BUDGET-X86`, which is §3.5.3's container-budget pair
+understood and not a capability difference: x86-64's blob region is 16384 bytes
+and a fifty-statement body holding a dozen comprehensions does not fit in it,
+while arm64's frame scratch is 131072. The one match is the program that stayed
+inside the smaller budget. The row is here because a corpus that cannot be run
+at the width where the SPILL paths live is a corpus that does not measure them,
+and because the cost is the number a future session needs before choosing the
+size.
 
 **The cost is 0.2 GB peak** (`tools/memslot.py --gb 8`), `-j 4`, both backends —
 nothing here is within an order of magnitude of the 3-4 GB line. Per program:
