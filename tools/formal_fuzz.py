@@ -313,6 +313,7 @@ A sweep of `environ` is therefore a tenth the size of a sweep of `core` for the
 same number of builds.
 """
 import argparse
+import collections
 import json
 import os
 import platform
@@ -1381,6 +1382,72 @@ class Gen:
         """Reserve a local and remember its initialiser for the preamble."""
         self.decls.append((name, value))
         return name
+
+    # ── every name a later statement may read ────────────────────────────
+    #
+    # The property, stated once because it is the generator's own invariant and
+    # not a fact about any backend: **a name the body reads is bound on every
+    # path**. `declare` is what buys it — its initialiser is emitted once at the
+    # top of `main`, before any branch runs — so a binding written at a
+    # statement's own indent is a REBINDING of a name that already exists, never
+    # the binding that makes it exist.
+    #
+    # The bug this is here for was real and cost a corpus: a helper that needed a
+    # dict emitted `D = {10: 100}` at whatever indent it was called with, and a
+    # `d.keys()` two statements later was emitted against a name CPython still
+    # had bound to its declared `0` — `AttributeError: 'int' object has no
+    # attribute 'items'`, reported as a `generator-error`. That verdict is
+    # `check_one`'s early return, so the program was never built and EVERY
+    # construct in it went unmeasured while the sweep's tally counted it.
+    #
+    # A read of an unbound name is a CONTROL-FLOW question, not a syntax one, so
+    # it is invisible to `compile()` and to a backend that refuses the program:
+    # nothing but this can see it, which is why it lives here rather than in a
+    # test that runs the oracle and reads the answer off a traceback.
+    _POOLS = ("words", "smalls", "strings", "lists", "dicts", "tuples",
+              "globals", "global_containers")
+
+    def _module_level_names(self):
+        """The names `emit_top` binds unconditionally, read out of the text.
+
+        Parsed rather than remembered, so a helper that starts binding a name at
+        module level by any spelling is counted without also being added to a
+        table here — a second copy of the fact is how the two drift.
+        """
+        out = set()
+        for line in self.toplevel:
+            m = re.match(r"([A-Za-z_]\w*)\s*(?::[^=]+)?=[^=]", line)
+            if m:
+                out.add(m.group(1))
+        return out
+
+    def readable(self):
+        """`[(name, pool)]` for every name a later statement may READ.
+
+        The pools are exactly that — a name in one of them is a candidate for
+        some later statement's expression — which is why this is the right
+        subject set: a binding nothing ever reads cannot produce a read before
+        its store, whatever path it was emitted on.
+        """
+        out, seen = [], set()
+        for pool in self._POOLS:
+            for entry in getattr(self, pool, ()):  # (name, ...) or a bare name
+                name = entry[0] if isinstance(entry, tuple) else entry
+                if name not in seen:
+                    seen.add(name)
+                    out.append((name, pool))
+        return out
+
+    def unbound_reads(self):
+        """`[(name, pool)]` for every readable name with no unconditional bind.
+
+        Empty is the healthy answer; what it is NOT is a tautology, which is why
+        `test_formal_fuzz.py` also asserts that each mix's audit ran over a
+        program that HAS these pools — a corpus of empty pools would report no
+        violation and mean nothing.
+        """
+        bound = {n for n, _v in self.decls} | self._module_level_names()
+        return [(n, p) for n, p in self.readable() if n not in bound]
 
     # ── expressions ──
     def lit(self):
@@ -2759,9 +2826,19 @@ class Gen:
     # statements later was `AttributeError: 'int' object has no attribute
     # 'keys'` in CPython — a `generator-error`, which is the tool's verdict for a
     # program its own generator got wrong and which takes the program's real
-    # verdict with it. (`strmeth_stmt` and `list_stmt` bind the same way and can
-    # hit it the same way; see
-    # `bugs/TOOLS_a_generator_binding_emitted_inside_a_branch_is_not_a_binding.md`.)
+    # verdict with it: `check_one` returns before either backend is asked, so
+    # EVERY construct in the program goes unmeasured and the tally counts it.
+    # Measured on `--mix limits`, seed `sweepG` 8000-8009: 2 of 10.
+    #
+    # The other binders in this generator — `strmeth_stmt`, `list_stmt`,
+    # `dict_stmt`/`build_dict` — already go through `declare`, so the same class
+    # cannot reach them; that is now a CHECKED fact rather than a reading of
+    # four call sites, and it is why the three here emit nothing at `indent`
+    # either. See `Gen.unbound_reads`, which asks the generator the question for
+    # every name any statement may read, and `test_formal_fuzz.py`'s binds row,
+    # which proves the question is still being asked (37 of 60 `limits` programs
+    # are flagged when one of these three binders is put back the way it was).
+    #
     # `declare` puts the initialiser in the preamble, which is emitted once at
     # the top of `main` before any branch runs.
     def limit_bind_string(self, indent):
@@ -3630,11 +3707,49 @@ def make_program(seed, index, mix="core", stmts=(5, 12)):
     """
     return Gen(random.Random(f"{seed}:{index}:{mix}"), mix, stmts).program()
 
+
+#: What `audit_generation` returns: the names with no binding on every path, the
+#: program text, and every name a later statement may read. The third field is
+#: what makes an empty first field mean something — a caller can see whether the
+#: audit had any subject at all.
+Audit = collections.namedtuple("Audit", "unbound text readable")
+
+
+def audit_generation(seed, index, mix="core", stmts=(5, 12)):
+    """`Audit` for one GENERATED program — `make_program` plus the invariant.
+
+    Kept beside `make_program` and not inside it, so the generator stays a pure
+    function of its three arguments: a caller that wants the invariant (the
+    sweep's own `check_one`, and `test_formal_fuzz.py`) asks for it explicitly,
+    and the two cannot drift into disagreeing about what a program is.
+
+    Named for what it audits rather than `audit_program`, which is the `--audit`
+    entry point below and answers a different question about a SAVED program:
+    this one generates, that one judges.
+    """
+    gen = Gen(random.Random(f"{seed}:{index}:{mix}"), mix, stmts)
+    text = gen.program()
+    return Audit(gen.unbound_reads(), text, gen.readable())
+
 # ── the run ────────────────────────────────────────────────────────────────
 
 def check_one(index, args, tmpdir, lock=None):
     text = make_program(args.seed, index, args.mix, args.stmts)
     name = f"p{index}"
+    # Before the ORACLE, and reported with the same verdict it would have
+    # produced: a name the body reads with no binding on every path is a
+    # `NameError` in CPython, so the oracle would catch it — but only after
+    # being handed a program, and its traceback says which NAME rather than which
+    # pool remembered it. The generator knows, and saying so here costs nothing.
+    unbound, _t, _r = audit_generation(args.seed, index, args.mix,
+                                        args.stmts)
+    if unbound:
+        return {"index": index, "verdict": "generator-error",
+                "detail": "no binding on every path for "
+                          + ", ".join(f"{n} (readable as a {p})"
+                                      for n, p in unbound)
+                          + "; bind it through declare()",
+                "text": text}
     ref, err = cpython_answer(text, tmpdir, name)
     results = {}
     if isinstance(ref, tuple) and ref and ref[0] == "error":
