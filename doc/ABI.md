@@ -103,7 +103,7 @@ These cross the boundary as opaque pointers to the runtime types in
 
 **A formal value is one 64-bit word, so an `Optional[T]` is one word: the
 payload. `None` is a word `T` cannot produce.** That word is decided by
-`formal/model.py::optional_none_word`, mirrored in `lib/ProofLib.lean` as
+`formal/model.py`'s `optional_none_word`, mirrored in `lib/ProofLib.lean` as
 `optionalNoneWord`, and it is per payload type rather than per `Optional`:
 
 | Mojo `T` | the word `None` is |
@@ -255,9 +255,9 @@ was effectively doing — is reading a register the callee never promised.
 **There is no `mojo_try_push` macro.** An earlier version of this document
 specified one, and it was wrong about the current design: `setjmp` is emitted
 **directly into the generated function** by the try lowering
-(`mojo/backend_gimple/emit_stmts.py:3531` sets `gen._func_used_setjmp`, and the
-region is emitted there — `runtime/fire_runtime.h:164-165` says so in as many
-words: *"setjmp is emitted directly in generated functions"*). That is why
+(`mojo/backend_gimple/emit_stmts.py` sets `gen._func_used_setjmp` and emits the
+region there — `runtime/fire_runtime.h:512` says so in as many words: *"setjmp
+is emitted directly in generated functions"*). That is why
 `_mojo_exc_stack` and `_mojo_exc_top` are exported `extern` globals rather than
 reached through an accessor: the generated code indexes them itself. A client
 that wants to establish a catch point increments `_mojo_exc_top` and calls
@@ -266,13 +266,14 @@ the old macro had to be a macro.
 
 - **`mojo_exc_pop()`** — pops the topmost frame (`void`).
 - **`mojo_raise()`** — `longjmp`s to the current frame (`void`). A real function
-  with no `setjmp` of its own, so it is safe to call from a wrapper
-  (`runtime/fire_runtime.h:166`).
+  with no `setjmp` of its own, so it is safe to call from a wrapper — the header
+  says so beside its own declaration (`runtime/fire_runtime.h:513`, and the
+  declaration itself at `runtime/fire_runtime.h:520`).
 - **`mojo_exc_msg_set` / `mojo_exc_msg_get`** — set/get the string payload of a `raise` (`void` / `char *`).
 - **`mojo_exc_obj_set` / `mojo_exc_obj_get`** — set/get the opaque typed exception object (`void *`).
 - **`mojo_exc_type_set` / `mojo_exc_type_get`** — set/get the exception type tag
   (`void` / `int64_t`, over `extern int64_t _mojo_exc_type`;
-  `runtime/fire_runtime.h:185-187`). Added since this section was first
+  `runtime/fire_runtime.h:532-534`). Added since this section was first
   written and load-bearing for typed exceptions.
 
 **Cleanup-thunk registry.** `mojo_raise`'s `longjmp` skips every C statement
@@ -284,15 +285,42 @@ pushes a thunk after constructing an owned local, and cancels it at the same
 free call it already emits on the normal path. `mojo_raise` walks and invokes
 every still-live thunk back down to the catching try's checkpoint before it
 `longjmp`s, so an owned local is freed exactly once on whichever path actually
-runs. All `void` except `mojo_cleanup_cancel_n` (`int64_t`);
-`runtime/fire_runtime.h:203-221`, rationale at `:189-202`, and
-`doc/OWNERSHIP_MODEL.md`.
+runs. **Every entry point in the registry returns `void`** — including
+`mojo_cleanup_cancel_n`, whose `int64_t` is its *argument* and not its return
+type; all of them are declared in `runtime/fire_runtime.h` beside the comment
+quoted above, with the rationale in the same header and in
+`doc/OWNERSHIP_MODEL.md`. **The list below is the whole registry** — the depth counter `extern int _mojo_cleanup_top` is exported
+beside it — and it is pinned by name against the header rather than against this
+paragraph, so a push family added to the runtime fails here rather than
+silently going undocumented:
 
-- **`mojo_cleanup_push_dict` / `_list` / `_set`** — push a heap-owning thunk (`void *`).
-- **`mojo_cleanup_push_dict_stack` / `_list_stack` / `_set_stack`** — push a
-  *stack*-allocated thunk. Distinct from the above because an unwind past one
-  of these must call `mojo_*_destroy` (buffer-only teardown) and never
-  `mojo_*_free`, which would `free()` a stack address.
+- **`mojo_cleanup_push_dict`** / **`mojo_cleanup_push_list`** /
+  **`mojo_cleanup_push_set`** — push a heap-owning thunk (`void *`).
+- **`mojo_cleanup_push_dict_stack`** / **`mojo_cleanup_push_list_stack`** /
+  **`mojo_cleanup_push_set_stack`** — push a *stack*-allocated thunk. Distinct
+  from the above because an unwind past one of these must call `mojo_*_destroy`
+  (buffer-only teardown) and never `mojo_*_free`, which would `free()` a stack
+  address.
+
+  **Spelled out in full rather than as `` `head` / `_tail` `` shorthand**, and
+  that is deliberate in a contract document rather than a style note: the
+  shorthand is ambiguous about where the shared prefix ends —
+  `` `mojo_cleanup_push_dict_stack` / `_list_stack` `` reads as prefix
+  `mojo_cleanup_push_` and as prefix `mojo_cleanup_push_dict_` equally well — so
+  a reader, and `test_formal_doc_truth.py`'s registry check, has to guess. Every
+  name in the registry above is written out.
+- **`mojo_cleanup_push_ptr(void *p)`** — a struct instance: the unwind
+  `free()`s the whole block. It is a heap family, not a stack one, despite the
+  bare spelling.
+- **`mojo_cleanup_push_list_strs(void *p)`** — a list that **solely owns** its
+  string elements (every one freshly allocated by the runtime function that
+  built it; see `mojo_list_free_owned_strs`). A list of strings is usually
+  *borrowed*, so this is chosen by the owner and never inferred from the
+  element type — which makes it the one entry in this registry a caller can get
+  wrong by inference rather than by omission.
+- **`mojo_cleanup_push_closure(void *p)`** — a closure's bound method and its
+  environment are one allocation unit (see `mojo_closure_free`), and this frees
+  both.
 - **`mojo_cleanup_cancel_n(int64_t n)`** — pop the `n` most-recently-pushed
   thunks **without invoking them**; called immediately before the inline frees
   they duplicate.
@@ -300,13 +328,15 @@ runs. All `void` except `mojo_cleanup_cancel_n` (`int64_t`);
   catching try's checkpoint.
 
 **Coroutine boundary.** `extern int _mojo_exc_pending` with
-`mojo_exc_pending_set` / `mojo_exc_pending_get` (`runtime/fire_runtime.h:250-252`).
-This is the one entry set a client must not guess at: the generated C++
-generator body calls it at the `extern "C" _resume()` boundary, because an
-ordinary `yield from` delegation loop re-throws as a C++ exception and gets
-unwound for real, while GIMPLE C code calls `mojo_raise()` itself. A callee on
-that boundary that is not a live GIMPLE C frame must not have its `longjmp`
-cross ordinary live C frames (`runtime/fire_runtime.h:240-249`).
+`mojo_exc_pending_set` / `mojo_exc_pending_get`
+(`runtime/fire_runtime.h:606-608`). This is the one entry set a client must not
+guess at: the generated C++ generator body calls it at the `extern "C"
+_resume()` boundary, because an ordinary `yield from` delegation loop re-throws
+as a C++ exception and gets unwound for real, while GIMPLE C code calls
+`mojo_raise()` itself. A callee on that boundary that is not a live GIMPLE C
+frame must not have its `longjmp` cross ordinary live C frames — the header's
+own comment on the set explains why in terms of a suspended frame no longer
+existing (`runtime/fire_runtime.h:579-604`).
 
 ## Generics
 

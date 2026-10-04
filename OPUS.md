@@ -19,6 +19,15 @@ with a loop or a `bl` still gets one named `sorry` over `Total`. That
 statement is true (or at least not known to be false), which is more than
 could be said for what it replaced.
 
+**The emitter's own condition has four clauses, not two**, and the gap matters
+because two of them are silent. `_gen_universal_e2e_cfg` returns `None` — so
+the caller emits the named `sorry` — unless the walk is **not recursive**, is
+**acyclic** (every branch target after the branch), has **no `bl` block**, and
+is given a `fuel` at or above the instruction count. So "acyclic and has no
+calls" is two of four: a self-recursive export that is otherwise acyclic in its
+CFG, and an export offered less fuel than it has instructions, both fall back
+to the `sorry` without either condition being visible from this sentence.
+
 How: the generator's existing CFG walk (`_gen_universal_e2e_cfg`, halt-only
 mode) now proves `{ident}_halts`:
 
@@ -310,10 +319,14 @@ A three-export dylib, built through the ordinary path
 
 So the scheme is not partial in a diffuse way: on a plain arithmetic export it
 is total, and the two exclusions in `_gen_universal_e2e_cfg` are exactly the
-two that bite. `fuel < _TOTAL` never fires in practice — `exportFuel` is
-100000 and no export approaches that instruction count — so it is not a
-constraint worth thinking about. **The binding constraints are `bl` and the back
-edge, one per §4.2 and §4.1.**
+two that bite. `fuel < _TOTAL` never fires in practice — and this is the one
+sentence in this file that was stale for longer than it looks, because it said
+"`exportFuel` is 100000" when `exportFuel` has been
+`200000 + (image.codeSize / 4) * n` since §4.1's arithmetic-form fix landed.
+It is not a constraint worth thinking about at either size. **The binding
+constraints are `bl` and the back edge, one per §4.2 and §4.1.** (The third
+exclusion, `recursive`, is not exercised by this table and is not claimed to be
+subsumed by the other two; see §1.)
 
 This matters for sequencing: §4.1 and §4.2 are not two independent items of
 equal size. §4.1 (loops) is a *definitional* question — no amount of walking
@@ -359,17 +372,22 @@ and §2 of that request contains the finding that matters most for budgeting:
 prologue/epilogue memory round trip is bitvector computation. Nobody should
 budget address arithmetic for that.
 
-**What blocks it is one line in a file I do not own.** The emitter emits
-`import Contracts`; `formal/lean.py`'s `LIBRARY_MODULES` is still
+**The blocker that was here is gone.** The emitter emits `import Contracts`;
+`formal/lean.py`'s `LIBRARY_MODULES` was
 `("ProofLib", "X86", "work", "Refine")`, so `lib/Contracts.lean` — tracked in
 git since `c967b5d` — was never built by the project, and nothing importing it
-could be checked. **That is now fixed**: `formal/lean.py`'s `LIBRARY_MODULES`
-has been extended to include `Contracts`, and `lib/Contracts.olean` builds.
-So this blocker is gone and §5.3/§5.5 are unblocked; the remaining work is in
-the emitter, not in registration. `formal/lean.py` is integrator-owned (FORMAL.md §11.3), so this
-is escalated in `IR-2-to-integrator-lib-registration-and-total-shape.md` rather
-than edited. It is now the blocker for **two** agents, which is the argument for
-doing it: it is one line, it is mechanical, and it is unblocking.
+could be checked. `LIBRARY_MODULES` now includes `Contracts` and
+`lib/Contracts.olean` builds. It was escalated rather than edited here because
+`formal/lean.py` was integrator-owned (FORMAL.md §11.3), in
+`IR-2-to-integrator-lib-registration-and-total-shape.md`; it was one line, it
+was mechanical, and it was blocking two agents.
+
+So §5.3 and §5.5 are unblocked by registration, and what is left in them is the
+emitter's own work. **Note the boundary this exposes**, because it is the same
+one §5.3 keeps running into: registering the module makes the proof *checkable*;
+it does not make the emitter *correct*. `lib/Contracts.lean` importing cleanly
+and `dylib_export_0_triple_spec` being discharged are independent facts, and
+only the second one is worth anything.
 
 One detail from that request that changes an emitted obligation, recorded here
 so it is not lost: `ExportBody.atExit` is stated **for the start state**, not
