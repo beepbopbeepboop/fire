@@ -4740,9 +4740,8 @@ def _value_may_be_a_frame(value, structs_by_name, holders, alias=None,
 
 
 def _collect_one_field_receiver_rebinds(fn, owner, structs_by_name,
-                                       one_field=None) -> None:
-    """PARK a ONE-FIELD struct's mutator that rebinds its receiver to a name of
-    its own struct type.
+                                       one_field=None, fns=()) -> None:
+    """PARK a ONE-FIELD struct's mutator that rebinds its receiver, two ways.
 
     **This runs BEFORE `_rewrite_self_fields`, and that is the whole design.**
     That rewrite collapses `recv.<sole field>` onto `recv` — it is what makes a
@@ -4757,20 +4756,46 @@ def _collect_one_field_receiver_rebinds(fn, owner, structs_by_name,
     therefore right to skip one-field owners, and right for the wrong reason to
     be asked at all: it cannot see the difference.
 
-    **Only the ALIASING spellings are parked**, and that is what the census
-    decided (`tools/formal_receiver_rebind_census.py`: 51 hand-written
-    `receiver = <value>` sites in the one-field methods of this repository and
-    the stdlib, of which 23 are a construction of their own struct and 28 are a
-    value the method computed — `self = self & rhs`, `self = False`,
+    **Only the ALIASING spellings are parked as the copy defect**, and that is
+    what the census decided (`tools/formal_receiver_rebind_census.py`: 51
+    hand-written `receiver = <value>` sites in the one-field methods of this
+    repository and the stdlib, of which 23 are a construction of their own struct
+    and 28 are a value the method computed — `self = self & rhs`, `self = False`,
     `self = _binary_op(self, rhs)` — and NONE is a name of the receiver's own
     type). A store to the receiver's own word is what those 28 mean and what the
     write-back exists to deliver; refusing them would cost `std/builtin/
     bool.mojo` and every other in-place operator in the corpus, for a construct
     that is not a defect.
 
+    **A rebinding to a FRAME is a different defect and is parked apart**, on
+    `_one_field_receiver_frame_rebinds`. The copy above stores a word the
+    method computed or was given; a frame is an ADDRESS, and one this function
+    BUILT is an address into scratch that is about to be reclaimed, delivered to
+    a caller that will read it after the return. For a program that never
+    happens — an `__init__` is inlined at its construction site
+    (`model.init_body_stores`), and a body that is not a straight line of
+    receiver-field stores is refused there, by name. **A dylib export is a
+    spelling of `__init__` that IS run as a method**, with no inlining and no
+    construction site to refuse it, which is why the frame half is parked here
+    and raised at the dylib boundary rather than being one refusal here: a
+    refusal raised in this pass would also preempt every program that merely
+    DECLARES such a constructor, and it is not one.
+
+    **Only a frame this function BUILDS is parked, and that is not a limit of the
+    walk but the shape of the boundary.** `self.inner = <a name>` is the caller's
+    own frame being copied back into the receiver, which is exactly what the
+    write-back is for; and a frame from a CALLEE (`self.inner = mk(41)`) is
+    refused one function earlier, at the same dylib boundary, by
+    `returned_frame_library_refusal` on `mk` itself — measured on both machines
+    for a free function and for a method that returns its own receiver, which is
+    the same refusal. So there is no frame-RETURNING spelling left for this arm
+    to decide, and adding one would be a second recognition of a fact the loop
+    above has already settled.
+
     Parked rather than raised for the reason every finding in this family is:
     the refusal must not preempt the import diagnosis, and this question cannot
-    be asked until the imports are known. `check_receiver_rebinds` raises it.
+    be asked until the imports are known. `check_receiver_rebinds` raises the
+    copy half; `compile_formal_dylib` raises the frame half.
     """
     if owner is None or not M.one_field_answer(owner, one_field):
         return
@@ -4787,24 +4812,64 @@ def _collect_one_field_receiver_rebinds(fn, owner, structs_by_name,
     params, locals_ = M.receiver_own_type_names(fn, owner, structs_by_name)
     aliases = {n: "a parameter" for n in params}
     aliases.update({n: "a local" for n in locals_})
+    owner_name, member = getattr(owner, "name", None), \
+        M.method_member_name(owner, fn)
+# The SOLE FIELD, and the second spelling of a rebinding target. A one-word
+    # struct's source almost never writes `self = …`: it writes
+    # `self.<sole field> = …`, which is the same assignment by the identity
+    # `_rewrite_self_fields` is about to collapse. Recognised from the DECLARED
+    # field name rather than from any chain walk, so the two spellings cannot be
+    # answered by two different derivations of "the receiver's own storage", and
+    # an owner with no sole field to name contributes no dotted spelling at all
+    # rather than one with `None` in it.
+    sole = M.struct_sole_field_name(owner)
+    dotted = ({f"{r}.{sole}" for r in receivers} if sole is not None
+              else frozenset())
+    frame_rebinds = []
     for node in M.iter_nodes(getattr(fn, "body", None) or []):
         if not isinstance(node, (F.AssignStmt, F.VarDecl)):
             continue
         if isinstance(node, F.VarDecl):
             target, value = node.name, node.value
         else:
-            target = (node.target.name
-                      if isinstance(node.target, F.IdentExpr) else None)
+            tgt = node.target
+            target = (tgt.name if isinstance(tgt, F.IdentExpr)
+                      # `self.<sole> = …`: the receiver read through its own
+                      # field, which is the spelling the source uses and the one
+                      # `_rewrite_self_fields` is about to collapse onto it.
+                      else (f"{tgt.obj.name}.{getattr(tgt, 'member', None)}"
+                            if isinstance(tgt, F.MemberExpr)
+                            and isinstance(tgt.obj, F.IdentExpr) else None))
             value = node.value
-        if not isinstance(target, str) or target not in receivers:
+        if not isinstance(target, str) or value is None:
+            continue
+        # **The dotted spelling is read for the FRAME arm only.** The copy arm
+        # below has always answered the bare receiver alone, and widening it is
+        # a separate change with its own blast radius: `self.<sole> = other` is
+        # the same assignment by the identity, but "and therefore refused" is a
+        # claim about programs this bug is not about. The parked entry keeps
+        # the SOURCE's spelling rather than the canonical receiver, because the
+        # refusal has to quote the line the reader wrote.
+        frame_target = target if target in receivers or target in dotted else None
+        if isinstance(value, F.CallExpr) and frame_target is not None:
+            built = _returned_frame_construction(
+                fn, value, M.call_callee_name(value.func), structs_by_name,
+                fns)
+            if built is not None:
+                frame_rebinds.append((frame_target, _expr_spelling(value),
+                                      built.name, owner_name, member))
+            continue
+        if target not in receivers:
             continue
         if not isinstance(value, F.IdentExpr) or value.name not in aliases:
             continue
         fn._one_field_receiver_rebind = (
             target, value.name,
             "a parameter" if value.name in params else "a local",
-            getattr(owner, "name", None), M.method_member_name(owner, fn))
-        return
+            owner_name, member)
+        break
+    if frame_rebinds:
+        fn._one_field_receiver_frame_rebinds = frame_rebinds
 
 
 def _collect_one_field_dropped_stores(fn, owner, structs_by_name,
@@ -14323,9 +14388,12 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # own type. Asked HERE, at the top of the loop, because
         # `_rewrite_self_fields` below collapses `recv.<sole field>` onto `recv`
         # and after that a field store and a rebinding are the same text — the
-        # shape is unanswerable anywhere later in the pipeline.
+        # shape is unanswerable anywhere later in the pipeline. `_image_function_
+        # names` is the construction-vs-function dispatch `_returned_frame_
+        # construction` asks about, and it is already computed above this loop.
         _collect_one_field_receiver_rebinds(fn, method_owners.get(fn.name),
-                                            structs_by_name, one_field)
+                                            structs_by_name, one_field,
+                                            _image_function_names)
         # …and its sibling: a one-field method that stores its own field through
         # a receiver no write-back will hand back, so the store is computed and
         # dropped. Asked at the same point for the same reason — after
@@ -17577,6 +17645,37 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     for fn in ordered:
         if getattr(fn, "_returns_frame_struct", None) is not None:
             raise FormalBuildError(M.returned_frame_library_refusal(fn.name))
+
+    # …and the frame that reaches the importer through the OTHER convention,
+    # which is a hazard this loop above could not see because it is not a
+    # returned frame: a one-word struct's receiver comes back through the
+    # caller's own storage (`model.receiver_writeback_name`), so a mutator that
+    # REBINDS that receiver to a frame it built itself hands the importer an
+    # address into this function's scratch, in the cell the importer owns. The
+    # return register carries nothing at all, which is why this needs its own
+    # loop and not a second arm of the one above.
+    #
+    # **This is the boundary that makes the shape reachable, and it is the only
+    # one.** `_collect_receiver_rebinds` exempts an `__init__` from the rebinding
+    # rule because a program INLINES a constructor body at its construction site
+    # (`model.init_body_stores`), where a body that is not a straight line of
+    # receiver-field stores — this one, since it constructs — is refused by name
+    # before any of this is emitted. An exported `__init__` has no construction
+    # site: it is called, through the symbol, by a compilation this build does
+    # not perform. So the escape is published unless something here says no, and
+    # while it is unreachable (every consumer spelling is refused at ITS
+    # construction site) that is the wrong reason for a check to be off: the
+    # second refusal is what would have to move.
+    #
+    # Read off the parked entries `_collect_one_field_receiver_rebinds` left, and
+    # there is no condition to re-ask: it parks a rebinding only where the frame
+    # is one THIS function built, because a frame from a callee is refused by the
+    # loop above, on the callee.
+    for fn in ordered:
+        for target, spelling, frame, owner, member in (
+                getattr(fn, "_one_field_receiver_frame_rebinds", ()) or ()):
+            raise FormalBuildError(M.receiver_writeback_frame_library_refusal(
+                fn.name, owner, member, target, spelling, frame))
 
     # The library's merged slot table is PUBLISHED before the codegen runs,
     # because a slot access is an absolute address the codegen computes against

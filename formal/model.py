@@ -28152,6 +28152,40 @@ def returned_frame_library_refusal(name: str) -> str:
             f"caller and the callee are compiled together")
 
 
+def receiver_writeback_frame_library_refusal(name: str, owner: str, member: str,
+                                             target: str, spelling: str,
+                                             frame: str) -> str:
+    """A one-word mutator that hands its caller a frame ADDRESS it built itself.
+
+    `returned_frame_library_refusal`'s hazard reached through the OTHER
+    convention, and the sentence it opens with is deliberately the same one,
+    because it is the same fact seen from outside: what the importer is handed
+    is a symbol after a call which leaves a frame address in storage the
+    importer owns. What is different is the register it travels in — there is
+    no returned-frame convention here and no trailing hidden word; the value
+    goes out through the receiver cell the caller passed in
+    (`receiver_writeback_name`), which is why this shape needs its own message
+    rather than being reported as the frame return it resembles.
+
+    `owner`/`member` are the class and the method, because the export's name is
+    a mangling of both (`Box1___init__`) and a reader who wrote
+    `self.inner = Inner(a, b)` needs to be told which of a class's methods the
+    boundary is publishing, not handed a symbol to search for. `target` and
+    `spelling` are the source's own two halves of the offending statement, in
+    the order the source wrote them. `frame` names what the address points at —
+    the struct whose frame this function built, or the callee it took one from —
+    because "a frame" alone does not tell the reader whether the block is one
+    they can see.
+    """
+    return (f"{name} returns a frame address, so it cannot be compiled into a "
+            f"dylib: `{target} = {spelling}` in {owner}.{member} binds the "
+            f"receiver to a frame built in this function's own scratch ({frame}), "
+            f"and {owner} has exactly one field, so its receiver IS that field "
+            f"and comes back through the caller's own storage — the address "
+            f"therefore outlives the frame it names, and an importer of this "
+            f"library has no way to learn the width of the block it must "
+            f"reserve. Store THROUGH the field instead, which is the same "
+            f"program with a lifetime both ends can see")
 
 
 def returned_frame_blob_refusal(fn_name: str, holder: str, field: str,
