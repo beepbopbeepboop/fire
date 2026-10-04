@@ -120,11 +120,20 @@ Three of those BUILD, and the artifacts are the stronger check:
 | `subprocess.mojo` (83 984 bytes) | **byte-identical** |
 | `ctypes.mojo` (67 712 bytes) | 43 bytes differ, in two clusters and **neither is code**: 12 inside an `LC_LOAD_DYLIB` name (the CAS dylib's content hash, which includes the output path — and the two trees were given two different ones on purpose) and 31 inside the `LC_CODE_SIGNATURE` region (`dataoff 49328`, `datasize 18384`). Two trees cannot produce one signature without one path. |
 
-**What this does not cover, and it is the integrator's:** a whole-scope
+**What it does not cover, and it is the integrator's:** a whole-scope
 `tools/formal_sweep.py` over all 710 files, and the Lean half. The twelve above
 are a sample chosen for size and for the fact that three of them build at all;
 they are not a census, and the doc that would settle the question is
 `bugs/FORMAL_sweep_work_map_2026-10-04_b10.md`'s next round.
+
+**What it costs: 0.10 s on `formal/model.py`, 3 runs each, best of three.**
+1.86 s before, 1.96 s after — about 5 %, and it is one extra body walk per
+function (`pointer_frame_bindings` is collected in the loop that already walks
+every function once, and asked from inside the fixpoint rather than beside it).
+`bugs/PERF_formal_build_recomputes_a_per_struct_census_on_every_ask.md` is the
+doc that says what a build-cost number has to be measured against, and the honest
+reading of this one is that a fixpoint EDGE is not free even when it merges
+nothing: the walk is per function and there are a thousand functions.
 
 ### §9's sixth item, re-measured: the x86-64 one-field field read is FIXED, and
 ### what the measurement was is the record
