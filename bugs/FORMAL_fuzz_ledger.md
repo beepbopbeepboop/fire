@@ -34,7 +34,7 @@ backends (`--backends x86_64,arm64`). Peak memory across every sweep in this
 file: **0.1 GB** (`tools/memslot.py --gb 4`), so none of it is within an order of
 magnitude of the 3-4 GB line.
 
-**4032 programs over 13 sweeps.** Two bugs fixed, two limits filed, and four
+**5212 programs over 25 sweeps.** Three bugs fixed, five limits filed, and eight
 defects in the tool itself.
 
 | date | mix | seed | indexes | programs | tally | what came of it |
@@ -61,6 +61,35 @@ programs that could not be generated at all.
 `signed` was run with `--max-min-steps 30` rather than the default 400, for the
 reason §5 gives: a program whose disagreement is a KNOWN construct pays for a
 reduction that attribution then neutralises anyway.
+
+### 2.1 The arch-parity sweep (`sweepG`, 2026-10-03) — 1180 programs, twelve mixes
+
+Seed name `sweepG` and index ranges from 7000, disjoint from every row above, so
+no row double-counts another's programs. The subject of this block is the
+three-way claim the tool's `--backends x86_64,arm64` makes: **arm64 == CPython,
+x86-64 == CPython, and arm64 == x86-64 on exit code, stdout and refusals.** One
+hundred and eighty of the programs are clean on all three, `strings` is four
+minimiser artefacts (§3.6), and `limits` is the refusal surface (§3.5) — which is
+a family that did not exist before this sweep.
+
+| date | mix | seed | indexes | programs | tally | what came of it |
+|---|---|---|---|---|---|---|
+| 2026-10-03 | `core` | `sweepG` | 7000-7149 | 150 | 150 match | nothing |
+| 2026-10-03 | `calls` | `sweepG` | 7000-7149 | 150 | 150 match | nothing |
+| 2026-10-03 | `classes` | `sweepG` | 7000-7149 | 150 | 150 match | nothing |
+| 2026-10-03 | `lists` | `sweepG` | 7000-7099 | 100 | 100 match | nothing |
+| 2026-10-03 | `containers` | `sweepG` | 7000-7099 | 100 | 100 match | nothing — the family §3.2 came from, now clean on a fresh seed range |
+| 2026-10-03 | `globals` | `sweepG` | 7000-7099 | 100 | 100 match | nothing |
+| 2026-10-03 | `strmeth` | `sweepG` | 7000-7099 | 100 | 100 match | nothing |
+| 2026-10-03 | `generics` | `sweepG` | 7000-7099 | 100 | 100 match | nothing |
+| 2026-10-03 | `signed` | `sweepG` | 7000-7099 | 100 | 38 match, 62 `KNOWN` (31 `floordiv`, 20 `modulo`, 11 both), 0 findings | nothing — every disagreement reduced to the documented one |
+| 2026-10-03 | `environ` | `sweepG` | 7000-7019 | 20 | 20 match | nothing |
+| 2026-10-03 | `strings` | `sweepG` | 7000-7009 | 10 | 1 match, 5 `KNOWN:str_subscript`, 4 `MISMATCH-X86`, 0 findings after attribution | the 4 are minimiser artefacts — §3.6 |
+| 2026-10-03 | `limits` | `sweepG` | 8000-8099 | 100 | 95 refusal (190 audited, `true=190`), 5 `REFUSAL-DIVERGES-X86+ARM` | the refusal surface itself — §3.5 |
+
+`limits` was run with `--max-min-steps 30` for the same reason `signed` was: the
+five divergences are all the container-budget pair (§3.5.3) and the shrinker
+cannot reduce a construct that is not in the program.
 
 ## 3. Findings
 
@@ -147,10 +176,114 @@ the corpus does not cover, which is worth knowing as a property of the tool.
 corpus cannot produce the construct, and a row nothing can trigger is a row that
 has stopped measuring.
 
-## 4. Four defects in the TOOL, all found by using it
+### 3.4 The x86-64 `int(s, base)` parse was refused by its OWN duplicate label
+
+**Found:** by hand, probing what a `sum(xs)` refusal actually says (the probe
+that became `--audit`), and confirmed by `--mix limits`' `unknown_callee` family.
+**Fixed:** `1aa8edc6`. **Pinned:** `test_formal_x86_64_parity.py`'s five
+`int_parse_*` rows, which run on BOTH machines.
+
+`print(int("12"))` printed `12` on arm64 and REFUSED on x86-64:
+
+    build: internal: label 'main_ip1_end' is defined twice, at 0x1000003ba and
+    at 0x1000003ba. … A label name must carry a per-site counter.
+
+`_emit_int_parse` ended in two identical `self.asm.label(endl)` emits, from the
+commit that added the parse (`05d720ef`), so the whole parse was arm64-only from
+that day. Three things had to be true for that to be invisible, and each is a
+statement about the tool rather than about the bug:
+
+1. **nothing ran the case on x86-64.** `test_formal_run.py`'s `INT_PARSE_CASES`
+   pin these five programs through `run_case`, which builds THE HOST'S
+   ARCHITECTURE for an answered case — so on an arm64 host they were arm64 rows.
+   The five are now also in `test_formal_x86_64_parity.py`, where a case runs on
+   both machines or not at all. With the duplicate label put back, two of them
+   fail with the internal error and pass without it.
+2. **the internal error was filed as a `refusal`** (§4.5) — a correctly-refused
+   construct, in a sweep's tally, for a lowering bug only one machine had;
+3. **both machines refusing was agreement** (§4.6), so even the pair arm64-answers
+   / x86-64-refuses did not read as a divergence in the message — it read as one
+   in the VERDICT, which is §4.1's already-fixed half.
+
+The same static check over both emitters (`asm.label(X)` twice in a row) finds
+this one occurrence and no others, which is the cheap form of the sweep: the
+duplicate-label check the assembler already performs is a better oracle than a
+thousand programs, and it was already refusing the build.
+
+### 3.5 The refusal surface: three findings, none of them a miscompile
+
+**Found:** `--mix limits`, which is new — see §5 for why the corpus had no
+refusal coverage at all. All three are filed, none is fixed, and none is a wrong
+answer: they are about **the messages**, which is the class §3.1-§3.4 are not.
+
+Every refusal the corpus reaches is now audited (`--audit`, and every sweep),
+and the 190 refusals of seeds 8000-8099 came back `true=190, unnamed=0, false=0,
+no-predicate=0` — so the three below are not what the sweep found *in that
+range*; they are what the same audit reports on the two families the range did
+not reach, and on the five divergences it did.
+
+#### 3.5.1 An unlowered callee is refused by the LINK AUDIT, which names no construct
+
+`print(sum(xs))` — and `max`, `min`, `abs`, and any name nothing declares — is
+refused on BOTH machines by `_unaccounted_report`, which says the image would
+bind a symbol nothing provides and then, in its own words, cannot decide whether
+that symbol is a call the codegen emitted. The construct is genuinely outside the
+subset and the refusal genuinely stops the build; the message names a FILE and a
+SYMBOL, and never says that `sum` is a call this path does not lower.
+`bugs/FORMAL_an_unlowered_callee_is_refused_by_a_link_audit.md`.
+
+#### 3.5.2 The audit's other three verdicts, and what it cannot decide
+
+`unnamed` and `false` are findings and `no-predicate` is the honest answer for a
+family with no CPython-checkable claim. What the audit CANNOT do is decide
+whether a construct really is outside the modelled subset: that is a property of
+`formal/model.py`, not of the message, and the only witnesses available here are
+the two machines and CPython. So `no-predicate` is counted in the summary and
+never folded into `true` — a sweep that audited nothing says so, which is the
+difference between "the refusals were true" and "nothing looked at the refusals".
+
+#### 3.5.3 The two machines have different container budgets
+
+Five of a hundred `limits` programs are `REFUSAL-DIVERGES-X86+ARM` and all five
+are one 17608-byte list literal: arm64's scratch is 128 KB and x86-64's blob
+region 16 KB, so the same source builds and runs on one machine and is refused on
+the other, and `frame_blob_refusal`'s docstring says so. The refusal is TRUE on
+both machines and the parity finding is real all the same, because a construct
+one machine declines is a parity finding whatever the reason.
+`bugs/FORMAL_the_two_architectures_have_different_container_budgets.md`.
+
+The messages also differ for a second reason, worth separating from the first:
+the machines refuse at different POINTS, so arm64 got past the literal and
+refused a later construct in the same program. `test_formal_run.py` has the
+vocabulary for that shape (`refuse_either:`) and the fuzzer has none — both
+report one `REFUSAL-DIVERGES`, which is right, since "the two machines do not
+agree about this program" is the finding either way.
+
+### 3.6 The four `strings` disagreements are the minimiser, and this time it is §3.3
+
+**Found:** `strings`, `sweepG` 7000-7009 — 4 `MISMATCH-X86` out of 9 programs,
+against 2 in the `sweepD` row above. **Not backend bugs**, and the shape is §3.3
+exactly: in every one of the four, arm64 and x86-64 print the SAME bytes, so
+there is no x86-64 bug to find, and the reduced program disagrees with CPython
+about something else — a `print(f(...))` where the minimiser deleted `f`'s
+`return`, which is `FORMAL_a_function_with_no_return_yields_a_word_where_cpython_
+yields_None.md` (images print a leftover register, CPython prints `None`).
+
+So the tool is RIGHT to report them unexplained — neutralising `str_subscript`
+leaves a disagreement that is not the known one, which is the rule §"THE KNOWN
+DIVERGENCES" states — and the reproducer on disk is a program that disagrees for
+a different reason than the one reported. Two of the four reduced programs
+(7000, 7006) contain no subscript at all; the other two keep one and cannot be
+attributed. §4.4 is the earlier measurement of the same failure; this is its
+second instance and it is the argument for shrinking with `want` fixed per
+verdict rather than at all.
+
+## 4. EIGHT defects in the TOOL, all found by using it
 
 None is a backend bug. Between them they cost more time than the backend bugs
-did, and each one made the tool report LESS than it should.
+did, and each one made the tool report LESS than it should. §4.5-§4.8 are the
+four the `sweepG` arch-parity sweep added, and they share a shape: each one
+classified something as a correctly-refused construct that was not one.
 
 ### 4.1 A one-sided refusal was not a finding
 
@@ -214,7 +347,64 @@ divergence was still there — `f` where the image printed `102`, `r` for `114`,
 `e` for `101` — but the reproducer no longer contained it, so `blame` had nothing
 to attribute. **Those two rows are minimiser artefacts, not backend bugs**, and
 they are in §2's table rather than deleted from it because a run that produced
-them is part of the record.
+them is part of the record. §3.6 is the same failure on a different corpus, four
+times, and it is now the second measurement rather than the first.
+
+### 4.5 An INTERNAL diagnostic was filed as a `refusal`
+
+`run_on` separated a crash from a refusal by asking whether the diagnostic was a
+traceback or a sentence. Both assemblers raise `CodegenError` for their OWN
+consistency checks, so "internal: label 'main_ip1_end' is defined twice, at 0x…
+and at 0x…" is a sentence about the COMPILER and it was counted as a sentence
+about the program. §3.4 is the bug that hid there, and the tally said the file
+was outside the modelled subset. Its own verdict now (`CODEGEN-INTERNAL`), on
+the one prefix both assemblers use.
+
+The lesson is §"WHAT IS AND IS NOT A FINDING"'s own rule applied one level down:
+a refusal is a claim about the source, so anything that is not a claim about the
+source is a different verdict, and a tool that has two words for "the compiler
+said no" needs three for "the compiler disagreed with itself".
+
+### 4.6 BOTH machines refusing was agreement, whatever the words said
+
+One refusal is compared with the other machine; two identical refusals were not
+compared with each other. So "arm64 answered it, x86-64 refused it" was a
+finding (§4.1) while "arm64 refused it this way, x86-64 refused it that way" was
+a clean run — which is §3.4's second hiding place, and it hid the SAME bug. The
+comparison folds architecture labels through `formal_sweep_parity.fold_arch`
+rather than a second copy of it, because that normaliser was settled by
+measurement against real logs (12 of 542 rows differed for no reason other than
+a machine name) and "on the formal arm64 path" against "on the formal x86-64
+path" is one sentence told by two machines.
+
+### 4.7 Refusals were counted in ONE bucket, which the docstring has never done
+
+`WHAT IS AND IS NOT A FINDING` has said "counted by message so the construct mix
+stays visible" since the tool was written, and `classify` returned the string
+`"refusal"` for every one of them — so a sweep of two thousand programs could not
+say whether it had met one limit thirteen times or thirteen limits once. The
+count is now per (backend, construct), with the construct read off the message's
+head and required to be something the PROGRAM contains. That requirement is what
+makes it a measurement rather than a caption: it is what reports §3.5.1 as
+`unnamed` rather than as `symbol(s)`.
+
+### 4.8 The corpus could not produce a refusal at all, so the audit had nothing to audit
+
+4032 programs over the thirteen sweeps above produced 13 refusals, and all 13
+were one bug. That is not a corpus measuring the limits; it is a corpus that
+cannot reach them, and every other mix here is built out of constructs the path is
+supposed to LOWER — which is the right discipline for finding miscompiles and the
+wrong one for measuring messages. `--mix limits` emits constructs outside the
+modelled subset on purpose (string concatenation, the length-dependent methods, a
+slice, a `try` arm with a body, a dict method, an unlowered callee, a container
+past one machine's budget), and it is the first family in this file that is
+DECLARED not to lower: `test_formal_fuzz.py`'s `MIXES_NOT_LOWERED` used to be
+empty, and its emptiness was the point, so the row is a deliberate reversal of a
+stated invariant with the measurement that forced it.
+
+Two of its seven families are in the mix although they are known to produce
+findings (§3.5.1 and §3.5.3). A family that produces a finding is a family that
+measures, and a corpus tuned to be green is a corpus that has stopped.
 
 ## 5. What the corpus still cannot say, and what it costs to run
 
@@ -231,9 +421,16 @@ reduction that attribution then neutralises anyway.
 that imports `os` rebuilds the host module's dylib every time and this tool has
 no build cache.
 
-**The corpus cannot produce:** a function with no `return` (§3.3), string
-concatenation or a length-dependent string method (refused, with the measurement
-in the refusal — `model.string_concat_refusal`), a dict store of a new key
+**`limits` costs 0.03 s per program** (100 programs in 30.6 s), which is the
+cheapest family in this file and the one that reaches the most refusals per
+program: 190 audited refusals out of 100 programs, because every program is
+refused by BOTH backends and both are audited. Its `--max-min-steps 30` is not
+optional in practice — the five `REFUSAL-DIVERGES` it produces are the
+container-budget pair, and the shrinker cannot reduce a construct that is not in
+the program, so it spends the whole budget finding that out.
+
+**The corpus cannot produce:** a function with no `return` (§3.3), a dict store
+of a new key
 (NOW GENERATED and measured: `d[k] = v` is CPython's INSERT on both backends,
 `formal/model.py`'s `dict_store_capacity`, so this row was removed from the
 list rather than worked around), an `append` inside a loop (a blob's capacity is the number of append SITES and
@@ -243,14 +440,25 @@ has no answerable key kind — 15 of 40 programs until the mix was changed to bi
 a dict once), `struct`/`var` (CPython cannot parse it), floats, pointers, and file
 descriptors.
 
+**…and the list above is now SPLIT BY MIX rather than by corpus.** String
+concatenation, a length-dependent string method, a slice, a `try` arm with a
+body, a dict method, an unlowered callee and a container past the frame budget
+are all things this corpus as a whole could not produce and `--mix limits` now
+does, deliberately (§4.8). They are refusals rather than lowerings, so what they
+buy is the MESSAGE and not an answer — which is the trade §4.8 makes and the
+reason the mix is declared not to lower.
+
 **What would be the next thing to generate**, in this ledger's order: `while`/`else`
-and `for`/`else` (the corpus emits neither), a `with` statement, a `try`/`except`
-shape (a `try`'s handler arm with a body is REFUSED — `formal/model.py` stops
-walking the arms, and commit `95d3d580` is where that landed — so it would
-measure a refusal rather than a lowering), a
-comprehension whose generator has a CONDITION over a dict walk, and a
-`global` container mutated through two different helpers. Each is a family whose
-absence from this table is a coverage hole rather than a decision.
+and `for`/`else` (the corpus emits neither), a `with` statement (measured: it is
+REFUSED with a message that names the protocol and the remedy, and it needs a
+context manager CPython can also run, which is why `limits` leaves it out — a
+`with 1 as w` is a `TypeError` in CPython and would take the program's verdict
+with it), a `try`/`except` shape (NOW GENERATED — `limits`' `try_handler`, which
+is the single largest row in its construct mix at 114 of 190 refusals, so the
+next thing to vary there is the arm body), a comprehension whose generator has a
+CONDITION over a dict walk, and a `global` container mutated through two
+different helpers. Each is a family whose absence from this table is a coverage
+hole rather than a decision.
 
 ## 6. Reproducing a row
 

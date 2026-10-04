@@ -2356,7 +2356,7 @@ class Gen:
             # symbol is a call the codegen emitted. So the construct is refused
             # and the message names a file and a symbol rather than the call —
             # `REFUSAL-UNNAMED` in every sweep, and
-            # `bugs/FORMAL_an_unlowered_callee_is_a_dangling_call_not_a_refusal.md`
+            # `bugs/FORMAL_an_unlowered_callee_is_refused_by_a_link_audit.md`
             # is where that is written down.
             # Arity is CPython's, so the oracle can answer: `abs` takes ONE
             # operand and `max`/`min` take two or more, and a generated program
