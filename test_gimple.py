@@ -10809,6 +10809,125 @@ walk_span()
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_cyclic_closure_from_import_of_a_container_global_reads_the_owner():
+        """A `from b import K` read must load `b`'s field even when `b` is
+        still BEING COMPILED — the cyclic-closure shape that made the
+        self-hosted binary read a constant `0` and die.
+
+        A module's own globals are registered at the END of its own
+        `gen_module_impl` (the `_declared_globals` freeze), and
+        `_collect_import_modules` collects imports out of nested function
+        bodies too, so a closure with an import CYCLE reaches an importer's
+        from-import scan while the owner is an ancestor still in progress on
+        the compile stack. `_gmi_scan_imported_global_homes` gated its record
+        on `_module_global_field_type(owner, name)`, which has no
+        `_module_globals` entry to answer from at that moment, so nothing was
+        recorded, `_lower_IdentExpr`'s gate refused the name, and the read
+        fell to the unknown-identifier `(int64_t)0`.
+
+        Measured on the self-host closure: `gimple_codegen.py` (reached
+        nested inside `fire_compiler.py`, which imports it from inside a
+        `__main__` self-test) reads `DESUGARED_GENEXP_NAMES` — a `list` global
+        in `fire_compiler.py`, repopulated by `desugar_genexps` two statements
+        earlier — and the compiled binary's `--dump-full` of a TWO-LINE program
+        died in `mojo_iter_boxed_list` with `TypeError: object is not
+        iterable`. `_module_globals` held one module at that point and no
+        `fire_compiler` at all.
+
+        The owner's TYPE is available anyway, and this is where it comes from:
+        `_selfhost_module_scalar_globals` seeds `_global_to_module` /
+        `_global_var_types` from the compiler's own sources BEFORE any body is
+        lowered, for exactly this cycle (its own docstring names it). That
+        pre-seed answers the QUALIFIED spelling (`b.K`) through
+        `_lower_MemberExpr`'s `submod.GLOBAL` fallback; the bare-name half
+        never learned to read it. So the record is taken provisionally and the
+        read routes on it, gated on the type being a container — whose C
+        storage is the boxed `int64_t` every container global is declared with,
+        so no field `c_decl` has to be guessed.
+
+        THREE states, and the two negatives are the point: a provisional route
+        that cannot tell "the owner has not registered this field yet" from
+        "the owner provably declares no such field" would route a read to a
+        field that does not exist (gcc: "'struct _x_toplev' has no member
+        named 'K'"), which is what the gate exists to prevent. So the owner
+        REGISTERED with no such field must still refuse, and the owner
+        registered WITH it must keep taking the owner's own triple.
+        """
+        global _PASS, _FAIL
+        name = "cyclic_closure_from_import_of_a_container_global_reads_the_owner"
+        import mojo.backend_gimple.module_gen as _mmg
+        from fire_compiler import Parser, py_tokenize
+
+        importer_src = ('from p_home import NAMES\n'
+                        '\n'
+                        'def show():\n'
+                        '    return list(NAMES)\n')
+        stmts = Parser(py_tokenize(importer_src)).parse_module()
+
+        def _read_node():
+            """The `NAMES` IdentExpr of `return list(NAMES)`, found by shape
+            rather than by index so the fixture's whitespace can move."""
+            fn = [s for s in stmts if getattr(s, 'name', None) == 'show'][0]
+            call = fn.body[0].value
+            return [a for a in call.args
+                    if getattr(a, 'name', None) == 'NAMES'][0]
+
+        def _lower_with(owner_fields):
+            """`(recorded home, ctype, emitted text)` for the mid-compile state
+            `owner_fields` describes: None = the owner has not registered its
+            globals yet, a list = the triples its struct is built from."""
+            gen = gimple_codegen.GimpleGen(do_imports=False,
+                                           module_name='p_importer')
+            gen._current_module_ctx = 'p_importer'
+            # What Phase 1.7 / the self-host pre-seed concluded about the name.
+            gen._global_to_module['NAMES'] = 'p_home'
+            gen._global_var_types['NAMES'] = 'MojoList *'
+            if owner_fields is not None:
+                gen._module_globals['p_home'] = list(owner_fields)
+            _mmg._gmi_scan_imported_global_homes(gen, stmts)
+            ctype, _cval = gen._lower_IdentExpr(_read_node())
+            return (gen._own_imported_global_home.get('NAMES'), ctype,
+                    '\n'.join(gen.body_lines))
+
+        bad = []
+        # 1. The owner is mid-compile: the owner's field, from the seeded type.
+        home, ctype, text = _lower_with(None)
+        if home != 'p_home':
+            bad.append(f"mid-compile owner: recorded home {home!r}, "
+                       f"expected 'p_home'")
+        if '_p_home_globals.NAMES' not in text:
+            bad.append("mid-compile owner: the read did not load "
+                       "_p_home_globals.NAMES")
+        if 'ct param or undeclared' in text:
+            bad.append("mid-compile owner: the read still fell to the "
+                       "unknown-identifier (int64_t)0 placeholder")
+        if ctype != 'int64_t':
+            bad.append(f"mid-compile owner: read typed {ctype!r}, expected the "
+                       f"boxed 'int64_t' a container global is stored as")
+        # 2. The owner is REGISTERED and declares no such field: refuse, or a
+        #    from-import of a function/submodule/stdlib name routes a read to
+        #    a field that does not exist.
+        home, _ctype, text = _lower_with([])
+        if home is not None:
+            bad.append(f"owner registered without the field: recorded home "
+                       f"{home!r}, expected nothing")
+        if 'ct param or undeclared' not in text:
+            bad.append("owner registered without the field: the read stopped "
+                       "refusing, so it would name a field that is not there")
+        # 3. The owner is registered WITH the field: unchanged, and still the
+        #    owner's own triple that types the load.
+        home, ctype, text = _lower_with([('NAMES', 'int64_t', 'MojoList *')])
+        if '_p_home_globals.NAMES' not in text or ctype != 'int64_t':
+            bad.append("owner registered with the field: the pre-existing route "
+                       "stopped working")
+        if bad:
+            for b in bad:
+                print(f"FAIL  {name}: {b}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_a_program_written_inside_the_checkout_is_not_the_compiler():
         """A user program's LOCATION must not change its generated C.
 
@@ -10935,6 +11054,7 @@ print(run('x/y.txt'))
     test_iterator_cursor_len_is_remaining_and_dunder_next_advances()
     test_span_cursor_reads_the_span_and_len_tracks_the_cursor()
     test_a_program_written_inside_the_checkout_is_not_the_compiler()
+    test_cyclic_closure_from_import_of_a_container_global_reads_the_owner()
     test_struct_unpack_computed_format_compiles()
     test_struct_unpack_computed_format_keeps_literal_half()
     test_ctor_arg_container_literal_field_is_container_typed()

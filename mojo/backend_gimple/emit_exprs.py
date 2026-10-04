@@ -43,6 +43,14 @@ import mojo.backend_gimple.emit_calls as ggc
 import mojo.backend_gimple.emit_infra as ginf
 from mojo.middle.module_shared import builtin_module_constant
 
+# The Mojo container types a module-level global is DECLARED with. Every one of
+# them is stored in the `_<mod>_globals` struct as a boxed `int64_t`, which is
+# the rule the three read/route sites below share — so it is named once here
+# rather than written out at each of them (they were three copies of one list,
+# and the new `_imp_pending` gate needed the same answer to decide whether a
+# type is derivable without the owner's own field triple).
+_BOXED_CONTAINER_CTYPES = ('MojoDict *', 'MojoList *', 'MojoSet *')
+
 def _lower_strided(gen, node, store: bool):
     """Scalar (SIMD-width-1) lowering of the strided_load/strided_store
     intrinsics: a plain load/store of the pointer's scalar element. Consistent
@@ -652,8 +660,47 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     # everything below behaves exactly as it did before.
     _imp_fields = gen._module_global_field_type(_imp_home, _imp_field) \
         if (_imp_home and _imp_field) else None
+    # The owner's struct is registered at the END of the owner's own
+    # `gen_module_impl`, so in a closure with an import CYCLE the importer
+    # can be compiled while the owner is still an ancestor on the compile
+    # stack and `_module_global_field_type` has no entry to answer from.
+    # `_gmi_scan_imported_global_homes` records the (home, field) pair
+    # provisionally in exactly that case; this is the flag that lets the
+    # read act on it, and it is deliberately narrow — ALL of:
+    #
+    #   * the owner is still unregistered, so "no field" cannot mean "the
+    #     owner provably declares none" (the gate's load-bearing case, which
+    #     must keep refusing);
+    #   * the owner's own answer still does not exist (if it does, `_imp_fields`
+    #     is the strictly better source and this never applies);
+    #   * the name is one `_gmi_scan_imported_global_homes` recorded, so this
+    #     module really did `from <owner> import <field>` and did not
+    #     redeclare it;
+    #   * the shared `_global_var_types` conclusion — Phase 1.7's own reading
+    #     of the OWNER's top-level assignment — is a CONTAINER type, whose C
+    #     storage is the boxed `int64_t` every container global is declared
+    #     with (see the `gtype in _BOXED_CONTAINER_CTYPES` rule below). That
+    #     restriction is what makes this safe without the owner's triple: a
+    #     scalar's field C type (`char *`, `int`, `_Bool`, a struct pointer)
+    #     is NOT derivable from the Mojo type alone, so those keep the
+    #     placeholder rather than guess.
+    #
+    # Measured on the self-host closure without this: `gimple_codegen.py`'s
+    # `_run_pipeline` reads `DESUGARED_GENEXP_NAMES` (a `list` global in
+    # `fire_compiler.py`, populated by `desugar_genexps` two statements
+    # earlier) and got the unknown-identifier `(int64_t)0`, so the compiled
+    # binary's `--dump-full` of a TWO-LINE program died in
+    # `mojo_iter_boxed_list` with `TypeError: object is not iterable`.
+    # `len(...) > 0` on both halves, NOT bare truthiness: this file's own
+    # rule (see `_this_mod` above) is that on the self-hosted compiled path a
+    # boxed `char *` is truthy even when it is the empty string, and an empty
+    # `_imp_home` reaching the route below would emit `__globals.NAME`.
+    _imp_pending = (len(_imp_home) > 0 and len(_imp_field) > 0
+                    and _imp_home not in gen._module_globals
+                    and _imp_fields is None
+                    and gen._global_var_types.get(name) in _BOXED_CONTAINER_CTYPES)
     if (_global_owner_mod is None or _as_str(_global_owner_mod) == _this_mod
-            or _owned_here or _imp_fields is not None) and \
+            or _owned_here or _imp_fields is not None or _imp_pending) and \
             (name in gen._func_declared_globals or name not in gen.var_types) \
             and (name in gen._global_var_types or _imp_fields is not None):
         # WHICH module's `_<mod>_globals.<name>` field this read must load, in
@@ -707,6 +754,19 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         if _read_types is None and _imp_fields is not None:
             _read_types = _imp_fields
             _read_mod = _imp_home
+        elif _read_types is None and _imp_pending:
+            # The owner is mid-compile in this closure (see `_imp_pending`),
+            # so its triple does not exist yet. Phase 1.7's own conclusion for
+            # the name IS the owner's conclusion — `_global_to_module` named
+            # this owner for it one gate ago — and `_imp_pending` has already
+            # established that the type is a container, whose field is
+            # declared `int64_t` (the rule two lines below, which is where the
+            # `c_decl_from_owner` of 'int64_t' comes from). So the load and
+            # the type still agree BY CONSTRUCTION rather than by a second
+            # inference: this module's struct has no such member (it never
+            # declared it), so the owner's is the only field there is.
+            _read_types = ('int64_t', gen._global_var_types[name])
+            _read_mod = _imp_home
         elif _read_types is None:
             _owner_s = _as_str(_global_owner_mod) if _global_owner_mod is not None else ''
             if _owner_s and _owner_s != _read_mod:
@@ -721,7 +781,7 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             c_decl_from_owner = None
         # Globals are stored at C level as int64_t (boxed pointers) except
         # for char * and simple int globals whose C type matches the Mojo type.
-        if gtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+        if gtype in _BOXED_CONTAINER_CTYPES:
             ctype = 'int64_t'
         else:
             ctype = gtype
@@ -858,8 +918,16 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         #    module's own scan has no field for) loads the owner's field —
         #    the same situation, reached through the other table.
         safe_module = gimple_ctypes._c_field_name(_read_mod)
+        # The field name is `_imp_field`, not `name`, whenever the read routed
+        # to the module this one IMPORTED the name from — `_imp_fields` for the
+        # owner that has registered, `_imp_pending` for the one still being
+        # compiled. Under `from b import K as J` the local spelling is `J` and
+        # the owner's FIELD is still `K`, so the local name is not an answer
+        # for either. `name` remains the answer for every other route, which
+        # is every route that loads THIS module's own struct.
         _field_name = gimple_ctypes._c_field_name(_imp_field) \
-            if _imp_fields is not None else gimple_ctypes._c_field_name(name)
+            if (_imp_fields is not None or _imp_pending) \
+            else gimple_ctypes._c_field_name(name)
         field_ref = f"_{safe_module}_globals.{_field_name}"
         if ctype == 'int64_t' and c_decl_type.endswith(' *'):
             # Global is declared as a pointer type at C level but we box it as int64_t.
@@ -1440,7 +1508,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             if _bound_mod else None
         if _field_types is not None:
             c_decl_type, gtype = _field_types
-            ctype = 'int64_t' if gtype in ('MojoDict *', 'MojoList *', 'MojoSet *') else gtype
+            ctype = 'int64_t' if gtype in _BOXED_CONTAINER_CTYPES else gtype
             t = gen._new_temp(ctype)
             if node.member in gen._actual_types and gen._actual_types[node.member].endswith(' *'):
                 gen._actual_types[t] = gen._actual_types[node.member]
@@ -1475,7 +1543,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         if (_bound_mod and node.member in gen._global_var_types
                 and getattr(gen, '_global_to_module', {}).get(node.member) == _bound_mod):
             gtype = gen._global_var_types[node.member]
-            ctype = 'int64_t' if gtype in ('MojoDict *', 'MojoList *', 'MojoSet *') else gtype
+            ctype = 'int64_t' if gtype in _BOXED_CONTAINER_CTYPES else gtype
             t = gen._new_temp(ctype)
             if node.member in gen._actual_types and gen._actual_types[node.member].endswith(' *'):
                 gen._actual_types[t] = gen._actual_types[node.member]

@@ -1613,6 +1613,15 @@ def _gmi_scan_imported_global_homes(self, stmt_list) -> None:
       `_own_imported_global_home`'s own comment — a submodule, an unresolvable
       stdlib) fails this and is left entirely alone, which is what keeps
       every already-working from-import spelling byte-identical.
+      ONE exception, and it is the cyclic-closure case: a module's own
+      globals are registered at the END of its `gen_module_impl`, so a
+      from-import whose owner is an ANCESTOR still in progress on the
+      compile stack has no `_module_globals` entry to ask about yet. The
+      owner's registration is not optional and cannot be run early (it
+      needs the type facts the passes between here and there conclude), so
+      a provisional record is taken instead — see the gate below and
+      `_lower_IdentExpr`'s `_imp_pending`, which is the only reader and
+      re-checks the owner's own answer before it routes anything.
 
     An ambiguous binding (two `from` statements in this module binding one
     bare name to two different owners' fields) is DROPPED rather than
@@ -1655,7 +1664,37 @@ def _gmi_scan_imported_global_homes(self, stmt_list) -> None:
                         del fields[_local]
                 continue
             if self._module_global_field_type(_iowner_s, _iname) is None:
-                continue
+                # Not answered. Two different reasons, and they must not be
+                # confused: the owner is REGISTERED and declares no such
+                # field (a function, a submodule, an unresolvable stdlib) —
+                # refuse, exactly as before; or the owner is still being
+                # compiled further up this same call stack, so it has no
+                # entry to ask about yet. A module's own globals are
+                # registered at the END of its own `gen_module_impl`
+                # (gen_module_impl's `_declared_globals` freeze), and
+                # `_collect_import_modules` collects imports from nested
+                # function bodies too, so a closure with an import CYCLE
+                # reaches this scan while the owner is mid-compile: measured
+                # on the self-host closure, `gimple_codegen.py` (compiled
+                # nested inside `fire_compiler.py`, which reaches it through
+                # the `from gimple_codegen import compile_to_gimple` inside a
+                # `__main__` self-test at fire_compiler.py:8040) asked about
+                # `DESUGARED_GENEXP_NAMES` while `_module_globals` held 1
+                # module and no `fire_compiler` at all.
+                #
+                # So record it PROVISIONALLY when the owner is unregistered
+                # AND Phase 1.7 independently concluded the name is a
+                # module-level global OF THAT OWNER (`_global_to_module`
+                # said so above, and it is in `_global_var_types`) — that is
+                # the same evidence the owner's own freeze will act on, so
+                # the field is coming. `_lower_IdentExpr`'s `_imp_pending`
+                # is the only reader, and it re-asks the owner before using
+                # the record, so a provisional entry that the owner's own
+                # registration contradicts cannot route a read.
+                if _iowner_s in self._module_globals:
+                    continue
+                if _iname not in self._global_var_types:
+                    continue
             homes[_local] = _iowner_s
             fields[_local] = _iname
 

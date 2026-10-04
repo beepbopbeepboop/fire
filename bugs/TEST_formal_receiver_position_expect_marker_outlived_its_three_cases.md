@@ -97,10 +97,10 @@ zero are the same either way.)
 This one is invisible to `make gate`, which is the whole reason it can sit on a
 tree: a marker on a test no bucket but `proofs` runs cannot be observed going
 green, and `expect=` was chosen for this job when the count was right. The same
-blind spot is what the deleted `TEST_expect_marked_tests_in_no_bucket_never_run`
-doc was about, from the other side — that one is closed (commit 8705f540 gated
-the fourteen registered tests nothing ran), and this is the shape that survived
-it: the job IS in a bucket, and the bucket is one nobody runs.
+blind spot had its own doc, from the other side — expect-marked tests that no
+bucket ran were registered and never executed, so their markers could never rot
+out — and that one is closed and deleted with its fix. This is the shape that
+survived it: the job IS in a bucket, and the bucket is one nobody runs.
 
 While the row is open, `tools/suite.py:490` should also stop saying
 `# 2 s, 12 cases` for this job — it is 33 cases now, and a `MEMCLASS` comment is
