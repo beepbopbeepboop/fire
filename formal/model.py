@@ -32005,6 +32005,13 @@ CALL_RECEIVER_WHY = {
         "a struct of this unit DERIVES from it and declares the method too, "
         "so the declaration names the base's method while the value may be "
         "the derived one",
+    "receiverless":
+        "the method takes no receiver — a `@staticmethod` — and this path "
+        "binds one by position, so the call would carry none. That is fine "
+        "for a receiver that is a NAME, and not for one that is a CALL: "
+        "passing no receiver means the call is never EVALUATED, and dropping "
+        "it would remove its effect from the program — which is a silent "
+        "wrong answer rather than a refusal",
     "other module":
         "this module declares no struct of that name. A method of a struct "
         "another module declares is a symbol in THAT module's library, and "

@@ -912,7 +912,36 @@ REFUSALS = [
     # reason the lift still declines: lifting this reads at address 0 and
     # answers 0, a number no source wrote (measured on both architectures before
     # the lift existed, by the row this one used to be).
-    # (5) The last `why`, and the one `std/builtin/float_literal.mojo` gets:
+    # (5) A `@staticmethod`, where "pass no receiver" is not free: the receiver
+    # is a CALL, and the lift binds arguments by position, so a receiverless
+    # call never EVALUATES it.  Measured before this row and this `why` existed
+    # (the lift was in, the guard was not): `m.make().shout(5)` built, answered
+    # 105 on both architectures, and `make`'s own effect was simply gone — a
+    # silent wrong answer, which is the outcome every refusal in this file
+    # exists to prevent.  `make` is written to be observable here so the row
+    # says what a lift would have cost rather than only that it was refused.
+    ("refuse_a_static_method_on_a_call_result_receiver",
+     "struct Made:\n"
+     "    var n: Int\n"
+     "\n"
+     "    @staticmethod\n"
+     "    def shout(k: Int) -> Int:\n"
+     "        return k + 100\n"
+     "\n"
+     "struct Maker:\n"
+     "    var s: Int\n"
+     "    def make(self) -> Made:\n"
+     "        var q = Made()\n"
+     "        q.n = self.s\n"
+     "        return q\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var m = Maker()\n"
+     "    m.s = 1\n"
+     "    return m.make().shout(5)\n",
+     "the method takes no receiver"),
+
+    # (6) The last `why`, and the one `std/builtin/float_literal.mojo` gets:
     # the annotation DOES name the receiver's type, and the struct of that name
     # is declared in ANOTHER module — `IntLiteral` is `std/builtin/
     # int_literal.mojo`, and `float_literal.mojo` neither imports it nor

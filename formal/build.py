@@ -14395,7 +14395,7 @@ def _subscript_receiver_target(call, elems: dict):
 
 def _call_receiver_verdict(call, elems: dict, structs_by_name: dict,
                            functions=None, fn=None, owner=None,
-                           bound: dict = None) -> tuple:
+                           bound: dict = None, receiverless=()) -> tuple:
     """`(struct, why_not)` for a CALL RESULT receiver; `(None, None)` if untyped.
 
     `why_not` is a key of `model.CALL_RECEIVER_WHY`, and the tuple carries a
@@ -14466,12 +14466,21 @@ def _call_receiver_verdict(call, elems: dict, structs_by_name: dict,
         return st, "ambiguous"
     if _derived_overrides(st, func.member, structs_by_name):
         return st, "derived"
+    # A method that DECLARES no receiver is the one case where passing no
+    # receiver is not free: the receiver expression is a CALL, and the lift
+    # binds arguments by position, so a receiverless call never evaluates it.
+    # For a NAME that is invisible (reading a name has no effect the source
+    # could observe) and `_method_call_target` has always done it; for a call it
+    # would drop the call.  Measured before this check existed: `m.make().
+    # shout(5)` built and answered 105 while `make`'s own effect was gone.
+    if func.member in (receiverless or ()):
+        return st, "receiverless"
     return st, None
 
 
 def _call_receiver_target(call, elems: dict, structs_by_name: dict,
                           functions=None, fn=None, owner=None,
-                          bound: dict = None):
+                          bound: dict = None, receiverless=()):
     """`f().m(x)` → `(owner name, m, f())` when the callee's `-> T` names one.
 
     The receiver-type predicate's second use at the LIFT, and the shape
@@ -14494,7 +14503,7 @@ def _call_receiver_target(call, elems: dict, structs_by_name: dict,
             and isinstance(call.func.obj, F.CallExpr)):
         return None
     st, why = _call_receiver_verdict(call, elems, structs_by_name, functions,
-                                     fn, owner, bound)[:2]
+                                     fn, owner, bound, receiverless)[:2]
     if st is None or why is not None:
         return None
     return st.name, call.func.member, call.func.obj
@@ -14828,11 +14837,12 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
             target = _subscript_receiver_target(n, elems)
         if target is None:
             target = _call_receiver_target(n, elems, structs_by_name,
-                                           functions, fn, owner, bound)
+                                           functions, fn, owner, bound,
+                                           receiverless)
         if target is None:
             why = _receiver_shape_refusal(n, owners, fn_name, imported, elems,
                                           structs_by_name, functions, fn, owner,
-                                          bound)
+                                          bound, receiverless)
             if why is not None:
                 raise CodegenError(why)
             return n
@@ -14892,7 +14902,7 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
 def _receiver_shape_refusal(call, owners: dict, fn_name, imported=(),
                             elems: dict = None, structs_by_name: dict = None,
                             functions=None, fn=None, owner=None,
-                            bound: dict = None):
+                            bound: dict = None, receiverless=()):
     """Why THIS `recv.m(...)` has no lift, or None when it has a better answer.
 
     The recogniser is narrow on purpose, and every clause is there because a
@@ -14992,7 +15002,8 @@ def _receiver_shape_refusal(call, owners: dict, fn_name, imported=(),
     # type.  `None` for a SUBSCRIPT receiver, which is a different question with
     # its own table (`elems`) and its own refusal.
     established = (_call_receiver_verdict(call, elems, structs_by_name,
-                                          functions, fn, owner, bound)
+                                          functions, fn, owner, bound,
+                                          receiverless)
                   if isinstance(recv, F.CallExpr) else None)
     return M.subscript_receiver_method_refusal(
         member, M.receiver_shape_text(recv), owners, fn_name, established)
