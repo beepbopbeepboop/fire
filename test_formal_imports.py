@@ -27,7 +27,11 @@ with "Symbol not found". These tests pin the replacement behaviour:
      sibling > the stdlib loader, and each step of it is pinned by a test that
      goes red if the order inverts — because the failure mode of getting it
      wrong is a program that binds the wrong module and computes the wrong
-     answer with nothing to grep for.
+     answer with nothing to grep for. Inside the first of those steps the name
+     AS SPELLED is offered to every search root before the LEAF fallback is
+     offered to any, so a dotted import cannot bind a module its own name does
+     not spell (`test_the_spelling_outranks_a_nearer_roots_leaf`, and the
+     measured stdlib rows behind it).
  10. an import EDGE that binds no name the dependency could publish as one
      boundary symbol needs no library at all, and a module that genuinely has
      no boundary symbol is still REFUSED for every edge that does bind
@@ -1191,6 +1195,162 @@ def test_package_relative_dotted_import_resolves(tmpdir, _shared):
     _result, out = build(os.path.join(root, "sub"), "user.aout")
     code, err = run(out)
     check(code == 42, f"returned {code}, expected 42; stderr: {err}")
+
+
+def test_the_spelling_outranks_a_nearer_roots_leaf(tmpdir, _shared):
+    """A dotted name binds to what it SPELLS, never to a nearer root's leaf.
+
+    `resolve_module_path` walks its roots nearest-first and, at each one,
+    offered the name as spelled and then the name's LEAF.  So the leaf of one
+    name could be preferred over the spelling of another, decided by nothing but
+    how deep the IMPORTER sat — which is not a fact about the import.  Measured
+    over the stdlib on the tree before the fix, 31 bindings in 252 files went to
+    a module other than the one they named, and two of them are the clearest
+    possible statement of it: `std/sys/info.mojo` and `std/_gpu/host/info.mojo`
+    each import the other and each got THEMSELVES.  (Both are rows in
+    `test_a_dotted_stdlib_import_resolves_to_the_module_it_names` below.)
+
+    The tree here is that shape with the numbers replaced, so the two candidate
+    answers are DIFFERENT and the program's exit code says which one it got:
+
+        a/mod/__init__.mojo        what the LEAF `mod` finds one root nearer
+                                   — returns 99
+        pkg/sub/mod.mojo           what `pkg.sub.mod` SPELLS — returns 10
+        pkg/sub/__init__.mojo      …so `mod` is a module of a package
+        a/b/prog.mojo              `from pkg.sub.mod import value`
+
+    `a/b`, `a` and the project root are all search roots for `a/b/prog.mojo`
+    (the walk in `_search_roots` ascends from the importer), so the leaf was
+    offered at `<root>/a` before the spelling was offered at `<root>`.  It used
+    to be taken there, and the program printed 99.  `pkg/sub/mod.mojo` is a
+    `.mojo` and not a package because within ONE root a module beats a package
+    (`pkg/sub/mod.mojo` before `pkg/sub/mod/__init__.mojo`), which is a
+    different rule and is not what this case is about."""
+    root = os.path.join(tmpdir, "spelling")
+    os.makedirs(root)
+    write_tree(root, {
+        "pkg/__init__.mojo": "def own():\n  return 1\n",
+        "pkg/sub/__init__.mojo": "def own():\n  return 2\n",
+        "pkg/sub/mod.mojo": "def value():\n  return 10\n",
+        "a/mod/__init__.mojo": "def value():\n  return 99\n",
+        "a/b/prog.mojo": ("from pkg.sub.mod import value\n"
+                          "def main():\n  return value()\n"),
+    })
+    fresh_cas()
+    got = I.resolve_module_path("pkg.sub.mod",
+                                relative_to=os.path.join(root, "a", "b",
+                                                         "prog.mojo"))
+    check(got is not None
+          and os.path.abspath(got) == os.path.abspath(
+              os.path.join(root, "pkg", "sub", "mod.mojo")),
+          f"`pkg.sub.mod` from a/b/prog.mojo resolved to {got!r}; the name "
+          f"spells pkg/sub/mod.mojo, and a nearer root's leaf is not allowed "
+          f"to answer for it")
+    _result, out = build(os.path.join(root, "a", "b"), "prog.aout")
+    code, err = run(out)
+    check(code == 10,
+          f"returned {code}, expected 10 (pkg/sub/mod.mojo); stderr: {err}. "
+          f"99 is the leaf `mod/` one root nearer, and a program that imported "
+          f"`pkg.sub.mod` and computed 99 is a wrong answer with nothing on "
+          f"the link line to catch it")
+
+
+def test_a_dotted_stdlib_import_resolves_to_the_module_it_names(tmpdir,
+                                                                _shared):
+    """Every measured stdlib binding that the leaf fallback got wrong.
+
+    The synthetic case above pins the RULE; this pins the CASES it was measured
+    on, because a rule that is right and a tree that has moved are different
+    facts and this is the one that says whether the rule still has anything to
+    do.  Each row is (the importing file, the name it writes, the file the name
+    spells); the whole stdlib is checked, so a NEW instance of the same shape
+    fails here too rather than waiting for the next sweep to find it.
+
+    Skipped, with the reason printed and counted, when there is no stdlib
+    checkout beside this tree — see `_stdlib_dir` and `_Skip`."""
+    stdlib = _stdlib_dir()
+    if stdlib is None:
+        raise _Skip("no stdlib checkout beside this tree, so there is no swept "
+                    "file whose imports can be read")
+    cases = [
+        # A sibling package at `<stdlib>/std` captured the leaf. The three
+        # files are the measured `std.sys.compile` rows.
+        ("collections/_asan_annotations.mojo", "std.sys.compile",
+         "sys/compile.mojo"),
+        ("builtin/_startup.mojo", "std.sys.compile", "sys/compile.mojo"),
+        ("testing/assert_aborts.mojo", "std.sys.compile", "sys/compile.mojo"),
+        # A pair of modules that each import the other and each got themselves:
+        # the leaf matched the importer's OWN file.
+        ("_gpu/host/info.mojo", "std.sys.info", "sys/info.mojo"),
+        ("sys/info.mojo", "std._gpu.host.info", "_gpu/host/info.mojo"),
+        ("_gpu/intrinsics.mojo", "std.sys.intrinsics", "sys/intrinsics.mojo"),
+        ("_gpu/primitives/id.mojo", "std.sys.intrinsics",
+         "sys/intrinsics.mojo"),
+        ("_gpu/primitives/warp.mojo", "std.sys.intrinsics",
+         "sys/intrinsics.mojo"),
+        # A package and the module beside it, where the leaf found the PACKAGE
+        # for a name that spells the module (`std.math.math`).
+        ("complex/complex.mojo", "std.math.math", "math/math.mojo"),
+        ("simd.mojo", "std.math.math", "math/math.mojo"),
+        ("_plugin/_trait.mojo", "std.math.math", "math/math.mojo"),
+        ("builtin/debug_assert.mojo", "std.io.io", "io/io.mojo"),
+        ("format/_utils.mojo", "std.io.io", "io/io.mojo"),
+        ("builtin/_stubs.mojo", "std.os.os", "os/os.mojo"),
+        ("os/fstat.mojo", "std.time.time", "time/time.mojo"),
+        ("os/_macos.mojo", "std.time.time", "time/time.mojo"),
+        ("builtin/string_literal.mojo", "std.collections.string.format",
+         "collections/string/format.mojo"),
+        # …and the other direction: a module that spells a PACKAGE and got the
+        # module beside it instead.
+        ("math/uutils.mojo", "std.math", "math/__init__.mojo"),
+        ("memory/alloc.mojo", "std.memory", "memory/__init__.mojo"),
+        ("memory/pointer.mojo", "std.memory", "memory/__init__.mojo"),
+        ("benchmark/bencher.mojo", "std.benchmark", "benchmark/__init__.mojo"),
+        ("python/bindings.mojo", "std.python", "python/__init__.mojo"),
+        ("testing/prop/random.mojo", "std.random", "random/__init__.mojo"),
+        ("collections/string/string.mojo", "std.collections.string",
+         "collections/string/__init__.mojo"),
+    ]
+    for rel, name, spelled in cases:
+        src = os.path.join(stdlib, rel)
+        check(os.path.isfile(src),
+              f"the stdlib checkout at {stdlib} has no {rel}, so this row is "
+              f"not measuring the file it claims to measure")
+        got = I.resolve_module_path(name, relative_to=src)
+        check(got is not None
+              and os.path.abspath(got) == os.path.abspath(
+                  os.path.join(stdlib, spelled)),
+              f"{rel} writes `from {name} import …`, which spells "
+              f"{spelled}; it resolved to "
+              f"{os.path.relpath(got, stdlib) if got else None} instead")
+
+    # And the whole stdlib, so the shape cannot come back in a file no sweep
+    # row names yet: a leaf match in a root NEARER than the one that spells the
+    # name. `first_source` asked of a two-root list is the rule itself, and the
+    # roots are the ones a real build of that file searches.
+    drifted = []
+    for dirpath, _dirs, files in os.walk(stdlib):
+        for fname in sorted(files):
+            if not fname.endswith(".mojo"):
+                continue
+            path = os.path.join(dirpath, fname)
+            try:
+                stmts = I.module_statements(path)
+            except Exception:
+                continue
+            roots = I._search_roots(path, None)
+            for mod in I.imported_modules(stmts):
+                if mod.startswith("."):
+                    continue
+                now = I.resolve_module_path(mod, relative_to=path)
+                alt = I.first_source(mod, roots, ".mojo")
+                if alt and now and os.path.abspath(alt) != os.path.abspath(now):
+                    drifted.append((os.path.relpath(path, stdlib), mod,
+                                    os.path.relpath(now, stdlib),
+                                    os.path.relpath(alt, stdlib)))
+    check(not drifted,
+          f"{len(drifted)} stdlib import(s) still resolve to a module other "
+          f"than the one they name: {drifted[:6]}")
 
 
 def test_host_module_still_refused_despite_same_named_sibling(tmpdir, _shared):
@@ -3557,6 +3717,10 @@ TESTS = [
     ("a repository sibling resolves", test_repository_sibling_resolves),
     ("a package-relative dotted import resolves",
      test_package_relative_dotted_import_resolves),
+    ("the spelling outranks a nearer root's leaf",
+     test_the_spelling_outranks_a_nearer_roots_leaf),
+    ("a dotted stdlib import resolves to the module it names",
+     test_a_dotted_stdlib_import_resolves_to_the_module_it_names),
     ("a module's identity is its package chain, not its reach order",
      test_own_module_identity_is_the_package_chain),
     ("a relative import at the root builds one library and runs",
