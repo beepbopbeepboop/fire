@@ -574,17 +574,36 @@ class TestDyldProbe(unittest.TestCase):
           goes through the export trie, which is the only place `_macho_symbol`
           is used, so an arm64-only fixture would leave the function that
           replaced the `lstrip` untested.
+
+        **Which binds the precondition is about, and why it is not "all of
+        them".** It is the binds the IMPORTED library provides, selected by the
+        ordinal the image recorded, and the exclusion is measured rather than
+        defensive: the x86-64 image also binds libSystem's `exit` at ordinal 1,
+        which is a C library name and begins with no underscore, so the
+        unfiltered `name.startswith("_")` failed on x86_64 and passed on arm64
+        (which emits no such bind). That is the same defect as the assertion
+        this file's `relpkg` case stopped making — a precondition pinned to a
+        spelling rather than to the property — and it was invisible for as long
+        as `setUpClass` raised before this class ran a single case. The
+        ordinal is the honest filter because it is what dyld itself resolves
+        against: a two-level bind is answered by ONE named library
+        (`test_the_ordinal_decides_which_library_is_consulted`), so a libSystem
+        bind says nothing about what an imported module's mangling did.
         """
         from formal import build as FB
         for arch, image in self.leading_underscore.items():
-            names = [name for _ordinal, name in S._binds(image)]
-            self.assertTrue(names, f"[{arch}] precondition: the image binds "
-                                   f"something")
             dylibs = S._load_dylib_names(image)
-            foreign = next((d for d in dylibs
-                            if "libSystem" not in os.path.basename(d)), None)
+            foreign_ordinals = {i + 1 for i, d in enumerate(dylibs)
+                                if "libSystem" not in os.path.basename(d)}
+            foreign = next((dylibs[i - 1] for i in sorted(foreign_ordinals)),
+                           None)
             self.assertIsNotNone(foreign, f"[{arch}] no imported library on "
                                           f"the link line: {dylibs}")
+            names = [name for ordinal, name in S._binds(image)
+                     if ordinal in foreign_ordinals]
+            self.assertTrue(names, f"[{arch}] precondition: the image binds "
+                                   f"something from the imported library "
+                                   f"{os.path.basename(foreign)}")
             exports = set(FB.macho_dylib_exports(foreign))
             for name in names:
                 self.assertTrue(
