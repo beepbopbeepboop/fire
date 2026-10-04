@@ -714,6 +714,28 @@ def model_checks():
         '    return inner(n)\n'))
     ok("the scan finds a nested non-ASCII literal", found, ["héllo"])
 
+    # A KEYWORD ARGUMENT, and the row this arm exists for.  `CallExpr.kwargs` is
+    # declared `list of (str, Expr)` — tuples, not nodes — so a walk that
+    # descends only into dataclasses skips every keyword argument's VALUE.  That
+    # is the unsound direction: the scan's job is to make the encoding block
+    # conservative, and a literal it cannot see makes it permissive, so
+    # `printf("%s", s="héllo")` put non-ASCII text in the image while the scan
+    # reported the image ASCII.  Measured, on both engines identically, before
+    # the walk was widened.
+    ok("the scan finds a keyword arguments value",
+       M.non_ascii_strings_in(stmts(
+           'def main(n):\n    printf("%s", s="héllo")\n    return 0\n')),
+       ["héllo"])
+
+    # A DECORATOR argument, for the same reason and one level further out: it is
+    # a `CallExpr` on the function, so nothing about it is special once tuples
+    # are descended — which is the point of the row, that there is nothing
+    # special.
+    ok("the scan finds a decorator arguments value",
+       M.non_ascii_strings_in(stmts(
+           '@deco(name="héllo")\ndef main(n):\n    return 0\n')),
+       ["héllo"])
+
     ok("the scan skips ASCII",
        M.non_ascii_strings_in(stmts('def main(n):\n    printf("%s", "abc")\n')),
        [])

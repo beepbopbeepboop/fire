@@ -6516,24 +6516,43 @@ def non_ascii_strings_in(stmts: list, limit: int = 32) -> list:
     """
     out: list = []
     stack = list(stmts or [])
-    seen = set()
+    visited = set()
+    texts = set()
     while stack:
         node = stack.pop()
+        if id(node) in visited:
+            continue
+        visited.add(id(node))
         if (isinstance(node, F.StringLiteral)
                 and not getattr(node, "is_raw", False)
                 and not getattr(node, "is_bytes", False)):
             text = F.decoded_literal(node)
-            if not text_is_ascii(text) and text not in seen:
-                seen.add(text)
+            if not text_is_ascii(text) and text not in texts:
+                texts.add(text)
                 out.append(text)
                 if len(out) >= limit:
                     return out
-        if dataclasses.is_dataclass(node):
+        if isinstance(node, (list, tuple, set, frozenset)):
+            # A child can be a TUPLE of (name, node) pairs and not a node:  a
+            # `CallExpr`'s own `kwargs` is declared `list of (str, Expr)`, so a
+            # walk that only descends into dataclasses skips the VALUE of every
+            # keyword argument — and `printf("%s", s="héllo")` put a non-ASCII
+            # string in the image while the scan reported the image ASCII. That
+            # is the unsound direction: the scan exists to make the encoding
+            # block CONSERVATIVE, and a literal it cannot see makes it
+            # permissive. Measured, both engines identical, before this arm:
+            #   $ python3 -c '… non_ascii_strings_in(<that module>)'
+            #   []
+            stack.extend(node)
+        elif isinstance(node, dict):
+            stack.extend(node.keys())
+            stack.extend(node.values())
+        elif dataclasses.is_dataclass(node):
             for field in dataclasses.fields(node):
                 value = getattr(node, field.name, None)
-                if isinstance(value, (list, tuple)):
-                    stack.extend(v for v in value if dataclasses.is_dataclass(v))
-                elif dataclasses.is_dataclass(value):
+                if (dataclasses.is_dataclass(value)
+                        or isinstance(value, (list, tuple, set, frozenset,
+                                              dict))):
                     stack.append(value)
     return out
 
