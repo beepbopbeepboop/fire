@@ -424,8 +424,9 @@ one level down, which is why it is written down rather than guessed at.
     one slot, which is the outcome `struct_field_names`' own docstring calls
 worse than a refusal. **So it wants a differential test over the same
     516-file corpus comparing the two walks' assignment SETS, per struct, before
-    it lands** — the shape this doc's §3.1 harness already has. This is
-    `bugs/PERF_struct_field_split_asked_once_per_function.md`'s step 2, and it is
+    it lands** — the shape this doc's §3.1 harness already has. This is the
+    2026-10-02 perf filing's step 2 (`struct_field_names` asked once per
+    FUNCTION, deleted with its fix), and it is
     the right SECOND half of §3: §3 made the question rare, this would make it
     cheap, and together they mean a future asker cannot put the cost back.
     **LANDED 2026-10-03** — `model.iter_statement_nodes`, with the differential
@@ -551,8 +552,9 @@ table changed the answer" as a question about which path ran.
 ## 7. What this doc supersedes
 
 `bugs/PERF_formal_build_recomputes_a_per_struct_census_on_every_ask.md` and
-`bugs/PERF_struct_field_split_asked_once_per_function.md` both describe the same
-redundancy from 2026-10-02, with the same two candidate fixes and the same
+the 2026-10-02 `struct_field_names`-asked-once-per-FUNCTION perf doc (both
+deleted with their fixes, since this doc and §6.1 are what they were waiting for)
+describe the same redundancy from 2026-10-02, with the same two candidate fixes and the same
 warning that a memo across `_prepare_functions` needs an invalidation argument.
 **Both candidate fixes in those docs are now measured and rejected in favour of
 threading:** the per-struct field set does not drift (§3.1, 0 of 7 788), so the

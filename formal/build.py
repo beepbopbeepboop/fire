@@ -5002,8 +5002,14 @@ def _collect_one_field_dropped_stores(fn, owner, structs_by_name,
     whole-struct derivation and the free functions are the majority: the asks
     scale with the function count, which is the regression
     `test_formal_bracketed_method_field_set.py`'s `module table` group asserts is
-    gone (`bugs/PERF_struct_field_split_asked_once_per_function.md`). The guard
-    is what puts it back.
+    gone — measured on 2026-10-04, wrapping all four of the partition's
+    predicates around `formal.build.compile_formal` on four sources: `myinterpreter.py`,
+    `formal/build.py`, `gimple_codegen.py` and `formal/arm64_codegen.py` ask
+    `struct_is_one_field`, `struct_fits_one_word`, `struct_field_count` and
+    `struct_is_framed` **zero** times each, and derive `_split_declaration` once
+    per struct (224 / 135 / 123 / 104). `formal/arm64_codegen.py`, the file the
+    2026-10-02 pass measured at 40.3 s CPU, builds in 2.17 s. The guard is what
+    puts the free functions back out of the count.
     """
     if owner is None:
         return
