@@ -286,6 +286,51 @@ CASES = [
      "    print(x)\n"
      "    return 0\n", "7\n"),
 
+    # The THIRD position where a name is a READ and the walk that folds module
+    # constants treated the enclosing node as a store, after `x = G` and the
+    # `elif` arm above. `out[K] = v` stores into `out` and READS both `out` and
+    # `K`, and the walk skipped the whole target — so `K` reached the emitter as a
+    # bare `IdentExpr` and the build refused "'K' has no home" on BOTH
+    # architectures, blaming the register allocator for a disagreement between
+    # two walks. Measured on `tools/memslot.py:held_env`
+    # (`bugs/FORMAL_proof_coverage_census_2026-10-03.md` §0.6's round-2
+    # census), whose `out[POOL] = str(pool)` is this shape exactly.
+    #
+    # Four shapes in one case, because "the index of a store target is a read"
+    # is one rule and the four are the four places it can be written: a bare
+    # subscript store, an AUGMENTED one (whose target walk is a separate
+    # statement type), a MULTI-assign, and a constant read in a body the walk
+    # has to reach through a branch. The dict subscript is the one that RUNS —
+    # a list indexed by a string has no meaning, so it is a refusal rather than
+    # a number, and the refusal it earns now names the SUBSCRIPT (`xs['k']`)
+    # instead of the constant.
+    ("read_global_as_a_subscript_index_in_a_store",
+     "KEY = 'k'\n"
+     "IDX = 1\n"
+     "\n"
+     "def store() -> Int:\n"
+     "    d = {'a': 1}\n"
+     "    d[KEY] = 7\n"
+     "    return d[KEY]\n"
+     "\n"
+     "def aug() -> Int:\n"
+     "    xs = [1, 2, 3]\n"
+     "    xs[IDX] += 10\n"
+     "    xs[0], xs[2] = 7, 9\n"
+     "    return xs[0] + xs[1] + xs[2]\n"
+     "\n"
+     "def branchy() -> Int:\n"
+     "    xs = [4, 5]\n"
+     "    if 2 > 0:\n"
+     "        xs[IDX - 1] = 6\n"
+     "    return xs[0] * 10 + xs[1]\n"
+     "\n"
+     "def main(n):\n"
+     "    print(store())\n"
+     "    print(aug())\n"
+     "    print(branchy())\n"
+     "    return 0\n", "7\n28\n65\n"),
+
     # ── containers ──
     # A module-level list is an address-valued slot: the slot holds a POINTER to
     # the blob, so it is the case that exercises the initializer at all — an
