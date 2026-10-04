@@ -460,6 +460,45 @@ self.asm.emit_label_rel(first_func_name, here_offset=-4)
 the first statement runs. So even with storage there would be nothing to read:
 the command line is gone, not merely unreachable.
 
+## 2026-10-04 (`work/formal21-5`): §(2)'s last false sentence — an IMPORTED FUNCTION used as a value
+
+**§(2) says a writable word cannot cross a dylib boundary, and it says of the
+case that reaches it that the reader is sent to the wrong document. There was one
+spelling where the reader was sent to a sentence that was simply FALSE.**
+
+`model.dylib_value_member_refusal` (2026-10-04, this file's §(2) work) covers
+`os.environ.get(k)`: the dotted chain. The FROM-IMPORT spelling — `from os
+import environ` then `environ.get(k)` — reached
+`model.module_global_refusal`'s generic arm, which says:
+
+> So this name's value is a real global with nowhere to live, which is a property
+> of the value model rather than of this call
+
+**False of it.** `environ` is published by `os` as a FUNCTION — the message two
+sentences earlier lists it — and `from os import environ; environ()` builds and
+runs on both architectures (measured: `environ_count(environ())` answers 49).
+The name crosses; what cannot cross is the function used as a VALUE. "Nowhere to
+live" sends a reader looking for a `__DATA` slot for the one name in the program
+that needs none, which is the same misdirection this document's
+`module_attribute_refusal` was written to remove for `sys.argv`.
+
+The repair is one reader (`model.imported_function_as_a_value_refusal`, which
+asks the same question the dotted arm asks, off the same export tables) and one
+shared operation list (`model._value_operations_repair`), so the two spellings
+cannot drift. The arm answers only when the module DOES publish the name, which
+is what keeps it from claiming a function where there is none.
+
+Three cases measured on both architectures — `os.environ.get(k)`,
+`os.environ[k]` and `os.environ[k] = v`, all three after the from-import — were
+the false sentence and are now the call-through-a-value sentence. Full account,
+with both messages quoted and the cause-table correction:
+`bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md` §5a.
+
+**What is left of this document is unchanged and is still two things**: an
+EXPORTED SLOT (item 2 of "the exact next step"), and `sys.argv`'s source. §(2)'s
+subject is now diagnosed correctly in every spelling this tree can reach, which
+is the difference between a refusal that misdirects and one that does not.
+
 ## Re-measured 2026-10-02 (the `sweep6:module-state` round)
 
 Every shape below was rebuilt on this tree, on **both** architectures, with the

@@ -13166,7 +13166,22 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # (`TABLE = [1,2,3]`, laid out in that library's `__DATA`) has
                 # to be told it is a constant and not a variable, and the
                 # manifest is the only place that fact exists.
-                raise CodegenError(M.module_global_refusal(
+                # …and a name the module publishes as a FUNCTION is a third
+                # kind again, and it is the one whose generic sentence is false:
+                # `from os import environ` then `environ.get(k)` was refused as
+                # "this name's value is a real global with nowhere to live",
+                # while `environ()` lowers and runs — the name crosses, and what
+                # cannot is the FUNCTION USED AS A VALUE. The dotted spelling of
+                # the same program has said so since 2026-10-04
+                # (`model.dylib_value_member_refusal`), so this asks that
+                # question through the same published-name table before falling
+                # through to the generic arm, which is the honest report for a
+                # name the module does not publish at all.
+                _why = M.imported_function_as_a_value_refusal(
+                    name, getattr(sym, "module", None) or "", fn.name,
+                    _module_published_names(getattr(sym, "module", None),
+                                            link_line))
+                raise CodegenError(_why or M.module_global_refusal(
                     name, sym, fn.name,
                     *_published_shape(getattr(sym, "module", None), link_line)))
             raise CodegenError(M.unresolved_name_refusal(

@@ -267,6 +267,21 @@ CAUSES = (
     # MODULE and needs none. Keyed on the clause that is unique to the new
     # message ("a module is not a value this path can place"), which is why the
     # two rows cannot collide: the bare message does not contain it.
+    #
+    # **AND since 2026-10-04 the row above is the odd one out in a way this
+    # comment has to record.** A from-import whose name the module publishes as a
+    # FUNCTION is no longer refused as "a module-level name of another module":
+    # it is a call through a VALUE, which is what the dotted spelling has said
+    # since 2026-10-04, and its message carries the same clause — so it lands
+    # HERE rather than above (`model.imported_function_as_a_value_refusal`,
+    # `test_formal_module_attr.py`'s `the IMPORTED spelling of a call through a
+    # value says the same`). That is the classification being made more precise
+    # rather than the row being widened: both spellings now name one construct.
+    # **Measured on the 2026-10-04 arm64 log: no file moves**, because the one
+    # file the bare row holds is `std/time/__init__.mojo`'s
+    # `time.mojo: 'CompilationTarget'`, and a TYPE is pre-empted by
+    # `model.is_type_name` before either arm — so the row above is 1 file of a
+    # TYPE and this row is 30 of the constructs it names.
     ("a module's ATTRIBUTE read as a value, across a dylib boundary",
      (("is not a value this path can place",),)),
 

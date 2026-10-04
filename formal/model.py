@@ -17358,15 +17358,83 @@ def dylib_value_member_refusal(name: str, module: str, leaf: str,
                   f"`{parent}`, and those beginning `{attr}_` are they: "
                   f"{shown} — call one of those, passing whatever the "
                   f"`{attr}`-returning function hands back")
-    else:
-        repair = (f"`{parent}` publishes no function whose name begins "
-                  f"`{attr}_`, so it publishes no operation on it at all, and "
-                  f"there is no spelling of `{leaf}` for this path")
+    repair = _value_operations_repair(parent, attr, ops, leaf)
     return (f"{name}(): `{module}` is not a module with a library on this "
             f"link line — `{attr}` is a FUNCTION of `{parent}`, so "
             f"`{name}()` is a call through a VALUE and there is no symbol for "
             f"it to bind. A dylib publishes functions, not the objects they "
             f"are called on, so an operation on a value a module hands back "
+            f"cannot be spelled as a member of it; {repair}. "
+            f"bugs/FORMAL_module_state_no_storage.md §(2) records why a value "
+            f"cannot cross a dylib boundary at all")
+
+
+def _value_operations_repair(module: str, attr: str, published, leaf: str) -> str:
+    """The REPAIR half of the call-through-a-value refusal, from one place.
+
+    **One reader, and it is the substantive half.** A module that publishes `foo`
+    and also `foo_get`, `foo_set`, `foo_len` has published the OPERATIONS on the
+    value it hands back as functions of its own, because a dylib publishes
+    functions and cannot publish the object they are called on. So the repair is
+    the list of exports whose name begins `attr_` — which for `os.environ` is the
+    whole of `environ_count` … `environ_value`, and is the answer rather than a
+    hint. The prefix rule is not a guess about this module: it is the only
+    generic statement available about how a host module spells an operation on
+    its own value, and it is falsifiable — a module that publishes nothing of the
+    sort produces an empty list, which is reported as such rather than left out.
+
+    Two callers, and they are the two SPELLINGS of one fact: the dotted chain
+    (`os.environ.get(k)`) and the imported name (`from os import environ` then
+    `environ.get(k)`). Before this was shared they were two sentences about one
+    capability, which is how the second came to claim a function had "nowhere to
+    live" while the first named it correctly.
+    """
+    ops = sorted(n for n in published if n.startswith(attr + "_"))
+    if not ops:
+        return (f"`{module}` publishes no function whose name begins "
+                f"`{attr}_`, so it publishes no operation on it at all, and "
+                f"there is no spelling of `{leaf}` for this path")
+    shown = ", ".join(ops[:8]) + (", …" if len(ops) > 8 else "")
+    return (f"the operations on it are published as FUNCTIONS of "
+            f"`{module}`, and those beginning `{attr}_` are they: {shown} — "
+            f"call one of those, passing whatever the `{attr}`-returning "
+            f"function hands back")
+
+
+def imported_function_as_a_value_refusal(name: str, mod: str, fn_name: str,
+                                         published):
+    """`from mod import name` then an operation on `name` — or None.
+
+    **The FROM-IMPORT half of `dylib_value_member_refusal`, and it answers the
+    same question the same way: is this imported name one the module publishes as
+    a FUNCTION?** `environ` is (`os`'s own accessor), and `from os import
+    environ; environ()` builds and runs on both architectures — so refusing the
+    `.get` with "this name's value is a real global with nowhere to live" is
+    false about it: the name crosses, and what cannot cross is the FUNCTION USED
+    AS A VALUE. That sentence sends a reader looking for storage for the one name
+    in the program that needs none, which is the defect
+    `module_attribute_refusal`'s own docstring records for `sys.argv`.
+
+    `published` is `_module_published_names(module, link_line)`: the same
+    `dylib_export_tables` walk the emitter's call resolution takes, in the same
+    link order, because "does this module publish that name" is a question the
+    emitter already asks and a second reading of the manifests is a second answer
+    to it. None — and the caller falls through to the generic arm, which is the
+    honest report — for a name the module does NOT publish, which is the case
+    where the generic sentence is true.
+    """
+    if not published or name not in published:
+        return None
+    ops = set(published)
+    repair = _value_operations_repair(mod, name, ops, f"{name}.…")
+    who = f"{fn_name}: " if fn_name else ""
+    return (f"{who}{name!r} is imported from `{mod}`, and it is one of that "
+            f"module's published FUNCTIONS — importing it and CALLING it lowers "
+            f"today (`{mod}.{name}(...)` or `{name}(...)`), so the import is not "
+            f"what is refused. What is refused is an OPERATION on it: a function "
+            f"is not a value this path can place, so `{name}.…` is a call "
+            f"through a VALUE and there is no symbol for it to bind. A dylib publishes functions, not the objects "
+            f"they are called on, so an operation on a value a module hands back "
             f"cannot be spelled as a member of it; {repair}. "
             f"bugs/FORMAL_module_state_no_storage.md §(2) records why a value "
             f"cannot cross a dylib boundary at all")
