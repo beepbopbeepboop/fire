@@ -1446,11 +1446,17 @@ class _Abs:
 
 
 def _abs_step(prev, form, raw, addr, length):
-    """The abstract state AFTER `form` at `addr`, or None if it is not known.
+    """The abstract state AFTER `form` at `addr`.
 
     `prev` is left alone: every node of the tree gets its own state, because a
     fork's two arms start from the same state and diverge from there, and the
-    tree keeps both.
+    tree keeps both. `None` in, `None` out — there is no state to copy from an
+    unknown one, and a caller that has none must not be handed a guess.
+
+    **Nothing here raises.** A form outside the table, or one whose bytes are
+    shorter than the decode below needs, wipes the state instead: this runs
+    inside `_tree`, so an exception would take the whole emitter down rather than
+    leave one branch undecided, which is the outcome this section is for.
     """
     if prev is None:
         return None
@@ -1523,7 +1529,7 @@ def _abs_step(prev, form, raw, addr, length):
         # sign extension of the whole 64-bit RAX, not of its low word (`cqo`'s
         # own row in `_SUCCS` says which of the two this is).
         a = st.get(_R_AX)
-        st.put(_R_DX, None if a is None else _u64(-1) if _msb(a) else 0)
+        st.put(_R_DX, None if a is None else (_u64(-1) if _msb(a) else 0))
         return st
     if form == "mov_rm64_imm32":
         st.put(_R_AX, int.from_bytes(raw[3:7], "little", signed=True))
@@ -1590,10 +1596,11 @@ def _abs_step(prev, form, raw, addr, length):
         st.put(src, st.get(dst))
         return st
     if form == "lea_r64_rip":
-        # `lea` computes its address from the END of the instruction, and
-        # `_resolve` says so in its own comment: the displacement counts from
-        # `m + 7`, not from `m`.
-        st.put(dst, (addr + 7 + _disp(3, True)) % _U64)
+        # `lea` computes its address from the END of the instruction, which is
+        # what `length` is for: `_resolve` says the displacement counts from
+        # `m + 7`, and the seven is this form's length rather than a constant
+        # written twice.
+        st.put(dst, (addr + length + _disp(3, True)) % _U64)
         return st
     if form == "lea_r64_rm64_disp32":
         st.put(dst, _addr(st.get(src), _disp(3, True)))
@@ -1849,20 +1856,10 @@ _SIMP_FORMS = {
 }
 
 #: What every decided branch's proof needs whatever the path: the condition
-#: itself (the goal is about `x86_cond`) and the flag/register accessors every
-#: form's successor mentions.
-#:
-#: **`x86_init_mem_reads_zero` is NOT in it, and that is measured rather than
-#: assumed.**  The initial state's zeroed memory is the floor word's value at the
-#: entry function's guard, so the lemma looks necessary; it is not, because
-#: `[i0, X86State.init]` turns `i0` into the `X86State.init` record and that
-#: record's `mem` field IS `fun _ => 0`, which `[mem_read_bytes]` reduces on its
-#: own. Passing it anyway costs an unused-simp-argument warning on every
-#: decision — two per guarded function — and one match attempt per rewrite.
-#: What every decided branch's proof needs whatever the path: the condition
 #: itself (the goal is about `x86_cond`) and the flag accessor the
-#: flag-setting instructions' successors mention — `x86_flags_*` compute
-#: `sf` and `of_` with it, and `simp` folds the whole record.
+#: flag-setting instructions' successors mention — `x86_flags_*` compute `sf`
+#: and `of_` with it, and `simp` folds the whole record whether it wants to or
+#: not.
 _DECISION_SIMP = ("x86_cond", "x86_msb")
 
 
@@ -1979,13 +1976,14 @@ class _Node:
     two branches are settled rather than walked.
 
     `k` is this node's index in the emitted chain — `s{k}` is the state its step
-    starts in — and it is assigned HERE, in the build, rather than by a counter
-    inside `emit_terminates`' walk. `walk` reads it off the node instead of
-    keeping its own, which is the only arrangement in which the walk and the
-    build cannot come to disagree about which step is which; and `_tracked`, the
-    pre-pass that decides how many per-step facts to emit, needs the same numbers
-    before the walk runs at all. `abs` is the abstract machine's state as this
-    instruction is about to run, for the same reason.
+    starts in — and it is stamped by `_index` over the FINISHED tree rather than
+    by a counter inside `emit_terminates`' walk, which reads it off the node
+    instead of keeping its own. One number, not two: the walk cannot come to
+    disagree with the build about which step is which, and `_tracked` — the
+    pre-pass that decides how many per-step value facts to emit — has the same
+    numbers before the walk runs at all. `abs` is the abstract machine's state as
+    this instruction is about to run, and `after` the state it leaves, which is
+    what `hval{k+1}` is about.
 
     `halt` is set by `_leaf_halts` and is the index of this leaf's disjunct in
     `emit_terminates`' statement, or None for a node that is not a leaf. It lives
@@ -2357,13 +2355,15 @@ _NO_TREE_CHARS = {"form": None, "call": 60, "loops": 0, "size": 0}
 #: is what that refusal's own docstring said was the fix and is not a bigger
 #: bound: `wide_recv` is one path of 150 steps again and elaborates in 162 s.
 #: The bound stays, because the doubling it was measured against is still what
-#: any branch the machine cannot settle does — `2ifs`, `elif3` and `deepif` are
-#: four and three leaves for want of anything to decide, and a program with four
-#: input-dependent branches is 16 paths whatever else is true of it.
+#: any branch the machine cannot settle does — `twoifs` and `elif3` are four
+#: leaves each and `deepif` three, every one of them a branch on the program's
+#: INPUT, and a program with four input-dependent branches is 16 paths whatever
+#: else is true of it.
 #:
-#: The measurements behind the table above are the BEFORE ones and are kept as
-#: they are, because the ratio is the claim: the same fixtures are now 1, 1, 4
-#: and 1 leaves (see `formal/examples`, `emit_terminates` alone, Lean-free).
+#: The table above is the BEFORE state and is kept as it is, because the ratio
+#: is the claim: the same fixtures are now 1, 1, 4 and 1 leaves — `ret42`,
+#: `SOURCE`, `bittest`, `wide_recv` — by `emit_terminates` alone, which is
+#: Lean-free and takes a second over the whole corpus.
 _MAX_CHAIN_STEPS = 2000
 
 

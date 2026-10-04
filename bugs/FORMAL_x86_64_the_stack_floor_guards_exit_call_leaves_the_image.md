@@ -1,10 +1,84 @@
 # the stack-floor guard's `exit(2)` call target is outside the image: the path tree now ends there, and the theorem is a disjunction over halt addresses
 
 **Status: the path tree is FIXED (2026-10-04, `work/gatefix6`); what the guard
-still costs is written down below and is not fixed.** The defect this doc filed
-— "no end-to-end path tree exists", every example reporting `body loops, or
-branches out of the function` — no longer happens, and the theorem that is
-emitted instead is one the model can support.
+still costs was written down below and is FIXED (2026-10-04,
+`work/formal22-guard-branches`) — the section "what the guard still costs" is
+kept as the record of what the cost was and where the measurement is.** The
+defect this doc filed — "no end-to-end path tree exists", every example
+reporting `body loops, or branches out of the function` — no longer happens, and
+the theorem that is emitted instead is one the model can support.
+
+## Status (2026-10-04 — the guard's two branches are DECIDED, and `wide_recv` emits)
+
+**The doubling is gone, and the fix is the one this doc's "next step" named:
+decide the guard's own two branches instead of walking both arms.** Both are
+settled by arithmetic over the initial state, so walking them was work for an
+answer already known.
+
+* **`JNE done`** — has the floor word been parked already?  In the ENTRY function
+  it reads 0, because `X86State.init`'s memory is a constant zero function.  In
+  a CALLEE it is what the entry parked, which is non-zero **because
+  `X86State.init`'s stack pointer is the LITERAL `0xfffffffffffffff0` and not a
+  function of the input** — that is what makes the whole comparison arithmetic on
+  Python integers rather than an obligation about `n`.
+* **`JAE ok`** — SP on a path is a sum of literal frame movements, so
+  `sp >= sp - BUDGET` is arithmetic on two literals.  Nothing about the two
+  obligations below was needed: no new library lemma, no model change, and the
+  wrapping `UInt64` comparison closes in `decide` like any other ground fact.
+
+`_Abs` (in `formal/x86_64_endtoend_test.py`) is the constant propagation that
+answers them, `_abs_cond` is `x86_cond`'s own `match` transcribed nibble for
+nibble, and `_tree` asks it at every `jcc`: **a settled condition is followed
+into ONE arm and the other is never built.**  A form the table does not model
+wipes the state and a store whose ADDRESS is unknown drops the memory model, so a
+gap in the analysis costs the old behaviour and nothing else — and **a decision
+it gets wrong costs a rejected file, not a wrong theorem**, because every
+decision is emitted as a `have hdec{k} : x86_cond … = …` whose proof has no
+`sorry` in it anywhere.
+
+**The proof is one step of unfolding, not a `simp` over the chain, and that part
+was not obvious.**  `s{k}` is one nested term (`s1 = {i0 with …}, s2 = {s1 with
+…}`), so the direct proof is a single `simp [hs1 … hs{k}]`, and it is
+superlinear: measured on `wide_recv`, one such `simp` at step 41 cost seconds
+and the same one at step 131 **was still running at `PROOF_WALL_S` (1500 s)**,
+with `mem_write_bytes`'s `ite` chain and the nested `Int.ofNat … + disp`
+addresses re-normalised at every one of the 131 levels.  So the values are stated
+one step at a time instead — `hval{k}` is `s{k}`'s own field values, proved from
+`hs{k}` and `hval{k-1}`, which is a projection reduction and some literal
+arithmetic — and the decision then reads the last fact.  The whole chain costs
+what one step costs times the number of steps.
+
+| | before | after |
+|---|---|---|
+| `emit_terminates` over `formal/examples` | 38 of 50 emitted | **39 of 50** |
+| corpus leaves / step equations | 218 / 6 315 | **69 / 2 718** |
+| corpus emitted bytes | 4.31 MB | **3.02 MB** |
+| `ret42` | 4 leaves, 58 steps | **1 leaf, 16 steps** |
+| `bittest` | 10 leaves, 457 steps | **4 leaves, 220 steps** |
+| `twoifs` | 10 leaves, 409 steps | **4 leaves, 196 steps** |
+| `wide_recv` | **REFUSED, too large** (12 241 steps / 94 leaves / 29 908 lines) | **1 leaf, 150 steps, 4 013 lines** |
+
+Lean, on the two files this doc's own "Reproducing" line names:
+`ret42` **3.9 s**, `wide_recv` **161.6 s** — 1.6 % of `PROOF_WALL_S` — both with
+no errors.  `wide_recv`'s five admissions are four `hpop`s and the closing
+`hrip`, counted by name in the report and unchanged by this; the point of the
+table is that the file now EXISTS to be measured at all.
+
+**What the remaining leaves are, so the table is not read as "the guard is the
+only branch".**  `twoifs`, `elif3`, `deepif` and `bittest` keep four, four, three
+and four leaves, and every one of them is a branch on the program's INPUT —
+nothing an emitter can settle, since the theorem is quantified over `n`.  The
+guard's own two branches per guarded prologue are gone from all of them; what is
+left is `2^(branches on the path)` over the program's own conditionals, which is
+what a path tree is for.
+
+**Still open, unchanged by this pass: the VALUE theorem.**  `emit()` has no path
+structure at all — it walks straight-line from the entry and refuses on the first
+`jcc` or `call` — so with two branches and a `call_rel32` in every prologue it
+declines every example (`ret42` reports `value: - (branches: call_rel32,
+jcc_rel32)`).  Fixing it is the same decide-the-guard work plus `by_cases` in an
+emitter that has none, and it is NOT started.  The section below is the record
+of the other half.
 
 ## What landed
 
@@ -60,6 +134,11 @@ that cover the change (`formal/x86_64_endtoend_test.py`'s own entry point is 43
 Lean proofs and is not in a gate bucket).
 
 ## What the guard still costs, and the exact next step
+
+**SUPERSEDED (2026-10-04) — kept as the record of the cost and of where the
+measurement is. Both branches are decided now; the Status above has the fix and
+the after-table.** Everything below describes the state this section was written
+against, and the "exact next step" it ends with is the one that was taken.
 
 **The guard's two branches per prologue are a per-path TREE, so they multiply.**
 `_tree` walks every branch outcome and there is no way to share the two arms of

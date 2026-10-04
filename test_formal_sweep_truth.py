@@ -2398,12 +2398,19 @@ class TestX86EndToEndEmitter(unittest.TestCase):
     def test_a_tree_too_large_to_prove_is_refused_by_name_not_attempted(self):
         """The bound, exercised at a bound small enough to hit.
 
-        `wide_recv` is what it is for \u2014 12 241 step equations over 94 leaves,
-        because the guard's two branches per prologue multiply every path \u2014 and
-        the alternative to refusing is 1500 s of wall followed by a FAILURE
-        whose message is about the clock. So the refusal is a `_NoTree` with a
-        kind of its own, it keeps its numbers in the one line the screen shows,
-        and it is counted apart from the three older outcomes.
+        `wide_recv` is what it was for \u2014 12 241 step equations over 94 leaves,
+        because the guard's two branches per prologue multiplied every path \u2014 and
+        the alternative to refusing is 1500 s of wall followed by a FAILURE whose
+        message is about the clock. So the refusal is a `_NoTree` with a kind of
+        its own, it keeps its numbers in the one line the screen shows, and it is
+        counted apart from the three older outcomes.
+
+        **The bound stays after the guard's branches were settled**, because the
+        doubling is what any branch the machine CANNOT settle does, and a program
+        with four input-dependent conditionals is 16 paths whatever else is true
+        of it (`twoifs`, `elif3` and `deepif` are four, four and three leaves).
+        The fixture is lowered to hit the bound rather than the corpus raising it
+        to be hit, so this row is about the refusal and not about a number.
         """
         import formal.x86_64_endtoend_test as E
         code, info, insns, shapes = self._source_plan()
