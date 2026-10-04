@@ -158,7 +158,7 @@ arm64 proof:
 
 | | leaves reached | admits (Lean, fallbacks stripped) |
 |---|---|---|
-| `frame-contract-terminal` | 324 | 0 — `identity` (4 leaves) and `wdiff` (4) |
+| `walk-terminal` | 324 | 0 — `identity` (4 leaves) and `wdiff` (4) |
 | `runs-cbz-condition` | 36 | **2 of 6 in `count`** |
 | `runs-ret-x0` / `-x30` / `-frame-ok-window` | 12 each | 0 in `count` (which is red for another reason — below) |
 | `runs-bl-step` | 7 | 0 in `count` |

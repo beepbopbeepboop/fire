@@ -86,10 +86,15 @@ CFG_LEAF_TAG = "arm64-cfg-leaf"
 #: differently.  All fifteen are here: a registry that quietly omits the
 #: admissions it was built to account for is the same defect one level up.
 CFG_LEAF_SITES = {
-    # `emit_block`'s frame-contract terminal: a method receiver's value flow
-    # into a structured contract.  Carries NO fallback under `strict` (see the
-    # emission), because there the gap is meant to be a build failure.
-    "frame-contract-terminal",
+    # `emit_block`'s terminal: the end of the value-flow chain, after the
+    # per-block fold and the frame-slot reads.  Reached by EVERY program's
+    # `run_result_exit`/`go_exit` walk -- 324 of the 433 leaves in the arm64
+    # corpus -- and by the dylib `halts` theorem, so the name says what the
+    # leaf is rather than which of the two `frame=` callers reached it.  (It was
+    # `frame-contract-terminal`, which is wrong: the one caller that passes a
+    # frame contract sets `strict` and takes the `done` branch below, so this
+    # site is the NO-frame path.)
+    "walk-terminal",
     # The `dec`-while loop contract's back edge: the counter's own decrement
     # and the frame slot that pins the exit value, read off the executed path.
     "dec-while-back-edge-decrement",
@@ -6056,14 +6061,19 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                       f"first | decide | omega | simp | native_decide)")
                 for _pl in ((frame or {}).get("post") or []):
                     A(f"{IND}{_pl.lstrip()}")
-                # A frame contract is stated with NO `sorry` fallback: the
-                # whole point of the exercise is that this is the proof, and a
-                # fallback here is a theorem nobody has checked.  A gap in the
-                # terminal value flow is a hard error, not an admission.
+                # A STRICT frame contract is stated with NO `sorry` fallback:
+                # the whole point of the exercise is that this is the proof,
+                # and a fallback here is a theorem nobody has checked, so a gap
+                # in its terminal value flow is a hard error rather than an
+                # admission.  Everything else -- the ordinary `run_result_exit`
+                # walk of every program, and the dylib `halts` theorem -- keeps
+                # the fallback, because those are long proofs whose leaves this
+                # generator cannot always close and an unelaborated proof is not
+                # a smaller failure than an admitted one.
                 if (frame or {}).get("strict"):
                     A(f"{IND}all_goals done")
                 else:
-                    _cfg_leaf(A, IND, "frame-contract-terminal",
+                    _cfg_leaf(A, IND, "walk-terminal",
                               "all_goals (first | done | sorry)")
         elif kind == "seq":
             nxt_pc = block["instrs"][-1] + 4

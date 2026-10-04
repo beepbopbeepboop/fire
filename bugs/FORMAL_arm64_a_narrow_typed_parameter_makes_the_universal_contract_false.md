@@ -10,6 +10,19 @@ and `sle8.mojo` do not typecheck on this tree, they are not in
 FAILs and — with `count`, `fact`, `pow2`, `sqsum` and `sum` from
 `bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md` — seven.
 
+Measured on the tree's tip (`45c77c17`), fallbacks IN PLACE, so this is the
+baseline and not an artefact of the census instrument:
+
+```
+BASELINE sle8 : False cached False holes 0
+   sle8b_proof.lean:4745:43: error: unsolved goals
+   sle8b_proof.lean:4760:192: error: The prover found a potentially spurious counterexample:
+   … (twelve diagnostics, identical in sgt8)
+BASELINE sgt8 : False cached False holes 0
+   sgt8_proof.lean:4745:43: error: unsolved goals
+   …
+```
+
 Not fixed: closing it is a decision about what a typed parameter's range
 hypothesis is, and both available answers change a theorem's statement rather
 than its proof.

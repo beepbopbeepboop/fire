@@ -1827,7 +1827,7 @@ class TestDec1PathContext(unittest.TestCase):
 #: corpus figures in the class docstring say which ones are still live.
 EXPECTED_CFG_LEAF_SITES = {
     # the eight the trust audit's table named
-    "frame-contract-terminal",
+    "walk-terminal",
     "dec-while-back-edge-decrement",
     "dec-while-back-edge-frame-slot",
     "runs-ret-x0",
@@ -1954,7 +1954,7 @@ class TestCfgLeafCensus(unittest.TestCase):
         self.assertLessEqual(
             {"runs-bl-step", "runs-cbz-condition", "runs-ret-x0",
              "dec-while-back-edge-decrement", "loop-cond-step",
-             "frame-contract-terminal"} - reached, set(),
+             "walk-terminal"} - reached, set(),
             "the corpus slice no longer reaches the leaves it was chosen for")
 
     def test_removing_the_fallback_leaves_no_admission_on_a_tagged_line(self):

@@ -16,7 +16,7 @@ Over those 47:
 
 | site | leaves reached | admits (measured by stripping the fallback and reading Lean) |
 |---|---|---|
-| `frame-contract-terminal` | 324 | 0, over `identity` (4), `udivmod`/`threevar`/`bitops` (4 each), `ifonly` (8), `absval` (8), `sign` (12) |
+| `walk-terminal` | 324 | 0, over `identity` (4), `udivmod`/`threevar`/`bitops` (4 each), `ifonly` (8), `absval` (8), `sign` (12) |
 | `runs-cbz-condition` | 36 | **2 of 6 in `count`** — `bugs/FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md` |
 | `runs-ret-x0`, `runs-ret-x30`, `runs-ret-frame-ok-window` | 12 each | 0 in `count` |
 | `runs-bl-step` | 7 | 0 in `count` |
