@@ -1089,6 +1089,60 @@ CASES = [
      "    printf(\"%d\", show())\n"
      "    return 0\n", 0, "3"),
 
+    # THE FOLD, and the one shape `the variadic bracket arity and the `len(<display>)` fold (landed in e72a5f93)`
+    # §5 item 2 measured as the whole of what was left: `len(<a display the
+    # instantiation supplied>)` is a closed-form function of a constant, and
+    # `fold_literal_expr` — the ONE folder — now has that arm. The two rows
+    # around it are the guards, and they are here because the arm READS A NAME
+    # (`len`) and a folder with a free name in it is what produced a fabricated
+    # word before (`fold_literal_expr`'s own `names` note).
+    #
+    # It is a LITERAL display and not `len(keys)`, which is the row two above and
+    # is still its own refusal: a parameter's value belongs to an
+    # INSTANTIATION, and the class body has no instantiation.
+    ("comptime_len_of_a_literal_display_folds",
+     "struct Box:\n"
+     "    comptime length = len([1, 2, 3])\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return Self.length\n"
+     "\n"
+     "def show() -> Int:\n"
+     "    return Box.length\n"
+     "\n"
+     "def main(n) -> Int:\n"
+     "    printf(\"%d\", show())\n"
+     "    return 0\n", 0, "3"),
+    # A `len` this class body BINDS shadows the builtin, and the class body can
+    # spell a shadow three ways — a field, a class-level constant and a bracket
+    # parameter are three tables in the tree, and `model.struct_bound_names` is
+    # the one reader of their union. Measured: with the shadow spelled as a
+    # class-level constant the fold fired and the program answered 0.
+    ("a_len_the_class_body_binds_is_not_the_builtin",
+     "struct Box:\n"
+     "    len: Int = 2\n"
+     "    comptime width = len([1, 2, 3])\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return Self.width\n"
+     "\n"
+     "def main(n) -> Int:\n"
+     "    return 0\n",
+     "refuse:has no comptime evaluator to run one", None),
+    # …and a display whose length is not knowable here: a starred element's
+    # count is whatever the sequence it names holds, so `len([*[1, 2], 3])` is 3
+    # only for that value. Refused rather than counted, because the elements are
+    # counted rather than folded.
+    ("comptime_len_of_a_starred_element_is_refused",
+     "struct Box:\n"
+     "    comptime width = len([*[1, 2], 3])\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return Self.width\n"
+     "\n"
+     "def main(n) -> Int:\n"
+     "    return 0\n",
+     "refuse:has no comptime evaluator to run one", None),
     # The `refuse:` sibling above with the needle this tree raises: it quotes the
     # VALUE, which is what sends a reader to the class body rather than to the
     # read, where the generic "is a class-level constant of Table" did not.
@@ -10288,6 +10342,13 @@ SOLE_FIELD_CTOR_STORE_CASES = [
      "    printf(\"v=%d h=%d\", b.inner.v, b.inner.has)\n"
      "    return 0\n",
      0, "v=0 h=0"),
+    # The WIDER version of this shape — defaults in the `Opt`, a store THROUGH
+    # the frame, and the CPython oracle — is the row
+    # `one_word_outer_over_a_nested_frame` in `ONE_FIELD_MUTATOR_CASES`, which is
+    # where a group that compares against CPython belongs; this one is here
+    # because the group's question is WHICH RULE ANSWERS each of the three
+    # constructor stores, and both rows answer it.
+    #
     # (c) A frame the CALLEE made — which the doc predicted would BUILD, and
     # which does NOT: `init_body_stores` only substitutes a BARE PARAMETER for a
     # right-hand side, because only a bare parameter has the caller's own
@@ -18549,6 +18610,61 @@ SOLE_FIELD_CALLEE_CASES = [
 ]
 
 ONE_FIELD_MUTATOR_CASES = [
+    # A ONE-WORD struct whose sole field is a nested FRAME, which is the one
+    # case the one-word identity cannot lower on its own: `b.inner` collapses
+    # onto `b`, so the source's `b.inner.v` reaches the emitter as `b.v` — a
+    # field of `Opt` read through a local whose only classification was "a
+    # word" — and both machines REFUSED it by name, with a message about an
+    # expression the source does not contain
+    # (`the one-word outer over a nested frame (landed in 22e8f57d)`).
+    #
+    # The answer is the two-hop read and it needs no new table: `Box`'s word IS
+    # the address of the `Opt` frame the construction site reserved for it
+    # (`model.struct_nested_frame_fields`), so once `b` is a holder of `Opt`,
+    # `b.v` is one load at `[b + 8*slot(v)]` — the two hops the source wrote. A
+    # MULTI-field outer keeps `model._frame_nested_slots`' tuple instead,
+    # because a slot there survives the collapse.
+    #
+    # It is in the MUTATOR group rather than beside the constructor-store rows
+    # it came from because that group carries a CPython oracle and those carry
+    # refusal needles, and the point of the row is the answer, not the refusal.
+    ("one_word_outer_over_a_nested_frame",
+     "struct Opt:\n"
+     "    var v: Int = 5\n"
+     "    var has: Int = 7\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self.inner = Opt()\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var b = Box()\n"
+     "    printf(\"A %d %d\", b.inner.v, b.inner.has)\n"
+     "    b.inner.v = 41\n"
+     "    var c = Box()\n"
+     "    c.inner.has = 9\n"
+     "    printf(\" B %d C %d %d\", b.inner.v, c.inner.v, c.inner.has)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Opt:\n"
+     "    def __init__(self):\n"
+     "        self.v = 5\n"
+     "        self.has = 7\n"
+     "\n"
+     "class Box:\n"
+     "    def __init__(self):\n"
+     "        self.inner = Opt()\n"
+     "\n"
+     "def main():\n"
+     "    b = Box()\n"
+     "    sys.stdout.write(\"A %d %d\" % (b.inner.v, b.inner.has))\n"
+     "    b.inner.v = 41\n"
+     "    c = Box()\n"
+     "    c.inner.has = 9\n"
+     "    sys.stdout.write(\" B %d C %d %d\" % (b.inner.v, c.inner.v,\n"
+     "                                            c.inner.has))\n"),
     ("one_field_mutator_no_args",
      "struct Cell:\n"
      "    var _value: Int\n"

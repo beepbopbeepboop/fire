@@ -86,14 +86,23 @@ SAMPLES = [
      "x.y cannot be placed: this name holds a frame address in more than one "
      "shape, and the shapes do not agree"),
     # The container-operand family: a container operation whose base is a word
-    # ESTABLISHED not to be a container.  Three rows because the BASE is what
-    # tells a reader which of them to look at, and because the field row is new
-    # (`model.slot_container_operand_refusal`) — the two others were already
-    # being filed as "other refusal", which is the thing this table exists to
-    # prevent.  Each sample is the opening clause of a real message.
+    # ESTABLISHED not to be a container.  FOUR rows because the BASE is what
+    # tells a reader which of them to look at, and because the two newest are new
+    # (`model.scalar_container_base_evidence`) — the other two were already being
+    # filed as "other refusal", which is the thing this table exists to prevent.
+    #  Each sample is the opening clause of a real message, and each is the clause
+    #  its family's marker keys on, which is what makes this table a check on the
+    #  markers rather than a list beside them: a sample that another family's
+    #  marker also matches is a shadowed row, and there is one such pair here by
+    #  construction (every message opens with "asks for a container element"), so
+    #  the markers must be the base-specific clause instead.
     ("container operation on a scalar slot",
      "a subscript of `s.n` asks for a container element, and `s.n` is a struct "
      "field declared to hold an integer"),
+    ("element of a value that is not a container",
+     "a subscript of `5` asks for a container element, and `5` is a number — "
+     "the literal carries no count at offset 0 and no memory behind it, so "
+     "there is nothing for the container walk to read"),
     ("container operation on a non-container",
      "a subscript of `a` asks for a container element, and `a` is a value this "
      "function bound to an integer"),
@@ -588,6 +597,20 @@ CAUSE_SAMPLES = [
      "size_of[type, target] is a subscript whose index is a tuple. A value "
      "here is one 64-bit word and a list is a flat blob of words, so a tuple "
      "index has no representation on this path"),
+    # The SOURCE-PROVEN half of the container-operand family, which had no cause
+    # and so fell into `other refusal` for every message the two emitters
+    # produce from it — which is the outcome this table exists to prevent. The
+    # sample is the SCALAR-source half (`model.scalar_container_base_refusal`),
+    # which is the one this row is new for; the bare-name half
+    # (`non_container_element_refusal`) and the slot half
+    # (`model.scalar_container_base_evidence`'s field arm) are one defect with
+    # the same fix and are counted by the marker this one deliberately does NOT
+    # claim, so the cause a planner reads is the half whose evidence is a
+    # declaration rather than a binding.
+    ("element of a value that is not a container",
+     "a subscript of `5` asks for a container element, and `5` is a number — "
+     "the literal carries no count at offset 0 and no memory behind it, so "
+     "there is nothing for the container walk to read"),
     # NOTE the order boundary this one sits on: the message opens with the
     # receiver sentence the frame-address cause keys on and only reaches its
     # own marker in the second clause, so a sample abbreviated before that

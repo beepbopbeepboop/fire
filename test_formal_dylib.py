@@ -1546,7 +1546,7 @@ def test_a_receiver_writeback_is_not_a_returned_frame(tmpdir, shared):
         into the receiver cell. A caller that followed the published
         `frame_params` — reserve a two-word `Inner` frame, pass its address —
         would read a dead block through a contract the callee does not honour,
-        so it is refused (`receiver_frame_escape_library_refusal`) and no
+        so it is refused (`receiver_writeback_frame_library_refusal`) and no
         manifest is written.
 
     Neither of the two rules can be the other's, which is why this case is one

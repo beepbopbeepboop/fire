@@ -42,7 +42,7 @@ _CPP_FLAGS = ('-std=c++20', '-fPIC', f'-I{RUNTIME}')
 # so `struct Box[T, keys: List[T]]:` became
 # `struct Box_1_T_3_Int_4_keys_39__x005B1_x002C_…_x005D]:` and the build died
 # at `Unexpected RBRACKET(']')` on both backends. See
-# `bugs/FORMAL_a_generic_structs_parameters_are_never_bound.md` §0a, where
+# `the variadic bracket arity and the `len(<display>)` fold (landed in e72a5f93)` §0a, where
 # the before/after table and the stdlib file that reaches it are.
 _HEAD = re.compile(r'\b(fn|def|struct)\s+(\w+)\s*\[')
 

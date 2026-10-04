@@ -880,6 +880,76 @@ def test_a_module_body_is_a_load_time_initializer(tmpdir, shared):
           "not have")
 
 
+def test_a_receiver_bound_to_a_frame_is_refused_on_both_machines(tmpdir,
+                                                                  shared):
+    """The frame-escape check is asked of BOTH architectures, in one place.
+
+    `formal/build.py`'s dylib-boundary check reads nothing an architecture
+    chooses — the by-reference receiver (`model.receiver_writeback_name`) and
+    the frame the method built in its own scratch are decided in the shared
+    pipeline, before any emitter runs — so the arm64 row in
+    `test_formal_dylib.py` and this one are the SAME refusal. It is asserted
+    here for the reason that file is arm64-only (a proved contract needs an
+    arm64 generator, which is why `fire.py dylib` refuses `--backend=x86_64`
+    outright): without this row the check would be pinned on one machine, and
+    an emitter- or arch-conditional change to it would pass the whole file.
+
+    Both halves of the pair are here, because the defect is the pair: the
+    WRITE-THROUGH constructor writes the caller's block in place and is a
+    legitimate export; the one that ASSIGNS a frame to its own single field
+    hands the importer an address into the callee's reclaimed scratch. They
+    differ in one line, so a check that refused both would be refusing the
+    corpus, and one that refused neither is what shipped.
+    """
+    from formal.build import FormalBuildError, compile_formal_dylib
+    write_through = (
+        "struct Inner:\n"
+        "    var a: Int\n"
+        "    var b: Int\n"
+        "\n"
+        "struct Box1:\n"
+        "    var inner: Inner\n"
+        "\n"
+        "    def __init__(out self, a: Int, b: Int):\n"
+        "        self.inner.a = a\n"
+        "        self.inner.b = b\n"
+        "\n"
+        "def mk(x: Int) -> Int:\n"
+        "    return x + 1\n")
+    rebinds = write_through.replace(
+        "        self.inner.a = a\n        self.inner.b = b\n",
+        "        self.inner = Inner(a, b)\n")
+    for arch in ("arm64", "x86_64"):
+        ok = os.path.join(tmpdir, f"wt-{arch}.mojo")
+        with open(ok, "w") as f:
+            f.write(write_through)
+        compile_formal_dylib([ok], output=os.path.join(
+            tmpdir, f"wt-{arch}.dylib"), arch=arch, fmt="macho", prove=False,
+            check=False)
+
+        bad = os.path.join(tmpdir, f"rb-{arch}.mojo")
+        with open(bad, "w") as f:
+            f.write(rebinds)
+        try:
+            compile_formal_dylib([bad], output=os.path.join(
+                tmpdir, f"rb-{arch}.dylib"), arch=arch, fmt="macho",
+                prove=False, check=False)
+        except FormalBuildError as e:
+            text = str(e)
+        else:
+            raise TestFailure(
+                f"a constructor that binds its one word to a frame it built "
+                f"itself was published as a {arch} dylib: the importer is "
+                f"handed an address into a scratch that is gone when the "
+                f"export returns")
+        check("returns a frame address" in text,
+              f"the {arch} refusal does not name what reaches the importer: "
+              f"{text}")
+        check("self.inner = Inner(a, b)" in text,
+              f"the {arch} refusal does not quote the source's statement: "
+              f"{text}")
+
+
 TESTS = [
     ("x86-64 dylib stubs are jmpq *(%rip)",
      test_x86_64_dylib_stub_entries_are_jmpq_rrip),
@@ -905,6 +975,8 @@ TESTS = [
      test_module_dylib_with_an_extern_call_loads_into_a_program),
     ("the x86-64 dylib exports its module API",
      test_the_x86_64_dylib_exports_its_module_api),
+    ("a receiver bound to a frame is refused on both machines",
+     test_a_receiver_bound_to_a_frame_is_refused_on_both_machines),
 ]
 
 

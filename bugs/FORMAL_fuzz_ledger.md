@@ -339,7 +339,7 @@ bind a symbol nothing provides and then, in its own words, cannot decide whether
 that symbol is a call the codegen emitted. The construct is genuinely outside the
 subset and the refusal genuinely stops the build; the message names a FILE and a
 SYMBOL, and never says that `sum` is a call this path does not lower.
-`bugs/FORMAL_an_unlowered_callee_is_refused_by_a_link_audit.md`.
+`the link audit's naming of an unlowered callee (landed in ee704916)`.
 
 #### 3.5.2 The audit's other three verdicts, and what it cannot decide
 

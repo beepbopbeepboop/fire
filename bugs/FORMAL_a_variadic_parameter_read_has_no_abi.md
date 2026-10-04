@@ -1,10 +1,20 @@
 # FORMAL_a_variadic_parameter_read_has_no_abi: the row was unowned, and the refusal in it is CORRECT
 
+**Status: NOT FIXED, and correctly so at the width it is written at.** The
+refusal is right and the ABI decision is still unmade — but the CORPUS half is
+now done (2026-10-04, `formal21-2`): `tools/formal_fuzz.py` can emit a `*rest`
+DEFINITION and a call site for it, so the day the ABI lands, a `--mix limits`
+sweep measures it instead of being unable to produce the construct at all. That
+was §5 step 5 and it was measured ABSENT; the measurement and what it now shows
+are in §5 below. Everything else on this list is untouched, and the reason is
+the doc's own: the emitters and `lib/ProofLib.lean` have to move together and
+the latter's 27 MB `.olean` peaks at 7.82 GB to rebuild.
+
 **Area:** `formal/build.py::_refuse_variadic_reads` /
 `formal/model.py::variadic_read_refusal` (the refusal), and for the fix
 `formal/arm64_codegen.py`, `formal/x86_64_codegen.py`, `lib/ProofLib.lean` and both
 `formal/*_proof_gen.py`. **Both architectures** — measured below, not inferred.
-**Status: NOT FIXED, and correctly so at the width it is written at.** Filed 2026-10-04 by
+Filed 2026-10-04 by
 `sweep20:sweep-b10` from the b10 sweep, where it is the **7th-largest codegen cause and the
 largest one with no document and no claim.**
 
@@ -113,7 +123,42 @@ receiver's frame or a folded constant — none of which is "a count of words".
    (`FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md`, claimed), which is
    `FILES BLOCKED IS AN UPPER BOUND` doing what §2.4 of the b10 map measured it doing to the
    43-file Optional row.
-5. **Add a `*args` DEFINITION and READ to `tools/formal_fuzz.py`'s pools — measured absent.**
+5. ~~**Add a `*args` DEFINITION and READ to `tools/formal_fuzz.py`'s pools —
+   measured absent.**~~ **DONE 2026-10-04 (`formal21-2`).** `variadic_define`
+   and `variadic_call` are in the `limits` mix. Three properties, each of which
+   the doc's own analysis says the corpus needs and which a sloppier family
+   would have got wrong:
+
+   * **the READ is `len(rest)`**, not `rest[0]`, because CPython has to be able
+     to ANSWER the program: `len(rest)` is the shape whose wrong-but-exit-0
+     answer is measurable (an "empty" lowering prints 0 where CPython prints the
+     number of extras), while `rest[0]` on an empty tuple is an `IndexError`,
+     and an oracle that errors takes the whole program's verdict with it;
+   * **the call site VARIES the count** (0..3 extras) — the doc's sharpest point
+     is that "the empty answer is right exactly when no extra argument was
+     passed, and wrong otherwise, and nothing in the program says which case it
+     is", so a corpus that always passed zero extras could not tell the two
+     apart either;
+   * **both halves are one feature**: a definition with no call site is dead
+     code, and a read with no definition is a `NameError`, so emitting only one
+     produces no verdict at all.
+
+   Measured after, six seeds of `--mix limits` on both architectures:
+
+       refusal audit: true=12, unnamed=0, false=0, no-predicate=0
+
+   and the refusal the family reaches is the one above, reporting the two
+   numbers the corpus now varies:
+
+       build: var7: the body reads 'rest', its *-parameter, and this path has no
+       variadic ABI … (this module's call sites pass 2..5 argument(s), against 2
+       fixed parameter(s)) …
+
+   `test_formal_fuzz.py` PASS — 0 failures, with `limits` still 30/30
+   audited-true. **So the coverage hole is closed and the ABI decision is not**:
+   the family can now notice the day it is landed, which is the whole of what
+   step 5 was for.
+
    Its docstring's "what a mix does NOT generate" list (§ the `--mix` families, the bullet above
    `THE COST OF A MIX`) rules out a variadic `printf` with more than five operands and points at
    `test_formal_run.py`'s `BOTH_ARCH_CASES` ladder for the stack-argument convention; it says

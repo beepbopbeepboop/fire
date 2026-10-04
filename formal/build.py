@@ -999,21 +999,101 @@ def _audit_bound_symbols(external_syms, dylib_syms, where: str,
             and not _is_libsystem(sym)]
 
 
-def _unaccounted_report(source_path: str, unaccounted: list, where: str) -> str:
-    """The one wording for "this image would bind symbols nothing provides"."""
+def _image_bare_callee_symbols(functions) -> set:
+    """Every SYMBOL the image writes for a bare-named callee of its own source.
+
+    The link audit's second question needs the emitter's spelling of a name, not
+    the source's: `external_syms` records what went into the image, and the two
+    differ for any name the module layer renames. Both are carried, because which
+    of them the emitter used is not a fact this function can derive from a set
+    of names — and a name that matched neither would be reported with no cause
+    named, which is where this started.
+    """
+    out = set()
+    for fn in functions or ():
+        for name in (getattr(fn, "_bare_callee_names", None) or ()):
+            out.add(name)
+            sym = M.module_symbol(name)
+            if sym is not None and getattr(sym, "name", None):
+                out.add(sym.name)
+    return out
+
+
+def _unaccounted_report(source_path: str, unaccounted: list, where: str,
+                        bare_callees=None) -> str:
+    """The one wording for "this image would bind symbols nothing provides".
+
+    **`bare_callees` is what lets the message say which of its two causes each
+    name is**, and the two sentences it adds are the whole of this bug's
+    content. The shared paragraph this used to end on is accurate about the
+    link line and useless about the program: it names a file and a symbol, and
+    the reader of a refusal needs to know whether to change their PROGRAM or
+    their LINK LINE — and the message said in as many words that it could not
+    tell them. That was true when written and stopped being true when
+    `check_module_symbols` began collecting a bare-named callee into
+    `bare_callees` precisely so the name-placement walk would not fire on it:
+    from that point the backend KNEW the name was a callee and had no way to
+    say so here. The knowledge is published per function
+    (`_bare_callee_names`) and joined into one set by
+    `_image_bare_callee_symbols`, which is the only place that needs it.
+
+    Everything above the new sentences is unchanged, because those sentences are
+    NEEDLES: `tools/formal_sweep.py`'s `_EXTERN_BUILD_MARK` /
+    `_EXTERN_BUILD_COUNT_RE`, `tools/formal_sweep.py`'s own `would bind` family
+    label, `tools/formal_fuzz.py`'s audit comment, and the docstrings of
+    `formal/imports.py` and `test_formal_module_attr.py` all quote them. What
+    changed is the paragraph that followed them, which asserted the distinction
+    was unavailable — a claim this message would now contradict three lines
+    after making it.
+
+    The classification is per name rather than for the whole list, because the
+    two causes really do coexist: one image can bind a dangling call to a
+    builtin this path does not lower AND a name that entered as a bare
+    reference. Naming only the callees and keeping the shared paragraph for the
+    rest is what says so.
+    """
+    named = [n for n in unaccounted if n in (bare_callees or ())]
+    named_clause = ""
+    if named:
+        shown = ", ".join(f"`{n}`" for n in named[:8])
+        more = " …" if len(named) > 8 else ""
+        verb = "is a call this build emitted" if len(named) == 1 \
+            else "are calls this build emitted"
+        named_clause = (
+            f" {shown}{more} {verb} and nothing provides "
+            f"{'it' if len(named) == 1 else 'them'}, so "
+            f"{'that call is' if len(named) == 1 else 'those calls are'} not "
+            f"lowered on this path: this backend has no call to bind there, "
+            f"which is a fact about the PROGRAM and not about the link line. "
+            f"Write the operation out, or bind the name from a library that "
+            f"provides it.")
+    rest = [n for n in unaccounted if n not in named]
+    if not rest:
+        # Every name was a callee this build emitted, so there is nothing left
+        # for the link line to explain and saying otherwise would put the
+        # paragraph's own claim ("asked nowhere in this backend") three lines
+        # after contradicting it.
+        tail = (" Every name in this list is one of the calls named above, so "
+                "nothing about the link line is left to explain. (Provider "
+                f"check: {_libsystem_probe_status()}.)")
+    else:
+        tail = (f" Nothing on this link line defines "
+                f"{'it' if len(rest) == 1 else 'them'}: not the C library, and "
+                f"not any library this program linked. Two very different "
+                f"causes produce that, and the distinction is not lost — each "
+                f"of the remaining name(s) is either a call the codegen "
+                f"emitted (`info['external_syms']`, so some construct was not "
+                f"lowered and the call is dangling) or a name that entered the "
+                f"image as a bare reference with no call site behind it. "
+                f"Deciding which is a question for the assembler, and it is "
+                f"asked nowhere in this backend, so this message stops at the "
+                f"fact both causes share. (Provider check: "
+                f"{_libsystem_probe_status()}.)")
     return (f"{os.path.basename(source_path)}: the {where} would bind "
             f"{len(unaccounted)} symbol(s) that nothing provides, so it could "
             f"not be loaded: {', '.join(unaccounted[:8])}"
-            f"{' …' if len(unaccounted) > 8 else ''}. Nothing on this link "
-            f"line defines them: not the C library, and not any library this "
-            f"program linked. Two very different causes produce that, and the "
-            f"distinction is not lost — each name in this list is either a call "
-            f"the codegen emitted (`info['external_syms']`, so some construct "
-            f"was not lowered and the call is dangling) or a name that entered "
-            f"the image as a bare reference with no call site behind it. "
-            f"Deciding which is a question for the assembler, and it is asked "
-            f"nowhere in this backend, so this message stops at the fact both "
-            f"causes share. (Provider check: {_libsystem_probe_status()}.)")
+            f"{' …' if len(unaccounted) > 8 else ''}."
+            f"{named_clause}{tail}")
 
 
 def _advertised_but_absent(path: str, exports: list) -> list:
@@ -1159,7 +1239,8 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
         if unaccounted:
             raise FormalBuildError(
                 _unaccounted_report(source_path or "<program>", unaccounted,
-                                    "image"))
+                                    "image",
+                                    _image_bare_callee_symbols(ordered)))
         binary = elf.build_elf(code, entry=info["base_addr"],
                                vaddr=info["base_addr"],
                                external_syms=external_syms,
@@ -1215,7 +1296,8 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     if unaccounted:
         raise FormalBuildError(
             _unaccounted_report(source_path or "<program>", unaccounted,
-                                "image"))
+                                "image",
+                                _image_bare_callee_symbols(ordered)))
     binary = build_macho(code, external_syms=external_syms, arch=arch,
                          dylibs=[{"install_name": d["install_name"],
                                   "symbols": set((d.get("map") or {}).values())}
@@ -4756,9 +4838,8 @@ def _value_may_be_a_frame(value, structs_by_name, holders, alias=None,
 
 
 def _collect_one_field_receiver_rebinds(fn, owner, structs_by_name,
-                                       one_field=None) -> None:
-    """PARK a ONE-FIELD struct's mutator that rebinds its receiver to a name of
-    its own struct type.
+                                       one_field=None, fns=()) -> None:
+    """PARK a ONE-FIELD struct's mutator that rebinds its receiver, two ways.
 
     **This runs BEFORE `_rewrite_self_fields`, and that is the whole design.**
     That rewrite collapses `recv.<sole field>` onto `recv` — it is what makes a
@@ -4773,20 +4854,46 @@ def _collect_one_field_receiver_rebinds(fn, owner, structs_by_name,
     therefore right to skip one-field owners, and right for the wrong reason to
     be asked at all: it cannot see the difference.
 
-    **Only the ALIASING spellings are parked**, and that is what the census
-    decided (`tools/formal_receiver_rebind_census.py`: 51 hand-written
-    `receiver = <value>` sites in the one-field methods of this repository and
-    the stdlib, of which 23 are a construction of their own struct and 28 are a
-    value the method computed — `self = self & rhs`, `self = False`,
+    **Only the ALIASING spellings are parked as the copy defect**, and that is
+    what the census decided (`tools/formal_receiver_rebind_census.py`: 51
+    hand-written `receiver = <value>` sites in the one-field methods of this
+    repository and the stdlib, of which 23 are a construction of their own struct
+    and 28 are a value the method computed — `self = self & rhs`, `self = False`,
     `self = _binary_op(self, rhs)` — and NONE is a name of the receiver's own
     type). A store to the receiver's own word is what those 28 mean and what the
     write-back exists to deliver; refusing them would cost `std/builtin/
     bool.mojo` and every other in-place operator in the corpus, for a construct
     that is not a defect.
 
+    **A rebinding to a FRAME is a different defect and is parked apart**, on
+    `_one_field_receiver_frame_rebinds`. The copy above stores a word the
+    method computed or was given; a frame is an ADDRESS, and one this function
+    BUILT is an address into scratch that is about to be reclaimed, delivered to
+    a caller that will read it after the return. For a program that never
+    happens — an `__init__` is inlined at its construction site
+    (`model.init_body_stores`), and a body that is not a straight line of
+    receiver-field stores is refused there, by name. **A dylib export is a
+    spelling of `__init__` that IS run as a method**, with no inlining and no
+    construction site to refuse it, which is why the frame half is parked here
+    and raised at the dylib boundary rather than being one refusal here: a
+    refusal raised in this pass would also preempt every program that merely
+    DECLARES such a constructor, and it is not one.
+
+    **Only a frame this function BUILDS is parked, and that is not a limit of the
+    walk but the shape of the boundary.** `self.inner = <a name>` is the caller's
+    own frame being copied back into the receiver, which is exactly what the
+    write-back is for; and a frame from a CALLEE (`self.inner = mk(41)`) is
+    refused one function earlier, at the same dylib boundary, by
+    `returned_frame_library_refusal` on `mk` itself — measured on both machines
+    for a free function and for a method that returns its own receiver, which is
+    the same refusal. So there is no frame-RETURNING spelling left for this arm
+    to decide, and adding one would be a second recognition of a fact the loop
+    above has already settled.
+
     Parked rather than raised for the reason every finding in this family is:
     the refusal must not preempt the import diagnosis, and this question cannot
-    be asked until the imports are known. `check_receiver_rebinds` raises it.
+    be asked until the imports are known. `check_receiver_rebinds` raises the
+    copy half; `compile_formal_dylib` raises the frame half.
     """
     if owner is None or not M.one_field_answer(owner, one_field):
         return
@@ -4803,24 +4910,64 @@ def _collect_one_field_receiver_rebinds(fn, owner, structs_by_name,
     params, locals_ = M.receiver_own_type_names(fn, owner, structs_by_name)
     aliases = {n: "a parameter" for n in params}
     aliases.update({n: "a local" for n in locals_})
+    owner_name, member = getattr(owner, "name", None), \
+        M.method_member_name(owner, fn)
+# The SOLE FIELD, and the second spelling of a rebinding target. A one-word
+    # struct's source almost never writes `self = …`: it writes
+    # `self.<sole field> = …`, which is the same assignment by the identity
+    # `_rewrite_self_fields` is about to collapse. Recognised from the DECLARED
+    # field name rather than from any chain walk, so the two spellings cannot be
+    # answered by two different derivations of "the receiver's own storage", and
+    # an owner with no sole field to name contributes no dotted spelling at all
+    # rather than one with `None` in it.
+    sole = M.struct_sole_field_name(owner)
+    dotted = ({f"{r}.{sole}" for r in receivers} if sole is not None
+              else frozenset())
+    frame_rebinds = []
     for node in M.iter_nodes(getattr(fn, "body", None) or []):
         if not isinstance(node, (F.AssignStmt, F.VarDecl)):
             continue
         if isinstance(node, F.VarDecl):
             target, value = node.name, node.value
         else:
-            target = (node.target.name
-                      if isinstance(node.target, F.IdentExpr) else None)
+            tgt = node.target
+            target = (tgt.name if isinstance(tgt, F.IdentExpr)
+                      # `self.<sole> = …`: the receiver read through its own
+                      # field, which is the spelling the source uses and the one
+                      # `_rewrite_self_fields` is about to collapse onto it.
+                      else (f"{tgt.obj.name}.{getattr(tgt, 'member', None)}"
+                            if isinstance(tgt, F.MemberExpr)
+                            and isinstance(tgt.obj, F.IdentExpr) else None))
             value = node.value
-        if not isinstance(target, str) or target not in receivers:
+        if not isinstance(target, str) or value is None:
+            continue
+        # **The dotted spelling is read for the FRAME arm only.** The copy arm
+        # below has always answered the bare receiver alone, and widening it is
+        # a separate change with its own blast radius: `self.<sole> = other` is
+        # the same assignment by the identity, but "and therefore refused" is a
+        # claim about programs this bug is not about. The parked entry keeps
+        # the SOURCE's spelling rather than the canonical receiver, because the
+        # refusal has to quote the line the reader wrote.
+        frame_target = target if target in receivers or target in dotted else None
+        if isinstance(value, F.CallExpr) and frame_target is not None:
+            built = _returned_frame_construction(
+                fn, value, M.call_callee_name(value.func), structs_by_name,
+                fns)
+            if built is not None:
+                frame_rebinds.append((frame_target, _expr_spelling(value),
+                                      built.name, owner_name, member))
+            continue
+        if target not in receivers:
             continue
         if not isinstance(value, F.IdentExpr) or value.name not in aliases:
             continue
         fn._one_field_receiver_rebind = (
             target, value.name,
             "a parameter" if value.name in params else "a local",
-            getattr(owner, "name", None), M.method_member_name(owner, fn))
-        return
+            owner_name, member)
+        break
+    if frame_rebinds:
+        fn._one_field_receiver_frame_rebinds = frame_rebinds
 
 
 def _collect_one_field_dropped_stores(fn, owner, structs_by_name,
@@ -4870,78 +5017,6 @@ def _collect_one_field_dropped_stores(fn, owner, structs_by_name,
     fn._one_field_dropped_store = (
         field, convention,
         getattr(owner, "name", None), M.method_member_name(owner, fn))
-
-
-def _collect_receiver_frame_escapes(fn, owner, structs_by_name,
-                                    one_field=None) -> None:
-    """PARK a by-reference mutator that stores a frame it BUILT into its own
-    receiver cell.
-
-    The third collector in this family, and it exists because the other two both
-    stand aside for this shape. `_collect_receiver_rebinds` grants its
-    one-field exemption unless the sole field is a frame, but then exempts
-    `__init__` on the premise that "a constructor is never CALLED — its
-    `self.<field> = …` stores are inlined into the fresh block at the
-    construction site". `_collect_one_field_dropped_stores` stands aside
-    entirely for a nested-frame owner, because "`self.inner = o` is `self = o`
-    there, and `_collect_receiver_rebinds` refuses exactly that". Both premises
-    are true of a PROGRAM and false of a MODULE BOUNDARY: an exported
-    constructor is a call across a dylib edge, its body is never inlined
-    anywhere, and the block its frame needs does not exist when the importer
-    reserves one.
-
-    So the question is asked here, before `_rewrite_self_fields` collapses
-    `self.<field>` onto `self` (after which a store through the frame and a
-    rebinding of the receiver are the same text), and parked rather than raised
-    because it is a LIBRARY-boundary fact: a program cannot reach this shape
-    (`model.init_body_stores` refuses a constructor body that is not a straight
-    line of stores, at the construction site, with the offending statement
-    spelled out), while a dylib export publishes the constructor as a callable
-    symbol whether or not any importer can call it soundly.
-
-    **The stored value is a CONSTRUCTION, and that is the decidable half.** "A
-    frame this function built" is `model.struct_constructor_sites` — the same
-    prologue-scratch table both emitters lay their blocks out from — so a store
-    of anything else is not this finding: a parameter's frame belongs to the
-    CALLER (and copying its address into the cell is a no-op the write-back
-    already performs), and a word is not a frame at all. A store of the address
-    of a frame a CALLEE returned (`self.inner = mk(v)`) is the same escape, and
-    it is decided by another rule: measured on `work/formal21-1`, every spelling
-    of it outside a constructor is refused by `_collect_receiver_rebinds` with
-    the receiver-rebinding sentence, and inside a constructor
-    `model.init_body_stores` refuses the body as one it does not inline. So the
-    shape left for THIS check is the construction one, which is also the shape a
-    module boundary can reach — the two refusals a program meets both happen
-    before any code is emitted.
-    """
-    if owner is None:
-        return
-    nested = M.one_word_sole_field_frame(owner, structs_by_name or {}, one_field)
-    if nested is None:
-        return
-    recv = M.receiver_writeback_name(fn)
-    if recv is None or recv not in M.struct_receivers(owner):
-        return
-    field = M.struct_sole_field_name(owner)
-    if field is None:
-        return
-    sites = M.struct_constructor_sites(fn, structs_by_name or {})
-    if not sites:
-        return
-    for node in M.iter_nodes(getattr(fn, "body", None) or []):
-        if not isinstance(node, (F.AssignStmt, F.VarDecl)):
-            continue
-        target = node.target
-        if not (isinstance(target, F.MemberExpr)
-                and target.member == field
-                and isinstance(target.obj, F.IdentExpr)
-                and target.obj.name == recv):
-            continue        # a store THROUGH the frame: the caller's own bytes
-        if isinstance(node.value, F.CallExpr) and id(node.value) in sites:
-            fn._receiver_frame_escape = (
-                getattr(owner, "name", None), M.method_member_name(owner, fn),
-                field, getattr(nested, "name", None))
-            return
 
 
 def _collect_receiver_rebinds(functions, structs_by_name: dict,
@@ -7840,21 +7915,119 @@ def _seed_one_word_bindings(fn, structs_by_name, functions, holders, hstruct,
     parameter case reaches codegen through no door this path opens, and seeding
     it would have made the callee's own `self.n.a` (a method receiver, which IS
     seeded, three arms above) the only shape of this family that lowers.
+
+    **Why the read becomes answerable rather than needing a two-hop table.**
+    `_rewrite_self_fields` collapses `o.n` onto `o` by the one-word identity, so
+    the source's `o.n.a` arrives at the emitter as `o.a` — and once `o` is a
+    holder of `Inner`, `o.a` is one load at `[o + 8*slot(a)]`, which is exactly
+    the two hops the source wrote. `model._frame_nested_slots`' tuple is for a
+    chain that SURVIVES the collapse (a multi-field outer, where `o` is a frame
+    and `o.n` is a slot in it); a one-word outer has no slot to survive, so the
+    same read is one hop on a different base.
+
+    `hstruct` is written for exactly one case — a one-word local whose sole
+    field is a nested FRAME — and a caller that has no `hstruct` to write has no
+    case: `model.one_word_sole_field_frame` needs a FRAMED struct to find, and
+    the one place this is called with a module that declares none (`framed`
+    empty, the early return in the `==`-dispatch analysis) cannot produce one.
     """
     key = _fn_key(fn)
     bound = _one_word_constructor_bindings(fn, structs_by_name,
                                            [f.name for f in functions])
     one_word[key].update(bound)
+    # …and the same bindings read for the FRAME half, which is the case the
+    # one-word VALUE table above cannot see and the frame pass had no case for.
+    #
+    # **A one-word struct's word is its sole field, and that field can be a
+    # nested FRAME, so the word is an ADDRESS.** `struct Outer: var n: Inner`
+    # has no frame of its own — `struct_is_framed` is False, so
+    # `_constructor_bindings` above skips it — and the block for `Inner` is
+    # reserved for the construction SITE (`struct_nested_frame_fields`), so `o`
+    # holds that block's address.
+    #
+    # **The holder arm is the LOCAL twin of the method seeding in
+    # `_frame_receivers`' first loop, and it is the same one fact.**
+    # `model.one_word_sole_field_frame` answers "the FRAMED struct this one-field
+    # struct's sole field holds", and the construction of such a struct puts that
+    # frame's ADDRESS in the word — `model.struct_constructor_site_bytes` says so
+    # in its own words ("that struct's own 8 bytes are not reserved, because
+    # there is no object: the VALUE is the nested frame's address"), so the word
+    # a local receives from `Outer()` is an address from the first instruction
+    # and `o.n.<f>` is ONE load at `o + 8·slot(f)`. The METHOD receiver has been
+    # a holder of that frame since that function was written; the LOCAL had no
+    # case, so the frame analysis still believed `o` was a plain word and the
+    # read was refused by name —
+    #
+    #     struct Inner: var a: Int; var b: Int
+    #     struct Outer: var n: Inner          # <- the only difference
+    #     def main(k):
+    #         var o = Outer()
+    #         o.n.put(7)                      # refused: 'o.a' is a field access
+    #         printf("%d %d", o.n.a, o.n.b)   #   through 'o' — and 'a' is not
+    #         return o.n.get() * 10 + o.n.a   #   a field of Outer
+    #
+    # Both architectures, identical words; measured before this arm, and commit
+    # 03e3b7b6 has the table. The one-word REWRITE was never the defect and is
+    # not what changed: `o.n` IS `o`, and after it the chain is `o.a`, which is
+    # `Inner`'s own field read — so all the walk needed was to be told that `o`
+    # names a frame, and every consumer downstream (the field walk's slot table,
+    # the escape check, `_check_method_receiver_types`) gets that from one place.
+    #
+    # **Why the read becomes answerable rather than needing a two-hop table.**
+    # `_rewrite_self_fields` collapses `o.n` onto `o` by the one-word identity,
+    # so the source's `o.n.a` arrives at the emitter as `o.a` — and once `o` is
+    # a holder of `Inner`, `o.a` is one load at `[o + 8*slot(a)]`, which is
+    # exactly the two hops the source wrote. `model._frame_nested_slots`' tuple
+    # is for a chain that SURVIVES the collapse (a multi-field outer, where `o`
+    # is a frame and `o.n` is a slot in it); a one-word outer has no slot to
+    # survive, so the same read is one hop on a different base.
+    #
+    # **A name already classified stays classified**, for the precedence
+    # `_constructor_bindings` states: two layouts for one name, and only one of
+    # them is the truth.
+    #
+    # **A DECLARED PARAMETER is deliberately not seeded, and that is the same
+    # limit `check_one_word_frame_receivers` states rather than a second one.**
+    # Whether a parameter's word holds an address is a fact about the CALLER:
+    # `def f(h: Outer) -> Int: return h.n.a` is right for a caller that wrote
+    # `f(o)` with `o` built by `Outer()` and a load at address 0 for one that did
+    # not, and this pass cannot see the call sites. The local case has no such
+    # gap precisely because `struct_constructor_site_bytes` guarantees the block
+    # exists before the constructor returns.
+    #
+    # Measured on both architectures, not argued: passing such an object to a
+    # callee is refused anyway, by `frame_container_operand_refusal` —
+    #
+    #     struct Inner: var a, b
+    #     struct Outer: var n: Inner
+    #     def read(o: Outer) -> Int: return o.n.a
+    #     def main(k: Int) -> Int: var o = Outer(); o.n.a = 7; return read(o)
+    #
+    # → "a Inner frame address is passed to read(), which is a C library entry
+    # point and takes a VALUE of a type its own prototype names" — so the
+    # parameter case reaches codegen through no door this path opens, and seeding
+    # it would have made the callee's own `self.n.a` (a method receiver, which IS
+    # seeded, three arms above) the only shape of this family that lowers.
+    #
+    # `hstruct` is written for exactly this one case — a one-word local whose
+    # sole field is a nested FRAME — and a caller with no `hstruct` to write has
+    # no case: `model.one_word_sole_field_frame` needs a FRAMED struct to find,
+    # and the one place this is called with a module that declares none
+    # (`framed` empty, the early return in the `==`-dispatch analysis) cannot
+    # produce one. `setdefault(...).append(...)` rather than an assignment, for
+    # the same precedence the guard above states: a second layout for one name is
+    # a fact to keep, not one to overwrite.
     for name, sts in bound.items():
         if name in holders[key]:
-            continue
+            continue        # already classified: two layouts for one name
         for st in sts:
-            inner = M.one_word_sole_field_frame(st, structs_by_name)
+            inner = M.one_word_sole_field_frame(st, structs_by_name, one_field)
             if inner is None:
                 continue
             holders[key].add(name)
-            hstruct[key][name] = [inner]
+            hstruct[key].setdefault(name, []).append(inner)
             break
+
     # A PARAMETER declared as a one-field struct is the same fact about the
     # same word: `def eq(a: Plain, b: Plain)` hands the caller two values that
     # ARE their fields, so inside `eq` they are that struct and their `==` is
@@ -10238,13 +10411,20 @@ def _constant_literal(struct_def, name: str, structs_by_name: dict = None):
     about the constant alone. Without the table every caller below it is
     exactly where it was, because a reference to a class this unit does not
     declare has no answer here either way."""
+    # The names THIS class body binds, which is `fold_literal_expr`'s `bound`:
+    # a field, a bracket parameter or a class constant named `len` shadows the
+    # builtin here, and a fold that read it as the builtin would put a number
+    # where the source computed something else. `struct_bound_names` is the one
+    # reader of that union and `struct_field_default` asks the same one.
+    bound = M.struct_bound_names(struct_def)
     for const_name, default in M.struct_class_constants(struct_def):
         if const_name != name:
             continue
         if structs_by_name is None:
-            kind, payload = M.class_constant_word(const_name, default)
+            kind, payload = M.class_constant_word(const_name, default, bound)
         else:
-            kind, payload = M.class_constant_word_in(structs_by_name, default)
+            kind, payload = M.class_constant_word_in(structs_by_name, default,
+                                                    bound=bound)
         if kind == M.DEFAULT_INT:
             return F.IntLiteral(value=int(payload)), default
         if kind == M.DEFAULT_STRING:
@@ -10268,8 +10448,9 @@ def _container_operand_slot(node, parent):
     name — `s.n`, `self.d` — because that is the shape whose STRUCT this pass can
     name. A deeper chain's owner is a frame the frame analysis has not built yet
     at the point the class-constant rewrite runs, so those reach the emitters and
-    are caught there by the same message; `slot_container_operand_refusal`'s own
-    docstring says which recognition sees what.
+    are caught there by the same message;
+    `model.scalar_container_base_evidence`'s own docstring says which
+    recognition sees what.
     """
     op = base = None
     if isinstance(node, F.SubscriptExpr) and node.attrs is None:
@@ -10325,7 +10506,7 @@ def _refuse_container_operands_on_scalar_slots(fn, structs_by_name: dict,
     three rows above and stays silent about every field whose kind the image
     cannot establish, which is 2 446 of the 2 642 `X.<field>[i]` sites in the
     610-file stdlib corpus; the census is in
-    `model.slot_container_operand_refusal`.
+    `model.scalar_container_base_evidence`.
     """
     bases = _method_class_constant_bases(fn, owner)
     for name, st in (receiver_structs or {}).items():
@@ -10345,11 +10526,12 @@ def _refuse_container_operands_on_scalar_slots(fn, structs_by_name: dict,
         kind = M.struct_field_kind(st, base.member, FT.TYPE_NAMES,
                                    FT.STRING_TYPE_NAMES, structs_by_name,
                                    dtype_names=FT.DTYPE_TYPE_NAMES)
-        why = M.slot_container_operand_refusal(op, kind, _member_chain(base),
-                                              getattr(fn, "name", None)
-                                              or "<module>")
-        if why is not None:
-            raise CodegenError(why)
+        evidence = M.scalar_container_base_evidence(base, kind)
+        if evidence is None:
+            continue
+        raise CodegenError(M.scalar_container_base_refusal(
+            op, _member_chain(base), evidence,
+            getattr(fn, "name", None) or "<module>"))
 
 
 def _rewrite_class_constants(fn, structs_by_name: dict, owner=None,
@@ -12461,6 +12643,24 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # cases of `test_formal_module_attr.py` and 4 of `test_formal_imports.py`
         # — so the set is what the question is asked of.
         bare_callees: set = set()
+        # …and their NAMES, which is the half the LINK AUDIT needs and cannot
+        # rebuild. `bare_callees` is a set of node identities because that is
+        # what the walk has (`M.iter_nodes` has no parent, so identity is the
+        # only way to say "this occurrence"), and the audit at the end of the
+        # build runs against names the emitters produced — by which point the
+        # AST this loop walks is out of scope. Published on the function for the
+        # same reason `_recv_ref_sites` is: the consumer is a different
+        # function from the one that compiled it, and it holds no unit.
+        #
+        # **This is not this pass's question.** `check_module_symbols` asks
+        # "does a table in this compiler place this name", and the answer for a
+        # callee is that a callee is not a read. What the link audit asks is the
+        # OTHER half the refusal it used to stop short of naming: the build
+        # emitted a call to this name and nothing provides it, so the construct
+        # was not lowered. Answering that here, where the callee is known to be
+        # a callee, is what lets the audit say which of its two causes each name
+        # is instead of reporting the one they share.
+        bare_callee_names: set = set()
         for c in M.iter_nodes(fn.body):
             if not isinstance(c, F.CallExpr):
                 continue
@@ -12468,6 +12668,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             if isinstance(func, F.IdentExpr):
                 callees.add(id(func))
                 bare_callees.add(id(func))
+                bare_callee_names.add(func.name)
             elif isinstance(func, F.MemberExpr):
                 # Case 2, through `model.dylib_module_reference` — the ONE
                 # recogniser of "this chain is rooted at an imported module".
@@ -12493,6 +12694,11 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # subtraction exists to stop.
                 for node in M.subscript_callee_names(c):
                     callees.add(id(node))
+        # The names leave here, once the whole callee scan is in — the set is
+        # not narrowed by anything below (`callees` is, by the `external_call`
+        # precedence and the bracketed roots; `bare_callees` is not, and the
+        # link audit must see exactly the set this walk collected).
+        fn._bare_callee_names = frozenset(bare_callee_names)
         # The same rule one level up, for a callee spelled with a BRACKET.
         # `external_call["setenv", Int32](…)` puts the C symbol in the bracket
         # and leaves `external_call` as a bare name with no home — but it is the
@@ -14587,25 +14793,18 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # own type. Asked HERE, at the top of the loop, because
         # `_rewrite_self_fields` below collapses `recv.<sole field>` onto `recv`
         # and after that a field store and a rebinding are the same text — the
-        # shape is unanswerable anywhere later in the pipeline.
+        # shape is unanswerable anywhere later in the pipeline. `_image_function_
+        # names` is the construction-vs-function dispatch `_returned_frame_
+        # construction` asks about, and it is already computed above this loop.
         _collect_one_field_receiver_rebinds(fn, method_owners.get(fn.name),
-                                            structs_by_name, one_field)
+                                            structs_by_name, one_field,
+                                            _image_function_names)
         # …and its sibling: a one-field method that stores its own field through
         # a receiver no write-back will hand back, so the store is computed and
         # dropped. Asked at the same point for the same reason — after
         # `_rewrite_self_fields` the store and a rebinding are the same text.
         _collect_one_field_dropped_stores(fn, method_owners.get(fn.name),
                                           structs_by_name, one_field)
-        # …and the third of the family: a nested-frame owner whose mutator
-        # stores a frame it BUILT into its own receiver cell, which is an escape
-        # through the receiver word rather than through the return register.
-        # Asked at the same point for the same reason, and it is the shape the
-        # other two decline: `_collect_receiver_rebinds` exempts `__init__`
-        # because a constructor is inlined rather than called, and
-        # `_collect_one_field_dropped_stores` stands aside for every
-        # nested-frame owner. An EXPORTED constructor is called.
-        _collect_receiver_frame_escapes(fn, method_owners.get(fn.name),
-                                        structs_by_name, one_field)
         # …and the OWNING STRUCT, published on every method so
         # `model.declared_receiver_writeback` can ask the one-field question of a
         # declaration without a `method_owners` table in hand. That is what lets
@@ -17849,22 +18048,48 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # Read off the per-function table `_frame_receivers` published rather than
     # recomputed, so the question is the one the emitters will ask.
     for fn in ordered:
-        # …and neither can it export a mutator that hands a frame back through
-        # its RECEIVER, which is the same fact with the hidden word replaced by
-        # the receiver cell (`_collect_receiver_frame_escapes` parked it). The
-        # `frame_params` this export would publish describes a block the callee
-        # does not write, so publishing it is a contract the library does not
-        # honour; a program cannot reach the shape (`init_body_stores` refuses
-        # the body at the construction site), so this is the whole of the
-        # surface. Architecture-independent, and it says so: the refusal is
-        # raised before any codegen, which is why it holds for a backend with
-        # no dylib mode as much as for this one.
-        parked = getattr(fn, "_receiver_frame_escape", None)
-        if parked is not None:
-            raise FormalBuildError(
-                M.receiver_frame_escape_library_refusal(fn.name, *parked))
         if getattr(fn, "_returns_frame_struct", None) is not None:
             raise FormalBuildError(M.returned_frame_library_refusal(fn.name))
+
+    # …and the frame that reaches the importer through the OTHER convention,
+    # which is a hazard this loop above could not see because it is not a
+    # returned frame: a one-word struct's receiver comes back through the
+    # caller's own storage (`model.receiver_writeback_name`), so a mutator that
+    # REBINDS that receiver to a frame it built itself hands the importer an
+    # address into this function's scratch, in the cell the importer owns. The
+    # return register carries nothing at all, which is why this needs its own
+    # loop and not a second arm of the one above. The `frame_params` such an
+    # export would publish describes a block the callee does not write, so
+    # publishing it is a contract the library does not honour.
+    #
+    # **This is the boundary that makes the shape reachable, and it is the only
+    # one.** `_collect_receiver_rebinds` exempts an `__init__` from the rebinding
+    # rule because a program INLINES a constructor body at its construction site
+    # (`model.init_body_stores`), where a body that is not a straight line of
+    # receiver-field stores — this one, since it constructs — is refused by name
+    # before any of this is emitted. An exported `__init__` has no construction
+    # site: it is called, through the symbol, by a compilation this build does
+    # not perform. So the escape is published unless something here says no, and
+    # while it is unreachable (every consumer spelling is refused at ITS
+    # construction site) that is the wrong reason for a check to be off: the
+    # second refusal is what would have to move.
+    #
+    # Read off the parked entries `_collect_one_field_receiver_rebinds` left, and
+    # there is no condition to re-ask: it parks a rebinding only where the frame
+    # is one THIS function built, because a frame from a callee is refused by the
+    # loop above, on the callee. That collector is the ONE recognition of this
+    # shape — it reads `_returned_frame_construction`, the single reader of "is
+    # this call a frame", rather than asking `struct_constructor_sites` a second
+    # question of its own, which is the disagreement
+    # `_returned_frame_construction`'s docstring says would be a copy of the
+    # wrong width rather than a failure. Architecture-independent, and it says
+    # so: the refusal is raised before any codegen, which is why it holds for a
+    # backend with no dylib mode as much as for this one.
+    for fn in ordered:
+        for target, spelling, frame, owner, member in (
+                getattr(fn, "_one_field_receiver_frame_rebinds", ()) or ()):
+            raise FormalBuildError(M.receiver_writeback_frame_library_refusal(
+                fn.name, owner, member, target, spelling, frame))
 
     # The library's merged slot table is PUBLISHED before the codegen runs,
     # because a slot access is an absolute address the codegen computes against
@@ -17913,7 +18138,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                                            "library", dylib_exports)
         if unaccounted:
             raise FormalBuildError(
-                _unaccounted_report(source_paths[0], unaccounted, "library"))
+                _unaccounted_report(source_paths[0], unaccounted, "library",
+                                    _image_bare_callee_symbols(ordered)))
         exports = _formal_exports(source_paths, ordered, info, module_prefixes,
                                   _method_exports(source_paths, structs_by_file,
                                                   module_prefixes))
@@ -18011,7 +18237,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                                         "library", dylib_exports)
     if unaccounted:
         raise FormalBuildError(
-            _unaccounted_report(source_paths[0], unaccounted, "library"))
+            _unaccounted_report(source_paths[0], unaccounted, "library",
+                                _image_bare_callee_symbols(ordered)))
 
     exports = _formal_exports(source_paths, ordered, info, module_prefixes,
                               _method_exports(source_paths, structs_by_file,

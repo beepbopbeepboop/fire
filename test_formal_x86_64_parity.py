@@ -996,6 +996,65 @@ CASES = [
      "    o.n.n.w = 4\n"
      "    sys.stdout.write(\"%d %d %d %d\" % (o.v, o.n.v, o.n.n.v, o.n.n.w))\n"
      "    return 0\n"),
+    # The chain at ONE FIELD, which is the row `nested_frame_chain_three_levels`
+    # could not reach: `Out` above has `v` to spare, so `Out` is a frame and
+    # `o.n.n.v` is three loads off a frame base. Drop `v` and `Out` is a ONE-WORD
+    # struct, `_rewrite_self_fields` collapses `o.n` onto `o`, and the source's
+    # `o.n.a` reaches the emitter as `o.a` — a field of `Inner` read through a
+    # local whose only classification was "a word". It was REFUSED on both
+    # machines with a message naming `o.a`, which the source never writes, and
+    # the refusal's own repair ("bind the base from a constructor this image can
+    # see") was satisfied by the line above it.
+    #
+    # The answer is the two-hop read and it needs no new table: `Outer`'s word
+    # IS the address of the `Inner` frame the construction site reserved
+    # (`struct_nested_frame_fields`), so once `o` is a holder of `Inner`,
+    # `o.a` is one load at `[o + 8*slot(a)]` — the same two hops the source
+    # wrote. A multi-field outer keeps `model._frame_nested_slots`' tuple,
+    # because a slot there SURVIVES the collapse.
+    ("one_word_outer_over_a_nested_frame",
+     "struct In:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def put(out self, v: Int) -> Int:\n"
+     "        self.a = v\n"
+     "        return self.a\n"
+     "    def get(self) -> Int:\n"
+     "        return self.a\n"
+     "\n"
+     "struct Out:\n"
+     "    var n: In\n"
+     "\n"
+     "def main():\n"
+     "    var o = Out()\n"
+     "    o.n.put(7)\n"
+     # The value is PRINTED rather than returned: `run_case` requires the
+     # oracle to exit 0, and a Mojo entry stub makes `main`'s return the exit
+     # status while `cpython_answer`'s bare `main()` call discards it — so a
+     # returned 77 here compares 77 against 0 and the case asserts nothing.
+     "    printf(\"%d %d %d\", o.n.a, o.n.b, o.n.get() * 10 + o.n.a)\n"
+     "    return 0\n",
+     "class In:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "    def put(self, v):\n"
+     "        self.a = v\n"
+     "        return self.a\n"
+     "    def get(self):\n"
+     "        return self.a\n"
+     "\n"
+     "class Out:\n"
+     "    def __init__(self):\n"
+     "        self.n = In()\n"
+     "\n"
+     "import sys\n\n"
+     "def main():\n"
+     "    o = Out()\n"
+     "    o.n.put(7)\n"
+     "    sys.stdout.write(\"%d %d %d\" % (o.n.a, o.n.b,\n"
+     "                                o.n.get() * 10 + o.n.a))\n"
+     "    return 0\n"),
     # The same chain HANDED TO A CALLEE, which is the `_emit_frame_copy` half and
     # not the `_emit_frame_nested_addresses` half: the copy reserves its own
     # block and has to lay the nested frames out in it identically, so a fix
@@ -1592,7 +1651,81 @@ CASES = [
 # the check is `refuse:`-shaped for the same reason `test_formal_run.py`'s are:
 # nothing about the program's OUTPUT can carry the assertion, because the
 # assertion is that it must not have one.
+# …and the CONTROL for those three, which is a CASE rather than a refusal because
+# nothing about its OUTPUT is wrong: an unclassified base keeps the container
+# reading, and that is load-bearing. `INT_KIND` is this model's DEFAULT for a
+# word, so a rule that read it as a claim would refuse every subscript over an
+# unannotated parameter — 284 of them, measured, by the census
+# `subscript_base_lowering`'s own docstring cites. This is the one program that
+# says so, on both machines, with CPython's answer as the expectation.
+CASES.append(
+    ("a_subscript_on_an_unclassified_parameter_still_builds",
+     "def at(xs, i):\n"
+     "    return xs[i]\n"
+     "\n"
+     "def main():\n"
+     "    print(at([4, 5, 6], 1))\n"
+     "    return 0\n",
+     "def at(xs, i):\n"
+     "    return xs[i]\n"
+     "\n"
+     "def main():\n"
+     "    print(at([4, 5, 6], 1))\n"
+     "    return 0\n")
+)
+
 REFUSALS = [
+    # A SUBSCRIPT on a base the source proves to be a scalar. This is the
+    # worst failure mode in the area — an image that SEGFAULTS with no
+    # diagnostic — and it was not one shape but three, and the two machines did
+    # not agree about any of them: x86-64 exited 139 on all three, arm64 refused
+    # two of them with a message about the literal a one-field rewrite folded
+    # the field to, and faulted on the third.
+    #
+    # The needle is the shared SENTENCE rather than the base, because the base is
+    # what the two machines spelled differently (`5` against `s`) and what a
+    # future rewrite of the one-field identity would move again. What has to be
+    # pinned is that both say the base is not a container, in the same words.
+    ("a_subscript_on_a_literal_field_faulted_identically",
+     "struct S:\n"
+     "    var n: Int = 5\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var s = S()\n"
+     "    printf(\"%d\", s.n[0])\n"
+     "    return 0\n",
+     "asks for a container element"),
+    # The `DType` row, and the one that faulted on BOTH machines: the field is
+    # established by the CONSTRUCTOR rather than by a class-level default, so
+    # nothing folds to a literal and nothing refuses. A type's value is its tag
+    # word, and a tag has no count and no elements.
+    ("a_subscript_on_a_type_value_faulted_identically",
+     "struct S:\n"
+     "    var d: DType = 5\n"
+     "    def __init__(out self, v: DType):\n"
+     "        self.d = v\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var s = S(DType.int32)\n"
+     "    printf(\"%d\", s.d[0])\n"
+     "    return 0\n",
+     "is a TYPE value"),
+    # A CALLEE this backend does not lower, which used to stop at a link audit
+    # that named a FILE and a SYMBOL and never the call — so a reader could not
+    # tell whether to change the program or the link line, and the fuzz audit
+    # filed every such refusal as `unnamed`. The needle is the sentence that
+    # resolves it, not the symbol list, because the symbol list is the part both
+    # machines already agreed on: what has to be pinned is the sentence that
+    # says which of the two causes each name is.
+    #
+    # `sum` rather than `frobnicate` on purpose: the message must name a name
+    # that IS a real construct, since a diagnostic quoted from a program that
+    # spells nothing is exactly the shape the fuzz audit calls `unnamed`.
+    ("an_unlowered_callee_names_the_call",
+     "def main():\n"
+     "    var xs = [1, 2, 3]\n"
+     "    return sum(xs)\n",
+     "is not lowered on this path"),
     ("aug_on_two_strings_refused_identically",
      "def main():\n"
      "    var a = [\"ab\", \"cd\"]\n"

@@ -1391,6 +1391,93 @@ def test_the_census_reads_the_measured_shapes_out_of_the_corpus():
           f"{sorted(set(kinds) - set(T.BUCKETS))}")
 
 
+def test_a_variadic_bracket_parameter_takes_the_extra_arguments(tmpdir):
+    """`*values: T` is one declaration with an ARITY, and it was read as one
+    NAME — so a use site written the way the stdlib writes it was refused for
+    arity.
+
+    `elaborate.type_param_names` returns `['T', 'Trait', 'keys', '*values']` for
+    `type_dict.mojo`'s real declaration, so the `*` is right there in the list and
+    `instantiate` compared its LENGTH against the argument count:
+
+        MonomorphError: Pair[Int, 1, 2, 3] supplies 4 type arguments but `Pair`
+        declares 2 (T, *values); an instantiation is one template specialized
+        for exactly the arguments it declares
+
+    Six arguments against four names is not a malformed bracket when one of the
+    names declares an arity, and the repair that message offered — "take the
+    arguments as named parameters" — is the program rewritten, not the program
+    answered.
+
+    **What is asserted here is the three things the rule decides**, in the order
+    they can each be wrong: the arity (four counts, all of which must
+    instantiate), the SUBSTITUTION (a tuple display, because a `*values` is a
+    sequence of the arguments supplied and `len(())` is 0 rather than a
+    subscript into a name nothing declared), and the IDENTITY (two counts must
+    be two mangled names, or the second instantiation would overwrite the
+    first's symbol and a consumer would silently bind the wrong body — the
+    whole class of bug this feature has). And the emitted source PARSES, for
+    the reason the case above exists.
+    """
+    from formal import monomorph as MM
+    import fire_compiler as F
+    src = ("struct Pair[T: AnyType, *values: T]:\n"
+           "    comptime length = len(Self.values)\n"
+           "\n"
+           "    def size(self) -> Int:\n"
+           "        return Self.length\n")
+    names = {}
+    for args, want in ((("Int",), "len(())"),
+                       (("Int", "1"), "len((1,))"),
+                       (("Int", "1", "2", "3"), "len((1, 2, 3))")):
+        mangled, concrete = MM.instantiate(src, "Pair", args)
+        check(want in concrete,
+              f"Pair[{' , '.join(args)}] bound `*values` to something other "
+              f"than {want!r}: {concrete!r}")
+        try:
+            F.Parser(F.py_tokenize(concrete)).parse_module()
+        except Exception as exc:                    # noqa: BLE001
+            raise TestFailure(
+                f"the variadic instantiation does not parse, which is the "
+                f"whole defect for this shape: {exc!r}\n{concrete!r}") from None
+        names[len(args)] = mangled
+    check(len(set(names.values())) == len(names),
+          f"two variadic counts produced one mangled name {names}, so the "
+          f"second instantiation would overwrite the first's symbol")
+    check("(1,)" in MM.instantiate(src, "Pair", ("Int", "1"))[1],
+          "a one-element sequence is spelled `(1,)` and not `(1)` — a "
+          "parenthesised expression is not a tuple and `len((1))` is a type "
+          "error the reader would have to decode")
+
+    # THE REFUSAL THAT SURVIVES, because a rule that reads `*` as an exemption
+    # from the arity check would take the check with it: too FEW arguments binds
+    # a declaration the bracket does not supply, whatever the declaration says.
+    # `**kwargs` is the other half — a keyword collection has no positional
+    # spelling in a bracket, so the star is not an exemption there either.
+    try:
+        MM.instantiate(src, "Pair", ())
+    except MM.MonomorphError as e:
+        check("supplies 0 type arguments" in str(e),
+              f"too few arguments is not refused any more, and its message "
+              f"does not say what it counted: {e}")
+    else:
+        raise TestFailure(
+            "a bracket with fewer arguments than the declaration's FIXED "
+            "parameters instantiated anyway, so the emitted body would be built "
+            "from a parameter the source never bound")
+    kwargs = "struct P[T: AnyType, **kw: T]:\n    var x: Int\n"
+    try:
+        MM.instantiate(kwargs, "P", ("Int", "Bool"))
+    except MM.MonomorphError as e:
+        check("keyword collection" in str(e),
+              f"a `**kwargs` parameter was treated as variadic without saying "
+              f"why it is not: {e}")
+    else:
+        raise TestFailure(
+            "`**kwargs` was bound as a positional variadic; a bracket argument "
+            "is a positional spelling and a keyword collection is not one")
+
+
 TESTS = [
     ("a generic struct template is instantiated at the importer's type",
      test_a_generic_struct_template_is_instantiated_at_the_importers_type),
@@ -1426,6 +1513,8 @@ TESTS = [
      test_the_census_answers_each_of_the_five_questions),
     ("the census reads the measured shapes out of the corpus",
      test_the_census_reads_the_measured_shapes_out_of_the_corpus),
+    ("a variadic bracket parameter takes the extra arguments",
+     test_a_variadic_bracket_parameter_takes_the_extra_arguments),
 ]
 
 EXPECTED_FAILURES: dict = {}

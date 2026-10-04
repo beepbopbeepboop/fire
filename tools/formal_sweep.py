@@ -796,20 +796,29 @@ _REFUSAL_FAMILIES = (
     # be lost. Order here is load-bearing; see _FRAME_ESCAPES above.
 ) + _FRAME_ESCAPES + (
     # A container operation over a word that is ESTABLISHED not to be a
-    # container. Three members of one family with three different bases — a bare
+    # container. FOUR members of one family with four different bases — a bare
     # name holding a frame address, a bare name this function bound to an
-    # integer, and a struct FIELD declared a number or a type tag
-    # (`model.slot_container_operand_refusal`) — and one fix: the base is not a
-    # container. Split by base rather than lumped because the base decides which
-    # of them a reader has to look at, and because the field row is new (the
-    # two others were already being filed as "other refusal", which is the
-    # specific thing this table exists to prevent).
-    # The FIELD row comes first because its message also contains the clause the
-    # bare-name row matches, and order in this tuple is load-bearing for the
-    # same reason the frame escapes are: the first match wins, so a broader
-    # marker above a narrower one silently swallows it.
+    # integer, a struct FIELD declared a number or a type tag, and a base the
+    # SOURCE proves is a scalar without naming a binding (a literal, or a type
+    # value); the last three are read by `model.scalar_container_base_evidence`
+    # and said by `model.scalar_container_base_refusal`, and one fix covers all
+    # of them: the base is not a container. Split by base rather than lumped
+    # because the base decides which of them a reader has to look at, and because
+    # the two newer rows are new (the other two were already being filed as
+    # "other refusal", which is the specific thing this table exists to prevent).
+    #
+    # **Each row's marker is the clause only THAT base's message carries**, and
+    # that is what keeps the four from shadowing one another: order in this tuple
+    # is load-bearing for the same reason the frame escapes are (the first match
+    # wins, so a broader marker above a narrower one silently swallows it), and
+    # the broad marker every one of these four messages opens with —
+    # "asks for a container element" — is therefore NOT one of them. That is what
+    # stops the row below from swallowing the two above it, which is the failure
+    # a broad marker produces silently.
     ("is a struct field declared to hold", "container operation on a scalar slot"),
-    ("asks for a container element, and", "container operation on a non-container"),
+    ("carries no count at offset 0", "element of a value that is not a container"),
+    ("is a value this function bound to an integer",
+     "container operation on a non-container"),
     ("is a CONTAINER operation on a", "container operation on a frame address"),
     ("is a method call on a value", "method call on a value"),
     ("is a method on a string", "method call on a string"),

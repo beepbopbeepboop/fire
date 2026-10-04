@@ -1096,9 +1096,21 @@ MIXES = {
     # answers. Two programs, two names, one dispatch arm each — they were the
     # same name on two branches, and a name that two generators answer to is a
     # name whose arm depends on which one the `elif` chain reached first.
+    #
+    # `variadic_define` and `variadic_call` are here for the reason
+    # `bugs/FORMAL_a_variadic_parameter_read_has_no_abi.md` §5 step 5 records and
+    # measured: a function that DECLARES `*rest` and READS it was unreachable
+    # from this generator, so nothing here could notice the day it was fixed.
+    # Both halves are needed for a verdict — the read is what
+    # `formal/build.py::_refuse_variadic_reads` fires on, and a definition with
+    # no call site is dead code — and the call site varies the COUNT, because
+    # the doc's own measurement is that the empty answer is right exactly when
+    # no extra argument was passed and wrong otherwise: a corpus whose every
+    # call passes zero extras cannot tell the two apart either.
     "limits": (("str_concat", 4), ("str_new_method", 6), ("slice_print", 4),
                ("dict_method", 3), ("try_handler", 3), ("unknown_callee", 3),
-               ("big_blob", 2), ("assign", 2), ("if", 2), ("print", 2)),
+               ("big_blob", 2), ("variadic_define", 3), ("variadic_call", 4),
+               ("assign", 2), ("if", 2), ("print", 2)),
     # ── the nine families the fuzz-3 sweep added ──
     #
     # Every one of them is a construct the corpus could not produce at all, and
@@ -1251,6 +1263,7 @@ class Gen:
         self.argfuncs = []    # (name, params, required count, defaults)
         self.tryfuncs = []    # (name, param) helpers with a return in a try
         self.closure_blobs = {}   # captured list name -> the index its body reads
+        self.variadics = []   # (name, fixed arity) `*rest` defs
         self.classes = []     # (name, fields, methods) definitions
         self.objs = []        # (var, class name, fields, methods) instances
         self.fields = []      # field names, inside a method body
@@ -1484,7 +1497,7 @@ class Gen:
             "try_finally", "try_finally_loop", "try_finally_return",
             "arg_define", "arg_call", "slice_read", "slice_step",
             "unpack_bind", "unpack_dict", "big_int", "big_shift", "chain_cmp",
-            "str_interp")
+            "str_interp", "variadic_define", "variadic_call")
         if budget <= 0 and kind in ("if", "while", "for", "call",
                                     "nested_call", "recursion",
                                     "list_in_loop", "dict_iter",
@@ -1579,6 +1592,8 @@ class Gen:
                       "dict_method", "try_handler", "unknown_callee",
                       "big_blob"):
             self.limits_stmt(indent, kind)
+        elif kind in ("variadic_define", "variadic_call"):
+            self.variadic_stmt(indent, kind)
         elif kind in ("obj_new", "field_read", "field_cmp", "field_write",
                       "method_call", "method_call_in_arg"):
             self.object_stmt(indent, kind)
@@ -2350,6 +2365,54 @@ class Gen:
     # length" and `List[T]` is refused the same way. So the body works on a
     # second, ORDINARY parameter and the type parameter is carried by the
     # signature, which is what makes one definition serve two specialisations.
+    def variadic_stmt(self, indent, kind):
+        """A function that DECLARES `*rest` and a call site for it.
+
+        The construct `formal/build.py::_refuse_variadic_reads` exists for, and
+        the one this generator could not reach: a `*rest` DEFINITION on its own
+        is dead code and a `*rest` READ with no definition is a NameError, so the
+        two kinds are one feature and the call site is not optional.
+
+        **The read is `len(rest)` and not `rest[0]`** because CPython has to be
+        able to ANSWER it. `len(rest)` is the shape the doc's reproducer uses and
+        the one whose wrong-but-exit-0 answer is measurable: a backend that
+        lowered the parameter as the empty sequence would print 0 here where
+        CPython prints the number of extras passed, and the corpus has to be able
+        to SEE that. `rest[0]` on an empty tuple is an IndexError in CPython,
+        which is a legitimate program but an oracle that errors takes the whole
+        program's verdict with it.
+        """
+        if kind == "variadic_define" or not self.variadics:
+            self.define_variadic()
+            return
+        name, fixed = self.rng.choice(self.variadics)
+        extras = self.rng.randint(0, 3)
+        args = [str(self.rng.randint(0, 60)) for _ in range(fixed + extras)]
+        self.emit(indent, f'print({name}({", ".join(args)}))')
+
+    def define_variadic(self):
+        """One `def v(a, *rest)` whose body is `return len(rest)`.
+
+        One fixed parameter before the star and `len` of the star in the body:
+        both are load-bearing rather than taste. **The fixed parameter** is what
+        makes the star a VARIADIC rather than the only parameter, so a call site
+        can pass a known count and an unknown one in the same program — and the
+        refusal's own message reports the two numbers ("this module's call sites
+        pass 3..3 argument(s), against 1 fixed parameter(s)"), so a corpus that
+        never varied the count could not read it. **The read is in the RETURN**
+        because a `comptime`-folded body would be a different construct.
+        """
+        if self.defined >= MAX_FUNCS:
+            return None
+        self.defined += 1
+        name = self.fresh("var")
+        fixed = self.rng.randint(1, 2)
+        params = ", ".join(self.fresh("w") for _ in range(fixed))
+        self.defs.append(f"def {name}({params}, *rest):")
+        self.defs.append("    return len(rest)")
+        self.variadics.append((name, fixed))
+        return name
+
     def generic_stmt(self, indent, kind):
         if kind == "generic_define" or not self.generics:
             self.define_generic()
@@ -2542,7 +2605,7 @@ class Gen:
             # symbol is a call the codegen emitted. So the construct is refused
             # and the message names a file and a symbol rather than the call —
             # `REFUSAL-UNNAMED` in every sweep, and
-            # `bugs/FORMAL_an_unlowered_callee_is_refused_by_a_link_audit.md`
+            # `the link audit's naming of an unlowered callee (landed in ee704916)`
             # is where that is written down.
             # Arity is CPython's, so the oracle can answer: `abs` takes ONE
             # operand and `max`/`min` take two or more, and a generated program

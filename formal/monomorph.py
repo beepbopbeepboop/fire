@@ -296,6 +296,53 @@ def _fold_self_params(template_src: str, params) -> str:
     return out
 
 
+def split_variadic_params(params):
+    """`(fixed, variadic_or_None)` for a template's bracket-parameter names.
+
+    **A `*name` parameter is one declaration with an ARITY, and treating it as
+    one name is what made `Pair[Int, 1, 2, 3]` un-instantiable.** Mojo's bracket
+    head is a parameter list (`elaborate.type_param_names`' own docstring), and
+    `*values: T` declares a parameter that takes any number of arguments — so
+    `std/collections/type_dict.mojo`'s own use site,
+    `TypeDict[T=Int, Trait=AnyType, [1,2,3], Int, String, Float64]`, supplies
+    SIX arguments against four declared names and is not malformed. Read as four
+    names it was refused for arity, with a message that told the reader to take
+    the arguments as named parameters — which is the program rewritten, not the
+    program answered.
+
+    Only a LAST `*name` counts, because that is where a Python-like parameter
+    list puts a variadic and because a `*name` followed by more names is a
+    syntax this path does not accept a bracket spelling for. `**kwargs` is
+    returned with its OWN star so the caller can refuse it BY NAME rather than
+    bind it: a bracket argument is a POSITIONAL spelling and a keyword
+    collection is not one, so the extra-argument rule has no reading for it.
+    """
+    if params and params[-1].startswith("**"):
+        return params[:-1], ("**", params[-1][2:])
+    if params and params[-1].startswith("*"):
+        return params[:-1], ("*", params[-1][1:])
+    return params, None
+
+
+def _variadic_binding(name, args):
+    """The substitution text for a `*name` parameter bound to `args`.
+
+    A tuple display, and nothing else: the parameter's value at run time is a
+    SEQUENCE of the arguments the use site supplied, and a tuple display is the
+    one spelling in this tree that is a sequence of expressions with a length
+    the reader can count. `()` for none — a `*values` bound to nothing is the
+    empty sequence, and `len(())` is 0 rather than a subscript into a name
+    nothing declared.
+
+    **The arguments are the consumer's own spellings, already validated as type
+    arguments** (`type_arg_text`, which every bracketed use site goes through
+    before it becomes a demand), so this cannot splice a computed expression
+    into a declaration. That is the reason it is a tuple of the same strings
+    rather than a re-parse of anything.
+    """
+    return "(" + ", ".join(args) + (",)" if len(args) == 1 else ")")
+
+
 def instantiate(src: str, name: str, args) -> tuple:
     """`(mangled_name, concrete_source)` for `name[args]` inside `src`.
 
@@ -304,6 +351,12 @@ def instantiate(src: str, name: str, args) -> tuple:
     before anything is substituted: a bracket with the wrong arity is not an
     instantiation of this template, and mangling it anyway would publish a
     symbol whose body was built from a parameter the source never bound.
+
+    **A VARIADIC parameter is exempt from the exact count, and only it.**
+    `split_variadic_params` is the one reader of the distinction; this function
+    asks it and then checks what it left. The refusal that survives is the one
+    that is still true: too FEW arguments is a bracket that cannot bind the
+    declaration, whatever the declaration says.
     """
     import elaborate, monomorphize                 # lazy — module docstring
     kind = template_kind(src, name)
@@ -315,13 +368,32 @@ def instantiate(src: str, name: str, args) -> tuple:
             f"but its declaration has no type parameter, so there is nothing to "
             f"substitute and no instantiation is a different function")
     args = [str(a) for a in args]
-    if len(args) != len(params):
+    fixed, variadic = split_variadic_params(params)
+    if variadic is not None and variadic[0] == "**":
+        raise MonomorphError(
+            f"{name}[{', '.join(args)}] supplies {len(args)} type "
+            f"argument{'s' if len(args) != 1 else ''} but `{name}` declares "
+            f"{len(params)} ({', '.join(params)}), and `**{variadic[1]}` is a "
+            f"keyword collection: a bracket argument is a POSITIONAL spelling "
+            f"and there is no positional spelling for one of these. Name the "
+            f"arguments the declaration takes and pass the collection as a "
+            f"value, which is the same program with a representation")
+    too_few = len(args) < len(fixed)
+    too_many = variadic is None and len(args) > len(fixed)
+    if too_few or too_many:
         raise MonomorphError(
             f"{name}[{', '.join(args)}] supplies {len(args)} type "
             f"argument{'s' if len(args) != 1 else ''} but `{name}` declares "
             f"{len(params)} ({', '.join(params)}); an instantiation is one "
-            f"template specialized for exactly the arguments it declares")
-    targs = dict(zip(params, args))
+            f"template specialized for exactly the arguments it declares"
+            + ("" if too_few else
+               f" — a `*` parameter would take the extra one"
+               f"{'s' if len(args) - len(fixed) != 1 else ''} and this "
+               f"declaration has none"))
+    targs = dict(zip(fixed, args[:len(fixed)]))
+    if variadic is not None:
+        targs[variadic[1]] = _variadic_binding(variadic[1],
+                                              args[len(fixed):])
     try:
         mangled, concrete = monomorphize.monomorphize_source(
             _fold_self_params(template_src, params), targs)

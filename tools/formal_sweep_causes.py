@@ -209,6 +209,20 @@ CAUSES = (
     # ranks the causes rather than the one that summarises them.
     ("multi-index subscript",
      (("is a subscript whose index is a tuple",),)),
+    # An ELEMENT of a value that is not a container, and the row that makes the
+    # SOURCE-PROVEN half of the container-operand family visible: before it,
+    # every message from `scalar_container_base_refusal` — a literal base, or a
+    # type tag — fell into `other refusal`, which is the outcome this table
+    # exists to prevent.  One marker for the two shapes is deliberate: they are
+    # one defect, a container lowering reading eight bytes at offset 0 of its
+    # base and calling that a COUNT, and they are one defect because
+    # `model.scalar_container_base_evidence` decides both and the two emitters
+    # ask it through one `_refuse_scalar_container_operand`.  The marker is the
+    # clause they SHARE rather than the one they open with, because every
+    # message in the family opens with the same clause and a broad marker here
+    # would collect the bare-name and slot rows as well.
+    ("element of a value that is not a container",
+     (("carries no count at offset 0",),)),
     # ABOVE the two rows below it, and for a reason that is a fact about the
     # messages rather than about this construct: they are all one family — a
     # representation the target does not have — and the broad ones end with a

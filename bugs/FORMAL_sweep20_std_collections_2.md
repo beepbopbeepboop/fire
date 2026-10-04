@@ -13,7 +13,7 @@ Two things a reader should take away, in this order.
   distinct causes, six files, and not one of them unowned: the bare-template-call
   row (3 files) and `type_dict.mojo`'s parameter binding are
   `FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable` and
-  `FORMAL_a_generic_structs_parameters_are_never_bound` (`formal19-1`),
+  the generic-struct-parameters bug (fixed in e72a5f93),
   `binary_heap.mojo` is `FORMAL_binary_heap_mojo_after_the_len_value`
   (`formal18-2`), and `tile.mojo` is
   `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value`
@@ -164,7 +164,7 @@ finding**.
 | `collections/bitset.mojo` | `FormatStruct(writer, "BitSet")` at `:692` | a bare call to a template whose type arguments are inferrable from the arguments | `FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable` (`formal19-1`) |
 | `memory/alloc.mojo` | `FormatStruct(writer, "Allocation")` at `:450` | the same | the same |
 | `memory/pointer.mojo` | `strided_load(self, Int(stride), SIMD[.bool, width](…))` at `:1892` | the same, on `std.sys.intrinsics`'s `def strided_load[dtype: DType, //, simd_width: SIMDLength, …]` | the same |
-| `collections/type_dict.mojo` | `comptime _index[key: Self.T] = Self.keys.try_index(key)` | a `comptime` class attribute whose value reads a **PARAMETER**, which belongs to an instantiation and not to the class body | `FORMAL_a_generic_structs_parameters_are_never_bound` (`formal19-1`) |
+| `collections/type_dict.mojo` | `comptime _index[key: Self.T] = Self.keys.try_index(key)` | a `comptime` class attribute whose value reads a **PARAMETER**, which belongs to an instantiation and not to the class body | the generic-struct-parameters bug (fixed in e72a5f93) |
 | `collections/binary_heap.mojo` | `self.clear()` | a method call on a value whose receiver is a name, and `clear` is in neither method table | `FORMAL_binary_heap_mojo_after_the_len_value.md` §3a (`formal18-2`), whose own analysis says the one-word rewrite is the repair and that the table entry it names would "emit a store against the wrong word" |
 | `algorithm/backend/tile.mojo` | `*tile_size_list` at `:99` | the body reads a `*-parameter` and this path has no variadic ABI | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md`'s last section (`formal16-7`), which names this exact wall and calls it "a change to the calling convention both backends AND the Lean proof share" |
 
