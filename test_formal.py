@@ -106,6 +106,45 @@ EXPECTED_FAILURES = {
                      "certificates), the source half is not -- the semantic "
                      "model has no list domain and the list blob's memory "
                      "image is not derived from the source literal",
+
+    # `struct Point: var x: Int; var y: Int` and `return p.get_x() + p.get_y()`.
+    # The SAME gap as the row above, one type further, and it is refused at a
+    # DIFFERENT STAGE: the shared model generator raises
+    # `NotImplementedError: model: a struct field read has no value in the
+    # semantic model` while TRANSLATING, so no proof is generated at all rather
+    # than generated and rejected by Lean.  `p.x` is 4 and `p.y` is 0 whatever
+    # `n` is, and the model's domain is `UInt64 -> UInt64` -- a function of the
+    # ENTRY argument -- so there is no term to emit and answering 0 would be a
+    # false statement about the source.
+    #
+    # x86-64 does NOT refuse this one: `formal/x86_64_proof_gen.py` catches the
+    # generator's exception, emits the model as the IDENTITY with a NOTE, and
+    # suppresses the AST bridge and the run tests with their reasons, so the
+    # end-to-end theorem is `sorry` and nothing false is claimed.  That honesty
+    # is pinned by
+    # `test_formal_call_proof_gen.py::TestAPlaceholderModelClaimsNothing` --
+    # including that the file stops claiming an AST at all, which it used to, and
+    # wrongly for `subscript_var`.  So the two backends DISAGREE about this
+    # shape (arm64 refuses, x86-64 disclaims), which is asserted as a fact
+    # there; `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_
+    # same_function.md` is the family that finding belongs to and that doc is
+    # gone, so the assertion is where the mechanism lives.
+    #
+    # The fix is a value-model change: `mojo` becomes a function of an
+    # ENVIRONMENT rather than of one word, every field read projects out of it,
+    # and `Point()` starts with the class-level defaults the language gives it.
+    # That is the same work `subscript_var` above asks for (a list domain plus a
+    # memory image for the blob) one type further, it is shared by both backends
+    # and by the Lean proof, and it is the tagged-value convergence
+    # `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`
+    # describes.  Not a light worker's row, and not this file's to decide.
+    "wide_recv": "a struct field read has no value in the semantic model, whose "
+                 "domain is UInt64 -> UInt64 -- a function of the ENTRY argument, "
+                 "and p.x is 4 whatever n is; arm64 refuses it at GENERATION "
+                 "time and x86-64 emits a disclaimed placeholder model with a "
+                 "sorry end-to-end theorem. The fix is a struct domain in the "
+                 "value model (an environment rather than one word), shared by "
+                 "both backends and by the Lean proof",
 }
 
 
