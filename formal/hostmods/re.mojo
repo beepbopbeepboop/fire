@@ -58,7 +58,16 @@ WHAT IS NOT HERE, AND THE REASON IS THE SAME FOR ALL OF IT
     default for a `str` pattern is Unicode, so `\\w` matches U+00AA there and
     does not here. That is a real difference and it is a property of matching
     bytes rather than code points, which is what a `char *` IS on this path
-    (`bugs/FORMAL_string_value_model.md`).
+    (`bugs/FORMAL_string_value_model.md`). Each of these has an INLINE spelling
+    too -- `(?i)`, `(?x)`, `(?s)`, `(?m)`, `(?a)`, `(?u)` -- and the global
+    form of that is implemented too, by `_p_inline`; it was not, which made this
+    engine answer `STATUS_UNSUPPORTED` for `(?x) a` while answering "matched"
+    for the same pattern with `re.VERBOSE()` as an argument. The SCOPED form
+    `(?x: ... )` is not implemented, and `_p_inline`'s own docstring says why:
+    flags are one word `_vm` reads once at entry, so a flag that changes inside
+    a compiled program needs the matcher to carry a mutable word through
+    `_step`. `test_re_formal.py` asserts that boundary rather than
+    leaving it implicit, in a test named for the SCOPED form's refusal.
   * **`re.escape` and `re.sub` return `malloc`'d buffers** the CALLER owns,
     exactly as `os/_syscalls.mojo`'s string functions do, and exactly for the
     same reason: a `str` here is a bare `char *` into read-only text, and
@@ -827,9 +836,146 @@ def _p_group(a, code, nxt: Int) -> Int:
                 _p_adv(a, code)
             _p_adv(a, code)
             return _p_group1(a, code, nxt)
-        _spa(a, _P_ERR, 3)                  # lookahead, conditionals, inline
+        # `(?letters)` -- CPython's INLINE GLOBAL FLAGS. This module implements
+        # every one of them as an ARGUMENT (`re.VERBOSE()`, `re.MULTILINE()`,
+        # `re.DOTALL()`, `re.IGNORECASE()`) and used to refuse the spelling
+        # inside the pattern, which is the same feature twice and made the
+        # engine answer `STATUS_UNSUPPORTED` for a pattern its own docstring
+        # says it supports. Found by generating CPython's own `test_re.py` as
+        # a conformance table (`test_formal_hostmods_conformance.py`), which is
+        # where `(?x) a` and `(?m)^b` come from.
+        #
+        # "AT THE START" IS SCANNED, not counted, and the first two versions of
+        # this were both wrong in a way worth recording. A node count does not
+        # work at all: `(?i)(?m)a` compiles no node per flag group, but
+        # `_p_alt` and `_p_cat` each emit a JMP of their own first, so the count
+        # at the first flag group is 4 and at the second is 5 -- measured -- and
+        # a test against either number refuses one of the two spellings CPython
+        # accepts. So the rule is CPython's own: **nothing but other
+        # flag groups may precede this one**, which `_p_at_head` reads
+        # straight off the pattern source.
+        #
+        # OR-ing into `_P_FLAGS` is the whole of the implementation, and it is
+        # enough because the three consumers read it at the right time:
+        # `_flg` during the parse (so VERBOSE starts skipping whitespace at the
+        # NEXT atom, and `^`/`$` capture MULTILINE), and `_vm` once at entry
+        # from the finished word (so DOTALL and IGNORECASE reach `_step`).
+        # Nothing in the MATCHER changes, which is why this is a parser change
+        # and not a VM change.
+        if _p_at_head(a, code) == 1:
+            if _p_inline(a, code) == 1:
+                return nxt
+        _spa(a, _P_ERR, 3)                  # lookahead, conditionals, scoped flags
         return 0 - 1
     return _p_group1(a, code, nxt)
+
+
+def _p_flagok(c: Int) -> Int:
+    """1 if CPython accepts `c` as an inline flag letter for this engine.
+
+    `a` and `u` are accepted and set NOTHING, which is this module's
+    documented position rather than a shrug: the engine matches BYTES, so it
+    already is what `(?a)` asks for, and `(?u)` cannot make the word class match
+    U+00AA because there is no U+00AA here
+    (`bugs/FORMAL_string_value_model.md`). `L` is NOT accepted: CPython refuses
+    it for a `str` pattern, and this engine has only bytes.
+
+    Separate from `_p_flagbit` because "accepted and sets nothing" and "not a
+    letter at all" both have a bit of 0 and are different answers: one is a
+    pattern CPython compiles, the other is a refusal.
+    """
+    if c == 97 or c == 105 or c == 109 or c == 115 or c == 117 or c == 120:
+        return 1
+    return 0
+
+
+def _p_flagbit(c: Int) -> Int:
+    """The flag bit CPython's inline letter `c` sets. 0 for `a` and `u`."""
+    if c == 105:                             # i
+        return F_IGNORECASE
+    if c == 109:                             # m
+        return F_MULTILINE
+    if c == 115:                             # s
+        return F_DOTALL
+    if c == 120:                             # x
+        return F_VERBOSE
+    return 0
+
+
+def _p_at_head(a, code) -> Int:
+    """1 if nothing but `(?letters)` groups precedes the `(` just consumed.
+
+    CPython's own rule for a global flag group, and the reason it is not simply
+    "the group starts at offset 0": `(?i)(?m)a` is two of them and CPython
+    accepts it, while `(?i)a(?m)b` and `(a)(?i)b` are refused with "global
+    flags not at the start of the expression". All four measured.
+
+    A SCAN and not a stored word, and the reason is that there is nowhere to
+    put the word: all 26 parser slots are taken (`_P_USED` and `_P_W` are
+    `sub`'s output state, `_P_OLIM`/`_P_ASTART` and friends moved into frames
+    for the reason `_pf` gives), and the alternative -- a marker bit in
+    `_P_FLAGS` cleared by every node -- is wrong because the two JMPs
+    `_p_alt` and `_p_cat` emit are not pattern parts. The scan is over the
+    pattern's own prefix, which is a handful of bytes for a pattern that
+    begins with flag groups and one byte for every other pattern.
+    """
+    i = 0
+    k = _pa(a, _P_POS) - 2          # the offset of THIS group's `(`
+    while i < k:
+        if _b(code, i) != 40:
+            return 0                 # a real character, so a real part
+        i = i + 1
+        if _b(code, i) != 63:
+            return 0                 # `(` that is not a flag group
+        i = i + 1
+        while 1:
+            if i >= _pa(a, _P_LIMIT):
+                return 0
+            c = _b(code, i)
+            if c == 41:
+                i = i + 1
+                break
+            if c == 97 or c == 105 or c == 109 or c == 115 or c == 120:
+                i = i + 1
+                continue
+            return 0                 # `L`, `-`, `:` and a `P` stop the scan
+    return 1
+
+
+def _p_inline(a, code) -> Int:
+    """`(?letters)` with the `?` already consumed: set the flags, eat the `)`.
+
+    1 when it consumed one. 0 when what follows is not this at all -- a `:` for
+    the SCOPED form `(?x: … )`, a `-` for `(?-x)`, a letter this engine refuses
+    -- and the caller refuses the whole group, which is what CPython does for
+    `(?z)`, for `(?-i)` without a `:` and for a `(?L)` on a `str` pattern.
+
+    `a` and `u` are accepted and change nothing, which is this module's
+    documented position rather than a shrug: the engine matches BYTES, so it is
+    already what `(?a)` asks for, and `(?u)` cannot make the word class match U+00AA
+    because there is no U+00AA here (`bugs/FORMAL_string_value_model.md`).
+
+    The SCOPED form `(?x: … )` is NOT here and cannot be added this way. Flags
+    are one word read by `_vm` at entry, so a flag that changes in the middle
+    of a compiled program would need the VM to carry a mutable word through
+    `_step` -- a different change, with its own proof cost, and it is the next
+    step rather than this one.
+    """
+    f = 0
+    while 1:
+        c = _p_peek(a, code)
+        if c == 41:                          # ')'
+            _p_adv(a, code)
+            _spa(a, _P_FLAGS, _pa(a, _P_FLAGS) | f)
+            return 1
+        if c < 0:
+            return 0                         # end of pattern inside `(?`
+        if _p_flagok(c) == 0:
+            if c == 76:                      # L -- CPython refuses it for a str
+                _spa(a, _P_ERR, 3)
+            return 0                         # a `-`, a `:`, a `P`, an unknown letter
+        _p_adv(a, code)
+        f = f | _p_flagbit(c)
 
 
 def _p_group0(a, code, nxt: Int) -> Int:
@@ -2474,23 +2620,36 @@ def UNICODE():
     return 32
 
 
-def STATUS_OK():
+# THE FOUR STATUSES, ANNOTATED `-> int`, and the annotation is the whole point
+# of the paragraph. A cross-dylib call's result cannot be classified without the
+# CALLEE's return type in the manifest, so `if r == re.STATUS_NO():` in another
+# module was REFUSED at build time with the "they are unequal" message this
+# file's other docstrings quote -- a caller cannot compare a status it cannot
+# type. It was found by `test_formal_hostmods_conformance.py`, which lowers
+# CPython's own `test_re.py` calls to exactly that spelling.
+def STATUS_OK() -> int:
+    """The pattern is fine and it matched; the spans are in the caller's list."""
     return 1
 
 
-def STATUS_NO():
+def STATUS_NO() -> int:
+    """The pattern is fine and it did not match. NOT the same as a refusal."""
     return 0
 
 
-def STATUS_LIMIT():
+def STATUS_LIMIT() -> int:
+    """Gave up: bigger than this module compiles, or nested too deeply."""
     return 2
 
 
-def STATUS_UNSUPPORTED():
+def STATUS_UNSUPPORTED() -> int:
+    """The pattern uses something this engine does not compile (lookaround, a
+    backreference). A different answer from "no match", and the caller can see
+    the difference."""
     return 3
 
 
-def MAXGROUPS():
+def MAXGROUPS() -> int:
     """How many capturing groups a pattern may have."""
     return 8
 

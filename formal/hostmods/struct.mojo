@@ -116,6 +116,8 @@ surfaces downstream as a short buffer rather than as a plausible wrong
 number. A real difference from CPython, recorded here rather than hidden.
 """
 
+from os._syscalls import str_at, str_eq_n
+
 
 # ── the format, as one word per question ─────────────────────────────────────
 # Every helper answers a single scalar, because a scalar is the only thing
@@ -224,21 +226,173 @@ def _width_at(fmt: String, k: Int) -> int:
 
 
 def calcsize(fmt: String) -> int:
-    """Bytes `pack(fmt, ...)` produces. 0 for a format not implemented here.
+    """Bytes `pack(fmt, ...)` produces. 0 for a format this file will not size.
 
     CPython raises `struct.error`; see the docstring's ERRORS.
+
+    **THIS IS A PARSER AND NOT THE TABLE, and that changed because CPython's own
+    `test_struct.py` has `calcsize('iii')`, `calcsize('b')`, `calcsize('l')`,
+    `calcsize('n')` and `calcsize('P')` and every one of them used to answer 0.**
+    A size question with an answer, refused, because `_nvalues` below is a table
+    of the seventeen exact format strings this repository's own callers use and
+    nothing else. That table is the right shape for `pack` and `unpack_from`,
+    which need a BYTE ORDER this file deliberately does not implement; it is
+    the wrong shape for a size, which is a property of the grammar rather than
+    of the corpus. The cases came from generating `test_struct.py` rather than
+    reading it — see `test_formal_hostmods_conformance.py`.
+
+    THE GRAMMAR, IN FULL, because a size is not a byte order:
+
+        [<order>] then items, where an item is [<count>] <code>
+        <order>   `<` `>` `=` `!`  standard sizes, no alignment
+                  `@` or ABSENT   native sizes, native alignment
+
+    and the codes are `x c b B h H i I l L q Q n N P s p ?`. The three places
+    the byte order changes the SIZE and not the meaning:
+
+      * `l` and `L` are 4 bytes standard and 8 native. Every other integer code
+        is the same width either way on this target, which is why CPython's
+        `calcsize('l')` is 8 and `calcsize('<l')` is 4.
+      * `n`, `N` and `P` are NATIVE ONLY: CPython raises `struct.error` for
+        `'<P'` and for `'<2n'`, so the parser answers 0 there rather than a
+        size, and 0 is this module's status for a format it will not answer.
+      * `@` PADS. `calcsize('@xq')` is 16, not 9: the `x` takes byte 0 and the
+        `q` is aligned up to byte 8. Alignment is to the item's own size and is
+        1 for `x`, `s`, `p`, `c` and `?`, which is why `calcsize('@hx')` is 3.
+
+    `s` and `p` are `count` bytes both here and in CPython 3.14 — measured, not
+    quoted, and it is the kind of thing worth measuring because the documented
+    reading of `p` is "length count-1" and this build answers `count`.
     """
-    n = _nvalues(fmt)
-    if n == 0:
-        return 0
+    n = strlen(fmt)
+    i = 0
+    # NO PREFIX IS `@`. That is the one default in this function which is not
+    # obvious, and CPython's own suite pins it twice over: `calcsize('l')` is 8
+    # and `calcsize('<l')` is 4, and `calcsize('si')` is 8 against
+    # `calcsize('si')` with a `<` prefix at 5 — the second one because native
+    # mode PADS, so a format with no prefix is not only native-sized but
+    # native-ALIGNED.
+    native = 1
+    align = 1
+    # `<>!=@`, and the `=` is in the set for the reason the whole set exists:
+    # it was written `<>@!` without it, so `calcsize('=i')` was 0 where CPython
+    # says 4 — a standard-size format silently refused because the prefix that
+    # MEANS "use standard sizes" was the one prefix the test did not ask about.
+    # The grammar walk in `test_struct_formal.py` is what found it, by walking
+    # the cross product rather than a list of formats somebody remembered.
+    if n > 0 and str_at(fmt, 0, "<>!=@") == 1:
+        if str_at(fmt, 0, "@") == 0:
+            native = 0
+            align = 0
+        i = 1
     total = 0
-    k = 0
-    while k < n:
-        total = total + _width_at(fmt, k)
-        k = k + 1
-    if fmt == "<4sBBBBBBB5x":
-        total = total + 5          # the 5x pad bytes, which name no value
+    while i < n:
+        # The item is [<count>] <code>, and this loop is both halves: a value
+        # is ONE WORD on this path, so a helper that answered both "how many
+        # bytes" and "how many characters of `fmt` did you read" would have to
+        # pack two answers into one word. It is written out here instead, which
+        # is the same reason `normpath` is not a table of sub-functions.
+        count = 0
+        seen = 0
+        while i < n:
+            d = _fmt_digit(fmt, i)
+            if d < 0:
+                break
+            count = count * 10 + d
+            seen = seen + 1
+            i = i + 1
+        if seen == 0:
+            count = 1
+        if i >= n:
+            return 0                     # digits with no code after them
+        code = _fmt_code_size(fmt, i, native)
+        if code < 0:
+            return 0                     # a format this file will not size
+        a = 1
+        if align == 1:
+            a = _fmt_code_align(fmt, i)
+        if a > 1:
+            pad = a - (total % a)
+            if pad == a:
+                pad = 0
+            total = total + pad
+        total = total + count * code
+        i = i + 1
     return total
+
+
+# ── the format, parsed ───────────────────────────────────────────────────────
+#
+# The three helpers below answer ONE scalar each, which is this file's standing
+# convention (the header's "one word per question") and is why the item loop
+# above is written out rather than factored into a function.
+#
+# No SUBSCRIPT on `fmt` anywhere: `fmt: String` is annotated and a subscript on
+# such a parameter reads the blob's count word rather than a byte (the file
+# docstring's limit 1). Every byte test below is a `str_at` membership or a
+# `memcmp` at a POINTER, which is the spelling that works.
+
+
+def _fmt_digit(s: String, i: Int) -> int:
+    """The value of the digit at `i`, or -1."""
+    if str_eq_n(s + i, "0", 1) == 1:
+        return 0
+    if str_eq_n(s + i, "1", 1) == 1:
+        return 1
+    if str_eq_n(s + i, "2", 1) == 1:
+        return 2
+    if str_eq_n(s + i, "3", 1) == 1:
+        return 3
+    if str_eq_n(s + i, "4", 1) == 1:
+        return 4
+    if str_eq_n(s + i, "5", 1) == 1:
+        return 5
+    if str_eq_n(s + i, "6", 1) == 1:
+        return 6
+    if str_eq_n(s + i, "7", 1) == 1:
+        return 7
+    if str_eq_n(s + i, "8", 1) == 1:
+        return 8
+    if str_eq_n(s + i, "9", 1) == 1:
+        return 9
+    return 0 - 1
+
+
+def _fmt_code_size(fmt: String, i: Int, native: Int) -> int:
+    """Bytes ONE OCCURRENCE of the code at `i` takes, or -1. See `calcsize`."""
+    if str_at(fmt, i, "xcsbp?") == 1:
+        if str_at(fmt, i, "sp") == 1:
+            return 1                 # `s`/`p` are `count` bytes, padding 1
+        return 1
+    if str_at(fmt, i, "bBhH") == 1:
+        if str_at(fmt, i, "hH") == 1:
+            return 2
+        return 1
+    if str_at(fmt, i, "iIlL") == 1:
+        if str_at(fmt, i, "lL") == 1:
+            if native == 1:
+                return 8
+            return 4
+        return 4
+    if str_at(fmt, i, "qQnNP") == 1:
+        if str_at(fmt, i, "nNP") == 1:
+            if native == 0:
+                return 0 - 1         # CPython raises `struct.error` here
+            return 8
+        return 8
+    return 0 - 1
+
+
+def _fmt_code_align(fmt: String, i: Int) -> int:
+    """The alignment `@` gives the code at `i`, which is its size or 1.
+
+    Separate from `_fmt_code_size` because the answer depends on the BYTE ORDER
+    (`l` is 4 wide standard and 8 native) and the caller has already decided
+    that; passing it in again would be a second answer to one question.
+    """
+    if str_at(fmt, i, "xcsbp?") == 1:
+        return 1
+    return _fmt_code_size(fmt, i, 1)
 
 
 # ── bytes ────────────────────────────────────────────────────────────────────

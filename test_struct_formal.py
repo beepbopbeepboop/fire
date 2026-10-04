@@ -323,6 +323,85 @@ def test_calcsize_each_format(tmpdir):
                      f'calcsize("{fmt}") == {struct.calcsize(fmt)}')
 
 
+# The whole GRAMMAR, walked rather than sampled, because `calcsize` used to be
+# a table of the corpus's thirteen formats and every other format was 0.
+#
+# Generated, not listed, for the reason the corpus list is discovered rather
+# than written: a hand-written list of formats is a list of the ones somebody
+# thought of, and the question "is `calcsize` right" is about the grammar. The
+# cross product is six byte orders (including ABSENT, which is `@` — CPython's
+# `calcsize('l')` is 8 and `calcsize('<l')` is 4) times every code and several
+# shapes, and a format CPython itself refuses is left out of the walk rather
+# than compared against the module's status: `'<P'` raises `struct.error` in
+# CPython and 0 here, and the two are different questions.
+CALCSIZE_GRAMMAR = [
+    order + item
+    for order in ("", "<", ">", "=", "!", "@")
+    for item in ("x", "c", "b", "B", "h", "H", "i", "I", "l", "L", "q", "Q",
+                 "n", "N", "P", "s", "p", "?", "3x", "5s", "0s", "1p",
+                 "2i3h", "12i", "i3i", "8I", "4q", "8s", "IIHH", "qq")
+]
+
+# Alignment is the one thing `@` does that `<` does not, so it gets its own
+# rows rather than being left to the cross product to happen to produce.
+CALCSIZE_ALIGNED = ["@xq", "@xi", "@xb", "@xh", "@hx", "@hxx", "@x", "@si",
+                    "@i3l", "@7h", "@l", "@L", "@2n", "@ll", "@nP"]
+
+
+def test_calcsize_the_whole_grammar(tmpdir):
+    """Every code, every byte order, and `@`'s alignment, against CPython.
+
+    ONE program for the whole walk, because a program per format is a build per
+    format and this file's time is spent on builds: the suite's own note records
+    a run losing 21 checks to a per-case 60 s timeout. The printed integers are
+    compared element-wise by `expect_lines`, so a wrong answer names its index
+    and the rest of the walk still runs.
+    """
+    wanted = [f for f in CALCSIZE_GRAMMAR + CALCSIZE_ALIGNED
+              if _cpython_sizes(f)]
+    lines = ["from struct import calcsize", "", "def main():"]
+    for fmt in wanted:
+        lines.append(f'    print(calcsize("{fmt}"))')
+    src = "\n".join(lines) + "\n"
+    expect_lines(tmpdir, "calcsize_grammar", src,
+                 [struct.calcsize(f) for f in wanted],
+                 f"calcsize over {len(wanted)} formats of the whole grammar")
+
+
+def _cpython_sizes(fmt):
+    """CPython's size for `fmt`, or None when CPython refuses the format.
+
+    None rather than 0: this module's documented status for a format it will
+    not answer is 0 (`formal/hostmods/struct.mojo`'s ERRORS section), and 0 is
+    also CPython's answer for `''`, `'<'` and `'0s'`. Comparing the two would
+    be a test that passes for the wrong reason.
+    """
+    try:
+        struct.calcsize(fmt)
+    except struct.error:
+        return None
+    return struct.calcsize(fmt)
+
+
+def test_calcsize_absent_prefix_is_native_not_standard(tmpdir):
+    """`calcsize('l')` is 8 and `calcsize('<l')` is 4, and both are asserted.
+
+    Not a subsumption of the grammar walk: it is the single default in the
+    parser that a reader is most likely to get wrong, because every format in
+    this repository's own corpus carries an explicit `<`, so nothing else in
+    the tree would notice the difference. CPython's `test_struct.py` does, at
+    `calcsize('l')`, which is how this was found.
+    """
+    src = ('from struct import calcsize\n\ndef main():\n'
+           '    print(calcsize("l"))\n'
+           '    print(calcsize("<l"))\n'
+           '    print(calcsize("si"))\n'
+           '    print(calcsize("<si"))\n')
+    expect_lines(tmpdir, "calcsize_native_default", src,
+                 [struct.calcsize(f) for f in ("l", "<l", "si", "<si")],
+                 "calcsize: an absent byte-order prefix is `@`")
+
+
 # ── 2. pack, byte for byte ───────────────────────────────────────────────────
 
 def _pack_program(fmt, values, n_slots=None):
@@ -1134,6 +1213,8 @@ def main():
         test_the_harness_records_a_case_even_when_it_cannot_pass,
         test_every_corpus_format_is_implemented,
         test_calcsize_each_format,
+        test_calcsize_the_whole_grammar,
+        test_calcsize_absent_prefix_is_native_not_standard,
         test_pack_single_value_formats,
         test_pack_multi_value_formats,
         test_pack_omitted_value_slots_are_filled,
