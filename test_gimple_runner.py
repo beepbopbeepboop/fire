@@ -1688,6 +1688,196 @@ print("ret", returning())
 looping()
 """)
 
+    # A MULTI-ITEM `with` has to unwind in REVERSE acquisition order —
+    # `exit 7` before `exit 6` — which is the entire point of nesting: an
+    # inner context manager's teardown may depend on the outer one's state
+    # still being live. `_with_emit_exits` walked its index-parallel item
+    # lists FORWARD, so every multi-item `with` released the outer manager
+    # first (a multi-item `with` unwound forward, so the outer one was released first),
+    # silently, exit 0.
+    #
+    # Every exit route is in the one program because there are five emission
+    # sites for the same walk (normal tail, the `return` interceptor, the
+    # loop `continue`/`break` arm, the setjmp exception arm, and the no-`__exit__`
+    # fallback) and each is a separate place to get the order wrong. `as` on
+    # the first item only, because the teardown order is independent of it
+    # and CPython has to agree about the alias too.
+    test_gimple_matches_cpython("gimple_multi_item_with_unwinds_in_reverse", """\
+class Ctx:
+    def __init__(self, n):
+        self.n = n
+    def __enter__(self):
+        print("enter", self.n)
+        return self.n
+    def __exit__(self, a, b, c):
+        print("exit", self.n)
+
+def three():
+    with Ctx(1), Ctx(2), Ctx(3):
+        print("body")
+
+def raiser():
+    with Ctx(4) as a, Ctx(5):
+        print("before", a)
+        raise ValueError("boom")
+
+def early():
+    with Ctx(6), Ctx(7):
+        return 99
+
+def nested():
+    with Ctx(8):
+        with Ctx(9):
+            print("inner")
+
+three()
+try:
+    raiser()
+except ValueError as e:
+    print("caught", e)
+print("early", early())
+nested()
+""")
+
+    # Iterating a value that is not a container RAISES, for every consumer of
+    # the shared chokepoint — and a string, which IS iterable, is answered
+    # rather than refused.
+    #
+    # The chokepoint (`_materialize_as_list`'s ambiguous arm) had two wrong
+    # answers for one decision. It used to WALK whatever it was handed, so
+    # `list(12345678)` died with SIGSEGV; the fail-closed arm that fixed the
+    # crash answered an EMPTY list instead, which is a silent wrong answer —
+    # a program's loop body never runs and nothing says so, exit 0
+    # (the shared materialize-as-list chokepoint's not-a-container arm). CPython
+    # raises TypeError, so that is what this asserts, one row per consumer
+    # because each is a separate emission site over one chokepoint:
+    # list/all/any/enumerate/str.join/bytes.join.
+    #
+    # A `char *` was excluded from `all`/`any`'s materialization arm only
+    # because the arm could not answer it, and what it used instead was a stub
+    # that never looks at the value: `any("ab")` printed False where CPython
+    # prints True. The string rows below are that fix, on both spellings — a
+    # statically-typed literal and a value boxed through a parameter.
+    # An inlined lambda's value keeps its type across the enclosing
+    # function's RETURN boundary, for the kinds the return-type inference can
+    # see. The lambda is never materialized here — `_lower_LambdaExpr` records
+    # it and `_lower_inlined_lambda_call` emits its body straight into `o2` —
+    # so the inlined value is a real `char *` and the only thing that could
+    # lose it is `o2`'s own inferred signature, which saw `return fn()` as a
+    # call to an unknown callee and inferred `int64_t`. Both functions
+    # printed their string's own address.
+    #
+    # The int row is the control: `int64_t` is already the answer for an int,
+    # so it must be unchanged by the fix that teaches the estimator to look
+    # through a lambda-bound local.
+    test_gimple_matches_cpython("gimple_inlined_lambda_string_return_keeps_its_type", """\
+def o2():
+    s = 'ab'
+    fn = lambda: s
+    return fn()
+
+def o3():
+    s = 'ab'
+    fn = lambda: s + '!'
+    return fn()
+
+def i1():
+    n = 7
+    fn = lambda: n + 1
+    return fn()
+
+print(o2())
+print(o3())
+print(i1())
+""")
+
+    # The `double` flavour of the same defect, and it is a different KIND of
+    # wrong: a `char *` truncated to `int64_t` is recoverable (the boxed-pointer
+    # convention round-trips the bits and `_get_actual_type` re-derives
+    # `char *`), a `double` is not — `(int64_t)5.0` is `5` and nothing left in
+    # the tables can tell that from a genuine 5. So the loss has to be
+    # prevented, which is what recording the `double` local in
+    # `_prebound_local_ctypes` does.
+    #
+    # The last row is the same fix WITHOUT the lambda, and it was broken too
+    # (printed `2`): the defect was never about the lambda boundary, only
+    # about a `double` local being invisible to inference. `float` is pinned
+    # here for the same reason `int` is pinned above — `q = 2.5` is a
+    # `FloatLiteral`, so `float` and `double` must agree.
+    test_gimple_matches_cpython("gimple_double_local_keeps_its_type_across_inference", """\
+def g():
+    q = 2.5
+    fn = lambda: q * 2
+    return fn()
+
+def h():
+    q = 2.5
+    fn = lambda: q
+    return fn()
+
+def j():
+    q = 2.5
+    return q
+
+def k():
+    q = 2.5
+    fn = lambda: q * 2.0
+    return fn()
+
+print(g())
+print(h())
+print(j())
+print(k())
+""")
+
+    test_gimple_runtime_error("gimple_iterating_a_non_container_raises", """\
+def ident(x):
+    return x
+
+print(list(5))
+""", "TypeError")
+
+    test_gimple_runtime_error("gimple_all_of_a_non_container_raises", """\
+print(all(5))
+""", "TypeError")
+
+    test_gimple_runtime_error("gimple_any_of_a_non_container_raises", """\
+print(any(12345678))
+""", "TypeError")
+
+    test_gimple_runtime_error("gimple_enumerate_of_a_non_container_raises", """\
+print(list(enumerate(7)))
+""", "TypeError")
+
+    test_gimple_runtime_error("gimple_str_join_of_a_non_container_raises", """\
+print(",".join(3))
+""", "TypeError")
+
+    test_gimple_runtime_error("gimple_bytes_join_of_a_non_container_raises", """\
+print(b"".join(9))
+""", "TypeError")
+
+    # A boxed handle that IS a container: `all`/`any` used to answer from a
+    # stub that never looked at the value, so this was True whatever `x` was.
+    test_gimple_stdout("gimple_all_any_of_a_boxed_container_reads_it", """\
+def ident(x):
+    return x
+
+print(all(ident([1, 2])))
+print(any(ident([0, 0])))
+print(all(ident([])))
+""", "True\nFalse\nTrue\n")
+
+    test_gimple_matches_cpython("gimple_a_string_is_iterable_through_the_same_chokepoint", """\
+def ident(x):
+    return x
+
+print(",".join(ident("a,b")))
+print(list(ident("abc")))
+print(any(ident("ab")))
+print(all(ident("")))
+""")
+
     test_gimple_stdout("gimple_list_sort_method_in_place", """\
 def main():
     l = [3, 1, 2]
@@ -8089,6 +8279,76 @@ def main():
                           "    print(b.n)\n"
                           "main()\n",
     }, 'colln4_main.py')
+
+    # `from b import K` at MODULE level, with `K` read from a function body
+    # in the importing module: the value is b's, so the read is
+    # `_b_globals.K`, and before the fix it was `_root_globals.K` — a field
+    # the importing module's own `<module>_toplev` never declares, so gcc
+    # refused the whole program ("'struct _root_toplev' has no member named
+    # 'K'"). The self-host closure had 26 such names across 15 modules (one
+    # of the two `<module>_toplevel` families fixed in 6b7241c5); the
+    # qualified `b.K` spelling of the same value was already correct, so this
+    # is the bare-name half of that pair.
+    _check_agrees_with_cpython("imported_module_constant_reads_the_owners_field", {
+        'fgi_b.py': "K = 'abc'\n\ndef f():\n    return 1\n",
+        'fgi_a.py': "from fgi_b import K\n\ndef main():\n    print(K)\nmain()\n",
+    }, 'fgi_a.py')
+
+    # A container global crosses the boundary the same way, and the read has
+    # to take its ELEMENT type from the owner's field triple rather than from
+    # the importing module's own (empty) overlay — a bare int64_t address for
+    # the list when it did not.
+    _check_agrees_with_cpython("imported_module_list_constant_keeps_its_elements", {
+        'fgj_b.py': "L = [1, 2, 3]\n",
+        'fgj_a.py': "from fgj_b import L\n\ndef main():\n    print(L)\n    print(len(L))\nmain()\n",
+    }, 'fgj_a.py')
+
+    # `from b import N as J`: the LOCAL spelling is `J` and the owner's FIELD
+    # is still `N`, so both halves of the binding have to be tracked — a
+    # single "local name == field name" shortcut answers here.
+    _check_agrees_with_cpython("imported_module_constant_alias_reads_the_owners_field", {
+        'fgk_b.py': "N = 7\n",
+        'fgk_a.py': "from fgk_b import N as J\n\ndef main():\n    print(J)\nmain()\n",
+    }, 'fgk_a.py')
+
+    # The two rows that must NOT be re-routed, i.e. the gates
+    # `_gmi_scan_imported_global_homes` exists to enforce. A module-level
+    # `N = ...` rebinds the name in THIS module's namespace (Python
+    # semantics), so the bare read afterwards is this module's own field; and
+    # a function-local `N` shadows the import outright. Both printed the
+    # imported side's value when the routing was unconditional.
+    _check_agrees_with_cpython("own_module_global_beats_the_imported_homonym", {
+        'fgl_b.py': "N = 'b-side'\n",
+        'fgl_a.py': "from fgl_b import N\nN = 'a-side'\n\ndef main():\n    print(N)\nmain()\n",
+    }, 'fgl_a.py')
+    _check_agrees_with_cpython("local_beats_the_imported_module_global", {
+        'fgm_b.py': "N = 'b-side'\n",
+        'fgm_a.py': "from fgm_b import N\n\ndef main():\n    N = 'local'\n    print(N)\nmain()\n",
+    }, 'fgm_a.py')
+
+    # A container-of-struct literal in an IMPORTED module. The per-struct
+    # element-repr shims (`_mojo_elem_repr_P`) and the `void *` aliases of
+    # them are declared in the ROOT module's reflection block, which
+    # `gen_module_impl` splices in AFTER the imported modules' code — so this
+    # list's `mojo_list_set_elem_repr(t, _mojo_elem_repr_P)` used to name a
+    # function that was not yet declared. gcc's `__GIMPLE` parser cannot
+    # convert a function designator to `void *` by any means at all (a bare
+    # assignment is "non-trivial conversion in 'function_decl'", a C-style
+    # cast is "invalid operand in unary operation"), so 59 such calls across
+    # the self-host closure took out the functions containing them. Same
+    # family as the from-import rows above, in the same emission area, and
+    # only visible in a multi-module closure — a single-TU program declares
+    # and defines the shim in one block and never sees it.
+    _check_agrees_with_cpython("imported_module_list_of_structs_reprs_them", {
+        'fgn_b.py': "class P:\n"
+                    "    def __init__(self, x):\n"
+                    "        self.x = x\n"
+                    "    def __repr__(self):\n"
+                    "        return 'P<' + self.x + '>'\n"
+                    "def make():\n"
+                    "    return [P('a'), P('b')]\n",
+        'fgn_a.py': "import fgn_b\n\ndef main():\n    print(fgn_b.make())\nmain()\n",
+    }, 'fgn_a.py')
 
     # bugs/CODEGEN_fstring_and_str_of_a_list_are_garbage.md: f"{container}"
     # and str(container) read the container's raw header bytes as a C

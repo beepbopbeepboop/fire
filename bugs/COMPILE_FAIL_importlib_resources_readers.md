@@ -26,7 +26,7 @@ at `Lib/importlib/resources/_common.py:105`'s
 `itertools.filterfalse(...)`. That builtin has no lowering at all, so the
 operand's type is unmodelled and `next()` over it has no honest answer.
 Root-caused to six lines and filed as
-`CODEGEN_itertools_filterfalse_has_no_lowering.md`, which also records the
+the `itertools.filterfalse`-has-no-lowering gap, which also records the
 two measurements that show the refusal's *diagnosis* is misleading — the
 builtin `filter` IS modelled and `next(it)` over its result already works,
 as does `next(iter(it))` — and the trap that makes "just support

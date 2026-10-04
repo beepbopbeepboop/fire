@@ -7585,7 +7585,7 @@ main()
         here, and both are named in the docstring's neighbour bug docs:
         CPython raises TypeError where the compiled path answers `[]` for the
         first (a SIGSEGV until this same change's fail-closed arm —
-        `bugs/CODEGEN_iterating_a_non_container_is_a_segfault.md`), and a
+        the `list(<an int>)` arm), and a
         boxed dict's keys come back as their own addresses for the second
         (`bugs/CODEGEN_materialized_container_has_no_element_type.md`).
 
@@ -9380,6 +9380,293 @@ C().sort()
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_itertools_filterfalse_keeps_the_elements_whose_predicate_is_false():
+        """`itertools.filterfalse(f, xs)` must build a real list of the
+        elements its predicate REJECTS.
+
+        It had no lowering at all, so its result was an unmodelled handle of
+        unknown type — and the `next(...)` over it in
+        `Lib/importlib/resources/_common.py:105` then had no honest answer, so
+        that module fell back to source. The refusal named `next` as the
+        missing piece, which was a misdiagnosis: builtin `filter` over the
+        same shape compiled fine (its own rows are in this file), and
+        `next(iter(<list>))` was the landing spot all along.
+
+        The trap this has to avoid is real and was measured: adding a
+        `next(<bare MojoList *>)` lowering to cover the stdlib line would turn
+        two CPython `TypeError`s into values (`next([1, 2])` is a TypeError —
+        a list is not an iterator — while such a lowering would answer `1`).
+        So `next(it)` still refuses, and that is pinned by the next test: a
+        wrong fix here COMPILES AND RUNS, printing a value where CPython
+        raises, which is why the expectation is CPython's stdout on both
+        pipelines and not a hand-written string.
+
+        Four spellings, because each is a separate dispatch site: the
+        qualified member call (`_common.py`'s), the bare name after
+        `from itertools import filterfalse`, a `for` loop over the result, and
+        `list(...)` of it — with a `char *` element type, which is the kind
+        the per-element build has to carry through.
+        """
+        global _PASS, _FAIL
+        name = "itertools_filterfalse_keeps_the_elements_whose_predicate_is_false"
+        src = '''\
+import itertools
+from itertools import filterfalse
+
+def qualified(xs, f):
+    it = itertools.filterfalse(f, xs)
+    return next(iter(it))
+
+def bare(xs, f):
+    it = filterfalse(f, xs)
+    return next(iter(it))
+
+def as_loop(xs, f):
+    out = []
+    for v in itertools.filterfalse(f, xs):
+        out = out + [v]
+    return out
+
+print(qualified([1, 2, 3], lambda v: v < 2))
+print(bare([1, 2, 3, 4], lambda v: v % 2 == 0))
+print(as_loop([5, 6, 7], lambda v: v < 6))
+print(list(itertools.filterfalse(lambda v: v == 'b', ['a', 'b', 'c'])))
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_next_over_a_filter_result_still_refuses_without_iter():
+        """The negative half of the pair above: `next(<filtered list>)` has no
+        lowering and must keep having none.
+
+        In Python a list is NOT an iterator — `hasattr([], '__next__')` is
+        False; only `iter(x)` produces one — so `next(filter(f, xs))`'s
+        Mojo-side equivalent, `next(<the MojoList the filter built>)`, has no
+        honest value to return. A `next` over a `MojoList *` would answer the
+        first element instead, which compiles, runs, exits 0 and is wrong.
+
+        Pinned as a REFUSAL — the module falls back to source with a
+        diagnostic naming the shape — because the alternative assertion, a
+        value, would be pinning the very wrong answer this forbids.
+        """
+        global _PASS, _FAIL
+        name = "next_over_a_filter_result_still_refuses_without_iter"
+        src = '''\
+def bare(xs, f):
+    it = filter(f, xs)
+    return next(it)
+'''
+        for mode, kwargs in (('single-TU', {'do_imports': True}),
+                             ('link-mode', {'link_mode': True})):
+            try:
+                gimple_codegen._run_pipeline(src, filename='p.py', **kwargs)
+            except Exception:
+                continue
+            print(f"FAIL  {name} [{mode}]: next(<a list>) compiled, so a list "
+                  f"is being read as an iterator where CPython raises "
+                  f"TypeError")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_unannotated_init_param_evidence_reaches_the_signature():
+        """An unannotated `__init__` param's ctype must be the SAME answer in
+        the emitted signature and in the field's declaration.
+
+        The literal-evidence tables (`_ctor_lit_param_types`,
+        `_xf_own_ctor_params`) were read by the FIELD pass only — through a
+        `pm` map local to that loop — so a field fed from such a param was
+        declared `double` while the parameter stayed `int64_t` in
+        `func_param_types`, which is the table `emit_calls.py`'s constructor
+        path coerces each argument against ("Coerce each argument to its
+        declared `__init__` param C type"). The literal was therefore
+        truncated AT THE CALL: `B(2.5)` passed the integer 2, `self.f = f`
+        stored it into a `double` field, and `b.f` printed `2.0` where CPython
+        prints `2.5` — a wrong value with exit 0
+        (the float half of the unannotated-`__init__`-param evidence family).
+
+        The other four rows are the "do not break these" half, and each is a
+        path that reaches a ctype by a DIFFERENT rule, so the new arm cannot
+        quietly take one of them over: an explicit annotation (`Float64`),
+        a declared default (`s='hi'`, which is inference from the default
+        expression), a `char *` (which was already right — but for the wrong
+        reason: a string literal's ADDRESS round-trips through an `int64_t`
+        parameter unchanged, which is luck, not agreement), and a container
+        (a different evidence table). The last row is two params in one
+        constructor, one with float evidence and one without, so a fix that
+        typed the WHOLE signature from the evidence instead of per slot would
+        show up as the integer parameter arriving as a double.
+
+        CPython's stdout is the expectation, on both pipelines: the failure
+        mode is a plausible number (2.0 for 2.5, 1.0 for 1.5), so only the
+        oracle distinguishes it.
+        """
+        global _PASS, _FAIL
+        name = "unannotated_init_param_evidence_reaches_the_signature"
+        src = '''\
+class F:
+    def __init__(self, f):
+        self.f = f
+
+class S:
+    def __init__(self, s):
+        self.s = s
+        self.n = s
+
+class A:
+    def __init__(self, x: Float64):
+        self.x = x
+
+class C:
+    def __init__(self, xs):
+        self.xs = xs
+
+class D:
+    def __init__(self, s='hi'):
+        self.s = s
+
+class M:
+    def __init__(self, a, b):
+        self.a = a
+        self.b = b
+
+print(F(2.5).f)
+print(S("hi").s)
+print(S("hi").n)
+print(A(2.5).x)
+print(C([1, 2]).xs)
+print(D().s)
+print(D("yo").s)
+print(M(1.5, 2).a)
+print(M(1.5, 2).b)
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_module_level_struct_global_keeps_its_type_in_a_container():
+        """A module-level `p = P("a")` read as a bare name is a global, and
+        `_quick_type` used to answer `int64_t` for it because `var_types`
+        holds only locals and parameters.
+
+        A global holding a STRUCT is the one value class that cannot recover
+        from the box: its C field is an `int64_t` holding the pointer, and a
+        struct-allocated value has no runtime type tag for the container
+        walkers to dispatch on — so the list literal recorded no element repr
+        and `repr([p])` printed the pointer decimal where CPython prints the
+        object. `repr(p)` alone was already RIGHT, which is what makes this a
+        type-inference gap rather than a repr bug, so both spellings are
+        asserted: the one that was broken and the one that must stay right.
+
+        The same text inside a function is the control that pins the fix to
+        the module-level spelling rather than to struct-in-a-container, which
+        was already working.
+        """
+        global _PASS, _FAIL
+        name = "module_level_struct_global_keeps_its_type_in_a_container"
+        src = '''\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+
+p = P("a")
+print(repr([p]))
+print(repr(p))
+
+def inside():
+    q = P("b")
+    print(repr([q]))
+inside()
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'modlevel.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'ml_{mode}.c')
+                exe = os.path.join(td, f'ml_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_dict_union_right_operand_is_converted_at_runtime():
         """`dict | x` with `x`'s type unresolved must convert, not cast.
 
@@ -10110,6 +10397,10 @@ print(run('x/y.txt'))
     test_list_sort_in_a_method_body_is_gimple_legal()
     test_dict_union_right_operand_is_converted_at_runtime()
     test_dict_literal_star_star_pair_merges_instead_of_storing()
+    test_module_level_struct_global_keeps_its_type_in_a_container()
+    test_itertools_filterfalse_keeps_the_elements_whose_predicate_is_false()
+    test_next_over_a_filter_result_still_refuses_without_iter()
+    test_unannotated_init_param_evidence_reaches_the_signature()
     test_next_inside_for_over_same_iterator_is_one_ahead()
     test_iterator_cursor_len_is_remaining_and_dunder_next_advances()
     test_span_cursor_reads_the_span_and_len_tracks_the_cursor()

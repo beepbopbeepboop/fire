@@ -3309,16 +3309,18 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         gen._emit_label(bb_none)
         # NOT a container at all: a plain int, a bool, a float's bit pattern, a
         # struct type-tag, a function pointer — every shape that reaches an
-        # iterable-typed slot in this dynamic model. Answer an EMPTY list
-        # rather than walk it, because walking it is the crash this test
-        # exists to stop: `list(12345678)`, `all(<a small int>)` and
-        # `','.join(<a struct tag>)` all died with SIGSEGV before it. An
-        # empty answer is what every consumer that reached here already
-        # produced on the pre-R1 path, so this is strictly the removal of a
-        # segfault. CPython raises TypeError for all of these; making that a
-        # real refusal is the open half, recorded in
-        # bugs/CODEGEN_iterating_a_non_container_is_a_segfault.md.
-        _ne = gen._call_expr('MojoList *', 'mojo_list_new', [])
+        # iterable-typed slot in this dynamic model. Neither walking it (the
+        # SIGSEGV this arm exists to stop: `list(12345678)`, `all(<a small
+        # int>)` and `','.join(<a struct tag>)` all died) nor an empty list
+        # (the silent wrong answer that replaced the crash — `list(5)`
+        # printed `[]`, so a loop body never ran and nothing said so, exit 0)
+        # is an answer. The runtime decides, and it has two: a boxed STRING
+        # is iterable in Python and becomes its characters, everything else
+        # raises `TypeError` the way this runtime already reports every other
+        # bad receiver. Both halves and the reason CPython's type name is
+        # absent are in `mojo_iter_boxed_list`'s definition.
+        _ne = gen._call_expr('MojoList *', 'mojo_iter_boxed_list',
+                             [('int64_t', it64)])
         gen._emit(f"  {result} = {_ne};")
         gen._emit_label(bb_after)
         return result

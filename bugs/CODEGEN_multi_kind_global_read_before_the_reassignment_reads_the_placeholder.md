@@ -96,3 +96,45 @@ parse plus a `_quick_type`, not a compile.
    before it) — which also fixes the sibling case, a read in another
    function than the reassignment, which has the same segfault today.
 3. Re-run `scan_globals.py` over both corpora afterwards.
+
+## Status (2026-10-02, `work/bugs4-3-c`) — step 1 of the next step now EXISTS
+
+Re-measured on this tree, unchanged: the doc's own program still dies with
+SIGSEGV (exit -11) where CPython prints the two placeholders. Nothing here is
+fixed, and nothing here regressed.
+
+What did change is that the doc's stated blocker for the fix is gone. It says
+"the runtime has registries for the three container kinds but **none for
+`char *`** ... so the registry dispatch that would answer this correctly does
+not exist". `mojo_boxed_is_str(int64_t)` is exactly that discriminator and has
+been in `runtime/fire_runtime.{c,h}` since `c61999ea`:
+
+    int mojo_boxed_is_str(int64_t v) {
+        return _mojo_ptr_shaped(v) && !mojo_is_registered_list(v)
+            && !mojo_is_registered_dict(v) && !mojo_is_registered_set(v)
+            && !mojo_is_boxed(v);
+    }
+
+It excludes all three container registries TOGETHER on purpose (its own
+comment: "this predicate's job is 'is this a boxed string', and a container of
+any kind is a different answer, so adding one kind now and the other two later
+is how the list-only version shipped in the first place"), so it is safe to
+consult in exactly the way this doc needs — a positive test for the ONE class
+that has no registry, rather than a new registry that would have to
+interoperate with the existing three.
+
+So the next step reduces to step 2 alone, and step 2's two halves are:
+
+1. Route `_repr_boxed_container` and the other boxed-consumer arms through it.
+   The arms are the ones `mojo_repr_boxed` already dispatches on
+   (`fire_runtime.c`'s `mojo_repr_boxed` family, ~line 1086-1160) — a `char *`
+   arm there replaces the `mojo_repr_list_ints` call that is the fault in the
+   emitted C above.
+2. Mark the read-back temp of a multi-kind global as a boxed container when the
+   reading function has no store-provenance for it. `_actual_types` is
+   per-function, so a read in a DIFFERENT function than the store is
+   indistinguishable from a read before it — that is unchanged, and it is the
+   half that needs a closure-scoped record rather than a per-function one.
+
+The `scan_globals.py` census in "Blast radius" is still the cheap thing to
+re-run after either half, and it is still 0 multi-kind globals in both corpora.

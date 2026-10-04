@@ -92,7 +92,7 @@ from mojo.middle.module_shared import (
     _as_funcdef_node, _as_int, _as_intlit_node, _as_str, _as_structdef_node, _bytes_subclass_new_payload_name,
     _collect_import_modules, _collect_import_modules_rec, _cpp_method_receiver_name, _extract_init_expr, _gmi_all_stmts_nonfunc, _gmi_as_str, _gmi_collect_global_stmts,
     _gmi_collect_return_values, _gmi_collect_self_assigns, _gmi_container_ctype, _gmi_find_comptime_one, _gmi_global_init_code, _gmi_phase17_collect_appends, _gmi_prefold_toplevel_comptime,
-    _gmi_scan_cpp_nested_imports, _gmi_scan_func_body_for_self_attr, _gmi_scan_import_modules, _gmi_scan_try_imports, _gmi_self_member, _import_targets,
+    _gmi_scan_cpp_nested_imports, _gmi_scan_func_body_for_self_attr, _gmi_scan_import_modules, _gmi_scan_imported_global_homes, _gmi_scan_try_imports, _gmi_self_member, _import_targets,
     _mojo_type, _pair_key, _ptr_slot_in_range, _register_sym, _selfhost_fn_reassigns_method, _selfhost_homogeneous_tuple_ret_funcs,
     _selfhost_modglobal_is_pathcall, _selfhost_module_scalar_globals, _selfhost_struct_dict_field_val_types, _sms_key, _walk_ast
 )
@@ -710,24 +710,53 @@ def _render_struct_typedef_body(struct_name, fields):
 
 
 
-def _emit_reflection_dispatch(self, parts):
-    """Emit the generic reflection dispatch (getattr/setattr/repr/
-    dataclasses.fields/asdict). Extracted from gen_module_impl so its
-    `sn` struct-name loop variable lives in a fresh function scope: in
-    gen_module_impl's ~6000-line body `sn` was cross-unified to int64_t
-    by unrelated integer uses on the self-hosted backend, so every
-    `f"..._mojo_repr_{sn}"` here concatenated a boxed pointer and
-    crashed in mojo_str_cat/strlen on the shimless --dump-full path."""
-    # Build `reflect_structs` as an explicitly `_as_str`-typed list, NOT
-    # `sorted(setA & setB & setC)`. `self._emitted_structs` /
-    # `self._struct_allocs_needed` carry int64_t-tagged / boxed slots on
-    # the self-hosted backend, so the set intersection and the resulting
-    # `sorted()` loop var typed to int64_t — every `f"..._mojo_repr_{sn}"`
-    # / `f"..._mojo_getattr_{sn}"` f-string below then concatenated a
-    # boxed pointer, crashing in `mojo_str_cat` → `strlen()` on garbage
-    # (crash-report bt: `_platform_strlen` ← `mojo_str_cat` ←
-    # `gen_module_impl`, recursing through `_compile_imported_module` on
-    # a shimless `--dump-full`).
+def _reflect_struct_names(self) -> list:
+    """The structs `_emit_reflection_dispatch` emits helpers for, in content
+    order, as an explicitly `_as_str`-typed list.
+
+    Cached on the gen, and computed ONCE for the whole emission, because two
+    passes now need the identical list: `_emit_reflection_fwd_decls` (which
+    runs BEFORE the imported modules' code is spliced into the preamble,
+    because that code CALLS these helpers) and `_emit_reflection_dispatch`
+    (which emits their definitions). A forward declaration for a struct the
+    definition pass skipped is a `static` function declared and never defined,
+    and C's error for that is "used but never defined" — a different hard
+    failure from today's "implicit declaration", so a disagreement between
+    the two passes would trade one broken program for another. One list, one
+    cache, no possibility of drift.
+
+    NOT `sorted(setA & setB & setC)`. `self._emitted_structs` /
+    `self._struct_allocs_needed` carry int64_t-tagged / boxed slots on
+    the self-hosted backend, so the set intersection and the resulting
+    `sorted()` loop var typed to int64_t — every `f"..._mojo_repr_{sn}"`
+    / `f"..._mojo_getattr_{sn}"` f-string then concatenated a
+    boxed pointer, crashing in `mojo_str_cat` → `strlen()` on garbage
+    (crash-report bt: `_platform_strlen` ← `mojo_str_cat` ←
+    `gen_module_impl`, recursing through `_compile_imported_module` on
+    a shimless `--dump-full`).
+
+    Iterate `struct_field_types`' keys in CONTENT order and filter in
+    place — the result list is already sorted, no trailing `sorted()`.
+
+    `sorted(self.struct_field_types)` (the dict itself, not `.keys()`)
+    lowers to `mojo_dict_sorted_keys` → `mojo_list_sorted_str`, a genuine
+    string-content sort — the container-type dispatch in `_lower_sorted`
+    keys on `MojoDict *`, which `.keys()` would have already unwrapped. An
+    earlier revision built `_rs_names` as a `set()` and did
+    `sorted(_rs_names)` to reach `mojo_set_sorted` instead — but this
+    compiler stores these boxed `char *` names through the set's INT view,
+    so every slot carries `tag == 0` and `mojo_set_sorted` sorted them as
+    raw int64_t ADDRESSES and handed back pointer-ints; the reflection
+    emit loop's `self.struct_field_types.get(sn)` then missed on every one
+    and silently skipped ALL the `_mojo_repr_*`/`_mojo_getattr_*` helpers
+    (regressed struct_def/class_methods in test_ab_native).
+
+    Ordering here is load-bearing beyond determinism: it drives the struct
+    walk order, hence the `_str_pool` intern order, hence every `_slit_N` in
+    the output."""
+    _cached = getattr(self, '_reflect_structs_cache', None)
+    if _cached is not None:
+        return _cached
     _es_str = set()
     for _esx in self._emitted_structs:
         _es_str.add(_as_str(_esx))
@@ -735,42 +764,118 @@ def _emit_reflection_dispatch(self, parts):
     for _sanx in self._struct_allocs_needed:
         if _ptr_slot_in_range(_sanx):
             _san_str.add(_as_str(_sanx))
-    # Iterate `struct_field_types`' keys in CONTENT order and filter in
-    # place — the result list is already sorted, no trailing `sorted()`.
-    #
-    # `sorted(self.struct_field_types)` (the dict itself, not `.keys()`)
-    # lowers to `mojo_dict_sorted_keys` → `mojo_list_sorted_str`, a genuine
-    # string-content sort — the container-type dispatch in `_lower_sorted`
-    # keys on `MojoDict *`, which `.keys()` would have already unwrapped. An
-    # earlier revision built `_rs_names` as a `set()` and did
-    # `sorted(_rs_names)` to reach `mojo_set_sorted` instead — but this
-    # compiler stores these boxed `char *` names through the set's INT view,
-    # so every slot carries `tag == 0` and `mojo_set_sorted` sorted them as
-    # raw int64_t ADDRESSES and handed back pointer-ints; the reflection
-    # emit loop's `self.struct_field_types.get(sn)` then missed on every one
-    # and silently skipped ALL the `_mojo_repr_*`/`_mojo_getattr_*` helpers
-    # (regressed struct_def/class_methods in test_ab_native).
-    #
-    # Ordering here is load-bearing: it drives the struct walk order, hence
-    # the `_str_pool` intern order, hence every `_slit_N` in the output.
     _rs_names = []
     for _rsk in sorted(self.struct_field_types):
         _rsk = _as_str(_rsk)
         if _rsk in _es_str and _rsk in _san_str:
             _rs_names.append(_rsk)
-    reflect_structs = _rs_names
+    self._reflect_structs_cache = _rs_names
+    return _rs_names
+
+
+def _reflect_emitted_names(self) -> list:
+    """`_reflect_struct_names` minus the field-less structs — the ones
+    `_emit_reflection_dispatch` actually emits a helper for, and therefore
+    the only ones that may be forward-declared. Every dispatch table in that
+    function is driven from this list rather than re-deriving the same
+    condition, so a table can never reference a helper that was skipped.
+
+    It used to re-test `if self.struct_field_types.get(sn)` inside each
+    join's generator expression; self-hosted, those genexpr `if` clauses
+    did not filter, so the tables listed EVERY reflect struct while this
+    loop correctly skipped the field-less ones — emitting
+    `return _mojo_getattr_Layout((Layout *)obj, attr);` against a helper
+    that was never generated ("implicit declaration of function
+    '_mojo_getattr_Layout'", the head of fire_compiler.py's error list).
+
+    Cached for `_reflect_struct_names`'s reason: the forward-declaration pass
+    and the definition pass must agree exactly."""
+    _cached = getattr(self, '_reflect_emitted_cache', None)
+    if _cached is not None:
+        return _cached
+    _out = []
+    for _rsn in _reflect_struct_names(self):
+        if len(self.struct_field_types.get(_rsn, {})) > 0:
+            _out.append(_rsn)
+    self._reflect_emitted_cache = _out
+    return _out
+
+
+def _emit_reflection_fwd_decls(self, parts):
+    """Every DECLARATION `_emit_reflection_dispatch`'s definitions need,
+    emitted ahead of the imported modules' code.
+
+    C has no two-pass declarations, so in one translation unit a call must be
+    preceded by its declaration. `gen_module_impl` splices every inline-
+    compiled module's whole output — function bodies included — into the
+    preamble, and that code CALLS these helpers by name
+    (`mojo_list_set_elem_repr(t, _mojo_elem_repr_IntLiteral)` from a list
+    literal in an imported module), while the block emitting both the
+    forward declarations and the definitions ran after the splice. Measured
+    on the self-host closure: 59 `'_mojo_elem_repr_<Struct>' undeclared`
+    errors, every one of them an implicit declaration gcc resolves to
+    `int` — so the call compiled, the pointer it returned was truncated to
+    32 bits, and every such container's element repr in the SELF-HOSTED
+    compiler was garbage.
+
+    Kept as declarations-only and kept in ONE place — this function — rather
+    than duplicated ahead of the splice, so the definition pass emits
+    definitions and nothing else and the two halves cannot drift.
+    """
+    parts.append("static int64_t _mojo_dispatch_getattr (void *, char *);")
+    parts.append("static void _mojo_dispatch_setattr (void *, char *, int64_t);")
+    parts.append("static char * _mojo_dispatch_repr (void *);")
+    parts.append("static char * _mojo_repr_list (MojoList *);")
+    parts.append("static char * _mojo_repr_dict (MojoDict *);")
+    parts.append("static char * _mojo_generic_elem_repr (int64_t);")
+    parts.append("static char * _mojo_repr_pair (MojoList *);")
+    _emitted = _reflect_emitted_names(self)
+    repr_fwd_decls = [f"static char * _mojo_repr_{sn} ({sn} *obj);"
+                      for sn in _emitted]
+    if repr_fwd_decls:
+        parts.append("/* Forward decls for generic repr() (mutual struct references) */")
+        parts.append("\n".join(repr_fwd_decls))
+        parts.append('')
+    elem_repr_fwd_decls = [f"static char * _mojo_elem_repr_{sn} (int64_t v);"
+                           for sn in _emitted]
+    elem_repr_fwd_decls += [f"static void * _mojo_elem_repr_ptr_{sn};"
+                            for sn in _emitted]
+    # The `__repr__` each shim calls, when the struct has one. A declaration
+    # only, so it is safe here for the same reason the rest of this block is;
+    # whether a given struct HAS a `char *`-returning `__repr__` is
+    # `_struct_method_csym` + `func_return_types`, both of which are already
+    # complete at the splice point (every function body in the closure, root
+    # and imported, was emitted above it). Appended BEFORE the join below —
+    # a declaration added to the list after it has been emitted is a
+    # declaration that is not there, which is how this shim's call came out
+    # an implicit declaration while the declaration half looked correct.
+    for _sn in _emitted:
+        _erep = self._struct_method_csym(_sn, '__repr__', '')
+        if self.func_return_types.get(_erep) == 'char *':
+            elem_repr_fwd_decls.append(f'extern char *{_erep} ({_sn} *);')
+    if elem_repr_fwd_decls:
+        parts.append("/* Forward decls for the per-struct ELEMENT REPR shims "
+                     "(a container of structs) */")
+        parts.append("\n".join(elem_repr_fwd_decls))
+        parts.append('')
+    return elem_repr_fwd_decls
+
+
+def _emit_reflection_dispatch(self, parts):
+    """Emit the generic reflection dispatch (getattr/setattr/repr/
+    dataclasses.fields/asdict). Extracted from gen_module_impl so its
+    `sn` struct-name loop variable lives in a fresh function scope: in
+    gen_module_impl's ~6000-line body `sn` was cross-unified to int64_t
+    by unrelated integer uses on the self-hosted backend, so every
+    `f"..._mojo_repr_{sn}"` here concatenated a boxed pointer and
+    crashed in mojo_str_cat/strlen on the shimless --dump-full path.
+
+    DECLARATIONS live in `_emit_reflection_fwd_decls`, which
+    `gen_module_impl` calls BEFORE the imported modules' code is spliced into
+    the preamble — this function emits definitions only."""
+    reflect_structs = _reflect_struct_names(self)
     refl_parts = []
-    # The structs this loop actually EMITS helpers for. Every dispatch table
-    # below is driven from this list rather than re-deriving the same
-    # condition, so a table can never reference a helper that was skipped.
-    # It used to re-test `if self.struct_field_types.get(sn)` inside each
-    # join's generator expression; self-hosted, those genexpr `if` clauses
-    # did not filter, so the tables listed EVERY reflect struct while this
-    # loop correctly skipped the field-less ones — emitting
-    # `return _mojo_getattr_Layout((Layout *)obj, attr);` against a helper
-    # that was never generated ("implicit declaration of function
-    # '_mojo_getattr_Layout'", the head of fire_compiler.py's error list).
-    reflect_emitted = []
+    reflect_emitted = _reflect_emitted_names(self)
     # Every struct that gets an element-repr shim below. A SET rather than the
     # list, because the field-dump arm above asks "is there a shim for this
     # field's type?" once per field of every reflected struct, and a `sn not in
@@ -781,7 +886,6 @@ def _emit_reflection_dispatch(self, parts):
         fields = self.struct_field_types.get(sn, {})
         if len(fields) == 0:
             continue
-        reflect_emitted.append(sn)
         get_lines = []
         set_lines = []
         name_lits = []
@@ -843,18 +947,10 @@ def _emit_reflection_dispatch(self, parts):
             f"  return _r;\n}}\n"
             + asdict_part
         )
-    repr_fwd_decls = [f"static char * _mojo_repr_{sn} ({sn} *obj);"
-                      for sn in reflect_emitted]
-    # Forward decls for the element-repr shims below, which the list-literal
-    # lowering names by name (`mojo_list_set_elem_repr(t, _mojo_elem_repr_X)`)
-    # and the `__repr__` symbols they call, which are emitted with the function
-    # bodies further down the file.
-    elem_repr_fwd_decls = [f"static char * _mojo_elem_repr_{sn} (int64_t v);"
-                           for sn in reflect_emitted]
     # Same list as the getattr/setattr helpers above: this loop had its own
-    # copy of the "skip field-less structs" condition, and the forward-decl
-    # comprehension above had a third copy inside a comprehension `if` —
-    # which self-hosted does not filter. One list, one decision.
+    # copy of the "skip field-less structs" condition, and
+    # `_emit_reflection_fwd_decls` had a fourth — which self-hosted does not
+    # filter. One list, one decision: `reflect_emitted` above.
     for sn in reflect_emitted:
         fields = self.struct_field_types.get(sn, {})
         boxed = self.struct_boxed_fields.get(sn, set())
@@ -953,8 +1049,6 @@ def _emit_reflection_dispatch(self, parts):
         # `_mojo_dispatch_repr` to dispatch on.
         _erep = self._struct_method_csym(sn, '__repr__', '')
         _erep_ok = self.func_return_types.get(_erep) == 'char *'
-        if _erep_ok:
-            elem_repr_fwd_decls.append(f'extern char *{_erep} ({sn} *);\n')
         elem_repr_names.add(sn)
         refl_parts.append(
             f"static char * _mojo_elem_repr_{sn} (int64_t v) {{\n"
@@ -963,21 +1057,23 @@ def _emit_reflection_dispatch(self, parts):
             + (f"  return {_erep} (o);\n" if _erep_ok
                else f"  return _mojo_repr_{sn} (o);\n")
             + f"}}\n"
+            # The `void *` ALIAS of the shim, and the only spelling a
+            # `__GIMPLE` body may use to name it. Inside a `__GIMPLE`-
+            # tagged function gcc's raw GIMPLE parser cannot convert a
+            # function designator to `void *` by any means: a bare
+            # `_t = _mojo_elem_repr_Foo;` is a "non-trivial conversion in
+            # 'function_decl'" and `_t = (void *)_mojo_elem_repr_Foo;` is
+            # "invalid operand in unary operation" (a C-style cast is not a
+            # legal GIMPLE operand — see `_inc_val`'s docstring), and naming
+            # it directly as a call argument is "invalid argument to gimple
+            # call". So the conversion is done ONCE, here, at file scope,
+            # where the C frontend lowers it itself, and the bodies just
+            # read the alias. Measured: without it, every list/tuple-of-
+            # struct literal in a module imported into a closure fails to
+            # compile, because these shims are defined in the root module's
+            # block and the whole-closure ordering puts them later.
+            f"static void * _mojo_elem_repr_ptr_{sn} = (void *)_mojo_elem_repr_{sn};\n"
         )
-    parts.append("static char * _mojo_dispatch_repr (void *);")
-    parts.append("static char * _mojo_repr_list (MojoList *);")
-    parts.append("static char * _mojo_repr_dict (MojoDict *);")
-    parts.append("static char * _mojo_generic_elem_repr (int64_t);")
-    parts.append("static char * _mojo_repr_pair (MojoList *);")
-    if repr_fwd_decls:
-        parts.append("/* Forward decls for generic repr() (mutual struct references) */")
-        parts.append("\n".join(repr_fwd_decls))
-        parts.append('')
-    if elem_repr_fwd_decls:
-        parts.append("/* Forward decls for the per-struct ELEMENT REPR shims "
-                     "(a container of structs) */")
-        parts.append("\n".join(elem_repr_fwd_decls))
-        parts.append("")
     if True:
         parts.append("/* Generic reflection dispatch (getattr/setattr/dataclasses.fields/is_dataclass) */")
         parts.extend(refl_parts)
@@ -1304,6 +1400,38 @@ def _own_class_field_index(fields, name) -> int:
         if _cfd is not None and _cfd[0] == name:
             _pick = _i
     return _pick
+
+
+def _ctor_param_evidence(gen, struct_name, param, xf_own) -> str:
+    """The literal-evidence ctype for `<struct>::<param>` of an UNANNOTATED
+    `__init__` parameter, or `''` when there is none.
+
+    One reader for the two tables that carry it, in the one precedence they
+    agree on — this module's own call sites
+    (`gen._ctor_lit_param_types`) first, an IMPORTING module's literal call
+    sites (`_xf_own_ctor_params`) second — because the two consumers have to
+    reach the SAME answer or the store and the declaration disagree:
+    `gen_module_impl`'s field pass types `self.f = f`'s FIELD from it, and the
+    struct-method signature loop types the PARAM from it. When the param was
+    left at the `int64_t` default in the signature while the field said
+    `double`, `B(2.5)` truncated the argument to 2 at the call and read back
+    as 2.0 (bugs/CODEGEN_literal_evidence_param_field_typed_but_signature_
+    not.md). Both halves must come from one function for that to stay fixed.
+
+    Module-level, not a closure in `gen_module_impl`: a nested closure here
+    emitted NOTHING once the self-hosted binary compiled the compiler (see
+    `_with_emit_exits`'s docstring for the same failure mode).
+    """
+    _key = _as_str(struct_name) + '::' + _as_str(param)
+    _own = getattr(gen, '_ctor_lit_param_types', None) or {}
+    _t = _own.get(_key)
+    if _t:
+        return _as_str(_t)
+    _xf = xf_own or {}
+    _t = _xf.get(_key)
+    if _t:
+        return _as_str(_t)
+    return ''
 
 
 def _gmi_collect_self_reads(_method_names: set, body, found: dict) -> None:
@@ -4169,6 +4297,12 @@ def gen_module_impl(self, stmts):
             _xfpct = self._xmod_ctor_field_hints[_xfk]
             if _xfpct:
                 _xf_own_ctor_params[_xfhs + '::' + _xfhp] = _xfpct
+    # Also on `self`, because the struct-method SIGNATURE loop below reads
+    # the same evidence and this local is out of scope by then. The field
+    # pass in between reads the local; both go through
+    # `_ctor_param_evidence`, which takes the table as an argument, so
+    # neither can quietly diverge from the other.
+    self._xf_own_ctor_params = _xf_own_ctor_params
     for s in all_struct_defs:
         s = _as_structdef_node(s)
         if isinstance(s, StructDef):
@@ -4568,11 +4702,16 @@ def gen_module_impl(self, stmts):
                                 pm[pname] = '_Bool'
                             else:
                                 pm[pname] = 'int64_t'
-                        elif (_as_str(method.name) == '__init__'
-                              and (_as_str(s.name) + '::' + pname) in self._ctor_lit_param_types):
-                            pm[pname] = self._ctor_lit_param_types[_as_str(s.name) + '::' + pname]
-                        elif (_as_str(method.name) == '__init__'
-                              and (_as_str(s.name) + '::' + pname) in _xf_own_ctor_params):
+                        # Literal evidence, from this module's own call
+                        # sites and from an IMPORTING module's (the same two
+                        # tables, one reader — `_ctor_param_evidence`, which
+                        # the struct-method SIGNATURE loop below also calls,
+                        # because a param typed here and left `int64_t` there
+                        # truncates the argument at the call: `B(2.5)` stored
+                        # the int 2 into a field declared `double` and read
+                        # back 2.0).
+                        elif _as_str(method.name) == '__init__' and _ctor_param_evidence(
+                                self, s.name, pname, _xf_own_ctor_params):
                             # The same evidence, one module away: a constructor
                             # called from an IMPORTING module with a literal
                             # argument of this type. It has to be consulted
@@ -4603,7 +4742,8 @@ def gen_module_impl(self, stmts):
                             # a module's own literal evidence still wins over
                             # another module's; and an explicit annotation beats
                             # both (the `if ptype:` arm above).
-                            pm[pname] = _xf_own_ctor_params[_as_str(s.name) + '::' + pname]
+                            pm[pname] = _ctor_param_evidence(
+                                self, s.name, pname, _xf_own_ctor_params)
                         else:
                             pm[pname] = 'int64_t'
                 new_fields = {}
@@ -6533,6 +6673,33 @@ def gen_module_impl(self, stmts):
                             if ptype is None:
                                 _mipt = self._inferred_param_types.get(
                                     method_full_name, {}).get(pname)
+                                if _mipt is None and _as_str(m.name) == '__init__':
+                                    # An unannotated `__init__` param with
+                                    # literal call-site evidence gets that
+                                    # evidence's ctype HERE — the signature —
+                                    # and not only in the field pass below,
+                                    # which reached the FIELD and left this
+                                    # param at `int64_t`. The two then
+                                    # disagreed, and the disagreement was the
+                                    # bug: `B(2.5)` stored the truncated
+                                    # integer 2 into a field declared `double`
+                                    # and printed 2.0 where CPython prints 2.5.
+                                    # `_ctor_param_evidence` is the same reader
+                                    # the field pass uses, in the same
+                                    # precedence, so an explicit annotation
+                                    # still wins over both (the `ptype is None`
+                                    # guard) and the two cannot drift.
+                                    # `emit_calls.py`'s constructor path reads
+                                    # THIS table to coerce each argument
+                                    # ("Coerce each argument to its declared
+                                    # `__init__` param C type"), so the
+                                    # coercion and the field declaration now
+                                    # agree by construction.
+                                    _mipt_ev = _ctor_param_evidence(
+                                        self, s.name, pname,
+                                        getattr(self, '_xf_own_ctor_params', None))
+                                    if _mipt_ev:
+                                        _mipt = _mipt_ev
                             param_ctypes.append(
                                 _mipt if _mipt is not None
                                 else self._param_ctype(pname, ptype, m))
@@ -8559,11 +8726,30 @@ def gen_module_impl(self, stmts):
             else:
                 return 'int64_t'
 
-    def _phase17_set_gtype(_gname: str, _ctype: str):
-        """Record a Phase 1.7 global-type conclusion into BOTH the
-        whole-program-shared dict and THIS instance's own overlay (see
-        `_own_global_var_types`/`_global_dst_ctype` for why the overlay
-        must exist alongside the shared dict).
+    def _phase17_set_gtype(_gname: str, _ctype: str, _own: bool = True):
+        """Record a Phase 1.7 global-type conclusion into the
+        whole-program-shared dict, and — only when the statement is THIS
+        module's own — into its own overlay too (see
+        `_own_global_var_types`/`_global_dst_ctype` for why the overlay must
+        exist alongside the shared dict).
+
+        The `_own` split is the same distinction the callers already draw for
+        `_global_to_module` three lines below each of these call sites, via
+        `id(stmt) in _phase17_own_ids` — this function's own docstring says
+        why `_phase17_stmts` deliberately includes `imported_stmts`: the
+        SHARED table has to be a superset so cross-module `mod.attr` reads
+        resolve. `_own_global_var_types` has no such cross-module purpose. It
+        is read by `_lower_IdentExpr` as the answer to "is this bare name
+        THIS module's own global", and an imported module's top-level
+        `STDLIB_PATH = ...` is emphatically not — writing it there made a
+        bare `STDLIB_PATH` in the importing module's body load
+        `_build_stdlib_dylib_globals.STDLIB_PATH`, a field that module never
+        declares ("'struct _build_stdlib_dylib_toplev' has no member named
+        'STDLIB_PATH'", one per read site, 26 distinct names across 15
+        modules of the self-host closure). The bare read
+        now routes such a name to its OWNER's field via
+        `_own_imported_global_home`, which this split is what lets it
+        distinguish from a same-named global this module never imported.
 
         `_gname: str` is load-bearing: without it the self-hosted compiler
         typed the param int64_t and `_own_global_var_types[_gname] = ...`
@@ -8571,9 +8757,10 @@ def gen_module_impl(self, stmts):
         and a `var counter: Int = 0` module global was declared `int` (the
         IntLiteral default) instead of `int64_t` (the annotation)."""
         self._global_var_types[_gname] = _ctype
-        self._own_global_var_types[_gname] = _ctype
+        if _own:
+            self._own_global_var_types[_gname] = _ctype
 
-    def _phase17_infer_global_type(_gname, _value):
+    def _phase17_infer_global_type(_gname, _value, _own: bool = True):
         """Infer & record a global's C type (self._global_var_types,
         plus element type for list/tuple literals) from its assigned
         RHS value. Factored out of the AssignStmt branch below so
@@ -8589,7 +8776,7 @@ def gen_module_impl(self, stmts):
         bugs/hard/CODEGEN_multi_assign_local_var_type_not_inferred.md
         (that doc covers the LOCAL-variable analogue of this same
         gap; this is the GLOBAL/module-scope sibling)."""
-        _phase17_set_gtype(_gname, _phase17_value_type(_value))
+        _phase17_set_gtype(_gname, _phase17_value_type(_value), _own)
         if isinstance(_value, (ListExpr, TupleExpr)) and _value.elements:
             _elt = self._quick_type(_value.elements[0])
             for _e in _value.elements[1:]:
@@ -8850,6 +9037,15 @@ def gen_module_impl(self, stmts):
         return out
 
     for _scan_stmt in _phase17_stmts:
+        # "_phase17_stmts" deliberately spans this module's OWN top-level
+        # statements AND every inline-compiled imported module's (the SHARED
+        # `_global_var_types` has to be a superset so cross-module `mod.attr`
+        # reads resolve at all). `_phase17_own_ids` is the boundary, and it
+        # gates BOTH things an "is this name MINE" question feeds: the
+        # `_global_to_module` claim (each branch below) and, since this
+        # commit, the `_own_global_var_types` overlay `_phase17_set_gtype`
+        # writes. Named once so the two can never drift apart again.
+        _scan_own = id(_scan_stmt) in _phase17_own_ids
         if isinstance(_scan_stmt, AssignStmt) and isinstance(_scan_stmt.target, IdentExpr):
             _gname = _scan_stmt.target.name
             if (isinstance(_scan_stmt.value, CallExpr)
@@ -8863,9 +9059,9 @@ def gen_module_impl(self, stmts):
             if _gname in _pre_declared_globals:
                 continue
             _pre_declared_globals.add(_gname)
-            if _gname not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
+            if _gname not in self._global_to_module and _scan_own:
                 self._global_to_module[_gname] = _phase17_mod
-            _phase17_infer_global_type(_gname, _scan_stmt.value)
+            _phase17_infer_global_type(_gname, _scan_stmt.value, _scan_own)
         elif isinstance(_scan_stmt, MultiAssignStmt):
             for _tgt in _scan_stmt.targets:
                 if not isinstance(_tgt, IdentExpr):
@@ -8874,31 +9070,31 @@ def gen_module_impl(self, stmts):
                 if _gname in _pre_declared_globals:
                     continue
                 _pre_declared_globals.add(_gname)
-                if _gname not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
+                if _gname not in self._global_to_module and _scan_own:
                     self._global_to_module[_gname] = _phase17_mod
-                _phase17_infer_global_type(_gname, _scan_stmt.value)
+                _phase17_infer_global_type(_gname, _scan_stmt.value, _scan_own)
         elif isinstance(_scan_stmt, VarDecl) and _scan_stmt.name not in _pre_declared_globals:
             _pre_declared_globals.add(_scan_stmt.name)
             if _scan_stmt.name not in self._global_to_module:
                 self._global_to_module[_scan_stmt.name] = _phase17_mod
             if _scan_stmt.type_ann:
                 _resolved = self._resolve_type(_scan_stmt.type_ann)
-                _phase17_set_gtype(_scan_stmt.name, _resolved)
+                _phase17_set_gtype(_scan_stmt.name, _resolved, _scan_own)
                 if _resolved in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                     self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
             else:
                 if hasattr(_scan_stmt, 'value') and _scan_stmt.value:
                     if isinstance(_scan_stmt.value, DictExpr):
-                        _phase17_set_gtype(_scan_stmt.name, 'MojoDict *')
+                        _phase17_set_gtype(_scan_stmt.name, 'MojoDict *', _scan_own)
                         self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
                     elif isinstance(_scan_stmt.value, (ListExpr, TupleExpr)):
-                        _phase17_set_gtype(_scan_stmt.name, 'MojoList *')
+                        _phase17_set_gtype(_scan_stmt.name, 'MojoList *', _scan_own)
                         self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
                     elif isinstance(_scan_stmt.value, SetExpr):
-                        _phase17_set_gtype(_scan_stmt.name, 'MojoSet *')
+                        _phase17_set_gtype(_scan_stmt.name, 'MojoSet *', _scan_own)
                         self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
                     elif isinstance(_scan_stmt.value, StringLiteral):
-                        _phase17_set_gtype(_scan_stmt.name, 'char *')
+                        _phase17_set_gtype(_scan_stmt.name, 'char *', _scan_own)
                     elif (isinstance(_scan_stmt.value, CallExpr)
                             and isinstance(_scan_stmt.value.func, IdentExpr)
                             and _scan_stmt.value.func.name in ('dict', 'Dict', 'list', 'List', 'set', 'Set', 'frozenset')):
@@ -8907,54 +9103,54 @@ def gen_module_impl(self, stmts):
                             'list': 'MojoList *', 'List': 'MojoList *',
                             'set': 'MojoSet *', 'Set': 'MojoSet *',
                             'frozenset': 'MojoSet *',
-                        }[_scan_stmt.value.func.name])
+                        }[_scan_stmt.value.func.name], _scan_own)
                         self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
                     elif isinstance(_scan_stmt.value, CallExpr):
                         if isinstance(_scan_stmt.value.func, IdentExpr):
                             ret = self.func_return_types.get(_scan_stmt.value.func.name, '')
                             if ret and ret.endswith(' *'):
-                                _phase17_set_gtype(_scan_stmt.name, ret)
+                                _phase17_set_gtype(_scan_stmt.name, ret, _scan_own)
                             elif ret == 'char *':
-                                _phase17_set_gtype(_scan_stmt.name, 'char *')
+                                _phase17_set_gtype(_scan_stmt.name, 'char *', _scan_own)
                             else:
-                                _phase17_set_gtype(_scan_stmt.name, 'int64_t')
+                                _phase17_set_gtype(_scan_stmt.name, 'int64_t', _scan_own)
                         elif (isinstance(_scan_stmt.value.func, MemberExpr)
                                 and _scan_stmt.value.func.member in ('read', 'readline')
                                 and not _scan_stmt.value.args):
-                            _phase17_set_gtype(_scan_stmt.name, 'char *')
+                            _phase17_set_gtype(_scan_stmt.name, 'char *', _scan_own)
                         elif (isinstance(_scan_stmt.value.func, MemberExpr)
                                 and _scan_stmt.value.func.member == 'readlines'):
-                            _phase17_set_gtype(_scan_stmt.name, 'MojoList *')
+                            _phase17_set_gtype(_scan_stmt.name, 'MojoList *', _scan_own)
                         else:
-                            _phase17_set_gtype(_scan_stmt.name, 'int64_t')
+                            _phase17_set_gtype(_scan_stmt.name, 'int64_t', _scan_own)
                     else:
                         qt = self._quick_type(_scan_stmt.value) or 'int64_t'
-                        _phase17_set_gtype(_scan_stmt.name, qt if (qt.endswith(' *') or qt == '_Bool') else 'int64_t')
+                        _phase17_set_gtype(_scan_stmt.name, qt if (qt.endswith(' *') or qt == '_Bool') else 'int64_t', _scan_own)
                 else:
-                    _phase17_set_gtype(_scan_stmt.name, 'int64_t')
+                    _phase17_set_gtype(_scan_stmt.name, 'int64_t', _scan_own)
         elif isinstance(_scan_stmt, TryStmt):
             for _gname, _gtype in _phase17_scan_try_branches(_scan_stmt).items():
                 if _gname in _pre_declared_globals:
                     continue
                 _pre_declared_globals.add(_gname)
-                if _gname not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
+                if _gname not in self._global_to_module and _scan_own:
                     self._global_to_module[_gname] = _phase17_mod
-                _phase17_set_gtype(_gname, _gtype)
+                _phase17_set_gtype(_gname, _gtype, _scan_own)
         elif isinstance(_scan_stmt, IfStmt):
             for _gname, _gtype in _phase17_scan_if_branches(_scan_stmt).items():
                 if _gname in _pre_declared_globals:
                     continue
                 _pre_declared_globals.add(_gname)
-                if _gname not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
+                if _gname not in self._global_to_module and _scan_own:
                     self._global_to_module[_gname] = _phase17_mod
-                _phase17_set_gtype(_gname, _gtype)
+                _phase17_set_gtype(_gname, _gtype, _scan_own)
         elif (isinstance(_scan_stmt, ComptimeVarStmt)
                 and isinstance(_scan_stmt.value, (ListExpr, TupleExpr))
                 and _scan_stmt.target not in _pre_declared_globals):
             _pre_declared_globals.add(_scan_stmt.target)
-            if _scan_stmt.target not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
+            if _scan_stmt.target not in self._global_to_module and _scan_own:
                 self._global_to_module[_scan_stmt.target] = _phase17_mod
-            _phase17_infer_global_type(_scan_stmt.target, _scan_stmt.value)
+            _phase17_infer_global_type(_scan_stmt.target, _scan_stmt.value, _scan_own)
 
     _phase17_append_hits: dict = {}
     _gmi_phase17_collect_appends(self, _phase17_stmts, _phase17_append_hits)
@@ -9075,6 +9271,18 @@ def gen_module_impl(self, stmts):
         self._global_c_decl_types[_rgname] = 'int64_t'
         _mgk.add(_rgname)
     self._multi_kind_globals = _mgk
+
+    # Which of THIS module's bare names are really another module's globals
+    # field. Placed HERE, after every writer of the two tables its answer is
+    # built from — the Phase 1.7 scan above is what populates
+    # `_global_to_module`/`_own_global_var_types`, and the multi-kind global
+    # join immediately above is the last writer of the overlay — and before
+    # the first function-body emission below, because the bare-name reads it
+    # fixes live in those bodies. `stmts`, NEVER the `imported_stmts`
+    # concatenation: the question is "did THIS module import it", and a
+    # sibling's own `from c import K` says nothing about what this module's
+    # `K` means.
+    _gmi_scan_imported_global_homes(self, stmts)
 
     func_parts: list[str] = []
 
@@ -9979,6 +10187,20 @@ def gen_module_impl(self, stmts):
         else:
             _argstr = 'void'
         parts.append(f'extern {_as_str(_eret)} {_ecname} ({_argstr});')
+
+    # Every declaration the reflection block's definitions need, BEFORE the
+    # imported modules' code goes in below. That code CALLS those helpers by
+    # name from its own function bodies, and C has no two-pass declarations,
+    # so a declaration emitted after the splice is an implicit declaration —
+    # gcc resolves it to `int`, the returned `char *` is truncated to 32
+    # bits, and the self-hosted compiler's own container-of-struct element
+    # reprs came out garbage (59 `'_mojo_elem_repr_<Struct>' undeclared`
+    # errors on this closure; see `_emit_reflection_fwd_decls`'s own
+    # docstring). The `struct_field_types` walk at the top of this function
+    # has already run, so `self._emitted_structs` — one of the three inputs
+    # to the reflect-struct set — is complete here.
+    if self.emit_struct_defs:
+        _emit_reflection_fwd_decls(self, parts)
 
     _module_globals_insert_idx = len(parts)
     if imported_code:

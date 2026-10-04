@@ -27,7 +27,7 @@ Two things this measurement DOES establish, both of them new:
 - **23 sibling modules are compiled (as soft fallbacks) before the kill**,
   and the last diagnostic is `glob.py` refusing on
   ``next(...) on next(IdentExpr) has no lowering`` — the `next()` refusal
-  just filed as `CODEGEN_itertools_filterfalse_has_no_lowering.md`, which
+  just filed as the `itertools.filterfalse`-has-no-lowering gap, which
   is a real blocker for `importlib/resources/readers.py`'s closure too. So
   there is a *known, filed, narrow* blocker in this closure as well as the
   memory one, and the memory one is reached first.

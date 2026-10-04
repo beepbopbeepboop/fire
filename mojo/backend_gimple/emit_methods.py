@@ -5903,10 +5903,36 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # sibling overload only has the bare key available at this point,
     # since the suffixed key is only set when THAT overload's own
     # definition is emitted, which may happen later in emission order.
+    # Is this method's BODY going to be emitted in this translation unit at
+    # all? `gen_module_impl`'s StructDef arm emits one body per method of
+    # every StructDef in the module's statements, and `_struct_method_names`
+    # is the registration of exactly those StructDefs' methods — populated at
+    # parse/registration time, so it is already answered for a transitively
+    # imported module by the time a ROOT-module call site asks, and SHARED
+    # with every nested temp_gen so a root call site sees a sibling's struct.
+    # The two `func_return_types` lookups below cannot: at the call site in
+    # `lm/main.py` neither `lm_helper_Thing_show` nor `Thing_show` is in it
+    # yet, because the module that defines the method is inlined into the same
+    # parts list LATER.
+    #
+    # Needed because the stub is a bare `int64_t f (...);` guarded by
+    # `_MOJO_STUB_<Struct>_<method>`, and that guard is DEFINED by the stub
+    # itself — so nothing can suppress it afterwards, and the real definition
+    # that follows is a hard "conflicting types for '<mangled>'; have
+    # 'int64_t(Thing *)'" on every one of its call sites. Measured in link
+    # mode over three modules (`lm/main.py` -> `lm/mid.py` -> `lm/helper.py`,
+    # `t = lm.mid.make(7); print(t.show())`): the root emitted
+    # `int64_t lm_helper_Thing_show (...);` and the inlined `lm/helper.py`
+    # emitted the real `int64_t __GIMPLE lm_helper_Thing_show (Thing * self)`.
+    # The struct-typedef pass's OWN guard is `_MOJO_STUB_<Struct>` (no method
+    # name), so it could never have suppressed this one.
+    _methods_here = (getattr(gen, '_struct_method_names', {}) or {}).get(
+        struct_name) or []
     if (mangled not in gen._KNOWN_SIGS
             and mangled not in gen.func_return_types
             and f'{struct_name}_{method}{_method_overload_suffix}' not in gen.func_return_types
             and f'{struct_name}_{method}' not in gen.func_return_types
+            and method not in _methods_here
             and mangled not in gen._auto_stubbed
             and mangled not in gimple_codegen._SELFHOST_HARDCODED_FUNCS
             and f'{struct_name}_{method}' not in gimple_codegen._SELFHOST_HARDCODED_FUNCS):

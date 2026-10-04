@@ -4273,8 +4273,8 @@ def _gen_stmt_TryStmt(gen, node):
 
 def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs):
     """Emit every `with`-item's teardown (`__exit__` call, generator
-    resume/destroy, or a placeholder comment), in reverse-independent
-    index order.
+    resume/destroy, or a placeholder comment), in REVERSE index order —
+    last acquired, first released.
 
     HOISTED out of `_gen_stmt_WithStmt` (was a nested closure reading the
     enclosing function's `_ctx_ts`/`_ctx_vs`/`_ctx_sns`/`_gctx_bases`/
@@ -4296,12 +4296,31 @@ def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs):
     nested-tuple `for` target has no self-hosted lowering (emits
     mojo_unsupported_iter, the loop ran zero times so `with` blocks
     never emitted their __exit__ / generator teardown in the compiled
-    compiler's own output)."""
+    compiler's own output).
+
+    The walk runs BACKWARDS because that is the order the items were
+    ACQUIRED in: `with A() as a, B():` calls `A.__enter__` then
+    `B.__enter__`, and Python releases them in the mirror of that —
+    `B.__exit__` then `A.__exit__` — which is the whole point of nesting,
+    since an inner context manager's teardown may depend on the outer
+    one's state still being live. This emitted forward, so a multi-item
+    `with` released the outer manager first (exit 6 / exit 7 where CPython
+    prints exit 7 / exit 6; see
+    so the OUTER one was released first). One walk,
+    five call sites — the normal tail, the `return`/loop-exit interceptor,
+    and the exception arm — so every exit route unwinds in the same order.
+
+    A generator item's teardown is its final `resume()` + `_destroy()`,
+    which IS its `__exit__`, so reversing moves that pair after the outer
+    items' `__exit__`s only when the generator was acquired first — the
+    same relative order the acquisition order gives, which is what CPython
+    does for `@contextlib.contextmanager` items too.
+    """
     # `_as_str` on every element read out of a plain (element-type-
     # untracked) list parameter — otherwise the str slot erases to
     # int64_t and `f"({sn})"` emitted the pointer's DECIMAL address
     # (`/* with: __exit__ (4376542048) */`) instead of `int64_t`.
-    for _xi in range(len(_ex_ts)):
+    for _xi in range(len(_ex_ts) - 1, -1, -1):
         ct = _as_str(_ex_ts[_xi])
         cv = _as_str(_ex_vs[_xi])
         sn = _as_str(_ex_sns[_xi])

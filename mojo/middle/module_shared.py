@@ -1493,6 +1493,95 @@ def _gmi_scan_try_imports(self, _phase17_mod, stmt_list):
             if isinstance(_s.else_body, list):
                 _gmi_scan_try_imports(self, _phase17_mod, _s.else_body)
 
+def _gmi_scan_imported_global_homes(self, stmt_list) -> None:
+    """Record every bare name THIS module's own top-level `from b import K`
+    binds, together with the module whose `_<mod>_globals` struct declares
+    the field, so a later BARE read of that name loads the OWNER's field
+    instead of this module's.
+
+    Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_comptime`'s
+    docstring — and runs after Phase 1.7 (which is what populates
+    `_global_to_module`/`_global_var_types`) but BEFORE any function body is
+    emitted, because the reads it fixes happen inside those bodies.
+
+    What was wrong without it: the bare-name global read in
+    `_lower_IdentExpr` loads `_<current module>_globals.NAME`, and for a
+    `from b import K` that struct has no such member — gcc's "'struct
+    _root_toplev' has no member named 'K'", one error per read site. The
+    self-host closure had 26 distinct such names in 15 modules. The qualified
+    `b.K` spelling of the same value never had the problem, because
+    `_lower_MemberExpr` resolves the field through the owning module's own
+    `_module_global_field_type(bound_module, member)` triple; this is the
+    bare-name half of that pair.
+
+    Two gates, and both are load-bearing rather than defensive:
+
+    * **The owner must be a DIFFERENT module.** `from <self> import K` (a
+      module importing a name out of itself) is this module's own global
+      and must keep loading its own field.
+    * **This module must not declare a global of that name ITSELF.** `from b
+      import N` followed by a module-level `N = 'a-side'` rebinds the name in
+      THIS module's namespace (Python semantics), so the bare `N` afterwards
+      is this module's field, not `b`'s. `_own_global_var_types` is the
+      right test for "this module declares it", and it is only a sound test
+      because `_phase17_set_gtype`'s own-scope split keeps imported
+      modules' names out of it — the two changes are one fix, not two.
+    * **`_module_global_field_type(owner, name)` must answer.** That is the
+      exact member list the owner's struct typedef, its initializer and its
+      `_<mod>_mojo_global_get_<name>` accessor are all generated from, so a
+      hit is proof the field EXISTS rather than a claim that it should. A
+      from-import of a name no inline-compiled module declares as a global
+      (a function — this is the value half, see
+      `_own_imported_global_home`'s own comment — a submodule, an unresolvable
+      stdlib) fails this and is left entirely alone, which is what keeps
+      every already-working from-import spelling byte-identical.
+
+    An ambiguous binding (two `from` statements in this module binding one
+    bare name to two different owners' fields) is DROPPED rather than
+    resolved by scan order, mirroring `_note_own_func_home`'s
+    `_AMBIGUOUS_FUNC_HOME` policy: there is no right answer to pick, and
+    leaving the read un-routed reproduces today's behaviour rather than a
+    coin flip.
+    """
+    homes = self._own_imported_global_home
+    fields = self._own_imported_global_field
+    this_mod = self.module_name if len(self.module_name) > 0 else "root"
+    for _ig in stmt_list:
+        if not isinstance(_ig, FromImportStmt):
+            continue
+        # `from b import *` binds names this scan never sees, so there is
+        # nothing per-name to record; the qualified `b.K` path is what
+        # handles it.
+        if getattr(_ig, 'wildcard', False):
+            continue
+        for _nm2 in (getattr(_ig, 'name_alias_strs', None) or []):
+            _iname = _as_str(gimple_ctypes._fi_name(_nm2))
+            _ialias = _as_str(gimple_ctypes._fi_alias(_nm2))
+            _local = _ialias if _ialias else _iname
+            if not _local:
+                continue
+            _iowner = getattr(self, '_global_to_module', {}).get(_iname)
+            if _iowner is None:
+                continue
+            _iowner_s = _as_str(_iowner)
+            if (not _iowner_s) or _iowner_s == this_mod:
+                continue
+            if _iname in self._own_global_var_types:
+                continue
+            if _local in homes:
+                # Two owners for one bare name: ambiguous, so record
+                # nothing (see the docstring).
+                if homes[_local] != _iowner_s:
+                    del homes[_local]
+                    if _local in fields:
+                        del fields[_local]
+                continue
+            if self._module_global_field_type(_iowner_s, _iname) is None:
+                continue
+            homes[_local] = _iowner_s
+            fields[_local] = _iname
+
+
 def _gmi_scan_cpp_nested_imports(self, stmt_list):
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring."""

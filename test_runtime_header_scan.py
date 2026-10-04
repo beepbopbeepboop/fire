@@ -339,13 +339,23 @@ def test_every_declaration_is_seen():
     # the point the ledger exists to record: bugs4-2 counted from its own
     # base's 543, so its `547` was right for its tree and wrong for this one.
     #
+    # 550 -> 552 (2026-10-02, `bugs4-3`): iterating a value whose container
+    # KIND is a runtime fact, decided by the runtime instead of by the
+    # codegen's guess. `mojo_iter_boxed_list` is the call the shared
+    # chokepoint's not-a-container arm makes (a boxed string becomes its
+    # characters, anything else raises `TypeError` rather than answering an
+    # empty list), and `mojo_str_chars` is `list(<a str>)`, split out
+    # because it is answerable without knowing anything about the value. Two,
+    # read off the call on the MERGED header -- bugs4-3 counted from its own
+    # base's 543 and wrote `545`, which was right for its tree and wrong here.
+    #
     # Every entry here is read off the CALL, never added up, and the count is
     # read off the merged header rather than being any one branch's total plus
     # its own new names: two branches that each added names did not each add
     # them to THIS header. That is the whole reason this list is a ledger and
     # not a formula -- a name in the header that no line accounts for is the
     # only way this count can go wrong silently.
-    for header, want in (('fire_runtime.h', 550),
+    for header, want in (('fire_runtime.h', 552),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

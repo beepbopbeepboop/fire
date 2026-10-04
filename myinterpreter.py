@@ -179,7 +179,8 @@ def _split_invoker(owner_interp, args) -> tuple:
 class MojoFunction:
     """Represents a function defined in Mojo code."""
     def __init__(self, name, params, body, closure_scope, comptime_params=None, param_defaults=None,
-                 is_generator=False, is_async=False, interpreter=None):
+                 is_generator=False, is_async=False, interpreter=None,
+                 comptime_param_defaults=None):
         self.name = name
         self.params = params
         self.body = body
@@ -192,6 +193,17 @@ class MojoFunction:
         # — bound by `__getitem__` when the call site subscripts the
         # function (`f[Int32](...)`, not passed as regular arguments.
         self.comptime_params = comptime_params or []
+        # Declared DEFAULTS for those parameters — `def f[T, y=0, *,
+        # linux=0]()`'s `y=0`/`linux=0`, kept by the parser in
+        # FunctionDef.comptime_param_defaults. Separate from `_pd` (which
+        # holds the RUNTIME parameters' defaults) because the two are
+        # consumed differently: `_pd` is looked up per parameter while
+        # binding call arguments and by `_trailing_default_at`'s positional
+        # offset arithmetic (`len(dflts)` is the count of defaulted RUNTIME
+        # slots), so a comptime default in there would shift every runtime
+        # default's offset. Read in `_invoke` below, next to the `_pd` read,
+        # so there is exactly one place a declared default is applied.
+        self.comptime_param_defaults = comptime_param_defaults or {}
         if param_defaults:
             self._pd = param_defaults
         # Milestone 2 of bugs/INTERP_generator_yield_entirely_unimplemented.md:
@@ -250,7 +262,12 @@ class MojoFunction:
         # would always find nothing and silently drop every default value,
         # which is exactly the bug this line fixed — see the LambdaExpr
         # handler, whose `lambda x=5: ...` defaults rely on it working).
+        # `self.comptime_param_defaults` is the same lookup for the
+        # parameter list in the BRACKETS (`def f[T, y=0, *, linux=0]()`),
+        # which is the only default source `f[T=Int]()` can have — the
+        # bracket supplies every other value.
         _pdl = getattr(self, '_pd', None)
+        _cpdl = getattr(self, 'comptime_param_defaults', None)
         for cp_name in self.comptime_params:
             if cp_name not in comptime_bindings:
                 _found = False
@@ -259,6 +276,9 @@ class MojoFunction:
                         if _k == cp_name:
                             func_scope.define(cp_name, interpreter.eval_expr(_v))
                             _found = True; break
+                if not _found and _cpdl is not None and cp_name in _cpdl:
+                    func_scope.define(cp_name, interpreter.eval_expr(_cpdl[cp_name]))
+                    _found = True
                 if not _found and cp_name not in func_scope.vars:
                     func_scope.define(cp_name, None)
 
@@ -1277,17 +1297,41 @@ class BoundMethod:
         self.interpreter = interpreter
 
     def __call__(self, *args, **kwargs):
+        return self._invoke_bound({}, args, kwargs)
+
+    def _invoke_bound(self, comptime_bindings, args, kwargs):
+        """Run the body with `comptime_bindings` pre-bound into the body
+        scope. Shared by the plain call (empty bindings) and by the
+        keyword-bracket call `obj.body[f_key=show_k]()`
+        (`_MojoBoundComptimeReceiver`), so the scope push, the `self`
+        binding and the receiver argument are written once — the bracket
+        call used to go through `__getitem__`, which answered the receiver
+        itself and DROPPED every bracketed argument."""
         f = self.bound_func
         old_scope = self.interpreter.scope
         self.interpreter.scope = Scope(parent=self.interpreter.scope)
         self.interpreter.scope.define('self', self.instance)
         try:
-            return f(self.interpreter, self.instance, *args, **kwargs)
+            interp, rest = _split_invoker(f._interp, (self.instance,) + tuple(args))
+            return f._invoke(interp, comptime_bindings, rest, kwargs)
         finally:
             self.interpreter.scope = old_scope
 
     def __getitem__(self, key):
         return self
+
+
+class _MojoBoundComptimeReceiver:
+    """A receiver-bound method with its comptime parameters pre-bound —
+    `obj.body[f_key=show_k]()`, the shape `Dict.mojo`/`counter.mojo` use.
+    Holds the receiver and defers to its `_invoke_bound`, so calling one is
+    the same operation as calling the receiver itself, plus the bindings."""
+    def __init__(self, receiver, comptime_bindings):
+        self.receiver = receiver
+        self.comptime_bindings = comptime_bindings
+
+    def __call__(self, *args, **kwargs):
+        return self.receiver._invoke_bound(self.comptime_bindings, args, kwargs)
 
 
 class BoundClassMethod:
@@ -1317,12 +1361,18 @@ class BoundClassMethod:
         self.interpreter = interpreter
 
     def __call__(self, *args, **kwargs):
+        return self._invoke_bound({}, args, kwargs)
+
+    def _invoke_bound(self, comptime_bindings, args, kwargs):
+        """The `BoundMethod` counterpart — see its docstring; identical, with
+        `cls` and the class as the receiver."""
         f = self.bound_func
         old_scope = self.interpreter.scope
         self.interpreter.scope = Scope(parent=self.interpreter.scope)
         self.interpreter.scope.define('cls', self.cls)
         try:
-            return f(self.interpreter, self.cls, *args, **kwargs)
+            interp, rest = _split_invoker(f._interp, (self.cls,) + tuple(args))
+            return f._invoke(interp, comptime_bindings, rest, kwargs)
         finally:
             self.interpreter.scope = old_scope
 
@@ -3537,9 +3587,11 @@ class Interpreter:
         comptime_params = getattr(node, 'comptime_params', None)
         _pd = getattr(node, 'param_defaults', None)
         _pdv = list(_pd.items()) if _pd else None
+        _cpd = getattr(node, 'comptime_param_defaults', None)
         func = MojoFunction(node.name, params, node.body, self.scope, comptime_params, param_defaults=_pdv,
                              is_generator=getattr(node, 'is_generator', False),
-                             is_async=getattr(node, 'is_async', False), interpreter=self)
+                             is_async=getattr(node, 'is_async', False), interpreter=self,
+                             comptime_param_defaults=_cpd)
         spec = self._classify_params(node)
         bound = self._register_function(self.scope.vars, node.name, func, spec)
         # The rebinding a decorator IS: the decorated value replaces the
@@ -3687,9 +3739,11 @@ class Interpreter:
             comptime_params = getattr(m, 'comptime_params', None)
             _pd = getattr(m, 'param_defaults', None)
             _pdl = list(_pd.items()) if _pd else None
+            _cpd = getattr(m, 'comptime_param_defaults', None)
             method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl,
-                                        is_generator=getattr(m, 'is_generator', False),
-                                        is_async=getattr(m, 'is_async', False), interpreter=self)
+                                       is_generator=getattr(m, 'is_generator', False),
+                                       is_async=getattr(m, 'is_async', False), interpreter=self,
+                                       comptime_param_defaults=_cpd)
             spec = self._classify_params(m)
             if m.name in from_base:
                 from_base.discard(m.name)
@@ -3788,9 +3842,11 @@ class Interpreter:
                 comptime_params = getattr(m, 'comptime_params', None)
                 _pd = getattr(m, 'param_defaults', None)
                 _pdl = list(_pd.items()) if _pd else None
+                _cpd = getattr(m, 'comptime_param_defaults', None)
                 method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl,
-                                        is_generator=getattr(m, 'is_generator', False),
-                                        is_async=getattr(m, 'is_async', False), interpreter=self)
+                                           is_generator=getattr(m, 'is_generator', False),
+                                           is_async=getattr(m, 'is_async', False), interpreter=self,
+                                           comptime_param_defaults=_cpd)
                 spec = self._classify_params(m)
                 self._register_function(methods, m.name, method_func, spec)
         cls = MojoClass(node.name, [], methods, self)
@@ -5451,12 +5507,91 @@ class Interpreter:
     def eval_SubscriptExpr(self, expr: N.SubscriptExpr):
         """Evaluate subscript access."""
         obj = self.eval_expr(expr.obj)
+        # A KEYWORD bracket (`f[T=Int, y=5]`, `platform_map[T=Int, "O_APPEND",
+        # linux=0x400]()`) keeps its elements in `attrs` as (name, value)
+        # pairs and leaves `index` as the empty-subscript placeholder
+        # IntLiteral(0) — see fire_compiler.py's "keyword-style bracket"
+        # branch. Indexing that placeholder is not a subscript at all: it
+        # bound the callee's FIRST comptime parameter to 0 and dropped every
+        # bracketed argument, so `f[T=Int, y=5]()` returned a value computed
+        # from `y`'s default (and `f[T=Int]` raised `NameError: T` from the
+        # key `T` being evaluated in the enclosing scope). Bind the
+        # comptime parameters instead — the same model
+        # mojo/backend_gimple/emit_calls.py's `_kw_bracket`/`elems` split
+        # uses for the compiled path, so both engines answer alike.
+        _attrs = getattr(expr, 'attrs', None)
+        if _attrs:
+            _bound = self._bind_bracket_comptime(obj, _attrs, expr)
+            if _bound is not None:
+                return _bound
         idx = self.eval_expr(expr.index)
         if not hasattr(obj, '__getitem__'):
             if hasattr(obj, '__call__'):
                 return obj
             raise TypeError(f"{type(obj).__name__} object is not subscriptable")
         return obj[idx]
+
+    def _bind_bracket_comptime(self, obj, attrs, node):
+        """`f[...]` with keyword-bracket `attrs`: bind `obj`'s declared
+        comptime parameters and return the callable, or None when `obj` has
+        no comptime parameter list to bind (the caller then keeps its own
+        subscript path — a bound method reached as `obj.m[k=v](...)` is
+        handled by `BoundMethod.__getitem__`, which answers the callable
+        itself).
+
+        The two bracket spellings are read exactly as the parser produced
+        them and as emit_calls.py reads them: a `(None, value)` pair is
+        POSITIONAL (the parser's spelling for a literal or a call in the
+        bracket — `f[T=Int, "O_APPEND"]`), a bare `name = value` pair binds
+        that parameter BY NAME, and a bare NAME with no `=` (which the
+        parser keeps under its own name) binds by name too. Positionals fill
+        the remaining parameters in declaration order, which is what makes
+        `platform_map[T=Int, "O_APPEND", linux=..., macos=...]()` —
+        `operation` sitting between two keyword parameters — land on
+        `operation`.
+
+        A parameter with neither a supplied value nor a declared default is
+        an honest TypeError naming it, not a silent None: the bracket is
+        the ONLY place its value can come from.
+
+        `obj` is the callee VALUE, so it is also a method receiver
+        (`obj.body[f_key=show_k]()`); its declared parameters live on
+        `bound_func` there, and the bound value it produces is one that
+        keeps the receiver.
+        """
+        decl = obj
+        if not getattr(decl, 'comptime_params', None):
+            decl = getattr(obj, 'bound_func', None)
+        cps = getattr(decl, 'comptime_params', None)
+        if not cps:
+            return None
+        kws = {}
+        poss = []
+        for pair in attrs:
+            nm = pair[0]
+            if nm is None:
+                poss.append(pair[1])
+            else:
+                kws[nm] = pair[1]
+        dflts = getattr(decl, 'comptime_param_defaults', None) or {}
+        bindings = {}
+        pos_i = 0
+        for cp in cps:
+            given = None
+            if cp in kws:
+                given = kws[cp]
+            elif pos_i < len(poss):
+                given = poss[pos_i]
+                pos_i += 1
+            if given is not None:
+                bindings[cp] = self.eval_expr(given)
+            elif cp not in dflts:
+                raise TypeError(
+                    f"{self._loc(node)}comptime parameter '{cp}' is neither "
+                    f"given in the bracket nor has a default")
+        if decl is not obj:
+            return _MojoBoundComptimeReceiver(obj, bindings)
+        return _MojoBoundComptimeFunction(obj, bindings)
 
     def eval_SliceExpr(self, expr: N.SliceExpr):
         """Evaluate slice expression."""

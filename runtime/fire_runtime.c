@@ -8078,6 +8078,68 @@ void mojo_raise_index_error(char *detail) {
     mojo_raise();
 }
 
+/* `list(<a str>)`: one fresh 1-character string per BYTE, which is the
+ * element type Python's own `for c in s` loop binds (a one-character
+ * string, not a character code) and what `_gen_for_str` already builds with
+ * mojo_strlen + mojo_cstr_slice. Split out of `mojo_iter_boxed_list` because
+ * it is answerable without knowing anything about the value — `list(s)` on a
+ * statically-typed `char *` reaches this directly. */
+MojoList *mojo_str_chars(char *s)
+{
+    MojoList *l = mojo_list_new();
+    if (!s) return l;
+    size_t n = strlen(s);
+    for (size_t i = 0; i < n; i++)
+        mojo_list_append_str(l, mojo_cstr_slice(s, (int64_t)i, (int64_t)(i + 1)));
+    return l;
+}
+
+
+/* Iterating a value whose container KIND is a runtime fact — the runtime
+ * half of `_materialize_as_list`'s ambiguous arm
+ * (mojo/backend_gimple/emit_infra.py). The caller has already established
+ * that `v` is not a registered list, dict or set; two answers remain, and
+ * they are opposite in kind, which is why they cannot be one lookup.
+ *
+ * 1. A boxed STRING. Python iterates a str CHARACTER BY CHARACTER, so
+ *    `','.join(<boxed str>)`, `all(<boxed str>)` and `list(<boxed str>)` are
+ *    all legal and all have real answers. This arm used to answer an EMPTY
+ *    list for them — a silent wrong answer, since the join then printed
+ *    nothing at all — and refusing here instead would be a lie of the other
+ *    kind ("not iterable" for a type that is iterable). Byte-wise, matching
+ *    the string-iteration loop the codegen already emits
+ *    (`_gen_for_str`: mojo_strlen + mojo_cstr_slice per byte), so the two
+ *    spellings of the same iteration cannot disagree.
+ * 2. Anything else. A plain int, a bool, None, a function pointer, a struct
+ *    type tag: every shape that reaches an iterable-typed slot in this
+ *    dynamic model. This used to answer an empty list as well, and THAT is
+ *    the silent wrong answer worth removing — `list(5)` printed `[]`, so a
+ *    program's loop body never ran and nothing said so, with exit 0. (Before
+ *    the arm was made fail-closed at all it was a SIGSEGV, reading a length
+ *    out of whatever address it was handed.) Raising is what this runtime
+ *    already does for every other bad receiver (`mojo_require_mutable_list`
+ *    and the typed raisers above), and it reaches the program the way a
+ *    Python exception does: "Unhandled exception: TypeError: ..." on stderr
+ *    and exit 1.
+ *
+ * CPython names the offending TYPE ("'int' object is not iterable") and this
+ * cannot: the model has a registry per container kind plus
+ * `mojo_boxed_is_str`, but nothing that tells an int from a bool from None
+ * from a function pointer, so any name would be a guess. The message states
+ * the fact instead, which is the same rule the rest of this file follows
+ * where the model has nothing to say.
+ *
+ * The empty list after the raise is unreachable (`mojo_raise_type_error`
+ * longjmps, or exits when nothing is enclosing) and exists only because the
+ * generated branch must have a value of the right C type. */
+MojoList *mojo_iter_boxed_list(int64_t v)
+{
+    if (mojo_boxed_is_str(v))
+        return mojo_str_chars((char *)(intptr_t)v);
+    mojo_raise_type_error((char *)"object is not iterable");
+    return mojo_list_new();
+}
+
 /* The two ways a tuple refuses to be mutated, as CPython words them. Both
  * share mojo_require_mutable_list's typed-exception mechanism and the same
  * hardcoded-tag derivation as the four raisers above; they live here rather

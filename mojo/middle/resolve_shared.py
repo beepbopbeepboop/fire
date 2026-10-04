@@ -135,6 +135,37 @@ def _quick_type(gen, node) -> str:
         _ci = gen._closure_info_for_ident(node.name)
         if _ci is not None:
             return 'MojoBoundMethod *' if _ci.env_struct else 'void *'
+        # A MODULE-LEVEL global, read by bare name. `var_types` holds only
+        # locals and parameters, so a name that is not one fell to the
+        # int64_t default even though the global's own SEMANTIC type is
+        # recorded — and a global holding a STRUCT is the one value class
+        # that cannot recover: the C field is a boxed `int64_t` holding the
+        # pointer, and there is no runtime type tag on a struct-allocated
+        # value for the container walkers to dispatch on. Measured:
+        #
+        #     class P: ... def __repr__(self): return "R<" + self.x + ">"
+        #     p = P("a")
+        #     print(repr([p]))      # CPython [R<a>] / compiled [4345469360]
+        #
+        # `repr(p)` alone was already right, which is what makes this a
+        # `_quick_type` gap rather than a repr bug: the list literal's
+        # element type comes from `_infer_list_elem_type`, which asks
+        # `_quick_type` per element.
+        #
+        # `_own_global_var_types` and NOT the shared `_global_var_types`, and
+        # the distinction is measured rather than stylistic. The shared table
+        # is a whole-transitive-tree superset (it has to be, for cross-module
+        # `mod.attr`), so answering from it makes `_quick_type` describe a
+        # SIBLING's global — and two errors appear on the self-host closure
+        # that are absent with the own overlay: `assignment to 'char *' from
+        # 'int64_t'` in `resolve_shared.py` and `invalid conversion in gimple
+        # call` in `gimple_codegen.py`, because the answer is a semantic
+        # pointer type while the value on the C level is a boxed `int64_t`.
+        # The own overlay is the same "is this bare name MINE" answer
+        # `_lower_IdentExpr` asks before it picks a field to load, so the two
+        # agree by construction.
+        if node.name in getattr(gen, '_own_global_var_types', {}):
+            return _as_str(gen._own_global_var_types[node.name])
         return 'int64_t'
     if (isinstance(node, gimple_ctypes.SubscriptExpr)
             and isinstance(node.obj, gimple_ctypes.IdentExpr)):
@@ -345,6 +376,21 @@ def _quick_type(gen, node) -> str:
                 and len(node.args) == 1 and not getattr(node, 'kwargs', None)
                 and gen._quick_type(node.args[0]) == 'char *'):
             return 'char *'
+        # A call through a local bound to a LAMBDA, which is never
+        # materialized when it is created and called in the same statement
+        # list: the body is inlined and its real (ctype, expr) survives to
+        # the use site, so the ESTIMATOR has to say the same thing or the
+        # enclosing function's signature truncates it (`def g(): q = 2.5; fn
+        # = lambda: q * 2; return fn()` inferred `int64_t` and printed 5
+        # where CPython prints 5.0; a `char *` body printed its address).
+        # Populated by `infra_infer._lambda_call_ret_locals` for the body
+        # under inference — the emission-time `_callable_ret_types` is too
+        # late, since the forward declaration has already been written from
+        # this answer. See
+        # bugs/CODEGEN_lambda_call_boundary_loses_the_return_type.md.
+        _lrt = (getattr(gen, '_lambda_call_ret_types', None) or {}).get(fname)
+        if _lrt:
+            return _as_str(_lrt)
         return gen.func_return_types.get(fname, 'int64_t')
     if isinstance(node, gimple_ctypes.CallExpr) and isinstance(node.func, gimple_ctypes.MemberExpr):
         # A receiver this codegen KNOWS is a registered user struct resolves

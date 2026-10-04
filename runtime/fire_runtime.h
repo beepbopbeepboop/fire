@@ -607,6 +607,19 @@ int mojo_boxed_is_str(int64_t v);
 int mojo_is_registered_dict(int64_t addr);
 /* Set-shaped sibling of the list/dict registries — see mojo_set_new. */
 int mojo_is_registered_set(int64_t addr);
+/* `list(<a str>)`: one fresh 1-character string per byte — the element type
+ * Python's own `for c in s` binds, and what the codegen's string loop
+ * (emit_loops.py's `_gen_for_str`) builds with mojo_strlen +
+ * mojo_cstr_slice. Byte-wise because that loop is; a code-point-wise split
+ * would make the two spellings of the same iteration disagree. */
+MojoList *mojo_str_chars(char *s);
+/* The MojoList* view of a value whose container KIND is a runtime fact, for
+ * a caller that has already ruled out the three registered container kinds:
+ * a boxed STRING becomes its characters, and anything else raises
+ * `TypeError: object is not iterable` (it used to become an empty list, so
+ * `list(5)` printed `[]` and a loop body silently never ran). CPython names
+ * the offending type here and this cannot — see the definition. */
+MojoList *mojo_iter_boxed_list(int64_t v);
 /* `x in <boxed container>`: resolves list/dict/set at runtime instead of
  * the old hardcoded-false fallback. See mojo_in_dispatch_str's definition. */
 int mojo_in_dispatch_str(int64_t container, char *needle);

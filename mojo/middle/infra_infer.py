@@ -1696,6 +1696,29 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
             # until this case was added; the container literals below
             # already had an identical fix.
             cand = 'MojoBytes *' if n.value.is_bytes else 'char *'
+        elif isinstance(n.value, gimple_ctypes.FloatLiteral):
+            # A `double` local, which is the ONE scalar this map used to
+            # have no answer for at all — the docstring above calls scalars
+            # "not included, they are what the int64_t default is for" — and
+            # the int64_t default is a TRUNCATION for this one, not a box.
+            # Nothing downstream can recover it: `(int64_t)5.0` is `5`, and
+            # no table can tell that from a genuine 5, so a `double` that
+            # crosses an inference boundary loses its type with no recovery
+            # path, unlike every pointer-shaped value here (which `_to_int64`
+            # can re-derive through `_actual_types`).
+            #
+            # Measured shape (`def g(): q = 2.5; fn = lambda: q * 2; return
+            # fn()` prints `5` where CPython prints `5.0`): `q` read as
+            # int64_t, `q * 2` joined to int64_t, nothing recorded.
+            #
+            # Only `FloatLiteral` — the one RHS that is unambiguous evidence
+            # of `double` with no inference in between. A `double` from a
+            # call, an annotated `VarDecl`, or an arithmetic expression is
+            # NOT added, for the reason the docstring gives for every other
+            # exclusion: each would be a second, independently-drifting
+            # inference, and the conflict rule below is already the
+            # conservative answer for a name rebound to two kinds.
+            cand = 'double'
         else:
             t = _container_literal_ctype(n.value)
             if t:
@@ -1841,6 +1864,66 @@ def _dict_value_locals(gen, body: list) -> dict:
     return out
 
 
+def _lambda_call_ret_locals(gen, body: list) -> dict:
+    """`{local name: ctype}` for every local in `body` bound to a LAMBDA,
+    naming what CALLING it produces.
+
+    A lambda created and called in the same statement list is never
+    materialized: `_lower_LambdaExpr` records it in `gen._inlined_lambdas`
+    and `_lower_inlined_lambda_call` emits its body straight into the
+    enclosing function, so the call's own value is the body's real
+    (ctype, expr) pair. The enclosing function's RETURN type was a
+    different question, asked earlier and answered from the AST alone, and
+    there a call through a lambda-bound local is an unknown callee — so it
+    inferred `int64_t` and the correctly-typed inlined value was truncated
+    on the way out:
+
+        def g():
+            q = 2.5
+            fn = lambda: q * 2
+            return fn()          # int64_t g(void) — 5.0 became 5
+
+    The same loss for a `char *` body, which prints as the pointer's own
+    decimal. Only the RETURN boundary loses it: `fn = lambda: q * 2` then
+    `print(fn)` is unaffected, because that path materializes the lambda.
+
+    So the table answers one question — the ctype of `name(...)` for a
+    lambda-bound `name` — and `resolve_shared._quick_type`'s call case
+    consults it for that question only. It is NOT `_callable_ret_types`
+    (the runtime table the MATERIALIZED path uses): that one is keyed by
+    lowered VALUE as well as by name and is populated during emission,
+    which is too late for a signature the forward declaration has already
+    been written from. Keeping the two apart is also what stops an
+    emission-time entry from leaking into unrelated inference.
+
+    Only a body whose type is NOT the `int64_t` default is recorded, since
+    a recorded `int64_t` would say nothing the fallback does not already
+    say; and a name rebound to a different shape keeps its FIRST lambda,
+    matching `_declare_var`'s first-decl-wins rule.
+    """
+    out: dict = {}
+
+    def note(n):
+        if not isinstance(n, gimple_ctypes.AssignStmt):
+            return
+        t = n.target
+        if not isinstance(t, gimple_ctypes.IdentExpr):
+            return
+        name = _as_str(t.name)
+        if name in out:
+            return                       # first binding wins
+        lam = n.value
+        if not isinstance(lam, gimple_ctypes.LambdaExpr):
+            return
+        bt = gen._quick_type(lam.body)
+        if bt and bt != 'int64_t':
+            out[name] = bt
+
+    for n in _each_binding(body):
+        note(n)
+    return out
+
+
 def _infer_return_type_with_locals(gen, body: list) -> str:
     """`_infer_return_type`, but with the body's own pointer-valued locals
     visible to it (see `_prebound_local_ctypes`).
@@ -1875,8 +1958,12 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     fire for anything else."""
     _locals = _prebound_local_ctypes(gen, body)
     _dict_vals = _dict_value_locals(gen, body)
-    if not _locals and not _dict_vals:
-        return _infer_return_type_core(gen, body)
+    # No early-out on "all three empty" here, because `_lambda_call_ret_locals`
+    # is the one overlay that has to be computed INSIDE the window below: it
+    # asks `_quick_type` about the lambda's own body, so it has to see this
+    # body's locals (`fn = lambda: s` types `fn` by what `s` is, and `s` is
+    # only in `var_types` because of the `_prebound_local_ctypes` overlay
+    # above).
     _saved = gen.var_types
     _scratch_mark_ml: int = gen._scan_scratch_top
     _merged: dict = gen._scratch_dict_copy(_saved)
@@ -1896,12 +1983,23 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
         if _n not in _merged_dv:
             _merged_dv[_n] = _t
     gen._dict_val_types = _merged_dv
+    # Third table, same window: what CALLING a lambda-bound local produces
+    # (`_lambda_call_ret_locals`). Additive for the same reason — a name
+    # already carrying a real return type keeps it.
+    _lambda_rets = _lambda_call_ret_locals(gen, body)
+    _saved_lr = getattr(gen, '_lambda_call_ret_types', None)
+    _merged_lr: dict = gen._scratch_dict_copy(_saved_lr if _saved_lr else {})
+    for _n, _t in _lambda_rets.items():
+        if _n not in _merged_lr:
+            _merged_lr[_n] = _t
+    gen._lambda_call_ret_types = _merged_lr
     try:
         return _infer_return_type_core(gen, body)
     finally:
         gen.var_types = _saved
         gen._scan_scratch_top = _scratch_mark_ml
         gen._dict_val_types = _saved_dv
+        gen._lambda_call_ret_types = _saved_lr
 
 
 def _infer_return_type(gen, body: list) -> str:

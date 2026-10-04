@@ -233,6 +233,92 @@ def main():
 ''',
 }
 
+# Shapes CPython CANNOT EXPRESS, so the corpus above cannot hold them: a
+# bracketed parameter list is Mojo syntax, and `python3 prog.py` is a
+# SyntaxError on it. Each program below is run through the interpreter
+# ALONE and asserted against its declared semantics (`main()` is still
+# appended by the runner, so the programs define it and do not call it).
+#
+# These are the interpreter's own regressions — bugs/CODEGEN_interpreter_
+# evaluates_a_keyword_bracket_call_as_a_subscript.md being the one that
+# added the table. The compiled path is deliberately NOT asserted on the
+# same programs: it drops a bracketed call to a function with no RUNTIME
+# parameters to a literal 0 on every pipeline
+# (bugs/CODEGEN_bracket_call_to_a_runtime_paramless_function_is_a_zero.md),
+# so a two-engine diff here would be pinning the wrong answer on one side.
+#
+# name -> (source, expected stdout).
+INTERPRETER_ONLY = {
+    # A keyword bracket is a CALL's parameter binding, not a subscript. The
+    # parser keeps `f[T=Int, y=5]`'s elements in SubscriptExpr.attrs and
+    # leaves `index` as the empty-subscript placeholder IntLiteral(0), and
+    # the interpreter used to evaluate that placeholder — binding the
+    # callee's FIRST comptime parameter to 0 and dropping the rest, so this
+    # printed 0 instead of 5.
+    "keyword_bracket_binds_comptime_params_by_name": ('''\
+def f[T, y=0, *, linux=0]():
+    return y
+
+def main():
+    print(f[T=Int, y=5]())
+''', '5\n'),
+    # A parameter the bracket does not supply comes from its DECLARED
+    # default (`y=0`), which is why the same program answers 0 rather than
+    # None here. Both the keyword and the bare-positional spellings.
+    "comptime_param_default_applies_when_the_bracket_omits_it": ('''\
+def f[T, y=0, *, linux=0]():
+    return y
+
+def main():
+    print(f[T=Int]())
+    print(f[3, 9]())
+''', '0\n9\n'),
+    # A bracket that MIXES a keyword and a positional element, with the
+    # positional parameter sitting BETWEEN the two keywords: `std/sys/
+    # info.mojo`'s platform_map, whose flags std/io/file.mojo ORs into the
+    # open(2) call.
+    "mixed_keyword_and_positional_bracket_fills_in_order": ('''\
+def platform_map[T: DType, operation, *, linux=0, macos=0]():
+    print(operation, linux, macos)
+
+def main():
+    platform_map[T=Int, "O_APPEND", linux=1024, macos=8]()
+''', 'O_APPEND 1024 8\n'),
+    # The same binding on a METHOD, where the receiver has to survive it —
+    # `Dict.mojo`/`counter.mojo`'s `self.body[f_key=show_k]()`. The bracket
+    # used to answer the bound method itself (`BoundMethod.__getitem__`),
+    # so every bracketed argument was dropped and the body's `f_key` was
+    # None.
+    "method_keyword_bracket_binds_comptime_params": ('''\
+def show(k):
+    print("show", k)
+
+class P:
+    def __init__(self, k):
+        self.k = k
+
+    def body[f_key](self):
+        f_key(self.k)
+
+    def go(self):
+        self.body[f_key=show]()
+
+def main():
+    P(3).go()
+''', 'show 3\n'),
+    # An unbindable comptime parameter is an honest error naming it. The
+    # bracket is the only place such a parameter's value can come from, so
+    # binding None (which is what an unbindable one used to do) is a wrong
+    # answer rather than a default.
+    "unbindable_comptime_parameter_is_refused_by_name": ('''\
+def h[T, U]():
+    return 1
+
+def main():
+    print(h[T=Int]())
+''', 'TypeError'),
+}
+
 
 def _run(argv, cwd):
     try:
@@ -274,6 +360,36 @@ def check(name, source):
     return True, 'stdout + exit identical to CPython'
 
 
+def check_interp_only(name, source, want):
+    """Run one CPython-impossible program through the interpreter alone and
+    require `want` to appear in its combined stdout+stderr, with either a
+    zero exit (a value) or a non-zero one (the named refusal). `want` is a
+    substring rather than the whole stream because the refusal case's
+    traceback text is not this file's to pin."""
+    with tempfile.TemporaryDirectory(prefix='mojo_oracle_') as wd:
+        body = textwrap.dedent(source)
+        if not body.rstrip().endswith('main()'):
+            body = body + '\nmain()\n'
+        path = os.path.join(wd, 'prog.py')
+        with open(path, 'w') as f:
+            f.write(body)
+        out, rc, err = _run([sys.executable, MOJO, 'run', path], HERE)
+    if out is None:
+        return False, 'interpreter timed out'
+    both = out + (err or '')
+    if want.startswith('TypeError'):
+        if rc == 0:
+            return False, f'expected a refusal, got exit 0 printing {out!r}'
+        if want not in both:
+            return False, f'expected {want!r} in the output, got {both.strip()[-300:]!r}'
+        return True, f'refused with {want} (exit {rc})'
+    if rc != 0:
+        return False, f'exited {rc}: {(err or "").strip()[-300:]}'
+    if want not in out:
+        return False, f'expected {want!r} in stdout, got {out!r}'
+    return True, f'stdout contains {want!r}'
+
+
 def main():
     print('=' * 68)
     print('INTERPRETER ORACLE — myinterpreter vs CPython')
@@ -281,6 +397,17 @@ def main():
     npass = nfail = 0
     for name, source in CORPUS.items():
         ok, detail = check(name, textwrap.dedent(source))
+        print(f'{"PASS" if ok else "FAIL"}  {name}: {detail}')
+        if ok:
+            npass += 1
+        else:
+            nfail += 1
+    print()
+    print('-' * 68)
+    print('INTERPRETER ONLY — shapes CPython cannot express (no diff available)')
+    print('-' * 68)
+    for name, (source, want) in INTERPRETER_ONLY.items():
+        ok, detail = check_interp_only(name, source, want)
         print(f'{"PASS" if ok else "FAIL"}  {name}: {detail}')
         if ok:
             npass += 1

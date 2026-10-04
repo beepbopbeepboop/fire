@@ -892,7 +892,73 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
     return ok
 
 
+def test_transitive_struct_method_is_not_variadic_stubbed() -> bool:
+    """A struct method reached from a TRANSITIVELY imported module must not
+    be auto-stubbed as a bare `int64_t f (...)`.
+
+    The auto-stub's guard (`_MOJO_STUB_<Struct>_<method>`) is DEFINED by the
+    stub itself, so nothing can suppress it afterwards — and the real
+    definition that follows it, emitted by the module that actually owns the
+    struct, is then a hard compile failure rather than a wrong answer:
+
+        error: conflicting types for 'lm_helper_Thing_show';
+               have 'int64_t(Thing *)'
+
+    Two properties of the fixture are load-bearing and neither is incidental:
+
+    * the struct is defined THREE modules deep, so the root's call site is
+      lowered before the defining module is inlined into the same
+      translation unit — which is why neither `func_return_types` lookup in
+      the auto-stub's condition could have answered "this method WILL be
+      defined here", and why the answer had to come from
+      `_struct_method_names` instead;
+    * the METHOD is a non-dunder one. A dunder goes through a different
+      mangling path (`lm_helper_Thing___init__`) and was already fine, so a
+      `__init__`-only fixture would have proved nothing about the defect.
+
+    `_build_and_run` raises out of `driver.compile_program` on a gcc failure
+    (it does not catch `CalledProcessError`), and `main()` turns that into a
+    FAIL for this case — so before the fix this row failed at the COMPILE,
+    not on an answer.
+    """
+    pkg = {
+        'lm/__init__.py': '',
+        'lm/helper.py': (
+            'class Thing:\n'
+            '    def __init__(self, value):\n'
+            '        self.value = value\n'
+            '\n'
+            '    def show(self):\n'
+            '        return self.value\n'
+        ),
+        'lm/mid.py': (
+            'from lm.helper import Thing\n'
+            '\n'
+            'def make(n):\n'
+            '    return Thing(n)\n'
+        ),
+        'lm/main.py': (
+            'import lm.mid\n'
+            '\n'
+            'def main():\n'
+            '    t = lm.mid.make(7)\n'
+            '    print(t.show())\n'
+            '\n'
+            'main()\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'lm/main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'lm/main.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout == '7\n')
+    if not ok:
+        print(f"  ✗ transitive_struct_method_is_not_variadic_stubbed: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
 CASES = [
+    test_transitive_struct_method_is_not_variadic_stubbed,
     test_bare_submodule_import_value_read,
     test_bare_submodule_import_call,
     test_bare_submodule_import_call_inside_source_tree,

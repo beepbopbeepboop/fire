@@ -947,6 +947,23 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             bb = gmp._coerce_to_bytes(gen, bt, bv)
             return 'char *', gen._call_expr('char *', 'mojo_bytes_hex', [('MojoBytes *', bb)])
 
+    # `itertools.filterfalse(f, xs)` — the QUALIFIED spelling, which is the
+    # one `Lib/importlib/resources/_common.py:105` uses. Placed with the
+    # other module-member call shapes above (`bytes.fromhex`,
+    # `collections.Counter`) because it is the same kind of thing: a member of
+    # an imported module object that this codegen models itself rather than
+    # routing to `_lower_method_call`, which would treat the module as a
+    # receiver value.
+    if (isinstance(node.func, gimple_ctypes.MemberExpr)
+            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+            and node.func.obj.name == 'itertools'
+            and node.func.member == 'filterfalse'
+            and not gen._locally_binds_name('itertools')
+            and 'filterfalse' not in gen.func_return_types
+            and 'filterfalse' not in getattr(gen, '_imported_func_home', ())
+            and 'filterfalse' not in getattr(gen, '_own_imported_func_home', ())):
+        return _lower_itertools_filterfalse(gen, node)
+
     if isinstance(node.func, gimple_ctypes.MemberExpr):
         return gen._lower_method_call(node)
     # Subscripted method call: obj.method[TypeParam](...) — unwrap type param and route as method call.
@@ -1903,6 +1920,17 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if fname_raw == 'map':
             return _lower_builtin_map(gen, node)
         return _lower_builtin_filter(gen, node)
+    # `filterfalse(f, xs)` spelled BARE, after `from itertools import
+    # filterfalse` — the same gate as `map`/`filter` above, which is also
+    # what keeps a real compiled `filterfalse` (a Mojo `itertools` module in
+    # the closure registers its own functions' home modules in those tables)
+    # the winner instead of this lowering.
+    if (fname_raw == 'filterfalse' and len(node.args) == 2
+            and not gen._locally_binds_name('filterfalse')
+            and 'filterfalse' not in gen.func_return_types
+            and 'filterfalse' not in getattr(gen, '_imported_func_home', ())
+            and 'filterfalse' not in getattr(gen, '_own_imported_func_home', ())):
+        return _lower_itertools_filterfalse(gen, node)
     if (fname_raw == 'reversed' and len(node.args) == 1
             and not gen._locally_binds_name('reversed')
             and 'reversed' not in gen.func_return_types
@@ -3252,8 +3280,9 @@ def _lower_builtin_all_any(gen, fname_raw: str, node: gimple_ctypes.CallExpr) ->
         # because the representation is not a MojoList.
         bf = 'mojo_bytes_all' if fname_raw == 'all' else 'mojo_bytes_any'
         gen._emit_call('int', t, bf, [('MojoBytes *', av)])
-    elif at == 'MojoList *' or at == 'MojoDict *' or at == 'MojoSet *' \
-            or (at.endswith(' *') and at != 'char *'):
+    elif (at == 'MojoList *' or at == 'MojoDict *' or at == 'MojoSet *'
+          or at in ('int64_t', 'int', '_Bool', 'char *', 'MojoStr *')
+          or at.endswith(' *')):
         # DESIGN.html R1/R5: dict/set materialization (all(d)/any(s) over a
         # dict's keys / a set's elements, not a reinterpret of the header —
         # see bugs/CODEGEN_all_any_dict_set_miscompile.md) shares
@@ -3261,6 +3290,26 @@ def _lower_builtin_all_any(gen, fname_raw: str, node: gimple_ctypes.CallExpr) ->
         # shlex.join(); a genuinely-unknown boxed handle is now also
         # runtime-guarded (mojo_is_registered_dict/_set) there instead of
         # blindly assuming list.
+        #
+        # An `int64_t`/`int`/`_Bool` ARGUMENT belongs here too, and used to
+        # take the stub arm below: `all(5)` printed `True` and `any(7)`
+        # printed `False`, both with exit 0, where CPython raises
+        # `TypeError: 'int' object is not iterable`. A statically-typed
+        # scalar has no container to find, but it can still BE a boxed
+        # handle (`all(ident(some_list))` — an unannotated parameter), and
+        # the registry probes answer that case correctly where the stub
+        # answered `True` without looking at the value at all. So this arm is
+        # strictly more correct on both counts, and `_materialize_as_list`'s
+        # not-a-container arm is what raises (see
+        # so a program's loop body is silently skipped, exit 0).
+        #
+        # A `char *` was excluded from this arm only because the
+        # materialization could not answer it — a string IS iterable, so the
+        # exclusion kept the raise off one. What it kept instead was the stub,
+        # and the stub never looks at the value: `any("ab")` printed `False`
+        # where CPython prints `True` (`all("")` was right by the stub's own
+        # accident). Now the string becomes its characters and both answers
+        # are read off the real thing.
         lv = gen._materialize_as_list(at, av)
         gen._emit_call('int', t, runtime_fn, [('MojoList *', lv)])
     else:
@@ -3310,11 +3359,19 @@ def _callable_return_elem_type(gen, fn_expr) -> str:
 
 
 def _build_per_element_list(gen, fn_expr, it_val: str, elem: str | None,
-                            only_truthy: bool = False,
+                            keep: str = 'map',
                             var_prefix: str = '_fcall_elem'):
-    """New MojoList holding `fn_expr(<element>)` for each element of `it_val`
-    — the shared body of `map(f, xs)` (only_truthy=False), `filter(f, xs)`
-    (only_truthy=True) and `sorted(xs, key=f)`'s key list.
+    """New MojoList built by applying `fn_expr` to each element of `it_val`,
+    selected by `keep`:
+
+    * `'map'` — append `fn_expr(<element>)` itself (`map(f, xs)`);
+    * `'truthy'` — append the INPUT element when `fn_expr(<element>)` is
+      truthy (`filter(f, xs)`);
+    * `'falsy'` — append the INPUT element when `fn_expr(<element>)` is
+      FALSY (`itertools.filterfalse(f, xs)`).
+
+    The shared body of `map`, `filter`, `itertools.filterfalse` and
+    `sorted(xs, key=f)`'s key list.
 
     The runtime CANNOT do this itself: `mojo_map`/`mojo_filter` are identity
     stubs (fire_runtime.c) because a `char *` function pointer cannot call
@@ -3326,9 +3383,13 @@ def _build_per_element_list(gen, fn_expr, it_val: str, elem: str | None,
 
     `elem` is the input list's element type; it decides how the loop variable
     is read (and typed), so a container element stays a `MojoList *` and a
-    lambda key can index it. `only_truthy` filters on the call's result, which
-    is how `filter`'s predicate is applied.
+    lambda key can index it. The predicate is applied on the call's RESULT,
+    and the two filtering modes differ only in which branch of that verdict
+    appends — and both append the INPUT element, never the verdict: appending
+    the verdict (as `'map'` does with its result) made
+    `filter(lambda v: v > 1, [1, 2, 3])` produce `[1, 1]`.
     """
+    _keeps_element = keep in ('truthy', 'falsy')
     # Unique per call: `_declare_var` is first-decl-wins, so two `map`/`filter`
     # calls in one function would otherwise share the first one's element type
     # and emit a conflicting-types error.
@@ -3379,17 +3440,17 @@ def _build_per_element_list(gen, fn_expr, it_val: str, elem: str | None,
                 gen.var_types.pop(_pn, None)
             else:
                 gen.var_types[_pn] = _old_t
-    if only_truthy:
-        # filter's predicate: append only when the call's result is truthy.
+    if _keeps_element:
+        # The predicate's verdict selects the element; `'falsy'` is
+        # `itertools.filterfalse`, which keeps exactly the elements whose
+        # verdict is FALSE, so its yes-branch is the negated test.
         bb_yes = gen._new_bb(); bb_no = gen._new_bb()
-        _t = gen._new_val('_Bool', f'({kret_v}) != 0')
+        if keep == 'falsy':
+            _t = gen._new_val('_Bool', f'({kret_v}) == 0')
+        else:
+            _t = gen._new_val('_Bool', f'({kret_v}) != 0')
         gen._emit(f"  if ({_t}) goto {bb_yes}; else goto {bb_no};")
         gen._emit_label(bb_yes)
-    if only_truthy:
-        # filter keeps the INPUT's element — the call's result is only the
-        # predicate verdict. Appending the verdict instead (as map does with
-        # its result) made `filter(lambda v: v > 1, [1, 2, 3])` produce
-        # `[1, 1]`: two truthy verdicts, both the value 1.
         if _kelem_t == 'double':
             gen._void_call('mojo_list_append_double',
                            [('MojoList *', res), ('double', gen._cname(_kvar))])
@@ -3444,16 +3505,46 @@ def _lower_builtin_filter(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     the elements whose predicate call is truthy. The result holds the INPUT's
     elements, so its element type is the input's.
     """
+    return _lower_predicate_filter(gen, node, keep='truthy', what='filter')
+
+
+def _lower_itertools_filterfalse(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """`itertools.filterfalse(f, xs)` as a value: `filter` with the verdict
+    INVERTED, which is the whole difference between the two.
+
+    Reaching this at all was the bug: `filterfalse` had no lowering, so its
+    result was an unmodelled handle of unknown type, and the `next(...)` over
+    it in `Lib/importlib/resources/_common.py:105` had no honest answer and
+    the module fell back to source. Built the same way as `filter` (see
+    `_build_per_element_list`'s `'falsy'`), so the result is a real
+    `MojoList *` and every consumer of a filtered list keeps working.
+
+    Deliberately NOT the same as `filter`: CPython's `filterfalse` keeps the
+    elements whose predicate is FALSE, so a lowering that reused the truthy
+    branch would return the complement of the answer — a plausible wrong
+    value rather than a refusal, which is the worse outcome.
+    """
+    return _lower_predicate_filter(gen, node, keep='falsy',
+                                   what='itertools.filterfalse')
+
+
+def _lower_predicate_filter(gen, node: gimple_ctypes.CallExpr, keep: str,
+                            what: str) -> tuple[str, str]:
+    """`filter(f, xs)` / `itertools.filterfalse(f, xs)` — one body, `keep`
+    selecting which predicate verdicts append the input element. The result
+    holds the INPUT's elements, so its element type is the input's, which is
+    what makes `next(iter(...))` and a `for` loop over it read the right
+    kind."""
     if len(node.args) != 2:
         raise RuntimeError(
-            f"filter() with {len(node.args)} iterables is not supported yet "
-            f"(only filter(f, xs))")
+            f"{what}() with {len(node.args)} iterables is not supported yet "
+            f"(only {what}(f, xs))")
     fn_expr = node.args[0]
     at, av = gen.lower_expr(node.args[1])
     if at != 'MojoList *':
         av = gen._materialize_as_list(at, av)
     elem = gen._elem_of(av)
-    res = _build_per_element_list(gen, fn_expr, av, elem, only_truthy=True,
+    res = _build_per_element_list(gen, fn_expr, av, elem, keep=keep,
                                   var_prefix='_filter_elem')
     if elem and elem != 'int64_t':
         gen._elem_types[res] = elem
