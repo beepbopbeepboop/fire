@@ -26,8 +26,8 @@ is invisible here**, so a mix deleted from the corpus must be deleted with its
 reason in the tool's own docstring, and a construct added must show up in a
 sweep. The five mixes in §2's "new" block were each added because the backend had
 newly learned the construct and nothing could see it; the nine in §2.1 were each
-added because the CORPUS could not produce a construct at all, and two of them
-found a defect the day they were written (§3.4, §3.5).
+added because the CORPUS could not produce a construct at all, and three of them
+found a defect the day they were written (§3.4, §3.5, §3.6).
 
 ## 2. Sweeps
 
@@ -37,9 +37,11 @@ file: **0.1 GB** (`tools/memslot.py --gb 4`), so none of it is within an order o
 magnitude of the 3-4 GB line.
 
 **4032 programs over 13 sweeps.** Two bugs fixed, two limits filed, and four
-defects in the tool itself. §2.1 adds **4200 programs over 32 more sweeps**,
-two more fixes and one more tool defect, so the whole file is **8232 programs
-over 45 sweeps: four backend fixes, three limits filed, six tool defects.**
+defects in the tool itself. §2.1 adds **5100 programs over 41 more sweeps**,
+THREE more fixes and two more tool defects, so the whole file is **9132 programs
+over 54 sweeps: five backend fixes, four limits filed, seven tool defects** —
+and the last eleven rows of §2.1 are the OLD mixes on fresh seed ranges, which
+is what says the fixes did not cost the corpus anything it already had.
 
 | date | mix | seed | indexes | programs | tally | what came of it |
 |---|---|---|---|---|---|---|
@@ -59,18 +61,20 @@ over 45 sweeps: four backend fixes, three limits filed, six tool defects.**
 
 ### 2.1 The fuzz-3 sweep (2026-10-03, seed `sweep19c`)
 
-**4200 programs over 32 sweeps, and every mix in the table is a mix this
-session ADDED** — the corpus could not produce a loop's `else` arm, a closure, a
+**5100 programs over 41 sweeps.** The first eleven rows are the nine mixes this
+session ADDED — the corpus could not produce a loop's `else` arm, a closure, a
 default or keyword argument, a list slice, a tuple unpack, a word-boundary
 integer, a comparison chain as a value, a `try`/`finally`, or an interpolated
-string literal. Nine new mixes, each PROBED ON BOTH ARCHITECTURES before it was
-written down, because a mix that measures a refusal is a mix that spends its
-budget re-deriving `FORMAL_known_limits.md`.
+string literal — and each was PROBED ON BOTH ARCHITECTURES before it was written
+down, because a mix that measures a refusal is a mix that spends its budget
+re-deriving `FORMAL_known_limits.md`. The last eleven rows are the SEVEN
+PRE-EXISTING mixes on fresh seed ranges, which is the other half of the result:
+three fixes did not cost the corpus anything it already had.
 
 `-j 4` (the earlier rows used `-j 2`), both backends, `tools/memslot.py --gb 8`.
 Peak memory: **0.2 GB**. Cost: **0.7–2.8 programs/second** except `fstrings`,
 which is 17/s because every program is a refusal that never reaches the image.
-A sweep row is one `(mix, range, options)` triple, so the 32 rows below are 32
+A sweep row is one `(mix, range, options)` triple, so the 41 rows below are 41
 runs and the "sweeps" this file counts are rows — the earlier table's 13 are the
 same thing.
 
@@ -120,6 +124,15 @@ same indexes give different programs.
 | 2026-10-03 | `strfmt` | `sweep19c` | 7400-7499, `--stmts 30 50` (re-run after §4.6) | 100 | 100 match | nothing |
 | 2026-10-03 | `closures` | `sweep19c` | 7500-7599 (captured-container corpus) | 100 | 100 match | nothing |
 | 2026-10-03 | `slicing` | `sweep19c` | 7500-7599 (negative-bound corpus) | 100 | 100 match | nothing |
+| 2026-10-03 | `unpack` | `sweep19c` | 7600-7699 | 100 | 100 match | nothing — after §3.6's fix |
+| 2026-10-03 | `unpack` | `sweep19c` | 7700-7799 (dict-unpack corpus, first version) | 100 | 79 match, 21 `generator-error` | the corpus drew the SAME dict key twice — §4.5's last paragraph |
+| 2026-10-03 | `unpack` | `sweep19c` | 7700-7799 (re-run, corpus fixed) | 100 | 100 match | nothing |
+| 2026-10-03 | `containers` | `sweep19c` | 7800-7899 | 100 | 100 match | nothing |
+| 2026-10-03 | `lists` | `sweep19c` | 7800-7899 | 100 | 100 match | nothing |
+| 2026-10-03 | `strings` | `sweep19c` | 7800-7899, `--max-min-steps 30` | 100 | 21 match, 52 `KNOWN:str_subscript`, 27 `MISMATCH-X86` | **all 27 are classes §3.3 and §4.4 already name** — §4.7 |
+| 2026-10-03 | `strmeth` | `sweep19c` | 7800-7899 | 100 | 100 match | nothing |
+| 2026-10-03 | `generics` | `sweep19c` | 7800-7899 | 100 | 100 match | nothing |
+| 2026-10-03 | `globals` | `sweep19c` | 7800-7899 | 100 | 100 match | nothing |
 
 The three `--stmts 30 50` rows are a different AXIS rather than more of the same:
 x86-64 has fifteen usable general registers, so a function with twenty live
@@ -147,11 +160,12 @@ reduction that attribution then neutralises anyway.
 
 ## 3. Findings
 
-Three, in the order they were found. Each is a SILENT wrong answer or a
+Six, in the order they were found. Each is a SILENT wrong answer or a
 one-sided refusal — not a crash, not a diagnostic — because that is the class
-this tool exists for and the class every other suite here misses. §3.4 and §3.5
-are the fuzz-3 sweep's two, and each was found by a family the corpus could not
-produce at all.
+this tool exists for and the class every other suite here misses. §3.4, §3.5 and
+§3.6 are the fuzz-3 sweep's three, and each was found by a construct the corpus
+could not produce at all: two of them by probing it before a family was written
+around it, one by probing a shape that family did not reach.
 
 ### 3.1 A walk over a dict read `k0, v0, k1`, and a membership test's bound was its own needle
 
@@ -311,7 +325,55 @@ test is the value's PREFIX, and an ordinary string whose TEXT starts with `f"` o
 prints `f"n"`, and the formal path now refuses. The fix belongs in the parser —
 a flag beside `is_raw`, set where the placeholder is built from the RAW token.
 
-## 4. Five defects in the TOOL, all found by using it
+### 3.6 `k, v = d` bound a key and then a VALUE, and printed an address for the first
+
+**Found:** by hand, while probing the shapes a tuple unpack's right-hand side can
+be once the basic one was fixed. **Not** by a sweep, and this is the part worth
+recording: the corpus cannot produce it either, because `unpack`'s right-hand side
+is a tuple LITERAL — so the sequence was probe, fix, add the family, sweep.
+**Fixed:** `bf554772`.
+**Pinned:** `test_formal_value_model.py`'s `tuple_store_from_a_dict_binds_keys`,
+which needs BOTH halves to pass.
+
+```mojo
+d = {"a": 1, "b": 2}
+k, v = d
+print(k)     # CPython: a
+print(v)     # CPython: b
+```
+
+| | CPython | arm64 (before) | x86-64 (before) |
+|---|---|---|---|
+| `print(k)` | `a` | `4373316948` | `4309468543` |
+| `print(v)` | `b` | `1` | `1` |
+
+Two architectures, two DIFFERENT addresses for the same key, and `v` holding the
+first value — so this was a wrong answer on both machines *and* a divergence
+between them, all at exit 0. Three parts, and any one alone still leaves a wrong
+answer:
+
+1. **the stride.** Both emitters' blob unpack read element `i` at
+   `8 + 8*i`. A dict is `[npairs][k0][v0][k1][v1]…`, so it must be
+   `8 + 16*i` — `M.walk_stride`'s question, the one `for k in d` already asked and
+   the one `walk_stride` was written for (§3.1). The count check was already
+   right, because a dict's count field holds its pair count, which is why only the
+   loads moved.
+2. **the kind.** `ValueKinds._unpacked_element_kind` reads
+   `_iterable_dict_key_kind` — the same reader a dict walk's target uses — so the
+   targets classify as the strings they are and `print` has a conversion to
+   choose. Gating that on `is_dict_value` does **not** work, and the measurement
+   is the interesting part: that reader works from `_dict_names`, which a plain
+   `d = {…}` assignment never reaches, so the arm never ran and `len(k)` still
+   said "classified as 'int'". A gate that cannot be true is worse than none.
+3. **the conservative direction.** A name pre-bound to an integer (`k = 0`) and
+   then bound to a dict key is a flow-insensitive CONFLICT, and it now says so —
+   `print() cannot tell whether IdentExpr is a string or a number`, where it used
+   to print an address. A refusal, and the right one: the corpus's own preamble
+   discipline (every local declared with the value CPython would not have) puts
+   exactly that shape on the path, which is why the generator declares a dict
+   unpack's targets as STRINGS.
+
+## 4. Six defects in the TOOL, all found by using it
 
 None is a backend bug. Between them they cost more time than the backend bugs
 did, and each one made the tool report LESS than it should.
@@ -434,6 +496,16 @@ first 80 `loopelse` programs failed to compile); and a `return` inside `main`'s
 body truncates the program there, so the `try_finally_return` arm moved into a
 helper — dead code on both engines measures nothing.
 
+**And a third, from the dict-unpack family (§3.6): a dict literal with a
+DUPLICATE key.** `rng.choice` drew `""` twice for the two keys in 21 of 100
+programs; a dict with one pair then fails a 2-element unpack in the ORACLE
+("not enough values to unpack"), so 21 of the sweep's programs were
+`generator-error` — the corpus measuring itself. `rng.sample` over the non-empty
+words cannot collide with itself, and the preamble copy carries the same two
+keys for the reason every other preamble copy does: a walk that reaches the blob
+before the statement that fills it reads the pair COUNT first, and a count that
+differs between the two copies is a different program.
+
 ### 4.6 A `TIMEOUT` was reported about the SCHEDULER
 
 The sixth defect, and the only one in this file that is about the harness rather
@@ -461,6 +533,37 @@ a finding — it is now a statement about the program. The same re-run argument
 would apply to a BUILD timeout, and does not yet: a build that exceeds 120 s is
 expensive enough to be worth believing, which is the only reason it is spelled
 one way and not the other.
+
+### 4.7 The `strings` mix at scale: 27 `MISMATCH` out of 100, and every one is a class this file already names
+
+The first sweep here at the `strings` mix's own scale (100 programs, seed
+`sweep19c` 7800-7899, `--max-min-steps 30`): **52 `KNOWN:str_subscript`, 27
+`MISMATCH-X86`, 21 `match`.** Characterised by reading all 27 reproducers:
+
+| how many | what the reproducer is | which section |
+|---|---|---|
+| 21 | a `def` whose body the MINIMISER stripped of its `return`, so `print(helper(...))` is the no-`return` bug | §3.3 — filed, deliberately not in `KNOWN_DIVERGENCES` |
+| 6 | the `str_subscript` divergence itself, in a spelling the neutraliser cannot take apart | §3.1's row, and §4.4's attribution limit |
+
+**No new backend bug is in there, and the fact that 27 rows had to be read by
+hand to establish that is the finding.** Both classes are known and both are
+properties of the ATTRIBUTION, not of the backends:
+
+* the no-`return` class is reachable only through the minimiser (§3.3 says so
+  and measured it), which is also why it has no `KNOWN_DIVERGENCES` row — a row
+  the corpus cannot trigger is a row that has stopped measuring, and this is the
+  proof: the minimiser triggers it constantly and `blame` has no way to name it;
+* the six are the known byte-vs-character divergence in a reduced program where
+  the neutraliser's precondition (the `print(<name>[<literal>])` spelling with the
+  name bound by its own literal statement) no longer holds, so a REAL known bug
+  is reported as unexplained. One extra report rather than one hidden bug is the
+  documented direction to err in (§ "What the blame cannot do").
+
+The cheap improvement is a second marker on the no-`return` shape — the corpus
+can produce it by emitting a helper whose body ends without a `return`, which is
+exactly what the minimiser discovered — but that is a change to what the corpus
+measures, so it belongs in a session whose claim is the corpus rather than one
+commit at the end of another.
 
 ## 5. What the corpus still cannot say, and what it costs to run
 

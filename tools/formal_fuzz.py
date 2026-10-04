@@ -758,8 +758,9 @@ MIXES = {
                  ("if", 3), ("print", 3), ("augassign", 2)),
     "slicing": (("slice_read", 7), ("slice_step", 3), ("list_build", 3),
                 ("list_len", 2), ("assign", 2), ("if", 3), ("print", 2)),
-    "unpack": (("unpack_bind", 7), ("tuple_build", 3), ("list_build", 2),
-               ("tuple_read", 2), ("assign", 2), ("if", 3), ("print", 3)),
+    "unpack": (("unpack_bind", 6), ("unpack_dict", 4), ("tuple_build", 3),
+               ("list_build", 2), ("tuple_read", 2), ("assign", 2), ("if", 3),
+               ("print", 3)),
     "bignum": (("big_int", 7), ("big_shift", 3), ("assign", 2), ("cmp", 3),
                ("if", 3), ("print", 3), ("augassign", 2)),
     "chains": (("chain_cmp", 7), ("assign", 2), ("cmp", 3), ("if", 3),
@@ -1072,7 +1073,8 @@ class Gen:
             "loop_else", "loop_nested", "closure_def", "closure_call",
             "try_finally", "try_finally_loop", "try_finally_return",
             "arg_define", "arg_call", "slice_read", "slice_step",
-            "unpack_bind", "big_int", "big_shift", "chain_cmp", "str_interp")
+            "unpack_bind", "unpack_dict", "big_int", "big_shift", "chain_cmp",
+            "str_interp")
         if budget <= 0 and kind in ("if", "while", "for", "call",
                                     "nested_call", "recursion",
                                     "list_in_loop", "dict_iter",
@@ -1178,6 +1180,8 @@ class Gen:
             self.slice_stmt(indent, kind)
         elif kind == "unpack_bind":
             self.unpack_stmt(indent)
+        elif kind == "unpack_dict":
+            self.unpack_dict_stmt(indent)
         elif kind in ("big_int", "big_shift"):
             self.bignum_stmt(indent, kind)
         elif kind == "chain_cmp":
@@ -2509,6 +2513,49 @@ class Gen:
         # the wrong name still changes the sum.
         self.emit(indent, "print(" + " + ".join(
             f"({nm} * {i + 1})" for i, nm in enumerate(names)) + ")")
+
+    def unpack_dict_stmt(self, indent):
+        """`k, v = d` — a DICT on the right, which binds its KEYS.
+
+        The half of the element-kind family that is a different lowering rather
+        than a different value: a dict is a PAIR blob, so the unpack steps by
+        the pair where every other container steps by the element
+        (`model.walk_stride`), and the targets hold the KEYS rather than one
+        element each. It was found by hand and fixed — `formal/model.py`'s
+        `_unpacked_element_kind` and both emitters' blob unpack — and it is here
+        so a regression is a `MISMATCH` instead of a silent answer again.
+
+        **The two targets are declared as STRINGS in the preamble**, which is not
+        tidiness: the value scan is flow-INsensitive and a name two statements
+        bind two ways is a conflict that claims nothing, so `k = 0` followed by
+        `k, v = d` (where `k` is a key) is refused by `print` — correctly, and
+        for a program the model genuinely cannot classify. Declaring them as the
+        kind they will hold is what makes this family a DIFFERENTIAL TEST rather
+        than a refusal census, and it is why the keys are string literals: an
+        integer-keyed dict makes the same two names integers and needs the same
+        declaration.
+        """
+        # Two DISTINCT non-empty keys, and the distinctness is measured rather
+        # than assumed: `rng.choice` drew `""` twice in 21 of the first 100
+        # programs, a dict literal with a duplicate key has ONE pair, and the
+        # 2-element unpack then fails in the ORACLE with "not enough values to
+        # unpack" — 21 `generator-error`s in a sweep, which is a corpus bug and
+        # not a finding about anything. `sample` from the non-empty words cannot
+        # collide with itself, and `""` is out because it is a key no reader
+        # distinguishes.
+        keys = self.rng.sample([w for w in STRINGS if w] or ["ab"], 2)
+        items = ", ".join(f'"{w}": {self.rng.randint(0, 40)}' for w in keys)
+        dname = self.fresh("D")
+        # The preamble copy carries the SAME two keys, for the reason every other
+        # preamble copy in this generator does: the corpus reads a blob before
+        # the statement that fills it on some paths, and a dict's pair count is
+        # what a walk and an unpack both read first.
+        self.declare(dname, '{"%s": 0, "%s": 0}' % (keys[0], keys[1]))
+        self.emit(indent, f"{dname} = {{{items}}}")
+        targets = [self.declare(self.fresh("k"), '""') for _ in range(2)]
+        self.strings.extend(targets)
+        self.emit(indent, f"{', '.join(targets)} = {dname}")
+        self.emit(indent, f"print({targets[0]}, len({targets[1]}))")
 
     # ── word-boundary integers, under the operations that agree on them ──
     #
