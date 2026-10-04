@@ -1,14 +1,13 @@
 # `MojoExpr.call` carries ONE argument, so a call with two arguments has no faithful AST and `eval_eq_mojo` is false
 
-**Area:** FORMAL (the proof layer's AST bridge). **Status: OPEN, and RE-MEASURED
-twice: 2026-10-03 for the minimal reproduction below (now STALE — the program
-builds, runs and omits the AST bridge with an accurate one-line reason instead of
-emitting a false theorem, so what is left is a PROVABILITY gap, not a soundness
-one), and 2026-10-04 for step 1's ROUTE, which is now MEASURED rather than
-listed — see "Status: step 1's route is measured" below. Route 1 works, route 3
-is dead for a reason this file had wrong, and the pinned test is
-`test_formal_eval_eq_mojo_bridge.py::TestTheNestedExprRoutes` (0.9 s, three Lean
-files, no library).** Found 2026-10-02 while wiring the SysV stack-argument
+**Area:** FORMAL (the proof layer's AST bridge). **Status: OPEN, and CLOSER than
+this file's own "step 2 is still the fix" says: step 2 is DONE for every callee
+of arity one, measured on 2026-10-04, and what is left is exactly the
+`MojoExpr.call` widening this file is named for.** Re-measured twice: 2026-10-03
+for the minimal reproduction (stale — the program builds, runs and omits the AST
+bridge with an accurate one-line reason), and 2026-10-04 for step 1's route
+(measured) and for **step 2** (landed — see §"Status: step 2 is done for a
+callee of arity one"). Found 2026-10-02 while wiring the SysV stack-argument
 convention's proof half.
 
 ## Status: the reproduction is stale (2026-10-03)
@@ -152,6 +151,76 @@ this file's closing paragraph gives.
 **How to run it:** `python3 -m unittest
 test_formal_eval_eq_mojo_bridge.TestTheNestedExprRoutes -v` (0.9 s; skips when
 Lean is absent, since every assertion is about what Lean accepts).
+
+## Status: step 2 is done for a callee of arity one (2026-10-04)
+
+**`callFunc` is the model's own function table now, and `eval_eq_mojo` is
+STATED — and typechecks — for a program whose `main` returns a call's value.**
+Measured on both sides of the change, x86-64 (arm64 still refuses the whole
+program on the machine half, which is a different and larger gap — this file's
+§"On arm64 the same program fails EARLIER"):
+
+```
+def _bump1(a):
+    return a + 1
+def main():
+    return _bump1(41)
+```
+
+| | before | after |
+|---|---|---|
+| the emitted `callFunc` | `fun name arg => if name = "main" then mojo arg else 0` | `fun name arg => if name = "_bump1" then _bump1_go arg else if name = "main" then mojo arg else 0` |
+| the bridge | **omitted**: "the AST bridge cannot state this function's call — `_bump1` — `callFunc` answers 0 for a name it does not know" | **stated and proved**: `eval_eq_mojo (n : UInt64) : evalFunc ast (…) [n] = mojo n` closed by `simp +decide` |
+| holes | 2 (the x86-64 machine-half trust boundary, every proof in the tree) | **2** — the same two, and no third |
+
+**What landed, and it is three things in two files plus the tests.**  Nothing in
+`lib/ProofLib.lean` moved, which is the part worth stating: `_gen_go` already
+emits a model for every callee, and the table is those definitions, named.
+
+1. **`_callee_call_table(go_defs, prog, func_name)`** — `{spelling: f_go}` for
+   every callee that is not the entry, takes **exactly one parameter**, and whose
+   model is actually IN the emitted `go_defs`.  The third condition is read back
+   off the emitted text rather than predicted from the source, because
+   `_gen_go` does not always define one (a for-range-loop function returns its
+   loop model and no `f_go` at all), and a branch naming an undefined identifier
+   is a Lean error hundreds of lines downstream of the call that caused it.
+2. **`_call_func_lean`'s `exports` keyword**, shared by both generators, with an
+   **empty table reproducing the old stub byte for byte** — measured, not
+   asserted: all 51 `formal/examples/*.mojo` × both backends regenerate to
+   **98 byte-identical proof files, 0 differing**, so not one cached verdict in
+   `~/.gmojo` is invalidated by this.
+3. **`_resolvable` gains the same table**, which is the half that makes it sound.
+   Those are two readers of one fact — "which names does this `callFunc`
+   answer?" — and they are built from one function for exactly the reason
+   `x86_64_proof_gen.py` calls `AP._call_func_lean` rather than keeping a sixth
+   copy: measured by removing the wiring from one of them, which produces a
+   `callFunc` with no branch beside a gap check that thinks the name resolves —
+   and the false `eval_eq_mojo` is back, emitted rather than refused.
+
+Pinned by `test_formal_call_proof_gen.py::TestAstBridgeCallLimit`'s
+`test_a_callee_of_one_parameter_gets_a_branch_and_the_bridge_with_it` (the
+`callFunc` text, the theorem's presence, `def _bump1_go` really being in the
+file, and a real Lean check that the holes are still exactly two) plus
+`test_an_empty_call_table_is_the_old_stub_byte_for_byte`.
+
+**What is left is exactly the `MojoExpr.call` widening, and it is now the ONLY
+thing left.**  The arity condition above is not a workaround that could have
+been the fix: `callFunc` is `String → UInt64 → UInt64`, so it is handed ONE
+value, and a two-parameter `_go` has no faithful `f_go arg` no matter what the
+table knows.  So `_bump1(a, b)` is still refused by `_ast_bridge_gaps` with
+"2 arguments — `MojoExpr.call` carries ONE `MojoExpr`", and
+`test_a_wider_call_is_named_by_its_arity` still pins that refusal.  Widening the
+node to `List MojoExpr` is the change this file is named for, and §"step 1's
+route is measured" below is still its state: route 1 (a `mutual` block with an
+explicit recursion over the argument list) elaborates and keeps every `rfl`, and
+the one genuinely new obligation is `evalExpr_congr`, whose `induction e` Lean
+refuses on a nested inductive.
+
+**And one limit of the table that is worth stating rather than finding later:**
+a callee whose model is `partial def` (a self-recursive one) or one whose
+`_gen_go` returned no definition gets no branch, and is refused by the gap check
+with its own name — which is the correct outcome, because a `partial def` is not
+something `eval_eq_mojo` can be stated about without the recursion measure.
 
 ## The smallest reproduction
 

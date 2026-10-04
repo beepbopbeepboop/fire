@@ -1828,6 +1828,15 @@ class TestAstBridgeCallLimit(unittest.TestCase):
               "    return 0\n"
               "def main(x):\n"
               "    return zero() + x\n")
+    # A callee that takes ONE parameter, called with one argument: the shape the
+    # call TABLE answers.  It is the same program as `ONE_ARG` with the callee's
+    # arity dropped, and the difference is the whole point — `callFunc` is handed
+    # exactly one value, so a callee of one parameter has a faithful
+    # `f_go arg` and a callee of two does not.
+    ONE_ARG_CALLEE = ("def _bump1(a):\n"
+                      "    return a + 1\n"
+                      "def main():\n"
+                      "    return _bump1(41)\n")
 
     def _gaps(self, source, resolvable):
         from formal.arm64_proof_gen import _ast_bridge_gaps
@@ -1951,6 +1960,72 @@ class TestAstBridgeCallLimit(unittest.TestCase):
                          "the x86-64 generator's TWO designed trust "
                          "boundaries and no more: a third hole would be this "
                          "file quietly admitting something new")
+
+    def test_a_callee_of_one_parameter_gets_a_branch_and_the_bridge_with_it(self):
+        """`callFunc` answers for the program's OWN functions, so the bridge is
+        STATED rather than omitted.
+
+        This is the other half of the refusal above: `ONE_ARG`'s callee takes
+        two parameters and `callFunc` is handed one value, so there is no
+        faithful branch and the omission is right.  With ONE parameter there IS
+        one — `_gen_go` already emitted `_bump1_go` — and the bridge used to be
+        omitted anyway, which is the gap
+        `bugs/FORMAL_ast_bridge_carries_one_argument_per_call.md` names as step
+        2: `eval_eq_mojo` was FALSE for this program, not unproved.
+
+        Three assertions, and the middle one is the one that would catch a
+        branch naming something Lean has not heard of: the `callFunc` text, the
+        theorem's presence, and the theorem typechecking with the same TWO
+        designed sorries as every other x86-64 proof here.
+        """
+        tmp = tempfile.mkdtemp(prefix="a2-bridge-callee-")
+        try:
+            p, err = _generate(tmp, self.ONE_ARG_CALLEE, "bridge_callee",
+                               arch="x86_64")
+            self.assertIsNone(err, err)
+            text = open(p).read()
+            got = _check_proof(p)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertIn('if name = "_bump1" then _bump1_go arg else',
+                      text,
+                      "the call table did not reach the emitted `callFunc`, so "
+                      "the AST would still evaluate this call to 0")
+        self.assertIn("theorem eval_eq_mojo", text,
+                      "with a branch for the callee the bridge is statable, and "
+                      "omitting it would drop a theorem that now holds")
+        self.assertNotIn("AST bridge omitted", text,
+                         "the bridge was omitted anyway: the table and the "
+                         "omission disagree about the same call")
+        # …and the model the branch names is really in the file.
+        self.assertRegex(text, r"def _bump1_go\b",
+                         "the branch names `_bump1_go` and the file does not "
+                         "define it, which is a Lean error hundreds of lines "
+                         "downstream of the call")
+        if got is None:
+            self.skipTest("no Lean / no lib/ProofLib.olean")
+        ok, detail, n = got
+        self.assertTrue(ok, detail)
+        self.assertEqual(n, 2,
+                         "still exactly the two designed trust boundaries: "
+                         "stating the bridge must not have added a hole")
+
+    def test_an_empty_call_table_is_the_old_stub_byte_for_byte(self):
+        """Nothing is added to a program that calls nothing of its own.
+
+        Every generated proof in the tree with no admitted contract and no
+        callee must keep the text it had, because a re-wrap would invalidate
+        every cached verdict in `~/.gmojo` for a whitespace change — which is
+        the same sentence `_call_func_lean` carries, pinned here from the other
+        side so the two cannot disagree about what "no callee" means.
+        """
+        from formal.arm64_proof_gen import _call_func_lean
+        for wrap in (True, False):
+            with self.subTest(wrap=wrap):
+                self.assertEqual(
+                    _call_func_lean("main", {}, wrap=wrap),
+                    _call_func_lean("main", {}, wrap=wrap, exports={}),
+                    "an empty table must reproduce the stub exactly")
 
 
 class TestLoopContractBlocks(unittest.TestCase):

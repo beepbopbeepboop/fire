@@ -141,7 +141,8 @@ def _first_sentence(e) -> str:
     return (head if head.endswith(".") else head + ".")[:400]
 
 
-def _ast_value(fn, func_name: str, admitted: dict = None, scope=None) -> str:
+def _ast_value(fn, func_name: str, admitted: dict = None, scope=None,
+                callees: dict = None) -> str:
     """The `MojoFunc` value mirroring `fn`'s source AST.
 
     Raises whatever the shared emitter raises for a construct the untyped
@@ -163,8 +164,9 @@ def _ast_value(fn, func_name: str, admitted: dict = None, scope=None) -> str:
     # than off the arm64 generator's spelling→Lean map, because each generator
     # must be consistent with the `callFunc` IT emits and that is the one it
     # builds here.
-    resolvable = {func_name} | {c["name"] for c in (admitted or [])
-                                if isinstance(c, dict) and c.get("name")}
+    resolvable = ({func_name} | set(callees or ())
+                  | {c["name"] for c in (admitted or [])
+                     if isinstance(c, dict) and c.get("name")})
     gaps = AP._ast_bridge_gaps(fn, resolvable)
     if gaps:
         raise NotImplementedError(AP._ast_gap_message(gaps))
@@ -179,7 +181,7 @@ def _ast_value(fn, func_name: str, admitted: dict = None, scope=None) -> str:
 
 def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
                           go_lemmas: list = None, admitted: dict = None,
-                          arity: int = 1, scope=None) -> str:
+                          arity: int = 1, scope=None, callees: dict = None) -> str:
     """`eval_eq_mojo`: the AST interpreter agrees with the source model.
 
     Proved for the shapes the shared generator can close by `simp` (a
@@ -192,7 +194,7 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     if typed:
         return ("/- Typed function: the untyped AST-eval bridge is omitted;\n"
                 "   correctness follows from the machine value flow. -/\n")
-    _ast_value(fn, func_name, admitted, scope)   # probe: may raise
+    _ast_value(fn, func_name, admitted, scope, callees)   # probe: may raise
     from formal import arm64_proof_gen as AP
     if AP._is_recursive(fn) or AP._has_while(fn.body):
         return None       # caller emits the `sorry` form
@@ -241,7 +243,8 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     # that the AST model and the source model agree — including about what an
     # ADMITTED call means.
     from formal import arm64_proof_gen as AP
-    _cf = AP._call_func_lean(func_name, admitted, arity=arity)
+    _cf = AP._call_func_lean(func_name, admitted, arity=arity,
+                            exports=callees)
     return (f"/-- eval_eq_mojo: AST evaluation agrees with the semantic model. -/\n"
             f"theorem eval_eq_mojo {AP._entry_binders(arity)} :\n"
             f"  evalFunc ast {_cf} {AP._entry_arg_list(_en)} = "
@@ -823,6 +826,11 @@ def generate_x86_64_proof(prog, code, info) -> str:
     # uses 'sorry'".
     from formal import arm64_proof_gen as AP
     mojo_term = AP._go_apply(go_defs, func_name, AP._entry_arg_names(arity))
+    # `callFunc`'s branches over the program's OWN callees, read back off the
+    # emitted models — the shared `_callee_call_table`, and the same table the
+    # gap check below is asked with, so this backend cannot resolve a name its
+    # `callFunc` has no branch for (or refuse one it has).
+    _callees = AP._callee_call_table(go_defs, prog, func_name)
     # The old one-liner verbatim at arity one, which is every program in the
     # corpus: a comment is not semantics, but re-inking it would invalidate
     # every cached verdict in ~/.gmojo for a wording change.
@@ -867,7 +875,8 @@ def generate_x86_64_proof(prog, code, info) -> str:
         try:
             section = _eval_eq_mojo_section(func_name, fn, typed,
                                             go_lemma_names, admitted=_admitted,
-                                            arity=arity, scope=_vscope)
+                                            arity=arity, scope=_vscope,
+                                            callees=_callees)
         except Exception:                           # noqa: BLE001
             section = None
     if section is None:
@@ -883,7 +892,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
         # described a behaviour the code did not have. Quoting the message
         # means a new gap is described by the gap's own words.
         try:
-            _ast_value(fn, func_name, _admitted, _vscope)
+            _ast_value(fn, func_name, _admitted, _vscope, _callees)
             reason = ("this function's shape (recursive/looping): the bridge "
                       "is not closed yet")
         except Exception as e:                      # noqa: BLE001
@@ -896,7 +905,8 @@ def generate_x86_64_proof(prog, code, info) -> str:
         # has no AST form reached this unguarded call and raised out of the build
         # instead of omitting the AST.
         try:
-            ast_value = _ast_value(fn, func_name, _admitted, _vscope)
+            ast_value = _ast_value(fn, func_name, _admitted, _vscope,
+                                   _callees)
         except Exception as e:                      # noqa: BLE001
             section = (f"/- AST omitted: {_first_sentence(e)} -/\n")
         else:
