@@ -2053,6 +2053,20 @@ class TestX86EndToEndEmitter(unittest.TestCase):
                         else source)
             return E.emit_terminates(path)
 
+    @staticmethod
+    def _emitted_path(name):
+        """`emit_terminates` on one file of `formal/examples/`, by name.
+
+        Needed because the fixtures above are no longer interchangeable: the guard
+        being settled means a trap leaf now takes a program that reaches a call
+        out of the image for its own sake, and a multi-leaf theorem takes a
+        program with input-dependent branches. Emission is Lean-free and takes
+        milliseconds, so a real example is the cheap fixture.
+        """
+        import formal.x86_64_endtoend_test as E
+        return E.emit_terminates(
+            os.path.join(E.HERE, "examples", name + ".mojo"))
+
     def test_the_return_is_a_named_fact_and_the_step_uses_it(self):
         text = self._emitted()
         self.assertIn("hpop", text,
@@ -2262,13 +2276,24 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         stops AT the call; stepping it would move `rip` to the callee, where the
         model has no instruction and the chain would be proving a step the runner
         cannot take. Pinned on the TEXT because it is the difference between a
-        theorem and a wrong one, and nothing else in the file would say so."""
-        text = self._emitted()
+        theorem and a wrong one, and nothing else in the file would say so.
+
+        **The fixture is `subscript_var` and no longer `SOURCE`, and that is the
+        point of the change rather than an accident of it.** The guard's trap
+        arm used to be a leaf in every example, because the guard's own two
+        branches were walked rather than settled; now they are settled (both
+        guards in this corpus are provably not taken), so a trap leaf needs a
+        program whose path reaches a call out of the image for some OTHER
+        reason — `subscript_var`'s subscript reaches the allocator. `SOURCE`
+        crosses a frame but no such call, and the case below asserts that too, so
+        a fixture change cannot quietly stop testing the trap."""
+        text = self._emitted_path("subscript_var")
         found = list(re.finditer(r"have (hhalt\d+) : (s\d+)\.rip = (\d+) := by\n"
                                  r"[ ]*simp only \[(hs\d+)\]", text))
-        self.assertGreaterEqual(len(found), 2,
-                                "this chain crosses a callee's guard, so it has "
-                                "a trap leaf per arm of the fork above it")
+        self.assertEqual(len(found), 1,
+                         "this program's one path ends at the allocator, which "
+                         "is out of the image, so it has exactly one trap leaf: "
+                         f"{len(found)}")
         for m in found:
             self.assertNotEqual(m.group(2), "s0",
                                 "the halt state is the one the walk reached the "
@@ -2276,6 +2301,78 @@ class TestX86EndToEndEmitter(unittest.TestCase):
             self.assertEqual(m.group(4), "hs" + m.group(2)[1:],
                              "the halt fact is proved from the successor "
                              f"equation that defines {m.group(2)}")
+            # NO step: the call is where the run stops, so the file must not
+            # contain a step lemma application for its address.
+            self.assertNotIn("x86_step_call_rel32 s%s rc %s" % (m.group(2),
+                                                                m.group(3)),
+                             text,
+                             "the trap arm is a HALT and not a step: the runner "
+                             "stops at `st.rip = exit` before it steps")
+
+    def test_the_guards_branches_are_settled_and_not_walked(self):
+        """What replaced the doubling, on the fixture that used to show it.
+
+        `SOURCE` crosses a frame, so its emitted file used to contain SIXTEEN
+        leaves — the guard puts two conditional branches in each of the two
+        prologues, and every combination of the four arms was walked — and its
+        theorem was a sixteen-way disjunction over halt addresses. Both guards
+        are now decided (four `hdec`s, each a PROVED fact), so the file has one
+        leaf and the theorem is the exit sentinel alone.
+
+        Every pin here is on the TEXT, which is what makes this a check that can
+        run: the thing it covers is a Lean proof of 11 s, and
+        `formal/x86_64_endtoend_test.py`'s own entry point is 43 of those.
+        """
+        text = self._emitted()
+        decisions = re.findall(r"have (hdec\d+) : (x86_cond \d+ s\d+) = (true|false)"
+                               r" := by\n[ ]*simp \[([^\]]*)\][^\n]*\n[ ]*<;> decide",
+                               text)
+        self.assertEqual(len(decisions), 4,
+                         "two per guarded prologue — the branch that parks the "
+                         "floor word and the one that checks it — and this chain "
+                         "crosses a frame, so two prologues: four. "
+                         f"Got {decisions}")
+        for name, cond, value, simp in decisions:
+            # The decision's OWN proof, which is the two lines after its `have`:
+            # `text.count("sorry")` would be the wrong question (the step side
+            # conditions beside it are guarded on purpose) and so would a window
+            # wide enough to reach the next `have`.
+            body = re.search(r"have %s [^\n]*\n(?:[^\n]*\n){0,3}" % re.escape(name),
+                             text)
+            self.assertIsNotNone(
+                body, f"{name} is a `have ... := by` with three proof lines and "
+                "no fourth, so this regex cannot find it")
+            self.assertNotIn("sorry", body.group(0),
+                             f"{name} is a decision, and a decision with a "
+                             "`sorry` in it is a claim the emitter could not "
+                             "prove — which is how a wrong static analysis would "
+                             "become a wrong theorem rather than a failed file")
+            self.assertIn("hval", simp,
+                          f"{name}'s proof reads the per-step value facts, so it "
+                          "is ONE step of unfolding and not the whole chain: "
+                          f"{simp}")
+        self.assertNotIn("hhalt", text,
+                         "a decided guard has no trap leaf, so no halt-address "
+                         "fact and no disjunct naming a call out of the image")
+        self.assertEqual(text.count("by_cases"), 0,
+                         "every branch on this path is settled, so there is "
+                         "nothing left to split on")
+        self.assertEqual(text.count("\u2228"), 0,
+                         "one leaf, one disjunct: the theorem is back to 'the "
+                         "run reaches the exit pc'")
+
+    def test_a_body_that_needs_a_fork_still_splits_it(self):
+        """The control for the row above, and the reason it is not a coverage
+        loss: a branch on the INPUT is not decidable, and its two arms are walked
+        and its two leaves named. `twoifs` is two nested `if`s on `n`, which
+        lower to three conditional branches."""
+        text = self._emitted_path("twoifs")
+        self.assertEqual(text.count("by_cases"), 3,
+                         "the three conditional branches of the program itself "
+                         "are input-dependent, so none of them can be settled")
+        self.assertGreaterEqual(text.count("hdec"), 2,
+                                "…while the guard's own two branches on the same "
+                                "path are settled")
 
     def test_no_arm_of_the_theorem_proves_a_disjunct_no_leaf_names(self):
         """Each arm selects ONE disjunct, and it is the leaf's own.
@@ -2283,13 +2380,16 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         `right` past each disjunct above, then `left` (and no `left` on the last
         one, which is not a choice) \u2014 so the number of `right`s an arm emits is
         its leaf's index. A wrong index is a proof of a claim the run does not
-        make and Lean would accept it, so it is pinned here."""
-        text = self._emitted()
+        make and Lean would accept it, so it is pinned here.
+
+        `twoifs` and not `SOURCE`: `SOURCE` has one path now that its guard's
+        branches are settled, and one leaf makes this a vacuous row. `twoifs`
+        has four \u2014 two per arm of the program's own two conditional branches."""
+        text = self._emitted_path("twoifs")
         arms = re.findall(r"\n((?:[ ]*right\n)*)(?:[ ]*left\n)?"
                           r"[ ]*have h(?:rip|halt\d*) :", text)
         self.assertGreaterEqual(len(arms), 4,
-                                "this chain has a leaf per arm of the two forks "
-                                "the guard's prologue puts in it")
+                                "twoifs has a leaf per arm of its two forks")
         reached = sorted(len(re.findall("right", a)) for a in arms)
         self.assertEqual(reached, list(range(len(arms))),
                          "each leaf must reach a DIFFERENT disjunct, and between "

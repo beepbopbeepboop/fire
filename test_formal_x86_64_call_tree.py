@@ -41,6 +41,13 @@ every example reported `body loops, or branches out of the function`. It is a
 LEAF now, with the call's own address as its halt address, and
 `TestACallThatLeavesTheImageIsALeaf` pins that plus the leaf ORDER
 (`_leaf_halts`), which is what the emitted theorem's disjuncts are written in.
+
+The third is the guard those two branches belong to. `_tree` settles a branch
+whose condition the abstract machine can compute and follows ONE arm, which is
+what keeps a guarded prologue from doubling the paths through it;
+`TestADecidedForkIsWalkedOnce` pins that, and pins the control — an open
+condition is still walked twice — because a fork that vanishes for the wrong
+reason looks exactly like one that vanishes for the right one.
 """
 import os
 import struct
@@ -90,6 +97,22 @@ def _jne_rel32(at, target):
     return bytes([0x0F, 0x85]) + struct.pack("<i", target - (at + 6))
 
 
+def _test_rdi_rdi():
+    """`85 FF` -- `test rdi, rdi`, whose flags the emitter CANNOT settle.
+
+    RDI is `X86State.init`'s INPUT register and the theorem is quantified over it,
+    so the result of `test rdi, rdi` is not a number this emitter can compute. It
+    is the one way to write a `jne` whose condition is genuinely open, which is
+    what a test about walking BOTH arms needs: a `jne` on the initial flags is
+    decided (ZF starts clear, so `x86_cond 5` is true) and the fork never
+    happens. `TestADecidedForkIsWalkedOnce` is the other half of that.
+
+    TWO bytes and no REX prefix, which is the point of picking RDI: it is at
+    ModRM field 7, and a REX.B or REX.R would move it to R15.
+    """
+    return bytes([0x85, 0xFF])
+
+
 def _body(pieces):
     """`(shapes, code)` for a body given as `(offset, bytes)`, plus its bytes.
 
@@ -118,6 +141,8 @@ def _form_of(raw):
         return "jcc_rel32", raw
     if raw == _cqo():
         return "cqo", raw
+    if raw == _test_rdi_rdi():
+        return "alu_rr:test", raw
     raise AssertionError(f"this test does not write {raw.hex()}")
 
 
@@ -237,13 +262,18 @@ class TestACallThatLeavesTheImageIsALeaf(unittest.TestCase):
     theorem names.
     """
 
-    #:  0  jne -> 10     a fork, so the leaf ORDER is pinned as well as the leaf
-    #:  6  cqo
-    #:  8  ret           the fall-through arm's end of run
-    #: 10  call -> 0x9000   outside the image: the trap
+    #:  0  test rdi, rdi    an OPEN condition (see `_test_rdi_rdi`), so the fork
+    #:                      below is walked twice -- which is what this class is
+    #:                      about. A `jne` on the initial flags would NOT be: ZF
+    #:                      starts clear, the emitter settles it, and the fork
+    #:                      never happens (`TestADecidedForkIsWalkedOnce`).
+    #:  2  jne -> 12      a fork, so the leaf ORDER is pinned as well as the leaf
+    #:  8  cqo
+    #: 10  ret            the fall-through arm's end of run
+    #: 12  call -> 0x9000   outside the image: the trap
     OUTSIDE = 0x9000
-    TRAP = [(0, _jne_rel32(0, 10)), (6, _cqo()), (8, _ret()),
-            (10, _call_rel32(10, OUTSIDE))]
+    TRAP = [(0, _test_rdi_rdi()), (2, _jne_rel32(2, 12)), (8, _cqo()),
+            (10, _ret()), (12, _call_rel32(12, OUTSIDE))]
 
     def _trap_tree(self):
         shapes, code = _body(self.TRAP)
@@ -259,7 +289,7 @@ class TestACallThatLeavesTheImageIsALeaf(unittest.TestCase):
 
     def test_the_leaf_is_the_call_and_its_halt_is_the_calls_own_address(self):
         _code, t = self._trap_tree()
-        node = t.kids[0]
+        node = t.kids[0].kids[0]
         self.assertEqual(node.form, "call_rel32",
                          "the fork's taken arm IS the call: `kids[0]` is the "
                          "branch target and the call is the leaf")
@@ -267,26 +297,28 @@ class TestACallThatLeavesTheImageIsALeaf(unittest.TestCase):
                          "a leaf that leaves the image is its own kind, not a "
                          "`ret`: the run does not RETURN anywhere, it stops at "
                          "an address the model has no instruction for")
-        self.assertEqual(node.succ, BASE + 10,
+        self.assertEqual(node.succ, BASE + 12,
                          "the halt address is the CALL's own address %d, not "
                          "its target 0x%x: the runner stops at `st.rip = exit` "
                          "BEFORE it steps, so the claim is 'the run reaches the "
-                         "call'" % (BASE + 10, self.OUTSIDE))
+                         "call'" % (BASE + 12, self.OUTSIDE))
         self.assertEqual(node.kids, [], "a leaf has nothing after it")
 
     def test_two_arms_halt_at_different_addresses_in_walk_order(self):
         _code, t = self._trap_tree()
         halts = ET._leaf_halts(t)
-        self.assertEqual(halts, [BASE + 10, None],
+        self.assertEqual(halts, [BASE + 12, None],
                          "the trap arm halts at the call and the fall-through "
                          "arm at the exit sentinel (None), TAKEN FIRST because "
                          "it is kids[0] — and `emit_terminates` writes the "
                          "statement's disjuncts in this order and picks between "
                          f"them by index. Got {halts}")
         # The index is on the node, so the statement and the walk cannot read
-        # two different leaves as the same one.
-        trap = t.kids[0]
-        exit_leaf = t.kids[1].kids[0]
+        # two different leaves as the same one. The root is the `test`, so the
+        # FORK is one level down: `kids[0]` taken, `kids[1]` fell through.
+        fork = t.kids[0]
+        trap = fork.kids[0]
+        exit_leaf = fork.kids[1].kids[0]
         self.assertEqual(trap.halt, 0)
         self.assertEqual(exit_leaf.halt, 1)
         self.assertIsNone(exit_leaf.succ,
@@ -314,6 +346,81 @@ class TestACallThatLeavesTheImageIsALeaf(unittest.TestCase):
         self.assertIsNotNone(t)
         self.assertEqual(ET._leaf_halts(t), [BASE + 0])
         self.assertEqual(t.halt, 0)
+
+
+class TestADecidedForkIsWalkedOnce(unittest.TestCase):
+    """The other half of the guard's cost, and the reason the trap leaf is rarer
+    than it was.
+
+    `_tree` asks the abstract machine what a branch's condition is, and a
+    condition it can settle is followed into ONE arm — the other arm is not
+    built, let alone walked. This is what takes the stack-floor guard out of the
+    corpus's path counts: the guard puts two conditional branches in every
+    prologue of every image, and walking both of each doubled the paths through
+    every guarded function (`wide_recv` went from one path to 94).
+
+    The fixture is the trap body WITHOUT its `test rdi, rdi`, so the `jne` reads
+    the initial flags — and `X86State.init` starts with ZF clear, which settles
+    `x86_cond 5` to true.
+    """
+
+    OUTSIDE = 0x9000
+    DECIDED = [(0, _jne_rel32(0, 10)), (6, _cqo()), (8, _ret()),
+               (10, _call_rel32(10, OUTSIDE))]
+
+    def _tree_of(self):
+        shapes, code = _body(self.DECIDED)
+        return code, ET._tree(code, {"base_addr": BASE, "func_offset": BASE},
+                              shapes)
+
+    def test_a_settled_condition_leaves_exactly_one_kid(self):
+        _code, t = self._tree_of()
+        self.assertIsNotNone(t)
+        self.assertEqual(len(t.kids), 1,
+                         "a `jcc` the emitter can settle has ONE child, and it "
+                         "is the arm the condition selects — walking both is the "
+                         "cost this is here to remove")
+        self.assertIs(t.cond, True,
+                      "ZF starts clear in `X86State.init`, so `x86_cond 5` is "
+                      "true and the branch IS taken: `cond` is what "
+                      "`emit_terminates` turns into a proved `have` instead of "
+                      "a `by_cases`")
+        self.assertEqual(t.kids[0].form, "call_rel32",
+                         "the TAKEN arm, which is the call: `kids[0]` is the "
+                         "branch target and `cond is True` selects it")
+        self.assertEqual(t.kids[0].kind, "leaves",
+                         "…so the run reaches the trap and the tree has one leaf, "
+                         "which is the trap's address")
+
+    def test_the_fall_through_arm_is_not_built_at_all(self):
+        """Not merely unvisited: unbuilt, so its `ret` is not in the tree.
+
+        The trap body has a `ret` on the fall-through arm, so a tree that walked
+        both arms would have a second leaf halting at the exit sentinel. One leaf
+        is the whole difference, and it is what `emit_terminates` reads to write
+        the theorem's disjuncts.
+        """
+        _code, t = self._tree_of()
+        self.assertEqual(ET._leaf_halts(t), [BASE + 10],
+                         "one leaf, and it halts at the call: the fall-through "
+                         "arm's `ret` is not in the tree at all")
+        self.assertNotIn("ret", [n.form for n in next(ET._paths(t))],
+                         "the outermost `ret` of the fall-through arm is the one "
+                         "thing a decided fork must not reach")
+
+    def test_an_open_condition_is_still_walked_twice(self):
+        """The control, in the direction that matters: nothing is decided by
+        accident. With an OPEN condition the fork is whole — two kids, `cond` is
+        None, and both leaves are in the tree."""
+        shapes, code = _body(TestACallThatLeavesTheImageIsALeaf.TRAP)
+        t = ET._tree(code, {"base_addr": BASE, "func_offset": BASE}, shapes)
+        self.assertIsNotNone(t)
+        fork = t.kids[0]
+        self.assertEqual(fork.form, "jcc_rel32",
+                         "the fork is the `jcc`, one level below the `test`")
+        self.assertIsNone(fork.cond, "an open condition decides nothing")
+        self.assertEqual(len(fork.kids), 2)
+        self.assertEqual(ET._leaf_halts(t), [BASE + 12, None])
 
 
 class TestTheReporterNamesTheForm(unittest.TestCase):
