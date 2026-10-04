@@ -5888,13 +5888,14 @@ main()
     # `Dialog(5)` emitted `_t3 = (void *)_t5; _t4 = (char *)_t3;` with
     # `_t5 = (int64_t)5`, and the first `mojo_print` then `strlen`ed address
     # 5 — SIGSEGV, exit -11, not even the line before it reached stdout
-    # (both docs FIXED and DELETED with the fix, so this comment is the record:
-    # `CODEGEN_annotated_str_param_given_an_int_segfaults`, and the same crash
-    # filed a second time as
-    # `CODEGEN_method_returning_self_str_field_segfaults`, whose
-    # diagnosis pointed at the method's return path and was wrong — the
-    # generated C for `Dialog_show` is a correct `char *` load and the fault
-    # is entirely upstream, at the constructor's argument).
+    # (both docs FIXED and DELETED with the fix, so this comment is the
+    # record, and the fix is named rather than the docs because a deleted
+    # doc is a citation with no referent: a9c78439. The same crash was
+    # filed a second time under the name of a struct method returning one
+    # of its own `str` fields, whose diagnosis pointed at the method's
+    # return path and was wrong — the generated C for `Dialog_show` is a
+    # correct `char *` load and the fault is entirely upstream, at the
+    # constructor's argument.)
     #
     # Every spelling of the same mistake is here — a bare literal, a local,
     # and a value reached through a method — and the string cases are here

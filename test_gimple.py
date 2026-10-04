@@ -7498,10 +7498,10 @@ main()
         through `_stringify_value`, the same chokepoint `str()`, f-strings
         and `%s` use.
 
-        The doc's repro is a struct method returning one of its own `str`
-        fields (`bugs/CODEGEN_method_returning_self_str_field_segfaults.md`,
-        removed with this fix), and it is reproduced here — including the
-        imported-sibling spelling, since the field read off the object and
+        The doc's repro was a struct method returning one of its own `str`
+        fields (a doc removed with this fix, so it is named by the fix,
+        a9c78439, rather than cited), and it is reproduced here — including
+        the imported-sibling spelling, since the field read off the object and
         the read back out of the method are two separate lowerings and a fix
         to only one of them leaves the other wrong.
 
