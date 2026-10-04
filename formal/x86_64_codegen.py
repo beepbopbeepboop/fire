@@ -3292,41 +3292,14 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             raise CodegenError(reason)
 
     def _print_kwargs(self, e):
-        """`print`'s `sep=` / `end=` / `file=`, as (sep, end). Only literals.
+        """`print`'s `sep=` / `end=` / `file=` / `flush=`, as (sep, end, flush).
 
-        `file=` is refused unless it is stdout, because this model has exactly
-        one stream and a `file=sys.stderr` that quietly went to stdout would be
-        a program whose diagnostics are missing rather than one that failed.
-
-        `sep` and `end` come back as the literal NODES and not as `.value`,
-        which is the whole reason this signature is unchanged while its body is
-        not: `print(sep=r"\\t")` must print a backslash and a `t`, and
-        `print_literal` can only know that from the node. The defaults are
-        plain strings, which `print_literal` takes at face value — they are
-        already-decoded text."""
-        sep, end = " ", "\n"
-        for k, v in e.kwargs:
-            if not isinstance(v, F.StringLiteral):
-                raise CodegenError(
-                    f"print({k}=...) must be a string literal on the formal "
-                    f"x86-64 path (got {type(v).__name__}): the separator and "
-                    f"the line ending are baked into the format string, which "
-                    f"is built before the call is emitted")
-            if k == "sep":
-                sep = v
-            elif k == "end":
-                end = v
-            elif k == "file":
-                if not (isinstance(v, F.MemberExpr) and v.member == "stdout"):
-                    raise CodegenError(
-                        f"print(file=...) other than sys.stdout is not lowered "
-                        f"on the formal x86-64 path: this model has one output "
-                        f"stream")
-            else:
-                raise CodegenError(
-                    f"print() has no keyword argument {k!r} on the formal "
-                    f"x86-64 path (supports sep, end, file)")
-        return sep, end
+        **Two lines of delegation**, and `M.print_kwargs`'s docstring is where
+        the decision and its reasons are — including why it is ONE function and
+        not one per architecture: this method was a private copy in both
+        emitters until 2026-10-03, differing only in the backend word three
+        messages quote. `flush=` is answered there too."""
+        return M.print_kwargs(e, "x86_64")
 
     def _emit_print(self, e) -> None:
         """`print(...)` — a real call to the C library's `printf`.
@@ -3339,11 +3312,17 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
         `print()` with no arguments still prints a blank line, and the call's
         value is `None` — the format has no conversions, so printf reads no
-        varargs and the register state afterwards is irrelevant."""
-        sep, end = self._print_kwargs(e)
+        varargs and the register state afterwards is irrelevant.
+
+        **`flush=True` IS A REAL `fflush` AND NOT A DROPPED KEYWORD**, after the
+        `printf` — arm64's twin, from the same `M.print_kwargs`, so the two
+        machines cannot disagree about whether a keyword is honoured."""
+        sep, end, flush = self._print_kwargs(e)
         frags, operands = self._print_call(list(e.args))
         fmt = M.print_format(frags, sep, end)
         self._emit_call(_call("printf", [F.StringLiteral(fmt)] + operands))
+        if flush:
+            self._emit_call(_call("fflush", [F.IntLiteral(0)]))
 
     def _emit_debug_assert(self, e) -> None:
         """`debug_assert(cond, *messages)` — evaluate `cond`, and on falsy exit.

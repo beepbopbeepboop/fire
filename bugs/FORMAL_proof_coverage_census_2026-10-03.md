@@ -9,7 +9,9 @@ eligibility filter now excludes those candidates (`tools/formal_proof_breadth.py
 `_integer_unusable_in`, pinned by `test_formal_proof_breadth.py`), the arm64 half
 is re-measured in §0.2 with the new sample, and the Lean half is NOT re-measured
 because it is not re-measurable on this tree — see §0.3, which is a finding about
-master rather than about this census. Everything below §0 is the state of the
+master rather than about this census. §0.4 closes the largest family §0.2 found:
+**`print(flush=…)` was one refusal whose stated reason was false, and it is
+answered rather than ignored.** Everything below §0 is the state of the
 tree the first run was taken on, kept because §0's numbers are only readable
 against it, and §3's family table is superseded by §0.2's.**
 
@@ -162,6 +164,75 @@ phase A — `codegen-refused`, `proof-refused` and `proof-crash` are all decided
 before Lean runs — plus whatever Lean verdicts the content-addressed CAS already
 held, which is where the `pass`/`lean-rejected`/`bound-exceeded` rows come from.
 **That is a weaker claim than §2's table and is labelled as one.**
+
+## 0.4 The largest family is CLOSED, and it was a false refusal rather than a
+## value model (`work/formal18-5`, 2026-10-03)
+
+**Nine of §0.2's 32 were ONE refusal whose stated reason was false about every
+one of them, and all nine build past it now.**
+
+    print(…, flush=True)
+      ->  print(flush=...) must be a string literal on the formal arm64 path
+          (got BoolLiteral): the separator and the line ending are baked into
+          the format string, which is built before the call is emitted
+
+Every clause of that sentence is about `sep` and `end`. `flush` is a bool, it is
+baked into nothing, and the refusal fired because `_print_kwargs` asked **"is
+this value a string literal?" before it looked at the keyword** — so a keyword
+whose value is not text at all was judged by the rule written for the two
+keywords that want text. The ledger's own `(got BoolLiteral)` is the proof in the
+refusal's mouth: the value it complains about is the one keyword in the language
+that is never text. And it is the commonest keyword in this repository's own
+source — every one of the nine is the same `print(…, flush=True)` in a test's
+`check` helper, in nine files.
+
+**What landed is two changes, and the second is the one that matters.**
+
+  * `model.print_kwargs` — the decision, in ONE place. `_print_kwargs` was a
+    private method in `arm64_codegen.py` and the same method again in
+    `x86_64_codegen.py`, differing only in the backend word three messages
+    quote, and this document's own §2 says two emitters disagreeing is the
+    failure mode of this area. Both are now two lines of delegation, beside
+    `printf_format_refusal`, which already argues that shape.
+  * `flush=` is answered, and ANSWERED rather than tolerated: each emitter
+    writes `fflush(NULL)` after the `printf` when it is true. Not a dropped
+    keyword — the one thing a formal image cannot show by not flushing is a
+    program whose output has not reached the pipe yet, which is a MISSING line
+    rather than a wrong one. `fflush(NULL)` rather than `fflush(stdout)` because
+    this model has one stream, which is the fact `print(file=…)`'s refusal is
+    already stated on. `flush` of a NAME is still refused, and the message now
+    says what is wanted instead of what the separator is doing.
+
+**Measured per item, both architectures, off the tool's own `--show` output** so
+the modules are the census's own rather than anything re-selected:
+
+| | items | where each one lands |
+|---|---|---|
+| left `print(flush=…)` | **8 of 9** | `'+' on two strings` ×7, `print() cannot tell whether BinaryOp is a string or a number` ×1 |
+| …with byte-identical wording on the two machines | all 8 | the next refusal is a shared one, which §2's 39-of-60 measures over the whole class and this re-measures on the 8 |
+
+**The ninth item is not in the sample any more, and this change did not do
+that.** The ledger records `test_formal_link_accounting.py:69:check`; master's
+selection for that file is `test_formal_link_accounting.py:1036:_short_repr`,
+because the two have the same weight (3 top-level statements — the selector's
+`weight` is the statement count) and the tie is broken by the ident as a
+STRING, where `…:1036:…` sorts before `…:69:…`. `_short_repr` is refused for
+`len()` of an int, which is §0.1's class. So the family is 9 → 0 on the
+ledger's reading and on master's sample, but the ninth verdict belongs to a
+different function now, and the table above says so rather than counting it.
+
+**What it was worth, in this census's units — and it is NOT a coverage number.**
+Eight of the sixty items are still `codegen-refused`, now on the next row, which
+is the same shape `bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`
+§2 reached by hand: a spelling a file must be rewritten into is not a construct
+it was waiting on. What it bought is a class the corpus reaches at nine sites
+whose refusal named the wrong rule, and a duplicated decision collapsed into one.
+
+**And it makes the NEXT row the largest one, which is the useful number here.**
+After this change `'+' on two strings` is **11 of the 23 remaining**
+refusals (4 in §0.2 plus the 7 measured above) and `'%'`/`'<=` on a string is 5,
+so 16 of 23 are one subject: **a string VALUE model**, which is §6's first item
+and `FORMAL_string_value_model.md`, not a decision this kind of fix can make.
 
 ## 1. The workload, and why it is 60 functions and not 60 files
 

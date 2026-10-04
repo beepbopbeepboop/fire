@@ -7144,6 +7144,85 @@ BOTH_ARCH_CASES = [
      "    printf(\"%ld\", (n + 48) & ~31)\n"
      "    return 0\n", 0, "32"),
 ]
+
+# `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before
+# its value is looked at.
+#
+# The refusal this replaces asked "is this value a string literal?" FIRST and
+# only then read the keyword, so every keyword whose value is not text was
+# refused with a sentence about `sep` and `end` — the two that DO want text:
+#
+#     print(…, flush=True)
+#       ->  print(flush=...) must be a string literal on the formal arm64 path
+#           (got Constant): the separator and the line ending are baked into the
+#           format string, which is built before the call is emitted
+#
+# which is false in every clause: `flush` is neither `sep` nor `end`, it is not
+# baked into anything, and it is the commonest keyword in THIS repository's own
+# source — nine of the sixty items `tools/formal_proof_breadth.py` measures land
+# on it (`bugs/FORMAL_proof_coverage_census_2026-10-03.md` §0.2's largest
+# `codegen-refused` family), every one of them the same `print(…, flush=True)`
+# in a test's `check` helper.
+#
+# Both architectures, and the answered rows are in `both_arch_names` because the
+# fix is an emitted `fflush` in each backend's own `_emit_print`: a case whose
+# subject is two emitters writing the same call cannot be checked by running one
+# of them. The two `refuse:` rows run on both by construction.
+PRINT_KWARG_CASES = [
+    # `flush=True` PRINTS, and the `fflush` after it is what makes the answer
+    # observable rather than "it built": a formal image whose output is
+    # captured through a pipe is FULLY buffered, so the flush is the difference
+    # between the line reaching the reader at this statement and at exit.
+    # `end=""` beside it is the other half of the same row — the keyword that
+    # decides where the NEXT print starts — and it is here because a fix that
+    # reordered the loop could easily have broken the one that was already right.
+    # Both lines are in ONE program so no single-row special case can pass it.
+    ("print_flush_true_emits_a_flush_and_still_prints",
+     "def main(n):\n"
+     "    print(\"one\", flush=True)\n"
+     "    print(\"two\", end=\"|\", flush=True)\n"
+     "    print(\"three\")\n"
+     "    return 0\n", 0, "one\ntwo|three\n"),
+    # `flush=False` is the DEFAULT, so it must cost nothing and change nothing —
+    # the control for the row above, and the row that fails if a fix emits the
+    # `fflush` on the strength of the keyword being present rather than its
+    # value.
+    ("print_flush_false_is_the_default_and_still_prints",
+     "def main(n):\n"
+     "    print(\"one\", flush=False)\n"
+     "    print(\"two\", sep=\"-\", end=\"!\")\n"
+     "    return 0\n", 0, "one\ntwo!"),
+    # `flush` OF A NAME is refused, and the message says what is wanted rather
+    # than what the separator is doing: the emitter has to write the `fflush`
+    # at build time, so a value it cannot read is a flush this path cannot
+    # express. Refusing is the right answer and saying "must be a string
+    # literal" was not.
+    ("print_flush_of_a_name_is_refused",
+     "def main(n):\n"
+     "    var flag = 1\n"
+     "    print(\"x\", flush=flag)\n"
+     "    return 0\n",
+     "refuse:print(flush=...) must be True or False", None),
+    # THE REGRESSION ROW for the reorder: `sep` is a keyword that really does
+    # want a string literal, so it must still refuse one that is a name — with
+    # the sentence about the separator, which is what the source has to change.
+    # A fix that dispatched on the name and then accepted any value would pass
+    # both rows above and silently print a pointer.
+    ("print_sep_of_a_name_is_still_refused",
+     "def main(n):\n"
+     "    var sep = \"-\"\n"
+     "    print(\"x\", sep=sep)\n"
+     "    return 0\n",
+     "refuse:print(sep=...) must be a string literal", None),
+    # And the unknown keyword still says WHICH keywords exist, with `flush` in
+    # the list now that it is one. A refusal that listed `sep, end, file` while
+    # `flush` worked would send the next reader looking for a fourth spelling.
+    ("print_unknown_keyword_names_the_four_it_has",
+     "def main(n):\n"
+     "    print(\"x\", bogus=1)\n"
+     "    return 0\n",
+     "refuse:no keyword argument 'bogus'", None),
+]
 ASSIGNED_TYPE_REFUSALS = [
     # THE SHAPE THAT WAS REFUSED AND IS NOW THE POSITIVE CASE, and it is here
     # rather than deleted because it is the one the sweep named.
@@ -19120,6 +19199,7 @@ def main():
                   + DECLARED_TYPE_REFUSALS
                   + ASSIGNED_TYPE_CASES + ASSIGNED_TYPE_REFUSALS \
                   + BOTH_ARCH_CASES \
+                  + PRINT_KWARG_CASES \
                   + INIT_FIELD_TYPE_CASES \
                   + INIT_FIELD_TYPE_REFUSALS \
                   + ONE_WORD_NESTED_CASES \
@@ -19190,7 +19270,18 @@ def main():
     # `BOTH_ARCH_CASES` is the four-column shape, so it rides `selected` and the
     # ordinary `run_case` dispatch; what makes it different is the RUNNER, and
     # that is a set of names rather than a table of its own.
-    both_arch_names = {c[0] for c in BOTH_ARCH_CASES}
+    # A `refuse:` row is EXCLUDED from the both-architecture runner even
+    # when it lives in a group that is otherwise run on both: `run_case`
+    # already builds both backends for that shape and requires them to
+    # refuse with the same words, and `run_both_arch_case` requires the
+    # build to SUCCEED — so routing a refusal row through it would assert
+    # the opposite of what the row says. `PRINT_KWARG_CASES` is the group
+    # that made that worth stating: three of its five rows are refusals and
+    # two are answered.
+    both_arch_names = ({c[0] for c in BOTH_ARCH_CASES}
+                      | {c[0] for c in PRINT_KWARG_CASES}) - {
+        c[0] for c in PRINT_KWARG_CASES
+        if isinstance(c[2], str) and c[2].startswith('refuse:')}
     selected = [c for c in everything
                 if c[0] not in pair_names
                 and (not args.cases or c[0] in args.cases)]
