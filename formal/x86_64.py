@@ -212,7 +212,7 @@ def encode_mov_r64_r64(dst: Reg, src: Reg) -> bytes:
 
 
 def encode_movq_xmm_rm64(xmm: int, src: Reg) -> bytes:
-    """movq xmm<k>, r64 — 66 REX.W 0F 7E /r, the GPR-to-SSE move.
+    """movq xmm<k>, r64 — 66 REX.W 0F 6E /r, the GPR-to-SSE move.
 
     **Why this instruction exists at all**, because nothing else on this path
     crosses that boundary: a value here is one 64-bit word and it lives in a
@@ -225,8 +225,10 @@ def encode_movq_xmm_rm64(xmm: int, src: Reg) -> bytes:
     The encoding is `66 REX.W 0F 6E /r` and the direction matters, because the
     two moves share a ModRM shape and differ only in which half is the XMM:
     `0F 6E` is `MOVQ xmm, r/m64` (XMM in the reg field, GPR in r/m — the
-    direction wanted here) and `0F 7E` is `MOVQ r/m64, xmm` (the reverse, which
-    assembles, links and quietly loads whatever was already in XMM0 into RDI).
+    direction wanted here) and `0F 7E` is `MOVQ r/m64, xmm` (the reverse — now
+    `encode_movq_r64_xmm` above it, so the pair can be read against each other:
+    both assemble, both link, and the wrong one quietly loads whatever was
+    already in XMM0 into RDI).
     The width modifiers are load-bearing for the same reason: `0F 6E` without
     REX.W is `MOVD`, which drops all but the low 32 bits and so moves a
     DIFFERENT VALUE rather than a different placement of the same one.
@@ -1083,3 +1085,143 @@ class Assembler:
             self.sections["text"][idx:idx + instr_len] = \
                 encode_call_rel32(offset)
 
+
+
+# ── IEEE-754 binary64, the SCALAR SSE2 forms ──────────────────────────────
+#
+# A `double` is one 64-bit word holding its bit pattern, so storage needs no
+# instruction here either — a parameter, a spill slot, a struct field and a
+# return value are all already words, and `MOVQ` is what crosses into and out of
+# the XMM file.  The arithmetic does need them: `ADDSD` rounds to the format and
+# propagates NaN, and `ADD` on two bit patterns adds the patterns.
+#
+# XMM0..XMM7 is the whole reachable set on this path and not an arbitrary cut:
+# SysV AMD64 allocates variadic `double` arguments from exactly those eight, so
+# the arithmetic registers and the call's floating arguments are the same eight
+# and restricting to them removes the REX.R question the general case would
+# raise (`encode_movq_xmm_rm64` states the same bound for the same reason).
+#
+# Every encoding is checked against `clang -arch x86_64` by
+# `test_x86_64_encoders.py`.
+
+#: `(prefix, opcode)` per operation, all `F2 0F` except the compare and the
+#: zeroing xor.  `dst` is the XMM operand in ModRM.reg and `src` the one in
+#: ModRM.rm, matching AT&T's reversed print order.
+X86_SSE_FP_OPS = {
+    "addsd": 0x58,
+    "subsd": 0x5C,
+    "mulsd": 0x59,
+    "divsd": 0x5E,
+}
+
+
+def _sse_fp(op: str, dst: int, src: int) -> bytes:
+    """One `F2 0F <opcode> /r` scalar double operation, `dst op= src`.
+
+    All four read both sources before writing the destination, so `dst` may be
+    either of them.  `subsd` is what a negation must NOT be spelled: `0.0 - 0.0`
+    is `+0.0` where CPython's `-0.0` is `-0.0`.
+    """
+    assert op in X86_SSE_FP_OPS, op
+    assert 0 <= dst <= 7 and 0 <= src <= 7
+    return bytes([0xF2, 0x0F, X86_SSE_FP_OPS[op], _modrm(3, dst, src)])
+
+
+def encode_addsd_xmm(dst: int, src: int) -> bytes:
+    return _sse_fp("addsd", dst, src)
+
+
+def encode_subsd_xmm(dst: int, src: int) -> bytes:
+    return _sse_fp("subsd", dst, src)
+
+
+def encode_mulsd_xmm(dst: int, src: int) -> bytes:
+    return _sse_fp("mulsd", dst, src)
+
+
+def encode_divsd_xmm(dst: int, src: int) -> bytes:
+    return _sse_fp("divsd", dst, src)
+
+
+def encode_ucomisd_xmm(dst: int, src: int) -> bytes:
+    """UCOMISD dst, src — the flag-setting double compare, no result.
+
+    Flags only, like the integer `CMP`, so a conditional branches on them and a
+    value site `SETcc`s from them.
+
+    **The flags on NaN are the whole reason the condition this feeds is not the
+    integer one.**  UCOMISD reports unordered as `ZF=PF=CF=1`, so `SETE` ("ZF=1")
+    would call a NaN equal to everything and `SETBE` ("CF=1 or ZF=1") would call
+    it less-or-equal to everything.  `formal/model.py::float_condition` is where
+    the conditions are chosen from the parity flag and the operand order decided,
+    once, for both backends; the arm64 twin of this decision is
+    `encode_fcmp_dn_dm`'s docstring.
+    """
+    assert 0 <= dst <= 7 and 0 <= src <= 7
+    return bytes([0x66, 0x0F, 0x2E, _modrm(3, dst, src)])
+
+
+def encode_xorpd_xmm(dst: int, src: int) -> bytes:
+    """XORPD dst, src — bitwise, so `xorpd %xmm0, %xmm0` is the constant 0.0.
+
+    The zero a `double` value needs in one instruction.  It is XOR and not
+    `SUBPD` against itself because XOR of a pattern with itself is zero for
+    EVERY pattern including NaN, and the alternative is a load.
+    """
+    assert 0 <= dst <= 7 and 0 <= src <= 7
+    return bytes([0x66, 0x0F, 0x57, _modrm(3, dst, src)])
+
+
+def encode_movq_r64_xmm(dst: Reg, xmm: int) -> bytes:
+    """movq dst, xmm — 66 REX.W 0F 7E /r, the SSE-to-GPR move.
+
+    The reverse of `encode_movq_xmm_rm64`, and the one the codegen's own
+    contract makes mandatory: an expression leaves its value in RAX, so a
+    double-valued expression has to end with this or every caller downstream
+    reads a stale word.  The two directions share a ModRM shape and differ only
+    in which half is the XMM, which is why they are two functions and not one
+    with a flag.
+    """
+    assert 0 <= xmm <= 7
+    assert isinstance(dst, Reg)
+    rex = _rex(w=1, b=1 if dst.value >= 8 else 0)
+    return bytes([0x66, rex, 0x0F, 0x7E, _modrm(3, xmm, dst.value & 7)])
+
+
+def encode_cvtsi2sd_xmm_r64(dst: int, src: Reg) -> bytes:
+    """CVTSI2SD dst, src — the signed 64-bit integer as a double.
+
+    The int-to-float half of `float(x)`.  Rounding is round-to-nearest-even,
+    which is what CPython's `float(2**53 + 1)` answers and what no arithmetic on
+    the bit pattern would.
+    """
+    assert 0 <= dst <= 7
+    assert isinstance(src, Reg)
+    rex = _rex(w=1, r=1 if dst >= 8 else 0, b=1 if src.value >= 8 else 0)
+    return bytes([0xF2, rex, 0x0F, 0x2A, _modrm(3, dst, src.value & 7)])
+
+
+def encode_cvttsd2si_r64_xmm(dst: Reg, xmm: int) -> bytes:
+    """CVTTSD2SI dst, xmm — the double truncated toward zero into an integer.
+
+    The float-to-int half of `int(x)`, and "toward zero" is what makes it
+    CPython's: `int(2.9)` is 2 and `int(-2.9)` is -2.
+
+    The `T` is load-bearing.  `CVTSD2SI` without it consults the MXCSR control
+    word, so with the default rounding mode the SAME double yields a different
+    integer than CPython's `int()`; this backend has no way to read or set
+    MXCSR, so the trapping-free form is the only one whose answer does not
+    depend on state it cannot see.
+    """
+    assert 0 <= xmm <= 7
+    assert isinstance(dst, Reg)
+    # The ModRM halves are the other way round from `encode_cvtsi2sd`'s, and
+    # from `encode_movq_r64_xmm`'s, and that asymmetry is checked against
+    # `clang -arch x86_64` rather than reasoned about: CVTSD2SI is
+    # `CVTTSD2SI r/m64, xmm` in Intel syntax — the GPR is the DESTINATION and
+    # the XMM is the source — so the general register is the `reg` field (REX.R)
+    # and the XMM is the `r/m` field (REX.B), which is the reverse of the two
+    # moves. Getting it the other way round assembles, links, and converts the
+    # XMM's number as if it were the GPR's.
+    rex = _rex(w=1, r=1 if dst.value >= 8 else 0, b=1 if xmm >= 8 else 0)
+    return bytes([0xF2, rex, 0x0F, 0x2C, _modrm(3, dst.value & 7, xmm)])

@@ -160,6 +160,38 @@ CASES = [
     ("callq *%r11", lambda: X.encode_call_r64(R["R11"])),
 ]
 
+# ── IEEE-754 binary64, scalar SSE2 ─────────────────────────────────────
+#
+# A separate list appended rather than `CASES` extended inline, because these are
+# generated over register pairs and a `for` statement cannot appear inside a
+# list display.  Each operation gets several XMM pairs rather than one, because
+# the destination-aliases-a-source form is the shape the emitter emits
+# (`addsd %xmm0, %xmm0`) and a single (0, 1) case would leave the
+# read-before-write property untested — a ModRM byte with its two halves swapped
+# assembles to a different instruction.
+_FP_PAIRS = ((0, 1), (0, 0), (7, 0), (1, 7))
+_FP_OPS = ((X.encode_addsd_xmm, "addsd"), (X.encode_subsd_xmm, "subsd"),
+           (X.encode_mulsd_xmm, "mulsd"), (X.encode_divsd_xmm, "divsd"),
+           (X.encode_ucomisd_xmm, "ucomisd"), (X.encode_xorpd_xmm, "xorpd"))
+CASES += [(f"{mn} %xmm{src}, %xmm{dst}", lambda d=dst, s=src, f=fn: f(d, s))
+          for fn, mn in _FP_OPS for (dst, src) in _FP_PAIRS]
+# `xorpd %xmm0, %xmm0` is the one-instruction `+0.0`, so the all-equal pair is
+# a case in its own right rather than a repeat of the (0, 0) row above.
+CASES.append(("xorpd %xmm0, %xmm0", lambda: X.encode_xorpd_xmm(0, 0)))
+CASES += [(f"cvtsi2sd %{src.name.lower()}, %xmm{dst}",
+           lambda d=dst, r=src: X.encode_cvtsi2sd_xmm_r64(d, r))
+          for (dst, src) in ((0, R["RAX"]), (0, R["R9"]), (7, R["RDI"]))]
+CASES += [(f"cvttsd2si %xmm{xmm}, %{dst.name.lower()}",
+           lambda r=dst, x=xmm: X.encode_cvttsd2si_r64_xmm(r, x))
+          for (dst, xmm) in ((R["RAX"], 0), (R["R9"], 7), (R["RDI"], 3))]
+# The reverse of `cvtsi2sd`'s move: the pair differ only in which half of the
+# shared `66 REX.W 0F 6E / 7E` ModRM is the XMM, so both directions are cases —
+# `0F 6E` read backwards is `movq xmm, r/m64`, which assembles, links and
+# quietly loads whatever was already in XMM0 into RDI.
+CASES += [(f"movq %xmm{xmm}, %{dst.name.lower()}",
+           lambda r=dst, x=xmm: X.encode_movq_r64_xmm(r, x))
+          for (dst, xmm) in ((R["RAX"], 0), (R["R9"], 7), (R["RDI"], 3))]
+
 
 def main() -> int:
     failures = 0
