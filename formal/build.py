@@ -13762,6 +13762,17 @@ def _optional_operand_annotation(expr, fn, owner, structs_by_name,
                                                     structs_by_name)
         ann = M.param_annotation(fn, expr.name)
         if ann is None:
+            # The name's type may come from a CALL's return type rather than
+            # from a declaration (`var a = pickA()`), and this pass publishes
+            # that table — `_record_optional_binding`, a few lines below. It has
+            # to be consulted HERE as well as in both backends' receivers: this
+            # pass decides the WORD the comparison uses and the emitter only
+            # emits it, so a receiver this pass cannot type is a comparison
+            # against the folded 0 and an emitter that can lower it correctly.
+            # That is not a hypothetical disagreement — it was measured, as
+            # `var a = pickA(); a is None` printing 0 for an empty Optional.
+            ann = getattr(fn, M.OPTIONAL_RECEIVER_TYPES, {}).get(expr.name)
+        if ann is None:
             ann = M.optional_local_declared_annotation(fn, expr.name)
         return ann
     if isinstance(expr, F.MemberExpr) and isinstance(expr.obj, F.IdentExpr):
@@ -13800,12 +13811,127 @@ def _set_child(parent, old, new):
     `iter_nodes` walks, and it knows `IfStmt.elifs` is a list of tuples), so a
     replacement that walked `__dict__` instead would be a second answer to "what
     is this node's shape" — and would miss a field this walk finds.
+
+    **A LIST-valued field is descended into, and that is not a nicety: it is the
+    `CallExpr.args` case, which is the whole of the argument substitution.** A
+    version that compared the field's VALUE with `is` found nothing there —
+    `call.args` is a list and the node being replaced is one of its elements —
+    and returned False without a word, so `h.put(None)` kept the word 0 and the
+    substitution looked like it had run. Descending a list or tuple in place is
+    the same walk `iter_nodes` does (`isinstance(node, (list, tuple))`), so the
+    two cannot disagree about where a node lives.
     """
     for name in M._node_field_names(parent):
-        if getattr(parent, name, None) is old:
+        value = getattr(parent, name, None)
+        if value is old:
             setattr(parent, name, new)
             return True
+        if isinstance(value, list):
+            for i, item in enumerate(value):
+                if item is old:
+                    value[i] = new
+                    return True
+        elif isinstance(value, tuple):
+            for i, item in enumerate(value):
+                if item is old:
+                    holder = list(value)
+                    holder[i] = new
+                    setattr(parent, name, tuple(holder))
+                    return True
     return False
+
+
+# The published table both backends read for an UNANNOTATED name bound from an
+# `Optional`-returning call: `var yes = pick(1)`, where the local's type is the
+# callee's RETURN TYPE and the source never spells it.  Published on the
+# function as `fn._optional_receiver_types` — the same side-table shape
+# `_frame_receivers` uses for `fn._frame_candidates` — rather than written onto
+# the declaration, because a declaration's `type_ann` is read by every type
+# query in this file (`declared_type_kind`, `struct_field_declared_type`, the
+# kind oracles) and adding a spelling there would change answers this pass has
+# no business changing.  It is a separate table read by the `Optional` machinery
+# alone, which is the whole of what needs it.
+def _record_optional_binding(fn, name, value, optional_returns) -> None:
+    """Publish `name` -> its `Optional[T]` when `value` is such a call."""
+    if not name or not isinstance(value, F.CallExpr):
+        return
+    callee = M.subscript_callee_name(value) or M._flat_callee(value)
+    ann = optional_returns.get(callee) if callee else None
+    if ann is None and callee and "." in callee:
+        bare = callee.rpartition(".")[2]
+        hits = [a for n, a in optional_returns.items()
+                if n.rpartition("_")[2] == bare]
+        ann = hits[0] if len(hits) == 1 else None
+    if ann is None:
+        return
+    table = getattr(fn, M.OPTIONAL_RECEIVER_TYPES, None)
+    if table is None:
+        table = {}
+        setattr(fn, M.OPTIONAL_RECEIVER_TYPES, table)
+    table[name] = ann
+
+
+def _optional_call_argument_none(call, callee_defs, structs_by_name):
+    """Substitute the niche into every `None` ARGUMENT of `call`, or not.
+
+    The fourth shape the representation reaches, and the one the stdlib's own
+    `Optional` code is written in: `Slice(6, len(lst))` reaches `__init__` as
+    `self.step = None`, and a caller writing `b.put(None)` means the same word.
+    The callee's own signature is what says so — `model.function_param_shape`
+    plus `model.param_annotation`, the same two readers
+    `function_value_argument_refusal` uses for the same reason (a parameter's
+    declared type is a fact about the CALLEE and only the callee has it).
+
+    **A callee this module does not compile is left alone**, and that is a real
+    limitation rather than a decision: a build compiles each module nested, so
+    an imported function's `Optional` parameter has no signature in hand here,
+    and the `None` keeps folding to 0 inside the argument. It is recorded in
+    `bugs/FORMAL_optional_needs_a_niche.md` with the shape that reaches it, and
+    it is the same limitation `function_value_argument_refusal` states rather
+    than a new one — the alternative is guessing a parameter's type from the
+    call, which is how a payload is built with the wrong width.
+    """
+    name = M.subscript_callee_name(call) or M._flat_callee(call)
+    if name is None:
+        return
+    fdef = callee_defs.get(name)
+    if fdef is None and "." in name:
+        # `recv.method(...)` — the LIFTED name is `<Struct>_<method>`
+        # (`model.method_owner_names`' own spelling), and the receiver's struct is
+        # not in hand here, so the bare method name is matched against every
+        # lifted definition of it. UNAMBIGUOUSLY or not at all: two structs with
+        # a `put` whose signatures disagree about whether the parameter is an
+        # `Optional` would otherwise get one of the two answers by insertion
+        # order, which is the agree-or-refuse rule every other holder decision in
+        # this file keeps for exactly this shape.
+        bare = name.rpartition(".")[2]
+        hits = [f for n, f in callee_defs.items()
+                if n.rpartition("_")[2] == bare and f is not None]
+        if len(hits) != 1:
+            return
+        fdef = hits[0]
+    if fdef is None:
+        return
+    shape = M.function_param_shape(fdef)
+    # THE RECEIVER IS NOT AN ARGUMENT. `h.put(x)` is one argument and two
+    # declared parameters, because a method's receiver travels by pointer under
+    # the by-reference convention (`doc/ABI.md`, "The formal backend's receiver
+    # convention") rather than in the argument list. So the mapping from an
+    # argument's index to a parameter's index skips a leading receiver
+    # parameter, and a case that forgot that would substitute the niche for the
+    # RECEIVER's declared type — which is `self`/`mut self` and names no
+    # `Optional`, so the substitution would silently never fire and this shape
+    # would look answered while doing nothing.
+    offset = 1 if shape.positional and shape.positional[0].split(":")[0].strip() \
+        .split()[-1] in ("self", "cls", "Self", "this") else 0
+    for i, arg in enumerate(call.args or []):
+        j = i + offset
+        if j >= len(shape.positional):
+            break
+        ann = M.param_annotation(fdef, shape.positional[j])
+        if M.optional_payload_annotation(ann) is None:
+            continue
+        _replace_none_with_niche(call, arg, ann, structs_by_name)
 
 
 def apply_optional_none_representation(functions: list,
@@ -13827,6 +13953,11 @@ def apply_optional_none_representation(functions: list,
     not after `_rewrite_self_fields` collapses it.
     """
     method_owners = method_owners or {}
+    callee_defs = _callee_defs(functions)
+    optional_returns = {name: ann
+                        for name, fn in callee_defs.items()
+                        for ann in [getattr(fn, "return_type", None)]
+                        if M.optional_payload_annotation(ann) is not None}
     for fn in functions:
         owner = method_owners.get(getattr(fn, "name", None))
         # `parent` is None for a TOP-LEVEL statement, because `fn.body` is a
@@ -13845,9 +13976,14 @@ def apply_optional_none_representation(functions: list,
                 _optional_none_operand(fn, owner, structs_by_name, node,
                                        node.right, node.left, candidates)
             elif isinstance(node, F.VarDecl):
+                _record_optional_binding(fn, node.name, node.value,
+                                         optional_returns)
                 _replace_none_with_niche(node, node.value, node.type_ann,
                                          structs_by_name)
             elif isinstance(node, F.AssignStmt):
+                if isinstance(node.target, F.IdentExpr):
+                    _record_optional_binding(fn, node.target.name, node.value,
+                                             optional_returns)
                 ann = _optional_target_annotation(node.target, fn, owner,
                                                   structs_by_name,
                                                   candidates) \
@@ -13858,6 +13994,9 @@ def apply_optional_none_representation(functions: list,
                 _replace_none_with_niche(node, node.value,
                                          getattr(fn, "return_type", None),
                                          structs_by_name)
+            elif isinstance(node, F.CallExpr):
+                _optional_call_argument_none(node, callee_defs,
+                                             structs_by_name)
     return None
 
 

@@ -2660,6 +2660,25 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_truthy_word(expr.right)
             self.asm.label(join)
             return
+        # An `Optional` is the FOURTH lowering, asked before the kind table
+        # because the kind cannot carry it: an `Optional[Bool]` is INT_KIND and
+        # `TRUTHY_NONZERO` would call `Some(False)` falsy and a `None` whose
+        # niche is not 0 truthy. Mojo's own `Optional.__bool__` is "does this
+        # Optional HAVE a value" (`std/collections/optional.mojo:449`), so the
+        # test is `word != niche` — a 0/1, not a word, because the payload
+        # cannot be left in place. arm64's `_emit_truthy_word` carries the same
+        # note and must keep the same answer.
+        ann = self._optional_receiver_annotation(expr)
+        payload = M.optional_payload_annotation(ann)
+        if payload is not None:
+            niche, why = M.optional_none_word(payload, self._structs)
+            if niche is None:
+                raise CodegenError(why)
+            self._emit_expr(expr)
+            self._emit_mov_imm(Reg.R11, niche)
+            self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R11))
+            self._emit_setcc_bool(reg, "setne")
+            return
         how = M.truthy_lowering(self._expr_str_kind(expr), expr)
         self._emit_expr(expr)
         if reg is not Reg.RAX:
@@ -7539,6 +7558,9 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._structs, getattr(self._cur_fn, "name", None))
         if isinstance(expr, F.IdentExpr):
             ann = M.param_annotation(self._cur_fn, expr.name)
+            if ann is None:
+                ann = getattr(self._cur_fn, M.OPTIONAL_RECEIVER_TYPES,
+                              {}).get(expr.name)
             if ann is None:
                 ann = M.optional_local_declared_annotation(self._cur_fn,
                                                            expr.name)

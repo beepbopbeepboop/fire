@@ -28311,10 +28311,11 @@ def is_none_expr(node) -> bool:
 #     Optional answer and the reference answer the same answer.
 #   * a `Bool` — a Bool is a word holding 0 or 1 (`formal.types`' own note),
 #     so 2 is outside its domain.
-#   * a NARROW integer (`Int8`/`Int16`/`Int32`, `UInt8`/`UInt16`/`UInt32`) or a
-#     `Float32` — the word `1 << w` decodes to the value `2^w`, which is not a
-#     `w`-bit two's-complement integer nor a 32-bit float pattern, so the type
-#     cannot produce it.
+#   * a NARROW integer (`Int8`/`Int16`/`Int32`, `UInt8`/`UInt16`/`UInt32`) — the
+#     word `1 << w` IS the value `2^w`, and a `w`-bit type's values live in a
+#     64-bit register sign-extended (`formal/types.py`), so the set of words it
+#     can hold is the value range `[-2^(w-1), 2^(w-1)-1]` and `2^w` is outside
+#     every one of them.
 #
 # And there are types where there is NO such word, and the honest answer for
 # them is a REFUSAL rather than the 0 the fold produces today:
@@ -28324,6 +28325,10 @@ def is_none_expr(node) -> bool:
 #     types sign-extended), so there is no word left over.
 #   * `Float64` — every 64-bit pattern is a double, NaNs included.
 #   * `DType` — a type TAG is an index and 0 is a legal one.
+#   * `Float32` — measured: `Float32(1.5)` does not lower at all on this target
+#     (it becomes a call against a symbol nothing provides), so what word a
+#     `Float32` occupies is not established and there is nothing to have a
+#     niche FOR.
 #   * a payload whose type the source does not state, and a payload that is a
 #     struct of another module (whose layout this image cannot see).
 #
@@ -28432,17 +28437,30 @@ def optional_payload_annotation(ann) -> str | None:
 # not drifted" discipline `POINTEE_WIDTHS` above states.  Two tables of widths
 # with no test between them is how a `Int32` niche becomes an `Int64` one.
 SCALAR_TYPE_WIDTHS = {
-    "Bool": (1, None),        # a Bool is a word holding 0 or 1; `signed` unused
+    # A Bool is a word holding 0 or 1 (`formal.types`' own note), so its width
+    # is 1 and `signed` is carried as None because there is no signedness to
+    # get wrong about at one bit. BOTH spellings: `Bool` is Mojo's and `bool`
+    # is the unannotated Python one, and a reader who annotates either must get
+    # the same niche.
+    "Bool": (1, None), "bool": (1, None),
     "Int8": (8, True), "Int16": (16, True), "Int32": (32, True),
     "Int64": (64, True),
     "UInt8": (8, False), "UInt16": (16, False), "UInt32": (32, False),
     "UInt64": (64, False),
-    "Float32": (32, True), "Float64": (64, True),
+    "Float64": (64, True),
     # The UNANNOTATED `int` and Mojo `Int` are `Int64` (formal.types'
-    # `DEFAULT_INT_TYPE`), so they are the full-width row and are deliberately
-    # ABSENT here: naming them would give them a 64-bit width, and the branch
-    # below refuses a 64-bit width precisely because there is no word left.
+    # `DEFAULT_INT_TYPE`), so they are the full-width row and the branch below
+    # refuses a 64-bit width precisely because there is no word left.
     "int": (64, True), "Int": (64, True), "UInt": (64, False),
+    # **`Float32` is DELIBERATELY ABSENT, and the reason is a measurement
+    # rather than a preference.**  It has no width row here because what word a
+    # `Float32` occupies on this target is not established: `Float32(1.5)` does
+    # not lower at all — it is emitted as a call against the symbol `Float32`,
+    # which nothing on the link line provides, and the build is refused with
+    # "the image would bind 2 symbol(s) that nothing provides" (measured on both
+    # architectures, alongside `Float64`).  So a `Float32` payload has no
+    # representation here to have a niche FOR, and answering `Optional[Float32]`
+    # would be a claim about a type this backend cannot hold.
 }
 
 
@@ -28461,7 +28479,11 @@ def optional_none_word(payload, decls: dict = None):
       4. a STRUCT OF THIS MODULE (`decls`) — a frame address or a one-word
          cell, never 0, and this row is why the function takes `decls`;
       5. a SCALAR (`SCALAR_TYPE_WIDTHS`) — the word `1 << width`, or 2 for a
-         `Bool`, and nothing at all at width 64.
+         `Bool`, and nothing at all at width 64.  A `w`-bit integer's value
+         lives in a 64-bit register SIGN-EXTENDED (`formal/types.py`), so the
+         set of WORDS it can hold is its own value range and `1 << w` — the
+         value `2^w` — is outside every one of them.  `Float32` is absent from
+         the table, and that table's own comment is the reason why.
 
     Everything else returns `(None, why)`.  `why` is a refusal TEXT and not a
     category, because every caller raises it verbatim: two callers spelling "no
@@ -28613,6 +28635,18 @@ def optional_unwrap_refusal(method: str, annotation) -> str:
         f"answers, and `x is None`, `x == None`, `x.or_else(…)`, `x.`"
         f"value_or(…)`, `x.or(…)` and `x.unsafe_value()` all lower from the one "
         f"representation")
+
+
+# The ATTRIBUTE NAME of the per-function table `formal/build.py`'s
+# `apply_optional_none_representation` publishes for a name whose type comes
+# from a CALL's return type rather than from a declaration, and which both
+# backends read. It is a NAME rather than a string spelled at each site because
+# the publisher and the two readers are three places, and an attribute that two
+# of them spell `getattr(fn, "_optional_receiver_types")` is a third spelling
+# waiting to happen. `formal/build.py` cannot be imported from a backend (it
+# imports both of them), so the shared name lives here with the rest of the
+# representation.
+OPTIONAL_RECEIVER_TYPES = "_optional_receiver_types"
 
 
 def optional_local_declared_annotation(fn, name: str) -> str | None:

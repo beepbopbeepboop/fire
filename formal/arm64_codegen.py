@@ -3894,6 +3894,9 @@ ctor_field_value=self._ctor_field_value_for(name),
         if isinstance(expr, F.IdentExpr):
             ann = M.param_annotation(self._cur_fn, expr.name)
             if ann is None:
+                ann = getattr(self._cur_fn, M.OPTIONAL_RECEIVER_TYPES,
+                              {}).get(expr.name)
+            if ann is None:
                 ann = M.optional_local_declared_annotation(self._cur_fn,
                                                            expr.name)
             return ann
@@ -6664,6 +6667,29 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit_label_rel(join, here_offset=-4)
             self._emit_truthy_word(expr.right)
             self.asm.label(join)
+            return
+        # An `Optional` is the FOURTH lowering, and it is asked before the kind
+        # table because the kind cannot carry it: an `Optional[Bool]` is
+        # INT_KIND, and `TRUTHY_NONZERO` — "the word itself" — would say that
+        # `Some(False)` (the word 0) is falsy and that a `None` for a payload
+        # whose niche is not 0 is truthy. Both are wrong, and Mojo's own
+        # `Optional.__bool__` says what the answer is: `not
+        # self._value.isa[_NoneType]()`, i.e. "does this Optional HAVE a value"
+        # and not "is the payload truthy" (`std/collections/optional.mojo:449`).
+        # So the test is `word != niche`, which is a 0/1 and not a word — the
+        # one row here that does not leave the payload in place, and it cannot.
+        ann = self._optional_receiver_annotation(expr)
+        payload = M.optional_payload_annotation(ann)
+        if payload is not None:
+            niche, why = M.optional_none_word(payload, self._structs)
+            if niche is None:
+                raise CodegenError(why)
+            self._emit_expr(expr)
+            self._emit_mov_imm("X2", niche)
+            self.asm.emit(encode_cmp_xn_xm(0, 2))
+            self.asm.emit(encode_cset_xd_cond(0, "ne"))
+            if reg != "X0":
+                self.asm.emit(encode_mov_zr_xn(_reg_num(reg), 0))
             return
         how = M.truthy_lowering(self._expr_str_kind(expr), expr)
         self._emit_expr_to(expr, reg)
