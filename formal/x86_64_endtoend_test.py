@@ -194,6 +194,14 @@ _FORMS = {
     "alu_ri32:and": ("x86_step_and_ri32", False,
                      ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
                       "rm"]),
+    # `sub r64, imm32` on a GENERAL register: the same encoding as `add` with
+    # digit 5 instead of 0, so the same side-condition list, and the only member
+    # of this family whose flags come from `x86_flags_sub` AND write the result
+    # back (`cmp` is the other, and it discards it).  The backend emits it for
+    # the stack-floor guard's budget subtraction in every prologue.
+    "alu_ri32:sub_reg": ("x86_step_sub_ri32", False,
+                         ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
+                          "rm"]),
     "alu_ri8:cmp": ("x86_step_cmp_ri8", False,
                     ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
                      "rm"]),
@@ -281,6 +289,21 @@ _FORMS = {
     "lea_r64_rm64_disp32": ("x86_step_lea_rm64_disp32", False,
                             ["rip", "b0", "b1", "b2", "disp32", "rex", "w",
                              "mod", "rm", "rm_ne", "reg", "dst", "dst_lt"]),
+    # The RIP-relative mode of the same instruction: `mod = 00` with `rm = 101`,
+    # where the r/m field is not a register but the instruction pointer, so the
+    # displacement counts from the END of the instruction and there is no `rm`
+    # argument to supply.  It is a separate row rather than another mode of the
+    # one above for the reason `_shapes`' own comment gives: a name that does not
+    # say which mode it is is how an unmapped shape used to be satisfied by
+    # whichever lemma shared its name.
+    #
+    # Two producers, so one row closes both: the stack-floor guard's
+    # `lea r11, [rip+&floor]` in every prologue with an entry, and
+    # `_emit_global_init`'s RIP-relative `lea` for every address-valued module
+    # global.
+    "lea_r64_rip": ("x86_step_lea_r64_rip", False,
+                    ["rip", "b0", "b1", "b2", "disp32", "rex", "w",
+                     "mod", "rm", "reg", "dst", "dst_lt"]),
     "mov_rm64_r64_reg": ("x86_step_mov_rm64_r64_reg_st", False,
                          ["rip", "b0", "b1", "b2", "rex", "w", "mod",
                           "reg", "rm"]),
@@ -450,6 +473,16 @@ _SUCCS = {
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ((x86_get_reg $s "
         "($rm + x86_rex_b $rex)) + $imm) with rip := $next, zf := ($fa).zf, "
         "sf := ($fa).sf, cf := ($fa).cf, of_ := ($fa).of_ }",
+    # `add_reg`'s row with `-` and `($fs)`: digit 5 rather than digit 0, the same
+    # `81` encoding and therefore the same length, and the same immediate
+    # expression for the same reason the row above states it.  The flags are
+    # `$fs` — `x86_flags_sub` — which is the SAME placeholder the `cmp` row
+    # below uses; that row is flags-only, this one also writes the register, and
+    # the two differ in exactly that.
+    "alu_ri32:sub_reg":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ((x86_get_reg $s "
+        "($rm + x86_rex_b $rex)) - $imm) with rip := $next, zf := ($fs).zf, "
+        "sf := ($fs).sf, cf := ($fs).cf, of_ := ($fs).of_ }",
     "alu_ri32:and":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ((x86_get_reg $s "
         "($rm + x86_rex_b $rex)) &&& $imm) with rip := $next, zf := ($fl).zf, "
@@ -520,6 +553,20 @@ _SUCCS = {
         "{ x86_set_reg $s $dst (UInt64.ofNat ((Int.ofNat "
         "(x86_get_reg $s ($rm + x86_rex_b $rex)).toNat + $disp).toNat % "
         "18446744073709551616)) with rip := $next }",
+    # The RIP-relative `lea`: same register write, but the base is the END of
+    # this instruction rather than a register's value, and there is no `$rm` in
+    # the expression at all — which is the point.  A copy of the row above with
+    # `$rm` left in would be a proof about `lea [reg + disp]`, and the error
+    # would surface as a `Type mismatch` or a `sorry` naming neither the form
+    # nor the byte.
+    #
+    # `Int.ofNat ($m + 7)` verbatim, because this row is compared against the
+    # lemma's own conclusion by `exact Option.some.inj` and nothing rewrites
+    # between them; a `UInt64.ofNat m + 7` here is a different term and the step
+    # comes back unproved.
+    "lea_r64_rip":
+        "{ x86_set_reg $s $dst (UInt64.ofNat ((Int.ofNat ($m + 7) + $disp).toNat "
+        "% 18446744073709551616)) with rip := $next }",
     "mov_rm64_r64_reg":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) "
         "(x86_get_reg $s ($reg + x86_rex_r $rex)) with rip := $next }",
@@ -821,7 +868,8 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         extra_args = " %d %d %d %d %d" % (rex, modrm, reg, rm, dst)
         extra_succ = {"$rex": str(rex), "$reg": str(reg), "$rm": str(rm),
                       "$dst": str(dst)}
-    elif form in ("alu_ri32:add_reg", "alu_ri32:and", "alu_ri8:cmp"):
+    elif form in ("alu_ri32:add_reg", "alu_ri32:sub_reg", "alu_ri32:and",
+                  "alu_ri8:cmp"):
         # `REX.W 81 /digit id` or `83 /digit ib`, so the ModRM is `raw[2]` and the
         # immediate starts at `raw[3]` -- 4 bytes wide for `81`, one for `83`.
         # `digit` is the ModRM `reg` field and names the OPERATION; the
@@ -849,6 +897,17 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         if form == "alu_ri32:add_reg":
             res = "(%s + %s)" % (a, imm)
             extra_succ["$fa"] = "x86_flags_add $s %s %s %s" % (a, imm, res)
+        elif form == "alu_ri32:sub_reg":
+            # `add_reg`'s row with the operator and the flag function turned
+            # over, which is the whole difference between the two: digit 5 is
+            # `sub`, so the result subtracts and the flags come from
+            # `x86_flags_sub` — the same `$fs` the `cmp` row below uses, and the
+            # same subtraction.  Reached only now because the name was missing
+            # from the tuple above, which is the whole of this form's wiring:
+            # the arithmetic, the flags and the immediate reader were already
+            # here and already correct.
+            res = "(%s - %s)" % (a, imm)
+            extra_succ["$fs"] = "x86_flags_sub $s %s %s %s" % (a, imm, res)
         elif form == "alu_ri32:and":
             res = "(%s &&& %s)" % (a, imm)
             extra_succ["$fl"] = "x86_flags_logic $s %s" % res
@@ -996,6 +1055,28 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         # negative literal swallows the hypothesis that follows it.
         extra_args = " %d %d %d (%d)" % (rex, modrm, reg, disp)
         extra_succ = {"$reg": str(reg), "$rex": str(rex), "$disp": str(disp)}
+    elif form == "lea_r64_rip":
+        # `lea r64, [rip + disp32]`: mod=00 with rm=101, so the r/m field is the
+        # instruction POINTER and the displacement is read as a FOUR-BYTE value
+        # even though the mode says "no displacement" — which is why this cannot
+        # go through the `_MEMORY_DISP_FORMS` branch below, whose `mode == 0` arm
+        # supplies no displacement at all (correct for `[rbx]`, wrong here).
+        #
+        # The `rm` argument is absent from the LEMMA, and it has to be absent
+        # here too: the model's `ripRel` arm reads no register, so passing one
+        # would be an arity error naming neither the form nor the instruction.
+        # `disp` is signed and parenthesised, for the reason the memory branch
+        # gives — an unparenthesised negative literal swallows the hypothesis
+        # that follows it, and this form's displacement is negative in practice
+        # (`lea r11, [rip+&floor]` reaches forward, `rip-relative` loads of a
+        # string literal reach back).
+        rex, modrm = raw[0], raw[2]
+        reg = (modrm >> 3) & 7
+        dst = reg + (8 if rex & 4 else 0)
+        disp = int.from_bytes(raw[3:7], "little", signed=True)
+        extra_args = " %d %d %d %d (%d)" % (rex, modrm, reg, dst, disp)
+        extra_succ = {"$rex": str(rex), "$reg": str(reg), "$dst": str(dst),
+                      "$disp": str(disp)}
     elif form in _MEMORY_DISP_FORMS:
         # Every memory-operand `mov`/`lea` shape except the two SIB ones, and
         # they all take their arguments in the same order: REX, ModRM, reg (the
@@ -1113,7 +1194,8 @@ _MEM_MODE = {0: "nodisp", 1: "disp8", 2: "disp32"}
 #: call with a `dst` argument the lemma does not take, which reads as an arity
 #: error naming neither the form nor the instruction.
 _LOAD_MEMORY_FORMS = ("mov_r64_rm64_disp8", "mov_r64_rm64_disp32",
-                      "mov_r64_rm64_nodisp", "lea_r64_rm64_disp32")
+                      "mov_r64_rm64_nodisp", "lea_r64_rm64_disp32",
+                      "lea_r64_rip")
 
 #: The memory-operand shapes `_resolve` supplies arguments for.  The two SIB
 #: ones are absent deliberately: they have their own `_resolve` branches above,
