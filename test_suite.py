@@ -3874,6 +3874,97 @@ def test_every_test_file_is_registered():
           f'reason, {len(undeclared)} undeclared, {len(dangling)} dangling')
 
 
+def test_no_test_name_is_registered_twice():
+    """A second `test('name', …)` overwrites the first, and nothing says so.
+
+    `test()` registers into a dict (`REGISTRY[s.name] = s`), so a duplicate name
+    is not a duplicate row — it is a LOST one. The name resolves to whichever
+    call came last, the earlier call costs a dict store, and `--list` shows one
+    line, so the only thing a reader can notice is that the `desc` in the
+    registry is whichever commit landed last.
+
+    Real, twice, both from different commits that each registered two test files
+    nobody had registered before: `formal-field-walk` (5b2e62c3, then 574d9135)
+    and `formal-glob` (the same pair). Their two `desc`s disagreed — "glob:
+    CPython's own glob, both backends, 6 groups" against "glob: has_magic,
+    hidden files, symlinks and escapes, against CPython" — so the sentence in
+    the registry was decided by commit order.
+
+    The registry cannot answer this question: by the time anything reads it the
+    overwrite has happened and there is one row per name. So this reads the
+    SOURCE, as an AST walk rather than a grep, so a name that appears in a
+    comment or in a string is not counted as a registration. Both registrars are
+    walked — `test()` and `fanout()` are two functions that each store into
+    `REGISTRY`, so a name registered once each is the same lost row. Three
+    extra properties keep it from being a rule that fails on its first day:
+
+      * it reads every registration CALL, including ones inside `if`/`for`,
+        which is what "written twice" means; and
+      * it cross-checks the count against `len(REGISTRY)`, so the walk and the
+        registry still agree about how many names there are. Without that, a
+        walk that silently found nothing would pass every row above vacuously —
+        and it is a real check here, not a formality: it is what found that
+        `fanout()` is a second registrar (three names: the bootstrap dump
+        fanouts), which a walk of `test()` calls alone would have read as three
+        names the registry invented.
+    """
+    path = os.path.join(HERE, 'tools', 'suite.py')
+    source = open(path).read()
+    tree = ast.parse(source, filename=path)
+    # The registrars are DISCOVERED, not listed: a module-level function whose
+    # body assigns into `REGISTRY`. A hardcoded ('test', 'fanout') would be a
+    # second copy of a fact `tools/suite.py` already states, and the day a third
+    # registrar appears this check would keep reporting agreement with a
+    # registry that has a name in it from nowhere — which is the same
+    # vacuous-pass direction as a walk that found nothing.
+    registrars = set()
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for sub in ast.walk(node):
+            targets = []
+            if isinstance(sub, ast.Assign):
+                targets = sub.targets
+            elif isinstance(sub, (ast.AnnAssign, ast.AugAssign)):
+                targets = [sub.target]
+            for t in targets:
+                if (isinstance(t, ast.Subscript)
+                        and isinstance(t.value, ast.Name)
+                        and t.value.id == 'REGISTRY'):
+                    registrars.add(node.name)
+    check('the registry: the registrar discovery found the registrars',
+          {'test', 'fanout'} <= registrars,
+          f'tools/suite.py registers through {sorted(registrars)}, and the two '
+          f'that were there when this was written are missing — the check below '
+          f'would be walking a subset and reporting it as agreement')
+    where = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if not (isinstance(fn, ast.Name) and fn.id in registrars):
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Constant):
+            continue
+        name = node.args[0].value
+        if not isinstance(name, str):
+            continue
+        where.setdefault(name, []).append(node.lineno)
+    dupes = {n: ls for n, ls in where.items() if len(ls) > 1}
+    check('the registry: no name is registered twice', not dupes,
+          'the second registration replaces the first and the first is dead '
+          'code — delete it and keep the one that runs: '
+          + '; '.join(f'{n} at lines {ls}' for n, ls in sorted(dupes.items())))
+    check('the registry: the source walk and the registry agree on the count',
+          len(where) == len(suite.REGISTRY),
+          f'the walk found {len(where)} distinct registered names and REGISTRY '
+          f'holds {len(suite.REGISTRY)}, so one of them is not counting the '
+          f'registrations this check is about')
+    print(f'      the registry: {len(where)} names registered in '
+          f'tools/suite.py through {sorted(registrars)}, {len(dupes)} of them '
+          f'more than once')
+
+
 def test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject():
     """The three ways this check can be present and still never run.
 
@@ -4418,6 +4509,7 @@ def main():
                test_checked_run_replays_a_pass_and_reruns_a_failure,
                test_cached_spec_names_its_own_test,
                test_every_test_file_is_registered,
+               test_no_test_name_is_registered_twice,
                test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
                test_a_deleted_bug_doc_is_not_still_cited,
