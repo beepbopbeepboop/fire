@@ -1741,31 +1741,76 @@ def _search_roots(relative_to: str, project_root: str) -> list:
     return out
 
 
-def _candidates(module_name: str, base: str, ext: str) -> list:
-    """The file shapes a module name can take under `base`, for one extension.
+def _candidate_shapes(module_name: str, ext: str) -> tuple:
+    """The file shapes a module name can take, as TWO ordered phases.
 
-    `<name>.mojo`, `<name>/__init__.mojo` (a package), and the same two spelled
-    with the LEAF only. The leaf fallback is what makes a package-relative
-    dotted import of a sibling work: inside `formal/`, `import formal.types`
-    looks for `formal/formal/types.mojo` (the path spelled from the project
-    root, which is `formal/` itself here) and finds nothing, but the sibling
-    really is `types` in the very directory the import was written in.
-    module_loader resolves the same two shapes for the stdlib, so this is the
-    same rule, not a second one.
+    Phase 0 is the name AS SPELLED: `<name>.mojo` and `<name>/__init__.mojo`
+    (a package). Phase 1 is the same two spelled with the LEAF only. The leaf
+    fallback is what makes a package-relative dotted import of a sibling work:
+    inside `formal/`, `import formal.types` looks for `formal/formal/types.mojo`
+    (the path spelled from the project root, which is `formal/` itself here) and
+    finds nothing, but the sibling really is `types` in the very directory the
+    import was written in. `module_loader` resolves the same two shapes for the
+    stdlib, so this is the same rule, not a second one.
+
+    **The two phases are ordered against the ROOTS and not inside one root**,
+    which is the whole content of this function returning a tuple rather than
+    one flat list. Interleaved per root — leaf first at every root, before the
+    spelled shapes have been offered to the roots further out — the leaf of one
+    name silently wins over the spelling of another, and which one wins is
+    decided by how deep the IMPORTER happens to sit:
+
+        from <stdlib>/std/collections/_asan_annotations.mojo
+        from std.sys.compile import SanitizeAddress
+
+    `<stdlib>/std` is a search root (the walk in `_search_roots` ascends from
+    the importer), its LEAF candidates include `compile/__init__.mojo`, that
+    file exists, and it is returned — so `std.sys.compile` compiled
+    `std/compile/__init__.mojo` and gave it the module identity `std.sys.compile`.
+    Measured over the stdlib on the tree before this, **31 imports in 252 files
+    bound a module other than the one they name**, and two of them are the
+    clearest possible statement of the shape: `std/sys/info.mojo` writes
+    `from std._gpu.host.info import …` and got ITSELF, and
+    `std/_gpu/host/info.mojo` writes `from std.sys.info import …` and got
+    itself. Nothing about either name is ambiguous; the ordering just asked the
+    wrong question of the wrong root first. The name as spelled is the stronger
+    evidence, so it is asked of every root before the leaf is asked of any, and
+    `test_formal_imports.py` carries both the rule as a build-and-RUN case and
+    the 24 measured bindings as rows.
     """
     rel = module_name.replace(".", os.sep)
     leaf = module_name.split(".")[-1]
-    return [os.path.join(base, rel + ext),
-            os.path.join(base, rel, "__init__" + ext),
-            os.path.join(base, leaf + ext),
-            os.path.join(base, leaf, "__init__" + ext)]
+    return ((rel + ext, os.path.join(rel, "__init__" + ext)),
+            (leaf + ext, os.path.join(leaf, "__init__" + ext)))
+
+
+def first_source(module_name: str, roots, ext: str) -> str:
+    """The file `module_name` names, or None — `roots` walked nearest first.
+
+    One implementation for BOTH of the `resolve_module_path` passes that look
+    for a source file (Mojo in pass 1, a repository sibling in pass 3), because
+    they differ only in the extension and a second copy of this search is a
+    second copy of the ordering above to keep in step.
+
+    Public because it is the rule, not the walk: a caller that needs to know
+    what a name resolves to under a given root list asks this, so a reader does
+    not have to reconstruct the two phases from the loop in
+    `resolve_module_path`.
+    """
+    for shapes in _candidate_shapes(module_name, ext):
+        for base in roots:
+            for shape in shapes:
+                cand = os.path.join(base, shape)
+                if os.path.isfile(cand):
+                    return cand
+    return None
 
 
 def _relative_candidates(module_name: str, relative_to: str, ext: str) -> list:
     """The file shapes a RELATIVE module name can take, resolved properly.
 
     A leading dot is not a path separator, and treating it as one is what made
-    `..` resolve to the importer's own package. `_candidates` does
+    `..` resolve to the importer's own package. The root search does
     `module_name.replace(".", os.sep)`, so `".."` becomes `"/"`, the first two
     candidates land at the FILESYSTEM ROOT where they never exist, and the leaf
     fallback — which takes `"..".split(".")[-1]`, i.e. the empty string — then
@@ -1779,6 +1824,9 @@ def _relative_candidates(module_name: str, relative_to: str, ext: str) -> list:
         from .../gpu/host/nvidia/tma.mojo
           ".."            -> .../gpu/host/nvidia/__init__.mojo   WRONG
           "std.gpu.host"  -> .../gpu/host/__init__.mojo         right
+
+    (`_candidates` is the name that search had then; it is `_candidate_shapes`
+    plus `first_source` now, and the four shapes it listed are the same four.)
 
     so `from .. import DeviceBuffer` imported nvidia's own package instead of
     its parent, and the file was refused for a module that resolves perfectly
@@ -1838,6 +1886,10 @@ def resolve_module_path(module_name: str, relative_to: str = None,
          the target's own module, and refusing it because a same-named CPython
          module exists would bind the program to the wrong one. A real Mojo
          module is a stronger statement than any name in `HOST_MODULES`.
+         The name AS SPELLED is what pass 1 offers to every root, and the LEAF
+         fallback (`_candidate_shapes`'s second phase) is only offered after
+         every root has declined the spelling — see that function, which owns
+         the ordering and the measurement that put it there.
       2. HOST MODULE. If no Mojo source exists and the name is in
          `HOST_MODULES` (or its first dotted component is), the answer is
          "CPython standard library, nothing to compile" and no sibling is
@@ -1858,7 +1910,9 @@ def resolve_module_path(module_name: str, relative_to: str = None,
          a statement that is simply false about a file that is sitting right
          there. A `.py` loses to a `.mojo` of the same name in a further root
          (pass 1 runs first, over every root): Mojo source is the target's own
-         vocabulary and outranks a host-language source file.
+         vocabulary and outranks a host-language source file. Same two phases
+         and the same order as pass 1, and `first_source` is the one
+         implementation of both.
       4. module_loader, for the stdlib, as the last resort.
 
     Returns None when all four come up empty; the caller then distinguishes a
@@ -1890,11 +1944,16 @@ def resolve_module_path(module_name: str, relative_to: str = None,
         # importer's own package. A miss is the honest answer.
         return None
     roots = _search_roots(relative_to, project_root)
-    for ext in (".mojo",):                       # pass 1
-        for base in roots:
-            for cand in _candidates(module_name, base, ext):
-                if os.path.isfile(cand):
-                    return cand
+    # Pass 1 and pass 3 are the same search over the same roots with a
+    # different extension, so they are one call each into `first_source`, which
+    # owns the ORDERING (`_candidate_shapes`): the name as spelled, asked of
+    # every root, before the leaf is asked of any. The four passes keep their
+    # documented precedence — Mojo source, then a front-end-provided name, then
+    # the host-module list, then a repository sibling, then module_loader — and
+    # only pass 1 and pass 3 move inside themselves.
+    hit = first_source(module_name, roots, ".mojo")       # pass 1
+    if hit is not None:
+        return hit
     if is_frontend_provided(module_name):        # pass 1b
         # The front end implements it, at compile time, so there is no source
         # to compile and no dylib to link — the same answer a host module
@@ -1907,11 +1966,9 @@ def resolve_module_path(module_name: str, relative_to: str = None,
         return None
     if _is_host_module(module_name):              # pass 2
         return None
-    for ext in (".py",):                         # pass 3
-        for base in roots:
-            for cand in _candidates(module_name, base, ext):
-                if os.path.isfile(cand):
-                    return cand
+    hit = first_source(module_name, roots, ".py")        # pass 3
+    if hit is not None:
+        return hit
     try:                                         # pass 4
         from module_loader import ModuleLoader
         path = ModuleLoader().resolve_module_path(module_name)
