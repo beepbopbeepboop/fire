@@ -1208,6 +1208,8 @@ class X86_64Codegen:
         self._vkinds = self._scan_value_kinds(f)
         self._list_caps, self._list_caps_by_name = self._scan_list_caps(
             f, self._vkinds)
+        self._dict_caps, self._dict_caps_by_name = M.dict_store_capacity(
+            f, M.dict_store_sites(f))
 
         # Prologue: establish the frame pointer, reserve the frame, spill the
         # callee-saved registers this function borrows into the frame's tail
@@ -4464,7 +4466,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         raise CodegenError(M.non_container_element_refusal(
             op, M.spelled(obj), self.func_name or "<module>"))
 
-    def _emit_subscript_addr(self, e: F.SubscriptExpr) -> None:
+    def _emit_subscript_addr(self, e: F.SubscriptExpr,
+                             for_store: bool = False) -> None:
         """RAX = the ADDRESS of `obj[index]` (not its value).
 
         Split out so the same address computation serves a read, a store and
@@ -4516,7 +4519,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if why is not None:
             raise CodegenError(why)
         if self._is_dict_subscript(e.obj):
-            self._emit_dict_lookup_addr(e)
+            self._emit_dict_lookup_addr(e, store=for_store)
             return
         # arm64's twin of the same refusal, asked at the same point in the same
         # dispatch: a string index against a base whose shape nothing states,
@@ -5125,8 +5128,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     self._emit_expr(v)
                 continue
             pairs.append((k, v))
-        n = len(pairs)
-        offset = self._reserve_blob(8 + 16 * n, "a dict literal")
+        n = M.dict_literal_static_pairs(expr)
+        assert n == len(pairs), (
+            "dict_literal_static_pairs and _emit_dict disagree about what a "
+            "literal writes: the reservation the store path is checked against "
+            "is computed from the former and the blob from the latter")
+        # The blob is reserved for `pairs_written + store_sites`; the count
+        # word holds only `pairs_written`. arm64's `_emit_dict` has the same
+        # arrangement and the same reason (`model.dict_store_capacity`).
+        reserved = self._dict_caps.get(id(expr), n)
+        offset = self._reserve_blob(8 + 16 * reserved, "a dict literal")
         self._emit_blob_base(offset, Reg.R11)
         self._emit_mov_imm(Reg.R10, n)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
@@ -5178,13 +5189,42 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             raise CodegenError(M.string_iteration_refusal(
                 op, self.func_name or "<module>"))
 
-    def _emit_dict_lookup_addr(self, e: F.SubscriptExpr) -> None:
-        """RAX = the ADDRESS of the value stored under `e`'s key.
+    def _emit_dict_lookup_addr(self, e: F.SubscriptExpr,
+                               store: bool = False) -> None:
+        """RAX = the ADDRESS of the value stored under `e`'s key — or, on a
+        STORE, the store itself and RAX = 0.
 
-        A linear scan over the pairs at 16-byte stride, comparing keys; a
-        miss exits(1), the same signal an out-of-range list index gives (this
-        path has no exception runtime to raise KeyError with). The key is
-        spilled first because the scan clobbers RAX."""
+        A linear scan over the pairs at 16-byte stride, comparing keys. The
+        key is spilled first because the scan clobbers RAX.
+
+        **`store` is what separates the two miss answers, and it is the same
+        three arms arm64 has** (`_emit_dict_lookup_addr` there): a miss on a
+        READ stops the program, which is right because a missing key is
+        CPython's `KeyError` and this path has no exception runtime; a miss on a
+        STORE is CPython's INSERT and needs room the literal reserved for it
+        (`model.dict_store_capacity`), checked at run time against that same
+        capacity; and a store this build cannot size for says which of the two
+        reasons it is and stops. Both machines answer the same three ways,
+        which is the one thing this pair must never fail to do.
+        """
+        base_name = e.obj.name if isinstance(e.obj, F.IdentExpr) else None
+        cap = None
+        why_no_room = None
+        if store:
+            # A statically-known CONTAINER key is compared element-wise on arm64
+            # and never materialised, so an insert there has no key WORD to
+            # write. x86-64's scan compares raw words and COULD store the blob
+            # pointer — and must not, because then the two architectures would
+            # answer this case differently (`M.static_key_elements` is the one
+            # rule for what a container key is).
+            if M.static_key_elements(e.index) is not None:
+                why_no_room = M.dict_store_no_room_message(
+                    base_name or "<expr>", M.spelled(e.index))
+            else:
+                cap = self._dict_caps_by_name.get(base_name)
+                if cap is None:
+                    why_no_room = M.dict_store_other_blob_message(
+                        base_name or "<expr>", M.spelled(e.index))
         self._emit_expr(e.obj)
         self._push_slot(Reg.RAX)                   # dict blob
         self._emit_expr(e.index)
@@ -5215,9 +5255,40 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.label(hit_label)
         # value address = dict + 16 + 16*i
         self._emit_elem_addr(Reg.RSI, Reg.R11, Reg.RAX, header=16, scale=4)
+        if store:
+            # The store happens HERE and RAX becomes the assignment's `None`:
+            # a dict store on a miss has no address to return at all (the store
+            # IS the insert), so handing a slot back to a caller that stores
+            # through it is a write to whatever the miss arm left in RAX.
+            self.asm.emit(encode_mov_r64_rm64(Reg.R9, Reg.RSP, 0))
+            self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 0, Reg.R9))
+            self._emit_mov_imm(Reg.RAX, 0)
         self._emit_jmp(end_label)
         self.asm.label(miss_label)
-        self._emit_call_exit(1)
+        if cap is None:
+            if why_no_room is not None:
+                self._emit_overflow_diagnostic(why_no_room)
+            self._emit_call_exit(1)
+        else:
+            oob_label = f"{fn}_dl{wid}_oob"
+            self.asm.emit(encode_cmp_r64_imm32(Reg.R10, cap))
+            self._emit_setcc_bool(Reg.R8, "setae")
+            self._emit_jcc_bool(Reg.R8, COND_NE, oob_label)
+            self._emit_elem_addr(Reg.RSI, Reg.R10, Reg.R9, header=8, scale=4)
+            self.asm.emit(encode_mov_rm64_r64(Reg.R9, 0, Reg.RDI))   # the key
+            # The value is read AFTER the compare: `setcc` above writes R8, and
+            # reading it before would store the capacity comparison's 0/1
+            # instead of the value.
+            self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RSP, 0))
+            self.asm.emit(encode_mov_rm64_r64(Reg.R9, 8, Reg.R8))   # the value
+            self.asm.emit(encode_add_r64_imm32(Reg.R10, 1))
+            self.asm.emit(encode_mov_rm64_r64(Reg.RSI, 0, Reg.R10))  # the count
+            self._emit_mov_imm(Reg.RAX, 0)       # the assignment's None
+            self._emit_jmp(end_label)
+            self.asm.label(oob_label)
+            self._emit_overflow_diagnostic(
+                M.dict_store_overflow_message(base_name or "<expr>", cap))
+            self._emit_call_exit(1)
         self.asm.label(end_label)
 
     def _emit_for_unpack(self, targets: list, blob_reg: Reg, tag: str) -> None:
@@ -6232,6 +6303,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         that does not read the element back.
         """
         self._push_slot(src)                       # value
+        if self._is_dict_subscript(target.obj):
+            # The one subscript whose store is not "compute an address and
+            # store through it": `d[k] = v` INSERTS on a miss, so there is no
+            # address to return and the value is written inside the lookup's own
+            # arms (`_emit_dict_lookup_addr`). The refusals still run, because it
+            # goes through `_emit_subscript_addr` like every other subscript.
+            self._emit_subscript_addr(target, for_store=True)
+            self._pop_slot(Reg.R11)                # the value, discarded
+            self._emit_mov_imm(src, 0)            # the assignment's None
+            return
         self._emit_subscript_addr(target)          # RAX = address
         self._pop_slot(Reg.R11)                    # R11 = value
         if self._sub_width == 1:

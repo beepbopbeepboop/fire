@@ -12177,7 +12177,114 @@ STDERR_CASES = [
      "    printf(\"n=%d\", len(xs))\n"
      "    return 0\n",
      1, ["list.append overflowed 'xs'", "its capacity is 1", "append SITES"]),
+    # `d[k] = v` for a key the blob does NOT hold, which is CPython's INSERT and
+    # used to be a key scan that missed and stopped the program having printed
+    # nothing. The reservation is `formal/model.py`'s `dict_store_capacity` —
+    # the pairs the literal wrote plus one per `d[k] = v` SITE in the function
+    # that built it — so the three needles are the same three the append case
+    # asks for and for the same reason: a message that said only "dict overflow"
+    # would leave a reader unable to tell this from a frame-budget refusal, which
+    # has a different remedy.
+    #
+    # `i` is the INDEX, so every execution is a DIFFERENT key and the reservation
+    # of one pair is genuinely exceeded — the shape `xs.append` in a loop has,
+    # and the reason the guard is a run-time check rather than a refusal.
+    ("dict_store_past_its_reservation_is_loud",
+     "def main(n):\n"
+     "    d = {\"a\": 1}\n"
+     "    var i = 0\n"
+     "    while i < 3:\n"
+     "        d[i] = i\n"
+     "        i = i + 1\n"
+     "    printf(\"n=%d\", len(d))\n"
+     "    return 0\n",
+     1, ["dict store into 'd' overflowed", "its capacity is 2 pairs",
+         "SITE"]),
+    # The OTHER half of the two sentences, and it is a different problem with a
+    # different repair: this blob's pairs were written by ANOTHER function, so
+    # this build never saw them and has no reservation to add to. The needle set
+    # says which of the two it is, because a reader who is told "cannot reserve"
+    # and not which of the two reasons would go and look at the wrong thing.
+    ("dict_store_into_a_blob_this_build_cannot_size_is_loud",
+     "def fill(d: Dict[String, Int], k: String, v: Int):\n"
+     "    d[k] = v\n\n"
+     "def main(n):\n"
+     "    var t = {\"a\": 1}\n"
+     "    fill(t, \"b\", 2)\n"
+     "    printf(\"b=%d\", t[\"b\"])\n"
+     "    return 0\n",
+     1, ["dict store of 'k' into 'd'", "cannot reserve",
+         "not built by a dict LITERAL"]),
 ]
+
+# `d[k] = v` INSERTS, and these are the answers CPython gives. They are in
+# `CASES` rather than in a dict-shaped suite because the construct is a STORE
+# and every store on this path goes through `_emit_subscript_store_reg`, which
+# is where the shape that is not this one — "compute an address and store
+# through it" — lives: on a miss there is no address to return, because the
+# store IS the insert.
+#
+# `dict_store_of_a_present_key_is_the_control` is what keeps a "fix" that
+# refuses every dict store from passing: that program computed correctly before
+# this change and still does.
+DICT_STORE_CASES = [
+    ("dict_store_of_a_new_key_inserts",
+     "def main(n):\n"
+     "    d = {}\n"
+     "    d[\"x\"] = 3\n"
+     "    printf(\"v=%d n=%d\", d[\"x\"], len(d))\n"
+     "    return 0\n", 0, "v=3 n=1"),
+    ("dict_store_of_an_absent_key_after_a_literal_inserts",
+     "def main(n):\n"
+     "    d = {\"a\": 1}\n"
+     "    d[\"b\"] = 2\n"
+     "    d[\"a\"] = 7\n"
+     "    printf(\"a=%d b=%d n=%d\", d[\"a\"], d[\"b\"], len(d))\n"
+     "    return 0\n", 0, "a=7 b=2 n=2"),
+    ("dict_store_of_a_present_key_is_the_control",
+     "def main(n):\n"
+     "    d = {\"a\": 1, \"b\": 2}\n"
+     "    d[\"a\"] = 7\n"
+     "    printf(\"a=%d n=%d\", d[\"a\"], len(d))\n"
+     "    return 0\n", 0, "a=7 n=2"),
+    # Through a `Dict[…]` PARAMETER, to a key the table HOLDS: the blob was
+    # built elsewhere, so there is no reservation here — and the store is still
+    # correct, because a key that is present takes the scan's hit arm on both
+    # backends and never reaches the capacity check. This is the case that says
+    # the reservation is an INSERT's requirement and not a STORE's.
+    ("dict_store_through_a_dict_parameter_of_a_present_key",
+     "def fill(d: Dict[String, Int], k: String, v: Int):\n"
+     "    d[k] = v\n\n"
+     "def main(n):\n"
+     "    var t = {\"a\": 1}\n"
+     "    fill(t, \"a\", 9)\n"
+     "    printf(\"a=%d n=%d\", t[\"a\"], len(t))\n"
+     "    return 0\n", 0, "a=9 n=1"),
+    # THE SAME KEY in a loop: every execution hits the key the first one put
+    # there, so the count does not grow and the reservation is never exceeded.
+    # It is here because it is the arrangement that looks like the overflow case
+    # and is not: one site, three executions, one pair.
+    ("dict_store_of_the_same_key_in_a_loop_is_the_last_write",
+     "def main(n):\n"
+     "    d = {\"a\": 1}\n"
+     "    var i = 0\n"
+     "    while i < 3:\n"
+     "        d[\"k\"] = i\n"
+     "        i = i + 1\n"
+     "    printf(\"k=%d n=%d\", d[\"k\"], len(d))\n"
+     "    return 0\n", 0, "k=2 n=2"),
+    # An INTEGER key, which is the other half of what this path's dict surface
+    # is (the rest is interned string literals) and takes the raw 64-bit compare
+    # rather than the element-wise one. `d = {}` reserves nothing of its own, so
+    # the whole of the blob is the reservation.
+    ("dict_store_of_an_integer_key_into_an_empty_table",
+     "def main(n):\n"
+     "    d = {}\n"
+     "    d[10] = 1\n"
+     "    printf(\"v=%d n=%d\", d[10], len(d))\n"
+     "    return 0\n", 0, "v=1 n=1"),
+]
+CASES.extend(DICT_STORE_CASES)
 
 
 # Cases that must be REFUSED with the by-reference receiver switched OFF.

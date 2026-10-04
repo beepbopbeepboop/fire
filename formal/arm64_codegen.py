@@ -1298,6 +1298,8 @@ dylib_exports: list = None, globals_base: int = None,
         self._vkinds = self._scan_value_kinds(f)
         self._list_caps, self._list_caps_by_name = self._scan_list_caps(
             f, self._vkinds)
+        self._dict_caps, self._dict_caps_by_name = M.dict_store_capacity(
+            f, M.dict_store_sites(f))
 
         # Prologue: save FP/LR, set FP, save callee-saved var regs, move each
         # incoming argument into ITS OWN callee-saved home (always arg0 into
@@ -4237,7 +4239,16 @@ ctor_field_value=self._ctor_field_value_for(name),
         X0 exits holding the blob address. Keys/values are int64 or
         (interned) string/inner-blob pointers — same slot width as list
         blobs. Cursor reserves the full blob before any child is evaluated
-        so nested containers sit above it. Star-unpack not applicable."""
+        so nested containers sit above it. Star-unpack not applicable.
+
+        **The blob is reserved for `pairs_written + store_sites`, and the
+        count word holds only `pairs_written`.**  A dict LITERAL says which
+        pairs were written; it said nothing about how many more there is room
+        for, which is why `d["new"] = v` had nowhere to write and the miss arm
+        stopped the program (`model.dict_store_capacity`, the same reservation
+        `list.append` gets from `_scan_list_caps`, and the same bargain: one
+        store SITE per reservation, every EXECUTION of it counted, and a store
+        in a loop stops loudly rather than writing past the blob)."""
         # Static pairs only: `**other` / `*xs` are evaluated for side
         # effects then skipped (fixed pair-blob, no dynamic growth).
         static_pairs = []
@@ -4253,8 +4264,13 @@ ctor_field_value=self._ctor_field_value_for(name),
                 splat_exprs.append(k)
                 continue
             static_pairs.append((k, v))
-        n = len(static_pairs)
-        size = 8 * (1 + 2 * n)
+        n = M.dict_literal_static_pairs(expr)
+        assert n == len(static_pairs), (
+            "dict_literal_static_pairs and _emit_dict disagree about what a "
+            "literal writes: the reservation the store path is checked against "
+            "is computed from the former and the blob from the latter")
+        reserved = self._dict_caps.get(id(expr), n)
+        size = 8 * (1 + 2 * reserved)
         if self._list_cursor + size > self._blob_cap:
             raise CodegenError(M.frame_blob_refusal(
                 "a dict literal", self._list_cursor + size, self._blob_cap))
@@ -4335,8 +4351,10 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_cset_xd_cond(13, "eq"))
             self.asm.emit(encode_and_xd_xn_xm(ok, ok, 13))
 
-    def _emit_dict_lookup_addr(self, e: F.SubscriptExpr) -> None:
-        """X0 = &dict[key] value slot. Missing key → Darwin exit(1).
+    def _emit_dict_lookup_addr(self, e: F.SubscriptExpr,
+                                 store: bool = False) -> None:
+        """X0 = &dict[key] value slot. A missing key on a READ stops the
+        program; on a STORE it is CPython's INSERT.
 
         Pair-blob layout: [count][k0][v0]…; value i is at base+16+16*i.
         Key compare is raw 64-bit equality — valid for interned string
@@ -4344,11 +4362,33 @@ ctor_field_value=self._ctor_field_value_for(name),
         static container key, which is compared element-wise (see
         `_static_key_needle`): a tuple key's blob pointer is not a value.
 
+        **`store` is what separates the two miss answers, and it is why the
+        miss arm is three arms and not one.**  `d[k] = v` INSERTS in CPython,
+        and before this it stopped the program having printed nothing, on both
+        backends, with the diagnostic naming neither the key nor the table. The
+        insert needs three facts, and only one of them was missing: the SCAN is
+        the same scan, and the pair address is arithmetic on the base and the
+        count, so what is new is the ROOM — `model.dict_store_capacity`
+        reserves `pairs + store sites` at the literal, and the arm below is
+        that capacity checked, a pair written at the count, and the count
+        bumped. The two arms that cannot insert say so in a sentence instead of
+        exiting silently: no capacity (the blob was built by another function,
+        so this build never saw its pairs) and a static container key (compared
+        element-wise, never materialised, so there is no key word to write).
+
+        `self._emit_subscript_addr` passes `store` down from the ONE caller
+        that stores, so the read, the store and the augmented assignment cannot
+        be told apart wrongly — and the augmented assignment
+        (`d[k] += v`) deliberately keeps the READ arm, because it raises
+        `KeyError` on a missing key and exiting is the right answer for it.
+
         Stack on entry to the scan (two STP pushes, or one when the key is
         compared element-wise and never needs a slot):
           [SP+0]  key (lookup), [SP+8] XZR
           [SP+16] base,        [SP+24] junk
-        Hit path stashes the value address in X4 across the pops."""
+        On the store arm the CALLER's spilled value is above those two pushes —
+        [SP+32] — which is where the insert reads it from. Hit path stashes the
+        value address in X4 across the pops."""
         self._sub_counter += 1
         sid = self._sub_counter
         fn = self.func_name
@@ -4356,6 +4396,22 @@ ctor_field_value=self._ctor_field_value_for(name),
         hit_label = f"{fn}_dlk{sid}_hit"
         end_label = f"{fn}_dlk{sid}_end"
         loop_label = f"{fn}_dlk{sid}_loop"
+        # The room this store may use, and None for the two arms that cannot
+        # insert. Decided BEFORE the scan because the miss arm's shape depends
+        # on it, and read from the NAME table for the reason
+        # `_emit_list_append` reads its capacity from the name table.
+        cap = None
+        why_no_room = None
+        if store:
+            base_name = e.obj.name if isinstance(e.obj, F.IdentExpr) else None
+            if M.static_key_elements(e.index) is not None:
+                why_no_room = M.dict_store_no_room_message(
+                    base_name or "<expr>", M.spelled(e.index))
+            else:
+                cap = self._dict_caps_by_name.get(base_name)
+                if cap is None:
+                    why_no_room = M.dict_store_other_blob_message(
+                        base_name or "<expr>", M.spelled(e.index))
 
         if isinstance(e.obj, F.DictExpr):
             self._emit_dict(e.obj)
@@ -4399,15 +4455,63 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         self.asm.label(hit_label)
         self.asm.emit(encode_add_xd_xn_imm(4, 5, 8))    # X4 = value slot
-        _pop_scan()
-        self.asm.emit(encode_mov_zr_xn(0, 4))
+        if store:
+            # A dict STORE puts the value here, out of the caller's spill, and
+            # leaves NOTHING to store through afterwards: `_emit_subscript_addr`
+            # is a "where does this live" question, and on a miss there is no
+            # where — the store IS the insert. Handing a value slot back to a
+            # caller that then stores through it is how the miss arm's `None`
+            # became a write to address 0.
+            self.asm.emit(encode_ldr_xt_xn_imm(7, 31, base_off + 16))
+            self.asm.emit(encode_str_xt_xn_imm(7, 4, 0))
+            _pop_scan()
+            self.asm.emit(encode_mov_zr_xn(0, 0))    # the assignment's None
+        else:
+            _pop_scan()
+            self.asm.emit(encode_mov_zr_xn(0, 4))
         self._emit_b_to(end_label)
 
         self.asm.label(miss_label)
-        _pop_scan()
-        self.asm.emit(encode_movz_xd_imm(0, 1))
-        self.asm.emit(encode_movz_xd_imm(16, 1))
-        self.asm.emit(encode_svc(0x80))
+        if cap is None:
+            _pop_scan()
+            if why_no_room is not None:
+                self._emit_overflow_diagnostic(why_no_room)
+            self.asm.emit(encode_movz_xd_imm(0, 1))
+            self.asm.emit(encode_movz_xd_imm(16, 1))
+            self.asm.emit(encode_svc(0x80))
+        else:
+            # THE INSERT. `X1` = base and `X2` = count come off the scan's own
+            # pushes, the spilled VALUE is at [SP+32] (see the stack note), and
+            # the pair lands at `base + 8 + 16*count` — the same address the hit
+            # arm computes, one past the end.
+            oob_label = f"{fn}_dlk{sid}_oob"
+            self.asm.emit(encode_ldr_xt_xn_imm(1, 31, base_off))
+            self.asm.emit(encode_ldr_xt_xn_imm(2, 1, 0))     # X2 = count
+            self._emit_mov_imm("X3", cap)
+            self.asm.emit(encode_cmp_xn_xm(2, 3))
+            self.asm.emit(encode_cset_xd_cond(4, "cs"))      # count >= cap
+            self.asm.emit(encode_cbnz_xn(0, 4))
+            self.asm.emit_label_rel(oob_label, here_offset=-4)
+            self.asm.emit(encode_add_xd_xn_imm(5, 1, 8))
+            self.asm.emit(encode_add_xd_xn_xm_lsl4(5, 5, 2))  # X5 = key slot
+            self.asm.emit(encode_ldr_xt_xn_imm(6, 31, 0))    # X6 = key
+            self.asm.emit(encode_str_xt_xn_imm(6, 5, 0))
+            self.asm.emit(encode_ldr_xt_xn_imm(7, 31, base_off + 16))  # value
+            self.asm.emit(encode_str_xt_xn_imm(7, 5, 8))
+            self.asm.emit(encode_add_xd_xn_imm(2, 2, 1))
+            self.asm.emit(encode_str_xt_xn_imm(2, 1, 0))     # count = n + 1
+            _pop_scan()
+            self.asm.emit(encode_mov_zr_xn(0, 0))    # the assignment's None
+            self._emit_b_to(end_label)
+            self.asm.label(oob_label)
+            _pop_scan()
+            self._emit_overflow_diagnostic(
+                M.dict_store_overflow_message(
+                    e.obj.name if isinstance(e.obj, F.IdentExpr) else "<expr>",
+                    cap))
+            self.asm.emit(encode_movz_xd_imm(0, 1))
+            self.asm.emit(encode_movz_xd_imm(16, 1))
+            self.asm.emit(encode_svc(0x80))
         self.asm.label(end_label)
 
     def _is_dict_key_subscript(self, e: F.SubscriptExpr) -> bool:
@@ -4521,7 +4625,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         raise CodegenError(M.non_container_element_refusal(
             op, M.spelled(obj), self.func_name or "<module>"))
 
-    def _emit_subscript_addr(self, e: F.SubscriptExpr) -> None:
+    def _emit_subscript_addr(self, e: F.SubscriptExpr,
+                             for_store: bool = False) -> None:
         """X0 = &obj[index]. Blob path bounds-checkes (exit 1 on OOB).
 
         The single choke point for a subscript: a read, a store
@@ -4533,7 +4638,16 @@ ctor_field_value=self._ctor_field_value_for(name),
         proof generator (the emitted index is a frame address, so the
         bounds-check branch the step model has to follow is not one it has a
         contract for) and the second emitted a store through a computed
-        address. Both now say no."""
+        address. Both now say no.
+
+        `for_store` is the ONE thing that separates the three, because the
+        dict lookup's answer does depend on it: `d[k] = v` INSERTS on a
+        miss, while `d[k]` and `d[k] += v` do not (`_emit_dict_lookup_addr`
+        has the arms). It is a parameter rather than a flag on the emitter
+        because the augmented assignment must NOT inherit it — `+=` raises
+        `KeyError` on a missing key, so stopping is the right answer there —
+        and a flag the store caller sets and every other caller has to
+        remember to clear is a flag that survives an exception path."""
         self._refuse_frame_container_operand("a subscript", e.obj)
         self._refuse_non_container_operand("a subscript", e.obj)
         if M.is_external_call_template(e):
@@ -4578,7 +4692,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         if why is not None:
             raise CodegenError(why)
         if self._is_dict_key_subscript(e):
-            self._emit_dict_lookup_addr(e)
+            self._emit_dict_lookup_addr(e, store=for_store)
             return
         # A string index against a base whose shape nothing states: the one
         # spelling of this subscript that neither the dict path nor the byte
@@ -4726,6 +4840,18 @@ ctor_field_value=self._ctor_field_value_for(name),
         computation clobbers is the backend's business, not this caller's.
         """
         self.asm.emit(encode_stp_sp_pre(reg, 31))   # push the value
+        if self._is_dict_key_subscript(target):
+            # The one subscript whose store is not "compute an address and
+            # store through it": `d[k] = v` INSERTS on a miss, so there is no
+            # address to return and the value is written inside the lookup's own
+            # arms (`_emit_dict_lookup_addr`). Everything before this — the
+            # multi-index, type-index and string-index refusals — still runs,
+            # because it goes through `_emit_subscript_addr` like every other
+            # subscript.
+            self._emit_subscript_addr(target, for_store=True)
+            self.asm.emit(encode_ldp_sp_post(reg, 31))   # pop the value
+            self.asm.emit(encode_mov_zr_xn(reg, 0))      # the assignment's None
+            return
         self._emit_subscript_addr(target)           # X0 = address
         self.asm.emit(encode_stp_sp_pre(0, 2))      # save addr
         self.asm.emit(encode_mov_zr_xn(9, 0))       # X9 = addr
