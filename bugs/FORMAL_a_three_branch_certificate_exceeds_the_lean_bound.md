@@ -178,3 +178,7 @@ $ python3 .tmp/check_lean.py .tmp/three_notheorem.lean 420      # rc=0, 23.1s, 2
 worktree's `lib/` — **not** `ensure_library`, whose currency check wants a
 `ProofLib.olean` rebuild that peaks at 7.82 GB, i.e. over an 8 GB ceiling. That
 is the one trap in reproducing any of this, and it cost this pass a killed run.
+Both harnesses are scratch (`.tmp/leanrun.py` is a `subprocess` with a timeout, so
+a known-slow case costs minutes rather than `PROOF_WALL_S`; `check_lean.py` is
+five lines) and are spelled out above rather than committed — §2's whole claim is
+that these measurements are cheap, and a committed script would suggest otherwise.
