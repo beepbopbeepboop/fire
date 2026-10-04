@@ -58,6 +58,14 @@ WHAT IS AND IS NOT A FINDING
                        `formal/model.py`'s `STACK_TRAP_STATUS`).  A documented
                        limit of this path and not a disagreement: CPython has
                        no such bound and ran the same text.
+  CPYTHON-TIMEOUT     the ORACLE did not finish the program, so nothing was
+                       compared and nothing is claimed.  Its own verdict rather
+                       than a crash: `cpython_answer` answers `None` for it, and
+                       a caller that read "not an error tuple" as "has an
+                       answer" died with `TypeError: cannot unpack non-iterable
+                       NoneType object` — measured, in a `signed` sweep, on a
+                       program whose recursion runs CPython past its own
+                       recursion limit.
   refusal             the compiler said no.  Not a finding: a construct with
                        no representation is CORRECTLY refused, and a fuzzer
                        that counted those as bugs would spend its whole budget
@@ -401,6 +409,22 @@ PY_DRIVER = (
 )
 
 
+def has_oracle(ref):
+    """Whether `cpython_answer` produced an ANSWER rather than one of its two
+    non-answers.
+
+    It has THREE, which is the whole reason this is a function: an answer is an
+    `(exit, stdout)` tuple, a generator error is `("error", …)`, and a CPython
+    TIMEOUT is `None`.  "not an error tuple" is therefore not "has an oracle",
+    and every caller that read it that way crashed on the timeout with
+    `TypeError: cannot unpack non-iterable NoneType object` — measured in a
+    `signed` sweep, minimising a program whose recursion runs CPython past its
+    own recursion limit.  A tool that dies on its own oracle reports nothing
+    about the backend, and its exit status says nothing either.
+    """
+    return bool(isinstance(ref, tuple) and ref and ref[0] != "error")
+
+
 def cpython_answer(text, tmpdir, name):
     """(exit, stdout) for `text` + `main()`, run by the interpreter here."""
     py = os.path.join(tmpdir, name + ".ref.py")
@@ -649,7 +673,7 @@ class Gen:
         self.strings = []     # String locals
         self.strings_text = {}  # String local -> the literal it was bound to
         self.lists = []       # (name, length) list locals of ints
-        self.dicts = []       # (name, key kind, keys, values) dict locals
+        self.dicts = []       # (name, key kind, keys) dict locals
         self.tuples = []      # (name, length) tuple locals of ints
         self.globals = []     # (name, initial value) module-level INT names
         self.global_containers = []   # (name, length) module-level list names
@@ -1360,7 +1384,7 @@ class Gen:
         if kind == "dict_build" or not self.dicts:
             self.build_dict()
             return
-        var, key_kind, keys, values = self.rng.choice(self.dicts)
+        var, key_kind, keys = self.rng.choice(self.dicts)
         if kind == "dict_read":
             # Through a local, and the local joins `words` so later statements
             # can compare against it — a subscripted value is an ordinary word
@@ -1472,7 +1496,7 @@ class Gen:
         # branch went. That is the conservative direction for an oracle, and the
         # refusal stays visible in the tally rather than being generated.
         self.declare(name, literal)
-        self.dicts.append((name, key_kind, keys, values))
+        self.dicts.append((name, key_kind, keys))
         return name
 
     def absent_key(self, key_kind):
@@ -1486,7 +1510,7 @@ class Gen:
         """
         if key_kind == "int":
             return str(self.rng.randint(41, 99))
-        written = {k for _v, kind, keys, _vals in self.dicts if kind == "str"
+        written = {k for _v, kind, keys in self.dicts if kind == "str"
                    for k in keys}
         pool = [repr(w) for w in STRINGS if w and repr(w) not in written]
         return self.rng.choice(pool or ["'zz'"])
@@ -2060,6 +2084,13 @@ def check_one(index, args, tmpdir, lock=None):
     if isinstance(ref, tuple) and ref and ref[0] == "error":
         return {"index": index, "verdict": "generator-error",
                 "detail": ref[1], "text": text}
+    if not has_oracle(ref):
+        # A CPython TIMEOUT is not a generator error — it is the oracle being
+        # unable to finish a program that is about to be handed to two
+        # compilers, and it gets its own verdict rather than a crash or a
+        # `generator-error` that names a traceback it never produced.
+        return {"index": index, "verdict": "CPYTHON-TIMEOUT", "detail": err,
+                "text": text}
     want_exit, want_out = ref
     for backend in args.backends:
         results[backend] = run_on(backend, text, tmpdir, name)
@@ -2168,6 +2199,9 @@ def report(rec, args):
                 lines.append(f"      {backend:<7} {r['verdict']}: "
                              f"{shorten(r['diag'], 220)}")
         return "\n".join(lines)
+    if v == "CPYTHON-TIMEOUT":
+        return (f"  CPYTHON-TIMEOUT  #{rec['index']}  (the oracle did not "
+                f"finish; nothing was compared)")
     if v == "trapped":
         return f"  trapped #{rec['index']}  (the stack-floor guard; CPython ran "
     lines = [f"  {v}  #{rec['index']}"]
@@ -2415,7 +2449,7 @@ def _every_engine_agrees(text, args, tmpdir, name):
     docstring calls erring towards one extra report rather than one hidden bug.
     """
     ref, _err = cpython_answer(text, tmpdir, name)
-    if isinstance(ref, tuple) and ref and ref[0] == "error":
+    if not has_oracle(ref):
         return False
     want_exit, want_out = ref
     for backend in args.backends:
@@ -2491,7 +2525,11 @@ MIN_KINDS = {"x86_64": "x86", "arm64": "arm"}
 
 # The verdicts the summary prints whether or not they happened, and the rest are
 # printed only when they do.
-ALWAYS_REPORTED = ("match", "trapped", "refusal")
+#: Printed even when zero, because "0 CPYTHON-TIMEOUT" is a fact about the
+#: corpus and "no line" is not — the same reason `match`/`trapped`/`refusal`
+#: are here.  A CPython timeout is the ORACLE's verdict and says nothing about
+#: the backends, which is why it is neither a finding nor counted as one.
+ALWAYS_REPORTED = ("match", "trapped", "refusal", "CPYTHON-TIMEOUT")
 
 
 def resolve_min_kind(args):
@@ -2536,7 +2574,7 @@ def _still_fails(text, args, want=None):
     diags = {}
     with tempfile.TemporaryDirectory(dir=args.work) as td:
         ref, _err = cpython_answer(text, td, name)
-        have_oracle = not (isinstance(ref, tuple) and ref and ref[0] == "error")
+        have_oracle = has_oracle(ref)
         want_exit, want_out = ref if have_oracle else (None, None)
         for backend in args.backends:
             if kind == "x86" and backend != "x86_64":

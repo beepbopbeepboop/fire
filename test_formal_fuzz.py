@@ -285,12 +285,21 @@ def check_run(arch, count, jobs, verbose):
         failures += _fail(f"run_{arch}", out.strip()[-3000:], verbose)
 
     counts = _counts(out)
-    for label in ("match", "trapped", "refusal"):
+    for label in ("match", "trapped", "refusal", "CPYTHON-TIMEOUT"):
+        # `label in counts`, not `counts.get(label)`: the four are ALWAYS
+        # printed, zero included, so their PRESENCE is the assertion and their
+        # value is not.
         if label not in counts:
             failures += _fail(f"run_{arch}_printed_no_{label}_count",
                               out.strip()[-1500:], verbose)
     for label, n in sorted(counts.items()):
-        if label.startswith("generator-error"):
+        if label == "CPYTHON-TIMEOUT" and n:
+            failures += _fail(
+                f"run_{arch}_reported_cpython_timeouts",
+                f"{n} program(s) the ORACLE could not finish: the corpus has "
+                f"outgrown the reference's patience, which measures the "
+                f"generator's bounds and not the backend", verbose)
+        elif label.startswith("generator-error"):
             failures += _fail(
                 f"run_{arch}_reported_generator_errors",
                 f"{n} program(s) CPython will not run: that is the oracle's "
