@@ -22651,7 +22651,8 @@ def list_element_structs(fn, structs_by_name: dict, decls: dict,
 
 
 def receiver_struct(expr, fn, structs_by_name: dict, owner=None,
-                    bound: dict = None, elems: dict = None, functions=None):
+                    bound: dict = None, elems: dict = None, functions=None,
+                    one_field: bool = True):
     """The ONE-FIELD struct `expr` denotes, or None when nothing says which.
 
     The receiver-type predicate, and it is ONE function for the reason
@@ -22667,9 +22668,16 @@ def receiver_struct(expr, fn, structs_by_name: dict, owner=None,
 
       * a SUBSCRIPT — `bs[0]`, `messages[i]`.  The element type of `elems`, which
         `list_element_structs` built from the two spellings that state one;
-      * a CALL — `S()`, or a call whose declared return type names a struct.  The
-        constructor's own declaration, and for the second the callee's `-> T` out
-        of `functions` read by `annotation_base_name`;
+      * a CALL — `S()`, a call whose declared return type names a struct, or a
+        METHOD call `recv.m(...)`, whose result type is the method's own `-> T`.
+        The constructor's own declaration, for the second the callee's `-> T` out
+        of `functions` read by `annotation_base_name`, and for the third
+        `_method_call_result_struct`, which reads that `-> T` off the METHOD
+        after establishing the receiver's struct — added 2026-10-04, and the
+        refusal sentence `subscript_receiver_method_refusal` prints used to be
+        false about `std/builtin/float_literal.mojo` because of it ("this path
+        has no inference that answers which struct does `self.
+        __int_literal__()` hold" — the return annotation answers exactly that);
       * a bare NAME — `self`, a parameter declared with a struct annotation, or a
         name bound to a constructor call (`bound`, which the caller already
         computed for the one-word field rewrite and passes in rather than
@@ -22693,14 +22701,26 @@ def receiver_struct(expr, fn, structs_by_name: dict, owner=None,
     passed for a local.  A multi-field struct's receiver is an address of a frame
     that belongs to the function which created it, which is a different lifetime
     and a different refusal, and this predicate does not speak for it.
+
+    **`one_field=False` waives that gate, and exactly one caller needs it: the
+    refusal that has to NAME the struct.**  `formal/build.py::
+    _call_receiver_verdict` asks with the gate off, so a receiver whose type is
+    a multi-field struct is refused with the sentence about the REPRESENTATION
+    rather than with the one about a missing type — which would be false, since
+    a parameter declared `Wide` says exactly which struct it is.  A caller that
+    waives the gate takes on the gate's rule: what comes back is a NAME, not a
+    value, and passing it as a receiver is the thing the gate exists to stop.
     """
     st = _receiver_struct_source(expr, fn, structs_by_name, owner, bound,
-                                 elems, functions or {})
-    return st if st is not None and struct_is_one_field(st) else None
+                                 elems, functions or {}, one_field)
+    if st is None:
+        return None
+    return st if (not one_field or struct_is_one_field(st)) else None
 
 
 def _receiver_struct_source(expr, fn, structs_by_name: dict, owner,
-                            bound: dict, elems: dict, functions: dict):
+                            bound: dict, elems: dict, functions: dict,
+                            one_field: bool = True):
     """The struct ONE source names, or None.  `receiver_struct`'s four rows."""
     structs_by_name = structs_by_name or {}
     bound = bound or {}
@@ -22712,6 +22732,19 @@ def _receiver_struct_source(expr, fn, structs_by_name: dict, owner,
         return (elems or {}).get(base.name) if isinstance(base, F.IdentExpr) \
             else None
     if isinstance(expr, F.CallExpr):
+        if isinstance(expr.func, F.MemberExpr):
+            # `recv.m(...)` — a METHOD call, whose result type is the METHOD's
+            # own `-> T`.  This is the row `formal/build.py::_call_receiver_target`
+            # asks at the lift, and it is the same answer read one hop further
+            # out: `self.__int_literal__().__int__()` (`std/builtin/
+            # float_literal.mojo`) is `IntLiteral___int__(self.
+            # __int_literal__())`, and the only fact that settles which
+            # `___int__` it is — `__int__` is declared by `FloatLiteral` HERE and
+            # by `IntLiteral` in another module, so the name alone picks the
+            # wrong one — is the method's declared return type.
+            return _method_call_result_struct(expr, fn, structs_by_name,
+                                             owner, bound, elems, functions,
+                                             one_field)
         if not isinstance(expr.func, F.IdentExpr):
             return None
         st = structs_by_name.get(expr.func.name)
@@ -22741,6 +22774,93 @@ def _receiver_struct_source(expr, fn, structs_by_name: dict, owner,
         base, _ann, _why, declared = struct_field_declared_type(st, path)
         return structs_by_name.get(base) if (declared and base) else None
     return None
+
+
+def call_result_type_name(expr, fn, structs_by_name: dict, owner,
+                          bound: dict, elems: dict, functions: dict,
+                          one_field: bool = True) -> str:
+    """The TYPE NAME `expr` evaluates to by its own declaration, or None.
+
+    The ONE reader of a callee's declared `-> T`, and it is here rather than in
+    the two rows that need it because they must not be able to disagree: the
+    CALL row of `_receiver_struct_source` answers "which STRUCT", and a
+    refusal needs "which NAME" as well — `formal/build.py::
+    _call_receiver_verdict` asks this one to say `IntLiteral` out loud when the
+    struct of that name is declared in another module and there is therefore no
+    struct to lift to.  Two readers of one annotation is how one of them starts
+    reporting a different type for the same call.
+
+    Three spellings, all of them declarations rather than inferences:
+
+      * a CONSTRUCTION `S()` names `S`;
+      * a call to a function of this module — `mk()` — names whatever its `-> T`
+        spells, or nothing when it declares none;
+      * a METHOD call `recv.m(...)` names the method's `-> T`, and only once the
+        receiver's own struct is settled AND the struct declares that method
+        exactly once.  Two declarations of one method are two `-> T`s with
+        nothing in the call saying which was meant, so the answer is None and
+        not "the first one".
+
+    `one_field` is `receiver_struct`'s own gate, passed through rather than
+    re-derived: a caller that waived it to get a NAME for a multi-field
+    receiver has to get that name from the same chain of hops, or the answer
+    stops one step short of where the gate was waived.
+
+    `None` is the answer for every doubtful case, which is what makes the
+    caller's refusal safe to read: a name this prints is a name the source
+    wrote.
+    """
+    if not isinstance(expr, F.CallExpr):
+        return None
+    if isinstance(expr.func, F.MemberExpr):
+        recv = receiver_struct(expr.func.obj, fn, structs_by_name, owner, bound,
+                               elems, functions, one_field)
+        if recv is None:
+            return None
+        named = [m for m in struct_methods(recv)
+                 if m.name == expr.func.member]
+        if len(named) != 1:
+            return None
+        ret = getattr(named[0], "return_type", None)
+        return annotation_base_name(ret, self_type=getattr(recv, "name", None))
+    if not isinstance(expr.func, F.IdentExpr):
+        return None
+    if expr.func.name in (structs_by_name or {}):
+        return expr.func.name
+    callee = (functions or {}).get(expr.func.name)
+    ret = getattr(callee, "return_type", None)
+    return annotation_base_name(ret, self_type=getattr(owner, "name", None))
+
+
+def _method_call_result_struct(call, fn, structs_by_name: dict, owner,
+                               bound: dict, elems: dict, functions: dict,
+                               one_field: bool = True):
+    """The struct `recv.m(...)` returns, from the METHOD's own `-> T`, or None.
+
+    The CALL row's method half, and it is asked by `receiver_struct` rather than
+    by the build pass so the two cannot disagree about which receiver's type is
+    established — the reason this predicate is one function at all.
+
+    One line of work, and `call_result_type_name` is the line: a NAME this
+    module declares is a struct here, and a NAME it does not is nothing to lift
+    to.  Which is why `std/builtin/float_literal.mojo` still refuses, and why
+    the sentence it gets says so — see `formal/build.py::CALL_RECEIVER_WHY`'s
+    `other module` row and `_call_receiver_verdict`.
+
+    `struct_methods` is the one reader of a struct's methods, so this cannot
+    disagree with `_derived_overrides` about which struct declares what; the
+    derived-struct hazard is checked by the LIFT (`formal/build.py::
+    _call_receiver_target`), which is the place that acts on the answer, and
+    checking it here as well would be two gates that can only ever agree.
+
+    The two paragraphs above are `call_result_type_name`'s, and that function
+    is where they now live: it reads the same annotations and answers with the
+    NAME rather than the struct, which is what a refusal about a struct this
+    module does not declare needs to print.
+    """
+    base = call_result_type_name(call, fn, structs_by_name, owner, bound, elems,
+                                 functions, one_field)
+    return (structs_by_name or {}).get(base) if base else None
 
 
 def _single_field_chain(expr) -> tuple:
@@ -32926,9 +33046,56 @@ def receiver_shape_text(expr) -> str:
     return type(expr).__name__
 
 
+# Why an ESTABLISHED receiver type still cannot be passed as a receiver here,
+# one sentence each.  Keyed by the `why` `_call_receiver_verdict` returns, and
+# a table rather than an `if` chain because every one of these is a refusal a
+# reader has to act on, and the action is different in each case: two of them
+# want a different METHOD, one wants a different STRUCT, one is a value-model
+# question shared with every other multi-field receiver, and one is a property
+# of the program rather than of the backend.
+CALL_RECEIVER_WHY = {
+    "construction":
+        "a CONSTRUCTION is not a value this path can pass as a receiver: the "
+        "struct is named, and a one-word struct's fields live in a frame that "
+        "the construction in an argument position never builds — so the word "
+        "the callee would read is not a number the source wrote",
+    "frame":
+        "a struct of {n} fields has its receiver as the ADDRESS of a frame "
+        "rather than as a word, and this call site has no frame to take the "
+        "address of — that is a change to the value model the two backends "
+        "AND the Lean proof share, and it is refused everywhere else for the "
+        "same reason",
+    "undeclared":
+        "the struct's own DECLARATION does not declare a method of that name, "
+        "and lifting to the struct that does declare it would call a "
+        "different function than the source names",
+    "ambiguous":
+        "the struct declares that method more than once, and nothing in the "
+        "call says which of the declarations was meant",
+    "derived":
+        "a struct of this unit DERIVES from it and declares the method too, "
+        "so the declaration names the base's method while the value may be "
+        "the derived one",
+    "receiverless":
+        "the method takes no receiver — a `@staticmethod` — and this path "
+        "binds one by position, so the call would carry none. That is fine "
+        "for a receiver that is a NAME, and not for one that is a CALL: "
+        "passing no receiver means the call is never EVALUATED, and dropping "
+        "it would remove its effect from the program — which is a silent "
+        "wrong answer rather than a refusal",
+    "other module":
+        "this module declares no struct of that name. A method of a struct "
+        "another module declares is a symbol in THAT module's library, and "
+        "this unit neither imports it nor compiles it, so there is nothing "
+        "here for the call to bind — the receiver's type is written down and "
+        "the CALLEE is what is missing",
+}
+
+
 def subscript_receiver_method_refusal(member: str, receiver_text: str,
-                                     owners: dict, fn_name: str) -> str:
-    """A method called on a receiver whose STRUCT is not established — refused by
+                                     owners: dict, fn_name: str,
+                                     established: tuple = None) -> str:
+    """A method called on a receiver whose STRUCT cannot be used — refused by
     name here rather than emitted as a dangling call.
 
     `recv.m(a)` is lifted to `Struct_m(recv, a)` whenever `recv` is a bare name,
@@ -32976,9 +33143,35 @@ def subscript_receiver_method_refusal(member: str, receiver_text: str,
     `formal/build.py`'s `_receiver_shape_refusal` asks it of both, and the two
     spellings of either shape (`recv.m(x)` and `recv.m[T](x)`) get this one
     sentence.
+
+    **`established` is `(struct, why)` and it is what keeps this sentence
+    honest on a receiver whose type IS known.**  Until 2026-10-04 the type was
+    read only from a binding, an element table or a subscript, so "what is
+    missing is the receiver's TYPE" was true of every case that reached here.
+    `formal/build.py::_call_receiver_verdict` now reads a CALL's declared
+    return type as well, and two of the shapes it declines are declined for a
+    reason that has nothing to do with the type — a construction whose frame is
+    never built, and a struct whose receiver is a frame address.  For those,
+    printing the old sentence would send a reader to declare a type the source
+    already declares, which is the "false about the file" outcome this file's
+    own header calls worse than no message.  So `why` selects one sentence from
+    `CALL_RECEIVER_WHY` — which lives HERE rather than in the build pass that
+    produces the keys, because this is the layer that turns a key into English
+    and the two must not be able to disagree about which keys exist.
     """
     who = f"{fn_name}: " if fn_name else ""
     owner = owners.get(member)
+    if established and established[1] is not None:
+        why = established[1]
+        named = (established[2] if len(established) > 2
+                 else getattr(established[0], "name", str(established[0])))
+        detail = CALL_RECEIVER_WHY[why].format(
+            n=struct_field_count(established[0]) if why == "frame" else 0,
+            base=named)
+        return (f"{who}`{receiver_text}.{member}(…)` cannot be lowered: "
+                f"`{receiver_text}` is a `{named}`, and that IS established — "
+                f"this is not a missing-type refusal. What this path cannot do "
+                f"is use it as the receiver here, because {detail}.")
     return (f"{who}`{receiver_text}.{member}(…)` cannot be lowered: dispatch "
             f"here is BY NAME, so a method call is lifted to "
             f"`{owner}_{member}(receiver, …)` from the name alone — and "

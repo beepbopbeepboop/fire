@@ -14282,6 +14282,24 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # `#functions`-long list once per function: 1 031 × 1 031 name reads on
     # `myinterpreter.py`, i.e. a million attribute loads to compute one list.
     _image_function_names = [f.name for f in functions]
+    # `{name: FunctionDef}` for `model.receiver_struct`'s CALL row, which reads a
+    # callee's DECLARED return type to answer "which struct does `f()` hold?".
+    # Two names of the same shape are DROPPED rather than resolved: an overload
+    # pair is two declarations with two `-> T`s and no spelling in a call that
+    # says which one runs, so a table that kept the last of them would answer a
+    # question about the callee by picking one.  Every other `{name: def}` table
+    # in this file is a lookup of a name that is already unique by the time it is
+    # read (`structs_by_name` over deduplicated StructDefs, `method_owners` over
+    # owners that have already popped their ambiguous names), and this is the one
+    # place a name reaches a table before anything has established that it is.
+    _functions_by_name, _overloaded_names = {}, set()
+    for _f in functions:
+        if _f.name in _functions_by_name:
+            _overloaded_names.add(_f.name)
+        elif _f.name not in _overloaded_names:
+            _functions_by_name[_f.name] = _f
+    for _n in _overloaded_names:
+        _functions_by_name.pop(_n, None)
     for fn in functions:
         # A `with` is CPython's context-manager PROTOCOL, and this path used to
         # lower its first line and drop the two calls that ARE it — the emitters
@@ -14354,7 +14372,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
                               fn.name,
                               _this_unit_modules,
                               structs_by_name,
-                              elems)
+                              elems,
+                              fn, st, _functions_by_name, one_word)
         # A class-level CONSTANT read through a RECEIVER is the same read, and
         # goes before `_rewrite_self_fields` for the reason the comment above
         # gives. Everything else about it is `_rewrite_class_constants`.
@@ -14746,6 +14765,122 @@ def _subscript_receiver_target(call, elems: dict):
     return st.name, func.member, recv
 
 
+def _call_receiver_verdict(call, elems: dict, structs_by_name: dict,
+                           functions=None, fn=None, owner=None,
+                           bound: dict = None, receiverless=()) -> tuple:
+    """`(struct, why_not)` for a CALL RESULT receiver; `(None, None)` if untyped.
+
+    `why_not` is a key of `model.CALL_RECEIVER_WHY`, and the tuple carries a
+    THIRD element for the one `why` that has no struct to name: `other module`
+    is about a TYPE the annotation spells and this unit does not declare, so
+    what the refusal has to print is the name, not a StructDef.
+
+    One function for the LIFT and the REFUSAL, and that is the whole point of
+    it: the lift asks "can this be the receiver" and the refusal asks "why not",
+    so two recognisers would be two answers to one question — and the failure
+    mode is the exact one this file's other predicates are arranged against
+    (`model.receiver_struct`'s own docstring): a lift that happens where a
+    refusal was expected, or a refusal whose sentence names a missing TYPE for
+    a receiver whose type is right there in a return annotation.
+
+    `why_not` is set the moment the TYPE is known — not when the lift runs out
+    of options — because that is what lets the refusal say "`recv` is a
+    `Maker`" instead of "this path has no inference that answers which struct
+    `recv` holds".
+
+    **A CONSTRUCTION is refused here even though its type is known**, which is
+    the one answer this function gives that `model.receiver_struct` would not:
+    `Box()` names `Box`, and `Box().get()` still cannot be lifted, because a
+    one-word struct's fields live in a FRAME (`model.one_word_sole_field_frame`
+    makes that storage an address) and a construction in argument position
+    builds no frame — measured on both architectures, `Box().get()` through the
+    lift reads at address 0 and answers 0, which is a number no source wrote.
+    `bugs/FORMAL_method_call_on_a_construction_is_not_rewritten.md` is the doc
+    and `test_formal_receiver_position.py`'s
+    `refuse_a_method_call_on_a_construction_receiver` is the pin.
+    """
+    func = call.func
+    if not (isinstance(func, F.MemberExpr) and isinstance(func.obj,
+                                                           F.CallExpr)):
+        return None, None
+    inner = func.obj
+    # A construction, before any type question: the struct is named by the
+    # callee spelling and that is the whole of what is established, and it is
+    # not enough (the `why` above).
+    if isinstance(inner.func, F.IdentExpr) \
+            and inner.func.name in (structs_by_name or {}):
+        return structs_by_name[inner.func.name], "construction"
+    # `one_field=False`: the gate is applied HERE rather than inside the
+    # predicate, because a multi-field answer is a refusal this message has to
+    # be able to NAME.  A receiver declared `Wide` says which struct it is, and
+    # "what is missing is the receiver's TYPE" would be false about it.
+    st = M.receiver_struct(inner, fn, structs_by_name, owner, bound, elems,
+                           functions or {}, one_field=False)
+    if st is None:
+        # Not a struct of THIS module.  That is the answer for a receiver whose
+        # type nothing establishes, and a DIFFERENT one for a call whose
+        # annotation names a type this unit does not declare — which is the
+        # `std/builtin/float_literal.mojo` case (`self.__int_literal__()` says
+        # `-> IntLiteral`, and `IntLiteral` is declared in
+        # `std/builtin/int_literal.mojo`, which this unit does not import).
+        # Without the distinction both get the missing-TYPE sentence, and for
+        # the second that sentence is false: the type is written down.
+        base = M.call_result_type_name(inner, fn, structs_by_name, owner, bound,
+                                       elems, functions or {}, one_field=False)
+        return (None, "other module", base) if base and base not in (
+            structs_by_name or {}) else (None, None)
+    if not M.struct_is_one_field(st):
+        return st, "frame"
+    named = [m for m in M.struct_methods(st) if m.name == func.member]
+    if not named:
+        return st, "undeclared"
+    if len(named) > 1:
+        return st, "ambiguous"
+    if _derived_overrides(st, func.member, structs_by_name):
+        return st, "derived"
+    # A method that DECLARES no receiver is the one case where passing no
+    # receiver is not free: the receiver expression is a CALL, and the lift
+    # binds arguments by position, so a receiverless call never evaluates it.
+    # For a NAME that is invisible (reading a name has no effect the source
+    # could observe) and `_method_call_target` has always done it; for a call it
+    # would drop the call.  Measured before this check existed: `m.make().
+    # shout(5)` built and answered 105 while `make`'s own effect was gone.
+    if func.member in (receiverless or ()):
+        return st, "receiverless"
+    return st, None
+
+
+def _call_receiver_target(call, elems: dict, structs_by_name: dict,
+                          functions=None, fn=None, owner=None,
+                          bound: dict = None, receiverless=()):
+    """`f().m(x)` → `(owner name, m, f())` when the callee's `-> T` names one.
+
+    The receiver-type predicate's second use at the LIFT, and the shape
+    `subscript_receiver_method_refusal` was asked about from the other side:
+    `m.make().take(r)` has no name to dispatch from either, but unlike `bs[0]`
+    its TYPE is written down — `make`'s own return annotation — so the lift does
+    not need a binding this path would have to invent.
+
+    **The receiver is passed as the call itself**, not as a temporary: the lift
+    turns `m.make().take(r)` into `Maker_take(m.make(), r)`, and the ordinary
+    call path then evaluates argument 0 as the expression it always was.  That
+    is why nothing has to bind a local, and why the refusal's own advice ("give
+    the receiver a local of a declared struct type") was a workaround for a gap
+    in this function rather than a property of the program.
+
+    `_call_receiver_verdict` is what decides, so the refusal for the same
+    receiver cannot name a different reason than the one that stopped the lift.
+    """
+    if not (isinstance(call.func, F.MemberExpr)
+            and isinstance(call.func.obj, F.CallExpr)):
+        return None
+    st, why = _call_receiver_verdict(call, elems, structs_by_name, functions,
+                                     fn, owner, bound, receiverless)[:2]
+    if st is None or why is not None:
+        return None
+    return st.name, call.func.member, call.func.obj
+
+
 def _ambiguous_method_owners(base, structs_by_name: dict) -> list:
     """The structs in this image that BOTH declare `base.<member>`, or [].
 
@@ -15019,7 +15154,8 @@ def _with_protocol(item, body, opened_tmp, enter, exit_, fn):
 def _rewrite_method_calls(node, owners: dict, wide: dict = None,
                           receiverless: set = None, fn_name: str = None,
                           imported=(), structs_by_name: dict = None,
-                          elems: dict = None) -> None:
+                          elems: dict = None, fn=None, owner=None,
+                          functions=None, bound: dict = None) -> None:
     """`recv.m(a)` -> `Struct_m(recv, a)`, in place, over a statement tree.
 
     Rewriting the CALL rather than special-casing a method call in the
@@ -15072,15 +15208,21 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
         if target is None:
             target = _subscript_receiver_target(n, elems)
         if target is None:
-            why = _receiver_shape_refusal(n, owners, fn_name, imported)
+            target = _call_receiver_target(n, elems, structs_by_name,
+                                           functions, fn, owner, bound,
+                                           receiverless)
+        if target is None:
+            why = _receiver_shape_refusal(n, owners, fn_name, imported, elems,
+                                          structs_by_name, functions, fn, owner,
+                                          bound, receiverless)
             if why is not None:
                 raise CodegenError(why)
             return n
-        owner, member, receiver = target
-        if (wide or {}).get(owner) is not None:
-            st = wide[owner]
+        owner_name, member, receiver = target
+        if (wide or {}).get(owner_name) is not None:
+            st = wide[owner_name]
             raise CodegenError(
-                f"{owner}.{member}() cannot be lowered: its "
+                f"{owner_name}.{member}() cannot be lowered: its "
                 f"receiver has {M.struct_field_summary(st)}, and a formal "
                 f"value is one 64-bit word, so `self.<field>` has no "
                 f"representation on this path. The receiver would have to "
@@ -15088,7 +15230,16 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
                 f"a change to the value model the two backends AND the Lean "
                 f"proof share, not to this one function. Concretely, "
                 f"{M.struct_width_cost(st)}")
-        lifted = F.IdentExpr(name=M.method_function_name(owner, member))
+        # A CALL RESULT receiver is itself very often a method call — that is
+        # the shape `_call_receiver_target` answers — and this walk does not
+        # descend into a construct it has consumed (`model.rewrite_tree`'s
+        # `None` arm), so the receiver is lifted HERE, before the call that
+        # takes it as an argument.  Bottom-up over a strictly smaller subtree,
+        # so it terminates; and a receiver that is not liftable is left exactly
+        # as it was, because `visit` on it is the same question this node was.
+        if isinstance(receiver, F.CallExpr):
+            visit(receiver)
+        lifted = F.IdentExpr(name=M.method_function_name(owner_name, member))
         if member not in (receiverless or ()):
             # The receiver is about to become `args[0]`, and every consumer of
             # that list — `bind_call_arguments`'s arity check,
@@ -15098,12 +15249,13 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
             # whose first parameter is an ordinary argument is refused here
             # rather than half-bound: `model.method_declares_receiver` has the
             # measurement and the reason.
-            _st = (structs_by_name or {}).get(owner)
+            _st = (structs_by_name or {}).get(owner_name)
             _decl = next((mth for mth in M.struct_methods(_st)
                           if mth.name == member), None) if _st is not None else None
             if _decl is not None and not M.method_declares_receiver(_decl):
                 raise CodegenError(
-                    M.method_without_a_receiver_parameter_refusal(owner, member))
+                    M.method_without_a_receiver_parameter_refusal(owner_name,
+                                                                 member))
             n.args = [receiver] + list(n.args)
         if isinstance(n.func, F.SubscriptExpr):
             # The brackets stay, and stay on the callee: they are the
@@ -15119,7 +15271,10 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
     M.rewrite_tree(node, visit)
 
 
-def _receiver_shape_refusal(call, owners: dict, fn_name, imported=()):
+def _receiver_shape_refusal(call, owners: dict, fn_name, imported=(),
+                            elems: dict = None, structs_by_name: dict = None,
+                            functions=None, fn=None, owner=None,
+                            bound: dict = None, receiverless=()):
     """Why THIS `recv.m(...)` has no lift, or None when it has a better answer.
 
     The recogniser is narrow on purpose, and every clause is there because a
@@ -15212,8 +15367,18 @@ def _receiver_shape_refusal(call, owners: dict, fn_name, imported=()):
         return None
     if M.dylib_module_reference(recv, imported) is not None:
         return None
+    # The receiver's TYPE, asked by the same function the lift asked, so the two
+    # halves of this construct cannot report different reasons: a receiver whose
+    # type is known and unusable gets the sentence about the REPRESENTATION, and
+    # one whose type nothing establishes gets the sentence about the missing
+    # type.  `None` for a SUBSCRIPT receiver, which is a different question with
+    # its own table (`elems`) and its own refusal.
+    established = (_call_receiver_verdict(call, elems, structs_by_name,
+                                          functions, fn, owner, bound,
+                                          receiverless)
+                  if isinstance(recv, F.CallExpr) else None)
     return M.subscript_receiver_method_refusal(
-        member, M.receiver_shape_text(recv), owners, fn_name)
+        member, M.receiver_shape_text(recv), owners, fn_name, established)
 
 
 def dylib_manifest_path(dylib_path: str) -> str:
