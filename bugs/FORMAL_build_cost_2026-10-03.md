@@ -4,12 +4,20 @@
 `formal/model.py`'s `struct_derived_names`, and the code paths each feeds —
 **shared, so every number here moved both backends at once.**
 
-**Status: the two costs below are FIXED and verified (byte-identical artifacts
-on both architectures); what is left is four residues, each MEASURED and each
-with its exact next step and its precondition in §6.** Nothing in
-`formal/build.py` or `formal/model.py` here is a cache: the fix removes two
-derivations of a MODULE-level table that a per-FUNCTION loop was making for
-itself, which is the same shape as the `wide` / `dispatch_owners` /
+**Status: CLOSED as an investigation. All four residues are now either FIXED or
+MEASURED-and-declined, and the numbers are in §6 and §6.2 — 2026-10-03, on this
+tree.** What is left here is the record, and the reason the record stays is that
+**fourteen comments in `formal/build.py`, `formal/model.py` and
+`test_formal_bracketed_method_field_set.py` cite this doc as the provenance of
+the 0-of-7 788 drift measurement** that justifies threading a module-level table
+at all; deleting the file would either dangle those or strip the provenance off
+the code that depends on it. A reader profiling this pipeline should read §6.2
+and stop: the two remaining residues are 0.094 s and 0.003 s on the largest file
+in the repository, and both are declined with the measurement that declines them.
+
+Nothing in `formal/build.py` or `formal/model.py` here is a cache: the fixes
+remove two derivations of a MODULE-level table that a per-FUNCTION loop was
+making for itself, which is the same shape as the `wide` / `dispatch_owners` /
 `method_owners` tables those loops already read. There is no invalidation
 question, because nothing is remembered across a mutation.
 
@@ -381,6 +389,8 @@ one level down, which is why it is written down rather than guessed at.
   and `_overridden_comptime_names`, which asks `struct_derived_names` per struct.
   **Not attempted in this pass**: it is another four signatures, and the win is
   ~2 s on one file against 53 s already taken off it.
+  **LANDED 2026-10-03** — see §6.1, which has the numbers and the two callers
+  this list did not name.
 * **`struct_receiver_stores` walks every node of every method body to find
   assignments** (2.05 s of the remaining 3.4 s, 2 245 derivations, 6 160 632
   nodes visited for the few thousand assignments it finds). Two things were
@@ -412,12 +422,23 @@ one level down, which is why it is written down rather than guessed at.
     corpus result, not a proof, and the failure mode if a future node type
     breaks it is a field set missing a store, i.e. two real fields aliased into
     one slot, which is the outcome `struct_field_names`' own docstring calls
-    worse than a refusal. **So it wants a differential test over the same
+worse than a refusal. **So it wants a differential test over the same
     516-file corpus comparing the two walks' assignment SETS, per struct, before
     it lands** — the shape this doc's §3.1 harness already has. This is
     `bugs/PERF_struct_field_split_asked_once_per_function.md`'s step 2, and it is
     the right SECOND half of §3: §3 made the question rare, this would make it
     cheap, and together they mean a future asker cannot put the cost back.
+    **LANDED 2026-10-03** — `model.iter_statement_nodes`, with the differential
+    this bullet asked for as `tools/formal_field_walk_differential.py` and its
+    pin as `test_formal_field_walk.py`. The differential earned its place on its
+    first run: without `_STATEMENT_CONTAINERS` it reported **four** structs where
+    the walk missed a store (`fire_compiler.py`'s `TestSuite`, a class nested in
+    a method; `std/iter`'s `_ChainedIterator`, an `except` arm; `std/benchmark`'s
+    `Format`, a `match` arm; and one more), which is the counterexample class
+    this bullet predicted. Measured size, and it is smaller than "2 s":
+    `struct_receiver_stores` over `myinterpreter.py` is **0.143 s → 0.024 s**
+    over 875 calls, the build's wall **1.83 s → 1.72 s**, and all 50
+    `formal/examples/*.mojo` images are byte-identical on both architectures.
 * **`unit_field_evidence` is asked 78 times per build** (2.34 s of the 6.2 s
   instrumented build, with `iter_struct_defs` at 3 857 460 calls under it), and
   the shape is the same recomputation §3 and §4 removed:
@@ -428,15 +449,12 @@ one level down, which is why it is written down rather than guessed at.
   declaring S structs pays S whole-module walks, and the answer is a function of
   `(path, content)` — the exact key `module_statements` already caches on, and
   the evidence tuple is immutable `(frozenset, bool)`, so one walk per module is
-  sound by construction rather than by an invalidation argument.
-  **NOT ATTEMPTED HERE, and it is a claim conflict rather than a difficulty:**
-  `formal/imports.py` is the host-module machinery, which
-  `tools/control.py claims` shows another worker holding (`sweep14:hostmods-more2`,
-  plus `module:platform+fnmatch+collections-rest` and
-  `bug:FORMAL_functools_is_unbuildable_as_a_host_module`), and the rule for a
-  light worker is to report an area another worker holds rather than edit it.
-  The next step is one memo in `_attach_declared_census` keyed the way
-  `module_statements` keys itself.
+  sound by construction rather than by invalidation argument.
+  **NOT ATTEMPTED, and §6.2 measures why it no longer matters:** 116 calls over
+  **113 distinct parses**, so the memo would save three walks. The `_field_evidence`
+  guard at the top of `_attach_declared_census` now covers a whole module,
+  because `attach_field_evidence` writes the evidence onto every struct it is
+  handed — which is what changed between this bullet being written and now.
 * **`struct_derived_names` is asked 3 185 more times from
   `_overridden_comptime_names`** (`formal/build.py:8501`), which
   `_constant_read_sites` calls once per LOCAL and once per RECEIVER of the
@@ -446,7 +464,89 @@ one level down, which is why it is written down rather than guessed at.
   the structural fix — one `{name: frozenset(derived names)}` table derived
   beside `framed`, which would also answer `struct_is_enum`'s 876 genexpr calls
   and `_derived_overrides`' 18 — is not worth the surface. Recorded so the next
-  profile of this pipeline does not re-derive it.
+  profile of this pipeline does not re-derive it. **§6.2 re-measures it at
+  0.094 s with the caller split, and declines it again on the same grounds.**
+
+## 6.1 The one-field threading, LANDED (2026-10-03)
+
+§6's first residue is closed, and the numbers are better and smaller than the
+§6 estimate in both directions.
+
+**The asks, measured by wrapping `struct_is_one_field` and attributing each call
+to its caller** (the `.tmp/callers2.py` shape §3.1 used), on `myinterpreter.py`:
+
+| | before | after |
+|---|---|---|
+| `struct_is_one_field` calls | **1 541** | **146** |
+| …of which the derivation itself | 146 | 146 |
+| per-function askers | 1 395 | **0** |
+
+146 is `one_field_struct_names` asking once per one-field struct (146 of the
+file's 275), so **every per-function asker now reads the module-level table** and
+the residual is the derivation. The before-column's four remaining callers were
+not the ones §6 listed — §6 named `_prepare_functions`' loop,
+`one_field_mutating_methods` and `_collect_one_field_receiver_rebinds`, and the
+measurement adds `model.one_word_sole_field_frame` (276, called from three
+build.py sites and from three model.py ones) and
+`model.one_field_dropped_receiver_stores` (276, one per method).
+
+**The wall clock, three runs each, best of, in one process per side** with
+`one_field_struct_names` stubbed to `None` for the "predicate" side (which puts
+every `one_field_answer` back on the per-struct walk without editing a file):
+
+| file | table | predicate | |
+|---|---|---|---|
+| `myinterpreter.py` (1 031 functions) | **3.30 s** | 4.54 s | **1.38x** |
+| `test_metal_codegen.py` | 3.55 s | 3.59 s | 1.01x |
+| `ast_rewriter.py` | 1.58 s | 1.56 s | 0.99x |
+| `formal/examples/count.mojo` | 0.07 s | 0.07 s | — |
+
+**So the win is on the outlier and is a wash elsewhere, and §6's "~2 s on one
+file" was half of what actually landed (1.2 s).** The reason is visible in the
+ask counts: the saving is `#functions × #structs` and only `myinterpreter.py`
+has both large — `test_metal_codegen.py` asks 124 either way, which is its own
+method count, and the table's 123 is mostly the derivation. **A file that is
+REFUSED before the per-function loop pays the derivation for nothing**
+(`ast_rewriter.py`: 85 asks with the table against 15 without, and 0.99x on the
+clock), which is the honest cost of a module-level table and the reason the win
+is a per-file property rather than a uniform one.
+
+**Behaviour, which is the bar for a change that is supposed to be
+behaviour-preserving.** Eight `formal/examples/*.mojo` plus every corpus file
+that declares a one-field struct and still builds: the image is **byte-identical**
+(`sha256`) and the refusals are **identical in exit code and full diagnostic
+text**, table against predicate, on both architectures.
+
+**What it cost in surface, honestly: fifteen signatures**, not the four §6
+predicted — `_frame_receivers`, `_seed_one_word_bindings`,
+`_collect_one_field_dropped_stores`, `_collect_one_word_frame_receivers`,
+`_park_one_word_frame_receivers`, `_check_method_receiver_types`,
+`_collect_receiver_rebinds`, `_one_word_field_map`, `_one_word_sole_field_chain`,
+`_rewrite_self_fields`, `_rewrite_one_word_field_method_calls`,
+`_lift_one_word_field_method`, and in `formal/model.py`
+`one_word_sole_field_frame`, `one_field_dropped_receiver_stores`,
+`one_field_mutating_methods` — plus the two new readers
+`one_field_struct_names` and `one_field_answer`. Every one of them is a
+keyword with a `None` default that keeps the old behaviour, so a caller with no
+module context is unaffected; `one_field_answer` is the single place that decides
+between the two paths, which is why it is a function and not twelve copies of
+`st.name in table`.
+
+**One caller deliberately NOT threaded**, and it is not an oversight:
+`_one_word_constructor_bindings` asks `struct_field_count(st) != 1`, which is a
+DIFFERENT question — it includes a struct of ZERO fields, which
+`struct_is_one_field` excludes — so the table cannot answer it. It also asks
+`struct_is_framed`, which is threaded elsewhere and would be the next table if
+this residue is ever followed by another.
+
+**Pinned by a test, not by a timing**, which is §3.1's rule and the reason this
+paragraph is allowed to claim anything: `test_formal_bracketed_method_field_set.py`'s
+`module table` group now also asserts that `one_field_struct_names`' set IS the
+set `struct_is_one_field` accepts, that `one_field_answer(st, table)` agrees
+with the predicate for every struct in the case, **and that
+`one_field_answer(st, None)` agrees with it too** — the second half is what a
+caller with no module context gets, and a difference there would be "the threaded
+table changed the answer" as a question about which path ran.
 
 ## 7. What this doc supersedes
 
@@ -463,3 +563,63 @@ three helpers) is a smaller redundancy inside the same derivation: measured
 here at **0.02 s over 704 calls**, so it is no longer worth doing. They are left
 in place as the record of the measurement, and this doc is the one to read for
 the current numbers.
+
+## 6.2 The LAST TWO residues, measured on this tree and DECLINED (2026-10-03)
+
+§6 listed four. One landed as §6.1 and one landed as
+`model.iter_statement_nodes`; these are the other two, measured in a REAL build
+on this tree rather than in an instrumented one, because the instrumented
+numbers this doc started from turned out to be an order of magnitude above the
+real ones and that is the whole of the decision.
+
+Both measurements come from wrapping one function and timing it around the call
+inside `fire.py build --formal --no-prove`, which is the shape §2 prescribes for
+`cProfile`'s reasons:
+
+    # .tmp — wrap the function, call fire.main(), print the tally on stderr
+    python3 .tmp/timeit_ufe.py build --formal --no-prove -o .tmp/t myinterpreter.py
+    python3 .tmp/timeit_sdn.py build --formal --no-prove -o .tmp/t myinterpreter.py
+
+**`unit_field_evidence` — the residue §6 called "a claim conflict", and the
+conflict is not what is left.** It is 116 calls over **113 distinct module
+parses** on the deepest closure in the corpus (`std/python/bindings.mojo`, whose
+build takes 31.6 s and is refused early, for 0.134 s of this function), and **10
+calls over 9 distinct parses** on `myinterpreter.py` (0.119 s). So a memo keyed
+the way `module_statements` keys itself would save **three walks** there and
+**one** on `myinterpreter.py` — about **0.003 s**. The shape §6 described, "a
+module declaring S structs pays S whole-module walks", is no longer what happens:
+the `getattr(struct_def, "_field_evidence", None)` guard at the top of
+`_attach_declared_census` now covers the whole module, because
+`attach_field_evidence` writes the evidence onto every struct it is handed. The
+memo is declined at 0.003 s, and the guard that made it unnecessary is quoted in
+`_attach_declared_census`'s own docstring.
+
+**`struct_derived_names` from `_overridden_comptime_names` — declined again, with
+a better number than §6 had.** 4 085 calls, **0.094 s** of a 1.68 s
+`myinterpreter.py` build, and the caller split is new information for the next
+profile:
+
+| caller | calls |
+|---|---:|
+| `formal/build.py:9530` (`_overridden_comptime_names`) | 2 264 |
+| `formal/build.py:9594` | 927 |
+| `formal/model.py:27862` (`struct_is_enum`'s `any(...)`) | 876 |
+| `formal/build.py:9308` (`_derived_overrides`) | 18 |
+
+§6 estimated 0.11 s from the instrumented profile and called the structural fix
+"not worth the surface"; 0.094 s measured confirms it with the caller attached.
+A `{name: frozenset(derived names)}` table derived beside `framed` would answer
+all three rows and is the same shape as the two fixes above — so this is declined
+on the SIZE, not on the mechanism, and it becomes the first thing to do if a
+profile of this pipeline ever puts `struct_derived_names` above 0.5 s.
+
+**What §6 estimated and the real numbers replaced, for the next reader.** The
+instrumented build in §2 charged `_prepare_functions` 33.3 s of a 31 s build;
+unstopped, the same file builds in **1.7 s**. So every "X s of the remaining
+build" in §2 and §6 should be read as an instrumented figure and divided by
+roughly twenty before it is compared with anything. The three landed changes
+between them took `myinterpreter.py` from 53 s (the doc's `base`) to 1.7 s, and
+the last of them — the statement walk — is 0.143 s → 0.024 s of `struct_receiver_stores`
+with the build's wall going 1.83 s → 1.72 s. That is a 6% win on one outlier
+file and a wash elsewhere, which is the honest size of it and not the "2 s" the
+instrumented profile suggested.

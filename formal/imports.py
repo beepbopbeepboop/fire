@@ -302,7 +302,37 @@ HOST_MODELLED = frozenset((
     #     is written at the top of the file: `filter`/`filterfalse` are
     #     sequences, `iglob` is a generator, and `translate` emits a regex
     #     dialect `re.mojo` does not compile.
-    "glob", "secrets", "uuid",
+    #   `glob`  — LEFT on 2026-10-04 for `formal/hostmods/glob.mojo`, the
+    #     LARGEST UNCLAIMED row in the sweep's host-import ranking: 50 files
+    #     blocked and 15 of them naming it, ranked by
+    #     `tools/formal_sweep_causes.py --host bugs/sweeps/sweep-arm-9.txt`, and
+    #     the row `bugs/FORMAL_host_import_row_ranked_by_module_2026-10-03.md`
+    #     §5 item 4 had left as `formal10-3`'s. `glob`, `glob_free`,
+    #     `has_magic` and `escape`, checked answer for answer **and in order**
+    #     against CPython's own `glob` by `test_formal_glob.py` over a fixture
+    #     tree carrying a dotfile, a hidden DIRECTORY, a symbolic link to a file
+    #     and a DANGLING one, on both backends.
+    #
+    #     **The record that said this row was blocked on a CAPABILITY was half
+    #     wrong, and the half that was wrong is what made it possible.** It held
+    #     that `glob.glob` returns a run-time-length list and a list cannot be
+    #     one here (`bugs/FORMAL_listdir_no_run_time_sequence.md` items 2 and
+    #     3). True of a LIST and irrelevant: `os.listdir` already answers a
+    #     run-time-length container, because `malloc` takes a run-time size and
+    #     its memory outlives the function that asked for it. So `glob` builds
+    #     the same `[count:i64][char *]…` shape, declares `-> List[String]` —
+    #     which is what puts the CONTAINER kind in the manifest, and a container
+    #     kind is the one thing a caller cannot derive, since a list is one word
+    #     and the C signature is `int64_t` either way — and a caller writes
+    #     `len(paths)`, `paths[i]` and `for p in paths`.
+    #
+    #     What is absent is at the top of the module: `iglob` and the four
+    #     `glob*` helpers are a GENERATOR and a SEQUENCE, `root_dir`/`dir_fd`
+    #     want a directory descriptor and no file in this repository spells
+    #     either, and `**` under `recursive` recurses without bound exactly as
+    #     CPython 3.14's does — a tree carrying a link to an ancestor loops in
+    #     both, which is the agreement rather than the defect.
+    "secrets", "uuid",
     #   `ast`  — `formal/hostmods/ast.mojo`, the TOKENIZER and a lexical
     #     validator, not a tree: `parse`, `parse_reason`, `tokenize`,
     #     `tokenize_from`, `token_bound` and `token_name`, with token kinds,
@@ -911,11 +941,25 @@ def host_module_tier(name: str) -> str:
 
 
 def _host_tier_conflicts() -> list:
-    """Names in both tiers, and (for auditing a future edit) names in neither.
+    """Names in BOTH tiers, which is a partition bug and nothing else.
 
-    Empty is correct. This exists so a name added to one tier and forgotten in
-    the other is a visible failure rather than a silent change to a verdict
-    nobody reads a diff for. The suite asserts on it.
+    Empty is correct. This exists so a name added to one tier and forgotten in the
+    other is a visible failure rather than a silent change to a verdict
+    nobody reads a diff for. The suite asserts on it, in three files.
+
+    **It does not report names in NEITHER tier, and that is not an omission.**
+    An earlier version of this docstring said it did, and the sentence was false:
+    217 CPython standard-library names are in no tier (measured; see
+    `test_formal_imports.py::test_an_unclassified_stdlib_name_is_not_called_a_typo`,
+    which asserts the count is still large enough for its row to be about
+    anything), so a "names in neither" half could never be empty and asserting it
+    empty would be a red suite rather than a discipline. "In no tier" is a
+    STATEMENT ABOUT THE TABLE, and the table is allowed to have gaps: a name
+    nobody imports has no consumer whose answer the classification would change,
+    which is measured — and enforced as a tripwire, so a name that acquires one
+    and is still unclassified is a failure — by
+    `test_formal_imports.py::test_no_unclassified_stdlib_name_is_imported_by_anything`.
+    That test is where the question this sentence used to claim belongs.
     """
     return sorted(HOST_UNREACHABLE & HOST_MODELLED)
 
@@ -1727,31 +1771,76 @@ def _search_roots(relative_to: str, project_root: str) -> list:
     return out
 
 
-def _candidates(module_name: str, base: str, ext: str) -> list:
-    """The file shapes a module name can take under `base`, for one extension.
+def _candidate_shapes(module_name: str, ext: str) -> tuple:
+    """The file shapes a module name can take, as TWO ordered phases.
 
-    `<name>.mojo`, `<name>/__init__.mojo` (a package), and the same two spelled
-    with the LEAF only. The leaf fallback is what makes a package-relative
-    dotted import of a sibling work: inside `formal/`, `import formal.types`
-    looks for `formal/formal/types.mojo` (the path spelled from the project
-    root, which is `formal/` itself here) and finds nothing, but the sibling
-    really is `types` in the very directory the import was written in.
-    module_loader resolves the same two shapes for the stdlib, so this is the
-    same rule, not a second one.
+    Phase 0 is the name AS SPELLED: `<name>.mojo` and `<name>/__init__.mojo`
+    (a package). Phase 1 is the same two spelled with the LEAF only. The leaf
+    fallback is what makes a package-relative dotted import of a sibling work:
+    inside `formal/`, `import formal.types` looks for `formal/formal/types.mojo`
+    (the path spelled from the project root, which is `formal/` itself here) and
+    finds nothing, but the sibling really is `types` in the very directory the
+    import was written in. `module_loader` resolves the same two shapes for the
+    stdlib, so this is the same rule, not a second one.
+
+    **The two phases are ordered against the ROOTS and not inside one root**,
+    which is the whole content of this function returning a tuple rather than
+    one flat list. Interleaved per root — leaf first at every root, before the
+    spelled shapes have been offered to the roots further out — the leaf of one
+    name silently wins over the spelling of another, and which one wins is
+    decided by how deep the IMPORTER happens to sit:
+
+        from <stdlib>/std/collections/_asan_annotations.mojo
+        from std.sys.compile import SanitizeAddress
+
+    `<stdlib>/std` is a search root (the walk in `_search_roots` ascends from
+    the importer), its LEAF candidates include `compile/__init__.mojo`, that
+    file exists, and it is returned — so `std.sys.compile` compiled
+    `std/compile/__init__.mojo` and gave it the module identity `std.sys.compile`.
+    Measured over the stdlib on the tree before this, **31 imports in 252 files
+    bound a module other than the one they name**, and two of them are the
+    clearest possible statement of the shape: `std/sys/info.mojo` writes
+    `from std._gpu.host.info import …` and got ITSELF, and
+    `std/_gpu/host/info.mojo` writes `from std.sys.info import …` and got
+    itself. Nothing about either name is ambiguous; the ordering just asked the
+    wrong question of the wrong root first. The name as spelled is the stronger
+    evidence, so it is asked of every root before the leaf is asked of any, and
+    `test_formal_imports.py` carries both the rule as a build-and-RUN case and
+    the 24 measured bindings as rows.
     """
     rel = module_name.replace(".", os.sep)
     leaf = module_name.split(".")[-1]
-    return [os.path.join(base, rel + ext),
-            os.path.join(base, rel, "__init__" + ext),
-            os.path.join(base, leaf + ext),
-            os.path.join(base, leaf, "__init__" + ext)]
+    return ((rel + ext, os.path.join(rel, "__init__" + ext)),
+            (leaf + ext, os.path.join(leaf, "__init__" + ext)))
+
+
+def first_source(module_name: str, roots, ext: str) -> str:
+    """The file `module_name` names, or None — `roots` walked nearest first.
+
+    One implementation for BOTH of the `resolve_module_path` passes that look
+    for a source file (Mojo in pass 1, a repository sibling in pass 3), because
+    they differ only in the extension and a second copy of this search is a
+    second copy of the ordering above to keep in step.
+
+    Public because it is the rule, not the walk: a caller that needs to know
+    what a name resolves to under a given root list asks this, so a reader does
+    not have to reconstruct the two phases from the loop in
+    `resolve_module_path`.
+    """
+    for shapes in _candidate_shapes(module_name, ext):
+        for base in roots:
+            for shape in shapes:
+                cand = os.path.join(base, shape)
+                if os.path.isfile(cand):
+                    return cand
+    return None
 
 
 def _relative_candidates(module_name: str, relative_to: str, ext: str) -> list:
     """The file shapes a RELATIVE module name can take, resolved properly.
 
     A leading dot is not a path separator, and treating it as one is what made
-    `..` resolve to the importer's own package. `_candidates` does
+    `..` resolve to the importer's own package. The root search does
     `module_name.replace(".", os.sep)`, so `".."` becomes `"/"`, the first two
     candidates land at the FILESYSTEM ROOT where they never exist, and the leaf
     fallback — which takes `"..".split(".")[-1]`, i.e. the empty string — then
@@ -1765,6 +1854,9 @@ def _relative_candidates(module_name: str, relative_to: str, ext: str) -> list:
         from .../gpu/host/nvidia/tma.mojo
           ".."            -> .../gpu/host/nvidia/__init__.mojo   WRONG
           "std.gpu.host"  -> .../gpu/host/__init__.mojo         right
+
+    (`_candidates` is the name that search had then; it is `_candidate_shapes`
+    plus `first_source` now, and the four shapes it listed are the same four.)
 
     so `from .. import DeviceBuffer` imported nvidia's own package instead of
     its parent, and the file was refused for a module that resolves perfectly
@@ -1824,6 +1916,10 @@ def resolve_module_path(module_name: str, relative_to: str = None,
          the target's own module, and refusing it because a same-named CPython
          module exists would bind the program to the wrong one. A real Mojo
          module is a stronger statement than any name in `HOST_MODULES`.
+         The name AS SPELLED is what pass 1 offers to every root, and the LEAF
+         fallback (`_candidate_shapes`'s second phase) is only offered after
+         every root has declined the spelling — see that function, which owns
+         the ordering and the measurement that put it there.
       2. HOST MODULE. If no Mojo source exists and the name is in
          `HOST_MODULES` (or its first dotted component is), the answer is
          "CPython standard library, nothing to compile" and no sibling is
@@ -1844,7 +1940,9 @@ def resolve_module_path(module_name: str, relative_to: str = None,
          a statement that is simply false about a file that is sitting right
          there. A `.py` loses to a `.mojo` of the same name in a further root
          (pass 1 runs first, over every root): Mojo source is the target's own
-         vocabulary and outranks a host-language source file.
+         vocabulary and outranks a host-language source file. Same two phases
+         and the same order as pass 1, and `first_source` is the one
+         implementation of both.
       4. module_loader, for the stdlib, as the last resort.
 
     Returns None when all four come up empty; the caller then distinguishes a
@@ -1876,11 +1974,16 @@ def resolve_module_path(module_name: str, relative_to: str = None,
         # importer's own package. A miss is the honest answer.
         return None
     roots = _search_roots(relative_to, project_root)
-    for ext in (".mojo",):                       # pass 1
-        for base in roots:
-            for cand in _candidates(module_name, base, ext):
-                if os.path.isfile(cand):
-                    return cand
+    # Pass 1 and pass 3 are the same search over the same roots with a
+    # different extension, so they are one call each into `first_source`, which
+    # owns the ORDERING (`_candidate_shapes`): the name as spelled, asked of
+    # every root, before the leaf is asked of any. The four passes keep their
+    # documented precedence — Mojo source, then a front-end-provided name, then
+    # the host-module list, then a repository sibling, then module_loader — and
+    # only pass 1 and pass 3 move inside themselves.
+    hit = first_source(module_name, roots, ".mojo")       # pass 1
+    if hit is not None:
+        return hit
     if is_frontend_provided(module_name):        # pass 1b
         # The front end implements it, at compile time, so there is no source
         # to compile and no dylib to link — the same answer a host module
@@ -1893,11 +1996,9 @@ def resolve_module_path(module_name: str, relative_to: str = None,
         return None
     if _is_host_module(module_name):              # pass 2
         return None
-    for ext in (".py",):                         # pass 3
-        for base in roots:
-            for cand in _candidates(module_name, base, ext):
-                if os.path.isfile(cand):
-                    return cand
+    hit = first_source(module_name, roots, ".py")        # pass 3
+    if hit is not None:
+        return hit
     try:                                         # pass 4
         from module_loader import ModuleLoader
         path = ModuleLoader().resolve_module_path(module_name)
@@ -2016,6 +2117,15 @@ HOST_OWNED_BLOBS = {
                         "release": "os.listdir_free"},
     "os.walk_free": {"param": 0, "count_word": 0, "entry_base": 1,
                      "release": "os.walk_free"},
+    # `glob`'s answer is the same shape for the same reason (`-> List[String]`
+    # over a `malloc`'d `[count][char *]…`), and the caller owns every path in
+    # it. It is registered here for the same reason `os.listdir` is: without
+    # the row, `paths[i] = v` is a store into memory the caller does not own and
+    # nothing says so.
+    "glob.glob": {"returns": True, "count_word": 0, "entry_base": 1,
+                  "release": "glob.glob_free"},
+    "glob.glob_free": {"param": 0, "count_word": 0, "entry_base": 1,
+                       "release": "glob.glob_free"},
 }
 
 
@@ -2250,13 +2360,21 @@ def _attach_declared_census(struct_def, declaring_path: str) -> None:
     when the module is compiled as the ENTRY) is not overwritten by an importer's
     view — and two modules' evidence for one struct is not a thing that can
     happen anyway, since the walk is keyed by declaring path.
+
+    **The whole module's structs, not just this one**, and that is the
+    inheritance resolution's requirement rather than tidiness: a base
+    contributes its fields only if the table it is resolved against declares it
+    (`model.attach_inherited_fields`), so passing one struct would answer every
+    class in the module as if it had no base at all. The walk asks once per
+    struct it collects, so the resolution runs more than once over the same
+    module; it is idempotent, and the guard above keeps the first answer.
     """
     if getattr(struct_def, "_field_evidence", None) is not None:
         return
     from formal import model as M
-    M.attach_field_evidence([struct_def],
-                            M.unit_field_evidence(
-                                module_statements(declaring_path)))
+    stmts = module_statements(declaring_path)
+    M.attach_field_evidence(list(M.iter_struct_defs(stmts)),
+                            M.unit_field_evidence(stmts))
 
 
 def declared_kinds(path: str) -> dict:
@@ -2459,6 +2577,238 @@ def reexported_names(stmts, kinds_by_module: dict = None) -> dict:
                 and not bound.startswith("_")):
             out.setdefault(bound, (module, kind, name))
     return out
+
+
+def _edge_import_statements(stmts, in_function: bool = False) -> list:
+    """`[(statement, in_function), …]` — every import in `stmts`, bodies too.
+
+    The same SET `imported_modules` collects, for its reason and with its
+    exclusions (a `FunctionDef` body is descended, an `If`/`Try` body is not), and
+    the reason this reader cannot reuse that function's list is that it answers a
+    different question: not "which modules are dependencies" but "what does each
+    of this file's statements BIND". An import inside a function body binds a
+    name in THAT scope, and none of the top-level tables above carry it — so a
+    per-edge decision taken from those tables alone would be answering about a
+    name the edge does not bind, which is the wrong kind of answer here.
+
+    `in_function` travels with the statement because the caller treats a
+    function-local import as a reason to KEEP a library rather than to judge it
+    on the names it binds: the names are bound in a scope this pass does not
+    track, so it cannot claim the edge binds nothing.
+    """
+    out = []
+    for st in stmts or []:
+        if isinstance(st, (F.ImportStmt, F.FromImportStmt)):
+            out.append((st, in_function))
+        elif isinstance(st, F.FunctionDef):
+            out.extend(_edge_import_statements(
+                getattr(st, "body", None) or [], True))
+    return out
+
+
+def library_free_edges(importer_path: str, stmts: list,
+                       project_root: str = None, demands: dict = None) -> dict:
+    """`{dependency source path: ([(bound name, module as spelled), …], why)}` —
+    the imports of `importer_path` that need no library, the names each one binds
+    and the reason it binds no symbol.
+
+    **THE RULE IS PER EDGE, not per module**, and that is the whole of it: a
+    module dylib exists so that something on an import EDGE can bind a symbol in
+    it. An edge that binds no name the dependency could publish as ONE symbol has
+    nothing to bind, so the library it would produce has nothing in it that
+    anyone on this edge can reach — and building it anyway turns a correct
+    program into a refusal.
+
+    The measured case is `std/collections/__init__.mojo`'s
+    `from .binary_heap import BinaryHeap`. `BinaryHeap` is a generic struct
+    TEMPLATE, and `doc/ABI.md`'s public-symbol rule has never published a
+    template under its base name — `formal/build.py::no_public_api_reason` is the
+    sentence that says so and
+    `test_formal_imports.py::test_a_generic_template_is_not_exported_under_its_base_name`
+    pins the empty export set — so that edge cannot bind a symbol whatever
+    `binary_heap.mojo` exports. Before this, that one edge's non-symbol cost 163
+    swept files their build, because `build_module_dylib` refused the library
+    whether or not the importing chain wanted it
+    (`bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §4.1).
+
+    **Which names are templates is read from `reflect.export_exclusions`**, by
+    `formal/monomorph.py::template_names`, which is the SAME rule
+    `collect_exports_src` filters the export table through. So "a name this edge
+    binds that is not a symbol" and "a name this backend would not export" are
+    one decision read twice rather than two implementations that can disagree.
+
+    **FOUR reasons keep a library**, and each is a case where the edge's binder is
+    not a name in an import statement at the top level of this file:
+
+    * a bare `import m` binds the MODULE, so `m.f(…)` is a call this pass cannot
+      rule out — `formal/model.py::import_bindings` is the reader that says which
+      statement shape it is;
+    * `from m import *` binds `m`'s whole export set, which is a fact about a
+      compilation that has not happened yet (`star_imported_modules`' own
+      docstring);
+    * a `from m import …` inside a function body, for `_edge_import_statements`'s
+      reason;
+    * an INSTANTIATION of one of `m`'s templates is DEMANDED of it (`demands`).
+      This is the one thing that does make a template-only module publishable, and
+      it is how a caller reaches a template at all: `formal/monomorph.py`
+      compiles each demanded instantiation into that module's own library as a
+      concrete definition, so an edge that asks for one needs the library.
+
+    A name this file also DEFINES is not bound by the edge and is not consulted,
+    which is `imported_bound_names`' precedence and `reexported_names`' — a bare
+    call resolves to the local definition, so the dependency's same-named symbol
+    is irrelevant to it.
+
+    A `demands` argument of None means "no information", and then the last
+    reason above cannot fire; both callers pass the set they already computed
+    rather than recomputing it, because computing it is a walk of this file's
+    bracketed call sites (`formal/imports.py::instantiation_demands`) and a
+    decision that disagreed with the demands the build actually used would be a
+    decision about a different build.
+
+    The bindings are in the value, not only the names, because the caller that
+    acts on this table has to be able to NAME the module in a diagnostic
+    (`check_library_free_calls`), and the spelling a relative import is written
+    in is the only spelling the reader of the file has. Each binding is
+    `(name bound here, name the defining module published it as, module as
+    spelled)`, and the template test is over the first TWO: for an unaliased
+    import they are one name, and for `f as g` the boundary symbol is `f`'s.
+    """
+    from formal import monomorph as MM            # lazy — pulls the middle tier
+    root = project_root or importer_path
+    defined = _defined_names(stmts)
+    edges: dict = {}
+    for st, in_function in _edge_import_statements(stmts):
+        if isinstance(st, F.ImportStmt):
+            spellings = [st.module] + [m for m, _a in (st.extra or [])]
+        else:
+            spellings = [st.module]
+        for spelling in spellings:
+            if not isinstance(spelling, str) or not spelling:
+                continue
+            dep = resolve_module_path(spelling, relative_to=importer_path,
+                                      project_root=root)
+            if dep is None:
+                continue
+            edge = edges.setdefault(os.path.abspath(dep), [[], ""])
+            if isinstance(st, F.ImportStmt):
+                edge[1] = edge[1] or (
+                    f"`import {spelling}` binds the module, so `{spelling}.f(…)`"
+                    f" is a call of that module's export which an import "
+                    f"statement alone cannot rule out")
+            elif not (st.names or []):
+                edge[1] = edge[1] or (
+                    f"`from {spelling} import *` binds the module's whole "
+                    f"export set, which is a fact about a library that has not "
+                    f"been built yet")
+            elif in_function:
+                edge[1] = edge[1] or (
+                    f"`from {spelling} import …` inside a function body binds "
+                    f"a name in that scope, which this edge does not track")
+            else:
+                for bound, original, spelled in _from_import_bindings([st]):
+                    # The DEFINING name decides the shadowing question, not the
+                    # local one, and it is `reexported_names`' own filter
+                    # (`if name in defined: continue`) for the reason that
+                    # function gives: `from x import f as g` beside a local
+                    # `def g` publishes NOTHING under `g` — the local
+                    # definition wins the bare call — but it still publishes
+                    # `f`, because `f` is a name no local declaration shadows.
+                    # Judging the edge by `bound` instead would read that module
+                    # as binding nothing at all and drop a library the
+                    # manifest's own re-export table still points into:
+                    # measured, `test_formal_imports.py`'s "a name the module
+                    # defines wins over its own import" builds a package that
+                    # re-exports `base as g` beside its own `def g`, and the
+                    # program calls `base` as well as `g`.
+                    if original and original not in defined:
+                        edge[0].append((bound or original, original, spelled))
+    out: dict = {}
+    for key, (bound, keep) in edges.items():
+        if keep or (demands or {}).get(key):
+            continue
+        templates = set(MM.template_names(module_source_text(key)))
+        bindings = sorted(set(bound))
+        # BOTH spellings, and the reason is an ALIAS: `from x import f as g`
+        # binds `g` here and the symbol the link line has to carry is `x`'s
+        # `f`, because the export table is keyed by the DEFINING name
+        # (`reexported_names`' third element, and `import_bindings`' "defining
+        # name"). Judging the edge by the local spelling alone would exempt an
+        # edge that binds `f` under another name — and the consumer that calls it
+        # under either spelling then has no library to bind, which is measured:
+        # `test_formal_imports.py`'s "a name the module defines wins over its own
+        # import" binds `g` for a `base` in another module and calls `base` too.
+        if templates.issuperset(n for _b, n, _s in bindings):
+            listed = ", ".join(b for b, _n, _s in bindings) or "it binds no name"
+            out[key] = (bindings,
+                        f"every name this edge binds is a GENERIC template of "
+                        f"that module — {listed} — and a template is not one "
+                        f"boundary symbol: each instantiation is, under its own "
+                        f"mangled name, and no instantiation is demanded of it "
+                        f"here")
+    return out
+
+
+def check_library_free_calls(importer_path: str, stmts: list,
+                             library_free: dict) -> None:
+    """Refuse a BARE call to a name an exempt edge binds; raise `ImportBuildError`.
+
+    The one thing an exempt edge can still be asked for, and it is a refusal
+    rather than a silent gap because a bare call to a template has no callee to
+    bind: `widen(3)` names no instantiation, so there is no symbol for it under
+    any spelling, and the image would carry a BL against nothing.
+
+    **This is the message the exemption would otherwise cost.** Before the
+    per-edge rule, that call was refused by the dependency's export gate, whose
+    sentence names the construct and the repair (`widen[Int](…)`). With the edge
+    exempt the gate is never reached, and the refusal that arrives instead is the
+    LINK-TIME bind audit's — true, and about as specific as "the image would bind
+    a symbol that nothing provides", which sends the reader to the linker rather
+    than to the brackets. So the exemption carries its own refusal, asked here
+    where the edge decision was made and before anything is emitted, and it is
+    `formal/model.py::imported_callee_refusal` verbatim: the same sentence every
+    other unbindable imported callee gets, so there is one message for this fact
+    rather than one per way of reaching it.
+
+    A BRACKETED callee (`widen[Int](3)`) cannot arrive here, and the reason is
+    structural rather than a filter: an edge whose bound names include a template
+    that is spelled at a call site is asking for that instantiation, which is the
+    fourth of `library_free_edges`' four reasons to KEEP a library — so an
+    exemption and a bracketed call of one of its names cannot both be true. A
+    demand that `formal/monomorph.py` then fails to satisfy leaves the brackets
+    in place for the bracketed-callee scan, which is the sentence that is true
+    of that case.
+
+    `importer_path` is only in the signature so the caller reads as one call per
+    file, and it is unused here: the message names the CALL and the module as
+    the reader spelled it, which `library_free_edges` carried over, and inventing
+    a path here would be a second spelling of the same fact.
+    """
+    from formal import model as M                   # lazy — cycle
+    exempt = {}
+    for bindings, _why in (library_free or {}).values():
+        for bound, defining, spelled in bindings:
+            # BOTH spellings, for the ALIAS reason `library_free_edges` gives:
+            # the call may be written as the alias or as the defining name and
+            # neither has a callee, so the refusal has to reach either.
+            exempt.setdefault(bound, spelled)
+            exempt.setdefault(defining, spelled)
+    if not exempt:
+        return
+    for st in stmts or []:
+        fn_name = st.name if isinstance(st, F.FunctionDef) else ""
+        for node in M.iter_nodes(getattr(st, "body", None) or [st]):
+            if not isinstance(node, F.CallExpr):
+                continue
+            callee = node.func
+            if not isinstance(callee, F.IdentExpr) \
+                    or callee.name not in exempt:
+                continue
+            sym = M.GlobalSymbol(callee.name, None, "imported",
+                                 exempt[callee.name],
+                                 getattr(callee, "line", 0) or 0)
+            raise ImportBuildError(
+                M.imported_callee_refusal(callee.name, sym, fn_name))
 
 
 def own_module_identity(source_path: str, project_root: str = None) -> str:
@@ -2823,7 +3173,30 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
             merged[tmpl] = sorted(set(merged.get(tmpl, [])) | set(args))
         below[other] = merged
     dep_dylibs = []
+    # PER EDGE (`library_free_edges`): an import that binds nothing the
+    # dependency could publish as one symbol needs no library, and asking for one
+    # anyway is what turned `std/collections/__init__.mojo`'s re-export of the
+    # `BinaryHeap` TEMPLATE into the refusal of all 163 files that import the
+    # package — the module was refused for a boundary symbol nobody on that edge
+    # could bind. The four reasons that keep a library (a bare `import`, a star
+    # import, a function-local `from`, and a demanded instantiation) are that
+    # function's, so the two cannot disagree about which edges are exempt.
+    #
+    # The library is left off this module's LINK LINE as well as not built, and
+    # that is the same fact twice rather than a shortcut: a load command naming a
+    # library nothing binds through is a dependency the loader opens for
+    # nothing, and `_record_depends` below already records only the libraries
+    # that were actually built.
+    library_free = library_free_edges(source_path, stmts,
+                                      project_root=project_root or source_path,
+                                      demands=below)
+    # The refusal the exemption owes, asked BEFORE the loop so a module whose
+    # own body calls one of these names bare fails with the sentence that names
+    # the construct rather than with the link-time bind audit's.
+    check_library_free_calls(source_path, stmts, library_free)
     for _mod, dep_path in depends:
+        if os.path.abspath(dep_path) in library_free:
+            continue
         d = build_module_dylib(_mod, dep_path, out_dir, arch,
                                project_root=project_root or source_path,
                                _stack=_stack + (os.path.abspath(source_path),),

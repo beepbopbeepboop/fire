@@ -842,7 +842,8 @@ ENV_VIEW_PROGRAM = """\
 from os import environ, environ_count, environ_key, environ_value
 from os import environ_find, environ_get, environ_get_or, environ_has
 from os import environ_set, environ_del, environ_items, environ_keys
-from os import environ_copy, environ_pop, environ_clear
+from os import environ_copy, environ_pop, environ_clear, environ_update
+from os import environ_popitem, environ_pair_free
 from os import environ_free, getenv, putenv
 from os._syscalls import str_replace_all
 
@@ -929,6 +930,112 @@ def main(n):
     printf("pop-absent [%s]@@", show(environ_pop(e3, "FORMAL_ENV_VIEW_PROBE",
                                                 "dflt")))
     printf("pop-absent-count %d@@", environ_count(e3))
+    # ── popitem(): an ARBITRARY pair, as ONE blob ──
+    # On a view the program BUILDS ITSELF from three known pairs, and that is the
+    # whole reason: "which pair" is only decidable if the view's ORDER is known,
+    # and a fresh `environ()` is a snapshot of a process environment the test
+    # harness composed (`ENV_VIEW_ENV` plus whatever `putenv` added, and the
+    # `…_LATE` above is one such) while `e3`'s order has been edited twice by the
+    # removals above — `environ_del` shifts the LAST pair into the hole, which
+    # `environ_pop`'s own docstring calls a recorded divergence rather than an
+    # omission. A cleared view with three `environ_set` calls in it has neither
+    # problem: the order is the three stores in that order, on both
+    # architectures.
+    #
+    # Four things are being said at once, and the first is the point of the
+    # function existing: the answer is ONE word — a blob's address — carrying
+    # BOTH halves of the pair, which is what
+    # `bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md` §4 called
+    # "a genuine two-word limit" and is not. The second is that the count word
+    # says how many elements the blob has, so a caller reads it by subscript
+    # rather than trusting a convention. The third is that the removal happened:
+    # the view is one pair shorter and `getenv` no longer sees the variable,
+    # because CPython's `popitem` unsets it. The fourth is that the pair
+    # OUTLIVES the view entry it came from — a copy, not the alias `environ_pop`
+    # shows it must not be — and that it is released by its own release function.
+    # `pair` is ANNOTATED, and that is not incidental: a subscript through an
+    # unannotated word cannot read a buffer, which is the refusal this block
+    # first hit and which `re.escape`'s own docstring records being measured
+    # three ways.
+    var ep = environ_copy(e3)
+    environ_clear(ep)
+    ep = environ_set(ep, "FORMAL_ENV_VIEW_TAIL", "last")
+    ep = environ_set(ep, "FORMAL_ENV_VIEW_SPACE", "two words")
+    ep = environ_set(ep, "FORMAL_ENV_VIEW_EQUALS", "a=b=c")
+    var epn = environ_count(ep)
+    var pair: Pointer[Int64] = environ_popitem(ep)
+    printf("popitem-before %d@@", epn)
+    printf("popitem-n %d@@", pair[0])
+    printf("popitem-key [%s]@@", show(pair[1]))
+    printf("popitem-value [%s]@@", show(pair[2]))
+    printf("popitem-after %d@@", environ_count(ep))
+    printf("popitem-getenv [%s]@@", show(getenv(pair[1])))
+    printf("popitem-free %d@@", environ_pair_free(pair))
+    printf("popitem-free-null %d@@", environ_pair_free(0))
+    # An EMPTY view has no pair, and CPython raises KeyError for it: 0 is the
+    # answer and a blob is never 0 on success, so `pair != 0` is the test.
+    var eq = environ_copy(e3)
+    environ_clear(eq)
+    printf("popitem-empty %d@@", environ_popitem(eq))
+    printf("popitem-null %d@@", environ_popitem(0))
+    printf("popitem-empty-free %d@@", environ_free(eq))
+    # ── update(other): every pair of the other view, in ONE call ──
+    # Two views, both copies, so the rest of this program still has `e3`: the
+    # receiver carries what `e3` carries and the other view changes ONE value
+    # that is already there and adds ONE key that is not. Those are the two
+    # branches of `environ_set` — in place, and append-and-maybe-move — and the
+    # append is what makes `update`'s answer a blob rather than a status, which
+    # is the whole contract `update-count-moved` is about.
+    var ur = environ_copy(e3)
+    var uo = environ_copy(e3)
+    uo = environ_set(uo, "FORMAL_ENV_VIEW_PLAIN", "updated")
+    uo = environ_set(uo, "FORMAL_ENV_VIEW_UPDATE_NEW", "added")
+    var before = environ_count(ur)
+    var u = environ_update(ur, uo)
+    printf("update-count %d@@", environ_count(u))
+    printf("update-count-before %d@@", before)
+    # …and the count MOVED UP, which is what says the append happened rather
+    # than the call being ignored: a `realloc` that does not move answers the
+    # old pointer, and the caller cannot tell the two apart without this.
+    printf("update-count-moved %d@@", environ_count(u) - before)
+    printf("update-plain [%s]@@", show(environ_get(u, "FORMAL_ENV_VIEW_PLAIN")))
+    printf("update-new-has %d@@", environ_has(u, "FORMAL_ENV_VIEW_UPDATE_NEW"))
+    printf("update-new-get [%s]@@",
+           show(environ_get(u, "FORMAL_ENV_VIEW_UPDATE_NEW")))
+    printf("update-new-getenv [%s]@@",
+           show(getenv("FORMAL_ENV_VIEW_UPDATE_NEW")))
+    printf("update-kept [%s]@@", show(environ_get(u, "FORMAL_ENV_VIEW_TAIL")))
+    # The SOURCE view is untouched, which is the same independence `copy()`
+    # asserts and the reason `uo` is a copy rather than `e3` itself.
+    printf("update-source [%s]@@", show(environ_get(uo,
+                                                    "FORMAL_ENV_VIEW_PLAIN")))
+    # `update(e, e)` — CPython allows `d.update(d)` and every pair is equal
+    # afterwards, so this is the case that says the aliasing path duplicated the
+    # value before handing it to a store that frees the buffer it was read
+    # from. Read back through the view AFTER the call, because the failure this
+    # row exists for is a freed buffer that still prints.
+    var ua = environ_copy(u)
+    ua = environ_update(ua, ua)
+    printf("update-self-count %d@@", environ_count(ua))
+    printf("update-self-plain [%s]@@",
+           show(environ_get(ua, "FORMAL_ENV_VIEW_PLAIN")))
+    printf("update-self-new [%s]@@",
+           show(environ_get(ua, "FORMAL_ENV_VIEW_UPDATE_NEW")))
+    printf("update-free %d@@", environ_free(ua))
+    printf("update-free-other %d@@", environ_free(uo))
+    printf("update-free-receiver %d@@", environ_free(u))
+    # An EMPTY other view changes nothing and answers the receiver — CPython's
+    # `update` of an empty mapping, and the 0-pair view is one this program
+    # builds with `clear` rather than one it needs a second environment for.
+    var ue = environ_copy(e3)
+    environ_clear(ue)
+    var ur2 = environ_copy(e3)
+    var u2 = environ_update(ur2, ue)
+    printf("update-empty-count %d@@", environ_count(u2))
+    printf("update-empty-plain [%s]@@",
+           show(environ_get(u2, "FORMAL_ENV_VIEW_TAIL")))
+    printf("update-empty-free %d@@", environ_free(ue))
+    printf("update-empty-free-receiver %d@@", environ_free(u2))
     # ── clear(): every pair, and every variable, gone ──
     # On a COPY, so the rest of this program still has a view to free — and
     # `clear-getenv` is the half a view-only implementation would miss: CPython
@@ -942,6 +1049,116 @@ def main(n):
     printf("free-view %d@@", environ_free(e3))
     return 0
 """
+
+
+def _update_oracle():
+    """CPython's `dict.update` answers for the `update` half of this program.
+
+    Computed, not written out: the program builds two views out of copies of
+    `e3`, changes one value that is already there and adds one key that is not,
+    and then reads the receiver back. A dict in this process asked the same
+    question is the oracle, because `os.environ.update` IS `MutableMapping.
+    update` and the only thing a table written here would add is a second place
+    for the two answers to disagree.
+
+    `update-count-moved` is the one row that is about the CALL rather than the
+    mapping: it is 1 because the added key made the view one pair longer, and
+    the view is a `malloc`'d block that a `realloc` may move — which is why
+    `environ_update` answers a blob and not a status.
+    """
+    recv = {k: v for k, v in ENV_VIEW_ENV.items()
+            if k != "FORMAL_ENV_VIEW_PLAIN"}      # what `e3` holds at that point
+    other = dict(recv)
+    other["FORMAL_ENV_VIEW_PLAIN"] = "updated"
+    other["FORMAL_ENV_VIEW_UPDATE_NEW"] = "added"
+    n_before = len(recv)
+    recv.update(other)                            # CPython's own operation
+    recv.update(dict(recv))                       # `d.update(d)`: every pair equal
+    # The EMPTY-other rows are about a DIFFERENT receiver: a fresh copy of `e3`,
+    # which never had the two keys this block added. So they answer from the
+    # count `e3` holds at that point — the six above less the one the `pop`
+    # removed — and not from `recv`, which by now holds seven pairs. Saying so
+    # here is cheaper than a reader working out which receiver a row is about.
+    e3_count = len(ENV_VIEW_ENV) - 1
+    return {
+        "update-count": str(len(recv)),
+        "update-count-before": str(n_before),
+        "update-count-moved": str(len(recv) - n_before),
+        "update-plain": f"[{recv['FORMAL_ENV_VIEW_PLAIN']}]",
+        "update-new-has": "1",
+        "update-new-get": f"[{recv['FORMAL_ENV_VIEW_UPDATE_NEW']}]",
+        # `putenv`: the store went through `__setitem__`, so the C library
+        # answers the new value too — the same fact `set-new-getenv` is.
+        "update-new-getenv": f"[{recv['FORMAL_ENV_VIEW_UPDATE_NEW']}]",
+        "update-kept": f"[{recv['FORMAL_ENV_VIEW_TAIL']}]",
+        "update-source": "[updated]",
+        "update-self-count": str(len(recv)),
+        "update-self-plain": f"[{recv['FORMAL_ENV_VIEW_PLAIN']}]",
+        "update-self-new": f"[{recv['FORMAL_ENV_VIEW_UPDATE_NEW']}]",
+        "update-free": "0",
+        "update-free-other": "0",
+        "update-free-receiver": "0",
+        "update-empty-count": str(e3_count),
+        "update-empty-plain": f"[{ENV_VIEW_ENV['FORMAL_ENV_VIEW_TAIL']}]",
+        "update-empty-free": "0",
+        "update-empty-free-receiver": "0",
+    }
+
+
+def _popitem_oracle(items):
+    """CPython's answers for the `popitem` block of `ENV_VIEW_PROGRAM`.
+
+    **The one row that cannot be derived from `items` alone is the KEY**, and
+    that is the honest answer rather than a missing one: CPython's `popitem` is
+    documented as "remove and return an arbitrary (key, value) pair" and is LIFO
+    since 3.7, so an oracle can only be written by RUNNING CPython's own
+    `popitem` on the same mapping.  A table written out here would be a second
+    place for the two answers to disagree, which is what every other oracle in
+    this file is for.
+
+    The mapping is the three-pair view the PROGRAM builds — a cleared view with
+    three `environ_set` calls in it — and NOT `e3` and NOT the process
+    environment, for the reason the block's own comment gives: `environ_del`
+    reorders a view in place, so `e3`'s order is no longer `ENV_VIEW_ENV`'s, and
+    the harness's environment is not the image's. A view whose order the program
+    wrote down is the only one whose "which pair" is decidable.
+
+    So the dict is asked, and every other row is read off what it answered:
+
+      * `popitem-before` / `popitem-after` are the count either side of the call,
+        so the row says the removal happened rather than the pair being copied
+        out and nothing removed;
+      * `popitem-n` is 2 because a container on this path keeps its count at word
+        0 and this is a two-element blob — the same convention `environ_count`
+        reads;
+      * `popitem-getenv` is `[]`, not the value: `__delitem__` calls `unsetenv`,
+        so the C library stops seeing the variable, which is the same fact
+        `del-getenv` and `clear-getenv` are.
+    """
+    # The view the PROGRAM built: a cleared view with three `environ_set` calls
+    # in it, in that order, so the order is the three stores in that order and
+    # CPython is asked about exactly that mapping. Nothing here is derived from
+    # the process environment the harness composed, which is the whole point —
+    # see the block's own comment.
+    env = {"FORMAL_ENV_VIEW_TAIL": "last",
+           "FORMAL_ENV_VIEW_SPACE": "two words",
+           "FORMAL_ENV_VIEW_EQUALS": "a=b=c"}
+    before = len(env)
+    d = dict(env)
+    key, value = d.popitem()                      # CPython's own operation
+    return {
+        "popitem-before": str(before),
+        "popitem-n": "2",
+        "popitem-key": f"[{key}]",
+        "popitem-value": f"[{value}]",
+        "popitem-after": str(len(d)),
+        "popitem-getenv": "[]",
+        "popitem-free": "0",
+        "popitem-free-null": "0",
+        "popitem-empty": "0",
+        "popitem-null": "0",
+        "popitem-empty-free": "0",
+    }
 
 
 def _env_view_oracle():
@@ -1016,6 +1233,16 @@ def _env_view_oracle():
         "pop-getenv": "[]",
         "pop-absent": "[dflt]",
         "pop-absent-count": str(n - 1),
+        # `update(other)`: computed with CPython's OWN `dict.update` over the
+        # same starting mapping, because the point of these rows is that the
+        # answer is a dict operation rather than a table written here. `recv` is
+        # what `e3` holds at this point (every key but `…_PLAIN`, which the
+        # `pop` above removed) and `other` is `recv` with one value replaced and
+        # one key added — the in-place branch and the appending one.
+        **_update_oracle(),
+        # `popitem()`: CPython's own `dict.popitem` on the mapping the program
+        # has at this point, for the reason `_popitem_oracle` gives.
+        **_popitem_oracle(items),
         # `clear()`: the mapping is empty and every variable is unset, so
         # `os.getenv` — the C library's answer — is empty too.
         "clear": "0",

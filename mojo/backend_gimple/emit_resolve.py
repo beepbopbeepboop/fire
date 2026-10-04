@@ -709,6 +709,12 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # mangled call-site suffix, so both halves of one mangled
                 # symbol always agree (log_match c52cbf-vs-7a6366 family).
                 temp_gen._home_def_param_types = gen._home_def_param_types
+                # share: the RETURN-type twin of the store just shared, for the
+                # same reason and read by the same `_func_csym` mirror — a
+                # call site's emitted symbol carries the module qualifier, so
+                # only the defining unit's own answer for that qualifier can
+                # type that call.
+                temp_gen._home_def_return_types = gen._home_def_return_types
                 # Once per TRANSLATION UNIT, not once per module: a
                 # single-TU closure carries ~160 modules and the GPU
                 # introspection definitions are program-wide. Shared by

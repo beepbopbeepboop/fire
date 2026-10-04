@@ -400,6 +400,53 @@ CAUSES = (
     # `test_refusal_taxonomy.py` so it stays that way in BOTH directions.
     ("a bracketed specialization of a callee this unit does not compile",
      (("so the brackets cannot be bound",),)),
+    # A CALL to a name the DEFINING module does not export, which is the largest
+    # row in the corpus and had NO row at all until 2026-10-04: 170 of the 710
+    # files on the b10 sweep, 55% of every codegen finding in the tree, all of
+    # them carrying ONE sentence from `formal/model.py::imported_callee_refusal`
+    # — and `other refusal`, the bucket this table's own docstring defines as
+    # "nobody has looked", was how the ranking reported them.
+    #
+    # It is the row the per-edge export gate (`formal/imports.py::library_free_edges`)
+    # emptied INTO: at `-9` those files were 125 on `module exports no public
+    # functions` and 43 on `Optional unwrap`, both NAMED; fixing the gate in front
+    # of them moved them one refusal further on, to a refusal this table could not
+    # name. So the fix that made the backend build more files also made the
+    # instrument blind, which is the shape of that defect in general — the same one
+    # `…_b9.md` §5.1 fixed for the `with`.
+    #
+    # THE MARKER IS THE FACT, NOT THE ADVICE. Two clauses of the message are
+    # load-bearing and stable: the call "has to bind a symbol `M` exports", and
+    # "That module does not export it". The sentence that USED to follow them —
+    # "spell it as `name[<a type>](…)`" — is advice, and `work/formal19-1`
+    # deletes it because it is wrong about correct Mojo (a bare template call is
+    # the spelling the stdlib uses). Keying on that would have taken 170 files
+    # silently back to `other refusal` the day a branch nobody is waiting for
+    # landed, which is the failure the comments above this table warn about twice.
+    ("a call to a name the defining module does not export",
+     (("does not export it",),)),
+    # ── a call through a VALUE: three shapes, three rows, and the distinction
+    #    is which DECLARATION is missing. They used to be one refusal, so all
+    #    three sat in `other refusal`, which is the bucket that means nobody has
+    #    looked. Above the `is passed to` pair below because each of these
+    #    messages contains "a call through a VALUE" and two of them contain a
+    #    clause that pair would otherwise claim; pinned in both directions by
+    #    `test_refusal_taxonomy.py`'s samples.
+    #
+    # The construct LOWERS when there is nothing to read: a function value is a
+    # code address, and `f[w, h](x)` through a word passes the bracket as
+    # leading arguments
+    # (`std/algorithm/backend/tile.mojo`'s `workgroup_function[tile_size]`).
+    # These three are the shapes with no declaration in hand, and each one says
+    # what the reader can write instead.
+    ("a call through a value whose declared type cannot hold one",
+     (("a word that is not a code address is nothing to branch through",),)),
+    ("a function passed where the callee declares something else",
+     (("is passed to", "read as a value"),)),
+    ("a bracketed callee through a value, which this build cannot read",
+     (("is a bracketed call through a VALUE",),)),
+    ("a keyword argument in a call through a value",
+     (("no declaration to bind it by NAME",),)),
     ("receiver passed at argument position 0",
      (("in argument position",),)),
     ("receiver passed to a call, position not stated",
@@ -953,12 +1000,71 @@ def _host_source_path(name: str):
     return None
 
 
+def _module_scope_bindings(nodes, names):
+    """Every name bound at MODULE scope in `nodes`, and recursively in the bodies
+    of the statements that run at import.
+
+    A module attribute is a binding in the module's own namespace, and CPython's
+    stdlib puts a real share of them inside `if`/`try`/`with` at module level:
+    `types.py` binds `SimpleNamespace = type(sys.implementation)` inside a
+    module-level `try:` that imports `_collections_abc`, and `types.__all__` is
+    `[n for n in globals() if not n.startswith('_')]` — a COMPREHENSION, which
+    `ast.literal_eval` cannot answer, so the `__all__` path does not fire for
+    that module and the top-level scan is all there was.
+
+    Scanning `tree.body` alone therefore reported `types` as declaring six names
+    and the ranking printed `uses: 0 — every blocked file names nothing types
+    declares, so the row is import CLOSURE` while **22 blocked files spell
+    `types.SimpleNamespace` and 9 spell `types.ModuleType`** (`myinterpreter.py`
+    alone has 22 of the former). That is the direction this tool must never be
+    wrong in: it reads as "nothing to do here" and it is the largest false
+    negative the `--host` table has had.
+
+    The recursion stops at function and class bodies, and that boundary is the
+    whole discipline: a `def`'s locals are not module attributes, so descending
+    into one would add every local in CPython's stdlib (measured on `inspect`:
+    400+ names, none of them an attribute) and a `class`'s body is a namespace
+    of its own. What runs at import — `if`, `try`, `with`, `for`, `while` — is
+    descended, because a name bound there IS in the module's namespace.
+    """
+    import ast
+    for node in nodes:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef, ast.Lambda)):
+            names.add(node.name if hasattr(node, "name") else "")
+            continue
+        if isinstance(node, ast.Assign):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    names.add(tgt.id)
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name):
+                names.add(node.target.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, (ast.If, ast.Try, ast.With, ast.AsyncWith,
+                               ast.For, ast.AsyncFor, ast.While)):
+            _module_scope_bindings(node.body, names)
+            # `except` handlers and `else`/`finally` are module scope too, and
+            # `TryStar` (3.11+) is spelled separately from `Try` in the AST.
+            _module_scope_bindings(getattr(node, "orelse", []), names)
+            _module_scope_bindings(getattr(node, "finalbody", []), names)
+            for h in getattr(node, "handlers", []) or ():
+                _module_scope_bindings(h.body, names)
+
+
 def _host_declared_names(name: str):
     """The names a caller can bind from the host module `name`, or None.
 
-    `__all__` where CPython defines it as a literal list, else every top-level
+    `__all__` where CPython defines it as a literal list, else every module-scope
     binding the source makes that does not begin with an underscore. None means
     the names could not be read, which the printed row says is not a count of 0.
+
+    **A `__all__` that is not a literal list falls through to the scan, and that
+    fallback has to see module-scope bindings inside `if`/`try`/`with`** — see
+    `_module_scope_bindings`, and `types.py` for the case that made it a
+    function rather than a loop.
     """
     if name in _host_decl_cache:
         return _host_decl_cache[name]
@@ -970,22 +1076,17 @@ def _host_declared_names(name: str):
             with open(path, encoding="utf-8", errors="replace") as f:
                 tree = ast.parse(f.read(), filename=path)
             names = set()
-            for node in tree.body:
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                     ast.ClassDef)):
-                    names.add(node.name)
-                elif isinstance(node, ast.Assign):
-                    for tgt in node.targets:
-                        if isinstance(tgt, ast.Name):
-                            names.add(tgt.id)
-                elif isinstance(node, ast.AnnAssign):
-                    if isinstance(node.target, ast.Name):
-                        names.add(node.target.id)
-                elif isinstance(node, (ast.Import, ast.ImportFrom)):
-                    for alias in node.names:
-                        names.add(alias.asname or alias.name.split(".")[0])
+            _module_scope_bindings(tree.body, names)
             if "__all__" in names:
                 exported = None
+                for node in tree.body:
+                    if isinstance(node, ast.Assign) and any(
+                            isinstance(t, ast.Name) and t.id == "__all__"
+                            for t in node.targets):
+                        try:
+                            exported = list(ast.literal_eval(node.value))
+                        except Exception:               # noqa: BLE001
+                            exported = None
                 for node in tree.body:
                     if isinstance(node, ast.Assign) and any(
                             isinstance(t, ast.Name) and t.id == "__all__"

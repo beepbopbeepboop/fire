@@ -434,6 +434,33 @@ def test_a_bare_call_to_an_imported_generic_is_still_refused(tmpdir):
         check("does not export it" in bare,
               f"[{arch}] a bare call to an imported generic must be refused as "
               f"an export gap: {bare.strip()[-400:]}")
+        # …and the refusal must not tell this file its SOURCE is wrong. It used
+        # to end "spell it as `widen[<a type>](…)` and the library will carry
+        # the instantiation", which is a repair for correct code: in Mojo a
+        # template call's type arguments are INFERRED, `widen(5)` is the spelling
+        # the stdlib uses (`FormatStruct(writer, "Allocation")` is 68 files of
+        # it), and the gap is in this path's demand pipeline. That is the
+        # `refuse_without:` defect — a next step that is wrong about the code
+        # being compiled — so the sentence now says which side the fault is on,
+        # names the inference and its measurement, and calls the bracket a
+        # WORKAROUND. The property is pinned here rather than in the message's
+        # own test because it is a property of the REFUSAL a program gets.
+        check("the SOURCE is right" in bare
+              and "does not infer them yet" in bare,
+              f"[{arch}] the refusal does not say the bare spelling is correct "
+              f"source and that the inference is what is missing: "
+              f"{bare.strip()[-600:]}")
+        check("workaround" in bare,
+              f"[{arch}] the bracket is offered without saying it is a "
+              f"workaround for this path rather than a correction: "
+              f"{bare.strip()[-400:]}")
+        check("FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_"
+              "inferrable.md" in bare,
+              f"[{arch}] the refusal does not point at the measurement of the "
+              f"inference it is short of")
+        check("spell it as `widen[" not in bare,
+              f"[{arch}] the old imperative is back: a reader sent to edit "
+              f"correct stdlib")
         bracketed = run_pair_case(
             tmpdir, arch, "mm_brack", lib,
             ("from pairlib import widen\n"
@@ -544,6 +571,208 @@ def test_only_the_export_rule_says_what_is_a_template(tmpdir):
           f"{names}")
 
 
+def test_a_source_derived_answer_is_made_once_per_source_and_never_shared(tmpdir):
+    """One derivation per source TEXT, and each caller gets its own container.
+
+    Both `template_names` and `all_instantiation_calls` are functions of a
+    source string and nothing else, and both are asked once per module of an
+    import CLOSURE rather than once per source — measured on `std/simd.mojo`,
+    where the export rule ran 7 042 times over 160 modules and
+    `fire_compiler.py_tokenize` 7 335 times in total, 51% of an 84 s build.
+
+    So this pins three things, and the first is a COUNT rather than a timing
+    (a build that got slow again would be noticed by nobody, and one that got
+    fast by answering a different question would pass every refusal test in the
+    tree):
+
+      * the derivation behind each runs ONCE per distinct source — so a future
+        caller that reintroduces a per-module ask fails here;
+      * interleaving two sources keeps the two answers apart, which is what a
+        key that is not the source would get wrong;
+      * the value handed back is a FRESH container every call, so a caller that
+        mutates what it got cannot reach into the next caller's answer.
+    """
+    from formal import monomorph as MM
+    import reflect
+
+    lib = ("struct Pair[T]:\n"
+           "    var first: T\n"
+           "\n"
+           "def widen[T](v: T) -> T:\n"
+           "    return v\n")
+    other = ("struct Box[T]:\n"
+             "    var value: T\n")
+
+    # 1 + the count the caller itself causes, per distinct source.
+    seen = {"n": 0}
+    real_exclusions = reflect.export_exclusions
+
+    def counted(src, parsed=None):
+        seen["n"] += 1
+        return real_exclusions(src, parsed)
+
+    reflect.export_exclusions = counted
+    try:
+        names = [MM.template_names(lib) for _ in range(4)]
+        other_names = [MM.template_names(other) for _ in range(3)]
+        again = MM.template_names(lib)
+    finally:
+        reflect.export_exclusions = real_exclusions
+    check(seen["n"] == 2,
+          f"the export rule ran {seen['n']} times for two sources asked seven "
+          f"times between them; it is a whole-module tokenize+parse per call "
+          f"and it is what made `std/simd.mojo` cost 84 s")
+    check(all(n == names[0] for n in names) and again == names[0],
+          f"the same source gave different answers across calls: "
+          f"{names + [again]}")
+    check(all(n == other_names[0] for n in other_names),
+          f"the second source's own answers disagree: {other_names}")
+    check(set(names[0]) == {"Pair", "widen"},
+          f"the cached answer is not the export rule's: {names[0]}")
+    check(set(other_names[0]) == {"Box"},
+          f"a cached answer was served for the WRONG source, which is the "
+          f"failure a key that is not the source produces: {other_names[0]}")
+
+    # The container is the caller's, not the cache's.
+    names[0].append("Injected")
+    check(MM.template_names(lib) == ["Pair", "widen"],
+          f"a caller mutating the list it got back reached into the cached "
+          f"answer: {MM.template_names(lib)}")
+
+    parsed = {"n": 0}
+    real_statements = MM._consumer_statements
+
+    def counted_statements(src):
+        parsed["n"] += 1
+        return real_statements(src)
+
+    prog = ("def main():\n"
+            "    var a = Pair[Int]()\n"
+            "    var b = Pair[Float64]()\n")
+    other_prog = ("def main():\n"
+                  "    var c = Box[Bool]()\n")
+    MM._consumer_statements = counted_statements
+    try:
+        found = [MM.all_instantiation_calls(prog) for _ in range(5)]
+        other_found = [MM.all_instantiation_calls(other_prog) for _ in range(3)]
+    finally:
+        MM._consumer_statements = real_statements
+    check(parsed["n"] == 2,
+          f"the consumer source was parsed {parsed['n']} times for eight asks "
+          f"over two sources; `formal/imports.py::instantiation_demands` asks "
+          f"once per imported module over one unchanged consumer")
+    check(all(f == found[0] for f in found) and \
+        all(f == other_found[0] for f in other_found),
+          f"the same source gave different demand sets across calls: "
+          f"{found + other_found}")
+    check(found[0] == {"Pair": [("Float64",), ("Int",)]},
+          f"the cached demand set is not the derived one: {found[0]}")
+    check(other_found[0] == {"Box": [("Bool",)]},
+          f"a cached demand set was served for the WRONG consumer: "
+          f"{other_found[0]}")
+    found[0]["Pair"].append(("Injected",))
+    found[0]["Injected"] = [("Bool",)]
+    check(MM.all_instantiation_calls(prog) == {"Pair": [("Float64",), ("Int",)]},
+          f"a caller mutating the demand set it got back reached into the "
+          f"cached one: {MM.all_instantiation_calls(prog)}")
+
+    # 3. BOTH questions, ONE source — which is what
+    # `formal/imports.py::build_module_dylib` asks, since it hands the same
+    # `module_source_text(source_path)` to `template_names` (as
+    # `own_templates`) and to `instantiation_demands` (as `consumer_src`). One
+    # cache keyed on the source alone served one question's answer out of the
+    # other's slot, and the build died with `'tuple' object has no attribute
+    # 'items'` on 4 of the 43 files of the byte-comparison spread.
+    both = ("struct Pair[T]:\n"
+            "    var first: T\n"
+            "\n"
+            "def main():\n"
+            "    var a = Pair[Int]()\n")
+    check(MM.template_names(both) == ["Pair"],
+          f"the template set of a source that also has demands: "
+          f"{MM.template_names(both)}")
+    check(MM.all_instantiation_calls(both) == {"Pair": [("Int",)]},
+          f"the demand set of a source whose template set was just read: "
+          f"{MM.all_instantiation_calls(both)}")
+    check(MM.template_names(both) == ["Pair"],
+          f"and the template set again, after the demand set read its slot: "
+          f"{MM.template_names(both)}")
+
+
+def test_a_template_is_located_once_per_source_and_name(tmpdir):
+    """`template_kind`/`_template_source` are whole-module SCANS, so they are
+    asked once per `(source, name)` and not once per instantiation.
+
+    `elaborate.extract_struct_source` and `extract_fn_source` each split the
+    module into lines and run `elaborate._bracket_depth_by_line` over it, and
+    `instantiate` asks both of this module's questions once per (template,
+    argument-list) pair: 300 asks over FOUR distinct pairs on `std/simd.mojo`,
+    which is 600 bracket-depth scans of whole modules and 39% of what was left
+    of that build.
+
+    Counted rather than timed, and the count is the point: a caller that
+    reintroduces a per-instantiation ask fails here, and one that made the
+    lookup answer a different question would still be caught by the equality
+    assertions rather than by a clock.
+    """
+    from formal import monomorph as MM
+    import elaborate
+
+    lib = ("struct Pair[T]:\n"
+           "    var first: T\n"
+           "    var second: T\n"
+           "\n"
+           "    def scaled(self) -> T:\n"
+           "        return self.first + self.second\n"
+           "\n"
+           "def widen[T](v: T) -> T:\n"
+           "    return v\n")
+    scans = {"n": 0}
+    real_depth = elaborate._bracket_depth_by_line
+
+    def counted(src):
+        scans["n"] += 1
+        return real_depth(src)
+
+    elaborate._bracket_depth_by_line = counted
+    try:
+        kinds = [(MM.template_kind(lib, "Pair"), MM.template_kind(lib, "widen"))
+                 for _ in range(6)]
+        sources = [MM._template_source(lib, "Pair", MM.KIND_STRUCT)
+                   for _ in range(6)]
+        made = [MM.instantiate(lib, "Pair", (a,))[0]
+                for a in ("Int", "Float64", "Bool")]
+        again = MM.template_kind(lib, "Pair")
+        miss = 0
+        for _ in range(3):
+            try:
+                MM.template_kind(lib, "NoSuchTemplate")
+            except MM.MonomorphError:
+                miss += 1
+    finally:
+        elaborate._bracket_depth_by_line = real_depth
+    check(all(k == (MM.KIND_STRUCT, MM.KIND_FN) for k in kinds),
+          f"a struct template and a function template were not told apart: "
+          f"{kinds}")
+    check(again == MM.KIND_STRUCT,
+          f"the same (source, name) gave a different kind across calls: "
+          f"{again}")
+    check(all(s == sources[0] and "scaled" in s for s in sources),
+          f"the template's own text is not the extractor's: {sources[0]!r}")
+    check([m.split("_")[-1] for m in made] == ["Int", "Float64", "Bool"] and
+          all(m.startswith("Pair_") for m in made),
+          f"three instantiations of one template did not mangle as the ABI "
+          f"says: {made}")
+    check(scans["n"] <= 16,
+          f"{scans['n']} whole-module bracket-depth scans for 6 + 6 + 3 + 3 "
+          f"asks over two templates in one source; each is a scan of the "
+          f"whole module and there are two `(source, name)` pairs here")
+    check(miss == 3,
+          f"a name this module does not declare was refused {miss} times "
+          f"rather than 3; a refusal answered from a cache would go stale "
+          f"against a source that later declares the name")
+
+
 def test_an_instantiation_substitutes_the_parameter_and_keeps_the_self_spelling(tmpdir):
     """`Self.T` is `T`, and the shared substitution would otherwise break it.
 
@@ -566,13 +795,28 @@ def test_an_instantiation_substitutes_the_parameter_and_keeps_the_self_spelling(
            "    def fill(self):\n"
            "        self.items = List[Self.T]()\n")
     mangled, concrete = MM.instantiate(src, "Bag", ("Int",))
-    check(mangled == "Bag_Int", f"the mangled name is {mangled!r}")
+    # The mangled spelling comes from the ONE mangler rather than from a
+    # literal, and that is the whole point of this assertion: `monomorphize.
+    # mangle` deliberately encodes each field with its index, its name and a
+    # digest (`Box[T]` → `Box_1_T_5_Int64`) because the old spelling was not
+    # INJECTIVE — two instantiations could share a symbol — and a literal here
+    # went stale the moment that landed, turning this case red on a mangling
+    # scheme nobody had broken. Deriving it makes the case say what it is
+    # about: that `instantiate` uses the shared mangler, not that a particular
+    # string came out of it.
+    import monomorphize
+    check(mangled == monomorphize.mangle("Bag", {"T": "Int"}),
+          f"the mangled name is {mangled!r}, which is not what the shared "
+          f"mangler produces")
     check("Self." not in concrete,
           f"`Self.T` survived into the instantiation, which binds nothing: "
           f"{concrete!r}")
     check("List[Int]" in concrete,
           f"the field's type argument was not substituted: {concrete!r}")
-    check("struct Bag_Int" in concrete and "struct Bag[" not in concrete,
+    # …and the SAME derivation for the declaration's own name, which is the
+    # other half of what this case is about (the substitution is only useful if
+    # the declaration is renamed to the symbol the library will publish).
+    check(f"struct {mangled}" in concrete and "struct Bag[" not in concrete,
           f"the declaration was not renamed and de-parameterised: "
           f"{concrete!r}")
 
@@ -725,8 +969,18 @@ def test_two_demand_sets_are_two_libraries(tmpdir):
               f"two demand sets produced one path ({want_int!r}); a program "
               f"that binds `Pair_Bool_get_first` would be handed a library that "
               f"exports `Pair_Int_get_first` instead")
-        for path_built, want, other in ((want_int, "Pair_Int", "Pair_Bool"),
-                                        (want_bool, "Pair_Bool", "Pair_Int")):
+        # …and the expected symbol is spelled by the ONE mangler for the same
+        # reason as the case above: `Pair_Int` was the pre-injective spelling and
+        # went stale with it. The NEGATIVE half still keys on the plain base
+        # names, because what it is testing is that the demand set decided the
+        # artifact — and `Pair_Bool` is a substring of nothing an `Int` library
+        # publishes, whether or not the mangler lengthens it.
+        import monomorphize
+        for path_built, want, other in (
+                (want_int, monomorphize.mangle("Pair", {"T": "Int"}),
+                 monomorphize.mangle("Pair", {"T": "Bool"})),
+                (want_bool, monomorphize.mangle("Pair", {"T": "Bool"}),
+                 monomorphize.mangle("Pair", {"T": "Int"}))):
             with open(I._manifest_path(path_built)) as f:
                 exports = {e.get("symbol") for e in
                            (json.load(f).get("exports") or [])}
@@ -737,6 +991,215 @@ def test_two_demand_sets_are_two_libraries(tmpdir):
                   f"{os.path.basename(path_built)} also exports {other}, so "
                   f"the demand set is not what decided the artifact: "
                   f"{sorted(exports)}")
+
+
+def test_a_bracketed_parameter_annotation_instantiates(tmpdir):
+    """`keys: List[T]` is a parameter, and every instantiation of it used to be
+    a file that does not parse.
+
+    The head matcher's character class was "not a bracket", so it stopped at
+    `List[T]`'s `]`, `monomorphize_source` cut the head there and left `]:`
+    behind:
+
+        struct Box[T: AnyType, keys: List[T]]:      ->  struct Box_1_…_x005D]:
+        parse error: Unexpected RBRACKET(']')
+
+    which is the worst of the three failure directions — the instantiation is
+    produced, substituted correctly, and cannot be compiled. It is not an exotic
+    shape either: it is `std/collections/type_dict.mojo` (every one of whose
+    parameters is a value) and `SIMD[…]` in any numeric template.
+
+    **The assertion that was missing everywhere is that the emitted source
+    PARSES** — the mangled name was already right, so a test that checked only
+    the name passed against a definition no compiler would accept. Hence
+    `Parser(py_tokenize(out)).parse_module()` here, and the substitution is
+    checked as well because a head that ends in the right place still has to
+    substitute INSIDE the annotation.
+    """
+    from formal import monomorph as MM
+    import fire_compiler as F
+    src = ("struct Box[T: AnyType, keys: List[T]]:\n"
+           "    var items: List[T]\n"
+           "\n"
+           "    def size(self) -> Int:\n"
+           "        return len(self.items)\n")
+    mangled, concrete = MM.instantiate(src, "Box", ("Int", "[1, 2, 3]"))
+    check(concrete.startswith(f"struct {mangled}:"),
+          f"the definition was not renamed and its parameter list not dropped: "
+          f"{concrete!r}")
+    check(concrete.rstrip().endswith("return len(self.items)"),
+          f"the body was cut with the head: {concrete!r}")
+    check("List[Int]" in concrete,
+          f"a type parameter inside another parameter's ANNOTATION was not "
+          f"substituted: {concrete!r}")
+    try:
+        mod = F.Parser(F.py_tokenize(concrete)).parse_module()
+    except Exception as exc:                        # noqa: BLE001
+        raise TestFailure(
+            f"the instantiation does not parse, which is the whole defect: "
+            f"{exc!r}\n{concrete!r}") from None
+    check(any(getattr(s, "name", None) == mangled for s in mod),
+          f"the parser did not read the instantiated name back: "
+          f"{[getattr(s, 'name', None) for s in mod]}")
+
+    # THE CONTROL, so the fix cannot be "the parameter list ends at the first
+    # `]`" all over again, and the NESTED case, because a matcher that counts
+    # one level is a matcher with the same bug one level down.
+    import elaborate as E
+    check(E.type_param_names("struct Box[T: AnyType, keys: List[T]]:\n"
+                             "    pass\n") == ["T", "keys"],
+          "the parameter reader stops at the `]` inside `List[T]`")
+    check(E.type_param_names(
+        "struct Box[T, keys: SIMD[Tuple[Int, Int], 4]]:\n    pass\n")
+        == ["T", "keys"],
+        "a bracketed type argument carrying its own comma splits the parameter "
+        "in half (`split(',')` rather than a top-level split)")
+    check(E.parse_bounds("struct Box[T: AnyType, keys: List[T]]:\n    pass\n")
+          == {"T": "AnyType", "keys": "List[T]"},
+          "the trait bound of a parameter whose type is a type application is "
+          "read from a truncated list")
+
+    # …and the multi-line form `type_dict.mojo` writes, whose parameters carry
+    # a trailing comma, a `//` separator and a `*values` marker. This is the
+    # real declaration, transcribed: every parameter of that struct is a VALUE,
+    # so the `keys: List[T]` line is not an edge case there but the middle of
+    # the parameter list, and before the fix `type_param_names` returned
+    # `['T', 'Trait', 'keys']` — it stopped at that `]` and lost `*values`.
+    typed_dict = ("struct TypeDict[\n"
+                 "    T: Equatable & Movable,\n"
+                 "    Trait: type_of(AnyType),\n"
+                 "    //,\n"
+                 "    keys: List[T],\n"
+                 "    *values: Trait,\n"
+                 "](TrivialRegisterPassable):\n"
+                 "    var items: List[T]\n"
+                 "\n"
+                 "    def get(self) -> Int:\n"
+                 "        return len(Self.keys) + len(self.items)\n")
+    check(E.type_param_names(typed_dict) == ["T", "Trait", "keys", "*values"],
+          f"std/collections/type_dict.mojo's parameter list is not read whole: "
+          f"{E.type_param_names(typed_dict)}")
+    mangled_td, concrete_td = MM.instantiate(
+        typed_dict, "TypeDict", ("Int", "AnyType", "[1,2,3]", "String"))
+    check("len([1,2,3])" in concrete_td,
+          f"`len(Self.keys)` was not folded with the argument the "
+          f"instantiation supplied: {concrete_td!r}")
+    try:
+        F.Parser(F.py_tokenize(concrete_td)).parse_module()
+    except Exception as exc:                        # noqa: BLE001
+        raise TestFailure(f"the TypeDict instantiation does not parse: "
+                          f"{exc!r}\n{concrete_td!r}") from None
+    check(concrete_td.startswith(f"struct {mangled_td}("),
+          f"the declaration's base class and parameter list were lost: "
+          f"{concrete_td!r}")
+
+
+def test_a_stated_mangled_spelling_is_the_one_the_mangler_produces(tmpdir):
+    """No `doc/` or `bugs/` file may state a mangled spelling the mangler does
+    not produce.
+
+    The two cases above used to write `Pair_Int` out by hand, and both went
+    stale the moment `monomorphize.mangle` became injective — leaving
+    `doc/ABI.md` §Generics stating, in the one document a consumer reads to
+    learn what the boundary symbol is, a symbol no code produces. Deriving the
+    expected name in a TEST is not enough: a test stops at its own file, and
+    the sentence a reader reads was in a contract. So the invariant is checked
+    where the prose is.
+
+    `Pair[Int]` is the witness because it is the example every one of these
+    documents uses. The rule is deliberately narrow: it looks for a token that
+    LOOKS like this mangling (`Pair_` plus an alnum continuation) and requires
+    it to be a well-formed `_fields` encoding — `Pair` followed by one or more
+    `_{len}_{name}_{len}_{value}` fields, each declared length checked against
+    the segment it introduces. That is what `monomorphize._fields` emits and
+    what its docstring says is uniquely decodable ("the maximal digit run is a
+    count, the next `_` separates, and each count is followed by exactly that
+    many characters"), so the check is the mangler's own format read back rather
+    than a copy of it: `Pair_1_T_6_Colour` is a different instantiation and
+    passes, `Pair_Int` and `Pair_Colour` are the pre-injective shape and do not.
+    Asking "is this string a mangling of SOME instantiation" rather than "is it
+    the one for `Int`" is what lets a document use the mangler on any example.
+
+    **A paragraph that discusses the ENCODING may name the spelling the
+    encoding replaced**, because "it used to be `Pair_Int`" is the sentence that
+    tells a reader holding the old name what to look for. That exemption is
+    keyed on the word `injective` in the paragraph rather than on any list of
+    known-old spellings, so it cannot rot into "any stale spelling is fine" —
+    an example line does not say the encoding is injective, and the two
+    paragraphs that do are the ones about the change. The scan is per paragraph
+    rather than per line because prose wraps: the word and the spelling it
+    qualifies are routinely 80 columns apart.
+    """
+    import monomorphize
+    import re
+    problems: list = []
+
+    def decodes(token: str) -> bool:
+        """Whether `token` is `<name>` followed by `_fields`-shaped fields.
+
+        The decoder is `monomorphize._fields`' own description read back: at
+        each position a digit run is a length, an `_` separates, and exactly
+        that many characters must follow. Written out rather than imported
+        because there is nothing to import — `_fields` produces, it does not
+        parse — and because a test that re-implements the producer's format is
+        what makes the format a CONTRACT rather than an accident.
+        """
+        pos = token.find("_")
+        if pos < 0:
+            return False                      # no fields: `Pair` is its own name
+        i = pos + 1
+        fields = 0
+        while i < len(token):
+            start = i
+            while i < len(token) and token[i].isdigit():
+                i += 1
+            if i == start or i >= len(token) or token[i] != "_":
+                return False
+            count = int(token[start:i])
+            i += 1
+            if i + count > len(token) or token[i + count] != "_":
+                return False
+            i += 1 + count                    # the field's name
+            start = i
+            while i < len(token) and token[i].isdigit():
+                i += 1
+            if i == start or i >= len(token) or token[i] != "_":
+                return False
+            count = int(token[start:i])
+            i += 1
+            if i + count > len(token):
+                return False
+            i += count                        # the field's value
+            fields += 1
+        return fields > 0
+
+    pattern = re.compile(r"\bPair_[A-Za-z0-9_]*")
+    for root in ("doc", "bugs"):
+        base = os.path.join(HERE, root)
+        for dirpath, _dirs, files in os.walk(base):
+            for name in sorted(files):
+                if not name.endswith(".md"):
+                    continue
+                path = os.path.join(dirpath, name)
+                rel = os.path.relpath(path, HERE)
+                text = open(path, encoding="utf-8").read()
+                for para in re.split(r"\n\s*\n", text):
+                    if "injective" in para.lower():
+                        continue
+                    for token in pattern.findall(para):
+                        token = token.rstrip("_")
+                        if not decodes(token):
+                            line = text[:text.index(para)].count("\n") + 1
+                            problems.append(
+                                f"{rel}:{line} states {token!r}, which is not a "
+                                f"spelling monomorphize.mangle can produce — it "
+                                f"emits length-prefixed fields "
+                                f"(`Pair[Int]` is "
+                                f"{monomorphize.mangle('Pair', {'T': 'Int'})!r}"
+                                f"), and this one carries no lengths")
+    check(not problems,
+          "a document states a mangled spelling no code produces:\n  "
+          + "\n  ".join(problems))
 
 
 TESTS = [
@@ -754,6 +1217,10 @@ TESTS = [
      test_a_non_concrete_type_argument_is_still_refused),
     ("only the export rule says what is a template",
      test_only_the_export_rule_says_what_is_a_template),
+    ("a source-derived answer is made once per source and never shared",
+     test_a_source_derived_answer_is_made_once_per_source_and_never_shared),
+    ("a template is located once per source and name",
+     test_a_template_is_located_once_per_source_and_name),
     ("an instantiation substitutes the parameter and keeps the Self spelling",
      test_an_instantiation_substitutes_the_parameter_and_keeps_the_self_spelling),
     ("a type argument that is computed is not a demand",
@@ -762,6 +1229,10 @@ TESTS = [
      test_a_value_typed_bracket_is_not_read_as_a_type),
     ("two demand sets are two libraries",
      test_two_demand_sets_are_two_libraries),
+    ("a bracketed parameter annotation instantiates",
+     test_a_bracketed_parameter_annotation_instantiates),
+    ("a stated mangled spelling is the one the mangler produces",
+     test_a_stated_mangled_spelling_is_the_one_the_mangler_produces),
 ]
 
 EXPECTED_FAILURES: dict = {}

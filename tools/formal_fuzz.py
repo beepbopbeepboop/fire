@@ -70,13 +70,48 @@ WHAT IS AND IS NOT A FINDING
                        no representation is CORRECTLY refused, and a fuzzer
                        that counted those as bugs would spend its whole budget
                        re-discovering `bugs/FORMAL_known_limits.md`.  Counted by
-                       message so the construct mix stays visible.
+                       the CONSTRUCT the message names, and audited — see "THE
+                       REFUSAL AUDIT" below, which is the part that decides
+                       whether the message is true.
+  CODEGEN-INTERNAL    the backend reported an internal inconsistency of its own
+                       (its label table, its allocation walk) where a reader
+                       would be told about the PROGRAM.  A finding, and its own
+                       verdict: a refusal is a claim about the source, so
+                       counting an internal error as one reports a compiler bug
+                       as a documented limit.  Measured: x86-64 refused every
+                       image containing an `int(s, base)` with "internal: label
+                       'main_ip1_end' is defined twice, at 0x… and at 0x…".
   codegen-crash        the compiler raised something that is not a refusal
                        (a traceback, or a signal).  THIS is a finding: a
                        backend that dies on a source it merely cannot model is
                        a crash the sweep classifies separately, and it is never
                        cached, so it costs a build on every sweep until it is
                        gone.
+
+THE REFUSAL AUDIT — is the message true, and does it name the construct?
+------------------------------------------------------------------------
+A refusal is a claim about the program: "this construct has no representation
+here, and here it is".  Three ways that claim can be worthless, all of which
+used to reach a sweep's tally as a clean `refusal`:
+
+  * the diagnostic is about the COMPILER rather than the program (`internal: …`)
+    — its own verdict above, not a refusal's;
+  * it names something the PROGRAM DOES NOT CONTAIN, which sends the reader
+    looking for a construct that is not there — `REFUSAL-UNNAMED`, a finding;
+  * the two machines DISAGREE about it, whether one declines what the other
+    lowered (`REFUSAL-DIVERGES`) or both decline it in different words — the
+    second shape is new, and it is the one that hid the `int(s, base)` pair.
+
+A fourth, for the families whose message makes a claim ABOUT CPython — "CPython
+raises UnboundLocalError for that program" is a promise the interpreter can be
+asked to keep — is `REFUSAL-FALSE`, and the check is in `REFUSAL_CLAIMS`.
+
+What the audit CANNOT do is decide whether a construct really is outside the
+modelled subset: that is a property of `formal/model.py`, not of the message.
+So every family with no checkable claim is reported as `no-predicate` and
+COUNTED in the summary, never silently absent — a sweep that says
+`refusal audit: true=13, unnamed=0, false=0, no-predicate=0` and one that
+printed no audit line at all must not look the same.
 
 THE KNOWN DIVERGENCES, AND WHY GENERATING THEM IS THE POINT
 -----------------------------------------------------------
@@ -213,8 +248,13 @@ Deliberately absent, each for a stated reason:
     key scan that misses, and the miss signal on this path is `exit(1)` with
     nothing printed; `xs.append(v)` inside a loop overflows the blob's
     capacity, which is the number of append SITES in the function that built
-    it. Both are limits with a diagnostic rather than defects, and both are
-    measured: `bugs/FORMAL_a_dict_store_of_a_new_key_is_a_run_time_miss.md`.
+    it. Both are limits with a diagnostic rather than defects, and the append
+    one was measured as such. The dict half is no longer a limit: `d[k] = v`
+    for an absent key is CPython's INSERT, the pair blob is reserved at the
+    literal for the pairs it wrote plus one per store SITE
+    (`formal/model.py`'s `dict_store_capacity`), and the two stores the
+    `containers` mix generates here are therefore programs the corpus
+    measures.
   * a variadic `printf` with more than five operands — arm64 refuses a variadic
     call whose arguments pass the register file, so a program with more than
     seven of them is not a two-architecture case at all. The stack-argument
@@ -241,6 +281,14 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+
+# `tools/formal_sweep_parity.py`'s architecture-label fold, imported rather than
+# copied: it is the normaliser the sweep's parity tool settled by measurement
+# (its own comment says 12 of 542 rows differed for no reason other than a
+# machine name), and the two tools answer the same question about the same two
+# messages. A missing sibling is a loud ImportError on purpose — a silent
+# fallback would be a second normaliser, which is the thing being avoided.
+import formal_sweep_parity as _SWEEP_PARITY  # noqa: E402
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIRE = os.path.join(HERE, "fire.py")
@@ -333,15 +381,28 @@ PRELUDE = (
 
 # ── the harness ────────────────────────────────────────────────────────────
 
-def build(src, out, backend, timeout=BUILD_TIMEOUT):
+def build(src, out, backend, timeout=BUILD_TIMEOUT, test_input=None):
     """Compile `src` for `backend`; (rc, diagnostic).
 
     The diagnostic is stderr or stdout, whichever carries text — a refusal is
     printed where the build found it, and the two are not the same stream on
     every failure.
+
+    `test_input` is the formal path's `-n`, and it is `None` here by default so
+    that this corpus keeps measuring the images the CLI builds by default.  It
+    is a parameter because the OTHER caller of this function — the proof-layer
+    fuzzer `tools/formal_proof_fuzz.py` — measures programs whose entry takes an
+    argument, and the input is BAKED INTO THE IMAGE by the startup stub
+    (`formal/build.py`'s `test_input`), so a corpus that could not vary it would
+    be a corpus measuring one input and calling it a program.  Passing it here
+    rather than writing a second build command in that file is what keeps the
+    refusal/crash classification below the single place that decides it.
     """
     cmd = [sys.executable, FIRE, "build", "--formal", "--no-prove",
-           f"--backend={backend}", "-o", out, src]
+           f"--backend={backend}", "-o", out]
+    if test_input is not None:
+        cmd += ["-n", str(test_input)]
+    cmd.append(src)
     try:
         p = subprocess.run(cmd, capture_output=True, text=True,
                            timeout=timeout, cwd=HERE)
@@ -425,11 +486,21 @@ def has_oracle(ref):
     return bool(isinstance(ref, tuple) and ref and ref[0] != "error")
 
 
-def cpython_answer(text, tmpdir, name):
-    """(exit, stdout) for `text` + `main()`, run by the interpreter here."""
+def cpython_answer(text, tmpdir, name, args=""):
+    """(exit, stdout) for `text` + `main(args)`, run by the interpreter here.
+
+    `args` is the argument list the driver calls `main` with, spliced into the
+    driver verbatim so a caller can pass one value (`"5"`), several (`"5, 7"`)
+    or nothing at all (the default, which is this corpus: every program it
+    generates is `main()`).  It exists for `tools/formal_proof_fuzz.py`, whose
+    programs take the input the image has baked into it — a second CPython
+    driver there would be a second oracle, which is the one thing this tool's
+    docstring refuses to have.
+    """
     py = os.path.join(tmpdir, name + ".ref.py")
+    driver = PY_DRIVER.replace("_rc = main()", "_rc = main(%s)" % args)
     with open(py, "w") as f:
-        f.write(PY_DRIVER.replace("@PROGRAM@", text).replace("@TAG@", _RC_TAG))
+        f.write(driver.replace("@PROGRAM@", text).replace("@TAG@", _RC_TAG))
     try:
         p = subprocess.run([sys.executable, py], capture_output=True, text=True,
                            timeout=PY_TIMEOUT, env=dict(FIXED_ENV))
@@ -454,12 +525,316 @@ def cpython_answer(text, tmpdir, name):
     return ("error", "the CPython driver printed no %s sentinel" % _RC_TAG), ""
 
 
+# ── the refusal audit ───────────────────────────────────────────────────────
+#
+# A refusal is a CLAIM about the program: "this construct has no representation
+# on this path, and here is which one".  Three things can make the claim
+# worthless, and every one of them used to reach a sweep's tally as a clean
+# `refusal` — the verdict that means "correctly refused, not a finding":
+#
+#   * THE DIAGNOSTIC IS NOT ABOUT THE PROGRAM.  Both assemblers raise
+#     `CodegenError` for their own internal consistency checks, so an
+#     `internal: …` sentence is a claim about the compiler wearing a refusal's
+#     clothes.  `run_on` gives it its own verdict now (`codegen-internal`,
+#     above); this is where the sentence stops being one.
+#   * THE MESSAGE NAMES SOMETHING THE PROGRAM DOES NOT CONTAIN.  A reader who
+#     is sent looking for a construct that is not there has been handed a worse
+#     outcome than a refusal: a wrong answer about their own source.  The check
+#     below is mechanical — the diagnostic has to quote a token that is in the
+#     program, or name an AST node — and it is deliberately the WEAKEST possible
+#     reading of "names the construct", because a stronger one is a judgement
+#     about prose and this file refuses to make judgements it cannot re-run.
+#   * THE TWO MACHINES DISAGREE ABOUT IT.  `classify` compares two-sided
+#     refusals now, with architecture labels folded, so "one machine refuses the
+#     construct" and "the other machine refuses it in different words" are both
+#     findings instead of one clean run.
+#
+# WHAT THE AUDIT CANNOT DECIDE, said here rather than left to be discovered:
+# whether a construct really is outside the modelled subset.  That is a
+# property of `formal/model.py`, not of the message, and the only mechanical
+# witnesses available here are the two architectures (which is the third item
+# above) and CPython.  So a family with no CPython-checkable claim is reported
+# as `no-predicate` and COUNTED, never silently absent: a sweep whose refusals
+# were all unaudited says so in its summary, which is the difference between "the
+# refusals were true" and "nothing looked at the refusals".
+
+#: A build diagnostic that is the COMPILER talking about itself.  Both
+#: assemblers use this one prefix, from their own duplicate-label check, and it
+#: is matched here rather than spelled per backend because there is one prefix to
+#: match: a second spelling would be a second thing to keep in step.
+INTERNAL_DIAG_RE = re.compile(r"\binternal: ")
+
+#: What a refusal quotes: `'x'`, `` `x` `` and `"x"`.  The three because the
+#: messages use all three — `read_before_store_refusal` writes `'y'`, the string
+#: method refusals write `` `s.upper()` ``, and `printf_format_refusal` writes a
+#: format string in double quotes.
+QUOTED_RE = re.compile(r"'([^'\n]{1,160})'|`([^`\n]{1,160})`|\"([^\"\n]{1,160})\"")
+
+#: An AST node name, which is how a refusal names a construct the source spells
+#: with punctuation: "print() cannot tell whether `SliceExpr` is a string or a
+#: number" is about a slice, and `xs[1:3]` does not contain the word.
+AST_NODE_RE = re.compile(r"\b([A-Z]\w*(?:Expr|Stmt))\b")
+
+#: An identifier, for the check that a quoted token really is IN the program.
+IDENT_RE = re.compile(r"[A-Za-z_]\w*")
+
+#: The words of a message that are the CONSTRUCT rather than the prose around
+#: it — every identifier in the first sentence is a candidate, which is how
+#: `d.keys() is a method call on a value` is read as naming `d.keys()` while
+#: `the image would bind 1 symbol(s)` is not read as naming `symbol`.
+STOPWORDS = frozenset("""
+a an the this that these those it its is are was were be been being of to in on at
+by for from with without as and or not no if then than so such which what when where
+while do does did doing have has had having here there one two both either neither
+can cannot could may might must shall should will would you your they them their
+he she we us i me my mine ours yours theirs but because about into over under again
+""".split())
+
+
+def _message_head(diag, limit=400):
+    """The first sentence or two of a diagnostic — where the construct is named.
+
+    Bounded rather than exact: a message that puts its construct in the third
+    sentence must not be failed for that, and one that puts it in the first must
+    not depend on where the prose happens to break.  Two sentences and a cap is
+    the measure; the whole message is scanned too where that is cheap (see
+    `audit_refusal`), so this only decides which tokens get priority.
+    """
+    flat = " ".join(diag.split())
+    cut = 0
+    for _ in range(2):
+        # Not `:` — a refusal's site prefix is a colon (`main: 'y' is read at
+        # line 2 …`, `line 5: a bare `except:` …`) and breaking there left the
+        # head as the bare word `main:`, which is the FUNCTION and not the
+        # construct.  The prefix is stripped by `refusal_construct` instead.
+        m = re.search(r"(?<=[.!?])\s", flat[cut:])
+        if not m:
+            break
+        cut += m.end()
+    return flat[:cut or limit]
+
+
+#: The site prefix a refusal opens with — `main: `, `line 29: `,
+#: `p7.mojo: ` — stripped before the construct is read off, because it names
+#: WHERE and the construct is WHAT. `\s?\d*` is what allows `line 29: ` to be
+#: one prefix and not two tokens, and a bare word pattern that lacked it left
+#: five of `limits`' ten programs filed under the construct `line`.
+SITE_PREFIX_RE = re.compile(r"^(?:[A-Za-z_][\w./]*\s?\d*: )+")
+
+#: Construct NAMES that no token of a program can match, because the message
+#: names the construct as a PROSE noun phrase and the program contains no such
+#: word: "a list literal does not fit in the frame: it needs 17608 bytes" names
+#: the construct `list` and the program is 2100 bare integers. Measured on the
+#: twelve shapes `limits` produces; small on purpose, because every word here
+#: WEAKENS the check — a word that appears in a message that names nothing lets
+#: that message pass — so it holds only words this backend's own refusals use to
+#: name a construct.
+CONSTRUCT_WORDS = (
+    "list", "dict", "tuple", "string", "slice", "comprehension", "lambda",
+    "closure", "pointer", "float", "double", "struct", "descriptor",
+    "generator", "frame", "container", "blob",
+)
+# …a TUPLE and not a set, because the answer is the word that appears EARLIEST in
+# the message and a set has no order: "a list literal does not fit in the frame"
+# has to be filed under `list` and not under whichever of the two the hash table
+# happened to yield first, because a construct mix whose rows move between runs
+# is a mix nobody can compare against the last one.
+
+
+def _is_construct_token(tok):
+    """Whether one whitespace-separated token of a message names a construct.
+
+    Quoted always (`read_before_store_refusal` writes `'y'` and means it),
+    a punctuation run usually (`s.upper()`, `print()`, `'+'`, `frame:`), and a
+    capitalised AST node name always (`SliceExpr`). A bare lower-case word is
+    never one — those are the prose between the construct and the explanation,
+    and treating them as candidates is what made every message name something.
+    """
+    quoted = len(tok) >= 2 and tok[0] in "'`\"" and tok[-1] == tok[0]
+    core = tok.strip("`'\"")
+    if not core:
+        return False
+    if quoted:
+        return True
+    if AST_NODE_RE.fullmatch(core):
+        return True
+    return any(ch in core for ch in "()[]{}.,:+-*/%<>=!&|^~@#'")
+
+
+def refusal_construct(diag, text=None):
+    """The construct a refusal names, for the tally; `unnamed` when it names none.
+
+    This is the CONSTRUCT MIX a sweep produces, which the docstring above has
+    always promised ("counted by message so the construct mix stays visible") and
+    which `classify` did not do: every refusal landed in one bucket, so a sweep
+    of two thousand programs could not say whether it had met one limit thirteen
+    times or thirteen limits once.
+
+    `text` is the program, and it is what decides: a candidate that is not in the
+    program is not this program's construct, so the search continues and
+    `unnamed` is the honest answer when none of them is. That is the same rule
+    `audit_refusal` applies and for the same reason — "the image would bind 1
+    symbol(s) that nothing provides: sum" has four plausible leading tokens and
+    none of them is the call in the source, because the message never says what
+    `sum` is.
+    """
+    body = SITE_PREFIX_RE.sub("", _message_head(diag), count=1)
+    for cand in body.split():
+        if not _is_construct_token(cand):
+            continue
+        core = cand.strip("`'\"")
+        # A CALL spelling matches its callee: the message's leading token for a
+        # slice refused by `print()` is `print()`, and no program contains that
+        # substring — it contains `print(xs[1:3])`. Without the `()` half of the
+        # test the message's own construct fell through to the AST node further
+        # along the sentence and the blob refusal's to the word `string`.
+        if text is None or core in text or core.rstrip("()") in text:
+            return core[:40]
+    hits = [(body.find(word), word) for word in CONSTRUCT_WORDS
+            if re.search(r"\b%s\b" % word, body)]
+    return min(hits)[1] if hits else "unnamed"
+
+
+def _identifiers_in(text):
+    """Every identifier the program contains.
+
+    Identifiers ONLY, and not operators: an operator arrives inside a quoted
+    token that has no identifier word in it at all (`'+'`, `'<<='`), and that
+    case is decided by asking whether the quoted spelling is a SUBSTRING of the
+    program — which is the right test for punctuation, because the program
+    contains `s + "cd"` and never contains the token `+` as a word. A set of
+    punctuation runs was here first and produced `b"`, `d"` and `n(` alongside
+    the operators, which is three more things to be wrong about and no case the
+    substring test does not already cover.
+    """
+    return set(IDENT_RE.findall(text))
+
+
+def audit_refusal(text, diag, cpython=None):
+    """Is this refusal honest? `(verdict, detail)`; see the block comment above.
+
+    Four verdicts, and the point of naming the unhelpful ones is that a sweep
+    must be able to say how much of its refusal surface it actually checked:
+
+      ``true``          the message names a construct of this program, and every
+                        CPython-checkable claim in it holds.
+      ``unnamed``       it names nothing in the program — a finding: the reader
+                        is sent looking for a construct that is not there.
+      ``false``         it names a construct and a CPython-checkable claim in it
+                        is refuted by running the program — a finding.
+      ``no-predicate``  it names its construct and no claim in it is checkable
+                        here.  Counted, printed, never a finding: this verdict
+                        is what keeps the other three honest.
+
+    `cpython` is `cpython_answer`'s three-way answer, passed in rather than run
+    again so a caller that already has it pays for it once — and so the audit has
+    no way to demand an oracle it did not get.
+    """
+    # ── 1. does the message name something the program contains? ──
+    prog = _identifiers_in(text)
+    named = []
+    for m in QUOTED_RE.finditer(diag):
+        quoted = m.group(1) or m.group(2) or m.group(3) or ""
+        for word in IDENT_RE.findall(quoted):
+            if word in prog and word.lower() not in STOPWORDS:
+                named.append(word)
+                break
+        else:
+            stripped = quoted.strip()
+            if stripped and stripped in text:
+                named.append(stripped)
+                break
+    for m in AST_NODE_RE.finditer(diag):
+        named.append(m.group(1))
+    # The head's LEADING TOKEN, which is where half of these messages put the
+    # construct and where they put it unquoted: `s.upper()` is a method call on a
+    # value, `d.keys()` is a method call on a value, and neither is written with
+    # quotes anywhere in the sentence. Matched against the program as a SPELLING
+    # rather than word by word, because a dotted call is one token to a reader
+    # and several to a word matcher.
+    #
+    # And it is what the link audit does NOT have: "sum.mojo: the image would
+    # bind 1 symbol(s) … : sum" leads with a FILE NAME and mentions the symbol
+    # unquoted in the middle, so nothing in it is a construct of the program. That
+    # is the measured shape of a refusal which names no construct at all, and it
+    # is why the rule is a spelling against the program rather than "does the
+    # message contain an identifier".
+    lead = refusal_construct(diag, text)
+    if lead != "unnamed":
+        named.append(lead)
+    if not named:
+        return "unnamed", ("the diagnostic quotes nothing this program "
+                           "contains, so it does not name the construct: "
+                           + shorten(diag, 160))
+
+    # ── 2. the claims that CPython can refute ──
+    for pattern, check in REFUSAL_CLAIMS:
+        claim = pattern.search(diag)
+        if not claim:
+            continue
+        if cpython is None:
+            return "no-predicate", (f"{claim.group(0)!r} makes a claim about "
+                                    f"CPython and the oracle was not run")
+        ok, why = check(text, cpython)
+        if not ok:
+            return "false", f"{claim.group(0)!r}: {why}"
+    return "true", ", ".join(dict.fromkeys(named))
+
+
+#: Claims a refusal makes ABOUT CPython, and the check that refutes one.  Each
+#: row is (pattern, check) and the check is `(text, cpython_answer) -> (ok, why)`,
+#: because "the message promises something and the reference disagrees" is the
+#: only kind of falsehood this tool can decide on its own.
+#:
+#: `read_before_store_refusal` is the row that matters, because its message
+#: spells the promise out — "CPython raises UnboundLocalError for that program
+#: (NameError at module level)" — and a message that names the exception it
+#: cannot raise is checkable against the interpreter this tool already runs.
+#: `cpython_answer` answers `("error", stderr)` when CPython rejects the text, so
+#: the check reads the exception out of the oracle's own traceback.
+#:
+#: BOTH classes are accepted rather than the one the first sentence names,
+#: because the message itself says which is which: demanding `UnboundLocalError`
+#: of a MODULE-LEVEL read would report a true statement as a lie, and an audit
+#: that cries wolf on the module-level case teaches a reader to ignore it.
+#:
+#: The corpus cannot generate this family (every local is declared up front, so
+#: a read before its store is a `generator-error` rather than a program), so the
+#: row is reached from `--audit` on a saved program rather than from a sweep of
+#: `core`.  It is here because the row is TRUE and the alternative is an audit
+#: that silently skips the one claim it can check.
+def _cpython_raises_any(ref, classes):
+    """(`error`, stderr) from `cpython_answer`, and whether it raised one of them."""
+    if not (isinstance(ref, tuple) and ref and ref[0] == "error"):
+        return None, f"CPython answers this program with {ref!r}, and raises nothing"
+    return any(c in ref[1] for c in classes), ref[1].strip().splitlines()[-1][:120]
+
+
+REFUSAL_CLAIMS = [
+    (re.compile(r"CPython raises (UnboundLocalError|NameError)"),
+     lambda text, ref: _cpython_raises_any(ref, ("UnboundLocalError", "NameError"))),
+]
+
+
+def fold_arch(text):
+    """Architecture labels folded to `<arch>`, from the sweep's own normaliser.
+
+    Delegated rather than re-spelled: `tools/formal_sweep_parity.py` measured
+    these rules against real logs (12 of 542 rows differed for no reason other
+    than a machine name), and a second copy here is a second thing to keep in
+    step — the same argument as `build()` being the one place the
+    refusal/crash classification lives for both fuzzers.
+    """
+    return _SWEEP_PARITY.fold_arch(text)
+
+
 def run_on(backend, text, tmpdir, name):
     """Everything ONE backend says about `text`: built? ran? printed what?
 
-    Returns a dict whose `verdict` is one of `ok`, `refusal`, `crash`,
-    `timeout`; `ok` carries the exit status and stdout that the comparison
-    needs, and every verdict carries enough text to reproduce the report line.
+    Returns a dict whose `verdict` is one of `ok`, `refusal`, `codegen-internal`,
+    `crash`, `timeout`; `ok` carries the exit status and stdout that the
+    comparison needs, and every verdict carries enough text to reproduce the
+    report line.
     """
     src = os.path.join(tmpdir, f"{name}.mojo")
     out = os.path.join(tmpdir, f"{name}.{backend}")
@@ -467,15 +842,38 @@ def run_on(backend, text, tmpdir, name):
         f.write(text)
     rc, diag = build(src, out, backend)
     if rc != 0:
-        # A crash is a traceback or a signal; a refusal is a sentence.  The
-        # distinction matters because only one of them is a defect: `formal`
-        # raises CodegenError with prose for a construct it declines to model.
+        # THREE shapes of build failure, and only the first two are the same
+        # thing.  A crash is a traceback or a signal; a refusal is a sentence;
+        # and an INTERNAL sentence is neither, because it is a claim about the
+        # COMPILER rather than about the program.
+        #
+        # `internal:` is the two assemblers' own consistency check speaking
+        # (`formal/arm64.py`'s and `formal/x86_64.py`'s `Assembler.label`: a
+        # label name defined twice), and it is the exact shape a fuzzer must not
+        # file as a refusal.  Measured: x86-64 refused every image containing an
+        # `int(s, base)` with "internal: label 'main_ip1_end' is defined twice,
+        # at 0x… and at 0x…", which named a label and named no construct, and
+        # `classify` counted it as a correctly-refused construct — so a sweep
+        # reported a clean `refusal` over a parser-lowering bug that only x86-64
+        # had.  "A message that is false about the file is worse than no
+        # message" (`bugs/FORMAL_known_limits.md`) applies twice over here: once
+        # because the message was false about the FILE, and again because the
+        # tally said the file was outside the modelled subset.
         crashed = ("Traceback (most recent call last)" in diag
                    or "codegen-crash" in diag
                    or rc < 0
                    or rc in (134, 139, 136, 132, 133, 135, 137))
-        return {"verdict": "crash" if crashed else "refusal", "rc": rc,
-                "diag": diag.strip()[-400:]}
+        if crashed:
+            verdict = "crash"
+        elif INTERNAL_DIAG_RE.search(diag):
+            verdict = "codegen-internal"
+        else:
+            verdict = "refusal"
+        # The WHOLE diagnostic, not its tail.  A refusal names its construct in
+        # its first sentence, and the audit below reads that sentence; the tail
+        # is the remedy, which is what a screen line wants and what an audit
+        # does not.
+        return {"verdict": verdict, "rc": rc, "diag": diag.strip()}
     if not os.path.isfile(out):
         return {"verdict": "crash", "rc": rc,
                 "diag": "reported success and wrote no binary"}
@@ -631,6 +1029,25 @@ MIXES = {
     # The process environment, against a FIXED one (`FIXED_ENV`).
     "environ": (("environ_get", 4), ("environ_len", 3), ("environ_cmp", 3),
                 ("if", 2), ("assign", 2), ("augassign", 2)),
+    # The REFUSAL half of the corpus: constructs OUTSIDE the modelled subset,
+    # emitted on purpose, because nothing else here can reach a refusal. Every
+    # one of the eleven mixes above emits something the path is supposed to
+    # LOWER, which is the right discipline for finding miscompiles and the wrong
+    # one for measuring limits — measured: 4032 programs over the thirteen sweeps
+    # `bugs/FORMAL_fuzz_ledger.md` records produced 13 refusals and all 13 were
+    # one bug (`_cb0` has no home), so the refusal surface had no coverage at all
+    # and neither did the audit below have anything to audit.
+    #
+    # So a sweep of THIS mix is a sweep of the messages: does each machine
+    # refuse, do both refuse the same construct in the same words, and does each
+    # message name something the program contains. The weights are chosen so the
+    # mix reaches every family rather than the loudest one, and `unknown_callee`
+    # and `big_blob` are IN it although they are known to produce findings: a
+    # family that produces a finding is a family that measures, and a corpus
+    # tuned to be green is a corpus that has stopped.
+    "limits": (("str_concat", 4), ("str_new_method", 6), ("slice_read", 4),
+               ("dict_method", 3), ("try_handler", 3), ("unknown_callee", 3),
+               ("big_blob", 2), ("assign", 2), ("if", 2), ("print", 2)),
 }
 
 # The growing augmented operators, and the bound each one's RIGHT-HAND side is
@@ -904,7 +1321,9 @@ class Gen:
             "str_endswith", "str_lstrip", "str_meth_len",
             "global_build", "global_read", "global_write", "global_bump",
             "global_container", "generic_define", "generic_call",
-            "environ_get", "environ_len", "environ_cmp")
+            "environ_get", "environ_len", "environ_cmp",
+            "str_concat", "str_new_method", "slice_read", "dict_method",
+            "try_handler", "unknown_callee", "big_blob")
         if budget <= 0 and kind in ("if", "while", "for", "call",
                                     "nested_call", "recursion",
                                     "list_in_loop", "dict_iter",
@@ -993,6 +1412,10 @@ class Gen:
             self.generic_stmt(indent, kind)
         elif kind in ("environ_get", "environ_len", "environ_cmp"):
             self.environ_stmt(indent, kind)
+        elif kind in ("str_concat", "str_new_method", "slice_read",
+                      "dict_method", "try_handler", "unknown_callee",
+                      "big_blob"):
+            self.limits_stmt(indent, kind)
         elif kind in ("obj_new", "field_read", "field_cmp", "field_write",
                       "method_call", "method_call_in_arg"):
             self.object_stmt(indent, kind)
@@ -1370,13 +1793,12 @@ class Gen:
     #     `print(d["a"])` is refused on both backends — "print() cannot tell
     #     whether SubscriptExpr is a string or a number" — and a family that is
     #     95% refused is a family that finds nothing.
-    #   * a STORE names a key the LITERAL wrote. A key the table does not
-    #     contain is a key scan that misses, and the miss signal on this path is
-    #     `exit(1)` with nothing printed: measured on both architectures for
-    #     `d = {"a": 1}; d["b"] = 2; print(len(d))`, which CPython answers 2 and
-    #     both images answer by dying. That is the grow-a-dict limit
-    #     (`bugs/FORMAL_a_dict_store_of_a_new_key_is_a_run_time_miss.md`), so the
-    #     corpus stays on the half that works.
+    #   * a STORE may name a key no table wrote, and half the time it does. That
+    #     is CPython's INSERT and this path lowers it as one now — reserved pair,
+    #     pair written at the count, count bumped — so it is a construct the
+    #     corpus can measure rather than a limit it had to route around. The
+    #     other half still names a written key, because that is the arm the
+    #     SCAN takes and the two must keep disagreeing about nothing.
     #   * a dict with MIXED key kinds claims nothing, so a table here has one
     #     kind of key throughout — a string-keyed table and an integer-keyed
     #     one, never both. See `model.dict_literal_key_kind`'s gate.
@@ -1395,8 +1817,21 @@ class Gen:
             self.words.append(tmp)
             return
         if kind == "dict_write":
-            self.emit(indent, f"{var}[{self.rng.choice(keys)}] = "
-                              f"{self.rng.randint(0, 40)}")
+            # Half the time a key NO table in this program wrote, because
+            # `d[k] = v` for an absent key is CPython's INSERT and this path now
+            # lowers it as one: the pair blob is reserved at the literal for the
+            # pairs it wrote plus one per store SITE
+            # (`formal/model.py`'s `dict_store_capacity`), the miss arm writes
+            # the pair at the count and bumps it, and `len(d)` afterwards is one
+            # more than it was. Before that it was a key scan that missed and
+            # stopped the program having printed nothing, which is why the
+            # `containers` mix stayed on the half that worked and reported the
+            # limit as a `MISMATCH-*` finding on every program that contained
+            # it. (The doc that recorded that limit is deleted with the fix,
+            # which is the repository's rule for a fixed bug.)
+            key = (self.absent_key(key_kind) if self.rng.random() < 0.5
+                   else self.rng.choice(keys))
+            self.emit(indent, f"{var}[{key}] = {self.rng.randint(0, 40)}")
             return
         if kind == "dict_len":
             self.emit(indent, f"print(len({var}))")
@@ -1452,11 +1887,13 @@ class Gen:
     def build_dict(self):
         """One dict local, string-keyed or integer-keyed, never mixed.
 
-        The keys are the SPELLINGS the rest of the generator uses to subscript,
-        test and store, and they are collected as such: a table whose key list
+        The keys are the SPELLINGS the rest of the generator uses to READ,
+        test and iterate, and they are collected as such: a table whose key list
         disagrees with its own text is a program that reads a key the table does
         not have, which is a run-time miss on this path and a KeyError in
-        CPython — an oracle failure, not a finding.
+        CPython — an oracle failure, not a finding. A `dict_write` may still
+        store a key from OUTSIDE this list, because that is an insert and both
+        engines perform one; see `dict_stmt`.
         """
         name = self.fresh("D")
         key_kind = self.rng.choice(["str", "int"])
@@ -1835,6 +2272,178 @@ class Gen:
             return
         self.emit(indent, f"print(os.getenv({key!r}))")
 
+    # ── the OUT-OF-SUBSET half: `limits` ──
+    #
+    # Every other statement in this generator emits something the formal path is
+    # supposed to LOWER, because a corpus of constructs the backend refuses
+    # measures nothing — which is what `test_formal_fuzz.py`'s
+    # `check_mix_builds` exists to say, and it says it about every mix but this
+    # one.  The refusal surface is therefore not covered at all: 4032 programs
+    # over the thirteen sweeps `bugs/FORMAL_fuzz_ledger.md` records produced 13
+    # refusals, and all thirteen were one bug.  That is not a corpus measuring
+    # the limits; it is a corpus that cannot reach them.
+    #
+    # So this family emits constructs OUTSIDE the modelled subset on purpose, and
+    # the sweep's job is the audit: does each machine refuse, do both refuse the
+    # SAME construct in the SAME words, and does the message name something the
+    # program contains.  Every construct here is valid CPython, so the oracle
+    # answers it and the refusal is a claim about a program that demonstrably
+    # means something.
+    #
+    # What CPython answers is not recorded per construct — the sweep's verdict
+    # already carries it, and a constant here would be an assertion about the
+    # backend made against itself.
+    def limits_stmt(self, indent, kind):
+        # A string, a list and a dict to work on, built if absent. Declared the
+        # way `strmeth_stmt` does it: a bound name, so the construct under test
+        # is never "a name that does not exist", which is a different refusal
+        # and one the corpus already covers elsewhere.
+        if kind == "str_concat":
+            if not self.strings:
+                self.limit_bind_string(indent)
+            recv = self.rng.choice(self.strings)
+            self.emit(indent, f'{recv} = {recv} + "cd"')
+            return
+        if kind == "str_new_method":
+            if not self.strings:
+                self.limit_bind_string(indent)
+            recv = self.rng.choice(self.strings)
+            # The five methods this path DOES lower are `strmeth`'s subject, and
+            # the point of this row is a method outside them. `upper`, `strip`,
+            # `title`, `swapcase` and `zfill` are spellings of one refusal (a NEW
+            # string of the same length, with no buffer to put it in) and
+            # `split`/`rsplit` are the other one (a SEQUENCE of strings, whose
+            # element count is only known at run time), so they are a choice
+            # among names rather than seven rows to keep.
+            meth = self.rng.choice(["upper", "lower", "strip", "title",
+                                    "swapcase", "split", "rsplit"])
+            self.emit(indent, f"print({recv}.{meth}())")
+            return
+        if kind == "slice_read":
+            if not self.lists:
+                self.limit_bind_list(indent)
+            # `self.lists` holds (name, length) TUPLES, so the name is the
+            # first field; choosing the tuple itself emits `('L5', 3)[1:3]`,
+            # which is a subscript of a tuple literal and is not this row.
+            name = self.rng.choice(self.lists)[0]
+            lo = self.rng.randint(0, 1)
+            hi = lo + self.rng.randint(1, 2)
+            self.emit(indent, f"print({name}[{lo}:{hi}])")
+            return
+        if kind == "dict_method":
+            if not self.dicts:
+                self.limit_bind_dict(indent)
+            name = self.rng.choice(self.dicts)[0]
+            meth = self.rng.choice(["keys", "items"])
+            self.emit(indent, f"print({name}.{meth}())")
+            return
+        if kind == "try_handler":
+            # A handler arm with a body, which is refused rather than DROPPED:
+            # the image would build, exit 0, and not be the program that was
+            # written. `pass` in the arm is the shape that still builds, so this
+            # is deliberately not that one.
+            in_try = self.declare(self.fresh("q"), "0")
+            in_arm = self.declare(self.fresh("q2"), "0")
+            self.emit(indent, "try:")
+            self.emit(indent + 1, f"{in_try} = 1")
+            self.emit(indent, "except:")
+            self.emit(indent + 1, f"{in_arm} = 2")
+            self.emit(indent, f"print({in_try})")
+            return
+        if kind == "unknown_callee":
+            # A name that is neither a function in the image nor a C symbol
+            # anything provides. Measured on both architectures: this does NOT
+            # reach a refusal about `sum`; it reaches the LINK AUDIT, which
+            # reports that the image would bind a symbol nothing provides and
+            # then says, in its own words, that it cannot decide whether that
+            # symbol is a call the codegen emitted. So the construct is refused
+            # and the message names a file and a symbol rather than the call —
+            # `REFUSAL-UNNAMED` in every sweep, and
+            # `bugs/FORMAL_an_unlowered_callee_is_refused_by_a_link_audit.md`
+            # is where that is written down.
+            # Arity is CPython's, so the oracle can answer: `abs` takes ONE
+            # operand and `max`/`min` take two or more, and a generated program
+            # that calls either with the wrong number is a `generator-error` —
+            # the tool's verdict for a program its own generator got wrong, and
+            # a generator error would hide every refusal in the same program.
+            # `sum` needs a LIST: `sum(3)` is a TypeError in CPython, and a
+            # generator error would take the whole program's verdict with it.
+            lists = [n for n, _k in self.lists]
+            # Never `sum` in the two-argument branch: `sum(a, b)` is a TypeError
+            # in CPython, so a fallback that reached it turned a program into a
+            # `generator-error` instead of a refusal — measured, on `limits`
+            # seeds 8000-8009 (2 of 10 programs).
+            callee = self.rng.choice(
+                ["sum", "max", "min", "abs"] if lists
+                else ["max", "min", "abs"])
+            if callee == "sum":
+                self.emit(indent, f"print(sum({self.rng.choice(lists)}))")
+            elif callee == "abs":
+                self.emit(indent, f"print(abs({self.int_expr(3)}))")
+            else:
+                self.emit(indent, f"print({callee}({self.int_expr(3)}, "
+                                  f"{self.int_expr(5)}))")
+            return
+        if kind == "big_blob":
+            # A container literal past ONE architecture's frame budget and
+            # inside the other's. `frame_blob_refusal`'s own docstring records
+            # the two budgets (arm64's scratch 128 KB, x86-64's blob region
+            # 16 KB), so the measured shape is a `REFUSAL-DIVERGES` rather than
+            # a bug in either lowering — a construct refused on one machine and
+            # lowered on the other, which is this fuzzer's definition of a
+            # parity finding, and `bugs/FORMAL_container_budget_differs_between_
+            # the_two_architectures.md` is what it is filed as.
+            # 2100..2400 and no wider: x86-64's blob region is 16 KB and a
+            # word-element blob is `[count][element...]`, so 2048 elements is
+            # its ceiling and anything past 2100 is refused there and lowered on
+            # arm64 (128 KB of scratch). A 4000-element literal would still work
+            # and would make every program that carries it unreadable.
+            if getattr(self, "_big_blob_done", False):
+                # ONE per program, and the reason is the program's own size: a
+                # 2400-element literal is ~12 KB of text, two of them are 24 KB,
+                # and a refusal has to be read in its source to be believed. The
+                # first one already answers the question this row asks.
+                self.emit(indent, f"print({self.int_expr(0)})")
+                return
+            self._big_blob_done = True
+            n = self.rng.choice([2100, 2200, 2400])
+            elems = ", ".join(str((i * 7) % 100) for i in range(n))
+            name = self.fresh("BL")
+            self.emit(indent, f"{name} = [{elems}]")
+            self.emit(indent, f"print(len({name}))")
+            return
+        # unreachable: `stmt` only dispatches kinds this family owns
+        raise AssertionError(kind)
+
+    # The three bindings `limits` needs, and why they go in the PREAMBLE rather
+    # than at the statement's own indent: a binding emitted inside a branch is
+    # not a binding. `limits` emits `try:`/`except:` arms and nested `if`s, so a
+    # `D = {10: 100}` written under `if (w3 <= w4):` left `D` at its declared
+    # `0` for every path that did not take the branch, and the `d.keys()` two
+    # statements later was `AttributeError: 'int' object has no attribute
+    # 'keys'` in CPython — a `generator-error`, which is the tool's verdict for a
+    # program its own generator got wrong and which takes the program's real
+    # verdict with it. (`strmeth_stmt` and `list_stmt` bind the same way and can
+    # hit it the same way; see
+    # `bugs/TOOLS_a_generator_binding_emitted_inside_a_branch_is_not_a_binding.md`.)
+    # `declare` puts the initialiser in the preamble, which is emitted once at
+    # the top of `main` before any branch runs.
+    def limit_bind_string(self, indent):
+        name = self.declare(self.fresh("t"), '"ab"')
+        self.strings.append(name)
+        self.strings_text[name] = "ab"
+        return name
+
+    def limit_bind_list(self, indent):
+        name = self.declare(self.fresh("L"), "[1, 2, 3]")
+        self.lists.append((name, 3))
+        return name
+
+    def limit_bind_dict(self, indent):
+        name = self.declare(self.fresh("D"), "{10: 100, 20: 200}")
+        self.dicts.append((name, "int", [10, 20]))
+        return name
+
     def list_stmt(self, indent, kind):
         if kind == "list_build" or not self.lists:
             name = self.fresh("L")
@@ -2097,8 +2706,37 @@ def check_one(index, args, tmpdir, lock=None):
     finding = classify(results, want_exit, want_out, args)
     rec = {"index": index, "verdict": finding, "text": text,
            "want": {"exit": want_exit, "stdout": want_out}, "results": results}
-    if finding.startswith(("MISMATCH", "ARM64-DIVERGES", "CODEGEN-CRASH",
+    if finding == "refusal":
+        # Every refusal every engine agreed on is AUDITED here, and the audit's
+        # verdict is what the record carries — a clean `refusal` with no audit
+        # behind it is indistinguishable from a clean `refusal` whose message
+        # names a construct that is not in the program, which is the whole thing
+        # this is for.
+        audits = {}
+        for backend, r in results.items():
+            if r.get("verdict") != "refusal":
+                continue
+            verdict, detail = audit_refusal(text, r["diag"], ref)
+            audits[backend] = (verdict, detail)
+        rec["audit"] = {b: {"verdict": v, "detail": d} for b, (v, d) in audits.items()}
+        rec["construct"] = {b: refusal_construct(results[b]["diag"])
+                            for b in audits}
+        bad = sorted({v for v, _ in audits.values()} & {"unnamed", "false"})
+        if bad:
+            # A refusal whose message names nothing in the program, or whose
+            # CPython-checkable claim the reference refutes, is a FINDING — the
+            # same sentence the tool's own docstring uses about a wrong
+            # comparison: a message that is false about the file is worse than
+            # no message, and a message that is silent about the file is the
+            # same failure with one fewer word in it.
+            rec["verdict"] = "REFUSAL-" + "+".join(v.upper() for v in bad)
+    if finding.startswith(("MISMATCH", "ARM64-DIVERGES", "CODEGEN-",
                            "REFUSAL-DIVERGES")):
+        # …and NOT for a `REFUSAL-UNNAMED`/`REFUSAL-FALSE`, which are findings
+        # without a reproducer to shrink: the subject of the finding is a
+        # MESSAGE about the program, so shrinking the program is destroying the
+        # evidence, and `blame` would then attribute a message defect to a
+        # construct the minimiser had just deleted.
         # Attribution runs on the MINIMISED program, never on this one: a blame
         # over a forty-statement program names every construct it contains,
         # which is the "there is a known bug in here too" reading this exists to
@@ -2145,6 +2783,14 @@ def classify(results, want_exit, want_out, args):
         return "ARM64-DIVERGES"
     if any(r.get("verdict") == "crash" for r in results.values()):
         return "CODEGEN-CRASH"
+    if any(r.get("verdict") == "codegen-internal" for r in results.values()):
+        # The backend talking about ITSELF — its own label table, its own
+        # allocation walk — where a reader is told about the PROGRAM. Its own
+        # verdict rather than a refusal's because a refusal is a claim about the
+        # source and this is a claim about the compiler, so counting it as one
+        # reports a compiler bug as a documented limit. See the refusal-audit
+        # block above for the measurement.
+        return "CODEGEN-INTERNAL"
     if any(r.get("verdict") == "timeout" for r in results.values()):
         return "TIMEOUT"
     if any(r.get("verdict") == "trapped" for r in results.values()):
@@ -2170,6 +2816,27 @@ def classify(results, want_exit, want_out, args):
         return "REFUSAL-DIVERGES-" + "+".join(
             "X86" if b == "x86_64" else "ARM" for b in refusals)
     if refusals:
+        # BOTH machines refusing is not automatically agreement. The two
+        # architectures are ONE language implementation, so the words have to be
+        # the same ones — which is what `test_formal_x86_64_parity.py`'s
+        # `refuse:` rows already require of a hand-picked construct and what
+        # nothing required of a GENERATED one until now. A construct one machine
+        # declines in different words is a finding for the same reason a
+        # construct one machine declines altogether is: the two do not agree
+        # about what the program is, and one of them is wrong about it.
+        #
+        # Measured, and it is not a hypothetical: x86-64 refused every image
+        # containing an `int(s, base)` with "internal: label 'main_ip1_end' is
+        # defined twice …" while arm64 answered the program, and this branch
+        # reported one clean `refusal` over the pair. The labels are folded
+        # first, because "on the formal arm64 path" and "on the formal x86-64
+        # path" are one sentence told by two machines and reporting them as a
+        # difference would be a difference in this function rather than in the
+        # backend.
+        folded = {b: fold_arch(results[b].get("diag", "")) for b in refusals}
+        if len(set(folded.values())) > 1:
+            return "REFUSAL-DIVERGES-" + "+".join(
+                "X86" if b == "x86_64" else "ARM" for b in refusals)
         return "refusal"
     return "match"
 
@@ -2184,10 +2851,30 @@ def report(rec, args):
     if v == "match":
         return None
     if v == "refusal":
-        return f"  refusal  #{rec['index']}"
-    if v.startswith("REFUSAL-DIVERGES"):
+        # The construct, because one bucket called `refusal` cannot say whether
+        # a sweep met one limit thirteen times or thirteen limits once — and
+        # which one it was is the first thing a reader wants.
+        names = sorted(set(rec.get("construct", {}).values()))
+        return f"  refusal  #{rec['index']}  {', '.join(names) or 'unnamed'}"
+    if v.startswith("REFUSAL-UNNAMED") or v.startswith("REFUSAL-FALSE"):
         lines = [f"  {v}  #{rec['index']}",
-                 "      one architecture refused what the other lowered"]
+                 "      the refusal is a claim about the program, and this one "
+                 "does not hold up"]
+        for backend, r in rec["results"].items():
+            if r["verdict"] == "refusal":
+                a = rec["audit"][backend]
+                lines.append(f"      {backend:<7} {a['verdict']}: "
+                             f"{shorten(a['detail'], 200)}")
+                lines.append(f"      {'':<7} said: "
+                             f"{shorten(r['diag'], 200)}")
+        return "\n".join(lines)
+    if v.startswith("REFUSAL-DIVERGES"):
+        lines = [f"  {v}  #{rec['index']}"]
+        both_refused = all(r["verdict"] == "refusal"
+                           for r in rec["results"].values())
+        lines.append("      both refused it in different words"
+                     if both_refused else
+                     "      one architecture refused what the other lowered")
         if "reduced_from" in rec:
             lines.append(f"      reduced {rec['reduced_from']} -> "
                          f"{rec['reduced_to']} bytes")
@@ -2209,6 +2896,11 @@ def report(rec, args):
         lines.append(f"      CPython rejected the generated program: "
                      f"{shorten(rec['detail'])}")
         return "\n".join(lines)
+    if v == "CODEGEN-INTERNAL":
+        # Said plainly, because the verdict is a compiler claim wearing a
+        # refusal's clothes and the reader has to know that is what happened.
+        lines.append("      the backend reported an internal inconsistency, "
+                     "where a reader would be told about the PROGRAM")
     if v.startswith("KNOWN:"):
         # The construct(s), the document that owns each, and the two answers —
         # so the row says WHY it was set aside rather than merely that it was.
@@ -2228,6 +2920,65 @@ def report(rec, args):
             lines.append(f"      {backend:<7} {r['verdict']}: "
                          f"{shorten(r['diag'], 220)}")
     return "\n".join(lines)
+
+
+def audit_program(text, args):
+    """`--audit`: what every architecture says about ONE program, audited.
+
+    A sweep audits the refusals its corpus produces, and the corpus's whole
+    value discipline is that it stays inside the modelled subset — so the
+    interesting refusals are the ones it cannot generate, and this is how they
+    are reached.  The three verdicts it can return are the three the audit can
+    fail on, and a program that ANSWERS on both machines is not an audit
+    failure: it is a program the path supports, which is the good outcome and is
+    printed as one.
+
+    CPython is asked first and its answer is what refutes a claim, so a
+    `--audit` of a program CPython rejects still audits — that is the
+    `REFUSAL_CLAIMS` case, where the message promises the exception CPython
+    raises and this is where that promise is kept or broken.
+    """
+    tmpdir = tempfile.mkdtemp(prefix="formalaudit.", dir=args.work)
+    try:
+        ref, err = cpython_answer(text, tmpdir, "audit")
+        print(f"CPython: {' '.join(str(ref).split())[:200]}")
+        if ref is None:
+            print("         the oracle TIMED OUT; a claim about CPython cannot "
+                  "be checked against nothing")
+        elif not has_oracle(ref):
+            print("         CPython rejects this program, which is what a "
+                  "claim about the exception it raises is checked against")
+        bad = []
+        folded = {}
+        for backend in args.backends:
+            r = run_on(backend, text, tmpdir, "audit")
+            print(f"{backend}: {r['verdict']}"
+                  + (f" exit={r['rc']} {shorten(r.get('stdout', ''), 80)!r}"
+                     if r["verdict"] == "ok" else ""))
+            if r["verdict"] == "ok":
+                if has_oracle(ref) and r["stdout"] != ref[1]:
+                    print(f"          MISMATCH: CPython prints "
+                          f"{shorten(ref[1], 120)!r}")
+                    bad.append("answer")
+                continue
+            if r["verdict"] != "refusal":
+                print(f"          {' '.join(r['diag'].split())[:240]}")
+                bad.append(r["verdict"])
+                continue
+            folded[backend] = fold_arch(r["diag"])
+            verdict, detail = audit_refusal(text, r["diag"], ref)
+            print(f"          construct: {refusal_construct(r['diag'])}")
+            print(f"          audit: {verdict}: {detail[:240]}")
+            print(f"          said: {' '.join(r['diag'].split())[:240]}")
+            if verdict in ("unnamed", "false"):
+                bad.append(f"{backend}:{verdict}")
+        if len(set(folded.values())) > 1:
+            print("REFUSAL-DIVERGES: the two machines refused it in different "
+                  "words (architecture labels folded)")
+            bad.append("words")
+        return 1 if bad else 0
+    finally:
+        subprocess.run(["rm", "-rf", tmpdir])
 
 
 def main():
@@ -2263,6 +3014,13 @@ def main():
                     help="write every program to --work, not only findings")
     ap.add_argument("--minimize", metavar="PROG",
                     help="shrink one program to a minimal reproducer and print it")
+    ap.add_argument("--audit", metavar="PROG",
+                    help="audit ONE program's refusals on both architectures: "
+                         "each engine's verdict, the construct its message "
+                         "names, and whether that name is in the program "
+                         "(see THE REFUSAL AUDIT).  Exits 1 when a message "
+                         "names nothing, promises something CPython refutes, "
+                         "or the two machines refuse it in different words")
     ap.add_argument("--min-kind", default=None, choices=["x86", "arm", "any"],
                     help="which disagreement --minimize and the attribution "
                          "must preserve; default follows --backends, and is "
@@ -2317,10 +3075,18 @@ def main():
             text = f.read()
         return minimize(text, args)
 
+    if args.audit:
+        with open(args.audit) as f:
+            text = f.read()
+        return audit_program(text, args)
+
     started = time.time()
     counts = {}
     blamed = {}
     findings = []
+    constructs = {}
+    audits = {}
+    refusals = []
     tmpdir = tempfile.mkdtemp(prefix="formalfuzz.", dir=args.work)
     try:
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
@@ -2334,21 +3100,36 @@ def main():
                 print(line, flush=True)
             elif line and not args.quiet:
                 print(line, flush=True)
+            # The refusal MIX and its AUDIT, counted whatever the verdict turned
+            # out to be.  A refusal that became a finding is still a refusal the
+            # corpus produced, and a construct mix that only counts the ones that
+            # passed is a mix that hides the construct it just failed on.
+            for backend, what in rec.get("construct", {}).items():
+                key = (backend, what)
+                constructs[key] = constructs.get(key, 0) + 1
+                verd = rec["audit"][backend]["verdict"]
+                audits[verd] = audits.get(verd, 0) + 1
+                refusals.append({"index": rec["index"], "backend": backend,
+                                 "construct": what, "audit": verd,
+                                 "detail": rec["audit"][backend]["detail"],
+                                 "diag": rec["results"][backend]["diag"]})
             if rec["verdict"].startswith("KNOWN:"):
                 key = rec["blame"][0] if len(rec["blame"]) == 1 else "+".join(
                     rec["blame"])
                 blamed[key] = blamed.get(key, 0) + 1
             elif rec["verdict"].startswith(("MISMATCH", "ARM64-DIVERGES",
-                                            "CODEGEN-CRASH", "generator",
-                                            "REFUSAL-DIVERGES")):
+                                            "CODEGEN-", "generator",
+                                            "REFUSAL-")):
                 findings.append(rec)
     finally:
         subprocess.run(["rm", "-rf", tmpdir])
 
     with open(os.path.join(args.work, "findings.json"), "w") as f:
         json.dump({"args": vars(args), "counts": counts,
+                   "refusal_audit": audits,
                    "findings": [{k: v for k, v in r.items() if k != "text"}
                                 for r in findings],
+                   "refusals": refusals,
                    "programs": {str(r["index"]): r["text"]
                                 for r in findings}},
               f, indent=1)
@@ -2367,6 +3148,16 @@ def main():
     for v, n in sorted(counts.items(), key=lambda kv: -kv[1]):
         if v not in ALWAYS_REPORTED:
             print(f"  {v:<18} {n}")
+    if constructs:
+        print("  refusals by construct (the mix this corpus reached, per backend):")
+        for (backend, what), n in sorted(constructs.items(),
+                                         key=lambda kv: (-kv[1], kv[0])):
+            print(f"    {n:5d}  {backend:<7} {what}")
+        # The audit's own tally, `no-predicate` included and always: a sweep that
+        # says nothing about how much of its refusal surface it checked is
+        # indistinguishable from one that checked all of it and found nothing.
+        print("  refusal audit: " + ", ".join(
+            f"{v}={audits.get(v, 0)}" for v in AUDIT_VERDICTS))
     if blamed:
         print("  known constructs blamed (the MINIMAL set that explains each):")
         for key, n in sorted(blamed.items(), key=lambda kv: -kv[1]):
@@ -2530,6 +3321,14 @@ MIN_KINDS = {"x86_64": "x86", "arm64": "arm"}
 #: are here.  A CPython timeout is the ORACLE's verdict and says nothing about
 #: the backends, which is why it is neither a finding nor counted as one.
 ALWAYS_REPORTED = ("match", "trapped", "refusal", "CPYTHON-TIMEOUT")
+
+#: The refusal audit's own verdicts, in the order a summary prints them.  Named
+#: here rather than derived from the records so the line is the SAME four fields
+#: whether the sweep saw four kinds of refusal or none: a run that audited
+#: nothing has to be able to say so, and a field that appears only when it is
+#: non-zero cannot.
+AUDIT_VERDICTS = ("true", "unnamed", "false", "no-predicate")
+
 
 
 def resolve_min_kind(args):

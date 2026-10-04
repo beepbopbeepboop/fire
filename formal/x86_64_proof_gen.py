@@ -203,9 +203,19 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     # first-parameter-only defect this closes, and `AP._entry_arg_names` is the
     # reader both backends use -- so the two cannot bind a different number of
     # parameters than the entry has.
-    _sp = [p[0] for p in (fn.params or [])]
+    # `AP._entry_env`, not a comprehension written here: it is the one answer to
+    # "which Lean binder is this source parameter" (`_entry_arg_names` by
+    # position), and the copy that was here was keyed the WRONG WAY ROUND —
+    # theorem binder -> source name — while `_cmp_go` looks names up by their
+    # SOURCE spelling. So a two-parameter entry's second parameter was not in the
+    # environment at all, and the `NotImplementedError` that raised here was
+    # swallowed by the caller's `except Exception` and turned into the `sorry`
+    # form of this very section: a hole, silently, for every program whose
+    # condition mentions anything but the first parameter. `AP._collect_conds`
+    # used to DISCARD its `env` argument, which is why the wrong-way-round map
+    # was harmless while it was ignored, and why nothing caught it.
+    env = AP._entry_env(fn, arity)
     _en = AP._entry_arg_names(arity)
-    env = ({_en[i]: _sp[i] for i in range(len(_sp))} if _sp else {})
     # vtypes/call_types, so the `by_cases` conditions and the model's own `if`
     # are the same term, and `sKey` (ProofLib's sign-flip, which is how both
     # render a signed comparison) in the simp set so `simp` sees that the
@@ -548,7 +558,19 @@ def _run_tests_section(func_name: str, test_input: int, externs: list = None,
     termination obligation fails — for a program whose arithmetic is perfectly
     fine.  Emitting the obligations anyway turns a known limitation into a
     build failure on every program that prints, which is most of them; naming
-    the symbols in a comment instead says what is actually true."""
+    the symbols in a comment instead says what is actually true.
+
+    `externs` must therefore be the PROGRAM's calls, not the image's: the
+    emitter's own — the stack-floor guard's `exit` trap, in every prologue since
+    `e11f066d` — is subtracted by `_program_externs` before it reaches here,
+    because that call is one the model provably never executes (the guard's
+    `JAE` is always taken; `formal/x86_64_codegen.py::_emit_stack_floor_guard`
+    spells out the sequence and the argument).  Reading the trap as a program
+    call is what removed every run test from this backend, for every program on
+    it.  `test_formal_call_proof_gen.py::TestCompilerTrapIsNotAProgramCall` is
+    what pins that they are back and that a real extern call still suppresses
+    them.
+    """
     if placeholder:
         # The run test's whole value is that it compares the MODEL against the
         # MACHINE.  When the model is a placeholder the comparison is against
@@ -611,6 +633,66 @@ def _run_tests_section(func_name: str, test_input: int, externs: list = None,
             + " = " + AP._apply_args('mojo', vv) + " := by\n"
             f"  native_decide\n")
     return "\n".join(out) + "\n"
+
+
+def _placeholder_model(func_name, fn) -> str:
+    """The documented fallback `<fn>_go`, at the SOURCE's arity.
+
+    Emitted when the shared model generator refuses this shape, in place of a
+    model: the rest of the file (the AST, the bytes, the certificates) is still
+    real and the end-to-end theorem is `sorry` regardless, so nothing false is
+    claimed — this is a stated gap, not a crash.
+
+    The ARITY is the whole of what this used to get wrong. It was written
+    `(n : UInt64)` unconditionally, so a two-parameter entry got a
+    one-parameter model and the shared `_go_apply` — which reads the arity back
+    OUT of the emitted model rather than predicting it, deliberately, so the two
+    cannot drift — refused the file three definitions later with
+
+        model: main_go takes 1 argument(s) but the theorem it is the model of
+        has 2 (n, n1).
+
+    So the fallback's promise ("rather than failing the build") did not hold for
+    any entry wider than one argument, and it held for exactly the arity every
+    program in `formal/examples` has. Measured by
+    `tools/formal_proof_fuzz.py --mix ternary`: 9 of 60 programs refused this
+    way, every one of them a two-parameter entry.
+
+    ONE definition for both fallback sites (the refused shape, and the model that
+    refers to a `<name>_go` it never defines), because they were two copies of
+    the same sentence and this is the defect that let them disagree with the
+    arity checker three hundred lines away.
+    """
+    names = [p[0] for p in (getattr(fn, "params", None) or [])] or ["n"]
+    sig = " ".join(f"({n} : UInt64)" for n in names)
+    return f"def {func_name}_go {sig} : UInt64 :=\n  {names[0]}\n"
+
+
+def _program_externs(info: dict) -> list:
+    """The extern calls the PROGRAM makes, as symbol names.
+
+    `info["extern_calls"]` is every unbound call the image carries, and
+    `info["compiler_traps"]` is the subset this backend emitted as its own — the
+    stack-floor guard's `exit`, once per guarded prologue, which `e11f066d` put
+    in EVERY image with an entry.  Subtracting it here is what puts the run
+    tests back: they are the one part of an x86-64 proof that is evidence about
+    the machine rather than about the model, and they were absent from every
+    program on this backend until this function existed.
+
+    Subtract by ADDRESS, not by symbol.  An image that both traps and prints
+    has two `exit`-vs-`printf` facts to tell apart, and dropping every `exit`
+    would also drop the one a `raise` emits (`_emit_diverge` reaches
+    `_emit_call_exit` and is deliberately NOT a compiler trap, because the
+    program really does get there).
+
+    An image whose `info` has no `compiler_traps` — a dylib, or any emitter that
+    predates the key — is read as having none, which is the conservative
+    direction: its run tests stay suppressed rather than being restored on a
+    call that may be reachable.
+    """
+    traps = set(info.get("compiler_traps") or ())
+    return [e.get("sym") for e in (info.get("extern_calls") or ())
+            if e.get("addr") not in traps]
 
 
 def generate_x86_64_proof(prog, code, info) -> str:
@@ -691,8 +773,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
         # failing the build, emit a trivial model and say so: the rest of the
         # file (AST, bytes, certificates) is still real, and the end-to-end
         # theorem is `sorry` regardless, so nothing false is claimed.
-        go_defs = (f"def {func_name}_go (n : UInt64) : UInt64 :=\n"
-                   f"  n\n")
+        go_defs = _placeholder_model(func_name, fn)
         model_placeholder = True
         go_lemma_names = []
         model_note = (f"/- NOTE: the shared model generator does not cover "
@@ -721,8 +802,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
                 f"which the shared generator does not define, so the semantic "
                 f"model below is the identity and nothing downstream of it is "
                 f"claimed. -/\n")
-            go_defs = (f"def {func_name}_go (n : UInt64) : UInt64 :=\n"
-                       f"  n\n")
+            go_defs = _placeholder_model(func_name, fn)
             go_lemma_names = []
 
     parts.append("/-- Mojo semantics: direct Lean model of the source code. -/\n"
@@ -821,7 +901,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
     parts.append(_compile_correct_section(func_name, arity))
     parts.append(_run_tests_section(
         func_name, test_input,
-        [e.get("sym") for e in (info.get("extern_calls") or [])],
+        _program_externs(info),
         placeholder=model_placeholder,
         arity=arity, entry_values=entry_values))
     _certs, _total = _decode_function_body(code, info, func_offset)

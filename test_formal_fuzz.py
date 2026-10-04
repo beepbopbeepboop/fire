@@ -226,6 +226,42 @@ CLASSIFIER_CASES = [
      {"x86_64": {"verdict": "ok", "rc": 0, "stdout": "1\n"},
       "arm64": {"verdict": "refusal", "diag": "no home"}},
      "REFUSAL-DIVERGES-ARM"),
+    # BOTH refusing is agreement ONLY when the two say the same thing. These
+    # two rows are the second shape of the same verdict, and it is the one that
+    # hid a real bug: x86-64 refused every image containing an `int(s, base)`
+    # with "internal: label 'main_ip1_end' is defined twice …" while arm64
+    # answered the program, and the pair counted as one clean `refusal`.
+    ("both_refuse_in_different_words",
+     {"x86_64": {"verdict": "refusal", "diag": "'+' on two strings is refused"},
+      "arm64": {"verdict": "refusal", "diag": "a list literal does not fit"}},
+     "REFUSAL-DIVERGES-X86+ARM"),
+    # …and the FOLD is what keeps that from firing on every refusal: "on the
+    # formal arm64 path" and "on the formal x86-64 path" are one sentence told by
+    # two machines, and a difference there would be a difference in this
+    # classifier rather than in the backend. Written as the pair of strings a
+    # real message pair differs by, and measured: with the fold removed this row
+    # returns a divergence and the sweep is red on every slice it ever refused.
+    ("both_refuse_with_only_the_arch_label_differing",
+     {"x86_64": {"verdict": "refusal",
+                 "diag": "print() cannot tell whether SliceExpr is a string on "
+                         "the formal x86-64 path"},
+      "arm64": {"verdict": "refusal",
+                "diag": "print() cannot tell whether SliceExpr is a string on "
+                        "the formal arm64 path"}},
+     "refusal"),
+    # The COMPILER talking about itself, where a reader is told about the
+    # PROGRAM. Its own verdict: as a `refusal` it was a documented limit, and
+    # the tally said so.
+    ("an_internal_diagnostic_is_not_a_refusal",
+     {"x86_64": {"verdict": "codegen-internal", "rc": 1,
+                 "diag": "build: internal: label 'main_ip1_end' is defined "
+                         "twice, at 0x1000003ba and at 0x1000003ba"},
+      "arm64": {"verdict": "refusal", "diag": "'+' on two strings is refused"}},
+     "CODEGEN-INTERNAL"),
+    ("an_internal_diagnostic_where_both_machines_have_one",
+     {"x86_64": {"verdict": "codegen-internal", "rc": 1, "diag": "internal: a"},
+      "arm64": {"verdict": "codegen-internal", "rc": 1, "diag": "internal: a"}},
+     "CODEGEN-INTERNAL"),
     # A refusal AND a wrong answer is the wrong answer, and it is reported as
     # one: the finding names the engine that is wrong about the program's
     # meaning, which is the engine that produced an answer.
@@ -262,6 +298,155 @@ def check_classifier(verbose):
                               f"expected {want!r}", verbose)
     print(f"formal fuzz: classify    {'PASS' if not failures else 'FAIL'} "
           f"{len(CLASSIFIER_CASES)} verdicts (no compiler)")
+    return failures
+
+
+# (name, program text, diagnostic, cpython answer, want verdict, want construct).
+# The programs and the diagnostics are MEASURED — each one is what both
+# backends actually said for a program of that shape, off `limits` seeds
+# 8000-8015 — because a table of invented sentences would test the audit's
+# spelling of a language nobody writes.  `cpython` is `cpython_answer`'s
+# three-way answer; `None` stands for a CPython TIMEOUT, which is the one
+# answer the audit must not mistake for an oracle.
+AUDIT_CASES = [
+    # A quoted operator: the construct IS the operator and the message says so.
+    ("a_quoted_operator",
+     'def main():\n    s = "ab"\n    print(s + "cd")\n    return 0\n',
+     "build: '+' on two strings is refused on this path. A string here is a "
+     "bare `char *`, so `+` is integer arithmetic on two addresses.",
+     (0, "abcd\n"), "true", "+"),
+    # The method-call head, unquoted — the shape half of these messages use and
+    # the one a quoted-token-only rule would call unnamed.
+    ("a_dotted_method_head",
+     'def main():\n    s = "ab"\n    print(s.upper())\n    return 0\n',
+     "build: s.upper() is a real method of String, but it returns a NEW "
+     "string of the same length, and the only buffer available for it is the "
+     "receiver's own bytes.",
+     (0, "AB\n"), "true", "s.upper()"),
+    # …and the same message about a dict receiver.
+    ("a_dict_method_head",
+     'def main():\n    d = {10: 100}\n    print(d.keys())\n    return 0\n',
+     "build: d.keys() is a method call on a value, and this backend lowers "
+     "only append, close, write and the string methods count, endswith, find, "
+     "lstrip, startswith — 'keys' is not one of those",
+     (0, "dict_keys([10])\n"), "true", "d.keys()"),
+    # A `line N:` site prefix in front of a quoted keyword. The prefix names
+    # WHERE and must not become the construct: five of `limits`' first ten
+    # programs were filed under the construct `line` before the prefix was
+    # stripped as one thing.
+    ("a_line_prefix_and_a_quoted_keyword",
+     "def main():\n    try:\n        q = 1\n    except:\n        q = 2\n"
+     "    print(q)\n    return 0\n",
+     "build: line 29: a bare `except:` is a handler arm with a body this path "
+     "cannot put in the image, so it is refused rather than dropped",
+     (0, "1\n"), "true", "except:"),
+    # A construct named as an AST node, which no token of the program can
+    # match: `xs[1:3]` does not contain the word `SliceExpr`.
+    ("a_slice_through_print",
+     'def main():\n    xs = [1, 2, 3]\n    print(xs[1:3])\n    return 0\n',
+     "build: print() cannot tell whether SliceExpr is a string or a number on "
+     "the formal arm64 path, and guessing would print an address as if it were "
+     "text.",
+     (0, "[2, 3]\n"), "true", "print()"),
+    # A construct named in PROSE, with no token of the program to match it: a
+    # 2100-element literal of bare integers, and a message about "a list
+    # literal". Flagged `unnamed` without the construct-word vocabulary, and that
+    # would be a false finding on a message that names its construct perfectly
+    # well.
+    ("a_container_budget_refusal",
+     "def main():\n    BL = [" + ", ".join(["1"] * 2100) + "]\n"
+     "    print(len(BL))\n    return 0\n",
+     "build: a list literal does not fit in the frame: it needs 17608 bytes "
+     "and this function has 16344 left for containers.",
+     (0, "2100\n"), "true", "list"),
+    # THE FINDING, and it is measured: an unlowered callee reaches the link
+    # audit, whose message opens with the FILE name and names the symbol in the
+    # middle of a sentence about symbols. Four plausible leading tokens, none of
+    # them the call in the source, because the message never says what `sum` is.
+    # The construct is genuinely outside the subset and the refusal genuinely
+    # stops the build; the message is what fails, and that is the whole subject
+    # of `bugs/FORMAL_an_unlowered_callee_is_refused_by_a_link_audit.md`.
+    ("an_unlowered_callee_names_nothing",
+     'def main():\n    xs = [1, 2]\n    print(sum(xs))\n    return 0\n',
+     "build: sum.mojo: the image would bind 1 symbol(s) that nothing provides, "
+     "so it could not be loaded: sum. Nothing on this link line defines them: "
+     "not the C library, and not any library this program linked.",
+     (0, "3\n"), "unnamed", "unnamed"),
+    # The same shape with an INTERNAL diagnostic, which never reaches the audit
+    # because `run_on` gives it its own verdict first — asserted here because
+    # the two classifications are adjacent and a reordering would let the second
+    # report the first's bugs.
+    ("an_internal_diagnostic_names_nothing",
+     "def main():\n    print(1)\n    return 0\n",
+     "build: internal: label 'main_ip1_end' is defined twice, at 0x1000003ba "
+     "and at 0x1000003ba.",
+     (0, "1\n"), "unnamed", "unnamed"),
+    # A promise about CPython, KEPT: the message says UnboundLocalError for a
+    # read before its store and CPython raises UnboundLocalError.
+    ("a_kept_cpython_promise",
+     "def main():\n    print(y)\n    y = 3\n    return 0\n",
+     "build: main: 'y' is read at line 2 before anything in this function "
+     "stores it, and CPython raises UnboundLocalError for that program "
+     "(NameError at module level).",
+     ("error", "UnboundLocalError: local variable 'y' referenced before "
+               "assignment"), "true", "y"),
+    # …and REFUTED, which is the only `false` this tool can decide: the same
+    # message over a program CPython runs. A refusal whose promise the reference
+    # refutes is worse than one that names nothing, because the reader has been
+    # told what to expect from the source and it is not that.
+    ("a_refuted_cpython_promise",
+     "def main():\n    print(y)\n    y = 3\n    return 0\n",
+     "build: main: 'y' is read at line 2 before anything in this function "
+     "stores it, and CPython raises UnboundLocalError for that program "
+     "(NameError at module level).",
+     (0, "3\n"), "false", "y"),
+    # The promise with NO oracle to keep or refute it. `None` is a CPython
+    # TIMEOUT and the audit must say so rather than pass the claim: the whole
+    # value of the row is that it is checked, and an unchecked claim reported
+    # as checked is the failure mode of an audit that cannot fail.
+    ("a_cpython_promise_with_no_oracle",
+     "def main():\n    print(y)\n    y = 3\n    return 0\n",
+     "build: main: 'y' is read at line 2 before anything in this function "
+     "stores it, and CPython raises UnboundLocalError for that program "
+     "(NameError at module level).",
+     None, "no-predicate", "y"),
+]
+
+
+def check_audit(verbose):
+    """Every verdict `audit_refusal` can return, on measured messages.
+
+    No compiler: the audit is a function of a PROGRAM and a MESSAGE, and both
+    are in the table above.  It is the function that decides whether a refusal
+    is worth reading, so a change to it that turned every verdict into `true`
+    would pass the generator half and the run half of this file — those run real
+    builds and compare ANSWERS, and neither of them looks at a diagnostic.
+    """
+    failures = 0
+    for name, text, diag, cpython, want, want_construct in AUDIT_CASES:
+        got, detail = F.audit_refusal(text, diag, cpython)
+        if got != want:
+            failures += _fail(
+                f"audit_{name}",
+                f"said {got!r} ({detail}), expected {want!r}", verbose)
+        got_construct = F.refusal_construct(diag, text)
+        if got_construct != want_construct:
+            failures += _fail(
+                f"audit_{name}_names",
+                f"named the construct {got_construct!r}, expected "
+                f"{want_construct!r}", verbose)
+    # Every verdict the audit can return has a row above, so a new one cannot be
+    # added without saying what it means.  Stated rather than inferred: the
+    # summary prints `no-predicate` in the tally whether or not it happened, and
+    # a verdict nobody has a case for is a verdict whose line never gets read.
+    covered = {c[4] for c in AUDIT_CASES}
+    missing = set(F.AUDIT_VERDICTS) - covered
+    if missing:
+        failures += _fail("audit_has_no_case_for",
+                          f"{sorted(missing)} is in AUDIT_VERDICTS and in no "
+                          f"row of AUDIT_CASES", verbose)
+    print(f"formal fuzz: audit      {'PASS' if not failures else 'FAIL'} "
+          f"{len(AUDIT_CASES)} verdicts (no compiler)")
     return failures
 
 
@@ -305,13 +490,15 @@ def check_run(arch, count, jobs, verbose):
                 f"{n} program(s) CPython will not run: that is the oracle's "
                 f"own traceback and measures the generator, not the backend",
                 verbose)
-        elif label.startswith(("MISMATCH", "ARM64-DIVERGES", "CODEGEN-CRASH",
-                               "REFUSAL-DIVERGES")):
+        elif label.startswith(("MISMATCH", "ARM64-DIVERGES", "CODEGEN-",
+                               "REFUSAL-DIVERGES", "REFUSAL-UNNAMED",
+                               "REFUSAL-FALSE")):
             failures += _fail(f"run_{arch}_reported_{label}",
                               f"{n} unexplained — every disagreement in the "
                               f"known table must have reduced to it, and one "
-                              f"architecture declining what another lowered "
-                              f"is a finding whatever the known table says",
+                              f"architecture declining what another lowered, "
+                              f"or a refusal that names nothing, is a finding "
+                              f"whatever the known table says",
                               verbose)
     if not counts.get("match"):
         failures += _fail(f"run_{arch}_agreed_on_nothing",
@@ -352,14 +539,21 @@ MIX_BUILD_INDEXES = 2
 MIX_BUILD_ARCH = "x86_64"
 
 #: Mixes whose constructs are NOT supposed to lower, so "no answer" is the
-#: expected outcome for them and requiring one would be requiring a bug. There
-#: are none today, and the empty table is the point: a family added to `MIXES`
-#: is a family whose construct the backend lowers, so a mix that cannot produce
-#: an answer is a mix that cannot find anything. The `field_read` row in
-#: `tools/formal_fuzz.py` is why this check exists at all — 284 of 300 generated
-#: class programs were ONE refusal, which is a family that measures nothing and
-#: a suite that reported numbers.
-MIXES_NOT_LOWERED = ()
+#: expected outcome for them and requiring one would be requiring a bug.
+#:
+#: There was one row and none today, and the row is `limits` — the REFUSAL half
+#: of the corpus, added because 4032 programs over the thirteen sweeps the
+#: ledger records produced 13 refusals and all 13 were one bug, so nothing in the
+#: corpus could measure a limit and nothing could measure a MESSAGE.  Its whole
+#: job is to be refused, so requiring an answer from it would be requiring the
+#: bug the tool exists to find.
+#:
+#: What it must still produce is an AUDIT: `limits` is the only mix that exercises
+#: `audit_refusal`, and a mix that stopped reaching a refusal would report a
+#: clean sweep while measuring nothing — which is the failure this table's
+#: neighbours in the same file exist to catch, one level down. `check_mix_refuses`
+#: is that check.
+MIXES_NOT_LOWERED = ("limits",)
 
 
 def check_mix_builds(mix, indexes, verbose):
@@ -417,6 +611,62 @@ def check_mix_builds(mix, indexes, verbose):
     return failures
 
 
+def check_mix_refuses(mix, indexes, verbose):
+    """A mix declared NOT-LOWERED still has to reach a refusal, and an audit.
+
+    `check_mix_builds` asks whether a mix produces an ANSWER, which is the right
+    question for eleven of the twelve and the wrong one for `limits`: this mix
+    exists to produce REFUSALS, so the question here is whether it still
+    produces them, and whether the audit has something to say about each.
+
+    Both halves are needed. A mix that stopped reaching a refusal would report a
+    clean sweep while measuring nothing — the same hole `check_mix_builds`
+    exists for, one level down — and a refusal whose audit is `no-predicate`
+    across the board would be a corpus that produces messages nobody reads.
+
+    Cheaper than it looks: `check_mix_builds` is skipped for these mixes, so
+    this does not add a second set of builds on top of it.
+    """
+    work = os.path.join(ROOT, "build", "formal-fuzz", f"refuses-{mix}")
+    argv = [sys.executable, os.path.join(ROOT, "tools", "formal_fuzz.py"),
+            "--seed", "suite", "--mix", mix, "--seeds", f"0-{indexes - 1}",
+            "-j", str(indexes), "--max-min-steps", "10", "--work", work,
+            "--quiet"]
+    proc = subprocess.run(argv, capture_output=True, text=True, cwd=ROOT)
+    out = proc.stdout or ""
+    counts = _counts(out)
+    audited = 0
+    for line in out.splitlines():
+        if line.startswith("  refusal audit:"):
+            for field in line.split(":", 1)[1].split(","):
+                name, _, n = field.strip().partition("=")
+                if name == "true":
+                    audited = int(n or 0)
+    failures = 0
+    if counts.get("generator-error"):
+        failures += _fail(
+            f"{mix}_has_generator_errors",
+            f"{counts['generator-error']} program(s) CPython will not run — the "
+            f"constructs in this mix are valid Python by construction, so one "
+            f"that is not is the generator's arity or spelling", verbose)
+    if not counts.get("refusal"):
+        failures += _fail(
+            f"{mix}_produced_no_refusal",
+            f"{counts} — a mix declared not-lowered whose constructs now LOWER "
+            f"is measuring nothing, and `MIXES_NOT_LOWERED` would be asserting a "
+            f"limit that is gone", verbose)
+    if not audited:
+        failures += _fail(
+            f"{mix}_audited_nothing",
+            f"{counts.get('refusal', 0)} refusal(s) and no audit verdict of "
+            f"`true`; the refusal-audit machinery is not being reached, which is "
+            f"what this mix exists to reach", verbose)
+    print(f"formal fuzz: refuses  {mix:9} "
+          f"{'PASS' if not failures else 'FAIL'} "
+          f"refusals={counts.get('refusal', 0)}/{indexes} audited-true={audited}")
+    return failures
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -440,11 +690,16 @@ def main():
     print("=" * 68)
     mixes = [args.mix] if args.mix else sorted(F.MIXES)
     failures = check_classifier(args.verbose)
+    failures += check_audit(args.verbose)
     for mix in mixes:
         failures += check_generator(mix, args.gen_indexes, args.verbose)
     if not args.no_build_check:
         for mix in mixes:
             failures += check_mix_builds(mix, MIX_BUILD_INDEXES, args.verbose)
+        for mix in mixes:
+            if mix in MIXES_NOT_LOWERED:
+                failures += check_mix_refuses(mix, args.gen_indexes // 2,
+                                              args.verbose)
     arches = ("arm64", "x86_64") if args.arch == "both" else (args.arch,)
     for arch in arches:
         failures += check_run(arch, args.count, args.jobs, args.verbose)

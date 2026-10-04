@@ -40,6 +40,7 @@ from formal.x86_64 import *  # noqa: F401,F403 — encoders, Reg, Assembler
 import fire_compiler as F
 import mojo.middle.comptime as comptime_eval
 from formal import model as M
+from formal import monomorph
 from formal.model import CodegenError, IDENTITY_TYPE_CTORS
 from mojo.middle.boundnames import bound_names_in_order
 
@@ -704,6 +705,15 @@ class X86_64Codegen:
         # branch from a short-circuit `and`/`or`'s (same reason, and the same
         # `cond_branches` key, as formal/arm64_codegen.py).
         self._cond_branch_pcs = []
+        # ADDRESSES of the calls this emitter made as its OWN — currently the
+        # stack-floor guard's `exit` trap, one per guarded prologue.  Published
+        # in `compile()`'s `info` as `compiler_traps`, and read by
+        # `formal/x86_64_proof_gen.py` so a call site the COMPILER emitted is not
+        # read as a call site the PROGRAM makes.  See `_emit_stack_floor_guard`
+        # for why that distinction is the difference between a run test and no
+        # run test, and `test_formal_call_proof_gen.py::
+        # TestCompilerTrapIsNotAProgramCall` for what is asserted about it.
+        self._compiler_trap_addrs: list = []
         # The functions whose prologue carries the stack-floor guard, filled by
         # `compile()` once the whole image's call graph is known — see
         # `model.stack_floor_guarded_names`. The x86-64 twin of arm64's, from the
@@ -958,6 +968,14 @@ class X86_64Codegen:
             "func_name": first_func_name,
             "external_syms": external_syms,
             "extern_calls": extern_calls,
+            # The subset of `extern_calls` this EMITTER made as its own — today
+            # only the stack-floor trap, once per guarded prologue.  Published so
+            # a consumer can tell a call the PROGRAM makes from one the compiler
+            # made and cannot reach; `_run_tests_section` in
+            # `formal/x86_64_proof_gen.py` is the consumer, and the reason (with
+            # the unreachability argument this is worth) is on
+            # `_emit_stack_floor_guard`.
+            "compiler_traps": sorted(self._compiler_trap_addrs),
             "test_input": self.test_input,
             # EVERY entry argument's value, in order — the proof generator's
             # entry state is built from this list, so a two-parameter entry has
@@ -1208,6 +1226,8 @@ class X86_64Codegen:
         self._vkinds = self._scan_value_kinds(f)
         self._list_caps, self._list_caps_by_name = self._scan_list_caps(
             f, self._vkinds)
+        self._dict_caps, self._dict_caps_by_name = M.dict_store_capacity(
+            f, M.dict_store_sites(f))
 
         # Prologue: establish the frame pointer, reserve the frame, spill the
         # callee-saved registers this function borrows into the frame's tail
@@ -1503,6 +1523,24 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if tag is not None:
             self._emit_mov_imm(dst, tag)
             return
+        # A FUNCTION of THIS image, read as a value, is its CODE ADDRESS.  Last
+        # of the homes and not the first, because that is what makes shadowing
+        # free: a local or a parameter spelled like a function is found by one
+        # of the arms above and never reaches here, which is the case
+        # `test_formal_specialization.py`'s shadowing guard pins.
+        #
+        # It is `LEA r, [rip + d]` and nothing else, and it is the addressing a
+        # STRING LITERAL's address already uses two lines of `_emit_comptime_val`
+        # away — so the one thing being invented here is that the label is code
+        # rather than data.  The `rip` relocation is back-patched by `resolve()`
+        # from the label table, and `compile()` binds a function NAME to its
+        # entry label after every body is out, so a function read as a value
+        # before its own definition is emitted is the same address a direct call
+        # to it reaches.
+        if name in self._functions:
+            self.asm.emit(encode_lea_r64_rip(dst, 0))
+            self.asm.emit_label_rip(name, here_offset=-4)
+            return
         raise CodegenError(self._no_home(name))
 
     def _no_home(self, name: str) -> str:
@@ -1515,13 +1553,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if "." in name:
             return M.field_access_refusal(name, self.func_name or "<module>",
                                           name.split(".", 1)[0], holder)
-        # A FUNCTION NAME read as a value is not an unplaceable name: both this
-        # emitter and the allocation walk know it is not a local, which is why
-        # neither gave it one, and the allocator sentence below is false in
-        # every clause. Named here for the reason `model.function_value_refusal`
-        # gives — a first-class function has no representation on this path at
-        # all, so the message says that instead of blaming the allocator.
-        if name in self._functions:
+        # A FUNCTION of ANOTHER image, read as a value, has no address here.
+        # This unit has the DECLARATION (it is how the callee's parameters are
+        # bound for an ordinary call into a linked library) and no CODE — the
+        # body is in the library, and materializing an address for it needs a
+        # GOT slot this assembler does not fill for anything but a C symbol.
+        # It used to be asked about `name in self._functions`, which `_load_var`
+        # now answers before it comes here: a function of THIS image is a `LEA`
+        # away and is lowered, so the arm is the cross-image case and
+        # `model.function_value_refusal` is still the sentence for it.
+        if name in self._extern_decls:
             return M.function_value_refusal(name,
                                             self.func_name or "<module>")
         return M.unresolved_name_refusal(
@@ -1566,6 +1607,34 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
         R10 and R11 are the pair `_emit_global_init` and the frame paths already
         use, so nothing here borrows a register.
+
+        **The trap's `exit` is recorded as a COMPILER call, not a program call.**
+        `_emit_call_exit` goes through `_emit_extern_call`, so the trap puts an
+        `extern_calls` entry in EVERY image with an entry — and since `e11f066d`
+        put the guard in every such prologue, that entry was in every image.
+        `formal/x86_64_proof_gen.py::_run_tests_section` suppresses the whole run
+        test for an image with any extern call, on the true ground that the model
+        has no memory for a `__TEXT,__stubs` trampoline; measured, that
+        suppression then fired on every program on this backend, so x86-64
+        emitted ZERO run tests and ZERO termination obligations.
+        So the trap's address goes into `_compiler_trap_addrs` and is published as
+        `info["compiler_traps"]`, and the generator subtracts those addresses from
+        the list it refuses on.  The unreachability the subtraction rests on is
+        this function's own emitted sequence, and it needs nothing but "a load
+        from unmapped memory reads 0":
+
+            MOV R10, [R11] ; TEST R10, R10 ; JNE done
+              -> the load reads 0, so `JNE` is NOT taken and control falls into
+                 the "first caller sets it" half
+            MOV R10, RSP ; SUB R10, BUDGET ; MOV [R11], R10
+            done: MOV R11, RSP ; CMP R11, R10 ; JAE ok
+              -> R10 = SP - BUDGET and R11 = SP, so SP >= SP - BUDGET, the carry
+                 is clear and `JAE` IS taken: control lands on `ok`, which is the
+                 body's first instruction
+
+        which holds for every input and every function.  arm64 needs none of this
+        because its trap is a raw `svc`, which is IN the image and which
+        `lib/ProofLib.lean` decodes.
         """
         if self._globals_base is None:
             # No `__DATA`, so no word to keep the floor in. `formal/build.py`
@@ -1605,7 +1674,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_jcc_rel32(COND_AE, 0))
         self.asm.emit_label_rel32(ok_label, here_offset=-4)
         self.asm.label(trap_label)
-        self._emit_call_exit(M.STACK_TRAP_STATUS)
+        self._compiler_trap_addrs.append(
+            self._emit_call_exit(M.STACK_TRAP_STATUS))
         # `label`, not `emit_label_rel32`: this DEFINES where the branch above
         # goes, and it lands on the first instruction of the BODY. Recording a
         # relocation here would be a second branch to a label nothing defines.
@@ -2329,24 +2399,35 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_stmt(s)
 
 
-    def _emit_extern_call(self, name: str) -> None:
+    def _emit_extern_call(self, name: str) -> int:
         """Call an unbound symbol, in whichever of the two extern forms the
-        target binary format uses (see __init__'s `extern_style`)."""
+        target binary format uses (see __init__'s `extern_style`).
+
+        Returns the call site's absolute address — the same word `compile()`
+        publishes in `info["extern_calls"]`, so a caller that knows the call it
+        just emitted is the compiler's own (the stack-floor trap) can record
+        that address instead of leaving the proof generator to guess."""
         if self.extern_style == "got":
             self.asm.emit_extern_call_got(name)
         else:
             self.asm.emit_extern_call(name)
+        return self.asm.extern_refs[-1][1]
 
-    def _emit_call_exit(self, status: int) -> None:
+    def _emit_call_exit(self, status: int) -> int:
         """Call the C library's `exit(status)`.
 
         The extern path (a stub the loader binds) rather than a raw syscall,
         because the syscall number for exit differs between Darwin and Linux
         and the formal x86-64 path emits the same code for both — the binary
-        format, not the instruction stream, is what differs per platform."""
+        format, not the instruction stream, is what differs per platform.
+
+        Returns the call site's address; see `_emit_extern_call`.  Every caller
+        must decide for ITSELF whether that call is reachable — the difference
+        is the whole of `info["compiler_traps"]`, and `_emit_diverge` (a
+        `raise`, which the program really does reach) must never claim one."""
         self._emit_mov_imm(Reg.RDI, status)
         self._emit_mov_imm(Reg.RAX, 0)   # AL = 0 vector registers (varargs)
-        self._emit_extern_call("exit")
+        return self._emit_extern_call("exit")
 
     def _emit_diverge(self) -> None:
         """Leave the machine: run every enclosing finally, then `exit(1)`.
@@ -2650,7 +2731,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         `print(i)` is 2 under CPython and was 3 here.
 
             start:  <test>          --done--> false:
-                    fallthrough to body:
+                    fallthrough to init:
+            init:   i = start_val
             body:   <body>
             step:   [for: i += step]
                     <test>          --again--> body:
@@ -2667,12 +2749,27 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         `for i in range(0, 0)` is `0` under CPython and would print `-step`.
         Hence the head test being separate from the test at the bottom.
 
+        **And the head test reads `start_val`, not the counter** — the same rule
+        from the other end. CPython's `for` binds the target only when the
+        iteration produces a value, so a range that yields nothing must leave a
+        name that already held one alone; storing `start_val` into the counter
+        before the test cannot express that, and measured on both architectures
+        `i = 7; for i in range(0, 0): …` left `i == 0` where CPython leaves 7.
+        So the store moved to `init:`, between the test and the body, and the
+        test's left operand became the `start_val` EXPRESSION (`_emit_for_test`
+        takes one, so the head and the loop back edge stay one comparison).
+        That evaluates `start_val` twice, which is only sound when
+        `model.expr_is_repeatable` says so; `for i in range(f(), 0)` keeps the
+        store-then-test order. Nothing else about the loop moved, and no
+        instruction the model has no step for was added.
+
         `break` jumps to end (skipping the else); `continue` jumps to step, so
         a for-loop still advances its counter."""
         self._while_counter += 1
         wid = self._while_counter
         fn = self.func_name
         start_label = f"{fn}_loop{wid}_start"
+        init_label = f"{fn}_loop{wid}_init"
         body_label = f"{fn}_loop{wid}_body"
         step_label = f"{fn}_loop{wid}_step"
         false_label = f"{fn}_loop{wid}_false"
@@ -2683,6 +2780,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         end_tmp = f"_fe{depth}"
         step_tmp = f"_fs{depth}"
         descending = False
+        # Whether the head test may read `start_val` and leave the store for
+        # `init:`. `model.expr_is_repeatable` is the shared answer and arm64's
+        # `_emit_loop` asks it for the same reason.
+        bind_after_test = False
         if for_range:
             target, rargs = for_info
             start_val, end_val, step_val = _range_info(rargs)
@@ -2698,7 +2799,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._emit_expr(step_val)
                 self._store_var(step_tmp, Reg.RAX)
             self._emit_expr(start_val)
-            self._store_var(target, Reg.RAX)
+            if M.expr_is_repeatable(start_val):
+                bind_after_test = True
+            else:
+                self._store_var(target, Reg.RAX)
             self._for_depth += 1
 
         self._loops.append({"start": start_label, "step": step_label,
@@ -2709,7 +2813,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             leave_cc = None
             if for_range:
                 leave_cc = COND_LE if descending else COND_GE
-                self._emit_for_test(target, end_tmp, leave_cc, false_label)
+                self._emit_for_test(
+                    start_val if bind_after_test else F.IdentExpr(target),
+                    end_tmp, leave_cc, false_label)
+                if bind_after_test:
+                    self.asm.label(init_label)
+                    self._emit_expr(start_val)
+                    self._store_var(target, Reg.RAX)
             else:
                 self._emit_truthy_word(cond)
                 self._emit_branch_if_false(false_label)
@@ -2724,8 +2834,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 # The loop-back test is the same comparison as the head test
                 # with the opposite polarity, emitted by the same helper, so the
                 # two cannot drift into disagreeing about when the loop ends.
-                self._emit_for_test(target, end_tmp, cond_negated(leave_cc),
-                                    body_label)
+                self._emit_for_test(F.IdentExpr(target), end_tmp,
+                                    cond_negated(leave_cc), body_label)
                 self._emit_for_restore(target, step_val, step_tmp, lit_step)
                 self._emit_jmp(false_label)
             else:
@@ -2740,14 +2850,18 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._for_depth -= 1
             self._loops.pop()
 
-    def _emit_for_test(self, target: str, end_tmp: str, cc: int,
+    def _emit_for_test(self, left, end_tmp: str, cc: int,
                        label: str) -> None:
-        """CMP the counter against the bound and jump to `label` on `cc`.
+        """CMP the loop's left operand against the bound and jump to `label`
+        on `cc`.
+
+        `left` is an EXPRESSION, because the loop head tests `range()`'s own
+        `start` while the loop back edge tests the counter — and both go through
+        here so the two cannot drift into disagreeing about when the loop ends.
 
         `cc` is a CONDITION CODE, and the caller supplies both polarities of the
         same comparison: the loop head jumps on the one that leaves the loop and
-        the loop back edge on its negation. Both go through here so the two
-        cannot be spelled differently.
+        the loop back edge on its negation.
 
         The branch LEAVES the loop when its condition is the negation of the
         loop's own: an ascending range runs while i < end and leaves on
@@ -2756,7 +2870,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         negation of a value the condition expression already produced.) Signed,
         since the counter and the bound are int64 values.
         """
-        self._load_var(target, Reg.RAX)
+        self._emit_expr(left)
         self._load_var(end_tmp, Reg.R11)
         self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R11))
         self._record_cond_branch()
@@ -3292,41 +3406,14 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             raise CodegenError(reason)
 
     def _print_kwargs(self, e):
-        """`print`'s `sep=` / `end=` / `file=`, as (sep, end). Only literals.
+        """`print`'s `sep=` / `end=` / `file=` / `flush=`, as (sep, end, flush).
 
-        `file=` is refused unless it is stdout, because this model has exactly
-        one stream and a `file=sys.stderr` that quietly went to stdout would be
-        a program whose diagnostics are missing rather than one that failed.
-
-        `sep` and `end` come back as the literal NODES and not as `.value`,
-        which is the whole reason this signature is unchanged while its body is
-        not: `print(sep=r"\\t")` must print a backslash and a `t`, and
-        `print_literal` can only know that from the node. The defaults are
-        plain strings, which `print_literal` takes at face value — they are
-        already-decoded text."""
-        sep, end = " ", "\n"
-        for k, v in e.kwargs:
-            if not isinstance(v, F.StringLiteral):
-                raise CodegenError(
-                    f"print({k}=...) must be a string literal on the formal "
-                    f"x86-64 path (got {type(v).__name__}): the separator and "
-                    f"the line ending are baked into the format string, which "
-                    f"is built before the call is emitted")
-            if k == "sep":
-                sep = v
-            elif k == "end":
-                end = v
-            elif k == "file":
-                if not (isinstance(v, F.MemberExpr) and v.member == "stdout"):
-                    raise CodegenError(
-                        f"print(file=...) other than sys.stdout is not lowered "
-                        f"on the formal x86-64 path: this model has one output "
-                        f"stream")
-            else:
-                raise CodegenError(
-                    f"print() has no keyword argument {k!r} on the formal "
-                    f"x86-64 path (supports sep, end, file)")
-        return sep, end
+        **Two lines of delegation**, and `M.print_kwargs`'s docstring is where
+        the decision and its reasons are — including why it is ONE function and
+        not one per architecture: this method was a private copy in both
+        emitters until 2026-10-03, differing only in the backend word three
+        messages quote. `flush=` is answered there too."""
+        return M.print_kwargs(e, "x86_64")
 
     def _emit_print(self, e) -> None:
         """`print(...)` — a real call to the C library's `printf`.
@@ -3339,11 +3426,17 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
         `print()` with no arguments still prints a blank line, and the call's
         value is `None` — the format has no conversions, so printf reads no
-        varargs and the register state afterwards is irrelevant."""
-        sep, end = self._print_kwargs(e)
+        varargs and the register state afterwards is irrelevant.
+
+        **`flush=True` IS A REAL `fflush` AND NOT A DROPPED KEYWORD**, after the
+        `printf` — arm64's twin, from the same `M.print_kwargs`, so the two
+        machines cannot disagree about whether a keyword is honoured."""
+        sep, end, flush = self._print_kwargs(e)
         frags, operands = self._print_call(list(e.args))
         fmt = M.print_format(frags, sep, end)
         self._emit_call(_call("printf", [F.StringLiteral(fmt)] + operands))
+        if flush:
+            self._emit_call(_call("fflush", [F.IntLiteral(0)]))
 
     def _emit_debug_assert(self, e) -> None:
         """`debug_assert(cond, *messages)` — evaluate `cond`, and on falsy exit.
@@ -4179,7 +4272,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.label(trap)
         self._emit_overflow_diagnostic(M.int_parse_trap_message(base))
         self._emit_call_exit(M.SHIFT_TRAP_STATUS)
-        self.asm.label(endl)
+        # ONCE, and the arm64 twin is the reason to say so: this carried a
+        # second, identical `self.asm.label(endl)` from the commit that added the
+        # parse (`05d720ef`), and the assembler's own duplicate-label check then
+        # refused every x86-64 image containing an `int(...)` — so the whole
+        # parse was arm64-only and it read as a LIMIT rather than as the internal
+        # error it was ("label 'main_ip1_end' is defined twice, at 0x... and at
+        # 0x...", a sentence naming a label and naming no construct). Measured on
+        # `print(int("12"))`: arm64 printed 12, x86-64 refused. Both labels were
+        # at the same offset, so dropping the duplicate moves no branch;
+        # `test_formal_x86_64_parity.py`'s `int_parse_*` rows are the pin.
         self.asm.label(endl)
 
     def _emit_overflow_diagnostic(self, text: str) -> None:
@@ -4464,7 +4566,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         raise CodegenError(M.non_container_element_refusal(
             op, M.spelled(obj), self.func_name or "<module>"))
 
-    def _emit_subscript_addr(self, e: F.SubscriptExpr) -> None:
+    def _emit_subscript_addr(self, e: F.SubscriptExpr,
+                             for_store: bool = False) -> None:
         """RAX = the ADDRESS of `obj[index]` (not its value).
 
         Split out so the same address computation serves a read, a store and
@@ -4516,7 +4619,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if why is not None:
             raise CodegenError(why)
         if self._is_dict_subscript(e.obj):
-            self._emit_dict_lookup_addr(e)
+            self._emit_dict_lookup_addr(e, store=for_store)
             return
         # arm64's twin of the same refusal, asked at the same point in the same
         # dispatch: a string index against a base whose shape nothing states,
@@ -5125,8 +5228,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     self._emit_expr(v)
                 continue
             pairs.append((k, v))
-        n = len(pairs)
-        offset = self._reserve_blob(8 + 16 * n, "a dict literal")
+        n = M.dict_literal_static_pairs(expr)
+        assert n == len(pairs), (
+            "dict_literal_static_pairs and _emit_dict disagree about what a "
+            "literal writes: the reservation the store path is checked against "
+            "is computed from the former and the blob from the latter")
+        # The blob is reserved for `pairs_written + store_sites`; the count
+        # word holds only `pairs_written`. arm64's `_emit_dict` has the same
+        # arrangement and the same reason (`model.dict_store_capacity`).
+        reserved = self._dict_caps.get(id(expr), n)
+        offset = self._reserve_blob(8 + 16 * reserved, "a dict literal")
         self._emit_blob_base(offset, Reg.R11)
         self._emit_mov_imm(Reg.R10, n)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
@@ -5178,13 +5289,42 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             raise CodegenError(M.string_iteration_refusal(
                 op, self.func_name or "<module>"))
 
-    def _emit_dict_lookup_addr(self, e: F.SubscriptExpr) -> None:
-        """RAX = the ADDRESS of the value stored under `e`'s key.
+    def _emit_dict_lookup_addr(self, e: F.SubscriptExpr,
+                               store: bool = False) -> None:
+        """RAX = the ADDRESS of the value stored under `e`'s key — or, on a
+        STORE, the store itself and RAX = 0.
 
-        A linear scan over the pairs at 16-byte stride, comparing keys; a
-        miss exits(1), the same signal an out-of-range list index gives (this
-        path has no exception runtime to raise KeyError with). The key is
-        spilled first because the scan clobbers RAX."""
+        A linear scan over the pairs at 16-byte stride, comparing keys. The
+        key is spilled first because the scan clobbers RAX.
+
+        **`store` is what separates the two miss answers, and it is the same
+        three arms arm64 has** (`_emit_dict_lookup_addr` there): a miss on a
+        READ stops the program, which is right because a missing key is
+        CPython's `KeyError` and this path has no exception runtime; a miss on a
+        STORE is CPython's INSERT and needs room the literal reserved for it
+        (`model.dict_store_capacity`), checked at run time against that same
+        capacity; and a store this build cannot size for says which of the two
+        reasons it is and stops. Both machines answer the same three ways,
+        which is the one thing this pair must never fail to do.
+        """
+        base_name = e.obj.name if isinstance(e.obj, F.IdentExpr) else None
+        cap = None
+        why_no_room = None
+        if store:
+            # A statically-known CONTAINER key is compared element-wise on arm64
+            # and never materialised, so an insert there has no key WORD to
+            # write. x86-64's scan compares raw words and COULD store the blob
+            # pointer — and must not, because then the two architectures would
+            # answer this case differently (`M.static_key_elements` is the one
+            # rule for what a container key is).
+            if M.static_key_elements(e.index) is not None:
+                why_no_room = M.dict_store_no_room_message(
+                    base_name or "<expr>", M.spelled(e.index))
+            else:
+                cap = self._dict_caps_by_name.get(base_name)
+                if cap is None:
+                    why_no_room = M.dict_store_other_blob_message(
+                        base_name or "<expr>", M.spelled(e.index))
         self._emit_expr(e.obj)
         self._push_slot(Reg.RAX)                   # dict blob
         self._emit_expr(e.index)
@@ -5215,9 +5355,40 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.label(hit_label)
         # value address = dict + 16 + 16*i
         self._emit_elem_addr(Reg.RSI, Reg.R11, Reg.RAX, header=16, scale=4)
+        if store:
+            # The store happens HERE and RAX becomes the assignment's `None`:
+            # a dict store on a miss has no address to return at all (the store
+            # IS the insert), so handing a slot back to a caller that stores
+            # through it is a write to whatever the miss arm left in RAX.
+            self.asm.emit(encode_mov_r64_rm64(Reg.R9, Reg.RSP, 0))
+            self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 0, Reg.R9))
+            self._emit_mov_imm(Reg.RAX, 0)
         self._emit_jmp(end_label)
         self.asm.label(miss_label)
-        self._emit_call_exit(1)
+        if cap is None:
+            if why_no_room is not None:
+                self._emit_overflow_diagnostic(why_no_room)
+            self._emit_call_exit(1)
+        else:
+            oob_label = f"{fn}_dl{wid}_oob"
+            self.asm.emit(encode_cmp_r64_imm32(Reg.R10, cap))
+            self._emit_setcc_bool(Reg.R8, "setae")
+            self._emit_jcc_bool(Reg.R8, COND_NE, oob_label)
+            self._emit_elem_addr(Reg.RSI, Reg.R10, Reg.R9, header=8, scale=4)
+            self.asm.emit(encode_mov_rm64_r64(Reg.R9, 0, Reg.RDI))   # the key
+            # The value is read AFTER the compare: `setcc` above writes R8, and
+            # reading it before would store the capacity comparison's 0/1
+            # instead of the value.
+            self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RSP, 0))
+            self.asm.emit(encode_mov_rm64_r64(Reg.R9, 8, Reg.R8))   # the value
+            self.asm.emit(encode_add_r64_imm32(Reg.R10, 1))
+            self.asm.emit(encode_mov_rm64_r64(Reg.RSI, 0, Reg.R10))  # the count
+            self._emit_mov_imm(Reg.RAX, 0)       # the assignment's None
+            self._emit_jmp(end_label)
+            self.asm.label(oob_label)
+            self._emit_overflow_diagnostic(
+                M.dict_store_overflow_message(base_name or "<expr>", cap))
+            self._emit_call_exit(1)
         self.asm.label(end_label)
 
     def _emit_for_unpack(self, targets: list, blob_reg: Reg, tag: str) -> None:
@@ -6232,6 +6403,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         that does not read the element back.
         """
         self._push_slot(src)                       # value
+        if self._is_dict_subscript(target.obj):
+            # The one subscript whose store is not "compute an address and
+            # store through it": `d[k] = v` INSERTS on a miss, so there is no
+            # address to return and the value is written inside the lookup's own
+            # arms (`_emit_dict_lookup_addr`). The refusals still run, because it
+            # goes through `_emit_subscript_addr` like every other subscript.
+            self._emit_subscript_addr(target, for_store=True)
+            self._pop_slot(Reg.R11)                # the value, discarded
+            self._emit_mov_imm(src, 0)            # the assignment's None
+            return
         self._emit_subscript_addr(target)          # RAX = address
         self._pop_slot(Reg.R11)                    # R11 = value
         if self._sub_width == 1:
@@ -7862,6 +8043,49 @@ ctor_field_value=self._ctor_field_value_for(name),
             raise CodegenError(
                 "unsupported call target on the formal x86-64 path "
                 f"(got {type(e.func).__name__})")
+        # A CALLEE THIS FUNCTION BINDS — arm64's rule, its reason and its
+        # message, from the one shared pair (`model.callee_is_a_bound_value` /
+        # `model.callee_value_refusal`).  `func(i)` where `func` arrived as a
+        # parameter is a call through a VALUE, and "a name this unit does not
+        # compile" cannot tell it from a C symbol, so the extern path emitted a
+        # call against a symbol spelled `func` and the bind audit reported a
+        # missing symbol instead of the construct that is missing.
+        #
+        # IT LOWERS NOW, on arm64's terms and beside the BUILTIN intercepts on
+        # purpose: a parameter or local spelled `len` or `print` is the
+        # function the source wrote, and `M.emitter_lowers` asks about the NAME
+        # alone, so deciding this after those arms would compile somebody
+        # else's function.  `is_extern` is FALSE for a call through a word,
+        # which is what keeps every arm below — all of them about calling a C
+        # symbol — out of it; the argument loop, the SysV split and the call
+        # itself are the same code either way, and the call is `CALL r64`
+        # through R11 instead of `CALL rel32` through a label.
+        through_value = (not is_extern_call and name not in self._functions
+                         and M.callee_is_a_bound_value(self._cur_fn, name))
+        # …and the name has to be a BARE one. `_callee_symbol` flattens a
+        # subscript callee to its base, so `a.b[3](x)` arrives here as `a.b`
+        # and `a[i](x)` as `a`; only the first of those is a name the function
+        # binds as a callable, and `comptime.specialization_name` is the one
+        # recogniser of the bare spelling.
+        through_value = through_value and (
+            e.func.name == name if isinstance(e.func, F.IdentExpr)
+            else comptime_eval.specialization_name(e.func) == name)
+        if through_value:
+            ann = M.param_annotation(self._cur_fn, name)
+            if e.kwargs:
+                raise CodegenError(M.value_call_keyword_refusal(
+                    M.member_chain_text(e.func), "a keyword argument in"))
+            if not M.value_callee_can_hold_a_function(ann):
+                raise CodegenError(M.callee_value_refusal(
+                    name, self._cur_fn, M.member_chain_text(e.func), ann))
+            if isinstance(e.func, F.SubscriptExpr):
+                # A bracketed callee through a value: a specialization, or an
+                # index into a container. Only the parameter's declared type
+                # can say — see `model.value_call_bracket_reading`.
+                if M.value_call_bracket_reading(self._cur_fn, name, ann) \
+                        != "specialization":
+                    raise CodegenError(M.value_bracket_reading_refusal(
+                        name, self._cur_fn, ann))
         # `external_call["sym", T]` names a C SYMBOL, and `std/os/env.mojo`
         # defines Mojo functions called `getenv`/`setenv`/`unsetenv` over the
         # same three C symbols — so a bare name would branch to the module's OWN
@@ -7970,21 +8194,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         if not is_extern_call and name in self._structs:
             self._emit_struct_constructor(e, name, self._structs[name])
             return
-        # A CALLEE THIS FUNCTION BINDS — arm64's rule, its reason and its
-        # message, from the one shared pair (`model.callee_is_a_bound_value` /
-        # `model.callee_value_refusal`).  `func(i)` where `func` arrived as a
-        # parameter is a call through a VALUE, and "a name this unit does not
-        # compile" cannot tell it from a C symbol, so the extern path emitted a
-        # call against a symbol spelled `func` and the bind audit reported a
-        # missing symbol instead of the construct that is missing.
-        if not is_extern_call and name not in self._functions \
-                and M.callee_is_a_bound_value(self._cur_fn, name):
-            # The SOURCE's spelling, not the flattened base name: `c.f(…)`
-            # flattens to `c`, and a refusal that names `c` sends the reader
-            # to the wrong line. `member_chain_text` prints both spellings.
-            raise CodegenError(M.callee_value_refusal(
-                name, self._cur_fn, M.member_chain_text(e.func)))
-        is_extern = is_extern_call or name not in self._functions
+        is_extern = is_extern_call or (name not in self._functions
+                                       and not through_value)
         # The gimple backend's C runtime is a library of a DIFFERENT target, not
         # an external dependency of this one, and the source spells its ABI as
         # bare `mojo_*` names. Everything a call to one of those could bind to
@@ -8016,9 +8227,21 @@ ctor_field_value=self._ctor_field_value_for(name),
         # binder as a local one — that is the whole fix for a default argument
         # that arrives as a stack address — and one whose declaration is not
         # known keeps the old positional-only behaviour.
-        args = (list(e.args)
-                if is_extern and self._callee_decl(name) is None
-                else self._bind_call_args(name, e))
+        # A callee reached through a word has NO declaration in this image, so
+        # the binder has nothing to bind against and every argument is passed
+        # exactly as the call site wrote it — in position, with the
+        # specialization's brackets AHEAD of them. That is the same rule the
+        # direct path applies to a generic's comptime parameters
+        # (`comptime.param_names`: they are ordinary leading arguments), read
+        # through the one bracket reader
+        # `formal/monomorph.py::supplied_bracket_args`, so there is one answer
+        # to "what does `f[a, b](x)` pass" rather than one per backend and one
+        # per callee kind.
+        args = (monomorph.supplied_bracket_args(e) + list(e.args)
+                if through_value
+                else (list(e.args)
+                      if is_extern and self._callee_decl(name) is None
+                      else self._bind_call_args(name, e)))
         if is_extern and self._callee_decl(name) is None:
             # …and the count is checked against what the MANIFEST publishes,
             # because "no declaration to read" must not mean "no contract to
@@ -8104,7 +8327,12 @@ ctor_field_value=self._ctor_field_value_for(name),
         # see `_vararg_placement`, and the reason it is asked here rather than
         # in the argument loop below is that the stack half and the register
         # half both need the same answer.
-        placement = self._vararg_placement(name, args)
+        # …and the callee NAME is a formality here: a call through a word is not
+        # a call to a C entry point, so the printf argument-classification arm
+        # of `_vararg_placement` must not fire on a parameter that happens to be
+        # spelled like one. The empty name is what says "no callee name", and
+        # that table keys on names only, so it answers the identity placement.
+        placement = self._vararg_placement("" if through_value else name, args)
         n_stack = sum(1 for _c, _slot in placement if _c == "stack")
         if len(args) > _MAX_INCOMING_ARGS:
             raise CodegenError(
@@ -8183,6 +8411,24 @@ ctor_field_value=self._ctor_field_value_for(name),
         # it, so it is the ADDRESS of the caller's own storage rather than the
         # value in it.
         recv_arg = self._receiver_argument(e, name)
+        # A CALLEE REACHED THROUGH A WORD is evaluated and pushed FIRST, below
+        # every argument, and popped back after them. Both halves are forced:
+        # the source writes the callee before the arguments and an argument
+        # expression here can be an arbitrary call that clobbers every
+        # caller-saved register, so evaluating the callee after the arguments
+        # would read whatever the last one left; and it is pushed LOWEST because
+        # the pops below are a fixed count, so a slot under them is the one
+        # still there when the count is spent. R11 is the destination
+        # (`SCRATCH_REGS`: caller-saved, holds no local), and at this point
+        # nothing transient is live — the last argument was popped.
+        if through_value:
+            self._emit_expr(e.func.obj if isinstance(e.func, F.SubscriptExpr)
+                            else e.func)
+            # RAX, not R11: `_emit_expr` leaves its value in RAX on this
+            # backend exactly as it leaves one in X0 on arm64, and R11 is where
+            # it comes BACK out (below). Pushing R11 would push whatever the
+            # callee's own name evaluation happened to leave there.
+            self._push_slot(Reg.RAX)
         for j, _c, _slot in reg_plan:
             if j == recv_arg:
                 self._emit_receiver_argument(args[j], name)
@@ -8239,6 +8485,9 @@ ctor_field_value=self._ctor_field_value_for(name),
             else:
                 self.asm.emit(encode_mov_r64_r64(ARG_REGS[slot], Reg.RAX))
 
+        if through_value:
+            # The callee's own slot, last off the stack and into R11.
+            self._pop_slot(Reg.R11)
         if is_extern:
             # AL = how many vector registers the caller used, which the ABI
             # requires a variadic callee to be told: `va_start` builds the
@@ -8252,6 +8501,13 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_mov_imm(Reg.RAX, nxmm)
             self._emit_extern_call(symbol)
 
+        elif through_value:
+            # `CALL R11` — the branch through the word, the register form of
+            # `FF /2` and the twin of arm64's `BLR`. RSP is 16-byte aligned at
+            # this point (the outgoing area above is a whole number of 16-byte
+            # slots), which is what SysV requires at a call and is the same
+            # alignment the `call rel32` below is emitted with.
+            self.asm.emit(encode_call_r64(Reg.R11))
         else:
             self.asm.emit(encode_call_rel32(0))
             # The NAME a call reaches, not the label this image happens to

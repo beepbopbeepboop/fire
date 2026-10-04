@@ -26,6 +26,7 @@ from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
 import fire_compiler as F
 import mojo.middle.comptime as comptime_eval
 from formal import model as M
+from formal import monomorph
 from mojo.middle.boundnames import (
     bound_names_in_order, _lbn_target_names,
     _lbn_split_commas,
@@ -1298,6 +1299,8 @@ dylib_exports: list = None, globals_base: int = None,
         self._vkinds = self._scan_value_kinds(f)
         self._list_caps, self._list_caps_by_name = self._scan_list_caps(
             f, self._vkinds)
+        self._dict_caps, self._dict_caps_by_name = M.dict_store_capacity(
+            f, M.dict_store_sites(f))
 
         # Prologue: save FP/LR, set FP, save callee-saved var regs, move each
         # incoming argument into ITS OWN callee-saved home (always arg0 into
@@ -1579,6 +1582,22 @@ dylib_exports: list = None, globals_base: int = None,
         tag = M.type_tag_for_name(name)
         if tag is not None:
             self._emit_mov_imm(f"X{dst}", tag)
+            return
+        # A FUNCTION of THIS image, read as a value, is its CODE ADDRESS.  Last
+        # of the homes and not the first, because that is what makes shadowing
+        # free: a local or a parameter spelled like a function is found by one of
+        # the four arms above and never reaches here, which is the case
+        # `test_formal_specialization.py`'s shadowing guard pins.
+        #
+        # It is `ADRP`+`ADD` and nothing else, and it is the assembler call a
+        # STRING LITERAL's address already uses (`emit_adrp_add`), so the one
+        # thing being invented here is that the label is code rather than data.
+        # The label a NAME resolves to is bound after every body is out
+        # (`compile()`'s `_entry_labels` loop) and `resolve()` runs after that,
+        # so a function used as a value before its own definition is emitted is
+        # the same address a direct call to it reaches.
+        if name in self._functions:
+            self.asm.emit_adrp_add(dst, name)
             return
         raise CodegenError(self._no_home(name))
 
@@ -2005,13 +2024,16 @@ dylib_exports: list = None, globals_base: int = None,
         if "." in name:
             return M.field_access_refusal(name, self.func_name or "<module>",
                                           name.split(".", 1)[0], holder)
-        # A FUNCTION NAME read as a value is not an unplaceable name: both this
-        # emitter and the allocation walk know it is not a local, which is why
-        # neither gave it one, and the allocator sentence below is false in
-        # every clause. Named here for the reason `model.function_value_refusal`
-        # gives — a first-class function has no representation on this path at
-        # all, so the message says that instead of blaming the allocator.
-        if name in self._functions:
+        # A FUNCTION of ANOTHER image, read as a value, has no address here.
+        # This unit has the DECLARATION (it is how the callee's parameters are
+        # bound for an ordinary call into a linked library) and no CODE — the
+        # body is in the library, and materializing an address for it needs a
+        # GOT slot and a stub section this assembler does not have.  It used to
+        # be asked about `name in self._functions`, which `_load_var` now
+        # answers before it comes here: a function of THIS image is an
+        # `ADRP`+`ADD` away and is lowered, so the arm is the cross-image case
+        # and `model.function_value_refusal` is still the sentence for it.
+        if name in self._extern_decls:
             return M.function_value_refusal(name,
                                             self.func_name or "<module>")
         return M.unresolved_name_refusal(
@@ -2699,13 +2721,15 @@ dylib_exports: list = None, globals_base: int = None,
         past. Measured, both architectures, on a five-line program:
         `for i in range(0, 3): …` then `print(i)` is 2 under CPython and was 3.
 
-            start:  <test>  --holds--> body:   <body>
-                    B false                   (an empty range leaves the
-            step:   i += step                 counter at its initial value,
-                    <test> --holds--> body     which is what CPython does —
-                    i -= step                 it never binds the name at all,
-                    B false                   and what it does when the name
-            false:  [<else_body>]             already held one)
+            start:  <test>  --holds--> init:   i = start_val
+                    B false                   (an empty range must not BIND
+            init:   i = start_val             the counter at all — see below;
+            body:   <body>                    it is CPython's rule, not an
+            step:   i += step                 optimisation, and the emptiness
+                    <test> --holds--> body     is a run-time fact as often as
+                    i -= step                 not a compile-time one)
+                    B false
+            false:  [<else_body>]
             end:
 
         The counter is tested BEFORE the increment, so the loop-exit path
@@ -2721,11 +2745,28 @@ dylib_exports: list = None, globals_base: int = None,
         blanket `i -= step` prints `-step`. Hence the first test being emitted
         separately from the loop-back test.
 
+        **The head test reads `start_val`, not the counter, and that is the
+        second half of the same rule.** CPython's `for` binds the target only
+        when the iteration produces a value, so a range that yields NOTHING must
+        leave a name that already held one alone. Storing `start_val` into the
+        counter before the test cannot express that: measured on both
+        architectures, `i = 7; for i in range(0, 0): …` left `i == 0` where
+        CPython leaves 7 — and the emptiness is a RUN-TIME fact as often as not
+        (`for i in range(0, k)` with `k <= 0`), so it cannot be decided by
+        looking at the arguments. Hence `init:`, between the head test and the
+        body, which is where the store goes. It costs a second evaluation of
+        `start_val`, so it is only emitted when `model.expr_is_repeatable` says
+        the second one has the same answer; `for i in range(f(), 0)` keeps the
+        store-then-test order, which is the old behaviour and the only sound one
+        there. The instruction vocabulary is unchanged (CMP, B.cond, and the
+        store the prologue already emitted), so the model needs no new step.
+
         `continue` → step (for-loops still advance the counter)."""
         self._while_counter += 1
         wid = self._while_counter
         fn = self.func_name
         start_label = f"{fn}_loop{wid}_start"
+        init_label = f"{fn}_loop{wid}_init"
         body_label = f"{fn}_loop{wid}_body"
         step_label = f"{fn}_loop{wid}_step"
         false_label = f"{fn}_loop{wid}_false"
@@ -2733,11 +2774,18 @@ dylib_exports: list = None, globals_base: int = None,
 
         is_for = for_info is not None
         for_conds = None
+        # Whether the head test can read `start_val` and leave the store for
+        # `init:`. Set here so the prologue below knows not to store, and read
+        # again inside the loop; `model.expr_is_repeatable` is the shared answer
+        # and the x86-64 backend asks the same question for the same reason.
+        bind_after_test = False
         if is_for:
             target, rargs = for_info
             start_val, end_val, step_val = self._range_info(rargs)
-            self._emit_expr(start_val)
-            self._store_var(target, 0)
+            bind_after_test = M.expr_is_repeatable(start_val)
+            if not bind_after_test:
+                self._emit_expr(start_val)
+                self._store_var(target, 0)
             # The comparison has to follow the step's direction, or a descending
             # range exits immediately (and an ascending one would run away). A
             # step whose sign is only known at runtime is refused rather than
@@ -2762,10 +2810,21 @@ dylib_exports: list = None, globals_base: int = None,
                 # on the CSET it left behind: `for i in range(a, b)` computed
                 # a boolean, dropped it, and looped forever. Compare and branch
                 # on the flags directly.
-                self._emit_branch_if_cmp(F.IdentExpr(target), end_val,
-                                         for_conds[0], for_conds[1],
-                                         body_label)
+                #
+                # The left operand is `start_val` itself when the store was
+                # deferred to `init:`, and the COUNTER otherwise. Both are the
+                # same comparison with the same condition codes; the difference
+                # is only which word answers it, and only the `init:` below
+                # depends on that.
+                self._emit_branch_if_cmp(
+                    start_val if bind_after_test else F.IdentExpr(target),
+                    end_val, for_conds[0], for_conds[1],
+                    init_label if bind_after_test else body_label)
                 self._emit_b_to(false_label)
+                if bind_after_test:
+                    self.asm.label(init_label)
+                    self._emit_expr(start_val)
+                    self._store_var(target, 0)
             elif not self._emit_branch_unless(cond, false_label):
                 self._emit_truthy_word(cond)
                 self.asm.emit(encode_cmp_xn_imm(0, 0))
@@ -4237,7 +4296,16 @@ ctor_field_value=self._ctor_field_value_for(name),
         X0 exits holding the blob address. Keys/values are int64 or
         (interned) string/inner-blob pointers — same slot width as list
         blobs. Cursor reserves the full blob before any child is evaluated
-        so nested containers sit above it. Star-unpack not applicable."""
+        so nested containers sit above it. Star-unpack not applicable.
+
+        **The blob is reserved for `pairs_written + store_sites`, and the
+        count word holds only `pairs_written`.**  A dict LITERAL says which
+        pairs were written; it said nothing about how many more there is room
+        for, which is why `d["new"] = v` had nowhere to write and the miss arm
+        stopped the program (`model.dict_store_capacity`, the same reservation
+        `list.append` gets from `_scan_list_caps`, and the same bargain: one
+        store SITE per reservation, every EXECUTION of it counted, and a store
+        in a loop stops loudly rather than writing past the blob)."""
         # Static pairs only: `**other` / `*xs` are evaluated for side
         # effects then skipped (fixed pair-blob, no dynamic growth).
         static_pairs = []
@@ -4253,8 +4321,13 @@ ctor_field_value=self._ctor_field_value_for(name),
                 splat_exprs.append(k)
                 continue
             static_pairs.append((k, v))
-        n = len(static_pairs)
-        size = 8 * (1 + 2 * n)
+        n = M.dict_literal_static_pairs(expr)
+        assert n == len(static_pairs), (
+            "dict_literal_static_pairs and _emit_dict disagree about what a "
+            "literal writes: the reservation the store path is checked against "
+            "is computed from the former and the blob from the latter")
+        reserved = self._dict_caps.get(id(expr), n)
+        size = 8 * (1 + 2 * reserved)
         if self._list_cursor + size > self._blob_cap:
             raise CodegenError(M.frame_blob_refusal(
                 "a dict literal", self._list_cursor + size, self._blob_cap))
@@ -4335,8 +4408,10 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_cset_xd_cond(13, "eq"))
             self.asm.emit(encode_and_xd_xn_xm(ok, ok, 13))
 
-    def _emit_dict_lookup_addr(self, e: F.SubscriptExpr) -> None:
-        """X0 = &dict[key] value slot. Missing key → Darwin exit(1).
+    def _emit_dict_lookup_addr(self, e: F.SubscriptExpr,
+                                 store: bool = False) -> None:
+        """X0 = &dict[key] value slot. A missing key on a READ stops the
+        program; on a STORE it is CPython's INSERT.
 
         Pair-blob layout: [count][k0][v0]…; value i is at base+16+16*i.
         Key compare is raw 64-bit equality — valid for interned string
@@ -4344,11 +4419,33 @@ ctor_field_value=self._ctor_field_value_for(name),
         static container key, which is compared element-wise (see
         `_static_key_needle`): a tuple key's blob pointer is not a value.
 
+        **`store` is what separates the two miss answers, and it is why the
+        miss arm is three arms and not one.**  `d[k] = v` INSERTS in CPython,
+        and before this it stopped the program having printed nothing, on both
+        backends, with the diagnostic naming neither the key nor the table. The
+        insert needs three facts, and only one of them was missing: the SCAN is
+        the same scan, and the pair address is arithmetic on the base and the
+        count, so what is new is the ROOM — `model.dict_store_capacity`
+        reserves `pairs + store sites` at the literal, and the arm below is
+        that capacity checked, a pair written at the count, and the count
+        bumped. The two arms that cannot insert say so in a sentence instead of
+        exiting silently: no capacity (the blob was built by another function,
+        so this build never saw its pairs) and a static container key (compared
+        element-wise, never materialised, so there is no key word to write).
+
+        `self._emit_subscript_addr` passes `store` down from the ONE caller
+        that stores, so the read, the store and the augmented assignment cannot
+        be told apart wrongly — and the augmented assignment
+        (`d[k] += v`) deliberately keeps the READ arm, because it raises
+        `KeyError` on a missing key and exiting is the right answer for it.
+
         Stack on entry to the scan (two STP pushes, or one when the key is
         compared element-wise and never needs a slot):
           [SP+0]  key (lookup), [SP+8] XZR
           [SP+16] base,        [SP+24] junk
-        Hit path stashes the value address in X4 across the pops."""
+        On the store arm the CALLER's spilled value is above those two pushes —
+        [SP+32] — which is where the insert reads it from. Hit path stashes the
+        value address in X4 across the pops."""
         self._sub_counter += 1
         sid = self._sub_counter
         fn = self.func_name
@@ -4356,6 +4453,22 @@ ctor_field_value=self._ctor_field_value_for(name),
         hit_label = f"{fn}_dlk{sid}_hit"
         end_label = f"{fn}_dlk{sid}_end"
         loop_label = f"{fn}_dlk{sid}_loop"
+        # The room this store may use, and None for the two arms that cannot
+        # insert. Decided BEFORE the scan because the miss arm's shape depends
+        # on it, and read from the NAME table for the reason
+        # `_emit_list_append` reads its capacity from the name table.
+        cap = None
+        why_no_room = None
+        if store:
+            base_name = e.obj.name if isinstance(e.obj, F.IdentExpr) else None
+            if M.static_key_elements(e.index) is not None:
+                why_no_room = M.dict_store_no_room_message(
+                    base_name or "<expr>", M.spelled(e.index))
+            else:
+                cap = self._dict_caps_by_name.get(base_name)
+                if cap is None:
+                    why_no_room = M.dict_store_other_blob_message(
+                        base_name or "<expr>", M.spelled(e.index))
 
         if isinstance(e.obj, F.DictExpr):
             self._emit_dict(e.obj)
@@ -4399,15 +4512,63 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         self.asm.label(hit_label)
         self.asm.emit(encode_add_xd_xn_imm(4, 5, 8))    # X4 = value slot
-        _pop_scan()
-        self.asm.emit(encode_mov_zr_xn(0, 4))
+        if store:
+            # A dict STORE puts the value here, out of the caller's spill, and
+            # leaves NOTHING to store through afterwards: `_emit_subscript_addr`
+            # is a "where does this live" question, and on a miss there is no
+            # where — the store IS the insert. Handing a value slot back to a
+            # caller that then stores through it is how the miss arm's `None`
+            # became a write to address 0.
+            self.asm.emit(encode_ldr_xt_xn_imm(7, 31, base_off + 16))
+            self.asm.emit(encode_str_xt_xn_imm(7, 4, 0))
+            _pop_scan()
+            self.asm.emit(encode_mov_zr_xn(0, 0))    # the assignment's None
+        else:
+            _pop_scan()
+            self.asm.emit(encode_mov_zr_xn(0, 4))
         self._emit_b_to(end_label)
 
         self.asm.label(miss_label)
-        _pop_scan()
-        self.asm.emit(encode_movz_xd_imm(0, 1))
-        self.asm.emit(encode_movz_xd_imm(16, 1))
-        self.asm.emit(encode_svc(0x80))
+        if cap is None:
+            _pop_scan()
+            if why_no_room is not None:
+                self._emit_overflow_diagnostic(why_no_room)
+            self.asm.emit(encode_movz_xd_imm(0, 1))
+            self.asm.emit(encode_movz_xd_imm(16, 1))
+            self.asm.emit(encode_svc(0x80))
+        else:
+            # THE INSERT. `X1` = base and `X2` = count come off the scan's own
+            # pushes, the spilled VALUE is at [SP+32] (see the stack note), and
+            # the pair lands at `base + 8 + 16*count` — the same address the hit
+            # arm computes, one past the end.
+            oob_label = f"{fn}_dlk{sid}_oob"
+            self.asm.emit(encode_ldr_xt_xn_imm(1, 31, base_off))
+            self.asm.emit(encode_ldr_xt_xn_imm(2, 1, 0))     # X2 = count
+            self._emit_mov_imm("X3", cap)
+            self.asm.emit(encode_cmp_xn_xm(2, 3))
+            self.asm.emit(encode_cset_xd_cond(4, "cs"))      # count >= cap
+            self.asm.emit(encode_cbnz_xn(0, 4))
+            self.asm.emit_label_rel(oob_label, here_offset=-4)
+            self.asm.emit(encode_add_xd_xn_imm(5, 1, 8))
+            self.asm.emit(encode_add_xd_xn_xm_lsl4(5, 5, 2))  # X5 = key slot
+            self.asm.emit(encode_ldr_xt_xn_imm(6, 31, 0))    # X6 = key
+            self.asm.emit(encode_str_xt_xn_imm(6, 5, 0))
+            self.asm.emit(encode_ldr_xt_xn_imm(7, 31, base_off + 16))  # value
+            self.asm.emit(encode_str_xt_xn_imm(7, 5, 8))
+            self.asm.emit(encode_add_xd_xn_imm(2, 2, 1))
+            self.asm.emit(encode_str_xt_xn_imm(2, 1, 0))     # count = n + 1
+            _pop_scan()
+            self.asm.emit(encode_mov_zr_xn(0, 0))    # the assignment's None
+            self._emit_b_to(end_label)
+            self.asm.label(oob_label)
+            _pop_scan()
+            self._emit_overflow_diagnostic(
+                M.dict_store_overflow_message(
+                    e.obj.name if isinstance(e.obj, F.IdentExpr) else "<expr>",
+                    cap))
+            self.asm.emit(encode_movz_xd_imm(0, 1))
+            self.asm.emit(encode_movz_xd_imm(16, 1))
+            self.asm.emit(encode_svc(0x80))
         self.asm.label(end_label)
 
     def _is_dict_key_subscript(self, e: F.SubscriptExpr) -> bool:
@@ -4521,7 +4682,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         raise CodegenError(M.non_container_element_refusal(
             op, M.spelled(obj), self.func_name or "<module>"))
 
-    def _emit_subscript_addr(self, e: F.SubscriptExpr) -> None:
+    def _emit_subscript_addr(self, e: F.SubscriptExpr,
+                             for_store: bool = False) -> None:
         """X0 = &obj[index]. Blob path bounds-checkes (exit 1 on OOB).
 
         The single choke point for a subscript: a read, a store
@@ -4533,7 +4695,16 @@ ctor_field_value=self._ctor_field_value_for(name),
         proof generator (the emitted index is a frame address, so the
         bounds-check branch the step model has to follow is not one it has a
         contract for) and the second emitted a store through a computed
-        address. Both now say no."""
+        address. Both now say no.
+
+        `for_store` is the ONE thing that separates the three, because the
+        dict lookup's answer does depend on it: `d[k] = v` INSERTS on a
+        miss, while `d[k]` and `d[k] += v` do not (`_emit_dict_lookup_addr`
+        has the arms). It is a parameter rather than a flag on the emitter
+        because the augmented assignment must NOT inherit it — `+=` raises
+        `KeyError` on a missing key, so stopping is the right answer there —
+        and a flag the store caller sets and every other caller has to
+        remember to clear is a flag that survives an exception path."""
         self._refuse_frame_container_operand("a subscript", e.obj)
         self._refuse_non_container_operand("a subscript", e.obj)
         if M.is_external_call_template(e):
@@ -4578,7 +4749,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         if why is not None:
             raise CodegenError(why)
         if self._is_dict_key_subscript(e):
-            self._emit_dict_lookup_addr(e)
+            self._emit_dict_lookup_addr(e, store=for_store)
             return
         # A string index against a base whose shape nothing states: the one
         # spelling of this subscript that neither the dict path nor the byte
@@ -4726,6 +4897,18 @@ ctor_field_value=self._ctor_field_value_for(name),
         computation clobbers is the backend's business, not this caller's.
         """
         self.asm.emit(encode_stp_sp_pre(reg, 31))   # push the value
+        if self._is_dict_key_subscript(target):
+            # The one subscript whose store is not "compute an address and
+            # store through it": `d[k] = v` INSERTS on a miss, so there is no
+            # address to return and the value is written inside the lookup's own
+            # arms (`_emit_dict_lookup_addr`). Everything before this — the
+            # multi-index, type-index and string-index refusals — still runs,
+            # because it goes through `_emit_subscript_addr` like every other
+            # subscript.
+            self._emit_subscript_addr(target, for_store=True)
+            self.asm.emit(encode_ldp_sp_post(reg, 31))   # pop the value
+            self.asm.emit(encode_mov_zr_xn(reg, 0))      # the assignment's None
+            return
         self._emit_subscript_addr(target)           # X0 = address
         self.asm.emit(encode_stp_sp_pre(0, 2))      # save addr
         self.asm.emit(encode_mov_zr_xn(9, 0))       # X9 = addr
@@ -5025,42 +5208,15 @@ ctor_field_value=self._ctor_field_value_for(name),
             raise CodegenError(reason)
 
     def _print_kwargs(self, e: F.CallExpr):
-        """`print`'s `sep=` / `end=` / `file=`, as (sep, end). Only literals.
+        """`print`'s `sep=` / `end=` / `file=` / `flush=`, as (sep, end, flush).
 
-        `file=` is refused unless it is stdout, because this model has exactly
-        one stream and a `file=sys.stderr` that quietly went to stdout would be
-        a program whose diagnostics are missing rather than one that failed.
-
-        `sep` and `end` come back as the literal NODES and not as `.value`,
-        which is the whole reason this signature is unchanged while its body is
-        not: `print(sep=r"\t")` must print a backslash and a `t`, and
-        `print_literal` can only know that from the node. The defaults are
-        plain strings, which `print_literal` takes at face value — they are
-        already-decoded text."""
-        sep, end = " ", "\n"
-        for k, v in e.kwargs:
-            if not isinstance(v, F.StringLiteral):
-                raise CodegenError(
-                    f"print({k}=...) must be a string literal on the formal "
-                    f"arm64 path (got {type(v).__name__}): the separator and "
-                    f"the line ending are baked into the format string, which "
-                    f"is built before the call is emitted")
-            if k == "sep":
-                sep = v
-            elif k == "end":
-                end = v
-            elif k == "file":
-                if not (isinstance(v, F.MemberExpr)
-                        and v.member == "stdout"):
-                    raise CodegenError(
-                        f"print(file=...) other than sys.stdout is not lowered "
-                        f"on the formal arm64 path: this model has one output "
-                        f"stream")
-            else:
-                raise CodegenError(
-                    f"print() has no keyword argument {k!r} on the formal "
-                    f"arm64 path (supports sep, end, file)")
-        return sep, end
+        **Two lines of delegation**, and `M.print_kwargs`'s docstring is where
+        the decision and its reasons are: `flush=` is answered there (the
+        largest `codegen-refused` family in this repository's own source, per
+        `bugs/FORMAL_proof_coverage_census_2026-10-03.md` §0.2), and the rule
+        that the keyword is dispatched BEFORE its value is inspected is what
+        stops a bool from being refused with a sentence about `sep`."""
+        return M.print_kwargs(e, "arm64")
 
     def _emit_print(self, e: F.CallExpr) -> None:
         """`print(...)` — a real call to the C library's `printf`.
@@ -5075,12 +5231,22 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         `print()` with no arguments still prints a blank line, and the call's
         value is `None` — the format string's `%`-count is zero, so printf
-        reads no varargs and the register state afterwards is irrelevant."""
-        sep, end = self._print_kwargs(e)
+        reads no varargs and the register state afterwards is irrelevant.
+
+        **`flush=True` IS A REAL `fflush` AND NOT A DROPPED KEYWORD**, after the
+        `printf`: the one thing a formal image cannot see by not flushing is a
+        program whose output has not reached the pipe yet, which is a missing
+        line rather than a wrong one. `fflush(NULL)` is the C library's own
+        "every stream"; there is exactly one stream this model writes, which is
+        the fact `print(file=…)`'s refusal is stated on (`M.print_kwargs`)."""
+        sep, end, flush = self._print_kwargs(e)
         frags, operands = self._print_call(list(e.args))
         fmt = M.print_format(frags, sep, end)
         self._emit_call(F.CallExpr(func=F.IdentExpr(name="printf"),
                                    args=[F.StringLiteral(fmt)] + operands))
+        if flush:
+            self._emit_call(F.CallExpr(func=F.IdentExpr(name="fflush"),
+                                       args=[F.IntLiteral(0)]))
 
     def _emit_debug_assert(self, e: F.CallExpr) -> None:
         """`debug_assert(cond, *messages)` — evaluate `cond`, and on falsy exit.
@@ -7668,6 +7834,74 @@ ctor_field_value=self._ctor_field_value_for(name),
             raise CodegenError(
                 f"unsupported call target on the formal arm64 path "
                 f"(got {type(e.func).__name__})")
+        # A CALLEE THIS FUNCTION BINDS.  `func(i)` inside a function that took
+        # `func` as a parameter is a call through a VALUE, and `name not in
+        # self._functions` below cannot tell it from a call to a C symbol: both
+        # are "a name this unit does not compile", and the extern path's job is
+        # to emit a call to a symbol, so it emitted a call to a symbol spelled
+        # `func`.  The image was then caught by the bind audit four stages
+        # later, as a symbol nothing on the link line provides — a true
+        # statement, and one that says nothing about the construct, so
+        # `stdlib/std/algorithm/backend/cpu/map.mojo` (whose only statement is
+        # `func(i)`) was classified `not-answerable/unresolved-extern` rather
+        # than as the codegen gap it is.
+        #
+        # Asked HERE, at the one line that takes the extern path, and not in the
+        # link audit: a name a function binds is a word in a register, a spill
+        # slot, a receiver's frame or a `__DATA` cell, so there is no code
+        # address in it for a call to land on.  The decision and the words are
+        # `model.callee_is_a_bound_value` / `model.callee_value_refusal`, read
+        # by x86-64 from the same two, so the architectures cannot disagree
+        # about one call.
+        #
+        # IT LOWERS NOW, and what used to be a refusal is one branch through the
+        # word.  `is_extern` is FALSE for it, which is the whole of the change
+        # downstream: every arm guarded on `is_extern` below is about calling a
+        # C symbol and none of them applies to a branch through a value, while
+        # the argument loop, the ABI split and the call itself are the same code
+        # either way.  A function value is a CODE ADDRESS on this path
+        # (`_load_var`'s last home), so `BLR` is the instruction and
+        # `model.value_call_bracket_reading` is what settles the one genuinely
+        # ambiguous shape — a bracketed callee, which is a specialization or an
+        # index and only the parameter's declared type can say.
+        through_value = (not is_extern_call and name not in self._functions
+                         and M.callee_is_a_bound_value(self._cur_fn, name))
+        # …and the name has to be a BARE one. `_callee_symbol` flattens a
+        # subscript callee to its base, so `a.b[3](x)` arrives here as `a.b`
+        # and `a[i](x)` as `a`; only the first of those is a name the function
+        # binds as a callable. `comptime.specialization_name` is the one
+        # recogniser of the bare spelling (`monomorph._callee_base` reaches the
+        # same one), so the test is asked rather than spelled.
+        through_value = through_value and (
+            e.func.name == name if isinstance(e.func, F.IdentExpr)
+            else comptime_eval.specialization_name(e.func) == name)
+        if through_value:
+            ann = M.param_annotation(self._cur_fn, name)
+            # A keyword, or a bracket this build cannot read as a
+            # specialization, is the construct's own refusal; a parameter whose
+            # DECLARED type cannot hold a function is `callee_value_refusal`.
+            # Both are asked here, at the one line that decided the call is
+            # through a value, so the two architectures cannot refuse it
+            # differently.
+            if e.kwargs:
+                raise CodegenError(M.value_call_keyword_refusal(
+                    M.member_chain_text(e.func), "a keyword argument in"))
+            if not M.value_callee_can_hold_a_function(ann):
+                raise CodegenError(M.callee_value_refusal(
+                    name, self._cur_fn, M.member_chain_text(e.func), ann))
+            if isinstance(e.func, F.SubscriptExpr):
+                # A bracketed callee through a value: a specialization, or an
+                # index into a container. Only the parameter's declared type
+                # can say, and it is `model.value_call_bracket_reading`'s
+                # question for one reason —
+                # `std/algorithm/backend/tile.mojo`'s
+                # `workgroup_function: Some[Static1DTileUnitFunc]`, which
+                # cannot be indexed at all, so its brackets can only be
+                # comptime parameters.
+                if M.value_call_bracket_reading(self._cur_fn, name, ann) \
+                        != "specialization":
+                    raise CodegenError(M.value_bracket_reading_refusal(
+                        name, self._cur_fn, ann))
         # The three builtins this emitter intercepts by BARE NAME, read out of
         # `model.EMITTER_BUILTINS` rather than spelled here, for the reason that
         # table's comment gives: the set of names a backend compiles itself is a
@@ -7776,33 +8010,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         if not is_extern_call and name in self._structs:
             self._emit_struct_constructor(e, name, self._structs[name])
             return
-        # A CALLEE THIS FUNCTION BINDS.  `func(i)` inside a function that took
-        # `func` as a parameter is a call through a VALUE, and `name not in
-        # self._functions` below cannot tell it from a call to a C symbol: both
-        # are "a name this unit does not compile", and the extern path's job is
-        # to emit a call to a symbol, so it emitted a call to a symbol spelled
-        # `func`.  The image was then caught by the bind audit four stages
-        # later, as a symbol nothing on the link line provides — a true
-        # statement, and one that says nothing about the construct, so
-        # `stdlib/std/algorithm/backend/cpu/map.mojo` (whose only statement is
-        # `func(i)`) was classified `not-answerable/unresolved-extern` rather
-        # than as the codegen gap it is.
-        #
-        # Asked HERE, at the one line that takes the extern path, and not in the
-        # link audit: a name a function binds is a word in a register, a spill
-        # slot, a receiver's frame or a `__DATA` cell, so there is no code
-        # address in it for a call to land on.  The decision and the words are
-        # `model.callee_is_a_bound_value` / `model.callee_value_refusal`, read
-        # by x86-64 from the same two, so the architectures cannot disagree
-        # about one call.
-        if not is_extern_call and name not in self._functions \
-                and M.callee_is_a_bound_value(self._cur_fn, name):
-            # The SOURCE's spelling, not the flattened base name: `c.f(…)`
-            # flattens to `c`, and a refusal that names `c` sends the reader
-            # to the wrong line. `member_chain_text` prints both spellings.
-            raise CodegenError(M.callee_value_refusal(
-                name, self._cur_fn, M.member_chain_text(e.func)))
-        is_extern = is_extern_call or name not in self._functions
+        is_extern = is_extern_call or (name not in self._functions
+                                       and not through_value)
         # The gimple backend's C runtime is not an external dependency of THIS
         # target but a library of a different one, and it is spelled in the
         # source as bare `mojo_*` names (`mojo_sqlite3_open`, `mojo_list_len`,
@@ -7857,7 +8066,18 @@ ctor_field_value=self._ctor_field_value_for(name),
             # the export symbol the call binds, and `bind_call_arguments` is
             # the one implementation of "which argument lands on which
             # parameter, and what fills the gap".
-            args = self._bind_call_args(name, e)
+            # A callee reached through a word has NO declaration in this image,
+            # so the binder has nothing to bind against and every argument is
+            # passed exactly as the call site wrote it — in position, with the
+            # specialization's brackets AHEAD of them. That is the same rule
+            # the direct path applies to a generic's comptime parameters
+            # (`comptime.param_names`: they are ordinary leading arguments),
+            # read through the one bracket reader
+            # `formal/monomorph.py::supplied_bracket_args`, so there is one
+            # answer to "what does `f[a, b](x)` pass" rather than one per
+            # backend and one per callee kind.
+            args = (monomorph.supplied_bracket_args(e) + list(e.args)
+                    if through_value else self._bind_call_args(name, e))
         # A comptime specialization `f[a, b](x)` binds the callee's comptime
         # parameters (which are leading arguments on this path), so the bracket
         # expressions are evaluated here, in the caller's scope, and passed
@@ -8018,6 +8238,25 @@ ctor_field_value=self._ctor_field_value_for(name),
         # it, so it is the ADDRESS of the caller's own storage rather than the
         # value in it.
         recv_arg = self._receiver_argument(e, name)
+        # A CALLEE REACHED THROUGH A WORD is evaluated and spilled FIRST, below
+        # every argument, and popped back after them.  Both halves of that are
+        # forced:
+        #
+        #   * first, because the source writes the callee before the arguments
+        #     and an argument expression here can be an arbitrary call that
+        #     clobbers every caller-saved register — so evaluating the callee
+        #     after the arguments would read whatever the last one left;
+        #   * lowest on the stack, because the pops below are a fixed count, so
+        #     a slot pushed UNDER them is the one still there when the count is
+        #     spent, and a slot pushed over them would be popped as argument 0.
+        #
+        # X16 is the destination and X17 the pair's second half: both are
+        # temporaries under AAPCS and neither is an argument register, and at
+        # this point nothing transient is live (the last argument was popped).
+        if through_value:
+            self._emit_expr(e.func.obj if isinstance(e.func, F.SubscriptExpr)
+                            else e.func)
+            self.asm.emit(encode_stp_sp_pre(0, 31))
         for i, arg in enumerate(args[:_ABI_ARG_REGS]):
             if i == recv_arg:
                 self._emit_receiver_argument(arg, name)
@@ -8034,6 +8273,13 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_ldp_sp_post(0, 31))
             if i != 0:
                 self.asm.emit(encode_mov_zr_xn(i, 0))
+        if through_value:
+            # The callee's own slot, last off the stack and into X16 — one
+            # `LDP` pair whose high half is the X17 the push left, so nothing
+            # else has to move it.  It is popped HERE and not before the
+            # arguments because the pop loop above is a fixed count and this
+            # slot is underneath it.
+            self.asm.emit(encode_ldp_sp_post(16, 17))
         if is_extern:
             # A linked library's export spelling wins over the bare name, so
             # the BL, the GOT slot and the bind stream all name the symbol the
@@ -8067,6 +8313,14 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit_extern_bl(symbol)
             if area:
                 self.asm.emit(encode_add_xd_xn_imm(31, 31, area))
+        elif through_value:
+            # `BLR X16` — the branch-with-link through the word, and the one
+            # instruction `encode_blr_xn` was defined for since before any
+            # lowering called it.  Same frame discipline as the `BL` below it:
+            # this backend puts nothing in X30 across a call (an argument
+            # expression that itself calls runs BEFORE either of them), so the
+            # link register needs no save for the indirect form either.
+            self.asm.emit(encode_blr_xn(16))
         else:
             self.asm.emit(encode_bl(0))
             # The NAME a call reaches, not the label this image happens to keep

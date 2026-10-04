@@ -74,6 +74,7 @@ answer for a template this unit compiles.  `bugs/FORMAL_generic_monomorph_scope.
 records what that leaves.
 """
 
+import hashlib
 import re
 
 import fire_compiler as F
@@ -85,6 +86,89 @@ class MonomorphError(Exception):
 
 KIND_STRUCT = "struct"
 KIND_FN = "def"
+
+# ── derivations of a SOURCE, made once per distinct source ───────────────
+#
+# Two questions in this module are pure functions of a source TEXT and are each
+# asked once per module of the consumer's import CLOSURE rather than once per
+# source: `template_names` (below, via `formal/imports.py::
+# module_templates_by_path`, which walks every module a module re-exports and
+# asks each one which of its declared names are templates) and
+# `all_instantiation_calls` (via `formal/imports.py::instantiation_demands`,
+# once per imported module, for a consumer whose text is the same every time).
+# Both derivations start by tokenizing and parsing the text, and both were
+# paying for that once per walk rather than once per source.
+#
+# MEASURED, on `std/simd.mojo` (4 462 lines, 20 import statements, 84.3 s):
+# `fire_compiler.py_tokenize` ran 7 335 times, 7 042 of them from
+# `template_names` — one per (closure walk x module), the walk repeated once per
+# imported module by `instantiation_demands` and again by
+# `formal/build.py::_resolve_imports`. `cProfile` put 100.6 s of a 197.5 s
+# instrumented build inside `py_tokenize_named`, i.e. 51% of the whole build, and
+# `formal/model.py`'s walks — the thing the 2026-10-02 build-cost pass spent its
+# budget on — came to 1.8 s of the 84 s. On `myinterpreter.py` the same shape is
+# 7 re-parses of one 271 KB source, 0.68 s of a 2.7 s build.
+#
+# So this is not a cache of something that CHANGES: both answers are functions of
+# the source text alone, and the text is the key. A build that edits a module's
+# source reads a different key, which is why nothing here needs an invalidation
+# argument (the same argument `formal/imports.py::module_statements` makes for its
+# own content-keyed parse cache, and the one that doc's §3.1 makes about
+# threading a table instead).
+#
+# KEYED BY A DIGEST, not by the text, and that is a memory decision rather than a
+# speed one: holding the sources as keys would retain every module text of every
+# build this process ever did, where `formal/imports.py::_SOURCE_TEXT` already
+# holds them for the build in flight. blake2b over the source is 0.16 ms on a
+# 200 KB module against the 13 ms parse it stands in for, and 16 bytes against
+# 200 KB of retained key. A 128-bit digest is not a probabilistic answer to
+# "which source is this" — two sources colliding on it would have to be found by
+# an adversary, and the alternative that does not collide (the text itself) is
+# the retention above.
+#
+# BOUNDED, FIFO, because this process is the sweep's: one file per build and one
+# process per file today, but a bound is what keeps a long-lived one from growing
+# without limit. The cap is far above one build's working set (~160 modules for
+# `std/simd.mojo`'s closure), so a build never evicts what it is about to ask
+# again, and an eviction is a re-derivation and never a wrong answer.
+#
+# KEYED BY THE QUESTION AS WELL AS THE SOURCE, which is not tidiness: the first
+# version of this keyed on the digest alone, and a module that is asked BOTH
+# questions about ITSELF — `template_names` and `all_instantiation_calls` share
+# `module_source_text(path)` at `formal/imports.py::build_module_dylib` — then
+# read one question's answer out of the other's slot. Measured as a crash on 4 of
+# the 43 files of the byte-comparison spread
+# (`'tuple' object has no attribute 'items'`, the cached template-name tuple read
+# as a demand set), which is the whole reason the key carries `tag`.
+_DERIVED: dict = {}
+_DERIVED_CAP = 4096
+
+
+def _derived_from_source(tag: str, src: str, compute, subkey=None):
+    """`compute()` for `(tag, src, subkey)`, once per distinct triple.
+
+    `compute` is called with no arguments and must be a function of `src` and
+    `subkey` and nothing else — no module path, no parse tree, no mutable state
+    of this process — because the cache is keyed on those ALONE.  Everything
+    stored here is derived that way; the docstring above names the callers and
+    each of their derivations is a `reflect`/`elaborate` question about source
+    text.  `tag` names the QUESTION, so two questions about one source cannot
+    read each other's answers, and `subkey` carries the two callers that ask a
+    per-name question about a source (`template_kind` and `_template_source`,
+    which `instantiate` asks in a row).
+    """
+    key = (tag, subkey,
+           hashlib.blake2b(src.encode("utf-8", "surrogatepass"),
+                           digest_size=16).digest())
+    hit = _DERIVED.get(key)
+    if hit is not None:
+        return hit
+    val = compute()
+    if len(_DERIVED) >= _DERIVED_CAP:
+        del _DERIVED[next(iter(_DERIVED))]      # FIFO: the oldest insertion
+    _DERIVED[key] = val
+    return val
+
 
 # ── which declared names are templates ───────────────────────────────────
 
@@ -102,11 +186,19 @@ def template_names(src: str) -> list:
     records the one known imprecision of the rule it reads (a NESTED
     `def name[...]` puts the name in the template set), and duplicating the
     rule here would fork that imprecision into a second place to be wrong about.
+
+    **Once per source text, not once per module of a closure.**  The question is
+    a function of `src` alone, and `formal/imports.py::module_templates_by_path`
+    asks it of every module in a re-export closure, once per imported module of
+    the consumer — 7 042 tokenizations on `std/simd.mojo` where there are 160
+    modules to ask about.  The measurement and the key are in the module-level
+    note above `_DERIVED`; the answer is returned as a fresh `list` on every call
+    so that a caller mutating what it got back cannot reach into the cached one.
     """
     import reflect                                  # lazy — see the module docstring
-    return sorted(name for name, why in
-                  reflect.export_exclusions(src).items()
-                  if why == reflect.EXCL_GENERIC)
+    return list(_derived_from_source("template_names", src, lambda: tuple(sorted(
+        name for name, why in reflect.export_exclusions(src).items()
+        if why == reflect.EXCL_GENERIC))))
 
 
 def template_kind(src: str, name: str) -> str:
@@ -118,6 +210,28 @@ def template_kind(src: str, name: str) -> str:
     the export rule filed as a template that neither extractor can pull out is
     the nested-`def` imprecision above rather than a template — which is a fact
     the caller needs told rather than an instantiation it needs built.
+
+    **Once per `(source, name)`, because the extractors are whole-module
+    scans.**  `elaborate.extract_struct_source` and `extract_fn_source` each
+    `splitlines()` the module and run `elaborate._bracket_depth_by_line` over
+    it, and `instantiate` asks this question once per (template, argument-list)
+    pair — 300 times on `std/simd.mojo`, over FOUR distinct `(source, name)`
+    pairs, for 600 bracket-depth scans of whole modules and 8.4 s of a 21.6 s
+    instrumented build.  So the answer goes through `_derived_from_source` with
+    the name as its subkey, and a refusal is NOT stored: `_derived_from_source`
+    only caches a value that is not None, so a name no extractor finds is
+    re-derived (and re-refused) every time, which is what happened before.
+    """
+    return _derived_from_source("template_kind", src,
+                                lambda: _kind_of(src, name), subkey=name)
+
+
+def _kind_of(src: str, name: str) -> str:
+    """The `KIND_*` for `name` in `src`, or raise. The body of `template_kind`.
+
+    Split out so the memo in `template_kind` wraps ONE call and the refusal
+    stays a `raise` in the ordinary place rather than a sentinel a caller has
+    to know about.
     """
     import elaborate                                # lazy — see the module docstring
     if elaborate.extract_struct_source(src, name) is not None:
@@ -133,9 +247,22 @@ def template_kind(src: str, name: str) -> str:
 
 
 def _template_source(src: str, name: str, kind: str) -> str:
+    """`name`'s own declaration text, read out of `src`.
+
+    The SECOND reader of the extractors `template_kind` above just used, for
+    the same source and the same name, so it is memoized the same way and on
+    the same key's subkey: `instantiate` asks both questions in a row and each
+    ask was a pair of whole-module bracket-depth scans.  A template that is
+    not in the source is not stored either — see `template_kind`'s note — so
+    the refusal below still fires rather than being served from the cache.
+    """
     import elaborate
-    got = (elaborate.extract_struct_source(src, name) if kind == KIND_STRUCT
-           else elaborate.extract_fn_source(src, name))
+    got = _derived_from_source(
+        "_template_source", src,
+        lambda: (elaborate.extract_struct_source(src, name)
+                 if kind == KIND_STRUCT
+                 else elaborate.extract_fn_source(src, name)),
+        subkey=(name, kind))
     if got is None:
         raise MonomorphError(f"no {kind} template {name!r} in this module")
     return got
@@ -308,25 +435,38 @@ def all_instantiation_calls(consumer_src: str) -> dict:
     function is walked with its own bindings
     (`formal/build.py::_names_bound_in`) and each module-level statement with
     the module's own table (`formal/model.py::collect_module_symbols`).
+
+    **Once per source text, not once per imported module.**  The paragraph above
+    removed the re-parse PER MODULE FILTER and left the parse itself once per
+    call, and the call is still made once per imported module
+    (`formal/imports.py::instantiation_demands`) over one unchanged consumer —
+    7 extra full parses of a 271 KB `myinterpreter.py` and 22 each of
+    `std/simd.mojo`, measured.  The answer is a function of the text alone, so
+    it is derived once per distinct text (`_derived_from_source`, whose key and
+    bound are documented above `_DERIVED`) and handed back as a fresh dict of
+    fresh lists on every call.
     """
-    from formal import model as M                  # lazy — cycle
-    from formal.build import _names_bound_in       # lazy — cycle
-    stmts = _consumer_statements(consumer_src)
-    module_level = set(M.collect_module_symbols(stmts) or {})
-    found: dict = {}
-    for st in stmts:
-        values = _names_bound_in(st) \
-            if isinstance(st, F.FunctionDef) else module_level
-        for node in M.iter_nodes(st):
-            if not isinstance(node, F.CallExpr):
-                continue
-            base = _callee_base(node)
-            if base is None:
-                continue
-            args = _bracket_type_args(node.func, values)
-            if args:
-                found.setdefault(base, set()).add(tuple(args))
-    return {k: sorted(v) for k, v in found.items()}
+    def derive():
+        from formal import model as M                  # lazy — cycle
+        from formal.build import _names_bound_in       # lazy — cycle
+        stmts = _consumer_statements(consumer_src)
+        module_level = set(M.collect_module_symbols(stmts) or {})
+        found: dict = {}
+        for st in stmts:
+            values = _names_bound_in(st) \
+                if isinstance(st, F.FunctionDef) else module_level
+            for node in M.iter_nodes(st):
+                if not isinstance(node, F.CallExpr):
+                    continue
+                base = _callee_base(node)
+                if base is None:
+                    continue
+                args = _bracket_type_args(node.func, values)
+                if args:
+                    found.setdefault(base, set()).add(tuple(args))
+        return {k: tuple(sorted(v)) for k, v in found.items()}
+    return {k: list(v) for k, v in _derived_from_source(
+        "all_instantiation_calls", consumer_src, derive).items()}
 
 
 def demands_from_calls(found: dict, templates, own=()) -> dict:
@@ -562,12 +702,70 @@ def _bracket_type_args(sub, values=()) -> list:
     documents it), and a keyword bracket is not read here: binding it positionally
     against a declaration that is a lossy record is what that function's own
     docstring warns against, and an unrecognised item here would be mangled into
-    a name no importer computed.
+    a name no importer computed.  `bracket_items` is that decision, in one place
+    both readers of this bracket now share.
     """
-    if getattr(sub, "attrs", None):
+    spelled = [type_arg_text(i, values) for i in bracket_items(sub)]
+    return spelled if spelled and all(spelled) else []
+
+
+def bracket_items(sub) -> list:
+    """The bracket's ITEMS, a comma list expanded, or [] when there is none.
+
+    The ONE reader of a specialization's bracket, and both of its consumers are
+    here rather than beside the emitter that needs them: `demands` below, which
+    asks whether the items spell concrete TYPE arguments, and
+    `supplied_bracket_args`, which asks what a call site SUPPLIED for a callee
+    with no declaration to bind them against.  Two readings of one bracket is
+    how the two answers come to disagree about `f[a, b](x)` — and the second
+    one is the arm whose disagreement is a wrong value rather than a missing
+    demand, because it becomes leading ARGUMENTS.
+
+    `[]` for a callee that is not a subscript at all (`f(x)`), and for a
+    KEYWORD bracket (`f[a = 1](x)`), which the parser keeps in `attrs` and not
+    in `index`.  The keyword half is not answered here for the reason
+    `_bracket_type_args` gives: binding it needs the callee's declared
+    comptime-parameter names, and a value callee has no declaration — so
+    `model.value_call_keyword_refusal` is what a keyword bracket on one of
+    those is, rather than a positional guess here.
+    """
+    if sub is None or getattr(sub, "attrs", None):
+        return []
+    if not isinstance(sub, F.SubscriptExpr):
         return []
     index = sub.index
-    items = list(index.elements) if isinstance(
+    return list(index.elements) if isinstance(
         index, (F.TupleExpr, F.ListExpr)) else [index]
-    spelled = [type_arg_text(i, values) for i in items]
-    return spelled if spelled and all(spelled) else []
+
+
+def supplied_bracket_args(call) -> list:
+    """`f[a, b](x)` → `[a, b]`; `f(x)` → `[]`.  What the brackets SUPPLIED.
+
+    The bracket-to-arguments half of a specialization, for the callee whose
+    declaration this build does not have: a call through a FUNCTION VALUE, where
+    the word being called is the only callee there is and nothing declares its
+    comptime parameters.  On both architectures a comptime parameter is an
+    ordinary LEADING argument (`comptime.param_names` says so), so the items
+    the source wrote in brackets are the arguments it expects first, in bracket
+    order, evaluated in the CALLER's scope — which is what makes
+    `workgroup_function[tile_size](offset)` and `workgroup_function(tile_size,
+    offset)` one lowering rather than two.
+
+    **Why it is not `comptime.specialization_args`, which is the reader for
+    every other specialization on this path.**  That one binds the items to a
+    DECLARED list: it pads a short bracket with 0 and truncates a long one to
+    the declaration's length, because a named generic's parameter list is a
+    fact both ends hold.  Here there is no list, so there is nothing to pad
+    against and nothing may be truncated — the source wrote some arguments, and
+    they are passed, because the alternative is inventing an arity for a
+    function this build cannot read.  `f[3](x)` therefore reaches the callee as
+    `f(3, x)` and `f(x)` as `f(x)`; a callee that wanted a comptime parameter
+    the bracket did not supply is a program whose two ends disagree, and it
+    reads whatever the register held, exactly as a direct call to a generic
+    with too few arguments does.
+
+    Also why it is not the parser's own `index`: a comma list is several
+    arguments, and this is the place the bracket's meaning is known, so the
+    expansion happens here (`bracket_items`) rather than in each reader.
+    """
+    return bracket_items(getattr(call, "func", None))

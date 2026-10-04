@@ -538,6 +538,285 @@ class TestBitwiseNotIsNotLogicalNot(unittest.TestCase):
             "so a general ORN is unmodelled even though `MVN` is not")
 
 
+TERNARY_PROGRAM = "def main(n):\n    return 1 if n > 3 else 0\n"
+
+
+class TestAConditionalExpressionIsAValue(unittest.TestCase):
+    """`a if c else b`: the model's two renderings, the AST's refusal, and the
+    machine half's own word for what it cannot step.
+
+    A conditional expression is the construct this file's sibling
+    `bugs/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`
+    is about, and it is here rather than in that file because the subject is the
+    same one this file is about: two renderings of a source construct that have
+    to agree, and what happens when one of them cannot exist.
+
+    Four things are pinned, and the last is the one that keeps the other three
+    honest:
+
+      * the UNTYPED model selects between the two words, at the condition's own
+        signedness -- the comparison goes through `_cmp_go`, so `n > 3` on a
+        signed `n` is the sign-flipped word order and not the unsigned one;
+      * a NON-comparison condition is a test against zero, because Python's
+        conditional expression tests truthiness (`_emit_truthy_word`'s rule on
+        both backends) and not equality with zero;
+      * the TYPED model carries the SELECTED word at the arms' common type, which
+        is the one thing the typed path adds and the reason it cannot be the
+        untyped term;
+      * the arm64 refusal names the instruction it cannot step. The model is
+        right and the machine half is not, and a reader who is sent to "this
+        function shape" has nothing to look at.
+    """
+
+    def test_the_untyped_model_selects_between_the_two_words(self):
+        got = _models(TERNARY_PROGRAM, "main")
+        self.assertIn("then (UInt64.ofNat 1) else (UInt64.ofNat 0)", got,
+                      f"`1 if n > 3 else 0` does not model as a selection "
+                      f"between 1 and 0:\n{got}")
+        # The SIGN-FLIPPED comparison is the point: an unsigned `n > 3` would
+        # be a model of a different program for every negative `n`, and this is
+        # the same term `_cmp_go` hands the `if` this expression is nested in.
+        self.assertIn("(n ^^^ (0x8000000000000000 : UInt64)) > "
+                      "((UInt64.ofNat 3) ^^^ (0x8000000000000000 : UInt64))",
+                      got,
+                      f"the condition is not rendered at its own signedness:\n"
+                      f"{got}")
+
+    def test_a_truthy_condition_is_a_test_against_zero(self):
+        got = _models("def main(n):\n    return 1 if n else 0\n", "main")
+        self.assertIn("if (n ≠ 0) then (UInt64.ofNat 1) else (UInt64.ofNat 0)",
+                      got,
+                      f"`1 if n else 0` tests equality with zero instead of "
+                      f"truthiness, so it is wrong for every `n` that is neither "
+                      f"0 nor 1:\n{got}")
+
+    def test_a_nested_conditional_nests(self):
+        got = _models("def main(n):\n"
+                      "    return 2 if n > 9 else (5 if n > 3 else 7)\n",
+                      "main")
+        self.assertEqual(got.count("if (") , 2,
+                         f"a nested conditional expression is not two nested "
+                         f"selections:\n{got}")
+        self.assertIn("else (if ", got,
+                      f"the inner selection is not the else arm:\n{got}")
+
+    def test_the_typed_model_carries_the_selection_at_the_arms_common_type(self):
+        """`Int8` and `Int32` select into a word kept at the common type.
+
+        This is the typed model's own addition: the machine carries the value of
+        a conditional expression at the operands' type, so a selection of two
+        narrow words into a wide one has to be re-widened by the same
+        `_t_wrap` every arithmetic operator in `_expr_go_t` uses. Without it the
+        model computes a number the register does not hold.
+        """
+        got = _typed_model("def f(a: Int8, b: Int32) -> Int32:\n"
+                           "    return a if a > b else b\n", "f")
+        self.assertIn("(t32s (if ", got,
+                      f"the selected word is not carried at the arms' common "
+                      f"type:\n{got}")
+
+    def test_the_ast_refuses_rather_than_fabricating_a_zero(self):
+        """`MojoExpr` has no conditional constructor, and the AST must SAY so.
+
+        The fall-through this replaces returned `MojoExpr.int 0`, which is not a
+        gap in the proof but a bridge that agrees with the model about a
+        DIFFERENT program: the emitted file carried
+        `def ast := … [MojoStmt.return (MojoExpr.int 0)]` under a comment
+        reading "mirrors source code" for a source that says `1 if n > 3 else
+        0`. Raising is what lets the caller DROP the bridge, which is the right
+        answer here — the model's half of the two layers is real, so refusing
+        the whole proof would be refusing it for the AST's missing constructor.
+        """
+        import formal.arm64_proof_gen as G
+        from formal.build import parse_module
+        import fire_compiler as F
+
+        fns = [f for f in parse_module(TERNARY_PROGRAM)
+               if isinstance(f, F.FunctionDef)]
+        with self.assertRaises(NotImplementedError) as caught:
+            G._expr_ast(fns[0].body[0].value)
+        self.assertIn("conditional form", str(caught.exception),
+                      "the refusal does not name the limit it is refusing for")
+
+    def test_the_bridge_is_omitted_with_the_reason_named(self):
+        """x86-64 can carry the program, so the bridge is dropped, not refused.
+
+        This is the end-to-end statement of the previous row: the file has a
+        REAL model, no `ast` value at all, and a note naming the gap. The
+        assertion that matters is the middle one — `def ast` must be absent,
+        because the alternative is a fabricated mirror of the source sitting in
+        the file under a comment that says it mirrors the source.
+        """
+        tmp = tempfile.mkdtemp(prefix="ternary-")
+        try:
+            for arch in ("x86_64",):
+                path, err = _generate(tmp, TERNARY_PROGRAM, "tern_" + arch,
+                                      arch=arch)
+                self.assertIsNone(err, f"{arch}: {err}")
+                text = _read(path)
+                self.assertIn("AST bridge omitted", text,
+                              f"{arch}: the file does not say the bridge is "
+                              f"omitted:\n{text[:400]}")
+                self.assertIn("conditional form", text,
+                              f"{arch}: the note does not name the gap")
+                self.assertNotIn("def ast :", text,
+                                 f"{arch}: an `ast` value was emitted anyway, so "
+                                 f"the bridge is not really omitted")
+                self.assertIn("then (UInt64.ofNat 1) else (UInt64.ofNat 0)",
+                              text,
+                              f"{arch}: the model is not the selection, so the "
+                              f"generator fell back to a placeholder")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_the_arm64_refusal_names_the_select_it_cannot_step(self):
+        """The machine half's own word for its gap, not "this function shape".
+
+        `a if c else b` with pure operands is one `CSEL` on arm64, `arm64_step`
+        has no branch for it, `_STEP_CONDS` deliberately has no row for it, and
+        a block's runs certificate cannot be built — so the program gets no
+        proof. That is unchanged; what changed is that the message names the
+        instruction and the bug doc, which is the difference between a reader
+        knowing where the wall is and re-deriving it.
+        """
+        import struct
+        import formal.arm64_proof_gen as G
+        from formal.arm64 import encode_csel_xd_xm_cond
+
+        word = struct.unpack("<I", encode_csel_xd_xm_cond(0, 1, 2, "ne"))[0]
+        self.assertEqual((word >> 21) & 0x7ff, 0x4d4,
+                         f"`encode_csel_xd_xm_cond(0, 1, 2, \"ne\")` is "
+                         f"{word:#010x}, whose bits 31..21 are "
+                         f"{bin((word >> 21) & 0x7ff)} and not the CSEL field "
+                         f"the refusal's diagnosis reads — so the refusal names "
+                         f"an instruction the image does not contain")
+        self.assertIsNone(G._step_branch_index(word),
+                          "`arm64_step` grew a CSEL branch: the refusal message "
+                          "is no longer the reason this program has no proof, "
+                          "and `bugs/FORMAL_arm64_csel_is_not_modelled_so_the_"
+                          "step_table_cannot_claim_it.md` should be re-read "
+                          "before this row is deleted")
+
+        tmp = tempfile.mkdtemp(prefix="ternary-arm64-")
+        try:
+            path, err = _generate(tmp, TERNARY_PROGRAM, "tern_arm64",
+                                  arch="arm64")
+            self.assertIsNone(path, "arm64 now generates a proof for this "
+                                    "program, so the rows above are no longer "
+                                    "the whole story — re-measure them")
+            self.assertIn("CSEL", err,
+                          f"the refusal does not name the instruction:\n{err}")
+            self.assertIn("FORMAL_arm64_csel_is_not_modelled", err,
+                          f"the refusal does not point at the measurement:\n"
+                          f"{err}")
+            self.assertIn("_ternary_go", err,
+                          f"the refusal does not say the model states it:\n{err}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_a_spill_is_not_attributed_to_the_conditional_expression(self):
+        """The other unmodelled word is a spill, and it says so.
+
+        `STUR`/`LDUR` is the 9-bit-displacement form a frame access at a
+        NEGATIVE offset needs, and the step table has arms for the scaled
+        `STR`/`LDR` and not for these — so a function with enough spilled
+        locals to reach below the entry `sp` gets no arm64 proof either, and has
+        nothing to do with a conditional expression. This row is why the refusal
+        names the instruction off its encoding instead of assuming the one
+        construct this file is about: a message that blamed the ternary for a
+        spill would send a reader to fix the wrong thing.
+
+        Measured: twelve spilled locals is enough, and the words are
+        `stur x0, [x29, #-0x58]` (`0xf81a83a0`) and `ldur` of the same shape.
+        """
+        locals_12 = "\n".join(f"    v{i} = {i} + n" for i in range(12))
+        spill = ("def main(n):\n" + locals_12 + "\n    return "
+                 + " + ".join(f"v{i}" for i in range(12)) + "\n")
+        import formal.arm64_proof_gen as G
+        import struct
+        from formal.arm64 import encode_stur_xt_xn_imm, encode_ldur_xt_xn_imm
+        for enc, want in ((encode_stur_xt_xn_imm, "STUR"),
+                          (encode_ldur_xt_xn_imm, "LDUR")):
+            word = struct.unpack("<I", enc(0, 29, -0x58))[0]
+            self.assertEqual(G._unmodelled_instruction(word)[0], want,
+                             f"{want} is not what the refusal names for "
+                             f"{word:#010x}")
+
+        tmp = tempfile.mkdtemp(prefix="spill-arm64-")
+        try:
+            path, err = _generate(tmp, spill, "spill_arm64", arch="arm64")
+            self.assertIsNone(path, "a spilling function now generates an arm64 "
+                                    "proof, so `bugs/FORMAL_arm64_instruction_"
+                                    "coverage.md`'s LDUR/STUR row is stale and "
+                                    "this row should be re-measured")
+            self.assertNotIn("_ternary_go", err,
+                             f"a spill is being blamed on the conditional "
+                             f"expression:\n{err}")
+            self.assertIn("STUR", err,
+                          f"the refusal does not name the spill:\n{err}")
+            self.assertIn("NEGATIVE offset", err,
+                          f"the refusal does not say why the emitter reached "
+                          f"for the unscaled form:\n{err}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestTheConditionalExpressionModelTypechecks(unittest.TestCase):
+    """The teeth for the row above: the file with a REAL ternary model checks.
+
+    The text rows can all pass against a model nothing can be proved about —
+    that is the failure this repository's own `test_formal_run.py` docstring
+    records ("images dyld refused to load … every one of those produced a
+    *correct proof* about code that could not run"). So this asks Lean.
+
+    x86-64 only, and the reason is the arm64 wall rather than a preference:
+    `a if c else b` is one `CSEL` there and `arm64_step` has no branch for it,
+    so arm64 refuses the program (`bugs/FORMAL_arm64_csel_is_not_modelled_so_
+    the_step_table_cannot_claim_it.md`). What this pins on x86-64 is the half
+    that IS landable now — that the model a conditional expression produces is
+    a term the generated file accepts, that the bridge really is absent rather
+    than present and unproved, and that the two designed trust boundaries are the
+    only holes.
+
+    Skipped, loudly, without Lean or `lib/ProofLib.olean`.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        lean = _lean()
+        if not lean or not os.path.isfile(
+                os.path.join(HERE, "lib", "ProofLib.olean")):
+            raise unittest.SkipTest(
+                "no Lean / no lib/ProofLib.olean: skipping the ternary "
+                "typecheck. Run `python3 tools/suite.py prooflib` first.")
+        from formal.lean import check_proof_cached
+        cls.tmp = tempfile.mkdtemp(prefix="ternary-lean-")
+        path, err = _generate(cls.tmp, TERNARY_PROGRAM, "tern_x86_64",
+                              arch="x86_64")
+        cls.error = err
+        if err:
+            cls.ok, cls.detail, cls.n = False, err, 0
+            return
+        ok, detail, _cached, n = check_proof_cached(path, repo_root=HERE)
+        cls.ok, cls.detail, cls.n = ok, detail, n
+
+    @classmethod
+    def tearDownClass(cls):
+        if hasattr(cls, "tmp"):
+            shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_the_file_with_a_conditional_expression_model_typechecks(self):
+        self.assertTrue(self.ok, f"x86-64: {self.detail}")
+
+    def test_the_only_holes_are_the_two_designed_trust_boundaries(self):
+        self.assertEqual(self.n, 2,
+                         f"the generated file admits {self.n} `sorry`; the "
+                         f"x86-64 generator's two designed boundaries (the "
+                         f"AST/model conformance theorem and the end-to-end "
+                         f"one) are the only two this project admits, so a "
+                         f"third is a hole nobody designed")
+
+
 class TestBitwiseNotTheRunTestTypechecks(unittest.TestCase):
     """The teeth: `~n`'s run test `machine(n) = mojo n`, on BOTH backends.
 

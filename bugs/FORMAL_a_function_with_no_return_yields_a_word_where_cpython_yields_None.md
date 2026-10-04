@@ -6,9 +6,21 @@ when it is unclassified and is not a container") together with an epilogue that
 does not write the return register (`formal/arm64_codegen.py::_emit_epilogue`
 emits the scratch teardown, the frame restore and `RET`, and nothing else), so
 nothing in the pair knows the callee returns nothing.
-**Status: NOT FIXED. Minimised, measured on both architectures, and NOT a patch
-— the fix is a decision about what this path does with `None`, and it has a
-blast radius this session did not have the budget to measure (§4).**
+**Status: NOT FIXED, and §4 step 0 is now DONE — with a number ten times §0's,
+which moves the recommendation against the refusal (§0a).** The fix remains a
+decision about what this path does with `None`; the census that was the missing
+input is `tools/formal_returnless_census.py`, and it says direction (a) as §2
+states it would reach **510 call sites across 22 files, 456 of them in
+`formal/hostmods/argparse.mojo`** — a host module the gate builds today. So
+§4's steps 1 and 4 (the two counts, before and after) are now the decisive
+measurement and they are the integrator's, not a worker's.**
+
+**Re-measured 2026-10-03 (`work/formal18-1`): §2's objection to direction (a) —
+"the blast radius is unmeasured" — is now measured, and it came out the other
+way. §0's census said "much narrower than §2 feared"; §0a says ten times wider,
+because §0's number was a floor produced by name-keying and by counting one
+position (`argument of a call`) out of seven. §2's conclusion is unchanged and
+its reason is now a measurement rather than an argument.
 
 Found 2026-10-03 on `work/formal17-fuzz-continue-a` by `tools/formal_fuzz.py`,
 on the `strings` mix, seeds 0-3 — and, worth saying because it is unusual,
@@ -19,6 +31,130 @@ statements, and a helper whose body is left with no `return` is a program with a
 different defect in it). The reduced program is the minimal one and it is below.
 The full program and the reduced program are both in
 `.tmp/fz/sweep/strings/findings.json` in the worktree it was found in.
+
+---
+
+## 0. The census §2 asked for, over the repository AND the stdlib
+
+§4's step 1 is "measure `compile_stdlib.py`'s `FAILED: N (E expected, U
+unexpected)` and `build_stdlib_dylib.py`'s `skip <module>:` count". Those are two
+hours and two gigabytes and they belong to the integrator. What can be measured
+without either is the question the refusal would actually be asked about: **how
+many call sites in this corpus consume the value of a function that has no
+`return`?** A census over `fire_compiler.Parser`'s own AST, over this worktree's
+`*.mojo` and all 252 under `../new-modular/Mojo/stdlib/std`:
+
+| | |
+|---|---|
+| files scanned | every `*.mojo` under `.` and `../new-modular/Mojo/stdlib/std` |
+| functions whose body has no value-returning `return` | **1586** |
+| call sites of one, from the same module | **682** |
+| …of which the call's VALUE is consumed (it is an argument of another call) | **48**, in **4 files** |
+
+**And every one of those 48 is an artefact of the census being NAME-keyed.**
+The four files are `utils/coord.mojo`, `testing/prop/strategy/string_strategy.mojo`,
+`itertools/itertools.mojo` and `_gpu/host/info.mojo`, and the call sites are
+`self.value()`, `self._flatten()`, `self.normalize_target_arch()` — calls through
+a receiver. `coord.mojo` declares `def value` **three times** (lines 59, 150,
+395) and `info.mojo` declares `normalize_target_arch` twice (214, 224); at least
+one definition of each RETURNS a value, and a `{name: has-no-return}` set cannot
+tell which. That is the imprecision every by-name table in `formal/build.py`
+already refuses to have ("a name whose definitions disagree about whether they
+return a frame is absent from it"), and a census that repeats it answers a
+question nobody asked.
+
+**So: zero free-function call sites in the whole corpus consume the value of a
+return-less function, and the only rows a syntactic census reports are
+overloaded method names.** That is a strong result for direction (a) and it is
+not sufficient on its own, for two reasons the reader should not skip:
+
+  * **it is syntactic and same-module.** A call through a receiver, and a call
+    into an IMPORTED module, are both outside it, and a method's value being
+    consumed is exactly the case the doc's own §1 shape is (`self.value()` is
+    how a `DType`-like accessor reads). The right census keys on the resolved
+    DEFINITION (`formal/build.py`'s `_name_defs`), not on the name.
+  * **`compile_stdlib.py`'s `U` count is a different question.** It counts files
+    that stop compiling, and the four files above are inside the stdlib the gate
+    builds. Whether each of them is a genuinely `None`-printing row is still the
+    question §4's step 4 asks, and it is answerable only by the two counts.
+
+The census's script is `.tmp/census_none.py` in the worktree that wrote this
+section, and it is deliberately left in `.tmp` rather than promoted: a census
+whose own imprecision is this large is not a tool, it is a measurement with a
+footnote.
+
+## 0a. §0's census, redone the way §4 asked for it: 510 candidate sites, not 48
+
+`bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
+§4 step 0 asks for the census keyed on the resolved DEFINITION, including calls
+through a receiver and into an imported module, and calls §0's number "a floor,
+not the count". **It is now a census, and it is a tool rather than a script left
+in `.tmp`**: `tools/formal_returnless_census.py`, over this repository,
+`formal/hostmods/` and all 252 files of `../new-modular/Mojo/stdlib/std`
+(`python3 tools/memslot.py --gb 8 --label rlc -- python3
+tools/formal_returnless_census.py`).
+
+```console
+$ python3 tools/formal_returnless_census.py
+definitions: 6250   of which return nothing: 1827   structs (construction sites, excluded): 348
+names: 3030   decided: 2931   undecided (definitions disagree): 99
+call sites whose value is consumed, by what the callee is:
+   callee returns something                8786
+   callee's name is undecided              7499
+   CANDIDATE (same file)                    510
+   CANDIDATE (same name, other file)         37
+
+files with at least one same-file candidate: 22   candidate sites: 510
+     456  formal/hostmods/argparse.mojo
+       7  bootstrap_test_stress.mojo
+       6  ../new-modular/Mojo/stdlib/std/math/math.mojo
+       6  ../new-modular/Mojo/stdlib/std/simd.mojo
+       5  formal/hostmods/re.mojo
+       …
+```
+
+Three numbers, and they change §2's recommendation:
+
+| | §0's census | this one |
+|---|---|---|
+| functions that return nothing | 1586 | **1827** (and it excludes generators and coroutines, whose "return value" is the object) |
+| call sites whose VALUE is consumed | **48**, in 4 files, all of them artefacts of name-keying | **510** same-file sites across **22 files**, plus 37 more where only the NAME matches |
+| of those, the value is the function's own RESULT | not counted separately | **81** |
+| …assigned to a local (the weakest kind: no liveness pass) | — | **203** |
+| …passed as another call's argument (§0's shape) | 48 | **78** |
+| …used as an operand (`==`, `<`, `>`, `+`, …) | — | **142** |
+
+**The direction (a) refusal is not free, and §2's "a NEW refusal, and ordinary
+Python" is right for a reason nobody had measured.** 456 of the 510 are in ONE
+file — `formal/hostmods/argparse.mojo`, whose `_fld`, `_cp`, `_alpha_index` and
+`_name_ptr` are helpers that mutate and return nothing, and whose
+`x = _fld(rec, 1)` / `return _cp(src)` shapes are exactly the case. That file is
+a host module the gate compiles, so a refusal asked at every consumed value
+would move `build_stdlib_dylib.py`'s `skip <module>:` count, which is the one
+measurement CLAUDE.md says must not move silently.
+
+**And the 203 `assigned` rows are the weakest, for a reason the instrument says
+out loud**: nothing here does a liveness pass, so a local that is assigned a
+return-less call and never read is not an observable divergence at all. The 81
+`returned` rows are the ones with no such escape — CPython's answer there is
+`None` and this path's is a word — and the 142 rows that use the value as an
+OPERAND are a different defect again (CPython raises `TypeError`; this path
+computes with a word).
+
+**What the census deliberately does not do.** A same-name function in an
+unrelated module is still a candidate, and a name whose definitions disagree
+about whether they return is UNDECIDED and reported in its own bucket with both
+sites — which is `formal/build.py`'s existing rule ("a name whose definitions
+disagree about whether they return a frame is absent from it") and is what §0's
+census got wrong. 99 of 3030 names are undecided here, and `add`, `chain`,
+`gcd`, `count`, `__enter__` and `__exit__` are among them: a refusal cannot be
+asked about those at all without resolving the name first.
+
+So the census answers §4 step 0 and it makes step 1 (the two gate counts) the
+decisive measurement rather than a formality: **with 510 candidate sites, 456 of
+them in one host module that builds today, direction (a) as §2 states it is
+predicted to regress the build, and §4 step 4 would answer (b).** Which is the
+same conclusion §2 reached by argument and can now reach by number.
 
 ## 1. What is wrong
 
@@ -131,6 +267,14 @@ holds, and because a refusal is a sentence a reader can act on where `0` is not.
 
 ## 4. The exact next step
 
+0. ~~**Re-do §0's census keyed on the resolved DEFINITION.**~~ **DONE**
+   (§0a): `tools/formal_returnless_census.py`, over the corpus, keyed on every
+   definition of every name with a name UNDECIDED when its definitions disagree,
+   counting all seven consuming positions rather than one, and excluding
+   generators, coroutines and struct constructions. **510 same-file candidate
+   sites in 22 files, 456 of them in `formal/hostmods/argparse.mojo`.** The
+   difference from "direction (a) reaches four stdlib files" and "direction (a)
+   reaches none" is 456 rows in a file the gate builds.
 1. Measure `compile_stdlib.py`'s `FAILED: N (E expected, U unexpected)` and
    `build_stdlib_dylib.py`'s `skip <module>:` count on master, and keep them.
 2. Add to `formal/model.py` a refusal with the shape of

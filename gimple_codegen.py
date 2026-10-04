@@ -2928,6 +2928,27 @@ class GimpleGen:
         # no call sites and froze int64_t: two different overload suffixes
         # for one symbol — "implicit declaration of function" at g++).
         self._home_def_param_types: dict[str, list] = {}  # _pair_key(sanitized-home-qualifier, fn-name) -> [param ctypes]
+        # _pair_key(sanitized home-module qualifier, fn name) -> return ctype —
+        # the RETURN-type twin of the store just added, and written for the same
+        # reason with the same key, writer discipline and reader order, because
+        # `func_return_types` is keyed by the BARE name and a whole-translation-
+        # unit closure routinely has several modules each defining a function of
+        # one bare name with DIFFERENT return types (`mojo/middle/offload.py`'s
+        # `_mentions(...) -> bool` against `mojo/backend_gimple/elab_intu.py`'s
+        # unannotated `_mentions(ann)` -> `MojoList *`). One bare slot holds one
+        # arbitrary module's answer, so the other module's call sites read the
+        # wrong type: `assignment to 'MojoList *' from 'int' makes pointer from
+        # integer without a cast`. Only a unit that DEFINES the name writes here
+        # (`_record_home_def_return_type`), only `_func_csym` reads it, and it
+        # reads it keyed by the very qualifier that call site built its symbol
+        # from — so both halves of one mangled symbol name the same definition.
+        # `_quick_type`'s bare read was the second reader (return-type
+        # INFERENCE compounds: a forwarder's own return type is inferred from
+        # the callee), and it reaches this store through
+        # `_func_return_type_for_call` below. Regression coverage:
+        # `test_gimple.py`'s
+        # `two_modules_one_same_named_function_keep_their_own_return_types`.
+        self._home_def_return_types: dict[str, str] = {}
         # module name -> (path, source_text, parsed stmts), parsed once.
         self._imported_src_cache: dict = {}
         # Directories added via a literal `sys.path.insert(N, "literal")` seen
@@ -4306,6 +4327,31 @@ class GimpleGen:
         return gfn._overload_suffix(self, bare_name)
     def _note_own_func_home(self, bare_name: str, module_name: str, record_scope: bool=True) -> None:
         return gfn._note_own_func_home(self, bare_name, module_name, record_scope)
+    def _func_return_type_for_call(self, bare_name: str, default: str = 'int64_t') -> str:
+        """`func_return_types[bare_name]`, unless the module this reference
+        resolves to PUBLISHED its own answer for that definition, which wins.
+
+        `func_return_types` is keyed by the BARE name and a whole-translation-
+        unit closure routinely has several modules defining one bare name with
+        different return types, so its single slot holds one arbitrary module's
+        answer. An INFERENCE reader is as exposed to that as emission is, and
+        the exposure compounds: `def found(x): return _mentions(x, 'b')` infers
+        `found`'s own return type from whatever `_mentions` the shared slot
+        holds, so the wrong answer does not stay confined to the colliding
+        pair — it propagates into every function that forwards the call. The
+        per-definition store (`_home_def_return_types`) is what stops it, and
+        this is the one place a caller with no emitted symbol in hand can reach
+        it.
+
+        Reads the store through `_func_home_qualifier`, which never raises: an
+        ambiguous reference has no definition of its own to consult, so `''` is
+        the honest "no answer" and the bare slot remains the fallback.
+        """
+        _hit = gfn._home_def_return_type(
+            self, gfn._func_home_qualifier(self, bare_name), bare_name)
+        if _hit is not None:
+            return _hit
+        return self.func_return_types.get(bare_name, default)
     def _push_import_scope(self) -> dict:
         return gfn._push_import_scope(self)
     def _pop_import_scope(self) -> None:

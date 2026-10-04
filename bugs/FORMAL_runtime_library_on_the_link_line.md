@@ -1,5 +1,31 @@
 # FORMAL_runtime_library_on_the_link_line: the phase-2 payoff is landed and the header gap is CLOSED; two measured ceilings are open
 
+**Re-measured 2026-10-04 (`work/formal19-4`): the "what this does not do" bullet
+about proofs was STALE, and its replacement is a different doc's subject — so the
+two ceilings this document names are still the two ceilings, and the honest next
+step for the proof half now names an owner.** Measured, arm64,
+`fire.py build --formal` (i.e. `prove=True`) on a program whose only call is a
+linked entry point:
+
+    printf("%d\n", mojo_strlen("hello"))
+
+    runtime dylib: export table: 561 of 562 runtime entry points advertised
+    build: universal theorem: 2 calls this walk cannot follow
+      (0x1000004b8 -> 0x100000500 (opaque), 0x1000004d4 -> 0x10000050c
+      (opaque)), and ONE halt address cannot discharge them. … The semantic
+      model is emitted and correct for all of them; what is missing is the
+      machine half.  Raised here rather than left to the walk, which reported
+      this as a recursion problem.
+
+That is NOT the `ValueError: unsupported: recursion argument bound` the bullet
+quotes, and the bullet's own parenthetical already says the walk "reports this as
+a recursion problem" — the walk has been fixed to refuse by name and this
+document was not updated with it. The wall is now the SECOND-call case, which is
+`bugs/FORMAL_ast_bridge_carries_one_argument_per_call.md` (and it is one call,
+so `printf` contributes one and `mojo_strlen` the other). So: the link line is
+not what stands between a linked `mojo_*` call and a proof, and whoever takes
+that next should start from that doc rather than from this bullet.
+
 FORMAL.md phase 2 made a `mojo_*` call *decidable* — `model.gimple_runtime_callable`
 answers, from the runtime header's own types, whether a formal image could make
 one, and the answer had been "no, and for one reason: the library" for every one
@@ -545,14 +571,15 @@ change and not a separate cleanup. 219 → 207.
 
 ## What this does not do
 
-- **It is not a proof.** `formal/arm64_proof_gen.py` still raises `ValueError:
-  unsupported: recursion argument bound` for ANY program containing a call
-  (FORMAL.md §11.1, agent [2]'s scope), so `fire.py build --formal` on a
-  `mojo_*` call reaches the binary and stops at the proof step.
-  `test_formal_runtime_link.py` therefore runs `prove=False` throughout, and says
-  so in its own docstring rather than asserting nothing quietly. When [2] lands,
-  a linked `mojo_*` call will generate the same `extern_<sym>_step : True := by
-  trivial` as any other extern — which is phase 3's job, not this one's.
+- **It is not a proof, and the reason has MOVED** (re-measured at the head of
+  this file, 2026-10-04): it used to be `ValueError: unsupported: recursion
+  argument bound` for ANY program containing a call, and it is now the
+  second-call refusal the walk raises by name —
+  "2 calls this walk cannot follow … ONE halt address cannot discharge them" —
+  which is `bugs/FORMAL_ast_bridge_carries_one_argument_per_call.md`. The link
+  line is not the wall. `test_formal_runtime_link.py` still runs `prove=False`
+  throughout, and still says so in its own docstring rather than asserting
+  nothing quietly; that remains true and its reason is now the one above.
 - **The executable proof does not model the library.** `generate_arm64_proof`
   takes `(code, info)` and no dependency list, so the emitted proof is the same
   modulo the moved entry offset whether or not the library is there.

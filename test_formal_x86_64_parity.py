@@ -1317,6 +1317,96 @@ CASES = [
      "        1 if -4 < 17 else 0,\n"
      "        1 if (a - b) < a else 0))\n"
      "    return 0\n"),
+    # ── `int(s)` / `int(s, base)`: THE PARSE, ON BOTH MACHINES ──
+    #
+    # `test_formal_run.py`'s `INT_PARSE_CASES` pins the same five programs, and
+    # it pins them through `run_case`, which builds THE HOST'S ARCHITECTURE for
+    # an answered case — so on an arm64 host they were arm64 rows, and x86-64's
+    # half of the parse was never checked by anything.  It was refused: the
+    # lowering ended in two identical `self.asm.label(endl)` emits, and the
+    # assembler's own duplicate-label check turned that into
+    #
+    #     build: internal: label 'main_ip1_end' is defined twice, at 0x… and at 0x…
+    #
+    # which `formal_fuzz.py` classified as a REFUSAL — a construct with no
+    # representation — rather than as the internal error it is.  Measured on
+    # `print(int("12"))`: arm64 printed 12, x86-64 refused, exit 0 on one side
+    # and a build failure on the other, and nothing in the suite was red.
+    #
+    # So these five are HERE, where a case runs on both machines or not at all.
+    # `int_parse_of_a_string_parameter` is the shape the label counter has to
+    # survive: the parse is inside a CALLEE, so its end label is `parse_ip1_end`
+    # and a counter that was per-program rather than per-function would collide
+    # with the caller's own.
+    ("int_parse_of_a_decimal_string",
+     "def main():\n"
+     "    printf(\"%d %d %d %d\", int(\"41\"), int(\"0\"), int(\"-7\"),"
+     " int(\"  41  \"))\n"
+     "    return 0\n",
+     "import sys\n\n"
+     "def main():\n"
+     "    sys.stdout.write(\"%d %d %d %d\" % (int(\"41\"), int(\"0\"),"
+     " int(\"-7\"), int(\"  41  \")))\n"
+     "    return 0\n"),
+    ("int_parse_with_a_stated_base",
+     "def main():\n"
+     "    printf(\"%d %d %d %d %d\", int(\"41\", 10), int(\"ff\", 16),"
+     " int(\"101010\", 2), int(\"777\", 8), int(\"+7\", 10))\n"
+     "    return 0\n",
+     "import sys\n\n"
+     "def main():\n"
+     "    sys.stdout.write(\"%d %d %d %d %d\" % (int(\"41\", 10),"
+     " int(\"ff\", 16), int(\"101010\", 2), int(\"777\", 8),"
+     " int(\"+7\", 10)))\n"
+     "    return 0\n"),
+    # The `0x` PREFIX under an explicit 16, which `strtoll` reads and which a
+    # lowering that applied the base twice would not.
+    ("int_parse_in_base_sixteen_reads_the_0x_prefix",
+     "def main():\n"
+     "    printf(\"%d %d %d\", int(\"0x29\", 16), int(\"FF\", 16), int(\"0xff\", 16))\n"
+     "    return 0\n",
+     "import sys\n\n"
+     "def main():\n"
+     "    sys.stdout.write(\"%d %d %d\" % (int(\"0x29\", 16), int(\"FF\", 16),"
+     " int(\"0xff\", 16)))\n"
+     "    return 0\n"),
+    # Through a PARAMETER, which is the shape a real caller has and the one the
+    # evidence test turns on: an annotated `String` parameter is positively
+    # text, and an undecided operand keeps the number conversion.
+    ("int_parse_of_a_string_parameter",
+     "def parse(s: String) -> Int:\n"
+     "    return int(s)\n"
+     "def main():\n"
+     "    printf(\"%d %d\", parse(\"41\"), parse(\"-123\"))\n"
+     "    return 0\n",
+     "import sys\n\n"
+     "def parse(s: str) -> int:\n"
+     "    return int(s)\n"
+     "def main():\n"
+     "    sys.stdout.write(\"%d %d\" % (parse(\"41\"), parse(\"-123\")))\n"
+     "    return 0\n"),
+    # …and the CONTROL, on both machines: `int(n)` for a NUMBER is still the
+    # number conversion, which is what `model.int_parse_lowering`'s permissive
+    # `None` is for.  A parse applied to a number would turn every numeric
+    # `int(x)` in the corpus into a parse of digits.
+    ("int_parse_of_a_number_is_still_a_conversion",
+     "def widen(n: Int) -> Int:\n"
+     "    var v = int(n)\n"
+     "    var w = Int32(n)\n"
+     "    printf(\"%d %d\", v, w)\n"
+     "    return 0\n"
+     "def main():\n"
+     "    widen(300)\n"
+     "    return 0\n",
+     "import sys\n\n"
+     "def widen(n: int) -> int:\n"
+     "    v = int(n)\n"
+     "    w = int(n)\n"
+     "    sys.stdout.write(\"%d %d\" % (v, w))\n"
+     "    return 0\n"
+     "def main():\n"
+     "    widen(300)\n"
+     "    return 0\n"),
 ]
 
 

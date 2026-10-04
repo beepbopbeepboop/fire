@@ -194,6 +194,14 @@ _FORMS = {
     "alu_ri32:and": ("x86_step_and_ri32", False,
                      ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
                       "rm"]),
+    # `sub r64, imm32` on a GENERAL register: the same encoding as `add` with
+    # digit 5 instead of 0, so the same side-condition list, and the only member
+    # of this family whose flags come from `x86_flags_sub` AND write the result
+    # back (`cmp` is the other, and it discards it).  The backend emits it for
+    # the stack-floor guard's budget subtraction in every prologue.
+    "alu_ri32:sub_reg": ("x86_step_sub_ri32", False,
+                         ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
+                          "rm"]),
     "alu_ri8:cmp": ("x86_step_cmp_ri8", False,
                     ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
                      "rm"]),
@@ -281,6 +289,21 @@ _FORMS = {
     "lea_r64_rm64_disp32": ("x86_step_lea_rm64_disp32", False,
                             ["rip", "b0", "b1", "b2", "disp32", "rex", "w",
                              "mod", "rm", "rm_ne", "reg", "dst", "dst_lt"]),
+    # The RIP-relative mode of the same instruction: `mod = 00` with `rm = 101`,
+    # where the r/m field is not a register but the instruction pointer, so the
+    # displacement counts from the END of the instruction and there is no `rm`
+    # argument to supply.  It is a separate row rather than another mode of the
+    # one above for the reason `_shapes`' own comment gives: a name that does not
+    # say which mode it is is how an unmapped shape used to be satisfied by
+    # whichever lemma shared its name.
+    #
+    # Two producers, so one row closes both: the stack-floor guard's
+    # `lea r11, [rip+&floor]` in every prologue with an entry, and
+    # `_emit_global_init`'s RIP-relative `lea` for every address-valued module
+    # global.
+    "lea_r64_rip": ("x86_step_lea_r64_rip", False,
+                    ["rip", "b0", "b1", "b2", "disp32", "rex", "w",
+                     "mod", "rm", "reg", "dst", "dst_lt"]),
     "mov_rm64_r64_reg": ("x86_step_mov_rm64_r64_reg_st", False,
                          ["rip", "b0", "b1", "b2", "rex", "w", "mod",
                           "reg", "rm"]),
@@ -450,6 +473,16 @@ _SUCCS = {
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ((x86_get_reg $s "
         "($rm + x86_rex_b $rex)) + $imm) with rip := $next, zf := ($fa).zf, "
         "sf := ($fa).sf, cf := ($fa).cf, of_ := ($fa).of_ }",
+    # `add_reg`'s row with `-` and `($fs)`: digit 5 rather than digit 0, the same
+    # `81` encoding and therefore the same length, and the same immediate
+    # expression for the same reason the row above states it.  The flags are
+    # `$fs` — `x86_flags_sub` — which is the SAME placeholder the `cmp` row
+    # below uses; that row is flags-only, this one also writes the register, and
+    # the two differ in exactly that.
+    "alu_ri32:sub_reg":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ((x86_get_reg $s "
+        "($rm + x86_rex_b $rex)) - $imm) with rip := $next, zf := ($fs).zf, "
+        "sf := ($fs).sf, cf := ($fs).cf, of_ := ($fs).of_ }",
     "alu_ri32:and":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ((x86_get_reg $s "
         "($rm + x86_rex_b $rex)) &&& $imm) with rip := $next, zf := ($fl).zf, "
@@ -520,6 +553,20 @@ _SUCCS = {
         "{ x86_set_reg $s $dst (UInt64.ofNat ((Int.ofNat "
         "(x86_get_reg $s ($rm + x86_rex_b $rex)).toNat + $disp).toNat % "
         "18446744073709551616)) with rip := $next }",
+    # The RIP-relative `lea`: same register write, but the base is the END of
+    # this instruction rather than a register's value, and there is no `$rm` in
+    # the expression at all — which is the point.  A copy of the row above with
+    # `$rm` left in would be a proof about `lea [reg + disp]`, and the error
+    # would surface as a `Type mismatch` or a `sorry` naming neither the form
+    # nor the byte.
+    #
+    # `Int.ofNat ($m + 7)` verbatim, because this row is compared against the
+    # lemma's own conclusion by `exact Option.some.inj` and nothing rewrites
+    # between them; a `UInt64.ofNat m + 7` here is a different term and the step
+    # comes back unproved.
+    "lea_r64_rip":
+        "{ x86_set_reg $s $dst (UInt64.ofNat ((Int.ofNat ($m + 7) + $disp).toNat "
+        "% 18446744073709551616)) with rip := $next }",
     "mov_rm64_r64_reg":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) "
         "(x86_get_reg $s ($reg + x86_rex_r $rex)) with rip := $next }",
@@ -821,7 +868,8 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         extra_args = " %d %d %d %d %d" % (rex, modrm, reg, rm, dst)
         extra_succ = {"$rex": str(rex), "$reg": str(reg), "$rm": str(rm),
                       "$dst": str(dst)}
-    elif form in ("alu_ri32:add_reg", "alu_ri32:and", "alu_ri8:cmp"):
+    elif form in ("alu_ri32:add_reg", "alu_ri32:sub_reg", "alu_ri32:and",
+                  "alu_ri8:cmp"):
         # `REX.W 81 /digit id` or `83 /digit ib`, so the ModRM is `raw[2]` and the
         # immediate starts at `raw[3]` -- 4 bytes wide for `81`, one for `83`.
         # `digit` is the ModRM `reg` field and names the OPERATION; the
@@ -849,6 +897,17 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         if form == "alu_ri32:add_reg":
             res = "(%s + %s)" % (a, imm)
             extra_succ["$fa"] = "x86_flags_add $s %s %s %s" % (a, imm, res)
+        elif form == "alu_ri32:sub_reg":
+            # `add_reg`'s row with the operator and the flag function turned
+            # over, which is the whole difference between the two: digit 5 is
+            # `sub`, so the result subtracts and the flags come from
+            # `x86_flags_sub` — the same `$fs` the `cmp` row below uses, and the
+            # same subtraction.  Reached only now because the name was missing
+            # from the tuple above, which is the whole of this form's wiring:
+            # the arithmetic, the flags and the immediate reader were already
+            # here and already correct.
+            res = "(%s - %s)" % (a, imm)
+            extra_succ["$fs"] = "x86_flags_sub $s %s %s %s" % (a, imm, res)
         elif form == "alu_ri32:and":
             res = "(%s &&& %s)" % (a, imm)
             extra_succ["$fl"] = "x86_flags_logic $s %s" % res
@@ -996,6 +1055,28 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         # negative literal swallows the hypothesis that follows it.
         extra_args = " %d %d %d (%d)" % (rex, modrm, reg, disp)
         extra_succ = {"$reg": str(reg), "$rex": str(rex), "$disp": str(disp)}
+    elif form == "lea_r64_rip":
+        # `lea r64, [rip + disp32]`: mod=00 with rm=101, so the r/m field is the
+        # instruction POINTER and the displacement is read as a FOUR-BYTE value
+        # even though the mode says "no displacement" — which is why this cannot
+        # go through the `_MEMORY_DISP_FORMS` branch below, whose `mode == 0` arm
+        # supplies no displacement at all (correct for `[rbx]`, wrong here).
+        #
+        # The `rm` argument is absent from the LEMMA, and it has to be absent
+        # here too: the model's `ripRel` arm reads no register, so passing one
+        # would be an arity error naming neither the form nor the instruction.
+        # `disp` is signed and parenthesised, for the reason the memory branch
+        # gives — an unparenthesised negative literal swallows the hypothesis
+        # that follows it, and this form's displacement is negative in practice
+        # (`lea r11, [rip+&floor]` reaches forward, `rip-relative` loads of a
+        # string literal reach back).
+        rex, modrm = raw[0], raw[2]
+        reg = (modrm >> 3) & 7
+        dst = reg + (8 if rex & 4 else 0)
+        disp = int.from_bytes(raw[3:7], "little", signed=True)
+        extra_args = " %d %d %d %d (%d)" % (rex, modrm, reg, dst, disp)
+        extra_succ = {"$rex": str(rex), "$reg": str(reg), "$dst": str(dst),
+                      "$disp": str(disp)}
     elif form in _MEMORY_DISP_FORMS:
         # Every memory-operand `mov`/`lea` shape except the two SIB ones, and
         # they all take their arguments in the same order: REX, ModRM, reg (the
@@ -1113,7 +1194,8 @@ _MEM_MODE = {0: "nodisp", 1: "disp8", 2: "disp32"}
 #: call with a `dst` argument the lemma does not take, which reads as an arity
 #: error naming neither the form nor the instruction.
 _LOAD_MEMORY_FORMS = ("mov_r64_rm64_disp8", "mov_r64_rm64_disp32",
-                      "mov_r64_rm64_nodisp", "lea_r64_rm64_disp32")
+                      "mov_r64_rm64_nodisp", "lea_r64_rm64_disp32",
+                      "lea_r64_rip")
 
 #: The memory-operand shapes `_resolve` supplies arguments for.  The two SIB
 #: ones are absent deliberately: they have their own `_resolve` branches above,
@@ -1193,14 +1275,25 @@ class _Node:
     """One instruction in the path tree, with the children its branch allows.
 
     `kind` is "seq" (one successor), "jcc" (two, selected by a condition on
-    `state`), "jmp" (one, unconditional) or "ret" (none: the run is over).
+    `state`), "jmp" (one, unconditional), "ret" (none: the run is over) or
+    "leaves" (none, and NOT stepped: the run is at this instruction and the
+    image ends there — see `_tree`'s `call_rel32`).
+
+    `halt` is set by `_leaf_halts` and is the index of this leaf's disjunct in
+    `emit_terminates`' statement, or None for a node that is not a leaf. It
+    lives on the node rather than in a counter beside the walk so the two
+    traversals cannot come to disagree about which leaf is which: the statement
+    is written before the walk runs, so it has to know the leaves in advance,
+    and two counters incremented in step are two answers to one question.
     """
-    __slots__ = ("insn", "form", "raw", "addr", "kind", "state", "succ", "kids")
+    __slots__ = ("insn", "form", "raw", "addr", "kind", "state", "succ", "kids",
+                 "halt")
 
     def __init__(self, insn, form, raw, addr, kind, state, succ):
         self.insn, self.form, self.raw, self.addr = insn, form, raw, addr
         self.kind, self.state, self.succ = kind, state, succ
         self.kids = []
+        self.halt = None
 
 
 class _NoTree(ValueError):
@@ -1330,9 +1423,47 @@ def _tree(code, info, shapes):
             off = int.from_bytes(raw[1:5], "little", signed=True)
             if off + 5 <= 0:
                 return None
-            node = _Node(insn, form, raw, addr, "jmp", state, addr + 5 + off)
-            node.kids = [build(addr + 5 + off, None, depth + 1, frozenset(),
-                               rets + (addr + 5,))]
+            target = addr + 5 + off
+            if target not in by_addr:
+                # **A CALL THAT LEAVES THE IMAGE IS A LEAF, and the halt address
+                # is the CALL's own address** -- the same answer the arm64
+                # generator gives, in `_call_boundary`'s "opaque" kind and
+                # `_gen_universal_e2e_cfg`'s `exit_at`, and for the same reason.
+                #
+                # What the model says happens here is the whole question, so it
+                # is worth writing down rather than inferring: `rc` is 0 outside
+                # the image (`_header`), `x86_step_plain` has no arm for the byte
+                # 0x00 and so `x86_step` returns `none`, and
+                # `x86_exec_go_exit`'s `none` branch means "the run ended with
+                # nothing" (`x86_exec_go_exit_stuck`). So a run that steps onto
+                # such an address does not reach the exit sentinel -- the
+                # theorem as stated was FALSE for it, and no tree could prove
+                # it. What `x86_exec_go_exit` stops on is `st.rip = exit`
+                # BEFORE it steps, so naming the CALL's address as the halt
+                # address makes the run stop one instruction earlier and the
+                # claim becomes the one the model supports: the run REACHES the
+                # call. That is the arm64 half's own words -- "the fix is not to
+                # admit the `none` branch but to state the theorem the model CAN
+                # support, with the call as the halt address" -- and admitting
+                # the `none` branch is not available here anyway: `= none` over
+                # `Option` also covers running out of fuel, so it says nothing
+                # about where the run ended.
+                #
+                # **Which paths reach one is not a detail.** The stack-floor
+                # guard puts one in every prologue of every program image
+                # (`_emit_stack_floor_guard`), so this case is the guard's trap
+                # arm rather than a rarity: `exit(2)` with the target in the C
+                # library. Walking it as an ordinary node is what made every
+                # program in the corpus report `body loops, or branches out of
+                # the function` -- which names two reasons when the real one is
+                # the third, and `bugs/FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_image.md`
+                # is that report with the measurement behind it.
+                node = _Node(insn, form, raw, addr, "leaves", state, addr)
+                node.kids = []
+                return node
+            node = _Node(insn, form, raw, addr, "jmp", state, target)
+            node.kids = [build(target, None, depth + 1, frozenset(),
+                              rets + (addr + 5,))]
             return None if node.kids[0] is None else node
         if form == "ret":
             # A `ret` is the end of the RUN only when there is nothing to return
@@ -1418,13 +1549,59 @@ def _tree(code, info, shapes):
 #: act on the row at all, and the form is the whole content of the message --
 #: there is nothing else in it to protect.  The `call` branch keeps its bound
 #: because its message is English prose rather than a list.
-_NO_TREE_CHARS = {"form": None, "call": 60, "loops": 0}
+_NO_TREE_CHARS = {"form": None, "call": 60, "loops": 0, "size": 0}
+
+
+#: The most step equations one generated file may contain, and the refusal that
+#: says so by name.
+#:
+#: **It is the sum over every PATH, not the tree's size**, because that is what
+#: the file's cost is: each leaf emits its own closing `simp` over its own path,
+#: so a tree of N nodes and L leaves emits about `N * L` step equations. It is
+#: measured, not guessed, and in the unit that predicts the time:
+#:
+#:   fixture                        steps   leaves   emitted   Lean
+#:   TestX86EndToEndEmitter.STRAIGHT  ~230      4      825 lines   11 s
+#:   TestX86EndToEndEmitter.SOURCE     ~480     10     1624 lines   24 s
+#:   formal/examples/bittest          457     10     2338 lines      --
+#:   formal/examples/wide_recv      12241     94   29908 lines      --
+#:
+#: so ~15 s per 1000 lines on the two that are measured, and 2000 steps is
+#: roughly 10 000 lines and two and a half minutes -- inside `PROOF_WALL_S`
+#: (1500 s) with room, and 4.4x the worst tree in the corpus that is not
+#: `wide_recv`.
+#:
+#: **`wide_recv` is what the bound is for, and the reason is a rule rather than a
+#: number.** The stack-floor guard puts two conditional branches in every
+#: prologue, and a path tree walks every branch outcome, so the file is
+#: `2^(branches on the path)` times what it was: `wide_recv`'s five functions
+#: take it from one path to 94. Attempting that costs 1500 s of wall and then
+#: reports a FAILURE whose message is about the clock, which is B21's lesson
+#: arriving from the other side -- "an unaffordable attempt reported as a
+#: FAILURE is worse than an admitted gap, because the failure is 20 minutes that
+#: say nothing and the gap is one number". So the tree is refused, BY NAME and
+#: with its size in the line, which is what the gap is.
+#:
+#: **The fix that makes this bound unnecessary is not a bigger bound.** It is for
+#: the emitter to decide the guard's own two branches statically rather than walk
+#: both arms: they are decided by facts the emitter can compute (the floor word
+#: is 0 in `X86State.init`'s memory, so the first `JNE` is not taken; and the
+#: stack pointer is a sum of literal frame sizes, so the `JAE` is taken whenever
+#: the path is inside `model.STACK_FLOOR_BUDGET_BYTES`). See
+#: `bugs/FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_image.md` §
+#: "what is left", which is where that is written down with its two Lean
+#: obligations.
+_MAX_CHAIN_STEPS = 2000
 
 
 def _no_tree_line(kind, detail):
     """The one line the screen shows for a path that is not a theorem."""
     if kind == "loops":
         return "  loops (no finite path tree)"
+    if kind == "size":
+        # Its own shape rather than a prefix, for the same reason `loops` has
+        # one: the number IS the content, so nothing may truncate it.
+        return "  too large to prove: %s" % detail
     n = _NO_TREE_CHARS.get(kind)
     return "  no tree: %s" % (detail if n is None else detail[:n])
 
@@ -1443,6 +1620,33 @@ def _paths(node, acc=None):
     for kid in node.kids:
         yield from _paths(kid, list(acc))
     acc.pop()
+
+
+def _leaf_halts(node, acc=None):
+    """The halt address of every leaf, in the order the walk reaches them.
+
+    One entry per leaf: None for the outermost `ret` (which lands on the exit
+    sentinel 0 by popping the zero `X86State.init` leaves on the stack), and the
+    `call`'s own address for a leaf that leaves the image (`_tree`'s "leaves").
+    `emit_terminates` turns the list into the theorem's disjuncts, one per
+    entry, and `_Node.halt` carries each leaf's index — which is why this is a
+    pre-pass that ANNOTATES rather than a second traversal the walk has to stay
+    in step with.
+
+    The order is the walk's, and it has to be: the statement names the
+    disjuncts and the walk picks between them with `left`/`right`, so an index
+    computed in a different order is a proof of the wrong disjunct. Every
+    branch here is the same recursion `walk` does — `kids[0]` then `kids[1]` at
+    a fork — and `walk` reads the index off the node rather than counting.
+    """
+    acc = [] if acc is None else acc
+    if node.kids:
+        for kid in node.kids:
+            _leaf_halts(kid, acc)
+    else:
+        node.halt = len(acc)
+        acc.append(node.succ)
+    return acc
 
 
 def _byte_list(insns, code, base):
@@ -1638,23 +1842,76 @@ def emit_terminates(path):
     root = _tree(code, info, shapes)
     if root is None:
         raise ValueError("body loops, or branches out of the function")
+    # What the file would COST, refused by name: see `_MAX_CHAIN_STEPS` for the
+    # measurement and for why the guard makes it necessary rather than merely
+    # prudent. `leaves` is counted because it is the multiplier -- a tree's own
+    # node count undercounts by the number of paths through it.
+    leaves = list(_paths(root))
+    steps = sum(len(p) for p in leaves)
+    if steps > _MAX_CHAIN_STEPS:
+        raise _NoTree(
+            "size",
+            "%d step equations over %d leaves, past the %d this emitter can "
+            "prove (the stack-floor guard doubles every path; see "
+            "_MAX_CHAIN_STEPS)" % (steps, len(leaves), _MAX_CHAIN_STEPS))
     # Every node in the tree, which is an upper bound on the length of any one
     # path and so on the depth the closing `simp` at each `ret` will need.  Both
     # arms of a fork are counted, which over-counts; the option is a limit, so
     # over-counting only ever costs headroom nobody uses.
     out = _header(code, insns, base, _nodes(root))
+    # **The theorem is a DISJUNCTION, one disjunct per leaf of the tree.**
+    #
+    # It was a single claim — "the run reaches the exit pc" — and it was
+    # correct exactly as long as every path ended at the outermost `ret`. The
+    # stack-floor guard put a `call exit(2)` in every prologue of every program
+    # image (`_emit_stack_floor_guard`), so now a path can end by reaching a
+    # call that leaves the image, and for that path the run does NOT reach the
+    # exit pc: the model cannot decode an address outside the image, so
+    # `x86_exec_go_exit` returns `none` (`x86_exec_go_exit_stuck`). The old
+    # statement is FALSE for it, which is why this could not have been fixed by
+    # walking the guard's trap arm — it had to be fixed in what is claimed.
+    #
+    # What each disjunct claims is what the model supports: the run reaches the
+    # halt address that leaf names. `x86_exec_go_exit` tests `st.rip = exit`
+    # BEFORE it steps, so naming a call's own address makes the run stop one
+    # instruction earlier and the claim becomes "the run REACHES the call" —
+    # the arm64 generator's own answer for a call out of the image, in
+    # `_call_boundary`'s "opaque" kind and `_gen_universal_e2e_cfg`'s `exit_at`:
+    # "the fix is not to admit the `none` branch but to state the theorem the
+    # model CAN support, with the call as the halt address".
+    #
+    # The `none` branch is not an alternative reading, and it is worth saying
+    # why rather than leaving it to be re-asked: `(x86_exec_exit …) = none` is
+    # implied by `isSome = true`'s negation, so `A ∨ = none` holds for every
+    # `Option` and says nothing at all about where the run ended. Fuel
+    # exhaustion ends a run with `none` too. Only a NAMED halt address carries
+    # information.
+    halts = _leaf_halts(root)
+    n_disjuncts = len(halts)
+
+    def _disjunct(i):
+        addr = halts[i]
+        if addr is None:
+            return ("(x86_exec_exit (X86State.init n %d) rc 0).isSome = true"
+                    % entry)
+        return ("(x86_exec_go_exit (X86State.init n %d) rc %d 100000).isSome"
+                " = true" % (entry, addr))
+
     # NOT "No `sorry`", which this claimed until `admitted_facts` existed to
     # contradict it: the path tree IS walked once per branch outcome, so the
     # chain is walked, and `wide_recv` then emits four admitted `hpop`s and an
     # admitted closing `hrip` — five holes a reader cannot see from the verdict
     # line, which said "proved, 1 sorry" for all five.  The count is printed
     # beside the verdict now, and it is the number to watch.
-    out.append("/-- For EVERY input, the model runs this image to the exit pc.\n"
+    out.append("/-- For EVERY input, the model runs this image to one of %d halt\n"
+               "    addresses: the exit sentinel, or a `call` that leaves the image.\n"
                "    The path tree is walked once per branch outcome; the holes this\n"
-               "    leaves are named and counted in the report below. -/")
+               "    leaves are named and counted in the report below. -/"
+               % n_disjuncts)
     out.append("theorem terminates (n : UInt64) :")
-    out.append("    (x86_exec_exit (X86State.init n %d) rc 0).isSome = true := by"
-               % entry)
+    for i in range(n_disjuncts):
+        out.append("    %s%s" % ("∨ " if i else "", _disjunct(i))
+                   + ("" if i + 1 < n_disjuncts else " := by"))
     out.append("  rw [x86_exec_exit_eq_go]")
     out.append("  have hb := all_bytes")
     out.append("  let i0 : X86State := X86State.init n %d" % entry)
@@ -1683,15 +1940,54 @@ def emit_terminates(path):
         # treating the first as the second is what emitted `s_N.rip = 0` where
         # the machine pops the address the `call` pushed.
         ret_to = node.succ if node.kind == "ret" else None
-        call, succ = _resolve(node.form, node.raw, node.addr, state, k,
-                              cases, hs_in, node.insn.length,
-                              rip=ret_to)
         nxt = "s%d" % (k + 1)
         pad = "  " * ind
         case_simp = (", " + ", ".join(cases)) if cases else ""
 
         def emit(line):
             out.append(pad + line if line else "")
+
+        def emit_disjunct(i):
+            """Pick disjunct `i` of the statement: `right` past each one above.
+
+            `A ∨ (B ∨ (C ∨ D))` — `∨` binds to the right, so `D` is three
+            `right`s and NO `left`, while B is one `right` and a `left`. There
+            is no `Or` sugar in tactic mode; `left` and `right` are the tactics
+            that build one, and `left` on the last disjunct is the failure this
+            docstring's first sentence exists to describe. The index
+            `_leaf_halts` put on the node is all this needs, which is the point
+            of putting it there.
+            """
+            for _ in range(i):
+                emit("right")
+            if i + 1 < n_disjuncts:
+                emit("left")
+
+        if node.kind == "leaves":
+            # **The leaf that leaves the image, and it emits NO step.** The run
+            # is AT the call and the halt address is the call's own address, so
+            # the closing `x86_exec_go_exit_at` fires on the state this node was
+            # reached in — stepping the call would move `rip` to the callee, and
+            # the model's runner would then have no instruction to step there.
+            #
+            # The `rip` fact is a literal in the predecessor's successor
+            # equation (`hs_in`), which is why this arm is CHEAP where the exit
+            # leaf is not: there is no memory read here to reconstruct, so it is
+            # `simp only [hs{k}]` and no admission. That is the whole reason the
+            # guard's trap arm is affordable at all — see the statement's own
+            # comment for what it claims.
+            emit_disjunct(node.halt)
+            emit("have hhalt%d : %s.rip = %d := by" % (k, state, node.addr))
+            emit("  simp only [%s]" % ("i0, X86State.init" if hs_in is None
+                                       else hs_in))
+            emit("rw [%s]" % ",\n    ".join(
+                rules + ["x86_exec_go_exit_at (by decide) hhalt%d" % k]))
+            emit("simp")
+            return
+
+        call, succ = _resolve(node.form, node.raw, node.addr, state, k,
+                              cases, hs_in, node.insn.length,
+                              rip=ret_to)
 
         if ret_to is not None:
             # The chain has crossed a FRAME boundary, which is what the closing
@@ -1789,6 +2085,7 @@ def emit_terminates(path):
             return
 
         if node.kind == "ret" and node.succ is None:
+            emit_disjunct(node.halt)
             # The OUTERMOST return, and the only place the exit sentinel is
             # read: `X86State.init` leaves the stack zeroed, so this `ret` pops
             # address 0 and `x86_exec_go_exit` stops there. A `ret` with a
@@ -2121,7 +2418,7 @@ def main(argv):
         return 1
     val_ok = val_gap = term_ok = term_gap = 0
     val_holes = []
-    fails = notree = noform = nocall = hole_total = guard_total = 0
+    fails = notree = noform = nocall = nosize = hole_total = guard_total = 0
     for t in targets:
         name = os.path.basename(t)[:-5]
         try:
@@ -2206,13 +2503,18 @@ def main(argv):
                 kind, detail = "form", str(exc)
             if kind == "loops":
                 notree += 1
-                ts = _no_tree_line(kind, detail)
             elif kind == "call":
                 nocall += 1
-                ts = _no_tree_line(kind, detail)
+            elif kind == "size":
+                # A fourth counter rather than a fourth spelling of one of the
+                # others, for the reason the other three have: a tree that is
+                # refused for being unaffordable is not a form with no lemma,
+                # and folding it into `noform` would put a row about an
+                # unmodelled instruction where the problem is the clock.
+                nosize += 1
             else:
                 noform += 1
-                ts = _no_tree_line(kind, detail)
+            ts = _no_tree_line(kind, detail)
         else:
             if ok and not sorries:
                 term_ok += 1
@@ -2239,8 +2541,8 @@ def main(argv):
           "in the proved-with-a-sorry files, counted by name from the generated "
           "text" % (hole_total, guard_total))
     print("               %d no finite tree (%d loop, %d uncovered form, "
-          "%d returns into a caller)" % (notree + noform + nocall, notree,
-                                          noform, nocall))
+          "%d returns into a caller, %d too large to prove)"
+          % (notree + noform + nocall + nosize, notree, noform, nocall, nosize))
     print("  failing    : %d" % fails)
     return 1 if fails else 0
 

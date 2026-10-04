@@ -52,11 +52,20 @@ RUN_TIMEOUT = 60
 # only dots, a `.` component, a `..` component, a `..` that has nothing to pop,
 # and a path with an extension in a directory component rather than in the
 # name.
+#
+# The four `//`-shaped entries at the end are the POSIX classes the ROOT rule
+# turns on, and they are here because `realpath` and `splitroot_root` are two
+# functions that take different answers for the same input: CPython's `normpath`
+# KEEPS an exactly-two leading slash and CPython's `realpath` DROPS it, so a
+# corpus with only `"//a"` cannot tell the two rules apart. `"//a/b"` is the
+# same class with a tail, `"///a"` and `"////"` are the two that are NOT the
+# POSIX case, and `""`/`"/"` are in the corpus already.
 STRINGS = [
     "", "a", "a/b", "a/b/c", "/", "//", "///", "/a", "//a", "a/", "a//",
     "a/b/", "a/./b", "a/../b", "a/b/..", "a/..", "..", ".", "./", "../..",
     "a/b/c.txt", "a.b/c", "/a/b/", "x/y.tar.gz", "...", "..a", "a..b",
     "a/b.c/d", "dir.d/file", "a b/c d", "-", "a/-",
+    "//a/b", "///a", "////",
 ]
 
 # (label, the call with one %s, the CPython answer as a tuple, "s" or "i")
@@ -73,6 +82,17 @@ ONE_ARG_CASES = [
     ("normpath", "normpath(%s)", lambda a: (posixpath.normpath(a),), "s"),
     ("isabs", "isabs(%s)", lambda a: (int(posixpath.isabs(a)),), "i"),
     ("splitdrive", "splitdrive(%s)", lambda a: posixpath.splitdrive(a), "s"),
+    # `realpath` is in this corpus rather than only in the `fs` group's one
+    # case because it is CWD-RELATIVE for every path that does not resolve, and
+    # so is `normpath`'s answer for those paths: a corpus that could not run it
+    # over `//a`, `a/b` and `..` would not have found the `//` divergence,
+    # which is exactly the corpus gap that hid it.
+    ("realpath", "realpath(%s)", lambda a: (posixpath.realpath(a),), "s"),
+    # The ROOT, as one word: `splitroot`'s element 1, not element 0 — the drive
+    # is `""` on this target for every path, so element 0 would answer `""` for
+    # an absolute path and look right for a relative one.
+    ("splitroot_root", "splitroot_root(%s)",
+     lambda a: (posixpath.splitroot(a)[1],), "s"),
 ]
 
 

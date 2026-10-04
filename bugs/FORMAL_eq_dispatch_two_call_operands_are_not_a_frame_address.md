@@ -52,10 +52,12 @@ and the reason is one clause upstream of this document's whole subject:
 `formal/build.py::_frame_return_status` recognises a frame-valued `return` in
 exactly TWO ways — a bare name holding a frame, and a call to a function already
 known to return one — and `mk` is `def mk(v: int) -> Always: return Always(v,
-v + 1)`, whose return value is a CONSTRUCTION. So `mk` is classified
-`_RETURN_WORD`, every caller reserves no block for its result, and nothing about
-the call can be recognised as a frame anywhere. Filed, with the measurement and
-the blocker, as `bugs/FORMAL_a_function_whose_return_value_is_a_construction_is_not_frame_returning.md`.
+v + 1)`, whose return value is a CONSTRUCTION. So `mk` was classified
+`_RETURN_WORD`, every caller reserved no block for its result, and nothing about
+the call could be recognised as a frame anywhere. **FIXED 2026-10-03**
+(`formal/build.py`'s `_returned_frame_construction`, with the cases in
+`test_formal_returned_frame.py`): a construction-returning function is
+frame-returning, so a caller reserves a block and the callee copies into it.
 
 `c` is therefore unchanged and still refused by name, which is the safe direction,
 and `b` — the silent wrong answer this document is about — is fixed.

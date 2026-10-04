@@ -620,21 +620,35 @@ def comparison_chain(field_op: str, join_op: str, left, right,
 def inheritance_refusal(name: str, base: str) -> str:
     """The refusal for `@dataclass class C(A)`.
 
-    Measured: `class C(A)` parses with `bases=['A']` and this path's struct has
-    no base-class field merge, so `C(1, 2)` would fill C's OWN fields and drop
-    A's without a word. CPython's dataclass puts the BASE's fields first, so
-    the two disagree on the field ORDER as well as the field SET — and the
-    order is what decides which value lands in which slot, so this is a wrong
-    answer rather than a missing one. Refused."""
+    **What changed when the layout merge landed, and what did not.** The field
+    list is no longer the class's own body: `formal/model.py`'s
+    `attach_inherited_fields` merges a declared base's fields in, base-first,
+    which is the order CPython's generated `__init__` takes them in — so the
+    first reason this used to give ("this path's struct has no base-class field
+    merge at all, so C(1, 2) would fill C's OWN fields and drop A's without a
+    word") is no longer true, and a refusal that still gave it would send the
+    reader to look for a merge that is there.
+
+    What is still true is the half this file is about. Everything the DATACLASS
+    path derives is read off the class's OWN body — `field(default=…)` is
+    lowered by walking `model.struct_fields`, and `InitVar` is detected the same
+    way — so a base's fields and a base's `field(...)` wrappers are not part of
+    what is generated here, and the dataclass's own members (`__eq__`,
+    `__repr__`) would be built from this class's fields alone. Refusing the
+    class is what keeps that from being a wrong answer; the layout merge fixed
+    the slots, not the members."""
     return (f"{name} inherits from {base!r}, and a dataclass's fields are the "
             f"base class's fields FOLLOWED BY its own (CPython's generated "
-            f"`__init__` takes them in that order). This path's struct has no "
-            f"base-class field merge at all: the declared fields of {name} are "
-            f"the only ones it has slots for, so inheriting would silently drop "
-            f"{base}'s — the values would be filled into the wrong slots and "
-            f"the program would run and print numbers the source never wrote. "
-            f"Declare the inherited fields on {name} itself, or keep "
-            f"{base} a plain struct and pass it as a field")
+            f"`__init__` takes them in that order). The layout merge is in "
+            f"place — `formal/model.py`'s `attach_inherited_fields` puts "
+            f"{base}'s fields in {name}'s slots in that order — but everything "
+            f"the DATACLASS path generates is read off {name}'s own class body: "
+            f"`field(default=…)` is lowered from `model.struct_fields`, and an "
+            f"`InitVar` in {base} is not seen as one. So the fields would land "
+            f"in the right slots and the members built from them would not be "
+            f"the ones CPython builds. Declare {name} without the base and "
+            f"write the fields out, or keep {base} a plain struct and pass it "
+            f"as a field")
 
 
 def post_init_refusal(name: str) -> str:

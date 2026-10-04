@@ -2083,7 +2083,15 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         closing = text[i:]
         self.assertIn("simp only [hs", closing,
                       "a crossed chain must not pay for the full closing simp")
-        self.assertNotIn("x86_flags_add", closing,
+        # The EXPENSIVE closing block, named by its own simp set rather than by
+        # one lemma in it. `x86_flags_add` on its own is not that block's
+        # marker: it is also what `x86_step_add_rsp_imm32`'s successor equation
+        # says (`{ x86_flags_add s s.rsp imm (s.rsp + imm) with … }`), so an
+        # `add rsp, imm` anywhere on the path makes the bare name appear — which
+        # it did not when there was ONE arm per file and the closing `hrip` was
+        # the last thing emitted. The pair is what only the closing block writes
+        # (`simp [hs…, i0, X86State.init, x86_flags_sub, x86_flags_add,`).
+        self.assertNotIn("x86_flags_sub, x86_flags_add", closing,
                          "…which is what makes it the expensive one")
 
     def test_a_chain_that_never_left_its_frame_is_untouched(self):
@@ -2112,14 +2120,24 @@ class TestX86EndToEndEmitter(unittest.TestCase):
 
     def test_every_admission_is_counted_by_name_and_not_collapsed_to_one(self):
         import formal.x86_64_endtoend_test as E
-        facts = E.admitted_facts(self._emitted())
+        text = self._emitted()
+        facts = E.admitted_facts(text)
         admitted = sorted({n for n, _l, k in facts if k == "admitted"})
         # One per returned-to, plus the closing read. Asserted as a SET and not
         # as a count, because the count is the thing that was wrong.
-        self.assertEqual(
-            [n for n in admitted if n.startswith("hpop")],
-            ["hpop%d" % k for k in sorted(
-                int(n[4:]) for n in admitted if n.startswith("hpop"))])
+        #
+        # What the comparison is FOR is that every crossing the emitter wrote is
+        # reported under its own name and no two share one: the names come out
+        # of `admitted_facts` as a SET, so the count of `have hpop{k}` lines in
+        # the text is the only thing that can catch two crossings collapsed onto
+        # one name. It replaces a comparison of the string-sorted names against
+        # the integer-sorted ones, which agreed only while every index had the
+        # same number of digits — four crossings are hpop37, hpop56, hpop100 and
+        # hpop119, and the old form was comparing digit widths.
+        pops = sorted(n for n in admitted if n.startswith("hpop"))
+        self.assertEqual(len(pops), text.count("have hpop"),
+                         "a crossing is either not counted by name or shares a "
+                         f"name with another: {pops}")
         self.assertIn("hrip", admitted,
                       "the closing read is admitted on a crossed chain, and it "
                       "is a hole of its own — reporting only the `hpop`s would "
@@ -2176,6 +2194,136 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         self.assertNotIn("No `sorry`", text,
                          "the theorem's docstring must not claim no sorries "
                          "while the file below it admits five")
+
+    # ── the theorem's SHAPE, which the stack-floor guard changed ──────────────
+    #
+    # `_emit_stack_floor_guard` puts a `call exit(2)` in every prologue of every
+    # program image, and that call leaves the image: the model has no
+    # instruction at the C library's address, so `x86_exec_go_exit` returns
+    # `none` there and the run never reaches the exit sentinel. "The run reaches
+    # the exit pc" was therefore FALSE for the guard's trap arm, which is why
+    # this could not be fixed by walking that arm and why the theorem is a
+    # disjunction over halt addresses — one per leaf of the path tree.
+    #
+    # Lean-free, and it has to be: a Lean proof of this shape is 11 s on the
+    # straight-line fixture and 24 s on the crossed one, so a check on it is a
+    # check nobody runs. What is pinned here is what the text SAYS, which is
+    # where the shape is decided.
+
+    @staticmethod
+    def _source_plan():
+        """`(code, info, insns, shapes)` for `SOURCE`, the crossed-chain fixture.
+
+        `_emitted` writes the same program to a temporary file and compiles it,
+        so a case that needs the tree as well as the text asks for the plan
+        here rather than compiling twice with two copies of the fixture path."""
+        import os
+        import tempfile
+        import formal.x86_64_endtoend_test as E
+        with tempfile.TemporaryDirectory(prefix="formal-halts-") as td:
+            path = os.path.join(td, "case.mojo")
+            with open(path, "w") as f:
+                f.write(TestX86EndToEndEmitter.SOURCE)
+            return E._plan(path)
+
+    def test_the_theorem_has_one_disjunct_per_leaf_and_names_each_halt(self):
+        import formal.x86_64_endtoend_test as E
+        code, info, insns, shapes = self._source_plan()
+        halts = E._leaf_halts(E._tree(code, info, shapes))
+        text = self._emitted()
+        head = text[text.index("theorem terminates"):]
+        head = head[:head.index(":= by")]
+        # One disjunct per leaf, in the leaf order, and nothing else in the
+        # statement: a `\u2228` that no arm discharges is a hole in a claim.
+        self.assertEqual(head.count("x86_exec"), len(halts),
+                         f"{len(halts)} leaves and {head.count('x86_exec')} "
+                         f"disjuncts:\n{head}")
+        self.assertEqual(head.count("\u2228"), len(halts) - 1,
+                         "a right-nested `Or` has one `\u2228` fewer than it "
+                         f"has disjuncts:\n{head}")
+        self.assertIn("(x86_exec_exit (X86State.init n %d) rc 0).isSome = true"
+                      % info["func_offset"], head,
+                      "the exit sentinel is one of the halt addresses")
+        self.assertEqual(
+            head.count("x86_exec_go_exit"),
+            sum(1 for a in halts if a is not None),
+            "one `x86_exec_go_exit` disjunct per leaf that halts at a call")
+        for a in halts:
+            if a is None:
+                continue
+            self.assertIn("rc %d 100000).isSome = true" % a, head,
+                          "the halt address %d is a leaf's and must be named in "
+                          "the statement" % a)
+
+    def test_a_leaf_that_leaves_the_image_is_not_stepped(self):
+        """The trap arm emits a `rip` fact and NO step for the call.
+
+        `x86_exec_go_exit` tests `st.rip = exit` before it steps, so the run
+        stops AT the call; stepping it would move `rip` to the callee, where the
+        model has no instruction and the chain would be proving a step the runner
+        cannot take. Pinned on the TEXT because it is the difference between a
+        theorem and a wrong one, and nothing else in the file would say so."""
+        text = self._emitted()
+        found = list(re.finditer(r"have (hhalt\d+) : (s\d+)\.rip = (\d+) := by\n"
+                                 r"[ ]*simp only \[(hs\d+)\]", text))
+        self.assertGreaterEqual(len(found), 2,
+                                "this chain crosses a callee's guard, so it has "
+                                "a trap leaf per arm of the fork above it")
+        for m in found:
+            self.assertNotEqual(m.group(2), "s0",
+                                "the halt state is the one the walk reached the "
+                                "call in, not the initial state")
+            self.assertEqual(m.group(4), "hs" + m.group(2)[1:],
+                             "the halt fact is proved from the successor "
+                             f"equation that defines {m.group(2)}")
+
+    def test_no_arm_of_the_theorem_proves_a_disjunct_no_leaf_names(self):
+        """Each arm selects ONE disjunct, and it is the leaf's own.
+
+        `right` past each disjunct above, then `left` (and no `left` on the last
+        one, which is not a choice) \u2014 so the number of `right`s an arm emits is
+        its leaf's index. A wrong index is a proof of a claim the run does not
+        make and Lean would accept it, so it is pinned here."""
+        text = self._emitted()
+        arms = re.findall(r"\n((?:[ ]*right\n)*)(?:[ ]*left\n)?"
+                          r"[ ]*have h(?:rip|halt\d*) :", text)
+        self.assertGreaterEqual(len(arms), 4,
+                                "this chain has a leaf per arm of the two forks "
+                                "the guard's prologue puts in it")
+        reached = sorted(len(re.findall("right", a)) for a in arms)
+        self.assertEqual(reached, list(range(len(arms))),
+                         "each leaf must reach a DIFFERENT disjunct, and between "
+                         f"them they must reach all {len(arms)}: {reached}")
+
+    def test_a_tree_too_large_to_prove_is_refused_by_name_not_attempted(self):
+        """The bound, exercised at a bound small enough to hit.
+
+        `wide_recv` is what it is for \u2014 12 241 step equations over 94 leaves,
+        because the guard's two branches per prologue multiply every path \u2014 and
+        the alternative to refusing is 1500 s of wall followed by a FAILURE
+        whose message is about the clock. So the refusal is a `_NoTree` with a
+        kind of its own, it keeps its numbers in the one line the screen shows,
+        and it is counted apart from the three older outcomes.
+        """
+        import formal.x86_64_endtoend_test as E
+        code, info, insns, shapes = self._source_plan()
+        steps = sum(len(list(p)) for p in E._paths(E._tree(code, info, shapes)))
+        self.assertGreater(steps, 0)
+        saved = E._MAX_CHAIN_STEPS
+        try:
+            E._MAX_CHAIN_STEPS = steps - 1
+            with self.assertRaises(E._NoTree) as caught:
+                self._emitted()
+        finally:
+            E._MAX_CHAIN_STEPS = saved
+        self.assertEqual(caught.exception.kind, "size")
+        line = E._no_tree_line("size", str(caught.exception))
+        self.assertIn(str(steps - 1), line,
+                      "the refusal must say how big the tree was: a bound with "
+                      f"no measurement in it cannot be moved on evidence: {line}")
+        self.assertNotEqual(line, E._no_tree_line("loops", ""),
+                            "too large is not a loop, and the four outcomes must "
+                            "not collapse into one another")
 
 
 # ── 8. the other half of the launch estate: WHERE the generated file goes ─────

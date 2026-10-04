@@ -474,6 +474,20 @@ What a proof currently rests on, so that removing an item is visible. The projec
 has **no Lean `axiom` and no `opaque`** anywhere; everything is assumed in the
 `sorry` sense, which is the harder habit to see.
 
+**That sentence is about the SOURCE TEXT, and a theorem's transitive closure is a
+different question.** `native_decide` and `bv_decide` close a goal by compiling
+and running a decision procedure rather than by producing a term the kernel
+checks, so every theorem proved with one depends on Lean's `Lean.ofReduceBool`
+axiom and `#print axioms` reports it — which `OPUS.md` §1 already says about a
+generated theorem.  There are no `axiom` declarations and no `sorry` in any of the
+five `lib/` modules, and 749 proof sites go through one of those two tactics; both
+halves are counted by `test_formal_admitted.py` (`LIBRARY_TRUST`, a hard 0 for the
+first two and a ceiling for the third, because that number is a debt being paid
+down in a file several branches edit).  Neither tactic can prove a FALSE
+statement — it evaluates and answers — so this is row 10 below about where the
+trust SITS, not about whether it holds, and
+`bugs/FORMAL_native_decide_axiom.md` carries the replacement plan.
+
 | # | where | what is trusted |
 |---|---|---|
 | 1 | `lib/ProofLib.lean:4624` `in_image_stub` | a dylib export is in the image |
@@ -483,7 +497,8 @@ has **no Lean `axiom` and no `opaque`** anywhere; everything is assumed in the
 | 5 | `formal/x86_64_proof_gen.py:690` | the x86-64 end-to-end theorem |
 | 6 | `formal/arm64_proof_gen.py:6910` | every extern call step (`True := by trivial`) |
 | 7 | `formal/arm64_proof_gen.py:4077,4258,4790,4797,4875,4891,5089` | `all_goals (first \| done \| sorry)` CFG leaves — 13 sorries in 9 of 43 arm64 proofs, owned by `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md` |
-| 8 | FORMAL.md §7a | **the ADMITTED HOST CONTRACTS**: one `sorry` per `@admitted(...)` in a `formal/hostmods/` module, counted by the same census as every other hole, named per file by a `trust:` line, and classified by `tools/formal_sweep.py` as `built-with-admitted-contracts`. 15 of them across `subprocess`, `ctypes`, `fcntl`, `concurrent.futures` and `threading`. This is the FIRST row here that is about the HOST rather than about this compiler's own code: it is a claim about a second process, a thread, a dynamic loader and a kernel lock, declared in the Mojo source and checked for scope. The policy is §7a; the per-contract assumptions are in each module's own `@admitted` text |
+| 8 | FORMAL.md §7a | **the ADMITTED HOST CONTRACTS**: one `sorry` per `@admitted(...)` in a `formal/hostmods/` module, counted by the same census as every other hole, named per file by a `trust:` line, and classified by `tools/formal_sweep.py` as `built-with-admitted-contracts`. 19 of them across `concurrent.futures`, `ctypes`, `subprocess` and `threading`. `fcntl` admits nothing and is not among them; the figure was 15 and the list did name `fcntl`, until the audit of 2026-10-04 found both stale. This is the FIRST row here that is about the HOST rather than about this compiler's own code: it is a claim about a second process, a thread and a dynamic loader, declared in the Mojo source and checked for scope AND checked for TRUTH — every contract is probed against CPython or the OS, and fifteen of the nineteen were found asserting something the host does not do. The policy is §7a; the per-contract assumptions are in each module's own `@admitted` text, and `bugs/FORMAL_trust_audit_2026-10-04.md` is the audit that corrected them |
+| 10 | `lib/ProofLib.lean`, `lib/Contracts.lean`, `lib/X86.lean` | 749 `native_decide`/`bv_decide` sites, whose proofs reach `Lean.ofReduceBool` rather than the kernel — the largest admitted assumption in the model, and the one §7's preamble used to leave out of the inventory entirely. Counted, not hidden, and owned by `bugs/FORMAL_native_decide_axiom.md` |
 | 9 | ~~`lib/ProofLib.lean:895`~~ | **REMOVED 2026-09-28.** This row said "All per-node lemmas currently admit". Read, they do not: all seven `evalExpr_*` lemmas are `rfl`, which is the whole content of each statement, and `lib/ProofLib.lean` contains no `sorry` or `admit` at all. The section comment above them said the same false thing and said so in the present tense; both are corrected. The trust that remains is row 4 — `rfl` proves the unfolding of `evalExpr`, not that `evalExpr` is what the machine runs. |
 
 **The two holes in the mechanism that checks this** were both closed in the
@@ -606,26 +621,68 @@ keeps its normal proof**. The condition is about CALLS, not about contracts bein
 present: a file that imports `subprocess` and never calls it links a library with
 seven contracts in it and its own proof is decidable.
 
-**5. An admitted call REFUSES at run time, with a status that cannot be mistaken
-for the host's answer.** `subprocess.run` prints which contract stopped it and
-exits **125** — outside 0..255, so it *cannot* be read as a child's exit status.
-A refusal that returned a plausible number would be a fabricated answer wearing a
-diagnostic's clothes, and the number has to make the mistake impossible rather
-than unlikely.
+**5. An admitted call REFUSES at run time, and the refusal is identified by the
+diagnostic, not by the number.** `subprocess.run` prints which contract stopped
+it and exits **125**.  A refusal that RETURNED a plausible number would be a
+fabricated answer wearing a diagnostic's clothes, so what makes the mistake
+impossible is that it exits at all; the number then says only that the image did
+not answer, and it says that by being nonzero and reserved by this tree.
+
+This rule used to claim something false, and the correction is the kind of thing
+an audit exists to find: it said 125 was *outside 0..255* and therefore could not
+be read as a child's exit status.  125 is inside it (`sh -c 'exit 125'` is
+reported as 125), and **no exit code can be outside it at all** — the kernel
+masks one, so `sh -c 'exit 300'` is reported as 44.  The diagnostic on stdout is
+the channel that distinguishes a refusal from an answer;
+`test_formal_admitted.py`'s `truth` group re-measures both halves every run so the
+claim cannot rot back.
 
 ### What each contract assumes
 
-One table, and it is generated from the declarations rather than written here —
-`python3 test_formal_admitted.py counts` prints the counts and the module
-docstrings carry the full text of each.
+The counts in the next table are **checked against the declarations** —
+`test_formal_admitted.py`'s `test_the_formal_md_inventory_agrees` reads this file
+and fails in both directions.  A census published in prose is a census with two
+copies, and until this row was added the second copy was free to describe a trust
+boundary that no longer existed: it said `subprocess` admits 7 and `fcntl` 1,
+against 12 and 0.  The ASSUMPTION column is a summary; each module's own
+`@admitted` text is the text, and `bugs/FORMAL_trust_audit_2026-10-04.md` carries
+the audit of it against CPython.
 
 | module | contracts | assumes |
 |---|---|---|
-| `subprocess` | 7 | the child's exit status is an integer in 0..255; captured output is an arbitrary byte string; `call` raises nothing for a non-zero status |
-| `ctypes` | 2 | `CDLL` returns 0 (no such library here) or a non-zero word this target's loader owns; a call through a handle returns one word, unconstrained |
-| `fcntl` | 1 | `flock` answers one word: 0 taken, or an errno that is a fact about every other holder of the file |
-| `concurrent.futures` | 2 | `submit` runs the callable on some thread and answers one word; `shutdown(wait=True)` has joined every thread |
-| `threading` | 3 | `Thread.start` begins running the target; `Thread.join` it has stopped; `Lock.acquire` is granted by the kernel |
+| `concurrent.futures` | 2 | `submit` runs the callable on a thread of this process or in a process of this machine and answers one word; `shutdown(wait=True)` has joined the pool's OWN workers |
+| `ctypes` | 2 | `CDLL` returns 0 when `dlopen(3)` failed — the file may be absent, may not be a loadable image, or a symbol may be unresolvable — or a non-zero word this target's loader owns; a call through a handle answers one word under the default `restype`, unconstrained in value |
+| `subprocess` | 12 | the child's status word: `0..255` for a normal exit or `-N` for a death by signal N; output answers stop at the first NUL byte, because a `str` here is a NUL-terminated `char *`; `poll`'s "not collected" marker is the model's own `-65`, outside every answer the host gives; `kill`/`terminate` deliver only while the child is still running |
+| `threading` | 3 | `Thread.start` begins running the target; `Thread.join` with no timeout, it has stopped; `Lock.acquire` is a per-object userspace mutex inside this process, naming no descriptor |
+
+**Fifteen of the nineteen were FALSE of the real host**, three more were true only
+under a reading the audit had to guess at, and one was true and is unchanged:
+
+| what was claimed | what the host does |
+|---|---|
+| six `subprocess` contracts: "the exit status, an integer in 0..255" | CPython reports `-N` for a death by signal, and `subprocess.run(["sh","-c","kill -9 $$"]).returncode` is `-9` |
+| three `subprocess` contracts: the output is "an arbitrary byte string" | a `str` on this path is a NUL-terminated `char *`, and CPython's answer really does contain NULs: `check_output(["sh","-c","printf 'a\0b'"])` is three bytes |
+| `popen_poll`: `-1` while the child has not been collected | `-1` is an answer CPython gives -- a child killed by `SIGHUP` -- so the model's "not collected" marker and a real answer were one word |
+| `popen_kill`/`popen_terminate`: "the signal reaches the child this handle names" | once the child has been collected CPython sends **nothing** and raises nothing: `Popen.send_signal` polls and returns |
+| `ctypes.CDLL`: "0, meaning no library of that name is on this target" | `dlopen` fails on files that EXIST and are not loadable images, so handle 0 does not mean the library is absent |
+| a call through a `ctypes` handle: "the value the foreign function returns is one word" | true of `ctypes`' default `restype` of `c_int` and of nothing else: `restype = None` answers `None` |
+| `threading.Lock.acquire`: "the lock is held by the kernel on a descriptor" | CPython's `threading.Lock` is a userspace semaphore with no `fileno`, no `_handle` and no descriptor, and a CHILD PROCESS took `fcntl.flock(LOCK_EX)` on a file while this process held one |
+| `Executor.submit`: "the callable runs on some thread" | a `ProcessPoolExecutor` runs it in another PROCESS, measured by having the callable report its own pid |
+
+True only under a reading the audit had to choose, and now said out loud:
+`Thread.start` "has run the target callable" (it has BEGUN -- `start()` returns
+before a sleeping callable finishes), `Thread.join` "the thread has stopped" (true
+of `join()` with no timeout, false of `join(timeout)`), and
+`Executor.shutdown(wait=True)` "every thread the pool started has stopped" (true
+of the pool's OWN workers -- a thread a submitted callable started itself is
+still running when it returns).
+
+Every one of them now has a `truth` row in `test_formal_admitted.py` that
+re-measures it, a contract that lands without one fails the
+`every admitted contract has a truth row` check, and every row is checked in the
+other direction too: `every truth probe rejects the pre-audit text` puts the old
+sentence back through its own probe, so a probe that stopped testing what it was
+written for fails as well.
 
 Everything a hostmod **decides** rather than admits is checked against CPython's
 own answer by `test_formal_admitted.py` — `subprocess`'s argument shapes and
@@ -647,6 +704,7 @@ CPython's answer is 9223372036, and a timeout check that refused `-1` — the va
 | `formal/lean.py`'s census | the count, as Lean reports it — the same instrument that counts every other hole in this project |
 | `tools/formal_sweep.py` | the class `built-with-admitted-contracts`: in the answerable denominator, NOT in the numerator |
 | `test_formal_admitted.py` | `ADMITTED_COUNTS`, pinned per module, failing in BOTH directions |
+| `test_formal_admitted.py`'s `truth` group | every contract's ASSUMPTION against CPython or the OS, and this file's own inventory against `counts_by_module()` — the instrument that found the eight false contracts |
 
 The sweep class is the one that matters for a coverage report. A `pass` is this
 tool's claim that the image built and every symbol it binds is on its own link

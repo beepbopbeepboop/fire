@@ -17,11 +17,38 @@ WHAT IT DOES, per round
    `fire.py build --formal --no-prove` the sweep runs;
 2. groups the answers by the module that refused, and prints the count, one
    example file and the message for each group;
-3. replaces one refusing module — the first in sorted-path order, so the walk is
-   deterministic — in a THROWAWAY COPY of the stdlib with a stub that exports one
-   function, and drops the import lines naming it, so its re-exports stop being
-   what the next round reports;
+3. replaces one refusing module — the first in sorted-path order that names a
+   file this tool may rewrite, so the walk is deterministic — in a THROWAWAY COPY
+   of the stdlib with a stub that exports one function, and drops the import
+   lines naming it, so its re-exports stop being what the next round reports;
 4. asks again.
+
+WHICH MODULE REFUSED
+--------------------
+Two shapes, and the SECOND one is why a round could report zero links on a scope
+whose largest group was 37 of 46 files (measured 2026-10-04 on
+`std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu}`, `work/formal20-std-os-io-2`):
+
+  · formal/build.py's chain wrapper, `<file>: <that file's own error>` — the
+    prefix names the refusing file directly.
+  · `formal/model.py::imported_callee_refusal`, which is what a call to a name
+    the DEFINING module does not export produces, and which names the module in
+    PROSE (`... it is imported from `std.format._utils`, so the call has to bind
+    a symbol `std.format._utils` exports`) rather than in that prefix. It is
+    also the single largest cause in the tree: 123 files, per
+    `bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
+    §1.
+
+That second shape used to fall into the catch-all `<no module named>` group,
+whose key is not a filename, so step 3 had nothing to rewrite and the walk
+stopped at round 0 — reporting *no chain at all* for the refusal that blocks the
+most files. It is resolved with the build's OWN resolver,
+`formal.imports.resolve_module_path(name, relative_to=importer)`, rather than by
+a second spelling rule here: that one already knows a dotted name
+(`std.format._utils`), a package (`std.math` → `std/math/__init__.mojo`) and a
+relative spelling (`..fstat`, `.path`) resolve, and it is the resolver the builds
+that produced these messages used. A name it cannot resolve stays unrewritable,
+and step 3 then says so in words instead of trying to rewrite a placeholder.
 
 THE LIMIT, stated in the output rather than only here, because it decides what
 the numbers mean
@@ -31,6 +58,17 @@ or two a round can be measuring what the module just stubbed was used for rather
 than the next link in the chain. The tell is a group's count moving when a
 DIFFERENT group was stubbed, and `round N:` prints every group, so a reader sees
 it. Links measured before that starts are the ones worth acting on.
+
+The limit has a LOUD form, and the walk stops on it rather than reporting it.
+Dropping an import line from a file whose only use of the name was the only
+statement in an indented block leaves that block empty, and the next build
+reports a parse error for that file — which every file importing it then reports
+too. Measured on the 46-file `std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu}`
+scope, round 4 answered `build: 32:0: Unexpected INDENT('')` for all 42
+remaining files. That is one mangled file, not 42 files refusing a construct,
+and `mangled_copy` says so: such a round is counted as unmeasurable, the stop
+message names the first file and quotes the parser, and nothing measured up to
+that round is discarded.
 
 THE STDLIB IS ONLY EVER READ
 ----------------------------
@@ -60,8 +98,133 @@ import sys
 
 HERE = pathlib.Path(__file__).resolve().parent.parent
 FIRE = str(HERE / "fire.py")
+# `formal.imports.resolve_module_path` below is the build's own resolver, and
+# this tool is run as `python3 tools/formal_chain_probe.py`, which puts `tools/`
+# on sys.path and NOT the repository root. Without this the import fails, the
+# resolution returns None, and every export-gate group falls back to a basename
+# — which is the whole bug, silently back.
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
 DEFAULT_ROUNDS = 9
 BUILD_TIMEOUT = 120
+
+# The group key for a refusal that names no module at all. NOT a filename, and
+# that is the whole reason `stub_targets` refuses it: this tool rewrites files
+# inside the copy and there is nothing here to rewrite.
+NO_MODULE = "<no module named>"
+
+# formal/build.py's chain wrapper: `<file>: <that file's own error>`.
+_CHAIN_PREFIX_RE = re.compile(r"([\w./]+\.mojo): ")
+
+# formal/model.py::imported_callee_refusal, which names the DEFINING module in
+# prose instead.  The backtick span is the module name as the resolver spells it
+# — `std.format._utils`, `std.math`, `..fstat`, `.path`.
+_EXPORT_GATE_RE = re.compile(r"is imported from `([^`]+)`")
+
+# A message that says the COPY no longer parses, which is this tool's own edit
+# and not a link in the chain. Dropping a `from … import …` line from a file
+# whose only use of it was inside an indented block leaves the block with nothing
+# in it, and the next build says so. Measured on the 46-file
+# `std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu}` scope (round 4): all 42
+# remaining files reported `build: 32:0: Unexpected INDENT('')`, which is not 42
+# files hitting one construct — it is one mangled file and 41 files that import
+# it.
+_MANGLED_COPY_RE = re.compile(
+    r"Unexpected INDENT|IndentationError|unexpected indent|expected an indented"
+    r" block")
+
+
+def mangled_copy(msg) -> bool:
+    """Whether `msg` reports the THROW-AWAY COPY failing to parse.
+
+    True means this round measured the stub step's damage rather than a link in
+    the chain, and the caller must stop rather than group 42 files under a
+    parser's complaint: the neutering removed the names these files CALL, which
+    is this module's documented limit, and a parse error is the limit announcing
+    itself in the least readable way available.
+    """
+    return bool(_MANGLED_COPY_RE.search(msg or ""))
+
+
+def _resolve_module(name, importer, probe):
+    """Where module `name` lives INSIDE the copy, or None.
+
+    `formal.imports.resolve_module_path` rather than a path rule written here,
+    because it is the resolver the builds that produced these messages used: it
+    knows that `std.math` is `std/math/__init__.mojo` and that `..fstat` is
+    relative to the importing FILE, and a second spelling rule in this tool
+    would be a second thing to keep right.
+
+    **A path outside `probe` is None**, and that is a safety property rather
+    than a tidiness one. The resolver is pointed at the real stdlib by
+    `MOJO_STDLIB`, which this process sets for its BUILDS and not for itself, so
+    an unfiltered answer names a file in `../new-modular/Mojo/stdlib` — which
+    exists, so a naive `is_file()` check passes, and the next thing the tool does
+    is `write_text` over it. This module's contract is that the real stdlib is
+    only ever read, so a resolution the walk may not act on is discarded here and
+    the group falls back to the basename search, which only ever looks inside the
+    copy.
+    """
+    if not name or not importer:
+        return None
+    try:
+        from formal.imports import resolve_module_path
+        found = resolve_module_path(name, relative_to=str(importer))
+    except Exception:
+        return None
+    if not found:
+        return None
+    found = pathlib.Path(found).resolve()
+    if under_stdlib(found, probe) is None:
+        return None
+    return found
+
+
+def refusing_module(msg, importer, rel, probe):
+    """Which module refused, as `(group key, exact file or None, stem)`.
+
+    `exact` is the one file to rewrite when the resolver could place the module;
+    None means the key is a bare basename and `stub_targets` falls back to
+    searching the copy for it, which is what a chain-prefix refusal has always
+    done and what a basename like `stat.mojo` (both a stdlib package and a
+    hostmod) needs. `stem` is the bare module name for the import-line drop in
+    either case: `from std.math import align_up` and `from ..fstat import stat`
+    both name their module by its last component.
+
+    `rel` renders a path relative to the copy, for the printed group key and the
+    example line, so a reader sees `std/format/_utils.mojo` rather than an
+    absolute path under `.tmp`. `probe` is the copy's root, which is what decides
+    whether a resolution is one this tool may act on (`_resolve_module`).
+    """
+    chain = _CHAIN_PREFIX_RE.findall(msg)
+    if chain:
+        base = chain[-1]
+        return base, None, base[:-len(".mojo")]
+    m = _EXPORT_GATE_RE.search(msg)
+    if not m:
+        return NO_MODULE, None, ""
+    name = m.group(1)
+    stem = name.rsplit(".", 1)[-1]
+    exact = _resolve_module(name, importer, probe)
+    if exact is None:
+        return name, None, stem
+    return rel(exact) or str(exact), exact, stem
+
+
+def stub_targets(group, probe):
+    """The files to replace for `group`, and [] when there are none.
+
+    An `exact` file is the only target: it is placed by the resolver, so a
+    package whose stem is `__init__` rewrites exactly the one package the walk
+    stopped at instead of every `__init__.mojo` in the copy.
+    """
+    exact = group["exact"]
+    if exact is not None:
+        return [exact] if exact.is_file() else []
+    stem = group["stem"]
+    if not stem:
+        return []
+    return sorted(probe.rglob(stem + ".mojo"))
 
 
 def stdlib_files(roots):
@@ -156,6 +319,15 @@ def main() -> int:
     scope = [probe / under_stdlib(p, stdlib) if under_stdlib(p, stdlib) else p
              for p in scope]
     env = dict(os.environ, MOJO_STDLIB=str(probe))
+    # …and for THIS process, so `formal.imports.resolve_module_path` — which the
+    # walk imports, not the builds — places a module inside the copy on its LAST
+    # pass too (`module_loader`, which reads STDLIB_PATH once at import). It is
+    # belt to `_resolve_module`'s filter rather than the thing that makes
+    # resolution land in the copy: a stdlib module resolves against the roots
+    # walked up from the importing file's own directory, and those are inside the
+    # copy by construction. It is set here, before the first import, because that
+    # is the only time it can be.
+    os.environ["MOJO_STDLIB"] = str(probe)
 
     print(f"stdlib copy: {probe}")
     print(f"scope: {len(scope)} file(s); {args.rounds} round(s) on "
@@ -163,8 +335,9 @@ def main() -> int:
     crashed = []
     for rnd in range(args.rounds):
         rows = round_messages(scope, outdir, args.arch, env)
-        groups = collections.defaultdict(list)
+        groups = {}
         built = []
+        mangled = []
         for path, rc, msg in rows:
             if rc == 0:
                 built.append(path)
@@ -172,27 +345,60 @@ def main() -> int:
             if rc is not None and "the backend raised" in msg:
                 crashed.append((path, msg))
                 continue
-            hits = re.findall(r"([\w./]+\.mojo): ", msg)
-            groups[hits[-1] if hits else "<no module named>"].append(
-                (path, msg))
+            if mangled_copy(msg):
+                mangled.append((path, msg))
+                continue
+            key, exact, stem = refusing_module(
+                msg, path, lambda p: under_stdlib(p, probe), probe)
+            group = groups.get(key)
+            if group is None:
+                # First answer wins the placement. Two files in the same scope
+                # can name the same module in two spellings that resolve
+                # differently only if the resolver disagrees with itself, and
+                # the walk must be deterministic, so it does not get a vote.
+                group = groups[key] = {"exact": exact, "stem": stem,
+                                       "members": []}
+            group["members"].append((path, msg))
         print(f"\n=== round {rnd}: {len(built)} built, "
-              f"{len(groups)} refusing module(s)")
-        for mod in sorted(groups, key=lambda k: (-len(groups[k]), k)):
-            members = groups[mod]
+              f"{len(groups)} refusing module(s)"
+              + (f", {len(mangled)} unmeasurable (the stub step left the copy "
+                 f"unparseable)" if mangled else ""))
+        for mod in sorted(groups, key=lambda k: (-len(groups[k]["members"]), k)):
+            members = groups[mod]["members"]
             path, msg = members[0]
             rel = under_stdlib(path, probe) or str(path)
             print(f"  {len(members):3d}  {mod}")
             print(f"       example: {rel}")
             print(f"       {msg[:300]}")
+        if mangled:
+            # Said here rather than as a group, because a group reads as a link
+            # in the chain and this is not one: it is the measurement's own
+            # wreckage. Everything measured up to this round stands; the links
+            # after it are not walkable with this stub, and reporting the parser
+            # complaint as 42 files refusing something would be the exact
+            # failure this tool exists to avoid.
+            path, msg = mangled[0]
+            print(f"\n  (stopping: {len(mangled)} of {len(scope)} file(s) no "
+                  f"longer parse, so this round measured the stub step and not "
+                  f"the chain — neutering a module removes the names its users "
+                  f"call, which is this tool's documented limit. First: "
+                  f"{under_stdlib(path, probe) or path}\n    {msg[:300]})")
+            break
         if not groups:
             break
-        victim = sorted(groups)[0]
-        stem = victim[:-len(".mojo")]
-        stubbed = list(probe.rglob(stem + ".mojo"))
-        if not stubbed:
-            print(f"\n  (stopping: {stem} is not under the stdlib copy, so "
-                  f"there is nothing this tool may rewrite)")
+        # The first group in sorted-path order THAT NAMES A FILE THIS TOOL MAY
+        # REWRITE. Sorting the groups first and taking [0] unconditionally is
+        # what made a round with a catch-all group stop at round 0 with a
+        # placeholder sliced as if it were a filename.
+        victim = next((k for k in sorted(groups)
+                       if stub_targets(groups[k], probe)), None)
+        if victim is None:
+            unrewritable = ", ".join(sorted(groups))
+            print(f"\n  (stopping: none of the refusing groups names a file in "
+                  f"the stdlib copy this tool may rewrite — {unrewritable})")
             break
+        stubbed = stub_targets(groups[victim], probe)
+        stem = groups[victim]["stem"]
         for p in stubbed:
             p.write_text(
                 f'"""{p.name}, stubbed by tools/formal_chain_probe.py."""\n\n'

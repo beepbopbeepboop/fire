@@ -286,6 +286,104 @@ CASES = [
      "    print(x)\n"
      "    return 0\n", "7\n"),
 
+    # The THIRD position where a name is a READ and the walk that folds module
+    # constants treated the enclosing node as a store, after `x = G` and the
+    # `elif` arm above. `out[K] = v` stores into `out` and READS both `out` and
+    # `K`, and the walk skipped the whole target — so `K` reached the emitter as a
+    # bare `IdentExpr` and the build refused "'K' has no home" on BOTH
+    # architectures, blaming the register allocator for a disagreement between
+    # two walks. Measured on `tools/memslot.py:held_env`
+    # (`bugs/FORMAL_proof_coverage_census_2026-10-03.md` §0.6's round-2
+    # census), whose `out[POOL] = str(pool)` is this shape exactly.
+    #
+    # Four shapes in one case, because "the index of a store target is a read"
+    # is one rule and the four are the four places it can be written: a bare
+    # subscript store, an AUGMENTED one (whose target walk is a separate
+    # statement type), a MULTI-assign, and a constant read in a body the walk
+    # has to reach through a branch. The dict subscript is the one that RUNS —
+    # a list indexed by a string has no meaning, so it is a refusal rather than
+    # a number, and the refusal it earns now names the SUBSCRIPT (`xs['k']`)
+    # instead of the constant.
+    # A module constant whose initializer is an OPERATOR, which is how this
+    # repository's own source spells one: `1 << 20` is a bit mask,
+    # `2 ** 62 - 1` is `MAX64`, `MASK & n` is the third of a family. Only four
+    # arithmetic operators were folded (`+ - * //`) and no bitwise or shift among
+    # them, so a constant written any other way read as `rebound` rather than
+    # `assigned`, reached the emitter as a bare `IdentExpr`, and was refused —
+    # with a message about PRINT's materialization, for a name the build had read
+    # and simply could not fold. Measured on `test_formal_math.py:isqrt_source`
+    # by the proof-breadth census, where it also made the two backends report
+    # different subjects for one function.
+    #
+    # All thirteen in one case, and the numbers are the assertion: a fold that
+    # got three of the six operators right would build and print wrong ones.
+    # Three of the thirteen are there because of WHERE the range check lives:
+    # `BIG` and `MINV` are the word's own top and bottom values, and their
+    # intermediates (`2 ** 63`) are not words, so a folder that checked each
+    # operator as it went would refuse exactly the two constants that are
+    # representable. `REF` reads an EARLIER module-level binding through `>>`,
+    # which is the one operator here whose answer is not a function of the low
+    # 64 bits and so is the one whose operands are checked.
+    ("module_constant_folded_through_its_operators",
+     "POW = 2 ** 3 - 1\n"
+     "SHL = 1 << 20\n"
+     "SHR = 100 >> 2\n"
+     "REF = SHL >> 4\n"
+     "AND = 7 & 3\n"
+     "OR = 7 | 8\n"
+     "XOR = 7 ^ 3\n"
+     "MIX = 3 * 4 + (1 << 5)\n"
+     "NEG = -8 >> 2\n"
+     "BIG = 2 ** 62 - 1\n"
+     "MINV = -(2 ** 63)\n"
+     "NOTV = ~(1 << 3)\n"
+     "TOP = (1 << 62) | 7\n"
+     "\n"
+     "def main(n):\n"
+     "    print(POW)\n"
+     "    print(SHL)\n"
+     "    print(SHR)\n"
+     "    print(REF)\n"
+     "    print(AND)\n"
+     "    print(OR)\n"
+     "    print(XOR)\n"
+     "    print(MIX)\n"
+     "    print(NEG)\n"
+     "    print(BIG)\n"
+     "    print(MINV)\n"
+     "    print(NOTV)\n"
+     "    print(TOP)\n"
+     "    return 0\n",
+     "7\n1048576\n25\n65536\n3\n15\n4\n44\n-2\n4611686018427387903\n"
+     "-9223372036854775808\n-9\n4611686018427387911\n"),
+
+    ("read_global_as_a_subscript_index_in_a_store",
+     "KEY = 'k'\n"
+     "IDX = 1\n"
+     "\n"
+     "def store() -> Int:\n"
+     "    d = {'a': 1}\n"
+     "    d[KEY] = 7\n"
+     "    return d[KEY]\n"
+     "\n"
+     "def aug() -> Int:\n"
+     "    xs = [1, 2, 3]\n"
+     "    xs[IDX] += 10\n"
+     "    xs[0], xs[2] = 7, 9\n"
+     "    return xs[0] + xs[1] + xs[2]\n"
+     "\n"
+     "def branchy() -> Int:\n"
+     "    xs = [4, 5]\n"
+     "    if 2 > 0:\n"
+     "        xs[IDX - 1] = 6\n"
+     "    return xs[0] * 10 + xs[1]\n"
+     "\n"
+     "def main(n):\n"
+     "    print(store())\n"
+     "    print(aug())\n"
+     "    print(branchy())\n"
+     "    return 0\n", "7\n28\n65\n"),
+
     # ── containers ──
     # A module-level list is an address-valued slot: the slot holds a POINTER to
     # the blob, so it is the case that exercises the initializer at all — an
@@ -434,6 +532,62 @@ CASES = [
     # row here that needs `global_slot_is_dict` — without it a dict global's
     # `D["a"]` is emitted as a SEQUENCE subscript and the key's address becomes
     # an element offset, which is a load from a nonsense address.
+    # `None` as a container ELEMENT, and the row that was refused before
+    # 2026-10-04 with **"one of its elements is computed by a call"** — about a
+    # literal, with no call in it. `_static_word` had no arm for a `None`, in
+    # either spelling (it arrives as `IdentExpr("None")`, not `NoneLiteral`),
+    # even though both emitters lower a `None` to the word 0 and every other
+    # reader of the same value accepts the two spellings as one.
+    #
+    # The nested shape is `formal/arm64_proof_gen.py`'s `_STEP_CONDS`, whose
+    # first entry is `(None, 0xd65f03c0)` and which
+    # `tools/formal_proof_breadth.py`'s census records under exactly that
+    # misdiagnosis. `mask is None` reading a blob element is the other half: it
+    # is the test that says the word is 0 rather than a marker nothing wrote,
+    # and a layout that stored a sentinel other than 0 would answer every row
+    # "not None".
+    ("read_nested_container_with_none_elements",
+     "TBL = [(None, 7), (3, 1), (None, 11), (6, 2)]\n"
+     "\n"
+     "def pick(w: Int) -> Int:\n"
+     "    var i = 0\n"
+     "    while i < len(TBL):\n"
+     "        var pair = TBL[i]\n"
+     "        var mask = pair[0]\n"
+     "        var base = pair[1]\n"
+     "        if mask is None:\n"
+     "            if w == base:\n"
+     "                return i\n"
+     "        else:\n"
+     "            if (w & mask) == base:\n"
+     "                return i\n"
+     "        i = i + 1\n"
+     "    return -1\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"%d %d %d %d\", pick(7), pick(5), pick(11), pick(4))\n"
+     "    return 0\n",
+     "0 1 2 -1"),
+
+    # The same word in the two simpler shapes: a list element and a dict VALUE,
+    # so the fix is not only about a nested container laying out.
+    ("read_none_in_a_list_and_a_dict",
+     "ITEMS = [1, None, 3]\n"
+     "MAP = {\"a\": None, \"b\": 2}\n"
+     "\n"
+     "def first_none() -> Int:\n"
+     "    var i = 0\n"
+     "    while i < len(ITEMS):\n"
+     "        if ITEMS[i] is None:\n"
+     "            return i\n"
+     "        i = i + 1\n"
+     "    return -1\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"%d %d\", first_none(), 1 if MAP[\"a\"] is None else 0)\n"
+     "    return 0\n",
+     "1 1"),
+
     ("read_dict_of_strings_by_key",
      "D = {\"a\": 1, \"b\": 2}\n"
      "\n"
@@ -1052,6 +1206,25 @@ REFUSALS = [
      "    print(v)\n"
      "    return 0\n",
      "no initializer"),
+    # …and WHY the name has a slot, which is the second half of that row's
+    # sentence and was false of every container global. `GlobalSlot.mutable`'s
+    # own comment records this sentence being fixed once already — in the
+    # MANIFEST, where `write_dylib_manifest` split `variables` from `containers`
+    # for exactly this reason — while the refusal kept it, so a name nothing
+    # writes was reported as one a function writes through `global`. The `absent`
+    # is the false clause and this row is what keeps it out: `L` above is a
+    # CONSTANT with a home, and a reader sent looking for the writer that does
+    # not exist stops reading the sentence that names the real problem, which is
+    # the element of the literal that is not a word.
+    ("a_container_global_says_it_is_a_constant_not_a_variable",
+     "L = [len(\"ab\"), 3]\n"
+     "\n"
+     "def main(n):\n"
+     "    v: Int = L[0]\n"
+     "    print(v)\n"
+     "    return 0\n",
+     "is a CONSTANT with a home and not a variable",
+     "a function writes it through `global L`"),
 
     # A local that SHADOWS a module global, read before the local is stored. The
     # refusal is the point of the row, and the reason is a fact about CPython
@@ -1705,7 +1878,16 @@ def run_case(name, files, want_stdout, tmpdir, verbose):
     return True, ""
 
 
-def run_refusal(name, source, needle, tmpdir, verbose):
+def run_refusal(name, source, needle, absent, tmpdir, verbose):
+    """Both backends must refuse, naming `needle` and NOT naming `absent`.
+
+    `absent` is the sentence the refusal must not contain, and it exists
+    because a diagnostic that names the wrong thing about the name it names is
+    this file's subject: one row asserts the reason a name HAS a `__DATA` slot,
+    and that reason is not the same for every slot (`a_container_global_says_it_
+    is_a_constant_not_a_variable`). It is optional so the rows that only care
+    about the missing initializer stay one tuple long.
+    """
     src = os.path.join(tmpdir, name + ".mojo")
     with open(src, "w") as f:
         f.write(source)
@@ -1722,6 +1904,10 @@ def run_refusal(name, source, needle, tmpdir, verbose):
         if needle not in text:
             return False, (f"--backend={backend} refused, but not naming the "
                            f"missing initializer ({needle!r}): "
+                           f"{text.strip()[-300:]}")
+        if absent is not None and absent in text:
+            return False, (f"--backend={backend} refused with {absent!r}, which "
+                           f"is the sentence this row says must not appear here: "
                            f"{text.strip()[-300:]}")
     if verbose:
         print(f"      refused identically on both backends: {needle!r}")
@@ -1866,11 +2052,16 @@ def main():
         print(f"SKIP: the images are arm64, host is {platform.machine()}")
         return 0
 
-    everything = ([(c[0], c[1], c[2]) for c in CASES]
-                  + [(c[0], c[1], c[2]) for c in FRAME_CASES]
-                  + [(c[0], c[1], c[2]) for c in REFUSALS]
-                  + [(c[0], c[1], c[2]) for c in FRAME_REFUSALS]
-                  + [(c[0], None, c[1]) for c in LAYOUT_CASES])
+    # The refusal tables may carry a FOURTH element — a sentence the message
+    # must NOT contain — so they are widened to four here rather than indexed,
+    # and every other table stays three.
+    everything = ([(c[0], c[1], c[2], None) for c in CASES]
+                  + [(c[0], c[1], c[2], None) for c in FRAME_CASES]
+                  + [(c[0], c[1], c[2], c[3] if len(c) > 3 else None)
+                     for c in REFUSALS]
+                  + [(c[0], c[1], c[2], c[3] if len(c) > 3 else None)
+                     for c in FRAME_REFUSALS]
+                  + [(c[0], None, c[1], None) for c in LAYOUT_CASES])
     selected = [c for c in everything if not args.cases or c[0] in args.cases]
     known = {c[0] for c in everything}
     if args.cases and len(selected) != len(args.cases):
@@ -1882,10 +2073,10 @@ def main():
 
     passed = failed = 0
     with tempfile.TemporaryDirectory() as tmpdir:
-        for name, files, want in selected:
+        for name, files, want, absent in selected:
             try:
                 if name in refusal_names:
-                    ok, detail = run_refusal(name, files, want, tmpdir,
+                    ok, detail = run_refusal(name, files, want, absent, tmpdir,
                                              args.verbose)
                 elif name in layout_names:
                     ok, detail = want(tmpdir, name, args.verbose)

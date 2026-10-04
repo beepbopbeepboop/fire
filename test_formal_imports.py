@@ -27,14 +27,19 @@ with "Symbol not found". These tests pin the replacement behaviour:
      sibling > the stdlib loader, and each step of it is pinned by a test that
      goes red if the order inverts — because the failure mode of getting it
      wrong is a program that binds the wrong module and computes the wrong
-     answer with nothing to grep for.
- 10. a module that genuinely has no boundary symbol is REFUSED, and the
-     refusal says which of the ways it has none. 33 of the 578 swept files
-     are this one refusal; the decision and its cost are in
-     bugs/FORMAL_known_limits.md §1, and the five tests at the end of this
-     file pin both the decision and the accuracy of the message, because a
-     message that is false about the file sends the reader after a construct
-     that is not there.
+     answer with nothing to grep for. Inside the first of those steps the name
+     AS SPELLED is offered to every search root before the LEAF fallback is
+     offered to any, so a dotted import cannot bind a module its own name does
+     not spell (`test_the_spelling_outranks_a_nearer_roots_leaf`, and the
+     measured stdlib rows behind it).
+ 10. an import EDGE that binds no name the dependency could publish as one
+     boundary symbol needs no library at all, and a module that genuinely has
+     no boundary symbol is still REFUSED for every edge that does bind
+     something from it — with a message saying which of the ways it has none.
+     The decision and its cost are in bugs/FORMAL_known_limits.md §1, and the
+     tests at the end of this file pin both the rule and the accuracy of the
+     message, because a message that is false about the file sends the reader
+     after a construct that is not there.
 
 Invoked directly:
     python3 test_formal_imports.py [-v]
@@ -1192,6 +1197,162 @@ def test_package_relative_dotted_import_resolves(tmpdir, _shared):
     check(code == 42, f"returned {code}, expected 42; stderr: {err}")
 
 
+def test_the_spelling_outranks_a_nearer_roots_leaf(tmpdir, _shared):
+    """A dotted name binds to what it SPELLS, never to a nearer root's leaf.
+
+    `resolve_module_path` walks its roots nearest-first and, at each one,
+    offered the name as spelled and then the name's LEAF.  So the leaf of one
+    name could be preferred over the spelling of another, decided by nothing but
+    how deep the IMPORTER sat — which is not a fact about the import.  Measured
+    over the stdlib on the tree before the fix, 31 bindings in 252 files went to
+    a module other than the one they named, and two of them are the clearest
+    possible statement of it: `std/sys/info.mojo` and `std/_gpu/host/info.mojo`
+    each import the other and each got THEMSELVES.  (Both are rows in
+    `test_a_dotted_stdlib_import_resolves_to_the_module_it_names` below.)
+
+    The tree here is that shape with the numbers replaced, so the two candidate
+    answers are DIFFERENT and the program's exit code says which one it got:
+
+        a/mod/__init__.mojo        what the LEAF `mod` finds one root nearer
+                                   — returns 99
+        pkg/sub/mod.mojo           what `pkg.sub.mod` SPELLS — returns 10
+        pkg/sub/__init__.mojo      …so `mod` is a module of a package
+        a/b/prog.mojo              `from pkg.sub.mod import value`
+
+    `a/b`, `a` and the project root are all search roots for `a/b/prog.mojo`
+    (the walk in `_search_roots` ascends from the importer), so the leaf was
+    offered at `<root>/a` before the spelling was offered at `<root>`.  It used
+    to be taken there, and the program printed 99.  `pkg/sub/mod.mojo` is a
+    `.mojo` and not a package because within ONE root a module beats a package
+    (`pkg/sub/mod.mojo` before `pkg/sub/mod/__init__.mojo`), which is a
+    different rule and is not what this case is about."""
+    root = os.path.join(tmpdir, "spelling")
+    os.makedirs(root)
+    write_tree(root, {
+        "pkg/__init__.mojo": "def own():\n  return 1\n",
+        "pkg/sub/__init__.mojo": "def own():\n  return 2\n",
+        "pkg/sub/mod.mojo": "def value():\n  return 10\n",
+        "a/mod/__init__.mojo": "def value():\n  return 99\n",
+        "a/b/prog.mojo": ("from pkg.sub.mod import value\n"
+                          "def main():\n  return value()\n"),
+    })
+    fresh_cas()
+    got = I.resolve_module_path("pkg.sub.mod",
+                                relative_to=os.path.join(root, "a", "b",
+                                                         "prog.mojo"))
+    check(got is not None
+          and os.path.abspath(got) == os.path.abspath(
+              os.path.join(root, "pkg", "sub", "mod.mojo")),
+          f"`pkg.sub.mod` from a/b/prog.mojo resolved to {got!r}; the name "
+          f"spells pkg/sub/mod.mojo, and a nearer root's leaf is not allowed "
+          f"to answer for it")
+    _result, out = build(os.path.join(root, "a", "b"), "prog.aout")
+    code, err = run(out)
+    check(code == 10,
+          f"returned {code}, expected 10 (pkg/sub/mod.mojo); stderr: {err}. "
+          f"99 is the leaf `mod/` one root nearer, and a program that imported "
+          f"`pkg.sub.mod` and computed 99 is a wrong answer with nothing on "
+          f"the link line to catch it")
+
+
+def test_a_dotted_stdlib_import_resolves_to_the_module_it_names(tmpdir,
+                                                                _shared):
+    """Every measured stdlib binding that the leaf fallback got wrong.
+
+    The synthetic case above pins the RULE; this pins the CASES it was measured
+    on, because a rule that is right and a tree that has moved are different
+    facts and this is the one that says whether the rule still has anything to
+    do.  Each row is (the importing file, the name it writes, the file the name
+    spells); the whole stdlib is checked, so a NEW instance of the same shape
+    fails here too rather than waiting for the next sweep to find it.
+
+    Skipped, with the reason printed and counted, when there is no stdlib
+    checkout beside this tree — see `_stdlib_dir` and `_Skip`."""
+    stdlib = _stdlib_dir()
+    if stdlib is None:
+        raise _Skip("no stdlib checkout beside this tree, so there is no swept "
+                    "file whose imports can be read")
+    cases = [
+        # A sibling package at `<stdlib>/std` captured the leaf. The three
+        # files are the measured `std.sys.compile` rows.
+        ("collections/_asan_annotations.mojo", "std.sys.compile",
+         "sys/compile.mojo"),
+        ("builtin/_startup.mojo", "std.sys.compile", "sys/compile.mojo"),
+        ("testing/assert_aborts.mojo", "std.sys.compile", "sys/compile.mojo"),
+        # A pair of modules that each import the other and each got themselves:
+        # the leaf matched the importer's OWN file.
+        ("_gpu/host/info.mojo", "std.sys.info", "sys/info.mojo"),
+        ("sys/info.mojo", "std._gpu.host.info", "_gpu/host/info.mojo"),
+        ("_gpu/intrinsics.mojo", "std.sys.intrinsics", "sys/intrinsics.mojo"),
+        ("_gpu/primitives/id.mojo", "std.sys.intrinsics",
+         "sys/intrinsics.mojo"),
+        ("_gpu/primitives/warp.mojo", "std.sys.intrinsics",
+         "sys/intrinsics.mojo"),
+        # A package and the module beside it, where the leaf found the PACKAGE
+        # for a name that spells the module (`std.math.math`).
+        ("complex/complex.mojo", "std.math.math", "math/math.mojo"),
+        ("simd.mojo", "std.math.math", "math/math.mojo"),
+        ("_plugin/_trait.mojo", "std.math.math", "math/math.mojo"),
+        ("builtin/debug_assert.mojo", "std.io.io", "io/io.mojo"),
+        ("format/_utils.mojo", "std.io.io", "io/io.mojo"),
+        ("builtin/_stubs.mojo", "std.os.os", "os/os.mojo"),
+        ("os/fstat.mojo", "std.time.time", "time/time.mojo"),
+        ("os/_macos.mojo", "std.time.time", "time/time.mojo"),
+        ("builtin/string_literal.mojo", "std.collections.string.format",
+         "collections/string/format.mojo"),
+        # …and the other direction: a module that spells a PACKAGE and got the
+        # module beside it instead.
+        ("math/uutils.mojo", "std.math", "math/__init__.mojo"),
+        ("memory/alloc.mojo", "std.memory", "memory/__init__.mojo"),
+        ("memory/pointer.mojo", "std.memory", "memory/__init__.mojo"),
+        ("benchmark/bencher.mojo", "std.benchmark", "benchmark/__init__.mojo"),
+        ("python/bindings.mojo", "std.python", "python/__init__.mojo"),
+        ("testing/prop/random.mojo", "std.random", "random/__init__.mojo"),
+        ("collections/string/string.mojo", "std.collections.string",
+         "collections/string/__init__.mojo"),
+    ]
+    for rel, name, spelled in cases:
+        src = os.path.join(stdlib, rel)
+        check(os.path.isfile(src),
+              f"the stdlib checkout at {stdlib} has no {rel}, so this row is "
+              f"not measuring the file it claims to measure")
+        got = I.resolve_module_path(name, relative_to=src)
+        check(got is not None
+              and os.path.abspath(got) == os.path.abspath(
+                  os.path.join(stdlib, spelled)),
+              f"{rel} writes `from {name} import …`, which spells "
+              f"{spelled}; it resolved to "
+              f"{os.path.relpath(got, stdlib) if got else None} instead")
+
+    # And the whole stdlib, so the shape cannot come back in a file no sweep
+    # row names yet: a leaf match in a root NEARER than the one that spells the
+    # name. `first_source` asked of a two-root list is the rule itself, and the
+    # roots are the ones a real build of that file searches.
+    drifted = []
+    for dirpath, _dirs, files in os.walk(stdlib):
+        for fname in sorted(files):
+            if not fname.endswith(".mojo"):
+                continue
+            path = os.path.join(dirpath, fname)
+            try:
+                stmts = I.module_statements(path)
+            except Exception:
+                continue
+            roots = I._search_roots(path, None)
+            for mod in I.imported_modules(stmts):
+                if mod.startswith("."):
+                    continue
+                now = I.resolve_module_path(mod, relative_to=path)
+                alt = I.first_source(mod, roots, ".mojo")
+                if alt and now and os.path.abspath(alt) != os.path.abspath(now):
+                    drifted.append((os.path.relpath(path, stdlib), mod,
+                                    os.path.relpath(now, stdlib),
+                                    os.path.relpath(alt, stdlib)))
+    check(not drifted,
+          f"{len(drifted)} stdlib import(s) still resolve to a module other "
+          f"than the one they name: {drifted[:6]}")
+
+
 def test_host_module_still_refused_despite_same_named_sibling(tmpdir, _shared):
     """The precedence that must NOT be reordered: host module before `.py`.
 
@@ -1591,6 +1752,88 @@ def test_an_unclassified_stdlib_name_is_not_called_a_typo(tmpdir, _shared):
           "and it must say that nothing here can say whether the module is "
           f"reachable, which is the whole difference from a tiered name: "
           f"{text[-300:]}")
+
+
+def test_no_unclassified_stdlib_name_is_imported_by_anything(tmpdir, _shared):
+    """The other half of the row above: those 200-odd names have NO consumer.
+
+    `test_an_unclassified_stdlib_name_is_not_called_a_typo` pins what a build
+    SAYS about a name in no tier, and it says the true thing: this tree cannot
+    say whether the module is reachable. What it cannot pin is whether that
+    matters, because "unclassified" is a statement about the table and not about
+    the corpus. The corpus question is the one that decides how much of the
+    table is worth filling, and it is cheap to ask of every `.mojo` file rather
+    than of the ones a sweep happened to reach:
+
+        unclassified names  x  files that IMPORT one of them  =  (must be empty)
+
+    Measured over this repository and the stdlib on 2026-10-03, it is EMPTY --
+    not one of the 223 was imported by any of the 370 files, which is why
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md` stopped asking for
+    222 per-name judgements: there is no measurement to tell a right entry from
+    a plausible one, and no file whose answer changes. Asserting it here makes
+    that a standing invariant rather than a snapshot, and it is a TRIPWIRE with
+    a direction: the day a file imports `binascii`, this goes red and the fix is
+    to place the name by the rule in `formal/imports.py`, which is the only
+    thing that can answer the question the new consumer has asked.
+
+    The stdlib half SKIPS when it is absent, on purpose and for the reason
+    `test_formal_mlir_precedence.py`'s census says: the stdlib lives OUTSIDE
+    this repository, and "there is no corpus here" must not print the same word
+    as "every consumer of these names is classified". The repository half is
+    unconditional, so the invariant is still checked on a checkout without it.
+    """
+    import sys as _sys
+    # "In no tier" is not the whole of it, and the difference is 20-odd names
+    # that are answered: a name this tree has WRITTEN leaves its tier (see the
+    # rule on `HOST_MODELLED`), so `os`, `sys` and `os._syscalls` answer
+    # `host_module_tier` with `''` while being the three most-imported modules
+    # in the corpus. So the set is the doc's own -- no tier AND no module --
+    # resolved through the resolver rather than through a path spelling, which
+    # is what makes `os._syscalls` (a submodule of an answered package) count as
+    # answered.
+    probe = os.path.join(HERE, "formal", "arm64.py")
+    unclassified = {n for n in _sys.stdlib_module_names
+                    if not I.host_module_tier(n)
+                    and not I.resolve_module_path(n, relative_to=probe,
+                                                 project_root=probe)}
+    check(len(unclassified) > 100,
+          f"precondition: only {len(unclassified)} CPython standard-library "
+          "names are in no tier, so this row is about the names in no tier "
+          "only if there are many of them")
+    roots = [(HERE, "this repository")]
+    stdlib = os.path.join(HERE, "..", "new-modular", "Mojo", "stdlib", "std")
+    if os.path.isdir(stdlib):
+        roots.append((stdlib, "the stdlib"))
+    consumers = []
+    scanned = 0
+    for root, what in roots:
+        for dirpath, dirs, files in os.walk(root):
+            dirs[:] = [d for d in sorted(dirs)
+                       if d not in (".git", "build", ".tmp", "__pycache__")]
+            for name in sorted(files):
+                if not name.endswith(".mojo"):
+                    continue
+                path = os.path.join(dirpath, name)
+                try:
+                    with open(path, "rb") as f:
+                        source = f.read()
+                    stmts = I.parse_module_for_closure(source, path)
+                except Exception:  # noqa: BLE001 — a file this path cannot
+                    continue        # parse is not a consumer of anything
+                scanned += 1
+                for mod in I.imported_modules(stmts):
+                    top = mod.split(".")[0]
+                    if top in unclassified:
+                        consumers.append((mod, os.path.relpath(path, root)))
+    check(scanned > 100,
+          f"only {scanned} .mojo files were scanned, so this row is not "
+          "covering the corpus it claims to cover")
+    check(not consumers,
+          "these files import a CPython standard-library name that no tier "
+          "classifies, so nothing here can say whether the module is "
+          f"reachable and the file's host-import row has no verdict: "
+          f"{consumers[:10]}")
 
 
 def test_mojo_source_beats_host_module(tmpdir, _shared):
@@ -2329,17 +2572,30 @@ def test_a_package_that_declares_something_is_still_refused(tmpdir, _shared):
     each of these has to keep its own refusal: a generic-only body (one trie
     entry cannot be two instantiations), a body whose only declaration is
     private, and a body whose names are all C library symbols. Without the
-    `_declared_api_shape` test the branch swallowed all three, and
-    `test_a_module_with_no_boundary_symbol_is_refused` went red — which is why
+    `_declared_api_shape` test the branch swallowed all three, and the
+    generic-only module test at the end of this file went red — which is why
     that row exists and why the three are named here.
 
     The program imports the package itself (`from pkg import widen`), which is
     the spelling that makes the package's dylib get built at all; with
     `import pkg.sub` there is no package library to refuse and the case would
     pass vacuously.
+
+    **AND IT CALLS THE NAME**, which is the whole difference from 2026-10-04 and
+    the reason the `gen` row's expected wording changed. The per-edge rule
+    (`formal/imports.py::library_free_edges`) exempts an edge that binds nothing
+    but templates, so a package whose body is one generic template, imported by
+    a program that never calls it, now builds — and there is nothing to assert
+    about a refusal there. Calling it puts the edge back in the shape the gate
+    exists for: a bare call to a template has no callee, and the refusal comes
+    from the IMPORTER (`imported_callee_refusal`, naming `widen`) rather than
+    from the module's own gate. The other two shapes are unaffected: `widen` is
+    not a name either of them declares, so their edges keep their library and
+    their own sentences.
     """
     cases = {
-        "gen": ("def widen[T: Intable](v: T) -> T:\n  return v\n", "GENERIC"),
+        "gen": ("def widen[T: Intable](v: T) -> T:\n  return v\n",
+                "does not export it"),
         "private": ("def _hidden(x):\n  return x\n", "private"),
         "clib": ("def exit(x):\n  return x\n", "C library symbol"),
     }
@@ -2348,7 +2604,7 @@ def test_a_package_that_declares_something_is_still_refused(tmpdir, _shared):
         os.makedirs(root)
         write_tree(root, {"pkg/__init__.mojo": body,
                           "prog.mojo": "from pkg import widen\n"
-                                      "def main():\n  return 0\n"})
+                                      "def main():\n  return widen(1)\n"})
         fresh_cas()
         result, _out = build(root, "prog.aout", expect_ok=False)
         text = result.stderr or result.stdout
@@ -2906,37 +3162,95 @@ GENERIC_ONLY_MODULE = "def widen[T: Intable](v: T) -> T:\n  return v\n"
 CONCRETE_MODULE = "def widen(v):\n  return v\n"
 
 
-def test_a_module_with_no_boundary_symbol_is_refused(tmpdir, _shared):
-    """A module whose only public function is a GENERIC template is refused.
+def test_a_module_nobody_binds_a_concrete_name_from_needs_no_library(
+        tmpdir, _shared):
+    """A module whose every imported name is a TEMPLATE is not built, and the
+    program that imports it builds and runs.
 
-    The limit, pinned. doc/ABI.md §Generics is explicit that a generic is not
-    a single boundary symbol — each INSTANTIATION is, keyed in the CAS by its
-    type arguments — and that monomorphization is Stage 5, which this path
-    does not do. So there is no name an importer could bind, and the honest
-    answer is the refusal.
+    **THE PER-EDGE RULE, and the decision this row used to pin the other way.**
+    A module dylib exists so that something on an import EDGE can bind a symbol
+    in it, so an edge that binds no name the dependency could publish as one
+    symbol needs no library — `formal/imports.py::library_free_edges` decides
+    that per edge and `build_module_dylib` and `_resolve_imports` both act on
+    it. `BinaryHeap` is the measured case (`std/collections/__init__.mojo`
+    re-exports it and 162 of the 163 files the export gate blocked name nothing
+    it declares), and `bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §4.1 is the
+    measurement.
 
-    It is a `refuse` in substance: the build must FAIL and the message must
-    name the module and say GENERIC. If a future change makes this build, this
-    test fails — which is the point, because the only way to make it build is
-    to publish the template under its base name, and that is a run-time wrong
-    answer rather than a build error.
+    What this pins is the half that could have gone wrong silently: the program
+    RUNS and **no library for the module exists at all**, so the pass is not
+    "an empty trie happened to link". A library with an empty export table would
+    satisfy a build that never binds anything, and the assertion that would
+    catch a regression to that is the absence of the file.
+
+    It replaces `test_a_module_with_no_boundary_symbol_is_refused`, which
+    asserted the opposite and existed to stop a template being published under
+    its base name. That is still refused, and it is still pinned — by
+    `test_a_generic_template_is_not_exported_under_its_base_name` below (the
+    export set is empty) and by the next test (a bare call cannot bind). The
+    difference the reversal makes is that the module is no longer refused for
+    having no boundary symbol when NOTHING on the edge wants one.
     """
     root = os.path.join(tmpdir, "genericonly")
     os.makedirs(root)
-    write_tree(root, {"mylib/__init__.mojo": GENERIC_ONLY_MODULE,
+    write_tree(root, {"mylib.mojo": GENERIC_ONLY_MODULE,
                       "prog.mojo": "from mylib import widen\n"
                                   "def main():\n  return 0\n"})
     fresh_cas()
+    _result, out = build(root, "prog.aout")
+    code, err = run(out)
+    check(code == 0,
+          f"a program that imports a template and calls nothing returned {code} "
+          f"rather than 0: {err}")
+    built = sorted(glob.glob(os.path.join(cas_imports("arm64"),
+                                          "mylib.*.arm64.dylib")))
+    check(not built,
+          f"a library was built for a module this edge binds no concrete name "
+          f"from, so the pass above is an empty trie that happened to link "
+          f"rather than the edge needing nothing: {built}")
+
+
+def test_a_bare_call_to_a_template_is_refused_by_the_export_rule(tmpdir, _shared):
+    """The surviving half of the old limit: `widen(3)` names no instantiation,
+    so it has no callee — and the refusal says so, by NAME.
+
+    The counterpart to the test above, and the reason the per-edge rule is not a
+    hole. The edge is exempt because every name it binds is a template, and the
+    one thing that still cannot be done across it is CALL one without spelling
+    the type argument: `widen(3)` is a BL against a symbol that does not exist
+    under any spelling. So `formal/imports.py::check_library_free_calls` refuses
+    it where the edge decision was made, and with
+    `formal/model.py::imported_callee_refusal` — the same sentence every other
+    unbindable imported callee gets.
+
+    It used to be refused by the module's own export gate instead, one layer
+    away, and the message the reader gets is the part worth pinning: it must
+    NAME THE CALL and the rule that stops it, because the gate's sentence
+    ("`widen` has no boundary symbol") is about the library and a reader who
+    never knew a library was being built cannot use it. Three assertions, one
+    per fact the sentence has to carry: the callee's name, the export rule, and
+    the spelling that would work.
+    """
+    root = os.path.join(tmpdir, "genericonly_bare")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": GENERIC_ONLY_MODULE,
+                      "prog.mojo": "from mylib import widen\n"
+                                  "def main():\n  return widen(3)\n"})
+    fresh_cas()
     result, _out = build(root, "prog.aout", expect_ok=False)
-    check(result.returncode != 0,
-          "a module exporting only a generic template built successfully; one "
-          "trie entry cannot be two instantiations, so a call with different "
-          "type arguments would silently bind the first one's body")
     text = result.stderr or result.stdout
-    check("__init__.mojo" in text,
-          f"the refusal does not name the module: {text.strip()[-300:]}")
-    check("GENERIC" in text,
-          f"the refusal does not say the export is blocked by genericity: "
+    check(result.returncode != 0,
+          "a bare call to an imported template built successfully; one trie "
+          "entry cannot be two instantiations, so a call with different type "
+          "arguments would silently bind the first one's body")
+    check("widen" in text,
+          f"the refusal does not name the call it is about: "
+          f"{text.strip()[-300:]}")
+    check("doc/ABI.md" in text,
+          f"the refusal does not say which rule stops the call: "
+          f"{text.strip()[-300:]}")
+    check("widen[<a type>]" in text,
+          f"the refusal does not give the spelling that would bind: "
           f"{text.strip()[-300:]}")
 
 
@@ -3403,6 +3717,10 @@ TESTS = [
     ("a repository sibling resolves", test_repository_sibling_resolves),
     ("a package-relative dotted import resolves",
      test_package_relative_dotted_import_resolves),
+    ("the spelling outranks a nearer root's leaf",
+     test_the_spelling_outranks_a_nearer_roots_leaf),
+    ("a dotted stdlib import resolves to the module it names",
+     test_a_dotted_stdlib_import_resolves_to_the_module_it_names),
     ("a module's identity is its package chain, not its reach order",
      test_own_module_identity_is_the_package_chain),
     ("a relative import at the root builds one library and runs",
@@ -3417,6 +3735,8 @@ TESTS = [
      test_a_host_module_refusal_says_what_this_target_offers),
     ("an unclassified CPython stdlib name is not called a typo",
      test_an_unclassified_stdlib_name_is_not_called_a_typo),
+    ("no unclassified stdlib name is imported by anything",
+     test_no_unclassified_stdlib_name_is_imported_by_anything),
     ("a package that only re-exports builds and runs",
      test_package_reexport_builds_and_runs),
     ("a package dylib exports nothing and says namespace",
@@ -3457,8 +3777,10 @@ TESTS = [
      test_a_host_module_refusal_carries_its_measured_next_step),
     ("every host-module advice entry is honest",
      test_host_module_advice_is_honest),
-    ("a module exporting only a generic template is refused",
-     test_a_module_with_no_boundary_symbol_is_refused),
+    ("a module nobody binds a concrete name from needs no library",
+     test_a_module_nobody_binds_a_concrete_name_from_needs_no_library),
+    ("a bare call to a template is refused by the export rule",
+     test_a_bare_call_to_a_template_is_refused_by_the_export_rule),
     ("a generic template is not exported under its base name",
      test_a_generic_template_is_not_exported_under_its_base_name),
     ("a C-library-named definition is not blamed on privacy",

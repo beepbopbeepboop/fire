@@ -16,6 +16,97 @@ every number below is measured NOW, by walking each file's import closure with
 `formal/imports.py`'s own `resolve_module_path`, which is the resolver the build
 itself uses.
 
+**RE-MEASURED LATER THE SAME DAY (2026-10-03, second pass) and the conclusion
+holds: eleven of thirteen are still closure, and `glob` is still the only real
+row. §"Re-measured" has today's numbers, an order-independent definition of
+"terminal" (the original one was a property of the traversal order), the FILES
+each row is the only blocker for, and one new fact about `shlex`.**
+
+## Re-measured 2026-10-03, second pass
+
+Same walk, same corpus (350 `.py`/`.mojo` files in this tree, excluding
+`bugs/`, `formal/` and the build directories), with two changes to the
+measurement rather than to the conclusion:
+
+* **`terminal` is now "this module is the ONLY thing standing between the file
+  and a build"**, i.e. the file's set of unresolvable modules is exactly `{m}`.
+  The original column was the FIRST unresolvable module of a depth-first walk,
+  which makes the number a property of the traversal order: `fire_compiler.py`
+  leaves five modules unresolved and which one is "first" is an artefact. The
+  new definition is what "writing this module makes this file build" means, and
+  it reproduces the original column closely enough (below) to show the original
+  was measuring the same thing by accident.
+* **A `shared` column**, the files where `m` is unresolvable *and something else
+  is too*. That is the doc's own point as a number: `abc` is unresolvable in 200
+  files and is the only blocker in **none** of them.
+
+| alone | shared | closure | module | the doc's `terminal`, for comparison |
+|---:|---:|---:|---|---|
+| **7** | 205 | 212 | `glob` | 7 |
+| 5 | 82 | 87 | `collections` | 4 |
+| 2 | 2 | 4 | `random` | 1 |
+| 2 | 1 | 3 | `datetime` | 2 |
+| 1 | 200 | 201 | `copy` | 1 |
+| 1 | 24 | 25 | `resource` | 1 |
+| 1 | 17 | 18 | `itertools` | 1 |
+| 1 | 0 | 1 | `functools` | 1 |
+| 0 | 200 | 200 | `abc` | 0 |
+| 0 | 68 | 68 | `types` | 0 |
+| 0 | 14 | 14 | `operator` | 0 |
+| 0 | 5 | 5 | `inspect` | 0 |
+| 0 | 3 | 3 | `shlex` | 0 |
+
+**Eleven of thirteen are still closure, and `glob` is still the only row with a
+double-digit `alone` count.** The drift since the first pass is small and in the
+direction the first pass predicted (a module landing unmasks the row behind it):
+`collections` 4 → 5, `random` 1 → 2.
+
+### The files each row is the ONLY blocker for
+
+This is the actionable half the first pass did not have, and it is worth more
+than the counts: it says which file a module would move, so a module worth one
+file can be compared with a module worth seven on the same scale.
+
+| module | alone for |
+|---|---|
+| `glob` (7) | `bootstrap-validate.mojo`, `cas.py`, `fault_tolerance.py`, `py314_cache.py`, `test_relaxed_imports.mojo`, `tools/audit_selfhost_ast.py`, `tools/fix_genexpr_anyall.py` |
+| `collections` (5) | `consolidate_string_pool.py`, `tools/analyze_stdlib_errors.py`, `tools/arm64_insn_audit.py`, `tools/formal_chain_probe.py`, `tools/heapprof_report.py` |
+| `random` (2) | `test_formal_hashlib.py`, `tools/formal_fuzz.py` |
+| `datetime` (2) | `run_stdlib_tests.py`, `scripts/bootstrap_full_test.py` |
+| `copy` (1) | `tools/apply_extraction.py` |
+| `resource` (1) | `test_selfhost_memory.py` |
+| `itertools` (1) | `test_formal_run.py` |
+| `functools` (1) | `version.py` |
+
+**Four of `glob`'s seven are not the files the b7 log listed**, which is the same
+date problem this doc is about: `checked_run.py`, `test_no_new_container_casts.py`
+and `tools/suite.py` were in the sweep's row and are not in this one, and
+`cas.py`, `fault_tolerance.py` and `py314_cache.py` are in this one and were not
+in it. The row MOVES as the tree moves, which is why §below measures rather than
+ranks.
+
+### `shlex` is still not alone anywhere, and there is a second thing in the way
+
+All three files that want it, with their whole unresolvable set:
+
+```
+test_suite.py        -> abc, copy, glob, importlib, importlib.util, memslot,
+                        shlex, signal, suite, types, zlib
+tools/ab_run_one.py  -> glob, shlex, signal
+tools/suite.py       -> glob, shlex, signal
+```
+
+So §next-step item 2 below ("blocked behind `glob`") holds and **understates it**:
+`signal` is in all three, and `signal` is not a module anyone has sized — it is
+libSystem's signal handling, which is a capability question of its own rather
+than a row in this list. (`memslot`, `suite` and `importlib.util` in the first
+line are REPOSITORY siblings that this static walk cannot resolve and a real run
+resolves through `sys.path`; they are artefacts of the walk, and the doc's method
+has always had them.)
+
+**So `shlex` is a three-deep sequencing answer, not a two-deep one**, and writing
+it moves nothing on its own even after `glob` lands.
+
 ## The measurement, and how to reproduce it
 
 Two numbers per module, because they answer different questions:
@@ -170,25 +261,56 @@ on where a subject about a module is not.
 
 ## The next step, in the order the ranking gives
 
+(Re-measured 2026-10-03; item 1's blocker is now FIXED and item 2's is deeper
+than this list said. Everything else stands.)
+
 1. **`glob` — 7 files, and the only real row.** §3 says why it is not taken
    here; whoever takes it needs §3's four bullets and the two ownership
-   questions answered first.
-2. **`shlex` — reachable, and blocked behind `glob`.** `quote`, `split` and
-   `join` are pure computation over bytes a value already is (`formal/imports.py`
-   says so), and the one file that wants it (`test_suite.py`, three
-   `shlex.quote` calls) stops on `glob` before it reaches `shlex`. So it is a
-   **sequencing** answer, not a capability one: write `glob` and `shlex` becomes
-   the next wall for `test_suite.py` and `tools/suite.py`.
+   questions answered first. **Both ownership questions are answered**: no
+   claim in `tools/control.py claims` names `glob`, and
+   `formal/hostmods/glob.mojo` is still not in this tree (it lives uncommitted on
+   `work/formal8-7-r2`'s working tree). **And the blocker is GONE — fixed at the
+   root 2026-10-03**, in `model.subscript_base_lowering`, the one decision both
+   emitters read: a subscript through an unannotated parameter now takes the
+   convention its CALL SITES use on that argument, so one value has one
+   convention wherever the name is written, and call sites that disagree are
+   refused by name rather than silently mismatched. Measured inert on this corpus
+   (3 713 unannotated-parameter subscripts over 459 `.mojo` files, none of them
+   changes answer) and pinned by `test_formal_run.py`'s
+   `both_arch_an_untyped_parameter_indexes_the_same_pointer_as_an_annotated_one`
+   and `test_formal_cross_module.py`'s
+   `a_container_returning_export_whose_helpers_take_the_buffer` — which is
+   `glob`'s own shape in miniature, a `-> List[Int]` export whose private helper
+   takes the buffer it is handed through an untyped parameter. So **`glob`'s next
+   step is no longer "wait for `subscript_base_lowering`, then annotate the blob
+   parameters"**: the annotation is no longer what chooses, so those parameters do
+   not need it. What is left is §3's real difficulty, which nothing in that round
+   touched — the run-time-length LIST, and a blob the CALLERS can iterate.
+2. **`shlex` — reachable, and blocked behind `glob` AND `signal`.** `quote`,
+   `split` and `join` are pure computation over bytes a value already is
+   (`formal/imports.py` says so). The three files that want it stop on `glob`
+   first — and on `signal` too, in all three (§Re-measured). So it is a
+   **sequencing** answer, not a capability one, and it is THREE deep rather than
+   two: write `glob` and `shlex` is still not the next wall, because `signal` is
+   beside it in every file that wants it.
 3. **`shlex` has an open QUESTION of its own**, and it is not a module:
    `FORMAL_link_accounting_shlex_entered_the_host_set_with_no_source`
    records that `shlex` was added to `HOST_MODULES` with no source, which fails
    `formal-link-accounting` in the everyday gate, and the doc asks which of two
    rules governs a sourceless standard-library name. Writing
-   `formal/hostmods/shlex.mojo` takes the doc's option 1 (the `fcntl` route) and
-   settles it — so **item 2 and item 3 are the same piece of work** and whoever
-   takes it should read that doc first.
+   `formal/hostmods/shlex.mojo` takes the doc's option 1 (the `fcntl` route —
+   `formal/hostmods/fcntl.mojo` is in the tree) and settles it — so **item 2 and
+   item 3 are the same piece of work** and whoever takes it should read that doc
+   first.
 4. **`inspect`, `resource`, `datetime`, `collections`, `copy`, `random`,
    `functools`, `itertools`, `types`, `operator`, `abc` — all closure.** §2
    gives the name-level reason for each and §1 gives the row. None of them is
    next, and writing this down is the point: the ranking made eleven of them look
-   like work and the measurement says otherwise.
+   like work and the measurement says otherwise. **The one caveat the second
+   measurement adds** is that three of them are the ONLY blocker for a single
+   file each — `itertools` for `test_formal_run.py`, `functools` for
+   `version.py`, `copy` for `tools/apply_extraction.py` — so "worth 0 or 1" is a
+   real number to weigh against a module's cost, and `itertools` is worth
+   noticing: the corpus's own run suite is one `itertools` call away, and §2's
+   reason for it ("the one name this corpus uses answers a SEQUENCE") has not
+   changed.

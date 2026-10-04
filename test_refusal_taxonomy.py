@@ -221,6 +221,34 @@ SAMPLES = [
     ("one-field mutator receiver hand-off",
      "Cell.swap() changes its receiver and returns a frame, and this path has "
      "two hidden-word conventions"),
+    # ── a call through a VALUE, 2026-10-03. The construct itself LOWERS now
+    #    (a function value is a code address and the specialization's brackets
+    #    are leading arguments), so what is in this bucket is the three shapes
+    #    with NO declaration in hand — three rows rather than one because the
+    #    three fixes are different, which is the whole criterion this table is
+    #    keyed on. One cause and one sample each: `classify_message` sees only
+    #    the message, so a marker with no sample is the dead-marker failure.
+    ("value call: declared type cannot hold a function",
+     "`f` is a call through a VALUE rather than through a function of this "
+     "unit — `f` is a name call_container binds, a parameter or a local of it "
+     "and it is declared `List[Int]`, and a word that is not a code address "
+     "is nothing to branch through"),
+    ("value call: bracket unreadable",
+     "`workgroup_function[…](…)` is a bracketed call through a VALUE, and a "
+     "bracket on a value is two constructs: the comptime parameters of a "
+     "specialization, or an index into a container"),
+    ("value call: keyword unreadable",
+     "`f(x, b=2)` is a keyword argument in a call through a VALUE, and this "
+     "path has no declaration to bind it by NAME: a callee reached through a "
+     "word is read as taking the arguments the call site writes"),
+    # The PASSING end rather than the calling end, and a different family
+    # because the fix is in a different place: a value call's refusal is raised
+    # by an emitter (there is no declaration to read at the call site), this one
+    # by `formal/build.py`'s name-placement walk, which is the only pass that
+    # has both ends of the call at once.
+    ("function value into a declared non-function",
+     "'dbl' is a FUNCTION of this image read as a value, and it is passed to "
+     "`call2()` in main as parameter `f`, which is declared `Int`"),
 
 ]
 
@@ -373,6 +401,39 @@ CAUSE_SAMPLES = [
      "debug_assert[…](…) calls a name this unit does not compile, so the "
      "brackets cannot be bound. A comptime specialization's brackets are the "
      "generic's comptime parameters"),
+    # The corpus's LARGEST row, and it had no row at all until 2026-10-04: 170 of
+    # the 710 files on the b10 sweep, 55% of every codegen finding in the tree,
+    # every one of them this one sentence. The ranking reported them as
+    # `other refusal` — the bucket `tools/formal_sweep_causes.py`'s own docstring
+    # defines as "nobody has looked" — which is the defect §5 of
+    # `bugs/FORMAL_sweep_work_map_2026-10-04_b10.md` is about.
+    #
+    # TWO samples, not one, because `classify_message` sees only the message and
+    # one sample is one proof its marker matches. They are the row's two ends: the
+    # stdlib's own `FormatStruct(writer, "Allocation")` (111 of the 170) and a
+    # repository file's `now()` through `time`. Both are cut from
+    # `formal/model.py::imported_callee_refusal`'s f-string rather than from a
+    # sweep log, so a reword of that f-string has to be made here too rather than
+    # leaving a sample of a sentence nothing emits.
+    #
+    # The marker deliberately is NOT the sentence that used to follow these two
+    # clauses. "spell it as `name[<a type>](…)`" is ADVICE, and `work/formal19-1`
+    # deletes it because it is wrong about correct Mojo — a bare template call is
+    # the spelling the stdlib uses — so a marker keyed on it would have taken 170
+    # files silently back to `other refusal` the day that branch landed. What is
+    # left is the FACT: the call has to bind a symbol the module does not export.
+    ("a call to a name the defining module does not export",
+     "`FormatStruct` is called, and it is imported from `std.format._utils`, so "
+     "the call has to bind a symbol `std.format._utils` exports. That module does "
+     "not export it, and the reason is `doc/ABI.md`'s export rule rather than "
+     "anything about this call: a name with a leading `_` is private, a generic "
+     "template is not one symbol but one per instantiation"),
+    ("a call to a name the defining module does not export",
+     "main: `now` is called, and it is imported from `time`, so the call has to "
+     "bind a symbol `time` exports. That module does not export it, and the reason "
+     "is `doc/ABI.md`'s export rule rather than anything about this call: a name "
+     "with a leading `_` is private, a generic template is not one symbol but one "
+     "per instantiation"),
     ("a field of a field: a frame slot holds one word, not a struct",
      "self._dict._table._ctrl reads a field of a field through the receiver"),
     ("a field of a nested frame that the struct does not declare",
@@ -590,6 +651,33 @@ CAUSE_SAMPLES = [
     ("a one-field mutator's receiver hand-off is refused",
      "Cell.bump() changes its receiver and declares no return type, so the "
      "call has no value, and it is used as one here"),
+    # The same three, in the PLANNER's table, which has its own markers and
+    # therefore its own rot. The bracket one is quoted from
+    # `std/algorithm/backend/tile.mojo`'s own spelling (`workgroup_function`),
+    # because that is the file the row is about and a sample from a test
+    # program would let a reword of the test's own text go unnoticed.
+    ("a call through a value whose declared type cannot hold one",
+     "`func` is a call through a VALUE rather than through a function of this "
+     "unit — `func` is a name call_container binds, a parameter or a local "
+     "of it and it is declared `List[Int]`, and a word that is not a code "
+     "address is nothing to branch through"),
+    ("a bracketed callee through a value, which this build cannot read",
+     "`workgroup_function[…](…)` is a bracketed call through a VALUE, and a "
+     "bracket on a value is two constructs: the comptime parameters of a "
+     "specialization, or an index into a container"),
+    ("a keyword argument in a call through a value",
+     "`func(x, b=2)` is a keyword argument in a call through a VALUE, and "
+     "this path has no declaration to bind it by NAME: a callee reached "
+     "through a word is read as taking the arguments the call site writes"),
+    # …and the passing end. Its marker has TWO clauses on purpose: "is passed
+    # to" alone is the catch-all two rows below claim, and "read as a value"
+    # alone would be matched by any other message that says it, so the pair is
+    # what makes this row specific. Quoted from `test_formal_run.py`'s
+    # `a_function_name_passed_as_an_argument_is_named_as_one`, which is the case
+    # that raised it.
+    ("a function passed where the callee declares something else",
+     "'dbl' is a FUNCTION of this image read as a value, and it is passed to "
+     "`call2()` in main as parameter `f`, which is declared `Int`"),
 ]
 
 # The causes no arm64 message above exercises. Each one is named here with WHY,
@@ -1253,6 +1341,56 @@ def _host_rank_checks(failures):
           and not tf_names[0].startswith("_"),
           f"tempfile's public names are {tf_names!r}, and `mkdtemp` is among "
           f"them with no underscore-prefixed name in front")
+
+    # A module-scope binding INSIDE `if`/`try`/`with` is still a module
+    # attribute, and the scan has to see it or the row reads as closure.
+    #
+    # `types` is the case that made this a fix rather than a note: CPython's
+    # `types.py` binds `SimpleNamespace` and `ModuleType` inside a module-level
+    # `try:` (the `_collections_abc` import), and its `__all__` is
+    # `[n for n in globals() if not n.startswith('_')]` — a COMPREHENSION, so
+    # `ast.literal_eval` cannot answer it and the scan is all there was. With
+    # `tree.body` alone the ranking printed, for `types`:
+    #
+    #     10    0  modelled    —    types
+    #          uses:  0 — every blocked file names nothing types declares, so
+    #                 the row is import CLOSURE and not 10 files of work
+    #
+    # while 10 of those 10 files name something it declares (`ModuleType` x7,
+    # `SimpleNamespace` x4 across them). "Nothing to do here" is the reading
+    # this column must never produce when it is wrong, so it is checked against
+    # CPython's own source rather than against a fixture — a fixture would test
+    # the fixture.
+    try:
+        types_names = C._host_declared_names("types")
+    except Exception as exc:                             # noqa: BLE001
+        check(False, f"types' declared names could not be read: {exc}")
+        types_names = None
+    if types_names is None:
+        print("  SKIP  this interpreter's stdlib is not reachable, so the "
+              "module-scope binding scan is not checked")
+    else:
+        for name in ("SimpleNamespace", "ModuleType", "FunctionType",
+                     "LambdaType", "MappingProxyType"):
+            check(name in types_names,
+                  f"types does not declare {name!r} — it is bound at module "
+                  f"scope inside the `try:` that imports `_collections_abc`, "
+                  f"and a scan of `tree.body` alone cannot see it. That scan "
+                  f"reported the whole 10-file row as import CLOSURE while "
+                  f"every one of those files names a name in this list. The "
+                  f"names read now are {sorted(types_names)[:12]}…")
+        # …and a name that is NOT a module attribute must still be absent, or
+        # the fix has bought the right answer by collecting every local in
+        # CPython's stdlib (measured on `inspect`: 400+).
+        check("FrameType" in types_names or "frame" not in types_names,
+              "sanity: the scan's own locals are not being collected")
+        check(not any(n in ("arg", "local", "self", "retval")
+                      for n in types_names),
+              f"types declares a function local: "
+              f"{[n for n in ('arg', 'local', 'self', 'retval') if n in types_names]}"
+              f". `_module_scope_bindings` stops at `def` and `class` bodies "
+              f"precisely so this cannot happen — a `def`'s locals are not "
+              f"module attributes")
     return n[0]
 
 

@@ -500,11 +500,25 @@ def _quick_type(gen, node) -> str:
         # under inference — the emission-time `_callable_ret_types` is too
         # late, since the forward declaration has already been written from
         # this answer. See
-        # bugs/CODEGEN_lambda_call_boundary_loses_the_return_type.md.
+        # CODEGEN_lambda_call_boundary_loses_the_return_type.
         _lrt = (getattr(gen, '_lambda_call_ret_types', None) or {}).get(fname)
         if _lrt:
             return _as_str(_lrt)
-        return gen.func_return_types.get(fname, 'int64_t')
+        # `func_return_types[bare]` is one slot for the whole translation
+        # unit, so it cannot answer "what does the `_mentions` THIS module
+        # calls return" once two modules of one closure define that name
+        # (measured: offload.py's `_mentions(...) -> bool` against
+        # elab_intu.py's unannotated `_mentions(ann)`; and here it compounds,
+        # because this estimator is what infers a FORWARDER's own return type
+        # — `def found(...): return _mentions(...)` took the other module's
+        # `MojoList *`, so `print(found(...))` emitted
+        # `mojo_repr_list_ints((MojoList *)1)` and crashed on the int).
+        # `_func_return_type_for_call` reads the DEFINING module's own
+        # published answer first and falls back to the bare slot, so every
+        # name only one module defines behaves exactly as before — and a
+        # lambda call, which publishes no module-level return type at all,
+        # is answered by the arm above.
+        return gen._func_return_type_for_call(fname, 'int64_t')
     if isinstance(node, gimple_ctypes.CallExpr) and isinstance(node.func, gimple_ctypes.MemberExpr):
         # A receiver this codegen KNOWS is a registered user struct resolves
         # through its own mangled method symbol, and it has to be checked

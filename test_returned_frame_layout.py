@@ -246,16 +246,17 @@ def main(argv):
     #    asserts it structurally: both backends call the shared function and
     #    neither computes its own offsets.
     #
-    #    The shared entry point is `model.struct_constructor_sites`, and it is
-    #    named here rather than the pair of symbols this used to name because
-    #    the block arithmetic MOVED under it: `struct_frame_block_bytes` became
-    #    `struct_frame_block_layout` (which returns `(nested, total_bytes)` and
-    #    is what `struct_constructor_sites` now calls to fill each site's
-    #    `nested` row), so both backends stopped calling the byte-count helper
-    #    directly. Pinning the old pair would have called a correct tree wrong
-    #    for a rename that moved the work a level down rather than duplicating
-    #    it — so the property is stated as the two things it actually means:
-    #    each backend reads the shared layout, and neither defines one.
+    #    The pinned name is `struct_constructor_site_bytes`, not
+    #    `struct_frame_block_bytes`, and the difference is the point rather than
+    #    a rename: the emitters need the bytes ONE SITE reserves, which is not
+    #    the struct's block — a one-field struct whose sole field holds a frame
+    #    reserves the nested block alone, because there is no object, the value
+    #    IS the nested frame's address. `struct_constructor_site_bytes` is the
+    #    one reader that answers that (it is the function
+    #    `struct_constructor_sites` advances its own layout cursor by), so
+    #    pinning it keeps the property this case is about — one site can never
+    #    be reserved one amount and laid out another — instead of pinning a
+    #    name the consolidation deliberately stopped calling.
     for backend, fname in (('formal/arm64_codegen.py', '_frame_recv_bytes'),
                            ('formal/x86_64_codegen.py', '_frame_recv_bytes')):
         path = os.path.join(HERE, backend)
@@ -263,19 +264,53 @@ def main(argv):
             src = fh.read()
         check(f'{os.path.basename(backend)}_shares_the_frame_layout',
               'M.struct_constructor_sites' in src
-              and not re.search(r'\n\s*def struct_(?:constructor_sites|frame_block'
-                                r'_layout|frame_block_bytes)\b', src),
+              and 'M.struct_constructor_site_bytes' in src
+              and not re.search(r'\n\s*def struct_(?:constructor_sites|'
+                                r'constructor_site_bytes|frame_block_layout)\b',
+                                src),
               'this backend either does not read the shared frame layout or '
               'computes one of its own')
     # ...and the arithmetic really is in the shared model, so "neither backend
     # defines one" is a fact about the layout and not about where it moved to.
+    # This is the half that survives every rename of the layout function: it
+    # pins the CALL GRAPH rather than a symbol, so a consolidation that moves
+    # the bytes a level down cannot leave the emitters computing them.
     with open(os.path.join(HERE, 'formal', 'model.py')) as fh:
         msrc = fh.read()
     check('the_block_layout_lives_in_the_shared_model',
-          'def struct_frame_block_layout' in msrc
-          and 'struct_frame_block_layout(st, structs_by_name)' in msrc,
-          'model.struct_constructor_sites no longer calls the shared block '
-          'layout, so the per-site block size is computed somewhere else')
+          'def struct_constructor_site_bytes' in msrc
+          and 'def struct_frame_block_layout' in msrc
+          and 'struct_constructor_site_bytes(holder, structs_by_name)' in msrc,
+          'model.struct_constructor_sites no longer advances its layout cursor '
+          'by the shared per-site byte count, so a site can be reserved one '
+          'amount and laid out another')
+    for backend, fname in (('formal/arm64_codegen.py', '_frame_recv_bytes'),
+                           ('formal/x86_64_codegen.py', '_frame_recv_bytes')):
+        path = os.path.join(HERE, backend)
+        with open(path) as fh:
+            src = fh.read()
+        check(f'{os.path.basename(backend)}_shares_the_frame_layout',
+              'M.struct_constructor_sites' in src
+              and 'M.struct_constructor_site_bytes' in src
+              and not re.search(r'\n\s*def struct_(?:constructor_sites|'
+                                r'constructor_site_bytes|frame_block_layout)\b',
+                                src),
+              'this backend either does not read the shared frame layout or '
+              'computes one of its own')
+    # ...and the arithmetic really is in the shared model, so "neither backend
+    # defines one" is a fact about the layout and not about where it moved to.
+    # This is the half that survives every rename of the layout function: it
+    # pins the CALL GRAPH rather than a symbol, so a consolidation that moves
+    # the bytes a level down cannot leave the emitters computing them.
+    with open(os.path.join(HERE, 'formal', 'model.py')) as fh:
+        msrc = fh.read()
+    check('the_block_layout_lives_in_the_shared_model',
+          'def struct_constructor_site_bytes' in msrc
+          and 'def struct_frame_block_layout' in msrc
+          and 'struct_constructor_site_bytes(holder, structs_by_name)' in msrc,
+          'model.struct_constructor_sites no longer advances its layout cursor '
+          'by the shared per-site byte count, so a site can be reserved one '
+          'amount and laid out another')
 
     # 6. The convention refusal, which is the decision this whole item turns
     #    on, is reachable and says the thing that matters.

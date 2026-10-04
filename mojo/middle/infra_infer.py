@@ -22,6 +22,7 @@ import gimple_codegen  # constants used by some extracted helpers
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+from mojo.middle.boundnames import bound_names_in_order
 
 def _type_of(gen, name: str) -> str:
     boxed = getattr(gen, '_boxed_mut_locals', None)
@@ -1293,7 +1294,34 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                         # was referenced but never defined.
                         inferred[pname] = 'MojoDict *'
                     else:
-                        inferred[pname] = 'MojoList *'
+                        # The last resort, and the only place in this whole
+                        # function that GUESSES: nothing here can say WHICH
+                        # container, so it names the one the runtime's
+                        # subscript lowering defaults to. Before it does, one
+                        # more piece of evidence — a DECLARED container return
+                        # that hands this parameter straight back, which is
+                        # `_returned_param_containers`'s whole job. It is
+                        # evidence the RETURN SITE ALREADY ENFORCES (it
+                        # coerces every `return` to the declared type and
+                        # refuses a container-kind mismatch outright), so
+                        # reading it here cannot turn a program that compiles
+                        # today into one that does not: where this guess
+                        # disagrees with the annotation the build was already
+                        # a hard `cannot coerce`, and where it agrees the
+                        # guess was wrong anyway.
+                        #
+                        # Real: `elaborate.py::_fill_erased_params(template_src,
+                        # params, binding) -> dict` does
+                        # `binding[p] = ERASED_TYPE_ARG` with `p` a loop
+                        # variable over a list comprehension — a key whose
+                        # stringness no amount of local analysis can prove —
+                        # so `binding` took the `MojoList *` guess and the
+                        # `return binding` under `-> dict` refused the build:
+                        # "cannot coerce MojoList * to MojoDict * ... value=
+                        # 'binding'", which took `selfhost`, `mojoc` and
+                        # `bootstrap-stage2-cc` down together.
+                        inferred[pname] = (_returned_param_containers(func)
+                                          .get(pname) or 'MojoList *')
 
             # If not subscripted, try to infer from function calls
             elif function_calls:
@@ -1601,6 +1629,7 @@ _CONTAINER_LITERAL_CTYPES: dict = {
 }
 
 
+
 def _container_literal_ctype(value) -> str:
     """The container C type a LITERAL-constructing expression produces, or
     None if it is not one.
@@ -1636,6 +1665,121 @@ def _container_literal_ctype(value) -> str:
         # materialized list (`_lower_comprehension`'s own table).
         return 'MojoList *'
     return None
+
+
+def _bare_returned_params(body: list, names: set, out: set) -> None:
+    """Add to `out` every name in `names` that some `return <name>` hands back
+    VERBATIM — a bare name, not `name[k]` and not `f(name)`.
+
+    `out` is an explicit parameter mutated in place rather than a nested
+    recursive closure accumulating into a captured set, for the reason
+    `boundnames._lbn_walk` states: a self-hosted lifted closure carrying a
+    captured set across its own recursive calls is not reliably allocated, and
+    this file is in the self-host closure.
+
+    Recurses through control flow and never into a nested `FunctionDef` (whose
+    returns belong to its own scope — the same boundary `_each_binding` and
+    `mutated_free_names` use), and is deliberately NOT a generator: this file
+    is in the self-host closure, where a `yield` becomes a real stack-switching
+    coroutine (see `_each_binding`'s note for the measurement).
+
+    One walker rather than one per consumer, because a `return` walk that
+    recursed through `elif` and one that did not is exactly how the three
+    local-type overlays drifted before `_each_binding` unified them."""
+    for node in body or []:
+        if isinstance(node, gimple_ctypes.ReturnStmt):
+            v = node.value
+            if isinstance(v, gimple_ctypes.IdentExpr) \
+                    and _as_str(v.name) in names:
+                out.add(_as_str(v.name))
+        elif isinstance(node, gimple_ctypes.FunctionDef):
+            continue
+        elif isinstance(node, gimple_ctypes.IfStmt):
+            _bare_returned_params(node.then_body, names, out)
+            for _cond, arm in (node.elifs or []):
+                _bare_returned_params(arm, names, out)
+            _bare_returned_params(node.else_body, names, out)
+        elif isinstance(node, (gimple_ctypes.WhileStmt,
+                               gimple_ctypes.ForStmt)):
+            _bare_returned_params(node.body, names, out)
+            if getattr(node, 'else_body', None):
+                _bare_returned_params(node.else_body, names, out)
+        elif isinstance(node, gimple_ctypes.TryStmt):
+            _bare_returned_params(node.body, names, out)
+            for h in (node.handlers or []):
+                _bare_returned_params(h.body, names, out)
+            _bare_returned_params(node.else_body, names, out)
+            _bare_returned_params(node.finally_body, names, out)
+        elif isinstance(node, gimple_ctypes.WithStmt):
+            _bare_returned_params(node.body, names, out)
+
+
+def _returned_param_containers(func) -> dict:
+    """`{param name: ctype}` for every parameter of `func` that a DECLARED
+    container return annotation pins, because the body hands it straight back.
+
+    A `-> dict` is not decoration: every `return` in the function is coerced to
+    it, and `emit_resolve._sce_simple_emit` REFUSES a container-kind mismatch
+    outright. So when a `return <param>` meets that annotation, the parameter's
+    type is already decided — the build either agrees or is already a hard
+    `cannot coerce`. Reading the same fact here, where the type is first
+    invented, is what makes the two halves agree instead of one of them
+    guessing.
+
+    Three conditions, each load-bearing:
+
+      * the return annotation names a CONTAINER — read with the same
+        `gimple_ctypes._mojo_type` every other annotation reader in this file
+        uses, and admitted only if it lands in `_CONTAINER_KIND_TYPES`, the
+        same set `emit_resolve._sce_simple_emit` chokes on. A scalar or `void`
+        return says nothing a container parameter's type can be read from;
+      * the parameter is UNANNOTATED — an annotation on the parameter itself is
+        the more direct statement of the same fact and already wins upstream;
+      * the body hands it back verbatim AND never rebinds it, so the object
+        leaving is the object that arrived. A rebound name is excluded because
+        the annotation then describes a value the parameter no longer holds
+        (`def f(x) -> dict: x = [1]; return x` returns a list, and the honest
+        answer there is the refusal the return site already raises).
+
+    Sibling of `funcs_shared._param_ctype`'s three default-value rules — a `str`
+    default makes its parameter `char *`, a container-literal default makes it
+    that container — and the same argument: a declared value the call site
+    pads in is type evidence as strong as an annotation. This is the RETURN
+    half of that, and it lives here rather than beside them because this is
+    where the guess it replaces is made.
+
+    The motivating case is `elaborate.py::_fill_erased_params(template_src,
+    params, binding) -> dict`, whose `binding[p] = ERASED_TYPE_ARG` has a key
+    (`p`, a comprehension loop variable) no local analysis can prove is a
+    string — so the subscript signal reached its `MojoList *` last resort, and
+    the `return binding` refused the whole self-host closure. See
+    `_infer_param_types`'s arm for what that took down."""
+    rt = getattr(func, 'return_type', None)
+    if not rt:
+        return {}
+    ctype = gimple_ctypes._mojo_type(rt)
+    if ctype not in gimple_ctypes._CONTAINER_KIND_TYPES:
+        return {}
+    names = set()
+    for pname, ptype in (getattr(func, 'params', None) or []):
+        if ptype is None and not pname.startswith('*') \
+                and _as_str(pname) not in ('self', 'cls'):
+            names.add(_as_str(pname))
+    if not names:
+        return {}
+    returned: set = set()
+    _bare_returned_params(getattr(func, 'body', None), names, returned)
+    if not returned:
+        return {}
+    # `bound_names_in_order` with NO params is exactly "the names this body
+    # binds", from the ONE name-binding walk `mojo/middle/boundnames` exists
+    # to hold — not a second private walker here.
+    rebound = set(bound_names_in_order(getattr(func, 'body', None) or []))
+    out: dict = {}
+    for n in returned:
+        if n not in rebound:
+            out[n] = ctype
+    return out
 
 def _each_binding(body: list) -> list:
     """Every statement in `body` that can BIND a local, as a LIST, recursing

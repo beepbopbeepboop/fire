@@ -3202,15 +3202,30 @@ UNREGISTERED = {
     # table's own comment is where a reader looks for what these have in
     # common.
     'test_formal_returned_frame.py': _FORMAL_SUITE_REASON,
-    'test_formal_admitted.py': _FORMAL_SUITE_REASON,
     'test_formal_bracketed_method_field_set.py': _FORMAL_SUITE_REASON,
     'test_formal_cross_module.py': _FORMAL_SUITE_REASON,
     'test_formal_debug_assert.py': _FORMAL_SUITE_REASON,
     'test_formal_eval_eq_mojo_bridge.py': _FORMAL_SUITE_REASON,
-    'test_formal_fcntl.py': _FORMAL_SUITE_REASON,
     'test_formal_fnmatch.py': _FORMAL_SUITE_REASON,
     'test_formal_frame_return_overloads.py': _FORMAL_SUITE_REASON,
     'test_formal_libc_symbol.py': _FORMAL_SUITE_REASON,
+    # CHEAP and wants a REGISTRATION rather than an excuse, by CLAUDE.md's cost
+    # rule: `python3 test_formal_chain_probe.py` is 12 cases, no builds and no
+    # Lean, and 0.29 s measured 2026-10-04 (its only cost is two `copytree` calls
+    # of the stdlib, one per class, and it asserts on the list of paths
+    # `stub_targets` WOULD rewrite rather than writing them). It is listed here
+    # rather than registered because this branch's task is a sweep scope and
+    # says not to touch the registry. Exact next step:
+    # `test('formal-chain-probe', [PY, 'test_formal_chain_probe.py'], ...)` in
+    # the `check` bucket beside `formal-sweep-truth`, which covers the other
+    # instrument's truthfulness.
+    'test_formal_chain_probe.py': (
+        'Runs no build and no Lean: 12 cases over the two shapes of "module X '
+        'refused" and the choice of which group to rewrite next. 0.29 s '
+        'measured, so it wants a registration by CLAUDE.md\'s cost rule; listed '
+        'here because this branch is a sweep scope and is not touching the '
+        'registry. Next step: test(\'formal-chain-probe\', [PY, '
+        '\'test_formal_chain_probe.py\'], ...) beside \'formal-sweep-truth\'.'),
     # The same shape as the group above and CHEAP like `formal-hostmods-census`
     # below: measured 2026-10-03, `python3 test_formal_list_splat.py` is 5
     # cases x 2 backends = 10 builds plus one CPython oracle each, ~7 s
@@ -3239,7 +3254,34 @@ UNREGISTERED = {
         'for a job no gate can afford is to declare it. '
         'bugs/COMPILE_FAIL_estate_check_red_for_eleven_formal_suites.md records '
         'the same gap for the eleven suites above.',
-    'test_formal_math.py': _FORMAL_SUITE_REASON,
+    # The same shape as `test_formal_fuzz.py` above, and for the same reason: it
+    # is a differential FUZZER's own regression suite, and what it protects is
+    # the measurement. It is cheaper than that one (its Lean half is declared
+    # rather than run — see its own docstring), it adds the one assertion that
+    # file has no place for, which is that the corpus still REACHES the proof
+    # layer: a generator change that made every program a refusal would leave
+    # `test_formal_fuzz.py` green and this campaign measuring nothing.
+    'test_formal_proof_fuzz.py':
+        'The proof-layer differential fuzzer\'s own regression suite: the '
+        'generator\'s corpus (60 indexes, no compiler), the classifier\'s '
+        'cross of Lean\'s verdict with the image\'s, and — through the real '
+        '`compile_formal`, with `check=False` so no Lean — that two programs '
+        'which the 2026-10-03 fix widened to the proof layer still do, and that '
+        'a two-call program is still refused by name rather than crashing. '
+        'Measured 2026-10-03: ~25 s wall, 0.3 GB peak. Declared rather than '
+        'registered for the reason `test_formal_fuzz.py` is: a fuzzer\'s '
+        'heavier settings are a sweep, not a check.',
+    # `test_formal_{admitted,fcntl,math,shutil,stat}.py` were listed here when
+    # they landed on the formal6 merge (2026-10-03), and are REGISTERED now
+    # (`formal-admitted`, `formal-fcntl`, `formal-math`, `formal-shutil`,
+    # `formal-stat`, all `tiny` in the `proofs` bucket) — for
+    # `formal-tempfile`/`formal-textwrap`'s reason below: 7.0-34.5 s and
+    # 0.07-0.13 GB measured one at a time, so an excuse was a permanent one and
+    # these are the only coverage that diffs those five host modules' answers
+    # against CPython on both backends.  `proofs` rather than `check` because
+    # what they are ABOUT decides it: each builds and executes a formal image
+    # per group, and a 34.5 s `formal-shutil` and a 7.0 s `formal-fcntl` do
+    # not agree about the clock.
     'test_formal_manifest_atomic.py': _FORMAL_SUITE_REASON,
     # The same shape, and here for the same reason. `posixpath` is a SPELLING
     # of `os.path` — every one of its thirty functions is a one-line forward —
@@ -3293,9 +3335,7 @@ UNREGISTERED = {
     'test_formal_platform.py': _FORMAL_SUITE_REASON,
     'test_formal_recursion_contract.py': _FORMAL_SUITE_REASON,
     'test_formal_short_circuit_cond.py': _FORMAL_SUITE_REASON,
-    'test_formal_shutil.py': _FORMAL_SUITE_REASON,
     'test_formal_specialized_method_call.py': _FORMAL_SUITE_REASON,
-    'test_formal_stat.py': _FORMAL_SUITE_REASON,
     'test_formal_sweep_cache_key.py': _FORMAL_SUITE_REASON,
     # `test_formal_tempfile.py` and `test_formal_textwrap.py` were listed here
     # when they landed on 2026-10-03, and are REGISTERED now (`formal-tempfile`
@@ -3355,6 +3395,30 @@ UNREGISTERED = {
         "file impossible — it covers `tools/formal_declared_param_census.py`'s "
         'six type readers, the three shapes that must stay undecided, and the '
         'two stdlib declaration bugs the readers found.',
+
+    'test_formal_frame_field_census.py': 'The frame-field census TOOL, and '
+        'the same shape as the entry above: a parse and a walk, no build and no '
+        'Lean (7 cases, 0.3 s). Not registered because this session\'s task '
+        'says not to register anything; listed here for the reason the estate '
+        "check below exists. It covers `tools/formal_frame_field_census.py`'s "
+        'two filters — each with a case that turns it OFF, because the first '
+        "cut of that instrument reported 52 sites of which 28 were a word — the "
+        'delegating constructor that is 13 of its 14 corpus sites, and the one '
+        '`other` row, both read off the real tree rather than written for the '
+        'test.',
+
+    'test_formal_returnless_census.py': 'The return-less census TOOL, and the '
+        'third census tool in this shape: a parse and a walk over `.mojo` files, '
+        'no build and no Lean (11 cases, 0.01 s — the instrument is cheap, not '
+        "the corpus it walks). Not registered because this session's task says "
+        'not to register anything; listed here for the reason the estate check '
+        "below exists. It covers `tools/formal_returnless_census.py`'s rules "
+        'that DECIDE a row, including the two that remove one (a discarded '
+        'call, a struct construction) and the three that would otherwise '
+        "invent 456 — generators, coroutines, and a name whose definitions "
+        'disagree about whether it returns, which is the defect the census it '
+        'replaces had (`bugs/FORMAL_a_function_with_no_return_yields_a_word_'
+        'where_cpython_yields_None.md` §0), as a case.',
 
     # `test_formal_proof_breadth.py` was listed here when it landed on
     # 2026-10-03 with the note that the registering commit deletes the excuse,

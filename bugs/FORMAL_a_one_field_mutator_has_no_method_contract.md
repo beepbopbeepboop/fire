@@ -6,6 +6,48 @@ doc is the part of that work which is a project rather than a patch, written dow
 so the next reader does not have to re-derive it. Everything here is measured on
 arm64; the x86-64 backend has no analogue of the machinery at all (see §4).
 
+**Re-read 2026-10-03 (`work/formal18-1`): §5's step 1 names a function that no
+longer exists under that name, and the part that remains is step 2 — which §3
+already identifies as the part with no answer.** §0 below says which is which, so
+a taker does not start with the contained change and find it already done.
+
+---
+
+## 0. What moved since this was written, and what did not
+
+* **`_receiver_relative_accesses` is now `_frame_slot_accesses`**
+  (`formal/arm64_proof_gen.py:8503`). Same function, same `{0: 0}` seed, same
+  "None if a base register cannot be traced to the receiver". §5 step 1's
+  description of it is otherwise still accurate, and step 1 is still not done:
+  the seed is still `{0: 0}` and `LDR Xd, [X0]` at the callee's entry is still
+  read as a *receiver-relative slot 0 load* rather than as "the receiver's
+  value, which is a word".
+* **`_frame_store_writes` moved** (`:8734`), from the `:7947` §5 cites. Same
+  shape: one entry per `mem_write_u64` with the depth of its address below the
+  entry `sp`, `None` for a frame store.
+* **The exclusion is landed and is where §1 says it is** — `_frame_methods`
+  skips a method whose owning struct is one field (`:8683`), by
+  `model.struct_is_one_field`, read off `_owner_struct`. So §1's "net effect: a
+  one-field mutator gets NO contract" is still the whole of the behaviour, and
+  it is now a DECISION rather than an accident of the entry sequence.
+* **§5 step 2 is untouched and is the whole of what is left.** The exit store
+  needs the cell pointer to be a frame base for `Frame.Fits`, and nothing in the
+  model ties a pointer the CALLER passed to a frame of known depth. Either the
+  caller reserves the cell (making it a real frame in the caller's scratch, which
+  `model.struct_returned_frame_sites` already does for a returned frame) or the
+  model's claim stays about the callee alone — and §3's three numbered items say
+  why the second is not a sentence that can be written.
+
+**A fourth thing worth knowing, because it makes step 1 pointless on its own:**
+`_frame_methods` only ever classified a method whose body is a SINGLE statement
+(`kind = "set"` for one store, `kind = "get"` for one `return self.<f>`), and
+§2 measures that against the two shapes this is about — `def pop(out self) -> Int`
+with three statements, and `struct Pair` (two fields, so not this row) — and both
+answer `None`. A one-field mutator that mutates AND returns a value is a
+multi-statement body, so even with the cell load modelled it would not reach the
+`set`/`get` classifier. Step 1 and the single-statement restriction have to be
+lifted together, and the restriction is the same lift.
+
 ---
 
 ## 1. What the convention is now, and what the generator does about it

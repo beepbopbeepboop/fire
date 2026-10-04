@@ -208,6 +208,23 @@ def str_append(dst, src) -> str:
     `strcat` for the same reason `str_copy` is `memmove`: the C library's
     algorithm is the answer, and a second implementation of it is a second
     thing to be wrong.
+
+    **IN PLACE, AND THE ROOM IS THE CALLER'S TO PROVIDE.** This writes
+    `strlen(src) + 1` bytes at `dst + strlen(dst)` and nothing checks that they
+    fit, so a `dst` sized for its own string alone is overrun by every byte of
+    `src`. That is not hypothetical and it was in this tree until 2026-10-04:
+    `os/path/__init__.mojo`'s `join` built `str_dup(a)` — a block of
+    `strlen(a) + 1`, room for `a` and its terminator and nothing else — and
+    handed it here to append `b`, so every byte of `b` and its terminator landed
+    past the end of the allocation while `join`'s ANSWER stayed correct and every
+    differential test of it passed. It showed up as a `SIGABRT` from a caller
+    (`formal/hostmods/glob.mojo`'s `**` walk, 10 runs in 10) rather than as a
+    wrong string, which is the usual way a heap overrun presents.
+
+    So: `str_build(a, b)` when the answer is a NEW string, which is the shape
+    almost every caller wants and is what sizes the allocation correctly; and
+    this only when the destination is a buffer with room already reserved for
+    the append.
     """
     strcat(dst, src)
     return dst

@@ -1,10 +1,20 @@
 # A generated proof that exceeds Lean's memory ceiling is REJECTED, and four short-circuit proofs are red for that reason alone
 
-**Area:** FORMAL (the arm64 proof generator's output vs `formal/lean.py`'s Lean
+**Area:** FORMAL (the arm64 proof generator's OUTPUT vs `formal/lean.py`'s Lean
 run). Found 2026-10-03 on `work/formal16-7`, while landing a change to
 `formal/arm64_proof_gen.py` and running `test_formal_short_circuit_cond.py` as
-one of the narrow files that cover it. **NOT FIXED — and it is not the proof
-generator's model, which is why it is filed rather than fixed here.**
+one of the narrow files that cover it.
+
+**Status: the CAUSE is now measured and it is none of the three things this
+doc listed; NOT FIXED. The cost is `native_decide`/`bv_decide` in the
+per-block BRANCH-CONDITION facts, and what is missing is a lemma for a
+short-circuit condition's value flow, not a smaller record and not a larger
+ceiling.** §2 is the bisection; §3 is the fix direction; §4 is what was
+already tried and measured against.
+**§5 — the census half of this doc, the half that made the regression above
+invisible — is FIXED (2026-10-04): a replayed verdict now says so in the
+ledger, on the screen and in the summary, so a `wall_s: 0.1` row cannot be read
+as coverage again.**
 
 ## What was run, and what it showed
 
@@ -42,79 +52,188 @@ def either(n):
 
 and `bugs/sweeps/proof_breadth_2026-10-03.jsonl` records that file as
 `{"ident": "examples/either.mojo", "arch": "arm64", "cls": "pass",
-"n_sorries": 0}`. **So this is a regression against the 2026-10-03 census, not
-a long-standing red**, and the eight generator-level tests in the same file
-(`test_cond_nodes_agrees_with_collect_conds`, `test_condition_pairing_filters_on_the_recorded_branch`, …) all pass — the model, the branch pairing and the step lemmas are all fine. Only Lean's kernel gives up.
+"n_sorries": 0}`. **So this is a regression against the 2026-10-03 census,
+not a long-standing red**, and the eight generator-level tests in the same
+file (`test_cond_nodes_agrees_with_collect_conds`,
+`test_condition_pairing_filters_on_the_recorded_branch`, …) all pass — the
+model, the branch pairing and the step lemmas are all fine. Only Lean's
+kernel gives up.
 
-## Where it happens, precisely
+**The census row is not evidence that it ever checked**, and that is worth
+saying before anything else: it records `"wall_s": 0.1`, which is
+`formal/lean.py`'s verdict-cache HIT and not a run. So "it passed on
+2026-10-03" is a recorded verdict, and what regressed is unmeasured.
 
-The error is at a `def … : Prog :=` — the program's CFG record — not at a
-theorem:
+## 1. It reproduces, byte for byte, on this tree
 
-```
-$ sed -n '5512,5517p' either_proof.lean
-  exact either_b6_runs st hpc
-
-def either_prog : Prog :=
-  { fname := "either", code := either_code, base := 4294967968, entry := 4294967988,
-    exit := 4294968176, fuel := fun n => (200000 + 46 * n.toNat),
-    blocks := [either_blk_0, …, either_blk_6],
-    rets := [4294968148, 4294968172] }
-```
-
-The file is **688 KB** and 16 `sorry`s; every one of them is a named trust
-boundary, so the hole count is not what is being complained about. `Prog`
-carries a `blocks : List …` and a `fuel : Nat → Nat`, and a short-circuit
-condition is exactly the shape that multiplies the block count: `either` has
-7 blocks for 12 instructions, and the record has to be re-checked by the
-kernel against the block definitions above it.
-
-## It is NOT the string model, and that is measured rather than assumed
-
-`work/formal16-7`'s change to `formal/arm64_proof_gen.py` (a string literal's
-value in the model is its interned address) was in the tree while this ran, so
-the obvious first question is whether it caused this. **It did not, and the
-proof is a byte comparison**: with the change reverted in place
-(`git apply -R` of its own diff — never `git checkout <path>`), `either`
-generates an **identical** 688 KB file:
-
-```
-$ cmp either_HEAD_proof.lean either_proof.lean && echo IDENTICAL
-IDENTICAL
+```console
+$ python3 tools/memslot.py --gb 8 --label pg -- \
+      python3 fire.py build --formal -o .tmp/scc/either.proof .tmp/scc/either.mojo
+build: proof check failed: either_proof.lean:5517:8: error:
+  (kernel) excessive memory consumption detected
+memcap: done, peak 7.6 GB across up to 2 procs (ceiling 8.0 GB), child exit 1
 ```
 
-and Lean rejects it identically. `either` contains no string literal, so the
-only two of the change's four sites it could reach are the signature changes on
-`_expr_ast`/`_stmts_ast`, which emit no text.
+and standalone through `formal/lean.py::run_lean`, which is how every
+measurement below was taken (`-j 4 -M 6144 -T 200000`, the launcher's own
+bounds):
 
-## The next step, and it is a decision rather than a patch
+| the generated file | wall | CPU | peak RSS | verdict |
+|---|---|---|---|---|
+| as emitted (688 017 B, 7259 lines) | 208.8 s | 250.2 s | 8.00 GB | `either_proof.lean:5517:8: (kernel) excessive memory consumption detected` |
 
-Three things are available and which one is right depends on a fact nobody has
-measured:
+`either_proof.lean` is 16 `sorry`s, every one a named trust boundary, so the
+hole count is not what is being complained about.
 
-1. **`formal/lean.py`'s Lean invocation.** Lean takes `maxHeartbeats` from the
-   generated preamble (`set_option maxHeartbeats 20000000`) and has a
-   `maxMemory` besides it that this file does not set. `(kernel) excessive
-   memory consumption` is the `maxMemory` arm, so **the cheapest thing to try
-   is `set_option maxMemory` in the generated preamble** — the same lever the
-   file already pulls for `maxRecDepth` and `maxHeartbeats`, in the same three
-   lines. Measure whether a higher `maxMemory` (or removing it) lets these four
-   through before assuming the record has to shrink.
-2. **Shrink the `Prog` record.** `fuel := fun n => (200000 + 46 * n.toNat)` is
-   a function inside a structure the kernel has to compare for conversion; a
-   `Nat` constant or a named `def` would be cheaper to check. This is
-   `formal/arm64_proof_gen.py`'s `_gen_universal_e2e_cfg` and is a change to
-   what is emitted, not to what it means.
-3. **Do nothing here and let it be a census fact.** The eight Lean-checking
-   formal gate tests are disabled, so nothing red is visible in a gate today —
-   which is precisely why this is worth a doc: it is invisible, it is a
-   regression against a recorded pass, and the next session to touch
-   `arm64_proof_gen.py` will meet it as "the short-circuit proof test fails".
+## 2. The bisection, and it refutes all three of this doc's options
 
-**Not measured here:** whether (1) works, what `maxMemory` the run is actually
-defaulting to, and whether the four failures are one cause or a threshold that
-four files happen to cross. The first of those is a one-line experiment on an
-existing 688 KB file and is the next step.
+Every row is the SAME generated file with one edit, run through
+`formal/lean.py::run_lean`. **Only `rc=0` counts as cheap**: an edit that
+introduces a syntax error makes the file look cheap because elaboration
+aborts at the error, and two of the rows below were nearly mistaken for fixes
+for exactly that reason before the error was read.
+
+| the file | wall | peak RSS | verdict |
+|---|---|---|---|
+| as emitted | 208.8 s | 8.00 GB | the ceiling error |
+| **`-M 100000000` (the ceiling lifted)** | — | **> 8.00 GB, killed by `memcap`** | the ceiling error is the bound doing its job |
+| `blocks := []` in the record | 248.8 s | 8.03 GB | **the same error at the same line** |
+| `fuel := fun _ => 0` in the record | 22.9 s | 2.51 GB | cheap — **but** the terminal `change` then fails, so the rest of the theorem is never elaborated (a false cheap, see below) |
+| record's fuel as a named `def`/`abbrev` | 197–201 s | 7.88–8.05 GB | no better |
+| **truncated immediately after `def either_prog : Prog := …`** | **21.0 s** | **2.51 GB** | **`rc=0` — it checks** |
+| **`native_decide`/`bv_decide` (44 sites) replaced, body otherwise untouched** | 409.7 s | **2.82 GB** | the ceiling error is GONE; two `maxHeartbeats 20000000` timeouts instead |
+
+Three things follow, and they are the whole of what is now known:
+
+1. **The `Prog` record is not the cost.** The file up to and including
+   `def either_prog : Prog := …` — the record, its seven `Block`s, their
+   certificates, the code, the decode and step lemmas, and every
+   `native_decide` run test — **checks clean in 21.0 s at 2.51 GB.** So
+   option 2 of §4 of the old version of this doc ("shrink the `Prog` record",
+   "`fuel := fun n => …` is a function inside a structure the kernel has to
+   compare for conversion") is refuted by a measurement, not by an argument.
+   Two of its variants looked like fixes for an hour: they are cheap only
+   because a `change` failure aborts the theorem before the expensive part.
+2. **The ceiling is not too small.** With `-M` lifted the same file crosses
+   **8 GB of RSS** and is killed. Raising `LEAN_MEMORY_MB`
+   (`formal/lean.py`) converts a loud rejection into the memory debt
+   `bugs/PERF_memory_over_4gb_is_a_bug.md` is about. The doc's option 1 was
+   the wrong lever and this is the measurement that says so.
+3. **The memory is `native_decide` and `bv_decide`, in the theorem body.**
+   The universal theorem's body — everything after the record — carries 16
+   bare `native_decide` and 28 `bv_decide` sites, all of them in the
+   per-block branch-condition facts (`by_cases h : <flag> <;> simp [h, …]
+   <;> bv_decide`, `simp only […] ; simp […] ; native_decide ; all_goals try
+   bv_decide ; all_goals try grind ; …`). Replacing those 44 sites drops the
+   peak from 7.95 GB to **2.82 GB** and the ceiling error with it. The price
+   is wall time (409.7 s) and two heartbeat timeouts, which is the shape of a
+   cheap-but-incomplete recipe rather than of a cheap proof.
+
+**And that is why exactly these four programs are red.** `either`, `both`,
+`short_and` and `short_or` are the four short-circuit examples. A short-circuit
+condition emits its own conditional branch (`_emit_truthy_word`), and the
+merge block's condition register holds the LEFT operand's `cset` on the taken
+edge and the RIGHT one's on the fallthrough — so the ordinary
+`arm64_flag_*` facts do not apply and the generator's fallback chain has to
+reach for a decision procedure. A straight-line `if` closes on `simp`;
+these four do not.
+
+## 3. The fix direction
+
+**A lemma for a short-circuit condition's value flow, not a cheaper decision
+procedure.** The generator already knows the shape — `_sc_by_merge` in
+`_gen_universal_e2e_cfg` records, per merge block, the chain's kind (`and` /
+`or`), the two operands rendered as `_truth_go` would, and the chain's own
+branch pc — and it already refuses to attribute one proposition per block
+where one is wrong ("one proposition per block cannot describe it"). What it
+does not have is the FACT that would let a branch-condition leaf close on
+`simp`: for each of the two edges into the merge block, *which* operand's
+truth value the merge register holds, so that
+
+```
+arm64_reg r (merge_state edge) = 0 ↔ ¬(left)     -- on the short-circuit edge
+arm64_reg r (merge_state edge) = 0 ↔ ¬(right)    -- on the fallthrough
+```
+
+are two ordinary `simp`-dischargeable `Arm64State` facts about two
+concrete states, each of which the block's own `qS`/`qT` chain already names.
+With those, the `by_cases` + `simp` + `bv_decide` + `grind` +
+`native_decide` chain in `_CBZ`'s emitter has nothing left to decide, and
+neither the memory nor the wall time goes with it.
+
+The measurement that says this is the right shape and not a hope: the same
+file with those 44 sites removed elaborates in 2.82 GB, i.e. the DECISION
+PROCEDURES are the cost and nothing else in the body is. Two `sorry`s are
+already admitted at this construct and are named trust boundaries; this is not
+about those.
+
+While that lands, the two `either`-class facts below are worth doing because
+they are cheap and they are what a reader hits first:
+
+* the verdict cache made a red invisible as a `wall_s: 0.1` row in a census
+  file, so a proof regression of this size can be recorded as a pass. A proof
+  that no longer checks should not be replayed from the cache — see §5.
+
+## 4. What has been changed, and what has not
+
+**Landed** (partial, and it is NOT the fix): the per-block step budget is now
+ONE `Nat` subtraction against its base instead of a nested chain.
+`emit_block` used to thread the fuel as a string and concatenate `- k` onto
+whatever it was given, so `either`'s proof spelled
+`(((FUEL - 8) - 1) - 3) - 2) …` — 15 terms deep — **298 times**, at every
+`have`, every `rw [show … = … from by omega]` and every library call. It is
+now `FUEL - 42`, once. `(x - a) - b` and `x - (a + b)` are the same `Nat`
+value, so this changes what is emitted and not what it means, and `FUEL0`
+deliberately stays INLINE: `omega` reads its `200000` literal to prove every
+fuel obligation, and naming it hides the literal (measured: with the record's
+fuel named, `arm64_go_exit_hit`'s `0 < fuel` is the first thing that goes
+unproved). Verified on `formal/examples/const2.mojo` and `chain.mojo`
+(build + proof check, both green). **This is emitter hygiene, not the fix:
+`either` still fails identically, and the measurement in §2 row 1 is with the
+chains already folded.**
+
+**Tried and refuted, so a reader does not try them again:**
+
+* `set_option maxMemory` in the generated preamble, or a bigger
+  `LEAN_MEMORY_MB`. There is no `set_option maxMemory` in the preamble
+  because the ceiling is imposed on the command line by
+  `formal/lean.py::lean_flags` (`-M 6144`); adding a `set_option` would not
+  change the bound that fires. Raising the bound moves 8 GB of RSS into the
+  gate.
+* naming the record's `fuel` field (`def`, then `abbrev`). No better at
+  197–201 s / 7.9–8.1 GB, and it costs two things: `change` sees through a
+  `def` only at `.reducible` transparency, so the terminal `change` fails
+  with it, and `omega` does not unfold a reducible constant either, so the
+  fuel obligations fail.
+* `blocks := []` in the record: the error is unchanged, at the same line.
+
+## 5. A thing the census got wrong: FIXED 2026-10-04, and it is in this doc
+## because it is how the regression above stayed invisible
+
+`bugs/sweeps/proof_breadth_2026-10-03.jsonl` records `either` as
+`{"cls": "pass", "wall_s": 0.1}`. `0.1 s` is `formal/lean.py`'s verdict-cache
+HIT and not a run, so the file was never checked on that date — and a proof
+regression this size was recorded as coverage. "The corpus still measures this
+construct" is the claim `tools/formal_fuzz.py`'s `KNOWN_DIVERGENCES`
+discipline rests on, and a replayed verdict does not support it.
+
+**Landed.** `tools/formal_proof_breadth.py`'s `Verdict` carries a `cached`
+field, `run_item` stops discarding `check_proof_cached`'s third element, the
+ledger has a `cached` column, a replayed PASS prints on the screen (it used to
+be the only row of a run with nothing on it), and the per-architecture summary
+prints `of which replayed` so the counts cannot be read as a fresh measurement
+without opening the ledger. It is a FIELD and not a distinct `cls` because
+`pass`/`admitted` say what the PROOF is and every reader here aggregates on
+that, while "measured or replayed" is a second axis of the same row.
+
+`test_formal_proof_breadth.py::TestAReplayedVerdictSaysSo` pins it with the
+cache stubbed, which is the only way to test it deterministically: the two rows
+must carry the same class and opposite flags, and the summary must count the
+replayed one.
+
+**What this does NOT do:** it does not make a replayed verdict fail, and it
+does not re-check `either`. `either` is still red for the reason in §1, and the
+measurement that says so is a fresh run with `cached=False` in the ledger.
 
 ## Reproducing
 
@@ -132,3 +251,22 @@ python3 tools/memslot.py --gb 8 --label pg -- \
 # build: proof check failed: either_proof.lean:5517:8: error:
 #   (kernel) excessive memory consumption detected
 ```
+
+and the bisection, which is the part a taker should redo rather than trust:
+
+```sh
+# .tmp/scc/probe2.py: run_lean(lean, [src]) with LEAN_PATH=lib, printing
+# rc/wall/peak and the FIRST error lines (never the last 1200 chars).
+python3 - <<'EOF'
+s = open('.tmp/scc/either_proof.lean').read()
+i = s.index('theorem either_compiles_correctly_universal')
+open('.tmp/scc/t1.lean', 'w').write(s[:i])      # → rc=0, 21.0 s, 2.51 GB
+body = s[i:]
+body = body.replace('bv_decide', 'simp_all') \
+            .replace('\n            native_decide\n', '\n            sorry\n')
+open('.tmp/scc/noNat.lean', 'w').write(s[:i] + body)   # → 2.82 GB, no ceiling error
+EOF
+```
+
+`formal/examples/both.mojo`, `short_and.mojo` and `short_or.mojo` are the
+other three, and every number above holds for the one that was measured.

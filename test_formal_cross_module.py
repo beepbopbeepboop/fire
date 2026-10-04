@@ -1710,6 +1710,91 @@ def test_a_module_body_runs_at_load_across_the_boundary(tmpdir, _):
           f"the wrong order against main: {text!r}")
 
 
+# ── (6) a CONTAINER-returning export whose body calls helpers on the buffer ──
+#
+# The export's declared return type is a container, its body calls a private
+# helper, and the helper's parameter is UNTYPED and receives the scratch buffer
+# the export then reads. That shape was bisected to here, and its symptom is the
+# reason this file is the right home for it rather than a refusal row: the image
+# STARTED, printed nothing at all — not even the first `printf` in `main` — and
+# exited 1. The callee's helper trapped in its FIRST statement, the trap is a
+# raw `exit(1)` syscall, and a raw exit does not flush stdio, so every buffered
+# line the caller had printed went with it. "The caller's frame is laid out
+# around this callee" was the wrong reading of an artefact of buffering.
+#
+# `mod.mojo` is the minimum that reproduces it: one `malloc`'d scratch buffer, one
+# private helper that stores through an untyped parameter, one count store, one
+# read-back of what the helper wrote. Before the callee's parameter took the
+# convention its call site uses, the store landed at `segs + 16` with the count
+# word at `segs + 0` still zero, so the container walk's bounds check fired and
+# the raw exit took the process with it — measured on this tree: exit 1 and zero
+# bytes of output.
+#
+# There is no CPython oracle here and that is stated rather than worked around:
+# the program is about the REPRESENTATION of a returned blob — word 0 is the
+# count, element i is at `base + 8 + 8i` — and CPython's `List` is a different
+# representation of the same list, so `agrees_with_cpython` would be comparing
+# two languages rather than two compilations. What the numbers ARE is derived
+# from the source in front of the reader: `_split` returns 1, `b[0] = ns` makes
+# the count 1, `b[1] = segs[1]` copies the helper's 43 into element 0, so
+# `len(paths)` is 1 and `paths[0]` is 43. `test_formal_run.py`'s
+# `both_arch_an_untyped_parameter_indexes_the_same_pointer_as_an_annotated_one`
+# is the one-image half of the same claim.
+CONTAINER_LIB = """\
+def _split(pattern, segs) -> int:
+    segs[1] = 43
+    return 1
+
+
+def collect(pattern) -> List[Int]:
+    var segs: Pointer[Int64] = malloc(8 * 4)
+    memset(segs, 0, 32)
+    var ns = _split(pattern, segs)
+    var b: Pointer[Int64] = malloc(8 * (ns + 2))
+    memset(b, 0, 8 * (ns + 2))
+    b[0] = ns
+    b[1] = segs[1]
+    free(segs)
+    return b
+"""
+
+CONTAINER_PROG = """\
+from mod import collect
+
+
+def main(k):
+    printf("start\\n")
+    var paths = collect("*.py")
+    printf("n=%d e0=%d", len(paths), paths[0])
+    return 0
+"""
+
+
+def test_a_container_returning_export_whose_helpers_take_the_buffer(tmpdir, _):
+    """`collect` returns `List[Int]` and `_split` fills the buffer it is given.
+
+    Asserts the OUTPUT and not merely the exit status, because the exit status
+    is what the bug reported: a program that printed nothing and exited 1 is
+    indistinguishable from a program that printed nothing and exited 1 for a
+    different reason. `start` is in the expected text for the same reason — it
+    is the line the buffering artefact swallowed, so its presence is the
+    assertion that the callee's first statement ran at all.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "container_export")
+    os.makedirs(root)
+    write_tree(root, {"mod.mojo": CONTAINER_LIB, "prog.mojo": CONTAINER_PROG})
+    result, out = build(root, "prog.aout")
+    rc, text = run(out)
+    check(rc == 0,
+          f"the image exited {rc}, not 0 — and with no output at all that is "
+          f"the shape this case is about, since a raw exit(1) syscall does not "
+          f"flush stdio: {text!r}")
+    check(text == "start\nn=1 e0=43",
+          f"the helper's store and the export's read-back of it disagree: "
+          f"{text!r}")
+
+
 TESTS = [
     ("a module's own folded and slot stores cross the boundary",
      test_a_module_stores_that_the_image_already_holds_cross_the_boundary),
@@ -1779,6 +1864,8 @@ TESTS = [
      test_a_frame_address_reaching_an_ordinary_word_names_the_contract),
     ("arm64 and x86-64 return the same verdicts",
      test_the_executors_answer_the_same_questions),
+    ("a container-returning export whose helpers take the buffer it passes them",
+     test_a_container_returning_export_whose_helpers_take_the_buffer),
 ]
 
 # A known failure is registered here, never hidden: `expect=` is a promise with

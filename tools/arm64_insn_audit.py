@@ -56,6 +56,16 @@ rather than an oversight:
     where it should have read the callers, which is the mistake this step exists
     to make impossible to repeat.
 
+    That measurement is a dated one and the list is a MOVING one: an encoder
+    leaves it the moment a lowering emits it, which is the ordinary order of
+    work here. `blr` has — the call through a function VALUE emits
+    `encode_blr_xn(16)` (`formal/arm64_codegen.py`, the `through_value` arm of a
+    call), so `blr` is covered now and
+    `bugs/FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md`
+    records the move as this survey's own measurement rather than a change to it.
+    Run the tool for the current number; nothing here states one that a
+    lowering cannot invalidate.
+
 Usage:
     python3 tools/arm64_insn_audit.py                # full report
     python3 tools/arm64_insn_audit.py --top 40

@@ -1,5 +1,70 @@
 # FORMAL_module_state_no_storage: a module cannot hold state, so `sys.argv`, `sys.path` and the stream objects cannot exist on this path
 
+**Status (2026-10-04, `work/formal19-4`): `computed_element` — the last of the
+two `static_initializer_refusal_reason` remainders — was a MISDIAGNOSIS, and
+`global_value_refusal`'s sentence about why a name has a slot was false of every
+container global. Both fixed, with the refusal itself (see below); nothing else
+in this document moved, and the three remainders the tables name are still
+remainders.** Read this before "What is left", because that section's
+`computed_element` entry is now narrower than it reads.
+
+**`None` is a word, and `_static_word` had no arm for it.** Both emitters lower a
+`None` to zero (`arm64_codegen._emit_expr`'s `F.NoneLiteral` arm is
+`movz xd #0`), and every other reader of the same value accepts the two
+spellings — `None` arrives from the parser as `IdentExpr("None")`, not
+`F.NoneLiteral`, which is what `struct_init_shapes`'s own note says. So a
+module-level table with a `None` element has a word for that element like any
+other, and the cost of not having one was a refusal about a literal:
+
+    TBL = [(None, 7), (3, 9)]
+
+    def pick(w: Int) -> Int:
+        for i, (mask, base) in enumerate(TBL):
+            if mask is None:
+                ...
+
+    build: pick: 'TBL' has storage here … but that storage has no
+    initializer: one of its elements is COMPUTED BY A CALL, and a container is
+    laid out here as a run of words …
+
+There is no call in that program. `None` is now a static word (`_static_word`'s
+fourth arm, both spellings, and `NoneType` with them — `Ellipsis` deliberately
+not, because this path has no word for it), and the program builds, runs, and
+answers `mask is None` correctly for a blob element on both architectures.
+
+**And `computed_element` was the wrong reason rather than a missing
+capability**, which is the shape this document keeps hitting: the four reasons
+`static_initializer_refusal_reason` picks from are the four SHAPES it recognises,
+and a shape it does not recognise falls into the nearest of them. So the fix
+removes a misdiagnosis and a capability together, and the reason string still
+describes what is left: an element computed by a call is still refused
+(`test_formal_globals.py`'s `call_computed_container_element_refused`).
+
+**The two census items this moves, measured.** `tools/formal_proof_breadth.py
+--show <item>`, each emitted program rebuilt here on both architectures:
+
+| item | before | after |
+|---|---|---|
+| `formal/arm64_proof_gen.py:_step_branch_index` (`_STEP_CONDS`, 50 entries, the first `(None, 0xd65f03c0)`) | `'_STEP_CONDS' has storage here … one of its elements is computed by a call` | the image would bind `enumerate`, which nothing provides |
+| `gimple_codegen.py:_selfhost_syms` (`_SELFHOST_SIGS`) | the same sentence, on `_SELFHOST_SIGS` | `'_out.sort()' is a method call on a value` |
+
+Both are one row along rather than to `pass`, and `bugs/FORMAL_proof_coverage_
+census_2026-10-03.md` §0.2's family "a module global with storage but no
+initializer" (2 of its 32) is 0 on this tree.
+
+**The refusal's second clause was false and is now read off the slot.**
+`global_value_refusal` said every slot is there "because a function writes it
+through `global {name}`", which is true of `G = 5` plus `def bump(): global G`
+and false of every container global — `TBL` above has a slot because its value
+is a container BLOB the linker places, so it is a CONSTANT with a home and
+nothing writes it. `GlobalSlot.mutable` is the field that says which, and its
+own comment records this exact sentence having been fixed once already — in the
+MANIFEST, where `write_dylib_manifest` split `variables` from `containers` — while
+the refusal kept it. It is now read off the slot, with the module-body case
+(`filled_by_body`) named as its own third answer, and
+`test_formal_globals.py`'s `a_container_global_says_it_is_a_constant_not_a_
+variable` pins it with the false clause as an `absent`.
+
 **`sys.executable` is DOWN TO A PROJECT, and the project is not storage — measured
 2026-10-03 (`work/formal16-5`), so nobody spends the storage half.** This table's
 `sys.executable` row says the missing thing is "a place to put a path", because
@@ -818,6 +883,16 @@ named by `static_initializer_refusal_reason`: a container element computed by a
 CALL (`"computed_element"`, and the nested-container half of the old
 `"nested_element"` landed 2026-10-03 — see the Status at the top), and a
 module global whose name is imported from another module (`"imported"`).
+
+**`computed_element` is now NARROWER than the entry above reads (2026-10-04,
+`work/formal19-4`), because it was carrying shapes it does not describe.** It
+was what `formal/arm64_proof_gen.py`'s `_STEP_CONDS` and
+`gimple_codegen.py`'s `_SELFHOST_SIGS` were filed under, and neither has an
+element computed by a call — both have a `None`, which is a word (0) and which
+`_static_word` had no arm for. What is left under this reason is exactly what its
+message says: an element whose value is a call's result, whose result is not
+known before the program runs. The `imported` remainder is untouched — it is item
+2 of "the exact next step", an exported slot, and still a project.
 
 ## What this costs, by name
 

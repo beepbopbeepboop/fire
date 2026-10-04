@@ -5242,6 +5242,33 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     saved_decls          = gen.decls
     saved_body           = gen.body_lines
     saved_var_types      = dict(gen.var_types)
+    # `_c_names` is the ONE entry in `_reset_func`'s per-function list whose
+    # keys are not temp names, so dropping it is not the "safe direction" that
+    # list's own comment promises. It is the source-level-name → C-identifier
+    # map, and an entry in it exists only because some local SHADOWED
+    # something: a C keyword, a macro, a libc function (`close`), a struct
+    # typedef. Losing the map does not lose a temp, it changes the SPELLING of
+    # the enclosing function's own already-declared local — and every later
+    # reference falls back to the raw Python name, which is either a different
+    # variable or nothing at all.
+    #
+    # Real: `elab_intu._mentions` declares `close = _matching_bracket(ann,
+    # open_at)` (so `_declare_var` mints `int64_t _var_close;` and records the
+    # rename), then a lambda — `found.sort(key=lambda t: t[3] - t[1])` — runs
+    # `_reset_func` in the middle of the parent, and the SECOND
+    # `for base, bs, open_at, close in found:` unpack then wrote the raw
+    # spelling into a C variable nothing declares:
+    #
+    #     error: 'close' undeclared (first use in this function);
+    #            did you mean 'pclose'?
+    #
+    # `base`, `bs` and `open_at` in that same unpack were declared normally and
+    # gcc reported only `close`, which is what makes this one name's history
+    # rather than the unpack's. This is the same defect
+    # `_callable_ret_types`/`_dict_callable_ret` below were saved for, and the
+    # same discipline: `_reset_func`'s list and this list have to agree, name
+    # for name, or a nested lift silently changes the parent's meaning.
+    saved_c_names        = dict(gen._c_names)
     # The callable-value knowledge the ENCLOSING function has built up, for
     # the same reason and with the same shape as the state saved just below:
     # `_gen_lifted_closure` calls `_reset_func` to generate the lambda's own
@@ -5392,6 +5419,7 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     gen._callable_ret_types     = saved_callable_rets
     gen._container_callable_ret      = saved_dict_callable
     gen.var_types               = saved_var_types
+    gen._c_names                = saved_c_names
     gen.current_func_name       = saved_func_name
     gen.func_ret_type           = saved_ret_type
     gen.bb_counter              = saved_bb
@@ -6229,7 +6257,22 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # these self-emitted prototypes through), and every later call site
     # sees a real prototype.
     _ensure_libc_self_extern(gen, fname_raw)
-    ret_type = gen.func_return_types.get(fname_raw, 'int64_t')
+    # `fname` first, `fname_raw` second. `fname` is the symbol THIS call site
+    # emits (computed a few lines above, which is why it is available here), and
+    # `_func_csym` has already mirrored the defining unit's own return type
+    # under it — reading it therefore asks "what does the function I am calling
+    # return", while the bare name asks "what does some function of this name
+    # somewhere in the translation unit return". Those differ exactly when two
+    # modules of one closure define one bare name (measured: offload.py's
+    # `_mentions(...) -> bool` typed as `MojoList *` after
+    # elab_intu.py's unannotated `_mentions` claimed the shared bare slot, so
+    # the call temp was declared `MojoList *` and gcc rejected the assignment).
+    # The bare entry stays the fallback, and `fname` is also the right first
+    # choice for a name only one module defines — there the two agree.
+    # Nothing consults the bare slot before this that a per-definition answer
+    # would contradict, so the whole correction is this one lookup order.
+    ret_type = gen.func_return_types.get(
+        fname, gen.func_return_types.get(fname_raw, 'int64_t'))
 
     # Self-host hardcoded functions declared via concrete prototypes in
     # gen_module's `_is_selfhost_file` block.  Their return types are not

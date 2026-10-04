@@ -11,6 +11,15 @@ anything else fell through to a recursion-only branch.  The consequence was
 that the arm64 corpus had **no proof at all** for any program with a call, and
 a `sorry` census over generated files was measuring nothing.
 
+**And one family of programs that has no call in it at all**: `TestBitTestBranches`
+below covers `if n & 8:`, whose condition lowers to a single `TBZ`. A bit test
+writes no register and sets no flags, so the branch-condition value flow every
+other conditional branch gets from its `CSET` does not exist for it, and the
+generator used to refuse rather than emit a proposition about a register that
+says nothing about the condition. It is in this file because the thing being
+pinned is the same thing: what the generator emits for a program the corpus had
+no proof for.
+
 These tests pin the fix and the three defects that were behind it:
 
   * a call no longer raises, and the emitted proof states what the machine model
@@ -423,6 +432,30 @@ class TestGeneratorSource(unittest.TestCase):
                           f"{entry} handed the AST bridge a one-argument list, "
                           f"so its second parameter evaluates to 0")
 
+    def test_the_step_table_and_the_model_are_the_same_set(self):
+        """`_STEP_CONDS` and `arm64_step`, checked two ways, because one is not
+        enough.
+
+        `check_step_conds` compares SETS and is called by
+        `generate_arm64_proof`, so every proved build enforces it; `audit_step_table`
+        also checks that the two ORDERS agree per overlapping pair, and it is the
+        one that reads `lib/ProofLib.lean` as TEXT. Both existed and the second was
+        reading a branch condition out of a COMMENT above the TBZ case, which put
+        `test_formal.py` in a state where it raised before generating a single
+        proof for every example it has — see
+        `bugs/FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md`.
+
+        The regression this pins is the one whose fix was to REMOVE a row:
+        `CSEL` is emitted by `arm64_codegen.py` at six sites and is in neither the
+        table nor the model, and a row in one without the other is a generator
+        describing an effect the function it is proving takes no step for."""
+        import formal.arm64_proof_gen as G
+        G.check_step_conds(os.path.join(HERE, "lib", "ProofLib.lean"))
+        notes = G.audit_step_table(os.path.join(HERE, "lib", "ProofLib.lean"))
+        self.assertIsInstance(notes, list)
+        for note in notes:
+            self.assertIn("shadows entry", note)
+
     def test_adrp_step_uses_simpa(self):
         """An ADRP's result reads the program counter, so the library lemma
         takes `pc` as a parameter while `_step_rhs` writes `s.pc`; `exact`
@@ -589,6 +622,131 @@ class TestRegister31(unittest.TestCase):
                          "this generator need the helper in them too")
         self.assertIn("arm64_reg 31 s", G._step_rhs(0x8b1003e0, 2),
                       "`_step_rhs`'s ADD-register arm changed shape")
+
+
+# Lean's `=` and `\u2260`, spelled once so the pattern and the expectation
+# below cannot be two different characters.
+BIT_TEST_EQ, BIT_TEST_NE = "=", "\u2260"
+
+BIT_TESTS = {
+    # name: (source, the instruction it must lower to)
+    "bit_tbz": ("def f(n):\n    x = 0\n    if n & 8:\n        x = x + 1\n"
+                "    return x\n", 52),
+    "bit_tbnz": ("def f(n):\n    x = 0\n    if not (n & 4):\n        x = x + 2\n"
+                 "    return x\n", 53),
+    # `&` is commutative and the lowering accepts either order, so the mask on
+    # the left is the same instruction with the operands the other way round.
+    "bit_commuted": ("def f(n):\n    x = 0\n    if 16 & n:\n        x = x + 4\n"
+                    "    return x\n", 52),
+}
+
+
+class TestBitTestBranches(unittest.TestCase):
+    """An `if` whose condition is a BIT TEST is provable, and proves the bit.
+
+    These three programs used to end the generator in
+    `ValueError: unsupported: branch condition value flow (frame/flag
+    unavailable)`. The refusal was right — a conditional branch's source-level
+    proposition was read out of the CSET that wrote the tested register, and
+    `TBZ`/`TBNZ` write no register and set no flags — but the way out was not to
+    keep refusing: the branch's own condition IS the proposition, one bit of one
+    register, and `lib/ProofLib.lean`'s `arm64_step` already states it that way
+    for `0x36000000` / `0x37000000`.
+
+    Nothing here runs Lean. What is pinned is that the generator PRODUCES the
+    proof and that the proposition it emits is the bit test — a generator that
+    emitted an `hcond` about the whole register would typecheck and prove
+    something false, which is the `either`/`both` failure mode
+    `bugs/FORMAL_arm64_known_proof_gaps.md` exists to prevent. The Lean half is
+    `formal/examples/bittest.mojo`, which `test_formal.py` runs.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="a2-bittest-")
+        cls.proofs = {}
+        cls.errors = {}
+        for name, (src, _idx) in BIT_TESTS.items():
+            p, err = _generate(cls.tmp, src, name)
+            cls.proofs[name] = p
+            cls.errors[name] = err
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_a_bit_test_condition_generates_a_proof(self):
+        for name in BIT_TESTS:
+            self.assertIsNone(self.errors[name],
+                              f"{name}: proof generation raised "
+                              f"{self.errors[name]}")
+
+    def test_the_condition_proved_is_the_bit_test_not_the_whole_register(self):
+        """`((arm64_reg r s >>> bit) &&& 1) = 0` — the model's own spelling.
+
+        The whole-register form (`arm64_reg r s = 0`) is what the CBZ arm
+        emits, and it is FALSE for a bit test: `n = 8` satisfies one and not the
+        other. A proof about it would typecheck, which is exactly why the shape
+        is asserted rather than merely generated."""
+        for name, (_src, idx) in BIT_TESTS.items():
+            with open(self.proofs[name]) as fh:
+                text = fh.read()
+            self.assertIn("hcond_", text,
+                          f"{name}: no source-condition proposition was emitted")
+            m = re.search(r"hcond_\d+ : \(*\(arm64_reg (\d+) s_\d+ >>> "
+                          r"UInt64\.ofNat (\d+)\) &&& 1\) (=|" + re.escape(BIT_TEST_NE) + ") 0",
+                          text)
+            self.assertIsNotNone(
+                m, f"{name}: the emitted hcond is not a bit test")
+            self.assertEqual(m.group(1), "0",
+                             f"{name}: the tested register is the one the "
+                             f"lowering put the operand in")
+            self.assertEqual(
+                m.group(3),
+                BIT_TEST_EQ if idx == 52 else BIT_TEST_NE,
+                f"{name}: the polarity is the INSTRUCTION's, and a TBZ taken "
+                f"test is the bit being CLEAR")
+
+    def test_the_displacement_is_read_at_this_family_s_own_width(self):
+        """`imm14`, not `imm19`: bits 19..23 are the bit number here.
+
+        A 19-bit read folds the BIT into the displacement's sign bit, so the
+        `hb` fact the step lemma carries is false about the word and everything
+        proved from it is a proof about a different instruction."""
+        for name in BIT_TESTS:
+            with open(self.proofs[name]) as fh:
+                text = fh.read()
+            self.assertRegex(
+                text, r"have hb : .*>>> 5 &&& 16383 &&& 8192",
+                f"{name}: the sign-extend decision is not over the 14-bit "
+                f"immediate")
+
+    def test_the_branch_target_is_the_sign_extended_imm14(self):
+        """`_branch_target` decodes TBZ/TBNZ, and its target is the model's.
+
+        Measured by round trip rather than by reading: the encoder is asked for
+        a backward displacement and the decoder has to land on the address the
+        encoder was told about. The imm14 arm was MISSING while the block
+        scanner already classified these as `cbz`-kinded, so `targets` was
+        `[pc + 4, None]` and every consumer of the taken edge was handed a
+        `None`."""
+        import struct as _struct
+
+        from formal.arm64 import encode_tbz_xn_bit, encode_tbnz_xn_bit
+        import formal.arm64_proof_gen as G
+        pc = 0x1000
+        words = {}
+        for enc, idx in ((encode_tbz_xn_bit, 52), (encode_tbnz_xn_bit, 53)):
+            for delta in (32, -32, 4, -4):
+                word = _struct.unpack("<I", enc(3, 5, delta))[0]
+                words[pc] = word
+                self.assertEqual(
+                    G._step_branch_index(word), idx,
+                    "the step table does not recognise the encoded bit test")
+                self.assertEqual(
+                    G._branch_target(words, pc), pc + delta,
+                    f"imm14 decode: word 0x{word:08x} should branch to "
+                    f"{pc + delta}, not {G._branch_target(words, pc)}")
 
 
 class TestCallProofs(unittest.TestCase):
@@ -1304,6 +1462,296 @@ class TestAstBridgeCallLimit(unittest.TestCase):
                          "the x86-64 generator's TWO designed trust "
                          "boundaries and no more: a third hole would be this "
                          "file quietly admitting something new")
+
+
+class TestLoopContractBlocks(unittest.TestCase):
+    """Which block is a loop's TEST, asked once and asked right.
+
+    `_gen_countdown_loop` found its loop by taking "the first block of kind
+    `cbz`", which was the loop test only while every program's first branch was
+    its loop test.  `e11f066d` put the stack-floor guard's `CBNZ` in EVERY
+    prologue, so that block is now the guard's in every image and no countdown
+    loop matched anywhere: measured, none of `formal/examples/*.mojo` emitted a
+    loop contract, and `wdiff` / `countdown` / `wge` refused with "no loop
+    contract matches" — an UNEXPECTED failure of the `formal` suite job, since
+    `wdiff` is not in its `EXPECTED_FAILURES`.
+
+    The loop test is the target of the loop's `b` BACK EDGE, and the caller
+    already computes that, so it is passed in.  Three things are pinned:
+
+    * **the prologue's guard branch is NOT the loop test** — the fact that made
+      the old discovery wrong, asserted on the image rather than on the
+      generator's intent, so it keeps holding while the guard exists and fails
+      loudly the day it does not;
+    * **a loop's proof carries a contract** (`while_dec_exit_contract`), which
+      is the regression itself;
+    * **no hypothesis is cited that the file does not define** — the use site
+      used to name `hsrc_1` / `hsid_1` / `hsid_0` and the body chain
+      `{name}_b2_qT6`, which are one example's block numbering, and Lean reports
+      those as `Unknown identifier` hundreds of lines after the branch that
+      wanted them.  This is the same check as `TestDec1PathContext` below, for
+      the same reason, over a different arm.
+    """
+
+    LOOP = ("def wdiff(n):\n"
+            "    while n != 0:\n"
+            "        n = n - 1\n"
+            "    return n\n")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="a2-loopblocks-")
+        cls.proof, cls.error = _generate(cls.tmp, cls.LOOP, "loopblocks")
+        cls.result = None
+        if cls.error is None:
+            import formal.build as fb
+            src = os.path.join(cls.tmp, "loopblocks.mojo")
+            cls.result = fb.compile_formal(src, arch="arm64",
+                                           output=os.path.join(cls.tmp,
+                                                               "loopblocks2.aout"),
+                                           prove=False, check=False)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_it_generates(self):
+        self.assertIsNone(self.error, self.error)
+        self.assertIsNotNone(self.proof)
+
+    def test_the_prologues_guard_branch_is_not_the_loop_test(self):
+        """The premise the old discovery rested on, measured on the image.
+
+        `arm64_proof_gen._cfg_blocks` is the walk both the caller and
+        `_gen_countdown_loop` read, so this is the same partition the generator
+        sees — not a re-derivation of it.
+        """
+        import formal.arm64_proof_gen as G
+        info = self.result["info"]
+        code = self.result["code"]
+        base = info["base_addr"]
+        words = {base + i: int.from_bytes(code[i:i + 4], "little")
+                 for i in range(0, len(code) - len(code) % 4, 4)}
+        entry = info["func_offset"]
+        rets = [pc for pc, w in words.items()
+                if w == 0xd65f03c0 and pc >= entry]
+        blocks = G._cfg_blocks(words, entry, max(rets) + 4)
+        first_cbz = next((b for b in blocks if b["kind"] == "cbz"), None)
+        start_to_bi = {b["start"]: i for i, b in enumerate(blocks)}
+        back_edge = next((b for b in blocks if b["kind"] == "b"
+                          and start_to_bi.get(b["targets"][0]) is not None
+                          and blocks[start_to_bi[b["targets"][0]]]["kind"]
+                          == "cbz"), None)
+        self.assertIsNotNone(first_cbz, "no conditional branch in the image at "
+                            "all, so this row is not about the prologue's")
+        self.assertIsNotNone(back_edge, "no loop back edge in the image, so "
+                              "there is no loop test to confuse the guard with")
+        self.assertNotEqual(
+            first_cbz["start"], start_to_bi and
+            blocks[start_to_bi[back_edge["targets"][0]]]["start"],
+            "the first conditional branch IS the loop test, so taking it would "
+            "work -- this row is about the prologue's stack-floor guard "
+            "(`e11f066d`) being that branch, and that has changed")
+
+    def test_the_proof_carries_a_loop_contract(self):
+        text = open(self.proof).read()
+        self.assertIn("while_dec_exit_contract", text,
+                      "no loop contract in the proof: the generator found no "
+                      "loop test, which is the failure this class is about")
+
+    def test_no_hypothesis_is_cited_that_the_file_does_not_define(self):
+        text = open(self.proof).read()
+        # Each stem's DEFINING form, because they are not one form: `hsrc`,
+        # `hsid` and `hframe` are typed `have`s, `hlc` is a bare `have ... :=`,
+        # and `hc` is the `by_cases` that splits a conditional block. Reading
+        # the file for one spelling of "defined" and finding the other three
+        # would report every one of them as dangling.
+        for stem, defines in (
+                ("hsrc", r"have {n}\s*:"),
+                ("hsid", r"have {n}\s*:"),
+                ("hlc", r"have {n}\s*:?="),
+                ("hc", r"by_cases {n}\s*:")):
+            cited = set(re.findall(rf"\b({stem}_\d+)\b", text))
+            self.assertTrue(cited, f"this test is vacuous for {stem}_: the "
+                           f"emitted proof cites none")
+            defined = {n for n in cited
+                       if re.search(defines.format(n=re.escape(n)), text)}
+            self.assertEqual(cited - defined, set(),
+                             f"{stem}_ cited but never defined: "
+                             f"{sorted(cited - defined)}")
+
+
+class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
+    """An `exit` the COMPILER emits is not an `exit` the PROGRAM makes.
+
+    `e11f066d` put the stack-floor guard in the prologue of every image with an
+    entry, and on x86-64 the guard's trap is a call to the C library's `exit`
+    (`formal/x86_64_codegen.py::_emit_call_exit` takes the extern path, because
+    the syscall number for exit differs between Darwin and Linux).  So every
+    x86-64 image carried an `extern_calls` entry, and
+    `_run_tests_section` refuses the whole run-test section for an image with
+    any extern call — on the true ground that the model has no memory for a
+    `__TEXT,__stubs` trampoline.  Measured, the refusal then fired on EVERY
+    program on this backend: x86-64 emitted zero run tests and zero termination
+    obligations for the whole corpus, and it had emitted them before `e11f066d`.
+    Those are the theorems that compare the machine's result register against
+    `mojo` by `native_decide`, and they are what caught the fabricated string
+    `0` above without a human reading anything.
+
+    arm64 does not have it, and the asymmetry was the bug: arm64's trap is a
+    raw `svc`, which is IN the image, so its `extern_calls` stayed empty.  The
+    fix is not to make the two backends' traps alike but to let the emitter say
+    which call sites are its own — `info["compiler_traps"]`, subtracted by
+    address, not by symbol, because an image that both traps and `raise`s has two
+    `exit` facts to tell apart.
+
+    Every row of this class is cheap: proof GENERATION, no Lean.  That the run
+    tests which come back are TRUE is a separate claim and only Lean tells it
+    (`TestStringValueInTheModel` below is the assertion that the string model
+    they compare against is the interned address, and Lean accepts the whole
+    file there).
+    """
+
+    # The doc's table, one program per row: two that must be run-tested and one
+    # that must not.
+    PLAIN = "def main(n: Int) -> Int:\n    return 7\n"
+    RETURNS_A_STRING = "def main(n: Int) -> Int:\n    return \"small\"\n"
+    PRINTS = "def main(n: Int) -> Int:\n    print(42)\n    return 7\n"
+
+    @classmethod
+    def setUpClass(cls):
+        import formal.build as fb
+        cls.tmp = tempfile.mkdtemp(prefix="a2-trap-")
+        cls.built = {}
+        for name, src in (("plain", cls.PLAIN),
+                          ("string", cls.RETURNS_A_STRING),
+                          ("prints", cls.PRINTS)):
+            path = os.path.join(cls.tmp, f"{name}.mojo")
+            with open(path, "w") as f:
+                f.write(src)
+            for arch in ("x86_64", "arm64"):
+                try:
+                    r = fb.compile_formal(
+                        path, arch=arch,
+                        output=os.path.join(cls.tmp, f"{name}-{arch}.aout"),
+                        prove=True, check=False)
+                except Exception as e:                # noqa: BLE001
+                    cls.built[(arch, name)] = None
+                    cls.built[(arch, name, "error")] = \
+                        f"{type(e).__name__}: {e}"
+                    continue
+                cls.built[(arch, name)] = open(
+                    r["proof_path"], encoding="utf-8").read()
+                cls.built[(arch, name, "info")] = r["info"]
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _text(self, arch, name):
+        text = self.built.get((arch, name))
+        self.assertIsNotNone(
+            text, f"{name} on {arch} produced no proof: "
+                  f"{self.built.get((arch, name, 'error'))}")
+        return text
+
+    def _info(self, arch, name):
+        info = self.built.get((arch, name, "info"))
+        self.assertIsNotNone(info, f"{name} on {arch} was not built")
+        return info
+
+    def test_x86_64_run_tests_are_back_for_a_program_that_calls_nothing(self):
+        for name in ("plain", "string"):
+            text = self._text("x86_64", name)
+            with self.subTest(program=name):
+                self.assertNotIn("NO RUN TESTS", text,
+                                 "the compiler's own `exit` trap is being read "
+                                 "as a call the program makes")
+                for n in (0, 1, 2, 5, 10):
+                    self.assertIn(f"theorem main_runs_{n} :", text)
+                    self.assertIn(f"theorem main_terminates_{n} :", text)
+
+    def test_a_real_extern_call_still_suppresses_them_and_says_which(self):
+        """The refusal must survive the fix, or the fix is a hole in a wall.
+
+        `print` is a call to a `__TEXT,__stubs` trampoline the model cannot
+        follow, so this image's run really would fail to terminate. The
+        sentence naming `printf` is the reason a reader can tell this row from
+        the two above.
+        """
+        text = self._text("x86_64", "prints")
+        self.assertIn("NO RUN TESTS", text,
+                      "a program that calls printf is being run-tested, so a "
+                      "failure to terminate would be reported as a wrong answer")
+        self.assertIn("printf", text,
+                      "the suppression must name the symbol that caused it")
+
+    def test_the_trap_is_published_as_a_compiler_call(self):
+        """`info["compiler_traps"]` is the emitter's own list, and it is right.
+
+        Every entry must be the address of an `exit` in `extern_calls` — the
+        trap is a real call and must stay accounted for on the link line — and
+        no entry may be any other symbol's, or the subtraction would silence a
+        program call.
+        """
+        for name in ("plain", "string", "prints"):
+            info = self._info("x86_64", name)
+            traps = info.get("compiler_traps")
+            with self.subTest(program=name):
+                self.assertTrue(traps,
+                                "no compiler_traps published, so the generator "
+                                "has nothing to subtract and every run test is "
+                                "suppressed again")
+                by_addr = {e["addr"]: e["sym"]
+                           for e in (info.get("extern_calls") or [])}
+                for addr in traps:
+                    self.assertIn(addr, by_addr,
+                                  f"{addr} is published as a trap but is not "
+                                  f"an extern call at all")
+                    self.assertEqual(by_addr[addr], "exit",
+                                     f"the trap at {addr} is a "
+                                     f"{by_addr[addr]!r} call")
+
+    def test_the_subtraction_is_by_address_not_by_symbol(self):
+        """Two `exit` calls, one the compiler's: the program's must survive.
+
+        This is the case that makes the design a decision rather than a
+        convenience. `_emit_diverge` — a `raise`, a dialect trap used as a
+        statement — reaches the same `_emit_call_exit` and is deliberately NOT a
+        compiler trap, because the program really does get there. Subtract by
+        symbol and every `exit` disappears, which is the defect the run tests
+        were there to catch.
+        """
+        from formal.x86_64_proof_gen import _program_externs
+        trap, reached = 0x1000, 0x2000
+        info = {
+            "extern_calls": [{"sym": "exit", "addr": trap, "kind": "call"},
+                             {"sym": "exit", "addr": reached, "kind": "call"}],
+            "compiler_traps": [trap],
+        }
+        self.assertEqual(_program_externs(info), ["exit"])
+        self.assertEqual(_program_externs(
+            {"extern_calls": info["extern_calls"]}), ["exit", "exit"],
+            "with no traps published both exits are the program's")
+
+    def test_arm64_needs_no_trap_list_and_keeps_its_run_tests(self):
+        """The other backend, and the reason the asymmetry was the bug.
+
+        arm64's trap is a raw `svc`, which `lib/ProofLib.lean` decodes, so its
+        `extern_calls` was always empty for a program that calls nothing and
+        its run tests were never suppressed. Nothing here may change that, and
+        the assertion that it has not is what makes the x86-64 fix a fix rather
+        than a lowering of the bar on both sides.
+        """
+        info = self._info("arm64", "plain")
+        self.assertEqual([e["sym"] for e in (info.get("extern_calls") or [])],
+                         [], "arm64's guard trap is an `svc`, not a call")
+        self.assertFalse(info.get("compiler_traps"),
+                         "arm64 published compiler traps, so its trap is no "
+                         "longer the in-image `svc` this assertion assumes")
+        text = self._text("arm64", "plain")
+        self.assertNotIn("NO RUN TESTS", text)
+        self.assertIn("theorem main_runs_0 :", text)
 
 
 class TestDec1PathContext(unittest.TestCase):

@@ -57,6 +57,21 @@ with the fix by source order already, the bare `__mlir_op` case had no
 competing name to lose to, and both guards assert what the fix must NOT break.
 
 Run:  python3 test_formal_mlir_precedence.py [-v] [case ...]
+
+THE SECOND SUBJECT, added 2026-10-04: what the refusal says once the
+operation's OPERAND type can be read. `bugs/FORMAL_mlir_dialect_refusal_is_
+false_of_the_word_valued_ops.md` § Correction measured that the corpus's
+arithmetic sites are scalar or vector depending on the OPERAND's declared type
+and not on the operation's name — 9 word-typed, 26 over a `!kgen.simd<…>` — so a
+table keyed on the name would have been right for nine and wrong for
+twenty-six. `formal/build.py::_lower_dialect_arith` now reads the declaration
+and rewrites the nine; `formal/model.py`'s `mlir_operand_clause` reports what it
+read at the sites it declined, because "this path has no lowering table that
+establishes the operand type" became untrue the moment the table could. The
+`CLASSIFIED` rows added for it are the interesting half: each is a site where
+the operand type IS established and the answer is still a refusal, and each says
+which of the three things is missing — a VECTOR, an operation whose ordinary
+spelling computes something else, or a `comptime` alias that states nothing.
 """
 import argparse
 import os
@@ -282,6 +297,81 @@ CLASSIFIED = [
      "    return __mlir_op.`pop.cmp`[pred=__mlir_attr.`#kgen.cmp_pred<nonesuch>`](\n"
      "        a, a)\n",
      "`pop.cmp` is a dialect OPERATION whose value could be a word", None),
+    # …and the same program with an operand whose DECLARED type this build can
+    # read. The clause about the operand is added and says nothing about the
+    # OPERATION, which is the point: what is missing here is the predicate,
+    # not the operand's type, and a clause that said "the operation is not the
+    # ordinary spelling of anything" would be false of a comparison.
+    ("an_unknown_predicate_over_a_word_operand_names_the_operand_not_the_op",
+     "def bad(a: __mlir_type.index, b: __mlir_type.index) -> Int:\n"
+     "    return __mlir_op.`pop.cmp`[pred=__mlir_attr.`#kgen.cmp_pred<nonesuch>`](\n"
+     "        a, b)\n",
+     "Its operand is declared '__mlir_type.index'",
+     "applied ELEMENTWISE"),
+    # A VECTOR operand, declared in the SOURCE rather than reached through a
+    # `comptime` alias, and this is the row that makes the operand-type reader a
+    # guard rather than a formality: 26 of the corpus's 38 arithmetic sites are
+    # elementwise over an N-lane vector, and a table keyed on the operation name
+    # would have lowered every one of them to a scalar add of two vector-typed
+    # words. The refusal has to name the VECTOR, because the clause it replaces
+    # said the operand type was the missing piece and here it is not.
+    ("a_vector_operand_is_reported_as_a_vector_and_not_as_a_missing_type",
+     "struct Vec:\n"
+     "    var lanes: Int\n"
+     "    var v: __mlir_type.`!kgen.simd<4, ui32>`\n"
+     "\n"
+     "def addit(a: Vec, b: Vec) -> Int:\n"
+     "    return __mlir_op.`pop.add`(a.v, b.v)\n",
+     "Its operand is declared '__mlir_type.`!kgen.simd<4, ui32>`', which is an "
+     "N-LANE VECTOR",
+     "no lowering table that establishes the operand type"),
+    # A WORD operand on an operation the arithmetic table does not carry, which
+    # is the third case the clause has to be able to say: the type IS
+    # established, the result IS a word, and what is missing is the operation.
+    # `pop.floordiv` is named in the message because it is the omission that
+    # looks most like a gap in the table and is not one.
+    ("a_word_operand_on_an_operation_this_path_does_not_compute_is_named_as_one",
+     "def floored(a: __mlir_type.index, b: __mlir_type.index) -> Int:\n"
+     "    return __mlir_op.`pop.floor`(a, b)\n",
+     "What is missing is therefore the OPERATION rather than the type",
+     "no lowering table that establishes the operand type"),
+    # `std/simd.mojo`'s OWN spelling of the same operand, and the row that says
+    # the reader reads a declaration and not a resolvable name: the field is
+    # declared `Self._mlir_type`, which is a `comptime` ALIAS resolving to a
+    # vector. Claiming the field's name without resolving the alias is what would
+    # make this a scalar add, so the reader claims nothing and the refusal says
+    # so.
+    ("a_comptime_alias_operand_claims_nothing",
+     "struct Vec:\n"
+     "    comptime _mlir_type = __mlir_type[\n"
+     "        `!kgen.simd<`, 4, `, `, `ui32`, `>`,\n"
+     "    ]\n"
+     "\n"
+     "    var lanes: Int\n"
+     "    var _mlir_value: Self._mlir_type\n"
+     "\n"
+     "def addit(self: Vec, rhs: Vec) -> Vec:\n"
+     "    return Vec(lanes=0,\n"
+     "               _mlir_value=__mlir_op.`pop.add`(self._mlir_value,\n"
+     "                                              rhs._mlir_value))\n",
+     "Nothing in the source states a type for this operand",
+     "N-LANE VECTOR"),
+    # A field of the SAME NAME on a base this function does not type. Measured
+    # on this tree: `SIMDLength___init__(out self, value: Int)` writes
+    # `__mlir_op.`pop.cast_to_builtin`[…](value._mlir_value)`, and a field table
+    # keyed on the field NAME alone reported that operand as the `index` field
+    # `SIMDLength` declares — a fact about the name rather than about the field
+    # the source wrote, and one this row pins.
+    ("a_field_of_the_same_name_on_an_untyped_base_claims_nothing",
+     "struct Idx:\n"
+     "    var tag: Int\n"
+     "    var _mlir_value: __mlir_type.index\n"
+     "\n"
+     "def widen(value: Int) -> Idx:\n"
+     "    return Idx(tag=0,\n"
+     "               _mlir_value=__mlir_op.`pop.add`(value._mlir_value, 1))\n",
+     "Nothing in the source states a type for this operand",
+     "ONE 64-bit word here"),
     # `pop.select` is STILL refused here, and why is the point of the pair with
     # the GUARDED row below: this receiver declares nothing, so a select
     # answered kind-blind would test a `char *` for non-zero and answer 1. It
@@ -370,6 +460,80 @@ GUARDED = [
      "    printf(\"%d %d\\n\", pick(1, 10, 20), pick(0, 10, 20))\n"
      "    return 0\n",
      "10 20\n"),
+    # `std/builtin/simd_length.mojo`'s six `index.*` operations and its six
+    # `index.cmp`, which is every arithmetic site in the corpus whose operand is
+    # declared a word — and the arithmetic table is why they now build. The
+    # struct is TWO fields on purpose: a one-field struct's receiver IS its
+    # field, so `self.v` is rewritten to `self` before this pass runs and the
+    # operand stops being a declared `__mlir_type.index` at all.
+    #
+    # The expected values are STATED rather than taken from an oracle, because
+    # CPython cannot parse `__mlir_op.`index.add`` — and because two of them are
+    # not CPython's. `-7 // 2` is -4 in CPython and this path's `//` TRUNCATES,
+    # which is `index.divs` and not `pop.floordiv`; `-7 >> 2` is -2 in both
+    # because the shift is arithmetic. Those two are measured
+    # (`bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md`'s
+    # arithmetic table carries the measurement) and the row is what stops a
+    # future edit to that table from quietly choosing floor division.
+    ("a_dialect_arithmetic_lowers_when_its_operand_declares_a_word",
+     "struct Idx:\n"
+     "    var tag: Int\n"
+     "    var v: __mlir_type.index\n"
+     "\n"
+     "def addit(self: Idx, rhs: Idx) -> Idx:\n"
+     "    return Idx(tag=0, v=__mlir_op.`index.add`(self.v, rhs.v))\n"
+     "\n"
+     "def divs(self: Idx, rhs: Idx) -> Idx:\n"
+     "    return Idx(tag=0, v=__mlir_op.`index.divs`(self.v, rhs.v))\n"
+     "\n"
+     "def anded(self: Idx, rhs: Idx) -> Idx:\n"
+     "    return Idx(tag=0, v=__mlir_op.`index.and`(self.v, rhs.v))\n"
+     "\n"
+     "def shifted(self: Idx, rhs: Idx) -> Idx:\n"
+     "    return Idx(tag=0, v=__mlir_op.`index.shrs`(self.v, rhs.v))\n"
+     "\n"
+     "def eqv(self: Idx, rhs: Idx) -> Int:\n"
+     "    return 1 if __mlir_op.`index.cmp`[\n"
+     "        pred=__mlir_attr.`#index.cmp_predicate<eq>`\n"
+     "    ](self.v, rhs.v) else 0\n"
+     "\n"
+     "def lt(self: Idx, rhs: Idx) -> Int:\n"
+     "    return 1 if __mlir_op.`index.cmp`[\n"
+     "        pred=__mlir_attr.`#index.cmp_predicate<slt>`\n"
+     "    ](self.v, rhs.v) else 0\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var a = Idx(tag=1, v=-7)\n"
+     "    var b = Idx(tag=2, v=2)\n"
+     "    printf(\"%d %d %d %d\\n\", addit(a, b).v, divs(a, b).v, anded(a, b).v,\n"
+     "           shifted(a, b).v)\n"
+     "    printf(\"%d %d %d\\n\", eqv(a, a), eqv(a, b), lt(a, b))\n"
+     "    return 0\n",
+     "-5 -3 0 -2\n1 0 1\n"),
+    # The same arithmetic in a KEYWORD ARGUMENT, and the row that is really a
+    # regression pin for the shared walk: `CallExpr.kwargs` is a list of
+    # `(name, value)` pairs, so a replacement that lands in one of them is in a
+    # list nested inside a list. The walk that used to be written per pass
+    # returned its empty accumulator for a list with a replaced element, which
+    # set that list to `[]` — and the build died in
+    # `model.struct_construction_plan` with `not enough values to unpack
+    # (expected 2, got 0)`. A crash, out of a rewrite whose subject is an
+    # addition.
+    ("a_dialect_operation_lowers_inside_a_keyword_argument",
+     "struct Idx:\n"
+     "    var tag: Int\n"
+     "    var v: __mlir_type.index\n"
+     "\n"
+     "def shifted(self: Idx, rhs: Idx) -> Idx:\n"
+     "    return Idx(tag=0,\n"
+     "               v=__mlir_op.`index.shrs`(self.v, rhs.v))\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var a = Idx(tag=1, v=-7)\n"
+     "    var b = Idx(tag=2, v=2)\n"
+     "    printf(\"%d\\n\", shifted(a, b).v)\n"
+     "    return 0\n",
+     "-2\n"),
     # The same file with a `String`-declared receiver, and it must STILL be
     # refused. This is the row that decides the other one is a capability rather
     # than a blanket: without it, lowering `pop.select` for every operand is
