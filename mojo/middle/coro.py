@@ -3094,9 +3094,6 @@ def _call(fn_name: str, args: list) -> N.CallExpr:
     return N.CallExpr(func=_c_ident(fn_name), args=list(args))
 
 
-import zlib as _zlib
-
-
 def _exc_type_tag(name: str) -> int:
     # `_crc32_str`, NOT `zlib.crc32` (stubbed self-hosted — see its doc).
     return (gimple_ctypes._crc32_str(name) & 0x7fffffff) or 1

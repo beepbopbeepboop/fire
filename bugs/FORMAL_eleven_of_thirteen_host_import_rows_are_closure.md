@@ -4,9 +4,8 @@
 `bugs/FORMAL_sweep_work_map_2026-10-02_b7.md`'s host-import row. Not a claim on
 any of these modules — it is the measurement that says which of them is WORK and
 which is a file waiting on something else, because the ranking that started this
-(`tools/formal_sweep_causes.py --host`, and
-`bugs/FORMAL_host_import_row_ranked_by_module_2026-10-03.md`) reads a sweep log
-from **2026-10-02**, and `formal/hostmods/tempfile.mojo` landed on **2026-10-03**.
+(`tools/formal_sweep_causes.py --host`, whose 2026-10-03 write-up is deleted
+with its queue) reads a sweep log from **2026-10-02**, and `formal/hostmods/tempfile.mojo` landed on **2026-10-03**.
 
 That date is the whole content of this doc. The b7 log's `--host` table does not
 list `textwrap` at all — not because the row is small but because in that run all
@@ -135,8 +134,8 @@ Two numbers per module, because they answer different questions:
     ```
 
     This is NOT a sweep and it needs no `formal_sweep.py` run: it is the same
-    walk, statically, and it is the `.tmp`-free version of what §4 of
-    `FORMAL_host_import_row_ranked_by_module_2026-10-03.md` did by hand.
+    walk, statically, and it is the `.tmp`-free version of what §4 of the
+    2026-10-03 host-import ranking did by hand.
 
 ## The rows, ranked by terminal files
 
@@ -213,8 +212,8 @@ one grep — which is the level at which "not reachable" should be argued, becau
 ## §3 `glob` is the only real row left, and this doc does not claim it
 
 **7 terminal / 217 closure**, and it is the largest thing in the reachable part
-of the host-import row. `bugs/FORMAL_host_import_row_ranked_by_module_2026-10-03.md`
-records it as **OWNED — `formal10-3`**, holding
+of the host-import row. The 2026-10-03 host-import ranking records it as
+**OWNED — `formal10-3`**, holding
 `FORMAL_glob_copy_collections_io_not_attempted.md`. That document is NOT in this
 tree and `formal/hostmods/glob.mojo` does not exist, and `formal10-3` is not in
 `tools/control.py claims` on 2026-10-03 — so the claim is ambiguous: either that

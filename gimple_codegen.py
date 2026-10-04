@@ -9,7 +9,6 @@ import os
 import re
 import sys
 import hashlib
-import zlib
 import dataclasses
 
 from fire_compiler import (
