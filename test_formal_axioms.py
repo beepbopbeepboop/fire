@@ -83,9 +83,13 @@ FOUNDATION = set(L.AXIOM_FOUNDATION)
 # Zero is the headline.  `work_step_mov`'s whole proof is an `hne_ret` that used
 # to be a `native_decide` refuting `0xd65f03c0 &&& 0xffe00000 = 0x2a00fa00` — a
 # CLOSED proposition over literals, so `decide` discharges it and the KERNEL
-# checks it.  `arm64_step_cmp_sp_reads_sp` is the row to read first: seven sites
-# of that shape at seven masks, and its own docstring says the `arm64_reg 31`
-# claim was FALSE under the model this file's predecessor had.
+# checks it.  `arm64_step_cmp_sp_reads_zero` is the row to read first: seven
+# sites of that shape at seven masks, and its own docstring used to be WRONG —
+# it asserted that `cmp sp, x16` reads the stack pointer, which the assembler
+# accepts and the hardware does not (SUBS reads register 31 as the zero
+# register).  It says zero now, renamed when `tools/formal_model_fuzz.py`
+# measured the CPU against the model (commit "four arm64 model bugs the
+# differential fuzzer measured").
 #
 # The two non-zero counts are named rather than left open, because the SHAPE is
 # the finding: `work_step_movk`'s 57 `bv_decide` sites are each a `∀ w, …` over a
@@ -97,7 +101,7 @@ HEADLINE = {
     ("Contracts", "Contracts.spec_triple_ne_identity"): 0,
     ("X86", "lowMask_eight"): 0,
     ("ProofLib", "work_step_mov"): 0,
-    ("ProofLib", "arm64_step_cmp_sp_reads_sp"): 0,
+    ("ProofLib", "arm64_step_cmp_sp_reads_zero"): 0,
     ("ProofLib", "arm64_step_mul"): 0,
     ("ProofLib", "work_step_movk"): 57,
     ("ProofLib", "DylibExport.Semantics_refutable"): 1,
