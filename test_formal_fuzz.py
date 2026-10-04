@@ -37,11 +37,11 @@ the classifier or the attribution which altered a verdict would fail HERE
 instead of quietly changing what a sweep of two thousand programs measures.
 
 Every mix is checked in the generator half, including `signed` and `strings`,
-because those two carry the known-divergent constructs on purpose: a mix that
-stopped producing `//` with a signed divisor, or `s[i]`, would leave its
-`KNOWN_DIVERGENCES` row unreachable, and a row nothing can trigger is a row that
-has stopped measuring the construct it names. That is asserted directly, not
-inferred.
+because those two exist to produce a construct on purpose: a mix that stopped
+producing `//` with a signed divisor, or `s[i]`, would leave the corpus quietly
+smaller. For `strings` that is a DEAD `KNOWN_DIVERGENCES` row; for `signed` it
+is worse, because the row was DELETED when both backends learned to floor and
+nothing else would have noticed. Both are asserted directly, not inferred.
 
 NOT registered in `tools/suite.py` (it is declared in `test_suite.py`'s
 `UNREGISTERED` with that reason). It builds twenty images per architecture, which
@@ -51,6 +51,7 @@ programs — is a sweep rather than a check.
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 
@@ -93,10 +94,16 @@ def check_generator(mix, indexes, verbose=False):
       giving a different program — the second half is what makes determinism
       useful rather than merely repeatable, since a generator that ignored its
       seed would satisfy the first.
-    * **It names the known constructs its mix exists to reach.** This is the
-      anti-rot on `KNOWN_DIVERGENCES`: the two mixes that carry a known
-      divergence must keep producing it, or the row is dead and the day the
-      backend is fixed nobody notices.
+    * **It still produces the shapes its mix exists to reach.** Two halves, and
+      they fail in opposite directions. A mix that stops emitting a construct
+      `KNOWN_DIVERGENCES` names leaves a DEAD row — `strings` and `s[i]`, checked
+      by `_check_features`. A mix that stops emitting a construct the backend is
+      now RIGHT about leaves a silently smaller corpus, which no tally would
+      report — `signed` and the signed-over-signed `//`/`%`, checked by
+      `_check_generation` against `formal_fuzz.MIX_MUST_GENERATE`. That is why
+      `signed` is in the second table and not the first: its `floordiv` row was
+      DELETED in the commit that fixed both backends, and deleting the row must
+      not have deleted the coverage with it.
     * **The subset's stated invariants hold textually**: a `def main(`, and
       none of the Mojo-only keywords CPython cannot parse.
     """
@@ -125,6 +132,7 @@ def check_generator(mix, indexes, verbose=False):
                     f"contains {banned!r}, which CPython cannot parse:\n{src}",
                     verbose)
 
+    failures += _check_generation(mix, indexes, verbose)
     failures += _check_features(mix, indexes, verbose)
 
     print(f"formal fuzz: generator {mix:9} PASS={indexes - failures} "
@@ -133,15 +141,51 @@ def check_generator(mix, indexes, verbose=False):
 
 
 #: mix -> the feature it must keep producing, and why that mix exists.
+#:
+#: **This is the KNOWN-DIVERGENCE half, and it is not where `signed` is any
+#: more.**  A row here means the backend still gets the construct wrong, and the
+#: anti-rot is that such a row must be DELETED the day it stops being true.  So
+#: `signed` moved out of this table into `_check_generation` /
+#: `formal_fuzz.MIX_MUST_GENERATE`, which asserts the weaker and still
+#: load-bearing thing — that `--mix signed` still GENERATES a signed-over-signed
+#: `//`/`%`.  That claim is about the generator rather than about the backend, so
+#: it is true while the backend is right and it is what notices the day a change
+#: stops emitting the shape.
 MIX_MUST_REACH = {
-    "signed": ("floordiv",
-               "`--mix signed` is the only place a signed-over-signed division "
-               "is generated, which is the whole of the floor/truncate "
-               "disagreement"),
     "strings": ("str_subscript",
                 "`s[i]` is a byte rather than a one-character string, and the "
                 "corpus has to produce it for the row to stay live"),
 }
+
+
+def _check_generation(mix, indexes, verbose):
+    """Every mix that exists to PRODUCE a shape must still produce it.
+
+    Checked over the same index range as the rest, and separate from the
+    known-divergence half above because the two fail in opposite directions: a
+    mix that stops emitting a construct `KNOWN_DIVERGENCES` still names leaves
+    a dead row (a row nothing can trigger is a row that has stopped measuring),
+    and a mix that stops emitting a construct the backend is now RIGHT about
+    leaves a silently smaller corpus, which is the failure
+    `bugs/FORMAL_fuzz_ledger.md` §1 states — "a mix that stops producing a
+    construct reports the same clean tally as one that never produced it".  Only
+    the second one has any way of being noticed, and it was `signed`'s, which is
+    why it is checked on its own table (`formal_fuzz.MIX_MUST_GENERATE`) rather
+    than inferred from a row that had to be deleted in the same commit.
+    """
+    want = F.MIX_MUST_GENERATE.get(mix)
+    if not want:
+        return 0
+    pattern, why = want
+    hits = 0
+    for index in range(indexes):
+        if re.search(pattern, F.make_program("suite", index, mix)):
+            hits += 1
+    if hits == 0:
+        return _fail(f"{mix}_never_generates_its_own_construct", why, verbose)
+    print(f"formal fuzz: generator {mix:9} still generates "
+          f"{pattern!r} in {hits}/{indexes}")
+    return 0
 
 
 def _check_features(mix, indexes, verbose):
@@ -151,8 +195,8 @@ def _check_features(mix, indexes, verbose):
     rather than a property of the syntax pass because the failure it catches is
     silent: a mix that stopped emitting signed divisors would still parse, would
     still run, and would still report numbers — every one of them clean — while
-    `KNOWN_DIVERGENCES["floordiv"]` had become unreachable. That is a coverage
-    hole dressed as a green run.
+    `KNOWN_DIVERGENCES` had a row nothing could reach. That is a coverage hole
+    dressed as a green run.
     """
     want = MIX_MUST_REACH.get(mix)
     if not want:
@@ -515,8 +559,8 @@ def check_run(arch, count, jobs, verbose):
 def _counts(out):
     """The summary's own tally, read off its lines.
 
-    A verdict name can contain a space-free `:` (`KNOWN:floordiv`) but never a
-    space, so the first two fields of each tally line are the name and the
+    A verdict name can contain a space-free `:` (`KNOWN:str_subscript`) but never
+    a space, so the first two fields of each tally line are the name and the
     count. Read off the summary rather than off the exit status alone: the exit
     status says SOMETHING was wrong and this says what, and a runner that
     printed no summary would otherwise pass by printing nothing.

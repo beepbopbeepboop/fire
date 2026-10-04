@@ -30,6 +30,21 @@ These tests pin the fix and the three defects that were behind it:
     different function of the same name;
   * the extern bridge is a real machine fact, not `True := by trivial`.
 
+**And one class with neither a call nor a bit test in it**:
+`TestFloorCorrectionDecodes` covers `n // 3` and `n % 3`, whose division block is
+the only place this backend emits a CONDITIONAL VALUE mid-block (`CMP`/`CSET`
+rather than a branch) and the only place it emits an instruction whose word the
+model reads as a different instruction. Both of those were measured, not
+reasoned: `NEG Xd, Xm` is shadowed by the SUB-register arm
+(`TestRegister31` below says that branch must not read SP, and it is right,
+except that the branch cannot fire), and `MSUB Xd, Xn, Xm, XZR` is accepted by
+`MUL`'s mask as well. The class runs the emitter, takes the division block's
+words and asks the generator's own decoder what each one IS -- milliseconds,
+against a proof that failed ~10 minutes later on a loaded box. It is here
+because the thing being pinned is the same thing as the rest of the file: what
+the generator says about a construct, checked where the generator can be wrong
+without a Lean run.
+
 The Lean check is skipped, loudly, when Lean is unavailable; everything else
 runs either way, because a generator that cannot even produce text is worth
 catching without a 27MB library build.
@@ -622,6 +637,204 @@ class TestRegister31(unittest.TestCase):
                          "this generator need the helper in them too")
         self.assertIn("arm64_reg 31 s", G._step_rhs(0x8b1003e0, 2),
                       "`_step_rhs`'s ADD-register arm changed shape")
+
+
+# ── the floor correction, decoded ───────────────────────────────────────────
+#
+# `formal/arm64_codegen.py::_emit_floor_correction` and its two callers are the
+# only code in this tree that emits a CONDITIONAL VALUE into the middle of a
+# block (`CMP`/`CSET` instead of a branch), and every instruction it emits is one
+# `ProofLib.arm64_step` already modelled.  "Already modelled" turned out not to
+# be enough, twice, and both times the emitted word decoded as a DIFFERENT
+# instruction than the one written:
+#
+#   * `NEG Xd, Xm` is `SUBS Xd, XZR, Xm` with `Rn = 31`, and the SUB-register arm
+#     reads `arm64_reg_or_sp 31 s` — SP.  `TestRegister31` above says that
+#     branch must not, and it is right, but the SUB arm is tested FIRST so the
+#     NEG branch cannot fire.  `formal/examples/udivmod.mojo`'s proof failed with
+#     `native_decide … is false` on every input, and it is live on master today
+#     through unary minus.  Filed as
+#     `bugs/FORMAL_arm64_neg_is_shadowed_by_the_sub_register_arm.md`.
+#   * `MSUB Xd, Xn, Xm, XZR` — the word the fix reached for next — is accepted
+#     by BOTH `MUL`'s mask (`0xffe07c00`) and `MSUB`'s (`0xffe08000`), and
+#     `arm64_step` tests MUL first, so `-(d*c)` was read as `+d*c` and the
+#     residual goal came out with the wrong sign.
+#
+# So the property worth pinning is not "these instructions are modelled" — it is
+# **"each word the emitter emits decodes to the term the emitter meant"**, read
+# through the GENERATOR's own decoder (`_step_branch_index` / `_step_rhs`), which
+# `audit_step_table` checks against `lib/ProofLib.lean`'s if-chain order.  The
+# words come from running the emitter on a source with the construct in it, so a
+# change of register or of instruction is caught here rather than in a proof that
+# fails four hundred seconds later.
+
+#: The division block's words, from `SDIV` up to (not including) the trailing
+#: unconditional branch, with the term each must decode to.  `s` is the state
+#: entering the block: `X0` the dividend, `X1` the divisor.
+_FLOOR_COMMON = [
+    ("sdiv x2, x0, x1",
+     "some (arm64_set_reg 2 s (sdiv64 (arm64_reg 0 s) (arm64_reg 1 s)))"),
+    # r = n - q*d — the remainder SDIV did not leave in a register here.
+    ("msub x3, x2, x1, x0",
+     "some (arm64_set_reg 3 s (arm64_reg 0 s "
+     "- (arm64_reg 2 s * arm64_reg 1 s)))"),
+    ("eor x4, x3, x1",
+     "some (arm64_set_reg 4 s (arm64_reg 3 s ^^^ arm64_reg 1 s))"),
+    ("cmp x3, #0",
+     "some { s with nzcv := arm64_subs_flags (arm64_reg 3 s) (UInt64.ofNat 0) }"),
+    ("cset x5, ne",
+     "some (arm64_set_reg 5 s "
+     "(if arm64_matches_condition 1 s.nzcv then 1 else 0))"),
+    ("cmp x4, #0",
+     "some { s with nzcv := arm64_subs_flags (arm64_reg 4 s) (UInt64.ofNat 0) }"),
+    ("cset x6, lt",
+     "some (arm64_set_reg 6 s "
+     "(if arm64_matches_condition 11 s.nzcv then 1 else 0))"),
+    # c = (r != 0) AND (r XOR d reads negative)
+    ("and x5, x5, x6",
+     "some (arm64_set_reg 5 s (arm64_reg 5 s &&& arm64_reg 6 s))"),
+]
+
+_FLOOR_DIV_TAIL = [
+    ("sub x0, x2, x5",
+     "some (arm64_set_reg 0 s (arm64_reg 2 s - arm64_reg 5 s))"),
+]
+
+_FLOOR_MOD_TAIL = [
+    ("sub x6, x5, #1",
+     "some (arm64_set_reg 6 s (arm64_reg 5 s - UInt64.ofNat 1))"),
+    # ~(c - 1): all ones when c is 1, zero when it is 0 — the MASK.
+    ("mvn x6, x6",
+     "some (arm64_set_reg 6 s (arm64_reg 31 s "
+     "||| ((arm64_reg 6 s) ^^^ 0xffffffffffffffff)))"),
+    ("and x5, x6, x1",
+     "some (arm64_set_reg 5 s (arm64_reg 6 s &&& arm64_reg 1 s))"),
+    ("add x0, x3, x5",
+     "some (arm64_set_reg 0 s (arm64_reg 3 s + arm64_reg 5 s))"),
+]
+
+#: The two spellings this construct has already emitted once and whose words the
+#: model reads as something else.  Asserted ABSENT, because "the docstring says
+#: not this one" is not a check.
+def _neg_word():
+    """`neg x6, x5` — the word the obvious spelling of `-(d*c)` emits."""
+    import formal.arm64 as A
+    return A.encode_neg_xd_xn(6, 5)
+
+
+def _msub_xzr_word():
+    """`msub x6, x1, x5, xzr` — the NEXT obvious spelling, which the ENCODER
+    refuses (`encode_msub_xd_xn_xm_xa`'s range is 0..30 and its own docstring
+    says why), so the word is spelled out here rather than built through it.
+
+    That the encoder refuses it is what makes this row cheap to state; the row is
+    still worth having because the refusal is one `assert` away from being
+    widened and the word is what the widening would produce.
+    """
+    import struct
+    return struct.pack("<I", 0x9b008000 | (5 << 16) | (31 << 10) | (1 << 5) | 6)
+
+
+_FLOOR_FORBIDDEN = (
+    # Reads as `s.sp - xm`: NEG is shadowed by the SUB-register arm.
+    ("neg x6, x5", _neg_word, "arm64_reg 31 s -"),
+    # Reads as `x1 * x5`: MUL is tested before MSUB and both masks accept it.
+    ("msub x6, x1, x5, xzr", _msub_xzr_word,
+     "arm64_set_reg 6 s (arm64_reg 1 s * arm64_reg 5 s)"),
+)
+
+
+def _arm64_words(source):
+    """The instruction words `ARM64Codegen` emits for a one-function source."""
+    import struct
+    from formal.build import parse_module
+    import formal.arm64_codegen as AC
+    g = AC.ARM64Codegen()
+    g.compile(parse_module(source), emit_startup=False)
+    text = bytes(g.asm.sections["text"])
+    return [struct.unpack_from("<I", text, i)[0]
+            for i in range(0, len(text) - len(text) % 4, 4)]
+
+
+def _decode(word):
+    """`(index, term)` — the generator's reading of one instruction WORD.
+
+    Takes the word as an `int` and accepts the encoder's four bytes too, because
+    `formal/arm64.py`'s encoders return `bytes` and a reader that silently
+    accepted only one of the two would be a trap for whoever adds the next row.
+    """
+    import formal.arm64_proof_gen as G
+    if isinstance(word, (bytes, bytearray)):
+        word = int.from_bytes(word, "little")
+    idx = G._step_branch_index(word)
+    return idx, G._step_rhs(word, idx)
+
+
+class TestFloorCorrectionDecodes(unittest.TestCase):
+    """Every word the floor correction emits decodes to the term it meant.
+
+    Lean-free and image-free: it runs the emitter on `n % 3` / `n // 3` and
+    asks the proof generator's own decoder what each word in the division block
+    IS.  That is the check that would have caught both of the defects above, and
+    it runs in milliseconds where the proof that caught them takes ~10 minutes on
+    a loaded box.
+    """
+
+    def _block(self, expr):
+        """The words from the `SDIV` to the block's trailing branch."""
+        words = _arm64_words("def f(n):\n    return %s\n" % expr)
+        start = next(i for i, w in enumerate(words)
+                     if _decode(w)[1].startswith("some (arm64_set_reg 2 s (sdiv64"))
+        end = next(i for i in range(start, len(words))
+                   if _decode(words[i])[1].startswith("some { s with pc := ")
+                   and "s.pc" in _decode(words[i])[1])
+        return words[start:end]
+
+    def _check(self, expr, tail):
+        words = self._block(expr)
+        want = _FLOOR_COMMON + tail
+        self.assertEqual(len(words), len(want),
+                         f"{expr}: the division block emits {len(words)} words "
+                         f"and this test expects {len(want)}; the extra or "
+                         f"missing instruction is the thing to look at")
+        for (form, term), word in zip(want, words):
+            with self.subTest(f"{expr}: {form}"):
+                idx, got = _decode(word)
+                self.assertEqual(got, term,
+                                 f"0x{word:08x} (branch {idx}) decodes as "
+                                 f"{got!r}, which is not what `{form}` was "
+                                 f"emitted to mean")
+
+    def test_the_floor_dividend_block_decodes_as_written(self):
+        self._check("n // 3", _FLOOR_DIV_TAIL)
+
+    def test_the_floor_remainder_block_decodes_as_written(self):
+        self._check("n % 3", _FLOOR_MOD_TAIL)
+
+    def test_the_two_words_the_model_reads_as_something_else_are_not_emitted(self):
+        """The NEG and the MSUB-with-XZR, pinned by their DECODE rather than by
+        the reason they were dropped.
+
+        Each is asserted twice: that the word the encoding produces decodes as
+        the wrong instruction (which is why it was dropped — and which is the
+        claim the two bugs' write-ups make), and that the emitter does not emit
+        it (which is what has to stay true).
+        """
+        for form, encode, wrong_reading in _FLOOR_FORBIDDEN:
+            with self.subTest(form):
+                _idx, got = _decode(encode())
+                self.assertIn(
+                    wrong_reading, got,
+                    f"`{form}` now decodes correctly, so the reason it was "
+                    f"dropped no longer holds — that is worth knowing, and it "
+                    f"is not a reason to start emitting it without measuring")
+        for expr in ("n // 3", "n % 3"):
+            words = self._block(expr)
+            for form, encode, _wrong in _FLOOR_FORBIDDEN:
+                with self.subTest(f"{expr} does not emit {form}"):
+                    self.assertNotIn(encode(), words,
+                                     f"{expr} emits `{form}`, whose word the "
+                                     f"model reads as a different instruction")
 
 
 # Lean's `=` and `\u2260`, spelled once so the pattern and the expectation

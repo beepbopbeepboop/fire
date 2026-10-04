@@ -2942,6 +2942,46 @@ def shift_signedness(left_type):
     return left_type
 
 
+def division_floors(op: str, signed: bool) -> bool:
+    """Whether a `/`, `//` or `%` on operands of this signedness needs the FLOOR
+    correction — the `SDIV`/`IDIV` truncates, and the source says otherwise.
+
+    Three answers, and the third is why this is one function rather than an
+    `if op == "//"` in each backend:
+
+      * **unsigned** → False, and not as a shortcut: for two non-negative
+        operands truncating toward zero and flooring are the SAME function, so
+        `UDIV`/`DIV` is the answer and a correction would be a no-refusable
+        cost. This is why the emitters gate on `signed`;
+      * **`//` and `%` on a signed operand** → True. `//` floors and `%` takes
+        the sign of the DIVISOR, so `7 // -2` is `-4` and `7 % -2` is `-2`
+        where truncation answers `-3` and `1`. The correction is
+        `q - c` / `r + d*c` with `c = 1` when the remainder is non-zero and
+        the operands' signs differ, and no encoding containing a hardware
+        divide can express it — which is why it is a sequence of `CMP`/`CSET`
+        on both machines rather than a different divide;
+      * **`/` on a signed operand** → False, and this is a DOCUMENTED
+        LIMIT rather than a rule: there is no float on this path
+        (`FORMAL.md` §6 Phase 7), so `/` is the int-only truncation and
+        `0 - 7 / 2` answers `-3` where CPython answers `-3.5`. Reading `/`
+        as `fdiv64` would make it agree with `//` and disagree with CPython
+        in a new place, so the row stays where the phase-7 limit already
+        puts it.
+
+    BOTH backends ask this, for the reason `shift_saturated_is_zero` gives
+    above: that test IS the rule, and a second copy in a second backend is how
+    `y <<= 64` and `y << 64` came to disagree about one operator. Here the
+    failure it would have produced is worse than a disagreement about a
+    shift: a backend that corrected `//` and not `%` (or `//` and not `/`)
+    would answer a dividing program from two different notions of Python's
+    integer division, on the same machine, in the same function.
+    `bugs/FORMAL_floor_division_on_a_signed_operand_is_truncated.md` §"The
+    emitted shape" is where the correction's instruction sequence is derived;
+    the source model's half is `fdiv64`/`frem64` in `lib/ProofLib.lean`, whose
+    `fdiv_correction` is the same 0-or-1 word spelled over `sdiv64`."""
+    return bool(signed) and op in ("//", "%")
+
+
 # ── Read before store ─────────────────────────────────────────────────────
 #
 # A name the allocator gives a register is a name it cannot tell the

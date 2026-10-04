@@ -820,6 +820,46 @@ def srem64 (a b : UInt64) : UInt64 :=
   if b = 0 then 0
   else s64_to_u64 (Int.tmod (u64_toS64 a) (u64_toS64 b))
 
+/-- **The FLOOR correction**: `1` exactly when truncating division rounded toward
+    zero when the language's `//` floors — a non-zero remainder whose sign
+    differs from the divisor's — and `0` otherwise.
+
+    This is `Int.fdiv`'s condition, and it is decided from the remainder and the
+    DIVISOR alone: `sign(r) ≠ sign(d)` is `r ^^^ d` reading negative, which is
+    the `EOR`/`CMP`/`CSET` triple the arm64 and x86-64 emitters now emit, so the
+    dividend is not needed after the divide and `IDIV` (which leaves the dividend
+    nowhere) can still floor.
+
+    **Why the remainder is spelled `a - sdiv64 a b * b` and not `srem64 a b`.**
+    The two are the same word — `srem64_sub` in `work.lean` is the proof, and it
+    is the identity this function exists to avoid needing.  The machine computes
+    the remainder with an `MSUB` over two registers, so what reaches the `CMP`
+    is `a - sdiv64 a b * b`; spelling the model the same way makes the residual
+    goal of a dividing block a proposition over bit-vectors in which `sdiv64 a b`
+    is the only atom on BOTH sides, and `bv_decide` closes it.  Spelled through
+    `srem64` instead, the left side carries `Int.tmod` and the goal needs that
+    bridge lemma to become the same proposition at all. -/
+def fdiv_correction (a b : UInt64) : UInt64 :=
+  let r := a - sdiv64 a b * b
+  (if r = 0 then 0 else 1) &&& (if (r ^^^ b) >>> 63 = 1 then 1 else 0)
+
+/-- Signed 64-bit division that **floors**, which is what the language's `//`
+    means; `0` when the divisor is 0 (codegen's div0 path traps before this).
+
+    `q_floored = q - c` with `q = sdiv64` and `c = fdiv_correction`: the
+    truncating quotient is one too large exactly when the remainder is non-zero
+    and the operands' signs differ. -/
+def fdiv64 (a b : UInt64) : UInt64 :=
+  if b = 0 then 0 else sdiv64 a b - fdiv_correction a b
+
+/-- The language's `%`, which takes the sign of the DIVISOR:
+    `a - b * fdiv64 a b`, spelled with the same `fdiv_correction` the machine
+    computes and as the same `a - sdiv64 a b * b + b * c` the emitted
+    `MSUB`/`SUB` pair produces. -/
+def frem64 (a b : UInt64) : UInt64 :=
+  if b = 0 then 0
+  else a - sdiv64 a b * b + b * fdiv_correction a b
+
 /-- Arithmetic (sign-extending) shift right of a 64-bit pattern by `sh` (mod 64). -/
 def asr64 (x : UInt64) (sh : UInt64) : UInt64 :=
   let s := sh.toNat % 64
@@ -881,9 +921,18 @@ def evalExpr (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : Str
   -- machine's SDIV/MSUB/ASR steps compute (see `arm64_step`), so the source
   -- model and the value flow cannot drift.  Reading `/` as UInt64's would make
   -- `-7 / 2` a huge positive number, which is a model of a different language.
+  --
+  -- `/` stays `sdiv64` and `//`/`%` are `fdiv64`/`frem64`, which is the same
+  -- split the emitters make: there is no float on this path, so `/` is the
+  -- documented int-only truncation (`FORMAL.md` §6 Phase 7 — `-7 / 2` answers
+  -- `-3` where CPython answers `-3.5`), while `//` FLOORS and `%` takes the
+  -- sign of the DIVISOR, which is what the source says.  `fdiv64`/`frem64` are
+  -- spelled over `sdiv64` and the `MSUB` remainder so that what the machine's
+  -- SDIV/EOR/CMP/CSET/AND/SUB sequence computes and what this term says are the
+  -- same bit-vector proposition, not two facts bridged by a lemma.
   | MojoExpr.binop "/" l r => sdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
-  | MojoExpr.binop "//" l r => sdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
-  | MojoExpr.binop "%" l r => srem64 (evalExpr callFunc l env) (evalExpr callFunc r env)
+  | MojoExpr.binop "//" l r => fdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
+  | MojoExpr.binop "%" l r => frem64 (evalExpr callFunc l env) (evalExpr callFunc r env)
   | MojoExpr.binop "<<" l r => evalExpr callFunc l env <<< evalExpr callFunc r env
   | MojoExpr.binop ">>" l r => asr64 (evalExpr callFunc l env) (evalExpr callFunc r env)
   | MojoExpr.binop "**" l r => u64pow (evalExpr callFunc l env) (evalExpr callFunc r env)
@@ -1032,8 +1081,8 @@ theorem evalExpr_binop (callFunc : String → UInt64 → UInt64) (op : String) (
   | "|" => evalExpr callFunc l env ||| evalExpr callFunc r env
   | "^" => evalExpr callFunc l env ^^^ evalExpr callFunc r env
   | "/" => sdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
-  | "//" => sdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
-  | "%" => srem64 (evalExpr callFunc l env) (evalExpr callFunc r env)
+  | "//" => fdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
+  | "%" => frem64 (evalExpr callFunc l env) (evalExpr callFunc r env)
   | "<<" => evalExpr callFunc l env <<< evalExpr callFunc r env
   | ">>" => asr64 (evalExpr callFunc l env) (evalExpr callFunc r env)
   | "**" => u64pow (evalExpr callFunc l env) (evalExpr callFunc r env)
@@ -3499,6 +3548,33 @@ theorem arm64_cset_le (a b : UInt64) :
   by_cases h : a ≤ b
   · rw [if_pos ((arm64_flag_le a b).mpr h), if_pos h]
   · rw [if_neg (fun hc => h ((arm64_flag_le a b).mp hc)), if_neg h]
+
+/-- `CSET Xd, lt` after `CMP Xn, #0` is "Xn is negative", which is the
+    floor-division correction's second half: the truncating remainder's sign
+    differs from the divisor's exactly when `remainder ^^^ divisor` reads
+    negative.  Written from `arm64_flag_lt_s` like the three above rather than
+    as a fresh `bv_decide`, so the CSET bridge has ONE shape in this file
+    instead of one per condition code. -/
+theorem arm64_cset_lt_s (a b : UInt64) :
+    (if arm64_matches_condition 11 (arm64_subs_flags a b) then (1 : UInt64) else 0)
+      = (if (a ^^^ 0x8000000000000000) < (b ^^^ 0x8000000000000000) then 1 else 0) := by
+  by_cases h : (a ^^^ 0x8000000000000000) < (b ^^^ 0x8000000000000000)
+  · rw [if_pos ((arm64_flag_lt_s a b).mpr h), if_pos h]
+  · rw [if_neg (fun hc => h ((arm64_flag_lt_s a b).mp hc)), if_neg h]
+
+/-- **The floor correction, as the machine's `CMP`/`CSET` pair states it.**
+    `fdiv_correction` is the SOURCE model's version and is spelled over
+    `a - sdiv64 a b * b`; this is the same 0-or-1 word read out of the two
+    registers the emitter actually compared (`r` and `r ^^^ b`).  The two agree
+    by `bv_decide`, which is what closes a dividing block's terminal value flow
+    — the point of stating it is that the goal is then ONE proposition over
+    bit-vectors instead of two shapes plus the bridge that relates them. -/
+theorem fdiv_correction_of_flags (r t b : UInt64) :
+    (if arm64_matches_condition 1 (arm64_subs_flags r 0) then (1 : UInt64) else 0)
+        &&& (if arm64_matches_condition 11 (arm64_subs_flags t 0) then (1 : UInt64) else 0)
+      = (if r = 0 then 0 else 1) &&& (if t >>> 63 = 1 then 1 else 0) := by
+  simp only [arm64_cset_ne, arm64_cset_lt_s]
+  bv_decide
 
 /-! # Generic countdown-style while-loop contract
 

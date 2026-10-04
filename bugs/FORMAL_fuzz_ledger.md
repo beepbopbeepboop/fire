@@ -34,8 +34,8 @@ backends (`--backends x86_64,arm64`). Peak memory across every sweep in this
 file: **0.1 GB** (`tools/memslot.py --gb 4`), so none of it is within an order of
 magnitude of the 3-4 GB line.
 
-**5212 programs over 25 sweeps.** Three bugs fixed, five limits filed, and eight
-defects in the tool itself.
+**5312 programs over 26 sweeps.** Four bugs fixed, five limits filed, and
+eight defects in the tool itself.
 
 | date | mix | seed | indexes | programs | tally | what came of it |
 |---|---|---|---|---|---|---|
@@ -52,6 +52,7 @@ defects in the tool itself.
 | 2026-10-03 | `environ` | `sweepB` | 2000-2119 | 120 | 120 match | nothing |
 | 2026-10-03 | `signed` | `sweepF` | 6000-6099 | 100 | 31 match, 69 `KNOWN` (28 `floordiv`, 27 `modulo`, 14 both), 0 findings | nothing — every disagreement reduced to the documented one |
 | 2026-10-03 | `strings` | `sweepD` | 4000-4011 | 12 | 3 match, 7 `KNOWN:str_subscript`, 2 `MISMATCH-X86` | the 2 are §4.4, a minimiser artefact — **not** backend bugs |
+| 2026-10-04 | `signed` | `floor21` | 9000-9099 | 100 | **100 match**, 0 findings | the two `KNOWN_DIVERGENCES` rows this row retires were worth 62 of `sweepG`'s 100 (§2.1) — see §2.1a |
 
 The first two rows are a BASELINE rather than a result: they ran on master's
 corpus with the five new mixes absent, which is what "the corpus covered
@@ -61,6 +62,43 @@ programs that could not be generated at all.
 `signed` was run with `--max-min-steps 30` rather than the default 400, for the
 reason §5 gives: a program whose disagreement is a KNOWN construct pays for a
 reduction that attribution then neutralises anyway.
+
+### 2.1a The `signed` row after the floor fix (2026-10-04) — and what it cost to find
+
+The row above is the last one whose tally carries a `KNOWN` verdict for
+`//`/`%`. Both backends now floor: `model.division_floors` is the one decision
+they ask, `lib/ProofLib.lean`'s `fdiv64`/`frem64` are what the source model
+names, and `tools/formal_fuzz.py`'s `floordiv` and `modulo` rows are DELETED in
+the same commit as the fix — a row naming a construct that is now right forgives
+the next disagreement that happens to contain it. What replaces them is
+`formal_fuzz.MIX_MUST_GENERATE`, which asserts the weaker and still
+load-bearing thing (`--mix signed` must still GENERATE a signed-over-signed
+division), checked by `test_formal_fuzz.py::_check_generation`.
+
+**Two measurements worth reading, and the second is the one to keep.**
+
+1. **The tally.** Seed `floor21`, indexes 9000-9099, both backends: **100 match,
+   0 findings, 0 refused, 0 trapped**, in **59.6 s** against `sweepG`'s `signed`
+   row's 100 programs. The same mix before the fix was **38 match, 62 `KNOWN`**
+   (31 `floordiv`, 20 `modulo`, 11 both) — so the construct this mix exists for
+   went from two thirds of the corpus to none of it.
+2. **What found the defect the hand-written rows could not.** The FIRST run of
+   this row was 66 match / **34 `MISMATCH-X86`** with arm64 agreeing with CPython
+   on all 34 — an x86-64 `%` that added the divisor to a ZERO remainder, because
+   the correction's negation was applied to `c2` (the second `SETcc`) instead of
+   to `c = c1 AND c2`. **Every hand-written `//`/`%` row agrees on that bug**,
+   because `r == 0` is the only case where `c1` and `c2` disagree, and the
+   generator had not produced `0 % <negative>` in the eight rows of the floor
+   table. It is now
+   `test_formal_run.py::both_arch_an_exact_multiple_of_a_negative_divisor`, and
+   it is a better row than the table it joins because it was written *by* the
+   sweep rather than beside it.
+
+**And the cost of the run fell by 5x** — 299.9 s to 59.6 s for the same 100
+programs — which is §5's "a program whose disagreement is a KNOWN construct pays
+for a reduction that attribution then neutralises anyway" measured from the other
+side: with no disagreement there is nothing to minimise. **The shrinker was not
+the thing making `signed` expensive; the disagreements were.**
 
 ### 2.1 The arch-parity sweep (`sweepG`, 2026-10-03) — 1180 programs, twelve mixes
 
@@ -278,12 +316,14 @@ attributed. §4.4 is the earlier measurement of the same failure; this is its
 second instance and it is the argument for shrinking with `want` fixed per
 verdict rather than at all.
 
-## 4. EIGHT defects in the TOOL, all found by using it
+## 4. NINE defects in the TOOL, all found by using it
 
 None is a backend bug. Between them they cost more time than the backend bugs
 did, and each one made the tool report LESS than it should. §4.5-§4.8 are the
 four the `sweepG` arch-parity sweep added, and they share a shape: each one
-classified something as a correctly-refused construct that was not one.
+classified something as a correctly-refused construct that was not one. §4.9 is
+the odd one out: it classified nothing wrongly and simply left the record
+describing a program other than the one on disk.
 
 ### 4.1 A one-sided refusal was not a finding
 
@@ -405,6 +445,43 @@ stated invariant with the measurement that forced it.
 Two of its seven families are in the mix although they are known to produce
 findings (§3.5.1 and §3.5.3). A family that produces a finding is a family that
 measures, and a corpus tuned to be green is a corpus that has stopped.
+
+### 4.9 The reproducer on disk is the SHRUNK program and the recorded answers are the ORIGINAL's
+
+**Found 2026-10-04** by trying to rebuild one of §2.1a's 34 findings. The
+finding says
+
+```
+      want  exit=0 '3\n4095 28 3 5 -8\n…'
+      x86_64  exit=0 '3\n4095 28 3 5 -8\n…'
+```
+
+and `programs/p9011.mojo` is 894 bytes against `reduced_from: 1966` — so the file
+on disk cannot print the `3\n` the record quotes, and building it answers
+something else. It is not a stale-file artefact and not a mis-minimised predicate:
+`check_one` records `want` and `results` for the ORIGINAL text, then shrinks, sets
+`rec["text"] = small`, and writes that. The comment beside the write says "the
+minimised text is kept on the record so the reproducer on disk is the one the
+verdict is about", and **that is half true** — the VERDICT is reproduced (the
+shrinker's predicate is `(verdict, diagnostic)` per backend, so the reduced
+program fails the same way) and the OUTPUTS are not.
+
+That is §4.4's and §3.6's failure again and not the same instance of it: those
+are about the shrinker accepting a *trap* and landing somewhere that disagrees
+for a different reason, and this is about the RECORD — a reader who takes the
+reproducer at its word spends ten minutes looking for a defect that is not in it.
+Three things would fix it and the cheapest is first:
+
+1. **re-run the reduced program and record ITS answers too**, so the record
+   carries both and a mismatch between them is visible in `findings.json` rather
+   than in the next reader's afternoon. `check_one` already has the machinery;
+   `blame` re-builds the reduced program on every attribution, so the cost is one
+   extra build per finding, and findings are rare by construction.
+2. Or state the rule in the record: `want`/`results` describe the program the
+   finding is ABOUT and the file is a REDUCTION whose answers are not recorded —
+   which makes the comment above true by weakening it.
+3. Or keep both programs (`p9011.mojo` and `p9011.reduced.mojo`), which costs one
+   more file per finding and nothing else.
 
 ## 5. What the corpus still cannot say, and what it costs to run
 

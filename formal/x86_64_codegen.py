@@ -6103,9 +6103,15 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         it is turned into exit(1) — the same signal the arm64 backend uses
         for its own divide-by-zero path.
 
-        `/` and `//` both truncate toward zero here: formal's default integer
-        type is unsigned, and the toy x86-64 path this was ported from made
-        the same conflation (there was one `BinOp.Kind.DIV` for both)."""
+        `/` TRUNCATES toward zero here: there is no float on this path, so `/`
+        is the documented int-only truncation, and formal's default integer type
+        is unsigned, which truncates and floors alike.  `//` and `%` on a
+        SIGNED operand apply the FLOOR correction (`_emit_floor_correction`)
+        after the divide, because `IDIV` truncates and the language's `//`
+        floors and `%` takes the sign of the divisor. Which of the three that
+        is, is `model.division_floors` — the same decision arm64 asks, so the
+        two machines cannot answer one dividing program from two notions of
+        Python's integer division."""
         signed = cmp_signed(common_type(self._ttype(e.left),
                                         self._ttype(e.right)))
         self._if_counter += 1
@@ -6128,13 +6134,97 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self.asm.emit(encode_xor_edx_edx())
             self.asm.emit(encode_div_r64(Reg.R11))
         if op == "%":
-            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDX))
+            if M.division_floors(op, signed):
+                self._emit_floor_remainder()
+            else:
+                self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDX))
+        else:
+            if M.division_floors(op, signed):
+                self._emit_floor_quotient()
         self._emit_trunc(common_type(self._ttype(e.left),
                                      self._ttype(e.right)))
         self._emit_jmp(ok_label)
         self.asm.label(div0_label)
         self._emit_call_exit(1)
         self.asm.label(ok_label)
+
+    def _emit_floor_correction(self) -> None:
+        """`R8 = fdiv_correction(r, d)`, the 0-or-1 word `//` and `%` differ by.
+
+        Called with the truncating remainder in RDX and the divisor in R11 —
+        what `CQO`/`IDIV` has just produced — and it leaves RDX (`r`), R9 (`c2`)
+        and R8 (`c`) written, with RAX (the quotient) and R11 (`d`) untouched.
+        Both callers need all three, which is why this is one function and not
+        two copies of half the sequence.
+
+        THE SEQUENCE, and why it is the SAME shape arm64 emits
+        (`arm64_codegen._emit_floor_correction`):
+
+            MOV  R9, RDX      ; r
+            XOR  R9, R11      ; t = r XOR d   — sign(r) XOR sign(d), as a bit
+            TEST RDX, RDX ; SETNE R8D        ; c1 = r != 0
+            TEST R9, R9   ; SETL  R9D        ; c2 = t reads negative
+            AND  R8, R9                        ; c = c1 AND c2
+
+        **`IDIV` leaves the dividend nowhere, and that is why the correction is
+        decided from `r` and `d` alone.**  `MSUB` on arm64 has the dividend in a
+        register and could recompute `r = n - q*d` for free; here RDX already
+        HOLDS `r`, so nothing has to be recomputed at all and the correction is
+        six instructions on both machines.
+
+        R8/R9 rather than the two declared scratch registers (`x86_64.SCRATCH_REGS`
+        is R10/R11): R11 is the divisor and R10 is this backend's other scratch,
+        and the argument registers are dead after the prologue ("then move each
+        incoming argument home") — which is the same reason the string-method
+        helpers already use RDI/RSI/RCX as temporaries."""
+        self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.RDX))
+        self.asm.emit(encode_xor_r64_r64(Reg.R9, Reg.R11))
+        self.asm.emit(encode_test_r64_r64(Reg.RDX, Reg.RDX))
+        self._emit_setcc_bool(Reg.R8, "setne")
+        self.asm.emit(encode_test_r64_r64(Reg.R9, Reg.R9))
+        self._emit_setcc_bool(Reg.R9, "setl")
+        self.asm.emit(encode_and_r64_r64(Reg.R8, Reg.R9))
+
+    def _emit_floor_quotient(self) -> None:
+        """`//` on a SIGNED operand: `RAX = q - c`, from `_emit_floor_correction`'s
+        `c` in R8 and the truncating quotient still in RAX.
+
+        One `SUB`, and the model's `fdiv64` is `sdiv64 a b - fdiv_correction a b`
+        in the same order, so the residual goal needs no associativity lemma."""
+        self._emit_floor_correction()
+        self.asm.emit(encode_sub_r64_r64(Reg.RAX, Reg.R8))
+
+    def _emit_floor_remainder(self) -> None:
+        """`%` on a SIGNED operand: `RAX = r + d*c`, from `_emit_floor_correction`'s
+        `c` in R8, `r` in RDX and `d` in R11.
+
+        `ADD` with the product masked, because x86-64 HAS a two-operand add where
+        arm64 does not — but the product is `d*c` and x86-64 has no cheap way to
+        multiply a 0/1 by a word without a general `IMUL`, so it is
+        `MOV`/`NEG`/`AND`: `-c` is all ones when `c = 1` and zero when `c = 0`,
+        so `(-c) AND d` IS `d*c`. arm64 spells the same four words with a mask
+        built out of `SUB`/`MVN` (`~(c-1)`), which is the same value by a
+        different route.
+
+        **The `MOV` is load-bearing and was the bug this row found.** Negating
+        R9 in place negates `c2`, the second `SETcc`, and `c = c1 AND c2` is
+        zero whenever EITHER factor is — so negating `c2` computes `-c2` where
+        the answer needs `-c`. The two agree on every row that is not
+        `a % d == 0` with `d < 0` (there `c1 = 0`, `c2 = 1`), which is why the
+        hand-written floor table passed and a 100-program `--mix signed` sweep
+        did not: `0 % -7` answered `-7`, because `r = 0`, `c = 0` and the
+        correction added `d` anyway. arm64's `_emit_floor_remainder` masks from
+        the `AND`'s own destination, which is `c` itself, and does not have this
+        shape to get wrong.
+
+        The model's `frem64` is `a - sdiv64 a b * b + b * c` either way, so the
+        residual goal is one proposition over bit-vectors."""
+        self._emit_floor_correction()
+        self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.R8))
+        self.asm.emit(encode_neg_r64(Reg.R9))
+        self.asm.emit(encode_and_r64_r64(Reg.R9, Reg.R11))
+        self.asm.emit(encode_add_r64_r64(Reg.RDX, Reg.R9))
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDX))
 
     def _emit_shift(self, e: F.BinaryOp, op: str) -> None:
         """`<<` `>>`. A literal count in 0..63 uses the immediate form;

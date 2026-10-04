@@ -94,10 +94,28 @@ CASES = [
      "def main(n):\n    a = -8\n    b = a >> 2\n    if b == 0 - 2:\n        return 1\n    return 0\n", 1, None),
     ("print_negative",
      "def main(n):\n    a = -7\n    printf(\"%d\\n\", a)\n    return 3\n", 3, "-7"),
+    # `//` and `%` FLOOR (bugs/FORMAL_floor_division_on_a_signed_operand_is_truncated).
+    #
+    # These two rows PINNED the truncating answers — `0 - 7 // 2 == 0 - 3` and
+    # `(0 - 7) % 3 == 0 - 1` — because that is what SDIV/MSUB compute and the
+    # source model named `sdiv64`/`srem64`.  Python's rule is that `//` floors
+    # and `%` takes the sign of the DIVISOR, so both of those were wrong by one
+    # and the sign-mismatch rows were wrong by sign.  The divide is still an
+    # `SDIV`; the block now also carries the floor correction (`model.division_floors`
+    # is the decision both emitters ask, and `fdiv64`/`frem64` in
+    # `lib/ProofLib.lean` are what the source model names), and these two rows
+    # are rewritten to CPython's answers in the same commit as the fix — which is
+    # also the check that it landed.
+    #
+    # The `/` in the first row is the SEPARATE, already-documented limit: there
+    # is no float on this path, so `/` truncates and `-7 / 2` answers `-3` where
+    # CPython answers `-3.5` (`FORMAL.md` §6 Phase 7).  It is left as it is on
+    # purpose rather than "fixed" here, because making `/` floor would make it
+    # agree with `//` and disagree with CPython in a NEW place.
     ("neg_div_rem",
-     "def main(n):\n    a = 0 - 7\n    if a / 2 == 0 - 3 and a % 2 == 0 - 1:\n        return 1\n    return 0\n", 1, None),
+     "def main(n):\n    a = 0 - 7\n    if a // 2 == 0 - 4 and a % 2 == 1:\n        return 1\n    return 0\n", 1, None),
     ("neg_mod",
-     "def main(n):\n    a = 0 - 7\n    b = a % 3\n    if b == 0 - 1:\n        return 1\n    return 0\n", 1, None),
+     "def main(n):\n    a = 0 - 7\n    b = a % 3\n    if b == 2:\n        return 1\n    return 0\n", 1, None),
     # Controls.
     ("pos_still_works",
      "def main(n):\n    a = 3\n    b = 2\n    if a > b:\n        return 1\n    return 0\n", 1, None),
@@ -7300,6 +7318,76 @@ BOTH_ARCH_CASES = [
      "        if second == 43:\n"
      "            return 7\n"
      "    return 3\n", 7, "annotated=42 untyped=43"),
+    # ── the FLOOR table, both architectures, every row compared with CPython ──
+    #
+    # `bugs/FORMAL_floor_division_on_a_signed_operand_is_truncated.md` §"Re-
+    # measured" is an eight-row table in which four of the eight were wrong on
+    # BOTH machines, and every wrong one is a case where the operands' signs
+    # differ: truncating division rounds toward zero and Python floors. Those
+    # eight rows are HERE rather than in `CASES` for the reason this group's own
+    # docstring gives — the defect was identical on the two machines, but the
+    # FIX is new code on each (`_emit_floor_correction` and its two callers in
+    # `formal/arm64_codegen.py`; the same three in `formal/x86_64_codegen.py`,
+    # which needs no dividend because `IDIV` leaves `r` in RDX), and a
+    # single-architecture row would have run the arm64 half and called the fix
+    # verified.
+    #
+    # Every row parenthesises the negative operand, so no row can be read two
+    # ways: `0 - 7 // 2` parses as `0 - (7 // 2)` on this front end and answers
+    # -3, which is a fact about `//`'s PRECEDENCE rather than about flooring, and
+    # a row that turned on it would pass or fail for the wrong reason.
+    #
+    # `both_arch_floor_of_a_negative_dividend` is the row that would not have
+    # been found by reading the spec: `7 // (0 - 2)` is -4 and truncating
+    # division answers -3, and every reader's instinct is that "7 divided by
+    # -2" is -3. `both_arch_neg_odd_is_odd_modulo_two` is the second: `x % 2 == 1`
+    # is the standard odd-number test and it answered 0 for every negative odd
+    # `x`, because `%` took the sign of the DIVIDEND.
+    ("both_arch_floor_of_a_negative_dividend",
+     "def main() -> Int32:\n"
+     "    printf(\"%d %d %d\", (0 - 7) // 2, 7 // (0 - 2), (0 - 8) // 2)\n"
+     "    return 0\n", 0, "-4 -4 -4"),
+    ("both_arch_modulo_takes_the_sign_of_the_divisor",
+     "def main() -> Int32:\n"
+     "    printf(\"%d %d %d\", (0 - 7) % 3, 7 % (0 - 3), (0 - 7) % (0 - 3))\n"
+     "    return 0\n", 0, "2 -2 -1"),
+    ("both_arch_the_sign_matching_rows_are_unchanged",
+     "def main() -> Int32:\n"
+     "    printf(\"%d %d %d\", (0 - 7) // (0 - 3), (0 - 7) % (0 - 3), 7 % 3)\n"
+     "    return 0\n", 0, "2 -1 1"),
+    ("both_arch_neg_odd_is_odd_modulo_two",
+     "def main() -> Int32:\n"
+     "    printf(\"%d %d\", 1 if (0 - 8) % 2 == 0 else 0,\n"
+     "           1 if (0 - 7) % 2 == 1 else 0)\n"
+     "    return 0\n", 0, "1 1"),
+    # A dividend that is an EXACT multiple of a negative divisor, which is the
+    # one row of the whole family a hand-written table above cannot reach.
+    #
+    # `r == 0` is the only case where the correction's two factors DISAGREE:
+    # `c1` is 0 (nothing to correct) while `c2` is 1 whenever the divisor is
+    # negative (`r XOR d` is `d`). So every hand-written row above has
+    # `c == c2`, and an implementation that negates the second `SETcc` instead
+    # of the `AND` of the two agrees on all of them. x86-64's
+    # `_emit_floor_remainder` did exactly that: `0 % -7` answered `-7` because
+    # the correction added the divisor to a zero remainder. It was found by a
+    # 100-program `--mix signed` sweep and not by this table, which is the
+    # argument for the row.
+    ("both_arch_an_exact_multiple_of_a_negative_divisor",
+     "def main() -> Int32:\n"
+     "    printf(\"%d %d %d %d\", 0 % (0 - 7), (0 - 14) % (0 - 7),\n"
+     "           21 % (0 - 7), (0 - 21) % 7)\n"
+     "    return 0\n", 0, "0 0 0 0"),
+    # The UNSIGNED control, because the correction is gated on signedness
+    # (`model.division_floors`) and an over-correction would be invisible on
+    # every row above: for two non-negative operands truncating and flooring
+    # are the same function, so a `UDIV` path that ran the correction would
+    # answer the same numbers and cost four instructions per divide.
+    ("both_arch_unsigned_division_untouched",
+     "def main() -> Int32:\n"
+     "    var a: UInt32 = 17\n"
+     "    var b: UInt32 = 5\n"
+     "    printf(\"%d %d\", a // b, a % b)\n"
+     "    return 0\n", 0, "3 2"),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before
