@@ -13452,20 +13452,28 @@ POINTER_DEREF_CASES = [
      "    if read_back(mid, 1) != 5208208757389214273:      # …b'ABCDEFGH'\n"
      "        return 2\n"
      "    return 0\n", 0, None),
-]
 
-POINTER_DEREF_REFUSALS = [
-    # A STRUCT pointee.  The derivation is RIGHT — a struct's value on this path
-    # is a frame address, so the receiver already is the pointee, the same
-    # identity `Pointer()` gives — and it is refused because nothing recognises
-    # a name bound through a pointer as a frame holder, so `q.b` off the result
-    # reads a word of nothing.  Measured with the identity emitted: 0 on both
-    # architectures where the source says 22.  This is the frame-lifetime trap:
-    # a `Pointer[SomeStruct]` IS a frame address, so letting one be dereferenced
-    # without the holder analysis is a use-after-free wearing a pointer's
-    # clothes.  The refusal says all of that, and the next step is one line in
-    # `formal/build.py`'s holder fixpoint rather than a value-model change.
-    ("deref_refuse_struct_pointee",
+    # ── a STRUCT pointee, which is the IDENTITY rather than a load ─────────
+    #
+    # Six cases for one decision, and the reason there are six is that a frame
+    # has FIVE ways of being touched and this is the first path on which all of
+    # them work.  `p.value()` on a `Pointer[SomeStruct]` used to be REFUSED with
+    # a message that named its own reason exactly: nothing recognised a name
+    # bound through a pointer as a frame holder, so `q.b` off the result read a
+    # word of nothing — measured, 0 on both architectures where the source says
+    # 22.  `model.pointer_frame_pointee` is the recognition, and it has three
+    # consumers which between them cover the five touches: `_frame_receivers`
+    # seeds the name (`pointer_frame_bindings`), `_frame_return_status` counts a
+    # `return` of one as returning a FRAME, and both backends emit the receiver
+    # and nothing else.
+    #
+    # The direct spelling `p.value().b` comes first because it is the shape the
+    # refusal's own reproducer used, and it is the one that needs no name: the
+    # field read is one `LDR`/`mov` at `[address, 8*slot]` straight after the
+    # receiver is evaluated.  22, not 0 and not `a` — a load at the frame's
+    # FIRST slot would answer `a`, which is 0 here, so this case cannot tell a
+    # right answer from a right-looking one and the next one is what does.
+    ("deref_struct_pointee_is_the_receiver",
      "struct P3:\n"
      "    var a: Int64\n"
      "    var b: Int64\n"
@@ -13475,8 +13483,177 @@ POINTER_DEREF_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    var t = P3()\n"
      "    t.b = 22\n"
-     "    return read_field(t)\n",
-     "refuse:a STRUCT, and a struct's value on this path is a frame ADDRESS", None),
+     "    return read_field(t)\n", 22, None),
+    # The NAMED spelling, which is the recognition the refusal asked for and the
+    # one every later case is built on: `q` is a frame holder, so `q.b` is a
+    # frame slot and the whole existing machinery — layouts, escapes, nested
+    # frames — applies to it unchanged.  The two are separate cases because they
+    # are two lowerings (an emitter arm and a holder-table entry), and a
+    # one-sided fix here is the shape that reads as finished.
+    ("deref_struct_pointee_through_a_name_is_a_holder",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "def read_field(p: Pointer[P3]) -> Int:\n"
+     "    var q = p.value()\n"
+     "    return Int(q.b)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    t.b = 22\n"
+     "    return read_field(t)\n", 22, None),
+    # A STORE through the named holder, and the part of it worth pinning is the
+    # SECOND assertion inside the program: `bump` writes `t.b` in the CALLER's
+    # frame, so the value has to be visible there.  A store through a pointer
+    # that landed in the callee's own scratch would answer 41 and leave `t.b`
+    # at 0, which is a wrong answer with no diagnostic — so the program returns
+    # 90+41 in that case and 41 when it is right.
+    ("deref_struct_pointee_store_through_a_name_reaches_the_caller",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "def bump(p: Pointer[P3]) -> Int:\n"
+     "    var q = p.value()\n"
+     "    q.b = 41\n"
+     "    return Int(q.b)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    var got = bump(t)\n"
+     "    if t.b != 41:\n"
+     "        return 90 + got\n"
+     "    return got\n", 41, None),
+    # The same store spelled directly, `p.value().b = 41`.  It exists because
+    # the READ being answerable makes the store's old refusal FALSE: that
+    # sentence said "this path has no way to say what 'p.value(...)' holds", and
+    # after the read arm it plainly can.  A diagnostic that is false about the
+    # program is worse than a missing one, so the store arm is not optional
+    # tidiness — it is what keeps the message true.
+    ("deref_struct_pointee_store_directly_is_one_slot_store",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "def bump(p: Pointer[P3]) -> Int:\n"
+     "    p.value().b = 41\n"
+     "    return Int(p.value().b)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    var got = bump(t)\n"
+     "    if t.b != 41:\n"
+     "        return 90 + got\n"
+     "    return got\n", 41, None),
+    # `+=` through the named holder, which goes through no new code at all: the
+    # name is in `_frame_slots`, so `_load_var`/`_store_var` resolve
+    # `q.b += 5` as the load/op/store they always were.  It is here because it
+    # is the cheapest possible evidence that the recognition went into the
+    # EXISTING tables rather than beside them — a name special-cased in the
+    # emitter would answer this and nothing else.
+    ("deref_struct_pointee_augmented_through_a_name",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "def bump(p: Pointer[P3]) -> Int:\n"
+     "    var q = p.value()\n"
+     "    q.b += 5\n"
+     "    return Int(q.b)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    var got = bump(t)\n"
+     "    if t.b != 5:\n"
+     "        return 90 + got\n"
+     "    return got\n", 5, None),
+    # `return p.value()` — the frame-LIFETIME half, and the case that says why
+    # the answer above is safe rather than merely reachable.  Without
+    # `_frame_return_status` recognising it, `give` was classified
+    # `_RETURN_WORD`: no caller reserved a block, the callee copied into a
+    # register it was handed by accident, and the address of the CALLER's frame
+    # came back as a plain word.  With it, the block is in the caller's scratch
+    # and the frame is COPIED into it — which is why `u.b` is 7 here and would
+    # be reclaimed stack if the convention did not apply.
+    ("deref_struct_pointee_returned_is_copied_into_the_callers_block",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "def give(p: Pointer[P3]) -> P3:\n"
+     "    return p.value()\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    t.b = 7\n"
+     "    var u = give(t)\n"
+     "    return Int(u.b)\n", 7, None),
+]
+
+POINTER_DEREF_REFUSALS = [
+    # A ONE-FIELD STRUCT pointee, which is the half of the struct-pointee
+    # question that stays refused, and it is a DIFFERENT fact rather than a
+    # half-answer: a struct of one field has no frame — its value IS its own
+    # field — so there is nothing at the address, and the identity would be
+    # wrong rather than right.  `struct_is_framed` is the one test for the two,
+    # as everywhere else on this path.  It is pinned here because the
+    # multi-field case is now ANSWERED (`deref_struct_pointee_is_the_receiver`
+    # and its five siblings), so without this row nothing would say where the
+    # answer stops.
+    ("deref_refuse_one_field_struct_pointee",
+     "struct One:\n"
+     "    var v: Int64\n"
+     "def read_one(p: Pointer[One]) -> Int:\n"
+     "    return Int(p.value().v)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    return read_one(s)\n",
+     "refuse:a one-field struct whose value on this path is the word itself",
+     None),
+    # The frame-LIFETIME half of the same question, and the one that says the
+    # answered case above is safe rather than merely reachable: a name bound
+    # from `p.value()` is a frame HOLDER, and every channel that would carry a
+    # frame address past its creator is already refused for a holder.  This is
+    # that channel — a store into another object's field, where the slot outlives
+    # the frame by however long the object lives.  Without the recognition this
+    # program built and `o.held` held the address of `main`'s own frame.
+    ("deref_refuse_a_pointer_frame_stored_in_a_field",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "struct Box:\n"
+     "    var inner: Int64\n"
+     "    var held: Pointer[P3]\n"
+     "def park(p: Pointer[P3], o: Box) -> Int:\n"
+     "    var q = p.value()\n"
+     "    o.held = q\n"
+     "    return Int(q.b)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    var o = Box()\n"
+     "    return park(t, o)\n",
+     "refuse:is stored in the field 'o.held'", None),
+    # `p.value().b += 5` — the ONE shape of this family that is still refused,
+    # and it is pinned so it is a recorded limit rather than a surprise.  The
+    # augmented-assignment arm works from a NAME (`_load_var`/`_store_var` on a
+    # `_frame_slots` key), and a base that is an EXPRESSION has no name to key
+    # on, so the two backends refuse it from their own augmented arms.  Their
+    # WORDS differ, which is a pre-existing divergence in that diagnostic and not
+    # one of the pointer model's — hence `refuse_either:` with both needles
+    # rather than one, which is the honest encoding of "refused on both, and the
+    # two disagree about how they say so".  The named spelling is answered:
+    # `deref_struct_pointee_augmented_through_a_name`.
+    ("deref_refuse_augmented_through_a_pointer_frame",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "def bump(p: Pointer[P3]) -> Int:\n"
+     "    p.value().b += 5\n"
+     "    return Int(p.value().b)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    return bump(t)\n",
+     "refuse_either:unsupported augmented assignment target on the formal arm64"
+     " path|augmented assignment target must be a plain name on the formal"
+     " x86-64 path", None),
     # A FLOAT pointee.  A formal value has no float kind distinct from an int
     # (the same absence that refuses `__mlir_bool__`), so a 4-byte float load
     # would put IEEE binary32 bits in a register the program then treats as an
@@ -20257,7 +20434,9 @@ def main():
     # that made that worth stating: three of its five rows are refusals and
     # two are answered.
     both_arch_names = ({c[0] for c in BOTH_ARCH_CASES}
-                      | {c[0] for c in PRINT_KWARG_CASES}) - {
+                      | {c[0] for c in PRINT_KWARG_CASES}
+                      | {c[0] for c in POINTER_DEREF_CASES
+                         if c[0].startswith("deref_struct_pointee")}) - {
         c[0] for c in PRINT_KWARG_CASES
         if isinstance(c[2], str) and c[2].startswith('refuse:')}
     selected = [c for c in everything

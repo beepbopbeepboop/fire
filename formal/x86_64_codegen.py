@@ -2102,6 +2102,30 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                         # thing this pair is not allowed to do.
                         self._note_binding(key, stmt.value)
                         return
+                    # A store into a frame a POINTER names: the store half
+                    # of the member-read arm's `p.value().field`, and refused a
+                    # few lines below with a sentence about the BASE that the
+                    # read arm makes false.
+                    # `model.pointer_frame_expression` is the same decision the
+                    # read made, so the two cannot disagree about what the base
+                    # holds.
+                    st, _why = M.pointer_frame_expression(
+                        self._cur_fn, M.member_base_node(stmt.target),
+                        self._structs, self._structs)
+                    if st is not None:
+                        slot = M.struct_frame_slot(st, stmt.target.member)
+                        if slot is None:
+                            raise CodegenError(
+                                f"{M.spelled(stmt.target)} stores into "
+                                f"{stmt.target.member!r} of a {st.name} this "
+                                f"pointer points at, and that struct's "
+                                f"{M.struct_field_summary(st)} has no such "
+                                f"field: this path has no way to know which "
+                                f"word that is, and storing to the wrong one "
+                                f"is a wrong answer rather than a failure")
+                        self._emit_frame_store_through(
+                            stmt.value, M.member_base_node(stmt.target), slot)
+                        return
                     # REFUSED, not dropped.  This used to evaluate both sides
                     # and return, which is a SILENTLY DISCARDED STORE: the
                     # program built, ran, and the write was simply not there.
@@ -3606,12 +3630,15 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
     #   ("load", 4, signed)    movslq (%rax), %rax      48 63  — Int32/c_int
     #   ("load", 8, *)         movq   (%rax), %rax      48 8B  — Int64/a pointer
     #
-    # A STRUCT pointee has no instruction here and that is a decision, not an
-    # omission: the derivation says the answer is the receiver (a struct's value
-    # IS its frame address), and emitting it today returns 0 where the source
-    # says 22 on both architectures, because nothing recognises a name bound
-    # through a pointer as a frame holder.  `model.dereference_lowering` says so
-    # at length; the next step is one line in the holder fixpoint.
+    # A STRUCT pointee has no load and that is the derivation rather than an
+    # omission: a struct's value on this path IS its frame address, so the word
+    # in the receiver IS the pointee and nothing is loaded — the same identity
+    # `Pointer()` gives.  It is emitted as the receiver and nothing else, and the
+    # fields are read off that word through the holder tables
+    # (`model.pointer_frame_bindings` seeds them; the member-read arm reads
+    # them), so the field read is one `mov` at `+8*slot` whichever of the two
+    # spellings the source used.  `model.dereference_lowering` says why the
+    # answer was refused until the holder analysis could see the name.
     def _emit_dereference(self, e, method: str) -> None:
         # `model`'s, and shared with arm64, which is what keeps the two machines
         # from describing one construct differently — including the arm that
@@ -3636,6 +3663,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # Nothing is emitted after the receiver: the answer is the word that
             # is already in RAX. The load below would read the FIRST BYTE of the
             # pointee instead, which is what this used to do — measured, SIGSEGV.
+            return
+        if _load == "frame":
+            # A POINTER TO A STRUCT: the receiver word IS the frame's address
+            # (`model.pointer_frame_pointee`), so RAX already holds the answer
+            # and a load would read the frame's FIRST SLOT as though it were a
+            # pointee — `p.value().b` would answer `a`, not `b`.
             return
         base = Reg(0)
         dst = Reg(0)
@@ -3690,6 +3723,25 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self.asm.emit(encode_mov_rm32_r32(Reg.RAX, 0, Reg.R11))
         else:
             self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 0, Reg.R11))
+
+    # A STORE into a frame a POINTER names — `p.value().field = v`, the store
+    # half of the member-read arm's `p.value().field`.  It exists because the
+    # read being answerable makes the store's refusal FALSE: that refusal says
+    # "this path has no way to say what 'p.value(...)' holds", and after the
+    # read arm it plainly can.  A diagnostic that is false about the program is
+    # worse than a missing one.
+    #
+    # The register discipline is `_emit_pointer_store`'s above and `_store_var`'s
+    # one-load frame arm, for their reasons: the base is computed out of RAX and
+    # the caller-saved scratches, so the VALUE is pushed before the base is
+    # evaluated, and the store is a displacement off RAX rather than a
+    # register-to-register move.
+    def _emit_frame_store_through(self, value, base, slot: int) -> None:
+        self._emit_expr(value)                    # RAX = value
+        self._push_slot(Reg.RAX)
+        self._emit_expr(base)                     # RAX = the frame's address
+        self._pop_slot(Reg.R11)                    # R11 = the value
+        self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 8 * slot, Reg.R11))
 
     # ── methods on a string ───────────────────────────────────────────────
     #
@@ -5785,6 +5837,34 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                             f"this path has no way to know which word that is, "
                             f"and reading the wrong one is a wrong answer "
                             f"rather than a failure")
+                    self._emit_expr(expr.obj)
+                    self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX,
+                                                      8 * slot))
+                    return
+                # …and the same read off a POINTER's `.value()`, which is the
+                # other way a frame arrives without a block to copy it into: the
+                # address is the pointer's own word, so the field is one
+                # `mov` at `(%rax)` straight after the receiver is evaluated.
+                # The arm above cannot serve this shape — it reserves and copies,
+                # and there is nothing to copy, because the frame belongs to
+                # whoever owns the memory the pointer names.
+                #
+                # `model.pointer_frame_expression`, which is the same decision
+                # the holder tables and `_frame_return_status` are built from,
+                # so the two spellings of `q.b` cannot disagree about what `q`
+                # is.
+                st, _why = M.pointer_frame_expression(
+                    self._cur_fn, expr.obj, self._structs, self._structs)
+                if st is not None:
+                    slot = M.struct_frame_slot(st, expr.member)
+                    if slot is None:
+                        raise CodegenError(
+                            f"{M.spelled(expr)} reads {expr.member!r} out of a "
+                            f"{st.name} this pointer points at, and that "
+                            f"struct's {M.struct_field_summary(st)} has no "
+                            f"such field: this path has no way to know which "
+                            f"word that is, and reading the wrong one is a "
+                            f"wrong answer rather than a failure")
                     self._emit_expr(expr.obj)
                     self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX,
                                                       8 * slot))
