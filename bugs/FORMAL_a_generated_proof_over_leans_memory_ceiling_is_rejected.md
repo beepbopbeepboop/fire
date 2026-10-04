@@ -11,6 +11,10 @@ per-block BRANCH-CONDITION facts, and what is missing is a lemma for a
 short-circuit condition's value flow, not a smaller record and not a larger
 ceiling.** §2 is the bisection; §3 is the fix direction; §4 is what was
 already tried and measured against.
+**§5 — the census half of this doc, the half that made the regression above
+invisible — is FIXED (2026-10-04): a replayed verdict now says so in the
+ledger, on the screen and in the summary, so a `wall_s: 0.1` row cannot be read
+as coverage again.**
 
 ## What was run, and what it showed
 
@@ -203,18 +207,33 @@ chains already folded.**
   fuel obligations fail.
 * `blocks := []` in the record: the error is unchanged, at the same line.
 
-## 5. A thing the census got wrong, worth fixing on its own
+## 5. A thing the census got wrong: FIXED 2026-10-04, and it is in this doc
+## because it is how the regression above stayed invisible
 
 `bugs/sweeps/proof_breadth_2026-10-03.jsonl` records `either` as
-`{"cls": "pass", "wall_s": 0.1}`. `0.1 s` is `formal/lean.py`'s
-verdict-cache HIT, and the file was never checked on that date — so a
-regression this size is recorded as a pass, and the doc that found it had to
-establish that it was a regression *and* that the "pass" it regressed against
-was not a run. A census row that replays a cached verdict should say so (a
-distinct `cls`, or `wall_s` plus a `cached` flag), because "the corpus still
-measures this construct" is exactly the claim `tools/formal_fuzz.py`'s
-`KNOWN_DIVERGENCES` discipline rests on and a replayed verdict does not
-support it.
+`{"cls": "pass", "wall_s": 0.1}`. `0.1 s` is `formal/lean.py`'s verdict-cache
+HIT and not a run, so the file was never checked on that date — and a proof
+regression this size was recorded as coverage. "The corpus still measures this
+construct" is the claim `tools/formal_fuzz.py`'s `KNOWN_DIVERGENCES`
+discipline rests on, and a replayed verdict does not support it.
+
+**Landed.** `tools/formal_proof_breadth.py`'s `Verdict` carries a `cached`
+field, `run_item` stops discarding `check_proof_cached`'s third element, the
+ledger has a `cached` column, a replayed PASS prints on the screen (it used to
+be the only row of a run with nothing on it), and the per-architecture summary
+prints `of which replayed` so the counts cannot be read as a fresh measurement
+without opening the ledger. It is a FIELD and not a distinct `cls` because
+`pass`/`admitted` say what the PROOF is and every reader here aggregates on
+that, while "measured or replayed" is a second axis of the same row.
+
+`test_formal_proof_breadth.py::TestAReplayedVerdictSaysSo` pins it with the
+cache stubbed, which is the only way to test it deterministically: the two rows
+must carry the same class and opposite flags, and the summary must count the
+replayed one.
+
+**What this does NOT do:** it does not make a replayed verdict fail, and it
+does not re-check `either`. `either` is still red for the reason in §1, and the
+measurement that says so is a fresh run with `cached=False` in the ledger.
 
 ## Reproducing
 

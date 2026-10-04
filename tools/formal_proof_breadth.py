@@ -156,8 +156,28 @@ REPO_FUNCTION_TARGET = 45
 # `Verdict`: `ok` alone was never enough to report on, and every reader here
 # needs to know which of "the backend refused", "the generator refused" and "I
 # never got an answer" it is looking at.
+#
+# **`cached` is a FACT ABOUT THE MEASUREMENT, and it is here because a replayed
+# verdict used to read as a fresh one.** `formal.lean.check_proof_cached`
+# answers `True` for "this exact proof text has been checked before" in about a
+# tenth of a second, and this census used to discard that flag and report the
+# row as `pass` with `wall_s: 0.1`. That is how
+# `bugs/sweeps/proof_breadth_2026-10-03.jsonl` came to record
+# `formal/examples/either.mojo` as a pass when the file had never been checked
+# on that date — and a proof regression the size of
+# `FORMAL_a_generated_proof_over_leans_memory_ceiling_is_rejected.md`'s was
+# recorded as coverage. "The corpus still measures this construct" is the claim
+# `tools/formal_fuzz.py`'s `KNOWN_DIVERGENCES` discipline rests on, and a
+# replayed verdict does not support it.
+#
+# It is a field rather than a distinct `cls` on purpose: `pass`/`admitted` say
+# what the PROOF is and every reader here aggregates on that, while "was this
+# row measured or replayed" is a second axis of the same row. The report prints
+# the replayed count per architecture so the summary cannot be read as a fresh
+# measurement without the ledger being opened.
 Verdict = collections.namedtuple(
-    "Verdict", "ident arch cls detail phase wall_s n_sorries proof_lines")
+    "Verdict", "ident arch cls detail phase wall_s n_sorries proof_lines "
+               "cached")
 
 
 def _first_line(text, limit=300):
@@ -736,9 +756,9 @@ def run_item(item, arch, timeout, workdir):
     from formal.lean import check_proof_cached
 
     def verdict(cls, detail, phase="build", wall=0.0, n_sorries=None,
-                proof_lines=0):
+                proof_lines=0, cached=False):
         return Verdict(item.ident, arch, cls, _first_line(detail), phase,
-                       round(wall, 1), n_sorries, proof_lines)
+                       round(wall, 1), n_sorries, proof_lines, bool(cached))
 
     src = os.path.join(workdir, "prog.mojo")
     out = os.path.join(workdir, "prog.aout")
@@ -788,7 +808,7 @@ def run_item(item, arch, timeout, workdir):
         proof_lines = sum(1 for _ in f)
     check_started = time.monotonic()
     try:
-        ok, detail, _cached, n_sorries = check_proof_cached(
+        ok, detail, cached, n_sorries = check_proof_cached(
             proof_path, repo_root=HERE, timeout=timeout)
     except Exception as e:                      # noqa: BLE001 — a class here
         return verdict("build-crash", f"proof check raised: {e}",
@@ -798,12 +818,15 @@ def run_item(item, arch, timeout, workdir):
     if ok:
         cls = "pass" if not n_sorries else "admitted"
         return verdict(cls, detail, phase="check", wall=wall,
-                       n_sorries=n_sorries, proof_lines=proof_lines)
+                       n_sorries=n_sorries, proof_lines=proof_lines,
+                       cached=cached)
     if _bound_detail(detail):
         return verdict("bound-exceeded", detail, phase="check", wall=wall,
-                       n_sorries=n_sorries, proof_lines=proof_lines)
+                       n_sorries=n_sorries, proof_lines=proof_lines,
+                       cached=cached)
     return verdict("lean-rejected", detail, phase="check", wall=wall,
-                   n_sorries=n_sorries, proof_lines=proof_lines)
+                   n_sorries=n_sorries, proof_lines=proof_lines,
+                   cached=cached)
 
 
 def _refusal_class(detail):
@@ -866,6 +889,11 @@ def report(results, arch_list):
         proven = counts["pass"] + counts["admitted"]
         lines.append(f"   {'proved at all':16s} {proven:4d} "
                      f"({100.0 * proven / max(1, len(vs)):.1f}%)")
+        replayed = sum(1 for v in vs if v.cached)
+        if replayed:
+            lines.append(f"   {'of which replayed':16s} {replayed:4d}  "
+                         f"(a cached verdict, not a run — see the ledger's "
+                         f"`cached` field)")
     lines.append("")
     lines.append("== causes, ranked over every arch")
     causes = collections.defaultdict(lambda: collections.Counter())
@@ -946,7 +974,7 @@ def main(argv=None):
         except Exception as e:                  # noqa: BLE001 — a class here
             return Verdict(item.ident, arch, "build-crash",
                            _first_line(f"{type(e).__name__}: {e}"), "harness",
-                           0.0, None, 0)
+                           0.0, None, 0, False)
 
     interrupted = {"flag": False}
 
@@ -969,6 +997,14 @@ def main(argv=None):
             ledger.flush()
             if v.cls != "pass":
                 print(f"{v.cls:16s} {v.arch:6s} {v.ident}", flush=True)
+            elif v.cached:
+                # A replayed PASS is the case the `cached` field exists for: it
+                # would otherwise be the only row of a run with nothing on the
+                # screen, which is exactly how `either.mojo` came to be recorded
+                # as covered.
+                print(f"{'pass (replayed)':16s} {v.arch:6s} {v.ident} "
+                      f"[wall {v.wall_s}s — a cached verdict, not a run]",
+                      flush=True)
             if interrupted["flag"]:
                 for other in futures:
                     other.cancel()
