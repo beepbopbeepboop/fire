@@ -89,9 +89,13 @@ EXTERN_MSG = ("builds, but 31 import(s) dyld cannot resolve (one file "
 EXTERN_BUILD_MSG = (
     "build: bogus.mojo: the image would bind 1 symbol(s) that nothing "
     "provides, so it could not be loaded: definitely_not_a_real_symbol_9f3a. "
-    "These are constructs this backend does not lower (a struct type, a "
-    "method call on a value, a compiler intrinsic), not exports that are "
-    "missing. (Provider check: asked the C library (dlsym).)")
+    "`definitely_not_a_real_symbol_9f3a` is a call this build emitted and "
+    "nothing provides it, so that call is not lowered on this path: this "
+    "backend has no call to bind there, which is a fact about the PROGRAM and "
+    "not about the link line. Write the operation out, or bind the name from a "
+    "library that provides it. Every name in this list is one of the calls "
+    "named above, so nothing about the link line is left to explain. (Provider "
+    "check: asked the C library (dlsym).)")
 # fire.py prints `build: {e}` for a FormalBuildError AND for any other
 # exception, so a crash is only distinguishable by its traceback. These two are
 # the shapes that decides, taken from how fire.py's handler and CPython's

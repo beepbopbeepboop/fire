@@ -359,19 +359,28 @@ AUDIT_CASES = [
      "build: a list literal does not fit in the frame: it needs 17608 bytes "
      "and this function has 16344 left for containers.",
      (0, "2100\n"), "true", "list"),
-    # THE FINDING, and it is measured: an unlowered callee reaches the link
-    # audit, whose message opens with the FILE name and names the symbol in the
-    # middle of a sentence about symbols. Four plausible leading tokens, none of
-    # them the call in the source, because the message never says what `sum` is.
-    # The construct is genuinely outside the subset and the refusal genuinely
-    # stops the build; the message is what fails, and that is the whole subject
-    # of `bugs/FORMAL_an_unlowered_callee_is_refused_by_a_link_audit.md`.
-    ("an_unlowered_callee_names_nothing",
+    # THE FINDING, and it is FIXED: an unlowered callee used to reach the link
+    # audit, whose message opened with the FILE name and named the symbol in the
+    # middle of a sentence about symbols — four plausible leading tokens, none
+    # of them the call in the source, because the message never said what `sum`
+    # was. It says so now (`check_module_symbols` publishes each function's
+    # bare-named callees and `formal/build.py`'s `_unaccounted_report` asks the
+    # set which of its two causes each name is), so this row's verdict moves
+    # from `unnamed` to `true` and its construct from nothing to the callee. It
+    # is kept rather than deleted for the reason every row here is kept: it is
+    # the measurement, and the measurement is what would catch the regression.
+    # Both backends said byte-identical words for it before and after.
+    ("an_unlowered_callee_names_the_call",
      'def main():\n    xs = [1, 2]\n    print(sum(xs))\n    return 0\n',
      "build: sum.mojo: the image would bind 1 symbol(s) that nothing provides, "
-     "so it could not be loaded: sum. Nothing on this link line defines them: "
-     "not the C library, and not any library this program linked.",
-     (0, "3\n"), "unnamed", "unnamed"),
+     "so it could not be loaded: sum. `sum` is a call this build emitted and "
+     "nothing provides it, so that call is not lowered on this path: this "
+     "backend has no call to bind there, which is a fact about the PROGRAM and "
+     "not about the link line. Write the operation out, or bind the name from a "
+     "library that provides it. Every name in this list is one of the calls "
+     "named above, so nothing about the link line is left to explain. (Provider "
+     "check: asked the C library (dlsym).)",
+     (0, "3\n"), "true", "sum"),
     # The same shape with an INTERNAL diagnostic, which never reaches the audit
     # because `run_on` gives it its own verdict first — asserted here because
     # the two classifications are adjacent and a reordering would let the second

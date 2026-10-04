@@ -1420,6 +1420,22 @@ CASES = [
 # nothing about the program's OUTPUT can carry the assertion, because the
 # assertion is that it must not have one.
 REFUSALS = [
+    # A CALLEE this backend does not lower, which used to stop at a link audit
+    # that named a FILE and a SYMBOL and never the call — so a reader could not
+    # tell whether to change the program or the link line, and the fuzz audit
+    # filed every such refusal as `unnamed`. The needle is the sentence that
+    # resolves it, not the symbol list, because the symbol list is the part both
+    # machines already agreed on: what has to be pinned is the sentence that
+    # says which of the two causes each name is.
+    #
+    # `sum` rather than `frobnicate` on purpose: the message must name a name
+    # that IS a real construct, since a diagnostic quoted from a program that
+    # spells nothing is exactly the shape the fuzz audit calls `unnamed`.
+    ("an_unlowered_callee_names_the_call",
+     "def main():\n"
+     "    var xs = [1, 2, 3]\n"
+     "    return sum(xs)\n",
+     "is not lowered on this path"),
     ("aug_on_two_strings_refused_identically",
      "def main():\n"
      "    var a = [\"ab\", \"cd\"]\n"

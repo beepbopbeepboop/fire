@@ -999,21 +999,101 @@ def _audit_bound_symbols(external_syms, dylib_syms, where: str,
             and not _is_libsystem(sym)]
 
 
-def _unaccounted_report(source_path: str, unaccounted: list, where: str) -> str:
-    """The one wording for "this image would bind symbols nothing provides"."""
+def _image_bare_callee_symbols(functions) -> set:
+    """Every SYMBOL the image writes for a bare-named callee of its own source.
+
+    The link audit's second question needs the emitter's spelling of a name, not
+    the source's: `external_syms` records what went into the image, and the two
+    differ for any name the module layer renames. Both are carried, because which
+    of them the emitter used is not a fact this function can derive from a set
+    of names — and a name that matched neither would be reported with no cause
+    named, which is where this started.
+    """
+    out = set()
+    for fn in functions or ():
+        for name in (getattr(fn, "_bare_callee_names", None) or ()):
+            out.add(name)
+            sym = M.module_symbol(name)
+            if sym is not None and getattr(sym, "name", None):
+                out.add(sym.name)
+    return out
+
+
+def _unaccounted_report(source_path: str, unaccounted: list, where: str,
+                        bare_callees=None) -> str:
+    """The one wording for "this image would bind symbols nothing provides".
+
+    **`bare_callees` is what lets the message say which of its two causes each
+    name is**, and the two sentences it adds are the whole of this bug's
+    content. The shared paragraph this used to end on is accurate about the
+    link line and useless about the program: it names a file and a symbol, and
+    the reader of a refusal needs to know whether to change their PROGRAM or
+    their LINK LINE — and the message said in as many words that it could not
+    tell them. That was true when written and stopped being true when
+    `check_module_symbols` began collecting a bare-named callee into
+    `bare_callees` precisely so the name-placement walk would not fire on it:
+    from that point the backend KNEW the name was a callee and had no way to
+    say so here. The knowledge is published per function
+    (`_bare_callee_names`) and joined into one set by
+    `_image_bare_callee_symbols`, which is the only place that needs it.
+
+    Everything above the new sentences is unchanged, because those sentences are
+    NEEDLES: `tools/formal_sweep.py`'s `_EXTERN_BUILD_MARK` /
+    `_EXTERN_BUILD_COUNT_RE`, `tools/formal_sweep.py`'s own `would bind` family
+    label, `tools/formal_fuzz.py`'s audit comment, and the docstrings of
+    `formal/imports.py` and `test_formal_module_attr.py` all quote them. What
+    changed is the paragraph that followed them, which asserted the distinction
+    was unavailable — a claim this message would now contradict three lines
+    after making it.
+
+    The classification is per name rather than for the whole list, because the
+    two causes really do coexist: one image can bind a dangling call to a
+    builtin this path does not lower AND a name that entered as a bare
+    reference. Naming only the callees and keeping the shared paragraph for the
+    rest is what says so.
+    """
+    named = [n for n in unaccounted if n in (bare_callees or ())]
+    named_clause = ""
+    if named:
+        shown = ", ".join(f"`{n}`" for n in named[:8])
+        more = " …" if len(named) > 8 else ""
+        verb = "is a call this build emitted" if len(named) == 1 \
+            else "are calls this build emitted"
+        named_clause = (
+            f" {shown}{more} {verb} and nothing provides "
+            f"{'it' if len(named) == 1 else 'them'}, so "
+            f"{'that call is' if len(named) == 1 else 'those calls are'} not "
+            f"lowered on this path: this backend has no call to bind there, "
+            f"which is a fact about the PROGRAM and not about the link line. "
+            f"Write the operation out, or bind the name from a library that "
+            f"provides it.")
+    rest = [n for n in unaccounted if n not in named]
+    if not rest:
+        # Every name was a callee this build emitted, so there is nothing left
+        # for the link line to explain and saying otherwise would put the
+        # paragraph's own claim ("asked nowhere in this backend") three lines
+        # after contradicting it.
+        tail = (" Every name in this list is one of the calls named above, so "
+                "nothing about the link line is left to explain. (Provider "
+                f"check: {_libsystem_probe_status()}.)")
+    else:
+        tail = (f" Nothing on this link line defines "
+                f"{'it' if len(rest) == 1 else 'them'}: not the C library, and "
+                f"not any library this program linked. Two very different "
+                f"causes produce that, and the distinction is not lost — each "
+                f"of the remaining name(s) is either a call the codegen "
+                f"emitted (`info['external_syms']`, so some construct was not "
+                f"lowered and the call is dangling) or a name that entered the "
+                f"image as a bare reference with no call site behind it. "
+                f"Deciding which is a question for the assembler, and it is "
+                f"asked nowhere in this backend, so this message stops at the "
+                f"fact both causes share. (Provider check: "
+                f"{_libsystem_probe_status()}.)")
     return (f"{os.path.basename(source_path)}: the {where} would bind "
             f"{len(unaccounted)} symbol(s) that nothing provides, so it could "
             f"not be loaded: {', '.join(unaccounted[:8])}"
-            f"{' …' if len(unaccounted) > 8 else ''}. Nothing on this link "
-            f"line defines them: not the C library, and not any library this "
-            f"program linked. Two very different causes produce that, and the "
-            f"distinction is not lost — each name in this list is either a call "
-            f"the codegen emitted (`info['external_syms']`, so some construct "
-            f"was not lowered and the call is dangling) or a name that entered "
-            f"the image as a bare reference with no call site behind it. "
-            f"Deciding which is a question for the assembler, and it is asked "
-            f"nowhere in this backend, so this message stops at the fact both "
-            f"causes share. (Provider check: {_libsystem_probe_status()}.)")
+            f"{' …' if len(unaccounted) > 8 else ''}."
+            f"{named_clause}{tail}")
 
 
 def _advertised_but_absent(path: str, exports: list) -> list:
@@ -1159,7 +1239,8 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
         if unaccounted:
             raise FormalBuildError(
                 _unaccounted_report(source_path or "<program>", unaccounted,
-                                    "image"))
+                                    "image",
+                                    _image_bare_callee_symbols(ordered)))
         binary = elf.build_elf(code, entry=info["base_addr"],
                                vaddr=info["base_addr"],
                                external_syms=external_syms,
@@ -1215,7 +1296,8 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     if unaccounted:
         raise FormalBuildError(
             _unaccounted_report(source_path or "<program>", unaccounted,
-                                "image"))
+                                "image",
+                                _image_bare_callee_symbols(ordered)))
     binary = build_macho(code, external_syms=external_syms, arch=arch,
                          dylibs=[{"install_name": d["install_name"],
                                   "symbols": set((d.get("map") or {}).values())}
@@ -12275,6 +12357,24 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # cases of `test_formal_module_attr.py` and 4 of `test_formal_imports.py`
         # — so the set is what the question is asked of.
         bare_callees: set = set()
+        # …and their NAMES, which is the half the LINK AUDIT needs and cannot
+        # rebuild. `bare_callees` is a set of node identities because that is
+        # what the walk has (`M.iter_nodes` has no parent, so identity is the
+        # only way to say "this occurrence"), and the audit at the end of the
+        # build runs against names the emitters produced — by which point the
+        # AST this loop walks is out of scope. Published on the function for the
+        # same reason `_recv_ref_sites` is: the consumer is a different
+        # function from the one that compiled it, and it holds no unit.
+        #
+        # **This is not this pass's question.** `check_module_symbols` asks
+        # "does a table in this compiler place this name", and the answer for a
+        # callee is that a callee is not a read. What the link audit asks is the
+        # OTHER half the refusal it used to stop short of naming: the build
+        # emitted a call to this name and nothing provides it, so the construct
+        # was not lowered. Answering that here, where the callee is known to be
+        # a callee, is what lets the audit say which of its two causes each name
+        # is instead of reporting the one they share.
+        bare_callee_names: set = set()
         for c in M.iter_nodes(fn.body):
             if not isinstance(c, F.CallExpr):
                 continue
@@ -12282,6 +12382,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             if isinstance(func, F.IdentExpr):
                 callees.add(id(func))
                 bare_callees.add(id(func))
+                bare_callee_names.add(func.name)
             elif isinstance(func, F.MemberExpr):
                 # Case 2, through `model.dylib_module_reference` — the ONE
                 # recogniser of "this chain is rooted at an imported module".
@@ -12307,6 +12408,11 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # subtraction exists to stop.
                 for node in M.subscript_callee_names(c):
                     callees.add(id(node))
+        # The names leave here, once the whole callee scan is in — the set is
+        # not narrowed by anything below (`callees` is, by the `external_call`
+        # precedence and the bracketed roots; `bare_callees` is not, and the
+        # link audit must see exactly the set this walk collected).
+        fn._bare_callee_names = frozenset(bare_callee_names)
         # The same rule one level up, for a callee spelled with a BRACKET.
         # `external_call["setenv", Int32](…)` puts the C symbol in the bracket
         # and leaves `external_call` as a bare name with no home — but it is the
@@ -17724,7 +17830,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                                            "library", dylib_exports)
         if unaccounted:
             raise FormalBuildError(
-                _unaccounted_report(source_paths[0], unaccounted, "library"))
+                _unaccounted_report(source_paths[0], unaccounted, "library",
+                                    _image_bare_callee_symbols(ordered)))
         exports = _formal_exports(source_paths, ordered, info, module_prefixes,
                                   _method_exports(source_paths, structs_by_file,
                                                   module_prefixes))
@@ -17822,7 +17929,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                                         "library", dylib_exports)
     if unaccounted:
         raise FormalBuildError(
-            _unaccounted_report(source_paths[0], unaccounted, "library"))
+            _unaccounted_report(source_paths[0], unaccounted, "library",
+                                _image_bare_callee_symbols(ordered)))
 
     exports = _formal_exports(source_paths, ordered, info, module_prefixes,
                               _method_exports(source_paths, structs_by_file,
