@@ -4089,9 +4089,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                                 f"constructor placed. Those two lifetimes are "
                                 f"independent, which is the whole reason the "
                                 f"placed frame is preferred, so it is not "
-                                f"available here. Assign the field to a name and "
-                                f"call the method on the name, which is the same "
-                                f"program with a lifetime this analysis can see"
+                                f"available here. {DELEGATING_FIELD_ADVICE}"
                             )
                         if nested is None:
                             # Agreed, and the agreed type is provably NOT a
@@ -4222,9 +4220,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                             f"{', '.join(sorted({st.name for st in level}))} "
                             f"ASSIGNS it, so the word in the slot is a frame "
                             f"belonging to whichever function ran the "
-                            f"assignment. Assign the field to a name and read "
-                            f"through the name, which is the same program with a "
-                            f"lifetime this analysis can see"
+                            f"assignment. {DELEGATING_FIELD_ADVICE}"
                         )
                     if why is _UNPLACED:
                         # `model.nested_frame_hop_unplaced`, and not a second
@@ -6111,6 +6107,54 @@ _REASSIGNED = object()
 # not about the field's declared type, and the two arms want to say so in
 # different words.
 _UNPLACED = object()
+
+# What a `_REASSIGNED` refusal tells the reader to write instead, as ONE string
+# because both sites that raise it made the reader the SAME promise and the
+# promise was false on both architectures.
+#
+# **Measured, both backends, on this tree (2026-10-04).** The two advices this
+# replaces, and what the programs they name actually do:
+#
+#   * "Assign the field to a name and read through the name" — `var t =
+#     self.inner; t.v` is refused with `field_access_refusal`: "'t.v' is a field
+#     access through 't', and this path has no way to say what 't' holds". A
+#     local bound to a nested frame FIELD READ is not classified as a frame
+#     address, which is a separate gap from this one and is what the reader
+#     lands on instead of a working program.
+#   * "Assign the field to a name and call the method on the name" — `var t =
+#     self.inner; t.get()` is refused with the value-method-call refusal: "the
+#     receiver is a name on this path, and 'get' is not one of those methods of
+#     those receivers".
+#
+# So both sent the reader to a spelling this path refuses, which is the failure
+# mode this family of diagnostics documents itself as existing to prevent — "a
+# message that asserts a mechanism which is not operating sends the reader after
+# a non-bug", and more pointedly a PROMISE nobody checks.
+#
+# The advice below is measured to work: `struct Box { var pad: Int; var inner:
+# Opt; def __init__(out self, o: Opt): self.inner = o; def get(out self) ->
+# Int: return self.inner.v * 10 + self.inner.has }` with `Box(mk(4))` builds
+# and prints CPython's `41` on arm64 AND on x86-64. It is the DELEGATING field —
+# `model.init_stores_a_parameter_struct`, the predicate `_typed_nested_frame`
+# already exempts a few lines above the refusal — and the reason it is sound is
+# the one that predicate's own comment makes: the only assignment is
+# `__init__`'s and its argument is the CALLER's, so the frame in the slot and the
+# frame the caller is reached through die together. A method that is not
+# `__init__` assigning the field is exactly the case with two independent
+# lifetimes, which is the refusal.
+#
+# What it does NOT claim: that a non-constructor assigner becomes answerable, or
+# that the read-through-a-local spelling works. Both are separate gaps, named
+# here so the next reader of either of them knows they were measured rather than
+# assumed.
+DELEGATING_FIELD_ADVICE = (
+    "Assign the field in __init__ from a parameter of __init__ and read it "
+    "through the field, which is the same program with a lifetime this "
+    "analysis can see: a constructor's argument is the frame the CALLER "
+    "reached, so the two die together, while a method that assigns the field "
+    "puts in a frame belonging to whichever function ran the assignment and "
+    "nothing here says the two lifetimes agree"
+)
 
 
 def _field_annotation(cands, name, decls=None):
