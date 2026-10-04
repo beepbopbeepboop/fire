@@ -69,7 +69,7 @@ CHAIN_MSG_2 = (
     "build: reduce.mojo imports 'std.math', which cannot be built either: "
     "env.mojo imports 'std.sys', which cannot be built either: "
     "env.mojo: ptr.value() is a method call on a value, and this backend "
-    "lowers only append, close, write")
+    "lowers only append, clear, close, write")
 # B3's refusal, verbatim from the model's own function (formal/model.py:
 # gimple_runtime_refusal), which is what the class is keyed on.
 TARGET_MSG = ("build: mojo_sqlite3_open is an entry point of the gimple "

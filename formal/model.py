@@ -5566,9 +5566,12 @@ BUILTIN_VALUE_METHODS = {
     #
     # It is in this table and not in a backend's own because the two
     # architectures would otherwise have two `clear` lowerings that can agree
-    # today and drift, and because the KIND GUARD below is a model decision —
-    # `append`'s guard is capacity and lives in the emitter, which is the
-    # reason that arm says why its own does not.
+    # today and drift, and because the KIND GUARD is a model decision —
+    # `append`'s guard is capacity and lives in the emitter, which is the reason
+    # that arm says why its own does not. And the guard is POSITIVE evidence
+    # (`is_list_kind` of the receiver's kind) rather than the absence of a
+    # refusal, because a name in this table with no kind guard would zero the
+    # first word of ANY word and leave the program running.
     "clear": "list_clear",
     # `f.write(s)`: a text-mode write of a C string to a file descriptor.
     # `open(...)` already lowers to the C library's `open`, so the receiver
@@ -5588,6 +5591,49 @@ BUILTIN_VALUE_METHODS = {
 #: address that word holds, so it is honest only on a receiver established to be
 #: a list.
 BUILTIN_VALUE_METHOD_LIST_KINDS = frozenset({"clear"})
+
+
+# `xs.clear()` on a receiver this path has not established to be a blob.  Shared
+# by both backends for the reason `list_append_overflow_message` is: two
+# architectures that name one limit differently cost a reader the difference
+# between the limit and the architecture.
+def list_clear_refusal(dotted: str, kind, shape: str) -> str:
+    """Why `dotted.clear()` is not lowered here.
+
+    The guard is `is_list_kind`, and a DICT passes it — deliberately, and by
+    measurement rather than by accident: a dict on this path is a counted blob
+    too (`len_operand_lowering` reads its count from the same offset 0), so
+    zeroing that word empties it exactly as CPython's `dict.clear` does.
+    Measured on both architectures, `{"a": 1, "b": 2}` reports 2, clears to 0,
+    and a SECOND dict built after the clear still reports 1 — the third number
+    is the one that makes the store a store rather than a coincidence.
+    `test_formal_run.py::list_clear_empties_a_dict_blob` is that row.
+
+    **Asked from `_shape_guarded_refusal`, once, for both architectures** — the
+    `BUILTIN_VALUE_METHOD_LIST_KINDS` arm above is the guard, and each backend's
+    `_emit_value_method` asks `value_method_refusal` (hence this) with
+    `_method_recv_kind(e)` before it dispatches, so an emitter-level copy of the
+    same `is_list_kind` question would be the second reader of a fact the first
+    one already settled with the same arguments.  The sentence carries both
+    halves of the argument: what the store IS (one word, at the offset a
+    container's count lives at, which is the word `len` reads), and what it
+    would do to a word that is not a blob's header.
+    """
+    return (f"{dotted}() lowers to one store of zero at offset 0 of its "
+            f"receiver, and that offset is a container's COUNT — the very word "
+            f"`len` of the same receiver reads — so the store empties a list "
+            f"and writes into whatever address anything else holds, and "
+            f"the receiver has to be a list. {dotted}'s is "
+            f"{shape or 'a plain word'} classified as "
+            f"{kind if kind is not None else 'nothing this path can establish'}"
+            f", and this path will not read an arbitrary word as a blob's "
+            f"header. Cleared anyway it would zero the first eight bytes of "
+            f"whatever the word holds, and the program would keep running with "
+            f"a wrong length: that is the silent wrong answer this path does "
+            f"not emit. Bind a list to a name and call the method on the name, "
+            f"or give the field a `List[…]` declaration so the receiver's kind "
+            f"is stated")
+
 
 # ── Methods on a string ───────────────────────────────────────────────────
 #
@@ -12402,16 +12448,7 @@ def _shape_guarded_refusal(method, receiver_kind, dotted, receiver_is_fd,
         if method in BUILTIN_VALUE_METHOD_LIST_KINDS:
             if is_list_kind(receiver_kind):
                 return None
-            holds = (repr(receiver_kind) if receiver_kind
-                     else "a word of unknown contents")
-            return (f"{dotted}() lowers to one store of zero at offset 0 of "
-                    f"its receiver, and that offset is a container's COUNT — so "
-                    f"the store empties a list and writes into whatever address "
-                    f"anything else holds. {dotted}'s receiver is {holds}, and "
-                    f"this path will not read an arbitrary word as a blob's "
-                    f"header. Bind a list to a name and call the method on the "
-                    f"name, or give the field a `List[…]` declaration so the "
-                    f"receiver's kind is stated")
+            return list_clear_refusal(dotted, receiver_kind, receiver_shape)
         return None
     holds = repr(receiver_kind) if receiver_kind else "a word of unknown contents"
     return (f"{dotted}() is a method call on a value, and this backend "

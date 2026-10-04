@@ -1,12 +1,15 @@
 # `MojoExpr.call` carries ONE argument, so a call with two arguments has no faithful AST and `eval_eq_mojo` is false
 
 **Area:** FORMAL (the proof layer's AST bridge). **Status: OPEN, and RE-MEASURED
-2026-10-03: the minimal reproduction below is STALE — the program now builds,
-runs and omits the AST bridge with an accurate one-line reason instead of
-emitting a false theorem — so what is left is a PROVABILITY gap, not a
-soundness one. Step 1 below is still blocked on the Lean limitation measured in
-"Status: step 1 is blocked".** Found 2026-10-02 while wiring the SysV
-stack-argument convention's proof half.
+twice: 2026-10-03 for the minimal reproduction below (now STALE — the program
+builds, runs and omits the AST bridge with an accurate one-line reason instead of
+emitting a false theorem, so what is left is a PROVABILITY gap, not a soundness
+one), and 2026-10-04 for step 1's ROUTE, which is now MEASURED rather than
+listed — see "Status: step 1's route is measured" below. Route 1 works, route 3
+is dead for a reason this file had wrong, and the pinned test is
+`test_formal_eval_eq_mojo_bridge.py::TestTheNestedExprRoutes` (0.9 s, three Lean
+files, no library).** Found 2026-10-02 while wiring the SysV stack-argument
+convention's proof half.
 
 ## Status: the reproduction is stale (2026-10-03)
 
@@ -80,6 +83,75 @@ ENTRY's arity through `formal/model.py::entry_arity`. This one is about the
 arguments of a CALL: a different declaration and a different place in the
 evaluator, and untouched by that. Both have to be closed before a
 seven-argument function is provable, which is why this file exists alone now.
+
+## Status: step 1's route is MEASURED (2026-10-04), and this file's diagnosis of route 3 is wrong
+
+The "exact next step" below says route 1 — the `mutual` block with an explicit
+recursion over the argument list — "is a 0.3-second experiment on the isolated
+file above, and it is the FIRST thing to try". It has now been run, through
+`formal/lean.py::run_lean` only, on the toolchain this tree pins
+(`leanprover/lean4:v4.32.2`), and it is pinned by
+`test_formal_eval_eq_mojo_bridge.py::TestTheNestedExprRoutes` so a toolchain
+change reports itself instead of quietly making the route list stale.
+
+**All three answers, with the exact assertions:**
+
+| question | answer | how it is pinned |
+|---|---|---|
+| does a `mutual` block with an explicit recursion on `args` elaborate, and does `evalExpr` stay REDUCIBLE? | **YES and YES** | `test_an_explicit_recursion_over_the_arguments_keeps_the_evaluator_reducible` — three `rfl`s: a two-argument call through the handler, a non-call node, and a name the handler does not answer, so a version that reduced only the `call` arm fails |
+| what actually happens with the `List.foldl` spelling? | **it ELABORATES, and does not reduce.** `rfl` fails even on `.int 5` | `test_the_fold_spelling_does_not_reduce_rather_than_failing_to_elaborate` — asserts exit 1, a `Type mismatch`, and the ABSENCE of `structural recursion` in the output |
+| can `induction e` be used on the nested type? | **no** — "does not support the type `E` because it is a nested inductive type" | `test_induction_cannot_be_used_on_a_nested_inductive` |
+
+**So this file's §"Status: step 1 is blocked" overstates the block in one place
+and mis-describes it in another, and both matter to whoever takes it.**
+
+1. **The quoted error does not reproduce.** This file records Lean saying
+   *"failed to infer structural recursion: Cannot use parameter #1 … ⊢ sizeOf a✝ <
+   1 + sizeOf n + sizeOf args"* for the `foldl` spelling. On this toolchain that
+   file elaborates and exit status is 0. What this file's own stated CONSEQUENCE
+   predicts still happens — "`evalExpr` stops reducing, so all 26 of its per-node
+   lemmas … lose `rfl` and fail" — but it arrives with no message naming the
+   fold, and the first failure is `evalExpr_int` on a plain `.int`, not anything
+   about a call. **A worker following the quoted error would search for a message
+   Lean does not print and would read 26 `rfl` failures as 26 problems.**
+2. **Route 1 needs no rewrite of the evaluator.** The file's route 2 is "`MojoExpr.rec`
+   with an explicit motive for `evalExpr` itself. That is a rewrite of the core
+   evaluator plus 26 `rfl`s becoming `simp [evalExpr]`". Measured, none of that
+   is needed: the `mutual` + explicit-list-recursion form elaborates as a
+   STRUCTURAL recursion and every `rfl` survives, which is precisely the property
+   route 2 was going to buy.
+
+**What step 1 therefore costs, re-priced.** Still 58 lines across
+`lib/ProofLib.lean`, `formal/arm64_proof_gen.py` and `formal/admitted.py` — but
+the 58 lines buy less than the file's own ordering implies, because
+`evalExpr_congr` is the only part that needs a PROOF rather than an edit:
+
+* `MojoExpr.call (name : String) (args : List MojoExpr)`;
+* `evalExpr` in a `mutual` block with `evArgs`-shaped helper folding the list
+  (`args :: as => …`) — measured working;
+* `evalExpr_call` re-stated over the list, plus a `simp`-not-`rfl` one-argument
+  twin (`1 * v = v`);
+* `liftMF`'s `.call name a => .call name (liftMF a)` becomes the list form;
+* `_expr_ast`'s `Call` arm, and the two comment corrections §"Status: step 1 is
+  blocked" already names;
+* **`evalExpr_congr` keeps its name and its statement and changes only its
+  proof** — `MojoExpr.rec` with an explicit motive, and a `List` induction in the
+  `call` case to push the element-wise hypotheses through. That is the one
+  genuinely new Lean obligation, and keeping the statement is what stops it
+  moving every generated proof in the tree.
+
+**What did NOT change: step 2 is still the fix and step 1 was never one.** The
+reproduction at the top of this file still fails the same way; a correct AST for
+`f(1, 2)` still evaluates to 0 under the `if name = "main"` stub, so
+`eval_eq_mojo` is still false for it; and on arm64 the same program is still
+refused by the CFG walk (`FORMAL_arm64_the_universal_theorem_cannot_follow_a_
+call_into_the_same_image.md`). This commit moves step 1 from "a project" to "a
+patch plus one proof", and the reason it does not move the bug is the reason
+this file's closing paragraph gives.
+
+**How to run it:** `python3 -m unittest
+test_formal_eval_eq_mojo_bridge.TestTheNestedExprRoutes -v` (0.9 s; skips when
+Lean is absent, since every assertion is about what Lean accepts).
 
 ## The smallest reproduction
 

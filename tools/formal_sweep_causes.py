@@ -646,8 +646,16 @@ CAUSES = (
     # refusal three entries above. A duplicate with a dead marker is worse
     # than no row: it reads as a cause that blocks nothing, which is
     # indistinguishable from a cause nothing is blocked by.)
+    # Re-pointed 2026-10-04, and the reason is the map's own §5.1 lesson about a
+    # marker keyed on text that is going away: this one read `lowers only append,
+    # close, write`, which is the model's own enumeration of the lowered method
+    # names, so `List.clear` joining that table silently took every file in this
+    # row back to `other refusal` — 170 files' worth of bucket, for a word list.
+    # The clause below is the one that STATES the fact: the refusal exists
+    # because the name is not one of the methods that ARE lowered, and that is
+    # true whatever the table holds.
     ("method call on a value receiver is not one of the lowered methods",
-     (("lowers only append, close, write",),)),
+     (("is not one of those methods of those receivers",),)),
     # A class-level default that is a literal-looking expression whose value is
     # NOT materializable here (a call, a computed name) rather than one the
     # build can fold. 1 file, in-file, both architectures

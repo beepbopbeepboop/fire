@@ -409,6 +409,19 @@ def counts_by_module() -> dict:
 # project has no model of, and an admission is the wrong place to make one: it
 # would be a `sorry` over a claim nobody wrote a test for, which is the exact
 # failure `formal/arm64_proof_gen.py`'s `fun n => n` contract was.
+#
+# THIS LIST IS NOT THE RULE, and it is worth saying why in the place a reader
+# looks for the rule rather than only in a bug doc.  The audit of 2026-10-04
+# found an admission that overclaimed and that no phrase here matched:
+#
+#     the loader handle is 0, meaning no library of that name is on this target
+#
+# "the loader handle is 0" is a claim about the WORD and "no library of that
+# name is on this target" is a claim about the host's FILESYSTEM, and the word
+# "meaning" is the whole of the join — which is why a list of phrases cannot
+# see it.  Adding `meaning` to this table would reject the corrected text, which
+# says the same thing about the word and is true, so the list is left as the
+# one cheap arm it is and `value_attached_claim` below is the structural one.
 _OVERCLAIM = (
     ("always", "a claim that every run behaves this way"),
     ("never", "a claim that no run ever does otherwise"),
@@ -420,29 +433,224 @@ _OVERCLAIM = (
 )
 
 
+# ── the structural arm: a claim ATTACHED to a value ───────────────────────────
+#
+# The shape is grammatical rather than lexical, which is what makes it checkable
+# without a phrase list.  An admission is a set of constraints on one word; a
+# writer who also wants to say something about the host's STATE has to attach it
+# to that word, and the way English does that is an explanatory connective — "X
+# is V, meaning P" / "…, i.e. P" / "…, which is to say P".  So the sentence
+# itself says which clause is the claim about the word (before the connective)
+# and which is the claim about the world (after it), and the rule is that the
+# second has to be about the first.
+#
+# WHY NOT `meaning` IN THE TABLE ABOVE.  A phrase list is right about the words
+# it has seen and blind to the grammar, and adding connective after connective
+# produces a list that is wrong about good sentences: the corrected `ctypes`
+# text — "the loader handle is 0 when dlopen(3) failed: the file may be absent,
+# may not be a loadable image, or a symbol may be unresolvable" — is a claim
+# about the host's filesystem in every word and is *in scope*, because it
+# constrains the answer 0.  The same sentence with a connective is only refused
+# when the clause it attaches to is not about the word, and that is a question
+# about the two clauses rather than about a word.
+#
+# WHAT IT CANNOT SEE, stated here because a rule that only ever claims to work on
+# the instance it was written for is the failure `PRE_AUDIT_TEXT` exists for.
+# Two limits, both structural rather than fixable by more words:
+#
+#   * a world claim with NO connective passes — "the loader handle is 0 because
+#     no library of that name is on this target" is a sentence about the
+#     filesystem, and `because` is absent from the connective table on purpose
+#     because `subprocess.check_output`'s corrected admission uses it to explain
+#     a truncation that IS a constraint on the word.  `test_formal_admitted.py`'s
+#     `SCOPE_PROBES` carries one such sentence as an ACCEPT row, next to the
+#     truth row that does catch it, because that is where the boundary between
+#     the two instruments is;
+#   * a world claim that happens to share a word with the answer passes — the
+#     overlap test asks whether the clause is ABOUT the answer, not whether
+#     every clause of it is.
+#
+# A version that scales past both limits is the one this doc named second: give
+# `Contract` a declared KIND (`status`, `byte_string`, `handle`, …) and check
+# the text against that kind's shape, which is `bugs/FORMAL_contract_scope_
+# rule_is_a_phrase_list.md`'s §"option 2" and is not done here because it
+# duplicates every `@admitted` text in a second place — the one thing this
+# module's header forbids.
+_EXPLANATORY_CLAUSE = (
+    # Introduces a CLAUSE, so the template the probe rows are built from can
+    # carry one.  "that is to say" and "which is to say" are NOT here: "that is"
+    # and "which is" already match inside them, so listing them would be two
+    # entries of this table that removing changes nothing — the dead-marker
+    # shape, which `test_formal_admitted.py`'s `SCOPE_PROBES` is built to
+    # report rather than to accommodate.
+    "meaning", "means", "i.e.", "in other words", "that is", "which is",
+)
+_EXPLANATORY_PHRASE = (
+    # Introduces a PHRASE (`namely X`, `denoting X`, `read as X`), which is the
+    # other English shape a claim like this takes and needs the other template.
+    "namely", "denoting", "denotes", "signifying", "signifies", "read as",
+    "stands for",
+)
+_EXPLANATORY = _EXPLANATORY_CLAUSE + _EXPLANATORY_PHRASE
+_EXPLANATORY_RE = re.compile(
+    r"(?<![A-Za-z])(?:" +
+    "|".join(re.escape(c) for c in _EXPLANATORY) + r")(?![A-Za-z])",
+    re.IGNORECASE)
+
+# Where one clause of an admission ends and the next begins.  `:` is here
+# because `subprocess.call`'s admission uses it to introduce the word's own
+# domain ("the child's exit status word: 0..255 for a normal exit, or -N for a
+# death by signal N") and a colon-separated tail is a separate claim from the
+# phrase before it in exactly the way a comma-separated one is.
+_CLAUSE_END_RE = re.compile(r"[;.,:]")
+
+# A word of a clause, as opposed to a number or a delimiter.  `len >= 4` drops
+# the two- and three-letter words of the corpus's prose ("a", "is", "of", "in")
+# without a list of them, and the function words that survive are excluded
+# explicitly: this is a CLOSED class of grammar, not a list of phrases that
+# overclaim, which is the difference between the two lists in this file.
+_FUNCTION_WORDS = frozenset((
+    "about", "above", "after", "against", "also", "among", "another", "around",
+    "because", "before", "being", "below", "between", "both", "cannot", "could",
+    "does", "doing", "done", "down", "during", "each", "either", "else",
+    "enough", "every", "from", "further", "have", "having", "here", "into",
+    "itself", "less", "made", "make", "many", "more", "most", "much", "must",
+    "near", "neither", "never", "next", "none", "only", "onto", "other",
+    "others", "over", "same", "says", "shall", "should", "since", "some",
+    "such", "than", "that", "their", "them", "then", "there", "these", "they",
+    "this", "those", "through", "thus", "under", "until", "upon", "were",
+    "what", "when", "where", "which", "while", "will", "with", "within",
+    "without", "would", "your",
+))
+_WORD_RE = re.compile(r"[A-Za-z]+")
+
+# A clause with a numeral in it is naming a VALUE, whatever else it says: this is
+# the "or -N for a death by signal N" arm of every status contract in the tree,
+# and it is why a range or a sentinel is enough for a clause to count as a
+# constraint on the word without naming the word.
+_HAS_DIGIT_RE = re.compile(r"\d")
+
+
+def _content_words(text: str) -> set:
+    """The words of `text` that could be ABOUT something: len >= 4, not a
+    function word.  Stopwords are excluded because "…that is what the kernel
+    returns" and a head clause that happens to contain "that" must not count as
+    agreeing about the answer."""
+    return {w.lower() for w in _WORD_RE.findall(text)
+            if len(w) >= 4 and w.lower() not in _FUNCTION_WORDS}
+
+
+def _sentence_head(text: str, at: int) -> str:
+    """The part of `text` before offset `at`, back to the start of its sentence.
+
+    The sentence rather than the clause, because the answer is named once and
+    then talked about: "the child's exit status word: 0..255 for a normal exit,
+    meaning it is never negative there" has its answer named four clauses before
+    the connective, and the connective's clause is about the word by reference
+    to a noun phrase that is not in front of it.
+    """
+    start = 0
+    for m in re.finditer(r"[;.]", text[:at]):
+        start = m.end()
+    return text[start:at]
+
+
+def _explanation_clause(text: str, at: int) -> str:
+    """The clause the connective at `at` introduces, up to the next boundary."""
+    m = _CLAUSE_END_RE.search(text, at)
+    return text[at:m.start()] if m else text[at:]
+
+
+def _rule_value_attached_claim(contract: Contract) -> str:
+    """Why `contract`'s text attaches a claim about the world to the answer, or
+    '' when every clause it explains is a constraint on the word itself.
+
+    A clause that must mention the answer, and a clause carrying a numeral,
+    passes: the second is a value specification, which is a constraint on the
+    word by construction.  The message names the connective and quotes the
+    clause, because a writer who is refused has to be able to see which of their
+    own clauses the rule read as a claim about the host.
+    """
+    text = contract.assumes
+    for m in _EXPLANATORY_RE.finditer(text):
+        tail = _explanation_clause(text, m.end())
+        if _HAS_DIGIT_RE.search(tail):
+            continue
+        answer = _content_words(_sentence_head(text, m.start()))
+        if answer & _content_words(tail):
+            continue
+        return (f"admitted contract {contract.qualified} "
+                f"{contract.assumes!r} attaches a claim to its answer with "
+                f"{m.group(0)!r}, and the clause it introduces "
+                f"({tail.strip()!r}) names none of the answer's own words "
+                f"({', '.join(sorted(answer)) or 'none'}), so it is a claim "
+                f"about the HOST rather than about the word the host returns. "
+                f"An admitted contract may constrain what the host RETURNS; a "
+                f"claim about what the host DOES is not an admission, it is an "
+                f"unproved assertion with a proof attached to it. Say it about "
+                f"the word — \"… {m.group(0)} …\" naming the answer, or the "
+                f"answer's own domain (\"0..255\", \"a non-zero word\") — and "
+                f"the rule passes.")
+    return ""
+
+
+def _rule_no_text(contract: Contract) -> str:
+    if contract.assumes:
+        return ""
+    return (f"admitted contract {contract.qualified} is admitted with no text. "
+            f"A contract has to say what it assumes of the host: a `sorry` "
+            f"whose statement is empty is not a claim of trust, it is an absence "
+            f"of one.")
+
+
+def _rule_overclaim_phrase(contract: Contract) -> str:
+    low = contract.assumes.lower()
+    for phrase, why in _OVERCLAIM:
+        if phrase in low:
+            return (f"admitted contract {contract.qualified} admits "
+                    f"{contract.assumes!r}, which says {why}. An admitted "
+                    f"contract may constrain what the host RETURNS; a claim "
+                    f"about what the host DOES is not an admission, it is an "
+                    f"unproved assertion with a proof attached to it.")
+    return ""
+
+
+# The rules, in the order they run, as `(name, fn)`.  The NAMES are load-bearing
+# in two places and neither is bookkeeping: `test_formal_admitted.py`'s
+# `SCOPE_PROBES` is keyed by them, so a rule nothing exercises is reported
+# rather than passing quietly, and every refusal carries the name of the rule
+# that fired, so a writer who is refused can find it here.
+_SCOPE_RULES = (
+    ("no_text", _rule_no_text),
+    ("overclaim_phrase", _rule_overclaim_phrase),
+    ("value_attached_claim", _rule_value_attached_claim),
+)
+SCOPE_RULES = tuple(name for name, _fn in _SCOPE_RULES)
+
+
 def contract_text_is_scoped(contract: Contract) -> str:
     """'' when the contract only constrains the ANSWER; why not otherwise.
 
     A cheap text check, and deliberately so: its job is to stop an admission
-    that quietly grew a behavioural claim, and the cheapest instrument for that
-    is a list of the phrases such a claim is written with.  It is not a
-    judgement about whether an assumption is reasonable — nobody can check that
-    from here, and the assumption's whole point is that it is not checkable.  It
-    is a check that the assumption is about the ANSWER, which is a shape
-    question.
+    that quietly grew a claim about the host, and the cheapest instrument for
+    that is a text rule.  It is not a judgement about whether an assumption is
+    reasonable — nobody can check that from here, and the assumption's whole
+    point is that it is not checkable.  It is a check that the assumption is
+    about the ANSWER, which is a shape question.
+
+    Three rules, and the second and third are different IN KIND rather than
+    three entries in one table: `no_text` says a contract has to say something,
+    `overclaim_phrase` is the phrase list every overclaim in this tree has been
+    written with, and `value_attached_claim` is the structural rule for the
+    shape a phrase list cannot see — a claim about the host's state attached to
+    a value by an explanatory connective.  The third's own comment states what
+    it cannot see, which is the honest limit of a text check and the reason the
+    `truth` probes exist beside it.
     """
-    low = contract.assumes.lower()
-    for phrase, why in _OVERCLAIM:
-        if phrase in low:
-            return (f"{contract.qualified} admits {contract.assumes!r}, which "
-                    f"says {why}. An admitted contract may constrain what the "
-                    f"host RETURNS; a claim about what the host DOES is not an "
-                    f"admission, it is an unproved assertion with a proof "
-                    f"attached to it.")
-    if not contract.assumes:
-        return (f"{contract.qualified} is admitted with no text. A contract has "
-                f"to say what it assumes of the host: a `sorry` whose statement "
-                f"is empty is not a claim of trust, it is an absence of one.")
+    for name, rule in _SCOPE_RULES:
+        why = rule(contract)
+        if why:
+            return f"rule `{name}`: {why}"
     return ""
 
 

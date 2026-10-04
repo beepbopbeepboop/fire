@@ -882,5 +882,173 @@ class TestBitwiseNotTheRunTestTypechecks(unittest.TestCase):
                                      f"file admits none")
 
 
+# ── the ROUTE the AST bridge's own doc measured, pinned against the toolchain ──
+#
+# `MojoExpr.call` carries ONE `MojoExpr`, so a call with two arguments has no
+# faithful AST and `eval_eq_mojo` is false for it
+# (`bugs/FORMAL_ast_bridge_carries_one_argument_per_call.md`).  That doc names
+# three ways to widen it and says the first is a "0.3-second experiment", which
+# is this class: three Lean files, each answering one question, all of them
+# things the NEXT worker would otherwise re-derive by hand.
+#
+# Why a test and not a paragraph in the bug doc.  All three answers are facts
+# about the TOOLCHAIN, not about this tree, and each one is the kind that is
+# expensive to re-derive and cheap to get wrong: (1) whether a `mutual` block
+# with an explicit recursion over the argument list keeps `evalExpr` STRUCTURAL,
+# which is the property every `rfl` in the library depends on; (2) what actually
+# goes wrong with the `List.foldl` spelling the doc records having measured --
+# and the answer is NOT the error message the doc quotes; (3) that `induction`
+# cannot be used on a nested inductive at all, which is what forces
+# `evalExpr_congr`'s rewrite.  A toolchain change flips (1) or (2), and then the
+# doc's route list is stale in a way no reader would notice.
+#
+# No library, no `lib/ProofLib.olean`, 0.3 s a file: these are `Nat`s and a
+# two-argument function type, which is the same shape `evalExpr`'s own signature
+# has (`String -> UInt64 -> UInt64` is `String -> Nat -> Nat` here, so the
+# HANDLER IS A PARAMETER exactly as it is in the library -- that is the half of
+# the doc's experiment that does not reproduce).
+#
+# IF THIS CLASS FAILS: the toolchain changed, and the doc's route list has to be
+# re-measured rather than re-read.  If `lib/ProofLib.lean`'s `call` ever carries
+# a `List MojoExpr`, step 1 of that doc has landed and this class has nothing
+# left to say.
+NESTED_HEADER = """inductive E where
+  | int (v : Nat)
+  | var (n : String)
+  | call (name : String) (args : List E)
+"""
+
+RFL_PROOFS = """def handler : String -> Nat -> Nat := fun n a => if n = "main" then a else 0
+example : ev handler 0 (.call "main" [.int 1, .int 2]) = 2 := rfl
+example : ev handler 0 (.int 5) = 5 := rfl
+example : ev handler 0 (.call "other" [.int 1, .int 2]) = 0 := rfl
+"""
+
+# Route 1, the doc's first choice: a `mutual` block, with the argument fold
+# written as an explicit recursion on `args` so the recursive application is a
+# visible subterm.
+MUTUAL_ROUTE = """mutual
+  def ev (cf : String -> Nat -> Nat) (env : Nat) (e : E) : Nat :=
+    match e with
+    | .int v => v
+    | .var _ => env
+    | .call n args => cf n (evArgs cf env args 1)
+  def evArgs (cf : String -> Nat -> Nat) (env : Nat) (args : List E) (acc : Nat) : Nat :=
+    match args with
+    | [] => acc
+    | a :: as => evArgs cf env as (acc * ev cf env a)
+end
+
+""" + RFL_PROOFS
+
+# The spelling the doc quotes a "failed to infer structural recursion" error
+# for.  It is here because that error DOES NOT REPRODUCE: the file elaborates,
+# and what it compiles to is a well-founded fixpoint that does not reduce -- so
+# `evalExpr_int` and its 25 siblings lose `rfl` with nothing in the output
+# pointing at the fold.
+FOLDL_ROUTE = """def ev (cf : String -> Nat -> Nat) (env : Nat) (e : E) : Nat :=
+  match e with
+  | .int v => v
+  | .var _ => env
+  | .call n args => cf n (args.foldl (fun acc a => acc * ev cf env a) 1)
+
+""" + RFL_PROOFS
+
+# What `evalExpr_congr` does today, on the same nested type.
+INDUCTION_ROUTE = """theorem ev_congr (e1 e2 : E) (h : e1 = e2) : True := by
+  induction e1 <;> trivial
+"""
+
+
+class TestTheNestedExprRoutes(unittest.TestCase):
+    """The three Lean facts `MojoExpr.call (args : List MojoExpr)` depends on."""
+
+    @classmethod
+    def setUpClass(cls):
+        lean = _lean()
+        if not lean:
+            raise unittest.SkipTest("lean not installed (see ./lean-toolchain)")
+        from formal.lean import run_lean
+        cls.tmp = tempfile.mkdtemp(prefix="nested-expr-")
+
+        def check(text):
+            path = os.path.join(cls.tmp, "Case.lean")
+            with open(path, "w") as f:
+                f.write(NESTED_HEADER + "\n" + text)
+            run = run_lean(lean, [os.path.basename(path)], cwd=cls.tmp)
+            return run.returncode, (run.stdout or "") + (run.stderr or "")
+
+        cls.mutual = check(MUTUAL_ROUTE)
+        cls.foldl = check(FOLDL_ROUTE)
+        cls.induction = check(INDUCTION_ROUTE)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(getattr(cls, "tmp", ""), ignore_errors=True)
+
+    def test_an_explicit_recursion_over_the_arguments_keeps_the_evaluator_reducible(self):
+        """Route 1 WORKS: it elaborates, and every `rfl` still closes.
+
+        The second half is the one that matters and the one the doc called out:
+        "whether Lean's structural recursion then accepts the nested occurrence
+        is a 0.3-second experiment ... it is the FIRST thing to try because it
+        is the only route that leaves `evalExpr` reducible and every `rfl`
+        intact". The three `rfl`s are the whole assertion: a two-argument call
+        evaluated through the handler, a non-call node, and a name the handler
+        does not answer -- so a version that reduced only the `call` case would
+        fail the second of them.
+        """
+        rc, out = self.mutual
+        self.assertEqual(rc, 0,
+                         "the `mutual` + explicit-list-recursion route does not "
+                         "elaborate, or an `rfl` in it failed:\n" + out)
+        self.assertNotIn("error", out, "and it said no error:\n" + out)
+
+    def test_the_fold_spelling_does_not_reduce_rather_than_failing_to_elaborate(self):
+        """Route 3 is DEAD, and not for the reason the doc records.
+
+        The doc quotes Lean's "failed to infer structural recursion ... Cannot
+        use parameter #1" and attributes the whole consequence to it.  On this
+        toolchain that error does not reproduce: the file ELABORATES, and the
+        consequence arrives the quiet way instead -- `evalExpr` compiles to a
+        well-founded fixpoint, so `rfl` fails even on `.int 5`, which is the
+        shape every `evalExpr_*` lemma in `lib/ProofLib.lean` has.  A worker
+        following the doc's quoted error would be looking for a message Lean
+        does not print, and would read 26 `rfl` failures as 26 separate
+        problems.
+        """
+        rc, out = self.foldl
+        self.assertEqual(rc, 1,
+                         "the fold spelling now ELABORATES and its `rfl`s hold, "
+                         "so the toolchain changed and the doc's route list has "
+                         "to be re-measured:\n" + out)
+        self.assertIn("Type mismatch", out,
+                      "and it failed for some reason other than a failed `rfl`:\n"
+                      + out)
+        self.assertNotIn("structural recursion", out,
+                         "and it is not Lean's structural-recursion error after "
+                         "all -- the doc quotes one, so a worker would go "
+                         "looking for it:\n" + out)
+
+    def test_induction_cannot_be_used_on_a_nested_inductive(self):
+        """What forces `evalExpr_congr`'s rewrite, pinned so it is not re-tried.
+
+        The doc records this as a refusal with a pointer at the recursor.  It is
+        here because it is the one fact of the three that a reader is most
+        likely to believe has been fixed upstream, and because it is what makes
+        step 1 more than 58 lines: the congruence lemma every generated
+        `eval_eq_mojo` reaches has to keep its NAME and STATEMENT and change
+        only its proof, or every generated proof moves with it.
+        """
+        rc, out = self.induction
+        self.assertNotEqual(rc, 0,
+                            "`induction` on a nested inductive now WORKS, so "
+                            "`evalExpr_congr` may keep its proof and step 1 is "
+                            "smaller than the doc says:\n" + out)
+        self.assertIn("nested inductive", out,
+                      "and it was refused for some reason other than the nesting:"
+                      "\n" + out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -294,7 +294,8 @@ CASES = [
     # conversion is a DIFFERENT construct and it was refused for a different
     # reason: `as_c_string_span()` builds a `CStringSpan`, and the value-method
     # path had no lowering for it ("is a method call on a value, and this
-    # backend lowers only append, close, write … and the string methods").
+    # backend lowers only append, clear, close, write … and the string
+    # methods").
     #
     # The lowering is the IDENTITY and not a guess: on this path a `String` IS
     # its own address (a literal is NUL-terminated, so its address is its
