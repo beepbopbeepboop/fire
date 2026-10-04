@@ -6842,9 +6842,11 @@ BOTH_ARCH_CASES = [
        "    return d0(n)\n", 2, None),
     # ── A DELEGATING CONSTRUCTOR OVER A STRUCT OF THIS MODULE ──────────────
     #
-    # The last reason `bugs/FORMAL_receiver_stored_in_a_field.md`'s delegating
-    # row was refused. It is a THREE-step deadlock between two decisions that
-    # were each individually right:
+    # A DELEGATING CONSTRUCTOR storing a frame address into a field of a
+    # struct that outlives it — the shape that was refused until
+    # `model.init_stores_a_parameter_struct` landed (2026-10-03), and what it
+    # took was closing a THREE-step deadlock between two decisions that were
+    # each individually right:
     #
     #   1. `model.struct_nested_frame_fields` PLACED a nested frame in every
     #      field whose declared type names a framed struct of this module and
@@ -10505,8 +10507,7 @@ CONSTRUCTION_REFUSALS = [
      None),
 # (8) The SAME construction into a field DECLARED with that struct's type, and
     # **this one used to be a refusal and is now the row that says why it is
-    # not** (`model.init_stores_a_parameter_struct`, 2026-10-03,
-    # `bugs/FORMAL_receiver_stored_in_a_field.md`).
+    # not** (`model.init_stores_a_parameter_struct`, 2026-10-03).
     #
     # It was refused as "a store over a placed nested frame", and the PLACEMENT
     # is what made the store unsound — `struct_nested_frame_fields` reserves a
