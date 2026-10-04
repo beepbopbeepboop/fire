@@ -704,6 +704,15 @@ class X86_64Codegen:
         # branch from a short-circuit `and`/`or`'s (same reason, and the same
         # `cond_branches` key, as formal/arm64_codegen.py).
         self._cond_branch_pcs = []
+        # ADDRESSES of the calls this emitter made as its OWN — currently the
+        # stack-floor guard's `exit` trap, one per guarded prologue.  Published
+        # in `compile()`'s `info` as `compiler_traps`, and read by
+        # `formal/x86_64_proof_gen.py` so a call site the COMPILER emitted is not
+        # read as a call site the PROGRAM makes.  See `_emit_stack_floor_guard`
+        # for why that distinction is the difference between a run test and no
+        # run test, and `bugs/FORMAL_x86_64_run_tests_are_gone_since_the_stack_floor_guard_emits_exit.md`
+        # for the measurement.
+        self._compiler_trap_addrs: list = []
         # The functions whose prologue carries the stack-floor guard, filled by
         # `compile()` once the whole image's call graph is known — see
         # `model.stack_floor_guarded_names`. The x86-64 twin of arm64's, from the
@@ -958,6 +967,14 @@ class X86_64Codegen:
             "func_name": first_func_name,
             "external_syms": external_syms,
             "extern_calls": extern_calls,
+            # The subset of `extern_calls` this EMITTER made as its own — today
+            # only the stack-floor trap, once per guarded prologue.  Published so
+            # a consumer can tell a call the PROGRAM makes from one the compiler
+            # made and cannot reach; `_run_tests_section` in
+            # `formal/x86_64_proof_gen.py` is the consumer, and the reason (with
+            # the unreachability argument this is worth) is on
+            # `_emit_stack_floor_guard`.
+            "compiler_traps": sorted(self._compiler_trap_addrs),
             "test_input": self.test_input,
             # EVERY entry argument's value, in order — the proof generator's
             # entry state is built from this list, so a two-parameter entry has
@@ -1566,6 +1583,35 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
         R10 and R11 are the pair `_emit_global_init` and the frame paths already
         use, so nothing here borrows a register.
+
+        **The trap's `exit` is recorded as a COMPILER call, not a program call.**
+        `_emit_call_exit` goes through `_emit_extern_call`, so the trap puts an
+        `extern_calls` entry in EVERY image with an entry — and since `e11f066d`
+        put the guard in every such prologue, that entry was in every image.
+        `formal/x86_64_proof_gen.py::_run_tests_section` suppresses the whole run
+        test for an image with any extern call, on the true ground that the model
+        has no memory for a `__TEXT,__stubs` trampoline; measured, that
+        suppression then fired on every program on this backend, so x86-64
+        emitted ZERO run tests and ZERO termination obligations
+        (bugs/FORMAL_x86_64_run_tests_are_gone_since_the_stack_floor_guard_emits_exit.md).
+        So the trap's address goes into `_compiler_trap_addrs` and is published as
+        `info["compiler_traps"]`, and the generator subtracts those addresses from
+        the list it refuses on.  The unreachability the subtraction rests on is
+        this function's own emitted sequence, and it needs nothing but "a load
+        from unmapped memory reads 0":
+
+            MOV R10, [R11] ; TEST R10, R10 ; JNE done
+              -> the load reads 0, so `JNE` is NOT taken and control falls into
+                 the "first caller sets it" half
+            MOV R10, RSP ; SUB R10, BUDGET ; MOV [R11], R10
+            done: MOV R11, RSP ; CMP R11, R10 ; JAE ok
+              -> R10 = SP - BUDGET and R11 = SP, so SP >= SP - BUDGET, the carry
+                 is clear and `JAE` IS taken: control lands on `ok`, which is the
+                 body's first instruction
+
+        which holds for every input and every function.  arm64 needs none of this
+        because its trap is a raw `svc`, which is IN the image and which
+        `lib/ProofLib.lean` decodes.
         """
         if self._globals_base is None:
             # No `__DATA`, so no word to keep the floor in. `formal/build.py`
@@ -1605,7 +1651,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_jcc_rel32(COND_AE, 0))
         self.asm.emit_label_rel32(ok_label, here_offset=-4)
         self.asm.label(trap_label)
-        self._emit_call_exit(M.STACK_TRAP_STATUS)
+        self._compiler_trap_addrs.append(
+            self._emit_call_exit(M.STACK_TRAP_STATUS))
         # `label`, not `emit_label_rel32`: this DEFINES where the branch above
         # goes, and it lands on the first instruction of the BODY. Recording a
         # relocation here would be a second branch to a label nothing defines.
@@ -2329,24 +2376,35 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_stmt(s)
 
 
-    def _emit_extern_call(self, name: str) -> None:
+    def _emit_extern_call(self, name: str) -> int:
         """Call an unbound symbol, in whichever of the two extern forms the
-        target binary format uses (see __init__'s `extern_style`)."""
+        target binary format uses (see __init__'s `extern_style`).
+
+        Returns the call site's absolute address — the same word `compile()`
+        publishes in `info["extern_calls"]`, so a caller that knows the call it
+        just emitted is the compiler's own (the stack-floor trap) can record
+        that address instead of leaving the proof generator to guess."""
         if self.extern_style == "got":
             self.asm.emit_extern_call_got(name)
         else:
             self.asm.emit_extern_call(name)
+        return self.asm.extern_refs[-1][1]
 
-    def _emit_call_exit(self, status: int) -> None:
+    def _emit_call_exit(self, status: int) -> int:
         """Call the C library's `exit(status)`.
 
         The extern path (a stub the loader binds) rather than a raw syscall,
         because the syscall number for exit differs between Darwin and Linux
         and the formal x86-64 path emits the same code for both — the binary
-        format, not the instruction stream, is what differs per platform."""
+        format, not the instruction stream, is what differs per platform.
+
+        Returns the call site's address; see `_emit_extern_call`.  Every caller
+        must decide for ITSELF whether that call is reachable — the difference
+        is the whole of `info["compiler_traps"]`, and `_emit_diverge` (a
+        `raise`, which the program really does reach) must never claim one."""
         self._emit_mov_imm(Reg.RDI, status)
         self._emit_mov_imm(Reg.RAX, 0)   # AL = 0 vector registers (varargs)
-        self._emit_extern_call("exit")
+        return self._emit_extern_call("exit")
 
     def _emit_diverge(self) -> None:
         """Leave the machine: run every enclosing finally, then `exit(1)`.

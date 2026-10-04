@@ -548,7 +548,17 @@ def _run_tests_section(func_name: str, test_input: int, externs: list = None,
     termination obligation fails — for a program whose arithmetic is perfectly
     fine.  Emitting the obligations anyway turns a known limitation into a
     build failure on every program that prints, which is most of them; naming
-    the symbols in a comment instead says what is actually true."""
+    the symbols in a comment instead says what is actually true.
+
+    `externs` must therefore be the PROGRAM's calls, not the image's: the
+    emitter's own — the stack-floor guard's `exit` trap, in every prologue since
+    `e11f066d` — is subtracted by `_program_externs` before it reaches here,
+    because that call is one the model provably never executes (the guard's
+    `JAE` is always taken; `formal/x86_64_codegen.py::_emit_stack_floor_guard`
+    spells out the sequence and the argument).  Reading the trap as a program
+    call is what removed every run test from this backend:
+    bugs/FORMAL_x86_64_run_tests_are_gone_since_the_stack_floor_guard_emits_exit.md
+    """
     if placeholder:
         # The run test's whole value is that it compares the MODEL against the
         # MACHINE.  When the model is a placeholder the comparison is against
@@ -611,6 +621,34 @@ def _run_tests_section(func_name: str, test_input: int, externs: list = None,
             + " = " + AP._apply_args('mojo', vv) + " := by\n"
             f"  native_decide\n")
     return "\n".join(out) + "\n"
+
+
+def _program_externs(info: dict) -> list:
+    """The extern calls the PROGRAM makes, as symbol names.
+
+    `info["extern_calls"]` is every unbound call the image carries, and
+    `info["compiler_traps"]` is the subset this backend emitted as its own — the
+    stack-floor guard's `exit`, once per guarded prologue, which `e11f066d` put
+    in EVERY image with an entry.  Subtracting it here is what puts the run
+    tests back: they are the one part of an x86-64 proof that is evidence about
+    the machine rather than about the model, and they were absent from every
+    program on this backend until this function existed
+    (bugs/FORMAL_x86_64_run_tests_are_gone_since_the_stack_floor_guard_emits_exit.md).
+
+    Subtract by ADDRESS, not by symbol.  An image that both traps and prints
+    has two `exit`-vs-`printf` facts to tell apart, and dropping every `exit`
+    would also drop the one a `raise` emits (`_emit_diverge` reaches
+    `_emit_call_exit` and is deliberately NOT a compiler trap, because the
+    program really does get there).
+
+    An image whose `info` has no `compiler_traps` — a dylib, or any emitter that
+    predates the key — is read as having none, which is the conservative
+    direction: its run tests stay suppressed rather than being restored on a
+    call that may be reachable.
+    """
+    traps = set(info.get("compiler_traps") or ())
+    return [e.get("sym") for e in (info.get("extern_calls") or ())
+            if e.get("addr") not in traps]
 
 
 def generate_x86_64_proof(prog, code, info) -> str:
@@ -821,7 +859,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
     parts.append(_compile_correct_section(func_name, arity))
     parts.append(_run_tests_section(
         func_name, test_input,
-        [e.get("sym") for e in (info.get("extern_calls") or [])],
+        _program_externs(info),
         placeholder=model_placeholder,
         arity=arity, entry_values=entry_values))
     _certs, _total = _decode_function_body(code, info, func_offset)

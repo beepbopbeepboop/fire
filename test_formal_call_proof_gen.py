@@ -1424,6 +1424,180 @@ class TestLoopContractBlocks(unittest.TestCase):
                              f"{sorted(cited - defined)}")
 
 
+class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
+    """An `exit` the COMPILER emits is not an `exit` the PROGRAM makes.
+
+    `e11f066d` put the stack-floor guard in the prologue of every image with an
+    entry, and on x86-64 the guard's trap is a call to the C library's `exit`
+    (`formal/x86_64_codegen.py::_emit_call_exit` takes the extern path, because
+    the syscall number for exit differs between Darwin and Linux).  So every
+    x86-64 image carried an `extern_calls` entry, and
+    `_run_tests_section` refuses the whole run-test section for an image with
+    any extern call — on the true ground that the model has no memory for a
+    `__TEXT,__stubs` trampoline.  Measured, the refusal then fired on EVERY
+    program on this backend: x86-64 emitted zero run tests and zero termination
+    obligations for the whole corpus, and it had emitted them before `e11f066d`.
+    Those are the theorems that compare the machine's result register against
+    `mojo` by `native_decide`, and they are what caught the fabricated string
+    `0` above without a human reading anything
+    (bugs/FORMAL_x86_64_run_tests_are_gone_since_the_stack_floor_guard_emits_exit.md).
+
+    arm64 does not have it, and the asymmetry was the bug: arm64's trap is a
+    raw `svc`, which is IN the image, so its `extern_calls` stayed empty.  The
+    fix is not to make the two backends' traps alike but to let the emitter say
+    which call sites are its own — `info["compiler_traps"]`, subtracted by
+    address, not by symbol, because an image that both traps and `raise`s has two
+    `exit` facts to tell apart.
+
+    Every row of this class is cheap: proof GENERATION, no Lean.  That the run
+    tests which come back are TRUE is a separate claim and only Lean tells it
+    (`TestStringValueInTheModel` below is the assertion that the string model
+    they compare against is the interned address, and Lean accepts the whole
+    file there).
+    """
+
+    # The doc's table, one program per row: two that must be run-tested and one
+    # that must not.
+    PLAIN = "def main(n: Int) -> Int:\n    return 7\n"
+    RETURNS_A_STRING = "def main(n: Int) -> Int:\n    return \"small\"\n"
+    PRINTS = "def main(n: Int) -> Int:\n    print(42)\n    return 7\n"
+
+    @classmethod
+    def setUpClass(cls):
+        import formal.build as fb
+        cls.tmp = tempfile.mkdtemp(prefix="a2-trap-")
+        cls.built = {}
+        for name, src in (("plain", cls.PLAIN),
+                          ("string", cls.RETURNS_A_STRING),
+                          ("prints", cls.PRINTS)):
+            path = os.path.join(cls.tmp, f"{name}.mojo")
+            with open(path, "w") as f:
+                f.write(src)
+            for arch in ("x86_64", "arm64"):
+                try:
+                    r = fb.compile_formal(
+                        path, arch=arch,
+                        output=os.path.join(cls.tmp, f"{name}-{arch}.aout"),
+                        prove=True, check=False)
+                except Exception as e:                # noqa: BLE001
+                    cls.built[(arch, name)] = None
+                    cls.built[(arch, name, "error")] = \
+                        f"{type(e).__name__}: {e}"
+                    continue
+                cls.built[(arch, name)] = open(
+                    r["proof_path"], encoding="utf-8").read()
+                cls.built[(arch, name, "info")] = r["info"]
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _text(self, arch, name):
+        text = self.built.get((arch, name))
+        self.assertIsNotNone(
+            text, f"{name} on {arch} produced no proof: "
+                  f"{self.built.get((arch, name, 'error'))}")
+        return text
+
+    def _info(self, arch, name):
+        info = self.built.get((arch, name, "info"))
+        self.assertIsNotNone(info, f"{name} on {arch} was not built")
+        return info
+
+    def test_x86_64_run_tests_are_back_for_a_program_that_calls_nothing(self):
+        for name in ("plain", "string"):
+            text = self._text("x86_64", name)
+            with self.subTest(program=name):
+                self.assertNotIn("NO RUN TESTS", text,
+                                 "the compiler's own `exit` trap is being read "
+                                 "as a call the program makes")
+                for n in (0, 1, 2, 5, 10):
+                    self.assertIn(f"theorem main_runs_{n} :", text)
+                    self.assertIn(f"theorem main_terminates_{n} :", text)
+
+    def test_a_real_extern_call_still_suppresses_them_and_says_which(self):
+        """The refusal must survive the fix, or the fix is a hole in a wall.
+
+        `print` is a call to a `__TEXT,__stubs` trampoline the model cannot
+        follow, so this image's run really would fail to terminate. The
+        sentence naming `printf` is the reason a reader can tell this row from
+        the two above.
+        """
+        text = self._text("x86_64", "prints")
+        self.assertIn("NO RUN TESTS", text,
+                      "a program that calls printf is being run-tested, so a "
+                      "failure to terminate would be reported as a wrong answer")
+        self.assertIn("printf", text,
+                      "the suppression must name the symbol that caused it")
+
+    def test_the_trap_is_published_as_a_compiler_call(self):
+        """`info["compiler_traps"]` is the emitter's own list, and it is right.
+
+        Every entry must be the address of an `exit` in `extern_calls` — the
+        trap is a real call and must stay accounted for on the link line — and
+        no entry may be any other symbol's, or the subtraction would silence a
+        program call.
+        """
+        for name in ("plain", "string", "prints"):
+            info = self._info("x86_64", name)
+            traps = info.get("compiler_traps")
+            with self.subTest(program=name):
+                self.assertTrue(traps,
+                                "no compiler_traps published, so the generator "
+                                "has nothing to subtract and every run test is "
+                                "suppressed again")
+                by_addr = {e["addr"]: e["sym"]
+                           for e in (info.get("extern_calls") or [])}
+                for addr in traps:
+                    self.assertIn(addr, by_addr,
+                                  f"{addr} is published as a trap but is not "
+                                  f"an extern call at all")
+                    self.assertEqual(by_addr[addr], "exit",
+                                     f"the trap at {addr} is a "
+                                     f"{by_addr[addr]!r} call")
+
+    def test_the_subtraction_is_by_address_not_by_symbol(self):
+        """Two `exit` calls, one the compiler's: the program's must survive.
+
+        This is the case that makes the design a decision rather than a
+        convenience. `_emit_diverge` — a `raise`, a dialect trap used as a
+        statement — reaches the same `_emit_call_exit` and is deliberately NOT a
+        compiler trap, because the program really does get there. Subtract by
+        symbol and every `exit` disappears, which is the defect the run tests
+        were there to catch.
+        """
+        from formal.x86_64_proof_gen import _program_externs
+        trap, reached = 0x1000, 0x2000
+        info = {
+            "extern_calls": [{"sym": "exit", "addr": trap, "kind": "call"},
+                             {"sym": "exit", "addr": reached, "kind": "call"}],
+            "compiler_traps": [trap],
+        }
+        self.assertEqual(_program_externs(info), ["exit"])
+        self.assertEqual(_program_externs(
+            {"extern_calls": info["extern_calls"]}), ["exit", "exit"],
+            "with no traps published both exits are the program's")
+
+    def test_arm64_needs_no_trap_list_and_keeps_its_run_tests(self):
+        """The other backend, and the reason the asymmetry was the bug.
+
+        arm64's trap is a raw `svc`, which `lib/ProofLib.lean` decodes, so its
+        `extern_calls` was always empty for a program that calls nothing and
+        its run tests were never suppressed. Nothing here may change that, and
+        the assertion that it has not is what makes the x86-64 fix a fix rather
+        than a lowering of the bar on both sides.
+        """
+        info = self._info("arm64", "plain")
+        self.assertEqual([e["sym"] for e in (info.get("extern_calls") or [])],
+                         [], "arm64's guard trap is an `svc`, not a call")
+        self.assertFalse(info.get("compiler_traps"),
+                         "arm64 published compiler traps, so its trap is no "
+                         "longer the in-image `svc` this assertion assumes")
+        text = self._text("arm64", "plain")
+        self.assertNotIn("NO RUN TESTS", text)
+        self.assertIn("theorem main_runs_0 :", text)
+
+
 class TestDec1PathContext(unittest.TestCase):
     """The recursive-call arm's unfolding set and the hypothesis it cites.
 
