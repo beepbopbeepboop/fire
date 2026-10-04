@@ -99,6 +99,57 @@ These cross the boundary as opaque pointers to the runtime types in
 | `Dict` / `dict` | `MojoDict *` |
 | `Set` / `set` | `MojoSet *` |
 
+### `Optional[T]` on the formal backends: the payload word, and a NICHE for `None`
+
+**A formal value is one 64-bit word, so an `Optional[T]` is one word: the
+payload. `None` is a word `T` cannot produce.** That word is decided by
+`formal/model.py::optional_none_word`, mirrored in `lib/ProofLib.lean` as
+`optionalNoneWord`, and it is per payload type rather than per `Optional`:
+
+| Mojo `T` | the word `None` is |
+|---|---|
+| `String`, `Pointer[T]`, a container, a frame address, any struct of the module | `0` — an address, and no address a program can hold is 0 |
+| `Bool` | `2` — a `Bool` is a word holding 0 or 1 |
+| `Int8`/`Int16`/`Int32`, `UInt8`/`UInt16`/`UInt32` | `1 << w` — a `w`-bit value is sign-extended into a 64-bit register, so `2^w` is outside its range |
+| `Int`, `Int64`, `UInt`, `UInt64`, `Float64`, `Float32`, `DType`, an unstated payload, a struct of another module | **refused** — every word is a value of it, or nothing here says what a value of it is |
+
+So the boundary spellings are:
+
+| Mojo | at the ABI |
+|---|---|
+| `Some(v)` / `Optional[T](v)` | the word `v` — the constructor is the IDENTITY |
+| `None` / `Optional[T]()` | the niche word |
+| `x is None`, `x == None` | `x == niche` — the same question, the same word |
+| `x != None`, `x is not None` | `x != niche` |
+| `x.or_else(d)`, `x.value_or(d)`, `x.or(d)` | `x == niche ? d : x` |
+| `x.unsafe_value()` | `x` — there is no second word to unwrap |
+| `bool(x)`, `if x:` | `x != niche` (`Optional.__bool__` is "does this Optional HAVE a value") |
+
+**Nothing above needs a second register, a hidden word, or a frame**, which is
+the whole reason it is a niche and not a tagged pair: a `w`-bit scalar's niche
+is a word it cannot produce, so the value stays one word and crosses a
+function boundary, a module dylib and a frame slot in the return register like
+any other value. The two-word alternative — `Optional[T]` the ADDRESS of a
+`{tag, payload}` pair — is what a payload with no niche needs, it reuses the
+frame machinery this file's receiver section already documents, and its cost and
+its three measured obstacles are in `bugs/FORMAL_optional_needs_a_niche.md`.
+
+**A client binding one of these symbols needs to know the niche only if it
+hand-builds the value.** For a payload whose niche is 0 — every
+reference-shaped one — a client cannot tell the two apart by construction either,
+which is why the table's word is 0 for exactly that family: an `Optional[String]`
+crossing this boundary uses the same null convention a bare `String` does, and
+one convention is better than two that agree today.
+
+**This row changed an existing contract, and it is a fix rather than a break for
+the same reason the receiver section is.** Before it, `None` was the word 0 for
+EVERY payload, so `Some(0)` and `None` were one word: `if z is None` on
+`var z: Optional[Int] = 0` took the empty branch on both architectures, with no
+diagnostic. Cached artifacts built against the old convention are invalidated by
+the `Stability` section below (their content hash covers the ABI), and a client
+that hard-coded "0 means empty" for a `Bool` or narrow-integer payload needs the
+table above.
+
 ## Functions and methods
 
 - **Free function** `fn name(a: A, b: B) -> R` →
