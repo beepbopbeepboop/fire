@@ -42,6 +42,58 @@ it is a step, not a line.
 the measurement; `formal_declared_param_census.py`'s harness is, and it already
 walks parameter annotations.
 
+### 1a MEASURED 2026-10-04 (`formal25-3`): §1 is not a DEMAND question, and the
+### wall in front of it is bigger than §1
+
+The cost-to-measure line above was followed, and the measurement moves the item.
+**The demand is recorded and the layout crosses; what is missing is that a type
+POSITION is not RESOLVED to the instantiation's name**, and the first place that
+shows is the cross-image frame-holder contract, which compares names.
+
+Four programs, each built on both architectures with
+`fire.py build --formal --no-prove`:
+
+| # | shape | before |
+|---|---|---|
+| 1 | `struct Box[T]: var v: T` + `Box[Int]()` in ONE file | **refused by name** — §9, FIXED 2026-10-04 |
+| 2 | `def twice[T]` + `twice[Int](n)` in ONE file | **builds** (the local specialisation machinery) |
+| 3 | library declares `struct Pair[T]` + a method; program applies `Pair[Int]()` and calls the method | **refused by name** — §9, FIXED 2026-10-04 |
+| 4 | library declares `struct Pair[T]` **and** `def keep(p: Pair[Int]) -> Int`; program applies `Pair[Int]()` and passes it to `keep` | **refused, and the message is the point** |
+
+Row 4's message, verbatim:
+
+```
+build: a Pair receiver is passed to keep() at argument position 0, and keep's own
+manifest says the parameter in that position is a frame holder of Pair: the module
+that defines keep() compiled it that way, so a field re…
+```
+
+`Pair` is the TEMPLATE and `Pair_1_T_3_Int` is the instantiation. `keep` is
+compiled inside the library, where its parameter annotation reads `Pair[Int]` and
+resolves to the template's own name; the caller holds the instantiation, because
+that is the only name it was given. So the demand, the mangling and the layout
+all worked — row 3 gets as far as a method call — and what refuses is two
+spellings of one type.
+
+**So §1's next step is not a second spelling rule; it is a NAME RESOLUTION, and
+it carries a question this document has not asked.** `libA` is compiled ONCE per
+demand set (`demands_key` is part of the artifact's CAS key), and `keep`'s
+annotation names a type whose instantiated name depends on that set. A library
+asked for both `Pair[Int]` and `Pair[String]` has ONE `keep`, so either it is
+compiled per instantiation of the types in its signature — i.e. a function whose
+signature mentions an instantiated type is itself a template — or the annotation
+resolves to a set-independent name and the per-parameter contract carries the
+instantiation rather than a name. **Both are ABI decisions, which is why this
+document is where they belong and a patch is not.**
+
+And the measurement §1 asked for is **0 programs today**, for a reason worth
+recording: a program that needs an instantiation has to write the bracket
+somewhere it can be seen. The only way to obtain a `Pair[Int]` value without
+writing `Pair[Int]()` is a function that returns one — and a function that
+CONSTRUCTS one writes the bracket in the module that declares the template, which
+is row 1's shape. **§1 was unmeasurable until §9 was fixed**, which is the order
+the two were in.
+
 ---
 
 ## 2. A DOTTED application — `mod.Pair[Int]()`
@@ -241,3 +293,76 @@ sufficient.
   rows read from the manifest, and an instantiation adds rows of that shape. No
   instruction, no calling convention, no model change; `formal/dylib`'s proved
   path is exercised unchanged.
+
+---
+
+## 9. FIXED 2026-10-04 (`formal25-3`): a STRUCT template the module DECLARES can
+## itself apply — it was refused by name
+
+**Found while measuring §1** (§1a), and it was not in this document: the one
+demand set no caller could see was a module's OWN.
+
+`formal/monomorph.py::demands` skips a consumer's own templates on purpose, and
+`formal/imports.py::instantiation_demands` passes `own_templates` for the same
+reason — `demands`'s own docstring gives it, and the reason is **true of a
+FUNCTION template and false of a STRUCT template**:
+
+| shape | before | why |
+|---|---|---|
+| `def twice[T]` beside `twice[Int](n)` | builds | `_specialization_of` → `comptime.specialization_name` is a CALL specialisation and needs no declaration |
+| `struct Box[T]` beside `Box[Int]()` | **refused on both architectures** | a call to a name this unit does not compile: `_callee_defs(functions)` is a table of FUNCTIONS, and the instantiation is emitted under a mangled name nothing had emitted |
+
+```
+build: Box[…](…) calls a name this unit does not compile, so the brackets cannot
+be bound. If `Box` is a generic of another module then its instantiation is the
+boundary symbol … so a call arriving here asked for none …
+```
+
+The sentence is true of the file and the file is not wrong: it asks an importer's
+question of a module's own body. One field or two, executable or library — the
+same refusal in all four shapes.
+
+**What landed.** `formal/imports.py::imported_instantiations` asks for the
+module's own demands as well (`own=()`, this file's own templates) and
+`_own_instantiations` runs them through the same `instantiate_all` /
+`rewrite_instantiation_calls` the imported half uses, so the declaration and the
+rewrite stay one table — the property that function is built around. **The
+instantiated source is APPENDED to `stmts`,** and that is the half the imported
+set does not need: an imported template's body is compiled into the library that
+declares it, while an executable IS the whole compilation unit. The intermediate
+state is worth recording because it is the trap: with the declaration but not the
+body, a program constructed the struct, read and wrote its fields, and then failed
+the first METHOD call with the link audit's sentence — a message about the link
+line where the construct is `a.get()`. **A declaration without its body makes the
+diagnostic worse, so the body is not optional to this change.**
+
+Measured after: the one-file case builds and RUNS on both architectures, and so
+does the cross-module case with a method (§1a's rows 1 and 3).
+`test_formal_monomorph.py`'s `a struct template the module declares can itself
+apply` is the differential on both, with TWO instantiations in one file (prints 7
+then 1) because the failure this must not have is the two collapsing onto one
+symbol; its `lib=None` option is the one-file shape, which no case had.
+
+### 9a What is NOT fixed: the LIBRARY half, and why half of it is worse than none
+
+A module that applies its own template **and is built as a dylib** is still
+refused, with the same message. `compile_formal_dylib` re-parses each source and
+never calls `_imported_structs`, so `imported_instantiations` — which mutates
+`stmts` — is not on that path at all; the two halves that would fix it are
+`build_module_dylib`'s `mine` (the demand set, which `own_templates` empties) and
+a rewrite of the call sites in the statements `compile_formal_dylib` parses
+itself. Compiling the instantiation into the library **without** the rewrite is
+the trap above with a stranger message, which is why it is not done here.
+
+§1a is upstream of it for a library, because §1a is the name resolution and the
+library's own body needs the same one: `keep(p: Pair[Int])` inside `libA` names
+the template whatever the demand set is.
+
+### 9b The measurement that put §1a and §9 in this order
+
+`--mix` corpus aside, the ordering is not a preference: §1's construct is
+unreachable until a value of an instantiated type can be obtained at all, and the
+only source of one is a function that constructs it, which writes the bracket in
+the module that declares the template. **Anything that measures §1 has to fix
+§9 first**, and a planner reading this document in the other order will measure
+zero and conclude the item is worth nothing.
