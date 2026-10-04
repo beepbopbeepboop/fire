@@ -175,6 +175,14 @@ def _gmi_iter_calls(stmts, _seen=None):
                     stack.append(sub)
 
 
+# The marker an argument the recogniser DECLINED contributes to
+# `_gmi_apply_call_site_param_evidence`'s evidence set. A string, so it is a
+# member of the same set the ctypes are and needs no second table; named so a
+# reader of that set can tell it from a real ctype. See that function's
+# evidence-collection loop for why an unrecognised argument must be counted.
+_UNDECLINED_ARG = '<an argument _gmi_literal_ctype declined>'
+
+
 def _gmi_apply_call_site_param_evidence(gen, stmts):
     """Ground an unannotated parameter in what its CALLERS actually pass.
 
@@ -226,13 +234,36 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
             continue
         for pname, arg in zip(params, args):
             ctype = _gmi_literal_ctype(arg)
+            _ev = evidence.setdefault((fname, pname), set())
             if ctype is not None:
-                evidence.setdefault((fname, pname), set()).add(ctype)
+                _ev.add(ctype)
+            else:
+                # An argument the recogniser DECLINED is still an argument, and
+                # it has to be counted or `len(ctypes) == 1` below does not
+                # mean what it says. `_gmi_literal_ctype` answers None for
+                # everything context-dependent (an identifier, an arithmetic
+                # expression, a call result) -- a `FloatLiteral` among them --
+                # so `f(2.5)` and `f([1, 2])` produced the ONE-member set
+                # `{'MojoList *'}`, which reads as unanimous and is not: the
+                # double was never weighed. A consumer that believes it types
+                # the parameter as a list pointer, and the OTHER call site
+                # then fails to compile:
+                #
+                #     prog.py:5:3: error: cannot convert to a pointer type
+                #     5 | f(2.5)
+                #
+                # So the sentinel is recorded, and the guard below
+                # treats it as "not unanimous" -- which is what this function's
+                # own contract already says ("One ambiguous or absent call site
+                # leaves the inference exactly as it was").
+                _ev.add(_UNDECLINED_ARG)
 
     containers = ('MojoList *', 'MojoSet *', 'MojoDict *')
     for (fname, pname), ctypes in evidence.items():
         if len(ctypes) != 1:
             continue  # not unanimous
+        if _UNDECLINED_ARG in ctypes:
+            continue  # every call site's argument was declined: silence, not agreement
         # `list(ctypes)[0]`, NOT `next(iter(ctypes))`: this function is part
         # of the self-host closure, and `next` is not one of the runtime
         # symbols the compiled path links (caught by `selfhost` as an
