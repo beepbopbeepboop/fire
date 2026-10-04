@@ -1,4 +1,4 @@
-# FORMAL_std_builtin_sys_time_slice_2026-10-04: round 2 over eight `std/` directories — one root cause fixed, and the claim census that says why the other 74 files are not this slice's
+# FORMAL_std_builtin_sys_time_slice_2026-10-04: round 2 over eight `std/` directories — one root cause fixed, and the claim census that says why the other 73 refusals are not this slice's
 
 **Slice:** the 85 `.mojo` files under
 `../new-modular/Mojo/stdlib/std/{builtin,math,bit,random,format,utils,sys,time}`
