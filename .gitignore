@@ -81,3 +81,6 @@ abt*_*.pyi
 # keeps artifacts under output/, so a proof built by hand lands in the tree
 # untracked; these are rebuildable from the source, not sources themselves.
 *_proof.lean
+
+# a compiled binary dropped at the repo root by `fire.py build <path>`
+/mine

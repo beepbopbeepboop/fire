@@ -206,7 +206,7 @@ receiver. The only thing standing between that and a silently wrong program is
 `check_value_position_method_reads`, which reports a name the source never
 spells.
 
-`bugs/FORMAL_one_word_struct_field_call_receiver_is_collapsed.md` has the full
+`FORMAL_one_word_struct_field_call_receiver_is_collapsed` has the full
 measurement, the two candidate fixes with why neither was landed (one turns the
 refusal into an unresolved symbol and LOWERS nothing, the other has no measured
 effect at all), and the next step.

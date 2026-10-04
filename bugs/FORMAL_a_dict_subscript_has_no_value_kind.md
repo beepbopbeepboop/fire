@@ -129,7 +129,7 @@ expectations are derived by running the SAME text through CPython:
 this document's other bug: `comptime LIMIT = 3 + 4` was pinned as a REFUSAL and
 is now materialized as 7, because `literal_default_word` folded with
 `fold_literal_expr` instead of being a second, narrower classifier
-(`bugs/FORMAL_a_negative_class_constant_is_not_a_literal.md`, deleted by the
+(`“FORMAL_a_negative_class_constant_is_not_a_literal: `-3` is an `UnaryOp`”`, deleted by the
 commit that fixed it). Both rows now use `N + 4` with `N` a module-level
 constant, which is the shape that is still refused — a value with a FREE NAME in
 it, which the class body cannot resolve.

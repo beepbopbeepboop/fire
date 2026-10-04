@@ -85,7 +85,7 @@ direction.
 one of the formal files whose job is the field-set table. So this file is red and
 nobody runs it: the four failures have been invisible, and `make gate` is green
 over them. That is the shape
-`bugs/TEST_registered_tests_in_no_bucket_never_run.md` was about, with the
+`TEST_registered_tests_in_no_bucket_never_run` was about, with the
 stronger version — this one is not even registered.
 
 ## The exact next step

@@ -39,6 +39,7 @@ import mojo.middle.itcursor as itc
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
+import mojo.backend_gimple.emit_infra as ginf
 
 # Re-export shared helpers from mojo.middle.methods_shared via explicit imports.
 # (Was globals().update(dir(_shared)); self-hosted globals() is a
@@ -73,6 +74,35 @@ from mojo.middle.methods_shared import *  # noqa: F401,F403
 from mojo.middle.methods_shared import (
     _SELFHOST_SIBLING_MODULE_PREFIXES, _as_str, _gmm_callexpr_node, _is_selfhost_sibling_alias, _is_selfhost_source_file, _sms_key
 )
+from mojo.middle.resolve_shared import _is_none_literal
+
+# The value DOMAIN a dict slot's C type lives in, and the runtime helper
+# suffix that reads it back. A `MojoDict` stores every value as one raw
+# int64_t, so "what C type is this slot" is really "which of three readers
+# should read it" — and a dict slot has no room for two answers at once. That
+# is what `d.pop(k, default)` needs: the default and the stored value must be
+# readable by the SAME reader, so both are normalized to one domain name and
+# compared. `_Bool` and every narrower integer spelling share the int domain
+# because that is how `mojo_dict_set_int` / `mojo_dict_pop_int` already store
+# and read them.
+_DICT_VAL_DOMAIN = {'char *': 'char *', 'MojoStr *': 'char *',
+                    'MojoBytes *': 'MojoBytes *',
+                    'double': 'double', 'float': 'double',
+                    'int64_t': 'int64_t', 'int': 'int64_t',
+                    '_Bool': 'int64_t', '': 'int64_t'}
+_DICT_POP_RT = {'char *': ('str', 'char *'), 'double': ('double', 'double'),
+                'int64_t': ('int', 'int64_t')}
+
+
+def _dict_val_domain(ctype):
+    """The `d.pop(k, default)` value DOMAIN of a dict value C type — see
+    `_DICT_VAL_DOMAIN`. A container-valued dict answers its own type (and is
+    handled by the caller's container branch rather than by any runtime
+    reader), and an unrecognised type is its own domain so that a mismatch is
+    a refusal rather than a silent match."""
+    _t = _as_str(ctype)
+    return _DICT_VAL_DOMAIN.get(_t, _t)
+
 # Module-qualified struct identity — the construction-site resolution for the
 # same-bare-name collision fix. See the qualified-constructor case in
 # `_lower_method_call` below and `_struct_cname_by_id` in
@@ -487,8 +517,24 @@ def _lower_bound_method_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr,
     codegen); recover the real pointer through the same int64_t->void*->
     real-type cast dance `_lower_MemberExpr`'s object-lowering path uses
     for the identical situation.
+
+    The NAME is resolved exactly as `_lower_fnptr_call` and
+    `_lower_maybe_bound_call` resolve it, and for the same reason: a
+    module-level global is stored in this module's globals STRUCT, so
+    `gen._c_names.get(fname_raw, fname_raw)` on its own emits a reference
+    to a bare C identifier that does not exist — gcc's "'f' undeclared".
+    `f = m.truthy` at module scope followed by `f()` reached this function
+    (through the `_actual_types` overlay the global store records, which is
+    what makes the callee a bound method at all) and then failed to build
+    for exactly this reason. A captured name goes through `_lower_IdentExpr`
+    too, so it reads `_env->f`.
     """
-    bm_raw = gen._c_names.get(fname_raw, fname_raw)
+    if fname_raw in gen._captures and gen._env_param:
+        _bt, bm_raw = gen.lower_expr(gimple_ctypes.IdentExpr(name=fname_raw))
+    elif fname_raw not in gen.var_types and fname_raw in gen._global_var_types:
+        _bt, bm_raw = gen.lower_expr(gimple_ctypes.IdentExpr(name=fname_raw))
+    else:
+        bm_raw = gen._c_names.get(fname_raw, fname_raw)
     if stored_ctype == 'MojoBoundMethod *':
         bm_type, bm = 'MojoBoundMethod *', bm_raw
     else:
@@ -1096,6 +1142,98 @@ def _lower_struct_attr_call(gen, method, node):
                             f'struct.Struct.{method}() — raises at runtime')
 
 
+def _uncompiled_module_marker(gen, node) -> str:
+    """The module name behind `mod.member(...)` when `mod` is a bare-import
+    marker for a module THIS COMPILE never compiled, else `''`.
+
+    `import argparse` in a compiled program binds a module MARKER: an
+    `int64_t` global initialised to 0 (`_root_globals.argparse = 0`), because
+    `module_loader.can_resolve_module_path('argparse')` is false — there is no
+    source under this checkout's stdlib to compile. Every method on that marker
+    then used to be answered by this file's generic scalar passthrough, which
+    echoes the receiver unchanged: so `ArgumentParser(...)` "constructed" a 0,
+    `add_argument`/`parse_args` echoed the 0 back, and the program computed
+    with a parser that is not a parser, silently, until the first attribute
+    read off the result died with an `AttributeError` naming an attribute of a
+    class the program never built
+    (bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md).
+
+    Keyed on `_module_alias_names`, NOT `imported_symbols`, for the reason that
+    set's own docstring gives at length (an unresolved `from X import name`
+    binding has the identical dict shape, and taking the broader set once
+    wrongly excluded the genuine `block_idx.x` GPU-intrinsic accessor shape).
+    The `MemberExpr`/`IdentExpr` shape is required too: a marker reached by any
+    other spelling is not a call on it.
+
+    Cached per name on `gen` because the answer is a filesystem question and
+    the call site is not."""
+    fn = getattr(node, 'func', None)
+    if not isinstance(fn, gimple_ctypes.MemberExpr):
+        return ''
+    obj = fn.obj
+    if not isinstance(obj, gimple_ctypes.IdentExpr):
+        return ''
+    name = _as_str(obj.name)
+    if name not in getattr(gen, '_module_alias_names', ()):
+        return ''
+    # A module this compiler answers at COMPILE TIME (`re`: see
+    # `module_shared._COMPILE_TIME_CALL_MODULES`) is exempt, and the exemption
+    # is the SAME table the recogniser that makes it compile-time handled reads.
+    # `can_resolve_module_path` below is false for `re` — it asks whether there
+    # is Mojo SOURCE for a module under `TEST_PATH`/`std*`, and the real Python
+    # stdlib is neither — so without this the raise fired on a marker whose
+    # value nothing reads: `re.compile("...")` is stubbed to 0 and `.finditer()`
+    # is answered from `_regex_patterns`, which is the whole design, and raising
+    # turned a working `for m in re.compile(p).finditer(src)` into
+    # `NotImplementedError: module 're' is not compiled into this binary`. That
+    # is a regression against master, caught by
+    # `test_silent_noop_iter.py::finditer_still_lowered`.
+    if gimple_ctypes.compile_time_call_module(name):
+        return ''
+    # A module THIS compile emitted is not a marker, whatever the filesystem
+    # says. `can_resolve_module_path` below answers "is there Mojo SOURCE for
+    # this name under std*/test*", which is false for every PYTHON module of
+    # the compiler itself — `ownership_check`, `ownership_destruct`,
+    # `regex_compile` — yet those are compiled into the binary (they are
+    # `_COMPILER_SOURCES`, hashed into the CAS key for exactly that reason) and
+    # their calls are real extern calls into emitted code. Without this the
+    # raise fired on them, and the self-hosted compiler died on its first
+    # compile with
+    #
+    #   NotImplementedError: ownership_check.check_module: module
+    #   'ownership_check' is not compiled into this binary
+    #
+    # naming a module that was, from a call site (`gimple_codegen.
+    # _check_ownership`) that has been in the compiler since 2026-09-15 and
+    # whose diagnostics every compile depends on.
+    #
+    # `_compiled_modules` is the emission record itself, so this asks the
+    # question that matters — did I write this module's code — rather than a
+    # proxy for it. The two exemptions answer opposite halves and neither
+    # subsumes the other: `compile_time_call_module` is for a module that is
+    # NOT compiled and whose value nobody reads, this one for a module that IS
+    # compiled.
+    if name in (getattr(gen, '_compiled_modules', None) or ()):
+        return ''
+    cache = getattr(gen, '_uncompiled_marker_cache', None)
+    if cache is None:
+        cache = {}
+        gen._uncompiled_marker_cache = cache
+    if name in cache:
+        return cache[name]
+    _info = (gen.imported_symbols or {}).get(name)
+    _mod = _as_str(_info.get('module') or '') if isinstance(_info, dict) else ''
+    _resolvable = True
+    if _mod:
+        try:
+            import module_loader as _mlmod_marker
+            _resolvable = _mlmod_marker.can_resolve_module_path(_mod)
+        except Exception:
+            _resolvable = True      # cannot ask -> assume the module is fine
+    cache[name] = '' if _resolvable else (_mod or name)
+    return cache[name]
+
+
 def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
     func = node.func  # MemberExpr
@@ -1113,7 +1251,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # collections.Counter special case in `_lower_call` documents), so
     # `x = mod_a.Dialog("a")` bound `x` to the MODULE HANDLE itself and a
     # later `x.widgetName` raised a genuine runtime `AttributeError`. See
-    # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md
+    # CODEGEN_same_bare_name_struct_collision_across_modules
     # §4 ("module.Class(...) construction is unresolved on every path").
     #
     # The receiver is the disambiguating signal for a same-bare-named class:
@@ -1121,7 +1259,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `mod_b.Dialog(...)` constructs mod_b's `Dialog` and not whichever of two
     # same-named classes won the bare-name race. With nothing colliding this
     # returns the bare name verbatim, i.e. the pre-existing behaviour exactly
-    # (bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md).
+    # (CODEGEN_same_bare_name_struct_collision_across_modules).
     if (isinstance(func.obj, gimple_ctypes.IdentExpr)
             and func.obj.name in gen.imported_symbols
             and func.obj.name not in gen.struct_field_types
@@ -1174,7 +1312,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # before the receiver is lowered: lowering `UnsafePointer[T]` as an
     # ordinary subscript yields a bogus `mojo_list_get_int` temp and
     # `.alloc()` then falls through to the generic scalar-method stub (see
-    # bugs/CODEGEN_int_of_alloc_struct_pointer_returns_zero.md).
+    # CODEGEN_int_of_alloc_struct_pointer_returns_zero).
     if (func.member == 'alloc'
             and isinstance(func.obj, gimple_ctypes.SubscriptExpr)
             and isinstance(func.obj.obj, gimple_ctypes.IdentExpr)
@@ -1197,7 +1335,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # getfilesystemencoding()`) is invalid C ("assignment to 'char *'
     # from 'int' makes pointer from integer without a cast") — a hard
     # compile failure, not just an imprecise stub. Found via
-    # bugs/CODEGEN_generator_function_Lib_tarfile.md.
+    # “CODEGEN_generator_function: Lib/tarfile.py”.
     if (isinstance(func.obj, gimple_ctypes.IdentExpr) and func.obj.name == 'sys'
             and func.member in ('getfilesystemencoding', 'getdefaultencoding')):
         for a in node.args: gen.lower_expr(a)
@@ -1493,7 +1631,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # rather than falling through to the generic obj.method() dispatch below,
     # which would try to evaluate `super()` as an ordinary call to a bare
     # function named `super` (undefined symbol at link time — see
-    # bugs/consolidated/COMPILE_FAIL_cc_error_ld_returned_n_exit_status.md).
+    # COMPILE_FAIL_cc_error_ld_returned_n_exit_status).
     # Mirrors myinterpreter.py's eval_IdentExpr/_eval_super: `super()` means
     # "the first base class of the struct the enclosing method belongs to".
     if (isinstance(func.obj, gimple_ctypes.CallExpr) and isinstance(func.obj.func, gimple_ctypes.IdentExpr)
@@ -2239,7 +2377,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # itself as the separator string — `mojo_str_join(NULL, parts)`
         # returns "" unconditionally regardless of `parts`, silently
         # dropping every element. See
-        # bugs/CODEGEN_map_over_untyped_param_arg.md (the `shlex.join(map(str,
+        # CODEGEN_map_over_untyped_param_arg (the `shlex.join(map(str,
         # args))` repro this surfaced in) — mojo_shlex_join is a real
         # runtime helper (space-joins its parts, POSIX-quoting each one
         # via shlex.quote's own rule) rather than reusing str.join's
@@ -2442,7 +2580,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # (reverted) eager-execution branch briefly did, now correctly
         # gated behind this EXPLICIT driver call instead of firing on
         # every value-consuming reference to `f()` (see
-        # bugs/CODEGEN_compiled_async_eager_execution_semantic_mismatch.md
+        # CODEGEN_compiled_async_eager_execution_semantic_mismatch
         # — that bug's fix, 9a3a62b, deliberately left bare `x = f()`
         # (no `asyncio.run`) refused, and this still does not touch
         # that: `fname_raw in self._async_api` in _lower_call, a few
@@ -2669,6 +2807,70 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     # exactly what caused the self-host regression noted
                     # above.
                     gen._note_own_func_home(method_name, _mgc_sub_ref, record_scope=False)
+                    # …and register the MEMBER, which a bare `import X`
+                    # never did. `_note_own_func_home` alone is not enough
+                    # and this document's own next step says why: the entry
+                    # `_note_own_func_home` writes is the module's, and a
+                    # bare `import X` records only `imported_symbols['X']`
+                    # -- for the MODULE, not its members. So the re-dispatched
+                    # BARE call found no `imported_symbols['deep_fn']`,
+                    # `_func_mangleable('deep_fn')` was False,
+                    # `_func_csym` produced the bare `_safe_name('deep_fn')`
+                    # with no qualifier and no overload suffix, and
+                    # `_lower_named_call`'s `_is_unknown` branch emitted its
+                    # weak 0-returning stub:
+                    #
+                    #   __attribute__((weak)) int64_t deep_fn (...) {
+                    #     mojo_print ((char *)"deep_fn: unavailable in
+                    #                   compiled mode"); return (int64_t)0; }
+                    #   _t2 = deep_fn (1);
+                    #
+                    # exit 0, no diagnostic beyond the stub's own message,
+                    # and 0 where CPython prints 8. The inline
+                    # (`do_imports`) path emits `deep_deep_fn_9f63a2` for the
+                    # same two files, so the two paths disagreed about the
+                    # same symbol's NAME as well as about whether it exists.
+                    #
+                    # The signature comes from the DEFINING module's own
+                    # parsed FunctionDef via `_resolved_export_entry`, NOT
+                    # from `module_loader`'s text scan: the scan answers
+                    # `int64_t deep_fn (void)` for an unannotated
+                    # `def deep_fn(x)` (it reads signatures off the text),
+                    # which as the only prototype in the file would reject
+                    # its own call site. That is the same upgrade the
+                    # `from X import Y` path performs, through the same two
+                    # helpers -- `bugs/CODEGEN_bare_import_module_
+                    # qualified_call_answers_zero.md`, whose "partial fix
+                    # that is NOT enough, recorded so nobody re-lands it"
+                    # section is the `_note_own_func_home`-only version.
+                    try:
+                        _mgc_exps, _mgc_qual = gen._local_sibling_module_exports(
+                            _mgc_sub_ref)
+                    except Exception:
+                        _mgc_exps, _mgc_qual = None, None
+                    # ONLY when nothing has registered it already. An
+                    # import this compile already resolved properly --
+                    # `_emit_stdlib_import_externs` for a stdlib/test
+                    # module, `_register_link_imports` for a `from X import
+                    # Y` -- has an entry whose signature came from the
+                    # DEFINING module's own compile, and overwriting it with
+                    # a locally rebuilt one produced
+                    # `non-trivial conversion in 'function_decl'` across
+                    # `std/builtin/dtype.mojo` and `std/python/_cpython.mojo`
+                    # (measured). A missing entry is the whole bug; an
+                    # existing one is not this code's to improve.
+                    _mgc_raw = None
+                    if method_name not in gen.imported_symbols:
+                        _mgc_raw = (_mgc_exps or {}).get(method_name)
+                    if _mgc_raw:
+                        _mgc_entry = gen._resolved_export_entry(
+                            _mgc_sub_ref, method_name, _mgc_raw)
+                        if _mgc_entry:
+                            _mgc_entry = dict(_mgc_entry)
+                            _mgc_entry['module'] = _mgc_sub_ref
+                            gen._register_imported_symbol(
+                                method_name, _mgc_entry, method_name,
+                                write_param_types=True)
                     _mgc_bare_node = gimple_ctypes.CallExpr(
                         func=gimple_ctypes.IdentExpr(
                             name=method_name, line=getattr(node, 'line', 0)),
@@ -3267,7 +3469,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # `_lower_set_method`, which has no 'remove' case at all and
         # silently no-op'd instead of removing the element. Runtime-
         # dispatch via the kind registries instead (DESIGN.html R5). See
-        # bugs/CODEGEN_boxed_method_name_list_set_ambiguity.md, closed and
+        # CODEGEN_boxed_method_name_list_set_ambiguity, closed and
         # removed with the runtime kind registries.
         ip = gen._new_temp('int64_t')
         ov_local = gen._ensure_local(ot, ov)
@@ -3570,6 +3772,35 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             ov_local = gen._new_val(ot, f"({ot}){ov}")
         else:
             ov_local = gen._ensure_local(ot, ov)
+        # A call on a MODULE MARKER — `argparse.ArgumentParser(...)` and every
+        # `.method()` after it — is not a scalar operation at all, and the
+        # generic passthrough at the bottom of this block (which returns the
+        # receiver unchanged) is the wrong answer for every one of them: the
+        # program computes with a value that is not the object it named, and
+        # nothing says so until an unrelated attribute read dies naming an
+        # attribute of a class the program never built. Raise at the CALL
+        # instead, which is where it becomes true, and which is catchable so a
+        # program that genuinely probes for the capability can still say so.
+        #
+        # Above the comparison/arithmetic arms deliberately: none of them means
+        # anything on a marker either, and `argparse.__doc__ == x` should say
+        # the module is missing rather than answer about the integer 0.
+        _marker_mod = _uncompiled_module_marker(gen, node)
+        if _marker_mod:
+            for _ea in node.args:
+                gen.lower_expr(_ea)
+            gen._emit_call(
+                'void', '', 'mojo_module_not_compiled',
+                [('char *', gen._intern_string(_as_str(_marker_mod))),
+                 ('char *', gen._intern_string(_as_str(method)))])
+            # `mojo_module_not_compiled` longjmps and never returns, so this
+            # value is dead on every path that reaches it; it exists only so
+            # the surrounding expression still typechecks, exactly as the
+            # other never-taken raise sites in this file return a zero of the
+            # shape their caller wanted.
+            return gen._stub_result(ot, ov_local,
+                                    f'{_marker_mod}.{method}() — raises: module '
+                                    f'not compiled')
         if node.args:
             at, av = gen.lower_expr(node.args[0])
             # Coerce argument to the same type; GIMPLE requires separate cast stmt.
@@ -3851,12 +4082,23 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             default_ty, default_val = gen.lower_expr(args[1])
         val_type = gen._dict_val_of(ov)
         # `dict.get(k, <char* default>)` on a dict whose value type is
-        # unknown (int64_t): the default must NOT be coerced through a
-        # list accessor. If the caller supplied a char* default, treat the
-        # result as char* — a plain pointer round-trip, never a
-        # `mojo_list_get_int(default, 0)` (a hard segfault on the
-        # self-hosted `--dump myinterpreter.py`).
-        if val_type == 'int64_t' and default_ty == 'char *':
+        # UNKNOWN: the default must NOT be coerced through a list accessor.
+        # If the caller supplied a char* default, treat the result as char* —
+        # a plain pointer round-trip, never a `mojo_list_get_int(default, 0)`
+        # (a hard segfault on the self-hosted `--dump myinterpreter.py`).
+        #
+        # "Unknown" has to mean unknown, which is what
+        # `_dict_val_is_known` is for. `_dict_val_of` answers `'int64_t'` for a
+        # dict that is KNOWN to hold ints as well as for one nobody has
+        # observed, so the old `val_type == 'int64_t'` test also matched the
+        # first — and a `char *` default then overrode a known int value type:
+        # `d = {"a": 1}; print(d.get("a", "y"))` emitted
+        # `mojo_dict_get_str(d, "a")`, `print` called `strlen(1)` and the
+        # program died. The MISS rows passed because the absent-key path never
+        # reads the slot at all, which is what made this look like a
+        # default-type question rather than an evidence question. See
+        # “A dict's value accessor is guessed from the DEFAULT argument”.
+        if not gen._dict_val_is_known(ov) and default_ty == 'char *':
             val_type = 'char *'
         # The runtime keeps a bytes key in its own domain, so the VALUE
         # accessor has to be the bytes one too — the `_bytes` suffixed
@@ -3891,8 +4133,63 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             # default-application is spelled as branch-and-assign.
             result_type = val_type
             _container_vt = val_type in ('MojoDict *', 'MojoList *', 'MojoSet *')
-            if result_type not in ('char *', 'double', '_Bool') and not _container_vt:
-                result_type = default_ty if default_ty in ('char *', 'double', '_Bool') else 'int64_t'
+            # CPython's `get(k, default)` has a HETEROGENEOUS result: the
+            # stored value on a hit, the default on a miss, and those two can
+            # be different types. One C slot cannot be both, so the result type
+            # is the one that is SAFE to hold either, and the side that is not
+            # in that domain is materialised into it:
+            #
+            # * a `char *` result can hold any domain, because the model
+            #   already has `mojo_cstr_or_int_str` (an int64 word read as
+            #   "itself if it really is a `char *`, else its decimal") — so
+            #   if EITHER side is a string, the result is `char *`;
+            # * otherwise the result is the dict's value domain when that is
+            #   KNOWN, and the default's when it is not (there the default is
+            #   the only thing known about the slot).
+            #
+            # Reading the value type off the DEFAULT instead — which is what the
+            # `int64_t`-means-unknown confusion above used to do — is what made
+            # `d = {"a": 1}; d.get("a", "y")` call `strlen(1)`. Taking the
+            # result type from the value domain and only widening to `char *`
+            # when a side needs it is what makes BOTH disagreeing rows right:
+            # `d.get("a", "y")` prints `1` and `d.get("z", "y")` prints `y`.
+            _dflt_scalar = default_ty in ('char *', 'double', '_Bool') or default_ty in ('int64_t', 'int')
+            if not _container_vt and (val_type == 'char *' or default_ty == 'char *'):
+                result_type = 'char *'
+            elif not _container_vt and result_type not in ('char *', 'double', '_Bool'):
+                result_type = (val_type if gen._dict_val_is_known(ov)
+                               and val_type in ('int64_t', 'int', '_Bool')
+                               else (default_ty if _dflt_scalar and default_ty in ('double', '_Bool')
+                                     else 'int64_t'))
+            # The HIT read, in the RESULT's domain. A `char *` result over a
+            # non-string slot cannot use `mojo_dict_get_str` (that reads the
+            # slot's word as a pointer and `print` then calls `strlen` on the
+            # integer 1), and cannot use `mojo_dict_get_int` either (that hands
+            # the default's string bits back as a word, which prints as a
+            # pointer decimal) — `mojo_cstr_or_int_str` is the model's own
+            # answer to exactly this question.
+            _pres_word = None
+            if (result_type == 'char *' and val_type not in ('char *',)
+                    and not _container_vt):
+                _pres_word = gen._call_expr(
+                    'int64_t', f'mojo_dict_get{_sfx}_int',
+                    [('MojoDict *', ov), (key_type, key_val)])
+                raw = gen._call_expr('char *', 'mojo_cstr_or_int_str',
+                                     [('int64_t', _pres_word)])
+                val_type = 'char *'
+            if (result_type == 'char *' and default_ty not in ('char *', 'MojoStr *')
+                    and default_ty is not None):
+                # The DEFAULT also has to be in the result's domain, and a
+                # `(char *)<an int>` is a wild pointer. Materialise it the same
+                # way, so `d.get(k, 7)` prints `7` on a str-valued dict.
+                if default_ty in ('double', 'float'):
+                    _dm = gen._call_expr('char *', 'mojo_str_from_double',
+                                         [('double', gen._coerce_to_type(
+                                             default_ty, 'double', default_val))])
+                else:
+                    _dm = gen._call_expr('char *', 'mojo_cstr_or_int_str',
+                                         [('int64_t', gen._to_int64(default_ty, default_val))])
+                default_val, default_ty = _dm, 'char *'
             if _container_vt:
                 # `d.get(k, {})` on `d: dict[K, <container>]` — keep the
                 # container type (was collapsed to int64_t, losing every
@@ -3920,6 +4217,13 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             # default.
             if _container_vt:
                 cond = gen._ensure_bool_cond('int64_t', raw)
+            elif _pres_word is not None:
+                # The materialised `char *` read is TRUTHY for a miss — the
+                # absent slot is 0, and "0" is a non-empty string — so the
+                # presence test has to stay on the int64 word it came from, not
+                # on the string. Testing the string made every miss take the HIT
+                # branch and print `0` instead of the default.
+                cond = gen._ensure_bool_cond('int64_t', _pres_word)
             else:
                 cond = gen._ensure_bool_cond(result_type, raw_r)
             t = gen._new_temp(result_type)
@@ -3974,33 +4278,100 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         gen._emit(f"  mojo_dict_update ({ov_cast}, {other_val_cast});")
         return 'int', gen._new_val('int', '0')
     if method == 'pop' and args:
-        # A bytes key pops from the bytes key domain, and its runtime
-        # helper is the only one that takes the `dflt` argument Python's
-        # `pop(k, default)` needs — the str-domain mojo_dict_pop_int
-        # answers 0 for an absent key and cannot express a default at all.
+        # `d.pop(k)` / `d.pop(k, default)`. Two things were lost here and both
+        # were silent wrong answers rather than refusals:
+        #
+        # * the DEFAULT. `mojo_dict_pop_int` had no `dflt` parameter, so the
+        #   `-1` the source wrote was never lowered and a MISS answered 0 — a
+        #   real value in this model, so a "remove if present, else report
+        #   absence" idiom got a plausible number with exit 0
+        #   (“CODEGEN: `d.pop(k, default)` returns 0 on a MISS”);
+        # * the VALUE accessor. Only the int spelling existed, so a str-valued
+        #   dict popped its value as a raw pointer decimal
+        #   (“A dict's value accessor is guessed from the DEFAULT argument”).
+        #
+        # Both are one implementation now: the runtime carries the same three
+        # value domains in both key domains, and this picks the domain and
+        # hands the default to it.
         key_type, key_val, key_is_bytes = _dict_key_probe(gen, *gen.lower_expr(args[0]))
         val_type = gen._dict_val_of(ov)
-        if key_is_bytes:
-            # The bytes-domain pop helpers take the `dflt` Python's
-            # `pop(k, default)` needs — the str-domain mojo_dict_pop_int
-            # has no such parameter and answers 0 for an absent key, so a
-            # default could not even be expressed there. The str/double
-            # siblings exist because the slot is one int64_t of bits: without
-            # them a bytes-keyed dict holding strings popped its value as a
-            # raw pointer decimal.
-            if val_type == 'char *':
-                return 'char *', gen._call_expr(
-                    'char *', 'mojo_dict_pop_bytes_str',
-                    [('MojoDict *', ov), (key_type, key_val)])
-            if val_type == 'double':
-                return 'double', gen._call_expr(
-                    'double', 'mojo_dict_pop_bytes_double',
-                    [('MojoDict *', ov), (key_type, key_val)])
-            dflt = gen._to_int64(*gen.lower_expr(args[1])) if len(args) > 1 else '0'
-            return 'int64_t', gen._call_expr(
-                'int64_t', 'mojo_dict_pop_bytes_int',
-                [('MojoDict *', ov), (key_type, key_val), ('int64_t', dflt)])
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_dict_pop_int', [('MojoDict *', ov), (key_type, key_val)])
+        val_known = gen._dict_val_is_known(ov)
+        dflt_is_none = False
+        if len(args) > 1:
+            dflt_ty, dflt_val = gen.lower_expr(args[1])
+            dflt_is_none = bool(_is_none_literal(args[1]))
+        else:
+            dflt_ty, dflt_val = None, None
+        if not val_known:
+            # An unobserved dict takes the DEFAULT's type as its result type:
+            # that is the only thing known about what the slot holds, and it is
+            # the `get` lowering's existing rule (the arm above).
+            val_type = dflt_ty if dflt_ty in ('char *', 'double') else 'int64_t'
+        _container_vt = val_type in ('MojoDict *', 'MojoList *', 'MojoSet *')
+        if val_known and not _container_vt and not dflt_is_none \
+                and dflt_val is not None \
+                and _dict_val_domain(val_type) != _dict_val_domain(dflt_ty):
+            # CPython answers the default on a miss and the stored value on a
+            # hit, and one int64_t slot cannot be both. Choosing either side
+            # makes one of them a wrong answer — `(char *)<an int>` is a wild
+            # pointer that `print` then calls `strlen` on — so this is refused
+            # with both types named instead. `None` is in every domain, and an
+            # UNOBSERVED dict is already handled above.
+            raise RuntimeError(
+                f"d.pop(key, default) with a {dflt_ty} default on a dict whose "
+                f"values are {val_type}: one dict slot cannot hold both, so "
+                f"the hit and the miss cannot share a result type (use a "
+                f"default of the dict's own value type, or a dict whose value "
+                f"type is not statically known)")
+        _sfx = '_bytes' if key_is_bytes else ''
+        # The no-default spelling raises KeyError in CPython; this model has no
+        # such error and every mojo_dict_get_* already answers a miss with the
+        # absent box, so it passes the same domain-specific zero.
+        _absent = 'NULL' if val_type == 'char *' else ('0.0' if val_type == 'double' else '0')
+        if dflt_val is None or dflt_is_none:
+            dflt_expr, dflt_ct = _absent, val_type
+        elif val_type == 'char *':
+            dflt_expr, dflt_ct = dflt_val, 'char *'
+        elif val_type == 'double':
+            dflt_expr, dflt_ct = gen._coerce_to_type(dflt_ty, 'double', dflt_val), 'double'
+        elif _container_vt:
+            # The empty-container-literal reifier the `get` arm above uses: an
+            # empty `[]`/`{}`/`set()` default carries no evidence for a
+            # particular container KIND, so build the kind this dict holds.
+            _reified = gimple_ctypes.reify_empty_container_literal(gen, dflt_ty, val_type, args[1])
+            if _reified is None:
+                raise RuntimeError(
+                    f"d.pop(key, default) with a {dflt_ty} default on a dict "
+                    f"whose values are {val_type}: only an EMPTY "
+                    f"{val_type} literal can stand in for an absent "
+                    f"{val_type}, and this one is not")
+            dflt_expr, dflt_ct = gen._to_int64(dflt_ty, _reified), 'int64_t'
+        else:
+            dflt_expr, dflt_ct = gen._to_int64(dflt_ty, dflt_val), 'int64_t'
+        _rt = _DICT_POP_RT.get(val_type)
+        if _rt is None:
+            # Not one of the three SCALAR value domains: a container, or a
+            # struct pointer (`self._owner[fn.name] = fn` — `d.pop(k)` on a
+            # `dict[str, FunctionDef *]` reaches here, and a plain
+            # `_DICT_POP_RT[val_type]` raised `KeyError: 'FunctionDef *'`).
+            # A dict slot is one raw int64_t either way, so pop the WORD and
+            # cast it back — the same shape the `get` arm and `d[k]` both use
+            # for a non-scalar-valued dict, and the only one that can carry a
+            # container or a struct pointer.
+            raw = gen._call_expr(
+                'int64_t', f'mojo_dict_pop{_sfx}_int',
+                [('MojoDict *', ov), (key_type, key_val), ('int64_t', dflt_expr)])
+            t = gen._new_val(val_type, f"({val_type}){raw}")
+            _nd = gen._dict_nested_val_types.get(ov)
+            if _nd:
+                if val_type == 'MojoDict *':
+                    gen._dict_val_types[t] = _nd
+                else:
+                    gen._elem_types[t] = _nd
+            return val_type, t
+        return val_type, gen._call_expr(
+            _rt[1], f'mojo_dict_pop{_sfx}_{_rt[0]}',
+            [('MojoDict *', ov), (key_type, key_val), (dflt_ct, dflt_expr)])
     if method in ('copy',):
         return 'MojoDict *', gen._new_val('MojoDict *', f"mojo_dict_copy ({ov})")
     if method == 'clear':
@@ -4056,7 +4427,7 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
     # the runtime's typed insert helpers; element type comes from the same
     # _elem_of tracking every other list method uses.
     # collections.deque methods on the MojoList * representation
-    # (bugs/COMPILE_FAIL_asyncio_queues.md gap 2): a deque field
+    # (“COMPILE_FAIL: asyncio/queues.py” gap 2): a deque field
     # (`self._getters = deque()`) is typed MojoList *, and asyncio
     # round-trips Future handles through popleft/append/appendleft.
     if method == 'popleft' and not args:
@@ -4141,6 +4512,15 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
                 av = gen._coerce_to_type(at, 'int64_t', av)
                 at = 'int64_t'
             gen._emit_call('void', '', 'mojo_list_append_int', [('MojoList *', ov), (at, av)])
+            # A CALLABLE appended to a list, so a later `lst[0](...)` can
+            # dispatch. The list literal records through the same helper (see
+            # `_lower_list_literal`), and this is the `append` half: without
+            # it a list built one element at a time -- the shape every
+            # dispatch table assembled in a loop has -- was still stubbed, so
+            # the table's key would depend on whether the list was written
+            # `[f]` or `[]; .append(f)`. A non-callable element is a no-op
+            # inside the helper.
+            ginf.note_container_callable_ret(gen, ov, av, at, args[0])
             if at.endswith(' *') or (at == 'int64_t' and av in gen._actual_types and gen._actual_types[av].endswith(' *')):
                 actual_elem = gen._actual_types.get(_gmm_as_str(av), at)
                 gen._elem_types[ov] = actual_elem
@@ -4492,7 +4872,7 @@ def _lower_str_method(gen, ov: str, method: str, args: list) -> tuple:
     # side effects (e.g. `map(str, args)` inside `sep.join(map(str, args))`)
     # this duplicated the entire mojo_map(...) call and left the first,
     # unused copy's temp with a mismatched/dead type. See
-    # bugs/CODEGEN_map_over_untyped_param_arg.md.
+    # CODEGEN_map_over_untyped_param_arg.
     arg_pairs = [gen.lower_expr(a) for a in args]
     loaded_args = []
     for at, av in arg_pairs:
@@ -5305,7 +5685,7 @@ def _repack_method_call_spread_args(gen, mangled: str, struct_name: str,
     `f(self.interpreter, self.instance, *args, **kwargs)` where `f` is
     a `MojoFunction` whose own `__call__(self, interpreter, *args,
     **kwargs)` has exactly ONE real fixed param (`interpreter`) — see
-    bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md's
+    “setting/getting an arbitrary attribute on a generically-typed object”'s
     "Segfault root-caused" section. Invisible under a `__GIMPLE`-
     tagged caller (raw GIMPLE bypasses gcc's normal call-argument
     arity/type checking); surfaced once the caller genuinely lost
@@ -5644,10 +6024,36 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # sibling overload only has the bare key available at this point,
     # since the suffixed key is only set when THAT overload's own
     # definition is emitted, which may happen later in emission order.
+    # Is this method's BODY going to be emitted in this translation unit at
+    # all? `gen_module_impl`'s StructDef arm emits one body per method of
+    # every StructDef in the module's statements, and `_struct_method_names`
+    # is the registration of exactly those StructDefs' methods — populated at
+    # parse/registration time, so it is already answered for a transitively
+    # imported module by the time a ROOT-module call site asks, and SHARED
+    # with every nested temp_gen so a root call site sees a sibling's struct.
+    # The two `func_return_types` lookups below cannot: at the call site in
+    # `lm/main.py` neither `lm_helper_Thing_show` nor `Thing_show` is in it
+    # yet, because the module that defines the method is inlined into the same
+    # parts list LATER.
+    #
+    # Needed because the stub is a bare `int64_t f (...);` guarded by
+    # `_MOJO_STUB_<Struct>_<method>`, and that guard is DEFINED by the stub
+    # itself — so nothing can suppress it afterwards, and the real definition
+    # that follows is a hard "conflicting types for '<mangled>'; have
+    # 'int64_t(Thing *)'" on every one of its call sites. Measured in link
+    # mode over three modules (`lm/main.py` -> `lm/mid.py` -> `lm/helper.py`,
+    # `t = lm.mid.make(7); print(t.show())`): the root emitted
+    # `int64_t lm_helper_Thing_show (...);` and the inlined `lm/helper.py`
+    # emitted the real `int64_t __GIMPLE lm_helper_Thing_show (Thing * self)`.
+    # The struct-typedef pass's OWN guard is `_MOJO_STUB_<Struct>` (no method
+    # name), so it could never have suppressed this one.
+    _methods_here = (getattr(gen, '_struct_method_names', {}) or {}).get(
+        struct_name) or []
     if (mangled not in gen._KNOWN_SIGS
             and mangled not in gen.func_return_types
             and f'{struct_name}_{method}{_method_overload_suffix}' not in gen.func_return_types
             and f'{struct_name}_{method}' not in gen.func_return_types
+            and method not in _methods_here
             and mangled not in gen._auto_stubbed
             and mangled not in gimple_codegen._SELFHOST_HARDCODED_FUNCS
             and f'{struct_name}_{method}' not in gimple_codegen._SELFHOST_HARDCODED_FUNCS):

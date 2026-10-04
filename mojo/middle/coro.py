@@ -675,7 +675,7 @@ def _generator_value_kind(fn: N.FunctionDef,
     # all of them and landed on the `int64_t` default, which is the identical
     # silent truncation the call-site half of this slot's contract was fixed
     # for (see `_scan_callsite_param_kinds` and
-    # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md).
+    # CODEGEN_coro_yield_kind_unresolved_callsite).
     if None in kinds and (kinds - {None, 'i'}):
         return None, ('a `yield` whose value kind could not be resolved, '
                       'beside one that requires a non-int64_t value slot '
@@ -723,20 +723,88 @@ def _yield_from_ok(fn: N.FunctionDef) -> bool:
     return total == bare
 
 
+def _lambda_shape_ok(lam: N.LambdaExpr) -> bool:
+    """Is this `lambda`'s parameter shape one the shared call lowering gets
+    RIGHT? The measured answer, one clause per shape, all compiled + linked +
+    run against CPython inside a compiled generator body:
+
+    | shape | compiled | CPython |
+    |---|---|---|
+    | `lambda *a: add(a[0], a[1])`, called `e(4, 5)` | `9` | `9` |
+    | `lambda *a: addall(a)`, called `e(1, 2, 3)` | `6` | `6` |
+    | `lambda *args, **kwargs: add(n, args[0])`, capturing `n` | `13` | `13` |
+    | a variadic lambda ESCAPING as a call argument | `13` | `13` |
+    | a variadic lambda RETURNED out of the generator and called after | `3` | `3` |
+    | a variadic lambda behind an ordinary local, called there | right | right |
+    | `lambda x=n: x + 1` / `lambda x, y=n: x + y` / `lambda x, *, k=n:` | right | right |
+    | `lambda *, x=n: x + 1` | right | right |
+    | `lambda x=n, *a: x + a[0]`, called `e(0, 5)` | **`8`** | **`5`** |
+    | `lambda x, y=n, z=10: x + y + z`, called `e(4)` | **`135`** | **`17`** |
+
+    So the two clauses are the two wrong rows and nothing else: a DEFAULTED
+    parameter that a `*`/`**` parameter FOLLOWS, and two or more defaulted
+    parameters. Everything else -- including every `*args`/`**kwargs` shape,
+    which is what this guard used to refuse wholesale -- is correct.
+
+    The refusals stay because the failure they prevent is SILENT: both wrong
+    rows exit 0 with a plausible-looking integer, which is the worst verdict
+    a check can produce and the reason the guard is a refusal rather than a
+    warning. Their root cause is not this file's: a lambda's defaults are
+    stripped from the lifted signature (`_lower_LambdaExpr`'s `syn_params`,
+    which keeps only `(pname, None)`), so they are applied somewhere on the
+    call side, and both wrong rows are a call-site packing of more than one
+    substituted argument around a variadic tail. Filed as
+    `bugs/CODEGEN_two_lambda_defaults_are_mis_packed.md`.
+
+    One reading of the parameter list is load-bearing here. The parser DROPS a
+    bare `*` (the keyword-only marker), so `lambda *, x=n: ...` reaches this
+    function as `('x', <default>)` and is indistinguishable from
+    `lambda x=n: ...` — which is why the "a `*`/`**` parameter FOLLOWS" test
+    below is an index comparison against the first starred parameter rather
+    than a flag, and why that row is measured correct while
+    `lambda x=n, *a: ...` is not: the star is gone in one and present in the
+    other.
+
+    Variadic lambdas are no longer refused because they are no longer
+    miscompiled. `MojoVarargFn` (`runtime/fire_runtime.h`, "Variadic
+    callables") carries the callee, the env, the count of ordinary leading
+    parameters and which of the three variadic shapes it has, and
+    `mojo_fnptr_call_N` dispatches on it -- so the packing happens in the
+    runtime, at the one place that knows both the call's arity and the
+    callee's real parameter list. The forward-declaration bug that used to
+    make this a hard "conflicting types" error went with it. That was
+    measured on the ordinary path in 2026-09-26 and had never been
+    re-checked on the GENERATOR path, where this guard is what stands
+    between the shape and the A3 stack-switch lowering; so the rows above are
+    the re-check.
+    """
+    first_star = next((i for i, (pname, _d) in enumerate(lam.params)
+                       if pname.startswith('*')), None)
+    defaulted = 0
+    for i, (pname, pdefault) in enumerate(lam.params):
+        if pname.startswith('*'):
+            continue
+        if pdefault is None:
+            continue
+        defaulted += 1
+        if first_star is not None and i < first_star:
+            # A defaulted parameter BEFORE the variadic tail: measured `8`
+            # where CPython says `5`.
+            return False
+    return defaulted < 2
+
+
 def _lambdas_ok(fn: N.FunctionDef) -> bool:
-    """A `lambda` literal in the body is fine -- the desugared body is
+    """A `lambda` literal in a generator body is fine -- the desugared body is
     ordinary code and the ordinary codegen path lifts it to a top-level C
-    function -- EXCEPT for shapes that path miscompiles: a `*args`/
-    `**kwargs` parameter (emits a broken forward declaration) or a
-    parameter with a default value (silently reads garbage for the
-    defaulted slot). Refuse those so the module falls through to the cpp
-    path's own honest refusal instead of emitting broken/wrong C.
-    (bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md)"""
+    function -- EXCEPT for the parameter shapes that path gets wrong, which
+    `_lambda_shape_ok` above enumerates by measurement. Refuse those so the
+    module falls through to the cpp path's own honest refusal instead of
+    emitting broken/wrong C. (bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md)"""
     for n in _walk(fn):
         if isinstance(n, N.LambdaExpr):
-            for pname, pdefault in n.params:
-                if pname.startswith('*') or pdefault is not None:
-                    return False
+            if not _lambda_shape_ok(n):
+                return False
     return True
 
 
@@ -1283,7 +1351,7 @@ _PLAIN_CALLSITE_PARAM_KINDS: dict[str, dict[str, str]] = {}
 # stack-switch ABI fixes one C type per generator, so the default would
 # silently truncate a float to int64_t or print a `char *` as its address.
 # `_eligible` refuses those rather than emitting wrong code — see
-# bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md, which recorded
+# CODEGEN_coro_yield_kind_unresolved_callsite, which recorded
 # that the "or include one the static scan could not type at all" half of the
 # sentence above was specified here but not implemented: a `None` used to
 # EMPTY the kind set, so it was neither resolved nor a conflict and the slot
@@ -1324,7 +1392,7 @@ _ASYNC_FN_NAMES: set = set()
 # unpacked from its `__mojo_gen_arg` slot with a `(<T> *)` cast (structs
 # cross the C boundary as `T *` -- BUG-2026-030) and passed to the body as
 # a real typed `<T> *` C param, instead of collapsing to an opaque
-# int64_t. See bugs/COMPILE_FAIL_asyncio_queues.md gap 2.
+# int64_t. See “COMPILE_FAIL: asyncio/queues.py” gap 2.
 _STRUCT_NAMES: set = set()
 
 # Names (bare and `__mgco_<outer>_<name>`-qualified) of nested async
@@ -1483,6 +1551,21 @@ def _is_asyncio_run_call(node) -> bool:
     return (isinstance(node, N.CallExpr) and isinstance(node.func, N.MemberExpr)
             and node.func.member == 'run' and len(node.args) == 1
             and isinstance(node.func.obj, N.IdentExpr) and node.func.obj.name == 'asyncio')
+
+
+def _is_asyncio_awaitable_pred_call(node) -> bool:
+    """`asyncio.iscoroutine(x)`, one argument.
+
+    Only `iscoroutine`. `isawaitable` is the same question and lowers to the
+    same call, but it is NOT a member of `asyncio` in CPython 3.14 (it is
+    `inspect.isawaitable`), so a lowering for it here would make the compiled
+    path answer where CPython raises `AttributeError` -- a divergence this
+    rewrite has no business introducing. Named for what it recognises rather
+    than for the predicate's subject. See `_rewrite_asyncio_run`'s arm."""
+    return (isinstance(node, N.CallExpr) and isinstance(node.func, N.MemberExpr)
+            and node.func.member == 'iscoroutine' and len(node.args) == 1
+            and isinstance(node.func.obj, N.IdentExpr)
+            and node.func.obj.name == 'asyncio')
 
 
 def _unwrap_transfer(node):
@@ -2310,7 +2393,7 @@ def _compute_no_wd_forward(stmts: list) -> None:
     # exits, and since the runtime has no garbage collector each round's
     # fresh `resolvable` set and dict-items list are never freed either:
     # measured, a TWO-LINE program drove it past 8 GB of resident memory in
-    # under two minutes (see bugs/CODEGEN_container_eq_is_pointer_identity.md).
+    # under two minutes (see “CODEGEN: `==` / `!=` between two containers is POINTER identity”).
     # So the termination test here is the worklist draining, never a `==`.
     dirty: dict = {}
     queue: list = seeds                # the seeds ARE the initial worklist
@@ -2491,6 +2574,12 @@ def _rewrite_async_stmts(stmts: list, cvar: str) -> list:
         if isinstance(s, N.TryStmt):
             for h in (s.handlers or []):
                 h.body = _rewrite_async_stmts(h.body, cvar)
+        if _declares_its_own_scope(s):
+            # A nested `def` / `class` is its own function scope: pass it
+            # through rather than rewriting its body with THIS coroutine's
+            # context variable. See `_declares_its_own_scope`.
+            out.append(s)
+            continue
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
                 continue
@@ -2553,6 +2642,12 @@ def _rewrite_async_gen_stmts(stmts: list, cvar: str) -> list:
         if isinstance(s, N.TryStmt):
             for h in (s.handlers or []):
                 h.body = _rewrite_async_gen_stmts(h.body, cvar)
+        if _declares_its_own_scope(s):
+            # A nested `def` / `class` is its own function scope: pass it
+            # through rather than rewriting its body with THIS coroutine's
+            # context variable. See `_declares_its_own_scope`.
+            out.append(s)
+            continue
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
                 continue
@@ -2635,6 +2730,30 @@ def _mark_coro_body(body_fd):
     return body_fd
 
 
+def _mark_coro_callable_param_fns(body_fd, fn):
+    """Attach `{param: the function its declared default names}` to a
+    synthesized coroutine body, as `body_fd._mojo_coro_callable_param_fns`.
+
+    NAMES, not return types, and that is the whole point of attaching them
+    here instead of resolving them: `register` runs as an AST PRE-PASS,
+    before `gen_module_impl` has registered any module-level function's
+    `func_return_types` entry, so a return type looked up there is not there
+    yet. `gen_func` runs during module generation, when it is — so the body
+    carries the fact and the codegen resolves it. `_mark_coro_param_elem_kinds`
+    is the same idiom (evidence attached to the body because "the generator's
+    own FunctionDef is GONE" downstream).
+
+    The consumer is `_lower_fnptr_call_value`: `def apply_to(items, _f=upper)`
+    called inside a generator body got the homogenized `int64_t` box back
+    from `mojo_fnptr_call_N` for a `char *`, and every consumer of it (`len`, a
+    `for` loop, `print`) had nothing to dispatch on — exit 0 and no output.
+    bugs/CODEGEN_callable_param_called_in_ordinary_generator_returns_garbage.md.
+    """
+    _fns = _callable_param_function_defaults(fn)
+    if _fns:
+        body_fd._mojo_coro_callable_param_fns = _fns
+
+
 def _mark_coro_param_elem_kinds(body_fd, real_params, env):
     """Attach the C element ctype of every LIST-typed parameter to a
     synthesized coroutine body, as `body_fd._mojo_coro_param_elem_kinds`
@@ -2660,7 +2779,7 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env):
     element type reaches `_elem_types` through the ordinary cross-call
     element-type contract (`module_gen`'s `_param_elem_types` ->
     `emit_funcs.gen_func`), so the loop takes the list path directly.
-    See bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md ("Item 8").
+    See CODEGEN_coro_yield_kind_unresolved_callsite ("Item 8").
 
     Only LIST params are recorded, and only a scalar element kind: a
     container-of-container has no single C type either (it needs the nested
@@ -2798,6 +2917,24 @@ def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set, local_map: dict
             nv, npre = _rewrite_asyncio_run(v, cvar, task_vars, local_map, handle_vars)
             pre.extend(npre)
             setattr(node, k, nv)
+    if _is_asyncio_awaitable_pred_call(node):
+        # `asyncio.iscoroutine(x)` -> the SAME live-handle registry check
+        # `__mojo_async_run_gen` already performs before it drives anything,
+        # exported as a predicate of its own (`__mojo_async_iscoroutine`). No
+        # static inference is consulted and none is needed: unlike
+        # `asyncio.run`, this call does not DRIVE the value, it only asks
+        # about it, so there is no reinterpretation to refuse -- the runtime
+        # answers correctly for every shape, including the ones
+        # `asyncio.run` still refuses (a value reached through a dynamic
+        # callee, a parameter, a subscript).
+        #
+        # Which is the point: `if asyncio.iscoroutine(result): asyncio.run(result)`
+        # is the idiom, and before this the predicate itself answered `False`
+        # for a value that really is a coroutine -- the guard the source
+        # wrote evaluated backwards, silently, exit 0.
+        arg, apre = _rewrite_asyncio_run(node.args[0], cvar, task_vars, local_map,
+                                         handle_vars)
+        return _call('__mojo_async_iscoroutine', [arg]), list(apre)
     if _is_asyncio_run_call(node) or _is_task_wait_call(node, task_vars):
         _AW_COUNTER[0] += 1
         h = f'__arun{_AW_COUNTER[0]}'
@@ -2917,6 +3054,12 @@ def _rewrite_asyncio_run_stmts(stmts: list, cvar: str | None, task_vars: set | N
             if _tname is not None:
                 out.append(N.ExprStmt(value=_call('__mojo_async_task_schedule',
                                                   [_c_ident(_tname)])))
+            continue
+        if _declares_its_own_scope(s):
+            # A nested `def` / `class` is its own function scope: pass it
+            # through rather than rewriting its body with THIS coroutine's
+            # context variable. See `_declares_its_own_scope`.
+            out.append(s)
             continue
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
@@ -3108,6 +3251,12 @@ def _rewrite_stmts(stmts: list, cvar: str, kind: str, env=None) -> list:
             for h in (s.handlers or []):
                 h.body = _rewrite_stmts(h.body, cvar, kind, env)
         # recurse into compound-statement bodies
+        if _declares_its_own_scope(s):
+            # A nested `def` / `class` is its own function scope: pass it
+            # through rather than rewriting its body with THIS coroutine's
+            # context variable. See `_declares_its_own_scope`.
+            out.append(s)
+            continue
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
                 continue
@@ -3138,6 +3287,38 @@ def _looks_like_stmt_list(v: list) -> bool:
     return all(isinstance(x, _STMT_TYPES) for x in v)
 
 
+def _declares_its_own_scope(s) -> bool:
+    """True for a statement that opens a FUNCTION or CLASS SCOPE of its own,
+    so a coroutine rewrite must pass it through untouched.
+
+    Every `_rewrite_*_stmts` in this file recurses into a statement's
+    attributes looking for nested statement lists, and the test it uses —
+    "is this a list of statements?" — is answered by `_looks_like_stmt_list`,
+    whose `_STMT_TYPES` includes BOTH `FunctionDef` and `StructDef`. So a
+    nested `def`'s body and a nested `class`'s `methods` list were rewritten
+    with the ENCLOSING coroutine's context variable: their `return e` became
+    `__mojo_gen_set_return(__c, e); return`, and their `yield e` /
+    `await e` became this coroutine's yield/await. Both are wrong, and both
+    are silent — `__c` is not in scope in a nested def, so it read through
+    the `ct param or undeclared` fallback as a hard 0:
+
+        def gen(n):
+            def helper(x):
+                return x * 2
+            yield helper(3)
+
+    printed `0` for CPython's `6`.
+
+    The class half only became reachable once a nested `class` had methods to
+    rewrite at all — before that, `module_gen._gmi_hoist_nested_structs`
+    did not exist and a class declared inside a function had no layout and
+    no emitted methods (bugs/CODEGEN_class_defined_inside_a_function_has_no_
+    methods.md). So the two bugs shared one cause and this predicate is the
+    one place that says so.
+    """
+    return isinstance(s, (N.FunctionDef, N.StructDef))
+
+
 # ── lowering ───────────────────────────────────────────────────────────
 
 def _argkind(expr, caller_env: dict | None = None) -> str | tuple | None:
@@ -3165,7 +3346,7 @@ def _argkind(expr, caller_env: dict | None = None) -> str | tuple | None:
         parameter's consumer is `for r in data:` / `d[0]`, and both of those
         read the `('list', k)` entry.
 
-    See bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md."""
+    See CODEGEN_coro_yield_kind_unresolved_callsite."""
     k = _literal_kind(expr)
     if isinstance(k, (str, tuple)):
         return k
@@ -3368,7 +3549,7 @@ def _scan_callsite_param_kinds(stmts: list) -> None:
                 # include one the static scan could not type at all" half of
                 # `_CALLSITE_PARAM_CONFLICTS`' own docstring, which was
                 # specified there and never implemented; see
-                # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md.
+                # CODEGEN_coro_yield_kind_unresolved_callsite.
                 if None in kinds:
                     conflicted.add(pname)
                     continue
@@ -4210,6 +4391,12 @@ def _cap_rewrite_stmts(stmts: list, box_names: dict) -> list:
         if isinstance(s, N.TryStmt):
             for h in (s.handlers or []):
                 h.body = _cap_rewrite_stmts(h.body, box_names)
+        if _declares_its_own_scope(s):
+            # A nested `def` / `class` is its own function scope: pass it
+            # through rather than rewriting its body with THIS coroutine's
+            # context variable. See `_declares_its_own_scope`.
+            out.append(s)
+            continue
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
                 continue
@@ -4664,6 +4851,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     body_fd.is_async = False
     body_fd = _mark_coro_body(body_fd)
     _mark_coro_param_elem_kinds(body_fd, real_params, env)
+    _mark_coro_callable_param_fns(body_fd, fn)
 
     _lead = ([f'{struct_name} *'] if has_self else
              ['int64_t'] if is_classmethod else [])
@@ -4725,6 +4913,41 @@ def _callable_param_generator_names(fn: N.FunctionDef) -> dict:
             continue
         _d = _dflts.get(_pn)
         if isinstance(_d, N.IdentExpr) and _cm_as_str(_d.name) in _GEN_DEFS:
+            _out[_pn] = _cm_as_str(_d.name)
+    return _out
+
+
+def _callable_param_function_defaults(fn: N.FunctionDef) -> dict:
+    """`{param: the top-level function its declared default names}` for the
+    parameters of `fn`, EXCLUDING the ones `_callable_param_generator_names`
+    already owns.
+
+    The A3 rewrite moves every source parameter into a `var p =
+    __mojo_gen_arg(...)` local, so the body the ordinary codegen emits
+    carries no `param_defaults` — which is why the generator half of this
+    fact has to be re-derived here and hung on the BODY function for
+    `gen_func` to copy out. This is the ordinary-function half, and it needs
+    the same treatment for the same reason: `def apply_to(items, _f=upper)`
+    called inside a generator body got the homogenized `int64_t` box back
+    from `mojo_fnptr_call_N` for a `char *`, and every consumer of it
+    (`len`, a `for` loop, `print`) then had nothing to dispatch on —
+    bugs/CODEGEN_callable_param_called_in_ordinary_generator_returns_garbage.md.
+
+    A bare name only, for the reason
+    `calls_shared._callable_param_ret_types` gives: the answer is then the
+    DEFINING function's own `func_return_types` entry, read in the second
+    pass below (after every function in the module is registered), so a
+    callee declared LATER than the consumer still resolves.
+    """
+    _dflts = getattr(fn, 'param_defaults', None) or {}
+    _gens = _callable_param_generator_names(fn)
+    _out = {}
+    for _pn, _pann in (getattr(fn, 'params', None) or []):
+        _pn = _cm_as_str(_pn)
+        if _pn.startswith('*') or _pn in _gens:
+            continue
+        _d = _dflts.get(_pn)
+        if isinstance(_d, N.IdentExpr):
             _out[_pn] = _cm_as_str(_d.name)
     return _out
 
@@ -4918,7 +5141,7 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('__mojo_gen_close', 'int64_t')
     gen.func_param_types.setdefault('__mojo_gen_destroy', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_gen_destroy', 'void')
-    # "Detached async" (bugs/hard/CODEGEN_coro_detached_async_take_handle.md)
+    # "Detached async" (CODEGEN_coro_detached_async_take_handle)
     # -- the resume_fn half of the `_coro_resume_fn`/`_coro_destroy_fn`
     # pair BUILTIN_VALUE_MAP substitutes this for under MOJO_CORO=
     # stackswitch (gimple_codegen.GimpleGen.__init__); `__mojo_gen_destroy`
@@ -4953,7 +5176,14 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('__mojo_gen_yield_tagged', 'int64_t')
     gen.func_param_types.setdefault('__mojo_async_run_gen', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_async_run_gen', 'void')
-    # Eager task scheduling (bugs/COMPILE_FAIL_asyncio_queues.md gap 3).
+    # The predicate half of the same registry (`asyncio.iscoroutine` /
+    # `isawaitable`). Registering it here is what stops the call lowering from
+    # emitting the generic "unavailable in compiled mode" weak stub, whose
+    # `(...)` signature then conflicts with the real definition in
+    # fire_coro_gen.c — a hard gcc error, not a silent wrong answer.
+    gen.func_param_types.setdefault('__mojo_async_iscoroutine', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_async_iscoroutine', '_Bool')
+    # Eager task scheduling (“COMPILE_FAIL: asyncio/queues.py” gap 3).
     gen.func_param_types.setdefault('__mojo_async_task_schedule', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_async_task_schedule', 'void')
     gen.func_param_types.setdefault('__mojo_async_await_task', ['int64_t', 'int64_t'])
@@ -5084,8 +5314,6 @@ def register(gen, meta: list) -> None:
     # consumer.
     for m in meta:
         _cpg = m.get('callable_param_generators') or {}
-        if not _cpg:
-            continue
         _by_param = {}
         for _pn, _gn in _cpg.items():
             _api = gen._generator_api.get(_gn)

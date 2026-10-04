@@ -2453,7 +2453,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # between grew. That is the whole of the shape, and arm64 has had it
         # (`_emit_subscript_aug`) while this backend refused it — a two-backend
         # disagreement about whether `q[0] += 5` is a program
-        # (bugs/FORMAL_x86_64_augmented_assignment_through_a_subscript_is_refused.md).
+        # (FORMAL_x86_64_augmented_assignment_through_a_subscript_is_refused).
         # It delegates rather than growing a second copy of the operator table:
         # `_emit_subscript_aug` reuses this backend's own `_ALU_RR` and
         # `_emit_shift_reg`, so which operators a read-modify-write supports is
@@ -4033,7 +4033,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # made it TRUE, because the raw haystack is a backslash and a `t` and
         # contains a `t`. `fire_compiler.decode_c_escapes` is the one decoder,
         # the same one `_intern_string` uses — see
-        # bugs/FORMAL_string_literal_escape_is_not_decoded.md.
+        # FORMAL_string_literal_escape_is_not_decoded.
         if isinstance(left, F.StringLiteral) and isinstance(right, F.StringLiteral):
             # The EMPTY needle is TRUE, which is Python's rule and what
             # `strstr` returns for it (the haystack itself, non-NULL). Folding
@@ -4539,7 +4539,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         knows. The same name was then a `char *` to `len` and a list blob to
         this predicate, and the blob path bounds-checks against the first eight
         CHARACTERS of the string. See
-        bugs/CODEGEN_string_parameter_subscript_reads_count_field.md.
+        “`s[i]` on a `String`-annotated PARAMETER reads the blob's count field”.
         """
         if isinstance(obj, F.StringLiteral):
             return True
@@ -4688,7 +4688,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # dispatch: a string index against a base whose shape nothing states,
         # which is neither the dict KEY scan nor a byte offset into a `char *`.
         # See
-        # bugs/FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults.md.
+        # “FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults”.
         why = M.unstated_base_string_index_refusal(
             False, self._expr_str_kind(e.obj), self._expr_str_kind(e.index),
             M.spelled(e.obj), M.spelled(e.index))
@@ -4731,7 +4731,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # walk, whose first word of the base is a COUNT, so `p[0]` read the
             # byte at offset 0 as the element count and loaded
             # `base + 8 + 8*count`.  See
-            # bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md.
+            # FORMAL_subscript_of_a_pointer_reads_a_blob_count.
             self._sub_width = width
             if width != 1:
                 # The scale is emitted rather than assumed: `base + i` is right
@@ -5327,7 +5327,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         `ValueKinds.is_dict_value` for the base with no binding statement —
         a `Dict[String, Int]` PARAMETER, which exited 1 with nothing printed
         here as it did there. See
-        `bugs/FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults.md`.
+        `“FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults”`.
         """
         # `M.is_dict_expr` and not `isinstance(obj, F.DictExpr)`: a dict
         # COMPREHENSION is a `Comprehension` with kind='dict', and asking
@@ -6603,7 +6603,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
     # same shared refusals, and the reason is the whole point of this group:
     # `DelStmt` was NOT in this backend's statement dispatch, so `del lst[0]`
     # built on arm64 (where it removed nothing, see
-    # `bugs/FORMAL_del_of_a_subscript_is_a_silent_no_op_on_arm64.md`) and did
+    # `FORMAL_del_of_a_subscript_is_a_silent_no_op_on_arm64`) and did
     # not build here, with "unsupported statement DelStmt" as the whole
     # diagnostic. One architecture silently wrong and the other refusing is the
     # shape that must not survive, so the vocabularies are shared
@@ -7924,7 +7924,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # every later arm fell through and cleared `_dict_vars`, and
             # `d["a"]` was emitted as a load at the key's interned ADDRESS.
             # Measured on both architectures. See
-            # bugs/FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults.md.
+            # “FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults”.
             self._dict_vars.add(name)
         elif self._is_container_expr(value) or (
                 isinstance(value, F.IdentExpr)

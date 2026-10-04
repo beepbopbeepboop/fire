@@ -292,7 +292,7 @@ Re-verified fresh against this worktree (the 2026-08-24 `%`-format fix
 is present/holding). ipaddress.py's own isolated `.cpp` still has exactly
 the 1 remaining error: `if ((other == self))` — an ISO C++ pointer/int
 comparison, the same unannotated-parameter-defaults-to-int64_t hard bug
-(`bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md`, which
+(`“the constructor-call-site field-typing pass understood only scalars”`, which
 supersedes the removed
 `CODEGEN_unannotated_init_param_field_type_defaults_int64.md`)
 extended to ordinary function params. Not this pass's to fix (same
@@ -336,7 +336,7 @@ of the generic numeric-modulo fallback.
 Verified: `ipaddress.py`'s own isolated `.cpp` errors 15 -> 1 (the
 remaining one, `if ((other == self))` — an ISO C++ pointer/int comparison
 — is the SAME unannotated-parameter-defaults-to-int64_t hard bug tracked
-in `bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md`
+in `“the constructor-call-site field-typing pass understood only scalars”`
 extended to ordinary function params, not this fix's concern). Also fixed
 the same crash class in `enum.py` (`_iter_bits_lsb`'s `%r`) and
 `ftplib.py` (`FTP.mlsd`'s `"MLSD %s" % path`) — see those docs.
@@ -500,13 +500,13 @@ get used as real objects (`first.version`, `first._ip`, ...) —
 the same general "unannotated parameter/field defaults to int64_t"
 family; for the ORDINARY-function-parameter half of it — a parameter
 used as a real object's receiver, which is what `first.version`
-is — see `bugs/hard/CODEGEN_method_call_on_struct_param_mistyped.md`,
+is — see `CODEGEN_method_call_on_struct_param_mistyped`,
 now FIXED and deleted 2026-09-30 (2026-09-30 section of
 bugs/hard/README.md). It read, verified 2026-09-26: a method call on a struct passed as a
 free-function parameter is mis-typed in every case, giving a wrong
 value with exit 0 for some method names and SIGSEGV/SIGBUS for
 others; the struct-typed-parameter half is
-`bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md`, which
+`“the constructor-call-site field-typing pass understood only scalars”`, which
 supersedes the removed
 `CODEGEN_unannotated_init_param_field_type_defaults_int64.md`).
 Not attempted.
@@ -657,7 +657,7 @@ real property value:
 
 Also present: the exact same `stray '\' in program` /
 `_classattr_TextWrapper__letter` tokenizer error seen in
-`bugs/CODEGEN_generator_function_Lib_codecs.md`'s current re-diagnosis
+`“CODEGEN_generator_function: Lib/codecs.py”`'s current re-diagnosis
 (both transitively reach `textwrap.py`; same likely shared root cause,
 not investigated further here). None of this is generator-related. Not
 investigated further — genuinely out of scope for this cluster; the

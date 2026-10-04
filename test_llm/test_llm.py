@@ -837,7 +837,7 @@ class Vocab:
     # this as a MojoList and CORPUS (a char *) was cast to MojoList * at
     # the constructor call, so `sorted(set(text))` walked a string as if it
     # were a list of pointers and died dereferencing ASCII. See
-    # bugs/hard/CODEGEN_unannotated_param_container_builtin_ambiguity.md.
+    # CODEGEN_unannotated_param_container_builtin_ambiguity.
     def __init__(self, text: str):
         self.itos = sorted(set(text))
         self.stoi = {}

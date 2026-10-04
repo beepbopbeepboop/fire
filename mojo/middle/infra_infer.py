@@ -1362,7 +1362,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     # defaulting to int64_t, which produces a real GCC
                     # -Wint-conversion error at the mojo_map call site (passing
                     # an int64_t where mojo_map expects void*) — see
-                    # bugs/CODEGEN_map_over_untyped_param_arg.md.
+                    # CODEGEN_map_over_untyped_param_arg.
                     if func_name == 'map' and arg_index == 1:
                         inferred[pname] = 'MojoList *'
                         break
@@ -1501,6 +1501,72 @@ def _seed_addressed_locals(gen, body: list):
             _kp = _kw[_ki]
             if _as_str(_kp[0]) == 'to' and isinstance(_kp[1], IdentExpr):
                 gen._addressed_locals.add(_as_str(_as_ident_node(_kp[1]).name))
+
+def _generator_value_ctype_for_next(gen, arg):
+    """The value ctype `next(<arg>)` will produce, or None when `arg` does
+    not resolve to a registered generator api.
+
+    The four registries, in the order that can actually answer, and what each
+    one is keyed by -- they are not interchangeable, which is the reason this
+    is one function rather than four inline lookups:
+
+      * `_generator_var_api`  — the handle VALUE (`_tN`). Populated by
+        `_emit_generator_start_call` at EMISSION time, so it is the only one
+        that covers a generator assigned to a local first
+        (`g = mk(); next(g)`). Worth consulting first: it is keyed by the
+        very handle the lowering will drive, so it cannot disagree with it.
+      * `_generator_api`      — the generator FUNCTION name, including the
+        post-desugar wrapper spelling the A3 coroutine path renamed it to.
+      * `_generator_method_api` — `(StructName, method)` for a generator
+        METHOD (`next(b.render())`). Resolving the receiver needs the same
+        `var_types`-names-a-registered-struct gate `_quick_type`'s own method
+        row uses, so a user class can define a method named anything.
+      * `_imported_generator_bindings` / `_fn_returns_generator` — a
+        cross-module generator alias, and a generator whose identity is known
+        only from the enclosing function's `for x in gen(...)`.
+
+    None means "not a generator this pass knows", and the caller keeps today's
+    answer. That is the important direction: this function only ever adds
+    certainty."""
+    _gav = getattr(gen, '_generator_var_api', None) or {}
+    if isinstance(arg, gimple_ctypes.IdentExpr):
+        _an = _as_str(arg.name)
+        _by_val = _gav.get(gen._c_names.get(_an, _an))
+        if _by_val is not None:
+            return _by_val.get('value_ctype')
+        for _tbl in (getattr(gen, '_generator_api', None) or {},
+                     getattr(gen, '_imported_generator_bindings', None) or {}):
+            _e = _tbl.get(_an)
+            if isinstance(_e, dict) and _e.get('value_ctype'):
+                return _e['value_ctype']
+        _prov = (getattr(gen, '_fn_returns_generator', None) or {}).get(_an)
+        if _prov:
+            _pe = (getattr(gen, '_generator_api', None) or {}).get(_prov)
+            if isinstance(_pe, dict) and _pe.get('value_ctype'):
+                return _pe['value_ctype']
+        return None
+    if isinstance(arg, gimple_ctypes.CallExpr):
+        if isinstance(arg.func, gimple_ctypes.IdentExpr):
+            _fn = _as_str(arg.func.name)
+            for _tbl in (getattr(gen, '_generator_api', None) or {},
+                         getattr(gen, '_imported_generator_bindings', None) or {}):
+                _e = _tbl.get(_fn)
+                if isinstance(_e, dict) and _e.get('value_ctype'):
+                    return _e['value_ctype']
+            return None
+        if isinstance(arg.func, gimple_ctypes.MemberExpr) and isinstance(arg.func.obj, gimple_ctypes.IdentExpr):
+            _ot = _as_str(gen.var_types.get(_as_str(arg.func.obj.name), ''))
+            if not _ot.endswith(' *'):
+                return None
+            _sn = gimple_exprtypes._struct_name_of(_ot)
+            if _sn not in gen.struct_field_types:
+                return None
+            _me = (getattr(gen, '_generator_method_api', None) or {}).get(
+                (_sn, _as_str(arg.func.member)))
+            if isinstance(_me, dict) and _me.get('value_ctype'):
+                return _me['value_ctype']
+    return None
+
 
 def _closure_info_for_ident(gen, name: str):
     """Resolve a bare identifier reference to the ClosureInfo of the
@@ -1840,6 +1906,29 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
             # until this case was added; the container literals below
             # already had an identical fix.
             cand = 'MojoBytes *' if n.value.is_bytes else 'char *'
+        elif isinstance(n.value, gimple_ctypes.FloatLiteral):
+            # A `double` local, which is the ONE scalar this map used to
+            # have no answer for at all — the docstring above calls scalars
+            # "not included, they are what the int64_t default is for" — and
+            # the int64_t default is a TRUNCATION for this one, not a box.
+            # Nothing downstream can recover it: `(int64_t)5.0` is `5`, and
+            # no table can tell that from a genuine 5, so a `double` that
+            # crosses an inference boundary loses its type with no recovery
+            # path, unlike every pointer-shaped value here (which `_to_int64`
+            # can re-derive through `_actual_types`).
+            #
+            # Measured shape (`def g(): q = 2.5; fn = lambda: q * 2; return
+            # fn()` prints `5` where CPython prints `5.0`): `q` read as
+            # int64_t, `q * 2` joined to int64_t, nothing recorded.
+            #
+            # Only `FloatLiteral` — the one RHS that is unambiguous evidence
+            # of `double` with no inference in between. A `double` from a
+            # call, an annotated `VarDecl`, or an arithmetic expression is
+            # NOT added, for the reason the docstring gives for every other
+            # exclusion: each would be a second, independently-drifting
+            # inference, and the conflict rule below is already the
+            # conservative answer for a name rebound to two kinds.
+            cand = 'double'
         else:
             t = _container_literal_ctype(n.value)
             if t:
@@ -1873,6 +1962,30 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
                     _vt = gen._quick_type(_v)
                     if _vt.endswith(' *') and _vt[:-2].strip() in gen.struct_field_types:
                         cand = _vt
+                    # `next(<generator>)` is a POINTER result that is not a
+                    # struct -- `char *` for a string-yielding generator, and
+                    # the struct-pointer test above can never see it. So
+                    # `def h(): r = next(mk()); return r` inferred
+                    # `int64_t` and printed the yielded string's address,
+                    # while `def h(): return next(mk())` was already correct:
+                    # the same fact, asked one step later.
+                    #
+                    # Asked through `gen._generator_value_ctype_for_next`,
+                    # the SAME resolver `_quick_type`'s `next` row uses, so
+                    # the two cannot disagree about what a generator yields.
+                    # Narrow by construction: it answers only for a registered
+                    # generator api, and only when `next` is not shadowed, so
+                    # nothing about a scalar- or opaque-class-valued call
+                    # changes.
+                    elif (isinstance(_v.func, gimple_ctypes.IdentExpr)
+                          and _as_str(_v.func.name) == 'next'
+                          and not gen._locally_binds_name('next')):
+                        _nargs = _v.args or []
+                        _nv = None
+                        if len(_nargs) >= 1:
+                            _nv = gen._generator_value_ctype_for_next(_nargs[0])
+                        if _nv:
+                            cand = _nv
                 if cand is None:
                     # `q = p` -- a local bound from ANOTHER local this map
                     # already knows, which is the same value under a second
@@ -1985,6 +2098,66 @@ def _dict_value_locals(gen, body: list) -> dict:
     return out
 
 
+def _lambda_call_ret_locals(gen, body: list) -> dict:
+    """`{local name: ctype}` for every local in `body` bound to a LAMBDA,
+    naming what CALLING it produces.
+
+    A lambda created and called in the same statement list is never
+    materialized: `_lower_LambdaExpr` records it in `gen._inlined_lambdas`
+    and `_lower_inlined_lambda_call` emits its body straight into the
+    enclosing function, so the call's own value is the body's real
+    (ctype, expr) pair. The enclosing function's RETURN type was a
+    different question, asked earlier and answered from the AST alone, and
+    there a call through a lambda-bound local is an unknown callee — so it
+    inferred `int64_t` and the correctly-typed inlined value was truncated
+    on the way out:
+
+        def g():
+            q = 2.5
+            fn = lambda: q * 2
+            return fn()          # int64_t g(void) — 5.0 became 5
+
+    The same loss for a `char *` body, which prints as the pointer's own
+    decimal. Only the RETURN boundary loses it: `fn = lambda: q * 2` then
+    `print(fn)` is unaffected, because that path materializes the lambda.
+
+    So the table answers one question — the ctype of `name(...)` for a
+    lambda-bound `name` — and `resolve_shared._quick_type`'s call case
+    consults it for that question only. It is NOT `_callable_ret_types`
+    (the runtime table the MATERIALIZED path uses): that one is keyed by
+    lowered VALUE as well as by name and is populated during emission,
+    which is too late for a signature the forward declaration has already
+    been written from. Keeping the two apart is also what stops an
+    emission-time entry from leaking into unrelated inference.
+
+    Only a body whose type is NOT the `int64_t` default is recorded, since
+    a recorded `int64_t` would say nothing the fallback does not already
+    say; and a name rebound to a different shape keeps its FIRST lambda,
+    matching `_declare_var`'s first-decl-wins rule.
+    """
+    out: dict = {}
+
+    def note(n):
+        if not isinstance(n, gimple_ctypes.AssignStmt):
+            return
+        t = n.target
+        if not isinstance(t, gimple_ctypes.IdentExpr):
+            return
+        name = _as_str(t.name)
+        if name in out:
+            return                       # first binding wins
+        lam = n.value
+        if not isinstance(lam, gimple_ctypes.LambdaExpr):
+            return
+        bt = gen._quick_type(lam.body)
+        if bt and bt != 'int64_t':
+            out[name] = bt
+
+    for n in _each_binding(body):
+        note(n)
+    return out
+
+
 def _infer_return_type_with_locals(gen, body: list) -> str:
     """`_infer_return_type`, but with the body's own pointer-valued locals
     visible to it (see `_prebound_local_ctypes`).
@@ -2019,8 +2192,12 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     fire for anything else."""
     _locals = _prebound_local_ctypes(gen, body)
     _dict_vals = _dict_value_locals(gen, body)
-    if not _locals and not _dict_vals:
-        return _infer_return_type_core(gen, body)
+    # No early-out on "all three empty" here, because `_lambda_call_ret_locals`
+    # is the one overlay that has to be computed INSIDE the window below: it
+    # asks `_quick_type` about the lambda's own body, so it has to see this
+    # body's locals (`fn = lambda: s` types `fn` by what `s` is, and `s` is
+    # only in `var_types` because of the `_prebound_local_ctypes` overlay
+    # above).
     _saved = gen.var_types
     _scratch_mark_ml: int = gen._scan_scratch_top
     _merged: dict = gen._scratch_dict_copy(_saved)
@@ -2040,12 +2217,23 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
         if _n not in _merged_dv:
             _merged_dv[_n] = _t
     gen._dict_val_types = _merged_dv
+    # Third table, same window: what CALLING a lambda-bound local produces
+    # (`_lambda_call_ret_locals`). Additive for the same reason — a name
+    # already carrying a real return type keeps it.
+    _lambda_rets = _lambda_call_ret_locals(gen, body)
+    _saved_lr = getattr(gen, '_lambda_call_ret_types', None)
+    _merged_lr: dict = gen._scratch_dict_copy(_saved_lr if _saved_lr else {})
+    for _n, _t in _lambda_rets.items():
+        if _n not in _merged_lr:
+            _merged_lr[_n] = _t
+    gen._lambda_call_ret_types = _merged_lr
     try:
         return _infer_return_type_core(gen, body)
     finally:
         gen.var_types = _saved
         gen._scan_scratch_top = _scratch_mark_ml
         gen._dict_val_types = _saved_dv
+        gen._lambda_call_ret_types = _saved_lr
 
 
 def _infer_return_type(gen, body: list) -> str:
@@ -2111,14 +2299,34 @@ def alias_multi_kind_locals(gen, key: str, func) -> None:
         tbl.setdefault(_as_str(key), set()).update(got)
 
 
-def _prepass_list_elem(gen, elements) -> str:
-    """Element type of a container literal for the pre-pass. Mirrors
-    _infer_list_elem_type but resolves identifier elements through the
-    local container-element map instead of var_types (empty during Pass
-    2c) — e.g. `return ctype, cval` where cval was unpacked from an
-    earlier char*-tuple call."""
+def _prepass_list_elem(gen, elements) -> str | None:
+    """Element type of a container literal for the pre-pass, or None when the
+    literal carries NO element evidence. Mirrors `_infer_list_elem_type` but
+    resolves identifier elements through the local container-element map
+    instead of var_types (empty during Pass 2c) — e.g. `return ctype, cval`
+    where cval was unpacked from an earlier char*-tuple call.
+
+    An EMPTY literal answers None, not `'int64_t'`, and that is the whole
+    difference between this and `_infer_list_elem_type`. This function is the
+    EVIDENCE half of container-element inference — its only caller is
+    `_quick_container_elem`, whose answer is a claim about what a value
+    holds, and every reader of that claim (`_collect_return_elems` ->
+    `_return_elem_types`, the `TernaryExpr` arm's join) treats a non-None
+    answer as positively known. `_infer_list_elem_type`'s `'int64_t'` is a
+    STORAGE default for a local's declaration, which is the right answer
+    there and a false one here: `def a2(i): if i: return [<a str comprehension>];
+    return []` inferred `'int64_t'` from the empty literal alone (the
+    comprehension's own element contributes nothing — see below), and that
+    positive claim reached the call site as `_return_elem_types['a2']`, so
+    `print(a2(1))` routed to `mojo_repr_list_ints` and printed the two `char *`
+    slots as pointer decimals. Measured in bugs/
+    CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md; the same
+    program WITHOUT the trailing `return []` answers None and prints right,
+    which is what made the branch look like the trigger when the empty literal
+    is what carries the false claim.
+    """
     if not elements:
-        return 'int64_t'
+        return None
     types = []
     for e in elements:
         le = gen._quick_container_elem(e)
@@ -2198,6 +2406,17 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                     elem[v] = elem[val.name]
                     if val.name in nested:
                         nested[v] = nested[val.name]
+                elif isinstance(val, gimple_ctypes.DictExpr):
+                    # The dict-literal twin of `note_list_literal` above, and
+                    # missing for the same reason: this pre-pass only ever
+                    # replayed LIST literals, so a local `d = {"x": "1"}`
+                    # carried no value type into the cross-call contract even
+                    # though the codegen-time `_lower_dict_literal` records
+                    # one for the same literal. Same shared rule, so the two
+                    # cannot disagree about the dict they describe.
+                    dict_val[v] = gimple_exprtypes.dict_literal_val_ctype(gen, val.pairs)
+                elif isinstance(val, gimple_ctypes.IdentExpr) and val.name in dict_val:
+                    dict_val[v] = dict_val[val.name]
             elif (isinstance(n, gimple_ctypes.AssignStmt) and isinstance(n.target, gimple_ctypes.SubscriptExpr)
                     and isinstance(n.target.obj, gimple_ctypes.IdentExpr)):
                 v = n.target.obj.name

@@ -613,7 +613,86 @@ def _resolved_export_entry(gen, module: str, name: str, info):
     _out['c_parameters'] = _cparams
     _out['signature'] = (_ret + ' ' + _as_str(name) + ' ('
                          + (', '.join(_cparams) or 'void') + ')')
+    # WHETHER `_ret` was measured or defaulted, because a consumer must be able
+    # to tell. An unannotated `def make(n): return Thing(n)` has no annotation
+    # for `_resolve_type` to read, so `_ret` is the `int64_t` fallback and the
+    # DEFINING module's own emission recorded the truth (`Thing *`, from the
+    # `return` statement's own type) under the mangled name. A default is not
+    # evidence, and `register_imported_symbol` must not let one overwrite a
+    # measurement -- see its own comment and the bug doc named there.
+    _out['c_return_type_is_default'] = not _fn.return_type
     return _out
+
+def register_imported_symbol(gen, name: str, info: dict,
+                             original_name: str = None,
+                             write_param_types: bool = True) -> None:
+    """The three table writes an IMPORTED free function needs, in one place.
+
+    `imported_symbols[name]` is what every downstream consumer reads --
+    `_func_mangleable` (a name with a `signature` there IS mangleable),
+    `_func_csym` (which reads `original_name` for an alias), and the re-export
+    extern block -- and `func_return_types` / `func_param_types` are what the
+    call site's own emission reads. An entry that is missing from one and
+    present in the other is exactly the half-registered state this function
+    exists to prevent, and there are TWO import spellings that can produce
+    one: `_register_link_imports`' `from X import Y` and the bare-`import`
+    module-qualified call site in `emit_methods._lower_method_call` (see
+    bugs/CODEGEN_bare_import_module_qualified_call_answers_zero.md).
+
+    `write_param_types=False` keeps `func_param_types` untouched while still
+    recording the entry. That is `_register_sym`'s rule for a module whose
+    definition THIS compile will emit anyway: the definition's own signature
+    is authoritative, and a second, differently-keyed entry here is what a
+    stale cross-module hint reads instead.
+
+    `original_name` is recorded ONLY for a genuine alias. For an unaliased
+    import it equals `name`, and storing it makes `_func_csym` read it back
+    (MojoDict get -> int64_t, then a POINTER `!=` against the bare name that
+    is always true self-hosted) take its alias branch and emit
+    `_safe_name(<erased ptr>)` -- a decimal-address guard name, different
+    every run.
+    """
+    _sk = _as_str(name)
+    _info = _as_dict(dict(info or {}))
+    _orig = _as_str(original_name) if original_name is not None else None
+    if not _orig or _orig == _sk:
+        _info.pop('original_name', None)
+    else:
+        _info['original_name'] = _orig
+    _as_dict(gen.imported_symbols)[_sk] = _info
+    # `func_return_types` is the CALL SITE's answer, and the defining module's
+    # own emission has usually already recorded a MEASURED one under the
+    # mangled name (and propagated it here). So a `c_return_type` that
+    # `_resolved_export_entry` marked as its own `int64_t` fallback is
+    # recorded in `imported_symbols` -- where `_func_mangleable` and
+    # `_func_csym` want it -- and NOT written over that measurement.
+    #
+    # Without the guard: `import lm.mid` + `lm.mid.make(7)`, where
+    # `def make(n): return Thing(n)` is UNANNOTATED. The entry's default
+    # `int64_t` reached `func_return_types['make']`, the call site minted
+    # `int64_t _t2` for a `Thing *` return, and gcc rejected the whole
+    # translation unit:
+    #
+    #   lm/main.py:4:7: error: assignment to 'int64_t' from 'Thing *'
+    #   makes integer from pointer without a cast
+    #
+    # measured, and it is the shape `test_link_mode.py`'s
+    # `test_transitive_struct_method_is_not_variadic_stubbed` and
+    # `test_unannotated_param_with_disagreeing_call_sites` build. Found while
+    # merging the ten bugs4 branches: bugs4-1 added this registration (for a
+    # DIFFERENT bug -- a bare `import <sibling>` recorded no member, so the
+    # re-dispatched bare call found nothing and emitted a weak 0-returning
+    # stub), and master, which had no such registration, was green.
+    _c_ret = _info.get('c_return_type')
+    if _c_ret and not _info.get('c_return_type_is_default'):
+        gen.func_return_types[_sk] = _c_ret
+    _c_params = _info.get('c_parameters')
+    if write_param_types and _c_params is not None:
+        gen.func_param_types[_sk] = [
+            (' '.join(cp.split()[:-1]) if len(cp.split()) > 1 else cp)
+            for cp in (_c_params or [])
+        ]
+
 
 def _module_defines_symbol(gen, module: str, name: str, kind: str) -> bool:
     """Does `module`'s OWN top-level source define `name`? `kind` is
@@ -665,7 +744,7 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
     wherever the mismatch is a field/inference key rather than a symbol
     name (bugs/CODEGEN_reexported_function_import_qualifier_names_the_
     wrong_module.md, and the struct-through-a-re-export shape
-    bugs/CODEGEN_aliased_imported_struct_construction_unresolved.md sits
+    “OPEN: `from mod import Class as Alias” sits
     next to).
 
     Each hop matches on the LOCAL name the importing module binds, and
@@ -908,7 +987,7 @@ def _parsed_import(gen, module: str):
             # degrade to "not found" the same as any other unresolvable
             # module). They are not harmless, and the first place they
             # turned into a genuine crash was `_register_link_imports`
-            # (link mode's `mojo build`): failing to resolve `.base` meant
+            # (link mode's `fire build`): failing to resolve `.base` meant
             # `triple` never got registered at all, `f = triple` fell
             # through to the generic "undeclared identifier" placeholder
             # (a literal `0`), and calling through that placeholder
@@ -957,13 +1036,13 @@ def _local_sibling_module_exports(gen, module: str):
     """(exports_dict, qualifier) for a `from module import ...` that
     module_loader.load_module() can't resolve because it isn't a
     tracked stdlib/test module — i.e. a LOCAL project sibling file (see
-    bugs/DYLIB_sibling_import_calls_bind_to_weak_stubs.md, box.3d/game
+    DYLIB_sibling_import_calls_bind_to_weak_stubs, box.3d/game
     repo). (None, None) when `module` genuinely can't be found anywhere
     (a real external/unmodeled package, or a bare relative import), in
     which case the caller falls back to the existing weak-stub/
     unresolved-alias behavior.
 
-    `mojo dylib` (driver.compile_dylib -> build_stdlib_dylib.build)
+    `fire dylib` (driver.compile_dylib -> build_stdlib_dylib.build)
     compiles each module SEPARATELY — one private GimpleGen instance per
     file, do_imports=False, link_imports=False — so neither
     _register_link_imports (link_imports-only) nor the do_imports

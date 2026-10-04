@@ -212,7 +212,7 @@ shapes — this is about a whole nested TYPE DEFINITION).
 
 Single instance so far in this cluster; not folded into a hard-bug doc.
 If confirmed recurring elsewhere, write
-`bugs/hard/CODEGEN_generator_nested_class_def_unsupported.md`.
+`CODEGEN_generator_nested_class_def_unsupported`.
 
 Not fixed here — a nested class inside a generator is a genuinely
 unusual shape and support would need real design work (where does the

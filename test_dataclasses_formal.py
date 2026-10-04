@@ -161,7 +161,7 @@ def main(n):
 # path's construction fills DECLARATION ORDER from positional arguments and
 # refuses a count that does not match (`check_construction_shapes`), so
 # `Config(7)` is a construction-shape refusal rather than a dataclasses one.
-# It is recorded in `bugs/FORMAL_dataclass_partial_construction.md`; putting it
+# It is recorded in `FORMAL_dataclass_partial_construction`; putting it
 # in this case would have tested the construction check and called it a
 # dataclasses failure.
 FIELD_DEFAULT = """
@@ -460,7 +460,7 @@ def main(n):
 # call may supply a PREFIX of the fields and a KEYWORD spelling, and the rest
 # come from their own defaults. `Config(7)` is `width = 7, height = 24`, which
 # CPython says and which this backend used to refuse
-# (`bugs/FORMAL_dataclass_partial_construction.md`, now closed).
+# (`FORMAL_dataclass_partial_construction`, now closed).
 #
 # Every row is here because each of the four spellings has a DIFFERENT answer if
 # one of the rules is wrong, and a program that prints 7 24 7 24 7 3 cannot tell
@@ -502,7 +502,7 @@ def main(n):
 # THE COMPARISON IS IN `main`, not behind a call, and that is deliberate rather
 # than convenient: a one-word class compared through a function BOUNDARY does
 # not dispatch, on this tree and on the one before it —
-# `bugs/FORMAL_one_word_eq_dispatch_stops_at_a_call_boundary.md` is the
+# `FORMAL_one_word_eq_dispatch_stops_at_a_call_boundary` is the
 # measurement, and it is a different construct from the one this file is about.
 # A row here would pin a program that answers 0, and a case whose expectation
 # is a known wrong answer teaches the next reader that 0 is the answer.

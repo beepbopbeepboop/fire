@@ -80,7 +80,7 @@ def check(ok, what, detail="", tally=None, announce=True):
 
     The detail is KEPT in the record, not just printed: a suite that reports
     "FAIL <what>" and throws away the only sentence that says why has thrown
-    away the evidence, and `bugs/CODEGEN_test_struct_formal_is_flaky.md` is the
+    away the evidence, and `“CODEGEN_test_struct_formal: the struct suite is FLAKY”` is the
     write-up of a run whose output could not be attributed for exactly that
     reason. It is also what the harness self-test below asserts on, so a record
     that dropped it would make that check pass for the wrong reason.
@@ -186,7 +186,7 @@ def expect_lines(tmpdir, name, source, expected, what, tally=None,
 
     **TWO checks are recorded in every outcome, and that is the point.** This
     used to `return` from a failed length check, so the suite's own DENOMINATOR
-    moved with its own verdicts — `bugs/CODEGEN_test_struct_formal_is_flaky.md`
+    moved with its own verdicts — `“CODEGEN_test_struct_formal: the struct suite is FLAKY”`
     recorded 144, 145, 147 and 148 checks on an unchanged tree, and read that
     as "some checks did not run", which is a claim about the tree and not about
     the tally. It is about the tally: a case that fails on length used to cost
@@ -699,7 +699,7 @@ def test_the_module_builds_on_both_backends(_tmpdir=None):
     # the right one: it failed on "the x86-64 module dylib is an ELF object"
     # while the x86-64 EXECUTABLE beside it was a Mach-O, so the dylib and the
     # thing linking it had to agree on the container and the test said they
-    # must not. `bugs/CODEGEN_x86_64_module_dylib_emitted_as_macho.md` reported
+    # must not. `“An x86-64 module dylib is a Mach-O, so no x86-64 program can import anything”` reported
     # the same wrong premise, and its real content — that `fmt` was accepted
     # and ignored, and that an x86-64 module dylib with an extern call could
     # not be signed — was two separate real defects, now fixed.
@@ -734,15 +734,15 @@ def test_unservable_formats_are_refused_not_wrong(tmpdir):
     pins that it does.
     """
     for fmt in UNSERVABLE:
-        # `pack` has FIVE value slots. A format with more values than that is
-        # the case under test, so the call must not simply hand it every value:
-        # the extra words would be past the callee's arity, and a call across a
-        # dylib boundary refuses that now rather than dropping them (it used to
-        # drop them, which is how this generator came to emit an 8-argument call
-        # to a 6-parameter function and still build). The module answers the
-        # format it is asked about from `_nvalues(fmt)`, not from how many
-        # arguments arrived, so padding to five says exactly the intended
-        # thing: five values supplied, more wanted.
+        # `pack` has FIVE value slots, and this case supplies FIVE. That is the
+        # in-band decline the module implements and it is a real behaviour, but
+        # it is NOT the arity case: the eight-value call that reaches the
+        # ceiling is a separate check, in
+        # `test_the_eight_value_pack_is_refused_by_arity` below, because the
+        # two fail in different places and only one of them is the compiler.
+        # The module answers the format it is asked about from `_nvalues(fmt)`,
+        # not from how many arguments arrived, so five supplied and more wanted
+        # says exactly the intended thing.
         values = [1] * len(struct.unpack(fmt, bytes(struct.calcsize(fmt))))
         values = list(values[:5])
         args = ", ".join(str(v) for v in values)
@@ -786,6 +786,76 @@ def test_unservable_formats_are_refused_not_wrong(tmpdir):
               f"only 8 argument registers exist, one of which is the format); "
               f"the program instead read {size - len(got)} of {size} bytes "
               f"and {died or 'exited 0 after printing them'}")
+
+
+def test_the_eight_value_pack_is_refused_by_arity(tmpdir):
+    """`pack` handed EIGHT values is refused AT THE CALL, by name.
+
+    The case above supplies five, so the module's own in-band decline is what
+    it sees. That was the whole of this suite's arity coverage until
+    2026-10-02, and it is worth saying why that is a hole rather than a
+    detail: a fixture that truncates its own arguments never builds the
+    nine-argument call, so `pack`'s six-parameter signature — the ceiling the
+    module's whole design rests on (see its docstring, point 2: six is the
+    SMALLER of the two ABIs' integer argument registers, and a module sized to
+    arm64's eight was refused on x86-64) — was enforced by nothing. If the
+    signature check stopped firing, every one of these programs would still
+    build and still print nothing, and the suite would be green.
+
+    So the wide call is built here, with every value the format names, and the
+    REFUSAL is the assertion — by name, and with the parameter list, because a
+    refusal that named nothing could be satisfied by any refusal at all.
+
+        build: call pack(): too many positional arguments (9 for 6
+        parameter(s); the parameters are ['fmt', 'v0', 'v1', 'v2', 'v3', 'v4']
+
+    Two facts are pinned by that one string and both are load-bearing. The
+    `9 for 6` is the format plus eight values against five value slots, so the
+    count is the CALL's and not a cap the module imposed on itself. And the
+    parameter LIST is what says the ceiling is the signature rather than a
+    number someone typed: widening `pack` to eight value slots would have to
+    change that list, which is where a reader looks.
+
+    This is a BUILD refusal, so `build_and_run` raises; catching the
+    AssertionError is the passing outcome here, which is the mirror of the case
+    above and is why the two are separate functions rather than one loop with a
+    branch: the `except AssertionError` in the other one means a broken build,
+    and folding them together would make that indistinguishable.
+
+    Recorded here because it used to be in the fixture and was lost with it:
+    a bug doc since deleted with the fix that closed it — which also recorded
+    that the `expect=` marker this file's suite row had been carrying for these
+    two checks was already gone by then, so only the coverage hole was left."""
+    fmt = "<IIQQQQQQ"
+    nvals = len(struct.unpack(fmt, bytes(struct.calcsize(fmt))))
+    params = ["fmt"] + [f"v{i}" for i in range(5)]
+    src = ("from struct import pack\n\n"
+           "def main():\n"
+           f'    b = pack("{fmt}", {", ".join(str(v + 1) for v in range(nvals))})\n'
+           "    print(len(b))\n")
+    try:
+        got, died = build_and_run(tmpdir, f"arity_{fmt.strip('<>')}", src)
+    except AssertionError as e:
+        text = str(e)
+        # The three parts, separately, so a reworded message that stopped
+        # saying one of them is a FAIL rather than a pass with a new string.
+        check("too many positional arguments" in text,
+              f"pack(\"{fmt}\") with {nvals} values is refused as too many "
+              f"arguments, and the refusal says so: {text[-300:]}")
+        check(f"9 for {len(params)}" in text,
+              f"the refusal counts 9 arguments against the callee's "
+              f"{len(params)} parameters — the call's own arity, not a cap "
+              f"the module imposed: {text[-300:]}")
+        check(all(p in text for p in params),
+              f"the refusal names the callee's parameters {params}, which is "
+              f"what says the ceiling is the SIGNATURE: {text[-300:]}")
+        return
+    check(False,
+          f"pack(\"{fmt}\") with all {nvals} values BUILT and ran "
+          f"(stdout {got!r}, {died or 'exited 0'}) — the six-parameter "
+          f"signature is no longer enforced, so the module's whole design "
+          f"ceiling (its docstring, point 2) is unbacked and every five-value "
+          f"case above is passing for the wrong reason")
 
 
 # ── 5. the module is where the resolver looks, and the corpus imports it ─────
@@ -1073,6 +1143,7 @@ def main():
         test_unpack_from_eight_values,
         test_the_unservable_list_is_exactly_the_wide_pack_formats,
         test_unservable_formats_are_refused_not_wrong,
+        test_the_eight_value_pack_is_refused_by_arity,
         test_the_module_builds_on_both_backends,
         test_the_check_count_is_fixed_whatever_the_verdicts,
         test_module_resolves_and_is_exported,

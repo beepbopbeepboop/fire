@@ -287,7 +287,7 @@ def program(backend):
 
     Both values for every case rather than a subset, because `quote` is the
     parameter a cross-dylib default cannot supply
-    (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`) and a module
+    (`FORMAL_default_argument_not_applied_across_a_dylib`) and a module
     that ignored it would agree with CPython on every `quote=1` case — which is
     the value CPython defaults to, and therefore the value most callers use.
 

@@ -118,7 +118,7 @@ the read-before-store analysis then reports `Box`. So the construct the case wan
 refused (a dotted specialization, which `call_callee_name` deliberately answers
 `None` for) never reaches the check that would refuse it: the lift removes the
 dotted spelling first. That is the fifth shape in
-`bugs/FORMAL_method_call_on_a_subscripted_receiver.md` §"The NEXT blocker for
+`FORMAL_method_call_on_a_subscripted_receiver` §"The NEXT blocker for
 three of these files", which is filed, measured, and claimed
 (`bug:FORMAL_method_call_on_a_subscripted_receiver`, formal3-5). Not moved here.
 

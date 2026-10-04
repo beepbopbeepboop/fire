@@ -113,7 +113,7 @@ def test_async_build_refused(name: str, mojo_src: str, expected_substr: str):
     is honestly refused (raises with a message containing expected_substr)
     rather than silently producing the old eager-execution .cpp that would
     otherwise link and run fine while being semantically wrong.
-    See bugs/CODEGEN_compiled_async_eager_execution_semantic_mismatch.md."""
+    See CODEGEN_compiled_async_eager_execution_semantic_mismatch."""
     global _PASS, _FAIL
     try:
         gimple_codegen.compile_to_gimple_with_cpp(mojo_src)
@@ -139,7 +139,7 @@ def test_async_value_consumption_is_lazy(name: str, mojo_src: str, forbidden_mar
     coroutine object (see commit f5d9021's `_lower_call` change, which
     replaced the OLD honest "consumed as a value" whole-module refusal
     9a3a62b had put in place for the eager-execution bug -- see
-    bugs/CODEGEN_compiled_async_eager_execution_semantic_mismatch.md --
+    CODEGEN_compiled_async_eager_execution_semantic_mismatch --
     with a real, lazy `MojoAsync *` handle construction instead of ever
     reviving eager execution). `fire.py run` (the interpreter) on the exact
     same source independently confirms this is the right shape: it prints

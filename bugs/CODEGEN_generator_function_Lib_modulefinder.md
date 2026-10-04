@@ -470,7 +470,7 @@ bug)**: 2 new-visibility errors at line 284 (`passing argument 3 of
 'ModuleFinder_msg' makes pointer from integer without a cast`) —
 `def msg(self, level, str, *args):` called as `self.msg(2, "can't list
 directory", dir)`. This is the `*args`-parameter-signature shape
-`bugs/hard/CODEGEN_args_kwargs_signature_assumed_forwarding_only.md`
+`CODEGEN_args_kwargs_signature_assumed_forwarding_only`
 (task #142) already covers and this task's guidance explicitly holds
 back — not attempted.
 

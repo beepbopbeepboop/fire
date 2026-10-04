@@ -7,13 +7,13 @@ numbers are over — nothing here claims a verdict about a file no run reached.
 
 * **§5.1 — a machine fact filed as a backend gap, and published to the CAS.**
   Fixed here (`6febd26e`); filed as
-  `bugs/FORMAL_sweep_memcap_death_is_filed_as_codegen.md`.
+  `FORMAL_sweep_memcap_death_is_filed_as_codegen`.
 * **§5.2 — what `-t` and `-j` are worth on a loaded box**, measured, because the
   `-5` baseline's 361 `tool` rows and this run's 20 are the same fact.
 * **§2.3 — the SIGTERM drain does not drain**: a signalled sweep keeps building
   the whole rest of its scope and reports only what it had classified when the
   signal arrived. Filed as
-  `bugs/FORMAL_sweep_sigterm_drains_the_whole_scope.md`, **not fixed here** — it
+  `FORMAL_sweep_sigterm_drains_the_whole_scope`, **not fixed here** — it
   changes the interruption contract, and this branch already changes a
   classification rule.
 
@@ -187,7 +187,7 @@ The `-j 8 -t 600` run is the one whose logs are at
 scope they reached (stdlib files 1-171 plus the in-flight tail; **none of this
 repository's own 400 files**). **Neither arm printed its summary**, and the reason is a defect
 in the tool, filed as
-`bugs/FORMAL_sweep_sigterm_drains_the_whole_scope.md`: every file is submitted
+`FORMAL_sweep_sigterm_drains_the_whole_scope`: every file is submitted
 to the pool up front, so `ThreadPoolExecutor.shutdown(wait=True)` on the way out
 of the signal handler does not cancel — it drains the queue. The run stopped
 *printing* at once and went on *building* (13 children, every one of them
@@ -432,13 +432,13 @@ every cache key (`_criteria_id`), so this invalidates the CAS for every sweep on
 the machine and the next sweep rebuilds. That is the tool working as designed —
 a rule change must take effect — and it is the price of the fix.
 
-**Filed as** `bugs/FORMAL_sweep_memcap_death_is_filed_as_codegen.md` (the doc is
+**Filed as** `FORMAL_sweep_memcap_death_is_filed_as_codegen` (the doc is
 kept, not deleted: the fix landed, and the six rows it misfiled are still in the
 CAS under the pre-fix key, which the invalidation retires).
 
 ### 5.2 The SIGTERM drain does not drain, and the summary never arrives
 
-**Filed as** `bugs/FORMAL_sweep_sigterm_drains_the_whole_scope.md`, **not fixed
+**Filed as** `FORMAL_sweep_sigterm_drains_the_whole_scope`, **not fixed
 here.** In one paragraph, because §2.3 lives with the consequence: every file is
 submitted to the pool before the first is classified, and
 `ThreadPoolExecutor.shutdown(wait=True)` — which is what leaving the `with` block

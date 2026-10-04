@@ -340,7 +340,7 @@ it costs to arrange:
   × two arms is twelve builds on eighteen cores.
 * **Nothing was left running, and the file the task names as the
   never-terminating one is answered.** `std/python/bindings.mojo`
-  (`bugs/FORMAL_bindings_mojo_build_never_terminates.md`) **is** in the scope and
+  (`“`fire.py build --formal` on `std/python/bindings.mojo` never terminates”`) **is** in the scope and
   **did** get a verdict, on both arms:
 
   ```
@@ -407,7 +407,7 @@ omission.
 > it was, kept because the §6 conclusion ("a project and not a patch") was right
 > and because the four-build question it left open has its answer above.
 
-`bugs/FORMAL_dylib_module_body_has_no_load_time_entry_point.md`, filed with this
+`FORMAL_dylib_module_body_has_no_load_time_entry_point`, filed with this
 map, with the measurement below. The row in one paragraph:
 
 `formal/build.py` refuses to compile **any** module with top-level statements into

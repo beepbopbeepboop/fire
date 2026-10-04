@@ -95,7 +95,7 @@ link, so a marker here is legitimate rather than a silencer.
 absorbs two and the third (`refuse_a_dotted_specialized_callee_names_it`, which
 now stops at a read-before-assignment message instead) rides along inside the
 EXPECTED verdict. That is the subject of
-`bugs/TEST_expect_marker_undercounts_the_failures_it_absorbs.md`, so it is
+`TEST_expect_marker_undercounts_the_failures_it_absorbs`, so it is
 reported here rather than duplicated.
 
 ## Scope

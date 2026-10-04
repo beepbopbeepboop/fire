@@ -554,7 +554,7 @@ def test_several_unresolvable_imports_are_all_named(tmpdir, _shared):
     `unresolvable_imports` above raises inside the loop that builds the modules,
     so it reported whichever unresolvable import came first in the statement
     list. The measurement is in
-    `bugs/FORMAL_admitted_contracts_sweep_measurement.md`: fixing
+    `“What the admitted contracts did and did NOT move in the sweep”`: fixing
     `subprocess` on eight files moved them from "refused for `subprocess`" to
     "refused for `tempfile`", no file moved out of `not-answerable/host-import`,
     and the per-module breakdown before and after measured two different things
@@ -888,7 +888,7 @@ def test_guarded_imports_stay_inert(tmpdir, _shared):
     # runs the body, and a body that does not call `main` does not run it, so
     # the process exits 0 — which is what CPython does for the same file
     # (`main()` at file level returns into nothing). That shift is
-    # `bugs/FORMAL_toplevel_statements_dropped.md` being fixed, not a
+    # `FORMAL_toplevel_statements_dropped` being fixed, not a
     # regression, and asserting 13 would have pinned the silent drop back in
     # place. What this test is actually about is INERTNESS: the guarded import
     # must not become a dependency, so the build has to succeed at all and the
@@ -2105,7 +2105,7 @@ def test_an_imported_generic_is_refused_as_an_export_gap(tmpdir, _shared):
     whole of `formal/monomorph.py`.**  This test used to assert that
     `widen[Int](5)` was refused too, on the reasoning that "which of the two
     messages it should carry is
-    `bugs/FORMAL_bracketed_private_name_refused_as_a_specialization.md`'s
+    `FORMAL_bracketed_private_name_refused_as_a_specialization`'s
     subject and its own claim, so this test does not decide it" — i.e. it was
     never sure the refusal was the right answer, only that it was a refusal.
     The right answer is that a bracket says WHICH instantiation and a boundary

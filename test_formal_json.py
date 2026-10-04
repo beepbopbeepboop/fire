@@ -514,7 +514,7 @@ DUMPS_CORPUS = [
 # surrogate-pair arithmetic is checked over the WHOLE range and not at four
 # hand-picked points. These are emitted one program per chunk, each chunk
 # small, because `main` is a few hundred statements per program before
-# `bugs/FORMAL_always_returns_recurses_past_the_stack_on_a_large_function.md`
+# `FORMAL_always_returns_recurses_past_the_stack_on_a_large_function`
 # bites.
 CP_RANGES = [
     (0x01, 0x7F), (0x80, 0xFF), (0x100, 0x2FF), (0x300, 0x4FF),

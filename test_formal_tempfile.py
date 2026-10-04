@@ -521,7 +521,7 @@ def group_name(tmpdir, archs, verbose):
         separator inside the name and `mkdir` then fails on a parent directory
         that does not exist, so CPython raises `FileNotFoundError` and this path
         has no raise — `""` is the module's documented stand-in
-        (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md` is about
+        (`FORMAL_default_argument_not_applied_across_a_dylib` is about
         the other half of the same module). The oracle is a fresh interpreter,
         because `tempfile.gettempdir` caches and a second question in this
         process would be answered with the first one's environment.

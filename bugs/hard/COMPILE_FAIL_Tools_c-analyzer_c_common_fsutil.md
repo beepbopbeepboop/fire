@@ -1,18 +1,92 @@
 # COMPILE_FAIL (hard): Tools/c-analyzer/c_common/fsutil.py
 
-**State: PARTIAL, and better than the entry below it, but the file still
-does not build.** The blocker this doc's previous pass identified as "the
-real blocker" — **calling a keyword-only callable-valued parameter** — is
-FIXED for the same-module case: two of the file's four such generators
-(`walk_tree`, `iter_files_by_suffix`) now compile and run, and the
-underlying representation bug underneath them (a callable-valued parameter
-defaulting to a NULL function pointer, so calling it SIGSEGVed) is fixed
-everywhere, including in an ordinary `def`. The file remains unbuildable
-for three reasons that are NOT this bug: the two remaining
-same-import-spelling generators (`_walk_tree`, `glob_tree`), whose
-callable defaults name an **imported** module's function and so are still
-refused; `iter_files`'s variadic lambda; and `process_filenames`'s
-`Exception(...)`-as-a-value.
+## Status (2026-10-02 — re-measured against the current tree: same four refusals, one diagnosis corrected, and the remaining work is three features rather than a puzzle)
+
+### What it says now
+
+```
+$ MOJO_DEBUG=1 python3 fire.py build -o fsutil <the real file>
+Error building: cannot compile module: function(s) _walk_tree, glob_tree,
+iter_files, process_filenames ...
+Unsupported shape(s):
+  _walk_tree:        unsupported for-loop iterable type: CallExpr
+  glob_tree:         unsupported for-loop iterable type: CallExpr
+  iter_files:        a `lambda` with more than one parameter, a `*`/`**`-
+                    forwarding parameter, or a parameter default is not
+                    supported as a value inside a compiled generator/
+                    coroutine body
+  process_filenames: call to unresolved callee 'Exception(...)'
+```
+
+Four, the same four as this doc's 2026-09-29 entry, with the same messages.
+The file is 13967 bytes and lives at
+`/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/fsutil.py`; it was
+copied into this worktree's `.tmp/` and built from there, never written to.
+
+### The diagnosis correction: `iter_files`'s blocker is NOT `_lambdas_ok`
+
+This doc's item 3 blames `iter_files`' variadic lambda on
+`CODEGEN_generator_lambda_expr_unsupported.md`, and the 2026-09-26 entry names
+`mojo/middle/coro.py`'s `_lambdas_ok` as the gate. **That gate was removed as
+far as variadic lambdas are concerned on 2026-10-02** — `_lambdas_ok` is now
+`_lambda_shape_ok`, and a variadic lambda inside a compiled generator body
+compiles, links and runs correctly through six measured shapes (see that doc's
+new Status entry and the nine regression tests in
+`test_gimple_generator_runner.py`).
+
+**The file does not move, and the reason is a SECOND, older guard.**
+`mojo/backend_gimple/cpp_core.py`'s `_cpp_expr` `LambdaExpr` case has its own
+narrow admission — 0 params or one plain param, `_CPP_CALLABLE_CTYPE` /
+`_CPP_CALLABLE_CTYPE_1ARG` — and it is the one producing this message.
+Verified rather than inferred: `mojo/middle/coro.py` was restored to its
+pre-change bytes and the build re-run, and the message is byte-identical. So
+there were always two guards on this shape, one per emitter, and only one of
+them was being tracked.
+
+That second guard is a genuinely different piece of work, and a smaller one
+than this doc's history suggests: the C++20 emitter can express a variadic
+lambda NATIVELY (`[&](auto&&... a){ ... }`) — that is the whole reason it
+exists instead of the plain path's lift-to-a-top-level-function machinery — so
+what is missing is a nameable declared type for the value, not the lambda. The
+`std::function` route the 2026-08-24 entry rejected does not apply to a
+`__cplusplus`20 target with a variadic template operator().
+
+### The remaining four, each with its next step
+
+1. **`_walk_tree(root, *, _walk=os.walk)` / `glob_tree(root, *, suffix=None,
+   _glob=glob.iglob)`** — an imported `module.attr` callable default, and the
+   kwonly eligibility gate cannot decide it in `lower()`. **This doc's stated
+   reason for the gate is now measurably weaker and the real reason is
+   stronger:** it says refusing is better than "compile the generator and then
+   pad NULL — trading a refusal for a crash". Measured 2026-10-02, the
+   same-module spelling is correct and the imported one no longer crashes —
+   `def probe(x, *, g=os.walk): return g(x)` printed **an address** on
+   2026-09-26 and prints **`0`** today. So the trade is a refusal against a
+   SILENT WRONG ANSWER, which is worse, and the gate should stay. Filed with
+   the repro and a two-step fix:
+   `bugs/CODEGEN_imported_callable_default_answers_zero.md`. Its step 1 — make
+   `calls_shared._callable_value_symbol` refuse rather than emit a `0` for a
+   `module.attr` it cannot resolve — is small, and converts a wrong answer into
+   a correct one for every module that hits it, this one included.
+2. **`process_filenames`' `onempty = Exception('no filenames provided')`** — a
+   call to an exception constructor used as a VALUE, refused as "call to
+   unresolved callee 'Exception(...)'". Unchanged, untouched, and a distinct
+   shape from everything else in this doc. The next step is to decide whether
+   an exception constructor is representable as a value at all in the compiled
+   value model; nothing in the tree has answered that.
+3. **`iter_files`' variadic lambda** — see the correction above. Its remaining
+   work is `cpp_core.py`'s guard, and the fix above.
+4. `gen_module`'s whole-module escalation means the file stays unbuildable
+   until all four clear. That is the intended behaviour — every one of the four
+   is a refusal rather than a wrong answer — and it is why this doc is still
+   worth reading rather than deleting: it is a list of four named features, and
+   three of them now have their next step written down precisely enough to be
+   picked up one at a time.
+
+**State: PARTIAL, unchanged in count and better in diagnosis.** One of the
+four had its blocker moved to the right file by this pass, one has a sharper
+reason to stay refused, and three have a next step that does not require
+inventing a mechanism.
 
 ## Status (2026-09-29 — the kw-only-callable blocker is fixed for the same-module case; the file still does not build)
 
@@ -171,7 +245,7 @@ is stale for these two; see the report.
    SIGSEGV — `os` is an imported-symbol marker but its `walk` is never in
    `func_return_types` at all (measured: zero entries containing
    `"walk"`). Filed separately, with the repro and the two design options:
-   `bugs/CODEGEN_unresolved_imported_callable_default_null_pointer.md`.
+   `CODEGEN_unresolved_imported_callable_default_null_pointer`.
    This is the exact case `_walk_tree`/`glob_tree` would hit if their
    eligibility gate were simply relaxed, which is why it is not.
 3. **`iter_files`' `lambda *a, **k: _walk(*a, walk=_files, **k)`** — the

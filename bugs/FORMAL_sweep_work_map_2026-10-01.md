@@ -163,14 +163,14 @@ log, and in any earlier x86-64 log, are floors.
   build, not a big compilation, and `-t` is the only thing bounding it today.
   Smallest reproducer:
   `python3 tools/formal_sweep.py -t 30 <that file>`. Filed as
-  `bugs/FORMAL_bindings_mojo_build_never_terminates.md`.
+  `“`fire.py build --formal` on `std/python/bindings.mojo` never terminates”`.
 * `formal/arm64_codegen.py` — timeout at `-t 30`, measured at **29.8 s**. It
   misses by 0.2 s, so it is a `-t` artefact on this tree and would pass at
   `-t 60`; it is in the x86-64 log too, for the same reason.
 * `scripts/check_resolved_bugs.py` and, in a later run, four other files —
   `json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)`.
   **This one is a measured concurrency bug, and it is intra-sweep, not
-  cross-sweep.** See `bugs/FORMAL_dylib_manifest_written_in_place.md`.
+  cross-sweep.** See `FORMAL_dylib_manifest_written_in_place`.
 
 ## 6. What this document does not establish
 

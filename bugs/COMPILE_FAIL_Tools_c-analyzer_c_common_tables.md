@@ -4,6 +4,48 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-10-02 — the suggested first slice is DONE: the refusal names the callable
+
+The slice the entry below asks for ("make the refusal NAME the
+callable-local case ... so the three files' shared blocker is legible")
+landed in commit `ad7ffd96`. The refusal is now:
+
+```
+read_table: a `for` over a call through the callable-valued
+            local/parameter '_get_reader(...)' is not supported in a
+            compiled generator/coroutine body: what that call RETURNS is
+            not knowable here (it depends on which callable the caller
+            passes), and a `for` target needs the returned ITERATOR's
+            element type. It needs the callable's signature discovered
+            from its call sites first.
+```
+
+Verified on all three files the entry below groups as sharing this
+blocker, each of which now names its own callee:
+
+| file | callee named |
+|---|---|
+| `c_common/tables.py` | `read_table` → `_get_reader(...)` |
+| `c_analyzer/__init__.py` | `check_all` → `check(...)` |
+| `c_common/fsutil.py` | `_walk_tree` → `_walk(...)`, `glob_tree` → `_glob(...)` |
+
+Regressions `cpp_for_over_callable_param_names_the_callee` and
+`cpp_for_over_callable_param_leaves_resolved_callees_alone` in
+`test_gimple_generator_runner.py` — the second is the negative half, so
+the gate cannot be quietly too wide.
+
+**The blocker itself is untouched, and the three sub-problems the entry
+below lists are still all three.** One correction to that entry's
+reasoning, measured: `_get_reader` is NOT declared with one of the two
+callable ctypes. Its parameter inference gives up on a default-valued
+parameter and leaves it at the `int64_t` default (measured by dumping this
+unit's `declared` at the `for`), which is why the refusal's gate is "the
+callee is a bare name this unit has DECLARED" rather than "the callee is
+declared as a callable" — the precise predicate misses every real
+instance of this shape. That is worth knowing before item 1 is started:
+the parameter is not yet recognised as a callable AT ALL, so step 1 is
+two steps (bind the default's type, then carry a signature), not one.
+
 ## Status 2026-09-30 — one real blocker removed; a DIFFERENT, harder one is next
 
 Re-verified against the current tree (`python3 fire.py build`, sources copied

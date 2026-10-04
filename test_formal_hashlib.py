@@ -187,7 +187,7 @@ def _chunks(items, n):
     `RecursionError` out of `formal/arm64_codegen.py`, i.e. a crash in the
     compiler's plumbing rather than a claim about the source. Chunking keeps
     each program small enough to compile. Filed as
-    `bugs/FORMAL_always_returns_recurses_past_the_stack_on_a_large_function.md`;
+    `FORMAL_always_returns_recurses_past_the_stack_on_a_large_function`;
     until it is fixed, a test that needs many cases builds many small programs
     rather than one large one.
     """

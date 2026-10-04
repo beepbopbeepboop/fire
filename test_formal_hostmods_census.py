@@ -46,7 +46,7 @@ a check.
 
 A module dylib is cached by content, so a verdict from a previous version of the
 file would answer the wrong question — which is the measurement in
-`bugs/FORMAL_cas_verdict_key_ignores_the_hostmod_sources_it_compiles.md`, and it
+`FORMAL_cas_verdict_key_ignores_the_hostmod_sources_it_compiles`, and it
 is the reason this file points `GMOJO_HOME` at a private directory per row
 rather than sharing one.  It is also why the build is not deduplicated across
 rows: `os/__init__.mojo` and `os/path/__init__.mojo` both import
@@ -102,7 +102,7 @@ def hostmod_modules():
 # no stack area, so `match_core(7)` had nowhere to go.  Both conventions have
 # one now (`formal/x86_64_codegen.py`'s `_load_home_from_stack` and `_emit_call`
 # on x86-64, `_MAX_INCOMING_ARGS` on both), which is what
-# `bugs/FORMAL_x86_64_argument_registers.md` asked for (that filing is deleted
+# `FORMAL_x86_64_argument_registers` asked for (that filing is deleted
 # too, with its emitters half landed), so the rows are deleted
 # rather than re-needleed.
 #

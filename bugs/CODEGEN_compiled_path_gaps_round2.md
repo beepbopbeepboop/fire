@@ -1,6 +1,54 @@
 # CODEGEN: four compiled-path gaps measured on 2026-09-27, none of them refusals
 
-## Status (2026-10-01): #1's `cls` half is CLOSED (and it was NOT feature-sized,
+## Status (2026-10-02): #1 is CLOSED IN FULL, #2 and #4 were already closed,
+## #3 is untouched and still deliberately so
+
+#1's generator half is closed. Both halves turned out to be one change, exactly
+as the 2026-10-01 note below predicted, and the failure mode had moved since:
+`Child.gen(4)` is no longer `mojo_unsupported_iter` at the call site, it is a
+**void `Child_gen(...)` stub** whose `yield`s were dropped on the floor, which
+answers `mojo_unsupported_iter` at RUN time with a dead iterable. Same refusal,
+one step further from the cause.
+
+The fix is one C++ coroutine unit PER RECEIVER CLASS, keyed `(struct, method)`
+rather than on the defining FunctionDef's `id`:
+
+- `_merge_struct_inheritance` gives every StructDef's `.methods` the fully
+  merged view, so `Child.methods` holds the very SAME FunctionDef object
+  `Base.methods` does. The registration loop popped `id(m)` from
+  `_generator_fns` as it went, so `Child`'s turn never came.
+- The unit's `cls` is an opaque `int64_t` placeholder passed positionally and
+  never dereferenced — every `cls.<...>` read resolves BY NAME against the
+  struct the unit was emitted for (`_gen_cpp_generator_unit`'s
+  `_cls_refs_supported`) — so sharing the base's unit would read
+  `_classattr_Base__tag` where CPython reads Child's. Registering the subclass
+  alone, without its own unit, would therefore have converted this program's
+  LOUD `mojo_unsupported_iter` into a SILENT `7, 4`: the doc's own reason for
+  not doing the lookup half on its own, and the reason the two halves had to
+  land together.
+- Registering `('Child', 'gen')` closes both ends at once:
+  `_supported_generator_methods` also suppresses the void `Child_gen` stub
+  (both GIMPLE emission sites skip on membership, module_gen.py's Phase 2a),
+  and the call site — `emit_methods.py`'s `_lower_method_call`, whose
+  class-level-receiver arm looks up `(func.obj.name, method)` — finds its unit.
+  The `.cpp` side needed nothing new either: the struct-layout emission at
+  module_gen.py already iterates `_supported_generator_methods`.
+
+`Child.gen(4)` now yields `9, 4`, matching CPython.
+
+The two byte-identical registration loops this replaced ran back to back with
+nothing between them (the second's only difference was a `"(pass 2)"` debug
+string), so the consolidation is also a deletion: with the work keyed on the
+pair, a second identical pass could only ever find nothing new.
+
+**Regression:** `inherited_classmethod_generator_dispatches_per_class` in
+`test_gimple_generator_runner.py`, via `test_generator_matches_cpython` — the
+oracle is measured at test time, because the failure to catch is precisely
+"agrees with itself and is wrong" — and it calls `Base.gen(4)` in the SAME
+program as `Child.gen(4)`, so a fix that made the subclass read the base's
+value, or the base read the subclass's, cannot satisfy it.
+
+## Status (2026-10-01, superseded by the above): #1's `cls` half is CLOSED (and it was NOT feature-sized,
 ## as this document argued), #2 and #4 were already closed, #3 is untouched
 
 The `cls` half of #1 was recorded here as needing "a class OBJECT to exist at
@@ -59,25 +107,28 @@ the base read the subclass's would pass the first line).
 
 ### What is still open in #1, and why the remaining half was NOT landed
 
-**The generator half.** `Child.gen(4)` is still `mojo_unsupported_iter`, and
-that is deliberate. `gen._generator_method_api` is keyed
-`(struct_name, method_name)` and holds only `('Base', 'gen')` (measured), so
-the call site misses. The doc's prescription — "walk the base chain at the call
-site" — was **not** applied, and the reason is worth recording, because
-applying it alone would have made the program WORSE:
+**The generator half — CLOSED 2026-10-02, and this section's reasoning is what
+the fix was built on.** Kept because it correctly predicted the shape and
+correctly refused the tempting half of it. At the time:
 
-* Only ONE C++ generator unit is emitted, and it is **Base's**. Its `cls.tag`
-  resolves by name to `_classattr_Base__tag`.
-* So after a base-chain walk, `Child.gen(4)` would iterate successfully and
-  yield `7, 4` where CPython yields `9, 4` — converting a LOUD
-  `mojo_unsupported_iter` into a SILENT wrong value.
+* `gen._generator_method_api` is keyed `(struct_name, method_name)` and held
+  only `('Base', 'gen')` (measured), so the call site missed.
+* Only ONE C++ generator unit was emitted, and it was **Base's**. Its `cls.tag`
+  resolved by name to `_classattr_Base__tag`, so the doc's prescription — "walk
+  the base chain at the call site" — was **not** applied: on its own it would
+  have made the program WORSE, yielding `7, 4` where CPython yields `9, 4` and
+  converting a LOUD `mojo_unsupported_iter` into a SILENT wrong value.
+* The unit therefore had to be emitted per receiver class — register the
+  subclass alias in `_generator_method_api` AND generate a second unit keyed
+  `(Child, gen)` — which is why "land the lookup fix and record the `cls` half
+  as its own refusal" was not the right split either: the lookup fix and the
+  per-class unit are ONE change, and half of it is worse than not doing it.
 
-The unit has to be emitted per receiver class: register the subclass alias in
-`_generator_method_api` AND generate a second unit keyed `(Child, gen)` so its
-`cls.<attr>` names resolve against `Child`. That is the real shape of this half,
-and it is why the doc's "land the lookup fix and record the `cls` half as its
-own refusal" is not the right split either — the lookup fix and the per-class
-unit are ONE change, and half of it is worse than not doing it.
+That is exactly what landed; see the 2026-10-02 Status at the top. The one
+detail that had moved underneath the prediction: the miss was no longer visible
+as `mojo_unsupported_iter` at the call site but as a void `Child_gen(...)` stub,
+because `_generator_method_api` missing only decided that the `for` had no
+generator to drive — the call itself still lowered, and silently.
 
 **#3 (a heterogeneous `dict | dict`) is untouched** and still deliberately
 unhandled. Its "measure the blast radius first (`compile_stdlib.py`'s `U`
@@ -89,7 +140,7 @@ Re-measured against the current tree, with CPython alongside, on
 
 | # | gap | state |
 |---|---|---|
-| 1 | an inherited `@classmethod`/`@generator` binds the DEFINING class and does not dispatch | **PARTLY CLOSED 2026-10-01** — the `cls` / plain-`@classmethod` half is fixed (a class-attribute initialiser took the BASE's value for every override in a chain); the `@generator` half stays `mojo_unsupported_iter`, on purpose, see the Status above |
+| 1 | an inherited `@classmethod`/`@generator` binds the DEFINING class and does not dispatch | **CLOSED 2026-10-02** — the `cls` / plain-`@classmethod` half closed 2026-10-01 (a class-attribute initialiser took the BASE's value for every override in a chain); the `@generator` half closed 2026-10-02 (one C++ coroutine unit per receiver class instead of per defining `FunctionDef`) |
 | 2 | `x == None` on a `char *` is False, and `print` of one prints `(null)` | **FIXED** (two commits on this branch) |
 | 3 | a heterogeneous `dict \| dict` has no static value type | **OPEN** — deliberately unhandled; the refusal is still the recommended move and is still unmeasured |
 | 4 | `__itertools_only_<hash>` vs `_itertools_only_<hash>` | **FIXED on 2026-09-27**, not by this branch — see below |

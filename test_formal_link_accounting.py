@@ -469,7 +469,7 @@ ADMITTED_HOST_MODULE_TESTS = {
 # This table replaced `HOST_SET_ADDED_WITH_SOURCE`, which was an allow-list of
 # additions that had to be accompanied by a `formal/hostmods/<name>.mojo`, and
 # which `shlex` failed on 2026-10-03 (see
-# `bugs/FORMAL_link_accounting_shlex_entered_the_host_set_with_no_source.md`,
+# `FORMAL_link_accounting_shlex_entered_the_host_set_with_no_source`,
 # filed and then fixed here).  It was the wrong SHAPE as well as the wrong
 # rule: an allow-list is satisfiable by adding a source-less name to it, so the
 # check could only ever fail on a name somebody had not thought about.  What it
@@ -787,7 +787,7 @@ def test_host_tiers():
     # already had. What survives of it is the half that is still true
     # (`TemporaryDirectory` needs an `__exit__`, `NamedTemporaryFile` is a FILE
     # OBJECT), and both are in the module's own docstring and in
-    # `bugs/FORMAL_tempfile_context_manager_needs_a_way_out_of_a_with.md`. A name
+    # `FORMAL_tempfile_context_manager_needs_a_way_out_of_a_with`. A name
     # reaches this list by being written and leaves it by being named, so
     # adding one here is a separate edit from adding the module — and the
     # account above fails if only one of the two is done. Neither gets a

@@ -1,5 +1,94 @@
 # HARD BUG (performance): `_walk_ast` re-scan blowup for large transitive-import graphs
 
+## Status (2026-10-02, this pass — the doc's stated BLOCKER is measured away; what remains is two hazards, both named with their sites)
+
+The 2026-10-02 Phase 9 entry below ends with the reason `_walk_ast` is the
+one cost left, and it is a design objection rather than a measurement:
+
+> `_walk_ast` returns a fresh `list`, and its callers do everything with lists:
+> `for n in _walk_ast(body)`, `result.extend(_walk_ast(child))`, and several
+> that then sort or filter the result. A memo keyed on `id()` would hand the
+> SAME list object to every caller, and **one caller mutating it corrupts
+> every later reader** — a silent wrong answer from a performance change...
+> Making it safe needs either a read-only sequence type threaded through every
+> caller, or a per-caller-keyed cache, and neither is a narrow change to a
+> shared utility.
+
+**The mutation half of that is now measured, and it is one call site.** Every
+`_walk_ast` call in the tree, classified by what it does with the result:
+
+| | count |
+|---|---|
+| total call sites | **69** |
+| `for ... in`, `yield from`, `any()`, `all()`, `list()` — read-only by construction | **63** |
+| bound to a name (`_nodes = _walk_ast(body)`), then immediately `for node in _nodes` | **5** |
+| other | 0 |
+| **mutate the returned list in place** | **1**, and it is not a caller |
+
+The one is `mojo/middle/exprtypes.py`'s own docstring describing
+`_walk_ast_into`'s accumulator — `_walk_ast_into` takes an `out` list and
+appends to it, which is the accumulator, not a consumer of `_walk_ast`'s
+return value. So the "thread a read-only sequence type through every caller"
+half of the objection has **nothing to thread through**: 68 of 69 sites never
+touch the list, and the 69th iterates it once. That is why Phase 5 could
+already rewrite the walk as an accumulator without touching a single call
+site, and it is the same fact Phase 5 could not see from the inside.
+
+This is worth having as a number because it changes the shape of the fix: the
+memo does not need a new return type, a per-caller cache, or a
+migration. It needs the existing `list` plus a check.
+
+### The two hazards that are left, with their sites
+
+1. **Write-invalidation from AST mutation.** This is the real one and it is
+   the trap this doc has already fallen into twice (Phase 5's write analysis,
+   Phase 7's superset analysis). `grep -c '\.fields\.append|\.body\.append|
+   \.args\.append|\.handlers\.append'` over `mojo/backend_gimple/` and
+   `mojo/middle/` is **20 sites**, and three of them are exactly the shape
+   that matters: `module_gen.py:4159`, `:4246` and `:4442` all do
+   `s.fields.append(VarDecl(name=fn, ...))` on a `StructDef` that other passes
+   walk. A memo keyed on `id(structdef)` filled before one of those appends
+   and read after it returns a walk that does not contain the new field —
+   a wrong artifact, not a slow one. There are also whole-statement
+   REPLACEMENTS (`_inline_single_use_task_composition`,
+   `_normalize_await_kwargs`) which are safe by id-change rather than by
+   discipline.
+
+2. **`id()` reuse.** The key is an address, so a freed node's id can be handed
+   to a different node. Phase 2's `_field_scan_var_cache` gets away with it
+   because the AST is pinned by `_all_transitive_stmts_ordered` for the whole
+   compile — but `_walk_ast` is also called on temporary subtrees
+   (`_walk_ast(stmt)` at `module_gen.py:4259`/`:4274`/`:4295`, and
+   `_walk_ast(node)` over a `MemberExpr` chain), so a weak reference to the
+   node is required, not a bare id.
+
+### The exact next step
+
+1. A generation counter bumped by every AST-mutating site — the 20 above, plus
+   the rewriter passes — and included in the memo key. That converts hazard 1
+   from "be careful" into "a stale entry is unreachable", which is the only
+   form of this fix that is worth landing at all.
+2. `weakref`-keyed entries (or a strong ref held alongside the entry, which is
+   the same cost) for hazard 2.
+3. Return the SAME list to every caller, with a check that keeps it that way:
+   `test_gimple.py` already has `walk_ast_dataclass_cache_is_transparent`
+   proving the walk's CONTENT and ORDER are unchanged, and the census above
+   should become a check — "no call site of `_walk_ast` mutates its result" —
+   so the property is enforced rather than true today. That check is cheap, is
+   what makes the memo safe to add later, and is worth landing on its own
+   whether or not the memo ever is.
+4. Byte-identical generated C on the 160-module chain and on
+   `Lib/socket.py`, as every phase in this series has done, plus the three
+   suites the Phase 9 entry lists.
+
+**Not attempted this pass.** This is a light-worker branch with four compiled-
+path changes already on it, and CLAUDE.md's own definition of done for a change
+to `mojo/middle/exprtypes.py` is the full gate plus a byte-identity anchor,
+neither of which was available here. The census and the hazard census above
+are what the pass was for: they turn "it needs a read-only sequence type
+threaded through every caller, and that is not narrow" into "there is one call
+site to think about and it is not a caller".
+
 **State: OPEN — the CLOSED banner this doc carried until 2026-09-26 was wrong.**
 Phases 1-6 did land, and the AST-node-visit blowup the doc's own Symptom
 section measured IS gone (numbers below). But the underlying shape — per-level

@@ -298,7 +298,7 @@ def group_cross(verbose):
           f"disagree; the corpus is too small to pin the flag")
     # `import pathlib` and a dotted call, NOT `from pathlib import match as
     # pmatch`: a from-import ALIAS is not honoured for a call into another
-    # image (bugs/FORMAL_from_import_alias_dangles_the_call.md), which is a
+    # image (FORMAL_from_import_alias_dangles_the_call), which is a
     # refusal naming a name rather than a wrong answer, and the first version of
     # this group spelled it that way.
     record = (f'        printf("%d=%d/%d{REC}{REC}", k, '

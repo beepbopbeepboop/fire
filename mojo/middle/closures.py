@@ -61,6 +61,22 @@ def _selfhost_fn_reassigns_method(_fn, _pnames=('gen', 'self')) -> bool:
     return False
 
 
+def closure_lifted_name(outer_name: str, inner_name: str) -> str:
+    """The C function name a nested `def` is emitted under.
+
+    ONE definition, because two places must agree on it to the character or
+    a fact recorded about a nested def becomes unlookupable:
+    `discover_closures` builds `ClosureInfo.lifted_name` from it (and the
+    whole emission pipeline keys on that), while the GIMPLE module pass's
+    cross-call string evidence records against it — the `print` ladder's
+    `mojo_cstr_or_int_str` discriminator asks with `gen.current_func_name`,
+    which IS this name while the lifted body is being lowered. Two separate
+    f-strings would silently drift and the evidence would be written to a key
+    nobody reads, which looks exactly like no fix at all.
+    """
+    return f"{outer_name}_{inner_name}"
+
+
 def _gmi_all_stmts_nonfunc(stmts) -> list:
     """Hoisted out of `gen_module_impl._scan_for_closures` (was a
     2-level-deep nested closure) — see `_gmi_prefold_toplevel_comptime`'s
@@ -212,7 +228,7 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
             inner_params = _as_list(inner.params)
             if inner.is_async and not inner.is_generator:
                 continue
-            lifted    = f"{outer_name}_{inner.name}"
+            lifted    = closure_lifted_name(outer_name, _as_str(inner.name))
             # `_as_str` each element: `_used_idents_node` returns a set whose
             # str members erase to boxed int64_t under self-compile, so the
             # `used - inner_declared` difference below misses a declared name

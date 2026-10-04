@@ -1094,3 +1094,15 @@ class ClosureInfo:
         self.inferred_params: dict = {}
         self.inferred_ret: str = ''
         self.mut_names: frozenset = frozenset()
+        # Parameter types the CALL SITE had already resolved for this
+        # lifted function's own parameters, keyed by parameter name. Set
+        # only for a lambda passed to `map`/`filter`/`sorted(key=)`, where
+        # the call site binds each element to the lambda's parameter before
+        # lowering the call (see `_bind_callable_element_param`). It is a
+        # FALLBACK, never an override: the body's own usage evidence wins,
+        # because a wrong call-site binding would then be unfixable, while
+        # a body with no evidence at all has nothing to say. Read by
+        # `_gen_lifted_closure`, which is why it lives here rather than on
+        # `gen` — the value belongs to this lifted function, not to the
+        # whole compile.
+        self.call_site_param_types: dict = {}

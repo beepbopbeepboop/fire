@@ -168,7 +168,7 @@ stdlib dylib rebuild 0 skips / 0 errors.
 
 - framework.py ×11 and posixpath×9: the ALREADY-DOCUMENTED hard
   bare-name-collision class
-  (`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`)
+  (`CODEGEN_same_bare_name_struct_collision_across_modules`)
   — `reprlib_Repr_repr*` undeclared in framework.py's unit; ntpath.py
   and posixpath.py BOTH lift same-named closures from their duplicated
   `expandvars` implementations (`expandvars_repl`,
@@ -249,7 +249,7 @@ classes — `collections`/`inspect` (subscript-store fallback, benign),
 `operator.py`/`copy.py`/`types.py`/`weakref.py`/`io.py`/`pickle.py`/
 `argparse.py`/`enum.py`/`typing.py`/etc. Notably, some of these are
 the ALREADY-DOCUMENTED, still-open bare-name-collision class
-(`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`
+(`CODEGEN_same_bare_name_struct_collision_across_modules`
 — e.g. `reprlib_Repr_repr*` "undeclared here" in `framework.py`'s own
 compile unit, from `reprlib.Repr`'s dispatch table colliding with
 another same-named symbol elsewhere in the transitive closure); none

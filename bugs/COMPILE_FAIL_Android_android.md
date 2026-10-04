@@ -1,5 +1,103 @@
 # COMPILE_FAIL: Android/android.py
 
+## Status 2026-10-02 — the PREDICATE half of this doc's "next bounded action" is landed; the `asyncio.run` guard recognition and this file's blocker are not
+
+The doc's 2026-10-01 entry named the next step precisely: *"teach
+`asyncio.iscoroutine(x)` to lower to that same registry check (returning a real
+`_Bool`), and let the `if` that guards `asyncio.run` be recognised as the
+guard it is."* **The first of those two is done.**
+
+### What landed — `asyncio.iscoroutine(x)` asks the live-handle registry
+
+`runtime/fire_coro_gen.c` exports the check `__mojo_async_run_gen` already
+performs, as a predicate of its own:
+
+```c
+_Bool __mojo_async_iscoroutine(int64_t genHandle)
+{ return mgen_reg_has(genHandle) ? 1 : 0; }
+```
+
+`mojo/middle/coro.py`'s `_rewrite_asyncio_run` recognises the call and rewrites
+it to that, in the same pass that already rewrites `asyncio.run` /
+`create_task` / `.wait()`. No static inference is consulted and none is needed:
+unlike `asyncio.run` this call does not DRIVE the value, it only asks about
+it, so there is no reinterpretation to refuse, and the registry answers
+correctly for every shape — including the ones `asyncio.run` still refuses.
+
+**This was a silent wrong answer, not a missing feature.** Measured before
+the change, on the shape this file writes:
+
+```python
+c = work(5)
+if asyncio.iscoroutine(c):
+    print('yes')
+else:
+    print('no')
+```
+
+printed `no`. `iscoroutine` had no lowering at all, so the guard the source
+wrote evaluated **backwards** for a value that really was a coroutine: exit 0,
+no diagnostic, and it reads as correct because the `else` branch of a guard
+nobody is looking at is usually empty.
+
+`asyncio.isawaitable` is deliberately NOT included: in CPython 3.14 it is
+`inspect.isawaitable`, so a compiled answer under the `asyncio.` spelling —
+where CPython raises `AttributeError` — would be the divergence, not the fix.
+That is recorded in the recogniser's own docstring, because the two names
+looking interchangeable is exactly what invites it back.
+
+Two regressions, both at the layer that can tell the outcomes apart:
+
+- `runtime/test_fire_coro_gen.c`'s
+  `test_iscoroutine_answers_for_handles_and_non_handles` (driven by the
+  `coro` suite, 20/20 across both Layer-3 backends at -O0 and -O2): NULL, a
+  small integer and a plausible pointer answer 0; a REAL live handle answers
+  1; and — the half a static table could not give — the same handle answers 0
+  again once destroyed, which is what makes the registry rather than an
+  address->type table load-bearing.
+- `test_runtime_diff.py`'s `asyncio_iscoroutine_predicate` (interp-vs-JIT):
+  both branches of the guard, so a predicate that always answered `True`
+  cannot pass it.
+
+### What is still open — this file does not build, and this does not move it
+
+**`Android/android.py` still fails with the same refusal as before**, at the
+same site, `Android/android.py:1028`:
+
+```
+cannot compile module: asyncio.run(...) requires either a bare call to a
+supported compiled async function, or a name this function binds from such a
+call, as its argument -- got a non-call expression that is not a known
+coroutine handle, and driving it would reinterpret an arbitrary value as a
+coroutine handle
+```
+
+`result = dispatch[context.subcommand](context)` is a call through a dict
+SUBSCRIPT, so the callee is chosen at runtime and no static evidence about it
+exists. That refusal is correct and stays.
+
+What is left of the doc's next bounded action is therefore the second half,
+and it is the half that would actually matter:
+
+1. **Recognise the guard.** `if asyncio.iscoroutine(x): asyncio.run(x)` is a
+   guard the source wrote, and with the predicate now real it is a check the
+   compiler can read: inside the `then` body, `x` is a live handle *by
+   construction*, so `asyncio.run(x)` there needs no static inference about
+   where `x` came from. That is control-flow-sensitive reasoning, and it is a
+   design question rather than a missing branch — which is what the 2026-10-01
+   entry said and is still what it is.
+2. **Then the dynamic callee.** Even with (1), `dispatch[...]` yields a value
+   whose provenance no static pass can name, so the *bridge* still has to be
+   reachable for a non-statically-named callee. That is the same widening the
+   refusal's own wording names ("would reinterpret an arbitrary value as a
+   coroutine handle") and it stays refused until the registry check is what
+   stands between the value and `MojoGen *` — which, as of this entry, is now
+   true for the predicate and still only half-true for `asyncio.run`.
+3. **Then the 9 async functions** (`_async_quick_eligible`'s whitelist has no
+   `asyncio.create_subprocess_exec` / `process.communicate()` /
+   `stream.readexactly(...)`), which remain the feature-sized work this doc
+   has always said they are. Unchanged.
+
 ## Status 2026-10-01 — unchanged; the blocker is one dynamic callee, and the runtime half that would handle it already exists
 
 Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Android/android.py`

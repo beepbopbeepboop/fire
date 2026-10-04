@@ -252,7 +252,7 @@ with the sweep's own argv:
 | `html` | `escape` | `tools/md2html.py` → `OSError` handler arm |
 
 Plus `os.path.realpath`'s own divergence, found on the way and filed as
-`bugs/FORMAL_os_path_realpath_keeps_a_double_slash_root.md`.
+`FORMAL_os_path_realpath_keeps_a_double_slash_root`.
 
 Every one of them moved onto a refusal about the FILE'S OWN SOURCE, which is the
 whole value of a module in that directory: the verdict does not change, the
@@ -294,7 +294,7 @@ than this list said. Everything else stands.)
    two: write `glob` and `shlex` is still not the next wall, because `signal` is
    beside it in every file that wants it.
 3. **`shlex` has an open QUESTION of its own**, and it is not a module:
-   `bugs/FORMAL_link_accounting_shlex_entered_the_host_set_with_no_source.md`
+   `FORMAL_link_accounting_shlex_entered_the_host_set_with_no_source`
    records that `shlex` was added to `HOST_MODULES` with no source, which fails
    `formal-link-accounting` in the everyday gate, and the doc asks which of two
    rules governs a sourceless standard-library name. Writing

@@ -59,7 +59,7 @@ parser.py:52,58,67,68,72,74,75: implicit declaration of function
 `fire_compiler.py:2869` declares its own `class Parser` with a different
 `__init__`. Root-caused (two independent bare-name-keyed tables, one merged
 C struct layout and one forced `fire_compiler_` method qualifier) in
-`bugs/CODEGEN_user_class_named_Parser_merged_with_fire_compiler_Parser.md`.
+`CODEGEN_user_class_named_Parser_merged_with_fire_compiler_Parser`.
 
 **This entry exists so the two families are not confused.** Family A is
 this doc's subject and is unfixed; Family B is fixed nowhere and is not
@@ -395,7 +395,7 @@ exit 1). Single error, identical to 2026-08-07:
 build2, at tree.cc:5204`. This file (`analyzer.py`) itself is not
 directly implicated — the failure is entirely in the transitively-
 imported `cwriter.py` (`import lexer`/`from cwriter import CWriter`
-chain). `bugs/COMPILE_FAIL_Tools_cases_generator_cwriter.md` (checked
+chain). `“COMPILE_FAIL: Tools/cases_generator/cwriter.py”` (checked
 the same session) confirms this GCC ICE is still open there too, and
 is a genuinely different/deeper bug than the field-typing gap (task
 #143) that used to mask it — not a generator/coroutine yield-type
@@ -426,10 +426,10 @@ not this file's own code:
 /Users/mrs/net/Python-3.14.6/Tools/cases_generator/cwriter.py:20:1: error: type mismatch in binary expression
 ```
 
-Root-caused in `bugs/COMPILE_FAIL_Tools_cases_generator_cwriter.md` (a
+Root-caused in `“COMPILE_FAIL: Tools/cases_generator/cwriter.py”` (a
 comprehension-assigned struct field defaulting to `int` instead of
 `MojoList *` — new sibling gap originally recorded in
-`bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md`, the doc that
+`“the constructor-call-site field-typing pass understood only scalars”`, the doc that
 supersedes the removed
 `CODEGEN_unannotated_init_param_field_type_defaults_int64.md`).
 `analyzer.py` imports `lexer`/`cwriter` transitively; nothing specific

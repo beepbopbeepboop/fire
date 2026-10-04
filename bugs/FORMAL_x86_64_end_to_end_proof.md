@@ -240,7 +240,7 @@ Two consequences, and the second is the lesson:
 says why instead of proving something untrue. The `sorry` count going 1 → 0 is
 therefore **not** a proof getting stronger: `wide_recv` moved from the proved
 column to the "no tree" column, where it belongs, and
-`bugs/FORMAL_x86_64_endto_end_proof.md`'s "STILL OPEN" note on `wide_recv` is
+`FORMAL_x86_64_endto_end_proof`'s "STILL OPEN" note on `wide_recv` is
 superseded — what remains there is the return-following, not a separation lemma
 parameterised over a symbolic address (though that is still needed once the tree
 follows the return).
@@ -249,7 +249,7 @@ Everything below is the 2026-10-01 state and is left as written.
 
 One row above is not this pass's doing and is worth saying so: `udivmod` used to
 be the corpus's one WRONG (`real=4 model=7905747460161236410`, blamed on an
-untyped-`n` collapse in `bugs/FORMAL_default_int_type_typed_flag_collapse.md` and
+untyped-`n` collapse in `“`formal/`: `DEFAULT_INT_TYPE` became signed `Int`”` and
 `bugs/FORMAL_pointer_value_model.md`, both other workers' claims). Re-measured
 here for the table and it now answers `ok: 4`, so the suite reads 45/45 agree
 and 0 WRONG. Nothing in this branch touches the model — the two `X86.lean` edits
@@ -301,7 +301,7 @@ The one thing this pass did NOT touch is the model itself — `lib/X86.lean` gai
 X86.lean` shows and it is worth checking rather than asserting. The one WRONG in
 `x86_64_model_test.py` is `udivmod` (`real=4 model=7905747460161236410`), it is
 **pre-existing**, and it is already written down twice: see
-`bugs/FORMAL_default_int_type_typed_flag_collapse.md` ("very likely the same
+`“`formal/`: `DEFAULT_INT_TYPE` became signed `Int`”` ("very likely the same
 untyped-`n` / `int` collapse") and `bugs/FORMAL_pointer_value_model.md`. Both are
 other workers' claims, so it is neither fixed nor re-filed here. What it does
 mean is that this doc's older "43/43 agree, 0 wrong" line was counting a
@@ -750,7 +750,7 @@ the only name left, and it is not a wiring job. See its own entry.
 | `shift_imm8:shl/shr/sar` | shiftlr (+ subscript_var) | the count's clamp to 64 IS the semantics, so there is no `n < 64` to discharge; and `sar` is the `else` arm, not a third `if` |
 | `alu_ri32:add_reg`, `alu_ri32:and`, `alu_ri8:cmp` | ug8 (+ sum_range, subscript_var) | `81` and `83` differ in LENGTH as well as width; and `cmp` writes no register at all |
 | `mov_*_nodisp`, `mov_*_disp8` (base-register), `mov_*_disp32`, `lea …_disp32` | wide_recv, subscript_var | `_shapes` named only two of the three addressing modes, so `mov [rbp-0x410], rax` was reachable under the name of `mov [rbp+disp8], rax`. **Every mode now has its own name**, and an unmapped one is reported |
-| `cqo` | — (one half of udivmod's pair) | the model changed under the lemma and the lemma did not: `da151f0c` made `x86_cqo` the 64-bit extension where it had been `cdq`, and `x86_step_cqo` still stated `x86_sign_extend32` — so the theorem contradicted the definition it was about and **the library stopped elaborating**. See `bugs/FORMAL_x86_64_cqo_step_lemma_contradicts_the_model.md`, deleted with its fix (`2eb418c5`, `60300077`) |
+| `cqo` | — (one half of udivmod's pair) | the model changed under the lemma and the lemma did not: `da151f0c` made `x86_cqo` the 64-bit extension where it had been `cdq`, and `x86_step_cqo` still stated `x86_sign_extend32` — so the theorem contradicted the definition it was about and **the library stopped elaborating**. See `FORMAL_x86_64_cqo_step_lemma_contradicts_the_model`, deleted with its fix (`2eb418c5`, `60300077`) |
 | `movq_xmm_rm64` | — (only a floating `printf`, which the corpus has none of) | the first instruction crossing register FILES, so a successor with no register in it: `X86State` had no XMM file, and the alternative to adding eight `UInt64`s was a step that decoded the instruction and recorded no effect — a FALSE step, which is B2 at the level of a whole register file |
 
 Two of those six were found by the coverage getting better rather than by

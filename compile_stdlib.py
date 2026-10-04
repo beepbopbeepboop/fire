@@ -457,7 +457,8 @@ def transpile_file(mojo_file):
 
         # Stage 1: Python codegen (CAS-cached)
         try:
-            c_src = compile_module_to_c_cached(src, str(mojo_file), name)
+            c_src = compile_module_to_c_cached(src, str(mojo_file), name,
+                                               linkable=False)
         except Exception as e:
             return False, f"codegen: {str(e)[:120]}", False, False
 

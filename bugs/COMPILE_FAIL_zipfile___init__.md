@@ -25,7 +25,7 @@ covering all three arities on both pipelines. `grep mojo_max .tmp/zipfix2.log`
 is now **0**.
 
 **Root cause of the original blocker** (which was filed as
-`bugs/COMPILE_FAIL_open_is_ambiguous_from_transitive_registrations.md`,
+`COMPILE_FAIL_open_is_ambiguous_from_transitive_registrations`,
 now fixed and removed): `gen_module_impl`'s transitive-discovery loop
 registered every inlined sibling's top-level FunctionDef names into
 `_own_imported_func_home` as well as `_imported_func_home`. Tier 2 is
@@ -101,10 +101,10 @@ in the current lexical scope binds the name for this specific reference.
 ```
 
 Root-caused with an instrumented `_note_own_func_home` trace, and filed as
-`bugs/COMPILE_FAIL_open_is_ambiguous_from_transitive_registrations.md`
+`COMPILE_FAIL_open_is_ambiguous_from_transitive_registrations`
 with the tier fix it needs. NOT attempted there: it is a change to
 `_func_qualifier`'s tier order, which
-`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`
+`CODEGEN_same_bare_name_struct_collision_across_modules`
 owns and which several recent entries here flag as easy to regress into a
 SILENT wrong call.
 
@@ -130,10 +130,10 @@ unrelated siblings' transitive import registrations (`codecs`, `tokenize`,
 `bz2`, `lzma`, `compression.zstd._zstdfile`, …), all with
 `record_scope=False`, colliding on one shared `_own_imported_func_home`
 key. Root-caused with an instrumented `_note_own_func_home` trace, and
-filed as `bugs/COMPILE_FAIL_open_is_ambiguous_from_transitive_registrations.md`
+filed as `COMPILE_FAIL_open_is_ambiguous_from_transitive_registrations`
 with the tier fix it needs. NOT attempted here: it is a change to
 `_func_qualifier`'s tier order, which
-`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`
+`CODEGEN_same_bare_name_struct_collision_across_modules`
 owns and which several recent entries here flag as easy to regress into a
 SILENT wrong call.
 
@@ -715,7 +715,7 @@ by memoryview above):
   unchanged in substance: callee `open(..., pwd=None)`'s slot resolved
   int64_t while `read`'s forwarded `pwd` is inferred 'char *'. Confirmed
   this is exactly the unannotated-None-default-param family
-  (bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md, which
+  (“the constructor-call-site field-typing pass understood only scalars”, which
   supersedes the removed
   CODEGEN_unannotated_init_param_field_type_defaults_int64.md);
   explicitly out of scope this session per campaign rules. Still open.
@@ -859,7 +859,7 @@ error: passing argument 3 of 'PyZipFile_mojo_open' makes integer from
    parameter (also `bytes | None = None`). The call site's `pwd` value
    resolves to `int64_t` (the standard "unannotated param defaulting
    from a bare `None` literal infers int64_t" gap, same family as
-   `bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md`), while the
+   `“the constructor-call-site field-typing pass understood only scalars”`), while the
    callee's OWN declared parameter type for
    `pwd` apparently resolved differently (a pointer type, from some
    OTHER call site elsewhere in the file that passes a real bytes

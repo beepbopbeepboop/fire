@@ -91,7 +91,7 @@ _CPP_OPAQUE_PTR_STRUCTS = frozenset({
 # NAME referencing a module-level `comptime NAME: Int = <int-literal-or-
 # foldable-expr>` constant (the common real-world shape, e.g. box.3d/game's
 # `comptime MAX_BLOCKS: Int = 4096`) — see GimpleGen._module_const_int.
-# See bugs/BUG-2026-008.md (box.3d/game) for the real-world motivating case.
+# See BUG-2026-008 (box.3d/game) for the real-world motivating case.
 _FIXED_ARRAY_ANN_RE = re.compile(
     r'^\[\s*([A-Za-z_][A-Za-z0-9_]*)\s*;\s*([A-Za-z_0-9]+)\s*\]$')
 
@@ -109,7 +109,7 @@ _FIXED_ARRAY_ANN_RE = re.compile(
 # of its real C fields must route through the same dynamic-attribute
 # dispatch (`_mojo_dispatch_getattr`/`_mojo_dispatch_setattr` ->
 # `mojo_obj_getattr`/`mojo_setattr`'s real per-object storage, see
-# bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md Step 4) instead
+# “setting/getting an arbitrary attribute on a generically-typed object” Step 4) instead
 # of a direct `->member` access GCC would reject outright ("has no member
 # named ..."). Confirmed real instance: `inner.__name__ = 'read_nonlocal'`
 # / `f.__name__` on a `MojoBoundMethod` (Tools/scripts/var_access_
@@ -169,6 +169,11 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_dict_setdefault_str_kw': 'char *',
     'mojo_dict_contains_kw':      'int',
     'mojo_dict_pop_int_kw':       'int64_t',
+    'mojo_dict_pop_str_kw':       'char *',
+    'mojo_dict_pop_double_kw':    'double',
+    'mojo_dict_pop_int':          'int64_t',
+    'mojo_dict_pop_str':          'char *',
+    'mojo_dict_pop_double':       'double',
     'mojo_dict_set_bytes_int':    'void',
     'mojo_dict_set_bytes_str':    'void',
     'mojo_dict_set_bytes_double': 'void',
@@ -1008,7 +1013,7 @@ class GimpleGen:
         # unannotated ctor argument stayed the `int64_t` default (a scalar
         # mismatch is a hard `gcc -fgimple` "non-trivial conversion"
         # failure; a container mismatch is the silent SIGSEGV
-        # bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md fixed for
+        # “the constructor-call-site field-typing pass understood only scalars” fixed for
         # the SAME-module case — that fix's new pass runs per-gen and so
         # already covers an imported module's OWN internal call sites, but
         # not a call from a DIFFERENT module reaching in). Applied by the
@@ -1232,7 +1237,7 @@ class GimpleGen:
         self._struct_generator_method_names: dict[str, set[str]] = {}
         # Struct methods called from a compiled generator/async body on
         # EITHER `self` or a non-self struct-pointer-typed local/parameter
-        # (see bugs/hard/CODEGEN_generator_struct_typed_param_refused.md).
+        # (see CODEGEN_generator_struct_typed_param_refused).
         # This codegen's structs are plain C structs (no real C++ member
         # functions) — a method call must go through the method's own
         # mangled C symbol (`obj_ptr, args...`), exactly like an ordinary
@@ -1486,7 +1491,7 @@ class GimpleGen:
         # `obj.field[i]` on such a field into real C array indexing
         # (`&obj->field[i]` via array-decay + `_mojo_at_` helper) instead of
         # falling through to the MojoList*/generic-pointer paths, neither of
-        # which understands this shape. See bugs/BUG-2026-008.md (box.3d/game).
+        # which understands this shape. See BUG-2026-008 (box.3d/game).
         self._array_field_sizes: dict[str, dict[str, tuple[str, int]]] = {}
         # Module-level GLOBAL container element/value types: global_name ->
         # elem/value C type. Populated once by gen_module's Phase 1.7
@@ -1511,7 +1516,7 @@ class GimpleGen:
         # runs BEFORE any function body is emitted, since a function that
         # calls `e()` is emitted before `_toplevel` lowers the lambda) and
         # consulted by _reset_func to re-seed the per-function
-        # _callable_ret_types/_dict_callable_ret.
+        # _callable_ret_types/_container_callable_ret.
         #
         # Without this, a lambda bound to a MODULE global lost its return
         # type at the box: `e = lambda: False; print(e())` printed `0`, and
@@ -1519,11 +1524,26 @@ class GimpleGen:
         # the same shapes that are correct for a lambda bound to a LOCAL,
         # because the local store propagates _callable_ret_types through
         # the name (see _gen_stmt_AssignStmt). See
-        # bugs/CODEGEN_lambda_bool_return_prints_as_int.md.
+        # “CODEGEN: a lambda whose body is a bool returns int64 0/1”.
         self._global_callable_ret_types: dict[str, str] = {}
-        self._global_dict_callable_ret: dict[str, str] = {}
+        self._global_container_callable_ret: dict[str, str] = {}
         self._struct_field_owners: dict[str, list[tuple[str, str]]] = {}
         self._return_elem_types: dict[str, str] = {}
+        # Which PARAMETER each function's result IS, for the functions whose
+        # whole body is `return <param>` (`ident`, `passthrough`). Their
+        # return ELEMENT type is then a property of the CALL, not of the
+        # callee: `_return_elem_types` can hold one answer per function, and
+        # `ident` called with both `[1, 2, 3]` and `["a", "b"]` has one answer
+        # for two different element types — the string one wins, and every
+        # other call site then reads its int slots through
+        # `mojo_list_get_str`. Measured: `list(ident([1, 2, 3]))` printed five
+        # garbage bytes out of a three-element list, and `sorted(ident([3,
+        # 1, 2]))` handed `[3, 1, 2]` to the string comparator, which saw
+        # three values below the pointer window, called them equal, and
+        # returned the list UNSORTED. Keyed by function name, value is the
+        # parameter index. See
+        # bugs/CODEGEN_return_element_type_is_unified_across_call_sites.md.
+        self._passthrough_param_idx: dict[str, int] = {}
         # Functions whose `return` statements produce containers of MORE THAN
         # ONE kind (`if k: return names` / `return {x for x in names}`). Such
         # a function's inferred return type is the int64_t BOX — there is no
@@ -1565,7 +1585,7 @@ class GimpleGen:
         # type — `f = mk()` then `f()` reads `_root_globals.f`, and
         # `mk()()` casts the result into a fresh temp — so a value-keyed
         # table cannot match it. See
-        # bugs/CODEGEN_lambda_bool_return_prints_as_int.md.
+        # “CODEGEN: a lambda whose body is a bool returns int64 0/1”.
         self._return_callable_ret_types: dict[str, str] = {}
         # Function name -> per-slot C types of a MULTI-VALUE return's
         # tuple handle (`return cfg, Model(cfg)`). Deliberately module
@@ -1706,7 +1726,7 @@ class GimpleGen:
         # single-string-argument "opaque constructor" fallback, which
         # returns the argument unchanged — `x` became the literal `"a"` and
         # `x.widgetName` then dispatched getattr on a `char *`
-        # (bugs/CODEGEN_aliased_imported_struct_construction_unresolved.md).
+        # (“OPEN: `from mod import Class as Alias”).
         # Populated by `_note_struct_import_alias`, which is the single
         # writer for BOTH the module-scope (`_register_sym`) and the
         # function-scoped (`_gen_stmt_FromImportStmt`) spelling.
@@ -1832,7 +1852,7 @@ class GimpleGen:
         # {method}` C symbols. Historically that string was just
         # `StructDef.name`, so two same-bare-named classes in different
         # modules collided on it (see
-        # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md
+        # CODEGEN_same_bare_name_struct_collision_across_modules
         # — the loser's field table, its `self->field` accesses and its
         # `__init__` call sites all resolved against the WINNER's, so a `str`
         # field was silently stored into the winner's `int64_t` slot). These
@@ -2004,7 +2024,7 @@ class GimpleGen:
         # `_funcptr_builtins_needed` below already do) actually lowered an
         # `obj.__dict__`/`vars(obj)` expression (see `_lower_MemberExpr`'s
         # `__dict__` case and `_lower_call`'s `vars` case — Step 0 of
-        # bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md). Gates
+        # “setting/getting an arbitrary attribute on a generically-typed object”). Gates
         # whether `_mojo_dispatch_asdict`/the per-struct `_mojo_asdict_<sn>`
         # helpers get emitted at all: unlike `_mojo_dispatch_getattr`/
         # `_mojo_dispatch_setattr`/`_mojo_dispatch_fields`/`_mojo_dispatch_
@@ -2119,8 +2139,8 @@ class GimpleGen:
         # emit_infra._reset_func's `_callable_ret_types` entry.
         self._callable_ret_types: dict = {}
         # dict value -> the single callable return type stored into it ('' when
-        # ambiguous); see emit_infra._reset_func's `_dict_callable_ret` entry.
-        self._dict_callable_ret: dict = {}
+        # ambiguous); see emit_infra._reset_func's `_container_callable_ret` entry.
+        self._container_callable_ret: dict = {}
         self._module_int_consts_cache: dict = {}
         self._seen_generator_base_names: dict = {}
         self._cpp_module_fn_asts: dict = {}
@@ -2128,6 +2148,10 @@ class GimpleGen:
         self._global_literal_slot_ctypes: dict = {}
         self._local_def_param_types: dict = {}
         self._param_elem_types: dict = {}
+        # The dict-VALUE twin of the row above: callee -> {pname -> the dict
+        # value ctype its call sites agree on}. Read at the same place (see
+        # emit_funcs.gen_func / _gen_struct_method), into `_dict_val_types`.
+        self._param_dict_val_types: dict = {}
         # Per-function maps that `_reset_func` (a MODULE function in
         # gimple_gen_infra.py, taking `gen`) re-initialises with real
         # `dict[str, str]` annotations the `class GimpleGen` field-type
@@ -2219,6 +2243,33 @@ class GimpleGen:
         self._nested_elem_types: dict[str, str] = {}
         self._param_struct_types: dict[str, str] = {}
         self._dict_val_types: dict[str, str] = {}
+        # Per dict C name, the `_mojo_elem_repr_<Struct>` shim its `kind == 5`
+        # slots are rendered with — or '' once that dict has been seen to hold
+        # values the one function cannot render (a second struct type, or a
+        # plain int). Recorded at the STORE, where the value's type is still
+        # readable, and read by the runtime at REPR time, where it is not: the
+        # same bargain `mojo_list_set_elem_repr` makes for a list, keyed by the
+        # same `_dict_val_types` beside it and with the same lifetime.
+        self._dict_val_repr: dict[str, str] = {}
+        # The structs whose element-repr shim (`_mojo_elem_repr_<Struct>`) the
+        # reflection preamble EMITTED for this module, published by
+        # module_gen's `_emit_reflection_dispatch` and read by
+        # `gimple_exprtypes.struct_elem_repr_shim` — the one predicate the list
+        # and dict store lowerings ask. Empty until that preamble is built
+        # (which is before any body is lowered) and, for a unit compiled with
+        # `emit_struct_defs=False`, empty for good: no shim, no reference.
+        self._elem_repr_shims: set = set()
+        # The structs a CONTAINER store has asked an element-repr shim for
+        # (`gimple_exprtypes.struct_elem_repr_shim` records there when it names
+        # one). `_emit_reflection_dispatch` emits a shim for every struct in
+        # this set in addition to the ones its own filter finds, because the
+        # NAME is written into the generated C at the store site: the store and
+        # the emission cannot be decided independently without the two
+        # disagreeing, and when they did the self-host closure failed to link
+        # with `'_mojo_elem_repr_TrieNode' undeclared`. Filled while the bodies
+        # are lowered, read after, so it is complete by the time the preamble
+        # is built.
+        self._elem_repr_needed: set = set()
         self._dict_nested_val_types: dict[str, str] = {}
         self._captures: dict[str, str] = {}
         # Phase 4 (same doc, same pattern): per-top-level-statement
@@ -2329,7 +2380,7 @@ class GimpleGen:
         # `_mangled_signature_ctypes`, which is only ever populated for
         # struct methods, this covers plain free functions — see
         # `_lower_call`'s own trailing-keyword-only-param packing fix and
-        # bugs/COMPILE_FAIL_importlib__bootstrap.md's `_verbose_message`
+        # “COMPILE_FAIL: Lib/importlib/_bootstrap.py”'s `_verbose_message`
         # instance.
         self._vararg_trailing_param_types: dict[str, list] = {}
         # (struct_name, method_name) -> list of candidate overloads, each a dict:
@@ -2390,6 +2441,19 @@ class GimpleGen:
         self._emitted_dispatch_typedefs: set[str] = set()  # Track typedef names already emitted
         self._emitted_dispatch_tables: set[str] = set()    # Track table names already emitted
         self._funcptr_builtins_needed: set[str] = set()    # builtin C names needing static void* vars
+        # Value name -> the source-level function name, for the values that
+        # are FUNCTION OBJECTS rather than any other `void *`. A function
+        # value has no `char *` spelling, so every consumer of one used to
+        # fall through to `TypeLattice.printf_fmt`'s `%d` default and format
+        # the POINTER as a decimal — undefined behaviour on a 64-bit target,
+        # and the source of the decimal address `print(f)` used to emit where
+        # CPython prints `<function f at 0x...>`. Recorded by the two
+        # `_lower_IdentExpr` function-value branches and read only by `print`,
+        # which is the one consumer whose output is a `str()` spelling.
+        # Value-keyed like `_boxed_vals` and `_boxed_container_vals` beside
+        # it, and reset per function for the same reason they are: these are
+        # SSA temp names and temps do not outlive their function.
+        self._func_value_names: dict[str, str] = {}
         # Name -> C source for small non-GIMPLE accessor functions that a
         # __GIMPLE body needs to call. Two operations are legal in ordinary C
         # but are NOT valid GIMPLE primary expressions:
@@ -2451,7 +2515,7 @@ class GimpleGen:
         # generated code is textually concatenated into one translation unit
         # for the self-hosted build, gcc rejects the duplicate top-level
         # static as a redefinition. See
-        # bugs/CODEGEN_set_list_ctor_ignores_iterable_arg.md's quality-gate
+        # CODEGEN_set_list_ctor_ignores_iterable_arg's quality-gate
         # notes: fixing set()/list() to actually walk their iterable argument
         # (reusing the comprehension iteration machinery) let previously
         # mid-lowering-abandoned functions in myinterpreter.py/
@@ -2517,6 +2581,17 @@ class GimpleGen:
         # `_bool_valued` directly above: a field created lazily behind
         # `hasattr` reads as existing-but-NULL self-hosted.
         self._gmi_bool_params: set = set()
+        # current_func_name -> the parameter names whose ANNOTATION says
+        # `bool`, written by `mojo.middle.exprtypes.record_bool_params` at the
+        # two sites that lower a function/method body and read back by
+        # `bool_param_in_scope` from the one shared bool predicate. A
+        # `bool`-annotated parameter's own ctype is a plain `int` (same
+        # `_TYPE_MAP` reason `struct_bool_fields` exists), and it is NOT
+        # distinguishable from a small int LITERAL's lowering, so the
+        # annotation has to be captured rather than re-derived from the type.
+        # Declared here for the same self-hosting reason as `_bool_valued`:
+        # a field created lazily behind `hasattr` reads as existing-but-NULL.
+        self._bool_param_names: dict = {}
         # Struct -> method names whose every `return` hands back a `bool`
         # field of that struct (see module_gen.py's second method loop). The
         # method's own C return type is `int` -- the field's ctype -- so this
@@ -2532,7 +2607,7 @@ class GimpleGen:
         self._analysis_funcs: dict = {}   # see infra_infer._build_analysis_funcs
         self._fresh_returning: set = set()   # names whose calls return a fresh container
         self._analysis_structs: dict = {}    # see infra_infer._build_analysis_structs
-        self._own_fn_body: list = []   # the analysed function's body (string receiver pre-scan)
+        self._cur_func_body: list = []  # the AST body being lowered (see _reset_func)
         self._decl_value_node = None   # see lower_expr: the decl statement's RHS node
         self._decl_rhs_val: str = ''   # and the value it lowered to
         self._literal_storage: str = ''        # see emit_infra.emit_container_new
@@ -2583,7 +2658,7 @@ class GimpleGen:
         # from) never reached the root's own attribute, so a coroutine unit
         # discovered only that deep silently never flipped the root's
         # `needs_cxx` -- confirmed by the SAME repro this list was added to
-        # fix (bugs/COMPILE_FAIL_Tools_cases_generator_parser.md's lexer.py/
+        # fix (“COMPILE_FAIL: Tools/cases_generator/parser.py”'s lexer.py/
         # tokenize()): the root's own top-level `import lexer as lx` never
         # appears in parser.py itself, only transitively (parsing.py's own
         # `import lexer as lx`, itself reached through parser.py's `from
@@ -2611,6 +2686,15 @@ class GimpleGen:
         # build already uses (real body generation, not just field-type
         # registration), since there's no dylib to link its methods from.
         self._link_inline_modules: set = set()
+        # local name -> the module string, for a bare `import M [as L]` whose
+        # module this compile cannot resolve; '' for every other name. The
+        # consumer is `_uncompiled_module_marker` in emit_methods.py, which
+        # needs the filesystem answer (`module_loader.can_resolve_module_path`)
+        # once per name rather than once per call site. Keyed on the SAME
+        # `_module_alias_names` set, for the ambiguity that set's own docstring
+        # records: `imported_symbols` also holds every `from X import name`
+        # binding, and an unresolved one has the same dict shape.
+        self._uncompiled_marker_cache: dict = {}
         # Imported names that are generic templates (not concrete exports):
         # name -> the module source path, used to instantiate at call sites.
         self._imported_generics: dict = {}
@@ -2655,7 +2739,7 @@ class GimpleGen:
         # IdentExpr` to route a bare read of the imported name through a
         # real cross-translation-unit call into the DEFINING module's own
         # accessor function, instead of the "unknown identifier" zero/NULL
-        # placeholder a per-module-independent `mojo dylib` compile
+        # placeholder a per-module-independent `fire dylib` compile
         # previously fell through to for this shape.
         self._imported_global_accessors: dict = {}
         # Concrete imported structs used as parameter types here: their StructDefs
@@ -2757,6 +2841,36 @@ class GimpleGen:
         # while compiling THIS module's own body — no sharing needed, and
         # sharing is exactly what caused the bug.
         self._own_imported_func_home: dict = {}
+        # The VALUE half of `_own_imported_func_home` above: the bare name a
+        # `from b import K` (module-level, this gen_module call's own
+        # top-level stmts) binds, -> the module whose `_<mod>_globals` struct
+        # actually declares the field, and -> that field's name (different
+        # from the bare name under `from b import K as J`). Two dicts rather
+        # than one `local -> (module, field)` 2-tuple because a 2-tuple lowers
+        # to a MojoList on the self-hosted compiled path, so every reader of
+        # it boxes its slots to int64_t (see `_module_global_field_type`'s own
+        # closing note, which reads the same triples by index for this reason).
+        #
+        # Why it exists at all, when `_global_to_module` already maps a bare
+        # name to its owning module: that map is whole-transitive-tree and
+        # name-keyed, so a bare `K` in THIS module's body could be resolved
+        # through it to a SIBLING's `K` that this module never imported — the
+        # `filename` mis-resolution `_lower_IdentExpr`'s gate documents. This
+        # dict answers the stricter question "did THIS module's own source
+        # import it, and from where", which is the only question whose YES
+        # makes a bare read mean another module's field (real Python: `from
+        # b import K` binds b's object into this module's namespace, so `K`
+        # here IS b's K).
+        #
+        # The qualified `b.K` spelling never needed it: `_lower_MemberExpr`
+        # reads `_module_global_field_type(bound_module, member)` and the
+        # owning module's own `(name, c_type, g_mtype)` triple, so the field
+        # and its type agree by construction. This is the bare-name half of
+        # that same pair, and both are needed or the two spellings of one
+        # name disagree — the argument `_module_global_field_type` already
+        # makes for the homonym case.
+        self._own_imported_global_home: dict = {}
+        self._own_imported_global_field: dict = {}
         # Per-lexical-scope import tracking: a stack of {bare_name ->
         # module_qualifier} dicts, innermost scope LAST. Frame 0 is this
         # gen_module call's own module scope, populated (in statement order,
@@ -3074,7 +3188,7 @@ class GimpleGen:
         # holding the call result defaulted to int64_t (this dict's absence is
         # exactly what BUG-2026 CODEGEN_map_over_untyped_param_arg's "assignment
         # ... from void * makes integer from pointer" GCC error came from) —
-        # see bugs/CODEGEN_map_over_untyped_param_arg.md.
+        # see CODEGEN_map_over_untyped_param_arg.
         'mojo_map':              ('void *',    ['void *', 'void *']),
         'mojo_filter':           ('void *',    ['void *', 'void *']),
         'mojo_shlex_join':       ('char *',    ['MojoList *']),
@@ -3190,7 +3304,15 @@ class GimpleGen:
         'mojo_dict_set_double_kw':  ('void',     ['MojoDict *', 'int64_t', 'double']),
         'mojo_dict_set_str_kw':     ('void',     ['MojoDict *', 'int64_t', 'char *']),
         'mojo_dict_contains_kw':    ('int',      ['MojoDict *', 'int64_t']),
-        'mojo_dict_pop_int_kw':     ('int64_t',  ['MojoDict *', 'int64_t']),
+        'mojo_dict_pop_int_kw':     ('int64_t',  ['MojoDict *', 'int64_t', 'int64_t']),
+        'mojo_dict_pop_str_kw':     ('char *',   ['MojoDict *', 'int64_t', 'char *']),
+        'mojo_dict_pop_double_kw':  ('double',   ['MojoDict *', 'int64_t', 'double']),
+        'mojo_dict_pop_int':        ('int64_t',  ['MojoDict *', 'char *', 'int64_t']),
+        'mojo_dict_pop_str':        ('char *',   ['MojoDict *', 'char *', 'char *']),
+        'mojo_dict_pop_double':     ('double',   ['MojoDict *', 'char *', 'double']),
+        'mojo_dict_pop_bytes_int':  ('int64_t',  ['MojoDict *', 'MojoBytes *', 'int64_t']),
+        'mojo_dict_pop_bytes_str':  ('char *',   ['MojoDict *', 'MojoBytes *', 'char *']),
+        'mojo_dict_pop_bytes_double': ('double', ['MojoDict *', 'MojoBytes *', 'double']),
         'mojo_dict_setdefault_int_kw': ('int64_t', ['MojoDict *', 'int64_t', 'int64_t']),
         'mojo_dict_setdefault_str_kw': ('char *',  ['MojoDict *', 'int64_t', 'char *']),
         'mojo_replace_argv':   ('void',    ['MojoList *']),
@@ -3281,7 +3403,7 @@ class GimpleGen:
         # POSIX / C stdlib functions with non-int64_t returns (util stubs table)
         # NOTE: bare `isdir` (as opposed to `int_isdir`, the real os.path.isdir
         # runtime helper just below) is intentionally NOT listed here — see
-        # bugs/COMPILE_FAIL_Modules_getpath.md. Being "known" here forced
+        # COMPILE_FAIL_Modules_getpath. Being "known" here forced
         # `_lower_named_call`'s `_is_unknown` check permanently False for the
         # literal name `isdir`, which skipped the safe, lazy, per-file weak-
         # stub fallback every other CPython-getpath.c-injected-and-never-
@@ -4476,6 +4598,11 @@ class GimpleGen:
                                  depth: int = 0, want_abs: bool = False):
         return gfn._find_symbol_home_module(self, module, name, kind,
                                            depth=depth, want_abs=want_abs)
+    def _register_imported_symbol(self, name: str, info, original_name=None,
+                                  write_param_types: bool = True):
+        import mojo.middle.funcs_shared as _fn2
+        return _fn2.register_imported_symbol(self, name, info, original_name,
+                                            write_param_types)
     def _resolved_export_entry(self, module: str, name: str, info):
         return gfn._resolved_export_entry(self, module, name, info)
     def _resolve_test_relative_module(self, module: str) -> str | None:
@@ -4664,8 +4791,26 @@ class GimpleGen:
         # for the `mk()(...)` callee branch in `_lower_call` to read. The
         # value-keyed `_callable_ret_types` cannot serve there: the result is
         # cast into a fresh temp before the outer call sees it.
+        #
+        # The table is keyed by the name the DEF's body was generated under,
+        # and for a NESTED `def` that is the LIFTED symbol
+        # `f'{current_func_name}_{fname}'` — `gen.current_func_name` is
+        # `main_outer_str` while a `def outer_str` inside `main` is being
+        # generated — while the call site spells the bare `outer_str`. So the
+        # bare lookup alone silently loses the answer for every factory
+        # defined inside a function, and the second lookup uses
+        # `_lower_closure_call`'s OWN composition, which is the string the
+        # call it precedes goes on to emit. Measured: `def main(): def
+        # outer(): s = 'x'; return (lambda: s)` then `outer()()` printed the
+        # `char *`'s own decimal address where the identical factory at
+        # MODULE scope printed `x` — nothing about the nested scope's codegen
+        # differs except this key.
         if isinstance(node, CallExpr) and isinstance(node.func, IdentExpr):
-            _frt = self._return_callable_ret_types.get(node.func.name)
+            _fname = _as_str(node.func.name)
+            _frt = self._return_callable_ret_types.get(_fname)
+            if _frt is None and _fname in getattr(self, '_closure_envs', ()):
+                _frt = self._return_callable_ret_types.get(
+                    f'{self.current_func_name}_{_fname}')
             if _frt:
                 node._callable_ret = _frt
         return _lt, _lv
@@ -4841,10 +4986,14 @@ class GimpleGen:
         return ginf._elem_of(self, name)
     def _dict_val_of(self, name: str) -> str:
         return ginf._dict_val_of(self, name)
+    def _dict_val_is_known(self, name: str) -> bool:
+        return ginf._dict_val_is_known(self, name)
     def _dict_val_of_expr(self, expr) -> str:
         return ginf._dict_val_of_expr(self, expr)
     def _dict_union_val_type(self, lv, rv) -> str:
         return ginf._dict_union_val_type(self, lv, rv)
+    def _operand_is_dict(self, node, t: str, v=None) -> bool:
+        return grsl._operand_is_dict(self, node, t, v)
     def _prepare_analysis_funcs(self, stmts: list) -> None:
         self._analysis_funcs = ginf._build_analysis_funcs(stmts)
         self._analysis_structs = ginf._build_analysis_structs(stmts)
@@ -4868,6 +5017,10 @@ class GimpleGen:
     def _emit_call(self, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]],
                     arg_nodes: list = None) -> None:
         return ginf._emit_call(self, ret_type, result_var, fname, arg_pairs, arg_nodes)
+    def _emit_dict_int_value_store(self, dict_val: str, key_ctype: str, key_val: str,
+                                   val_ctype: str, val: str, val_node) -> None:
+        return ginf.emit_dict_int_value_store(self, dict_val, key_ctype, key_val,
+                                              val_ctype, val, val_node)
     def _declared_int_ctype(self, val: str) -> str | None:
         return ginf._declared_int_ctype(self, val)
     def _ensure_local(self, ctype: str, val: str) -> str:
@@ -4895,6 +5048,8 @@ class GimpleGen:
         return ginf._new_jbp_temp(self)
     def _closure_info_for_ident(self, name: str):
         return ginf._closure_info_for_ident(self, name)
+    def _generator_value_ctype_for_next(self, arg):
+        return ginf._generator_value_ctype_for_next(self, arg)
     def _collect_return_types(self, stmts: list, acc: list):
         return ginf._collect_return_types(self, stmts, acc)
     def _coerce_to_type(self, src_type: str, dst_type: str, value: str) -> str:
@@ -4933,6 +5088,10 @@ class GimpleGen:
         return ginf._try_lower_slice_region_eq(self, slice_node, other_node, negate)
     def _sprintf_one(self, c_spec: str, arg_val: str) -> str:
         return ginf._sprintf_one(self, c_spec, arg_val)
+    def _sprintf_n(self, c_spec: str, arg_vals: list) -> str:
+        return ginf._sprintf_n(self, c_spec, arg_vals)
+    def _to_c_int_arg(self, ctype: str, val: str) -> str:
+        return ginf._to_c_int_arg(self, ctype, val)
     def _to_int64(self, ctype: str, val: str) -> str:
         return ginf._to_int64(self, ctype, val)
     def _resolve_member_expr_type(self, node) -> str | None:
@@ -4956,12 +5115,14 @@ class GimpleGen:
         return ginf._compr_set_loop(self, node, gen0, res, res_type, it_val)
     def _gen_print(self, args: list, kwargs: list=None):
         return ginf._gen_print(self, args, kwargs)
-    def _note_dict_callable_ret(self, dict_val: str, value_text: str,
-                                value_ctype: str = 'int64_t') -> None:
-        return ginf.note_dict_callable_ret(self, dict_val, value_text, value_ctype)
+    def _note_container_callable_ret(self, container_val: str, value_text: str,
+                                     value_ctype: str = 'int64_t',
+                                     value_node=None) -> None:
+        return ginf.note_container_callable_ret(self, container_val, value_text,
+                                                value_ctype, value_node)
     def _emit_dict_int_value_store(self, dict_val: str, key_ctype: str,
                                    key_val: str, val_ctype: str, val: str,
-                                   val_node) -> None:
+                                   val_node=None) -> None:
         return ginf.emit_dict_int_value_store(self, dict_val, key_ctype, key_val,
                                               val_ctype, val, val_node)
     def _eval_const_int(self, node) -> int | None:
@@ -5056,8 +5217,9 @@ class GimpleGen:
     def _subst_idents(self, expr, mapping: dict):
         return grsl._subst_idents(self, expr, mapping)
     def _format_percent_spec(self, full_spec: str, conv: str, et: str, ev: str,
-                             enode=None) -> str:
-        return grsl._format_percent_spec(self, full_spec, conv, et, ev, enode)
+                             enode=None, width_ints: list | None = None) -> str:
+        return grsl._format_percent_spec(self, full_spec, conv, et, ev, enode,
+                                         width_ints)
     def _cast_for_list(self, elem_type: str, val: str, suf: str) -> str:
         return grsl._cast_for_list(self, elem_type, val, suf)
     def _type_expr_to_ann(self, node) -> str:
@@ -5801,8 +5963,8 @@ def compile_to_gimple_cached(mojo_src: str, do_imports: bool = False, filename: 
     The full tokenize -> parse -> AST-rewrite -> gen_module pipeline is
     content-addressed: the key covers everything it reads — the entry source,
     mode, filename, the compiler + stdlib fingerprints, and the sibling-import
-    closure digest — so every caller (--dump, build_executable, build_mojo_cli,
-    build_module, Makefile dump loops) shares one cache line per unique input
+    closure digest — so every caller (--dump, build_executable, build_module,
+    Makefile dump loops) shares one cache line per unique input
     set, and editing any transitively imported file invalidates it with no
     manual versioning.
 
@@ -5916,7 +6078,7 @@ def compile_to_gimple_with_cpp(mojo_src: str, do_imports: bool = False,
     extended with the CAS object paths `_compile_imported_module` built for
     TRANSITIVELY-IMPORTED sibling modules' own top-level coroutine units
     (the 4th coroutine-code source — see its call site in gimple_gen_
-    resolve.py and bugs/COMPILE_FAIL_Tools_cases_generator_parser.md).
+    resolve.py and “COMPILE_FAIL: Tools/cases_generator/parser.py”).
     `compile_linked` returns the same paths to driver.compile_program for
     the link-mode pipeline; this out-param gives the inline (do_imports=
     True) build_executable pipeline access to them too, so a root module
@@ -6010,7 +6172,7 @@ def compile_linked(mojo_src: str, filename: str = "",
     # temp_gen, not `gen` itself) sets this shared box rather than `gen`'s
     # own `_link_needs_cxx` attribute directly — see the box's own
     # declaration and `_compile_imported_module`'s matching write site for
-    # the full reasoning (bugs/COMPILE_FAIL_Tools_cases_generator_parser.md).
+    # the full reasoning (“COMPILE_FAIL: Tools/cases_generator/parser.py”).
     needs_cxx = gen._link_needs_cxx or gen._link_needs_cxx_box[0] or bool(gen.generated_cpp)
     return (code,
             list(dict.fromkeys(gen._link_dylibs)),

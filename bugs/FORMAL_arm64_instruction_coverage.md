@@ -202,7 +202,7 @@ instruction:
 derives a branch's source-level proposition out of the cset that wrote the tested
 register, and TBZ/TBNZ write no register and set no flags. The generator refuses
 rather than emitting an `hcond` about the wrong thing, which is the correct
-failure. `bugs/FORMAL_arm64_bit_test_branch_is_not_provable.md` has the
+failure. `“An `if` whose condition is a BIT TEST cannot be PROVED”` has the
 measurement, the site, and the next step — and it is why
 `formal/examples/bittest.mojo` is not committed with this: the example fails
 today and a failing example with no `EXPECTED_FAILURES` entry is the wrong shape.

@@ -165,7 +165,7 @@ MODULE_BODY_NAME = M.MODULE_BODY_NAME
 def _module_body_function(body: list, declares: list = None) -> F.FunctionDef:
     """`def __module_body__(): <body>` — the module's top level as a function.
 
-    The whole of the fix for `bugs/FORMAL_toplevel_statements_dropped.md`. A
+    The whole of the fix for `FORMAL_toplevel_statements_dropped`. A
     file whose body is
 
         import sys
@@ -718,7 +718,7 @@ def _extract_functions(stmts: list, synthetic: bool = True,
         compiled as one function (`_module_body_function`) placed FIRST, so it
         runs before `main` and the startup stub enters it.
 
-    That third bullet is the fix for `bugs/FORMAL_toplevel_statements_dropped.md`
+    That third bullet is the fix for `FORMAL_toplevel_statements_dropped`
     and it is a change of class, not of wording: a file whose whole body is
     `sys.exit(3)` used to build, run, and exit 0, and the sweep called it a
     pass. `model.module_body` decides which statements those are, by kind, once,
@@ -1332,7 +1332,7 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
         # `.path`, with the exports mangled to match — two libraries and two
         # export spellings for one file, so the digest in the filename stopped
         # being sufficient to identify the artifact. See
-        # bugs/FORMAL_relative_import_at_the_root_has_no_qualified_identity.md.
+        # FORMAL_relative_import_at_the_root_has_no_qualified_identity.
         parent = own_module_identity(source_path, source_path)
         # Per-architecture, and that is load-bearing rather than tidiness.
         # This directory holds BUILT module dylibs, and a dylib is a
@@ -1352,7 +1352,7 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
         # named whichever came first in the statement list, so the module a file
         # was refused for was decided by the order its imports are written in and
         # by which modules happen to be in `HOST_MODULES` at all — the
-        # measurement is in `bugs/FORMAL_admitted_contracts_sweep_measurement.md`,
+        # measurement is in `“What the admitted contracts did and did NOT move in the sweep”`,
         # where adding `subprocess.mojo` moved eight files from "refused for
         # `subprocess`" to "refused for `tempfile`" without moving a single file
         # out of `not-answerable/host-import`, and the per-module breakdown
@@ -3014,7 +3014,7 @@ def _seed_one_word_call_edges(fn, one_word, holders, params_of,
     dispatched correctly on both machines, which is the whole of the diagnosis:
     the rewrite fires when the operands are names THIS function bound from a
     one-word construction and not when they arrived as parameters.
-    (`bugs/FORMAL_one_word_eq_dispatch_stops_at_a_call_boundary.md`.)
+    (`FORMAL_one_word_eq_dispatch_stops_at_a_call_boundary`.)
 
     Three rules, and each of them is a refusal rather than a guess:
 
@@ -3448,7 +3448,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # the call sites hand it a frame: `R__single(self, counter)` is two
         # arguments to a one-parameter function, and the parameter the
         # definition reads as `counter` was bound to the receiver. See
-        # bugs/FORMAL_staticmethod_is_compiled_as_an_instance_method.md.
+        # FORMAL_staticmethod_is_compiled_as_an_instance_method.
         #
         # `model.method_receiver_name`, and not `fire_compiler
         # .method_receiver_kind`, because that rule asks the same question and
@@ -5855,7 +5855,7 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct, one_word=None,
         follows it into a parameter it recognises.  Rewriting `h == 5` instead
         would hand a word that may not be a frame to a method that dereferences
         it, and `h`'s own name can be rebound to a word elsewhere in the same
-        function (`bugs/FORMAL_holder_rebound_from_a_word.md`), so "may not be"
+        function (`FORMAL_holder_rebound_from_a_word`), so "may not be"
         is a measured fact about this pass, not a hypothetical;
       * the SAME struct is what makes it CORRECT.  Python resolves
         `a == b` through `type(a)`, and the two agreeing means there is no
@@ -6240,7 +6240,7 @@ def _typed_nested_frame(base, field, cands, structs_by_name, method_owner):
     # frame placed in the object's own block, which is why
     # `struct_nested_frame_fields` leaves it out and why the constructor reserves
     # nothing for it. Two questions, two answers, and the pair that used to
-    # deadlock on this shape is `bugs/FORMAL_receiver_stored_in_a_field.md`:
+    # deadlock on this shape is `“FORMAL_receiver_stored_in_a_field: a frame address in a struct field”`:
     # the placement made the delegating STORE unsound
     # (`_frame_field_store_is_sound`), and the store's soundness is what says the
     # slot is a pointer.
@@ -6634,7 +6634,7 @@ def _check_own_eq_dispatch(classes: dict, functions: list,
 
     `p == 5` and `p == None` are the shapes this refuses, and each message
     quotes the comparison so the reader can see which line is the problem.
-    `bugs/FORMAL_dataclass_own_eq_is_still_refused_though_dispatch_works.md`
+    `FORMAL_dataclass_own_eq_is_still_refused_though_dispatch_works`
     measured the row and is closed by this.
     """
     own = {}
@@ -10954,7 +10954,7 @@ def _apply_module_constant_sites(node, sites: dict, stores: set) -> None:
     name then reached the emitter as a bare `IdentExpr` with no home and was
     REFUSED ("'K' has no home") on both architectures, for a construct the
     build answers everywhere else — measured in
-    bugs/CODEGEN_elif_arm_reading_a_module_constant_has_no_home.md, whose
+    “CODEGEN: a module-level constant read on the right of an assignment”, whose
     diagnosis blamed the emitter's phi/web slot. It was this walk: the same
     shape of mistake as the assignment case in that file, one position over.
     The other walks over this tree already knew `elifs` was pairs and spelled
@@ -11775,7 +11775,7 @@ def _bound_before_first_statement(stmts) -> set:
     (`global`) or is local and ALREADY BOUND before the first statement's value
     is evaluated.  A read of one of them is legal, and a check that flagged it
     would be refusing correct code — which is the failure mode
-    `bugs/FORMAL_a_frame_holder_rebound_from_a_word.md` records for the receiver
+    `“FORMAL_a_frame_holder_rebound_from_a_word: fixed”` records for the receiver
     exclusion, and the reason this is a named helper rather than a condition
     repeated at each use."""
     out = set()
@@ -14106,7 +14106,7 @@ def refuse_member_reads_through_a_literal_base(functions: list) -> None:
     and answered the word 0 while x86-64's raised, so `(7).foo` printed `0` on
     one machine and was refused on the other from the same source — the
     "one architecture crashes and the other declines" shape
-    `bugs/FORMAL_an_attribute_read_through_an_unclassified_base_reads_zero.md`
+    `FORMAL_an_attribute_read_through_an_unclassified_base_reads_zero`
     measured. This pass refuses first, so both answer the same thing, and both
     emitters keep an arm that refuses the same shape for a construct that
     reached them by a route this pass does not model.
@@ -14269,7 +14269,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
             raise CodegenError(M.refuse_dropped_handler_arm(fn, found))
     # NAMED for what it holds, because the two tables in this function have the
     # same SUBJECTS and incompatible SHAPES and were interchanged once already
-    # (`bugs/FORMAL_frame_receivers_is_handed_the_method_name_table.md`):
+    # (`FORMAL_frame_receivers_is_handed_the_method_name_table`):
     #
     #   `dispatch_owners` — `{`size`: "Pair"}`  bare method name → struct NAME.
     #                       What `recv.m(x)` dispatches on, so a name TWO
@@ -14992,7 +14992,7 @@ def _subscript_receiver_target(call, elems: dict):
     """`bs[0].m(x)` → `(owner name, m, bs[0])` when the element type says which.
 
     The receiver-type predicate's one use at the LIFT, and the shape the deleted
-    `bugs/FORMAL_method_call_on_a_subscripted_receiver.md` was entirely about: a
+    `FORMAL_method_call_on_a_subscripted_receiver` was entirely about: a
     receiver that is a subscript has no name to lift from, so dispatch by name
     has nothing to work with, and its four sources say the element type is
     what settles it.  Two of the four are answered here — a list literal of

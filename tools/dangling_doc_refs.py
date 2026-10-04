@@ -19,6 +19,8 @@ in this repo", and they eventually disagree.
     python3 tools/dangling_doc_refs.py            # the census, by doc name
     python3 tools/dangling_doc_refs.py --by-file  # by citing file
     python3 tools/dangling_doc_refs.py --json     # machine-readable
+    python3 tools/dangling_doc_refs.py --ratchet  # only REGRESSIONS vs the baseline
+    python3 tools/dangling_doc_refs.py --write-baseline   # regenerate it
 
 Exit code is 1 when anything dangles, 0 when nothing does, so this can become
 a hook without being edited first. It is NOT wired into any bucket, and the
@@ -29,6 +31,17 @@ belong to whichever worker owns that area, not to whoever fixes the prose. A
 `check()` over the whole corpus would go red on every one of those branches for
 something it did not do, and a red check is indistinguishable from a real
 regression. The census is a CAMPAIGN, so it is reported as one.
+
+THE RATCHET is what that reasoning left missing, and it is the one shape that
+works over a corpus nobody can clear in one commit: `--ratchet` compares each
+file against a per-file ceiling in `tools/dangling_refs_baseline.py` and fails
+only when a file GAINS citations. That is green on arrival (every entry is the
+observed count), so it is a check a developer runs and a gate can hold; it goes
+red when someone deletes a bug doc whose name thirty files still cite, or adds
+a citation of one, and the fix is the one-line prose rewrite; and it can never
+go red for a branch that only fixed citations, because a file that lost them is
+below its ceiling. `--write-baseline` regenerates the ceilings after a sweep
+and prints what moved, so the ledger is regenerated rather than hand-edited.
 """
 import argparse
 import json
@@ -49,6 +62,11 @@ REF = re.compile(r'bugs/((?:hard/|consolidated/)?[A-Za-z0-9_][A-Za-z0-9_./+-]*'
                  r'\.md)')
 SUFFIXES = ('.md', '.py')
 
+# The ratchet's ledger. A `.py` and not a JSON so that the two entries which
+# need a WHY — the deliberate self-referential fixtures in `test_suite.py` —
+# can carry it next to the number.
+BASELINE_PATH = os.path.join(HERE, 'dangling_refs_baseline.py')
+
 
 def existing_docs():
     """Every `bugs/**.md` path, relative to the repo root."""
@@ -65,14 +83,50 @@ def existing_docs():
 
 def candidates():
     """Every `.md`/`.py` in the repo that could cite a doc, as root-relative
-    paths, with the derived directories dropped."""
+    paths, with the derived directories dropped.
+
+    TRACKED files, which is `git ls-files` rather than a directory walk, and the
+    reason is portability of the ratchet below. This tree is worked in from
+    several dozen git worktrees at once and each carries scaffolding of its own
+    — this worktree alone has an untracked `TASK.md` that names two bug docs and
+    a `work.log`. A ledger generated from a filesystem walk would carry those
+    numbers, the same branch checked out in a worktree without them would go
+    red, and a check that answers differently for two checkouts of one commit
+    is not a check. `checked_run.is_derived_dir` still drops `build/` and the
+    dot-directories, because `git ls-files` lists a tracked file under
+    `__pycache__/` like any other and those are not inputs either.
+
+    Falls back to the directory walk, with a warning, if git cannot answer —
+    the census is still true, it just cannot distinguish this worktree's
+    scaffolding from the repository's files.
+    """
+    import subprocess
+    try:
+        ls = subprocess.run(['git', 'ls-files', '-z'], cwd=ROOT,
+                            capture_output=True, text=True, timeout=60,
+                            errors='replace')
+        if ls.returncode == 0 and ls.stdout:
+            names = [n for n in ls.stdout.split('\0') if n.endswith(SUFFIXES)]
+            return [n.replace(os.sep, '/') for n in sorted(names)
+                    if n.replace(os.sep, '/') != SELF_PATH
+                    and not any(checked_run.is_derived_dir(part)
+                                for part in n.replace(os.sep, '/').split('/'))]
+        print(f'warning: `git ls-files` exited {ls.returncode}; walking the '
+              f'filesystem instead, so this run also sees untracked files',
+              file=sys.stderr)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f'warning: `git ls-files` unavailable ({type(e).__name__}: {e}); '
+              f'walking the filesystem instead, so this run also sees untracked '
+              f'files', file=sys.stderr)
+    out = []
     for dirpath, dirnames, filenames in os.walk(ROOT):
         dirnames[:] = sorted(d for d in dirnames
                              if not checked_run.is_derived_dir(d))
         for name in sorted(filenames):
             if name.endswith(SUFFIXES):
                 rel = os.path.relpath(os.path.join(dirpath, name), ROOT)
-                yield rel.replace(os.sep, '/')
+                out.append(rel.replace(os.sep, '/'))
+    return out
 
 
 def find(skip=()):
@@ -101,6 +155,118 @@ def find(skip=()):
     return have, by_doc, by_file
 
 
+# ── the ratchet ────────────────────────────────────────────────────────────
+# Per-file ceilings, so the corpus can only shrink and a NEW citation of a
+# deleted doc is a failure rather than a line in a census nobody diffs.
+#
+# The ledger is a generated file (see `--write-baseline`), because a ceiling
+# that is hand-maintained across 165 files is a second copy of the census and
+# the two would disagree. Regenerating it after a sweep is one command, and it
+# prints the delta so a rewrite cannot quietly raise its own ceiling.
+
+_BASELINE_HEADER = '''"""Per-file ceilings for `tools/dangling_doc_refs.py --ratchet`.
+
+GENERATED by `python3 tools/dangling_doc_refs.py --write-baseline`. Do not
+hand-edit: a file listed here is one whose citations of DELETED bug docs this
+tree still carries, and the number is what it carried when the ledger was last
+regenerated. The ratchet fails when a file EXCEEDS its number, so a file that
+fixes its citations needs no entry change, and an entry may be removed once the
+file has none.
+
+Two entries are deliberate rather than unfixed, and are the reason this ledger
+is a `.py` and not a JSON:
+
+`test_suite.py` names documents that do not exist (`NEVER_WRITTEN.md`,
+`NO_SUCH_DOC_ANYWHERE.md`, `DELETED_ONCE.md`, `SOME.md`) to PROVE the marker
+checks can fail. A walk for missing files is guaranteed to find one there. That
+also makes them the one thing in this tree a citation SWEEP must not rewrite:
+they are the negative controls, so "this name does not resolve" is the property
+under test, and a sweep that turned them into prose would silently delete the
+proof while leaving the check green. `tools/suite.py` cites a `.md` path as a
+fixture for the same reason.
+
+THE LEDGER ITSELF (`tools/dangling_refs_baseline.py`) is EXCLUDED from the
+walk, and it is excluded rather than entered because an entry for it cannot
+mean anything. Its whole content is the set of doc names other files still
+cite, so its own dangling-citation count is a function of what every OTHER
+file has been cleaned up to — it moves when a sweep lands, it moves when the
+compiler changes which docs exist, and `--write-baseline` would have to record
+its own pre-write number. That is not a ceiling, it is a snapshot of the
+ledger in the ledger. `test_suite.py` and `tools/suite.py` stay IN, because
+their fixtures are a fixed, small, intentional number that a ceiling can
+honestly bound.
+"""'''
+SELF_PATH = os.path.relpath(BASELINE_PATH, os.path.dirname(HERE)).replace(
+    os.sep, '/')
+
+
+def load_baseline():
+    """The per-file ceilings, or {} when the ledger is absent.
+
+    Read with `ast` and not by importing it. The ledger is generated, so the
+    failure this guards is a half-written one (an interrupted `--write-baseline`
+    leaves a file with an unterminated docstring), and a census tool that cannot
+    print its own census is worse than useless: the walk still runs and the
+    ratchet reports what it can.
+    """
+    if not os.path.exists(BASELINE_PATH):
+        return {}
+    import ast
+    try:
+        tree = ast.parse(open(BASELINE_PATH, encoding='utf-8').read())
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                    getattr(t, 'id', None) == 'BASELINE' for t in node.targets):
+                return dict(ast.literal_eval(node.value))
+    except (SyntaxError, ValueError) as e:
+        print(f'warning: {os.path.relpath(BASELINE_PATH, ROOT)} is unreadable '
+              f'({type(e).__name__}: {e}); every file is allowed its observed '
+              f'count, so --ratchet cannot fail and the census below is still '
+              f'true. Regenerate it with --write-baseline.',
+              file=sys.stderr)
+    return {}
+
+
+def ratchet_regressions(by_file, baseline=None):
+    """[(rel, observed, allowed)] for every file that GAINED citations.
+
+    A file with no baseline entry is allowed 0, which is the strict default and
+    the one that catches a brand-new file citing a deleted doc. A file whose
+    observed count has fallen below its ceiling is not a regression and not
+    reported, which is what lets a worker fix a file and merge without touching
+    the ledger at all.
+    """
+    if baseline is None:
+        baseline = load_baseline()
+    out = []
+    for rel, cites in by_file.items():
+        allowed = baseline.get(rel, 0)
+        if len(cites) > allowed:
+            out.append((rel, len(cites), allowed))
+    return sorted(out, key=lambda t: (-t[1], t[0]))
+
+
+def write_baseline(by_file, skip=(), baseline=None):
+    """Regenerate the ledger, and report what moved."""
+    have = load_baseline() if baseline is None else dict(baseline)
+    now = {rel: len(cites) for rel, cites in by_file.items() if cites}
+    lines = [_BASELINE_HEADER, 'BASELINE = {']
+    for rel in sorted(now):
+        lines.append(f'    {rel!r}: {now[rel]},')
+    lines.append('}\n')
+    with open(BASELINE_PATH, 'w') as f:
+        f.write('\n'.join(lines))
+    fixed = sorted(r for r in have if r not in now)
+    raised = sorted(r for r in now if now[r] > have.get(r, 0))
+    print(f'{len(now)} files, {sum(now.values())} citations of deleted docs; '
+          f'ledger written to {os.path.relpath(BASELINE_PATH, ROOT)}')
+    for rel in fixed:
+        print(f'  DROPPED  {rel}: {have[rel]} -> 0 (entry removed)')
+    for rel in raised:
+        print(f'  RAISED   {rel}: {have.get(rel, 0)} -> {now[rel]}')
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--by-file', action='store_true',
@@ -108,10 +274,43 @@ def main() -> int:
                          'deleted doc name (this is the landing order: it is '
                          'sorted by count)')
     ap.add_argument('--json', action='store_true', help='machine-readable')
+    ap.add_argument('--ratchet', action='store_true',
+                    help='fail only when a file GAINS citations of a deleted '
+                         'doc, against tools/dangling_refs_baseline.py')
+    ap.add_argument('--write-baseline', action='store_true',
+                    help='regenerate that ledger from the census and report '
+                         'what moved')
+    ap.add_argument('--skip', action='append', default=(),
+                    help='a repo-relative path to leave out of the walk '
+                         '(repeatable)')
     args = ap.parse_args()
 
-    _have, by_doc, by_file = find()
+    _have, by_doc, by_file = find(skip=set(args.skip))
     n_cites = sum(len(v) for v in by_doc.values())
+
+    if args.write_baseline:
+        return write_baseline(by_file, skip=set(args.skip))
+
+    if args.ratchet:
+        regressions = ratchet_regressions(by_file)
+        total = sum(len(v) for v in by_file.values())
+        if not regressions:
+            print(f'ratchet: no file gained a citation of a deleted doc '
+                  f'({total} citations remain across {len(by_file)} files, '
+                  f'all at or below their baseline)')
+            return 0
+        print(f'ratchet: {len(regressions)} file(s) cite MORE deleted docs '
+              f'than tools/dangling_refs_baseline.py allows:')
+        for rel, observed, allowed in regressions:
+            print(f'  {rel}: {observed} (baseline {allowed}) — '
+                  + ', '.join(sorted({d for d, _n in by_file[rel]}))[:200])
+        print('\nThe fix for one of these is to name the BUG rather than the '
+              'doc — the\nsymptom, or the commit that fixed it — which is what '
+              'test_arm64_encoders.py says\nat its shift sweep. If the '
+              'citation is deliberate, say so in a comment\non the same line, '
+              'or raise the ceiling on purpose with\n'
+              '`--write-baseline` after reading the diff.')
+        return 1
 
     if args.json:
         print(json.dumps({

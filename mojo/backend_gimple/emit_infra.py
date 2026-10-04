@@ -59,7 +59,7 @@ from ownership_check import _block_terminates
 from mojo.middle.infra_infer import *  # noqa: F401,F403
 from mojo.middle.infra_infer import (
     _FC_SEP, _POINTER_CTOR_NAMES, _as_ident_node, _as_int, _as_member_node, _as_set,
-    _as_str, _block_terminates, _closure_info_for_ident, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _list_elements_ok, _lambda_owned, _compute_closure_candidates, _compute_scoped_closure_candidates, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
+    _as_str, _block_terminates, _closure_info_for_ident, _generator_value_ctype_for_next, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _list_elements_ok, _lambda_owned, _compute_closure_candidates, _compute_scoped_closure_candidates, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
     _function_has_reachable_fallthrough, _infer_param_types, _infer_return_type, _is_free_eligible_function, _is_known_field, _known_field_type,
     _pair_key, _prepass_list_elem, _ptr_slot_in_range, _resolve_member_expr_type, _resolve_type, _scan_container_elems,
     _seed_addressed_locals, _type_of
@@ -71,6 +71,12 @@ from mojo.middle.infra_infer import (
 from mojo.middle.calls_shared import user_dunder_repr_call
 import mojo.middle.itcursor as itc
 from mojo.middle.stmts_shared import _annotation_container_elem_type
+# The extended-unpacking (`*rest`) slot arithmetic, shared with the
+# for-loop lowering that has the same per-slot walk — see
+# `_compr_list_loop`'s own comment and `starred_slot_index`'s docstring.
+from mojo.middle.loops_shared import (
+    _emit_starred_slot_list, starred_slot_index, starred_slot_name,
+)
 
 # Separator for `function_calls`' `name<sep>index` composite strings — see
 # `analyze_param_usage`. U+001F (ASCII Unit Separator): never appears in a
@@ -209,6 +215,11 @@ def _reset_func(gen, body: list = None, params: list = None,
     # per-function is not merely safe, it is the only scope in which the
     # name means anything.
     gen._boxed_vals = set()
+    # Same scope and same reason as `_boxed_vals` above: the writers are
+    # `_lower_IdentExpr`'s two function-value branches and the sole reader is
+    # `print`, all inside one function's lowering, and the keys are SSA temp
+    # names that cannot outlive it.
+    gen._func_value_names = {}
     gen.decls:       list[str]         = []
     gen.body_lines:  list[str]         = []
     gen.var_types:   dict[str, str]    = {}
@@ -222,6 +233,14 @@ def _reset_func(gen, body: list = None, params: list = None,
     # call, once `param_defaults` is in hand. See
     # `calls_shared._callable_param_generator_apis`.
     gen._callable_param_gen_api: dict[str, dict] = {}
+    # The same shape for the ORDINARY function a higher-order parameter's
+    # default names: `{param: the callee's return C type}`, so
+    # `_lower_fnptr_call_value` stops handing back the homogenized int64_t
+    # box for a `char *` / `MojoList *` result. Per-FUNCTION and reset HERE
+    # for the reason the line above gives. Seeded in `gen_func` from
+    # `calls_shared._callable_param_ret_types`, and for an A3 stack-switch
+    # body from `_coro_body_callable_param_rets`.
+    gen._callable_param_ret_types: dict[str, str] = {}
     # `{mut}`-capture-spec preloaded pointer temps (see _gen_lifted_
     # closure) -- reset per function so a stale entry from a
     # previously-compiled closure can never leak into an unrelated
@@ -331,6 +350,11 @@ def _reset_func(gen, body: list = None, params: list = None,
     # The NAMES of owned locals bound to a closure; the free is emitted for the
     # name at the scope exit.
     gen._owned_closure_names: set = set()
+    # The ENV VARS of nested `def`s this function owns -- a plain malloc block
+    # each, freed with a bare `free` (there is no bound method and no
+    # `_reg_bound_method` entry to drop, so `mojo_closure_free` would be
+    # wrong here). See `register_nested_env_free`.
+    gen._owned_env_names: set = set()
     # Names of values whose per-slot element kinds are recorded ON THE VALUE
     # (`struct.unpack` of a mixed format, and a local bound from one) — the
     # marker that makes a read with no compile-time slot index (iteration, a
@@ -399,6 +423,7 @@ def _reset_func(gen, body: list = None, params: list = None,
     # self-hosted compiler, so it is emptied where every other per-function
     # table is.
     gen._boxed_vals.clear()
+    gen._func_value_names.clear()
     # Temps holding a heap string THIS function's own concatenation lowering
     # just built (`_emit_str_cat`) and that nothing else can hold yet. The
     # parent concatenation that consumes one as a direct operand frees it.
@@ -431,7 +456,7 @@ def _reset_func(gen, body: list = None, params: list = None,
     # require -- confirmed via a hand-reduced, Mojo-independent C
     # repro that `longjmp` into a `__GIMPLE`-tagged function's
     # `setjmp` frame reads back all-zero and segfaults. See
-    # bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md's
+    # “setting/getting an arbitrary attribute on a generically-typed object”'s
     # "Segfault root-caused" section. gen_func (free functions) has
     # always deliberately been non-`__GIMPLE` (LENIENT) already, so
     # this flag only matters for the two `__GIMPLE`-tagged code
@@ -605,8 +630,8 @@ def _reset_func(gen, body: list = None, params: list = None,
     # unanimity rule is unchanged and is now enforced where the value is
     # stored, where the store site actually knows.
     # Reset per function for the same reason as the maps above.
-    gen._dict_callable_ret = {}
-    # Seeded from self._global_dict_callable_ret (Phase 1.7, never reset)
+    gen._container_callable_ret = {}
+    # Seeded from self._global_container_callable_ret (Phase 1.7, never reset)
     # for the same reason `_elem_types` is seeded from `_global_elem_types`
     # just above: a module-level dict of callables means the same thing in
     # every function, and without the seed a `d['k']()` inside any FUNCTION
@@ -618,10 +643,10 @@ def _reset_func(gen, body: list = None, params: list = None,
     # a new wrong one. Explicit loop + `_as_str`, NOT a dict comprehension
     # over `.items()`: the same self-host boxing gap the `_elem_types` seed
     # above records.
-    for _gck in gen._global_dict_callable_ret:
+    for _gck in gen._global_container_callable_ret:
         _gck_s = _as_str(_gck)
         if _gck_s not in _reset_locally_bound:
-            gen._dict_callable_ret[_gck_s] = _as_str(gen._global_dict_callable_ret[_gck])
+            gen._container_callable_ret[_gck_s] = _as_str(gen._global_container_callable_ret[_gck])
     # Builtin-container method bound as a first-class VALUE (`append =
     # l.append`, the classic accumulator-aliasing idiom) — key: the C
     # name of the temp/var holding the boxed value; value: (receiver
@@ -695,7 +720,7 @@ def _reset_func(gen, body: list = None, params: list = None,
     # route it through the dynamic-attribute dispatch machinery, without
     # broadening the type-keyed dispatch condition to match `char *` in
     # general (which is used pervasively for ordinary strings — see
-    # bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md's
+    # “setting/getting an arbitrary attribute on a generically-typed object”'s
     # "Residual gap: caught exception objects" section for why that
     # broader fix was rejected as too risky).
     gen._except_as_names: set          = set()
@@ -1063,7 +1088,7 @@ def _emit_imported_global_accessors(gen, stmts) -> None:
     Resolution mirrors gen_module's own "Process imports" sibling
     handling (module_loader.load_module for stdlib/test modules,
     falling back to `_local_sibling_module_exports` for a local project
-    sibling file — the exact shape `mojo dylib`'s per-module-
+    sibling file — the exact shape `fire dylib`'s per-module-
     independent compile needs, since a local sibling like box.3d/
     game's `engine_world.mojo` is never in module_loader's tracked
     stdlib/test set). Safe to call unconditionally (like
@@ -1229,6 +1254,11 @@ _OWNS_STR_ELEMS = frozenset([
 # mojo_char_to_str is absent on purpose: it returns one of 256 shared IMMORTAL
 # one-character strings (a malloc per character of every string scan was the
 # bulk of the self-hosted tokenizer's memory), so a free() of it would crash.
+# mojo_char_at_str is absent for the same reason and is the entry point a string
+# SUBSCRIPT and `for c in s` are lowered to (a `char`-typed argument is not a
+# legal gimple argument, so `mojo_char_to_str` itself is not callable from
+# generated code -- see its own comment in fire_runtime.c). Both return
+# mojo_char_to_str's table entry, so both must stay off this list.
 _FRESH_STRING_RETURNS = frozenset([
     'mojo_str_cat', 'mojo_str_from_int', 'mojo_cstr_slice',
     'mojo_cstr_repeat', 'mojo_cstr_reverse', 'mojo_repr_str',
@@ -1264,10 +1294,52 @@ def carry_callable_ret_types(gen, src: str, dst: str) -> None:
     lines — and the two global-store copies omitted all three, which is
     exactly the case that was broken. A copy that is forgotten is silent: the
     program keeps running and prints a plausible wrong value with exit 0."""
-    for _tbl in (gen._callable_ret_types, gen._dict_callable_ret,
+    for _tbl in (gen._callable_ret_types, gen._container_callable_ret,
                  gen._bound_method_ret_types):
         if src in _tbl:
             _tbl[dst] = _tbl[src]
+
+
+def carry_callable_ret_from_call(gen, value_node, dst: str) -> None:
+    """The `_return_callable_ret_types` hop: a name bound to the RESULT of a
+    call to a function that returns a CALLABLE inherits that callable's return
+    type.
+
+        def a():
+            e = lambda: False
+            return e
+        def c():
+            e = a()
+            print(e())        # CPython False; without this hop, 0
+
+    `carry_callable_ret_types` cannot do this hop, and the reason is its own
+    key: it copies from the lowered VALUE (`v`), and a call result is a fresh
+    temp that carries no entry — the fact lives on the NODE
+    (`node._callable_ret`, set by `GimpleGen.lower_expr`) and, before that, in
+    the compile-scoped `_return_callable_ret_types[callee]` the callee's own
+    `return` wrote. This reads the callee name straight off the CallExpr, which
+    is the one spelling that has it.
+
+    Only `_callable_ret_types`, because that is where a non-capturing closure or
+    a lifted free function lands; a callee returning a `MojoBoundMethod *` is
+    the `_bound_method_ret_types` family and is not claimed here.
+
+    A bound method bound through a call is NOT covered, and deliberately so:
+    `f = m.truthy` is an AssignStmt whose RHS is a MemberExpr, not a call,
+    and `m.truthy()` is not this shape either. What this hop buys is the one
+    that was measured wrong.
+
+    Called from the same four store sites that call `carry_callable_ret_types`,
+    because a copy that is silently forgotten is a wrong value with exit 0.
+    """
+    if not isinstance(value_node, gimple_ctypes.CallExpr):
+        return
+    _f = getattr(value_node, 'func', None)
+    if not isinstance(_f, gimple_ctypes.IdentExpr):
+        return
+    _rt = gen._return_callable_ret_types.get(_as_str(_f.name))
+    if _rt:
+        gen._callable_ret_types[dst] = _rt
 
 
 def note_fresh_result(gen, t: str) -> None:
@@ -1417,8 +1489,52 @@ def _elem_of(gen, name: str) -> str:
 
 
 def _dict_val_of(gen, name: str) -> str:
-    """Value C type for a dict variable."""
-    return gen._dict_val_types.get(name, 'int64_t')
+    """Value C type for a dict variable, normalized to a type this runtime has.
+
+    `'int'` is an INTERNAL marker — `TypeLattice.join` returns it when a `_Bool`
+    and an `int` meet, and `_SCALAR_INT_TYPES` lists it beside `int64_t` — but
+    it is not a C type this compiler emits: C's `int` is 32-bit, so declaring a
+    temp `int` and assigning it a 64-bit word TRUNCATES rather than widens, and
+    under `-fgimple`'s verifier it is a hard error before that:
+    `non-trivial conversion in 'var_decl'`.
+
+    It reached a declaration through `dict.get`'s result type. Measured on
+    `selfhost` after the merge of ten branches, one such temp per `.get` on
+    `_NODE_TYPE_CODES`, whose value type is `join('_Bool', 'int') == 'int'`:
+
+        int64_t _t5 = mojo_dict_get_int(...);
+        int      _t9 = _t5;          // ← ast_rewriter.py:137
+
+    The fix belongs HERE rather than at the `.get` that first saw it, because
+    this is the chokepoint every reader of a recorded dict value type goes
+    through, and `int` is this runtime's word type in every spelling — which is
+    also what `_cast` has always done (see `types.py`, where `int` and
+    `int64_t` are interchangeable for a cast). A reader that genuinely wants
+    the marker asks `_dict_val_types` directly; a reader that wants to DECLARE
+    a C variable comes through here.
+    """
+    vt = gen._dict_val_types.get(name, 'int64_t')
+    return 'int64_t' if vt == 'int' else vt
+
+
+def _dict_val_is_known(gen, name: str) -> bool:
+    """Whether `_dict_val_of`'s answer for `name` is EVIDENCE or its no-evidence
+    default.
+
+    `_dict_val_types` only gets an entry when codegen saw a store into that
+    dict, so the absent case is directly available — and it has to be, because
+    `_dict_val_of` answers `'int64_t'` both for a dict KNOWN to hold ints and
+    for a dict whose value type nobody has observed. Two readers need those
+    apart, and mixing them is not cosmetic: `dict.get`'s lowering used the
+    DEFAULT argument's type as the value type whenever `_dict_val_of` said
+    `int64_t`, so `d = {"a": 1}; d.get("a", "y")` emitted `mojo_dict_get_str`
+    on an int-valued dict and `print` called `strlen(1)`. Same shape for
+    `d.pop(k, default)`'s value accessor — see
+    “A dict's value accessor is guessed from the DEFAULT argument”. Callers that
+    only compare against a concrete type (`double`, `char *`, a container) are
+    unaffected by the ambiguity and should keep reading `_dict_val_of`.
+    """
+    return name in gen._dict_val_types
 
 
 _CAST_ONLY_RE = re.compile(r'^\(\s*[A-Za-z_][A-Za-z0-9_ ]*\*?\s*\)\s*\(?\s*'
@@ -1474,11 +1590,21 @@ def _dict_union_val_type(gen, lv, rv) -> str:
     bugs/BUGFIX_ROADMAP.md item 2 for that remaining gap.
     """
     lvt = _dict_val_of_expr(gen, lv)
-    if lvt is None:
+    rvt = _dict_val_of_expr(gen, rv)
+    # `int64_t` is this table's DEFAULT answer, not a fact about the value, so
+    # an operand carrying it contributes nothing: recording it as evidence
+    # could only ever collide with a real answer from the other side. That is
+    # the same rule the cross-call parameter contract applies to its
+    # observations (`module_gen._informative_elem_ctype`), and it is what makes
+    # `e = {}; m = e | {'PATH': '/a'}` work: `{}` has no value type at all, so
+    # it is not a disagreement with the string operand, it is silence.
+    _infos = [t for t in (lvt, rvt) if t is not None and t != 'int64_t']
+    if not _infos:
         return ''
-    if lvt == _dict_val_of_expr(gen, rv):
-        return lvt
-    return ''
+    for _t in _infos:
+        if _t != _infos[0]:
+            return ''
+    return _as_str(_infos[0])
 
 
 def _scalar_arg_is_addressable_local(gen, aval) -> bool:
@@ -2145,8 +2271,9 @@ def _is_fresh_operand(gen, node, val: str) -> bool:
 _KW_DICT_FNS = frozenset([
     'mojo_dict_get_int', 'mojo_dict_get_double', 'mojo_dict_get_str',
     'mojo_dict_set_int', 'mojo_dict_set_double', 'mojo_dict_set_str',
-    'mojo_dict_contains', 'mojo_dict_pop_int',
-    'mojo_dict_setdefault_int', 'mojo_dict_setdefault_str',
+    'mojo_dict_contains', 'mojo_dict_pop_int', 'mojo_dict_pop_str',
+    'mojo_dict_pop_double', 'mojo_dict_setdefault_int',
+    'mojo_dict_setdefault_str',
 ])
 
 
@@ -2485,7 +2612,7 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
         # _C[k] = 2` printed `0 0 0 / 3` where CPython prints `0 1 1 / 1`,
         # and the misses grew the dict once per lookup (the ~16 GB of
         # `mojoc --dump-full fire.py` in
-        # bugs/CODEGEN_tuple_dict_key_hashed_by_address.md). Passing the WORD
+        # CODEGEN_tuple_dict_key_hashed_by_address). Passing the WORD
         # instead lets `mojo_cstr_or_int_str` ask what it is and render a
         # container by VALUE, which is what makes the key agree with the tuple's
         # own `==` (`mojo_list_eq`, a by-value compare) and with the key the
@@ -3150,7 +3277,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
     handle (int64_t/void*/other pointer — the real kind isn't statically
     known), guard with the runtime kind registries
     (`mojo_is_registered_dict`/`_set`) instead of blindly assuming list —
-    the exact gap bugs/CODEGEN_all_any_dict_set_miscompile.md documented
+    the exact gap CODEGEN_all_any_dict_set_miscompile documented
     (that doc is gone, closed by this change).
     Fixing it here, once, closes it for all 5 call sites at once."""
     if src_type == 'MojoList *':
@@ -3233,16 +3360,18 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         gen._emit_label(bb_none)
         # NOT a container at all: a plain int, a bool, a float's bit pattern, a
         # struct type-tag, a function pointer — every shape that reaches an
-        # iterable-typed slot in this dynamic model. Answer an EMPTY list
-        # rather than walk it, because walking it is the crash this test
-        # exists to stop: `list(12345678)`, `all(<a small int>)` and
-        # `','.join(<a struct tag>)` all died with SIGSEGV before it. An
-        # empty answer is what every consumer that reached here already
-        # produced on the pre-R1 path, so this is strictly the removal of a
-        # segfault. CPython raises TypeError for all of these; making that a
-        # real refusal is the open half, recorded in
-        # bugs/CODEGEN_iterating_a_non_container_is_a_segfault.md.
-        _ne = gen._call_expr('MojoList *', 'mojo_list_new', [])
+        # iterable-typed slot in this dynamic model. Neither walking it (the
+        # SIGSEGV this arm exists to stop: `list(12345678)`, `all(<a small
+        # int>)` and `','.join(<a struct tag>)` all died) nor an empty list
+        # (the silent wrong answer that replaced the crash — `list(5)`
+        # printed `[]`, so a loop body never ran and nothing said so, exit 0)
+        # is an answer. The runtime decides, and it has two: a boxed STRING
+        # is iterable in Python and becomes its characters, everything else
+        # raises `TypeError` the way this runtime already reports every other
+        # bad receiver. Both halves and the reason CPython's type name is
+        # absent are in `mojo_iter_boxed_list`'s definition.
+        _ne = gen._call_expr('MojoList *', 'mojo_iter_boxed_list',
+                             [('int64_t', it64)])
         gen._emit(f"  {result} = {_ne};")
         gen._emit_label(bb_after)
         return result
@@ -3327,7 +3456,7 @@ def _fstring_sub_exprs(gen, node) -> list:
     with no intermediate variable) invisible to _collect_calls and thus
     to Pass 1.3d's cross-call scalar contract below: only the
     `y = g(...)` shape, a genuine AssignStmt.value CallExpr, was ever
-    observed. See bugs/CODEGEN_untyped_param_string_direct_fstring_call.md.
+    observed. See CODEGEN_untyped_param_string_direct_fstring_call.
     Mirrors _lower_StringLiteral's own fresh-parse-from-text handling of
     these so both paths agree on what a call site looks like."""
     val, is_fstring = gen._decode_str_literal_text(node.value)
@@ -3445,6 +3574,30 @@ def _list_repr_fn(gen, rav: str) -> str:
 # (`gen._return_value_slot_kinds`).
 _STRUCT_KIND_BYTE = {'int': 'i', 'double': 'd', 'bytes': 's', 'str': 'p'}
 
+# A dict's VALUE ctype -> `gen._struct_slot_kinds`' long-form spelling, so a
+# value whose slot ctype the codegen knows statically can be described in that
+# table rather than only in the `_tuple_slot_types` ctype table (which means
+# "a list of inner lists" and routes to the nested-list repr). Used for
+# `for v in d.items():` with ONE target — the loop variable holds the pair, so
+# its two slot ctypes are (the key, the dict's value type) and the kinds-aware
+# `mojo_repr_list_kinds` is what renders it; without this the pair printed as
+ # its own heap address (bugs/CODEGEN_dict_items_pair_valued_loop_var_prints_
+# as_pointer.md). A container ctype has no letter in that alphabet yet and
+# folds to 'int' here, exactly as `_list_literal_slot_kinds` documents for a
+# nested slot: a raw word IS the right read for a boxed pointer.
+_STRUCT_KIND_LONG = {'char *': 'str', 'MojoStr *': 'str',
+                     'double': 'double', 'float': 'double', '__fp16': 'double',
+                     'MojoBytes *': 'bytes', 'bytes': 'bytes',
+                     'int': 'int', 'int64_t': 'int', '_Bool': 'int', '': 'int'}
+
+
+def _gmi_slot_kind_long(ctype):
+    """`gen._struct_slot_kinds`' long-form spelling of one slot's C type — see
+    `_STRUCT_KIND_LONG`. One definition, because the alphabet is the runtime's
+    (`mojo_list_set_kinds`) and a second spelling of it is how the two walkers
+    would come to disagree about the same value."""
+    return _STRUCT_KIND_LONG.get(_as_str(ctype), 'int')
+
 # The same alphabet for a list of inner lists/tuples that share one per-slot
 # pattern — `[(1.5, 2)]`, `[('a', 0, 1) for i in range(2)]`. Keyed on the CTYPE
 # `_tuple_slot_types` records, so it accepts every spelling that map does
@@ -3542,7 +3695,7 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
     # container branches (emit_infra.py's print-args loop). Without this,
     # f"{struct.unpack(...)}" / str(a_call_result()) fell straight to the
     # generic `mojo_str` branch below and read the container's header bytes
-    # as a C string (bugs/CODEGEN_fstring_and_str_of_a_list_are_garbage.md).
+    # as a C string (“`f"{a_list}"` and `str(a_list)` print the container's raw header bytes”).
     if et in ('int', 'int64_t', 'void *'):
         _real = gen._get_actual_type(et, ev)
         if _real in ('MojoList *', 'MojoSet *', 'MojoDict *'):
@@ -3737,19 +3890,56 @@ def _try_lower_slice_region_eq(gen, slice_node, other_node, negate: bool):
     return '_Bool', t
 
 
-def _sprintf_one(gen, c_spec: str, arg_val: str) -> str:
-    """sprintf a single value through a heap buffer into `char *`, using
-    a compile-time-known C format spec. Same malloc+sprintf shape
+def _sprintf_n(gen, c_spec: str, arg_vals: list) -> str:
+    """sprintf `len(arg_vals)` values through a heap buffer into `char *`,
+    using a compile-time-known C format spec. Same malloc+sprintf shape
     print() already uses for its non-string/list/dict operands (see
-    the print()-builtin lowering) -- factored out here since
-    %-formatting needs it once per spec rather than once per call."""
+    the print()-builtin lowering) -- factored out here since %-formatting
+    needs it once per spec rather than once per call.
+
+    More than one value because a spec may carry a `*`-width and/or a
+    `.*`-precision, each of which consumes an operand of its own BEFORE the
+    value (`'%0*X' % (4, 255)`). C spells that dynamic width with its own
+    `*`, so the Python spec text passes through unchanged and only the
+    argument list grows -- see `_format_percent_spec`."""
     buf = gen._new_temp('char *')
     vp = gen._new_temp('void *')
     fmt_t = gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape(c_spec)))
     gen._emit(f'  {vp} = malloc (256);')
     gen._emit(f'  {buf} = (char *) {vp};')
-    gen._emit(f'  sprintf ({buf}, {fmt_t}, {arg_val});')
+    # Explicit accumulation, not `', '.join(arg_vals)`: the args arrive as a
+    # list built in a loop, and this file's rule for a list built that way is
+    # to iterate it plainly (see `_lower_percent_format`'s `parts` comment for
+    # the same reasoning at more length).
+    arg_text = ''
+    for _a in arg_vals:
+        arg_text = arg_text + ', ' + _a
+    gen._emit(f'  sprintf ({buf}, {fmt_t}{arg_text});')
     return buf
+
+
+def _sprintf_one(gen, c_spec: str, arg_val: str) -> str:
+    """`_sprintf_n` for the single-value case, which is every spec without a
+    `*`-width/`.*`-precision. Kept as its own name because that is what every
+    caller outside %-formatting asks for, and because its one-value argument
+    list is what makes its emitted line byte-identical to the pre-`_sprintf_n`
+    form."""
+    return _sprintf_n(gen, c_spec, [arg_val])
+
+
+def _to_c_int_arg(gen, ctype: str, val: str) -> str:
+    """A %-format width/precision operand as a plain C `int` lvalue.
+
+    C reads a `*` width out of the varargs as an `int`, and this codebase's
+    integers are `int64_t` everywhere, so the operand has to be narrowed
+    explicitly rather than passed as-is: on a varargs boundary that is not
+    merely untidy, it is the classic UB that prints a 4-digit width as
+    3850227328. Emitted through a temp (never a bare cast expression) because
+    every call-argument position in this emitter wants an lvalue."""
+    nv = _to_int64(gen, ctype, val)
+    t = gen._new_temp('int')
+    gen._emit(f'  {t} = (int) {nv};')
+    return t
 
 
 def _to_int64(gen, ctype: str, val: str) -> str:
@@ -4132,6 +4322,14 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
         # comprehension site (real: Tools/scripts/summarize_stats.py's
         # `[... for label, (value, den) in object_stats.items()]`).
         var_names = _split_top_level_comma(inner_str)
+        # A `*`-starred slot binds the REMAINDER as a list, and every slot
+        # after it is measured from the END of the item — so the position has
+        # to be known before the declarations and the assignments below,
+        # exactly as in `_gen_for_list` (see
+        # `mojo/middle/loops_shared.starred_slot_index`, which is where the
+        # shared arithmetic and the reason for it live).
+        star_idx = starred_slot_index(var_names)
+        n_after = 0 if star_idx < 0 else len(var_names) - star_idx - 1
         is_dict_items = _iv in gen._dict_items_val_elems
         value_elem = gen._dict_items_val_elems.get(_iv) if is_dict_items else None
         slot_types = gen._tuple_slot_types.get(_iv)
@@ -4169,6 +4367,12 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
         for _czi in range(len(var_names)):
             _cvn = _as_str(var_names[_czi])
             _cse = _as_str(slot_elems[_czi]) if _czi < len(slot_elems) else 'int64_t'
+            if _czi == star_idx:
+                # The starred slot holds a LIST of the remaining elements,
+                # which is also what makes it a `MojoList *` and not one of
+                # the row's own slot types — see `_emit_starred_slot_list`.
+                _cvn = starred_slot_name(_cvn)
+                _cse = 'MojoList *'
             _declare_target_name(_cvn, _cse)
             # Own binding per bound name, exactly as the single-target branch
             # below: `[(a, b) for a, b in pairs]` shadows BOTH names, and each
@@ -4176,6 +4380,9 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
             # back when the comprehension ends.
             for _bn in _compr_target_leaf_names(_cvn):
                 saved_slots.append((_bn, _compr_bind_target(gen, _bn, _cse)))
+            if _czi == star_idx:
+                gen._elem_types[starred_slot_name(_as_str(var_names[_czi]))] = \
+                    _as_str(slot_elems[_czi])
         len64 = gen._new_val('int64_t', f'mojo_list_len ({_iv})')
         idx64 = gen._new_val('int64_t', '(int64_t)0')
         bb_cond = gen._new_bb(); bb_body = gen._new_bb()
@@ -4225,8 +4432,29 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
                 else:
                     gen._safe_coerce_emit('int64_t', vt, raw, cv)
 
+        # With a star in the target the row's own length decides the starred
+        # slot's bounds and every slot after it, so it is read once; a
+        # starless target keeps the literal indices it always had.
+        _sub_len = None
+        if star_idx >= 0:
+            _sub_len = gen._new_val('int64_t', f"mojo_list_len ({_as_str(sub_list)})")
         for i, vn in enumerate(var_names):
-            _emit_slot_assign(sub_list, vn, i, slot_elems[i])
+            if i == star_idx:
+                _stop = _sub_len
+                if n_after:
+                    _na = gen._new_val('int64_t', f"{n_after}LL")
+                    _stop = gen._new_val('int64_t', f"{_sub_len} - {_na}")
+                _emit_starred_slot_list(gen, sub_list,
+                                        starred_slot_name(_as_str(vn)),
+                                        f"{i}LL", _stop,
+                                        _as_str(slot_elems[i]))
+                continue
+            _slot_i = i
+            if star_idx >= 0 and i > star_idx:
+                _base = gen._new_val('int64_t', f"{_sub_len} - {n_after}LL")
+                _off = gen._new_val('int64_t', f"{i - star_idx - 1}LL")
+                _slot_i = gen._new_val('int64_t', f"{_base} + {_off}")
+            _emit_slot_assign(sub_list, vn, _slot_i, slot_elems[i])
         gen._gen_compr_append(node, gen0, res, res_type, bb_post)
         gen._emit(f"  goto {bb_post};")
         gen._emit_label(bb_post)
@@ -4268,7 +4496,7 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
     #      gcc's "non-trivial conversion in 'var_decl'", which is how this was
     #      found (fire_compiler.py's own `_parse_comptime`, whose multi-target
     #      comprehension named `t` while a `Token *` local `t` was live;
-    #      bugs/CODEGEN_comprehension_target_shadows_struct_local.md).
+    #      CODEGEN_comprehension_target_shadows_struct_local).
     #
     # False in the common case — a target name that is not already live — so
     # the single-comprehension program is byte-identical to before.
@@ -4593,13 +4821,24 @@ def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  mojo_set_iter_free ({iter_t});")
 
 
-def note_dict_callable_ret(gen, dict_val: str, value_text: str,
-                           value_ctype: str = 'int64_t') -> None:
-    """A callable stored into a dict keeps its return type for a later
-    `d[k](...)` call, which is the one place a dict subscript can be a
-    CALLEE. Called from every dict store of an int64 slot; a non-callable
-    value matches none of the three sources below and is a no-op, which is
-    what keeps this off the hot path.
+def note_container_callable_ret(gen, container_val: str, value_text: str,
+                                value_ctype: str = 'int64_t',
+                                value_node=None) -> None:
+    """A callable stored into a CONTAINER keeps its return type for a later
+    `d[k](...)` / `lst[0](...)` call, which is the one place a container
+    subscript can be a CALLEE. Called from every store of an int64 slot into
+    any container this codegen tracks; a non-callable value matches none of
+    the three sources below and is a no-op, which is what keeps this off the
+    hot path.
+
+    CONTAINER, not dict: the table is keyed by the container's lowered name
+    and its consumer is the subscript-callee gate in `_lower_call`, which
+    asks "was a callable recorded being stored into THIS container?" without
+    caring which kind it is — so `_lower_list_literal`'s per-element append
+    (a single chokepoint) records through this same function, and the honest
+    name is the container-neutral one. It was `_dict_callable_ret` while only
+    dicts used it, and the doc that asked for the rename is
+    bugs/CODEGEN_call_through_subscript_callee_stubbed.md.
 
     THREE sources, because a first-class callable has more than one
     representation here and every one of them has to reach the same
@@ -4636,48 +4875,117 @@ def note_dict_callable_ret(gen, dict_val: str, value_text: str,
     """
     _rt = (gen._callable_ret_types.get(value_text)
            or gen._bound_method_ret_types.get(value_text))
+    # A CALL RESULT (`e['c'] = mk(100)` where `mk` returns a closure). The two
+    # tables above are keyed by a lowered VALUE, and a call result is a fresh
+    # temp no materialization site recorded; the fact is under the CALLEE's
+    # name in the compile-scoped `_return_callable_ret_types`, which the
+    # callee's own `return` wrote. Same source
+    # `carry_callable_ret_from_call` reads for the named-local hop, and it has
+    # to be read again here because this is a different destination.
+    if not _rt and isinstance(value_node, gimple_ctypes.CallExpr):
+        _vf = getattr(value_node, 'func', None)
+        if isinstance(_vf, gimple_ctypes.IdentExpr):
+            _rt = gen._return_callable_ret_types.get(_as_str(_vf.name))
     if not _rt and value_ctype == 'MojoBoundMethod *':
         _rt = 'int64_t'
     if not _rt:
         return
-    _cur = gen._dict_callable_ret.get(dict_val)
+    _cur = gen._container_callable_ret.get(container_val)
     if _cur is None:
-        gen._dict_callable_ret[dict_val] = _rt
+        gen._container_callable_ret[container_val] = _rt
     elif _cur and _cur != _rt:
-        # A second, DIFFERENT return type for the same dict: ambiguous from
-        # here on, and it must STAY ambiguous -- a third store of the first
-        # type must not un-poison it, so the '' is sticky (`_cur and ...`
-        # above never re-enters this branch once poisoned).
-        gen._dict_callable_ret[dict_val] = ''
+        # A second, DIFFERENT return type for the same container: ambiguous
+        # from here on, and it must STAY ambiguous -- a third store of the
+        # first type must not un-poison it, so the '' is sticky (`_cur and
+        # ...` above never re-enters this branch once poisoned).
+        gen._container_callable_ret[container_val] = ''
+
+
+def elem_repr_operand(gen, shim: str) -> str:
+    """The `void *` OPERAND naming the element-repr shim, for the runtime call.
+
+    The file-scope `static void *_funcptr_<shim> = (void *)<shim>;` this codegen
+    already emits for every function-pointer target, rather than the shim's
+    bare name. A function designator is not a legal gimple OPERAND, so passing
+    it inline produced
+
+        _t42 = _mojo_elem_repr_DType;
+
+    and gcc -fgimple refused the whole closure with "non-trivial conversion in
+    'function_decl'" -- one error per list literal in every module of the
+    stdlib, so `make mojoc` did not link at all (measured on the stdlib
+    `builtin/dtype.mojo`, three per function, plus the same shape in
+    `parsing_floats.mojo`). `(void *)name` is the same problem inside a cast,
+    which is equally not an operand, so the cast has to live in a real static
+    initializer instead; that initializer is what `_funcptr_builtins_needed`
+    collects and module_gen emits.
+
+    Read into a TEMP rather than passed as the bare global, and that is not
+    tidiness: a file-scope variable is not a legal gimple operand either, so
+
+        mojo_list_set_elem_repr (_t1, _funcptr__mojo_elem_repr_P);
+
+    is "invalid argument to gimple call" even with the static defined. `_new_val`
+    is what every other function-pointer path already uses for exactly this --
+    it emits `_t = _funcptr_X;` and hands back the temp -- so the shim is named
+    and loaded the same way the lifted-closure, builtin-callable and vararg
+    paths are.
+
+    ONE spelling for every function-pointer target, which is what makes this a
+    fix rather than a third way of naming the same thing: they all reach a
+    function pointer through `_funcptr_` already.
+    """
+    gen._funcptr_builtins_needed.add(shim)
+    return gen._new_val('void *', f'_funcptr_{shim}')
 
 
 def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
                               val_ctype: str, val: str, val_node) -> None:
-    """The one dict store of an integer-ish VALUE, shared by the dict literal
-    (`_lower_dict_literal`), the dict comprehension (`_lower_dict_compr`), the
+    """The one dict store of a NON-STRING VALUE, shared by the dict literal
+    (`_emit_dict_pair_store`), the dict comprehension (`_gen_compr_append`), the
     subscript store `d[k] = v`, the same store under a bytes key, and the two
     `d[k] = v` shapes that reach a dict through an opaque int-typed receiver —
-    six call sites, which is how six copies of the same three lines came to
-    disagree (five had the per-slot bool kind, one had the deleted dict-wide
-    marker; one had `mojo_dict_set_int` and its `_kw` twin disagreed about an
-    integer key).
+    six copies of the same three lines, which is how they came to disagree:
+    five still spelled the store against the deleted whole-dict marker
+    `mojo_mark_dict_bool_values`, and the sixth called a
+    `gen._emit_dict_int_value_store` that was never a delegate.
 
-    A Python bool and the integer 1/0 are the same int64_t slot here (see
-    `_lower_BoolLiteral`), so the store's TYPE cannot tell them apart; the
-    expression can, and `is_python_bool_expr` is the one predicate that says
-    so. When it does, the store goes through `mojo_dict_set_bool`, which tags
-    THAT slot `_DictSlot.kind == 3` — the dict's repr then prints True/False
-    for that value alone. This replaced a whole-dict registry
-    (`mojo_mark_dict_bool_values`, since deleted): one bool value made every
-    OTHER value in the same dict print as True/False too, so
-    `{'name': p.name, 'ok': p.ok}` rendered `{'name': True, 'ok': True}`.
+    Three value shapes, three setters, and each one is chosen from something
+    the store site can still see:
 
     `key_ctype == 'MojoBytes *'` is its own key domain in the runtime (see
-    `_DictSlot.keykind`), which is what the `bytes_` prefix selects — the
-    same prefix the dict literal's float and str arms use, so the two halves of
-    one literal cannot disagree about which domain a key is in.
+    `_DictSlot.keykind`), which is what the `bytes_` prefix below selects — so
+    the two halves of one literal cannot disagree about which domain a key is
+    in.
 
-    `note_dict_callable_ret` runs first for both branches — a stored callable
+    Every value kind is decided HERE rather than at each call site, because the
+    call sites are what disagreed:
+    * a FLOAT goes to `mojo_dict_set_double`, which stores the IEEE-754 bits
+      with `_DictSlot.kind == 1`. It used to be `_to_int64`'d into
+      `mojo_dict_set_int` on every path but the dict literal, so
+      `d['f'] = 1.5` stored the integer 1 (`print(d)` said `{'f': 1}`) and the
+      literal `{'f': 1.5}` stored 1.5 — one dict, two answers, decided by
+      which line wrote it. A C cast cannot be used instead: `(double)` and
+      `(int64_t)` casts are not legal gimple operands, which is why the
+      conversion goes through the value's own declared type and a setter.
+    * a Python bool — which is the same int64_t slot as the integer 1/0 here
+      (see `_lower_BoolLiteral`), so the store's TYPE cannot tell them apart
+      and only the EXPRESSION can — goes through `mojo_dict_set_bool`, which
+      tags THAT slot `kind == 3` and the dict's repr prints True/False for
+      that value alone. `is_python_bool_expr` is the one predicate that says
+      so. This replaced a whole-dict registry
+      (`mojo_mark_dict_bool_values`, since deleted): one bool value made every
+      OTHER value in the same dict print as True/False too, so
+      `{'name': p.name, 'ok': p.ok}` rendered `{'name': True, 'ok': True}`.
+    * a bare `None` is int64_t 0 here and so is the integer 0, for the same
+      reason, and goes through `mojo_dict_set_none` (`kind == 4`) — which is
+      what lets `{'z': 0}` print `0` and `{'n': None}` print `None` from the
+      same generic value repr. `_is_none_literal` is the predicate, and it is
+      deliberately a bare-NAME check (`None` is parsed as `IdentExpr('None')`),
+      not a value check: an `x` that HAPPENS to be None at runtime is not
+      knowable here, and such a slot keeps the plain int kind.
+
+    `note_container_callable_ret` runs first for all of them — a stored callable
     keeps its return type whatever its slot kind is.
 
     The store goes through `_emit_call`, NOT a raw `gen._emit`, because that
@@ -4685,10 +4993,50 @@ def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
     integer key arrives as a raw machine word and `_apply_kw_keys` rewrites the
     call to the `_kw` twin (`mojo_dict_set_int_kw(d, 3, v)`). A raw emit skips
     that and hands the runtime `(char *)3` as a key to hash, which segfaults."""
-    gen._note_dict_callable_ret(dict_val, val)
+    gen._note_container_callable_ret(dict_val, val, val_ctype, val_node)
+    _bs = 'bytes_' if key_ctype == 'MojoBytes *' else ''
+    if gen._is_none_literal(val_node):
+        gen._emit_call('void', '', 'mojo_dict_set_' + _bs + 'none',
+                       [('MojoDict *', dict_val), (key_ctype, key_val)])
+        return
+    if val_ctype in gimple_ctypes._FLOAT_TYPES:
+        gen._emit_call('void', '', 'mojo_dict_set_' + _bs + 'double',
+                       [('MojoDict *', dict_val), (key_ctype, key_val),
+                        ('double', val)])
+        return
+    # A STRUCT value is stored TAGGED and, with the repr function this compile
+    # emitted for that struct, recorded ON THE DICT — the same bargain
+    # `mojo_list_set_elem_repr` makes for a list, for the same reason: the
+    # value's static type is known here and is unrecoverable by the time
+    # anything walks the dict, because a struct-allocated value carries no
+    # runtime type tag for `_mojo_dispatch_repr` to find. Without it
+    # `print({'k': p})` rendered the generated field dump `P(x='a')` where
+    # CPython renders the user's `__repr__`.
+    #
+    # The dict records ONE function while the tag is per SLOT, so a dict
+    # holding two different struct types cannot have both rendered by it: the
+    # first struct recorded owns `kind == 5` and any other struct value is
+    # tagged `kind == 6` — "a struct this dict's repr does not describe" — and
+    # falls back to the generic dispatch. Tagging per slot is what keeps the
+    # answer from depending on store ORDER: the record is never cleared, so
+    # `d['p'] = p; d['n'] = 5` renders `{'p': R<a>, 'n': 5}` and
+    # `d['n'] = 5; d['p'] = p` renders the same, where clearing the record on
+    # the int would have made the first of those print a field dump.
+    _shim = gimple_exprtypes.struct_elem_repr_shim(gen, val_ctype)
+    if _shim:
+        _have = gen._dict_val_repr.get(dict_val, '')
+        if not _have:
+            gen._dict_val_repr[dict_val] = _shim
+            gen._emit_call('void', '', 'mojo_dict_set_val_repr',
+                           [('MojoDict *', dict_val),
+                            ('void *', elem_repr_operand(gen, _shim))])
+        _st = 'struct' if _have in ('', _shim) else 'other_struct'
+        gen._emit_call('void', '', 'mojo_dict_set_' + _bs + _st,
+                       [('MojoDict *', dict_val), (key_ctype, key_val),
+                        (val_ctype, val)])
+        return
     vv64 = gen._to_int64(val_ctype, val)
     _suffix = 'bool' if gimple_exprtypes.is_python_bool_expr(gen, val_node) else 'int'
-    _bs = 'bytes_' if key_ctype == 'MojoBytes *' else ''
     gen._emit_call('void', '', 'mojo_dict_set_' + _bs + _suffix,
                    [('MojoDict *', dict_val), (key_ctype, key_val),
                     ('int64_t', vv64)])
@@ -4807,9 +5155,9 @@ def _note_global_callable_store(gen, gname: str, value_text: str) -> None:
     _rt = gen._callable_ret_types.get(value_text)
     if _rt:
         gen._global_callable_ret_types[gname] = _rt
-    _drt = gen._dict_callable_ret.get(value_text)
+    _drt = gen._container_callable_ret.get(value_text)
     if _drt is not None:
-        gen._global_dict_callable_ret[gname] = _drt
+        gen._global_container_callable_ret[gname] = _drt
 
 
 def _gen_print(gen, args: list, kwargs: list = None):
@@ -4871,6 +5219,15 @@ def _gen_print(gen, args: list, kwargs: list = None):
     # a restored docstring value printed its address, and any Token built
     # from it carried that same wrong value into `.value`.
     resolved_parts = []
+    # `(word, boxed text)` pairs whose release is owed once the WHOLE print
+    # has been emitted, because the argument loop below no longer prints the
+    # discriminator's answer as it goes (see the `_is_may_hold_str_param`
+    # arm). `mojo_cstr_or_int_str` returns a string BORROWED (the very same
+    # address) but hands back an integer as a pooled heap block the caller
+    # now owns -- `mojo_cstr_or_int_release`'s contract, and doc/MEMORY.html
+    # "Transient keys". Holding several at once is fine: `mojo_print` copies
+    # out of each, and the block is still owned by nobody else in between.
+    _cstr_held: list = []
     for _pi, (atype, aval) in enumerate(parts):
         # A DYNAMIC tagged nested-generator-tuple element (see
         # _lower_IdentExpr's _tagged_dyn_src branch): the real kind is only
@@ -4946,15 +5303,19 @@ def _gen_print(gen, args: list, kwargs: list = None):
             if _pi < len(args) and _is_may_hold_str_param(gen, args[_pi]):
                 _rv = gen._call_expr('char *', 'mojo_cstr_or_int_str',
                                      [('int64_t', aval)])
-                gen._emit(f'  {print_fn} ({_rv});')
-                # REQUIRED, not optional: a boxed string comes back borrowed
-                # (the very same address) but an integer comes back as a
-                # pooled heap block this print now owns (see
-                # `mojo_cstr_or_int_release`'s contract and doc/MEMORY.html
-                # "Transient keys"). `mojo_print` copies out of it, so the
-                # release goes straight after the call.
-                gen._emit_call('void', '', 'mojo_cstr_or_int_release',
-                               [('int64_t', aval), ('char *', _rv)])
+                # CONVERT, do not print. This branch used to emit
+                # `print_fn` here and `continue` WITHOUT appending to
+                # `resolved_parts`, so a print with a second argument came
+                # out with the two SWAPPED and the `' '` separator
+                # attached to the wrong one: `print(x, y)` in a lambda
+                # called `b(1, "two")` printed `two1`. Every other arm of
+                # this loop only rewrites the pair and lets the ONE loop
+                # below print it in order; this one has to do the same, and
+                # the release the boxed integer's pooled block needs
+                # becomes a deferred pair (below) instead of a call made
+                # between two arguments.
+                _cstr_held.append((aval, _rv))
+                resolved_parts.append(('char *', _rv))
                 continue
             real = gen._get_actual_type(atype, aval)
             if real == 'char *':
@@ -5055,6 +5416,24 @@ def _gen_print(gen, args: list, kwargs: list = None):
             # builtin-returning bool (any/all/isinstance/in) reaches here.
             rv = gen._call_expr('char *', 'mojo_repr_bool', [('_Bool', aval)])
             gen._emit(f'  {print_fn} ({rv});')
+        elif aval in getattr(gen, '_func_value_names', ()):
+            # A FUNCTION OBJECT. `TypeLattice.printf_fmt` has no format for a
+            # pointer, so this used to reach the generic path below and
+            # `sprintf(..., "%d", (void *)fn)` — undefined behaviour on a
+            # 64-bit target, which is where the decimal address
+            # (`print(step)` -> 74387272) came from. CPython prints
+            # `<function step at 0x...>`: the NAME is the part that was
+            # missing, and the address was never wrong.
+            _fname = gen._func_value_names[aval]
+            _lit = gen._intern_string(
+                f'<function {_fname} at %p>')
+            _ft = gen._new_val('char *', _lit)
+            _fp = gen._new_temp('void *')
+            _fs = gen._new_temp('char *')
+            gen._emit(f'  {_fp} = (void *){aval};')
+            gen._emit(f'  {_fp} = (void *)(intptr_t)(int64_t){_fp};')
+            gen._emit(f'  {_fs} = mojo_sprintf_ptr ({_ft}, {_fp});')
+            gen._emit(f'  {print_fn} ({_fs});')
         else:
             t = gen._new_temp('char *')
             vp = gen._new_temp('void *')
@@ -5070,6 +5449,13 @@ def _gen_print(gen, args: list, kwargs: list = None):
             gen._emit(f'  free ({t});')
         if i < len(parts) - 1:
             _emit_literal_print(' ', print_fn)
+    # Index-walk, not a two-element for-target unpack: that boxes both slots
+    # on the self-hosted path (`_lower_fnptr_call_value`'s own comment gives
+    # the rule for the same shape).
+    for _ch_i in range(len(_cstr_held)):
+        gen._emit_call('void', '', 'mojo_cstr_or_int_release',
+                       [('int64_t', _cstr_held[_ch_i][0]),
+                        ('char *', _cstr_held[_ch_i][1])])
     _emit_literal_print('\\n', print_fn)
 
 
@@ -5683,7 +6069,7 @@ def _container_keys_safe(gen, name: str, ctype) -> bool:
     (ownership_destruct.key_views_consumed). Any other type is unaffected."""
     if ctype != 'MojoDict *' and ctype != 'MojoSet *':
         return True
-    return _key_views_ok(gen._own_fn_body, name)
+    return _key_views_ok(gen._cur_func_body, name)
 
 
 def maybe_push_owned_local(gen, name: str, value=None) -> None:
@@ -5722,7 +6108,7 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
     # bare static function pointer and allocates nothing, never appears there).
     if gen._decl_rhs_val != '' and gen._decl_rhs_val in gen._closure_vals:
         gen._closure_vals.discard(gen._decl_rhs_val)
-        if not _lambda_owned(gen._own_fn_body, name):
+        if not _lambda_owned(gen._cur_func_body, name):
             _drop_owned_candidate(gen, name)
             return
         gen._owned_closure_names.add(name)
@@ -5753,7 +6139,7 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
         # name at the scope exit, long after the temp is gone.
         if rhs in gen._owned_str_elem_vals:
             gen._owned_str_elem_vals.discard(rhs)
-            if not _list_elements_ok(gen._own_fn_body, name):
+            if not _list_elements_ok(gen._cur_func_body, name):
                 # The list owns its strings, but the program may hand an
                 # element pointer out (`kept.append(parts[0])`), and the
                 # element free would then dangle. Fail closed to the plain
@@ -5765,7 +6151,7 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
         # A fresh STRING is owned only if no method call on it can hand back
         # the receiver itself (`t = s.strip()` may alias `s`): see
         # ownership_destruct.receiver_results_consumed.
-        if gen.var_types.get(name) == 'char *' and not _string_uses_ok(gen._own_fn_body, name):
+        if gen.var_types.get(name) == 'char *' and not _string_uses_ok(gen._cur_func_body, name):
             candidates.discard(name)
             gen._owned_str_elem_names.discard(name)
             return
@@ -5869,6 +6255,10 @@ def _emit_owned_local_frees(gen):
         elif name in gen._owned_closure_names:
             # A bound method and the environment it owns (see mojo_closure_free).
             runtime_fn = 'mojo_closure_free'
+        elif name in gen._owned_env_names:
+            # A nested `def`'s environment: a plain malloc block and NO bound
+            # method, so a bare `free` -- see `register_nested_env_free`.
+            runtime_fn = 'free'
         elif name in gen._owned_str_elem_names and ctype == 'MojoList *':
             # Decided at the DECLARATION, where the value was still the temp a
             # `_OWNS_STR_ELEMS` function returned; re-derived here from
@@ -5939,7 +6329,14 @@ def _reset_scope_state(gen) -> None:
     declaring body is being lowered right now."""
     gen._literal_storage = ''
     gen._literal_storage_ctype = ''
-    gen._own_fn_body = []
+    # NOT `gen._cur_func_body`: that is the AST body BEING LOWERED, owned by
+    # `_reset_func` (and by `begin_function`), not per-candidate-set state. Its
+    # only two `reset_no_candidates` callers each call `_reset_func` on the
+    # body they are about to lower immediately before, so resetting it here
+    # did nothing but throw away the one piece of information the ownership
+    # analysis needs about the function in progress -- a struct method's own
+    # body became `[]`, which every "how is this local USED?" question then
+    # answered vacuously, i.e. "no mention, so nothing can hold it, free it".
     gen._scoped_free_candidates = set()
     gen._scope_armed = set()
     gen._scope_live = []
@@ -5954,6 +6351,7 @@ def _reset_scope_state(gen) -> None:
     gen._owned_str_elem_names = set()
     gen._owned_str_elem_vals = set()
     gen._owned_closure_names = set()
+    gen._owned_env_names = set()
     # See `begin_function`'s note: self-hosting cannot infer a set/list
     # field's element type from an assignment, only from this table.
     _fet = gen._field_elem_types.setdefault('GimpleGen', {})
@@ -5964,6 +6362,7 @@ def _reset_scope_state(gen) -> None:
     _fet['_owned_str_elem_names'] = 'char *'
     _fet['_owned_str_elem_vals'] = 'char *'
     _fet['_owned_closure_names'] = 'char *'
+    _fet['_owned_env_names'] = 'char *'
     _fet['_fresh_vals'] = 'char *'
     _fet['_fresh_str_tmps'] = 'char *'
     _fet['_boxed_vals'] = 'char *'
@@ -6216,7 +6615,7 @@ def maybe_stack_alloc_owned_ctor(gen, name: str, value, ann=None) -> bool:
       that IS stack-allocated, because `[]` is an empty constructor — lost
       the one piece of type information its own annotation carried, and a
       list filled only from a callee read back as ints
-      (bugs/CODEGEN_list_of_string_read_as_int_when_filled_in_a_callee.md,
+      (CODEGEN_list_of_string_read_as_int_when_filled_in_a_callee,
       closed and removed with the annotation-seeding fix)."""
     # Direct attribute access — see `maybe_push_owned_local`'s note.
     candidates = gen._owned_free_candidates
@@ -6329,7 +6728,7 @@ def begin_function(gen, fn) -> None:
     gen._owned_free_pushed = set()
     gen._owned_stack_allocated = set()
     _reset_scope_state(gen)
-    gen._own_fn_body = fn.body
+    gen._cur_func_body = fn.body
     gen._int_keyed_dicts = _compute_int_keyed_dicts(fn)
     gen._scoped_free_candidates = _compute_scoped_free_candidates(fn, gen._owned_free_candidates, gen._analysis_funcs, gen._analysis_structs)
     # A lambda local declared in a LOOP BODY is owned by the body, on the same
@@ -6366,6 +6765,49 @@ def reset_no_candidates(gen) -> None:
     gen._owned_stack_allocated = set()
     gen._int_keyed_dicts = set()
     _reset_scope_state(gen)
+
+
+def register_nested_env_free(gen, def_name: str, env_var: str,
+                             owner_body=None) -> None:
+    """Take ownership of the environment a nested `def` just allocated, when
+    the enclosing function's body proves it cannot escape.
+
+    `_alloc_<name>_env()` is a `malloc` per nested `def` STATEMENT, and
+    nothing freed it: `def helper(n): def inner(x): return x + n; return
+    inner(1)` measured +16 B/iteration (3.06 MB at 100k, 7.64 MB at 400k) —
+    bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md's OPEN 1. There
+    is no `MojoBoundMethod` and no `_reg_bound_method` entry here (the call
+    sites are DIRECT — `helper_inner (_env_inner, 1)`), so the teardown is a
+    bare `free` and the unwind entry is `mojo_cleanup_push_ptr`, NOT
+    `mojo_closure_free`, which would read two words of a `helper_inner_env *`
+    as a bound method.
+
+    `ownership_destruct.nested_def_env_owned` is the whole ownership
+    question; everything here is the wiring, and it is the same wiring
+    `_maybe_push_owned_local` does for a capturing lambda's value — register
+    the name, push the thunk at the declaration, let `emit_return_frees` and
+    `emit_fallthrough_frees` free and cancel it. Deliberately NOT
+    scope-registered: the env var is function-scoped
+    (`gen._declare_var` at the nested-`def` STATEMENT), so there is no loop
+    body to register against and the `break`/`continue` half of the block
+    machinery does not apply.
+
+    Fail-closed: an unprovable body leaves the name unregistered, which is
+    today's leak and never a double free.
+    """
+    # `owner_body` is the body of the function this nested `def` is a
+    # STATEMENT of, captured by the caller before anything was lifted -- see
+    # `_gen_stmt_FunctionDef`'s note on why it cannot be `gen._cur_func_body`.
+    # `owner_body is None` means the caller had no body to speak for, and no
+    # proof is no free.
+    if owner_body is None:
+        return
+    if not ownership_destruct.nested_def_env_owned(owner_body, _as_str(def_name)):
+        return
+    gen._owned_env_names.add(env_var)
+    gen._owned_free_candidates.add(env_var)
+    gen._owned_free_pushed.add(env_var)
+    gen._emit(f"  mojo_cleanup_push_ptr ({gen._cname(env_var)});")
 
 
 def emit_return_frees(gen) -> None:

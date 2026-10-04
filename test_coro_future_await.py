@@ -147,7 +147,7 @@ def main():
 
 
 def test_sync_method_side_future_ops():
-    """Gap 1 (bugs/COMPILE_FAIL_asyncio_queues.md): `create_future()` and
+    """Gap 1 (“COMPILE_FAIL: asyncio/queues.py”): `create_future()` and
     `.set_result(v)` reached from ORDINARY (non-coroutine) struct methods
     lower onto the same A3 Future handle the async side awaits. Mirrors
     asyncio.Queue.put_nowait -> _wakeup_next -> `waiter.set_result(None)`."""
@@ -185,7 +185,7 @@ def main():
 
 
 def test_eager_task_scheduling_concurrency():
-    """Gap 3 (bugs/COMPILE_FAIL_asyncio_queues.md): `create_task` eagerly
+    """Gap 3 (“COMPILE_FAIL: asyncio/queues.py”): `create_task` eagerly
     schedules the coroutine onto the shared scheduler ready queue, so two
     sibling tasks run concurrently and a producer wakes an already-parked
     consumer through a Future. `await <task>` drains the scheduler instead
@@ -218,7 +218,7 @@ def main():
 
 
 def test_deque_field_future_handle_roundtrip():
-    """Gap 2 (bugs/COMPILE_FAIL_asyncio_queues.md): an unannotated
+    """Gap 2 (“COMPILE_FAIL: asyncio/queues.py”): an unannotated
     `self._getters = deque()` field types as MojoList *; append/popleft
     round-trip an int64_t Future handle so `.set_result()` on the popped
     value reaches the awaiting coroutine. Mirrors asyncio.Queue's
@@ -257,7 +257,7 @@ def main():
 
 
 def test_async_struct_method_queue_roundtrip():
-    """Gap 4 (bugs/COMPILE_FAIL_asyncio_queues.md): `async def` METHODS on
+    """Gap 4 (“COMPILE_FAIL: asyncio/queues.py”): `async def` METHODS on
     a compiled struct (a `self: Queue` receiver) become real A3 stack-switch
     coroutines -- a receiver slot in the start-function + a method-mangled
     trampoline (__mgco_<Struct>_<method>_start), and `await obj.method(...)`
@@ -304,7 +304,7 @@ def main():
 
 
 def test_top_level_async_struct_param():
-    """bugs/COMPILE_FAIL_asyncio_queues.md gap 2: a struct-typed PARAM on a
+    """“COMPILE_FAIL: asyncio/queues.py” gap 2: a struct-typed PARAM on a
     top-level (non-method) `async def` keeps its pointer type -- it is
     unpacked from its `__mojo_gen_arg` slot with a `(<T> *)` cast and
     passed to the coroutine body as a real `<T> *` C param, so awaiting a
@@ -414,7 +414,7 @@ def test_native_future_class_bridge_sync_resolve():
     `if not self.done(): ... yield self` / `return self.result()` generator
     is bridged onto the native MojoFuture handle: `await <instance>` parks
     on the native waiter list, a sync `.set_result()` resolves it.
-    (bugs/COMPILE_FAIL_asyncio_futures.md)"""
+    (“COMPILE_FAIL: asyncio/futures.py”)"""
     src = "import asyncio\n\n" + _STD_FUT + """
 async def consumer(f: Fut) -> Int:
     var v = await f

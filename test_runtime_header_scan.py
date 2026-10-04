@@ -221,7 +221,7 @@ def test_every_declaration_is_seen():
     # (`mojo_list_eq` / `mojo_dict_eq` / `mojo_set_eq` / `mojo_value_eq`). They
     # are declared here rather than in their container's own section because
     # unlike every other comparison primitive all three container types have to
-    # be complete first -- see bugs/CODEGEN_container_eq_is_pointer_identity.md.
+    # be complete first -- see “CODEGEN: `==` / `!=` between two containers is POINTER identity”.
     #
     # 479 -> 521 (2026-10-01): three finished branches merged over this tree,
     # each of which added runtime entry points -- the bytes/memoryview surface
@@ -273,6 +273,33 @@ def test_every_declaration_is_seen():
     # list/tuple literal whose element type is a registered struct) and
     # `mojo_list_repr_elem` (what both repr walkers ask per slot). Two,
     # taken from the call.
+    # 543 -> 545 (2026-10-02, `bugs4-6-c`), for a dict slot that holds a
+    # Python `None`: `mojo_dict_set_none` and its bytes-key twin
+    # `mojo_dict_set_bytes_none`. Two, not one, for the same reason
+    # `mojo_dict_set_bytes_bool` exists beside `mojo_dict_set_bool` — a bytes
+    # key is its own key domain (`_DictSlot.keykind`), so it needs its own
+    # setter. The value kind they tag (`kind == 4`) is what lets `{'z': 0}`
+    # print `0` while `{'n': None}` prints `None` from one generic value
+    # repr, whose `val == 0` arm has to answer "None" for a NULL pointer
+    # slot; before this, every plain zero in every dict printed as `None`.
+    #
+    # NOT 544 in between: neither of these two needs a `-bytes_` DOUBLE twin
+    # for its own sake, because the float setter that already existed is
+    # dispatched by the shared `emit_dict_int_value_store` on `key_ctype`
+    # (`mojo_dict_set_bytes_double` was in the header already). A new value
+    # KIND needs a new setter; a value shape that already had one does not
+    # get a second spelling of it.
+    # 545 -> 551 (2026-10-02, `bugs4-6-c`), for a STRUCT stored as a dict
+    # value: `mojo_dict_set_struct` / `mojo_dict_set_val_repr` /
+    # `mojo_dict_repr_val` and the pair `mojo_dict_set_bytes_struct` /
+    # `mojo_dict_set_bytes_other_struct` — six, taken from the call. The
+    # `other_struct` pair exists because the dict records ONE repr function
+    # (a property of the dict) while the tag is per SLOT, so a second struct
+    # type needs its own tag (`kind == 6`) rather than being handed the first
+    # type's repr; without it `{'a': p, 'b': q}` printed q's repr twice, which
+    # is a wild read and not merely a wrong string. Four of the six are
+    # `_bytes_` twins of the same shape as `mojo_dict_set_bytes_bool`, so the
+    # key DOMAIN keeps exactly one spelling per value shape.
     #
     # NOT 542 in between: `bugs3-codegen-1-r2` added
     # `mojo_require_str_arg`, the runtime half of a str-annotated parameter
@@ -326,13 +353,85 @@ def test_every_declaration_is_seen():
     # return is the ceiling-3 shape and is still refused. Read off the CALL
     # (546), the same way every other number in this ledger was.
     #
+    # 546 -> 550 (2026-10-02, `bugs4-2`): the `d.pop(k, default)` value
+    # domains on the str-key side — `mojo_dict_pop_str` / `mojo_dict_pop_double`
+    # and their `_kw` twins. `mojo_dict_pop_int` gained the `dflt` parameter
+    # Python's two-argument `pop` needs and did so by CHANGING that one
+    # signature rather than adding a parallel `..._dflt` name; the four new
+    # names are the str and double readers the same family needed, so that a
+    # str-valued dict pops its value as a `char *` instead of a pointer
+    # decimal (“A dict's value accessor is guessed from the DEFAULT argument”,
+    # “CODEGEN: `d.pop(k, default)` returns 0 on a MISS”). Read off the CALL
+    # on the MERGED header (550 = this side's 546 plus those four), which is
+    # the point the ledger exists to record: bugs4-2 counted from its own
+    # base's 543, so its `547` was right for its tree and wrong for this one.
+    #
+    # 550 -> 552 (2026-10-02, `bugs4-3`): iterating a value whose container
+    # KIND is a runtime fact, decided by the runtime instead of by the
+    # codegen's guess. `mojo_iter_boxed_list` is the call the shared
+    # chokepoint's not-a-container arm makes (a boxed string becomes its
+    # characters, anything else raises `TypeError` rather than answering an
+    # empty list), and `mojo_str_chars` is `list(<a str>)`, split out
+    # because it is answerable without knowing anything about the value. Two,
+    # read off the call on the MERGED header -- bugs4-3 counted from its own
+    # base's 543 and wrote `545`, which was right for its tree and wrong here.
+    #
     # Every entry here is read off the CALL, never added up, and the count is
     # read off the merged header rather than being any one branch's total plus
     # its own new names: two branches that each added names did not each add
     # them to THIS header. That is the whole reason this list is a ledger and
     # not a formula -- a name in the header that no line accounts for is the
     # only way this count can go wrong silently.
-    for header, want in (('fire_runtime.h', 546),
+    # 552 -> 560 (2026-10-02, `bugs4-6`): the dict's own VALUE kinds. The
+    # store moved from one integer setter to one per kind, so the runtime grew
+    # `mojo_dict_set_none` (a bare `None`, which is int64_t 0 — the same word a
+    # plain `0` stores, so only a tag tells them apart), `mojo_dict_set_struct` /
+    # `mojo_dict_set_other_struct` (a struct VALUE, tagged per slot, with the
+    # second form for "a struct this dict's repr does not describe"),
+    # `mojo_dict_set_val_repr` (the recorded repr function) and
+    # `mojo_dict_repr_val` (what the dict's own walker asks), plus the
+    # `bytes_`-keyed twin of the None one. Eight, read off the call on the
+    # MERGED header; bugs4-6 counted from its own base's 543 and wrote `551`,
+    # which was right for its tree and wrong here.
+    #
+    # 560 -> 561 (2026-10-02, `bugs4-8`): `mojo_sprintf_ptr` — the
+    # `<function f at 0x...>` spelling `print(f)` needs, because a function
+    # value is a `void *` and `TypeLattice.printf_fmt` has no format for a
+    # pointer, so `print(f)` used to `sprintf` one with `%d` (undefined
+    # behaviour; a decimal address on this target). One name: the codegen half
+    # is a `print` dispatch arm, which adds no runtime entry point. bugs4-8
+    # counted from its own base's 543 and wrote `544`.
+    for header, want in (('fire_runtime.h', 565),
+    # 561 -> 565 (2026-10-02, `bugs4-9`), FOUR names on the merged header
+    # (its own ledger said five, from its base's 543 -> 548):
+    #   +1  `mojo_str_cat_free`, the left-operand-releasing cat every repr
+    #       walker is a chain of. It was a file-local `_cat_free` in
+    #       fire_runtime.c and is now PUBLIC because the repr walkers the
+    #       CODEGEN emits into every generated program are the same chain and
+    #       were leaking the same N-1 buffers per printed container; a second
+    #       copy emitted into the preamble would have been two
+    #       implementations of one rule in two languages.
+    #   +1  `mojo_dict_slot_double`, the double twin of `mojo_dict_slot_key`,
+    #       for the same caller: the emitted dict repr walks slots by INDEX and
+    #       `mojo_dict_get_double` takes a KEY, so a `kind == 1` slot had no
+    #       reader and went to the generic element repr, which dereferences a
+    #       word above 65536 — a double's IEEE-754 bits. `print({"c": 3.5})`
+    #       was a SIGSEGV.
+    #   +2  `mojo_raise_not_implemented` (the sixth typed raiser, beside the
+    #       five above) and `mojo_module_not_compiled`, the codegen's half of
+    #       it: a method call on a bare-imported module this compile never
+    #       compiled used to return the module marker (an int64_t 0) unchanged,
+    #       so `argparse.ArgumentParser(...)` "constructed" a parser that is not
+    #       one and every later method echoed it back, silently, until an
+    #       unrelated attribute read died naming an attribute of a class the
+    #       program never built. Raising at the CALL is where it becomes true,
+    #       and it is catchable.
+    # The fifth, `mojo_char_at`, is NOT in this count: it is the same helper
+    # master already had under the name `mojo_char_at_str` (5ba5a8aa, one day
+    # after bugs4-9's base), and this merge keeps ONE of the two — master's
+    # name, with bugs4-9's body, whose bounds are `mojo_cstr_slice`'s. Two
+    # names for one immortal-table character accessor would have been two
+    # implementations of one rule, which is what this file exists to catch.
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

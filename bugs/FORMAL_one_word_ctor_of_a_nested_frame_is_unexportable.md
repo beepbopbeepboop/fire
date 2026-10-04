@@ -122,7 +122,7 @@ word and nothing is classified; in the second it is placed, so `self` IS the
 
 1. **`Box1` is a ONE-WORD struct** (one field), and its one slot holds a placed
    nested frame, so `self` and `self.inner` are the same word — the elision
-   `bugs/FORMAL_one_word_struct_field_call_receiver_is_collapsed.md` measures
+   `FORMAL_one_word_struct_field_call_receiver_is_collapsed` measures
    and calls correct.
 2. **`_apply_receiver_writeback` appends `return self`.**
    `formal/build.py:6948`: a method that mutates its receiver and returns
@@ -282,7 +282,7 @@ the write-back.
    question.
 2. **A related crash in the same family, filed separately** because it is not a
    dylib question at all:
-   `bugs/FORMAL_one_word_struct_of_a_frame_field_is_constructed_as_a_null_word.md`
+   `FORMAL_one_word_struct_of_a_frame_field_is_constructed_as_a_null_word`
    — `Box1()` gives the one word ZERO, so the first field access through it is a
    load from address 0 (SIGSEGV on both architectures), and the same tree holds a
    two-backend disagreement about a one-field mutator whose receiver is a frame

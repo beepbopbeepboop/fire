@@ -61,7 +61,7 @@ kwargs if k not in slots]` before it reaches the `if shapes:` arm), so a keyword
 that names a *parameter* is reported as a keyword that names no *field*.
 
 **Not filed as its own bug here, and that is a decision worth recording**: the
-keyword-construction area was `bugs/FORMAL_struct_construction_shapes.md`, which
+keyword-construction area was `“FORMAL_struct_construction_shapes: `S()`, `S(a, b, …)` and `S(x)`”`, which
 was another worker's live claim, so this document did not edit it. **That doc was
 `git rm`'d on 2026-10-03, when the construction family closed** (its `constr_*`
 cases in `test_formal_run.py` are what stands in its place), so this item is now

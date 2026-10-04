@@ -543,7 +543,7 @@ CASES = [
     # before this walk is asked, so the "wrong way round" this row was
     # protecting against — reporting an `except: p = 2` as a store — is refused
     # BY NAME rather than analysed. The document this row's comment used to cite
-    # (`bugs/FORMAL_except_arm_is_never_emitted.md`) is deleted with its fix;
+    # (`“FORMAL_except_arm_is_never_emitted: a `try`'s handler is dropped, silently”`) is deleted with its fix;
     # `refuse_dropped_handler_arm` is what it became.
     ("one_handler_stores_nothing_is_not_a_path_that_stores_nothing",
      "    try:\n        p = 1\n    except ValueError:\n        pass\n"
@@ -1063,7 +1063,7 @@ CASES = [
      "    if n:\n        pass\n    print(q)\n", "refuse"),
 
     # ── THE SAME CONDITION, TESTED TWICE ───────────────────────────────────
-    # `bugs/FORMAL_read_before_store_what_is_left.md`'s residual 2, and the
+    # `“read-before-store: the shapes that still decide wrongly”`'s residual 2, and the
     # shape a "definitely stored" fixpoint over a CFG cannot see on its own:
     # the join after the first `if` intersects the arm that stores with the arm
     # that does not, so the name drops out — and the second `if` is exactly

@@ -1,156 +1,128 @@
-# CODEGEN: calling a function value held in a subscript returns 0
+# CODEGEN: calling a function value held in a subscript returned 0
 
-**State: PARTIALLY FIXED (2026-10-01). The dict case this doc was filed for
-works, and one further gap in it is now fixed; two shapes are still open and
-are measured below.** Not part of any claim currently being worked; filed from
-the variadic-lambda work because it was found alongside it and has the same
-shape (a callable held as a first-class value, reached through a subscript).
+**State: CLOSED 2026-10-02.** Every shape this document measured is fixed,
+including the two its own 2026-10-01 entry left open. The only shapes still
+stubbed are the two it recorded as *deliberately* out of reach
+(`a[i]['k'](...)`, `self.d['k'](...)`), and the reason it gave for those is
+unchanged and is restated at the bottom.
 
-## Status (2026-10-01) — what is closed and what is not
+## What is fixed, measured against CPython
 
-**Closed before this session, by `9d40b1b6`** ("CODEGEN: calling a function
-value held in a subscript was stubbed to 0"). That commit added the positive
-discriminator `_lower_call` consults — a container recorded in
-`gen._dict_callable_ret` as holding a callable — and left this doc in place,
-so the doc read as open while its own repro was green. Re-measured today, all
-of these print CPython's answer:
-
-| shape | before `9d40b1b6` | today |
+| shape | before | now |
 |---|---|---|
 | `d['k'] = lambda a, b: a + b` → `d['k'](2, 3)` | `0` | `5` |
 | `d['k'] = lambda *a: ...` → `d['k'](2, 3)` | `0` | `5` |
 | `d['k'] = add3` (a lifted free function) | `0` | `6` |
-| `d['k'] = lambda x: x + n` (CAPTURING lambda) | `0` | `11` |
+| `d['k'] = lambda x: x + n` (a CAPTURING lambda) | `0` | `11` |
+| `dd['m'] = C().m` → `dd['m'](4)` (a `MojoBoundMethod *`) | `0` | `8` |
+| `lst = [add3]` → `lst[0](1, 2, 3)` | `0` | `6` |
+| `lst = []; lst.append(add3)` → `lst[0](1, 2, 3)` | `0` | `6` |
+| `lst = [add3 for _ in range(1)]` → `lst[0](1, 2, 3)` | `0` | `6` |
+| `t = (add3,)` → `t[0](1, 2, 3)` | `0` | `6` |
+| `e['c'] = mk(100)` → `e['c'](1)` (a call result) | `0` | `101` |
 
-**Closed in this session: a `MojoBoundMethod *` stored into a dict.**
-`note_dict_callable_ret` (emit_infra.py) recorded only
-`gen._callable_ret_types`, which is where a *bare function pointer* — a
-non-capturing closure or a lifted free function — lands. A struct method bound
-as a value (`C().m`) and a CAPTURING lambda both materialize as a
-`MojoBoundMethod *` and are recorded in `gen._bound_method_ret_types`, which
-nothing consulted, so:
+Regressions in `test_gimple_runner.py`: the pre-existing
+`gimple_call_through_subscript_callee` and
+`gimple_dict_held_bound_method_through_subscript`, and the new
+`gimple_call_through_a_list_subscript_callee` (all three list-building
+spellings, the tuple, and the `mk` case with a bare-function-pointer-first
+control beside it).
 
-```python
-dd = {}
-dd['m'] = C().m
-print(dd['m'](4))        # CPython 8    ->  compiled 0, exit 0
-f = dd['m']
-print(f(4))               # CPython 8    ->  compiled 8   (the control)
-```
+## The three changes, and why they are one change
 
-The value in the dict was a perfectly good bound method all along —
-`mojo_fnptr_call_1` dispatches it, which is exactly what the working
-named-local spelling emits — so what was missing was an ENTRY, not a
-mechanism. It reproduced **only when the bound method was the dict's first
-callable store**: one lambda stored first puts the container in the table and
-the bound method then rides in on that entry. That is why this doc's own repro
-looked already-fixed. `note_dict_callable_ret` now consults both tables, plus
-`value_ctype == 'MojoBoundMethod *'` for a value whose construction temp is in
-neither (see the residual below). Regression:
-`test_gimple_runner.py`'s `gimple_dict_held_bound_method_through_subscript`,
-which pins the bound-method-first case and the lambda-first case side by side
-because the two differ only in what is stored first.
+The gate is a POSITIVE test: `_lower_call`'s runtime-subscript-callee arm
+asks "was a callable recorded being stored into THIS container?", and answers
+`False` for a container nothing has ever recorded — which silently leaves the
+stub. Every shape above was that same `False`.
 
-**Still open, measured today (all exit 0, all silently wrong):**
+1. **THE TABLE IS NOT ABOUT DICTS, AND IT now says so.** `_dict_callable_ret`
+   is `_container_callable_ret` (and `_global_dict_callable_ret` is
+   `_global_container_callable_ret`), and `note_dict_callable_ret` is
+   `note_container_callable_ret` with a `container_val` parameter — across
+   `gimple_codegen.py`, `emit_infra.py`, `module_gen.py`, `emit_calls.py`,
+   `emit_stmts.py` and the two test files. The consumer was always
+   container-neutral (it never asks which kind it is); only the name lied.
+   `gimple_codegen.py` is compiled by the self-hosting bootstrap, so both
+   sides change together, as the doc's own next step required.
 
-| shape | CPython | compiled | why |
-|---|---|---|---|
-| `lst = [add3]; lst[0](1, 2, 3)` | `6` | `0` | the list is never recorded, so the gate fails |
-| `def mk(n): return lambda x: x + n` … `e['c'] = mk(100); e['c'](1)` | `101` | `0` | see below |
-| `a[i]['k'](...)`, `self.d['k'](...)` | — | stub | documented as deliberately out of reach |
+2. **ALL THREE LIST-BUILDING PATHS NOW RECORD.** `_lower_list_literal`'s and
+   `_lower_tuple_literal`'s single append loop, `_lower_list_method`'s
+   `append`, and `_gen_compr_append`'s list arm. Three chokepoints, one
+   helper, one call each. Recording the literal alone was the doc's proposed
+   alternative and it was not enough: the shape a real dispatch table is
+   assembled in is a loop with an `append`, and it would still have been
+   stubbed — which is what the doc's "a list built by `append` would still be
+   stubbed" predicted.
 
-The `mk(100)` case is NOT a missing table entry and cannot be fixed by adding
-one: `func_return_types` records `mk` as returning `int64_t`, not
-`MojoBoundMethod *` (measured), and nothing at the store site can tell a
-callable result from a plain integer — `gen._actual_types`, `gen.var_types`,
-`_callable_ret_types` and `_bound_method_ret_types` are all silent for that
-temp. It works only when something ELSE already put the container in the table.
-The root cause is upstream: a function whose body returns a closure has no
-callable return type, so its result is an ordinary `int64_t` everywhere.
+   The value handed to the helper is the PRE-cast `ev`, not `ev_cast`: the
+   callable tables are keyed by the name `lower_expr` produced, and the cast
+   into the list's slot mints a fresh temp with no entry. Getting that
+   backwards is why the first attempt at this recorded nothing and looked
+   like a no-op.
 
-## Still-open next step
+3. **A CALL RESULT.** `e['c'] = mk(100)` stores a value no materialization
+   site recorded. Its fact is under the callee's NAME in
+   `_return_callable_ret_types`, which the callee's own `return` wrote — the
+   same compile-scoped record `emit_infra.carry_callable_ret_from_call` reads
+   for the named-local hop, and it has to be read again here because this is
+   a different destination. `note_container_callable_ret` takes the value's
+   AST node and consults it after its two value-keyed sources and before its
+   `MojoBoundMethod *` fallback.
 
-The list case is the one worth doing next, and it is the same mechanism
-rather than a second one: `_lower_list_literal`'s per-element append loop is a
-single chokepoint, and the table is already keyed by the container's lowered
-name, so recording list literals is one call. It needs the table RENAMED
-(`_dict_callable_ret` → something container-neutral) to stay honest, which is
-~20 mechanical sites across `emit_calls.py`, `emit_exprs.py`, `emit_infra.py`,
-`emit_resolve.py`, `emit_stmts.py` and `gimple_codegen.py` — and `gimple_codegen.py`
-is compiled by the self-hosting bootstrap, so both sides change together.
-Decide first whether to cover `append`/comprehension-built lists too or only
-literals: the gate is a POSITIVE test, so partial coverage is never wrong, but
-a list built by `append` would still be stubbed.
+There is also a fourth change this doc's 2026-10-01 table called "already
+closed" that was NOT: `d['k'] = add3`, a bare lifted free function. Its
+`_lower_IdentExpr` function-value branch minted `_funcptr_<csym>` and returned
+it without recording what the function RETURNS — so
+`note_container_callable_ret`'s first source had nothing to find and the whole
+table stayed empty. Measured on this tree before the fix (and not caused by
+it: the same `0` at `bc17a62b`). That branch now records
+`_callable_ret_types[t] = func_return_types[name]`, which is what its two
+siblings already did — a capturing closure records
+`_bound_method_ret_types`, a lambda records `_callable_ret_types` in
+`_lower_LambdaExpr`. Without it the doc's own "closed" row was a claim about
+a tree this one is not.
 
-The `mk(100)` case is a return-type inference change (a function returning a
-closure should have a callable return type), which is its own piece of work.
+## Still open, deliberately
 
-## Original report (2026-09-30) follows
+`a[i]['k'](...)` and `self.d['k'](...)` keep the stub, for the reason this
+document originally gave and the fix has not changed: the discriminator reads
+the container's name out of the type TABLES, and a base that is not a plain
+`Name` has no name to read them by. `a[i]` is a subscript and `self.d` is a
+field; both would need the base's C expression, and `lower_expr` has side
+effects (it emits statements and allocates temps), so probing with it and
+discarding the result emits the same code twice. A negative test ("the base
+looks like a container") is what this bug's own history rules out: finding
+that out cost a real regression, where `re`'s `_RE.finditer(src)` reached this
+branch with a tuple index and a plain-`int64_t` base and the value-lowered
+finditer result landed in the wrong place in the generator's C++.
 
-## What I ran and what I saw
+The next bounded step for those two is a *name-based* discriminator that does
+not need the base lowered: record the container under the names an `append` /
+`setitem` store used (`self.d` is a field, so `_struct_field_elem_types`-shaped
+side data would be needed) — i.e. the same fact keyed by a second route, which
+is a real piece of work and not a one-liner.
+
+## The original report (2026-09-30) follows, unchanged, because its mechanism
+## analysis is still the reason the fix looks the way it does
 
 CPython prints `5`; the compiled path prints `0`, exit 0, for BOTH a plain
-lambda and a variadic one — so it is independent of the variadic work in
-`bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`.
+lambda and a variadic one. The INTERPRETER agrees with CPython here
+(`python3 fire.py run` prints `5`), so this is the compiled path alone.
 
-`d['k'](2, 3)` where `d['k']` holds a callable:
-
-    def main():
-        d = {}
-        d['k'] = lambda a, b: a + b
-        print(d['k'](2, 3))
-
-| | CPython | compiled |
-|---|---|---|
-| plain lambda, `lambda a, b: a + b` | `5` | `0` |
-| variadic lambda, `lambda *a: a[0] + a[1]` | `5` | `0` |
-
-The INTERPRETER agrees with CPython here (`python3 fire.py run` prints `5`), so
-this is the compiled path alone — which is why it belongs in this repository's
-compiled-path bug set and not in `test_interp_oracle.py`.
-
-The same program with the value first read into a local —
-`f = d['k']; print(f(2, 3))` — prints `5` in both engines, on both paths.
-So the callee is reached correctly once it is a *named* local; it is the
-SUBSCRIPT callee that is not resolved.
-
-## Mechanism
-
-`CallExpr.func` here is a `SubscriptExpr`. `_lower_call` in
-`mojo/backend_gimple/emit_calls.py` value-lowers its callee for exactly two
-shapes — a chained `CallExpr` and a `LambdaExpr` (see its own comment, "ONLY a
-CallExpr callee (a genuine chained call) and a LambdaExpr callee (an
-immediately-invoked lambda — a real runtime callable value) are value-lowered
-here"). A `SubscriptExpr` callee deliberately does NOT take that route: the
-comment records that a subscript callee is "a GENERIC TYPE/constructor
-expression (`Scalar[x.dtype](...)` — a comptime bracket argument, not a
-runtime value), whose eager value-lowering would miscompile (found via
-math.mojo's `Scalar[x.dtype](...)`)".
+`CallExpr.func` here is a `SubscriptExpr`. `_lower_call` value-lowers its
+callee for exactly two shapes — a chained `CallExpr` and a `LambdaExpr` (see
+its own comment, "ONLY a CallExpr callee (a genuine chained call) and a
+LambdaExpr callee (an immediately-invoked lambda — a real runtime callable
+value) are value-lowered here"). A `SubscriptExpr` callee deliberately does
+NOT take that route: the comment records that a subscript callee is "a GENERIC
+TYPE/constructor expression (`Scalar[x.dtype](...)` — a comptime bracket
+argument, not a runtime value), whose eager value-lowering would miscompile
+(found via math.mojo's `Scalar[x.dtype](...)`)".
 
 That exemption is right for the *generic bracket* spelling and wrong for a
 plain runtime subscript on a dict or list holding a callable — the two are not
 distinguishable at the point the check is made, so the safe-looking rule
-silently stubs the second.
-
-## Next step
-
-Decide the two are different, and lower the runtime one. The discriminator is
-available and cheap: a `SubscriptExpr` whose base is a value of type
-`MojoDict *` / `MojoList *` (or an `int64_t` local whose
-`gen._actual_types` entry says so) is a runtime value read, while a bare
-`Name` base resolving to a generic/bracket type is the `Scalar[x.dtype]`
-spelling. Route the first through the same value-lowering the `CallExpr` and
-`LambdaExpr` callees already use — `MojoBoundMethod *` to
-`_lower_bound_method_call_value`, otherwise `_lower_fnptr_call_value` — which
-would also give a variadic lambda held in a dict the same treatment it gets
-through a named local.
-
-`d['k'](...)` is a common enough shape (a dispatch table keyed by name) that
-it is worth the check; and note that today it is a *silently wrong* answer
-rather than a refusal, so any program relying on it is already broken.
-
-Not attempted here: this was found while working
-`bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md` and is a different
-defect on a different expression shape. The fix touches the shared
-`CallExpr`-callee dispatch in `_lower_call`, which is exactly the machinery
-this project's own history warns about changing narrowly.
+silently stubs the second. That is why the discriminator is
+`_static_generic_return_ctype` FIRST (it answers only for a base NAME this
+compile recorded as an IMPORTED GENERIC) and the positive container test
+SECOND.

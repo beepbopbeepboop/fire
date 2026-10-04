@@ -376,7 +376,7 @@ BUILTIN_PROGRAMS = {
     # question every consumer asked — could not tell them apart, and BOTH
     # engines bound the whole item: `for (a,) in [(1,), (2,)]` printed `1` / `2`
     # where CPython prints `(1,)` / `(2,)`, exit 0, no diagnostic
-    # (bugs/CODEGEN_for_loop_target_one_tuple_vs_paren_single_name.md).
+    # (CODEGEN_for_loop_target_one_tuple_vs_paren_single_name).
     # CPython-comparable because the two engines were wrong in the SAME
     # direction here, which is exactly the case a plain engine-vs-engine diff
     # cannot see.
@@ -424,10 +424,7 @@ BUILTIN_PROGRAMS = {
     #     variable and this runtime has no repr for a pair-valued variable — the
     #     compiled path prints the MojoList pointer (it was wrong before this fix
     #     too, differently: the paren test unpacked the pair's slot 0). See
-    #     bugs/CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer.md.
-    #   * `for first, *rest in ...` — a starred slot is lowered as a variable
-    #     literally named `*rest`, so the body reads 0. See
-    #     bugs/CODEGEN_starred_rest_in_a_for_target_is_a_slot_named_star.md.
+    #     CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer.
     "for_target_one_tuple_dict_and_nested": textwrap.dedent("""\
         def main():
             d = {"a": 1, "b": 2}
@@ -439,6 +436,41 @@ BUILTIN_PROGRAMS = {
                 print(only)
             for (a2, (b2, c2)) in [(9, (10, 11))]:
                 print(a2, b2, c2)
+    """),
+    # Extended unpacking (`*rest`) in a for target, in all three positions the
+    # rule has: a star at the end, a star with slots after it, and the
+    # dict-`.items()` pair shape. Each line was `1 0` where CPython prints
+    # `1 [2, 3]` — the star reached the C declarator as `int64_t *rest;` and
+    # the assignment after it was `*rest = _t22;`, a store through an
+    # uninitialised pointer that happens to be mapped. The comprehension form
+    # (`[r for first, *r in pairs]`) is in its own case below because it was
+    # a PARSER gap as well as this lowering one: the generator-target parser
+    # had no `*` arm at all, so the whole comprehension was a SyntaxError on
+    # both engines before the star reached any lowering.
+    "for_target_starred_rest": textwrap.dedent("""\
+        def main():
+            for first, *rest in [(1, 2, 3), (4, 5, 6)]:
+                print(first, rest)
+            for a, *mid, z in [(1, 2, 3, 4)]:
+                print(a, mid, z)
+            for k, *vs in {"k1": 1, "k2": 2}.items():
+                print(k, vs)
+            for x, *ys in [("p", "q", "r")]:
+                print(x, ys, ys[0])
+            # enumerate and zip yield a PAIR per iteration, so the starred
+            # remainder is a ONE-ELEMENT list there — a different lowering
+            # again (`_emit_starred_slot_from_value`, not a slice of a row).
+            # Distinct target names per loop: a loop TARGET is a rebinding,
+            # and `_declare_var` is first-decl-wins per function (see
+            # `_gen_for_list`'s note), so reusing `i` across an int and a
+            # double sequence is a separate pre-existing bug
+            # (bugs/CODEGEN_zip_loop_target_keeps_the_first_loops_type.md).
+            for ei, *erest in enumerate([7, 8]):
+                print(ei, erest)
+            for zi, *zrest in zip([1, 2], ["u", "v"]):
+                print(zi, zrest)
+            for si, *srest in enumerate("ab"):
+                print(si, srest)
     """),
     "dict_ops": textwrap.dedent("""\
         def main():
@@ -458,15 +490,18 @@ BUILTIN_PROGRAMS = {
     # `_compr_list_loop` declared the target without
     # `force=_compr_target_is_shadowed(...)`, the argument its three sibling
     # comprehension loops pass, so first-decl-wins kept whatever was already
-    # live under that name (bugs/CODEGEN_comprehension_target_shadows_struct_local.md).
+    # live under that name (CODEGEN_comprehension_target_shadows_struct_local).
     # With a `struct` pointer live under the name the shape did not compile at
     # all (gcc "non-trivial conversion in 'var_decl'"), which is how it was
     # found; with a `char *` live it compiled and printed string ADDRESSES.
     #
-    # The comprehension is deliberately NOT inside a branch: a comprehension in
-    # an `if` body loses its RESULT list's element type, which is a separate
-    # bug (bugs/CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md)
-    # and would mask what this case is about.
+    # The comprehension is deliberately NOT inside a branch, so that this case
+    # measures the target's binding and nothing else; the branch spelling is
+    # its own case below
+    # (`comprehension_result_elem_type_across_a_branch`), which is what the
+    # branch-shaped reproducer for
+    # “A comprehension inside an `if` body loses its RESULT list's element type”
+    # turned out to be measuring.
     "comprehension_target_shadows_an_enclosing_local": textwrap.dedent("""\
         class Token:
             def __init__(self, kind):
@@ -494,6 +529,133 @@ BUILTIN_PROGRAMS = {
         def main():
             print(struct_pointer_live())
             print(char_star_live())
+    """),
+    # A dict value slot the runtime TAGGED as a plain int went through the
+    # generic element repr, whose 0-is-the-None-sentinel rule turned a real
+    # int 0 into `None` (`{i: i for i in range(2)}` printed `{'0': None, '1': 1}`).
+    # `_DictSlot.kind` is `0` for a plain int64_t (see its own comment: 1 =
+    # double bit-cast, 2 = char *, 3 = a Python bool), so the tag IS the
+    # evidence and `kind == 0` is `mojo_repr_int(val)`. The `kind == 1` arm is
+    # added in the same place: a double's IEEE-754 bits went to `mojo_repr_str`
+    # as a `char *`, and that pattern is pointer-shaped, so it printed garbage
+    # or faulted. See bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md.
+    #
+    # INTEGER KEYS are all this case uses, and they are all STRINGS on purpose:
+    # `{1: "a"}` prints `{'1': 'a'}`, and that needs the slot to remember
+    # whether the key ARRIVED as an integer or as the string "1" (`_canon_int`
+    # deliberately makes those one entry, as CPython does). Pinning either
+    # spelling here would make this case stop describing its own fix; the
+    # discriminator is written down at the missing arm in `module_gen.py`'s
+    # `_mojo_repr_dict` template. The last two lines are the controls: a dict
+    # LITERAL and a hand-built dict whose entries arrive by SUBSCRIPT STORE
+    # rather than through a comprehension, so the case is not measuring only
+    # one lowering.
+    #
+    # A double stored by SUBSCRIPT (`d["j"] = 1.5; print(d)` -> `{'j': 1}`) is
+    # also absent, and that one is a store-side tag the subscript-store
+    # lowering does not set -- it is recorded in the bug doc rather than pinned
+    # here, because pinning it would make this case describe two fixes.
+    "dict_repr_zero_value_is_not_the_none_sentinel": textwrap.dedent("""\
+        def main():
+            print({"k" + str(i): i for i in range(2)})
+            print({"k" + str(i): i * 1.5 for i in range(2)})
+            print({"k" + str(i): i + 1 for i in range(2)})
+            print({"a": 1, "b": 0})
+            d = {}
+            d["k"] = 0
+            d["j"] = 1
+            print(d)
+    """),
+    # `getattr(o, name, default)` computed the default-selection ternary
+    # correctly -- `_mojo_getattr_missed` was set, `_t9 = missed ? dflt : raw`
+    # was emitted -- and then BOXED the whole expression as `int64_t`, so
+    # `print` read it with the numeric path and printed the string's own heap
+    # address. The default's own C type is the domain both answers share, so
+    # the result is presented there; a `char *` default makes the expression a
+    # `char *`. The int default and the `hasattr` probe beside it are the
+    # controls: neither involves the cast. See
+    # bugs/CODEGEN_dynamic_attribute_string_reads_as_pointer.md.
+    "getattr_default_on_a_miss": textwrap.dedent("""\
+        class C:
+            pass
+
+        def main():
+            o = C()
+            print(getattr(o, "nope", "dflt"))
+            print(getattr(o, "nope", 7))
+            o.y = "set"
+            print(getattr(o, "y", "dflt"))
+            print(o.y)
+            print(hasattr(o, "nope"), hasattr(o, "y"))
+    """),
+    # An EMPTY container literal asserts no element type, and one place
+    # believed otherwise: `_lower_list_literal` /
+    # `_lower_tuple_literal` recorded `_infer_list_elem_type([])`'s
+    # `'int64_t'` no-evidence default as the temp's element type, and
+    # `_gen_ReturnStmt` publishes the returned temp's element type as the
+    # FUNCTION's return element type, last write wins. So a function whose
+    # `return []` came after a container return published `int64_t` for the
+    # whole function and `print(...)` of its result routed to
+    # `mojo_repr_list_ints`, which reads each slot with the integer accessor —
+    # a `char *` slot came back as a heap-address decimal. Measured in
+    # “A comprehension inside an `if` body loses its RESULT list's element type”,
+    # whose own diagnosis ("the ReturnStmt walk does not descend into an
+    # `if`") was wrong on both counts: `_collect_return_elems` has always
+    # descended, and the program WITHOUT the trailing `return []` was right.
+    #
+    # Each line is one shape, and the pair (first / second function) is the
+    # measurement: the same comprehension, the same `if`, and the only
+    # difference is whether an empty `return []` follows it. `b4`/`b5` have no
+    # branch at all and are the no-branch control.
+    "comprehension_result_elem_type_across_a_branch": textwrap.dedent("""\
+        def b2(i):
+            if i:
+                return [t for t in ["a", "b"]]
+            return []
+
+        def b7(i):
+            if i:
+                x = [t for t in ["a", "b"]]
+                return x
+            else:
+                return []
+
+        def b4(i):
+            x = [t for t in ["a", "b"]]
+            return x
+
+        def b8():
+            return []
+
+        def b9():
+            return ()
+
+        def main():
+            print(b2(1))
+            print(b7(1))
+            print(b4(1))
+            print(b8())
+            print(b9())
+    """),
+    # The same extended unpacking in a COMPREHENSION target, which needed two
+    # fixes rather than one: the generator-target parser had no `*` arm, so
+    # `[r for first, *r in pairs]` was a SyntaxError on both engines (the
+    # statement path's own `_parse_unpack_target` has always spelled it
+    # "*name" in the same target string), and once it parsed, the per-slot
+    # walk read `*r` as a slot NAME — a variable literally called `*r`, so
+    # the element repr came out `[0, 0]`.
+    #
+    # The remainder rows have THREE elements on purpose: a two-element
+    # remainder prints as a `(a, b)` pair through the runtime's
+    # registered-2-element-list heuristic (`_mojo_repr_pair`), which is a
+    # separate bug from this one and would mask it here — and the nested
+    # comprehension's own result holds three inner lists for the same reason.
+    "comprehension_starred_rest": textwrap.dedent("""\
+        def main():
+            pairs = [(1, "a", "b", "c"), (2, "d", "e", "f")]
+            print([r for first, *r in pairs])
+            rows = [[(1, "m", "n", "o"), (2, "p", "q", "r"), (3, "s", "t", "u")]]
+            print([[q for head, *q in r] for r in rows])
     """),
     # binds only `node.generators[0]` and every `_compr_*_loop` helper takes a
     # single generator, so the extra clauses were silently dropped -- exit 0,
@@ -638,6 +800,41 @@ BUILTIN_PROGRAMS = {
             print([[5, 0], [5, 1]])
             print([(7,)])
             print([(0, 0)])
+    """),
+    # A TUPLE holding a nested container in one of its slots, read on its own —
+    # `comprehension_of_tuples_and_lists`'s shape one level down, where the
+    # container is a tuple SLOT rather than an element. Every uniform repr
+    # helper takes one accessor for the whole value and one list-wide element
+    # ctype for what that accessor is reading, and neither says anything about a
+    # 2-slot tuple whose slots disagree: the list-wide ctype here is the inner
+    # list's own element type (`int64_t`, because slot 0 is a list of ints), so
+    # `_mojo_repr_intlists` read slot 1 — a plain int — through the inner-list
+    # reader, found no list there, and fell to `mojo_repr_obj`
+    # (`([1, 2], <object at 0x3>)`). The literal already records its own
+    # per-slot kinds on the VALUE (`mojo_list_set_kinds`, "li"), so the fix is
+    # for those two helpers to describe the value by them first, exactly as
+    # `_mojo_repr_defers_to_kinds` already does for the int/double/bool/bytes
+    # helpers. `str()` and a local are here because the value's own kinds row
+    # travels with the value, so a derived read needs no second record.
+    # `([[1, 2], 3], 4)` is the same defect one level out and takes the
+    # `slotkinds` helper instead, whose `kinds` argument describes the INNER
+    # slots and so was not a description of this value at all.
+    "tuple_with_a_nested_container_slot": textwrap.dedent("""\
+        def main():
+            print(([1, 2], 3))
+            print(([1, 2], 3.5))
+            print(([1, 2], "z"))
+            print(([1, 2], None))
+            print((1, [2, 3], "a", 4.5))
+            print(([1, 2], [3, 4]))
+            t = ([1, 2], 3)
+            print(t)
+            print(list(t))
+            print(t[0])
+            print(str(([1, 2], 3)))
+            print(([[1, 2], 3], 4))
+            print(((1, 2), 3))
+            print([([1, 2], 3)])
     """),
     "global_var": textwrap.dedent("""\
         var counter: Int = 0
@@ -946,6 +1143,47 @@ BUILTIN_PROGRAMS = {
             print(asyncio.run(c))
             print(asyncio.run(work(7)))
     """),
+    # `asyncio.iscoroutine(x)` had NO lowering at all, so it answered `False`
+    # for a value that really was a coroutine: the
+    # `if asyncio.iscoroutine(result):` guard that guards `asyncio.run` — the
+    # idiom `Android/android.py` writes — evaluated backwards. Silent, exit 0,
+    # no diagnostic, and it reads as correct because the `else` branch of a
+    # guard nobody is looking at is usually empty.
+    #
+    # Both the positive and the negative spelling are asserted, because the
+    # failure mode is the guard choosing the wrong branch rather than a value
+    # being wrong: a test with only the positive case would pass on a
+    # predicate that always answered True. `await`-free on purpose — the
+    # question is about the handle, not about suspension. (`isawaitable` is
+    # deliberately absent: it is `inspect.isawaitable` in CPython 3.14, so a
+    # compiled answer where CPython raises `AttributeError` would be the
+    # divergence, not the fix.)
+    "asyncio_iscoroutine_predicate": textwrap.dedent("""\
+        import asyncio
+
+        async def work(n):
+            await asyncio.sleep(0)
+            return n
+
+        def main():
+            c = work(5)
+            if asyncio.iscoroutine(c):
+                print('coroutine')
+            else:
+                print('not a coroutine')
+            d = 7
+            if asyncio.iscoroutine(d):
+                print('coroutine')
+            else:
+                print('not a coroutine')
+            print(asyncio.iscoroutine(5))
+            print(asyncio.iscoroutine('s'))
+            print(asyncio.iscoroutine(None))
+            # Driven at the end so CPython does not report an un-awaited
+            # coroutine at exit -- which would make this case's interpreter
+            # side fail on a warning rather than on the predicate.
+            print(asyncio.run(c))
+    """),
     "sibling_closure_kwargs": textwrap.dedent("""\
         def outer(flag):
             def probe(a, deep=False, refine=False):
@@ -992,7 +1230,7 @@ BUILTIN_PROGRAMS = {
     # callback at all — `sorted(key=lambda a: -a)` and `sorted(key=k)` for a
     # plain `def k(a)` fail the same way — so this harness could not compare
     # anything. Tracked in
-    # bugs/CODEGEN_interpreter_user_function_as_builtin_callback_crashes.md.
+    # CODEGEN_interpreter_user_function_as_builtin_callback_crashes.
     "variadic_lambda_packs_its_arguments": textwrap.dedent("""\
         def add(a, b):
             return a + b
@@ -1067,7 +1305,13 @@ CPYTHON_COMPARABLE = {
     # have seen it.
     "for_target_one_tuple_vs_paren_name",
     "for_target_one_tuple_dict_and_nested",
+    "for_target_starred_rest",
+    "comprehension_starred_rest",
     "comprehension_target_shadows_an_enclosing_local",
+    "comprehension_result_elem_type_across_a_branch",
+    "dict_repr_zero_value_is_not_the_none_sentinel",
+    "getattr_default_on_a_miss",
+    "dict_update_preserves_insertion_order",
 }
 
 

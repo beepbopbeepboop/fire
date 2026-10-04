@@ -23,12 +23,76 @@ from module_loader import read_reflection
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME = os.path.join(HERE, 'runtime')
 
+# How far up the tree a CPython source checkout is looked for. A `Lib/os.py`
+# is never more than a couple of levels above a `Tools/<tool>/` entry file
+# (`Lib` is a SIBLING of `Tools`, so the root is two levels up from
+# `Tools/<tool>/x.py`), and a bound is what keeps this from walking a
+# filesystem root on a pathologically deep checkout.
+_CPYTHON_LIB_WALK = 8
+# start dir -> detected `Lib` (or None). One `os.path.exists` per ancestor per
+# DISTINCT start directory, memoized because `_module_candidate_paths` asks the
+# same question once per imported module name.
+_cpython_lib_cache: dict = {}
+
+
+def cpython_lib_root(start_dir):
+    """`start_dir`'s nearest ancestor's `Lib/` if that ancestor is a CPython
+    source checkout, else None.
+
+    A CPython checkout is recognised by `Lib/os.py` — `os` is the one module
+    every CPython `Lib/` has, it is a top-level file rather than a package, and
+    no ordinary project directory has a `Lib/os.py` in it. This is what lets a
+    build whose ENTRY file lives in `Tools/` reach `Lib/`: `Lib` is a SIBLING of
+    `Tools`, not an ancestor, so no upward walk from `Tools/c-analyzer/` ever
+    arrives there — the whole reason `import argparse` used to degrade to a
+    receiver stub from inside a CPython checkout (see
+    “The compiler has no way to see CPython's `Lib/` from an entry file outside it”).
+
+    One definition, used by both consumers that need the answer: this
+    resolver's `_find` (which can only look along MOJO_PATH, so the directory
+    has to be handed to it) and `emit_resolve._module_candidate_paths` (the
+    inline importer's own importer-anchored search list)."""
+    if not start_dir:
+        return None
+    key = os.path.realpath(start_dir)
+    if key in _cpython_lib_cache:
+        return _cpython_lib_cache[key]
+    found = None
+    d = key
+    for _ in range(_CPYTHON_LIB_WALK):
+        if not d or d == os.path.sep:
+            break
+        cand = os.path.join(d, 'Lib')
+        if os.path.exists(os.path.join(cand, 'os.py')):
+            # `realpath`, not the walked `d`: a checkout reached THROUGH a
+            # symlinked `Lib` (a mirrored work tree, a bind mount, a
+            # `ln -s` into a scratch dir) otherwise hands the search list a
+            # second spelling of every module it contains, and the very next
+            # import of one of them resolves through the walked ancestor to
+            # the real path instead — the same module compiled twice into one
+            # translation unit, which is the one-identity-per-name rule this
+            # whole module exists to enforce (and `default_mojo_path` already
+            # dedups on `realpath` for the same reason).
+            found = os.path.realpath(cand)
+            break
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    _cpython_lib_cache[key] = found
+    return found
+
 
 def default_mojo_path():
     """The ordered search path, like sys.path. Because Mojo is a superset of
     Python, we honor both pathing env vars: **$MOJO_PATH first (ours wins)**, then
     $PYTHONPATH, then the project dir, the runtime test dir, and the stdlib root.
-    Deduped, order preserved."""
+    Deduped, order preserved.
+
+    `$PYTHONPATH` naming a CPython `Lib/` works only because `_find` probes the
+    `.py` spelling too (see its own comment); before that it silently resolved
+    nothing, which is worth stating because the env var looked like it should
+    have been enough."""
     parts = []
     for var in ('MOJO_PATH', 'PYTHONPATH'):     # ours preferred, then Python's
         env = os.environ.get(var)
@@ -105,12 +169,35 @@ class Resolver:
 
     def _find(self, name: str):
         """First file providing `name` along MOJO_PATH, plus the first shadowed
-        candidate if the name is provided more than once."""
+        candidate if the name is provided more than once.
+
+        Both `.mojo` AND `.py` spellings, because Mojo is a superset of Python
+        and a `.py` file on the search path IS a provider — probing only
+        `.mojo` made `$PYTHONPATH` useless for pointing at a CPython `Lib/`
+        (`$PYTHONPATH=<checkout>/Lib` left `resolve_source('argparse')` at
+        None), which is half of why a build whose entry file sits in a CPython
+        checkout could not see `Lib/` at all: see
+        “The compiler has no way to see CPython's `Lib/` from an entry file outside it”.
+
+        Extension is the INNER priority and LOCATION the outer one, so a real
+        match in a closer directory still wins over an unrelated same-named
+        `.py` further along the path. That ordering is the same rule
+        `emit_resolve._module_candidate_paths` already applies, and it is the
+        one that matters here: `$PYTHONPATH` entries come first precisely so
+        they can shadow, and `HERE`/`RUNTIME`/`STDLIB_PATH` (this compiler's
+        own directories, whose `.py` files are its *implementation*) come last.
+
+        Within one location a `.mojo` file still wins over a `.py` sibling: the
+        self-hosted stdlib modules are the ones a compiled program means when it
+        says `import std.io`, and a project that ships both has said which it
+        wants."""
         rel = name.replace('.', os.sep)
         found, shadowed = None, None
         for d in self.path:
             for cand in (os.path.join(d, rel + '.mojo'),
-                         os.path.join(d, rel, '__init__.mojo')):
+                         os.path.join(d, rel, '__init__.mojo'),
+                         os.path.join(d, rel + '.py'),
+                         os.path.join(d, rel, '__init__.py')):
                 if os.path.exists(cand):
                     if found is None:
                         found = cand

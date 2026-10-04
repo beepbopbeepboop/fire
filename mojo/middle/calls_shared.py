@@ -154,6 +154,55 @@ def _callable_default_generator(gen, default_node):
     return _api
 
 
+def _callable_param_ret_types(gen, fn_node) -> dict:
+    """`{param name: the return C type of the function that parameter's
+    declared DEFAULT names}` — the ordinary-function twin of
+    `_callable_param_generator_apis`, for the same reason and with the same
+    shape.
+
+    Without it a higher-order parameter's call result is the homogenized
+    `int64_t` box `mojo_fnptr_call_N` hands back, which is right for the box
+    and wrong for the value inside:
+
+        def upper(s):
+            return s.upper()
+        def apply_to(items, _f=upper):
+            r = _f(items)
+            print(r)               # CPython AB; compiled 4337064208
+            print(len(r))           # CPython 2;   compiled 0
+
+    `r` is a `char *` and every consumer that needs to know that — `len`, a
+    `for` loop, `print` — has nothing to dispatch on, so the program iterates
+    nothing and exits 0. See
+    bugs/CODEGEN_callable_param_called_in_ordinary_generator_returns_garbage.md.
+
+    Deliberately NARROW, and the narrowing is the doc's own: a bare-name
+    default only, so the answer is the DEFINING function's own inferred
+    `func_return_types` entry and nothing is guessed. A `lambda` default, a
+    bound-method default, an imported default and a `None` default are all
+    unanswered — `func_return_types` has no entry for a lambda's materialised
+    value until one is materialised, and the other three are the padding-site
+    question CODEGEN_unresolved_imported_callable_default_null_pointer
+    is about. A param absent from the answer is exactly today's behaviour.
+
+    `void` is excluded: `mojo_fnptr_call_N`'s result for a void callee is not
+    a value, and recording `'void'` would make the caller cast garbage.
+    """
+    _out = {}
+    _dflts = getattr(fn_node, 'param_defaults', None) or {}
+    for _pn, _pann in (getattr(fn_node, 'params', None) or []):
+        _pn = _as_str(_pn)
+        if _pn.startswith('*'):
+            continue
+        _d = _dflts.get(_pn)
+        if not isinstance(_d, gimple_ctypes.IdentExpr):
+            continue
+        _rt = gen.func_return_types.get(_as_str(_d.name))
+        if _rt and _rt != 'void':
+            _out[_pn] = _rt
+    return _out
+
+
 def _callable_param_generator_apis(gen, fn_node) -> dict:
     """`{param name: generator api}` for the parameters of `fn_node` whose
     declared default names a compiled generator of this compile. See

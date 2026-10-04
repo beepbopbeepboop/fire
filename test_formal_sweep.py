@@ -350,7 +350,7 @@ class TestDyldProbe(unittest.TestCase):
         # `__helper_twice_…` into `helper_twice_…` and reported a load failure
         # for an image that loads — measured on both `formal/hostmods/os`
         # hosts, both of which build, link and run. See
-        # bugs/FORMAL_relative_submodule_abi_prefix_off_by_one.md.
+        # FORMAL_relative_submodule_abi_prefix_off_by_one.
         os.makedirs(os.path.join(d, "relpkg"), exist_ok=True)
         with open(os.path.join(d, "relpkg", "_helper.mojo"), "w") as f:
             f.write("fn twice(a: Int) -> Int:\n    return a + a\n")
@@ -529,7 +529,7 @@ class TestDyldProbe(unittest.TestCase):
         # the export reads `_relpkg__helper_twice_9f63a2`. The image is
         # unaffected — it builds, the probe resolves it, and dyld runs it to 42
         # below, which is what this test is for. See
-        # bugs/FORMAL_sweep_relative_import_bind_name_shape_moved.md for the
+        # FORMAL_sweep_relative_import_bind_name_shape_moved for the
         # consequence: `lstrip("_")` is now a no-op on this fixture, so the
         # normalisation defect itself is pinned by the probe-level cases rather
         # than from here.
@@ -553,7 +553,7 @@ class TestDyldProbe(unittest.TestCase):
         fixture is the shape where the normalisation IS observable — the ABI
         prefix begins with an underscore — and it is what restores the end-to-end
         coverage the doc recorded as missing
-        (`bugs/FORMAL_sweep_relative_import_bind_name_shape_moved.md`).
+        (`FORMAL_sweep_relative_import_bind_name_shape_moved`).
 
         Three things are asserted, in the order they matter:
 
@@ -1825,7 +1825,7 @@ class TestWrapperDied(unittest.TestCase):
     backend, the class that fails a run — and were PUBLISHED to the CAS, so a
     machine fact outlived the run that observed it. The files are not memory
     hogs: `bit/mask.mojo`, one of the six, builds in 0.1 GB and is refused for a
-    real reason. `bugs/FORMAL_sweep_memcap_death_is_filed_as_codegen.md`.
+    real reason. `FORMAL_sweep_memcap_death_is_filed_as_codegen`.
     """
 
     BANNER = ("memcap: big.mojo -- ceiling 4.0 GB across the process tree\n")
@@ -1921,7 +1921,7 @@ class TestWrapperDied(unittest.TestCase):
     def test_the_row_names_the_signal_that_killed_the_wrapper(self):
         # "What killed the wrapper" was an OPEN QUESTION for this state — six
         # files per architecture in the 2026-10-02 sweep, and
-        # bugs/FORMAL_sweep_memcap_death_is_filed_as_codegen.md recorded the
+        # FORMAL_sweep_memcap_death_is_filed_as_codegen recorded the
         # candidates without concluding. The wrapper's own exit status answers
         # it, so the row says which signal rather than leaving a reader to
         # guess, and the SIGKILL case names the one thing in this repository
@@ -2158,7 +2158,7 @@ class TestResultsSurviveAnInterruptedRun(unittest.TestCase):
 class TestAStoppedRunStopsBuilding(unittest.TestCase):
     """A sweep told to stop stops BUILDING, and keeps what was in flight.
 
-    `bugs/FORMAL_sweep_sigterm_drains_the_whole_scope.md`. Every file is
+    `FORMAL_sweep_sigterm_drains_the_whole_scope`. Every file is
     submitted to the pool up front, so the executor's queue is the whole run;
     returning from the reporting loop used to leave the `with` block, whose
     `__exit__` calls `shutdown(wait=True)` with `cancel_futures=False`, and each
@@ -2665,7 +2665,7 @@ class TestArmVsX86Parity(unittest.TestCase):
         # not as a name, because a re-sweep against a probe that asks the right
         # question must be able to empty this list without a test edit; the
         # identity and its cause are in
-        # bugs/FORMAL_sweep_x86_64_libsystem_probe_asks_the_host.md.
+        # FORMAL_sweep_x86_64_libsystem_probe_asks_the_host.
         self.assertEqual(only_arm, [])
         for path, row in only_x86:
             self.assertEqual(row.cls, "not-answerable/unresolved-extern")

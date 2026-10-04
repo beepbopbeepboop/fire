@@ -102,6 +102,53 @@ def _unlowered_coroutines(stmts: list) -> list:
     return found
 
 
+def dylib_module_path_refuses_a_generated_cpp() -> bool:
+    """`compile_module_to_c` must REFUSE a module whose coroutine definitions
+    it cannot link, rather than return a `.c` that references them.
+
+    `closure_coroutines_are_lowerable` above is the invariant that keeps this
+    unreachable for the two module lists that ship; this is the other half.
+    That check asserts "every generator in this closure lowers in place", and
+    an assertion that the exposure is absent is not the same as a refusal when
+    it is not: `gen.generated_cpp` is dropped on the floor, the module's `.c`
+    keeps the `extern` declarations and the calls, and the object references
+    `_mojogen_*` symbols nothing defines. In a dylib that links anyway
+    (`-undefined dynamic_lookup`) and every client falls back to source with no
+    diagnostic; in an executable it is a link failure. See
+    bugs/CODEGEN_dylib_module_path_drops_generated_cpp.md.
+    """
+    sys.path.insert(0, REPO)
+    from build_stdlib_dylib import (_DylibGeneratedCppError,
+                                    compile_module_to_c)
+    # A DECORATED generator: the A3 stack-switch lowering refuses it outright
+    # (`coro._eligible` returns `(False, 'decorated')`), so the C++20 emitter
+    # takes it and `generated_cpp` is the only place its definitions exist.
+    src = ("def deco(f):\n    return f\n\n"
+           "@deco\n"
+           "def gen(n):\n"
+           "    for i in range(n):\n"
+           "        yield i * i\n")
+    ok = False
+    try:
+        compile_module_to_c(src, 'gen_probe.py', 'gen_probe')
+    except _DylibGeneratedCppError as e:
+        ok = 'gen_probe' in str(e) and 'generated_cpp' in str(e)
+    except Exception as e:                       # a different failure entirely
+        print(f"  ✗ dylib module path: expected _DylibGeneratedCppError, got "
+              f"{type(e).__name__}: {e}")
+    # ...and a module with NO generator must still compile: the refusal has to
+    # cost nothing on the module lists that ship (measured: 0 such modules).
+    plain = "def f(n):\n    return n + 1\n"
+    try:
+        c = compile_module_to_c(plain, 'plain_probe.py', 'plain_probe')
+    except Exception as e:
+        ok = False
+        print(f"  ✗ dylib module path: a generator-free module stopped "
+              f"compiling: {type(e).__name__}: {e}")
+    print(f"  dylib module path refuses an unlinkable generated_cpp: {ok}")
+    return ok
+
+
 def closure_coroutines_are_lowerable() -> bool:
     """No module of the self-host closure may contain a generator the
     compiled path cannot lower in place.
@@ -358,6 +405,7 @@ def run() -> tuple:
     verdict is a line of its own in the tally rather than a `False` that
     reads like a build failure."""
     static_ok = closure_coroutines_are_lowerable() and \
+        dylib_module_path_refuses_a_generated_cpp() and \
         pinned_prototypes_match_their_definitions()
     cwd = os.getcwd()
     with tempfile.TemporaryDirectory() as td:

@@ -304,7 +304,7 @@ This is downstream of the parser and independent of it: it fails for the
 all-keyword spelling that has always parsed, so part 2's fix does not change
 it. It is what `std/io/file.mojo`'s `O_CREAT` / `O_APPEND` / `O_CLOEXEC`
 aliases would hit on the interpreter path next, now that their parser half is
-right. Filed as `bugs/CODEGEN_interpreter_evaluates_a_keyword_bracket_call_as_a_subscript.md`.
+right. That gap was the interpreter's, and `d733c457` closed it.
 
 ## The next step (part 3, and the two filed follow-ons)
 

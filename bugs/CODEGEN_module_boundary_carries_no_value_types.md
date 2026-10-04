@@ -75,9 +75,11 @@ things are missing for `mod.f(...)`:
    that module's functions are EMITTED. An imported module is compiled — and
    its C written — from inside the importer's own pass, so the importer's
    observations cannot reach it by sharing a dict; that is the same reason
-   `_elem_types` is per-function (see
-   `bugs/hard/CODEGEN_cross_function_container_element_type.md`, which is this
-   defect one level in, for container elements instead of `char *`).
+   `_elem_types` is per-function. The doc that covered that half,
+   `“Container element types do not survive a function boundary”`, was removed
+   2026-10-02 with its fix — container ELEMENT types now cross a function
+   boundary — so this wall is narrower than it was: the `char *` case above is
+   the one still standing, and the container-element case beside it is not.
 
 The sibling doc `CODEGEN_polymorphic_unannotated_param_vacuous_unanimity.md`
 holds the full statement of the contract and the other half of its defect (an
@@ -146,3 +148,43 @@ where a plain-C link can find them.
 - Measured unchanged by the string-pool work that found it: re-running the same
   probes with the pre-fix pool emission emulated (every gen given an empty
   `_str_pool_declared`) returns byte-identical wrong answers.
+
+## Status (2026-10-02, `work/bugs4-3-c`) — one wall of this doc's step 2 now has a named precedent
+
+Neither shape is fixed and neither regressed: `m.f('abcd')` still prints
+`6581285`-shaped garbage where CPython prints `4`, and
+`for v in m.gen(['p','q'])` still prints two addresses. What this branch added
+is a second instance of the SAME wall this doc names, and the way it was
+solved is the precedent for step 2 here.
+
+The wall: "the observation must outlive the function that learned it". For a
+`from b import K` global read as a BARE name, the importing module has to load
+`_b_globals.K` — the OWNER's field — and `_b_globals` is not in `_a_globals`'s
+scope in any table `_lower_IdentExpr` had. The fix is a per-instance dict,
+`_own_imported_global_home` / `_own_imported_global_field`, filled once by
+`_gmi_scan_imported_global_homes` (`mojo/middle/module_shared.py`) from THIS
+module's own top-level `FromImportStmt`s, and deliberately NOT shared across
+nested temp_gens — the same decision `_own_imported_func_home`'s own comment
+gives ("sharing is exactly what caused the bug", from the `alpha_wrapper` /
+`beta_wrapper` miscompile).
+
+Two things about that are worth carrying into this doc's step 1:
+
+* **The collection point is a module-level scan, not the call site.**
+  `_gmi_scan_imported_global_homes` runs once per `gen_module_impl`, after
+  Phase 1.7 and before the first function body — because a per-call-site
+  collector cannot answer "was this name imported HERE", and the name-keyed
+  whole-tree tables it would consult (`_global_to_module`) answer that question
+  wrongly for a sibling's same-named global. A `_scalar_obs` collector over the
+  whole closure wants the same shape: one pass, per-compilation-unit, keyed so
+  that two modules' claims cannot silently merge.
+* **The owner must be provable, not plausible.** The scan records a home only
+  when `_module_global_field_type(owner, name)` answers — i.e. when the owner's
+  field list says the field EXISTS. A collector that trusts `_global_to_module`
+  alone would type `m.f`'s parameter from a call site in some OTHER module and
+  get it wrong silently, which is the homonym class
+  `_module_global_field_type`'s own docstring argues about at length.
+
+The other half of step 1 is unchanged and still the real work: teaching the
+`_scalar_obs` walk to accept a module-qualified callee at all, which this doc's
+"Shape 1" section locates precisely.

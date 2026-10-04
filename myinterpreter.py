@@ -18,6 +18,7 @@ import platform
 import operator
 import math
 import collections
+import builtins
 import threading
 from dataclasses import dataclass
 import fire_compiler as N
@@ -179,7 +180,8 @@ def _split_invoker(owner_interp, args) -> tuple:
 class MojoFunction:
     """Represents a function defined in Mojo code."""
     def __init__(self, name, params, body, closure_scope, comptime_params=None, param_defaults=None,
-                 is_generator=False, is_async=False, interpreter=None):
+                 is_generator=False, is_async=False, interpreter=None,
+                 comptime_param_defaults=None):
         self.name = name
         self.params = params
         self.body = body
@@ -192,16 +194,27 @@ class MojoFunction:
         # — bound by `__getitem__` when the call site subscripts the
         # function (`f[Int32](...)`, not passed as regular arguments.
         self.comptime_params = comptime_params or []
+        # Declared DEFAULTS for those parameters — `def f[T, y=0, *,
+        # linux=0]()`'s `y=0`/`linux=0`, kept by the parser in
+        # FunctionDef.comptime_param_defaults. Separate from `_pd` (which
+        # holds the RUNTIME parameters' defaults) because the two are
+        # consumed differently: `_pd` is looked up per parameter while
+        # binding call arguments and by `_trailing_default_at`'s positional
+        # offset arithmetic (`len(dflts)` is the count of defaulted RUNTIME
+        # slots), so a comptime default in there would shift every runtime
+        # default's offset. Read in `_invoke` below, next to the `_pd` read,
+        # so there is exactly one place a declared default is applied.
+        self.comptime_param_defaults = comptime_param_defaults or {}
         if param_defaults:
             self._pd = param_defaults
-        # Milestone 2 of bugs/INTERP_generator_yield_entirely_unimplemented.md:
+        # Milestone 2 of INTERP_generator_yield_entirely_unimplemented:
         # mirrors FunctionDef.is_generator (see fire_compiler.py) — copied
         # onto the MojoFunction at construction time (see
         # execute_FunctionDef/execute_StructDef/execute_TraitDef) so
         # `_invoke` can branch to the generator-construction path without
         # needing the original FunctionDef node around at call time.
         self.is_generator = is_generator
-        # Milestone 3b of bugs/INTERP_generator_yield_entirely_unimplemented.md:
+        # Milestone 3b of INTERP_generator_yield_entirely_unimplemented:
         # mirrors FunctionDef.is_async (see fire_compiler.py) exactly the
         # same way is_generator mirrors FunctionDef.is_generator above —
         # copied onto the MojoFunction at construction time so `_invoke`
@@ -250,7 +263,12 @@ class MojoFunction:
         # would always find nothing and silently drop every default value,
         # which is exactly the bug this line fixed — see the LambdaExpr
         # handler, whose `lambda x=5: ...` defaults rely on it working).
+        # `self.comptime_param_defaults` is the same lookup for the
+        # parameter list in the BRACKETS (`def f[T, y=0, *, linux=0]()`),
+        # which is the only default source `f[T=Int]()` can have — the
+        # bracket supplies every other value.
         _pdl = getattr(self, '_pd', None)
+        _cpdl = getattr(self, 'comptime_param_defaults', None)
         for cp_name in self.comptime_params:
             if cp_name not in comptime_bindings:
                 _found = False
@@ -259,6 +277,9 @@ class MojoFunction:
                         if _k == cp_name:
                             func_scope.define(cp_name, interpreter.eval_expr(_v))
                             _found = True; break
+                if not _found and _cpdl is not None and cp_name in _cpdl:
+                    func_scope.define(cp_name, interpreter.eval_expr(_cpdl[cp_name]))
+                    _found = True
                 if not _found and cp_name not in func_scope.vars:
                     func_scope.define(cp_name, None)
 
@@ -322,7 +343,7 @@ class MojoFunction:
             # protocol from both the sync-generator protocol
             # (MojoGeneratorObject: __iter__/__next__/send/throw) and the
             # coroutine protocol (MojoCoroutine: __await__) built for this
-            # milestone — see bugs/INTERP_generator_yield_entirely_unimplemented.md's
+            # milestone — see INTERP_generator_yield_entirely_unimplemented's
             # Milestone 3b report. Deliberately NOT built here: rather than
             # silently picking one of the two existing wrappers (either
             # would behave subtly wrong under `async for`), fail loudly so
@@ -359,7 +380,7 @@ class MojoFunction:
             # unification that got confused by two differently-shaped
             # return statements in the same function (a boxed generic value
             # vs. a directly-constructed local struct type) — see
-            # bugs/INTERP_generator_yield_entirely_unimplemented.md's
+            # INTERP_generator_yield_entirely_unimplemented's
             # Milestone 2 report for the concrete compile errors this
             # produced before the fix.
             result = MojoGeneratorObject(interpreter, func_scope, self.body)
@@ -900,7 +921,7 @@ class MojoCoroutine:
     real-asyncio-compatible: `asyncio.run(mojo_coro)`,
     `asyncio.gather(mojo_coro1, mojo_coro2)`, and `await mojo_coro` from
     ordinary real Python `async def` code all work, validated empirically
-    (see bugs/INTERP_generator_yield_entirely_unimplemented.md's Milestone
+    (see INTERP_generator_yield_entirely_unimplemented's Milestone
     3b report) — including a Mojo body that internally does
     `await asyncio.sleep(...)`, which really suspends on the real event
     loop and really takes real wall-clock time, and `asyncio.gather` of
@@ -1277,17 +1298,41 @@ class BoundMethod:
         self.interpreter = interpreter
 
     def __call__(self, *args, **kwargs):
+        return self._invoke_bound({}, args, kwargs)
+
+    def _invoke_bound(self, comptime_bindings, args, kwargs):
+        """Run the body with `comptime_bindings` pre-bound into the body
+        scope. Shared by the plain call (empty bindings) and by the
+        keyword-bracket call `obj.body[f_key=show_k]()`
+        (`_MojoBoundComptimeReceiver`), so the scope push, the `self`
+        binding and the receiver argument are written once — the bracket
+        call used to go through `__getitem__`, which answered the receiver
+        itself and DROPPED every bracketed argument."""
         f = self.bound_func
         old_scope = self.interpreter.scope
         self.interpreter.scope = Scope(parent=self.interpreter.scope)
         self.interpreter.scope.define('self', self.instance)
         try:
-            return f(self.interpreter, self.instance, *args, **kwargs)
+            interp, rest = _split_invoker(f._interp, (self.instance,) + tuple(args))
+            return f._invoke(interp, comptime_bindings, rest, kwargs)
         finally:
             self.interpreter.scope = old_scope
 
     def __getitem__(self, key):
         return self
+
+
+class _MojoBoundComptimeReceiver:
+    """A receiver-bound method with its comptime parameters pre-bound —
+    `obj.body[f_key=show_k]()`, the shape `Dict.mojo`/`counter.mojo` use.
+    Holds the receiver and defers to its `_invoke_bound`, so calling one is
+    the same operation as calling the receiver itself, plus the bindings."""
+    def __init__(self, receiver, comptime_bindings):
+        self.receiver = receiver
+        self.comptime_bindings = comptime_bindings
+
+    def __call__(self, *args, **kwargs):
+        return self.receiver._invoke_bound(self.comptime_bindings, args, kwargs)
 
 
 class BoundClassMethod:
@@ -1317,12 +1362,18 @@ class BoundClassMethod:
         self.interpreter = interpreter
 
     def __call__(self, *args, **kwargs):
+        return self._invoke_bound({}, args, kwargs)
+
+    def _invoke_bound(self, comptime_bindings, args, kwargs):
+        """The `BoundMethod` counterpart — see its docstring; identical, with
+        `cls` and the class as the receiver."""
         f = self.bound_func
         old_scope = self.interpreter.scope
         self.interpreter.scope = Scope(parent=self.interpreter.scope)
         self.interpreter.scope.define('cls', self.cls)
         try:
-            return f(self.interpreter, self.cls, *args, **kwargs)
+            interp, rest = _split_invoker(f._interp, (self.cls,) + tuple(args))
+            return f._invoke(interp, comptime_bindings, rest, kwargs)
         finally:
             self.interpreter.scope = old_scope
 
@@ -1753,7 +1804,7 @@ class MojoComplex:
     the complex values that result from combining one with a real number via
     `+`/`-`. This deliberately does NOT implement the full Python `complex`
     API (no `*`, `/`, `conjugate()`, `abs()`, comparisons, ...) — per
-    bugs/PARSE_FAIL_complex_number_literal.md's scope guidance, construction
+    PARSE_FAIL_complex_number_literal's scope guidance, construction
     + printing + `+`/`-` against int/float/other MojoComplex is enough to
     cover the two real stdlib patterns that motivated this (a complex value
     sitting in a set/list literal, never used in further arithmetic).
@@ -1808,7 +1859,7 @@ class MojoComplex:
         # ("undefined symbol _hash" at link time), and a `int(float_expr)`
         # replacement hit an unrelated existing gimple_codegen miscompile
         # (int() return type inferred as `char *` in this context). Per
-        # bugs/PARSE_FAIL_complex_number_literal.md's scope guidance this
+        # PARSE_FAIL_complex_number_literal's scope guidance this
         # class isn't meant to support full value-equality hashing (e.g.
         # collapsing `{1, 1+0j}` into `{1}` the way real Python's `complex`
         # does) — just construct/print/`+`/`-` without crashing.
@@ -2168,7 +2219,7 @@ def _mojo_simd_width_of(t):
 class _MojoCompilationTarget:
     """Stand-in for real Mojo's `sys.info.CompilationTarget` platform-predicate
     namespace. Answers for *this* interpreter host (macOS/arm64), not
-    whatever `mojo build` would actually target — fine for the predicates
+    whatever `fire build` would actually target — fine for the predicates
     stdlib tests branch on, since we're not cross-compiling."""
     def is_macos(self):
         return sys.platform == 'darwin'
@@ -2822,7 +2873,7 @@ class _SysProxy:
     while forwarding everything else to the real `sys` module. Without this,
     interpreted code that reads `sys.argv` sees the *host* process's live
     argv instead of its own — harmless for most scripts, but fatal for
-    self-referential ones: `mojo run fire.py help` would otherwise have the
+    self-referential ones: `fire run fire.py help` would otherwise have the
     nested interpretation of fire.py re-read the unchanged host argv, take
     the same branch, and re-interpret itself forever."""
     def __init__(self, argv):
@@ -2848,7 +2899,7 @@ class Interpreter:
         self._mojo_module_cache = {}
         self._func_specs = {}
         self._raised_mojo_value = None
-        # Milestone 2 of bugs/INTERP_generator_yield_entirely_unimplemented.md:
+        # Milestone 2 of INTERP_generator_yield_entirely_unimplemented:
         # per-OS-thread storage for "the yield_fn of the generator whose body
         # is currently running on THIS thread" — see MojoGeneratorObject
         # (each generator body runs on its own dedicated worker thread, so
@@ -3189,8 +3240,45 @@ class Interpreter:
         self.scope.define('RuntimeError', RuntimeError)
         self.scope.define('StopIteration', StopIteration)
         self.scope.define('Error', MojoError)
+        # …and the rest of the standard exception hierarchy, which the block
+        # above was missing in a way that turned a diagnostic into a DIFFERENT
+        # one. `fire_compiler.py` — this compiler's own source, which the
+        # interpreter executes whenever it interprets a program — raises
+        # `SyntaxError` from five sites (`replace_multiline_strings`'s
+        # "unterminated string literal", the `yield`/`await`-outside-a-
+        # generator refusal, the for/with target refusal, and two in the
+        # parser), and `SyntaxError` was not in scope. So the interpreter
+        # reached `raise SyntaxError(...)` and raised
+        # `NameError: name 'SyntaxError' is not defined` instead: the
+        # interpreter's copy of the tokenizer could not REPORT a lex error,
+        # which is the one thing a tokenizer has to be able to do.
+        #
+        # Found by `test_myinterpreter_validation.py`, which runs
+        # `fire_compiler.py`'s `py_tokenize` through the interpreter and
+        # compares it with the imported one — that file's reason for existing
+        # is that an interpreter bug produces a wrong answer rather than an
+        # exception, and this one did: 66 of 67 corpus texts matched and the
+        # 67th raised the wrong exception TYPE.
+        #
+        # Names, not aliases of anything Mojo-specific: the interpreter
+        # defines the PYTHON exception class, so `except SyntaxError` in a
+        # program the interpreter runs catches what the raise produced. The
+        # same is already true of the six above, and these are simply the
+        # rest of `builtins` that a real program or the compiler's own source
+        # can name.
+        for _exc_name in ('SyntaxError', 'IndentationError', 'TabError',
+                          'IndexError', 'KeyError', 'AttributeError',
+                          'NameError', 'UnboundLocalError', 'ArithmeticError',
+                          'ZeroDivisionError', 'OverflowError',
+                          'FloatingPointError', 'AssertionError',
+                          'NotImplementedError', 'RecursionError',
+                          'SystemError', 'StopAsyncIteration',
+                          'ImportError', 'ModuleNotFoundError',
+                          'LookupError', 'MemoryError', 'OSError',
+                          'IOError', 'FileNotFoundError', 'SystemExit'):
+            self.scope.define(_exc_name, getattr(builtins, _exc_name))
         # More standard builtins + exceptions that real stdlib files reference
-        # at module scope (found via fault_tolerance.py comparing `mojo run`
+        # at module scope (found via fault_tolerance.py comparing `fire run`
         # to CPython — e.g. keyword.py's frozenset, _pyrepl/types.py's object,
         # dbm/__init__.py's OSError all raised "name X is not defined").
         # Plain Python builtins, same pattern as set/zip/Exception above.
@@ -3537,9 +3625,11 @@ class Interpreter:
         comptime_params = getattr(node, 'comptime_params', None)
         _pd = getattr(node, 'param_defaults', None)
         _pdv = list(_pd.items()) if _pd else None
+        _cpd = getattr(node, 'comptime_param_defaults', None)
         func = MojoFunction(node.name, params, node.body, self.scope, comptime_params, param_defaults=_pdv,
                              is_generator=getattr(node, 'is_generator', False),
-                             is_async=getattr(node, 'is_async', False), interpreter=self)
+                             is_async=getattr(node, 'is_async', False), interpreter=self,
+                             comptime_param_defaults=_cpd)
         spec = self._classify_params(node)
         bound = self._register_function(self.scope.vars, node.name, func, spec)
         # The rebinding a decorator IS: the decorated value replaces the
@@ -3687,9 +3777,11 @@ class Interpreter:
             comptime_params = getattr(m, 'comptime_params', None)
             _pd = getattr(m, 'param_defaults', None)
             _pdl = list(_pd.items()) if _pd else None
+            _cpd = getattr(m, 'comptime_param_defaults', None)
             method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl,
-                                        is_generator=getattr(m, 'is_generator', False),
-                                        is_async=getattr(m, 'is_async', False), interpreter=self)
+                                       is_generator=getattr(m, 'is_generator', False),
+                                       is_async=getattr(m, 'is_async', False), interpreter=self,
+                                       comptime_param_defaults=_cpd)
             spec = self._classify_params(m)
             if m.name in from_base:
                 from_base.discard(m.name)
@@ -3788,9 +3880,11 @@ class Interpreter:
                 comptime_params = getattr(m, 'comptime_params', None)
                 _pd = getattr(m, 'param_defaults', None)
                 _pdl = list(_pd.items()) if _pd else None
+                _cpd = getattr(m, 'comptime_param_defaults', None)
                 method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl,
-                                        is_generator=getattr(m, 'is_generator', False),
-                                        is_async=getattr(m, 'is_async', False), interpreter=self)
+                                           is_generator=getattr(m, 'is_generator', False),
+                                           is_async=getattr(m, 'is_async', False), interpreter=self,
+                                           comptime_param_defaults=_cpd)
                 spec = self._classify_params(m)
                 self._register_function(methods, m.name, method_func, spec)
         cls = MojoClass(node.name, [], methods, self)
@@ -3830,7 +3924,7 @@ class Interpreter:
         # `import sys` is special: the program must see its own argv (see
         # _SysProxy), not the real process argv reinstated by a fresh
         # importlib.import_module('sys'). Re-binding the real module here is
-        # what turned `mojo run fire.py help` into unbounded recursion — the
+        # what turned `fire run fire.py help` into unbounded recursion — the
         # nested interpretation of fire.py would re-read the host's live
         # argv instead of the isolated one and take the same branch forever.
         if module == 'sys' or module.split('.')[0] == 'sys':
@@ -4426,7 +4520,7 @@ class Interpreter:
         methods`) is invisible to plain `hasattr`/`getattr`. Route through
         the class's own method table instead for MojoInstance; fall back to
         plain `hasattr` for everything else (native Python-backed runtime
-        objects). See bugs/INTERP_with_as_binding_for_loop_keyerror.md:
+        objects). See INTERP_with_as_binding_for_loop_keyerror:
         `with SomeInterpretedClass() as x:` never actually called the
         interpreted `__enter__`, silently using the un-entered instance
         itself instead — found via a KeyError inside `MojoInstance.
@@ -4776,7 +4870,7 @@ class Interpreter:
         `await asyncio.sleep(...)`), or anything else implementing
         `__await__`, matching real Python `await`'s own actual protocol
         (bytecode-level, not type-based — see
-        bugs/INTERP_generator_yield_entirely_unimplemented.md's Milestone
+        INTERP_generator_yield_entirely_unimplemented's Milestone
         3b report for why this is genuinely real-asyncio-compatible).
 
         This method itself runs on the current Mojo coroutine's OWN worker
@@ -5324,7 +5418,7 @@ class Interpreter:
         short-circuits to False (without evaluating any remaining operands)
         the moment one `operands[i] ops[i] operands[i+1]` link fails, and is
         True only if every link holds — `(a < b) and (b < c)`, never `(a <
-        b) < c`. See bugs/CHAINED_COMPARISON_WRONG_RESULT.md."""
+        b) < c`. See CHAINED_COMPARISON_WRONG_RESULT."""
         left = self.eval_expr(expr.operands[0])
         for op, operand_expr in zip(expr.ops, expr.operands[1:]):
             right = self.eval_expr(operand_expr)
@@ -5451,12 +5545,91 @@ class Interpreter:
     def eval_SubscriptExpr(self, expr: N.SubscriptExpr):
         """Evaluate subscript access."""
         obj = self.eval_expr(expr.obj)
+        # A KEYWORD bracket (`f[T=Int, y=5]`, `platform_map[T=Int, "O_APPEND",
+        # linux=0x400]()`) keeps its elements in `attrs` as (name, value)
+        # pairs and leaves `index` as the empty-subscript placeholder
+        # IntLiteral(0) — see fire_compiler.py's "keyword-style bracket"
+        # branch. Indexing that placeholder is not a subscript at all: it
+        # bound the callee's FIRST comptime parameter to 0 and dropped every
+        # bracketed argument, so `f[T=Int, y=5]()` returned a value computed
+        # from `y`'s default (and `f[T=Int]` raised `NameError: T` from the
+        # key `T` being evaluated in the enclosing scope). Bind the
+        # comptime parameters instead — the same model
+        # mojo/backend_gimple/emit_calls.py's `_kw_bracket`/`elems` split
+        # uses for the compiled path, so both engines answer alike.
+        _attrs = getattr(expr, 'attrs', None)
+        if _attrs:
+            _bound = self._bind_bracket_comptime(obj, _attrs, expr)
+            if _bound is not None:
+                return _bound
         idx = self.eval_expr(expr.index)
         if not hasattr(obj, '__getitem__'):
             if hasattr(obj, '__call__'):
                 return obj
             raise TypeError(f"{type(obj).__name__} object is not subscriptable")
         return obj[idx]
+
+    def _bind_bracket_comptime(self, obj, attrs, node):
+        """`f[...]` with keyword-bracket `attrs`: bind `obj`'s declared
+        comptime parameters and return the callable, or None when `obj` has
+        no comptime parameter list to bind (the caller then keeps its own
+        subscript path — a bound method reached as `obj.m[k=v](...)` is
+        handled by `BoundMethod.__getitem__`, which answers the callable
+        itself).
+
+        The two bracket spellings are read exactly as the parser produced
+        them and as emit_calls.py reads them: a `(None, value)` pair is
+        POSITIONAL (the parser's spelling for a literal or a call in the
+        bracket — `f[T=Int, "O_APPEND"]`), a bare `name = value` pair binds
+        that parameter BY NAME, and a bare NAME with no `=` (which the
+        parser keeps under its own name) binds by name too. Positionals fill
+        the remaining parameters in declaration order, which is what makes
+        `platform_map[T=Int, "O_APPEND", linux=..., macos=...]()` —
+        `operation` sitting between two keyword parameters — land on
+        `operation`.
+
+        A parameter with neither a supplied value nor a declared default is
+        an honest TypeError naming it, not a silent None: the bracket is
+        the ONLY place its value can come from.
+
+        `obj` is the callee VALUE, so it is also a method receiver
+        (`obj.body[f_key=show_k]()`); its declared parameters live on
+        `bound_func` there, and the bound value it produces is one that
+        keeps the receiver.
+        """
+        decl = obj
+        if not getattr(decl, 'comptime_params', None):
+            decl = getattr(obj, 'bound_func', None)
+        cps = getattr(decl, 'comptime_params', None)
+        if not cps:
+            return None
+        kws = {}
+        poss = []
+        for pair in attrs:
+            nm = pair[0]
+            if nm is None:
+                poss.append(pair[1])
+            else:
+                kws[nm] = pair[1]
+        dflts = getattr(decl, 'comptime_param_defaults', None) or {}
+        bindings = {}
+        pos_i = 0
+        for cp in cps:
+            given = None
+            if cp in kws:
+                given = kws[cp]
+            elif pos_i < len(poss):
+                given = poss[pos_i]
+                pos_i += 1
+            if given is not None:
+                bindings[cp] = self.eval_expr(given)
+            elif cp not in dflts:
+                raise TypeError(
+                    f"{self._loc(node)}comptime parameter '{cp}' is neither "
+                    f"given in the bracket nor has a default")
+        if decl is not obj:
+            return _MojoBoundComptimeReceiver(obj, bindings)
+        return _MojoBoundComptimeFunction(obj, bindings)
 
     def eval_SliceExpr(self, expr: N.SliceExpr):
         """Evaluate slice expression."""

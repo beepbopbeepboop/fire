@@ -329,6 +329,84 @@ def _selfhost_homogeneous_tuple_ret_funcs(self, sd: str) -> dict:
                         _out.setdefault(f"{_s.name}_{_m.name}", _e)
     return _out
 
+# Constants a MODULE MARKER exports that this compiler knows BY VALUE rather
+# than by compiled module body. `os` and `signal` are markers, never inlined
+# into the translation unit (their bodies are not part of any program's
+# closure the way a `from . import sibling` sibling's is), so there is no
+# `_module_globals['os']` field to read and no emitted struct to name — the
+# per-module field lookup that every other `mod.CONST` read answers through
+# (see `GimpleGen._module_global_field_type`) legitimately has nothing to say
+# about these two. These values are fixed by the OS ABI and by os.py's own
+# literals, so emitting them directly is not a guess.
+#
+# One table, because two backends read the same `os.linesep`: the ordinary
+# GIMPLE path's `_lower_MemberExpr` and the coroutine C++20 emitter's
+# module-constant read. Kept as two near-identical literal dicts, the
+# disagreement was invisible until the second reader existed and then produced
+# a SILENT wrong answer rather than an error — the coroutine emitter stubbed
+# `os.linesep` to `0` (an empty string) while the ordinary path in the same
+# program read `'\n'`, and the only thing that kept the coroutine body off
+# the compiled path was the mixed-yield refusal that difference caused
+# (bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md).
+#
+# The POSIX-only half of `signal` is deliberate: only the numbers identical
+# across every POSIX platform this runtime targets are listed, so a
+# BSD/Linux-only member (`SIGUSR1`, `SIGCHLD`, ...) keeps the honest
+# unresolved-attribute answer rather than risking a wrong number.
+_BUILTIN_MODULE_CONSTANTS = {
+    'os': {
+        'sep': ('char *', '/'),
+        'pathsep': ('char *', ':'),
+        'curdir': ('char *', '.'),
+        'pardir': ('char *', '..'),
+        'linesep': ('char *', '\n'),
+    },
+    'signal': {
+        'SIGHUP': ('int64_t', 1),
+        'SIGINT': ('int64_t', 2),
+        'SIGQUIT': ('int64_t', 3),
+        'SIGILL': ('int64_t', 4),
+        'SIGABRT': ('int64_t', 6),
+        'SIGFPE': ('int64_t', 8),
+        'SIGKILL': ('int64_t', 9),
+        'SIGSEGV': ('int64_t', 11),
+        'SIGPIPE': ('int64_t', 13),
+        'SIGALRM': ('int64_t', 14),
+        'SIGTERM': ('int64_t', 15),
+    },
+}
+
+
+def builtin_module_constant(module: str, name: str) -> tuple[str, object] | None:
+    """`(ctype, value)` for a constant `module` exports that this compiler
+    knows by value — `os.linesep` is `('char *', '\\n')`, `signal.SIGTERM` is
+    `('int64_t', 15)` — or None when it knows of no such constant.
+
+    `module` is the CANONICAL (import-resolved) module name, so an
+    `import os as _os` alias resolves the same as a bare `os`.
+
+    Both readers are in this file's `bugs/` and neither can be a second
+    implementation: see `_BUILTIN_MODULE_CONSTANTS`'s own comment for the
+    silent-wrong-answer failure the duplication produced. The VALUE is
+    returned unconverted so each backend can put it through its own literal
+    spelling (`_intern_string`/`_c_escape` for the GIMPLE path's string pool,
+    a C++ literal for the coroutine path's text) and neither has to reach
+    through the other.
+    """
+    return _BUILTIN_MODULE_CONSTANTS.get(module, {}).get(name)
+
+
+def builtin_module_constant_names(module: str) -> tuple:
+    """The `name`s `builtin_module_constant` knows for `module` — for the
+    callers that need the whole set rather than one lookup (the coroutine
+    emitter builds its per-unit `"<marker>.<name>" -> ctype` map by walking
+    markers, so it must be able to ask which names exist without holding a
+    second copy of the keys)."""
+    return tuple(_BUILTIN_MODULE_CONSTANTS.get(module, {}).keys())
+
+
+import re as _re
+
 def module_qualifier(q) -> str:
     """The ONE module-string -> C-qualifier sanitization every cross-module
     registry key and symbol prefix in this codegen must agree on.
@@ -583,26 +661,27 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
             self._unresolved_import_aliases.add(_sk)
         return
     if isinstance(sym_info, str):
-        _reg_isym[_sk] = {
-            'module': _eff_mod, 'original_name': orig_name,
-            'return_type': sym_info, 'parameters': [],
-            'signature': f"{sym_info} {_sk} (void)"
-        }
-        self.func_return_types[_sk] = sym_info
+        # One writer for the three tables, shared with the bare-`import`
+        # module-qualified call site (see
+        # `funcs_shared.register_imported_symbol`), which has the same three
+        # writes to do and used to have no writer to call. The
+        # `original_name` rule lives there too: only a genuine
+        # `import X as Y` alias records it, because storing it for an
+        # unaliased import makes `_func_csym` read it back (MojoDict get ->
+        # int64_t, then a POINTER `!=` against `bare_name` that is always
+        # true on the self-hosted path) take its alias branch ->
+        # `_safe_name(<erased ptr>)` -> a decimal-address guard name
+        # (`#ifndef _Users_..._<addr>`), different every run. This str branch
+        # used to record it unconditionally, which is that bug.
+        self._register_imported_symbol(
+            _sk,
+            {'module': _eff_mod, 'original_name': orig_name,
+             'return_type': sym_info, 'parameters': [],
+             'signature': f"{sym_info} {_sk} (void)"},
+            orig_name)
     elif isinstance(sym_info, dict):
         sym_info = _as_dict(dict(sym_info))
         sym_info['module'] = _eff_mod
-        # Only record `original_name` for a genuine `import X as Y` alias.
-        # For an unaliased import it equals `_sk`, and storing it makes
-        # `_func_csym` read it back (MojoDict get -> int64_t, then a POINTER
-        # `!=` against `bare_name` that is always true on the self-hosted
-        # path) take its alias branch -> `_safe_name(<erased ptr>)` -> a
-        # decimal-address guard name (`#ifndef _Users_..._<addr>`), different
-        # every run. `orig_name`/`_sk` here are real str params (module-level
-        # fn, not a lifted closure), so this compare is a true string compare.
-        if orig_name != _sk:
-            sym_info['original_name'] = orig_name
-        _reg_isym[_sk] = sym_info
         _ret_changed = False
         if orig_name.startswith('_'):
             pass
@@ -612,8 +691,6 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
             if _resolved_ret:
                 sym_info['c_return_type'] = _resolved_ret
                 _ret_changed = True
-        if 'c_return_type' in sym_info:
-            self.func_return_types[_sk] = sym_info['c_return_type']
         if sym_info.get('variadic'):
             if _ret_changed:
                 sym_info['signature'] = (
@@ -642,11 +719,12 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
                 _c_ret = _as_str(sym_info.get('c_return_type', 'int64_t'))
                 _param_str = ', '.join(_new_c_params) if _new_c_params else 'void'
                 sym_info['signature'] = f"{_c_ret} {orig_name} ({_param_str})"
-        if _sib_qualifier and 'c_parameters' in sym_info:
-            self.func_param_types[_sk] = [
-                ' '.join(cp.split()[:-1]) if len(cp.split()) > 1 else cp
-                for cp in (sym_info.get('c_parameters') or [])
-            ]
+        # `_sib_qualifier` decides the param types and nothing else: when
+        # THIS compile will emit the definition, the definition's own
+        # signature is authoritative and a second entry here is what a stale
+        # cross-module hint would read instead.
+        self._register_imported_symbol(_sk, sym_info, orig_name,
+                                       write_param_types=bool(_sib_qualifier))
     if _sib_qualifier and sym_info:
         # The condition is "will THIS compile emit that module's own
         # definition into this translation unit?", NOT `do_imports`. Two
@@ -1492,6 +1570,95 @@ def _gmi_scan_try_imports(self, _phase17_mod, stmt_list):
             _gmi_scan_try_imports(self, _phase17_mod, _s.then_body or [])
             if isinstance(_s.else_body, list):
                 _gmi_scan_try_imports(self, _phase17_mod, _s.else_body)
+
+def _gmi_scan_imported_global_homes(self, stmt_list) -> None:
+    """Record every bare name THIS module's own top-level `from b import K`
+    binds, together with the module whose `_<mod>_globals` struct declares
+    the field, so a later BARE read of that name loads the OWNER's field
+    instead of this module's.
+
+    Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_comptime`'s
+    docstring — and runs after Phase 1.7 (which is what populates
+    `_global_to_module`/`_global_var_types`) but BEFORE any function body is
+    emitted, because the reads it fixes happen inside those bodies.
+
+    What was wrong without it: the bare-name global read in
+    `_lower_IdentExpr` loads `_<current module>_globals.NAME`, and for a
+    `from b import K` that struct has no such member — gcc's "'struct
+    _root_toplev' has no member named 'K'", one error per read site. The
+    self-host closure had 26 distinct such names in 15 modules. The qualified
+    `b.K` spelling of the same value never had the problem, because
+    `_lower_MemberExpr` resolves the field through the owning module's own
+    `_module_global_field_type(bound_module, member)` triple; this is the
+    bare-name half of that pair.
+
+    Two gates, and both are load-bearing rather than defensive:
+
+    * **The owner must be a DIFFERENT module.** `from <self> import K` (a
+      module importing a name out of itself) is this module's own global
+      and must keep loading its own field.
+    * **This module must not declare a global of that name ITSELF.** `from b
+      import N` followed by a module-level `N = 'a-side'` rebinds the name in
+      THIS module's namespace (Python semantics), so the bare `N` afterwards
+      is this module's field, not `b`'s. `_own_global_var_types` is the
+      right test for "this module declares it", and it is only a sound test
+      because `_phase17_set_gtype`'s own-scope split keeps imported
+      modules' names out of it — the two changes are one fix, not two.
+    * **`_module_global_field_type(owner, name)` must answer.** That is the
+      exact member list the owner's struct typedef, its initializer and its
+      `_<mod>_mojo_global_get_<name>` accessor are all generated from, so a
+      hit is proof the field EXISTS rather than a claim that it should. A
+      from-import of a name no inline-compiled module declares as a global
+      (a function — this is the value half, see
+      `_own_imported_global_home`'s own comment — a submodule, an unresolvable
+      stdlib) fails this and is left entirely alone, which is what keeps
+      every already-working from-import spelling byte-identical.
+
+    An ambiguous binding (two `from` statements in this module binding one
+    bare name to two different owners' fields) is DROPPED rather than
+    resolved by scan order, mirroring `_note_own_func_home`'s
+    `_AMBIGUOUS_FUNC_HOME` policy: there is no right answer to pick, and
+    leaving the read un-routed reproduces today's behaviour rather than a
+    coin flip.
+    """
+    homes = self._own_imported_global_home
+    fields = self._own_imported_global_field
+    this_mod = self.module_name if len(self.module_name) > 0 else "root"
+    for _ig in stmt_list:
+        if not isinstance(_ig, FromImportStmt):
+            continue
+        # `from b import *` binds names this scan never sees, so there is
+        # nothing per-name to record; the qualified `b.K` path is what
+        # handles it.
+        if getattr(_ig, 'wildcard', False):
+            continue
+        for _nm2 in (getattr(_ig, 'name_alias_strs', None) or []):
+            _iname = _as_str(gimple_ctypes._fi_name(_nm2))
+            _ialias = _as_str(gimple_ctypes._fi_alias(_nm2))
+            _local = _ialias if _ialias else _iname
+            if not _local:
+                continue
+            _iowner = getattr(self, '_global_to_module', {}).get(_iname)
+            if _iowner is None:
+                continue
+            _iowner_s = _as_str(_iowner)
+            if (not _iowner_s) or _iowner_s == this_mod:
+                continue
+            if _iname in self._own_global_var_types:
+                continue
+            if _local in homes:
+                # Two owners for one bare name: ambiguous, so record
+                # nothing (see the docstring).
+                if homes[_local] != _iowner_s:
+                    del homes[_local]
+                    if _local in fields:
+                        del fields[_local]
+                continue
+            if self._module_global_field_type(_iowner_s, _iname) is None:
+                continue
+            homes[_local] = _iowner_s
+            fields[_local] = _iname
+
 
 def _gmi_scan_cpp_nested_imports(self, stmt_list):
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_

@@ -242,7 +242,7 @@ store) is behind a RECEIVER SEEDING, one layer up, and the fix for that layer
 is not safe to land alone — measured, it turns the store case from a refusal
 into a SIGSEGV. The measurement, the reproducer, and the order the two checks
 have to land in are in
-`bugs/FORMAL_one_field_holder_of_a_frame_is_not_a_holder.md`; read that one for
+`FORMAL_one_field_holder_of_a_frame_is_not_a_holder`; read that one for
 shape 2 and this one for shape 1.
 
 ## Status, 2026-10-03 (`formal10-2`): the recorded terminal cause was ONE layer

@@ -401,6 +401,26 @@ def container_kind(ctype: str) -> str | None:
         return None
     return {'MojoDict *': 'dict', 'MojoList *': 'list', 'MojoSet *': 'set', 'MojoBytes *': 'bytes'}[ctype]
 
+def _is_empty_container_literal(node) -> bool:
+    """True when `node` is a SYNTACTICALLY EMPTY container literal — `[]`,
+    `()`, `{}`, `set()` — which carries no evidence of what it would hold.
+
+    The same shape `reify_empty_container_literal` recognises, and for the
+    same reason it needs its own test rather than reusing that one: an empty
+    literal still has a STORAGE element type (`_infer_list_elem_type([])` is
+    `'int64_t'`, so a local can be declared), it is just not a statement about
+    the values. The consumer that needs the distinction is
+    `_gen_ReturnStmt`'s publish of `_return_elem_types`, where treating that
+    storage default as evidence routed a str-valued result through
+    `mojo_repr_list_ints` and printed its slots as pointer decimals — see
+    “A comprehension inside an `if` body loses its RESULT list's element type”.
+    """
+    if isinstance(node, (DictExpr, ListExpr, SetExpr, TupleExpr)):
+        return not (getattr(node, 'elements', None)
+                    or getattr(node, 'pairs', None))
+    return False
+
+
 def reify_empty_container_literal(gen, value_type: str, declared_type: str, value_node) -> str | None:
     """If `value_node` is a syntactically-EMPTY container literal (`{}`,
     `[]`, `set()`, `()`) whose default lowering (`value_type`) doesn't
@@ -693,6 +713,53 @@ _DISPATCH_TABLE_GLOBAL_CTYPES = {
     # ── no typed accessor: the box ──
     '_FIXED_ARRAY_ANN_RE': 'int64_t',
 }
+
+
+# ---------------------------------------------------------------------------
+# Modules whose CALLS this compiler answers from the SOURCE TEXT, at compile
+# time, so the runtime value of a call on the module MARKER is never observed.
+# ---------------------------------------------------------------------------
+
+# `re` is the one today: `_gmi_phase17`'s `X = re.compile("...")` scan records
+# the PATTERN against `X` (`gen._regex_patterns`), and `.finditer()` /
+# `.findall()` on `X` are then lowered against that recorded pattern with
+# `mojo_regex_*` — the value stored in `X` is a token and is never read.
+#
+# This table exists because that fact is load-bearing somewhere ELSE, and the
+# somewhere else used to get it wrong. `import re` binds a module MARKER: an
+# `int64_t` global initialised to 0 (`_root_globals.re = 0`), because
+# `module_loader.can_resolve_module_path('re')` is false — that predicate asks
+# whether there is MOJO SOURCE for a module under `TEST_PATH` or `std*`, and
+# the real Python stdlib is neither. So `re.compile(...)` is genuinely stubbed
+# to the marker, i.e. to 0, in the generated C — and that is CORRECT, because
+# nothing reads it.
+#
+# `_uncompiled_module_marker`'s raise (see
+# bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md) therefore
+# has to exclude these modules: it answers “is this a marker for a module this
+# compile never compiled”, which is true for `re` and irrelevant, because the
+# compile-time recogniser already holds the answer. Raising there turned
+# `for m in re.compile(r'[a-z]+').finditer(src)` into
+# `NotImplementedError: re.compile: module 're' is not compiled into this
+# binary` — on master that program prints its matches, so this is a regression
+# caught by `test_silent_noop_iter.py::finditer_still_lowered`.
+#
+# ONE table, read by the recogniser that fills `_regex_patterns` AND by the
+# predicate that decides not to raise, so “which modules are compile-time
+# handled” has one answer. A second module only enters by being implemented
+# here and in the recogniser together — which is the point.
+_COMPILE_TIME_CALL_MODULES = frozenset({'re'})
+
+
+def compile_time_call_module(module: str) -> bool:
+    """Does this compiler answer `module.<name>(...)` from the SOURCE TEXT?
+
+    True for `re` today — see `_COMPILE_TIME_CALL_MODULES`. A module in this
+    set binds a 0 marker and every call on it is answered by a lowering that
+    read the call's own arguments, so neither the marker's value nor the call's
+    return value is observable. See that set's comment for the two readers
+    that must agree and the regression that comes of it when they do not."""
+    return module in _COMPILE_TIME_CALL_MODULES
 
 
 def dispatch_table_global_ctype(name) -> str | None:
@@ -1571,9 +1638,9 @@ def _module_toplevel_name(module_name: str) -> str:
 
 def _module_init_name(module_name: str) -> str:
     """Public, documented C symbol name for a *library* module's module-scope
-    initializer (bugs/DYLIB_module_scope_never_executes.md, box.3d/game repo).
+    initializer (DYLIB_module_scope_never_executes, box.3d/game repo).
 
-    A `mojo dylib` build (emit_entry_points=False) never emits any `main()` —
+    A `fire dylib` build (emit_entry_points=False) never emits any `main()` —
     there is nothing in the produced .dylib's ABI that calls the module's own
     `_<module>_toplevel()` (see `_module_toplevel_name`), so every module-scope
     `var x = f()` / bare statement silently never ran. Two independent fixes

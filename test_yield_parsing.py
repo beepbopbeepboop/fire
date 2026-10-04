@@ -1,5 +1,5 @@
 """Parser-only unit tests for `yield`/`yield from` — Milestone 1 of
-bugs/INTERP_generator_yield_entirely_unimplemented.md.
+INTERP_generator_yield_entirely_unimplemented.
 
 These tests construct `Parser(py_tokenize(src)).parse_module()` directly and
 inspect the resulting AST (YieldExpr / YieldFromExpr / FunctionDef.is_generator

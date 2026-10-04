@@ -443,7 +443,7 @@ def prod_source():
 
     THE START IS A PARAMETER and this group sweeps two of them, 1 and -3,
     because a default argument is not applied across a dylib boundary
-    (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`) and a caller
+    (`FORMAL_default_argument_not_applied_across_a_dylib`) and a caller
     who forgets it gets whatever was in the register.
     """
     vals = [0, 1, 2, 3, 5, -4, 7]

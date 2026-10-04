@@ -22,7 +22,7 @@ Identical to the terminal the previous Status recorded, `unsafe_ptr` and
 `List[Self.T]` slot has no representable value.
 
 **And the document that recorded why that file is not worth working is gone.**
-`bugs/FORMAL_dylib_export_gate_ceiling.md` measured three candidate fixes for
+`“FORMAL_dylib_export_gate_ceiling: the 38-file row is not 38 problems”` measured three candidate fixes for
 `binary_heap.mojo` at a ceiling of ZERO files across all three, and was deleted
 rather than worked — so the ceiling-zero measurement now lives only here, and
 this file is what a reader needs in order to know that `env.mojo` is not one
@@ -38,7 +38,7 @@ one did not: it means the problem was measured and priced.
 2. **DONE (2026-10-02)** — a type argument in ANY bracketed generic position is
    not read as a value: `model.type_position_nodes` excludes a bracket list in a
    type position from the runtime question rather than asking it and refusing
-   (`bugs/FORMAL_external_call_a_multiparameter_type_in_the_bracket.md`,
+   (`FORMAL_external_call_a_multiparameter_type_in_the_bracket`,
    deleted with its fix).
 3. **NOT DONE, and not this session's** — re-run
 

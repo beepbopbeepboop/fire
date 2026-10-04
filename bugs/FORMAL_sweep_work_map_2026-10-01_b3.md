@@ -76,7 +76,7 @@ Stage-5 dependency.
 | 28 | 28 | callee has no definition on this path | `FORMAL_callee_no_def_ceiling_zero.md`; the `formal-callee-no-def-2` claim is integrated |
 | 24 | 24 | receiver passed at argument position 0 | one construct, all in-file |
 | 24 | 15 | MLIR dialect construct (`__mlir_attr`/`__mlir_type`/`__mlir_op`) | `construct:mlir-hoist-and-comptime-receiver` (`formal2-mlir-comptime`) and `construct:mlir-and-gpu-globals`. The 15 in-file are work; the 9 behind `_assembly.mojo` name nothing it declares |
-| 22 † | 22 | receiver stored in a field of a struct that outlives it | **unowned.** `formal/build.py:4735`. Reproducer: `bugs/FORMAL_receiver_stored_in_a_field.md` |
+| 22 † | 22 | receiver stored in a field of a struct that outlives it | **unowned.** `formal/build.py:4735`. Reproducer: `“FORMAL_receiver_stored_in_a_field: a frame address in a struct field”` |
 | 13 | 13 | a parameter's declared type contradicts every call site | **unowned.** `formal/model.py:7110` (`frame_declared_parameter_refusal`). Reproducer: same doc |
 | 9 | 9 | value with no representation on this path | one construct, all in-file |
 | 8 | 8 | frame address passed where a value is wanted | `FORMAL_wide_receiver_by_reference.md` |
@@ -197,7 +197,7 @@ codegen coverage: 0/12 = 0.0%
 
 **12 of 12 moved, every one onto `binary_heap.mojo: formal dylib has no public
 functions`** — the export gate, whose own doc
-(`bugs/FORMAL_dylib_export_gate_ceiling.md`) records a measured ceiling of 0
+(`“FORMAL_dylib_export_gate_ceiling: the 38-file row is not 38 problems”`) records a measured ceiling of 0
 files for every candidate, because 34 of its 35 blocked files do not contain
 the string `BinaryHeap`. So the 93-file row is real work (a builtin with no
 lowering at all, `FORMAL_debug_assert_bracket_has_no_lowering.md`) and it is
@@ -232,7 +232,7 @@ writing), and both are enqueued with the measurement instruction attached:
 * `formal2-declared-param` — `construct:declared-param-vs-call-sites`, the
   13-file row.
 
-Both have `bugs/FORMAL_receiver_stored_in_a_field.md` with the reproducer and
+Both have `“FORMAL_receiver_stored_in_a_field: a frame address in a struct field”` with the reproducer and
 the measured landing of each.
 ---
 
@@ -371,7 +371,7 @@ is the answer a planner needs and it is the opposite of the usual outcome:
 * **The value-model change is still real** (`formal/model.py:5879`'s comment
   says what it is: Optional needs a niche, a discriminant or a tag word) and it
   is owned: `formal2-re-and-slice` holds `builtin_slice.mojo`, and
-  `bugs/FORMAL_struct_construction_shapes.md` recorded the landing of the same
+  `“FORMAL_struct_construction_shapes: `S()`, `S(a, b, …)` and `S(x)`”` recorded the landing of the same
   line when its refusal changed from a false reason to a true one (that doc was
   `git rm`'d 2026-10-03 with the construction family).
 * Read the two rows together, exactly as §5 says to: the bracket row and the
@@ -474,7 +474,7 @@ python3 test_formal_sweep.py → Ran 75 tests, OK
 ## 14. One bug found by running the floor: the cross-image frame contract is not published for a free function
 
 **Filed here as
-`bugs/FORMAL_cross_image_frame_contract_is_not_published_for_a_free_function.md`,
+`FORMAL_cross_image_frame_contract_is_not_published_for_a_free_function`,
 since fixed and since deleted — `_export_frame_contract` publishes a contract
 for every export, and `test_formal_cross_module.py` pins it.** Four of the
 floor's five failures were ONE construct, and it is a

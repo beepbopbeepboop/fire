@@ -132,7 +132,7 @@ CASES = [
     #
     # TWO helpers, not one, because a single `has(d, k)` called with both a str
     # and an int argument hits an unrelated and separately documented defect
-    # (bugs/CODEGEN_polymorphic_unannotated_param_vacuous_unanimity.md): the
+    # (CODEGEN_polymorphic_unannotated_param_vacuous_unanimity): the
     # unannotated parameter is typed `char *` by vacuous unanimity and the int
     # call site SIGSEGVs. Each helper here has a unanimous call-site set, so
     # this case exercises the dispatcher and nothing else. (That crash was

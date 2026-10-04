@@ -489,7 +489,7 @@ HOST_MODELLED = frozenset((
     #     `keys`/iteration/`+=`/`|` are method calls and operators on a value,
     #     which needs a type this image can see. Shipping the blob under the
     #     name `Counter` is the approximation
-    #     `bugs/FORMAL_hashlib_sha3_and_blake2s_absent.md` declined to ship.
+    #     `FORMAL_hashlib_sha3_and_blake2s_absent` declined to ship.
     "collections",
     "heapq", "bisect", "csv", "difflib", "base64",
     #   `textwrap`  — LEFT on 2026-10-03 for `formal/hostmods/textwrap.mojo`,
@@ -566,7 +566,7 @@ HOST_MODELLED = frozenset((
     #
     #     `quote` is REQUIRED and not defaulted: a call from another image does
     #     not materialize a callee's defaults
-    #     (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`), and
+    #     (`FORMAL_default_argument_not_applied_across_a_dylib`), and
     #     CPython's default is `True`, so a caller passes 1.
     #
     #     `unescape` is absent and the reason is its SIZE, not its difficulty:
@@ -670,7 +670,7 @@ HOST_MODELLED = frozenset((
     #     SUBJECT of each file's refusal rather than its verdict: every call
     #     site in this corpus spells `mkdtemp(prefix=…)`, and a call across a
     #     dylib boundary cannot fill a default
-    #     (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`), so
+    #     (`FORMAL_default_argument_not_applied_across_a_dylib`), so
     #     what those 51 files get is a refusal naming the argument they did not
     #     pass. What is absent is at the top of that file and it is 64 files'
     #     worth: `TemporaryDirectory`'s contract is the removal on the way OUT
@@ -840,7 +840,7 @@ def _admitted_tier_conflicts() -> list:
 # rather than a fact about the target: the third argument of `fcntl(2)` does not
 # arrive, so `getfd`/`setfd`/`getfl`/`setfl` would be a `setfd` that reports
 # success and changes nothing —
-# `bugs/FORMAL_a_variadic_call_drops_its_third_argument.md`. A second measured
+# `“FORMAL_a_variadic_call_drops_its_third_argument: `fcntl(fd, F_SETFD”`. A second measured
 # fact worth keeping: **macOS's `flock` and `F_SETLK` SHARE a lock space**, the
 # opposite of Linux, so a reader who assumes Linux gets this backwards.
 
@@ -2229,7 +2229,7 @@ def unresolvable_import_errors(source_path: str, module_names) -> str:
     makes the diagnostic a property of the FILE rather than of the order its
     imports happen to be written in. One-at-a-time was the only shape here for
     years, and its measurement is
-    `bugs/FORMAL_admitted_contracts_sweep_measurement.md`: a file importing
+    `“What the admitted contracts did and did NOT move in the sweep”`: a file importing
     `subprocess`, `tempfile` and `glob` was refused for whichever came first in
     its statement list, so which module the diagnostic — and any census built
     from it — named changed when an unrelated import was added anywhere in the

@@ -340,7 +340,7 @@ Full quality gate: `test_gimple.py` 248/248, `test_module_cache.py`
 0 skipped (baseline via a separate `git worktree add` checkout at the
 pre-fix commit: also 0 skipped), `compile_stdlib.py -j8` 664/664 clean
 — all pass, no regression. Spot-checked
-`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`'s
+`CODEGEN_same_bare_name_struct_collision_across_modules`'s
 own two real-world triggers (`Lib/tkinter/filedialog.py`,
 `Lib/tkinter/simpledialog.py`) still build clean (unaffected, as
 expected — they go through link mode, not this inline-path mechanism).
@@ -415,7 +415,7 @@ on the first one, concrete blockers found on both:
    applies to every free function in every merged module) — which is
    the same class of foundational, shared bare-name-collision machinery
    already documented and deliberately deprioritized for **structs** in
-   `bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`.
+   `CODEGEN_same_bare_name_struct_collision_across_modules`.
    That doc currently asserts the bug is "structurally unreachable"
    through `fire.py build`'s primary (link-mode) path and only reachable
    via the inline fallback or `--dump-full`; this file is a **live,

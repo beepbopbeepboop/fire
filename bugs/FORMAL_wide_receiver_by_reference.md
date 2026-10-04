@@ -1586,14 +1586,17 @@ Two boundaries, and the first one is a gap in the round's partitioning:
 
 * **`formal/build.py` is in nobody's write set** and is not in §11.2's
   "Deliberately unowned" list. It is also the file that raises the refusal
-  (`:2423`), so all 18 findings are gated on a line nobody may edit.
-  `bugs/INTERFACE_REQUEST_4_to_formal_build.md` asks the integrator to assign
-  it and states the exact removal.
+  (`:2423`), so all 18 findings were gated on a line nobody could edit. The
+  request that asked the integrator to assign it, and stated the exact removal,
+  is deleted with its fix — see the Round 3 correction below.
 * **The proof-side obligation** is a `lib/Refine.lean` predicate — a callee
   contract variant that carves out the passed-in block rather than the receiver
-  frame, the same additive move as `FrameOk_except`. That is [3]'s file;
-  `bugs/INTERFACE_REQUEST_4_to_3_contracts.md` states the shape the codegen
-  will be written against, so the emitters and the theorem cannot disagree.
+  frame, the same additive move as `FrameOk_except`. **That predicate now
+  exists**: `FrameOk_into` and `ReturnsBlockInto` in `lib/Refine.lean` §4c, with
+  the two shape decisions recorded there (the clause is about 8-byte WORDS, and
+  the recovery of the plain `FrameOk` is one-directional because the new clause
+  is not implied by it). The request that asked for the shape is deleted with
+  its answer, so the emitters and the theorem cannot disagree.
 
 ### What is landed, and what it is worth
 
@@ -1758,11 +1761,11 @@ as long as only one of them was reachable.
 ## Round 3: the codegen landed, and the measured effect was ZERO files reaching `pass`
 
 The section above is the design; this is what happened when it was built.
-`bugs/FORMAL_returned_frame_caller_owned_block.md` has the diff-shaped account —
-the three decisions, the two bugs the new code contained, and the per-file
-landing table for the 30 sweep files this cause blocked. Three things belong
-here because they correct or complete statements above rather than replace
-them.
+The account of that landing — the three decisions, the two bugs the new code
+contained, and the per-file table for the 30 sweep files this cause blocked —
+was kept in a doc of its own, which is deleted with its fix; git history carries
+it. Three things belong here because they correct or complete statements above
+rather than replace them.
 
 **"Why this is blocked, and it is not on the Lean side" is no longer true of
 the first bullet.** `formal/build.py` had an owner by the time this landed and
@@ -1770,9 +1773,9 @@ the gate came down: the returned frame is now built in a block the CALLER owns,
 passed as one hidden trailing argument, and the 19 `returned by its creator`
 findings are **zero**.
 
-**The block is built IN, not copied into.** Round 2 and
-`bugs/INTERFACE_REQUEST_4_to_3_contracts.md` both say the copy, and both are
-superseded on that one point. A construction inside the returning function
+**The block is built IN, not copied into.** Round 2 and the interface request
+(which is deleted with its answer, in `lib/Refine.lean` §4d) both say the copy,
+and both are superseded on that one point. A construction inside the returning function
 writes through the hidden word instead, which removes the one thing that made
 the copy expensive — re-basing the ADDRESS of every nested frame in the block,
 at every depth, into the new block. The convention is otherwise identical: same
@@ -1921,5 +1924,5 @@ failing on x86-64 and are now reported on arm64, because arm64 now gets past
 the layout and read wall this round fixed and reaches the pre-existing
 returned-frame fault underneath it. Neither number changed, so this is not a
 regression and not a fix; it is the returned-frame convention
-(`bugs/FORMAL_returned_frame_caller_owned_block.md`) being the next thing in
+(`“FORMAL_returned_frame_caller_owned_block: `return <frame>` lowers”`) being the next thing in
 the chain, and these two rows are where it will show up first.

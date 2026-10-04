@@ -26,7 +26,7 @@ at `Lib/importlib/resources/_common.py:105`'s
 `itertools.filterfalse(...)`. That builtin has no lowering at all, so the
 operand's type is unmodelled and `next()` over it has no honest answer.
 Root-caused to six lines and filed as
-`CODEGEN_itertools_filterfalse_has_no_lowering.md`, which also records the
+the `itertools.filterfalse`-has-no-lowering gap, which also records the
 two measurements that show the refusal's *diagnosis* is misleading — the
 builtin `filter` IS modelled and `next(it)` over its result already works,
 as does `next(iter(it))` — and the trap that makes "just support
@@ -158,7 +158,7 @@ into a C symbol prefix and omitted the `lstrip('.')` the other four already
 had (`funcs_shared.py:376`, `:602`, `:830`, and `_compile_imported_module`'s
 `_module_key` in `emit_resolve.py`). The same class was already found and
 fixed for the STRUCT side at `funcs_shared.py:830`
-(`bugs/CODEGEN_link_mode_from_submodule_import_symbol_value_call_segfault.md`);
+(`“CODEGEN (link-mode): `from SUBMODULE import SYMBOL`, symbol bound to a”`);
 this was that same fix simply missed on the free-function side. The comment
 immediately below the fixed line states the requirement the old code
 violated: "the qualifier half and suffix half of one mangled symbol always
@@ -598,7 +598,7 @@ MultiplexedPath(*filter(bool, map(self._resolve, namespace_path)))`.
 
 Root-caused: this is a confirmed real-world instance of the
 already-documented hard bug
-`bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md` (which
+`“the constructor-call-site field-typing pass understood only scalars”` (which
 supersedes the removed
 `CODEGEN_unannotated_init_param_field_type_defaults_int64.md`)
 — `__init__(self, namespace_path)`'s unannotated `namespace_path`

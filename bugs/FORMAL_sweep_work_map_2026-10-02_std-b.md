@@ -122,7 +122,7 @@ whether the row is work or a dependency. Measured by
 
 | files | in-file | cause | terminal module | next step |
 |---|---|---|---|---|
-| 32 | 0 | `binary_heap.mojo` exports nothing (only the generic template `BinaryHeap`) | `std/collections/binary_heap.mojo` | **nothing — measured ceiling 0 for this slice, see §5.** `bugs/FORMAL_dylib_export_gate_ceiling.md` owns the decision not to change the export rule; `bugs/FORMAL_module_exports_nothing.md` says the refusal itself is true |
+| 32 | 0 | `binary_heap.mojo` exports nothing (only the generic template `BinaryHeap`) | `std/collections/binary_heap.mojo` | **nothing — measured ceiling 0 for this slice, see §5.** `“FORMAL_dylib_export_gate_ceiling: the 38-file row is not 38 problems”` owns the decision not to change the export rule; `FORMAL_module_exports_nothing` says the refusal itself is true |
 | 3 | 0 | `StridedSlice___init__` returns a frame address, so it cannot go into a dylib | `std/builtin/builtin_slice.mojo` | fix (a) reached it. A dylib importer binds the symbol and cannot reserve the block the object must be built in, so the open question is whether a ONE-FIELD struct needs a caller-owned block at all — it is one word, and the word is its field. `test_formal_returned_frame.py` is the account of the convention and of what it does not cover |
 | 1 | 0 | `__mlir_op` is an MLIR dialect construct | `std/sys/_assembly.mojo` | documented true limit (`bugs/FORMAL_known_limits.md` §1.1); nothing to do |
 | 1 | 1 | `value.write_repr_to()` — a method call on a **generic parameter's** value | `std/format/repr.mojo` | §6 |
@@ -132,7 +132,7 @@ whether the row is work or a dependency. Measured by
 
 The 32-file row is a property of the import graph, not of any of these 40 files,
 so the next question is what a file lands on once the gate stops firing. Run P
-answers it exactly as `bugs/FORMAL_dylib_export_gate_ceiling.md` §7 describes: a
+answers it exactly as `“FORMAL_dylib_export_gate_ceiling: the 38-file row is not 38 problems”` §7 describes: a
 copy of the stdlib at `.tmp/std_b_patched` with ONE public declaration appended to
 `binary_heap.mojo` (`def binary_heap_export_probe() -> Int: return 0` — a probe,
 **not** a proposed stdlib change), reached through `MOJO_STDLIB`, with an
@@ -203,7 +203,7 @@ slice's to claim.
   the wall between fix (c) and `env.mojo`'s real spelling
   (`OptionalPointer[UInt8, ImmUntrackedOrigin]`): a type application is refused
   earlier, as a subscript whose index is a tuple. It is
-  `bugs/FORMAL_external_call_a_multiparameter_type_in_the_bracket.md`, claimed by
+  `FORMAL_external_call_a_multiparameter_type_in_the_bracket`, claimed by
   `formal3-3-r2`, and its §"Next step" already says what the fix is. Two rows of
   `test_formal_external_call.py` are sitting on it (`env_round_trip` and
   `a_nested_bracket_in_the_type_argument_is_not_a_tuple_index`); both fail before
@@ -224,7 +224,7 @@ slice's to claim.
   `~/.gmojo/cas/formal-imports/arm64/` and its manifests. The write is atomic now
   (`formal/build.py`'s `_write_json_atomic`: private temp + fsync + `os.replace`,
   measured 0 torn reads in 12792 after the fix), so the failure mode is not
-  corruption — but `bugs/FORMAL_sweep_tool_json_decode_error.md` is the history of
+  corruption — but `FORMAL_sweep_tool_json_decode_error` is the history of
   what it was, and a verdict read while another sweep is still building a dylib is
   a verdict about a half-built library.
 * **`GMOJO_HOME` is the whole isolation.** `formal/build.py` derives the dylib
@@ -242,6 +242,6 @@ slice's to claim.
   `std/math/math.mojo` alone is minutes. Run it in the background and do
   something else.
 * `std/python/bindings.mojo` builds from other workers' trees were still running
-  at 14+ hours when this ran. `bugs/FORMAL_sweep_killed.md` records that file as
+  at 14+ hours when this ran. `FORMAL_sweep_killed` records that file as
   a build that does not terminate at a flat 0.06 GB. They hold CPU and nothing in
   this slice.

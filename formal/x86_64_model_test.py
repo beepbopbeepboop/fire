@@ -29,8 +29,10 @@ Exit: 0 iff every example agrees.
 
 import glob
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

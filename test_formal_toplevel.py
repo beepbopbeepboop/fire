@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """test_formal_toplevel.py — a module's top-level statements RUN.
 
-`bugs/FORMAL_toplevel_statements_dropped.md` was a SILENT miscompile, and the
+`FORMAL_toplevel_statements_dropped` was a SILENT miscompile, and the
 word that matters is silent. A file whose whole body is
 
     import sys

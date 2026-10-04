@@ -49,7 +49,7 @@ protecting, and they are not the same thing:
    declares), and the section below pins it: a `uses` column that is always 0,
    that matches substrings, or that reports "I could not find the module" as a
    measured 0, is worse than no column. Measured ceilings, both 0 files:
-   `bugs/FORMAL_dylib_export_gate_ceiling.md`.
+   `“FORMAL_dylib_export_gate_ceiling: the 38-file row is not 38 problems”`.
 
 Run:  python3 test_refusal_taxonomy.py
 """

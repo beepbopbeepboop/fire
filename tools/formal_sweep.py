@@ -538,7 +538,7 @@ CAUSE_MEMORY = "memory-killed"
 # backend — and were PUBLISHED to the CAS, so a machine fact survived the run
 # that observed it. The files are not memory hogs: `bit/mask.mojo`, one of the
 # six, builds in 0.1 GB and is refused for a real reason in three minutes.
-# bugs/FORMAL_sweep_memcap_death_is_filed_as_codegen.md.
+# FORMAL_sweep_memcap_death_is_filed_as_codegen.
 CAUSE_WRAPPER_DIED = "wrapper-died"
 # The image BUILDS, but this host cannot check whether its imports resolve.
 # Not a finding about the image and not a fact about the target: it is a gap in
@@ -630,7 +630,7 @@ _IMPORT_RE = re.compile(r"imports '([^']+)'")
 # cannot read it: `mods[-1]` below is right for a CHAIN (the innermost import is
 # the one with no source) and wrong for this shape, where every name is at the
 # SAME level and the last one is whatever sorted last. That is the measurement in
-# `bugs/FORMAL_admitted_contracts_sweep_measurement.md` — a per-module
+# `“What the admitted contracts did and did NOT move in the sweep”` — a per-module
 # breakdown drawn from a diagnostic that named one of a file's blockers decided
 # by the order its imports are written in.
 #
@@ -2438,7 +2438,7 @@ def _exports(path: str, name: str, static: bool = False):
     The sweep then reported a load failure for an image that loads: measured on
     `formal/hostmods/os/__init__.mojo` and `formal/hostmods/os/path/__init__.mojo`,
     both classified `unresolved-extern` on a build that links and runs. See
-    `bugs/FORMAL_relative_submodule_abi_prefix_off_by_one.md`. A dylib's name is
+    `FORMAL_relative_submodule_abi_prefix_off_by_one`. A dylib's name is
     therefore still not normalised, and the static arm still applies exactly the
     one mapping that IS correct on macOS (`_macho_symbol`).
 
@@ -2917,7 +2917,7 @@ def run_one(path, timeout, flags, mem_gb=MEMCAP_GB, population=None) -> Verdict:
                 # The signal is NAMED, read off the wrapper's own exit status,
                 # because "what killed the wrapper" used to be an open question
                 # for exactly this state (six files per architecture, 2026-10-02,
-                # `bugs/FORMAL_sweep_memcap_death_is_filed_as_codegen.md`) and an
+                # `FORMAL_sweep_memcap_death_is_filed_as_codegen`) and an
                 # exit status answers it without anybody reproducing it. memcap
                 # handles SIGTERM and SIGINT (it reports `interrupted`, kills its
                 # tree and exits 130/143), so the only signal that can leave this

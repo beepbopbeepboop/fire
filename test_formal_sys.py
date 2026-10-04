@@ -44,7 +44,7 @@ part that makes it a module:
      is not evidence about the module case: they are separate compilations,
      and half a dozen files in this tree still carry a comment saying a `\t`
      in a `.mojo` file is two characters because it used to be. That was
-     `bugs/FORMAL_sys_mojos_escape_note_is_stale.md`, whose consequence was to
+     `FORMAL_sys_mojos_escape_note_is_stale`, whose consequence was to
      check those corpora; 10 says the check's answer, on both architectures.
 
 Invoked directly:
@@ -388,7 +388,7 @@ def test_the_python_spelling_runs(tmp, _shared):
     (`codesign`: "main executable failed strict validation"), so no program
     linking `sys` can be built for that target at all. That is a pre-existing
     defect with a two-line reproduction and it is filed as
-    bugs/FORMAL_x86_64_dylib_externs_unsigned.md; the cross-architecture half
+    FORMAL_x86_64_dylib_externs_unsigned; the cross-architecture half
     of the contract is checked by
     `test_the_dotted_spelling_runs_on_both_backends` below, with a module that
     makes no extern calls.
@@ -447,7 +447,7 @@ def test_a_module_can_call_another_module(tmp, _shared):
 
     arm64, for the reason in `test_the_python_spelling_runs`: a dylib with a
     dependency cannot be codesigned for x86-64 on this host
-    (bugs/FORMAL_x86_64_dylib_externs_unsigned.md).
+    (FORMAL_x86_64_dylib_externs_unsigned).
     """
     root = workdir(tmp, "chain")
     for name, text in (("leafy", LEAFY), ("midy", MIDY)):

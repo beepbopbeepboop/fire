@@ -303,7 +303,7 @@ code change; doc stays open.
 
 This session implemented real loop-as-expression codegen for `list(x)`/
 `set(x)`/comprehension-as-value inside a compiled generator/coroutine
-body (see `bugs/CODEGEN_generator_function_Lib_codecs.md`'s entry of the
+body (see `“CODEGEN_generator_function: Lib/codecs.py”`'s entry of the
 same date for the implementation writeup). This file's three
 `__reversed__` refusals are all `reversed(...)` used as a plain builtin
 CALL (producing a value), not a `list()`/`set()`/comprehension shape —
@@ -555,7 +555,7 @@ This is a plain instance of the already-documented, already-structural
 promise design only supports a single scalar `int64_t`/`double`/`_Bool`
 yield type; `_infer_generator_yield_ctype` deliberately returns `None`
 for a `TupleExpr` yield value). Not narrow, not attempted here — same
-class of gap as `bugs/COMPILE_FAIL_asyncio_futures.md`'s
+class of gap as `“COMPILE_FAIL: asyncio/futures.py”`'s
 value-carrying-`return` refusal (both are "the coroutine promise type
 can't represent this value shape" gaps in the same shared machinery).
 `_OrderedDictKeysView.__reversed__` (`yield from reversed(...)`) and

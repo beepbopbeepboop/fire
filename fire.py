@@ -924,7 +924,8 @@ def build_executable(input_file: str, src: str, output: str = None,
             py_ldflags += ['-Wl,-z,stacksize=536870912']
 
         # Optional runtime units (build_config's registry -- see
-        # bugs/CODEGEN_optional_runtime_units_not_linked.md). runtime/ holds
+        # build_config.py's own header, where the bug is described).
+        # runtime/ holds
         # six C units and only fire_runtime.c was in a build path, while the
         # headers of the other four are `#include`d into EVERY generated TU
         # (module_gen.py's preamble) and all their signatures sit in

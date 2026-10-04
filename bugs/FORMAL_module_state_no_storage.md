@@ -73,7 +73,7 @@ buffer. Both halves of that are right and neither is the wall:
 
   * **The call is refused on this path, by name.** `_NSGetExecutablePath` begins
     with `_`, so it cannot be bound as a callee — the defect
-    `bugs/FORMAL_libc_call_whose_name_starts_with_an_underscore.md` is about, and
+    `FORMAL_libc_call_whose_name_starts_with_an_underscore` is about, and
     `os/_syscalls.mojo`'s `fs_environ_vec` is how this tree gets round it:
     `dlopen(0, 0)` and `dlsym` at RUN time. That spelling DEREFERENCES the symbol
     (`environ` is a data symbol, so two loads answer it) and this is the only
@@ -729,7 +729,7 @@ the field claims nothing, and two constructions that disagree claim nothing.
 
 ### And the stale row this file's owner had to decide
 
-A `bugs/TEST_a_mutated_module_global_is_refused_is_stale_after_the_slot_landed.md`
+A `TEST_a_mutated_module_global_is_refused_is_stale_after_the_slot_landed`
 doc (now deleted, with this section as its record) noted that `test_formal_run.py`'s
 `a_mutated_module_global_is_refused` still
 asserted a refusal the backend stopped owing when `formal-module-globals` gave a
@@ -953,7 +953,7 @@ so at each definition, names what it cannot do and why, and cites this document.
 ## What moved, measured, so nobody has to re-derive it
 
 All fourteen files the sweep listed for `sys` at the start, swept from a CLEARED
-CAS (see `bugs/FORMAL_sweep_cache_ignores_imports.md` for why that matters),
+CAS (see `FORMAL_sweep_cache_ignores_imports` for why that matters),
 `python3 tools/formal_sweep.py --no-stdlib <the fourteen>`:
 
 | file | class before | class after | what stops it now |

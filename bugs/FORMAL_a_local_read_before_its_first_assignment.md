@@ -101,7 +101,7 @@ filing's program.
 
 The list above is the one the filing measured, and it is missing the class that
 `read_before_store` itself walked into while fixing `with … as y:` — see
-`bugs/FORMAL_arm64_slice_concat_and_with_refusal.md` §1 and commit 07b724f2.
+`FORMAL_arm64_slice_concat_and_with_refusal` §1 and commit 07b724f2.
 
 A **`with … as y:` alias** is a binding that happens before the value the body
 sees, exactly like a `for` target, and the read-before-store walk added it to

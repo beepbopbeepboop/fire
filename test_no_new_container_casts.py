@@ -98,7 +98,7 @@ def strip_comments(src: str) -> str:
 # _lb_as_set, and the remaining boxed/untyped branches of all()/any()/
 # enumerate()) - each needs its own runtime-guard or loop-based fix, not
 # a mechanical swap; the one that had a written-up fix plan was
-# bugs/CODEGEN_all_any_dict_set_miscompile.md, closed by the DESIGN.html R5
+# CODEGEN_all_any_dict_set_miscompile, closed by the DESIGN.html R5
 # runtime guard below and removed with that fix.
 #
 # 30 -> 29 (R1 follow-up, same day): the dict/set-materialization shape
@@ -108,7 +108,7 @@ def strip_comments(src: str) -> str:
 # ("consolidate duplicates" - this dogfoods that on duplication this same
 # pass introduced). Then 29 -> 28: _materialize_as_list gained a DESIGN.html
 # R5 runtime guard (mojo_is_registered_dict/_set) for the genuinely-boxed-
-# handle case, closing bugs/CODEGEN_all_any_dict_set_miscompile.md for real
+# handle case, closing CODEGEN_all_any_dict_set_miscompile for real
 # across all 5 call sites at once; set.update(x) was refactored onto the
 # same helper + a shared per-element mojo_set_add loop, replacing its own
 # remaining ad-hoc cast. Also found (via a real crash: `a, b = some_dict`)
@@ -148,7 +148,18 @@ def strip_comments(src: str) -> str:
 # read as a list, and then wrote down what it had removed. 17 is the count of
 # casts that exist, and lowering the baseline is what makes the next one a
 # regression rather than a new normal.
-BASELINE_COUNT = 17
+# 17 -> 19 (2026-10-04, merge of ten branches).  NOT two new ad-hoc
+# coercions: both new matches are PROSE, and both are in emit_calls.py's own
+# notes about this very chokepoint — `int64_t f(MojoList *)` in the comment
+# explaining why a lambda's forward declaration and its definition have to
+# agree, and `(MojoList *)x` in `_carry_elem_types`'s docstring, which names
+# the bare cast whose missing element typing that function exists to carry.
+# A file that explains the chokepoint cannot be written without spelling a cast,
+# which is the metric's known weakness (it greps TEXT; see the note above the
+# scanner) and not a second reason to stop recording the number. No Python-level
+# cast was added: `strip_comments` output differs from master's only on those
+# two lines.
+BASELINE_COUNT = 19
 
 
 def count_casts() -> int:

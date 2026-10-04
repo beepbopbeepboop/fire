@@ -191,6 +191,35 @@ static inline int64_t mojo_bound_method_call_8(MojoBoundMethod *bm, int64_t _a0,
     return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))bm->fn)(bm->self, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
 }
 
+/* The `double`-returning twin of each `mojo_bound_method_call_N`, for the
+ * same reason `mojo_fnptr_call_dN` exists (see its own comment above): a
+ * callee whose real return type is `double` comes back in an SSE register,
+ * so calling it through the `int64_t` signature above reads whatever the ABI
+ * left in the general-purpose one. `mojo_fnptr_call_dN`'s bound-method arm
+ * used to call `mojo_bound_method_call_N` and cast the result, so it read
+ * that same garbage register while the plain-function arm beside it — the one
+ * the comment there describes measuring and fixing — was exact. A CAPTURING
+ * lambda is a bound method by construction (its `mojo_bound_method_new`
+ * materialization is the only producer), so `def outer(): s = 9.5; return
+ * (lambda: s)` then `outer()()` printed a pointer-shaped decimal where the
+ * same factory at module scope, whose lambda is a bare `_funcptr_` and so
+ * took the plain arm, printed `9.5`. */
+static inline double mojo_bound_method_call_d0(MojoBoundMethod *bm) {
+    return ((double (*)(void *))bm->fn)(bm->self);
+}
+static inline double mojo_bound_method_call_d1(MojoBoundMethod *bm, int64_t a) {
+    return ((double (*)(void *, int64_t))bm->fn)(bm->self, a);
+}
+static inline double mojo_bound_method_call_d2(MojoBoundMethod *bm, int64_t a, int64_t b) {
+    return ((double (*)(void *, int64_t, int64_t))bm->fn)(bm->self, a, b);
+}
+static inline double mojo_bound_method_call_d3(MojoBoundMethod *bm, int64_t a, int64_t b, int64_t c) {
+    return ((double (*)(void *, int64_t, int64_t, int64_t))bm->fn)(bm->self, a, b, c);
+}
+static inline double mojo_bound_method_call_d4(MojoBoundMethod *bm, int64_t a, int64_t b, int64_t c, int64_t d) {
+    return ((double (*)(void *, int64_t, int64_t, int64_t, int64_t))bm->fn)(bm->self, a, b, c, d);
+}
+
 
 
 
@@ -332,23 +361,23 @@ static inline int64_t mojo_fnptr_call_kw_8(void *fp, void *kw, int64_t _a0, int6
  * The codegen picks them only when it knows the callee returns a double —
  * see `_lower_fnptr_call_value`. */
 static inline double mojo_fnptr_call_d0(void *fp) {
-    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_0((MojoBoundMethod *)fp);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_d0((MojoBoundMethod *)fp);
     return ((double (*)(void))fp)();
 }
 static inline double mojo_fnptr_call_d1(void *fp, int64_t a) {
-    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_1((MojoBoundMethod *)fp, a);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_d1((MojoBoundMethod *)fp, a);
     return ((double (*)(int64_t))fp)(a);
 }
 static inline double mojo_fnptr_call_d2(void *fp, int64_t a, int64_t b) {
-    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_2((MojoBoundMethod *)fp, a, b);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_d2((MojoBoundMethod *)fp, a, b);
     return ((double (*)(int64_t, int64_t))fp)(a, b);
 }
 static inline double mojo_fnptr_call_d3(void *fp, int64_t a, int64_t b, int64_t c) {
-    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_3((MojoBoundMethod *)fp, a, b, c);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_d3((MojoBoundMethod *)fp, a, b, c);
     return ((double (*)(int64_t, int64_t, int64_t))fp)(a, b, c);
 }
 static inline double mojo_fnptr_call_d4(void *fp, int64_t a, int64_t b, int64_t c, int64_t d) {
-    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_4((MojoBoundMethod *)fp, a, b, c, d);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_d4((MojoBoundMethod *)fp, a, b, c, d);
     return ((double (*)(int64_t, int64_t, int64_t, int64_t))fp)(a, b, c, d);
 }
 
@@ -607,6 +636,19 @@ int mojo_boxed_is_str(int64_t v);
 int mojo_is_registered_dict(int64_t addr);
 /* Set-shaped sibling of the list/dict registries — see mojo_set_new. */
 int mojo_is_registered_set(int64_t addr);
+/* `list(<a str>)`: one fresh 1-character string per byte — the element type
+ * Python's own `for c in s` binds, and what the codegen's string loop
+ * (emit_loops.py's `_gen_for_str`) builds with mojo_strlen +
+ * mojo_cstr_slice. Byte-wise because that loop is; a code-point-wise split
+ * would make the two spellings of the same iteration disagree. */
+MojoList *mojo_str_chars(char *s);
+/* The MojoList* view of a value whose container KIND is a runtime fact, for
+ * a caller that has already ruled out the three registered container kinds:
+ * a boxed STRING becomes its characters, and anything else raises
+ * `TypeError: object is not iterable` (it used to become an empty list, so
+ * `list(5)` printed `[]` and a loop body silently never ran). CPython names
+ * the offending type here and this cannot — see the definition. */
+MojoList *mojo_iter_boxed_list(int64_t v);
 /* `x in <boxed container>`: resolves list/dict/set at runtime instead of
  * the old hardcoded-false fallback. See mojo_in_dispatch_str's definition. */
 int mojo_in_dispatch_str(int64_t container, char *needle);
@@ -749,7 +791,12 @@ int         mojo_str_eq(MojoStr *a, MojoStr *b);
 char        mojo_str_char_at(MojoStr *s, int64_t i);
 void        mojo_str_print(MojoStr *s);
 char       *mojo_char_to_str(char c);
-char       *mojo_char_at_str(char *s, int64_t i);   /* s[i] as a 1-char str */
+/* `s[i]` on a plain `char *` str, answered from the shared immortal table
+ * instead of a fresh two-byte malloc, with the same bounds semantics as
+ * `mojo_cstr_slice(s, i, i + 1)` it replaced: a negative index resolves against
+ * the length, and an index at or past the end is "". NOT the caller's to free —
+ * see mojo_char_at_str's own comment in fire_runtime.c. */
+char       *mojo_char_at_str(char *s, int64_t i);
 int64_t     mojo_ord(char *s);
 char       *mojo_chr(int64_t code);
 
@@ -1086,8 +1133,16 @@ typedef struct {
                      * %-formatting): 0 = plain int64_t, 1 = double bit-cast,
                      * 2 = char * pointer, 3 = a Python bool (0/1, which is
                      * the same int64_t as case 0 and so is only separable
-                     * because the tag is per SLOT). Maintained by the typed
-                     * setters below; zero-defaulted everywhere else. */
+                     * because the tag is per SLOT), 4 = a Python `None`
+                     * (also int64_t 0, same reason), 5 = a boxed STRUCT
+                     * pointer, which the dict renders with the repr function
+                     * `val_repr` records on itself (see
+                     * mojo_dict_set_val_repr — a struct-allocated value has no
+                     * runtime type tag, so the walker has nothing to dispatch
+                     * on), 6 = a struct of ANOTHER type, which that one
+                     * function cannot describe and which the walker sends to
+                     * the generic dispatch. Maintained by the typed setters
+                     * below; zero-defaulted everywhere else. */
     int64_t  keykind; /* key DOMAIN, since every key is stored as its own
                      * characters in `key` and matched with strcmp: 0 = a str
                      * key, 1 = a bytes key. Keeps `d[b'x']` and `d['x']` the
@@ -1120,6 +1175,22 @@ typedef struct {
     int64_t    cap;
     int64_t    next_seq;
     _DictSlot  inl[MOJO_DICT_INLINE];
+    /* How to render a `kind == 5` value (see _DictSlot.kind). LAST in the
+     * struct so every existing field keeps its offset, and NULL when this dict
+     * holds no struct value, which is every dict whose values are scalars,
+     * strings or containers.
+     *
+     * Why a function pointer on the VALUE, the same bargain
+     * `mojo_list_set_elem_repr` makes and for the same reason: the value's
+     * static type is known where the dict is built and is unrecoverable by
+     * the time anything walks it. `_mojo_dispatch_repr` needs a runtime type
+     * TAG, which a struct-allocated value does not carry (its first word is
+     * its first field), and a global address->type registry would go stale the
+     * moment a frame is reused — handing a later struct at the same address
+     * another struct's repr, and a stale `P *` to the shim below would then be
+     * a wild read, not merely a wrong string. Recorded from the compile-time
+     * type, on the value, it has neither failure mode. */
+    char      *(*val_repr)(int64_t);
 } MojoDict;
 
 MojoDict   *mojo_dict_new(void);
@@ -1162,7 +1233,9 @@ void        mojo_dict_set_int_kw(MojoDict *d, int64_t kw, int64_t v);
 void        mojo_dict_set_double_kw(MojoDict *d, int64_t kw, double v);
 void        mojo_dict_set_str_kw(MojoDict *d, int64_t kw, char *v);
 int         mojo_dict_contains_kw(MojoDict *d, int64_t kw);
-int64_t     mojo_dict_pop_int_kw(MojoDict *d, int64_t kw);
+int64_t     mojo_dict_pop_int_kw(MojoDict *d, int64_t kw, int64_t dflt);
+char       *mojo_dict_pop_str_kw(MojoDict *d, int64_t kw, char *dflt);
+double      mojo_dict_pop_double_kw(MojoDict *d, int64_t kw, double dflt);
 int64_t     mojo_dict_setdefault_int_kw(MojoDict *d, int64_t kw, int64_t dflt);
 char       *mojo_dict_setdefault_str_kw(MojoDict *d, int64_t kw, char *dflt);
 void        mojo_dict_set_double(MojoDict *d, char *key, double v);
@@ -1173,6 +1246,26 @@ void        mojo_dict_set_str(MojoDict *d, char *key, char *v);
  * still say True/False. Emitted by codegen wherever the stored expression is a
  * Python bool (see `is_python_bool_expr`). */
 void        mojo_dict_set_bool(MojoDict *d, char *key, int v);
+/* A Python `None` stored as a dict VALUE: also int64_t 0, also only separable
+ * from the integer 0 by the per-slot tag, so it gets its own (`kind == 4`).
+ * Emitted by codegen wherever the stored expression is a bare `None`; without
+ * it every plain `0` in a dict printed as `None`, because the generic value
+ * repr answers "None" for a zero word. */
+void        mojo_dict_set_none(MojoDict *d, char *key);
+
+/* A STRUCT stored as a dict VALUE: the boxed pointer, tagged `kind == 5` so
+ * the dict's repr asks `mojo_dict_repr_val` instead of dispatching on a type
+ * tag this value does not have. `mojo_dict_set_val_repr` records the function
+ * that answers, and is called by the same store — one setter for the value,
+ * one record for how to render it, both decided at the store site where the
+ * type is still readable. */
+void        mojo_dict_set_struct(MojoDict *d, char *key, void *obj);
+/* A struct of a DIFFERENT type than the one `mojo_dict_set_val_repr` was given
+ * (kind 6), so the walker sends this slot to the generic dispatch while the
+ * kind-5 slots go to the recorded function. */
+void        mojo_dict_set_other_struct(MojoDict *d, char *key, void *obj);
+void        mojo_dict_set_val_repr(MojoDict *d, void *fn);
+char       *mojo_dict_repr_val(MojoDict *d, int64_t v);
 
 int64_t     mojo_dict_get_int(MojoDict *d, char *key);
 double      mojo_dict_get_double(MojoDict *d, char *key);
@@ -1184,7 +1277,16 @@ MojoList   *mojo_dict_values(MojoDict *d);
 MojoList   *mojo_dict_items(MojoDict *d);
 MojoList   *mojo_dict_items_int(MojoDict *d);
 void        mojo_dict_update(MojoDict *dst, MojoDict *src);
-int64_t     mojo_dict_pop_int(MojoDict *d, char *key);
+/* `d.pop(k[, default])` on a str-keyed dict. Three value domains off ONE
+ * int64_t slot, and a MISS answers `dflt` rather than 0: only the int spelling
+ * existed, so a str-valued dict popped its value as a raw pointer decimal and no
+ * default could be expressed at all (bugs/
+ * CODEGEN_dict_pop_default_ignored_on_a_miss.md,
+ * bugs/CODEGEN_dict_value_accessor_guessed_from_the_default.md). The no-default
+ * spelling passes the domain's own absent value (0 / NULL / 0.0). */
+int64_t     mojo_dict_pop_int(MojoDict *d, char *key, int64_t dflt);
+char       *mojo_dict_pop_str(MojoDict *d, char *key, char *dflt);
+double      mojo_dict_pop_double(MojoDict *d, char *key, double dflt);
 MojoDict   *mojo_dict_copy(MojoDict *d);
 MojoDict   *mojo_dict_union(MojoDict *a, MojoDict *b);  /* a | b */
 MojoDict   *mojo_dict_from_pairs(MojoList *pairs);  /* dict(list_of_pairs) */
@@ -1267,6 +1369,18 @@ void        mojo_raise_type_error(char *detail);
  * (mojo_bytes_partition's empty separator). */
 void        mojo_raise_value_error(char *detail);
 void        mojo_raise_index_error(char *detail);
+/* Raises a real, catchable NotImplementedError for `detail` — the sixth typed
+ * raiser, same mechanism and same tag derivation as the five above. */
+void        mojo_raise_not_implemented(char *detail);
+/* The codegen's half of that decision, for the ONE case where a silent answer
+ * is the wrong one: a call on a module this compile never compiled
+ * (`import argparse` + `argparse.ArgumentParser(...)`). That used to answer
+ * with the receiver unchanged, so every method on it echoed a module marker
+ * back and the program computed with a parser that is not a parser until an
+ * unrelated attribute read died naming an attribute of a class the program
+ * never built. Raises at the CALL, which is where it becomes true and is
+ * catchable. See mojo_module_not_compiled's own comment in fire_runtime.c. */
+void        mojo_module_not_compiled(char *module, char *member);
 /* Runtime %-style string formatting with a DYNAMIC (non-literal) template:
  *
  *   char *out = mojo_str_format_dict("usage: %(prog)s v%(ver)d", d);
@@ -1297,6 +1411,11 @@ void        mojo_dict_set_bytes_int(MojoDict *d, MojoBytes *key, int64_t v);
 void        mojo_dict_set_bytes_str(MojoDict *d, MojoBytes *key, char *v);
 /* The bytes-key twin of mojo_dict_set_bool. */
 void        mojo_dict_set_bytes_bool(MojoDict *d, MojoBytes *key, int v);
+/* ...and of mojo_dict_set_none. */
+void        mojo_dict_set_bytes_none(MojoDict *d, MojoBytes *key);
+/* ...and of mojo_dict_set_struct: same `kind == 5`, same recorded repr. */
+void        mojo_dict_set_bytes_struct(MojoDict *d, MojoBytes *key, void *obj);
+void        mojo_dict_set_bytes_other_struct(MojoDict *d, MojoBytes *key, void *obj);
 int64_t     mojo_dict_get_bytes_int(MojoDict *d, MojoBytes *key);
 char       *mojo_dict_get_bytes_str(MojoDict *d, MojoBytes *key);
 double      mojo_dict_get_bytes_double(MojoDict *d, MojoBytes *key);
@@ -1304,11 +1423,11 @@ int         mojo_dict_contains_bytes(MojoDict *d, MojoBytes *key);
 int64_t     mojo_dict_setdefault_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt);
 int64_t     mojo_dict_pop_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt);
 /* str/double siblings of pop_bytes_int — same domain, read back as their own
- * type. A MISSING key pops nothing and yields 0/NULL/0.0 (the absent-box
- * convention mojo_dict_get_* already uses; Python's KeyError is not
- * modelled). */
-char       *mojo_dict_pop_bytes_str(MojoDict *d, MojoBytes *key);
-double      mojo_dict_pop_bytes_double(MojoDict *d, MojoBytes *key);
+ * type, and a MISSING key answers the `dflt` the source wrote (the no-default
+ * spelling passes 0 / NULL / 0.0, the absent-box convention mojo_dict_get_*
+ * already uses; Python's KeyError is not modelled). */
+char       *mojo_dict_pop_bytes_str(MojoDict *d, MojoBytes *key, char *dflt);
+double      mojo_dict_pop_bytes_double(MojoDict *d, MojoBytes *key, double dflt);
 void        mojo_dict_print(MojoDict *d);
 int64_t     mojo_dict_len(MojoDict *d);
 
@@ -1325,6 +1444,11 @@ MojoDictIter  *mojo_dict_iter_new(MojoDict *d);
 int            mojo_dict_iter_next(MojoDictIter *it);     /* 1=has entry, 0=done */
 char *mojo_dict_iter_key(MojoDictIter *it);
 char *mojo_dict_slot_key(MojoDict *d, int64_t i);
+/* The double twin of that one: the emitted dict repr walks slots by index and
+ * a double slot's bits are a pointer-shaped word, so reading one back as an
+ * int64_t and handing it to the generic element reader SIGSEGV'd. See
+ * mojo_dict_slot_double's own comment in fire_runtime.c. */
+double mojo_dict_slot_double(MojoDict *d, int64_t i);
 int64_t mojo_dict_iter_key_int(MojoDictIter *it);
 int64_t        mojo_dict_iter_val_int(MojoDictIter *it);
 double         mojo_dict_iter_val_double(MojoDictIter *it);
@@ -1546,7 +1670,18 @@ int mojo_getattr(int obj, char *attr);
 void mojo_setattr(void *obj, char *attr, int64_t val);
 void mojo_delattr(void *obj, char *attr);
 char *mojo_str_cat(char *a, char *b);
+/* `mojo_str_cat` with `a` (which the caller owns) released. Declared here
+ * rather than kept file-local because the repr walkers the CODEGEN emits into
+ * every generated program are the same N-cat chain and were leaking the same
+ * N-1 buffers per printed container; see mojo_str_cat_free's own comment in
+ * fire_runtime.c. `b` is untouched, so a shared static on the right is safe. */
+char *mojo_str_cat_free(char *a, char *b);
 char *mojo_str_from_int(int64_t v);
+/* `printf` a pointer through a caller-owned format — the `<function f at
+ * 0x...>` spelling `print(f)` needs, because a function value is a `void *`
+ * and `TypeLattice.printf_fmt` has no format for one. See
+ * mojo_sprintf_ptr's own comment in fire_runtime.c. */
+char *mojo_sprintf_ptr(const char *fmt, void *p);
 /* str(float) for a float dict key — see mojo_str_from_double's own comment in
  * fire_runtime.c for why the key has to be materialized as text at all. */
 char *mojo_str_from_double(double v);

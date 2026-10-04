@@ -40,7 +40,7 @@ and the module's own header said why, in two halves that were both wrong:
 is `dlsym` and not libSystem's own `_NSGetEnviron()` is in that function's
 docstring: a callee whose name begins with `_` cannot be bound on this path,
 because `model.libc_source_name` strips the underscore and macOS's `dlsym` does
-not put it back (`bugs/FORMAL_libc_call_whose_name_starts_with_an_underscore.md`,
+not put it back (`FORMAL_libc_call_whose_name_starts_with_an_underscore`,
 which is a two-one-line fix in the LINKER and therefore not a light change).
 
 **The spelling was the other half**, and it was already written down in the same

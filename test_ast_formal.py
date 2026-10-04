@@ -239,7 +239,7 @@ CASES = list(VERDICTS.items())
 # LEXER even though the escapes in the VALUE are decoded as CPython decodes
 # them (`fire_compiler.decode_c_escapes`), so a literal holding a backslash
 # before a quote can swallow the rest of the file
-# (bugs/CODEGEN_triple_quoted_literal_ending_in_a_backslash_swallows_the_rest_of_the_file.md).
+# (CODEGEN_triple_quoted_literal_ending_in_a_backslash_swallows_the_rest_of_the_file).
 # Both facts are measured, and they are why a source goes in as a chain of joins
 # with the quote runs and the awkward bytes built at RUN time instead of as one
 # literal.

@@ -170,7 +170,7 @@ bound-generator-value calling-convention gap (would need a new
 bound-method-value variant carrying the 4-function coroutine API through
 to a later call site, a real feature addition). The `translate_584a43`
 kwarg-arity issue (same-bare-name cross-module collision family,
-`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`)
+`CODEGEN_same_bare_name_struct_collision_across_modules`)
 remains behind it, unreached. Neither is touched by any recently-landed
 shared mechanism. No change; doc stays open.
 
@@ -647,7 +647,7 @@ produces a real `char *` — hence "assignment to int64_t from char*".
 This is a variant of the already-documented "generator yielded-value
 type inference" gap (`bugs/COMPILE_FAIL_ctypes_macholib_dyld.md`'s
 bullet 1, and the untyped-generator-param cousin in
-`bugs/hard/CODEGEN_generator_struct_typed_param_refused.md`'s sibling
+`CODEGEN_generator_struct_typed_param_refused`'s sibling
 docs) — specifically the FORWARD-REFERENCE angle of it: a generator with
 a `yield from` to a same-file sibling generator defined LATER, combined
 with an earlier plain `yield` of a different concrete type, produces a

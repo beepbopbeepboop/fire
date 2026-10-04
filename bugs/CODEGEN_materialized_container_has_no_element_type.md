@@ -1,6 +1,6 @@
 # CODEGEN: `list(<a boxed dict>)` reads every key as the decimal of its own address
 
-Found 2026-10-01 while fixing `bugs/CODEGEN_list_of_pairs_iterated_as_dict.md`
+Found 2026-10-01 while fixing `“CODEGEN: `list(x)` of an erased tuple element is an empty list”`
 (removed with that fix). That fix made `list(x)` dispatch an argument whose
 kind is not statically knowable through `_materialize_as_list`, which is the
 right chokepoint and answers list / dict-keys / set correctly **by count and
@@ -87,3 +87,47 @@ rather than per-call-site.
 Not a `list()` problem: `list(<a registered dict>)` is already correct, and
 `list(<a dict through a `MojoDict *`-typed local>)` too. It is specifically a
 value whose container KIND is a runtime fact.
+
+## Status (2026-10-02, `work/bugs4-3-c`) — the CONSUMER half of this fix already exists; only the producer half is missing
+
+Re-measured on this tree, unchanged: `print(list(ident(d)))` prints two
+addresses where CPython prints `['k', 'j']` (`[4335802768, 4335802784]`, exit
+0). Nothing here is fixed and nothing regressed.
+
+What did change is that this doc's "Next step" describes a three-part shape as
+if all three had to be built. Two of the three are already there, and naming
+them turns a large change into two lines:
+
+1. **`mojo_list_set_kinds`** — exists (`fire_runtime.{c,h}`; called from
+   `_lower_list_literal`'s per-element byte alphabet,
+   `_list_literal_slot_kind`'s `TypeLattice.slot_kind_byte`).
+2. **The registry** — `gen._maybe_kinds_vals` (declared in `gimple_codegen.py`
+   with its own rationale).
+3. **The reader** — `mojo_list_get_boxed`, and the consumer half is ALREADY
+   WIRED in two places:
+   * `emit_loops.py`'s list-loop accessor takes the `_mkv` arm
+     (`it_val in _maybe_kinds_vals or list_ptr in _maybe_kinds_vals`) and emits
+     `mojo_list_get_boxed (list_ptr, i)`, marking the loop target in
+     `gen._boxed_vals` so `print`/`str` resolve the box;
+   * `emit_exprs.py`'s subscript path consults `_maybe_kinds_vals` the same
+     way (its `kind != 'dict'` guard).
+
+So `_compr_list_loop`'s accessor does NOT need to be taught anything — it
+already asks. What is missing is the PRODUCER side, and it is exactly two
+statements in `_materialize_as_list`'s opaque arm: emit
+`mojo_list_set_kinds(result, "ssss…")` inside the `bb_dict` branch (the length
+is a runtime fact — `mojo_list_len` of the keys list — so the alphabet has to
+be built from it, or `mojo_list_set_kinds` must accept a sentinel), and add
+`result` to `gen._maybe_kinds_vals`.
+
+**The trap to re-measure first is the one this doc already names.** Marking the
+MERGED temp means the set / registered-list / boxed-value branches are read
+through `mojo_list_get_boxed` too, which is a different accessor from the
+uniform-suffix one they take today (`emit_loops`'s own comment says a list with
+no kinds of its own "takes the identical accessor it always did and yields the
+identical word" — that sentence stops being true the moment the temp is marked,
+so the property has to be re-established rather than assumed). The two rows to
+watch are `test_gimple_generator_runner.py`'s
+`generator_pops_heterogeneous_tagged_stack` and
+`generator_pops_stack_two_level_tuple_unpack`, which are the ones the earlier
+`_elem_types` attempt broke (`7 / 99 / 3` -> `4382923312 / 99 / 4382923328`).

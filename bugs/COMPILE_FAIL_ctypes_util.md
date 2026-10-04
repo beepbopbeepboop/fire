@@ -1,5 +1,44 @@
 # COMPILE_FAIL: Lib/ctypes/util.py
 
+## Status (2026-10-02 — this file's own errors are down to ONE, and that one is a filed bug in another claim's area)
+
+`python3 fire.py build -o .tmp/util /Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py`
+under `tools/memslot.py --gb 8` (the machine was carrying several other workers'
+builds, so this took ~50 min wall): exit 1, **521 `error:` lines, of which
+exactly ONE is attributed to `ctypes/util.py`**:
+
+```
+ctypes/util.py:221:10: error: implicit declaration of function 'shutil_which_15d274'
+```
+
+**The three `tempfile` errors the entry below names are GONE** — no
+`tempfile_NamedTemporaryFile_*`, no
+`tempfile__TemporaryFileWrapper_mojo_close`, no pointer-from-int on line 228 —
+and so is the `shutil.which` one except for the single line above. So this doc's
+own error count is 4 → 1, and nothing in this file is left to fix here.
+
+The one that remains is `shutil.which(...)` reached through a BARE
+`import shutil` (this file's line 2), which is
+`CODEGEN_bare_import_module_qualified_call_answers_zero.md` — filed from this
+doc, owned elsewhere, and **still live**, measured on this tree with its own
+two-file repro through `compile_to_gimple`: the generated C still carries
+
+```c
+__attribute__((weak)) int64_t deep_fn (...) { mojo_print ((char *)"deep_fn: unavailable in compiled mode"); return (int6…
+  _t2 = deep_fn (1);
+```
+
+So this doc cannot close until that fix lands, and the fix is not in this
+worker's claim.
+
+**What else is in the 521, so nobody re-reads them as this file's problem:**
+34 sibling modules are refused wholesale (the `next(...)`-on-an-unmodelled-
+operand family, plus two container-kind refusals — see
+`bugs/INTERFACE_REQUEST_1_to_middle_infra_infer.md`'s new entry), and the rest
+are ordinary gcc errors in other modules: genericpath 99, ntpath 88, threading
+65, subprocess 58, ctypes/__init__ 55, _osx_support 46, sysconfig 41, os 39,
+and 7 more. None of those is `ctypes/util.py`'s.
+
 ## Status (2026-10-01 — this file's own errors are ONE defect, now root-caused to a bare-`import` module-qualified call; filed as `CODEGEN_bare_import_module_qualified_call_answers_zero.md`)
 
 Re-measured on this tree, and the file's remaining errors are fewer and
@@ -369,7 +408,7 @@ return type resolves to `void` — and `print(<void-typed-expr>)` is
 invalid C, producing the two errors above.
 
 This is a variant of the SAME underlying gap already tracked for
-`ctypes/__init__.py` itself (bugs/COMPILE_FAIL_ctypes___init__.md, task
+`ctypes/__init__.py` itself (COMPILE_FAIL_ctypes___init__, task
 #39) — that file's own compile has multiple unresolved issues
 (`__ctype_le__`/`__ctype_be__` dynamic attributes, the CFUNCTYPE varargs-
 packing bug), any of which could be why `ctypes/__init__.py`'s own

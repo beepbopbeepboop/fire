@@ -6,7 +6,7 @@
 is False for every pair of containers that are equal but not the SAME object --
 which is every `while nxt != proven:` convergence test, since each round builds
 a fresh one. With no GC such a loop never terminates and leaks a set per round:
-the 43 GB two-line compile in bugs/CODEGEN_container_eq_is_pointer_identity.md,
+the 43 GB two-line compile in “CODEGEN: `==` / `!=` between two containers is POINTER identity”,
 and a prime suspect in the self-hosted compiler's own footprint. `is` / `is not`
 keep pointer identity, which is what they mean.
 

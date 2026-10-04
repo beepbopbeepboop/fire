@@ -355,7 +355,7 @@ field read of a `SIMD` field of a framed struct, and the NESTED-frame placement
 the generic `SIMD[.uint32, 4]` rather than a plain struct name. So `philox.mojo`
 is at least two constructs, and the second one is worth its own measurement.
 
-Filed as `bugs/FORMAL_staticmethod_is_compiled_as_an_instance_method.md`.
+Filed as `FORMAL_staticmethod_is_compiled_as_an_instance_method`.
 
 ## 6. What is deliberately NOT changed
 
@@ -392,14 +392,14 @@ $ python3 tools/formal_sweep_causes.py --min 4 .tmp/sweep-arm-b3.txt   # the row
 
 ## 8. Related
 
-* `bugs/FORMAL_receiver_stored_in_a_field.md` §2 — the sibling row this one was
+* `“FORMAL_receiver_stored_in_a_field: a frame address in a struct field”` §2 — the sibling row this one was
   split out of, and the 7-line reproducer this construct's docstring still uses.
   **Its §2 claim that the base64 case is "a contradiction in the source" is
   wrong**, and §3 here is the measurement: `b64encode(input_bytes, result)` with
   `mut result: String` is exactly the declared type at every call site. The
   contradiction is between the WORD `String()` produces and the FRAME `String`
   compiles to, and it is in this compiler's model, not in the stdlib.
-* `bugs/FORMAL_field_set_method_name_and_kwarg_blind_spot.md` — the same
+* `FORMAL_field_set_method_name_and_kwarg_blind_spot` — the same
   `struct_field_names` derivation reads `Pointer` as 13 fields and `Span` as 6,
   of which 10 and 2 respectively are METHOD names. Measured here for the same
   two types; it does not change their framed-ness (both have 3+ real fields) but

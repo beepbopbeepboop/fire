@@ -106,6 +106,68 @@ def _struct_unpack_elem_ctype(gen, call, index):
     return _struct_elem_ctype(codes)
 
 
+def _operand_is_dict(gen, node, t: str, v=None) -> bool:
+    """Is this operand's value a DICT, on more evidence than its C type?
+
+    The C type answers `int64_t` for a boxed pointer as readily as for an
+    integer, so "is it a dict" is a separate question whenever the container
+    was stored through the boxing convention — which is the case for every
+    module-level global and for every parameter. Each signal below is one this
+    codegen populates only for a dict, so any of them is positive evidence and
+    none of them is a guess:
+
+      * `t == 'MojoDict *'` — not boxed at all.
+      * the node is a `{...}` LITERAL — nothing to be uncertain about, and
+        `_quick_type`'s own docstring's reason for not listing `DictExpr`
+        generally (guessing wrong launders a container through a scalar slot)
+        does not apply to a literal whose type is not a guess.
+      * `_actual_types[n] == 'MojoDict *'` — the boxed-pointer tracking has
+        already recovered the real pointer type for this name.
+      * `n` has a `_dict_val_types` entry — that table is keyed by DICTS, and
+        an `int64_t` there means "a dict whose values are integers", not "an
+        integer" (see `_lower_dict_literal`). Its whole-program half is
+        `_global_dict_val_types`, which Phase 1.7 fills only from a global
+        bound to a dict literal / `dict(...)` / a `dict[K, V]` annotation.
+      * `node.name` is a PARAMETER of the function being emitted that every
+        visible call site handed a dict — `_param_dict_val_obs` is populated
+        only from arguments the call-site scan proved were dicts, so an entry
+        for this function's own parameter is that proof. Read here, and only
+        here, for the container KIND; the table's primary meaning stays the
+        dict's VALUE type.
+
+    Two names are consulted when both are available and different: `v`, the
+    already-lowered C expression (a module global lowers to a fresh `_tN`
+    temp, which is the name `_actual_types` is keyed by), and the source-level
+    `node.name` (which is what the whole-program tables are keyed by, and what
+    pre-lowering callers like `_quick_type` have).
+
+    Deliberately a predicate about ONE operand. Deciding whether `a | b` is a
+    `dict.__or__` needs BOTH answers, and that conjunction is the caller's, so
+    this cannot be misread as "this expression is a union"."""
+    if t == 'MojoDict *':
+        return True
+    if isinstance(node, gimple_ctypes.DictExpr):
+        return True
+    names = []
+    if isinstance(v, str):
+        names.append(v)
+    if isinstance(node, gimple_ctypes.IdentExpr):
+        _nm = _as_str(node.name)
+        if _nm not in names:
+            names.append(_nm)
+    for _n in names:
+        if (getattr(gen, '_actual_types', None) or {}).get(_n) == 'MojoDict *':
+            return True
+        if _n in (getattr(gen, '_dict_val_types', None) or {}):
+            return True
+    if isinstance(node, gimple_ctypes.IdentExpr):
+        _cf = _as_str(getattr(gen, 'current_func_name', '') or '')
+        _obs = getattr(gen, '_param_dict_val_obs', None) or {}
+        if _as_str(node.name) in (_obs.get(_cf) or {}):
+            return True
+    return False
+
+
 def _quick_type(gen, node) -> str:
     """Estimate C type of an expression without emitting code."""
     if isinstance(node, gimple_ctypes.IntLiteral):    return 'int64_t'
@@ -135,6 +197,37 @@ def _quick_type(gen, node) -> str:
         _ci = gen._closure_info_for_ident(node.name)
         if _ci is not None:
             return 'MojoBoundMethod *' if _ci.env_struct else 'void *'
+        # A MODULE-LEVEL global, read by bare name. `var_types` holds only
+        # locals and parameters, so a name that is not one fell to the
+        # int64_t default even though the global's own SEMANTIC type is
+        # recorded — and a global holding a STRUCT is the one value class
+        # that cannot recover: the C field is a boxed `int64_t` holding the
+        # pointer, and there is no runtime type tag on a struct-allocated
+        # value for the container walkers to dispatch on. Measured:
+        #
+        #     class P: ... def __repr__(self): return "R<" + self.x + ">"
+        #     p = P("a")
+        #     print(repr([p]))      # CPython [R<a>] / compiled [4345469360]
+        #
+        # `repr(p)` alone was already right, which is what makes this a
+        # `_quick_type` gap rather than a repr bug: the list literal's
+        # element type comes from `_infer_list_elem_type`, which asks
+        # `_quick_type` per element.
+        #
+        # `_own_global_var_types` and NOT the shared `_global_var_types`, and
+        # the distinction is measured rather than stylistic. The shared table
+        # is a whole-transitive-tree superset (it has to be, for cross-module
+        # `mod.attr`), so answering from it makes `_quick_type` describe a
+        # SIBLING's global — and two errors appear on the self-host closure
+        # that are absent with the own overlay: `assignment to 'char *' from
+        # 'int64_t'` in `resolve_shared.py` and `invalid conversion in gimple
+        # call` in `gimple_codegen.py`, because the answer is a semantic
+        # pointer type while the value on the C level is a boxed `int64_t`.
+        # The own overlay is the same "is this bare name MINE" answer
+        # `_lower_IdentExpr` asks before it picks a field to load, so the two
+        # agree by construction.
+        if node.name in getattr(gen, '_own_global_var_types', {}):
+            return _as_str(gen._own_global_var_types[node.name])
         return 'int64_t'
     if (isinstance(node, gimple_ctypes.SubscriptExpr)
             and isinstance(node.obj, gimple_ctypes.IdentExpr)):
@@ -160,6 +253,44 @@ def _quick_type(gen, node) -> str:
         _dvt = (getattr(gen, '_dict_val_types', None) or {}).get(node.obj.name)
         if _dvt:
             return _as_str(_dvt)
+    if (isinstance(node, gimple_ctypes.CallExpr)
+            and isinstance(node.func, gimple_ctypes.IdentExpr)
+            and _as_str(node.func.name) == 'next'
+            and not gen._locally_binds_name('next')
+            and len(node.args or []) >= 1):
+        # `next(<generator>)` / `next(<generator>, default)` yields that
+        # generator's own VALUE ctype, which `_lower_generator_next` already
+        # knows from the api it drives (`api['value_ctype']`) and returns as
+        # the call's type. Without a row here the type of the `next(...)`
+        # CALL is asked instead, and the answer is the scalar box `int64_t` --
+        # so `def h(): return next(mk())` declared `int64_t h(void)` and a
+        # yielded `char *` came back through an `int64_t` return slot as its
+        # own address, printed in decimal, exit 0. Every other consumption
+        # shape was already correct (`for x in mk():`, `list(mk())`,
+        # `r = next(mk())`), which is exactly why this survived: the value is
+        # read correctly everywhere and only the enclosing function's SIGNATURE
+        # is wrong.
+        #
+        # The 2-argument form answers the generator's value ctype too, and
+        # that is deliberate rather than a shortcut: `_lower_call`'s own
+        # 2-arg branch declares its result `gen._new_temp(vct)` and coerces
+        # `default` INTO it, so `vct` is what the emitter's expression is
+        # actually typed as. Inferring a join with `default`'s type here
+        # would make the inference and the emission disagree about the same
+        # expression, which is strictly worse than either being wrong alone --
+        # and `next(g, default)` where `default` is of another kind is an
+        # EMITTER defect (it coerces the default into the value slot), not an
+        # inference one. Recorded here rather than filed because the answer is
+        # right for every case that compiles.
+        #
+        # Falls back to the box (today's behaviour) when the argument does not
+        # resolve to a registered generator api, so nothing that works today
+        # changes -- `next(<user iterator struct>)` is the shape that reaches
+        # here unresolved, and it has its own lowering with its own return
+        # type.
+        _nc = gen._generator_value_ctype_for_next(node.args[0])
+        if _nc:
+            return _nc
     if isinstance(node, gimple_ctypes.BinaryOp):
         # 'in'/'not in' are missing from _CMP_OPS (generated_dispatch.py) —
         # real, pre-existing gap: falling through to
@@ -187,6 +318,19 @@ def _quick_type(gen, node) -> str:
             lt = gen._quick_type(node.left)
             rt = gen._quick_type(node.right)
             return gimple_ctypes.TypeLattice.join(lt, rt)
+        if node.op == '|':
+            # `a | b` on two dicts is `dict.__or__`, and it MATERIALISES a
+            # new `MojoDict *` — so a function whose whole body is
+            # `return a | b` has a pointer return, and typing it `int64_t`
+            # (what `join` below returns for two boxed operands) hands the
+            # caller an integer: the caller then formats the pointer's own
+            # bits with `%s` and prints an address, exit 0, no diagnostic.
+            # Both operands must be provably dicts, which is also Python's
+            # own rule — `int.__or__` is the only other `|` this codegen
+            # implements, and `join` below is still the answer for it.
+            if (_operand_is_dict(gen, node.left, gen._quick_type(node.left))
+                    and _operand_is_dict(gen, node.right, gen._quick_type(node.right))):
+                return 'MojoDict *'
         if node.op in gimple_ctypes._CMP_OPS or node.op in ('in', 'not in'): return '_Bool'
         lt = gen._quick_type(node.left)
         rt = gen._quick_type(node.right)
@@ -345,6 +489,21 @@ def _quick_type(gen, node) -> str:
                 and len(node.args) == 1 and not getattr(node, 'kwargs', None)
                 and gen._quick_type(node.args[0]) == 'char *'):
             return 'char *'
+        # A call through a local bound to a LAMBDA, which is never
+        # materialized when it is created and called in the same statement
+        # list: the body is inlined and its real (ctype, expr) survives to
+        # the use site, so the ESTIMATOR has to say the same thing or the
+        # enclosing function's signature truncates it (`def g(): q = 2.5; fn
+        # = lambda: q * 2; return fn()` inferred `int64_t` and printed 5
+        # where CPython prints 5.0; a `char *` body printed its address).
+        # Populated by `infra_infer._lambda_call_ret_locals` for the body
+        # under inference — the emission-time `_callable_ret_types` is too
+        # late, since the forward declaration has already been written from
+        # this answer. See
+        # CODEGEN_lambda_call_boundary_loses_the_return_type.
+        _lrt = (getattr(gen, '_lambda_call_ret_types', None) or {}).get(fname)
+        if _lrt:
+            return _as_str(_lrt)
         # `func_return_types[bare]` is one slot for the whole translation
         # unit, so it cannot answer "what does the `_mentions` THIS module
         # calls return" once two modules of one closure define that name
@@ -356,7 +515,9 @@ def _quick_type(gen, node) -> str:
         # `mojo_repr_list_ints((MojoList *)1)` and crashed on the int).
         # `_func_return_type_for_call` reads the DEFINING module's own
         # published answer first and falls back to the bare slot, so every
-        # name only one module defines behaves exactly as before.
+        # name only one module defines behaves exactly as before — and a
+        # lambda call, which publishes no module-level return type at all,
+        # is answered by the arm above.
         return gen._func_return_type_for_call(fname, 'int64_t')
     if isinstance(node, gimple_ctypes.CallExpr) and isinstance(node.func, gimple_ctypes.MemberExpr):
         # A receiver this codegen KNOWS is a registered user struct resolves

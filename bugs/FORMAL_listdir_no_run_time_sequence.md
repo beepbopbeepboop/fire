@@ -227,7 +227,7 @@ about a wrong count in word 0 looks like a wrong count.
 `os.listdir(p)` returns a blob, `listdir_len` and `listdir_get` read it, and
 `listdir_free` releases it. A caller who writes `os.listdir(p)` and then indexes
 the result as a list gets the blob path's answer, which is what
-`bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md` measured; the two
+`FORMAL_subscript_of_a_pointer_reads_a_blob_count` measured; the two
 docstrings in `formal/hostmods/os/__init__.mojo` say what the value is and how
 to read it, and a run-time-length blob with a count nobody can reach would have
 been the thing not to ship.

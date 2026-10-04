@@ -655,6 +655,24 @@ __mojo_async_await_sock_recv(int64_t coro, int64_t fd)
     return (int64_t)-2;
 }
 
+/* `asyncio.iscoroutine(x)` / `asyncio.isawaitable(x)` — the same question
+ * `__mojo_async_run_gen` asks before it drives anything, as a predicate of its
+ * own so the source can ask it too. The check is the registry lookup, not the
+ * cast: a value that is not a live handle is 0, which is CPython's own answer
+ * for `iscoroutine`, and there is no reinterpreting of an arbitrary int64_t
+ * into a `MojoGen *` to get there (nothing is read out of it).
+ *
+ * This is what makes `if asyncio.iscoroutine(result): asyncio.run(result)` --
+ * the idiom `Android/android.py` writes -- mean what it says. Before it, the
+ * predicate had no lowering at all and answered `False` for a value that
+ * really was a coroutine, so the guard the source wrote evaluated backwards:
+ * silent, exit 0, no diagnostic. */
+_Bool
+__mojo_async_iscoroutine(int64_t genHandle)
+{
+    return mgen_reg_has(genHandle) ? 1 : 0;
+}
+
 /* `asyncio.run(f())`'s bridge: genHandle is the MojoGenerator f() already
    constructed (via the ordinary __mgco_f_start call, routed there because
    f is registered in _generator_api). Drive its underlying MojoCoro to

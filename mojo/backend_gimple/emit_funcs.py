@@ -63,6 +63,36 @@ from mojo.middle.funcs_shared import (
 )
 
 def _gen_stmt_FunctionDef(gen, node: FunctionDef):
+    # The body that OWNS this nested `def`'s environment — read ONCE, here,
+    # before anything nested is lifted. It is emphatically NOT the AST body of
+    # whatever function was lowered most recently: lifting `mid`'s own body
+    # lowers `inner`'s environment statement, and it is `mid`'s body that owns
+    # that environment, not `outer`'s. That is not a near miss -- `outer`'s
+    # body never mentions `inner` at all, so asking about the wrong body always
+    # answers "yes, safe", and
+    #     def outer():
+    #         total = 0
+    #         def mid():
+    #             def inner(k):
+    #                 nonlocal total
+    #                 total = total + k
+    #             return inner        # <-- a real escape
+    #         f = mid(); f(3); f(4)
+    # emitted `free (_env_inner)` in `mid` immediately after handing that same
+    # pointer back as its return value, and the caller's first `f(3)` then
+    # dereferenced freed memory (SIGSEGV, test_nonlocal.py's "two closure
+    # levels deep" pair). `mid`'s own body DOES mention `inner` as a returned
+    # value, so the same rule asked of the right body declines to free it.
+    #
+    # `gen._cur_func_body` is that right body, and it is right here because
+    # `_reset_func` -- the one place that begins lowering a body -- sets it, so
+    # `_gen_lifted_closure` sets it too. The ownership analysis used to read a
+    # SECOND field for this (`_own_fn_body`), which only `begin_function`
+    # assigned, so every one of those questions was answered about a top-level
+    # function's body even while a closure was being lowered; the two fields
+    # are one field now, and the same class of stale read is documented at
+    # `emit_calls.py`'s `_cur_func_body` note.
+    owner_body = gen._cur_func_body
     # A nested `async def` (not an async generator) — whether nested
     # inside a struct method (device_context.mojo's `async def
     # wrapper(...) capturing -> None:` shape, discovered by gen_module's
@@ -181,6 +211,11 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
                 cname = gen._write_dest(vname)  # resolve capture path if nested
                 gen._safe_coerce_emit(local_type, _fct, cname, f"{env_var}->{gimple_ctypes._c_field_name(vname)}")
         gen._closure_envs[node.name] = env_var
+        # Take ownership of the environment this nested `def` just allocated,
+        # if the enclosing body proves nothing can hold it past this scope.
+        # A no-op otherwise, which is today's leak and never a double free.
+        # See `ginf.register_nested_env_free`.
+        ginf.register_nested_env_free(gen, node.name, env_var, owner_body)
     else:
         gen._closure_envs[node.name] = ''
 
@@ -2274,7 +2309,7 @@ def _locally_binds_name(gen, bare_name: str) -> bool:
     2-argument handling) purely because some unrelated module
     elsewhere in the same whole-program build happens to define a
     function with the same bare name. See
-    bugs/CODEGEN_generator_function_Lib_symtable.md's `with open(path,
+    “CODEGEN_generator_function: Lib/symtable.py”'s `with open(path,
     'rb') as f:` repro (symtable.py imports tokenize transitively but
     never binds its `open`)."""
     if bare_name in getattr(gen, '_local_top_level_func_names', ()):
@@ -2461,8 +2496,19 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         gen._callable_param_gen_api = dict(
             (getattr(gen, '_coro_body_callable_param_apis', None) or {})
             .get(node.name, {}))
+        # A coroutine body carries the FACT (`_mojo_coro_callable_param_fns`,
+        # attached by `coro._mark_coro_callable_param_fns`) rather than the
+        # answer, because `register` is an AST pre-pass that runs before any
+        # module-level function's `func_return_types` entry exists. Resolved
+        # here, where it does exist -- see that function's docstring.
+        gen._callable_param_ret_types = {}
+        for _cpt_pn, _cpt_fn in (getattr(node, '_mojo_coro_callable_param_fns', None) or {}).items():
+            _cpt_rt = gen.func_return_types.get(_as_str(_cpt_fn))
+            if _cpt_rt and _cpt_rt != 'void':
+                gen._callable_param_ret_types[_as_str(_cpt_pn)] = _cpt_rt
     else:
         gen._callable_param_gen_api = ggc._callable_param_generator_apis(gen, node)
+        gen._callable_param_ret_types = ggc._callable_param_ret_types(gen, node)
     # BUG-2026-016's allow-list: locals whose DECLARATION carries an
     # explicit NUMERIC/boolean annotation (`hin_id: UInt64 = 0`). Such a
     # variable can never legitimately hold a pointer, so when one is
@@ -2498,6 +2544,11 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # Set module context for global field access
     gen._current_module_ctx = gen.module_name if len(gen.module_name) > 0 else "root"
     gen.current_func_name = node.name
+    # Which of THIS function's parameters are annotated `bool` — see
+    # `gimple_exprtypes.record_bool_params`. Recorded here because this is the
+    # one place the annotation text and the emitted function name are both in
+    # hand, and `is_python_bool_expr` reads it back while the body is lowered.
+    gimple_exprtypes.record_bool_params(gen, node)
 
     # Seed param types into var_types BEFORE return-type inference so
     # _quick_type can resolve param names during the pre-pass. Unannotated
@@ -2621,6 +2672,21 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             gen._elem_types[bare] = e
             if ne:
                 gen._nested_elem_types[bare] = ne
+    # ...and the dict-VALUE half of the same contract, for the same reason and
+    # beside it. A dict parameter has no binding site inside the callee, so
+    # without this every `d[k]` / `d.items()` in the body fell to the
+    # `int64_t` default and read a `char *` slot through `mojo_dict_get_int` --
+    # the stored pointer's own bits, printed as a decimal, exit 0 (measured:
+    # `f({"x": "1"})` printed an address where CPython prints `1`, while the
+    # same call with the literal bound to a local first was already correct).
+    _pdv = getattr(gen, '_param_dict_val_types', {}).get(node.name, {})
+    for bare in _pdv:
+        # '' is the conflicting-call-sites marker (see _record_param_dict_val),
+        # and an unseeded slot is already the `int64_t` default, so both are
+        # no-ops here -- deliberately, rather than seeding a lie.
+        _pdv_v = _as_str(_pdv[bare])
+        if _pdv_v:
+            gen._dict_val_types[bare] = _pdv_v
     # Seed local container element types too, so return inference can see
     # through nested subscripts on locals (e.g. `return bodies[0][0]` where
     # bodies is a local list-of-double-lists). Lowering re-derives the same.
@@ -2932,7 +2998,7 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
     finally:
         gen._in_toplevel_gen = False
 
-    # Dependency-init prelude: a `mojo dylib` build compiles every
+    # Dependency-init prelude: a `fire dylib` build compiles every
     # module SEPARATELY (see gen_module's population of
     # `_toplevel_dep_init_modules`) and links them together, each with
     # its own unprioritized `__attribute__((constructor))`. Constructor
@@ -2976,7 +3042,7 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
     # wrapper (unchanged, pre-existing), PLUS (library/dylib modules
     # only, see gen_module) an automatic `__attribute__((constructor))`
     # AND a publicly-exported `<module>_init()` a C host may call
-    # directly (bugs/DYLIB_module_scope_never_executes.md). Whichever
+    # directly (DYLIB_module_scope_never_executes). Whichever
     # combination of those actually fires at runtime, module-scope code
     # must run exactly once — the guard lives HERE, inside the single
     # underlying function every caller funnels through, rather than in
@@ -3048,7 +3114,7 @@ def _materialize_imported_struct(gen, module: str, nm: str, local: str) -> bool:
     function `f` (e.g. `from base.chest import chest_total_count` where
     chest_total_count's own signature takes a `Chest`, but this file
     never imports `Chest` itself) — see
-    bugs/DYLIB_sibling_import_calls_bind_to_weak_stubs.md's "struct-
+    DYLIB_sibling_import_calls_bind_to_weak_stubs's "struct-
     typed function parameter" gap and
     bugs/hard/... crash-repro writeup for why a bare int64_t placeholder
     there is unsafe (a caller-side `S()`/field-write on that placeholder
@@ -3374,7 +3440,7 @@ def _register_imported_structs(gen, stmts) -> None:
     dynamic `_mojo_dispatch_setattr` on that placeholder — a crash, not
     merely a missed optimization (the exact shape a reverted symbol-hash-
     only fix for a related gap was found to reintroduce; see
-    bugs/DYLIB_sibling_import_calls_bind_to_weak_stubs.md's "follow-on
+    DYLIB_sibling_import_calls_bind_to_weak_stubs's "follow-on
     attempt #2" section). Tightly scoped beyond that to avoid disturbing
     the many imported structs a module merely passes through untouched."""
     if gen.do_imports or not getattr(gen, '_current_filename', None):
@@ -3418,7 +3484,7 @@ def _register_imported_structs(gen, stmts) -> None:
     # call on that null placeholder — a crash, not merely imprecise
     # codegen (the exact shape a reverted symbol-hash-only fix for a
     # related gap was found to reintroduce; see
-    # bugs/DYLIB_sibling_import_calls_bind_to_weak_stubs.md's "follow-on
+    # DYLIB_sibling_import_calls_bind_to_weak_stubs's "follow-on
     # attempt #2"). Combined with the existing _field_accessed check
     # below (which already requires an actual `name.field` textual
     # access, not just an assignment), this only pulls in structs that
@@ -3722,6 +3788,13 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
             gen._elem_types[_mbare] = _me
             if _mne:
                 gen._nested_elem_types[_mbare] = _mne
+    # ...and the dict-VALUE half, same reason, same qualified key. Without it a
+    # method handed a `{'k': 'v'}` reads that slot back as an integer.
+    _mpdv = getattr(gen, '_param_dict_val_types', {}).get(_mkey, {})
+    for _mbare2 in _mpdv:
+        _mpdv_v = _as_str(_mpdv[_mbare2])
+        if _mpdv_v:
+            gen._dict_val_types[_mbare2] = _mpdv_v
     _mloc_elem, _mloc_nested, _mloc_dict_val = gen._scan_container_elems(node.body)
     for _mv in _mloc_elem:
         gen._elem_types.setdefault(_as_str(_mv), _as_str(_mloc_elem[_mv]))
@@ -3778,6 +3851,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # Key by overload so overloaded methods don't share closure state (each
     # overload's lifted closures + capture env are distinct).
     gen.current_func_name = f"{struct_name}_{node.name}{overload_id}"
+    gimple_exprtypes.record_bool_params(gen, node)
     gen._current_struct_name = struct_name  # for Self() constructor call lowering
 
     # Seed param types for pre-pass inference

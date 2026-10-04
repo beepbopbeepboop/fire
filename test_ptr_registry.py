@@ -353,12 +353,12 @@ static void test_dict_int_keys(void) {
      * never checked before 2026-09-30 because the whole harness's asserts were
      * compiled out by python3-config's -DNDEBUG (see _flags), so a stale
      * constant sat here unnoticed. */
-    assert(mojo_dict_pop_int_kw(d, 5) == 51 && !mojo_dict_contains(d, "5") && !mojo_dict_contains_kw(d, 5));
-    assert(mojo_dict_pop_int(d, "7") == 70 && !mojo_dict_contains_kw(d, 7));
-    assert(mojo_dict_pop_int_kw(d, 12345) == 0);           /* absent */
+    assert(mojo_dict_pop_int_kw(d, 5, 0) == 51 && !mojo_dict_contains(d, "5") && !mojo_dict_contains_kw(d, 5));
+    assert(mojo_dict_pop_int(d, "7", 0) == 70 && !mojo_dict_contains_kw(d, 7));
+    assert(mojo_dict_pop_int_kw(d, 12345, -1) == -1);       /* absent: the DEFAULT, not 0 */
     assert(mojo_dict_get_int(d, "007") == 1 && mojo_dict_get_bytes_int(d, b5) == 555 && d->used == 5);
-    assert(mojo_dict_pop_int(d, "007") == 1 && d->used == 4);
-    assert(mojo_dict_pop_int(d, "+7") == 2 && mojo_dict_pop_int(d, "-0") == 3 && d->used == 2);
+    assert(mojo_dict_pop_int(d, "007", 0) == 1 && d->used == 4);
+    assert(mojo_dict_pop_int(d, "+7", 0) == 2 && mojo_dict_pop_int(d, "-0", 0) == 3 && d->used == 2);
     assert(mojo_dict_get_int(d, "abc") == 99 && mojo_dict_get_bytes_int(d, b5) == 555);
     mojo_dict_free(d);
 
@@ -397,7 +397,7 @@ static void test_dict_int_keys(void) {
     for (int round = 0; round < 400000; round++) {
         int i = rand() % M; int op = rand() % 5;
         if (op == 0) { mojo_dict_set_int_kw(m, keyv[i], round); val[i] = round; present[i] = 1; }
-        else if (op == 1) { int64_t r = mojo_dict_pop_int_kw(m, keyv[i]); assert(r == (present[i] ? val[i] : 0)); present[i] = 0; }
+        else if (op == 1) { int64_t r = mojo_dict_pop_int_kw(m, keyv[i], 0); assert(r == (present[i] ? val[i] : 0)); present[i] = 0; }
         else if (op == 2) { assert(mojo_dict_contains_kw(m, keyv[i]) == present[i]); }
         else if (op == 3) { int64_t r = mojo_dict_setdefault_int_kw(m, keyv[i], 42);
                             if (!present[i]) { val[i] = 42; present[i] = 1; assert(r == 42); } else assert(r == val[i]); }
@@ -423,7 +423,7 @@ static void test_dict_set_inline(void) {
     mojo_list_free(ks);
     char *k0 = mojo_dict_slot_key(&d, 0); (void)k0;
     /* pop inside the inline table keeps the survivors and their order, and stays inline */
-    assert(mojo_dict_pop_int_kw(&d, 101) == 1 && d.used == 3 && d.slots == d.inl);
+    assert(mojo_dict_pop_int_kw(&d, 101, 0) == 1 && d.used == 3 && d.slots == d.inl);
     assert(mojo_dict_get_int_kw(&d, 100) == 0 && mojo_dict_get_int_kw(&d, 102) == 2 && mojo_dict_get_int_kw(&d, 103) == 3);
     /* a copy and an update read integer slots without text */
     MojoDict *cp = mojo_dict_copy(&d);
@@ -449,7 +449,7 @@ static void test_dict_set_inline(void) {
         MojoDict e; mojo_dict_init(&e);
         mojo_dict_set_int(&e, "a", 1); mojo_dict_set_int(&e, "b", 2); mojo_dict_set_int(&e, "7", 3);
         assert(e.slots == e.inl && mojo_dict_get_int(&e, "b") == 2 && mojo_dict_get_int_kw(&e, 7) == 3);
-        assert(mojo_dict_pop_int(&e, "a") == 1 && mojo_dict_pop_int(&e, "7") == 3 && mojo_dict_get_int(&e, "b") == 2);
+        assert(mojo_dict_pop_int(&e, "a", 0) == 1 && mojo_dict_pop_int(&e, "7", 0) == 3 && mojo_dict_get_int(&e, "b") == 2);
         mojo_dict_clear(&e); assert(e.used == 0 && !mojo_dict_contains(&e, "b"));
         mojo_dict_set_int(&e, "c", 4); assert(mojo_dict_get_int(&e, "c") == 4);
         mojo_dict_destroy(&e);
@@ -613,7 +613,7 @@ static void test_boxed_str_discrimination(void) {
 }
 
 /* A CONTAINER used as a dict key keys by its VALUE
- * (bugs/CODEGEN_tuple_dict_key_hashed_by_address.md). This is the runtime
+ * (CODEGEN_tuple_dict_key_hashed_by_address). This is the runtime
  * half of that fix and it is here rather than only in the gimple runner
  * because two of its properties are invisible to a stdout comparison: the
  * key string must be RELEASABLE (`mojo_cstr_or_int_release` has to tell a

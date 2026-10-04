@@ -50,7 +50,7 @@ declared names are printed with it, so a reader can check the search rather
 than trust it. `0 of 35` next to a row of 35 is the difference between "38
 files of work" and "38 files waiting on a Stage 5 dependency", and it is the
 number that says which. Measured ceilings for that row: 0 files reach `pass`
-under either probe (`bugs/FORMAL_dylib_export_gate_ceiling.md`).
+under either probe (`“FORMAL_dylib_export_gate_ceiling: the 38-file row is not 38 problems”`).
 
 THE MARKERS ARE AND-WITHIN / OR-WITHIN, and both halves are load-bearing
 -------------------------------------------------------------------------
@@ -391,7 +391,7 @@ CAUSES = (
     # refusal`. That is the same defect the `==` row below records, one order
     # of magnitude larger, and it is the row a planner most needs: it is one
     # builtin with no lowering at all
-    # (`bugs/FORMAL_debug_assert_bracket_has_no_lowering.md`).
+    # (`FORMAL_debug_assert_bracket_has_no_lowering`).
     #
     # Above `callee has no definition` deliberately. The two messages are about
     # the same callee and share no substring — that one says "a name with no
@@ -644,7 +644,7 @@ CAUSES = (
     # and is not a literal, so there was nothing to materialize. It is gone
     # because `model.NONE_WORD` makes `None` the word 0, which is the
     # representation rather than an approximation, and `fold_literal_expr`
-    # folds it: `bugs/FORMAL_none_is_not_a_literal.md` is closed and the
+    # folds it: `“FORMAL_none_is_not_a_literal: `x: T = None` is a NAME on this parser”` is closed and the
     # message it named is no longer emitted by anything. A cause row whose
     # marker matches no live message is a cause that blocks nothing, which is
     # indistinguishable from a cause nothing is blocked by.

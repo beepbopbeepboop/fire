@@ -10,7 +10,7 @@ either did the right thing or produced something that looked fine:
   1. `from m import f as g` — the alias is a property of the IMPORTING file, and
      the export table is keyed by the DEFINING name. Looking the callee up by
      the local spelling found nothing, and the image bound a symbol no library
-     defines. (`bugs/FORMAL_from_import_alias_dangles_the_call.md`, fixed.)
+     defines. (`FORMAL_from_import_alias_dangles_the_call`, fixed.)
   2. a RELATIVE import — `from ._helper import f`. It USED to be the shape
      whose ABI prefix began with an underscore (`abi_module_name('._helper')`
      was `__helper`), so every symbol it exported began with one and the
@@ -31,16 +31,16 @@ either did the right thing or produced something that looked fine:
      register kept whatever the caller last put there, and `need_two(1)` read a
      stack address where the callee's own default says 511. A silently wrong
      ARGUMENT, which is the outcome this boundary exists to prevent.
-     (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`, fixed.)
+     (`FORMAL_default_argument_not_applied_across_a_dylib`, fixed.)
   4. a STRUCT from a `--link-dylib` library. Its methods crossed the boundary
      and its DECLARATION did not, so `b.n = 4` was refused with a repair the
-     reader cannot follow. (`bugs/FORMAL_link_dylib_imported_struct_field.md`,
+     reader cannot follow. (`FORMAL_link_dylib_imported_struct_field`,
      fixed.)
   5. `S()` on a struct whose `__init__` takes no required parameter — a
      construction, not a call, and the one construct whose lowering a dylib
      boundary does not change at all. It is here because it is the CONTROL for
      (3): the same disagreement with the language, reached without any module
-     involved. (`bugs/FORMAL_zero_arg_init_not_inlined.md`, fixed.)
+     involved. (`FORMAL_zero_arg_init_not_inlined`, fixed.)
 
 Every case below BUILDS the arm64 image, EXECUTES it, and compares its output
 and exit status with CPython running the SAME program. A refusal is asserted
@@ -1401,7 +1401,7 @@ def test_a_zero_argument_construction_of_a_constructor_that_needs_arguments(
 # classify it" and `resolve_frame_parameter_contract` read `position 0 >=
 # len([])` as "not-exported" — a refusal naming a missing EXPORT about a
 # function the manifest lists with an arity. The filing was
-# `bugs/FORMAL_cross_image_frame_contract_is_not_published_for_a_free_function.md`,
+# `FORMAL_cross_image_frame_contract_is_not_published_for_a_free_function`,
 # and it is deleted: fixed, with these cases as the proof.
 #
 # The module is one framed struct plus a function that holds nothing, which is

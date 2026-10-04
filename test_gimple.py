@@ -133,7 +133,7 @@ def test_raises(name: str, mojo_src: str, expected_substr: str):
     message containing expected_substr) instead of either crashing gcc on
     broken generated C or silently emitting wrong code. Used for shapes this
     codegen deliberately does not (yet) support — see
-    bugs/CODEGEN_conditional_toplevel_def_name_collision.md."""
+    CODEGEN_conditional_toplevel_def_name_collision."""
     global _PASS, _FAIL
     try:
         compile_to_gimple(mojo_src)
@@ -729,7 +729,7 @@ def run_tests():
     # is opaque" branch, and emitted `t = (int64_t)mojo_list_get_str (...)`
     # into a `struct Token *`. That is gcc's "non-trivial conversion in
     # 'var_decl'", which is how this was found (fire_compiler.py's own
-    # `_parse_comptime`; bugs/CODEGEN_comprehension_target_shadows_struct_local.md),
+    # `_parse_comptime`; CODEGEN_comprehension_target_shadows_struct_local),
     # and it took out `make mojoc`, `selfhost` and `bootstrap-stage2-cc` at
     # once.
     #
@@ -829,6 +829,16 @@ def f(d: Dict[Int, Int], i: Int) -> Int:
 """, must_have=["mojo_dict_set_int_kw (", "mojo_dict_get_int_kw (",
                 "mojo_dict_contains_kw (", "mojo_dict_pop_int_kw ("],
        must_not_have=["= mojo_cstr_or_int_str (", "mojo_cstr_or_int_release ("])
+
+    # `d.pop(k, default)` carries the default to the runtime, which is what a
+    # MISS answers. It used to be lowered away entirely: `mojo_dict_pop_int`
+    # had no `dflt` parameter, so the `-1` the source wrote never reached the
+    # generated C and every miss answered 0 (bugs/
+    # CODEGEN_dict_pop_default_ignored_on_a_miss.md).
+    test_c_shape("dict_pop_default_is_passed_to_the_runtime", """\
+def f(d: Dict[Int, Int], i: Int) -> Int:
+    return d.pop(i, -1)
+""", must_have=["mojo_dict_pop_int_kw (", "-1"], must_not_have=[])
 
     # A string comparison against an untracked int64_t operand still needs a real
     # string, so that path keeps the conversion and its release.
@@ -1427,7 +1437,7 @@ def set_missing(x: Int) -> Int:
 """)
 
     # 56b. set(iterable) constructor — see
-    # bugs/CODEGEN_set_list_ctor_ignores_iterable_arg.md: this used to
+    # CODEGEN_set_list_ctor_ignores_iterable_arg: this used to
     # silently produce an EMPTY set (the constructor arg's value was
     # discarded). Behavioral (len/iteration) coverage is in
     # test_gimple_runner.py; this just checks it compiles.
@@ -1806,7 +1816,7 @@ def splice(a: List, b: List):
 """)
 
     # 93c. x[a:b:k] = y → extended-slice store (mojo_list_assign_step);
-    # bugs/CODEGEN_slice_assignment_silently_noops.md.
+    # “CODEGEN: bounded/full slice-assignment (`x[a:b] = y`”.
     test("list_slice_assign_stepped", """\
 def strided(a: List, b: List):
     a[::2] = b
@@ -2173,7 +2183,7 @@ def nth_elem(p: UnsafePointer[Float64], n: Int) -> Float64:
     # Regression: the `UnsafePointer[T]` type-subscript receiver used to be
     # lowered as an ordinary value subscript and `.alloc(n)` fell through
     # to the generic scalar-method stub, so `Int(...)` of the result read
-    # 0 (bugs/CODEGEN_int_of_alloc_struct_pointer_returns_zero.md).
+    # 0 (CODEGEN_int_of_alloc_struct_pointer_returns_zero).
     test("unsafepointer_alloc_struct", """\
 struct Rec:
     var tag: Int64
@@ -2505,7 +2515,7 @@ def main():
 
     # 159. str.find(needle, start) — the 2-arg form must lower to
     #      mojo_str_find_from (not mojo_str_find, which silently drops the
-    #      start argument — see bugs/CODEGEN_str_find_start_arg_dropped.md).
+    #      start argument — see “CODEGEN: `str.find(needle”).
     #      Also locks in that the 1-arg form keeps calling mojo_str_find.
     _find_src = """\
 def main():
@@ -2550,7 +2560,7 @@ def test():
 """)
 
     # 160. Multi-name import `import a, b, c` must bind *every* name, not
-    # just the first (bugs/INTERP_multi_name_import_only_binds_first.md).
+    # just the first (INTERP_multi_name_import_only_binds_first).
     # gimple_codegen.py's ImportStmt lowering used to declare a module-marker
     # global only for node.module/node.alias; any comma-separated target
     # past the first (node.extra) was undeclared, so referencing it here
@@ -2565,7 +2575,7 @@ def main():
 """)
 
     # 161. map(str, param) over a plain/unannotated parameter, used inside
-    # another expression (str.join(...)) — bugs/CODEGEN_map_over_untyped_param_arg.md.
+    # another expression (str.join(...)) — CODEGEN_map_over_untyped_param_arg.
     # Before the fix this failed to even compile (GCC -Wint-conversion: `args`
     # defaulted to int64_t instead of MojoList*, and the temp holding
     # mojo_map(...)'s pointer result was declared int64_t too), AND the
@@ -2604,7 +2614,7 @@ def join_strs(args) -> String:
     # 162. A convention/ownership keyword (`var`, `ref`, `read`, etc.) used
     # as a plain parameter name inside `assert(x not in y)` must NOT be
     # misparsed as a parenthesized ownership-prefix binding target — see
-    # bugs/PARSE_FAIL_conv_kw_prefix_misfires_on_var_not_in.md. Real Python
+    # PARSE_FAIL_conv_kw_prefix_misfires_on_var_not_in. Real Python
     # has no such keywords, so they're common ordinary identifiers; the old
     # `_parse_primary` LPAREN carve-out for `(var x), (ref y) = ...` only
     # checked that the token after the keyword was NAME/KW-shaped, which
@@ -2634,7 +2644,7 @@ def main():
     # 164. `var` used as a plain identifier (Python compat: real Python has
     # no `var` keyword) followed by member access/assignment, a method
     # call, or as one of several tuple-unpack targets must NOT be misparsed
-    # as a var declaration — see bugs/PARSE_FAIL_var_as_identifier_member_access.md.
+    # as a var declaration — see PARSE_FAIL_var_as_identifier_member_access.
     # The statement-level `_parse_stmt` dispatch for `var` only special-cased
     # the `var = expr` shape; anything else (`.`, `,`, etc. right after
     # `var`) unconditionally committed to `_parse_var_decl()` and crashed on
@@ -2680,7 +2690,7 @@ def main():
     # 167. `var`/etc. as the FIRST element of a plain tuple-unpack for-loop
     # target (`for var, other_var in pairs:`) must NOT be misparsed as a
     # bogus convention-keyword prefix — see
-    # bugs/PARSE_FAIL_var_as_for_loop_target_comma.md. `_parse_for`'s
+    # PARSE_FAIL_var_as_for_loop_target_comma. `_parse_for`'s
     # convention-keyword carve-out already excluded peek(1) == KW('in') and
     # peek(1) == COLON, but not COMMA, so this real-stdlib shape
     # (Tools/cases_generator/stack.py:606) swallowed `var` as a bogus prefix
@@ -2719,7 +2729,7 @@ def main():
     # ending right before its own closing quote), followed later in the
     # same statement by another quoted string, must not corrupt the token
     # stream — see
-    # bugs/PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.md.
+    # PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.
     # `_process_nested_tstrings`'s ordinary-string-skip guard used to check
     # only the single character immediately before a quote for
     # alphanumeric-ness, so `r"..."` (prefix letter `r` IS alphanumeric)
@@ -2755,7 +2765,7 @@ def main():
     # plain `f`-prefixed string (no `t`/`T`) fell into the plain
     # simple-scan-to-matching-quote branch, which has no `{...}` awareness
     # and truncated the string at the first reused quote inside the braces.
-    # See bugs/PARSE_FAIL_fstring_same_quote_reuse.md. Covers both quote
+    # See PARSE_FAIL_fstring_same_quote_reuse. Covers both quote
     # characters, since the bug was quote-character-specific in the sense
     # that a DIFFERENT nested quote already worked.
     test("fstring_nested_same_single_quote_reused", """\
@@ -2807,7 +2817,7 @@ def f(x: some.module, y: some[module], z: some(module), alpha: some | obj, beta:
     # mirrors CPython's own Lib/test/test_annotationlib.py test_reverse_ops,
     # which exercises a whole battery of reverse-dunder-shaped binary-op
     # annotations (all NUMBER-literal prefixes) in one signature.
-    # See bugs/PARSE_FAIL_annotation_leading_literal_trailing_op.md.
+    # See PARSE_FAIL_annotation_leading_literal_trailing_op.
     test("annotation_leading_literal_trailing_op_battery", """\
 a = 1
 def f(radd: 1 + a, rsub: 1 - a, rmul: 1 * a, rmatmul: 1 @ a, rtruediv: 1 / a, rmod: 1 % a, rlshift: 1 << a, rrshift: 1 >> a, ror: 1 | a, rxor: 1 ^ a, rand: 1 & a, rfloordiv: 1 // a, rpow: 1**a):
@@ -2826,7 +2836,7 @@ print("ok")
     # test_literals, which exercises a battery of literal annotations
     # (NUMBER, STRING, bytes, bool, None, Ellipsis, complex) in one
     # signature — `g: ...` is the Ellipsis case.
-    # See bugs/PARSE_FAIL_annotation_ellipsis.md.
+    # See PARSE_FAIL_annotation_ellipsis.
     test("annotation_literals_battery", """\
 def f(a: 1, b: 1.0, c: "hello", d: b"hello", e: True, f: None, g: ..., h: 1j):
     pass
@@ -2852,7 +2862,7 @@ print("ok")
     # session (6ee8291 -> 6e6020f -> bb28e80 -> c2933a7 -> this one), so a
     # structural fix was chosen over a fifth narrow patch. Mirrors CPython's
     # own Lib/test/test_annotationlib.py test_shenanigans.
-    # See bugs/PARSE_FAIL_annotation_paren_then_dot.md.
+    # See PARSE_FAIL_annotation_paren_then_dot.
     test("annotation_paren_then_dot_battery", """\
 x = 1
 def f(x: x | (1).__class__, y: (1).__class__):
@@ -2872,7 +2882,7 @@ print("ok")
     # unrelated to the real problem). Since there's no runtime-dispatch
     # mechanism to represent "whichever branch executes wins" as distinct C
     # symbols, this must be refused honestly rather than silently miscompiled
-    # — see bugs/CODEGEN_conditional_toplevel_def_name_collision.md.
+    # — see CODEGEN_conditional_toplevel_def_name_collision.
     test("conditional_toplevel_def_name_collision", """\
 import sys
 if sys.platform == 'win32':
@@ -2894,7 +2904,7 @@ f()
     # must still be refused clearly (RuntimeError from
     # gen_module/compile_to_gimple) rather than silently miscompiled into a
     # single straight-line C function that just drops the yield. Milestone 1
-    # of bugs/INTERP_generator_yield_entirely_unimplemented.md — see
+    # of INTERP_generator_yield_entirely_unimplemented — see
     # fire_compiler.py's YieldExpr/YieldFromExpr/FunctionDef.is_generator
     # and gimple_codegen.py's gen_module pre-pass. A generator taking a
     # plain scalar parameter (`def f(n): yield n`) is now COMPILED, not
@@ -2930,7 +2940,7 @@ def f(s: String):
     # populated self._inferred_param_types, so the unannotated `s` fell
     # straight through to _resolve_type(None)'s naive int64_t default with
     # no cross-call-site evidence at all — see
-    # bugs/CODEGEN_compiled_generator_unannotated_string_param_mistyped.md.
+    # CODEGEN_compiled_generator_unannotated_string_param_mistyped.
     # The fix reuses the exact same cross-call scalar-contract mechanism
     # that already protects ordinary (non-generator) unannotated parameters
     # (e387af9/8799ec4) by deferring the generator compile attempt until
@@ -4249,7 +4259,7 @@ def main():
     test_generator_assign_then_for_loop_compiles_via_cpp_path()
 
     # Same step: `next(g)` called directly on an assigned generator variable
-    # — bugs/CODEGEN_compiled_generator_not_first_class_value.md's SECOND
+    # — CODEGEN_compiled_generator_not_first_class_value's SECOND
     # failure (previously an undefined-symbol LINK error, since the generic
     # `next()` builtin had no case for MojoGenerator* at all — only a
     # variadic FIXME extern stub with no definition anywhere). Asserts the
@@ -4481,7 +4491,7 @@ def main():
     test_generator_returned_from_function_compiles_via_cpp_path()
 
     # A `for` loop over a generator whose body does `in`/`not in` membership
-    # tests — bugs/CODEGEN_compiled_generator_not_first_class_value.md-adjacent
+    # tests — CODEGEN_compiled_generator_not_first_class_value-adjacent
     # .cpp emission. Python's `in`/`not in` operators are NOT emitted as infix
     # tokens in the C++20-coroutine body (that would spell Python keywords
     # `in`/`not in` directly into C++ — invalid: `not` is a C++ keyword and
@@ -4508,7 +4518,7 @@ def main():
     # used to fall through to the generic struct-field lookup and emit an
     # invalid `self->b` field access (`'C' has no member named 'b'` from the
     # C compiler, since `b` is a method, not a data field) — see
-    # bugs/CODEGEN_bound_method_as_value_not_resolved.md. Real stdlib
+    # CODEGEN_bound_method_as_value_not_resolved. Real stdlib
     # trigger: Lib/cmd.py's `readline.set_completer(self.complete)` passes a
     # bound method as a callback value the same way.
     test("bound_method_as_value", """\
@@ -4559,7 +4569,7 @@ def main():
 """)
 
     # 178. Untyped-parameter identity function called with a string argument
-    # — bugs/CODEGEN_untyped_param_string_passthrough_wrong.md. `a` has no
+    # — CODEGEN_untyped_param_string_passthrough_wrong. `a` has no
     # body-usage evidence at all (just returned unchanged), so the parameter
     # and the function's inferred return type used to default to int64_t;
     # the real char* argument then got silently truncated/reinterpreted as
@@ -5133,7 +5143,7 @@ async def f(x: String) -> String:
     return x
 """)
 
-    # bugs/COMPILE_FAIL_asyncio_queues.md gap 2: a STRUCT-typed param on a
+    # “COMPILE_FAIL: asyncio/queues.py” gap 2: a STRUCT-typed param on a
     # top-level (non-method) async def is now supported -- unpacked from
     # its __mojo_gen_arg slot with a `(T *)` cast (structs cross as `T *`,
     # BUG-2026-030) and threaded to the coroutine body as a real `T *` C
@@ -5172,7 +5182,7 @@ def main():
     print(asyncio.run(main_co()))
 """)
 
-    # bugs/COMPILE_FAIL_asyncio_futures.md items (1)-(3): the native Future
+    # “COMPILE_FAIL: asyncio/futures.py” items (1)-(3): the native Future
     # handle now carries an exception slot (set_exception/exception), a
     # cancelled state (cancel/cancelled/set_running_or_notify_cancel) and a
     # done-callback list (add_done_callback/remove_done_callback). These
@@ -5210,7 +5220,7 @@ def main():
     print(asyncio.run(main_co()))
 """)
 
-    # bugs/COMPILE_FAIL_asyncio_futures.md (3), callback-kind tag: a
+    # “COMPILE_FAIL: asyncio/futures.py” (3), callback-kind tag: a
     # bound-method callback (`self.on_done`, asyncio's own shape) and a
     # capturing-closure callback must lower through the MojoBoundMethod*
     # path (tag 1), not as a bare fn pointer. Behavioral proof:
@@ -5890,7 +5900,7 @@ def main():
         print(f"PASS  {name}")
         _PASS += 1
 
-    # bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md, Step 5.4:
+    # “setting/getting an arbitrary attribute on a generically-typed object”, Step 5.4:
     # a genuinely NEW dynamic attribute read on an opaquely-typed receiver
     # (an unannotated param whose static type can't be resolved to a known
     # struct) must lower to the real runtime dispatch chain that raises a
@@ -5956,7 +5966,7 @@ class Slot:
     # MojoDict* operand — the "invalid operands to binary % (have
     # 'int64_t' and 'MojoDict *')" hard-error class in real argparse.py /
     # Mac/BuildScript/build-installer.py closures (see
-    # bugs/COMPILE_FAIL_Mac_BuildScript_build-installer.md root cause 2).
+    # “COMPILE_FAIL: Mac/BuildScript/build-installer.py” root cause 2).
     # Now routed to runtime/fire_runtime.c's mojo_str_format_dict, which
     # resolves %(key)... specs against the dict AT RUNTIME.
     _dictfmt_src = """\
@@ -6584,7 +6594,7 @@ def root_cas_hash_call(parts) -> str:
         statically-known kind has no sound lowering. Both backends used to
         pick int64_t anyway and silently print a truncated float or a
         string's ADDRESS. Now both refuse, naming the parameter. See
-        bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md.
+        CODEGEN_coro_yield_kind_unresolved_callsite.
 
         That doc's residual -- "the refusal only fires on PROVABLE
         disagreement; a call site the static scan cannot type is a separate,
@@ -6652,7 +6662,7 @@ def main():
     # did not: reading a genuinely conflicting param is the cross-cutting
     # one-C-type-per-slot limitation, and asserting a value for it would
     # assert the wrong answer. That limitation is
-    # bugs/CODEGEN_polymorphic_unannotated_param_vacuous_unanimity.md, still
+    # CODEGEN_polymorphic_unannotated_param_vacuous_unanimity, still
     # OPEN; the `int64_t`-is-not-evidence rule in `_record_param_elem` is the
     # part of it that is fixed, and this case is where that rule earns its
     # keep.
@@ -6993,7 +7003,7 @@ def main():
         _PASS += 1
 
     # ------------------------------------------------------------------
-    # bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md's residue: a
+    # “the constructor-call-site field-typing pass understood only scalars”'s residue: a
     # container reached the constructor through one extra hop -- a LOCAL
     # bound to a container literal, or a `self.<field>` read of a field the
     # caller's own struct sets to a container literal -- instead of the
@@ -7055,7 +7065,7 @@ def main():
         _PASS += 1
 
     # ------------------------------------------------------------------
-    # bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md item 2: a field
+    # “the constructor-call-site field-typing pass understood only scalars” item 2: a field
     # value round-tripped through a LOCAL lost its type, so
     # `t = self.v; return t` inferred an `int64_t` return and `print`
     # rendered the `char *` as a decimal address. The three sites that seed
@@ -7112,7 +7122,7 @@ def main():
     # check passed and the only symptom was the RENDERED TEXT -- `print`
     # dispatches on the slot's C type (`emit_infra`'s `_Bool` branch calls
     # `mojo_repr_bool`), so an `int64_t` slot prints `1`. Its doc
-    # (bugs/hard/CODEGEN_generator_value_slot_loses_bool.md) was DELETED on
+    # (CODEGEN_generator_value_slot_loses_bool) was DELETED on
     # fix, per CLAUDE.md's "Bug docs" rule — the two decisions it left open
     # (mixed bool/int yields, unannotated call-site params) are recorded in
     # `_generator_value_kind`'s comment and pinned by
@@ -7562,7 +7572,7 @@ main()
           `_toplevel`, which is emitted after every ordinary function, so the
           per-function reset wiped whatever the store had recorded.
         - a DICT OF CALLABLES (`d = {"k": lambda: False}`): a second table
-          (`_dict_callable_ret`), gated on the dict's NAME, with the same
+          (`_container_callable_ret`), gated on the dict's NAME, with the same
           never-reset twin needed for a global.
         - a FACTORY (`def mk(): return lambda: 2.5`): the result is cast
           into a fresh temp before the outer `mk()()` sees it, so the answer
@@ -7704,7 +7714,7 @@ main()
         and `%s` use.
 
         The doc's repro is a struct method returning one of its own `str`
-        fields (`bugs/CODEGEN_method_returning_self_str_field_segfaults.md`,
+        fields (`“A struct method that returns one of its own `str` fields SEGFAULTs”`,
         removed with this fix), and it is reproduced here — including the
         imported-sibling spelling, since the field read off the object and
         the read back out of the method are two separate lowerings and a fix
@@ -7780,7 +7790,7 @@ main()
         here, and both are named in the docstring's neighbour bug docs:
         CPython raises TypeError where the compiled path answers `[]` for the
         first (a SIGSEGV until this same change's fail-closed arm —
-        `bugs/CODEGEN_iterating_a_non_container_is_a_segfault.md`), and a
+        the `list(<an int>)` arm), and a
         boxed dict's keys come back as their own addresses for the second
         (`bugs/CODEGEN_materialized_container_has_no_element_type.md`).
 
@@ -7844,7 +7854,7 @@ main()
         unknown-element default `str`, so EVERY read of it went through
         `mojo_list_get_str` — and `a[0]` holds `2.5`'s IEEE-754 bit pattern
         `0x4004000000000000`, which `strlen` walked to and died on
-        (bugs/CODEGEN_list_element_read_defaults_to_str_across_a_call.md).
+        (CODEGEN_list_element_read_defaults_to_str_across_a_call).
 
         Both halves are asserted. The indexed reads need the per-slot kinds to
         cross the boundary (the new `_return_value_slot_kinds`); the
@@ -7890,6 +7900,66 @@ main()
                       f"CPython {want!r}")
                 _FAIL += 1
                 return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_print_of_a_function_value_is_not_a_decimal_address():
+        """`print(f)` on a function object is a `str()` spelling, and it used
+        to be undefined behaviour.
+
+        A function VALUE is a `void *` — the pre-declared `_funcptr_<csym>`
+        static, because GIMPLE forbids `&func_name` as an rvalue. Nothing
+        downstream of that knew it was anything but a pointer, so `print`
+        reached its generic `sprintf(fmt, val)` arm and
+        `TypeLattice.printf_fmt('void *')` answered `%d`, because it has no
+        format for a pointer and its default is the integer one. Formatting a
+        64-bit pointer with `%d` is undefined behaviour; on this target it
+        prints the low half in decimal, which is where `print(step)` -> a bare
+        number like `74387272` came from.
+
+        The ADDRESS was never the wrong answer — CPython prints
+        `<function step at 0x...>` — so the `%d` was the whole bug, and it is
+        independent of the decorator-application defect this fixture is
+        reduced from (see
+        bugs/COMPILE_FAIL_decorator_application_dropped.md, whose defect 2
+        names it as separable). The fixture keeps the decorator because that
+        is the reduction the doc measured, and because a decorated `def` is
+        the ordinary way a program ends up holding a function value.
+
+        The address is asserted by SHAPE and not by value: it differs per
+        build, per process and per platform, which is why CPython cannot be
+        compared for equality here and the comparison is against the same
+        regex on both sides."""
+        global _PASS, _FAIL
+        name = "print_of_a_function_value_is_not_a_decimal_address"
+        src = '''\
+def deco(f):
+    return 99
+
+@deco
+def step(x):
+    return x + 1
+
+print(step)
+step(7)
+'''
+        got = _compiled_stdout(src, 'single-TU')
+        if isinstance(got, tuple):
+            print(f"FAIL  {name}: gcc -fgimple failed:\n{got[1][:800]}")
+            _FAIL += 1
+            return
+        m = re.fullmatch(r'<function step at 0x[0-9a-f]+>\n', got or '')
+        if not m:
+            print(f"FAIL  {name}: compiled stdout {got!r} is not "
+                  f"'<function step at 0x...>'")
+            _FAIL += 1
+            return
+        # And the decimal-address failure mode specifically: a bare integer is
+        # what the `%d` produced, so assert it is NOT that.
+        if re.fullmatch(r'[0-9]+\n', got or ''):
+            print(f"FAIL  {name}: still formatting the pointer as a decimal")
+            _FAIL += 1
+            return
         print(f"PASS  {name}")
         _PASS += 1
 
@@ -8075,7 +8145,7 @@ print("%r" % p)
           `Alias("s")` fell into the generic one-string-argument "opaque
           constructor" and returned the ARGUMENT — `x` became the literal
           `"a"` and `x.widgetName` raised AttributeError
-          (bugs/CODEGEN_aliased_imported_struct_construction_unresolved.md).
+          (“OPEN: `from mod import Class as Alias”).
         * The same class reached THROUGH a re-export then lost its field
           TYPES: the cross-module constructor-hint pass looked the struct
           up in the RE-EXPORTING module, which has no `class`, so
@@ -9485,6 +9555,117 @@ print(one([3, 9, 2]), two(3, 9), three(1, 7, 4), R().read1(3))
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_a_forwarded_string_argument_keeps_its_type():
+        """An unannotated parameter that only FORWARDS its arguments must
+        still be typed from what its own callers pass.
+
+        `“CODEGEN: a string argument's type is lost across a forwarding hop”`'s repro:
+
+            def sink(x, y, z): return '%s and %s' % (x, y)
+            def mid(a, b):     return sink(a, b, None)
+            def go():           return mid('readme', 'b')
+
+        `mid`'s body gives `_infer_param_types` nothing at all (`a` and `b`
+        are only handed to another unannotated callee), and `sink`'s ONE call
+        site passes exactly those names — so the observation of `sink`'s
+        parameters was silence, they kept the `int64_t` default, and
+        `'%s'` formatted the boxed `char *` as a decimal address:
+
+            CPython:  readme and b
+            compiled: 4301506648 and 4301506656      (exit 0)
+
+        A silent wrong answer, not a refusal. The fix is in
+        `_gmi_apply_call_site_param_evidence`: a parameter with NO
+        use-derived evidence (`cur is None` — the pass records an entry only
+        when the body says something) is not contradicted by anything, so
+        unanimous literal call sites are believed, which is what lets the
+        existing cross-call observation see `char *` at `sink`'s call site.
+
+        Every line is CPython-comparable, and both pipelines are run because
+        the inference is whole-program rather than per-function. The
+        `pct(5)` line is in the program on purpose: a parameter whose call
+        sites are a string AND an int must still print both correctly, which
+        is the case a too-eager "every literal wins" fix would break.
+        """
+        global _PASS, _FAIL
+        name = "a_forwarded_string_argument_keeps_its_type"
+        src = '''\
+def sink(x, y, z):
+    return '%s and %s' % (x, y)
+
+def mid(a, b):
+    return sink(a, b, None)
+
+def go():
+    return mid('readme', 'b')
+
+def pct(x):
+    return '%s' % x
+
+def show(x):
+    print(x)
+
+def relay(x):
+    return show(x)
+
+print(go())
+print(pct('s'))
+print(pct(5))
+relay('hi')
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'forwarded.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'fwd_{mode}.c')
+                exe = os.path.join(td, f'fwd_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_list_sort_in_a_method_body_is_gimple_legal():
         """`self.<field>.sort()` inside a METHOD must compile.
 
@@ -9575,6 +9756,293 @@ C().sort()
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_itertools_filterfalse_keeps_the_elements_whose_predicate_is_false():
+        """`itertools.filterfalse(f, xs)` must build a real list of the
+        elements its predicate REJECTS.
+
+        It had no lowering at all, so its result was an unmodelled handle of
+        unknown type — and the `next(...)` over it in
+        `Lib/importlib/resources/_common.py:105` then had no honest answer, so
+        that module fell back to source. The refusal named `next` as the
+        missing piece, which was a misdiagnosis: builtin `filter` over the
+        same shape compiled fine (its own rows are in this file), and
+        `next(iter(<list>))` was the landing spot all along.
+
+        The trap this has to avoid is real and was measured: adding a
+        `next(<bare MojoList *>)` lowering to cover the stdlib line would turn
+        two CPython `TypeError`s into values (`next([1, 2])` is a TypeError —
+        a list is not an iterator — while such a lowering would answer `1`).
+        So `next(it)` still refuses, and that is pinned by the next test: a
+        wrong fix here COMPILES AND RUNS, printing a value where CPython
+        raises, which is why the expectation is CPython's stdout on both
+        pipelines and not a hand-written string.
+
+        Four spellings, because each is a separate dispatch site: the
+        qualified member call (`_common.py`'s), the bare name after
+        `from itertools import filterfalse`, a `for` loop over the result, and
+        `list(...)` of it — with a `char *` element type, which is the kind
+        the per-element build has to carry through.
+        """
+        global _PASS, _FAIL
+        name = "itertools_filterfalse_keeps_the_elements_whose_predicate_is_false"
+        src = '''\
+import itertools
+from itertools import filterfalse
+
+def qualified(xs, f):
+    it = itertools.filterfalse(f, xs)
+    return next(iter(it))
+
+def bare(xs, f):
+    it = filterfalse(f, xs)
+    return next(iter(it))
+
+def as_loop(xs, f):
+    out = []
+    for v in itertools.filterfalse(f, xs):
+        out = out + [v]
+    return out
+
+print(qualified([1, 2, 3], lambda v: v < 2))
+print(bare([1, 2, 3, 4], lambda v: v % 2 == 0))
+print(as_loop([5, 6, 7], lambda v: v < 6))
+print(list(itertools.filterfalse(lambda v: v == 'b', ['a', 'b', 'c'])))
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_next_over_a_filter_result_still_refuses_without_iter():
+        """The negative half of the pair above: `next(<filtered list>)` has no
+        lowering and must keep having none.
+
+        In Python a list is NOT an iterator — `hasattr([], '__next__')` is
+        False; only `iter(x)` produces one — so `next(filter(f, xs))`'s
+        Mojo-side equivalent, `next(<the MojoList the filter built>)`, has no
+        honest value to return. A `next` over a `MojoList *` would answer the
+        first element instead, which compiles, runs, exits 0 and is wrong.
+
+        Pinned as a REFUSAL — the module falls back to source with a
+        diagnostic naming the shape — because the alternative assertion, a
+        value, would be pinning the very wrong answer this forbids.
+        """
+        global _PASS, _FAIL
+        name = "next_over_a_filter_result_still_refuses_without_iter"
+        src = '''\
+def bare(xs, f):
+    it = filter(f, xs)
+    return next(it)
+'''
+        for mode, kwargs in (('single-TU', {'do_imports': True}),
+                             ('link-mode', {'link_mode': True})):
+            try:
+                gimple_codegen._run_pipeline(src, filename='p.py', **kwargs)
+            except Exception:
+                continue
+            print(f"FAIL  {name} [{mode}]: next(<a list>) compiled, so a list "
+                  f"is being read as an iterator where CPython raises "
+                  f"TypeError")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_unannotated_init_param_evidence_reaches_the_signature():
+        """An unannotated `__init__` param's ctype must be the SAME answer in
+        the emitted signature and in the field's declaration.
+
+        The literal-evidence tables (`_ctor_lit_param_types`,
+        `_xf_own_ctor_params`) were read by the FIELD pass only — through a
+        `pm` map local to that loop — so a field fed from such a param was
+        declared `double` while the parameter stayed `int64_t` in
+        `func_param_types`, which is the table `emit_calls.py`'s constructor
+        path coerces each argument against ("Coerce each argument to its
+        declared `__init__` param C type"). The literal was therefore
+        truncated AT THE CALL: `B(2.5)` passed the integer 2, `self.f = f`
+        stored it into a `double` field, and `b.f` printed `2.0` where CPython
+        prints `2.5` — a wrong value with exit 0
+        (the float half of the unannotated-`__init__`-param evidence family).
+
+        The other four rows are the "do not break these" half, and each is a
+        path that reaches a ctype by a DIFFERENT rule, so the new arm cannot
+        quietly take one of them over: an explicit annotation (`Float64`),
+        a declared default (`s='hi'`, which is inference from the default
+        expression), a `char *` (which was already right — but for the wrong
+        reason: a string literal's ADDRESS round-trips through an `int64_t`
+        parameter unchanged, which is luck, not agreement), and a container
+        (a different evidence table). The last row is two params in one
+        constructor, one with float evidence and one without, so a fix that
+        typed the WHOLE signature from the evidence instead of per slot would
+        show up as the integer parameter arriving as a double.
+
+        CPython's stdout is the expectation, on both pipelines: the failure
+        mode is a plausible number (2.0 for 2.5, 1.0 for 1.5), so only the
+        oracle distinguishes it.
+        """
+        global _PASS, _FAIL
+        name = "unannotated_init_param_evidence_reaches_the_signature"
+        src = '''\
+class F:
+    def __init__(self, f):
+        self.f = f
+
+class S:
+    def __init__(self, s):
+        self.s = s
+        self.n = s
+
+class A:
+    def __init__(self, x: Float64):
+        self.x = x
+
+class C:
+    def __init__(self, xs):
+        self.xs = xs
+
+class D:
+    def __init__(self, s='hi'):
+        self.s = s
+
+class M:
+    def __init__(self, a, b):
+        self.a = a
+        self.b = b
+
+print(F(2.5).f)
+print(S("hi").s)
+print(S("hi").n)
+print(A(2.5).x)
+print(C([1, 2]).xs)
+print(D().s)
+print(D("yo").s)
+print(M(1.5, 2).a)
+print(M(1.5, 2).b)
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_module_level_struct_global_keeps_its_type_in_a_container():
+        """A module-level `p = P("a")` read as a bare name is a global, and
+        `_quick_type` used to answer `int64_t` for it because `var_types`
+        holds only locals and parameters.
+
+        A global holding a STRUCT is the one value class that cannot recover
+        from the box: its C field is an `int64_t` holding the pointer, and a
+        struct-allocated value has no runtime type tag for the container
+        walkers to dispatch on — so the list literal recorded no element repr
+        and `repr([p])` printed the pointer decimal where CPython prints the
+        object. `repr(p)` alone was already RIGHT, which is what makes this a
+        type-inference gap rather than a repr bug, so both spellings are
+        asserted: the one that was broken and the one that must stay right.
+
+        The same text inside a function is the control that pins the fix to
+        the module-level spelling rather than to struct-in-a-container, which
+        was already working.
+        """
+        global _PASS, _FAIL
+        name = "module_level_struct_global_keeps_its_type_in_a_container"
+        src = '''\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+
+p = P("a")
+print(repr([p]))
+print(repr(p))
+
+def inside():
+    q = P("b")
+    print(repr([q]))
+inside()
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'modlevel.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'ml_{mode}.c')
+                exe = os.path.join(td, f'ml_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_dict_union_right_operand_is_converted_at_runtime():
         """`dict | x` with `x`'s type unresolved must convert, not cast.
 
@@ -9607,12 +10075,17 @@ C().sort()
         broken.
 
         Both operand orders are in the program because the coercion is
-        applied to whichever side is unresolved. The merges are kept to
-        ONE application each: a second `|=` reorders the left operand's
-        keys, which is a separate runtime bug in `mojo_dict_update`
-        (RUNTIME_dict_update_discards_insertion_order.md, filed, verified
-        present with this change reverted) and is not what this test is
-        for."""
+        applied to whichever side is unresolved. Each field is merged
+        TWICE: `mojo_dict_update` used to walk the source's hash-slot
+        array, so the destination came out in slot order and the second
+        merge moved the pre-existing key behind the new one — every key
+        and value correct, only the order wrong. That is fixed (the walk
+        goes through `mojo_dict_order_indices`, as repr and iteration
+        already did) and the coverage is here rather than in a test of
+        its own: `test_runtime_diff.py`'s
+        `dict_update_preserves_insertion_order` is where the ordering
+        guarantee is pinned against CPython, and this shape keeps the
+        coercion honest when it is the SECOND merge that would reorder."""
         global _PASS, _FAIL
         name = "dict_union_right_operand_is_converted_at_runtime"
         src = '''\
@@ -9632,8 +10105,12 @@ class E:
 d = D()
 d.merge({'a': 1})
 print(d.data)
+d.merge({'b': 2})
+print(d.data)
 e = E()
 e.merge({'a': 1})
+print(e.data)
+e.merge({'b': 2})
 print(e.data)
 print({'p': 1} | {'q': 2})
 '''
@@ -10446,9 +10923,14 @@ print(run('x/y.txt'))
     test_paren_name_vs_one_tuple_for_target_differ()
     test_walk_ast_dataclass_cache_is_transparent()
     test_scalar_arity_min_max_params_are_not_containers()
+    test_a_forwarded_string_argument_keeps_its_type()
     test_list_sort_in_a_method_body_is_gimple_legal()
     test_dict_union_right_operand_is_converted_at_runtime()
     test_dict_literal_star_star_pair_merges_instead_of_storing()
+    test_module_level_struct_global_keeps_its_type_in_a_container()
+    test_itertools_filterfalse_keeps_the_elements_whose_predicate_is_false()
+    test_next_over_a_filter_result_still_refuses_without_iter()
+    test_unannotated_init_param_evidence_reaches_the_signature()
     test_next_inside_for_over_same_iterator_is_one_ahead()
     test_iterator_cursor_len_is_remaining_and_dunder_next_advances()
     test_span_cursor_reads_the_span_and_len_tracks_the_cursor()
@@ -10481,6 +10963,7 @@ print(run('x/y.txt'))
     test_ctor_of_a_container_reaches_the_comprehension()
     test_a_returned_heterogeneous_list_keeps_its_slot_kinds()
     test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not()
+    test_print_of_a_function_value_is_not_a_decimal_address()
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

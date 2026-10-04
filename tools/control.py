@@ -458,7 +458,7 @@ def _guard_runaway(roots, a, cwd_of, kill):
 
     2026-10-02: twelve `fire.py build --formal ... std/python/bindings.mojo` processes, up to 1.6 DAYS old and
     each burning ~55% of a core, plus two `test_formal_math.py` runs 10 hours old, were found left behind by
-    workers that had since finished: a non-terminating compile (bugs/FORMAL_bindings_mojo_build_never_terminates.md)
+    workers that had since finished: a non-terminating compile (“`fire.py build --formal` on `std/python/bindings.mojo` never terminates”)
     that nothing bounded. Any `fire.py build` / `test_*.py` / `formal_sweep.py` / probe script that is still
     running after --runaway-min minutes (default 120; the longest legitimate one is the self-host build at ~25 min)
     is killed. The gate and the integrator run through tools/suite.py (its own timeouts), so their processes are

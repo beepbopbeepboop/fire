@@ -324,7 +324,7 @@ def build_and_run(src, name, tmpdir, compare, backends=None, cross=None,
         optional filter for that comparison, for the one case where two
         architectures cannot be compared (a float-valued `printf` operand, where
         x86-64 reads `XMM0`; see
-        `bugs/FORMAL_x86_64_a_float_printf_operand_reads_XMM0.md`).
+        `“FORMAL_x86_64_a_float_printf_operand_reads_XMM0: `printf("%f"”`).
 
     Records are the `@@`-separated fields of the image's stdout. `@@` is the
     record terminator every hostmod test in this tree uses, and it is here for a

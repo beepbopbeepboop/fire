@@ -60,7 +60,7 @@ record the compiler can see.
 be written, and the reason is a capability this target does not have rather than
 a module nobody has got round to. Writing either module alone would produce a
 function whose name promises a graph walk and delivers an identity, which is the
-outcome `bugs/FORMAL_hashlib_sha3_and_blake2s_absent.md` filed a decision rather
+outcome `FORMAL_hashlib_sha3_and_blake2s_absent` filed a decision rather
 than shipping one.
 
 ## What is missing, stated as one thing

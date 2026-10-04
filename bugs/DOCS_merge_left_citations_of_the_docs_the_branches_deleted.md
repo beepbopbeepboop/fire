@@ -55,7 +55,7 @@ docs the eight branches `git rm`'d:
 **Harmless in a `bugs/` document (about 20 sites).** They say "was
 `…`.md`, deleted", "now closed", or are sweep work-map rows naming the cause the
 way a work map names a cause. The convention the branches themselves established
-(formal3-5's `bugs/FORMAL_struct_eq_compares_frame_addresses.md:4` reads "now
+(formal3-5's `FORMAL_struct_eq_compares_frame_addresses:4` reads "now
 fixed and `git rm`'d") is fine and this doc does not argue with it.
 
 **Harmful in a `.py` comment (11 sites, NOT fixed):**

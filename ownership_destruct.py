@@ -1623,7 +1623,7 @@ def list_elements_owned(fn_body, name: str) -> bool:
     leaking on purpose") and for a dict/set's `key_views_consumed` above; this
     is the LIST-element counterpart, and the leak it does close — the
     ~48 B/iteration of `String("a b c").split(" ")` measured over 100k and
-    400k iterations in bugs/CODEGEN_call_result_container_never_freed.md — is
+    400k iterations in CODEGEN_call_result_container_never_freed — is
     the `len()`-and-drop shape, which is the common one."""
     return _list_str_uses_ok(fn_body, name)
 
@@ -1730,6 +1730,44 @@ def lambda_value_owned(fn_body, name: str) -> bool:
     safe, and lifting that exclusion is a separate piece of work. This rule
     asks nothing about containers, so it holds on a body the container analysis
     refuses to look at."""
+    return _lambda_uses_ok(fn_body, name)
+
+
+def nested_def_env_owned(fn_body, name: str) -> bool:
+    """True iff the environment `_alloc_<name>_env()` allocated for a nested
+    `def name` may be freed when the enclosing function returns.
+
+    The same rule `lambda_value_owned` applies to a capturing lambda's value,
+    and for the same reason: the environment dies with the scope that made it
+    only if that scope is its last holder, and "holder" is narrow — the ONLY
+    acceptable mention of `name` is as the CALLEE of a call. `return inner(1)
+    + inner(2)` (one env, two calls, the shape
+    bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md's OPEN 1 measured
+    at +16 B/iteration) qualifies; `g = inner`, `kept.append(inner)`,
+    `return inner`, `inner.attr` and a mention inside any nested
+    `lambda`/`def` (whose own environment can outlive this scope) do not.
+
+    What is DIFFERENT from a capturing lambda, and why this is its own name
+    rather than a second rule:
+
+    * a capturing lambda's value is a `MojoBoundMethod *` PLUS the env, one
+      allocation unit freed by `mojo_closure_free` (which also drops the
+      `_reg_bound_method` entry — freeing the object without it makes
+      `mojo_is_bound_method` report whatever the allocator hands back next);
+    * a nested `def` produces NO bound method at all. Its call sites are
+      DIRECT (`helper_inner (_env_inner, 1)`), the env var is
+      function-scoped, and the value is a plain `malloc` block — so the
+      teardown is a bare `free` and the unwind entry is `MOJO_CLEANUP_PTR` /
+      `mojo_cleanup_push_ptr` ("a plain malloc/calloc block: a struct
+      instance"). `mojo_closure_free` would be WRONG here: it would treat a
+      `helper_inner_env *` as a `MojoBoundMethod` and free two words of it.
+
+    So it is the same question with a different teardown, which is exactly
+    what `lambda_value_owned`'s own docstring means by "This rule asks
+    nothing about containers, so it holds on a body the container analysis
+    refuses to look at" — this one asks nothing about a callable VALUE,
+    because there is none.
+    """
     return _lambda_uses_ok(fn_body, name)
 
 

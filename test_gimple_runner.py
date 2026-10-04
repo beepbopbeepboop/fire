@@ -202,6 +202,44 @@ def test_gimple_stdout_repeated(name: str, mojo_src: str, expected_stdout: str,
                     pass
 
 
+def dict_param_reader_is_str(name: str, mojo_src: str, fn: str, want: bool):
+    """Assert whether the generated C for `fn` reads a dict slot through
+    `mojo_dict_get_str`; return the reader calls it found.
+
+    The stdout assertions cannot see this axis at all: an UNTYPED dict slot is
+    read through `mojo_dict_get_int`, so a `char *` value comes back as the
+    stored pointer's own digits — an ASLR address that differs run to run and
+    no equality assertion can pin. What IS pinnable is which accessor the
+    generated C chose, and that is the entire content of the cross-call
+    dict-value contract, so both its positive and its negative case are
+    asserted this way."""
+    global _PASS, _FAIL
+    from gimple_codegen import compile_to_gimple
+    try:
+        c = compile_to_gimple(mojo_src, do_imports=False, filename='dvt.py')
+        # The mangled DEFINITION, not the forward declaration: `c.index(f'{fn}_')`
+        # finds the prototype first, whose `\n}`-terminated "body" is some
+        # unrelated function that follows it.
+        m = re.search(rf'^[^\n]*\b{fn}_[0-9a-f]+ \([^;]*\)\n\{{', c, re.M)
+        if m is None:
+            raise AssertionError(f'no definition of {fn}_ found in the generated C')
+        body = c[m.end():c.index('\n}', m.end())]
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+        return []
+    reads = [ln.strip() for ln in body.splitlines() if 'mojo_dict_get' in ln]
+    got = any('mojo_dict_get_str' in r for r in reads)
+    if got != want:
+        print(f"FAIL  {name}: {fn} {'does' if want else 'does not'} read its "
+              f"dict slot as a string, wanted {want} (reader calls: {reads})")
+        _FAIL += 1
+        return reads
+    print(f"PASS  {name}")
+    _PASS += 1
+    return reads
+
+
 def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str):
     """Test that mojo code compiles to GIMPLE, executes, and prints exactly
     `expected_stdout`. Unlike test_gimple_execution's exit-code check, this
@@ -529,7 +567,7 @@ def main() -> Int:
 
     # 10. set(iterable) / list(iterable) constructors actually populate the
     # collection from the argument, instead of silently producing an empty
-    # one — see bugs/CODEGEN_set_list_ctor_ignores_iterable_arg.md. This is
+    # one — see CODEGEN_set_list_ctor_ignores_iterable_arg. This is
     # a genuine behavioral check (len() + a sum over the iterated elements),
     # not just "does it compile": the bug compiled clean and returned 0 for
     # everything below before the fix.
@@ -559,7 +597,7 @@ def main() -> Int:
     # 10. A bound method referenced as a plain VALUE (not called
     # immediately) — `f = self.b` — then invoked later via `f()`. Compiling
     # this used to fail outright (a C compiler error, not just a wrong
-    # answer — see bugs/CODEGEN_bound_method_as_value_not_resolved.md), so
+    # answer — see CODEGEN_bound_method_as_value_not_resolved), so
     # this is a real behavioral round-trip check, not just "it compiles":
     # confirms the stored value actually calls back into the right method
     # WITH the right `self`, not merely that gcc accepts the generated C
@@ -584,7 +622,7 @@ def main() -> Int:
     # (mojo_maybe_bound_call_N). Previously the join collapsed the slot to
     # void* and the call unconditionally used mojo_fnptr_call_0, so the
     # bound-method branch called the MojoBoundMethod struct as code (bus
-    # error). See bugs/hard/CODEGEN_coro_stackswitch_body_semantics_gaps.md
+    # error). See “CODEGEN (A3 stack-switch): 4 further generator-body semantic gaps found”
     # #3. Reproduces in a plain (non-generator) method — this is the
     # codegen-wide check; the generator twin is in
     # test_gimple_generator_runner.py.
@@ -718,6 +756,177 @@ def main():
     e = lambda *a: add(a[0], a[1])
     print(e(4, 5))
 """, "9\n")
+
+    # `print(...)` inside a LAMBDA body emitted no separator and no newline:
+    # `print` is a statement-level builtin whose separators live only in
+    # `gen._gen_print`, and a lambda's body is an EXPRESSION, so the lifted
+    # function wrapped it in `ReturnStmt` and the generic call path claimed it
+    # instead — `mojo_print(<one value>)`, full stop. Three prints came out as
+    # `ABC` on one line for CPython's `A\nB\nC\n`, exit 0. Compared against
+    # CPython rather than a literal, because the separator and the line ending
+    # are the whole subject.
+    test_gimple_matches_cpython("gimple_print_in_lambda_body_terminates", """\
+def main():
+    a = lambda: print("A")
+    a()
+    b = lambda x: print("B")
+    b(1)
+    c = lambda x: print(x, "|", x)
+    c("C")
+    h = lambda s: print(s + "!")
+    h("hello")
+main()
+""")
+
+    # An untyped LAMBDA parameter is physically `int64_t` whatever it is
+    # handed (`mojo_fnptr_call_N` widens every argument), so a string arrives
+    # with its pointer bits and nothing recorded -- and `print(x)` in the body
+    # fell through to the generic `%ld` arm and printed the ADDRESS. `_lower_
+    # LambdaExpr` now asks the runtime's own discriminator, gated on a call
+    # site of this very lambda that was seen passing a `char *`, which is
+    # positive evidence and not "no evidence" (a bare integer is
+    # pointer-shaped in `[2^31, 2^47)`, so an ungated discriminator would
+    # trade one wrong answer for another). The `a(42)` line is the gate: an
+    # ordinary integer must still print as an integer.
+    test_gimple_matches_cpython("gimple_lambda_param_str_and_int_both", """\
+def main():
+    a = lambda x: print(x)
+    a(42)
+    a("s")
+main()
+""")
+
+    # The same shape through a nested `def`, which the cross-call evidence
+    # collector could not see at all: `all_functions` is the module's
+    # top-level statement list, so a `def` inside a function body has no entry
+    # in the callee table the call sites are matched against. The evidence
+    # was collected and dropped. Both the direct spelling and the FORWARDED
+    # one (`inner(n)` with `n` the enclosing's own untyped parameter), because
+    # the second needs the interprocedural fixed point and the first does not
+    # — a fix that only handled the first would look complete.
+    test_gimple_matches_cpython("gimple_nested_def_param_str_and_int", """\
+def outer(n):
+    def inner(s):
+        print(s)
+    inner(n)
+    inner(7)
+    return 0
+
+def main():
+    outer("A")
+    outer(3)
+main()
+""")
+
+    # A CAPTURING lambda inside a NESTED `def`: the env struct's field types
+    # and the stores that fill them disagreed. The int case was the loud one
+    # -- an `int s;` field filled with `_t4 = (int64_t)s; _env->s = _t4;`,
+    # which `-fgimple` rejects ("non-trivial conversion in 'var_decl'"), so
+    # the whole program FAILED TO BUILD rather than merely printing wrong.
+    #
+    # The lambda is RETURNED, which is what forces the env: a lambda that
+    # never escapes is beta-reduced into its call site instead
+    # (`gimple_capturing_lambda_inlined_at_call`, above).
+    test_gimple_matches_cpython("gimple_capturing_lambda_in_nested_def_env", """\
+def outer():
+    s = 9
+    return (lambda: s)
+
+def use(fn):
+    return fn()
+
+def main():
+    print(use(outer()))
+main()
+""")
+
+    # The OTHER two capture kinds, pinned for BUILDABILITY rather than for
+    # their printed value. Every env-fill arm used to hard-code the scalar
+    # coercion as `(int64_t)`, so `char *` and `MojoList *` fields stored a
+    # raw word against a pointer field -- a second non-trivial conversion, and
+    # one that cost this program its build entirely. The VALUES they still
+    # print wrong (a pointer decimal) are a SEPARATE gap and they are not
+    # env-field questions: the callable comes back out of a function into an
+    # unannotated `int64_t` parameter, which loses its return type at the
+    # `mojo_fnptr_call_N` boundary. That is
+    # bugs/CODEGEN_callable_return_type_lost_at_more_hops.md — the same hop
+    # `use(<callable>)` is at the bottom of
+    # `gimple_nested_def_capturing_lambda_call_is_typed` below, which pins the
+    # hop one level in (the factory's own `outer()()`) and passes.
+    # `test_gimple_execution` is the honest assertion for that: it fails on a
+    # gcc error, which is what this case is about.
+    test_gimple_execution("gimple_capturing_lambda_nested_def_ptr_kinds_build", """\
+def outer_str():
+    t = 'x'
+    return (lambda: t)
+
+def outer_list():
+    u = [1, 2]
+    return (lambda: u)
+
+def use(fn):
+    return fn()
+
+def main():
+    print(use(outer_str()))
+    print(use(outer_list()))
+    return 0
+main()
+""", expected_return=0)
+
+    # The same three capture kinds with the factory DEFINED INSIDE a function,
+    # which is where the env was already right and the callable's RETURN TYPE
+    # was not: `_return_callable_ret_types` is recorded by the return site
+    # under `gen.current_func_name`, and for a nested `def` that is the LIFTED
+    # symbol (`main_outer_str`), while the call site spells the bare
+    # `outer_str`. The lookup found nothing, so the call went through the
+    # homogenized `mojo_fnptr_call_0` and `sprintf("%ld", ...)` rendered a
+    # `char *` as its own decimal address. The `double` row then needed the
+    # runtime half as well — `mojo_fnptr_call_dN`'s bound-method arm called
+    # through the `int64_t` signature and so read the garbage register a
+    # double return leaves behind — which is why this is a `matches_cpython`
+    # over all three kinds and not an int-only case.
+    #
+    # `use(<callable>)` is deliberately NOT here: routing the callable through
+    # an unannotated parameter loses the return type one hop further out,
+    # which is bugs/CODEGEN_callable_return_type_lost_at_more_hops.md and is
+    # what `gimple_capturing_lambda_nested_def_ptr_kinds_build` above still
+    # pins for buildability only.
+    test_gimple_matches_cpython("gimple_nested_def_capturing_lambda_call_is_typed", """\
+def main():
+    def outer_int():
+        s = 9
+        return (lambda: s)
+
+    def outer_str():
+        t = 'x'
+        return (lambda: t)
+
+    def outer_dbl():
+        u = 9.5
+        return (lambda: u)
+
+    def outer_nocapture():
+        return (lambda: 3)
+
+    print(outer_int()())
+    print(outer_str()())
+    print(outer_dbl()())
+    print(outer_nocapture()())
+main()
+""")
+
+    # Two arguments through a slot that may hold a string: the discriminator
+    # arm used to print its own answer immediately and `continue` WITHOUT
+    # appending to the resolved-argument list, so the pair came out SWAPPED
+    # and the `' '` separator landed on the wrong one (`two1` for `1 two`).
+    test_gimple_matches_cpython("gimple_print_two_args_one_may_hold_str", """\
+def main():
+    b = lambda x, y: print(x, y)
+    b(1, "two")
+    b("one", 2)
+main()
+""")
 
     # A variadic lambda's `*args` really is a sequence: len(), iteration and
     # indexing all read the packed list, and the ZERO-argument call packs an
@@ -867,7 +1076,7 @@ def main():
     # discriminated with `isinstance(top, tuple)`. `isinstance(x, tuple)`
     # had no real lowering (fell through to an always-false runtime stub),
     # so the tuple branch was dead. See
-    # bugs/hard/CODEGEN_coro_stackswitch_body_semantics_gaps.md #4.
+    # “CODEGEN (A3 stack-switch): 4 further generator-body semantic gaps found” #4.
     test_gimple_stdout("gimple_isinstance_tuple_on_heterogeneous_pop", """\
 fn walk():
     stack = [(1, 2)]
@@ -908,7 +1117,7 @@ def main() -> Int:
     # literal reusing the SAME quote character as the f-string's own
     # delimiter (legal since PEP 701 / Python 3.12) — this used to truncate
     # the f-string at the first reused quote (see
-    # bugs/PARSE_FAIL_fstring_same_quote_reuse.md), producing a "could not
+    # PARSE_FAIL_fstring_same_quote_reuse), producing a "could not
     # be compiled" warning (falling back to mangled literal text). This is
     # a real behavioral round-trip check (VALUE, not just "it compiles"):
     # `len('ab')` interpolates to `2`, and the surrounding f-string text
@@ -923,7 +1132,7 @@ def main() -> Int:
 """, expected_return=len("value: 2"))
 
     # 12. Untyped-parameter identity function called with a string argument
-    # — bugs/CODEGEN_untyped_param_string_passthrough_wrong.md. `a` has no
+    # — CODEGEN_untyped_param_string_passthrough_wrong. `a` has no
     # body-usage evidence at all (just returned unchanged), so the
     # parameter and the function's inferred return type used to default to
     # int64_t; the real char* argument was silently reinterpreted as an
@@ -948,7 +1157,7 @@ print(g("ab"))
     # 14. Two-untyped-parameter shape (`a + b`, both strings) — the shape
     # that originally surfaced via an f-string interpolating a run-time-
     # computed string value from a function just like this one (see
-    # bugs/PARSE_FAIL_fstring_same_quote_reuse.md's verification pass).
+    # PARSE_FAIL_fstring_same_quote_reuse's verification pass).
     test_gimple_stdout("gimple_untyped_param_string_concat_passthrough", """\
 def g(a, b):
     return a + b
@@ -1186,7 +1395,7 @@ main()
 """, "5\n9\nhi\n")
 
     # The SAME subscript callee, reached with a `MojoBoundMethod *` in the
-    # dict instead of a bare function pointer. `note_dict_callable_ret`
+    # dict instead of a bare function pointer. `note_container_callable_ret`
     # consulted only `_callable_ret_types`, which is where a non-capturing
     # closure and a lifted free function land; a struct method bound as a
     # value (`C().m`) lands in `_bound_method_ret_types` instead. With no
@@ -1222,6 +1431,221 @@ def main():
 main()
 """, "8\n10\n8\n")
 
+    # The same subscript callee reached through a LIST rather than a dict, and
+    # through a FUNCTION-RETURNED closure rather than a literal. Both were
+    # still stubbed when this doc's dict half landed, for reasons that are
+    # worth recording because they are the same reason twice:
+    #
+    #   * the gate is a POSITIVE test -- "was a callable recorded being stored
+    #     into THIS container?" -- and a list literal, an `append` and a
+    #     comprehension are three different code paths, so recording the dict
+    #     store recorded none of them. All three now record through the one
+    #     `note_container_callable_ret`, which is why the table is named for
+    #     the CONTAINER and not for the dict (`_container_callable_ret`;
+    #     the rename is the doc's own instruction, and it is why the helper
+    #     reads `container_val`).
+    #   * `e['c'] = mk(100)` stores a CALL RESULT, and the value-keyed tables
+    #     are keyed by a lowered value a call result never has. Its fact is
+    #     under the callee's name in `_return_callable_ret_types` — the same
+    #     compile-scoped record the named-local hop reads.
+    #
+    # `lst3 = [add3, mk(10)]` is the control for the second point: with the
+    # bare function pointer stored first, the dict is already recorded, so a
+    # missing entry for the second element rides in on the first. That
+    # ordering dependence is exactly why the `mk` line is not a comment.
+    test_gimple_matches_cpython("gimple_call_through_a_list_subscript_callee", """\
+def add3(a, b, c):
+    return a + b + c
+
+def mk(n):
+    return lambda x: x + n
+
+def main():
+    lst = [add3]
+    print(lst[0](1, 2, 3))
+    grown = []
+    grown.append(add3)
+    print(grown[0](1, 2, 3))
+    built = [add3 for _ in range(1)]
+    print(built[0](1, 2, 3))
+    tup = (add3,)
+    print(tup[0](1, 2, 3))
+    e = {}
+    e['c'] = mk(100)
+    print(e['c'](1))
+    lst3 = [add3, mk(10)]
+    print(lst3[0](1, 2, 3))
+main()
+""")
+
+    # A class written INSIDE a function body. Every consumer of the module's
+    # struct set reads the MODULE-LEVEL statement list, and a `StructDef`
+    # nested in a `FunctionDef.body` was in none of them, so the class had no
+    # layout and no emitted methods: `_lower_MemberExpr`'s method-call arm
+    # resolves the receiver's struct through `struct_field_types`, found
+    # nothing, and fell into its stub branch, which yields the RECEIVER. So
+    # `i.twice()` returned `21` for `i = Inner(21)` — the right shape for the
+    # zero-argument case by accident, and a plausible number at exit 0 with no
+    # diagnostic for every other one.
+    #
+    # `dd['m'](4)` is the OTHER end of the same root cause and is in this test
+    # for that reason: with no layout the bound method `c.m` never became a
+    # `MojoBoundMethod *` at all (it stayed a plain `int64_t` receiver word, so
+    # `note_container_callable_ret` had nothing to record), and the subscript callee
+    # lowered to a dict read followed by a generic attribute lookup on a value
+    # that is not a `C` — an `AttributeError`, exit 1.
+    #
+    # The rest of the program is the collision matrix, because a hoisted name
+    # that is already taken has to be disambiguated or two classes would both
+    # claim one struct and the loser would silently borrow the winner's layout:
+    # `mk1`/`mk2` declare `Inner` in two different functions, and `Inner` is
+    # ALSO a module-level class here. All four answer differently (`4 60 200
+    # 45`), so a rename that lost the wrong mapping shows up immediately.
+    test_gimple_stdout("gimple_nested_class_methods", """\
+class Inner:
+    def __init__(self, v: int):
+        self.v = v
+    def twice(self):
+        return self.v * 100
+
+def mk1(n: int):
+    class Inner:
+        def __init__(self, v: int):
+            self.v = v
+        def twice(self):
+            return self.v * 2
+    return Inner(n).twice()
+
+def mk2(n: int):
+    class Inner:
+        def __init__(self, v: int):
+            self.v = v * 10
+        def twice(self):
+            return self.v * 3
+    return Inner(n).twice()
+
+def main():
+    class C:
+        def m(self, x):
+            return x * 2
+    c = C()
+    print(c.m(4))
+    dd = {}
+    dd['m'] = c.m
+    print(dd['m'](4))
+
+main()
+print(mk1(2))
+print(mk2(2))
+print(Inner(2).twice())
+""", "8\n8\n4\n60\n200\n")
+
+    # A callable-valued PARAMETER, CALLED in an ordinary function body. The
+    # call returned `mojo_fnptr_call_N`'s homogenized `int64_t` box — right
+    # for the box, wrong for the value inside — so a `char *` result printed
+    # its own pointer decimal, `len()` of it was 0, and a `for` loop over it
+    # iterated nothing:
+    #
+    #     def upper(s):
+    #         return s.upper()
+    #     def apply_to(items, _f=upper):
+    #         r = _f(items)
+    #         print(r)          # CPython AB
+    #         print(len(r))      # CPython 2
+    #         for ch in r: ...
+    #     apply_to('ab')        # compiled 4337064208 / 0 / nothing, exit 0
+    #
+    # The parameter is typed `int64_t` because `_param_ctype` is shared by
+    # both generator emitters and neither has a callable category, so the fix
+    # is the doc's own second option: carry the parameter's callable-ness as
+    # side-table metadata the way `_callable_param_gen_api` already does.
+    # `calls_shared._callable_param_ret_types` reads the declared default's
+    # bare name out of `func_return_types`; `_lower_fnptr_call_value`
+    # consults it where it already consults `_callable_ret_types`.
+    #
+    # `print(s.upper())` directly above each line is the control that says
+    # the loss is in the callable PARAMETER and not in a string-returning
+    # function's own call site.
+    test_gimple_stdout("gimple_callable_param_result_keeps_its_type", """\
+def upper(s):
+    return s.upper()
+
+def apply_to(items, _f=upper):
+    r = _f(items)
+    print(r)
+    print(len(r))
+    for ch in r:
+        print(ch)
+
+def main():
+    apply_to('ab')
+    print('ab'.upper())
+    print(len('ab'.upper()))
+main()
+""", "AB\n2\nA\nB\nAB\n2\n")
+
+    # The same hoisting, in the statement lists a class statement can hide in:
+    # an `if` arm, a loop body (re-created per iteration, so the struct must
+    # not carry per-call state), and a METHOD body — the last one is the case
+    # `module_shared._gmi_collect_self_assigns` folds a nested class's
+    # `self.<f> = ...` onto the ENCLOSING struct for, because a nested class
+    # had no layout of its own. The hoist APPENDS rather than moves for
+    # exactly that reason: moving the statement out of the body would silently
+    # withdraw the folded field.
+    test_gimple_stdout("gimple_nested_class_in_every_body", """\
+class WithAttrs:
+    tag = 7
+    def __init__(self, v: int):
+        self.v = v
+    def get(self):
+        return self.v
+
+class Outer:
+    def build(self, k: int):
+        class Nested:
+            def __init__(self, v: int):
+                self.v = v
+            def get(self):
+                return self.v * 2
+        return Nested(k).get()
+
+def in_if(flag: int):
+    if flag:
+        class K:
+            def __init__(self, v: int):
+                self.v = v
+            def get(self):
+                return self.v + 1
+        return K(10).get()
+    return -1
+
+def in_loop(n: int):
+    total = 0
+    for i in range(n):
+        class L:
+            def __init__(self, v: int):
+                self.v = v
+            def get(self):
+                return self.v
+        total = total + L(i).get()
+    return total
+
+def useattrs(x: int):
+    class WithAttrs2:
+        def __init__(self, v: int):
+            self.v = v
+            self.b = WithAttrs(v)
+        def both(self):
+            return self.v + self.b.get() + WithAttrs.tag
+    return WithAttrs2(x).both()
+
+print(in_if(1))
+print(in_if(0))
+print(in_loop(4))
+print(Outer().build(21))
+print(useattrs(3))
+""", "11\n-1\n6\n42\n13\n")
+
 
     test_gimple_stdout("gimple_callable_value_keeps_its_return_type", """\
 def plain():
@@ -1250,7 +1674,7 @@ main()
     # target is a field of this module's globals struct, so the store takes a
     # different path from a local assignment AND every read mints a fresh temp
     # — and all three of the "what does this callable really return" tables
-    # (`_callable_ret_types`, `_dict_callable_ret`, `_bound_method_ret_types`)
+    # (`_callable_ret_types`, `_container_callable_ret`, `_bound_method_ret_types`)
     # were dropped at BOTH of those hops, silently. `mojo_fnptr_call_N` is the
     # homogenized `int64_t` convention (right for the box it hands back, wrong
     # for the value inside), so with the type missing every module-level
@@ -1287,7 +1711,7 @@ print(d["k"]())
     # aliased the same way. Each hop re-keys the tables on a new name, so a
     # carry that only handled the first would still print `0` here, and a
     # dict-of-lambdas alias additionally goes through the separate
-    # `_dict_callable_ret` table.
+    # `_container_callable_ret` table.
     test_gimple_matches_cpython("gimple_module_level_callable_alias_keeps_its_return_type", """\
 e = lambda: False
 alias = e
@@ -1295,6 +1719,85 @@ print(alias())
 d = {"k": lambda: True}
 d2 = d
 print(d2["k"]())
+""")
+
+    # A function that RETURNS a callable — the hop the tables above cannot
+    # reach at all, because the value is a CALL RESULT rather than a
+    # materialized lambda. `def a(): return lambda: False` boxes its
+    # `void *` into an `int64_t` (`func_return_types` records `a` as
+    # returning `int64_t`), so `e = a()` records nothing, and `print(e())`
+    # printed `0` where CPython prints `False`.
+    #
+    # The carry that fixes it cannot be the shared one: `carry_callable_
+    # ret_types` copies from the lowered VALUE, and a call result is a fresh
+    # temp with no entry. The fact lives on the AST — `node._callable_ret`,
+    # set by `GimpleGen.lower_expr` — and before that in the compile-scoped
+    # `_return_callable_ret_types[callee]` that the callee's own `return`
+    # wrote — so `carry_callable_ret_from_call` reads the callee name straight
+    # off the CallExpr. `print(a())` on the same program is the control: the
+    # direct `mk()(...)` callee spelling already worked, via `node._callable_
+    # ret` directly.
+    test_gimple_matches_cpython("gimple_function_returning_a_callable_keeps_its_return_type", """\
+def a():
+    e = lambda: False
+    return e
+
+def b():
+    e = lambda x: x > 1
+    return e
+
+def c():
+    e = a()
+    print(e())
+    f = b()
+    print(f(5))
+    print(f(0))
+c()
+""")
+
+    # A BOUND METHOD stored in a MODULE GLOBAL — the calling CONVENTION, not
+    # the return type, and the two failed separately. The globals struct field
+    # is `int64_t`, so the call site had nothing to dispatch on and routed
+    # `f()` to `mojo_fnptr_call_N`, which calls the RAW method symbol with no
+    # `self`: a call with the wrong arity. It happened to print `1` rather
+    # than crash, which is luck and not a property. `truthy` returning `k > 4`
+    # is one argument, so a missing receiver is a single garbage register
+    # read; `add(a, b)` is two, and is the shape that shows the arity is
+    # really wrong rather than merely untidy.
+    #
+    # Two fixes, and the second was only reachable after the first: the global
+    # store records `_actual_types[name] = 'MojoBoundMethod *'` (the kind IS
+    # known there — `_bound_method_ret_types` holds a bound method and nothing
+    # else), and `_lower_bound_method_call` then resolved the name the way
+    # `_lower_fnptr_call` and `_lower_maybe_bound_call` already did. Without
+    # that second one the call site emitted a bare `f`, and gcc rejected the
+    # module with "'f' undeclared", because a global is a field of the globals
+    # struct and not a C identifier.
+    #
+    # The `local()` lines are the control: the identical spelling bound to a
+    # local was always right, which is what made this look like a return-type
+    # carry rather than a calling-convention one.
+    test_gimple_matches_cpython("gimple_bound_method_in_a_module_global_keeps_its_convention", """\
+class C:
+    def __init__(self):
+        self.k = 9
+    def truthy(self):
+        return self.k > 4
+    def add(self, a, b):
+        return self.k + a + b
+
+m = C()
+f = m.truthy
+print(f())
+g = m.add
+print(g(1, 2))
+
+def local():
+    lf = m.truthy
+    lg = m.add
+    print(lf())
+    print(lg(3, 4))
+local()
 """)
 
     # ── `with` teardown: the `as` target is optional, and so is running
@@ -1392,6 +1895,196 @@ def looping():
 raising()
 print("ret", returning())
 looping()
+""")
+
+    # A MULTI-ITEM `with` has to unwind in REVERSE acquisition order —
+    # `exit 7` before `exit 6` — which is the entire point of nesting: an
+    # inner context manager's teardown may depend on the outer one's state
+    # still being live. `_with_emit_exits` walked its index-parallel item
+    # lists FORWARD, so every multi-item `with` released the outer manager
+    # first (a multi-item `with` unwound forward, so the outer one was released first),
+    # silently, exit 0.
+    #
+    # Every exit route is in the one program because there are five emission
+    # sites for the same walk (normal tail, the `return` interceptor, the
+    # loop `continue`/`break` arm, the setjmp exception arm, and the no-`__exit__`
+    # fallback) and each is a separate place to get the order wrong. `as` on
+    # the first item only, because the teardown order is independent of it
+    # and CPython has to agree about the alias too.
+    test_gimple_matches_cpython("gimple_multi_item_with_unwinds_in_reverse", """\
+class Ctx:
+    def __init__(self, n):
+        self.n = n
+    def __enter__(self):
+        print("enter", self.n)
+        return self.n
+    def __exit__(self, a, b, c):
+        print("exit", self.n)
+
+def three():
+    with Ctx(1), Ctx(2), Ctx(3):
+        print("body")
+
+def raiser():
+    with Ctx(4) as a, Ctx(5):
+        print("before", a)
+        raise ValueError("boom")
+
+def early():
+    with Ctx(6), Ctx(7):
+        return 99
+
+def nested():
+    with Ctx(8):
+        with Ctx(9):
+            print("inner")
+
+three()
+try:
+    raiser()
+except ValueError as e:
+    print("caught", e)
+print("early", early())
+nested()
+""")
+
+    # Iterating a value that is not a container RAISES, for every consumer of
+    # the shared chokepoint — and a string, which IS iterable, is answered
+    # rather than refused.
+    #
+    # The chokepoint (`_materialize_as_list`'s ambiguous arm) had two wrong
+    # answers for one decision. It used to WALK whatever it was handed, so
+    # `list(12345678)` died with SIGSEGV; the fail-closed arm that fixed the
+    # crash answered an EMPTY list instead, which is a silent wrong answer —
+    # a program's loop body never runs and nothing says so, exit 0
+    # (the shared materialize-as-list chokepoint's not-a-container arm). CPython
+    # raises TypeError, so that is what this asserts, one row per consumer
+    # because each is a separate emission site over one chokepoint:
+    # list/all/any/enumerate/str.join/bytes.join.
+    #
+    # A `char *` was excluded from `all`/`any`'s materialization arm only
+    # because the arm could not answer it, and what it used instead was a stub
+    # that never looks at the value: `any("ab")` printed False where CPython
+    # prints True. The string rows below are that fix, on both spellings — a
+    # statically-typed literal and a value boxed through a parameter.
+    # An inlined lambda's value keeps its type across the enclosing
+    # function's RETURN boundary, for the kinds the return-type inference can
+    # see. The lambda is never materialized here — `_lower_LambdaExpr` records
+    # it and `_lower_inlined_lambda_call` emits its body straight into `o2` —
+    # so the inlined value is a real `char *` and the only thing that could
+    # lose it is `o2`'s own inferred signature, which saw `return fn()` as a
+    # call to an unknown callee and inferred `int64_t`. Both functions
+    # printed their string's own address.
+    #
+    # The int row is the control: `int64_t` is already the answer for an int,
+    # so it must be unchanged by the fix that teaches the estimator to look
+    # through a lambda-bound local.
+    test_gimple_matches_cpython("gimple_inlined_lambda_string_return_keeps_its_type", """\
+def o2():
+    s = 'ab'
+    fn = lambda: s
+    return fn()
+
+def o3():
+    s = 'ab'
+    fn = lambda: s + '!'
+    return fn()
+
+def i1():
+    n = 7
+    fn = lambda: n + 1
+    return fn()
+
+print(o2())
+print(o3())
+print(i1())
+""")
+
+    # The `double` flavour of the same defect, and it is a different KIND of
+    # wrong: a `char *` truncated to `int64_t` is recoverable (the boxed-pointer
+    # convention round-trips the bits and `_get_actual_type` re-derives
+    # `char *`), a `double` is not — `(int64_t)5.0` is `5` and nothing left in
+    # the tables can tell that from a genuine 5. So the loss has to be
+    # prevented, which is what recording the `double` local in
+    # `_prebound_local_ctypes` does.
+    #
+    # The last row is the same fix WITHOUT the lambda, and it was broken too
+    # (printed `2`): the defect was never about the lambda boundary, only
+    # about a `double` local being invisible to inference. `float` is pinned
+    # here for the same reason `int` is pinned above — `q = 2.5` is a
+    # `FloatLiteral`, so `float` and `double` must agree.
+    test_gimple_matches_cpython("gimple_double_local_keeps_its_type_across_inference", """\
+def g():
+    q = 2.5
+    fn = lambda: q * 2
+    return fn()
+
+def h():
+    q = 2.5
+    fn = lambda: q
+    return fn()
+
+def j():
+    q = 2.5
+    return q
+
+def k():
+    q = 2.5
+    fn = lambda: q * 2.0
+    return fn()
+
+print(g())
+print(h())
+print(j())
+print(k())
+""")
+
+    test_gimple_runtime_error("gimple_iterating_a_non_container_raises", """\
+def ident(x):
+    return x
+
+print(list(5))
+""", "TypeError")
+
+    test_gimple_runtime_error("gimple_all_of_a_non_container_raises", """\
+print(all(5))
+""", "TypeError")
+
+    test_gimple_runtime_error("gimple_any_of_a_non_container_raises", """\
+print(any(12345678))
+""", "TypeError")
+
+    test_gimple_runtime_error("gimple_enumerate_of_a_non_container_raises", """\
+print(list(enumerate(7)))
+""", "TypeError")
+
+    test_gimple_runtime_error("gimple_str_join_of_a_non_container_raises", """\
+print(",".join(3))
+""", "TypeError")
+
+    test_gimple_runtime_error("gimple_bytes_join_of_a_non_container_raises", """\
+print(b"".join(9))
+""", "TypeError")
+
+    # A boxed handle that IS a container: `all`/`any` used to answer from a
+    # stub that never looked at the value, so this was True whatever `x` was.
+    test_gimple_stdout("gimple_all_any_of_a_boxed_container_reads_it", """\
+def ident(x):
+    return x
+
+print(all(ident([1, 2])))
+print(any(ident([0, 0])))
+print(all(ident([])))
+""", "True\nFalse\nTrue\n")
+
+    test_gimple_matches_cpython("gimple_a_string_is_iterable_through_the_same_chokepoint", """\
+def ident(x):
+    return x
+
+print(",".join(ident("a,b")))
+print(list(ident("abc")))
+print(any(ident("ab")))
+print(all(ident("")))
 """)
 
     test_gimple_stdout("gimple_list_sort_method_in_place", """\
@@ -1574,6 +2267,31 @@ names = ["ccc", "a", "bb"]
 print(sorted(names, key=lambda s: k3(s)))
 print(sorted(names, key=lambda s: s + "!"))
 """, "['a', 'bb', 'ccc']\n['a', 'bb', 'ccc']\n")
+
+    # The MODULE-LEVEL spelling of the same list, which is where
+    # `gimple_sorted_string_key_runtime_built` above was red. A module-level
+    # container is stored in the globals struct as a BOXED `int64_t`, so at
+    # the read its C type is `int64_t` and its real kind lives in
+    # `_actual_types` — and every `sorted` dispatch asked the C type, so all
+    # three forms took the generic int64-slot path. A LOCAL list of the same
+    # contents works, which is what made this read as a bug about lambdas.
+    #
+    #   sorted(names)            ordered the strings by ADDRESS (non-
+    #                            deterministic across runs; here the input
+    #                            order, because the literals descend)
+    #   sorted(names, key=k3(s)) each key was `mojo_str_from_int(<address>)
+    #                            + "!"`, so the DECIMAL of each address
+    #                            decided the order and the answer was the
+    #                            input order — the symptom the bug doc filed
+    #   sorted(words, key=len)   SEGFAULTED (exit -11): the key loop read a
+    #                            list that was never materialized
+    #
+    # See CODEGEN_sorted_key_of_runtime_built_strings_sorts_by_address.
+    test_gimple_stdout("gimple_sorted_module_level_string_list", """\
+words = ["pear", "fig", "apple"]
+print(sorted(words, key=len))
+print(sorted(words))
+""", "['fig', 'pear', 'apple']\n['apple', 'fig', 'pear']\n")
 
     # ── MojoSet rehash: the `tag == 2` (bytes) domain ────────────────────
     # `_set_grow`'s replay had a `tag == 0` branch and a `tag == 1` branch
@@ -1860,7 +2578,7 @@ main()
 """, "9\n7\n")
 
     # A capture DISCOVERY gap, not a truthiness gap, which is what
-    # bugs/CODEGEN_captured_string_local_reads_falsey.md reported it as. The
+    # “CODEGEN: a captured `char *` local reads as falsey inside the closure body” reported it as. The
     # lambda-capture scan walked a hand-grown list of AST child fields, and a
     # field that was not on it was an UNDER-approximation of what the body
     # reads: the name never reached the env struct, and the body read a hard
@@ -2684,6 +3402,74 @@ def main():
     print(acc)
 """, "44\n4\n44\n3\n5\n1040000\n")
 
+    # ── A nested `def`'s ENVIRONMENT, which is a bare `malloc` block and NOT a
+    # bound method, so its teardown is `free` and not `mojo_closure_free` --
+    # measured at +16 B/iteration (3.06 MB at 100k, 7.64 MB at 400k) in
+    # bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md's OPEN 1. One
+    # environment is shared by BOTH of `callee`'s call sites, which is why it
+    # must be freed once at the enclosing function's scope exit rather than at
+    # each call. The last two consumers are the ones that make it an ownership
+    # question rather than a `free`: raised past by an exception (the push the
+    # declaration emitted frees it, the skipped `return` free does not), and a
+    # nested `def` RETURNED to its caller, which is a real escape and must stay
+    # alive -- calling it after `maker` returned is a use-after-free if the
+    # rule is not fail-closed. `Boxed` is the same pair inside a STRUCT METHOD,
+    # whose `_reset_func` is immediately followed by `reset_no_candidates`: the
+    # owning body has to survive that reset or every "how is this name USED?"
+    # question is answered about an empty body, which reads as "nothing can
+    # hold it" and frees BOTH of these.
+    test_gimple_bounded_memory("gimple_nested_def_env_is_freed", """\
+def callee(base: Int) -> Int:
+    def inner(x: Int) -> Int:
+        return x + base
+    return inner(1) + inner(2)
+
+def maker(base: Int):
+    def adder(x: Int) -> Int:
+        return x + base
+    return adder
+
+def boom(base: Int) -> Int:
+    def inner(x: Int) -> Int:
+        return x + base
+    if base > 2:
+        raise ValueError("no")
+    return inner(1)
+
+struct Boxed:
+    var v: Int
+
+    def run(self, base: Int) -> Int:
+        def inner(x: Int) -> Int:
+            return x + base
+        return inner(1) + inner(2)
+
+    def make(self, base: Int):
+        def adder(x: Int) -> Int:
+            return x + base + self.v
+        return adder
+
+def main():
+    var f = maker(10)
+    print(f(1))
+    print(f(2))
+    print(callee(10))
+    var b = Boxed(7)
+    print(b.run(10))
+    print(b.make(10)(1))
+    var total = 0
+    for r in range(4000000):
+        total += callee(6) % 1000
+    print(total)
+    var hits = 0
+    for r in range(20000):
+        try:
+            hits += boom(9)
+        except ValueError as e:
+            hits += 1
+    print(hits)
+""", "11\n12\n23\n23\n18\n60000000\n20000\n", 40)
+
     # ── A callee that provably returns a FRESH STRING hands ownership to its
     # caller, exactly as one returning a fresh container always has
     # (analyze_returns_fresh, which until now accepted only a container
@@ -3151,7 +3937,7 @@ def main():
 """, "5017\n46\n5\nTrue\nFalse\n5\n7\n6\n6\n3\nTrue\nFalse\n266666\n")
 
     # ── A CONTAINER used as a dict key keys by its VALUE
-    # (bugs/CODEGEN_tuple_dict_key_hashed_by_address.md). A tuple word reached
+    # (CODEGEN_tuple_dict_key_hashed_by_address). A tuple word reached
     # the dict as a bare address: `(p, os.path.getmtime(p))` built twice hit
     # twice as often as it missed never, so every lookup grew the dict and the
     # self-hosted `mojoc --dump-full fire.py` carried ~16 GB of it.
@@ -3221,8 +4007,180 @@ def main():
 main()
 """, "4\n299999\n", 40)
 
+    # Printing a container is not an exotic program: it is what a compiler's
+    # `--dump` does, what a logging path does, and what this file's own leak
+    # instrumentation would do to itself. Every repr walker is a chain of
+    # `mojo_str_cat`, each of which allocates a new buffer and leaves both
+    # arguments alone, so an N-element container leaked N+1 buffers sized to
+    # the text so far (~500 B per `print` of an 8-element list, measured at
+    # 99.7 MB for 200000 of them) plus one string per element. Both halves
+    # exist in TWO places — the runtime's `mojo_repr_list_*` family and the
+    # `_mojo_repr_list`/`_pair`/`_dict`/`_set` the codegen emits into every
+    # generated program — and a fix in only one of them leaves the program
+    # growing, which is why every shape is printed here rather than just the
+    # one the report measured.
+    #
+    # Each shape is here for a different walker, and between them they cover
+    # every branch whose ownership had to be decided: `xs` is the uniform-int
+    # runtime walker, `ys` the nested-int-list one, `ps` the pair-list one
+    # (runtime-built by `zip`, so its slots go through `mojo_repr_int` /
+    # `mojo_repr_str`), `fs` the float one, `d` the emitted `_mojo_repr_dict`,
+    # `st` the emitted `_mojo_repr_set`, and `mix` the emitted `_mojo_repr_list`
+    # over a heterogeneous list. `MallocScribble` (set by the harness) is what
+    # turns a `free()` of one of the two SHARED buffers this runtime returns —
+    # `mojo_repr_obj`'s static and `mojo_repr_bool`'s literals — into a wrong
+    # answer instead of a silent heap corruption, so a wrong branch here is a
+    # red rather than a crash three allocations later.
+    #
+    # The peak, not the stdout, is the assertion. The text itself is pinned
+    # separately by `gimple_container_repr_text_is_unchanged` below, because a
+    # repr that printed the wrong thing and leaked nothing would pass this.
+    #
+    # A TUPLE list is deliberately NOT in the loop. In a full run of this file
+    # `ps = [(0, 'a'), (1, 'b')]` prints as two pointer decimals, while the same
+    # program run on its own prints `[(0, 'a'), (1, 'b')]` — the compiler's
+    # per-process reflection state is shared by every case in the file, so a
+    # tuple list's element inference is order-dependent. That is a real thing
+    # to know about this harness and the wrong foundation for a memory
+    # tripwire, so the pair walkers are covered by the TEXT case below instead
+    # (`[(5, 6), (7, 8)]`, `[(1, 'a'), (2, 'b')]`, `zip(...)`) and what is left
+    # here is one walker per remaining runtime helper plus all four of the
+    # emitted ones.
+    #
+    # `{1, 2, 3}` covers the emitted `_mojo_repr_set`, and the float in `d` is
+    # the branch that used to be a SIGSEGV (`mojo_dict_slot_double`'s own
+    # comment) — a shape that crashes cannot be in a loop at all.
+    _PRINTED = ('[1, 2, 3, 4, 5, 6, 7, 8]\n'
+                '[[1, 2], [3, 4]]\n'
+                '[1.0, 2.5]\n'
+                "{'a': 1, 'b': 'two', 'c': 3.5}\n"
+                '{1, 2, 3}\n'
+                "[1, 'two', None]\n")
+    test_gimple_bounded_memory("gimple_printed_container_does_not_grow", """\
+def main():
+    xs = [1, 2, 3, 4, 5, 6, 7, 8]
+    ys = [[1, 2], [3, 4]]
+    fs = [1.0, 2.5]
+    d = {"a": 1, "b": "two", "c": 3.5}
+    st = {1, 2, 3}
+    mix = [1, "two", None]
+    for i in range(60000):
+        print(xs)
+        print(ys)
+        print(fs)
+        print(d)
+        print(st)
+        print(mix)
+main()
+""", _PRINTED * 60000, 40)
+
+    # The text of every walker above, printed ONCE, against CPython. Separate
+    # from the memory case because the memory case would still pass if a repr
+    # printed something else and leaked nothing, and because this is the half
+    # of the fix that a `free()`-the-wrong-buffer mistake shows up in.
+    #
+    # `print([1, 'two', None, True, 2.5])` is NOT here: a `True` in a MIXED
+    # list prints `1` on this tree, which is
+    # bugs/CODEGEN_bool_annotated_struct_field_prints_as_int.md's open item,
+    # not this fix, and pinning the wrong text here would make it look settled.
+    # `[True, False]` (all-bool, so it routes to `mojo_repr_list_bools`) is
+    # here. A bool DICT value is not, for a different reason:
+    # `{"d": True}` still emits a call to the deleted
+    # `mojo_mark_dict_bool_values`, so the program does not compile at all
+    # (bugs/COMPILE_FAIL_dict_literal_with_a_bool_value_emits_a_deleted_
+    # runtime_entry_point.md) — so this case would be red for a bug that is
+    # not this one. That doc's "coverage to add with the fix" names this case
+    # as the place to put the bool dict back; the `_mojo_repr_dict` `kind == 3`
+    # branch it would exercise is already marked non-owned in the comment
+    # above that branch in `mojo/backend_gimple/module_gen.py`.
+    test_gimple_stdout("gimple_container_repr_text_is_unchanged", """\
+def main():
+    print([1, 2, 3, 4, 5, 6, 7, 8])
+    print([1.0, 2.5, 3.0])
+    print([True, False])
+    print([[1, 2], [3, 4]])
+    print([(5, 6), (7, 8)])
+    print([(1, "a"), (2, "b")])
+    print([(1.5, 2)])
+    print({"a": 1, "b": "two", "c": 3.5, "e": None})
+    print({1, 2, 3})
+    print({"x", "y"})
+    print((1, 2, 3))
+    print([(1,), (2,)])
+    print((5,))
+    print(zip([0, 1], ["a", "b"]))
+    print(b"ab".split(b"a"))
+    d = {"f": 3.5}
+    print(d["f"])
+main()
+""", "[1, 2, 3, 4, 5, 6, 7, 8]\n"
+       "[1.0, 2.5, 3.0]\n"
+       "[True, False]\n"
+       "[[1, 2], [3, 4]]\n"
+       "[(5, 6), (7, 8)]\n"
+       "[(1, 'a'), (2, 'b')]\n"
+       "[(1.5, 2)]\n"
+       "{'a': 1, 'b': 'two', 'c': 3.5, 'e': None}\n"
+       "{1, 2, 3}\n"
+       "{'x', 'y'}\n"
+       "(1, 2, 3)\n"
+       "[(1,), (2,)]\n"
+       "(5,)\n"
+       "[(0, 'a'), (1, 'b')]\n"
+       "[b'', b'b']\n"
+       "3.5\n")
+
+    # The generated STRUCT field dump (`_mojo_repr_<Struct>`), which reaches
+    # this through the element-repr shim — a struct-allocated value carries no
+    # runtime type tag, so `print(p)` alone would not get here
+    # (`mojo_repr_obj`'s `<object at 0x...>`), and the list is what supplies the
+    # answer.
+    #
+    # Its cat chain released its LEFT operand and nothing else, so every field's
+    # own string survived the print: six fields here, so six leaked buffers per
+    # line, 176.7 B/iteration measured over a 4x range of loop counts against
+    # 80.4 after. Each field shape carries its OWN ownership answer now, decided
+    # where the expression is built: `mojo_repr_int`/`_str`/`_float` strdup or
+    # malloc, `_mojo_generic_elem_repr` owns its return on every branch, a
+    # `"True"`/`"None"` literal does not, and a NON-NULLABLE container field is
+    # released only when its pointer is there (a null list renders as a literal
+    # `"[]"` in every `mojo_repr_list_*` helper, so freeing that would be a
+    # crash). The nullable spellings get their `"None"` fallback from one
+    # `_mojo_repr_none()`, which is what lets a mixed ternary have ONE answer.
+    #
+    # `ps` is hoisted out of the loop ON PURPOSE: `[p]` would allocate a fresh
+    # list per iteration and measure that instead (~310 B/iteration, and it is
+    # a different defect). The residual 80.4 B/iteration this case still shows
+    # is also not the struct dump — it is the top-level repr result `print` asks
+    # for and never frees, which a plain `print([1, 2, 3])` loop leaks too (16.4
+    # B/iteration) and which `gimple_printed_container_does_not_grow`'s 40 MB
+    # ceiling is too loose to see. Filed, not fixed here:
+    # bugs/CODEGEN_print_of_a_container_never_frees_the_repr_it_asked_for.md.
+    _P_REPR = ("[P(n=7, f=1.5, s='hi', l=[1, 2], d={'a': 1}, inner=Inner(k=3))]\n")
+    test_gimple_bounded_memory("gimple_printed_struct_repr_does_not_grow", """\
+class Inner:
+    def __init__(self):
+        self.k = 3
+
+class P:
+    def __init__(self):
+        self.n = 7
+        self.f = 1.5
+        self.s = "hi"
+        self.l = [1, 2]
+        self.d = {"a": 1}
+        self.inner = Inner()
+
+def main():
+    p = P()
+    ps = [p]
+    for i in range(100000):
+        print(ps)
+main()
+""", _P_REPR * 100000, 14)
+
     # ── `with C():` with no `as` target still runs `__exit__`
-    # (bugs/CODEGEN_with_no_as_target_drops_exit.md, deleted with that fix).
+    # (“`with C():` with no `as` target never calls `__exit__` in the compiled path”, deleted with that fix).
     # The five index-parallel lists `_gen_stmt_WithStmt` accumulates per with
     # item were appended from inside `if item.alias is not None:`, so the
     # no-`as` spelling registered nothing: `__enter__` was called, the body ran,
@@ -3272,7 +4230,7 @@ main()
        "enter B 1\nloop body 1\nexit B 0\n"
        "enter B 1\nloop body 2\nexit B 0\n")
 
-    # ── An unannotated integer local is 64-bit (bugs/CODEGEN_unannotated_int_local_is_32_bit.md).
+    # ── An unannotated integer local is 64-bit (“CODEGEN: an unannotated integer local is a 32-bit `int`, not a 64-bit `Int`”).
     # `var a = 0` used to be a 32-bit `int`, so the accumulator wrapped at 2^31 while
     # `var b: Int = 0` and CPython both reached 6000000000.
     test_gimple_stdout("gimple_unannotated_integer_local_is_64_bit", """\
@@ -3547,7 +4505,7 @@ def main():
     print(b[0])
 """, "2\nalpha1\nbeta1\nalpha2\n")
 
-    # ── Iterating a Dict[Int, V] yields integer keys (bugs/CODEGEN_iterating_an_int_keyed_dict_yields_string_keys.md).
+    # ── Iterating a Dict[Int, V] yields integer keys (“CODEGEN: iterating a `Dict[Int, V]` yields the keys as strings”).
     # The keys used to come back as decimal STRINGS typed `char *`, so `ks += k` added
     # pointers. Covers `for k in d`, `.keys()`, `.items()` (pair and unpacked forms, a
     # parameter) and a string-keyed dict reusing the loop name (which must stay strings).
@@ -3599,6 +4557,58 @@ print(zip([0, 1], [2, 3]))
 print({"a": 1}.items())
 """, "[('a', 1)]\n")
 
+    # `for (v) in d.items():` binds ONE name to the whole [key, value] pair,
+    # and the variable carried no evidence that it is a 2-element list, so
+    # `print(v)` / `str(v)` / an f-string reached the scalar `mojo_str_from_int`
+    # path with a `MojoList *` in hand and printed the pair's HEAP ADDRESS --
+    # a different decimal on every run, which is also exactly what breaks
+    # bootstrap's stage2-vs-stage3 byte-identity check. `v.key` / `v.value` are
+    # the two spellings that already worked and must keep working, so they are
+    # in the same program: a fix to the variable's repr that broke either would
+    # show up here. See
+    # CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer.
+    test_gimple_stdout("gimple_dict_items_pair_var_prints_as_a_pair", """\
+def ints():
+    d = {"a": 1, "b": 2}
+    for (v) in d.items():
+        print(v)
+        print(str(v))
+        print(f"{v}")
+        print(v.key, v.value)
+
+def strs():
+    d = {"a": "x", "b": "y"}
+    for (v) in d.items():
+        print(v)
+
+def main():
+    ints()
+    strs()
+""", "('a', 1)\n('a', 1)\n('a', 1)\na 1\n"
+       "('b', 2)\n('b', 2)\n('b', 2)\nb 2\n"
+       "('a', 'x')\n('b', 'y')\n")
+
+    # `d.pop(k, default)` answers the DEFAULT on a miss. `mojo_dict_pop_int`
+    # had no `dflt` parameter, so the `-1` the source wrote was never lowered
+    # and every miss came back 0 -- a real value in this model, so a "remove
+    # if present, else report absence" idiom got a plausible number with exit
+    # 0. `d.pop(k)` with no default is correct today (it raises KeyError), so
+    # this is specifically the two-argument form; and a str-valued dict needs
+    # the `mojo_dict_pop_str` reader or its value pops as a pointer decimal.
+    # See “CODEGEN: `d.pop(k, default)` returns 0 on a MISS” and
+    # “A dict's value accessor is guessed from the DEFAULT argument”.
+    test_gimple_stdout("gimple_dict_pop_default_on_a_miss", """\
+def main():
+    d = {}
+    d["a"] = 1
+    print(d.pop("a", -1))
+    print(d.pop("a", -1))
+    print(d.pop("zz", -1))
+    s = {"k": "hello"}
+    print(s.pop("k"))
+    print(s.pop("k", "dflt"))
+""", "1\n-1\n-1\nhello\ndflt\n")
+
     test_gimple_stdout("gimple_enumerate_start_and_strings", """\
 print(list(enumerate([7, 8], 1)))
 print(list(enumerate(["a", "b"])))
@@ -3626,7 +4636,7 @@ print(String(7))
 
     # 16. Same two-param concat shape, but called DIRECTLY inline inside the
     # f-string's `{...}` interpolation — no intermediate variable at all.
-    # bugs/CODEGEN_untyped_param_string_direct_fstring_call.md: an f-string
+    # CODEGEN_untyped_param_string_direct_fstring_call: an f-string
     # interpolation's `{expr}` sub-expression is raw source text kept inside
     # the StringLiteral node, only parsed at actual codegen time — it was
     # invisible to the earlier cross-call scalar-contract call-site scan
@@ -3718,7 +4728,7 @@ def main():
 main()
 """, "read_nonlocal\n11\n")
 
-    # 19. (bugs/CODEGEN_keyword_only_ctor_call_skips_earlier_default.md) A
+    # 19. (CODEGEN_keyword_only_ctor_call_skips_earlier_default) A
     # keyword-only constructor call must fill every SKIPPED earlier param
     # with its own declared default, not 0. Before the fix: `Derived(b=99)`
     # emitted a=0, b=99, c=3 -- a silent wrong value, invisible to any
@@ -3913,7 +4923,7 @@ def main():
 
     # Slice-assignment really mutates the list in place (full + bounded,
     # growing and shrinking, pure insert, negative bounds) — this is the
-    # regression guard for bugs/CODEGEN_slice_assignment_silently_noops.md
+    # regression guard for “CODEGEN: bounded/full slice-assignment (`x[a:b] = y`”
     # (compiled `x[a:b] = y` used to be a silent no-op).
     test_gimple_stdout("gimple_slice_assign_mutation", """\
 def main():
@@ -4184,6 +5194,55 @@ fn main():
     # answered True and the two families disagreed with the reference. The
     # honest answer is the raise, which is what CPython gives; a wrong-length
     # fill is the same shape of error.
+    # A call on a MODULE MARKER — a bare `import M` for a module this compile
+    # cannot resolve, so `M` is an `int64_t` global initialised to 0 — used to
+    # be answered by the generic scalar passthrough, which returns the receiver
+    # unchanged. So `argparse.ArgumentParser(...)` "constructed" a 0,
+    # `add_argument`/`parse_args` echoed the 0 back, and the program computed
+    # with a parser that is not a parser, silently, until the first attribute
+    # read off the result died naming an attribute of a class the program never
+    # built: CPython's own `Apple/__main__.py --help` printed usage and exited
+    # 0, and this printed `Unhandled exception: AttributeError:
+    # cross_build_dir` and exited 0 too
+    # (bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md).
+    #
+    # The raise happens at the CALL, which is where it becomes true, and it is
+    # catchable — which is the second half of the assertion: a program that
+    # probes for the capability can still say so, and a raise that could not be
+    # caught would be a strictly worse stub than the silent one it replaces.
+    #
+    # `argparse` is the whole of the first program because it is the case the
+    # doc measured; the second is a lowercase member of the same marker, which
+    # is the same silent-0 shape and used to print `1` (see the note on
+    # `gimple_module_marker_lowercase_member_raises` below).
+    test_gimple_runtime_error("gimple_module_marker_call_raises", """\
+import argparse
+
+def main():
+    p = argparse.ArgumentParser(description="demo")
+    p.add_argument("--x", type=int)
+    print(p.parse_args())
+""", "NotImplementedError: argparse.ArgumentParser: module 'argparse' is not "
+       "compiled into this binary")
+
+    # The SAME program must still run to completion when the program itself
+    # handles the absence — the point of raising rather than aborting. `try` /
+    # `except NotImplementedError` is the shape a real consumer would use to
+    # fall back to its own argument parsing.
+    test_gimple_stdout("gimple_module_marker_call_is_catchable", """\
+import argparse
+
+def main():
+    try:
+        p = argparse.ArgumentParser(description="demo")
+        print("constructed")
+    except NotImplementedError as e:
+        print("fell back")
+""", "fell back\n")
+
+    # `bytes` raises are the same mechanism reached a different way; keeping
+    # this one next to the module-marker case is the point — an unavailable
+    # thing should say so, whichever route it took to be unavailable.
     test_gimple_runtime_error("gimple_bytes_isprintable_raises", """\
 fn main():
     print(b'a'.isprintable())
@@ -5965,6 +7024,117 @@ def main():
 main()
 """, "1\n2\nTrue\nFalse\n7\n7\n")
 
+    # The next two producers of the same fact, so the case above is not the
+    # only thing standing between a computed large key and a SIGSEGV.
+    # `gen._int_word_vals` records "this value holds a plain Python integer",
+    # and it was seeded only from `_lower_IntLiteral` — so `i + 1`, `-1` and
+    # `j * 1000000000` were all still asked of the runtime's range-only
+    # discriminator, which calls every positive int64 in [2^31, 2^47) a
+    # pointer. Both of these are now seeded: `-n`/`~n` in `_lower_UnaryOp` on
+    # an operand already recorded, and integer arithmetic in
+    # `_lower_binary`'s tail on two operands already recorded. Neither involves
+    # inference, which is what keeps the table monotone-safe — a miss falls
+    # back to today's behaviour and never to a crash.
+    #
+    # Every shape SIGSEGVs on the tree before this: `i + 1` computed from a
+    # large literal, `-1` (a negative word is outside the predicate's window,
+    # so it is the ASSIGNMENT that must recognise it), a literal-plus-literal,
+    # and a product of a small local by a large literal.
+    test_gimple_stdout("gimple_computed_dict_key_above_2gb_is_an_integer", """\
+def main():
+    i = 2999999999
+    d = {}
+    d[i + 1] = 7
+    print(d[i + 1])
+    e = {}
+    e[-1] = 9
+    print(e[-1])
+    f = {}
+    f[3000000000 + 1] = 3
+    print(f[3000000001])
+    g = {}
+    j = 5
+    g[j * 1000000000] = 1
+    print(g[j * 1000000000])
+    print(3000000000 in e)
+    print(-1 in e)
+main()
+""", "7\n9\n3\n1\nFalse\nTrue\n")
+
+    # The STORE side of the same fact: a large key that is ASSIGNED to a name,
+    # rather than written at the subscript. `gen._int_word_vals` was carried
+    # across a plain assignment and a tuple unpack, and NOT across the two
+    # other ways a value reaches a name — `var x = ...` and `x += ...` — or
+    # across a module-global store, so every one of these lost the record the
+    # literal had seeded and asked the runtime's range-only discriminator
+    # instead (every positive int64 in [2^31, 2^47) is a "pointer" to it).
+    # Both are now the same chokepoint the plain-assignment path already used
+    # (`_track_pointer_actual_type`), which is what keeps them sound: its
+    # `discard` branch clears the record on an RHS the codegen cannot vouch
+    # for, and the case below pins that direction too (`s` is a string by the
+    # time it is used as a key, and must stay a string key).
+    #
+    # `//` is here because it never reaches the binary tail where `%` is
+    # already covered; `**` because it is the usual way a large key is
+    # COMPUTED rather than written (`3 ** 20` is 3486784401), and its
+    # `(int)` cast makes "this is an integer" true for every input, so it
+    # needs no inference at all; and the ternary because two known-integer
+    # branches produce an integer, gated on BOTH branch types being
+    # integer-shaped so a branch that really lowers to a pointer cannot be
+    # recorded as one.
+    #
+    # SIGSEGV (exit -11) on the tree before, at the third line (`1`, `2` and
+    # `3` printed, then the ternary's `d[...]` died).
+    test_gimple_stdout("gimple_assigned_large_dict_key_survives_every_store_shape", """\
+def main():
+    k = 2999999999
+    k += 1
+    d = {}
+    d[k] = 1
+    print(d[k])
+    e = {}
+    e[3000000000 // 2] = 2
+    print(e[3000000000 // 2])
+    f = {}
+    f[3 ** 20] = 3
+    print(f[3 ** 20])
+    g = {}
+    g[3000000000 if True else 1] = 4
+    print(g[3000000000 if True else 1])
+    var h: Int = 3000000000
+    h2 = {}
+    h2[h] = 5
+    print(h2[h])
+    s = 3000000000
+    s = "sk"
+    d2 = {}
+    d2[s] = 6
+    print(d2["sk"])
+main()
+""", "1\n2\n3\n4\n5\n6\n")
+
+    # …and the MODULE-GLOBAL half, which is a separate hop rather than the
+    # same one: storing into the globals struct is its own shared helper
+    # (`_note_global_store_types`), and READING a global mints a fresh temp
+    # whose record has to be carried across as well — without that second
+    # copy the record stops at the temp and the dict site, which is keyed on
+    # the value it was handed, sees nothing. Both spellings of the
+    # declaration are here because they take different stores: a bare
+    # assignment and a `var`.
+    #
+    # SIGSEGV (exit -11) on the tree before, printing nothing at all: the
+    # very first statement's `d[K] = 1` was a `strcmp` of address 3000000000.
+    test_gimple_stdout("gimple_module_scope_large_dict_key_survives_the_global_store", """\
+K = 3000000000
+d = {}
+d[K] = 1
+print(d[K])
+var V = 3000000001
+e = {}
+e[V] = 2
+print(e[V])
+""", "1\n2\n")
+
     # The CONSTRUCTOR half of the same cross-call struct contract
     # (the ctor-direction cross-call struct contract in `module_gen.py`'s
     # constructor observation pass). The receiver
@@ -5992,6 +7162,74 @@ def main():
 
 main()
 """, "15\n")
+
+    # The same contract one hop FURTHER OUT: a dataclass travelling through
+    # two thin free-function wrappers, `b(w) -> a(w) -> L(w)`, where `w` is in
+    # `b`'s body only as `a(w)`'s argument and NOTHING calls `a` directly, so
+    # `a`'s own parameter has no call-site evidence at all. It gets the
+    # struct from `b`'s body, and `b` gets it from `b(T(9))` — so admission and
+    # propagation have to run to a fixpoint, one hop per round, or the chain
+    # stops at whichever function was reached first.
+    #
+    # Before the forwarding arm this printed the `T *`'s own bits (measured
+    # 4377466752 where CPython says 9): `self.w.numel()` degraded to the
+    # generic no-op stub at every level, exit 0, no diagnostic.
+    test_gimple_stdout("gimple_struct_ptr_param_forwarded_through_two_free_functions", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class L:
+    def __init__(self, w):
+        self.w = w
+    def numel(self):
+        return self.w.numel()
+
+def a(w):
+    return L(w)
+
+def b(w):
+    return a(w).numel()
+
+def main():
+    print(b(T(9)))
+
+main()
+""", "9\n")
+
+    # Three hops, so the bound is asserted rather than assumed: the fixpoint is
+    # capped at four rounds, and this is the case that would notice if the cap
+    # were lowered or the propagation removed.
+    test_gimple_stdout("gimple_struct_ptr_param_forwarded_through_three_free_functions", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class L:
+    def __init__(self, w):
+        self.w = w
+    def numel(self):
+        return self.w.numel()
+
+def a(w):
+    return L(w)
+
+def b(w):
+    return a(w)
+
+def c(w):
+    return b(w).numel()
+
+def main():
+    print(c(T(11)))
+
+main()
+""", "11\n")
+
 
     # The same fix reached through a FREE FUNCTION's parameter instead of
     # through a field, and with a second (`char *`) constructor argument
@@ -6472,6 +7710,62 @@ print([1, 2])
 print({"a": 1})
 """, "S<a>\nS<a>\nS<a>\nQ<b>\nQ<b>\nR<a>\nR<a>\nQ<b>\n1\nx\n[1, 2]\n{'a': 1}\n")
 
+    # A `*`-width and a `.*`-precision in a %-format spec, each of which
+    # consumes an operand of its own BEFORE the value. The compiler's spec
+    # parser treated `*` as the conversion character, so the template's
+    # operand count never matched its spec count and the WHOLE template
+    # degraded to its literal text — `'0x%0*X' % (precision, t)` printed
+    # `0x%0*X` (bugs/COMPILE_FAIL_Tools_unicode_gencodec.md's reported
+    # `    (): (0x%0*X, 0x%0*X),` entry lines).
+    #
+    # Every conversion is exercised, not just the hex one, because the
+    # operand ordering has to be right for each: C reads the dynamic width
+    # out of the varargs in the same position Python consumes it, so
+    # `'%.*f' % (3, x)` passing `x` where the precision belongs is the
+    # failure this shape invites, and it would print something plausible.
+    # `%%` rides along because an escaped percent inside a template that
+    # also has a dynamic spec used to defeat the whole thing.
+    #
+    # Compared against CPython rather than a hand-written expectation: the
+    # widths, the zero padding and the rounding are exactly what this is
+    # checking, and a hand-written string is one more thing to keep in sync.
+    test_gimple_matches_cpython("gimple_percent_format_star_width_and_precision", """\
+def hexdigits(precision, item):
+    return '0x%0*X' % (precision, item)
+
+def main():
+    for p in [2, 4, 6]:
+        print(hexdigits(p, 255))
+    print('%*d|' % (6, 42))
+    print('%-*d|' % (5, 3))
+    print('%.*f' % (3, 3.14159))
+    print('%*.*f|' % (8, 2, 3.14159))
+    print('%*x %*o' % (5, 255, 6, 8))
+    print('%*s|' % (5, 'x'))
+    print('%*r|' % (5, 'y'))
+    print('%*c|' % (4, 65))
+    print('a%%b %*s' % (5, 'x'))
+    print('%s=%r %d %05.2f' % ('k', 'v', 7, 1.5))
+main()
+""")
+
+    # The `bytes` spelling shares the SAME parser now, so a template whose
+    # lit/spec split the parser gets wrong is caught here too — the two copies
+    # had drifted into agreeing only by accident. It deliberately stops short
+    # of the `*`-width shapes: `MojoBytes` is `{data, len}`, not a C string, so
+    # a width cannot be applied through `sprintf` there without truncating at
+    # an embedded NUL, and that half is still open (see
+    # `_lower_bytes_percent_format`'s own comment).
+    test_gimple_matches_cpython("gimple_bytes_percent_format_shares_the_parser", """\
+def main():
+    print(b'0x%02X' % 255)
+    print(b'%d-%s' % (3, b'bb'))
+    print(b'%% plain')
+    print(b'%5d|%-5d|' % (42, 3))
+    print(b'%s' % b'a\\x00b')
+main()
+""")
+
     # A container of structs prints its ELEMENTS through the element's own
     # `__repr__` — the container rows of
     # bugs/CODEGEN_user_defined_dunder_repr_not_consulted_by_str_and_
@@ -6517,6 +7811,145 @@ def main():
 main()
 """, "[R<a>]\n(R<a>,)\n[R<a>, R<a>]\n[[R<a>]]\n[R<a>]\n[R<a>]\n"
        "[R<a>, R<a>]\n")
+
+    # A struct-typed FIELD inside another struct's generated field dump is
+    # rendered through that struct's own repr shim (`_mojo_repr_Q`), so
+    # `Holder(p=Q(x='b'))` reads as itself. It used to be formatted as an
+    # integer — `mojo_repr_int((int64_t)obj->p)`, i.e. the struct's ADDRESS,
+    # which ASLR moves every run, so nothing could compare it and no exit code
+    # could report it. The doc's fixture as written (a field holding a `P`
+    # from one place and a `Q` from another) is a DIFFERENT limitation and
+    # still is: one C type per slot, so `struct_field_types['Holder']['p']`
+    # is int64_t for two disagreeing call sites and the dump has nothing
+    # better to say. One field type per Holder is the shape this pins, with
+    # and without a `__repr__` on the field's own class (the dunder case
+    # takes the shim, the no-dunder case the field dump — both must not be a
+    # decimal).
+    #
+    # `DunderHolder(p=R(x='c'))` and not `DunderHolder(p=R<c>)`: a field dump
+    # is this runtime's own rendering (CPython has no field dump at all — it
+    # prints `<__main__.R object at 0x...>`), so the dunder is not consulted
+    # for it, while the CONTAINER case above does consult it. The point of
+    # this row is the same in both: not a decimal address.
+    test_gimple_stdout("gimple_struct_field_dump_is_not_an_address", """\
+class Q:
+    def __init__(self, x):
+        self.x = x
+
+class R:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+
+class PlainHolder:
+    def __init__(self, p):
+        self.p = p
+
+class DunderHolder:
+    def __init__(self, p):
+        self.p = p
+
+def main():
+    var h = PlainHolder(Q("b"))
+    var g = DunderHolder(R("c"))
+    print(repr([h]))
+    print(repr([[h]]))
+    print(repr(h))
+    print(repr([g]))
+    print(repr(g))
+main()
+""", "[PlainHolder(p=Q(x='b'))]\n[[PlainHolder(p=Q(x='b'))]]\n"
+       "PlainHolder(p=Q(x='b'))\n[DunderHolder(p=R(x='c'))]\n"
+       "DunderHolder(p=R(x='c'))\n")
+
+    # The DICT half of the same question, which the list fix above left open:
+    # `print({'k': p})` printed the generated field dump `P(x='a')` where
+    # CPython prints the object's own `__repr__`. The dict's slots already
+    # carried a `kind`; what they did not carry was a way to render a struct
+    # VALUE, for the same reason the list needed `mojo_list_set_elem_repr` — a
+    # struct-allocated value has no runtime type tag for `_mojo_dispatch_repr`
+    # to find. So the dict records the same shim, per slot (`kind == 5`) and on
+    # the dict itself (`mojo_dict_set_val_repr`), and `mojo_dict_values` /
+    # `mojo_dict_items` carry it into the list they build, which is what makes
+    # `list(d.values())` and `d.items()` agree with `print(d)`.
+    #
+    # Against CPython, so neither of this path's remaining gaps can be quietly
+    # asserted here: what is pinned is the VALUE's repr in each place it
+    # appears, plus the shape a per-dict function has to get right — an int
+    # stored beside the struct (the tag is per slot, so both are right, and in
+    # EITHER store order). `print(d.values())` and `print(d.items())` are not in
+    # this program because both print the list without its `dict_values(...)` /
+    # `dict_items(...)` view wrapper; `list(d.values())` is the same value and
+    # does match.
+    test_gimple_matches_cpython("gimple_dict_value_repr_uses_the_struct_dunder", """\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+
+def shapes():
+    p = P("a")
+    d = {}
+    d['k'] = p
+    print(d)
+    print(repr(d))
+    print(list(d.values()))
+    print(dict(d))
+    e = d | {'z': 1}
+    print(e)
+    h = {}
+    h['p'] = p
+    h['n'] = 5
+    print(h)
+    m = {}
+    m['n'] = 5
+    m['p'] = p
+    print(m)
+
+shapes()
+""")
+
+    # The two shapes the CPython comparison above cannot carry, pinned as they
+    # are rather than as they should be, so that a change to either is a
+    # decision somebody makes:
+    #
+    #   `print(d.items())` prints `[('k', R<a>)]` where CPython wraps it in
+    #   `dict_items(...)` — the pairs are right, the VIEW type is missing. That
+    #   is the items() wrapper, not this fix.
+    #   `{'p': p, 'q': q}` prints `'p': R<a>` and `'q': Q(y='b')` — the dict
+    #   records ONE repr function and the tag is per slot, so the second
+    #   struct type is `kind == 6` and goes to the generic dispatch, which
+    #   gives the field dump. Handing it the recorded function instead would
+    #   print 'q' as `R<...>` by reading a `Q *` through `P`'s repr, which is
+    #   a wild read rather than a wrong string.
+    test_gimple_stdout("gimple_dict_value_repr_remaining_two_shapes", """\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+
+class Q:
+    def __init__(self, y):
+        self.y = y
+    def __repr__(self):
+        return "Q<" + self.y + ">"
+
+def shapes():
+    p = P("a")
+    q = Q("b")
+    d = {}
+    d['k'] = p
+    print(d.items())
+    g = {}
+    g['p'] = p
+    g['q'] = q
+    print(g)
+
+shapes()
+""", "[('k', R<a>)]\n{'p': R<a>, 'q': Q(y='b')}\n")
 
     # §4.2a: print([True, False]) printed [1, None] -- the generic list repr
     # both formats a bool slot with %d instead of True/False AND treats a
@@ -6571,6 +8004,91 @@ print(d)
 print({'ok': True, 'count': 3})
 """, "{'k': True}\n{'k': True}\n{'k': False}\n{'k': 1}\n{'a': True}\n"
        "{'a': True, 'n': 5}\n{'ok': True, 'count': 3}\n")
+
+    # ...and EVERY dict store shape has to reach that same shared store.
+    # `emit_dict_int_value_store` is the one implementation of it, but the six
+    # lowering sites that used to spell the store out between them had drifted
+    # in two directions: five still called the whole-dict marker
+    # `mojo_mark_dict_bool_values`, which the runtime DELETED when the per-slot
+    # `kind` replaced it (so `{'k': True}` and `d['a'] = True` emitted a call
+    # to a function that does not exist — "implicit declaration" in the
+    # generated C, a hard build failure, not a wrong value), and the sixth, a
+    # bytes key with a non-str value, called `gen._emit_dict_int_value_store`,
+    # a `gen.` name that was never a delegate, so it raised AttributeError and
+    # took four registered cases with it.
+    #
+    # One program per shape, all against CPython: the dict literal, the
+    # subscript store (a local and a module-level dict), a CHAINED assignment
+    # (`d['a'] = e = False`, the MultiAssignStmt path), the dict comprehension,
+    # `dict(k=v)`'s kwarg pairs (the literal's other caller) and the bytes-key
+    # domain. Each asserts `True`/`False` for a bool slot AND leaves a plain
+    # int in the same dict, so a store that tags the whole dict instead of the
+    # one slot cannot pass.
+    test_gimple_matches_cpython("gimple_dict_store_shapes_share_one_bool_slot", """\
+def literal_store():
+    d = {}
+    d['a'] = True
+    d['n'] = 5
+    return d
+
+def chained():
+    g = {}
+    e = 0
+    g['a'] = e = False
+    return g
+
+def bytes_keyed():
+    b = {}
+    b[b'k'] = 5
+    b[b'j'] = 9
+    print(b[b'k'], b[b'j'], len(b))
+
+print(literal_store())
+print(chained())
+print({k: True for k in ['x', 'y']})
+print(dict(ok=True, n=3))
+d = {}
+d['p'] = 1 == 1
+d['r'] = 1 == 2
+d['s'] = 7
+print(d)
+bytes_keyed()
+""")
+
+    # What a dict's REPR makes of each value kind, against CPython. Three
+    # separate defects, one shared cause — the walker had a `val == 0` arm
+    # answering "None" (right for a NULL pointer slot) and no arm for `kind`,
+    # so it read every untagged word as if it were a pointer:
+    #
+    #   {'z': 0}            -> {'z': None}   a plain zero is not a None
+    #   print({'x': 1.5})   -> SEGFAULT      1.5's IEEE bits (4609434218613702656)
+    #                                       cleared 65536, so the bits were
+    #                                       dereferenced as an address
+    #   d['f'] = 1.5        -> {'f': 1}      the SUBSCRIPT store boxed the
+    #                                       float through _to_int64 while the
+    #                                       literal store used the double
+    #                                       setter, so one dict had two answers
+    #
+    # `None` now has its own slot kind (`mojo_dict_set_none`, kind 4), which is
+    # what lets a kind-0 zero print `0` in the same dict where a `None` prints
+    # `None`. `d['n']` still prints `0` where CPython says `None` — a READ
+    # does not carry the slot kind anywhere — which is deliberately NOT pinned
+    # here; see bugs/CODEGEN_dict_slot_read_loses_its_value_kind.md.
+    test_gimple_matches_cpython("gimple_dict_repr_kinds_agree_with_cpython", """\
+d = {}
+d['n'] = None
+d['z'] = 0
+d['b'] = False
+d['f'] = 1.5
+d['s'] = 'v'
+d['c'] = [1, 2]
+d['d'] = {}
+print(d)
+print({'a': None, 'z': 0, 'b': True, 'f': 2.5, 's': 'q'})
+print({k: None for k in ['p', 'q']})
+print({k: 0 for k in ['p', 'q']})
+print('%s' % d)
+""")
 
     # A `bool`-ANNOTATED struct field. `_TYPE_MAP` maps `'bool'` to `'int'`
     # on purpose (see struct_bool_fields' docstring), so the field's lowered
@@ -6702,6 +8220,54 @@ def main():
 main()
 """, "[True]\n[True, False]\nFalse\n1\n0\n")
 
+    # A `bool`-annotated PARAMETER, which is the third shape the one shared
+    # bool predicate has to answer and the only one that cannot be keyed on a
+    # type. `'bool'` resolves to `'int'` and `'int'` to `'int64_t'`, so a bool
+    # param IS distinguishable from an int param in `func_param_types` — but
+    # NOT from a small integer LITERAL's own lowering, which is also a plain C
+    # `int` (see `_local_literal_ctype`). Keying off the type would have
+    # turned `x = 5; print(x)` into `True`; the annotation is instead
+    # captured where it is still readable, by
+    # `mojo/middle/exprtypes.record_bool_params` at the two sites that set
+    # `current_func_name` with the FunctionDef in hand, and read back per
+    # function by `bool_param_in_scope`.
+    #
+    # `get2() -> bool` and `get()` are the method-return shapes and belong
+    # here too because they share the predicate; `b.report(True)` is the
+    # METHOD's bool parameter, whose key is `<Struct>_<method>` rather than
+    # the bare name — the two spellings of the same table. `v + 1` is the
+    # control: a bool param is still an ordinary int in arithmetic.
+    test_gimple_stdout("gimple_bool_annotated_parameter", """\
+class Box:
+    def __init__(self, flag: bool, n: int):
+        self.flag = flag
+        self.n = n
+    def get(self):
+        return self.flag
+    def get2(self) -> bool:
+        return self.flag
+    def report(self, other: bool):
+        print(other)
+
+def show(v: bool, n: int):
+    print(v)
+    print({'k': v})
+    print(v + 1)
+
+def main():
+    b = Box(True, 5)
+    print(b.get())
+    print(repr(b.get()))
+    print({'g': b.get()})
+    print(b.get2())
+    b.report(True)
+    b.report(False)
+    show(True, 5)
+    show(False, 5)
+main()
+""", "True\nTrue\n{'g': True}\nTrue\nTrue\nFalse\nTrue\n{'k': True}\n2\n"
+       "False\n{'k': False}\n1\n")
+
     # §4.2b: print({1, 2}) printed the set's own ADDRESS -- print had no
     # MojoSet * dispatch branch at all (len()/iteration on the same value
     # were already correct).
@@ -6831,7 +8397,197 @@ def main():
     show([[1, 2], [3, 4]])
 """, "1\n2\n3\n4\n")
 
-    # bugs/hard/CODEGEN_function_scoped_import_module_not_inlined.md: a
+    # The STRING spelling of the line above, which is where the same program
+    # was wrong. The OUTER loop already carried the nested element ctype
+    # across the call boundary (`_param_elem_types` / `_nested_elem_types`
+    # from `note_list_literal`), so `row` was correctly a `MojoList *` — but
+    # the target of a loop never inherited the iterable's OWN nested element
+    # type, so the INNER loop's target fell to the `int64_t` default and read
+    # its elements with `mojo_list_get_int`: `show([["a", "b"]])` printed the
+    # strings' heap addresses. The integer spelling passed only because
+    # `int64_t` is what that default already is, which is why this went
+    # unnoticed. Compared against CPython, and with `len()` and a `print` of
+    # the row itself so the fix has to be a real element type rather than a
+    # shape that happens to print.
+    test_gimple_matches_cpython("gimple_for_over_nested_list_param_of_str", """\
+def show_str(rows):
+    for row in rows:
+        for cell in row:
+            print(cell)
+
+def collect_str(rows):
+    out = []
+    for row in rows:
+        for cell in row:
+            out.append(cell)
+    return out
+
+def show_int(rows):
+    for row in rows:
+        for cell in row:
+            print(cell)
+
+def main():
+    show_str([["a", "bb"], ["c"]])
+    print(collect_str([["x", "y"], ["z"]]))
+    show_int([[1, 2], [3, 4]])
+main()
+""")
+
+    # A dict's VALUE type is a compile-time fact at the call site, and there is
+    # no binding site inside the callee to record it -- so before the cross-call
+    # dict-value contract (`_param_dict_val_types`, seeded at the same
+    # Pass-1.3d site as the scalar and element contracts and read by
+    # `gen_func` / `_gen_struct_method` beside `_param_elem_types`), the
+    # callee's `d[k]` fell to the `int64_t` default and read a `char *` slot
+    # through `mojo_dict_get_int`: the stored pointer's own bits, printed as a
+    # decimal, exit 0. Two spellings that MUST agree are asserted side by
+    # side, because the same program with the literal bound to a local first
+    # was already correct -- so a test of only one of them would pass on the
+    # broken tree for the wrong reason.
+    test_gimple_stdout("gimple_dict_param_value_type_from_the_call_site", """\
+def via_next(d):
+    a, b = next(iter(d.items()))
+    print(b)
+
+def via_for(d):
+    for k, v in d.items():
+        print(v)
+
+def via_subscript(d):
+    print(d["x"])
+
+def via_get(d):
+    print(d.get("x"))
+
+def via_alias(d):
+    e = d
+    print(e["x"])
+
+def main():
+    via_next({"x": "1"})
+    via_for({"x": "1"})
+    via_subscript({"x": "1"})
+    via_get({"x": "1"})
+    via_alias({"x": "1"})
+""", "1\n1\n1\n1\n1\n")
+
+    # The constructor carrier, which is not a MemberExpr callee at all and so
+    # needs its own observation to reach `_gen_struct_method` — a dict reaches
+    # a user class through `self.d = d` more often than through any other
+    # shape. Both the field read in another method and a `show()` driven
+    # through a free function's receiver are asserted, because the receiver
+    # spelling goes through a different resolution.
+    test_gimple_stdout("gimple_dict_param_value_type_reaches_a_constructor", """\
+class Box:
+    def __init__(self, d):
+        self.d = d
+    def show(self):
+        print(self.d["x"])
+
+def drive(b):
+    b.show()
+
+def main():
+    Box({"x": "1"}).show()
+    drive(Box({"x": "1"}))
+""", "1\n1\n")
+
+    # A float-valued dict takes the same contract through the `double` lane,
+    # which is a DIFFERENT reader (`mojo_dict_get_double`) from the string one.
+    test_gimple_stdout("gimple_dict_param_float_value_type_from_the_call_site", """\
+def f(d):
+    print(d["x"])
+def main():
+    f({"x": 1.5})
+""", "1.5\n")
+
+    # `a | b` on two dicts is `dict.__or__`, which MATERIALISES a new dict.
+    # The dict-union lowering has always existed (`mojo_dict_union`) but only
+    # fired when an operand's lowered C type was literally `MojoDict *`, and
+    # that is unreachable for a module-level global or an unannotated
+    # parameter — both are stored through the int64_t boxing convention and
+    # so lower to `int64_t`. The union then became a raw C `|` between two
+    # POINTERS (`_t13 | _t14`) and `print` formatted the result's bits with
+    # `%s`: an address, exit 0, no diagnostic.
+    #
+    # Both operands must be provably dicts, which is also Python's own rule —
+    # the sibling `int |` cases are asserted below so this cannot be a
+    # general "make `|` a union" change.
+    test_gimple_stdout("gimple_dict_union_of_globals_and_through_a_return", """\
+e = {}
+o = {'PATH': '/b'}
+d = {'PATH': '/a', 'X': '1'}
+
+def merged(x, y):
+    return x | y
+
+print(e | o | d)
+print(merged(e, d))
+""", "{'PATH': '/a', 'X': '1'}\n{'PATH': '/a', 'X': '1'}\n")
+
+    # The merged dict's own read-back, which is where the doc's real instance
+    # (`merged = env_defaults | os.environ | updates`, then `merged.get(k)`)
+    # lived: the KIND has to survive the store into the global, and the VALUE
+    # type has to reach the callee parameter when the union is passed
+    # straight in. An EMPTY dict contributes no value type at all, so it is
+    # not a disagreement with a string operand — it is silence, and treating
+    # the `int64_t` default as evidence is what made `{} | {'PATH': '/a'}`
+    # record nothing.
+    test_gimple_stdout("gimple_dict_union_result_reads_and_crosses_a_call", """\
+def show(m):
+    print(m['k'])
+    print(m.get('k'))
+    print(len(m))
+
+e = {}
+d = {'k': 'v'}
+m = e | d
+print(m)
+show(e | d)
+""", "{'k': 'v'}\nv\nv\n1\n")
+
+    # `int.__or__` is untouched, through the same shapes (globals, locals, and
+    # a function's return): the new evidence is a table this codegen fills for
+    # DICTS only, so an integer pair has none of it.
+    test_gimple_stdout("gimple_int_or_is_still_bitwise_or", """\
+A = 6
+B = 3
+def either(x, y):
+    return x | y
+print(A | B)
+print(either(6, 3))
+print(either(4, 1))
+print(6 ^ 3)
+""", "7\n7\n5\n5\n")
+
+    # DISAGREEMENT, asserted on the generated C rather than on stdout: the
+    # honest answer for `f({'x': '1'}); f({'x': 2})` is the `int64_t` default,
+    # and its observable consequence at the string call site is the stored
+    # pointer's own digits — an ASLR address, which no equality assertion can
+    # pin. So what is asserted is the absence of the accessor the contract
+    # would otherwise have chosen. The agreeing program is asserted FIRST, so
+    # the disagreeing one cannot pass by the generator never producing that
+    # call at all.
+    _agree_src = '''\
+def f(d):
+    print(d["x"])
+def main():
+    f({"x": "1"})
+    f({"x": "1"})
+'''
+    dict_param_reader_is_str(
+        'gimple_dict_param_value_type_agreement_types_the_slot', _agree_src, 'f', True)
+    dict_param_reader_is_str(
+        'gimple_dict_param_value_type_disagreement_stays_untyped', '''\
+def f(d):
+    print(d["x"])
+def main():
+    f({"x": "1"})
+    f({"x": 2})
+''', 'f', False)
+
+    # CODEGEN_function_scoped_import_module_not_inlined: a
     # cross-module constructor call whose only field-type evidence is an
     # unannotated scalar/container LITERAL argument (`Parameter('v', 7)`,
     # `Parameter` defined in a SIBLING module) left the field `int64_t` in
@@ -7092,7 +8848,7 @@ def main():
 
     test_c_accessor_helpers_emitted_once_across_modules()
 
-    # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md
+    # CODEGEN_same_bare_name_struct_collision_across_modules
     # §4 ("module.Class(...) construction is unresolved on every path"):
     # `mod_a.Dialog("a")` — a struct constructed through its OWNING MODULE
     # object rather than its bare name — lowered to a generic "method call"
@@ -7205,7 +8961,7 @@ def main():
 
     test_cross_module_iterator_struct_protocol_symbols()
 
-    # bugs/CODEGEN_unannotated_init_param_field_type_int64_residue.md (deleted
+    # “An unannotated `__init__` param still types its field `int64_t`” (deleted
     # with that fix): the cross-module constructor evidence above types a PARAM,
     # but the `_xmod_ctor_field_hints` merge applied it to the FIELD whose name
     # MATCHES the param. So a constructor that stores one param in two fields —
@@ -7265,7 +9021,7 @@ def main():
             print(f"FAIL  {name}: expected {want!r}, got {out!r}")
             _FAIL += 1
     _test_cross_module_ctor_param_types_every_field()
-    # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md:
+    # CODEGEN_same_bare_name_struct_collision_across_modules:
     # two REAL classes sharing a bare name across two modules. The single
     # string this codegen used as a struct's C identity was the bare
     # `StructDef.name`, so whichever module was processed first owned the
@@ -7605,6 +9361,159 @@ def main():
                           "main()\n",
     }, 'colln3_main.py')
 
+    # A submodule that FAILS to compile must not leave its per-translation-unit
+    # "already emitted this" marks behind. `_compile_imported_module` inlines a
+    # module's whole subtree into the ONE generated translation unit, so every
+    # `static char * _slit_N;` forward declaration, `_mojo_sizeof_*`/`_mojo_fnaddr_*`
+    # helper, compiled-regex table, list-marshalling pair, type-name singleton and
+    # "unavailable in compiled mode" stub lives in the FAILING module's own text —
+    # which the except handler throws away whole. The marks used to survive it, so
+    # every LATER module computed "already declared", emitted nothing, and gcc
+    # rejected the surviving reference sites: `error: '_slit_10000' undeclared
+    # (first use in this function)`.
+    #
+    # The nesting is what makes it reachable from a module's OWN code: a module's
+    # own string-pool block is appended near the very END of gen_module_impl, so a
+    # module can only leave a stale mark for a NESTED module that compiled
+    # successfully first. Hence `badmod` -> `innermod` (succeeds, emits the
+    # declaration) -> `badmod` itself raises, and `goodmod` — a sibling that
+    # survives and uses the same literal — is the one that dies.
+    #
+    # `next(it)` on an unannotated parameter is the refusal that makes `badmod`
+    # fail: it has no lowering at all (`emit_calls.py`'s own diagnostic, which
+    # refuses rather than emit a call to a symbol that does not exist), so it
+    # raises even under the `relaxed_imports=True` every imported module is
+    # compiled with, and takes the rollback path this asserts on. CPython runs
+    # the identical text fine (`pick` is never called), which is what makes the
+    # compiled-vs-CPython comparison below a real expectation rather than a
+    # hardcoded string.
+    _check_agrees_with_cpython("failed_submodule_rollback_string_pool_marks", {
+        'rb_inner.py': "def show():\n"
+                       "    print('rb_shared_literal')\n",
+        'rb_bad.py': "import rb_inner\n"
+                     "def pick(it):\n"
+                     "    return next(it)\n"
+                     "def go():\n"
+                     "    return rb_inner.show()\n",
+        'rb_good.py': "def shout():\n"
+                      "    print('rb_shared_literal')\n",
+        'rb_main.py': "import rb_bad\n"
+                      "import rb_good\n"
+                      "def main():\n"
+                      "    rb_good.shout()\n"
+                      "main()\n",
+    }, 'rb_main.py')
+
+    # A CPython source checkout's `Lib/` is a SIBLING of `Tools/`, not an
+    # ancestor, so the inline importer's bounded upward walk from a
+    # `Tools/<tool>/x.py` entry file can never arrive there and every CPython
+    # `Lib/` import used to degrade to a receiver stub with the source tree
+    # sitting right there on disk (bugs/
+    # COMPILE_FAIL_cpython_lib_is_invisible_outside_it.md). The layout below is
+    # a real one — `<root>/Lib/os.py` is what marks the root as a checkout, and
+    # `<root>/Tools/probe/entry.py` is the entry — and the expectation is
+    # CPython's own, run with `Lib` on its `PYTHONPATH` (which is how the
+    # interpreter finds it), so a stub or a silently-empty result fails rather
+    # than merely compiling.
+    #
+    # `_compile_n_files_and_run` cannot express this shape: it writes every
+    # fixture flat into one directory and runs CPython with that directory as
+    # cwd, which would make `libmod` a plain sibling and prove nothing. So this
+    # one gets its own helper, and the only difference from the shared one is
+    # the nested layout and the interpreter's `PYTHONPATH`.
+    def _compile_cpython_checkout_and_run(root, entry_relpath, timeout=120):
+        entry = os.path.join(root, entry_relpath)
+        from gimple_codegen import compile_to_gimple
+        c_code = compile_to_gimple(open(entry).read(), do_imports=True,
+                                   filename=entry)
+        cp_env = dict(os.environ)
+        cp_env['PYTHONPATH'] = os.path.join(root, 'Lib')
+        cp = subprocess.run([sys.executable, entry], capture_output=True,
+                            text=True, timeout=timeout, env=cp_env)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.c',
+                                         delete=False) as f:
+            f.write(c_code)
+            c_file = f.name
+        exe_file = c_file.replace('.c', '.exe')
+        try:
+            runtime_dir = os.path.join(HERE, 'runtime')
+            result = subprocess.run(
+                [find_gcc(), '-fgimple', f'-I{runtime_dir}', '-o', exe_file,
+                 c_file, os.path.join(runtime_dir, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=timeout)
+            if result.returncode != 0:
+                raise RuntimeError(f"gcc -fgimple failed: {result.stderr[:400]}")
+            return run_executable_stdout(exe_file), cp.stdout
+        finally:
+            for p in (c_file, exe_file):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+    def _check_cpython_lib_is_visible(name, lib_mod_src, entry_src):
+        global _PASS, _FAIL, _TIMEOUT
+        try:
+            with tempfile.TemporaryDirectory() as wd:
+                root = os.path.join(wd, 'cpy')
+                os.makedirs(os.path.join(root, 'Lib'))
+                os.makedirs(os.path.join(root, 'Tools', 'probe'))
+                # The marker `cpython_lib_root` recognises. Contents irrelevant:
+                # only its EXISTENCE is the contract, which is why a real
+                # checkout's `os.py` (a top-level module every CPython `Lib/`
+                # has, and not something an ordinary project directory
+                # contains) is a sound thing to test for.
+                open(os.path.join(root, 'Lib', 'os.py'), 'w').write("# marker\n")
+                open(os.path.join(root, 'Lib', 'libmod.py'), 'w').write(lib_mod_src)
+                open(os.path.join(root, 'Tools', 'probe', 'entry.py'),
+                     'w').write(entry_src)
+                got, want = _compile_cpython_checkout_and_run(
+                    root, os.path.join('Tools', 'probe', 'entry.py'))
+        except subprocess.TimeoutExpired as e:
+            print(f"TIMEOUT {name}: {e}")
+            _TIMEOUT += 1
+            return
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        if got == want:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: compiled {got!r} != CPython {want!r}")
+            _FAIL += 1
+
+    _check_cpython_lib_is_visible(
+        "cpython_checkout_lib_is_visible_from_a_tools_entry",
+        "VALUE = 40\n"
+        "\n"
+        "def bump():\n"
+        "    return VALUE + 2\n",
+        "import libmod\n"
+        "\n"
+        "def main():\n"
+        "    print(libmod.bump())\n"
+        "\n"
+        "main()\n")
+
+    # A `from mod import name` binding, not just a module-qualified call: the
+    # two go through different resolution paths in the inline importer
+    # (`_gen_stmt_FromImportStmt` consults `_submodule_source_path`, which
+    # reuses `_module_candidate_paths` rather than re-implementing it), so
+    # fixing only the qualified-call spelling would leave the binding one
+    # unresolved and still stubbed.
+    _check_cpython_lib_is_visible(
+        "cpython_checkout_lib_from_import_binds_the_real_module",
+        "def twice(n):\n"
+        "    return n * 2\n",
+        "from libmod import twice\n"
+        "\n"
+        "def main():\n"
+        "    print(twice(21))\n"
+        "\n"
+        "main()\n")
+
     # A `from mod import Dialog as X` binding must not change which class a
     # module-qualified construction picks, and the two classes must stay
     # independent when BOTH are constructed in one program (the shape where
@@ -7628,7 +9537,77 @@ def main():
                           "main()\n",
     }, 'colln4_main.py')
 
-    # bugs/CODEGEN_fstring_and_str_of_a_list_are_garbage.md: f"{container}"
+    # `from b import K` at MODULE level, with `K` read from a function body
+    # in the importing module: the value is b's, so the read is
+    # `_b_globals.K`, and before the fix it was `_root_globals.K` — a field
+    # the importing module's own `<module>_toplev` never declares, so gcc
+    # refused the whole program ("'struct _root_toplev' has no member named
+    # 'K'"). The self-host closure had 26 such names across 15 modules (one
+    # of the two `<module>_toplevel` families fixed in 6b7241c5); the
+    # qualified `b.K` spelling of the same value was already correct, so this
+    # is the bare-name half of that pair.
+    _check_agrees_with_cpython("imported_module_constant_reads_the_owners_field", {
+        'fgi_b.py': "K = 'abc'\n\ndef f():\n    return 1\n",
+        'fgi_a.py': "from fgi_b import K\n\ndef main():\n    print(K)\nmain()\n",
+    }, 'fgi_a.py')
+
+    # A container global crosses the boundary the same way, and the read has
+    # to take its ELEMENT type from the owner's field triple rather than from
+    # the importing module's own (empty) overlay — a bare int64_t address for
+    # the list when it did not.
+    _check_agrees_with_cpython("imported_module_list_constant_keeps_its_elements", {
+        'fgj_b.py': "L = [1, 2, 3]\n",
+        'fgj_a.py': "from fgj_b import L\n\ndef main():\n    print(L)\n    print(len(L))\nmain()\n",
+    }, 'fgj_a.py')
+
+    # `from b import N as J`: the LOCAL spelling is `J` and the owner's FIELD
+    # is still `N`, so both halves of the binding have to be tracked — a
+    # single "local name == field name" shortcut answers here.
+    _check_agrees_with_cpython("imported_module_constant_alias_reads_the_owners_field", {
+        'fgk_b.py': "N = 7\n",
+        'fgk_a.py': "from fgk_b import N as J\n\ndef main():\n    print(J)\nmain()\n",
+    }, 'fgk_a.py')
+
+    # The two rows that must NOT be re-routed, i.e. the gates
+    # `_gmi_scan_imported_global_homes` exists to enforce. A module-level
+    # `N = ...` rebinds the name in THIS module's namespace (Python
+    # semantics), so the bare read afterwards is this module's own field; and
+    # a function-local `N` shadows the import outright. Both printed the
+    # imported side's value when the routing was unconditional.
+    _check_agrees_with_cpython("own_module_global_beats_the_imported_homonym", {
+        'fgl_b.py': "N = 'b-side'\n",
+        'fgl_a.py': "from fgl_b import N\nN = 'a-side'\n\ndef main():\n    print(N)\nmain()\n",
+    }, 'fgl_a.py')
+    _check_agrees_with_cpython("local_beats_the_imported_module_global", {
+        'fgm_b.py': "N = 'b-side'\n",
+        'fgm_a.py': "from fgm_b import N\n\ndef main():\n    N = 'local'\n    print(N)\nmain()\n",
+    }, 'fgm_a.py')
+
+    # A container-of-struct literal in an IMPORTED module. The per-struct
+    # element-repr shims (`_mojo_elem_repr_P`) and the `void *` aliases of
+    # them are declared in the ROOT module's reflection block, which
+    # `gen_module_impl` splices in AFTER the imported modules' code — so this
+    # list's `mojo_list_set_elem_repr(t, _mojo_elem_repr_P)` used to name a
+    # function that was not yet declared. gcc's `__GIMPLE` parser cannot
+    # convert a function designator to `void *` by any means at all (a bare
+    # assignment is "non-trivial conversion in 'function_decl'", a C-style
+    # cast is "invalid operand in unary operation"), so 59 such calls across
+    # the self-host closure took out the functions containing them. Same
+    # family as the from-import rows above, in the same emission area, and
+    # only visible in a multi-module closure — a single-TU program declares
+    # and defines the shim in one block and never sees it.
+    _check_agrees_with_cpython("imported_module_list_of_structs_reprs_them", {
+        'fgn_b.py': "class P:\n"
+                    "    def __init__(self, x):\n"
+                    "        self.x = x\n"
+                    "    def __repr__(self):\n"
+                    "        return 'P<' + self.x + '>'\n"
+                    "def make():\n"
+                    "    return [P('a'), P('b')]\n",
+        'fgn_a.py': "import fgn_b\n\ndef main():\n    print(fgn_b.make())\nmain()\n",
+    }, 'fgn_a.py')
+
+    # “`f"{a_list}"` and `str(a_list)` print the container's raw header bytes”: f"{container}"
     # and str(container) read the container's raw header bytes as a C
     # string (`_stringify_value` had no container branch at all, unlike
     # `print`'s dispatch, which was already correct for the same values).
@@ -7641,6 +9620,107 @@ print(f"{s}")
 d = {'a': 1}
 print(str(d))
 """, "[1, 2, 3]\n[1, 2, 3]\n{1, 2}\n{'a': 1}\n")
+
+    # A user class named `Parser`, imported across a module boundary. `Parser`
+    # is a struct name this compiler hardcodes for its OWN parser
+    # (`fire_compiler.Parser`: `_tok` / `_pos` / `_filename` /
+    # `_pending_decs` / `_known_traits`), and the hardcoding used to be
+    # unconditional — so a user's `Parser` was MERGED into that layout and
+    # every one of its methods resolved against `fire_compiler.Parser`, whose
+    # `__init__` has a different signature. The generated struct was:
+    #
+    #   typedef struct Parser { ... _tok; _pos; _filename; _pending_decs;
+    #                                 _known_traits; struct Parser * toks; }
+    # and the call sites referenced `fire_compiler_Parser_peek`, which
+    # nothing defined.
+    #
+    # Both halves are asserted by RUNNING rather than by inspecting the C,
+    # because the merge's symptom is a wrong-offset field read, which prints a
+    # plausible wrong value rather than failing: this program's `p.toks[1]`
+    # reads offset 6 of a 5-field struct. The re-export variant below covers
+    # the harder disambiguation (the class crosses TWO module boundaries, via
+    # a base class, so neither the defining module's name nor the importing
+    # module's is enough).
+    _check_agrees_with_cpython("user_struct_named_parser_survives_the_selfhost_name", {
+        'pcol_def.py': "class Parser:\n"
+                       "    def __init__(self, tokens):\n"
+                       "        self.toks = tokens\n"
+                       "    def peek(self):\n"
+                       "        return self.toks[0]\n",
+        'pcol_main.py': "from pcol_def import Parser\n"
+                        "def use(src):\n"
+                        "    psr = Parser(src)\n"
+                        "    if not psr.peek():\n"
+                        "        return None\n"
+                        "    return psr\n"
+                        "p = use([1, 2])\n"
+                        "print(p.peek())\n"
+                        "print(p.toks[1])\n",
+    }, 'pcol_main.py')
+
+    # Same name, but the class is RE-EXPORTED through a third module and
+    # inherits from a base class defined in a fourth — the real instance's
+    # shape (`Cases/cases_generator/parsing.py`'s `class Parser(PLexer)`,
+    # re-exported by `parser.py`). Three modules and four hops, so a
+    # qualifier resolved from either end alone gets it wrong.
+    _check_agrees_with_cpython("user_struct_named_parser_survives_a_re_export_and_a_base", {
+        'pcol_base.py': "class PLexer:\n"
+                        "    def __init__(self, t):\n"
+                        "        self.t = t\n",
+        'pcol_parsing.py': "from pcol_base import PLexer\n"
+                           "class Parser(PLexer):\n"
+                           "    def peek(self):\n"
+                           "        return self.t[0]\n",
+        'pcol_facing.py': "from pcol_parsing import Parser\n",
+        'pcol_main.py': "from pcol_facing import Parser\n"
+                        "p = Parser([5, 6])\n"
+                        "print(p.peek())\n"
+                        "print(p.t[1])\n",
+    }, 'pcol_main.py')
+
+    # ...and the structural half, which is what makes a run-level assertion
+    # above able to mean anything: the emitted struct must carry NONE of
+    # `fire_compiler.Parser`'s own five field names, must carry the user's,
+    # and the method symbols must be mangled with the DEFINING module's
+    # qualifier. A merge or a wrong qualifier shows up here as a field or a
+    # symbol the user never wrote, with no gcc error at all.
+    #
+    # Scoped to the five selfhost names rather than "only the user's fields",
+    # because the cross-module registration has a SEPARATE defect of its own
+    # (an `__init__` parameter name leaking in as a field — see
+    # `bugs/CODEGEN_imported_class_gets_ctor_params_as_fields.md`), and an
+    # assertion about that would be red for a reason this test is not about.
+    def _parser_struct_and_symbols():
+        global _PASS, _FAIL
+        with tempfile.TemporaryDirectory() as wd:
+            open(os.path.join(wd, 'pcol_def.py'), 'w').write(
+                "class Parser:\n"
+                "    def __init__(self, tokens):\n"
+                "        self.toks = tokens\n"
+                "    def peek(self):\n"
+                "        return self.toks[0]\n")
+            entry = os.path.join(wd, 'pcol_main.py')
+            open(entry, 'w').write("from pcol_def import Parser\n"
+                                   "print(Parser([9]).peek())\n")
+            from gimple_codegen import compile_to_gimple
+            c = compile_to_gimple(open(entry).read(), do_imports=True,
+                                  filename=entry)
+        m = re.search(r'typedef struct Parser \{(.*?)\} Parser;', c, re.S)
+        fields = set(re.findall(r'\b(\w+);', m.group(1))) if m else set()
+        merged = sorted(fields & {'_tok', '_pos', '_filename',
+                                  '_pending_decs', '_known_traits'})
+        syms = sorted({s for s in re.findall(r'\b(\w*Parser_\w+)\s*\(', c)})
+        bad_syms = [s for s in syms if s.startswith('fire_compiler_')]
+        if merged or bad_syms or 'toks' not in fields \
+                or not any(s.endswith('_Parser_peek') for s in syms):
+            print("FAIL  user_struct_named_parser_emits_its_own_layout_and_qualifier: "
+                  f"fields={sorted(fields)} merged={merged} symbols={syms}")
+            _FAIL += 1
+        else:
+            print("PASS  user_struct_named_parser_emits_its_own_layout_and_qualifier")
+            _PASS += 1
+
+    _parser_struct_and_symbols()
 
 
 def main():

@@ -821,7 +821,7 @@ def _build_sys_stdin_read(b):
 # local first (`out = sys.stdout; out.write(...)`) is NOT rewritten — by
 # the time the call is seen, the receiver is a plain int64_t and there is
 # nothing left to tell it apart from any other integer. See
-# bugs/hard/CODEGEN_stream_handle_alias_has_no_type.md.
+# CODEGEN_stream_handle_alias_has_no_type.
 def _sys_stream_write(fd):
     def _build(b):
         return CallExpr(func=IdentExpr(name='mojo_stream_write'),

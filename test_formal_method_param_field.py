@@ -852,7 +852,7 @@ CASES = [
 
     # ── a `@staticmethod` gets NO receiver, on either side of a call ──────────
     #
-    # `bugs/FORMAL_staticmethod_is_compiled_as_an_instance_method.md`. Two
+    # `FORMAL_staticmethod_is_compiled_as_an_instance_method`. Two
     # readers in `formal/build.py` consulted only the parameter list and between
     # them gave a `@staticmethod` a receiver on BOTH sides: the definition was
     # compiled as if it took one, and the call site passed one, for a function

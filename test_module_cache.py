@@ -189,7 +189,23 @@ def test_stage2_3_dylib_and_cas(wd):
         # of pure per-module dead weight. Gating the cluster on "this module can
         # reach it" is measured and filed as
         # bugs/PERF_generic_repr_helpers_emitted_into_every_module.md.
-        check("stage2: client object is tiny (<9KB)", sz < 9216, f"{sz} bytes")
+        #
+        # 9216 -> 10240 (2026-10-03, merging the ten bugs4 branches): 9216 ->
+        # 9416 on this exact client, +200. The growth is the dict repr's own
+        # per-module material, from `bugs4-6`'s one-store-of-every-value-kind
+        # work, and it is the same KIND of thing the three entries above record
+        # rather than bodies landing in the client: two new `static` helpers in
+        # the always-emitted preamble (`_mojo_dict_val_repr`, which asks the
+        # dict's recorded repr for a struct slot, and `_mojo_repr_none`), plus
+        # three rows in `_mojo_repr_dict`'s value-kind chain (the `kind == 4`
+        # None row, the untagged-zero row, and the `kind == 5` struct row, which
+        # `_mojo_cat_dict_val` became). Read off the generated C by diffing the
+        # emitted `static` set against master's: exactly those two names are
+        # new. Bumped by two 1024 increments rather than one, because the rule
+        # this ladder follows is "clear the number and keep the teeth": 9416
+        # would clear 10240 with 824 to spare, which is the same margin the
+        # 11264 entry above was written for.
+        check("stage2: client object is tiny (<9KB)", sz < 10240, f"{sz} bytes")
     finally:
         os.remove(os.path.join(RUNTIME, 's2lib.mojo'))
 
@@ -298,6 +314,47 @@ def test_resolution_authority(wd):
               '/_m' in p and '/_p' in p and p.index('/_m') < p.index('/_p'))
     finally:
         os.environ.clear(); os.environ.update(old)
+
+    # “The compiler has no way to see CPython's `Lib/` from an entry file outside it”: `_find` probed
+    # only the two `.mojo` spellings, so `$PYTHONPATH` — which the search path
+    # DOES honour — was silently useless for pointing at a CPython `Lib/`:
+    # `$PYTHONPATH=<checkout>/Lib` left `resolve_source('argparse')` at None.
+    # Mojo is a superset of Python, so a `.py` file on the search path is a
+    # provider. Asserted through `_find` rather than `resolve()` because
+    # `resolve()` also BUILDS a dylib for whatever it finds, which is a
+    # different mechanism and not what this is about.
+    open(os.path.join(a, 'ridpy.py'), 'w').write("def ridpy_v():\n    return 1\n")
+    found, _sh = imports.Resolver(path=[a])._find('ridpy')
+    check("authority: a .py file on the search path is a provider",
+          found == os.path.join(a, 'ridpy.py'), str(found))
+    # Extension is the INNER priority, LOCATION the outer one — the same rule
+    # `emit_resolve._module_candidate_paths` applies, and the one that makes
+    # `$PYTHONPATH` able to SHADOW rather than merely append.
+    open(os.path.join(b, 'ridboth.mojo'), 'w').write("fn ridboth() -> Int64:\n    return 1\n")
+    open(os.path.join(b, 'ridboth.py'), 'w').write("def ridboth():\n    return 2\n")
+    found, _sh = imports.Resolver(path=[b])._find('ridboth')
+    check("authority: a .mojo sibling wins over a .py in the SAME directory",
+          found == os.path.join(b, 'ridboth.mojo'), str(found))
+    open(os.path.join(a, 'ridboth.py'), 'w').write("def ridboth():\n    return 3\n")
+    found, _sh = imports.Resolver(path=[a, b])._find('ridboth')
+    check("authority: a closer directory's .py still wins over a further .mojo",
+          found == os.path.join(a, 'ridboth.py'), str(found))
+    # And the CPython checkout itself: `$PYTHONPATH=<checkout>/Lib` is the case
+    # the bug doc names, so the detection is exercised on a real layout.
+    cpy = os.path.join(wd, 'cpy')
+    os.makedirs(os.path.join(cpy, 'Lib'), exist_ok=True)
+    open(os.path.join(cpy, 'Lib', 'os.py'), 'w').write("# marker\n")
+    open(os.path.join(cpy, 'Lib', 'ridcargparse.py'), 'w').write("def v():\n    return 1\n")
+    os.makedirs(os.path.join(cpy, 'Tools', 'probe'), exist_ok=True)
+    import imports as _imp
+    detected = _imp.cpython_lib_root(os.path.join(cpy, 'Tools', 'probe'))
+    check("authority: a CPython checkout is detected from an entry file in Tools/",
+          detected == os.path.realpath(os.path.join(cpy, 'Lib')), str(detected))
+    check("authority: the detected Lib is where the resolver then finds its .py",
+          imports.Resolver(path=[detected])._find('ridcargparse')[0]
+          == os.path.join(detected, 'ridcargparse.py'))
+    check("authority: a directory with no checkout above it detects nothing",
+          _imp.cpython_lib_root(a) is None, str(_imp.cpython_lib_root(a)))
 
 
 # ── Elaboration slice 1: generic call → CAS-cached instantiation ──────────
@@ -697,8 +754,17 @@ def test_reflected_struct_import(wd):
         # module.md; not landed with the merge because its failure mode is a
         # link error on the self-host closure, which only `make bootstrap` can
         # clear.
+        #
+        # 11264 -> 12288 (2026-10-03, merging the ten bugs4 branches), for
+        # stage2's reason and by the same two increments: this client carries
+        # the dict-repr additions too plus the per-struct
+        # `_mojo_elem_repr_<Sn>` shims `reflect_emitted` names, and 11600 needs
+        # a ceiling above it that still has teeth (11264 would not clear it at
+        # all). The invariant is unchanged: what grew is the always-emitted
+        # generic-repr preamble, which is CALLS into the runtime plus the small
+        # walkers above it, not bodies belonging to this client.
         check("reflect: client object is tiny — bodies live in the dylib",
-              sz < 11264, f"{sz} bytes")
+              sz < 12288, f"{sz} bytes")
     finally:
         os.remove(libpath)
 

@@ -167,7 +167,7 @@ cannot do is WRITE, and that is what the five names are waiting on:
 
 The capability is filed, with the exact next step and the reason the analysis
 belongs in one place for both backends, as
-`bugs/FORMAL_a_module_cannot_store_through_a_pointer_with_a_declared_pointee.md`.
+`FORMAL_a_module_cannot_store_through_a_pointer_with_a_declared_pointee`.
 
 That leaves two open items here, and neither is a defect in this tree:
 

@@ -339,10 +339,9 @@ tools/suite.py --list` is the census**, not this table — and since 2026-10-01 
 is the only census that can be: every registered test is now in a bucket unless
 it declares `dep=True` (one does, `prooflib`), which `test_suite.py` checks in
 both directions. So the `[]` column the eleven ungated `expect=` jobs used to
-print cannot be produced again by accident, which is what
-`bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md` and
-`bugs/TEST_registered_tests_in_no_bucket_never_run.md` were about; both docs are
-deleted with their fixes.
+print cannot be produced again by accident, which is what the two bugs about
+gated-but-never-run registrations were about; both of their docs are deleted
+with their fixes.
 
 A marker that states a count is CHECKED against the run, for the same reason:
 `expect=` forgives `FAIL`/`ERROR` wholesale, so a new failure inside an
@@ -384,9 +383,8 @@ row claiming otherwise is the failure `test_suite.py`'s
 **A declared red and an unrun red are different failures**, and the second is
 worse: a marker on a test no gate runs can never be observed going green, so it
 cannot rot out. That is why the ungated ones above were a coverage hole
-(`bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md`, and
-`bugs/TEST_registered_tests_in_no_bucket_never_run.md` for the ungated tests
-that are not marked at all) and not merely a cost question, why they went into
+(the `expect=` markers themselves, and the ungated
+tests that are not marked at all) and not merely a cost question, why they went into
 `coroutine` rather than staying out of every bucket, and why "register it" is
 never the same act as "run it". Every one of them is in a bucket (2026-10-01),
 measured one at a time before being named, and `test_suite.py`'s `the buckets:`
@@ -435,10 +433,10 @@ current figures are the last line of `build/suite.log`; a bucket's SIZE is
 `make check-plan` / `python3 tools/suite.py --dry-run <bucket>`, which reads
 the registry and is therefore a fact about the tree rather than about a run.
 A doc that states a test's STATUS is checked against the registry by
-`test_suite.py`, and `tools/dangling_doc_refs.py` walks the citations;
-`bugs/DOCS_stated_test_statuses_the_registry_no_longer_has.md` is deleted with
-its fix. A doc that states a tally is not checked, because there is nothing to
-check it against until somebody runs the gate.
+`test_suite.py`, and `tools/dangling_doc_refs.py` walks the citations —
+ratcheted per file, so a citation of a doc deleted by its own fix cannot be
+added back. A doc that states a tally is not checked, because there is nothing
+to check it against until somebody runs the gate.
 
 ## Known failures: `expect=` or `disabled=`, decided by cost
 
@@ -487,3 +485,17 @@ fixed with the remainder written down, or not fixed at all. Those are the
 cases where a Status section carrying the evidence and the exact next step
 is worth more than the absence of a file. `bugs/hard/` is for the ones that
 need their own careful pass; `bugs/OPEN_WORK.md` is the triage index.
+
+**Deleting a doc has a second half, and it is the half that gets skipped.**
+Every file that cited it now cites nothing. Run
+
+    python3 tools/dangling_doc_refs.py --ratchet
+
+in the same commit, and fix what it names: rewrite the citation to name the
+BUG (its symptom, or the commit that fixed it), or delete the sentence if the
+path was all it said. `--ratchet` fails only when a file GAINS a citation,
+against the per-file ceilings in `tools/dangling_refs_baseline.py`, and it is
+a registered gate job (`doc-refs`, in `check`) — so the corpus of dangling
+citations can only shrink from here, and it grew from 309 to 480 while nothing
+was watching it. To bank a sweep, `--write-baseline` regenerates the ceilings
+and prints what moved.

@@ -743,7 +743,7 @@ admitted against — which is the direction a rate about provability has to move
 - **A cross-dylib call whose value is used still has no machine half.** Admitting
   the model is what lets the proof be *generated and typechecked*; the end-to-end
   theorem about a program that calls into a dylib is a separate, pre-existing gap
-  (`bugs/FORMAL_lean_model_call_semantics.md`), and the generated file says so at
+  (`“[3] The Lean model — what landed, and what did not”`), and the generated file says so at
   the call boundary rather than pretending.
 
 ---
@@ -1214,7 +1214,7 @@ the launcher print wall/CPU/peak for every run it makes.
 `formal-call-proofgen`, `formal-dylib`, `formal-imports`, `formal-sweep`,
 `formal-x86`, `formal-x86-endtoend`, `formal-x86-model` — were `disabled=` in
 `tools/suite.py` against
-`bugs/FORMAL_gate_lean_proof_checks_have_no_time_bound.md`, which said plainly
+`“The formal Lean proof checks in the gate have no time bound”`, which said plainly
 that `formal7-lean-bound` owned the fix and that the doc was the switch: deleting
 it re-enabled the tests, and `tools/suite.py` refused to load the registry while
 a disabled test's doc was gone.

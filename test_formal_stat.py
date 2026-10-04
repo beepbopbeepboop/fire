@@ -46,7 +46,7 @@ compared against CPython. x86-64 runs under Rosetta 2 on Apple Silicon and is
 SKIPPED (not failed) on a host with no x86-64 support, with the reason
 printed. This is also the group that would catch `_filemode_cls` growing a
 seventh parameter: SysV x86-64 passes six integer arguments in registers and
-refuses a seventh (`bugs/FORMAL_x86_64_argument_registers.md`).
+refuses a seventh (`FORMAL_x86_64_argument_registers`).
 """
 import argparse
 import os
@@ -233,7 +233,7 @@ def sweep_source():
 
     A list literal is a frame blob, so a corpus carried as one is bounded by
     the frame budget — the same limit
-    `bugs/CODEGEN_list_literal_over_4095_words_asserts.md` is about, from the
+    `“CODEGEN: a list literal longer than 4095 words dies on a bare AssertionError”` is about, from the
     other direction. So the 65,536 in-range modes are a `while` loop (which
     needs no table at all) and the eleven out-of-range ones are an eleven-word
     literal. The program then emits exactly the sequence `corpus()` returns, in

@@ -327,7 +327,7 @@ def main(n):
     # compared by the program. `rp == ap` is a real bug on this path, and not
     # one this test should be asserting around: the `==` of two values whose
     # kinds are both unclassified is an ADDRESS comparison, so two identical
-    # strings compare unequal (bugs/FORMAL_string_equality_of_two_unclassified_words.md).
+    # strings compare unequal (FORMAL_string_equality_of_two_unclassified_words).
     # Comparing the printed strings here is also the stronger assertion — it
     # pins the fallback's actual value rather than a boolean derived from it.
     printf("realpath-missing=[%s]@@", realpath(join(root, "no-such")))
@@ -685,7 +685,7 @@ from os.path import join, isabs, normpath, join_all, commonprefix
 # group because its program imports none of those four names from `os.path`,
 # and `from os.path import exists as e` would NOT do: an alias in a from-import
 # is not honoured for a call into another image
-# (bugs/FORMAL_from_import_alias_dangles_the_call.md).
+# (FORMAL_from_import_alias_dangles_the_call).
 from os import exists, isdir, isfile, getsize
 
 def main(n):
@@ -748,7 +748,7 @@ def main(n):
         # and a path that is not there, and 1 where CPython says 0 for a
         # device node, a FIFO or a socket. It is `S_ISREG(st_mode)` read out of
         # the buffer `stat` fills now
-        # (bugs/FORMAL_stat_out_parameter_is_unreadable.md), so this line is
+        # (“FORMAL_stat_out_parameter_is_unreadable: `isfile` cannot be exact”), so this line is
         # CPython's own answer and a disagreement is a failure rather than a
         # documented exception. The `stat` group below is where the other two
         # of those three shapes are checked.

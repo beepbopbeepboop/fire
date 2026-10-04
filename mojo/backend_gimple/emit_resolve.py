@@ -47,6 +47,8 @@ import mojo.middle.exprtypes as gimple_exprtypes
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
+import mojo.backend_gimple.emit_infra as ginf
+import mojo.backend_gimple.emit_exprs as gex
 
 # Re-export shared helpers from mojo.middle.resolve_shared via explicit imports.
 # (Was globals().update(dir(_shared)); self-hosted globals() is a
@@ -56,7 +58,7 @@ from mojo.middle.resolve_shared import (
     _as_assignstmt_node, _as_multiassignstmt_node, _as_str, _as_vardecl_node, _calls_in_stmts, _closure_value_locals,
     _collect_calls_in_stmt, _collect_local_container_elems, _collect_return_elems, _decode_str_literal_text, _dtrace, _eval_const,
     _infer_list_elem_type, _infer_local_var_types, _infer_return_elem_type, _scratch_dict_copy, _is_none_literal, _is_sys_stderr, _lbn_target_names,
-    _lbn_walk, _module_const_int, _parse_fstring_parts, _prepass_callee_key, _quick_type, _record_closure_alias,
+    _lbn_walk, _module_const_int, _operand_is_dict, _parse_fstring_parts, _prepass_callee_key, _quick_type, _record_closure_alias,
     _refine_generic_return_type, _sms_key, _str_literal_to_slit, _subst_idents, _type_expr_to_ann
 )
 from mojo.middle.calls_shared import user_dunder_repr_call
@@ -224,6 +226,25 @@ def _module_candidate_paths(gen, module_name: str) -> list:
                 break
             _anc = _parent
     search_dirs += ['.', '..', script_dir]
+    # A CPython source checkout's `Lib/`, when the IMPORTING FILE is inside one.
+    # Appended LAST on purpose: every directory above it is more specific — the
+    # project's own tree, the CWD, this compiler's installation — so a name both
+    # of those and CPython's `Lib` provide still resolves the way it did before,
+    # and the ONLY thing that changes is a name nothing else provides. That is
+    # the whole gap: `Lib` is a SIBLING of `Tools`, not an ancestor, so the
+    # bounded upward walk above can never reach it from a `Tools/<tool>/x.py`
+    # entry file and `import argparse` used to degrade to a receiver stub with
+    # the source tree sitting right there on disk. Detection itself (and its
+    # memo) lives in `imports.py` because this resolver's own `_find` needs the
+    # same answer — see “The compiler has no way to see CPython's `Lib/` from an entry file outside it”.
+    try:
+        import imports as _imp_cpy
+        _cpython_lib = _imp_cpy.cpython_lib_root(importer_dir) if importer_dir else None
+    except Exception as e:
+        _cpython_lib = None
+        gimple_ctypes._debug_note(f'CPython Lib/ detection failed for {importer_dir!r}', e)
+    if _cpython_lib:
+        search_dirs.append(_cpython_lib)
     mojo_paths = []
     _seen_dirs: list = []
     for d in search_dirs:
@@ -285,7 +306,7 @@ def _module_candidate_paths(gen, module_name: str) -> list:
         # name's LEADING component, also try the dotted path's
         # remaining suffix directly under that dir (treating the dir
         # as already representing that first package level). See
-        # bugs/COMPILE_FAIL_tkinter_filedialog.md.
+        # COMPILE_FAIL_tkinter_filedialog.
         if len(_dotted_parts) > 1:
             _suffix_parts = _dotted_parts[1:]
             _rel_suffix_flat = '/'.join(_suffix_parts)
@@ -534,31 +555,55 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
             # reference (their referencing text was discarded with it).
             funcptr_needed_before = set(gen._funcptr_builtins_needed)
             funcptr_emitted_before = set(gen._emitted_funcptr_builtins)
-            # The string pool, for the SAME reason as the funcptr marks above
-            # and for the same failure: `_str_pool_declared` is what stops each
-            # module re-declaring every name interned before it, and an
-            # imported module emits `static char * _slit_N;` for the names it
-            # finds NOT yet declared. A failed subtree's generated text is
-            # discarded here, but its marks were not rolled back, so every name
-            # it interned was left marked declared with nothing declaring it --
-            # and the root's real definition comes near the END of the
-            # translation unit, after the function bodies that reference it.
-            # The result is "_slit_10001 undeclared (first use in this
-            # function)" on hundreds of references, from a subtree that was
-            # never in the output at all. Rolling the mark back keeps the pair
-            # symmetric, and a name interned only by the failed subtree is
-            # simply never declared because nothing references it.
-            strpool_declared_before = set(gen._str_pool_declared)
-            # `_c_helpers_needed` is the same shape of mark as the string pool:
-            # a helper is emitted INLINE at the point that needs it, and
-            # `_emitted_c_helpers` is what keeps a second module from emitting
-            # a duplicate `static` definition. A failed subtree's text is
-            # discarded, so its helpers' definitions went with it -- but the
-            # marks said they were already emitted, and every surviving
-            # reference became an implicit declaration. Measured: 100+
-            # "implicit declaration of function '_mojo_sizeof_<Struct>'", one
-            # per AST node class in fire_compiler.py.
+            # Every remaining per-TRANSLATION-UNIT "I already emitted this
+            # definition" registry, for the same reason and with the same
+            # consequence as the two above: the DEFINITION each of these
+            # marks is keyed to lands in the module's OWN `parts`, and this
+            # except handler throws those parts away whole. A mark that
+            # survives its own text leaves every LATER module believing the
+            # definition is already in the unit, so it emits nothing and the
+            # surviving reference sites die on an undeclared name — the
+            # *same* class of failure as `_funcptr_mojo_len` above, in the
+            # four other registries that carry a definition rather than a
+            # type:
+            #
+            #   `_str_pool_declared`        `static char * _slit_N;`
+            #   `_emitted_c_helpers`        `static int64_t _mojo_sizeof_X (void)`
+            #                               `static void * _mojo_fnaddr_f (void)`
+            #   `_regex_progs_defined`      `static const ARRAY[] = {...}`
+            #   `_emitted_list_marshalling` `_mg_pack_*`/`_mg_unpack_*`
+            #   `_emitted_singletons`       `static char * _mojo_type_name (...)`
+            #   `_emitted_unresolved_stub_syms` / `_auto_stubbed`  the
+            #                               `#ifndef`-guarded "unavailable in
+            #                               compiled mode" stub definitions
+            #
+            # Measured on Tools/c-analyzer/c_analyzer/__main__.py before this
+            # fix: 13 distinct `_slit_N` names and `_mojo_elem_repr_*` used
+            # with only their root-preamble definition, thousands of lines
+            # later, because c_parser/info.py, c_parser/parser/_func_body.py,
+            # c_parser/match.py and c_common/scriptutil.py each raise
+            # mid-compile and their marks outlived their text.
+            #
+            # Rolling a mark back can only ever ADD an emission, never
+            # remove one — and every one of these emissions is legal to
+            # repeat (`static char * x;` is a tentative definition, and the
+            # stubs are `#ifndef`-guarded), which is what makes the rollback
+            # unconditionally safe. The registries deliberately NOT listed
+            # here are the ones that hold KNOWLEDGE rather than an emission
+            # mark — `_str_pool` (name identity for a literal must stay
+            # stable across a retry, or the recompiled module would mint a
+            # second `_slit_N` for the same text), `_external_protos`,
+            # `struct_field_types`, `func_param_types`/`func_return_types`,
+            # `_module_globals` — and `_struct_allocs_needed`, whose actual
+            # emission is gated on `_emitted_allocs` (rolled back just above),
+            # so a stale entry there cannot lose a definition.
+            str_pool_declared_before = set(gen._str_pool_declared)
             emitted_c_helpers_before = set(gen._emitted_c_helpers)
+            regex_progs_defined_before = set(gen._regex_progs_defined)
+            emitted_list_marshalling_before = set(gen._emitted_list_marshalling)
+            emitted_singletons_before = set(gen._emitted_singletons)
+            stub_syms_before = set(gen._emitted_unresolved_stub_syms)
+            auto_stubbed_before = set(gen._auto_stubbed)
             gen._compiling_file_paths.add(_ap_key)
             try:
                 with open(path, 'r') as f:
@@ -871,7 +916,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # `_link_needs_cxx_box`'s own declaration for the fuller
                 # story, and this method's own cpp-unit-compile call
                 # site below for the concrete case that surfaced this —
-                # bugs/COMPILE_FAIL_Tools_cases_generator_parser.md).
+                # “COMPILE_FAIL: Tools/cases_generator/parser.py”).
                 # `_link_dylibs` shared for the identical reason (a
                 # nested import's own further imports recording a
                 # dylib). Harmless, unread dead data for a do_imports=
@@ -1053,14 +1098,23 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                     gen._funcptr_builtins_needed.discard(_n)
                 for _e in list(gen._emitted_funcptr_builtins - funcptr_emitted_before):
                     gen._emitted_funcptr_builtins.discard(_e)
-                for _sp in list(gen._str_pool_declared - strpool_declared_before):
-                    gen._str_pool_declared.discard(_sp)
-                for _ch in list(gen._emitted_c_helpers - emitted_c_helpers_before):
-                    gen._emitted_c_helpers.discard(_ch)
-                # See `sub_toplevels_before` above: a declaration with no body
-                # behind it is a link error attributed to the wrong module.
-                if len(gen._sub_toplevels) > sub_toplevels_before:
-                    del gen._sub_toplevels[sub_toplevels_before:]
+                # The other per-TU "already emitted" registries — see the
+                # snapshot block above for why each of these marks is tied to
+                # text this handler is about to discard.
+                for _d in list(gen._str_pool_declared - str_pool_declared_before):
+                    gen._str_pool_declared.discard(_d)
+                for _h in list(gen._emitted_c_helpers - emitted_c_helpers_before):
+                    gen._emitted_c_helpers.discard(_h)
+                for _p in list(gen._regex_progs_defined - regex_progs_defined_before):
+                    gen._regex_progs_defined.discard(_p)
+                for _m in list(gen._emitted_list_marshalling - emitted_list_marshalling_before):
+                    gen._emitted_list_marshalling.discard(_m)
+                for _s in list(gen._emitted_singletons - emitted_singletons_before):
+                    gen._emitted_singletons.discard(_s)
+                for _y in list(gen._emitted_unresolved_stub_syms - stub_syms_before):
+                    gen._emitted_unresolved_stub_syms.discard(_y)
+                for _b in list(gen._auto_stubbed - auto_stubbed_before):
+                    gen._auto_stubbed.discard(_b)
                 # doc/OWNERSHIP_MODEL.md Phase 3's per-function state
                 # (gimple_gen_infra.py's begin_function/_owned_free_
                 # candidates) is NOT tied to modules_before/etc like the
@@ -1237,29 +1291,37 @@ def _inline_bare_import_struct(gen, stmt, marker_reads) -> None:
       * `import insp` + `def show(p): return p.label()` +
         `show(insp.Parameter('v', 7))` printed `0`, exit 0 — a silent wrong
         value, and the reason the last remaining row of
-        bugs/hard/CODEGEN_method_call_on_struct_param_mistyped.md was still
+        CODEGEN_method_call_on_struct_param_mistyped was still
         red (the identical program spelled `from insp import Parameter`
         printed `v` in the SAME build; that doc is deleted as of this fix —
         see the 2026-09-30 section of bugs/hard/README.md);
       * `x = insp.Parameter('v', 7); print(x.v)` raised
         `AttributeError: v`, exit 1, on the module handle.
 
-    Scoped to a STRUCT reached through the marker, and to a LOCAL PROJECT
-    SIBLING, both deliberately:
+    The member CLASS no longer matters, because the classifier is the shared
+    one. This used to ask only `_source_defines_struct`, deliberately scoped
+    to a struct "because a FUNCTION reached through a bare marker is a
+    separately tracked bug with its own filed doc" — that doc is
+    `bugs/CODEGEN_bare_import_module_qualified_call_answers_zero.md`, and it
+    is closed by this change, so the exclusion has nothing left to exclude.
+    `_classify_unresolved_export` is the same classifier the `from M import X`
+    spelling uses, it already answers for a plain top-level FUNCTION (inline
+    the module) as well as a struct, and the docstring of the two duplicated
+    copies it replaced is the argument for using it here too: a
+    source-text classifier that is not exhaustive about SPELLING has to be
+    the same classifier everywhere. Without inlining, the member's own
+    definition is not in this translation unit and not behind any dylib on the
+    link line, so the call site the sibling-module branch resolves to a
+    correctly QUALIFIED, overload-suffixed symbol that nothing defines:
+    `ld: symbol(s) not found for architecture arm64: _deep_deep_fn_9f63a2`.
 
-    * struct, not any name — a FUNCTION reached through a bare marker is a
-      separately tracked bug with its own filed doc
-      (`bugs/CODEGEN_link_mode_bare_submodule_marker_call_silent_wrong_value.md`,
-      plus the `from . import SUB` sibling in
-      `bugs/COMPILE_FAIL_Tools_cases_generator_analyzer.md`), and taking it
-      here would widen this change's blast radius to every module this
-      compiler's own closure reaches a function through;
-    * local sibling, not stdlib/test — a stdlib module has a dylib (or
-      module_loader's source-level export table) behind it, and inlining it
-      here would emit a second definition of symbols the link already binds
-      to that dylib.
+    Still scoped to a LOCAL PROJECT SIBLING, deliberately: a stdlib module
+    has a dylib (or module_loader's source-level export table) behind it, and
+    inlining it here would emit a second definition of symbols the link
+    already binds to that dylib.
 
-    Records into `gen._link_inline_modules`; returns nothing."""
+    Records into `gen._link_inline_modules` (or the generic/overload tables);
+    returns nothing."""
     _pairs = _bare_import_bindings(stmt)
     for _i in range(0, len(_pairs), 2):
         _mod = _pairs[_i]
@@ -1286,9 +1348,7 @@ def _inline_bare_import_struct(gen, stmt, marker_reads) -> None:
         if not _text:
             continue
         for _m in _members:
-            if _source_defines_struct(_m, _text):
-                gen._link_inline_modules.add(_mod)
-                return
+            _classify_unresolved_export(gen, _m, _m, _mod, _path, _text)
 
 
 def _register_link_imports(gen, stmts) -> list:
@@ -2378,27 +2438,49 @@ def _intern_string(gen, escaped: str) -> str:
 
 
 def _format_percent_spec(gen, full_spec: str, conv: str, et: str, ev: str,
-                         enode=None) -> str:
+                         enode=None, width_ints: list | None = None) -> str:
     """Render one %-spec's operand to `char *`, applying any width or
-    precision in `full_spec` via a real C sprintf (see _sprintf_one)
+    precision in `full_spec` via a real C sprintf (see _sprintf_n)
     rather than reimplementing printf-style padding by hand.
 
     `enode` is the operand's AST node when the caller has it. It carries the
     only thing that distinguishes a bool from an int 0/1 — a bool's lowered C
     type is a plain `int` — so `'%r' % (b,)` has no other way to print True
-    (see `is_python_bool_expr` and `_repr_value`)."""
+    (see `is_python_bool_expr` and `_repr_value`).
+
+    `width_ints` are the already-lowered C `int` values a `*`-width and/or a
+    `.*`-precision consumed, in that order; empty for every spec without one.
+    They go in FRONT of the value, because that is where C reads them too —
+    `'%0*X' % (4, 255)` is `sprintf (buf, "%0*llX", 4, 255LL)`. The spec text
+    itself needs no rewriting for this: C spells a dynamic width with the same
+    `*`, and the 64-bit length modifier the integer conversions add lands
+    AFTER the width, which is exactly where C's grammar wants it
+    (`%[flags][width][.precision][length]conv`)."""
+    if width_ints is None:
+        width_ints = []
     if conv == 's':
         sval = gen._stringify_value(et, ev, enode)
         if full_spec == '%s':
             return sval
-        return gen._sprintf_one(full_spec[:-1] + 's', sval)
+        args = list(width_ints)
+        args.append(sval)
+        return gen._sprintf_n(full_spec[:-1] + 's', args)
     if conv == 'r':
         rval = gen._repr_value(et, ev, enode)
         if full_spec == '%r':
             return rval
-        return gen._sprintf_one(full_spec[:-1] + 's', rval)
+        args = list(width_ints)
+        args.append(rval)
+        return gen._sprintf_n(full_spec[:-1] + 's', args)
     if conv == 'c':
         nv = gen._to_int64(et, ev)
+        if width_ints:
+            # `%*c`: C takes the code as an `int`, so route it through sprintf
+            # rather than the `mojo_char_to_str` path below (which has no width
+            # to apply and takes a `char`).
+            args = list(width_ints)
+            args.append(nv)
+            return gen._sprintf_n(full_spec[:-1] + 'c', args)
         cv = gen._new_val('char', f'(char){nv}')
         return gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
     if conv in 'diouxX':
@@ -2409,10 +2491,14 @@ def _format_percent_spec(gen, full_spec: str, conv: str, et: str, ev: str,
         # undefined behavior (only 32 bits of the varargs int64_t are
         # consumed on most ABIs). "%5d" -> "%5lld", etc.
         c_spec = full_spec[:-1] + 'll' + conv
-        return gen._sprintf_one(c_spec, nv)
+        args = list(width_ints)
+        args.append(nv)
+        return gen._sprintf_n(c_spec, args)
     if conv in 'fFeEgG':
         dv = ev if et == 'double' else gen._new_val('double', f'(double){ev}')
-        return gen._sprintf_one(full_spec, dv)
+        args = list(width_ints)
+        args.append(dv)
+        return gen._sprintf_n(full_spec, args)
     # Unknown/unsupported conversion (e.g. '%a') -- degrade to str().
     return gen._stringify_value(et, ev)
 
@@ -3275,20 +3361,18 @@ def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
     cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
-    gen._ptr_helpers_needed.add('char')
-    # `mojo_cstr_slice` rather than a `char`-taking helper: gimple
-    # rejects a `char` argument ("invalid argument to gimple call"), since
-    # a char is promoted to int64_t non-trivially. See _gen_for_cstr.
-# `1LL`, not `(int64_t)1`: a C-style cast is not a legal gimple
-    # operand. `_t = _i + (int64_t)1` is rejected at gimplification
-    # with "expected expression before '(' token" -- a HARD error
-    # under `gcc -fgimple`, so it takes out the whole self-host
-    # closure, not just this subscript. The `LL` suffix is the
-    # tree's existing idiom for a width-correct int64_t literal
-    # (`0LL` appears throughout the generated C) and needs no cast.
-    _one_cs = gen._new_val('int64_t', "1LL")
-    _end_cs = gen._new_val('int64_t', f"{idx64} + {_one_cs}")
-    gen._emit(f"  {gen._cname(gen0.target)} = mojo_cstr_slice ({_iv}, {idx64}, {_end_cs});")
+    # `mojo_char_at_str`, for _gen_for_cstr's reason in full: gimple rejects a
+    # `char` argument ("invalid argument to gimple call"), so the slice stood
+    # in for `mojo_char_to_str` and allocated a two-byte buffer per character
+    # of every character comprehension. It reaches the same shared immortal table
+    # through an int64_t INDEX instead. The result is deliberately absent from
+    # the codegen's `_FRESH_STRING_RETURNS`, so no generated path frees it.
+    #
+    # No `_ptr_helpers_needed.add('char')`: the helper is called through the
+    # runtime and never through `_mojo_at_char`, so requesting that one emits a
+    # `static` definition with no call site (master's note beside
+    # `_gen_for_cstr` says the same).
+    gen._emit(f"  {gen._cname(gen0.target)} = mojo_char_at_str ({_iv}, {idx64});")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
@@ -3469,6 +3553,13 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         gen._emit(f"  mojo_list_append_{suf} ({res}, {ev_cast});")
         # Track element type so downstream for-loops use the right accessor
         gen._elem_types[res] = et
+        # A CALLABLE comprehension element, so `[f for ...][0](...)` can
+        # dispatch. The literal and the `append` paths record through the
+        # same helper, and a comprehension is the third way to build the list
+        # a dispatch table lives in; without this one the answer would depend
+        # on which of the three spellings assembled it. Keyed on the PRE-cast
+        # `ev`, which is the name the callable tables are keyed on.
+        ginf.note_container_callable_ret(gen, res, ev, et, node.element)
         # A comprehension whose element is a TUPLE or a nested LIST
         # (`[(5, j) for j in range(3)]`, `[[5, y] for y in ys]`) has to
         # record BOTH maps the equivalent list LITERAL records at
@@ -3529,38 +3620,34 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         if et and et != 'int64_t':
             gen._elem_types[res] = et
     elif node.kind == 'dict':
-        kt, kv = gen.lower_expr(node.element)   # element = key expression in dict compr
-        vt, vv = gen.lower_expr(node.key)        # key field holds the value expression
-        # parser stores dict comprehension as: element=key_expr, key=val_expr
-        # Dict keys are char* in the runtime: coerce the key to a char* local
-        # via _char_to_cstr (handles a non-char* key — e.g. a genuine Int
-        # key, stringified via mojo_str_from_int, or one actually boxed as
-        # int64_t — and loads global string literals into locals first).
-        if kt != 'char *':
-            kt, kv = gen._char_to_cstr(kt, kv)
-        elif kv.startswith('_slit_'):
-            kv_tmp = gen._new_val('char *', f"{kv}")
-            kv = kv_tmp
-        if vt in gimple_ctypes._FLOAT_TYPES:
-            gen._emit(f"  mojo_dict_set_double ({res}, {kv}, {vv});")
-        elif vt == 'char *':
-            if vv.startswith('_slit_'):
-                vv_tmp = gen._new_val('char *', f"{vv}")
-                vv = vv_tmp
-            gen._emit(f"  mojo_dict_set_str ({res}, {kv}, {vv});")
-        else:
-            # See the dict-literal case's identical comment: vt alone
-            # can't distinguish a real bool literal from a genuine int. `node.key`
-            # is the VALUE expression here -- the parser stores a dict
-            # comprehension as element=key_expr, key=val_expr (see the comment
-            # above `kt, kv = gen.lower_expr(node.element)`).
-            #
-            # The one store, as in the dict literal: the per-slot bool kind it
-            # decides is the whole-dict `mojo_mark_dict_bool_values` marker's
-            # successor (deleted; it made one bool value render every OTHER
-            # value in the dict as True/False), and its `_emit_call` is what
-            # resolves the placeholder key `_char_to_cstr` just handed out.
-            gen._emit_dict_int_value_store(res, kt, kv, vt, vv, node.key)
+        # The parser stores a dict comprehension as element=key_expr,
+        # key=val_expr, so the pair handed over is (key, value) — the same
+        # argument order `_emit_dict_pair_store` documents for the dict LITERAL
+        # and the `dict(k=v, ...)` builtin.
+        #
+        # ONE store, because there were THREE lowerings of it and they
+        # disagreed. The comprehension's own coerced the key with
+        # `_char_to_cstr(kt, kv)` — no `transient` / `word_ok`, which is the
+        # flag pair that arms `_char_to_cstr`'s CONTAINER-key branch, the one
+        # that hands the raw word over so `_apply_kw_keys` selects the `_kw`
+        # twin and the runtime's `mojo_dict_key_for` renders the tuple's
+        # CONTENT. Without those flags a `MojoList *` key fell through to a raw
+        # `(char *)value`, so `{k: 1 for k in pairs}` stored its two tuples
+        # under their HEAP ADDRESSES as the key TEXT: different on every run
+        # (ASLR), which makes it worse than a stable wrong answer — and the
+        # repr printed those address bytes, `{'\xef\xac\x99f': 1, ...}`. The
+        # literal spelling `{k: 1 for k in pairs}` reached `_repr_value` and
+        # keyed by content, so the two spellings of one key disagreed. See
+        # bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md, and
+        # CODEGEN_tuple_dict_key_hashed_by_address for the subscript
+        # spelling that was fixed the same way.
+        #
+        # `_emit_dict_pair_store` lowers both operands itself, so the values
+        # this used to lower here are not lowered twice, and its per-kind value
+        # dispatch (float, `None`, bool, struct), `_kw`-twin key handling and
+        # callable-return note are the shared ones rather than this site's
+        # third copy of each.
+        gex._emit_dict_pair_store(gen, res, node.element, node.key)
 
 
 

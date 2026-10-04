@@ -72,7 +72,7 @@ evidence.** `x = [i for i in range(3)]; show(x)` printed a pointer, while
 discriminator is not "across a call" either: it is that `print` has a
 container-typed overload that picks an accessor, and a user-defined `show` does
 not. That is the same family as
-`bugs/CODEGEN_list_element_read_defaults_to_str_across_a_call.md`, and it says
+`CODEGEN_list_element_read_defaults_to_str_across_a_call`, and it says
 the missing evidence is the same missing evidence in both.
 
 ### The fix, which the doc's "shape of the fix" was right about
@@ -103,7 +103,7 @@ that made up this branch.
 The three sibling docs to read together, because they are one defect with three
 report sites: this one, `CODEGEN_list_element_read_defaults_to_str_across_a_call.md`,
 and (for the repr sentinel itself)
-`bugs/CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer.md`.
+`CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer`.
 
 ## Repro (the doc's original, retained)
 

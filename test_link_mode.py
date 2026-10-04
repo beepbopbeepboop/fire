@@ -9,7 +9,7 @@ pipeline, which is link-mode: per-import dylibs + CAS + reflection,
 registration is invisible to every other gate step. This test exercises
 `driver.compile_program` directly against real multi-file packages on
 disk, so a regression here can't hide behind the inline-path gate the way
-`bugs/COMPILE_FAIL_asyncio_futures.md` did.
+`“COMPILE_FAIL: asyncio/futures.py”` did.
 
 Each case builds a real executable via `driver.compile_program` and runs
 it, checking both compile success (rc == 0, binary produced) and runtime
@@ -104,7 +104,7 @@ def _cpython_run(td: str, entry: str, as_module: bool = False) -> tuple[int, str
 
 
 def test_bare_submodule_import_value_read() -> bool:
-    """Regression test for bugs/COMPILE_FAIL_asyncio_futures.md (FIXED,
+    """Regression test for “COMPILE_FAIL: asyncio/futures.py” (FIXED,
     commit 94cc04c): a bare `from . import SUBMODULE` marker's own
     top-level function, read later as a plain VALUE (not called) and
     bound to a module-level name — `isfuture = base_futures.isfuture` —
@@ -138,7 +138,7 @@ def test_bare_submodule_import_call() -> bool:
     """A CALL through a bare `from . import SUBMODULE` marker
     (`base2.doubleval(21)`, real: `base_futures.isfuture(...)`-shaped
     calls) — used to silently return 0 instead of the real value (see
-    bugs/CODEGEN_link_mode_module_qualified_call_silent_wrong_value.md,
+    “CODEGEN (link-mode): a CALL through an imported module marker”,
     now fixed and removed). A first attempt (2026-08-28, reverted)
     resolved purely by bare method NAME with no module qualification
     and broke self-hosting via a real cross-module collision. The
@@ -284,7 +284,7 @@ _INSP_PY = (
 # The `import insp` sibling of `_INSP_PY`, with a METHOD so the
 # module-qualified-constructor case below also exercises a method call
 # through a free-function parameter — the shape of
-# bugs/hard/CODEGEN_method_call_on_struct_param_mistyped.md's last
+# CODEGEN_method_call_on_struct_param_mistyped's last
 # remaining row (that doc is deleted as of this fix; see the 2026-09-30
 # section of bugs/hard/README.md).
 _LABEL_PY = (
@@ -336,6 +336,85 @@ def test_sibling_function_import_call_is_inlined() -> bool:
     if not ok:
         print(f"  ✗ sibling_function_import_call_is_inlined: rc={rc} "
               f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
+def test_bare_import_sibling_function_call_through_module() -> bool:
+    """`import SIBLING` + `SIBLING.free_fn(...)` — the FUNCTION reached
+    through a bare module marker, the shape
+    `bugs/CODEGEN_bare_import_module_qualified_call_answers_zero.md` is
+    about, and the sibling of the two struct cases above.
+
+    The call used to reach the extern preamble's `weak` "unavailable in
+    compiled mode" stub, printing `deep_fn: unavailable in compiled
+    mode` INTO THE PROGRAM'S OWN STDOUT and then returning 0 — exit 0, a
+    wrong answer, and the only diagnostic on the wrong stream.
+
+    It is TWO defects, and fixing either alone leaves it broken, which is
+    why the doc recorded a "partial fix that is NOT enough" verbatim:
+
+      * **the module was never inlined.** `_inline_bare_import_struct`
+        asked only `_source_defines_struct`, so a bare marker reached
+        through a FUNCTION added nothing to `_link_inline_modules` and the
+        definition was in neither this translation unit nor any dylib on
+        the link line. It now calls the shared `_classify_unresolved_export`
+        — the same classifier the `from M import X` spelling uses, which
+        already answers for a plain top-level function.
+      * **the member was never registered.** `import deep` records
+        `imported_symbols['deep']` — for the MODULE, not its members — so
+        the re-dispatched bare call found no `imported_symbols['deep_fn']`,
+        `_func_mangleable` was False, `_func_csym` produced the bare
+        `_safe_name('deep_fn')` with no qualifier and no overload suffix,
+        and `_lower_named_call`'s `_is_unknown` branch emitted the stub.
+        The call site now registers the member, with the signature from
+        the DEFINING module's own parsed FunctionDef
+        (`_resolved_export_entry`), because `module_loader`'s text scan
+        answers `int64_t deep_fn (void)` for an unannotated
+        `def deep_fn(x)` and that, as the only prototype in the file,
+        rejects its own call site.
+
+    With only the second half, the call site emits the correctly QUALIFIED,
+    overload-suffixed `deep_deep_fn_9f63a2` and the link fails on it
+    (`ld: symbol(s) not found`); with only the first, it still calls the
+    unqualified stub. Both halves are here, and `from_deep_import_deep_fn`
+    below is the control for the `from` spelling.
+    """
+    pkg = {
+        '_deepmod.py': (
+            'def deep_fn(x):\n'
+            '    return x + 7\n'
+            '\n'
+            'def other(x):\n'
+            '    return x * 100\n'
+        ),
+        'bimp.py': (
+            'import _deepmod\n'
+            '\n'
+            'def main():\n'
+            '    print(_deepmod.deep_fn(1))\n'
+            '\n'
+            'main()\n'
+        ),
+        'bimpf.py': (
+            'from _deepmod import deep_fn\n'
+            '\n'
+            'def main():\n'
+            '    print(deep_fn(1))\n'
+            '\n'
+            'main()\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'bimp.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'bimp.py')
+        rc2, stdout2 = _build_and_run(pkg, 'bimpf.py', td)
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == '8'
+          and rc2 == 0 and stdout2.strip() == '8')
+    if not ok:
+        print(f"  ✗ bare_import_sibling_function_call_through_module: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r}) "
+              f"| from-import control rc={rc2} stdout={stdout2!r}")
     return ok
 
 
@@ -710,7 +789,7 @@ def test_builtin_open_is_not_ambiguous_from_transitive_siblings() -> bool:
     compression.zstd._zstdfile, tarfile) each define one, and the file's
     OWN compile unit is clean — the whole program was refused by this one
     message. See
-    bugs/COMPILE_FAIL_open_is_ambiguous_from_transitive_registrations.md.
+    COMPILE_FAIL_open_is_ambiguous_from_transitive_registrations.
 
     The sibling bodies here PRINT when called, so "the builtin was used"
     is asserted by their absence and not merely by the build succeeding —
@@ -780,7 +859,7 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
     through a forwarding hop.
 
     **In this file, not `test_gimple_runner.py`, which is where
-    `bugs/CODEGEN_polymorphic_unannotated_param_vacuous_unanimity.md` said
+    `CODEGEN_polymorphic_unannotated_param_vacuous_unanimity` said
     this belonged.** Measured, and the reason is structural: that runner's
     `compile_to_gimple` is the single-translation-unit path, where the whole-
     program call-site walk never runs and the parameter is left at `int64_t`
@@ -799,6 +878,39 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
         # returned through a forwarding hop
         ('def f(x):\n    return x\n\n\ndef g(x):\n    return f(x)\n\n\n'
          'print(g(1))\nprint(g("s"))\n', '1\ns\n'),
+        # A CONTAINER argument alongside a `char *` one. A container literal at
+        # a call site used to contribute no observation at all, so the slot saw
+        # `{'char *'}` — unanimous — and `f([1, 2])` stored the list through a
+        # `char *` formal, which `mojo_print` then strlen'd over the list
+        # HEADER's bytes (`X\n`). The pointer now vetoes the resolution, as for
+        # every other disagreeing pair, and the printed value comes back right
+        # in both orders.
+        ('def f(x):\n    print(x)\n\n\nf("s")\nf([1, 2])\n', 's\n[1, 2]\n'),
+        ('def f(x):\n    print(x)\n\n\nf([1, 2])\nf("s")\n', '[1, 2]\ns\n'),
+    ]
+    # The two pairs that used to be a HARD GCC ERROR and are now only wrong:
+    #
+    #   prog.py:6:3: error: pointer value used where a floating-point was
+    #   expected
+    #     6 | f([1, 2])
+    #
+    # A `double` parameter and a list argument in the same program, so the
+    # unanimity contract resolved the slot to `double` and the list's
+    # `MojoList *` went to a `double` formal. `float_only` and `list_only` are
+    # here too, because the fix is a VETO on a non-scalar observation and the
+    # two single-kind programs are what prove it did not disturb either.
+    #
+    # What is asserted is BUILDABILITY, and deliberately so: the values these
+    # two print are still wrong (`2` for `2.5`, a pointer decimal for the
+    # list), which is the separate float-boxing and runtime-tag rows of
+    # bugs/CODEGEN_polymorphic_param_non_str_kinds_print_wrong.md. Asserting
+    # the wrong text would pin a bug; asserting only that it COMPILES is the
+    # whole content of this row, and it was a hard failure before.
+    builds_only = [
+        'def f(x):\n    print(x)\n\n\nf(2.5)\nf([1, 2])\n',
+        'def f(x):\n    print(x)\n\n\nf([1, 2])\nf(2.5)\n',
+        'def f(x):\n    print(x)\n\n\nf(2.5)\n',
+        'def f(x):\n    print(x)\n\n\nf([1, 2])\n',
     ]
     ok = True
     for i, (src, want) in enumerate(cases):
@@ -810,10 +922,89 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
             print(f"  ✗ unannotated_param_disagreeing_call_sites[{i}]: "
                   f"rc={rc} stdout={stdout!r} "
                   f"(CPython rc={py_rc} {py_stdout!r}, want {want!r})")
+    for i, src in enumerate(builds_only):
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                rc, _stdout = _build_and_run({'prog.py': src}, 'prog.py', td)
+        except Exception as e:
+            ok = False
+            print(f"  ✗ unannotated_param_container_does_not_break_the_build"
+                  f"[{i}]: did not compile: {str(e)[:200]}")
+            continue
+        if rc != 0:
+            ok = False
+            print(f"  ✗ unannotated_param_container_does_not_break_the_build"
+                  f"[{i}]: compiled but exited {rc}")
+    return ok
+
+
+def test_transitive_struct_method_is_not_variadic_stubbed() -> bool:
+    """A struct method reached from a TRANSITIVELY imported module must not
+    be auto-stubbed as a bare `int64_t f (...)`.
+
+    The auto-stub's guard (`_MOJO_STUB_<Struct>_<method>`) is DEFINED by the
+    stub itself, so nothing can suppress it afterwards — and the real
+    definition that follows it, emitted by the module that actually owns the
+    struct, is then a hard compile failure rather than a wrong answer:
+
+        error: conflicting types for 'lm_helper_Thing_show';
+               have 'int64_t(Thing *)'
+
+    Two properties of the fixture are load-bearing and neither is incidental:
+
+    * the struct is defined THREE modules deep, so the root's call site is
+      lowered before the defining module is inlined into the same
+      translation unit — which is why neither `func_return_types` lookup in
+      the auto-stub's condition could have answered "this method WILL be
+      defined here", and why the answer had to come from
+      `_struct_method_names` instead;
+    * the METHOD is a non-dunder one. A dunder goes through a different
+      mangling path (`lm_helper_Thing___init__`) and was already fine, so a
+      `__init__`-only fixture would have proved nothing about the defect.
+
+    `_build_and_run` raises out of `driver.compile_program` on a gcc failure
+    (it does not catch `CalledProcessError`), and `main()` turns that into a
+    FAIL for this case — so before the fix this row failed at the COMPILE,
+    not on an answer.
+    """
+    pkg = {
+        'lm/__init__.py': '',
+        'lm/helper.py': (
+            'class Thing:\n'
+            '    def __init__(self, value):\n'
+            '        self.value = value\n'
+            '\n'
+            '    def show(self):\n'
+            '        return self.value\n'
+        ),
+        'lm/mid.py': (
+            'from lm.helper import Thing\n'
+            '\n'
+            'def make(n):\n'
+            '    return Thing(n)\n'
+        ),
+        'lm/main.py': (
+            'import lm.mid\n'
+            '\n'
+            'def main():\n'
+            '    t = lm.mid.make(7)\n'
+            '    print(t.show())\n'
+            '\n'
+            'main()\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'lm/main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'lm/main.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout == '7\n')
+    if not ok:
+        print(f"  ✗ transitive_struct_method_is_not_variadic_stubbed: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
     return ok
 
 
 CASES = [
+    test_transitive_struct_method_is_not_variadic_stubbed,
     test_bare_submodule_import_value_read,
     test_bare_submodule_import_call,
     test_bare_submodule_import_call_inside_source_tree,
@@ -824,6 +1015,7 @@ CASES = [
     test_sibling_class_constructor_field_function_scoped,
     test_bare_import_sibling_struct_ctor_through_module,
     test_bare_import_sibling_struct_field_through_module,
+    test_bare_import_sibling_function_call_through_module,
     test_module_scoped_cross_module_struct_ctor_both_import_spellings,
     test_module_scoped_cross_module_ctor_arg_through_a_param,
     test_dotted_sibling_import_qualifier_agrees,
