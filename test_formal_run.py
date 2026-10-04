@@ -10775,6 +10775,43 @@ CONSTRUCTION_REFUSALS = [
      "    return x.g\n",
      "refuse:whose body this path does not inline: `In1(…)`, a construction of a struct whose receiver is a frame",
      None),
+    # (7a) The SAME construction stored DIRECTLY into the one field, on a struct
+    # whose ONLY field is a nested frame — the shape a deleted bug doc was filed
+    # about, and the PROGRAM half of the pair `test_formal_dylib.py`'s `a
+    # receiver write-back is not a returned frame` refuses at a module
+    # boundary.  Both halves are here because they are two different questions
+    # with two different fixes, and a reader who has only one of them tends to
+    # assume the other one is the same refusal:
+    #
+    #   * in a PROGRAM the obstacle is the INLINE.  `Box1(20, 22)` is a call to a
+    #     declared `__init__`, this path inlines that body at the construction
+    #     site, and the body builds a frame the inlined copy has no prologue
+    #     site to put it in — `init_body_stores`, the same rule as (7).
+    #   * at a MODULE BOUNDARY the obstacle is the LIFETIME.  The constructor is
+    #     never inlined anywhere, and the frame it hands back is one it built in
+    #     its own prologue, so an importer that reserves the block the contract
+    #     describes reads a dead one.
+    #
+    # The needle is (7)'s, on purpose: the two programs differ by one field, one
+    # nesting level and where they run, and a reader who lands here should be
+    # sent to the same sentence rather than to a fourth one.
+    ("constr_refuse_a_one_word_ctor_that_assigns_a_nested_frame",
+     "struct In1b:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "struct Box1b:\n"
+     "    var inner: In1b\n"
+     "\n"
+     "    def __init__(out self, a: Int, b: Int):\n"
+     "        self.inner = In1b(a, b)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = Box1b(1, 2)\n"
+     "    return x.inner.a\n",
+     "refuse:whose body this path does not inline: `In1b(…)`, a construction of "
+     "a struct whose receiver is a frame",
+     None),
 # (8) The SAME construction into a field DECLARED with that struct's type, and
     # **this one used to be a refusal and is now the row that says why it is
     # not** (`model.init_stores_a_parameter_struct`, 2026-10-03).
