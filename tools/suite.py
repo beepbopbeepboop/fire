@@ -533,6 +533,19 @@ MEASURED_PEAK_GB = {
     # that measures it.
     'formal-read-before-store': (0.08, 'measured'),  # 8.5 s, 61 cases, no builds
     'formal-receiver-spelling': (0.08, 'measured'),  # 2.8 s, 3 differential cases
+    # …and `formal-field-walk`, the third file the estate check named, measured
+    # 2026-10-04 the day it was registered. `/usr/bin/time -l` rather than
+    # memcap's own poll, because the run is 0.08 s long and a poll with a 0.5 s
+    # sample cannot see a process that is gone before the first tick — memcap
+    # reports `peak 0.0 GB` three times out of three. Same quantity (maximum
+    # RSS of the tree), measured by the kernel instead of by a sampler, and
+    # three runs agreed to within 2 MB: 30.4, 29.8, 30.3.
+    'formal-field-walk': (0.03, 'measured'),  # 0.08 s, 3 cases, no builds
+    # `formal-glob` is the other file the same estate check named on 2026-10-04,
+    # measured the same way (three runs, two instruments): 40.7 s wall and
+    # 65.6 MB maximum RSS, which memcap's own poll rounds to the 0.1 GB its
+    # `%.1f` prints and this table records — so the number here is the kernel's.
+    'formal-glob': (0.07, 'measured'),      # 40.7 s, 6 groups, 2 backends
     # …and the third the estate check caught, on the merge of the formal5 batch
     # (2026-10-02): `test_formal_core_hostmods.py`, measured one at a time
     # under `tools/memslot.py --gb 8` before being named, like the two above.
@@ -2631,6 +2644,18 @@ test('formal-read-before-store', [PY, 'test_formal_read_before_store.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_formal_read_before_store.py', 'formal/model.py'],
      desc='read-before-store dominance, against CPython in both directions')
+# `iter_statement_nodes` against the full `iter_nodes`, over the three node
+# shapes that hid a store from a walk without `_STATEMENT_CONTAINERS`: a class
+# nested in a method, an `except` arm, a `match` arm. `struct_receiver_stores`
+# reads assignments through the cheap walk, so an assignment it cannot see is a
+# field this struct does not have — two real fields share one slot and every
+# read of the second returns the first's word. No image, no Lean, no sweep: a
+# parse and two walks, 0.08 s.
+test('formal-field-walk', [PY, 'test_formal_field_walk.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_field_walk.py', 'formal/model.py',
+            'tools/formal_field_walk_differential.py', 'fire_compiler.py'],
+     desc='the statement walk finds the assignments the full walk finds')
 # Every case is DIFFERENTIAL and each `this` case has a `self` twin that has
 # to compute the same thing, which is what stops the file from passing for the
 # wrong reason (a build that stopped taking ANY receiver would satisfy "the
@@ -2789,6 +2814,25 @@ test('formal-stat', [PY, 'test_formal_stat.py'], mem='tiny',
             'formal/build.py', 'formal/model.py',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='stat: the mode vocabulary, all 65547 modes against CPython')
+# `glob`, differential against CPython's own, over a fixture tree this file
+# builds itself (dots, a symlink to a file, a DANGLING one, magic in every
+# position) because `glob`'s rules are about names that are not there in an
+# ordinary directory. The lists are compared IN ORDER and not sorted: both sides
+# walk `os.scandir`, so the orders are the same order, and a module that
+# answered the right paths in a different order is a different program from the
+# one CPython runs.
+#
+# Registered rather than excused, and `proofs` rather than `check`, on
+# `formal-shutil`'s reasoning: an image per group, executed on both backends,
+# against CPython. 40.7 s and 0.07 GB measured, which is `formal-shutil`'s cost
+# class (34.5 s) rather than `formal-sys`'s (6.9 s, in both buckets).
+test('formal-glob', [PY, 'test_formal_glob.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_glob.py', 'formal/hostmods/glob.mojo',
+            'test_formal_dylib.py', 'formal/hostmods/os/__init__.mojo',
+            'formal/build.py', 'formal/model.py',
+            'formal/imports.py'] + FORMAL_BUILD_INPUTS,
+     desc='glob: has_magic, hidden files, symlinks and escapes, against CPython')
 
 # ── not the compiler: the CPU reference the Metal path is checked against ───
 # `test_llm/` is a self-contained sub-project: a ~1M-parameter linear-attention
@@ -2950,7 +2994,20 @@ BUCKETS = {
               # are in `proofs` as well so that bucket stays the whole formal
               # picture; the reason to name a cheap test in two buckets is the
               # reason `x86-examples` is named in two.
-              'formal-read-before-store', 'formal-receiver-spelling'],
+              'formal-read-before-store', 'formal-receiver-spelling',
+              # …and the third file the estate check named (2026-10-04, on the
+              # merge of the formal20 batch), measured at 0.08 s and 0.03 GB —
+              # the cheapest thing registered in this bucket by an order of
+              # magnitude, and the reason it is here rather than in
+              # `test_suite.py`'s UNREGISTERED. It pins
+              # `formal/model.py::iter_statement_nodes` against the full walk
+              # over the node shapes that made the first version of it wrong (a
+              # class nested in a method, an `except` arm, a `match` arm), and a
+              # missed assignment there is two real struct fields sharing one
+              # slot, so this is a coverage hole and not a stale entry — which
+              # is the distinction `test_suite.py` draws between registering a
+              # file and excusing one. Also in `proofs`, like the two above it.
+              'formal-field-walk'],
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps
@@ -3066,7 +3123,12 @@ BUCKETS = {
                 # what it is ABOUT are different questions, and only the second
                 # one should decide where it lives.
                 'formal-admitted', 'formal-fcntl', 'formal-math',
-                'formal-shutil', 'formal-stat'],
+                'formal-shutil', 'formal-stat', 'formal-glob',
+                # …and `formal-field-walk`, named in `check` above and here for
+                # `formal-read-before-store`'s reason: `proofs` is where the
+                # whole formal picture is, and expansion schedules a test once
+                # per run, so the second bucket costs nothing.
+                'formal-field-walk'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model',
             # The decoder, which is x86-64 coverage with no image in it: half a
             # second and one round-trip check, and registered with no bucket,
