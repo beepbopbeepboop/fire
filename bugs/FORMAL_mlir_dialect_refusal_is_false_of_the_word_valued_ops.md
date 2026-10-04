@@ -1,5 +1,19 @@
 # `__mlir_op`: 259 sites over 104 dialect operations were refused as "there is no MLIR on this path", and for a quarter of the arithmetic ones that is false
 
+**Status (2026-10-04, `work/formal21-5`): the last false sentence in this
+document's own subject is fixed, and the item it leaves behind is named — and it
+is NOT reachable from the corpus today, which is a measurement rather than an
+opinion.** The typed-result refusal said a bracket's `_type=` is "a fact this
+path has no source for", which is false of every `_type=` this build classifies:
+`model.mlir_result_clause` reports what the bracket says (the same treatment
+`mlir_operand_clause` gives the operand, one branch over), and
+`std/builtin/simd_length.mojo`'s `pop.cast_to_builtin[_type=__mlir_type.index]`
+is the site that proves it. **That file's terminal has also MOVED**, measured:
+it is no longer the cast at all but `_select.mojo`'s export rule
+(`bugs/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`, claimed by
+`formal16-2`), so the cast is one refusal further on than this document has said
+since 2026-10-04. See "What landed" below.
+
 **Status (2026-10-04, `work/formal19-4`): items 1 and 3 of "The next step" are
 DONE — the operand's DECLARED type is read, and the arithmetic operations whose
 operand is a word lower to the ordinary spelling on both architectures. What is
@@ -354,6 +368,98 @@ whoever takes the remaining work:
     the operand-type work rather than `std/simd.mojo` (which is 22 sites of pure
     vector and is not a scalar target at all).
 
+## What landed (2026-10-04, `work/formal21-5`): the RESULT type, and where the file's terminal went
+
+### The last false sentence, one branch over
+
+The elementwise branch was fixed on 2026-10-04 for claiming a fact it had
+(`mlir_operand_clause`); **the typed-result branch kept making the same claim
+about the other half of the same site.** It said:
+
+> and that bracket holds a DIALECT object (`__mlir_type.…`,
+> `__mlir_attr.`#kgen.…``) rather than a value. This path's only value is a
+> 64-bit word, so the result's width and element type are a fact it has no
+> source for.
+
+`__mlir_type.index` **is** in `MLIR_WORD_TYPE_NAMES` — the table this very
+document's item 1 added — so `mlir_type_kind` reads that bracket and the
+sentence is false of it. What a build says now, on the site
+`std/builtin/simd_length.mojo:76` reaches:
+
+    build: SIMDLength___init__: `pop.cast_to_builtin` is a dialect OPERATION whose
+    RESULT TYPE is written in its own bracket … and that bracket holds a DIALECT
+    object … rather than a value. Its bracket's result type is
+    '__mlir_type.index', which this path holds in ONE 64-bit word — a signed,
+    pointer-sized integer — so the RESULT is not what is missing here. What is
+    therefore missing is the OPERAND's DECLARED type, and nothing in this unit
+    states one: a DECLARATION is what this path reads, and a field read off a
+    struct the unit does not declare — a builtin such as `Int`, which has no field
+    table here — states nothing about its type. A deliberate deferral, not an
+    impossibility: the operation is nameable and its result is one word, so what
+    is missing is a fact about the operand rather than a representation of the
+    result.
+
+Three answers, and the third is the control: a `word` `_type=` says the result
+is not the missing thing and names the operand; a `!kgen.simd<…>` `_type=` says
+what is missing is a **representation** of N lanes, which is a different fact
+from a type and is what that site actually lacks; **a bracket with no `_type=`
+keeps the class's own sentence unchanged**, which is the case that says the clause
+fires where there is a type to read and nowhere else. `MLIR_RESULT_TYPE_ATTRS` is
+the single attribute name, because a bracket also carries `pred=`, `bin_op=`,
+`mask=`, `ordering=` and a variant discriminant, and none of them is a type.
+
+### What it is worth, in this document's units: 0 files, and the measurement is the point
+
+**No file moves, and the reason is not the change — it is where the file's
+terminal went.** Re-measured on this tree, both architectures, `simd_length.mojo`
+no longer reaches its own cast at all:
+
+    $ python3 fire.py build --formal --no-prove -o .tmp/x \
+          ../new-modular/Mojo/stdlib/std/builtin/simd_length.mojo
+    build: simd_length.mojo imports 'std.utils._select', which cannot be built
+    either: _select.mojo: formal dylib has no public functions: _select.mojo
+    exports nothing under doc/ABI.md's rules: every declaration in it is private
+    (_select_register_value) …
+
+**`_select.mojo`'s export rule, not the cast** — the 33-file row
+(`FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`, claimed by
+`formal16-2`, and this document has said since 2026-10-02 that `simd_length.mojo`
+is blocked on both). So the honest reading of this round is the one this document
+keeps arriving at: **the refusal is now TRUE where it fires, and the file is one
+row along.** `FILES BLOCKED IS AN UPPER BOUND` again, in the class column.
+
+### What the remaining missing fact is, and why it is not a patch
+
+The cast itself — `pop.cast_to_builtin[_type=index](x)` over a word `x` — is an
+IDENTITY on this path, and would be rewritten the way `MLIR_WORD_ARITH_OPS`
+rewrites `index.add`: to the operand itself, with no instruction selection. It is
+**not** implemented, and the reason is a fact rather than a cost:
+
+* the corpus has exactly ONE word-to-word cast — `simd_length.mojo:76`. The other
+  `cast_to_builtin` sites are `__mlir_type.i1` (`bool.mojo`), `__mlir_type.ui8`
+  (`dtype.mojo`) and `__mlir_type.`i32``/`i16`` (`_gpu/_utils.mojo`), all of which
+  are outside `MLIR_WORD_TYPE_NAMES` **on purpose** (an N-bit unsigned in a word
+  wraps at 2^N, so a 64-bit identity would be the wrong answer), and `simd.mijo`'s
+  are over vectors;
+* the operand's type cannot be established, because it is `value._mlir_value`
+  where `value: Int` — a field of a **builtin** struct, and this path reads
+  DECLARATIONS from the unit being compiled. There is no field table for `Int`
+  here, and adding one to answer a single site in a file another row blocks is
+  the speculative widening this document's own §Correction argues against.
+
+**So the next step for this construct, if anyone wants it, is a builtin field
+table** (`Int._mlir_value: __mlir_type.index` and its neighbours) read by
+`mlir_operand_declared_type`, and it is worth building when some FILE's terminal
+is the cast rather than when one file two rows back has one. The message now says
+so at the site, which is the half that was false.
+
+**Tests: `test_formal_mlir_precedence.py` is 32/32** (was 29) — three new
+`CLASSIFIED` rows, one per answer plus the control, each asserting its own words
+AND the absence of the sentence it replaces. **The census is unchanged**, which is
+the point: still 259 sites over 104 operations, still `typed-result 113 / effect
+75 / unguarded 34 / elementwise 24 / vector 13`. A message that reports more is
+not a message that classifies differently.
+
 ## The census, which nobody had
 
 `__mlir_op.\`<dialect>.<op>\`` over the whole stdlib, counted not guessed:
@@ -683,6 +789,17 @@ of this file is the current reading and this is the plan it was planned against.
 and 3 landed. It is a `_type=` over an `Int`'s dialect value, which is a value-
 model question about `Int` rather than about the arithmetic, and it is
 `bugs/FORMAL_known_limits.md` §2.2's territory rather than this document's.
+
+**Both clauses of that paragraph were superseded by "What landed" above, and both
+in the same direction.** The file's terminal is no longer the cast: it is
+`_select.mojo`'s export rule, measured on this tree, so the cast is one refusal
+further on than this section said. And the `_type=` over an `Int`'s dialect value
+is no longer refused for a reason this document called a value-model question —
+the build now READS the `_type=` and says the result is one word, and the missing
+thing it names is a **builtin struct's field table** (`Int._mlir_value`), which is
+a smaller and better-specified thing than "a value-model question about `Int`".
+The cast is still not lowered, and the reason is measured rather than judged: one
+word-to-word cast site in the corpus, in a file another row blocks first.
 
 `test_formal_mlir_precedence.py` is the suite that goes red if any of this moves:
 its `CLASSIFIED` rows assert each class's own words AND the absence of another

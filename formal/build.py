@@ -12424,6 +12424,14 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # so is its opposite at a site whose operand is a word the arithmetic
         # table simply does not carry.
         dialect_operands = {}
+        # …and the operation's own BRACKET, for the same key and the same reason,
+        # and for the class whose missing fact IS the bracket: a
+        # `pop.cast_to_builtin[_type=__mlir_type.index]` is refused because the
+        # result type is a dialect object, which is FALSE of a `_type=` this path
+        # classifies as one word (`model.mlir_result_clause`). The bracket is
+        # `call.func` itself, so there is nothing to look up and nothing that can
+        # disagree with the node the message is about.
+        dialect_brackets = {}
         for call in M.iter_nodes(fn.body):
             if not isinstance(call, F.CallExpr) or not call.args:
                 continue
@@ -12436,6 +12444,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 continue
             dialect_operands.setdefault(id(root), M.mlir_operand_declared_type(
                 call.args[0], dialect_ctx, unit_fields, struct_names))
+            if isinstance(call.func, F.SubscriptExpr):
+                dialect_brackets.setdefault(id(root), call.func)
         for sub in M.iter_nodes(fn.body):
             if isinstance(sub, F.IdentExpr):
                 # `exempt_roots` is the OTHER half of the rule the arm below
@@ -12454,7 +12464,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                     first_mlir = bracketed.get(id(sub)) \
                         or M.mlir_dialect_refusal(
                             sub.name, dialect_ops.get(id(sub)),
-                            dialect_operands.get(id(sub)))
+                            dialect_operands.get(id(sub)),
+                            dialect_brackets.get(id(sub)))
 
                 continue
             if not isinstance(sub, (F.SubscriptExpr, F.MemberExpr)):
@@ -13072,7 +13083,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # all rather than being the only one.
                 why = M.mlir_dialect_refusal(name,
                                              dialect_ops.get(id(node)),
-                                             dialect_operands.get(id(node)))
+                                             dialect_operands.get(id(node)),
+                                             dialect_brackets.get(id(node)))
                 raise CodegenError(f"{fn.name}: {why}" if fn.name else why)
             gslot = M.module_slot(name)
             if gslot is not None:

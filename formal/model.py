@@ -231,6 +231,11 @@ MLIR_DIALECT_PREFIX = "__mlir_"
 # `mlir_cmp_predicate_op` must accept only the latter as a predicate. Both are
 # the corpus's own spellings (`__mlir_type.index`, `__mlir_attr.`#…<eq>``).
 MLIR_DIALECT_TYPE_PREFIX = "__mlir_type."
+# The BARE root, without the dot: a dialect TYPE is spelled
+# `__mlir_type.<name>` and a dialect ATTRIBUTE `__mlir_attr.<name>`, and the
+# two are told apart by this root rather than by a prefix, because a subscript
+# carries both in one bracket.
+MLIR_DIALECT_TYPE_ROOT = "__mlir_type"
 MLIR_ATTR_ROOT = "__mlir_attr"
 
 # ── A dialect OPERATION, classified by what it DENOTES ──────────────────────
@@ -772,6 +777,119 @@ def mlir_operand_clause(operand) -> str:
     return ""
 
 
+# The bracket attribute that names an operation's RESULT TYPE.  ONE name, and it
+# is the only one in the corpus: `_type=`, on `pop.cast`, `pop.cast_to_builtin`,
+# `pop.cast_from_builtin`, `builtin.unrealized_conversion_cast`, `pop.simd.splat`
+# and the rest of `MLIR_TYPED_RESULT_OPS`.  A bracket carries OTHER things — a
+# `pred=`, a `bin_op=`, a `mask=`, an `ordering=`, a variant discriminant — and
+# none of them is a type, so this is keyed on the name rather than on "any
+# attribute in the bracket".  A name that is not in the corpus is not in this
+# tuple: reading an unrecognised attribute as a result type would answer a
+# question nobody asked, which is the name-keyed mistake
+# `MLIR_WORD_ARITH_OPS`'s own comment is about.
+MLIR_RESULT_TYPE_ATTRS = ("_type",)
+
+
+def mlir_bracket_result_type(bracket):
+    """The SPELLING of the result type in a dialect bracket, or None.
+
+    `bracket` is the `F.SubscriptExpr` an operation is written with, and the
+    answer is the `_type=` attribute's own value rendered as the source spells
+    it — `__mlir_type.index`, or ``__mlir_type.`!kgen.simd<4, ui32>` `` — because
+    a message that quotes the source is the only one a reader can check against
+    it. `mlir_type_kind` is what turns that spelling into `word`/`vector`/None.
+
+    None for a bracket with no `_type=`, for one with TWO of them (no single
+    answer), and for a value this build cannot render: a `comptime` name, a
+    template built from several fragments, a call. Each of those is a different
+    refusal and none of them may be answered as "no type is written here",
+    because a bracket that names a type by a name this build cannot resolve has
+    named one.
+    """
+    if not isinstance(bracket, F.SubscriptExpr):
+        return None
+    value = None
+    for attr in getattr(bracket, "attrs", None) or []:
+        if isinstance(attr, (tuple, list)) and len(attr) == 2 \
+                and attr[0] in MLIR_RESULT_TYPE_ATTRS:
+            if value is not None:
+                return None                      # two `_type=`: no single answer
+            value = attr[1]
+    return _mlir_type_spelling(value)
+
+
+def _mlir_type_spelling(node):
+    """`__mlir_type.index` as the source spells it, or None.
+
+    The corpus writes the same type three ways — `__mlir_type.index`,
+    ``__mlir_type.`!kgen.simd<4, ui32>` `` and bare `!kgen.simd<4, ui32>` — and
+    the first two arrive as a `MemberExpr` whose object is the bare `__mlir_type`
+    root and whose member is the backtick-quoted name, which is the same shape
+    `mlir_dialect_op_name` reads for an operation. The third is a bare
+    `IdentExpr`. Both are rendered here so the message can quote the source's own
+    spelling rather than a normalised one.
+
+    None for anything else, and a `MemberExpr` over some OTHER root is NOT a type
+    — `__mlir_attr.`#kgen.cmp_pred<eq>`` is an attribute, and answering it with
+    a type would be the false answer this whole arrangement exists to prevent.
+    """
+    if isinstance(node, F.MemberExpr) and isinstance(node.obj, F.IdentExpr) \
+            and node.obj.name == MLIR_DIALECT_TYPE_ROOT:
+        member = node.member
+        if not isinstance(member, str) or not member:
+            return None
+        if member[0] == "`" and member[-1] == "`" and len(member) >= 2:
+            # A name the dialect spells with characters Python would read as
+            # syntax comes back quoted (`!kgen.simd<4, ui32>`), and the quotes
+            # are part of the source's spelling, so they stay.
+            return f"{MLIR_DIALECT_TYPE_ROOT}.{member}"
+        # `__mlir_type.index` — the corpus's own spelling for the one word type,
+        # with no quotes, because `index` needs none.
+        if "`" in member or " " in member:
+            return None
+        return f"{MLIR_DIALECT_TYPE_ROOT}.{member}"
+    if isinstance(node, F.IdentExpr):
+        return node.name
+    return None
+
+
+def mlir_result_clause(bracket) -> str:
+    """One sentence about a RESULT TYPE this build read out of the bracket.
+
+    **The same treatment `mlir_operand_clause` gives the operand, and for the
+    same reason.** The typed-result refusal says "that bracket holds a DIALECT
+    object (`__mlir_type.…`) rather than a value … so the result's width and
+    element type are a fact it has no source for" — and that is FALSE at every
+    site whose `_type=` is a type this path classifies, which is the disease the
+    elementwise branch was fixed for in 2026-10-04 and the same disease one
+    branch over. `std/builtin/simd_length.mojo`'s
+    `pop.cast_to_builtin[_type=__mlir_type.index](value._mlir_value)` is the
+    case: `index` is in `MLIR_WORD_TYPE_NAMES`, so the result IS one 64-bit word
+    here, and what is missing is the OPERAND's declared type — `value._mlir_value`
+    is a field of `Int`, a builtin struct this unit does not declare.
+
+    Two answers and a None, like the operand's:
+      * `word` — the result is this path's only value, so the missing thing is
+        named as the operand rather than as the result;
+      * `vector` — the lane count and element width are the missing facts, which
+        is a different thing from the operand's type and says so;
+      * None, or a bracket with no `_type=` — nothing, so the class's own
+        sentence stands unchanged.
+    """
+    spelling = mlir_bracket_result_type(bracket)
+    kind = mlir_type_kind(spelling)
+    if kind == "word":
+        return (f" Its bracket's result type is {spelling!r}, which this path "
+                f"holds in ONE 64-bit word — a signed, pointer-sized integer — "
+                f"so the RESULT is not what is missing here.")
+    if kind == "vector":
+        return (f" Its bracket's result type is {spelling!r}, which is an "
+                f"N-LANE VECTOR and not a word at all, so the lane count and "
+                f"the element width are the facts this path has no source "
+                f"for.")
+    return ""
+
+
 def mlir_dialect_op_name(node):
     """The dialect operation `node` spells, or None if it spells none.
 
@@ -865,7 +983,8 @@ def mlir_effects_all_lowered(body) -> bool:
     return lowered == roots
 
 
-def mlir_dialect_op_refusal(op: str, operand: str = None) -> str:
+def mlir_dialect_op_refusal(op: str, operand: str = None,
+                            bracket=None) -> str:
     """Why this path refuses the dialect OPERATION `op`, by what it denotes.
 
     Four sentences for four different facts, because ONE sentence over all of
@@ -875,6 +994,16 @@ def mlir_dialect_op_refusal(op: str, operand: str = None) -> str:
     word": whether an elementwise operation's result is a word is a fact about
     its OPERANDS, and 26 of the 38 sites measured have a vector operand, so
     asserting it would be the same over-claim in a new place.
+
+    `bracket` is the operation's own `F.SubscriptExpr` when it is written with
+    one, and it is read only by the typed-result branch — the class whose
+    missing fact IS the bracket. It is here for the same reason `operand` is
+    (2026-10-04, and again a day later for the other half): the class's sentence
+    said the result's width and element type are "a fact this path has no
+    source for", which is FALSE of every `_type=` this path classifies — and
+    `simd_length.mojo`'s `pop.cast_to_builtin[_type=__mlir_type.index]` is one.
+    `mlir_result_clause` reports what the bracket says and, where it says
+    nothing this build can read, the class's own sentence stands unchanged.
 
     **Except where `operand` says otherwise**, which is the one thing that
     changed when the operand's DECLARED type became readable
@@ -915,15 +1044,42 @@ def mlir_dialect_op_refusal(op: str, operand: str = None) -> str:
             + mlir_operand_clause(operand)
         )
     if op in MLIR_TYPED_RESULT_OPS:
+        # Read ONCE and decide from it: the class's sentence, the clause that
+        # reports what the bracket says, what is missing and the advice that
+        # follows are four statements about the same fact, and asking
+        # `mlir_type_kind` four times is four places for them to disagree.
+        rkind = mlir_type_kind(mlir_bracket_result_type(bracket))
+        if rkind == "word":
+            tail = (" What is therefore missing is the OPERAND's DECLARED type, "
+                    "and nothing in this unit states one: a DECLARATION is "
+                    "what this path reads, and a field read off a struct the "
+                    "unit does not declare — a builtin such as `Int`, which has "
+                    "no field table here — states nothing about its type. A "
+                    "deliberate deferral, not an impossibility: the operation "
+                    "is nameable and its result is one word, so what is "
+                    "missing is a fact about the operand rather than a "
+                    "representation of the result.")
+        elif rkind == "vector":
+            tail = (" What is therefore missing is a REPRESENTATION of an "
+                    "N-lane vector — the buffer those lanes would live in, "
+                    "which this path does not build — and that is a different "
+                    "thing from a type. A deliberate deferral, not an "
+                    "impossibility: the operation is nameable and its result is "
+                    "nameable too, so nothing here is a claim that the "
+                    "construct cannot be written down.")
+        else:
+            tail = (" This path's only value is a 64-bit word, so the "
+                    "result's width and element type are a fact it has no "
+                    "source for. A deliberate deferral, not an impossibility: "
+                    "read the bracket at the use site instead.")
         return (
             f"`{op}` is a dialect OPERATION whose RESULT TYPE is written in its "
             f"own bracket — as `_type=`, or as a predicate, bin_op, mask, "
             f"ordering or discriminant beside it — and that bracket holds a "
             f"DIALECT object (`__mlir_type.…`, `__mlir_attr.`#kgen.…``) rather "
-            f"than a value. This path's only value is a 64-bit word, so the "
-            f"result's width and element type are a fact it has no source for. "
-            f"A deliberate deferral, not an impossibility: read the bracket at "
-            f"the use site instead."
+            f"than a value."
+            + mlir_result_clause(bracket)
+            + tail
             + mlir_operand_clause(operand)
         )
     if op in MLIR_ELEMENTWISE_OPS:
@@ -986,7 +1142,7 @@ def mlir_dialect_op_refusal(op: str, operand: str = None) -> str:
 
 
 def mlir_dialect_refusal(name: str, op: str = None,
-                         operand: str = None) -> str:
+                         operand: str = None, bracket=None) -> str:
     """The refusal for a bare `__mlir_*` name that no template rule covers.
 
     `__mlir_op` is the one the template set does not list, and it is the one
@@ -1003,10 +1159,11 @@ def mlir_dialect_refusal(name: str, op: str = None,
     family, which is all a caller with only the root name can honestly say.
 
     `operand` is the operation's first operand's DECLARED type spelling, when
-    the call site could read one (`mlir_operand_declared_type`). It changes no
-    CLASS — the census in `mlir_dialect_op_refusal` is unchanged by it — and
-    only lets the message report a type this build established instead of
-    saying it has none.
+    the call site could read one (`mlir_operand_declared_type`), and `bracket` is
+    the operation's own subscript when it has one. Neither changes a CLASS — the
+    census in `mlir_dialect_op_refusal` is unchanged by either — and each only
+    lets the message report a type this build established instead of saying it
+    has none.
 
     The alternative to refusing by name at all was worse and was measured: an
     unrecognised `__mlir_*` name has no binding, so `formal/build.py`'s name
@@ -1015,7 +1172,7 @@ def mlir_dialect_refusal(name: str, op: str = None,
     construct. Both of those files lost their place in the sweep's coverage for
     a reason that is about MLIR."""
     if op is not None:
-        return mlir_dialect_op_refusal(op, operand)
+        return mlir_dialect_op_refusal(op, operand, bracket)
     return (
         f"{name} is an MLIR dialect construct: this path has no MLIR, so it "
         f"lowers a Mojo program to a Mach-O image whose only value is a "
