@@ -7059,13 +7059,14 @@ main()
     # `Dialog(5)` emitted `_t3 = (void *)_t5; _t4 = (char *)_t3;` with
     # `_t5 = (int64_t)5`, and the first `mojo_print` then `strlen`ed address
     # 5 — SIGSEGV, exit -11, not even the line before it reached stdout
-    # (both docs FIXED and DELETED with the fix, so this comment is the record:
-    # `CODEGEN_annotated_str_param_given_an_int_segfaults`, and the same crash
-    # filed a second time as
-    # `CODEGEN_method_returning_self_str_field_segfaults`, whose
-    # diagnosis pointed at the method's return path and was wrong — the
-    # generated C for `Dialog_show` is a correct `char *` load and the fault
-    # is entirely upstream, at the constructor's argument).
+    # (both docs FIXED and DELETED with the fix, so this comment is the
+    # record, and the fix is named rather than the docs because a deleted
+    # doc is a citation with no referent: a9c78439. The same crash was
+    # filed a second time under the name of a struct method returning one
+    # of its own `str` fields, whose diagnosis pointed at the method's
+    # return path and was wrong — the generated C for `Dialog_show` is a
+    # correct `char *` load and the fault is entirely upstream, at the
+    # constructor's argument.)
     #
     # Every spelling of the same mistake is here — a bare literal, a local,
     # and a value reached through a method — and the string cases are here
@@ -7136,22 +7137,131 @@ def main():
 main()
 """, "1\n2\nTrue\nFalse\n7\n7\n")
 
-    # The next two producers of the same fact, so the case above is not the
-    # only thing standing between a computed large key and a SIGSEGV.
+    # The producers of the same fact, so the case above is not the only thing
+    # standing between a COMPUTED large key and a SIGSEGV.
     # `gen._int_word_vals` records "this value holds a plain Python integer",
     # and it was seeded only from `_lower_IntLiteral` — so `i + 1`, `-1` and
     # `j * 1000000000` were all still asked of the runtime's range-only
     # discriminator, which calls every positive int64 in [2^31, 2^47) a
-    # pointer. Both of these are now seeded: `-n`/`~n` in `_lower_UnaryOp` on
-    # an operand already recorded, and integer arithmetic in
-    # `_lower_binary`'s tail on two operands already recorded. Neither involves
-    # inference, which is what keeps the table monotone-safe — a miss falls
-    # back to today's behaviour and never to a crash.
+    # pointer: `mojo_dict_set_int_kw(d, 3000000001, 1)` is a `strcmp` of
+    # address 3000000001.  None of it involves inference, which is what keeps
+    # the table monotone-safe — a miss falls back to today's behaviour and
+    # never to a crash.
     #
-    # Every shape SIGSEGVs on the tree before this: `i + 1` computed from a
-    # large literal, `-1` (a negative word is outside the predicate's window,
-    # so it is the ASSIGNMENT that must recognise it), a literal-plus-literal,
-    # and a product of a small local by a large literal.
+    # The five cases below are the five distinct LOSSES between the literal and
+    # the key, not five spellings of one:
+    #
+    #   * the ARITHMETIC RESULT and the unary spelling — `i + 1`, `i * 3`,
+    #     `-1`, `~n`, `base << 1`, `m % 4`, and `//`, which never reaches the
+    #     binary tail where the other operators are covered;
+    #   * the STORE — a large key ASSIGNED to a name (`var x = ...`, `x += ...`)
+    #     rather than written at the subscript, which loses the record the
+    #     literal seeded;
+    #   * the MODULE-GLOBAL store, a separate hop: writing into the globals
+    #     struct is its own helper, and READING a global mints a fresh temp
+    #     whose record has to be carried across as well;
+    #   * `**` and the ternary, the other two ways a large key is computed
+    #     rather than written;
+    #   * the CONSUMERS other than the subscript store — `+=`, `.get` with and
+    #     without a default, `in`, `.pop`, `.setdefault`, a dict literal whose
+    #     key is computed, `sorted(d.keys())`.
+    #
+    # The operand-WIDENING cast sits inside the first of those and is why a
+    # two-operand rule alone marks nothing: `base + 1` lowers its literal `1`
+    # to an `int64_t` temp through exactly that block.  See `_mark_known_int`
+    # and `_INT_ARITH_OPS`.
+    #
+    # The string half is the SOUNDNESS contract and is why this is not just a
+    # list of integers: the SAME `+` on two `char *` operands must stay a
+    # `mojo_str_cat`, and the resulting key must still be FOUND.  A producer
+    # that marked a pointer would turn these into a silent wrong answer, which
+    # this codebase rates as worse than the crash it replaces.
+    #
+    # `echo(base + 1)` is the SECOND consumer of the same table (an annotated
+    # `str` parameter, which `_emit_call` either stringifies or hands to
+    # `mojo_cstr_or_int_str`); `gimple_annotated_str_param_given_a_non_str`
+    # above covers it for a literal and a plain local.
+
+    # SIGSEGV (exit -11), empty stdout, on the tree before this: every one
+    # of the eight computed keys below.
+
+    test_gimple_stdout("gimple_dict_key_computed_is_still_an_integer", """\
+def echo(s: str):
+    print(s)
+
+def main():
+    d = {}
+    base = 3000000000
+    d[base + 1] = "add"
+    print(d[base + 1])
+    print(base + 1 in d)
+    i = 7
+    d[i * 3] = "mul"
+    print(d[i * 3])
+    d[i - 2] = "sub"
+    print(d[i - 2])
+    d[-1] = "neg"
+    print(d[-1])
+    n = -3000000000
+    d[~n] = "invert"
+    print(d[~n])
+    d[base << 1] = "shift"
+    print(d[base << 1])
+    m = 10
+    d[m % 4] = "mod"
+    print(d[m % 4])
+    d[6000000000 // 2] = "floordiv"
+    print(d[6000000000 // 2])
+    echo(base + 1)
+    s = {}
+    a = "foo"
+    b = "bar"
+    s[a + b] = 1
+    print(s[a + b])
+    print(s["foo" + "bar"])
+main()
+""", "add\nTrue\nmul\nsub\nneg\ninvert\nshift\nmod\nfloordiv\n3000000001\n1\n1\n")
+
+    # The same computed key through the OTHER dict entry points, because they
+    # are separate consumers and not all of them route through the one
+    # subscript-store the case above covers: `+=` (two key conversions in one
+    # statement), `.get` with and without a default, `in`, `.pop`,
+    # `.setdefault`, a dict LITERAL whose key is a computed expression, and
+    # `sorted(d.keys())` (the key is re-materialised as text there). A fix
+    # that reached the plain store and nothing else would leave most of these
+    # crashing, which is why they are enumerated rather than left implied.
+
+    # SIGSEGV on the tree before, at the `+=` line: the other dict entry
+    # points are SEPARATE consumers and not all of them route through the one
+    # subscript store the case above covers.
+
+    test_gimple_stdout("gimple_dict_key_computed_reaches_every_dict_consumer", """\
+def main():
+    base = 3000000000
+    d = {}
+    d[base + 1] = 10
+    d[base + 1] += 5
+    print(d[base + 1])
+    print(d.get(base + 1))
+    print(d.get(base + 2, -1))
+    print(base + 1 in d)
+    print(d.pop(base + 1))
+    print(base + 1 in d)
+    d.setdefault(base + 3, 7)
+    print(d[base + 3])
+    e = {3000000000 + 2: "lit"}
+    print(e[3000000002])
+    for k in sorted(d.keys()):
+        print(k)
+main()
+""", "15\n15\n-1\nTrue\n15\nFalse\n7\nlit\n3000000003\n")
+
+
+    # SIGSEGV on the tree before, printing nothing at all: `i + 1` computed
+    # from a large literal, `-1` (a negative word is outside the predicate's
+    # window, so it is the ASSIGNMENT that must recognise it), a
+    # literal-plus-literal, and a product of a small local by a large literal.
+
     test_gimple_stdout("gimple_computed_dict_key_above_2gb_is_an_integer", """\
 def main():
     i = 2999999999
@@ -7197,6 +7307,15 @@ main()
     #
     # SIGSEGV (exit -11) on the tree before, at the third line (`1`, `2` and
     # `3` printed, then the ternary's `d[...]` died).
+
+    # SIGSEGV (exit -11) on the tree before, at the `1` line: `//` never
+    # reaches the binary tail, `3 ** 20` is 3486784401 and its `(int)` cast
+    # makes "this is an integer" true for every input, and the ternary is gated
+    # on BOTH branch types being integer-shaped so a branch that really lowers
+    # to a pointer cannot be recorded as one.  The last assignment is the sound
+    # direction: `s` is a string by the time it is used as a key, and must stay
+    # a string key — `_track_pointer_actual_type`'s `discard` is what does that.
+
     test_gimple_stdout("gimple_assigned_large_dict_key_survives_every_store_shape", """\
 def main():
     k = 2999999999
@@ -7236,6 +7355,11 @@ main()
     #
     # SIGSEGV (exit -11) on the tree before, printing nothing at all: the
     # very first statement's `d[K] = 1` was a `strcmp` of address 3000000000.
+
+    # SIGSEGV (exit -11) on the tree before, printing nothing at all: the very
+    # first statement's `d[K] = 1` was a `strcmp` of address 3000000000.  Both
+    # spellings of the declaration are here because they take different stores.
+
     test_gimple_stdout("gimple_module_scope_large_dict_key_survives_the_global_store", """\
 K = 3000000000
 d = {}
