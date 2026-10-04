@@ -180,13 +180,27 @@ HOST_UNREACHABLE = frozenset((
     # that a formal image links libSystem and nothing else. `zlib` and `gzip`
     # also have an honest route that does NOT link anything — DEFLATE is
     # arithmetic over bytes, so a `formal/hostmods/zlib.mojo` could compute it
-    # the way `re.mojo` computes a match — and 15 files in the sweep's host
-    # ranking are behind `zlib`. It is here rather than in HOST_MODELLED
-    # because the tier means "a Mojo-side implementation could in principle
-    # provide this, and has not yet", and for `zlib` the premise of this
-    # heading is the thing to argue with first: the cheapest correct module is
-    # one that implements inflate and deflate itself rather than one that links
-    # libz, and that is a project rather than a patch.
+    # the way `re.mojo` computes a match. It is here rather than in
+    # HOST_MODELLED because the tier means "a Mojo-side implementation could in
+    # principle provide this, and has not yet", and the cheapest correct module
+    # would be one that implements inflate and deflate itself rather than one
+    # that links libz.
+    #
+    # NOBODY ASKS FOR IT, and that was measured rather than assumed
+    # (2026-10-04). The ranking read this row at 15 files and then at 27, and
+    # called it a project on the strength of DEFLATE — but every one of those
+    # files sat behind one of THREE imports (`gimple_codegen.py`,
+    # `mojo/middle/types.py`, `mojo/middle/coro.py`), and not one of them read
+    # a name out of `zlib`. `gimple_codegen.py` names it in a signature table
+    # for `mojo_zlib_*` RUNTIME entry points it never calls, `types.py` names it
+    # in a docstring, and `coro.py` kept `import zlib as _zlib` from before its
+    # `_exc_type_tag` moved to `gimple_ctypes._crc32_str`. The three imports are
+    # deleted, so `zlib` is now 0 files and 0 uses; both are ratcheted by
+    # `test_refusal_taxonomy.py`, which fails on either a dead import or a real
+    # use. `gzip` was 0 files before this and is here for the same reason as
+    # `locale`: it is a correct classification of the MODULE, kept so a name
+    # that arrives has a tier rather than the false "not a stdlib module"
+    # refusal.
     "zlib", "gzip", "locale",
     # An EMBEDDED CPython's installation, which is the reading of `sysconfig`
     # that has no other: `get_paths()` answers "where is the interpreter that
@@ -309,8 +323,8 @@ HOST_MODELLED = frozenset((
     #     LARGEST UNCLAIMED row in the sweep's host-import ranking: 50 files
     #     blocked and 15 of them naming it, ranked by
     #     `tools/formal_sweep_causes.py --host bugs/sweeps/sweep-arm-9.txt`, and
-    #     the row `bugs/FORMAL_host_import_row_ranked_by_module_2026-10-03.md`
-    #     §5 item 4 had left as `formal10-3`'s. `glob`, `glob_free`,
+    #     the row the 2026-10-03 host-import ranking had left as `formal10-3`'s
+    #     (that ranking's doc is deleted with its queue). `glob`, `glob_free`,
     #     `has_magic` and `escape`, checked answer for answer **and in order**
     #     against CPython's own `glob` by `test_formal_glob.py` over a fixture
     #     tree carrying a dotfile, a hidden DIRECTORY, a symbolic link to a file

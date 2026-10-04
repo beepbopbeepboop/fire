@@ -109,13 +109,21 @@ CASES = [
     # are rewritten to CPython's answers in the same commit as the fix — which is
     # also the check that it landed.
     #
-    # The `/` in the first row is the SEPARATE, already-documented limit: there
-    # is no float on this path, so `/` truncates and `-7 / 2` answers `-3` where
-    # CPython answers `-3.5` (`FORMAL.md` §6 Phase 7).  It is left as it is on
-    # purpose rather than "fixed" here, because making `/` floor would make it
-    # agree with `//` and disagree with CPython in a NEW place.
+    # `/` is the SEPARATE, already-documented limit -- there is no float on this
+    # path, so `/` truncates and `-7 / 2` answers `-3` where CPython answers
+    # `-3.5` (`FORMAL.md` §6 Phase 7) -- and it is pinned by its own row below,
+    # `neg_slash_still_truncates`, rather than sharing this one.  It is left
+    # truncating on purpose rather than "fixed" here, because making `/` floor
+    # would make it agree with `//` and disagree with CPython in a NEW place.
     ("neg_div_rem",
      "def main(n):\n    a = 0 - 7\n    if a // 2 == 0 - 4 and a % 2 == 1:\n        return 1\n    return 0\n", 1, None),
+    # …and `/` beside it, which is the OTHER half of what the row above used to
+    # pin and is a different answer: `-7 / 2` is `-3`, not the `-4` the same
+    # operands give through `//`.  One row cannot hold both, because they are
+    # two decisions (`model.division_floors` answers False for `/` on purpose),
+    # and a row that asserted the pair would fail on either one alone.
+    ("neg_slash_still_truncates",
+     "def main(n):\n    a = 0 - 7\n    if a / 2 == 0 - 3 and a % 2 == 1:\n        return 1\n    return 0\n", 1, None),
     ("neg_mod",
      "def main(n):\n    a = 0 - 7\n    b = a % 3\n    if b == 2:\n        return 1\n    return 0\n", 1, None),
     # Controls.
@@ -7542,6 +7550,43 @@ BOTH_ARCH_CASES = [
      "    var b: UInt32 = 5\n"
      "    printf(\"%d %d\", a // b, a % b)\n"
      "    return 0\n", 0, "3 2"),
+    # ── …and the WHOLE sign matrix in ONE program, both architectures ──────
+    #
+    # The six rows above are one program each, because each of them was FOUND by
+    # something specific: the exact multiple of a negative divisor by a
+    # `--mix signed` sweep, the unsigned control by reading `division_floors`.
+    # This one is the complement, and it is here for the two values none of the
+    # six can reach: `1 // 2` is the FIRST thing that breaks if the correction's
+    # condition is written as `sKey a = sKey b` (`sKey` is an involution, so that
+    # is `a = b`, and `1 // 2` answers `-1`), and every row is in ONE program so
+    # a truncating `//` and a correct `%` cannot disagree inside it -- a partial
+    # fix cannot pass half of it.
+    #
+    # `//` FLOORS and `%` takes the sign of the DIVISOR; `SDIV`/`IDIV` truncate
+    # and take the sign of the DIVIDEND. The two therefore disagree exactly when
+    # the operands' signs differ, and before the correction these rows were -3,
+    # -3, -4, -1, 1, -1, 1, 0 where CPython says -3, -4, -4, 2, -2, -1, 1, 1.
+    # Every expected value below is CPython 3.14's, computed rather than typed,
+    # and the whole corpus is in ONE program so that one build per architecture
+    # answers all sixteen rows -- a truncating `//` and a correct `%` cannot
+    # disagree inside this program, so a partial fix cannot pass half of it.
+    #
+    # The first eight lines are the sign matrix (both orders of both signs, plus
+    # the two exact divisions), and the last two are the idiom no amount of
+    # reading the spec finds: `x % 2 == 1` is the standard ODD test and it
+    # answered 0 for every negative odd x, which is a wrong answer from correct-
+    # looking code rather than an exotic one. `1 // 2` is here for the same
+    # reason and is the FIRST thing that breaks if the correction's condition is
+    # written as `sKey a = sKey b` (which is `a = b`, so it would answer -1).
+    ("both_arch_floor_division_and_modulo_agree_with_cpython",
+     "def main(n):\n"
+     "    printf(\"%d %d %d %d\", 0 - 7 // 2, 7 // (0 - 2), (0 - 8) // 2, 7 // 2)\n"
+     "    printf(\" %d %d %d %d\", (0 - 7) % 3, 7 % (0 - 3), (0 - 7) % (0 - 3), 7 % 3)\n"
+     "    printf(\" %d %d\", 1 if (0 - 7) % 2 == 1 else 0, 1 if (0 - 8) % 2 == 0 else 0)\n"
+     "    printf(\" %d %d %d %d\", (0 - 7) // (0 - 2), 1 // 2, (0 - 1) // (0 - 2), (0 - 6) // 4)\n"
+     "    printf(\" %d\", (0 - 7) % (0 - 2))\n"
+     "    return 0\n", 0,
+     "-3 -4 -4 3 2 -2 -1 1 1 1 3 0 0 -2 -1"),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before

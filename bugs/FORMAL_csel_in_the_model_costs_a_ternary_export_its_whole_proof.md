@@ -9,7 +9,54 @@ Found 2026-10-03 on `work/formal13-3` while doing the `CSEL` step that
 prescribes. **OPEN, measured, NOT fixed here** — and it is the reason that step's
 CSEL model row is not landed even though it is three lines and it builds.
 
-**Status: the PRESCRIPTION in §"the next step" is measured to be aimed at the
+**Status 2026-10-04 (`work/formal16-4`): the `hprior` SHARING this document
+identifies as the thing to land first is LANDED and MEASURED, and it is worth
+80x fewer facts at five branches (§"What landed"). The `CSEL` model row itself
+is still `formal16-2`'s and is NOT landed — this document's own §"the dependency
+runs the other way" is unchanged, and it is still the case that landing it needs
+the certificate to fit, which is a Lean run neither this branch nor the previous
+passes could make.**
+
+**What landed, and what it measured** (`formal/arm64_proof_gen.py`'s per-path
+memo, no Lean needed to measure it — this document's §"What HAS changed is what
+it costs to find out" is the reason):
+
+| conditional branches | `hprior_*` before | after | proof lines before | after |
+|---:|---:|---:|---:|---:|
+| 2 | 48 | **24** | 6 942 | 6 822 |
+| 3 | 144 | **48** | 10 130 | 9 650 |
+| 4 | 384 | **96** | 15 814 | 14 374 |
+| 5 | 960 | **192** | 26 762 | 22 922 |
+
+The growth per branch goes from x3.0 / x2.67 / x2.5 to **x2.0**, which is the
+number of PATHS — the part that is not re-derivation — and the distinct
+statements are unchanged at 6 / 8 / 10 / 12. **The 80x is the ceiling and it is
+NOT reached, and the reason is this document's own subject matter seen from the
+other side:** cross-path sharing is unsound, because `s_{pb}` is REBOUND per
+path (`hsid_{pb}` is emitted once per visit: 1 / 2 / 4 / 8 / 16 times for blocks
+0 / 2 / 4 / 6 / 8 of the three-branch program), so a fact about `s_8` proved on
+one path is about that path's `s_8`. The memo is therefore a per-block copy of
+`ctx`, and `test_formal_call_proof_gen.py`'s `TestNestedConditionFactSharing`
+holds it to that: one check fails if a fact is proved twice in a scope, one if a
+fact is USED where it was not proved (which is what a memo shared between
+siblings looks like), and one if the growth goes above x2.2 again. All three were
+verified by disabling the memo and by sharing it globally, and the last one
+reports this document's own numbers when it is disabled.
+
+**So what this document's cost analysis now says.** The exponential it measures
+was `paths x prior-blocks x variables`, and one factor of that was
+re-derivation; the other two are the proof's actual shape. A three-branch
+program's certificate is still eight paths through the CFG, each needing its own
+`hcond_*` goal (28 of them) and its own `hx30_*` (32), and the `hcond_*` goals
+are what `§2 of bugs/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`
+measured at 103 s / 4.2 GB with `maxHeartbeats` at 2 000 000. **Whether the
+sharing is enough to let a three-branch export build a proof is NOT measured and
+cannot be from here** — the table above is emission, and the certificate's cost
+is the kernel's.
+
+## The status this document had before
+
+**The PRESCRIPTION in §"the next step" is measured to be aimed at the
 wrong goal, 2026-10-03.** Everything this doc assumes about where the cost lives
 was checked against the generated proof on this tree, and the `hx30` goal this
 doc says is "the last place in this walk that still re-unfolds the whole chain"

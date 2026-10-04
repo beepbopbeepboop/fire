@@ -12,8 +12,9 @@ WHAT IS HERE, AND WHY THIS ONE
 -------------------------------
 CPython's `html` is three modules and two functions: `escape`, `unescape`, the
 `html.parser` class, and the 2231-entry `html.entities.html5` table.
-`bugs/FORMAL_host_import_row_ranked_by_module_2026-10-03.md` §5 item 2 calls
-`escape` "the cheapest honest module left in the row", and this is it.
+The 2026-10-03 host-import ranking (`tools/formal_sweep_causes.py --host`, whose
+write-up is deleted with its queue) called `escape` "the cheapest honest module
+left in the row", and this is it.
 
 `escape` is FIVE ORDERED SUBSTRING REPLACEMENTS and nothing else:
 

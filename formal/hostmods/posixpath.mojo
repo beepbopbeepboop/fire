@@ -13,9 +13,9 @@ So every function below FORWARDS to `os.path` and none of them is a second
 implementation. That is said first because a reader who finds thirty `def`s
 that all `return` something else should know immediately that there is nothing
 behind them.
-`bugs/FORMAL_host_import_row_ranked_by_module_2026-10-03.md` §5 item 3 ranks
-this as the third-cheapest thing left in the sweep's 241-file host-import row
-and says the same: the fix is "a `formal/hostmods/posixpath.mojo` that
+The 2026-10-03 host-import ranking (`tools/formal_sweep_causes.py --host`, whose
+write-up is deleted with its queue) ranks this as the third-cheapest thing left
+in the sweep's 241-file host-import row and says the same: the fix is "a `formal/hostmods/posixpath.mojo` that
 re-exports `os.path`, which is what `os/__init__.mojo` already does for its own
 five names".
 

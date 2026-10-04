@@ -3255,9 +3255,10 @@ def test_the_modelled_surface_covers_what_the_tree_spells(tmpdir=None):
     somebody started calling `subprocess.run(..., newflag=True)` tomorrow, because
     nothing here knows what the tree spells.
 
-    The failure it is aimed at is the one `bugs/FORMAL_host_import_row_5_measured.md`
-    §`subprocess` records: a module that is "modelled" for nobody, green in every
-    differential test, and callable by zero of its callers.  A keyword the callers
+    The failure it is aimed at is the one the `subprocess` row of the host-import
+    ranking records (`bugs/FORMAL_subprocess_row_measured_b7.md`, measured over
+    all 143 importing files): a module that is "modelled" for nobody, green in
+    every differential test, and callable by zero of its callers.  A keyword the callers
     use and the model does not declare is exactly that, and it is invisible until
     somebody counts the call sites — which is what this does.
     """
@@ -3272,7 +3273,7 @@ def test_the_modelled_surface_covers_what_the_tree_spells(tmpdir=None):
           "mojo does not declare: " + ", ".join(undeclared) + "\n"
           "    A name here is a call site nothing answers: the build refuses it "
           "with `exports no <name>` and a differential test stays green, which "
-          "is the failure bugs/FORMAL_host_import_row_5_measured.md names. "
+          "is the failure the subprocess row of that ranking names. "
           "Declare it, or record why not.")
     # The KEYWORDS are the half that bit: `run` was declared with one parameter
     # and 508 of these call sites pass `capture_output`.  Checked per function,

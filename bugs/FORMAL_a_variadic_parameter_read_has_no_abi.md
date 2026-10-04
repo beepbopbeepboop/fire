@@ -163,9 +163,9 @@ receiver's frame or a folded constant — none of which is "a count of words".
    `THE COST OF A MIX`) rules out a variadic `printf` with more than five operands and points at
    `test_formal_run.py`'s `BOTH_ARCH_CASES` ladder for the stack-argument convention; it says
    nothing about a function that *declares* `*args` and reads it, and a grep of the generator for
-   `*args` / `variadic` finds only that bullet. So a generator that cannot emit the construct cannot
-   notice the day it is fixed — the same anti-rot the `signed` mix's floor division records:
-`tools/formal_fuzz.py`'s `floordiv`/`modulo` `KNOWN_DIVERGENCES` rows were deleted when both
+`*args` / `variadic` finds only that bullet. So a generator that cannot emit the construct cannot
+notice the day it is fixed — the same anti-rot the `tools/formal_fuzz.py`'s
+`floordiv`/`modulo` `KNOWN_DIVERGENCES` rows were deleted when both
 backends learned to floor, and what replaced them is `MIX_MUST_GENERATE`, which asserts the mix
 still PRODUCES a signed-over-signed division (`test_formal_fuzz.py::_check_generation`) rather
 than asserting it still diverges. Deleting the rows without that would have left both rows
