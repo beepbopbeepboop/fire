@@ -2948,6 +2948,232 @@ class TestCfgLeafCensus(unittest.TestCase):
             "stripping changed which sites the proof reaches, which it cannot")
 
 
+# ── A SYMBOLIC DIVISOR, and why the terminal value flow cannot close it ──────
+#
+# `def q(a, b): return a // b` is the shape the doc
+# `bugs/FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md`
+# is about, and the doc's own next step — put the enclosing `by_cases hc_N` into
+# the terminal value flow's `simp only [h8, mojo, …]` list — was measured here
+# and **changes nothing**: the eight terminal flows' residual goals are
+# byte-identical with and without it. Two facts explain that, and both are
+# pinned below because the doc's next step reads as though only one were true.
+#
+# 1. `hc_N` is stated over the REGISTER (`arm64_reg 1 s_4 = 0`) and the goal is
+#    over the PARAMETER (`n1`). Connecting them takes `hsid_*` plus the block's
+#    own `q_b*_qS`/`q_b*_qT` definitions, and `simp only` does not compose one
+#    member of the set with the rest of the set in that direction.
+# 2. The residual is not the doc's unreduced `if`. It is `1 = if n1 = 0 then 0
+#    else …` — and that goal is **FALSE**: the codegen's div0 arm is
+#    `movz x0, #1; movz x16, #1; svc #0x80` (`formal/arm64_codegen.py`, the
+#    `div0_label` arm of `_emit_div_shift_pow`), so the machine leaves `x0 = 1`
+#    and exits, while `fdiv64`'s div0 arm in `lib/ProofLib.lean` is `0`. So the
+#    universal theorem for a division by a possibly-zero divisor is an ADMITTED
+#    STATEMENT THAT IS FALSE, not one that is merely unproved, and no `simp`
+#    closes a false goal.
+#
+# Which is why this class asserts the FALSE goal's survival rather than the
+# goal's absence: if `fdiv64`'s div0 arm is ever corrected, or the walk starts
+# to model the div0 arm as the divergence it is, this pin fails and says so —
+# and the doc's next step becomes worth re-reading.
+_SYMBOLIC_DIVISOR = "def q(a, b):\n    return a // b\n"
+
+#: The walk terminal's admission, and the marker that prints the goals it
+#: absorbs.  `all_goals (first | done | sorry)` is the admission the doc is
+#: about; replacing `sorry` with `trace_state` is how a residual is READ, and
+#: reading it is the whole of the measurement.
+_ADMIT = "all_goals (first | done | sorry)"
+_TRACE = "all_goals (first | done | (trace_state; sorry))"
+
+#: `q_runs_*` / `q_compiles_correctly` are the CONCRETE tests, and they pin
+#: `x1 := 0` — so for this program they divide by zero on purpose and their
+#: statements are false (`run_result_exit` observes the div0 exit, `mojo 10 0`
+#: says 0).  Neutralising them is what lets the universal theorem be read on
+#: its own, and it is also the evidence that the concrete half of this program
+#: was already red before anything here.
+_CONCRETE = ":= by\n  native_decide\n"
+
+
+def _symbolic_divisor_proof(tmp):
+    """The arm64 proof for `a // b`, with the concrete tests neutralised."""
+    import formal.build as fb
+    src = os.path.join(tmp, "symdiv.mojo")
+    with open(src, "w") as f:
+        f.write(_SYMBOLIC_DIVISOR)
+    out = os.path.join(tmp, "symdiv.aout")
+    path = fb.compile_formal(src, arch="arm64", output=out, prove=True,
+                             check=False)["proof_path"]
+    text = open(path).read()
+    head, sep, tail = text.partition("theorem q_compiles_correctly_universal")
+    return head.replace(_CONCRETE, ":= by\n  sorry\n"), sep + tail
+
+
+def _with_branch_facts_in_the_terminal_flow(tail):
+    """`tail` with the enclosing `by_cases hc_N` added to every terminal `simp`.
+
+    The doc's next step, applied.  `_N` is the branch index and `cur` is the
+    branch hypothesis in scope at the line, which is the generator's own
+    `by_cases hc_{bi} : …` — the same statement the doc says is "simply not in
+    the list".
+    """
+    import re
+    cur, out = None, []
+    for line in tail.split("\n"):
+        m = re.search(r"by_cases (hc_\d+) :", line)
+        if m:
+            cur = m.group(1)
+        if "simp +decide only [h8, mojo," in line and cur:
+            line = line.replace("simp +decide only [h8, mojo,",
+                                f"simp +decide only [h8, {cur}, mojo,")
+        out.append(line)
+    return "\n".join(out)
+
+
+class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
+    """The two halves of the disagreement, and neither needs Lean."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="a2-div0-run-")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_the_models_zero_divisor_arm_is_a_literal_zero(self):
+        """`fdiv64` says `0` where the divisor is zero — the half that is text.
+
+        Read out of `lib/ProofLib.lean` rather than imported, so the assertion
+        is about the file the generated proofs import and not about whatever
+        this process happens to have elaborated.
+        """
+        text = open(os.path.join(HERE, "lib", "ProofLib.lean")).read()
+        m = re.search(r"def fdiv64 \(a b : UInt64\) : UInt64 :=\n"
+                      r"\s*if b = 0 then (\S+) else", text)
+        self.assertIsNotNone(
+            m, "`fdiv64`'s definition changed shape; this class pins what its "
+                "divisor-is-zero arm says, because that arm is what the walk's "
+                "terminal value flow reduces to")
+        self.assertEqual(
+            m.group(1), "0",
+            "fdiv64's div0 arm is no longer 0 — the arm64 div0 path leaves x0 = "
+            "1 and exits, so if this changed the walk's terminal value flow may "
+            "now close; re-read "
+            "bugs/FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md "
+            "before assuming it does not")
+
+    def test_a_zero_divisor_leaves_the_image_with_status_one(self):
+        """The other half, observed: `10 // 0` exits 1 and prints nothing.
+
+        Both backends, and the point is not that the status is 1 — CPython
+        raises `ZeroDivisionError` and exits 1 too — but that the image LEAVES:
+        nothing after the division runs, so there is no value for the model to
+        be right or wrong about, which is what makes `fdiv64`'s div0 arm a
+        claim about a path the source never returns from.
+        """
+        import subprocess
+        src = os.path.join(self.tmp, "zero.mojo")
+        with open(src, "w") as f:
+            f.write("def q(a, b):\n"
+                    "    return a // b\n"
+                    "\n"
+                    "def main() -> int:\n"
+                    '    printf("v=%d", q(10, 0))\n'
+                    "    return 0\n")
+        # `prove=False`, and deliberately: this half is about the IMAGE, and
+        # `main` calling `q` is exactly the interprocedural walk
+        # `_gen_universal_e2e_cfg` refuses ("the CFG walk is per-function").
+        import formal.build as fb
+        for backend in ("arm64", "x86_64"):
+            out = os.path.join(self.tmp, f"zero.{backend}")
+            fb.compile_formal(src, arch=backend, output=out, prove=False)
+            self.assertTrue(os.path.isfile(out),
+                            f"{backend}: the image was not written")
+            argv = ([out] if backend == "arm64" or sys.platform != "darwin"
+                    else ["arch", "-x86_64", out])
+            p = subprocess.run(argv, capture_output=True, text=True,
+                               timeout=60)
+            self.assertNotEqual(p.returncode, 0,
+                                f"{backend}: a zero divisor did not leave the "
+                                f"image — the div0 arm is reachable code, so "
+                                f"the model has a value to match after all and "
+                                f"this class's premise has changed")
+            self.assertEqual(p.stdout, "",
+                             f"{backend}: the program printed after a zero "
+                             f"divisor: {p.stdout!r}")
+
+
+class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
+    """The measurement itself: the residual is `1 = 0`, and it is FALSE."""
+
+    @classmethod
+    def setUpClass(cls):
+        lean = _lean()
+        if not lean or not os.path.isfile(
+                os.path.join(HERE, "lib", "ProofLib.olean")):
+            raise unittest.SkipTest(
+                "no Lean / no lib/ProofLib.olean: skipping. Every assertion "
+                "here is about what Lean's kernel says of the residual goal, "
+                "and none of it is answerable without it.")
+        cls.tmp = tempfile.mkdtemp(prefix="a2-div0-lean-")
+        from formal import lean as FLEAN
+        cls.out = {}
+        for label, patch in (("as_emitted", False), ("doc_next_step", True)):
+            head, tail = _symbolic_divisor_proof(cls.tmp)
+            if patch:
+                tail = _with_branch_facts_in_the_terminal_flow(tail)
+            text = head + tail.replace(_ADMIT, _TRACE)
+            path = os.path.join(cls.tmp, f"div0_{label}.lean")
+            with open(path, "w") as f:
+                f.write(text)
+            r = FLEAN.run_lean(lean, [os.path.basename(path)], cwd=cls.tmp,
+                               env={"LEAN_PATH": os.path.join(HERE, "lib")})
+            cls.out[label] = ((r.stdout or "") + (r.stderr or ""))
+
+    @classmethod
+    def tearDownClass(cls):
+        if hasattr(cls, "tmp"):
+            shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_the_false_goal_survives_the_documented_next_step(self):
+        """Both spellings leave `⊢ 1 =`, and adding `hc_N` changes nothing.
+
+        The two assertions are the refutation: the goal is there as emitted, and
+        it is there after the doc's next step is applied verbatim, so the next
+        step is not a smaller version of the fix — it is not a version of it.
+        """
+        for label in ("as_emitted", "doc_next_step"):
+            with self.subTest(spelling=label):
+                self.assertIn("⊢ 1 =", self.out[label],
+                              f"{label}: the div0 path's residual is no longer "
+                              f"the `1 = …` goal — fdiv64's div0 arm or the "
+                              f"div0 path's exit status may have been "
+                              f"corrected, which is the fix this doc wants")
+
+    def test_the_residual_is_the_same_with_and_without_the_branch_fact(self):
+        """The doc's next step, measured: identical goals, byte for byte."""
+        goals = {}
+        for label in ("as_emitted", "doc_next_step"):
+            got, keep = [], False
+            for line in self.out[label].splitlines():
+                if line.strip().startswith("⊢"):
+                    keep, cur = True, [line.strip()]
+                    continue
+                if keep:
+                    if line.startswith(" ") and line.strip():
+                        cur.append(line.strip())
+                        continue
+                    keep = False
+                    goals.setdefault(label, []).append(" ".join(cur))
+        self.assertTrue(goals.get("as_emitted"),
+                        "no residual goal was traced at all, so the measurement "
+                        "this class exists for did not happen")
+        self.assertEqual(goals["doc_next_step"], goals["as_emitted"],
+                         "adding the enclosing by_cases hypothesis to the "
+                         "terminal value flow's simp only list CHANGED the "
+                         "residual — which means the fix is further along than "
+                         "bugs/FORMAL_a_division_by_a_symbolic_value_leaves_"
+                         "the_zero_guard_open.md records, and its next step "
+                         "and its Status both need re-reading")
+
+
 def _generate_dir(tmp, src_path, name, out):
     """`compile_formal` on an existing `.mojo`, with NO Lean check.
 
