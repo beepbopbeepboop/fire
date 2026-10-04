@@ -5,9 +5,65 @@ computation and the caller's frame layout. Found 2026-10-03 on
 `work/formal8-7-r2` while writing `formal/hostmods/glob.mojo`, which this bug
 blocks (see "What it blocks").
 
-**Status: reproducer pinned and bisected to a statement-level difference; the
-cause is NOT located. Both architectures. The failure is a silent image — exit 1,
-no output at all.**
+**Status: the CAUSE IS LOCATED (2026-10-03), and it is not in the caller's
+frame at all: it is `subscript_base_lowering`'s two index conventions, which
+make the callee's helper write eight bytes from where the callee reads. Filed
+as its own doc because the decision belongs to another claim — see §What the
+cause is. Both architectures. The symptom is a silent image — exit 1, no output
+at all — and §Why the output is missing is the half that made it look like a
+frame bug.**
+
+## What the cause is
+
+`model.subscript_base_lowering` decides, per subscript, between a raw POINTER
+index (`base + i*width`) and a BLOB walk (`base + 8 + i*width`, bounds-checked
+against word 0). It decides from the base's DECLARED type, and a parameter has
+one only if the declaration gives it one. So in `glob`:
+
+```mojo
+def glob(root, pattern, recursive) -> List[String]:
+    var segs: Pointer[Int64] = malloc(8 * (n + 2))     # ANNOTATED: segs + 8k
+    var ns = _split(pattern, segs)                      # writes segs + 8 + 8k
+    ...
+
+def _split(pattern, segs) -> int:                       # UNTYPED: segs + 8 + 8k
+    ...
+```
+
+the write and the read of "element 0" are eight bytes apart, and the bounds
+check on the callee's side is comparing an index against a count that has not
+been written yet. Measured on both architectures:
+
+| shape | before | after |
+|---|---|---|
+| `_fill(p: Pointer[Int64])`: `p[1] = 42` | `b[1] == 42` | `b[1] == 42` |
+| `_fill_u(p)`: `p[1] = 43`, same pointer | `b[2] == 43`, `b[1]` unchanged | unchanged |
+
+and CPython says `b[1] == 43` for both spellings. The full reproducer, both
+architectures, is in
+`bugs/FORMAL_a_subscript_through_an_untyped_PARAMETER_is_a_blob_element_and_through_an_annotated_pointer_is_a_word.md`.
+
+**This is that doc's bug and not this one**, and the reason this doc's §The
+bisect below stops where it does: the fix is `subscript_base_lowering`'s, and
+`formal13-1` holds `bug:FORMAL_a_blob_is_two_conventions` — the same decision,
+whose cross-image half landed on master as `d9874a93`. Narrowing it to refuse
+the ambiguous spelling is a change to what every host module may write, so it
+is not a call this claim gets to make.
+
+## Why the output is missing, which is what made this look like a frame bug
+
+The callee's store traps, and the trap is a raw syscall:
+
+```
+movz x0, #1 ; movz x16, #1 ; svc #0x80        # exit(1), by syscall
+```
+
+A raw `exit` syscall terminates the process **without flushing stdio**, so every
+line the caller printed before the call is lost when stdout is a pipe — which is
+how every harness runs it. The caller is fine; the callee traps inside its own
+first helper; and "not even the first `printf` in `main` runs" is a property of
+the exit, not of the caller's frame. This is why §What is RULED OUT below could
+not find it: the evidence that pointed at the caller was an artefact of buffering.
 
 ## The symptom
 
@@ -94,10 +150,11 @@ Each of these was tried and **works**, so none of them is the trigger:
 | `os.listdir(path) -> List[String]` and `os.walk(root, maxdepth) -> List[String]` from a program | work |
 | a call to `glob` inside a function that `main` NEVER calls | works — the image runs and prints |
 
-That last row is the load-bearing one: **the same call site is harmless when
-nothing calls it.** So the bug is in how the CALLER's frame is laid out around a
-call to this particular callee, decided at build time from something about the
-callee, and the callee's own behaviour is not involved.
+That last row is the load-bearing one, and **it reads the other way now**: the
+same call site is harmless when nothing calls it, because nothing CALLS the
+callee, so the callee's first helper never runs and never traps. It was read as
+"the caller's frame is laid out around this callee"; it is "the callee's own
+first statement traps, and the trace looks like nothing ran".
 
 ## The bisect, and where it stands
 
@@ -115,7 +172,7 @@ present, each variant exported and called the same way:
 So the FIRST step that turns a working export into a failing one is **`_split`
 plus `_free_segments` plus `fs_free`** — three private calls, two of them on the
 segment array, and a `malloc`/`fs_free` pair around it. `g5`/`g7` above show that
-two `malloc`s plus one helper call is fine, so it is not the allocation count and
+two `mallocs` plus one helper call is fine, so it is not the allocation count and
 not the number of calls; it is something about calling THREE functions, or about
 the `malloc`/`free` PAIR, that the caller's frame computation mis-reads.
 
@@ -123,6 +180,32 @@ the `malloc`/`free` PAIR, that the caller's frame computation mis-reads.
 `g6`-shaped body (`one malloc + one helper call + store the call's result`) the
 image was **KILLED by signal 9** rather than exiting 1; with `g1` and `glob` it
 exits 1 silently. Different shapes, different symptoms, one area.
+
+## The bisect, re-run on 2026-10-03, and what it actually discriminates
+
+The harness above was rebuilt (`.tmp/cx/bisect_r3.py` in the tree that measured
+this; a two-file module plus one caller per variant, built and RUN, so the
+verdict is the image's exit code and output). It reproduces the symptom on the
+first shape that stores into a blob it has not counted yet, and **that shape is
+the harness's own bug, not the compiler's** — which is worth stating because it
+is the same mistake this doc's original bisect made:
+
+| variant | body | result |
+|---|---|---|
+| count first, then a helper that writes element 1, one `malloc` | `b[0] = 3; b[1] = _split(pattern, b)` | **works** |
+| the same with the helper taking only the string | `b[0] = 3; b[1] = _split(pattern)` | works |
+| the same with the helper's result discarded | `b[0] = 3; _split(pattern, b)` | works |
+| **count NOT yet set**, helper writes element 1 | `b[0] = _split(pattern, b)` | **fails, silent** |
+| count not yet set, the store in the CALLER instead | `b[0] = _split(pattern)` | prints a count, exits 0 |
+
+The last two rows are the discriminator, and they are not about the container
+return, the number of calls, or the malloc/free pair: **the same store is
+checked in the callee and not in the caller**, because the callee's `segs` is
+UNTYPED (so it takes the blob walk, count and all) and the caller's `b` is
+annotated `Pointer[Int64]` (so it is a raw pointer index). With the count
+declared first, every variant passes on both architectures. That is
+`bugs/FORMAL_a_subscript_through_an_untyped_PARAMETER_is_a_blob_element_and_through_an_annotated_pointer_is_a_word.md`,
+and it is the whole of what this doc was chasing.
 
 ## What it blocks, and why it is not worked around
 
@@ -136,21 +219,23 @@ the export map would bind and the program would run and compute nothing. A
 
 ## Exact next step
 
-1. Build the bisect harness from this doc's `g0`/`g1` pair — two exports in one
-   host module, one caller each — and grow `g1` one statement at a time until it
-   stops working. That is four or five builds and it names the statement.
-2. When it is named, look at what the CALLER emits for the call: the callee's
-   `frame_params` contract is `[None, None, None]` for `glob` and the same for
-   every working variant above, so the contract is NOT the discriminator. The
-   next thing to compare is the frame RESERVE the caller computes for the
-   container-typed return, and whether anything in the callee makes the model
-   believe the callee writes through one of its parameters (which would switch
-   the parameter to by-reference and change the caller's frame). `pattern` IS
-   assigned in `glob` — and a by-reference `char *` is exactly the shape whose
-   wrong handling corrupts a frame silently. **This is the most promising lead
-   and it is a lead, not a diagnosis**: `g2` assigns `pattern` too and the
-   one-parameter `pattern = _slice(...)` variant works, so the evidence so far
-   is consistent with "assigned parameter AND a container-typed return AND more
-   than one helper call" and nothing finer.
-3. Whatever it is, it belongs in `formal/model.py` (the frame/reserve decision,
-   shared) rather than in either emitter, because it reproduces on both.
+Steps 1 and 2 are DONE and are superseded by §What the cause is above: the
+statement is named, and it is not in the caller's frame computation at all. What
+is left:
+
+1. **`subscript_base_lowering`'s two conventions, which is the other claim's.**
+   The census that decides it — how many subscripts in `formal/hostmods/` go
+   through an unannotated parameter, and how many of those callers pass a blob —
+   is in that doc's §The next step, and it is the gate on whether the repair is
+   an annotation, a manifest-carried parameter kind, or a refusal of the
+   ambiguous spelling.
+2. **`glob.mojo` itself is then unblocked, and it is worth re-checking its
+   `_split`/`_walk` signatures against whichever answer lands**: if an
+   unannotated parameter keeps meaning "blob", every one of its parameters that
+   receives a `Pointer[Int64]` needs the annotation, which is a mechanical edit
+   to a module that does not exist in this tree yet (it is on
+   `work/formal8-7-r2`'s working tree, uncommitted).
+3. **Until then, the cheapest thing that would have found this in an afternoon**
+   is in that other doc's §next step 3: one helper with an annotated parameter
+   and one without, called on the same pointer, both storing, both read back. It
+   fails on the current tree, so it is a regression test that pays for itself.
