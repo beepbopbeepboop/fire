@@ -955,6 +955,109 @@ def main():
     print(f(1, 2, z=3))
 """, "8\n203\n")
 
+    # A lambda's DECLARED defaults, on both paths they used to get wrong, plus
+    # every shape that was already right — because a fix for "the default
+    # overrides an argument the call site passed" and one for "the argument the
+    # call site omitted is never supplied" are two edits to the same mechanism
+    # and either alone leaves the other silent.
+    #
+    # Both were exit 0 with a plausible integer:
+    #   lambda x=n, *a: x + a[0]   e(0, 5)   CPython 5   compiled 8   (n + n)
+    #   lambda x, y=n, z=10: ...    e(4)      CPython 17  compiled 135
+    #
+    # The root cause was one thing: `_lower_LambdaExpr` captures a declared
+    # default into the lifted function's ENV under the parameter's OWN name,
+    # and `_gen_lifted_closure` resolves a captured name to `_env-><name>` —
+    # so the default and an argument at the call site name the same C slot and
+    # the env read wins. Fixed at both ends: a parameter a call site SUPPLIES
+    # is never captured (`lambdareduce.params_supplied_at_calls`, which leaves
+    # the `lambda e, self=self:` idiom alone because that parameter is never
+    # supplied — that is what the idiom means), and an omitted argument is
+    # padded from the lambda's own declaration
+    # (`emit_calls._pad_lambda_defaults`).
+    #
+    # Against CPython rather than a fixed expectation, because `8` and `135`
+    # are values a hand-written expectation could have been written to match
+    # after the fact.
+    test_gimple_matches_cpython("gimple_lambda_declared_defaults_reach_the_call", """\
+def add(a, b):
+    return a + b
+
+def add3(a, b, c):
+    return a + b + c
+
+def addall(a):
+    return a[0] + a[1] + a[2]
+
+def r_dup_first(n):
+    e = lambda x=n, *a: add(x, a[0])
+    return e(0, 5)
+
+def r_dup(n):
+    e = lambda x, y=n, z=10: add3(x, y, z)
+    return e(4)
+
+def r_dup_all(n):
+    e = lambda x=n, y=2, z=3: add3(x, y, z)
+    return e()
+
+def r_tkinter(n):
+    e = lambda ev, self=n: add(self, 1)
+    return e(0)
+
+def r_varargs(n):
+    e = lambda *args, **kwargs: add(n, args[0])
+    return e(7)
+
+def r_one_lead(n):
+    e = lambda f, *a: add(f, a[0])
+    return e(4, 5)
+
+def r_kwonly(n):
+    e = lambda **k: add(k["a"], 1)
+    return e(a=6)
+
+def r_var_then_kw(n):
+    e = lambda *a, k=n: add(a[0], k)
+    return e(4)
+
+def r_bare_kwonly(n):
+    e = lambda *, x=n: x + 1
+    return e()
+
+def r_one_default(n):
+    e = lambda x=n: x + 1
+    return e()
+
+def r_second_default(n):
+    e = lambda x, y=n: add(x, y)
+    return e(4)
+
+def r_kw_and_default(n):
+    e = lambda x, *, k=n: add(x, k)
+    return e(4)
+
+def r_var(n):
+    e = lambda *a: add(a[0], a[1])
+    return e(4, 5)
+
+def main():
+    print(r_dup_first(3))
+    print(r_dup(3))
+    print(r_dup_all(3))
+    print(r_tkinter(3))
+    print(r_varargs(3))
+    print(r_one_lead(3))
+    print(r_kwonly(0))
+    print(r_var_then_kw(3))
+    print(r_bare_kwonly(3))
+    print(r_one_default(3))
+    print(r_second_default(3))
+    print(r_kw_and_default(3))
+    print(r_var(3))
+main()
+""")
+
     # Keyword arguments at the call site reach a `**kwargs` callee, packed
     # into the MojoDict the lifted body reads. A call with none must still
     # hand the callee a real (empty) dict, never NULL: `len(k)` and `k['x']`

@@ -5044,8 +5044,30 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     # env FIELD it never read, and the body then emitted `_env->v` against a
     # struct with no such member ("'main_lambda_1_env' has no member named
     # 'v'"). A real default is the only thing that can capture here.
+    #
+    # ...and only while no call site of this lambda SUPPLIES the parameter. The
+    # env field holds the default, so it and an argument at a call site name
+    # the same thing, and the env read wins inside the lifted body because that
+    # is what `gen._captures` resolves the name to: the default silently
+    # overrides the value the program actually passed. Measured on this tree,
+    # both silent and at exit 0:
+    #
+    #     lambda x=n, *a: x + a[0]   e(0, 5)   CPython 5   compiled 8   (n + n)
+    #     lambda x, y=n, z=10: ...    e(4)      CPython 17  compiled 135
+    #
+    # which is `bugs/CODEGEN_two_lambda_defaults_are_mis_packed.md`. The
+    # `lambda e, self=self:` idiom this loop exists for is untouched by the
+    # guard: its parameter is never supplied — that is what the idiom means
+    # — so the capture stands and the env still carries the outer value.
+    #
+    # The unsupplied parameters with a NON-identifier default (`z=10` above)
+    # are the other half of that doc's second row and are still wrong: nothing
+    # pads them at the call, which is why the doc is kept rather than deleted.
+    _supplied_params = _gld.params_supplied_at_calls(gen, node)
     captures = []
     for pname, default in node.params:
+        if pname in _supplied_params:
+            continue
         if isinstance(default, gimple_ctypes.IdentExpr) and default.name in gen.var_types:
             captures.append((pname, gen.var_types[default.name]))
 
@@ -5823,6 +5845,53 @@ def _lower_fnptr_call(gen, fname_raw: str, var_ctype: str,
     return gen._lower_fnptr_call_value(fp_type, fp_raw, node, ret_type)
 
 
+def _pad_lambda_defaults(gen, node: gimple_ctypes.CallExpr,
+                         arg_pairs: list) -> None:
+    """Append the DEFAULTS of a local-bound lambda's unsupplied parameters to
+    `arg_pairs`, in place.
+
+    Python binds a declared default only when the argument is ABSENT, and a
+    lambda's lifted C signature has no defaults to bind (they are stripped,
+    because they are expressions rather than type annotations). So every
+    parameter past the last supplied argument, and any parameter the call site
+    left unbound by keyword, has to be filled from the lambda's own
+    declaration at the call.
+
+    Deliberately conservative in three directions, each for a stated reason:
+
+      * a call that passes KEYWORDS routes to the `_kw_` runtime helper, whose
+        signature is not "positional args then the callee's parameters", so
+        this leaves it alone rather than guessing at that shape;
+      * a `*args` / `**kwargs` parameter ends the padding — the variadic
+        machinery already owns the tail, and a default is not expressible for
+        either of them;
+      * a parameter with no default and no argument stays absent, exactly as
+        before. It is not padded with 0: this function fixes a value the
+        source states, and inventing one for a source that states none would
+        turn a visible failure into a silent answer.
+    """
+    if getattr(node, 'kwargs', None):
+        return
+    _callee = node.func
+    if not isinstance(_callee, gimple_ctypes.IdentExpr):
+        return
+    _lam = _gld.lambda_bound_to(gen, _callee.name)
+    if _lam is None:
+        return
+    _supplied = _gld.params_supplied_at_calls(gen, _lam)
+    for _pname, _pdefault in (getattr(_lam, 'params', None) or []):
+        if not isinstance(_pname, str) or _pname.startswith('*'):
+            return
+        if _pname in _supplied:
+            continue
+        if _pdefault is None:
+            continue
+        _dt, _dv = gen.lower_expr(_pdefault)
+        if _dt != 'int64_t':
+            _dv = gen._new_val('int64_t', f'(int64_t){_dv}')
+        arg_pairs.append(('int64_t', _dv))
+
+
 def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.CallExpr,
                             ret_type: str = 'int64_t') -> tuple[str, str]:
     """Emit a call through an already-lowered function-pointer VALUE
@@ -5839,6 +5908,23 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
     without it a `lambda: False` prints `0` and a `lambda: "hi"` prints its
     own pointer decimal. `_narrow_callable_result` is that one conversion."""
     arg_pairs = [gen.lower_expr(a) for a in node.args]
+    # A LAMBDA's declared defaults, applied here rather than in the env, is the
+    # other half of the fix and the reason `_lower_LambdaExpr` strips them from
+    # the lifted signature at all: a lifted function sees every declared
+    # parameter as an ordinary one, so an argument the call site OMITS has to
+    # be filled in by whoever knows the default — and this is that place.
+    # Without it, `lambda x, y=n, z=10: x + y + z` called `e(4)` passed ONE
+    # argument to a three-parameter C function and the two missing slots took
+    # whatever the ABI left in the argument registers: `135` where CPython
+    # prints `17`. `mojo_fnptr_call_N` cannot do this — it has no idea what a
+    # given callable's defaults are, and a plain function pointer value does
+    # not carry them either.
+    #
+    # Only a lambda BOUND TO A LOCAL in this function: that is the one callee
+    # whose parameter list is still recoverable (`lambda_bound_to`). Anything
+    # else is left exactly as it was, because "pad with zeros" would be a
+    # guess.
+    _pad_lambda_defaults(gen, node, arg_pairs)
     n = len(arg_pairs)
     # Cast to void * so the runtime helper receives a stable pointer type.
     if fp_type != 'void *':
