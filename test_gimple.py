@@ -631,6 +631,16 @@ def f(d: Dict[Int, Int], i: Int) -> Int:
                 "mojo_dict_contains_kw (", "mojo_dict_pop_int_kw ("],
        must_not_have=["= mojo_cstr_or_int_str (", "mojo_cstr_or_int_release ("])
 
+    # `d.pop(k, default)` carries the default to the runtime, which is what a
+    # MISS answers. It used to be lowered away entirely: `mojo_dict_pop_int`
+    # had no `dflt` parameter, so the `-1` the source wrote never reached the
+    # generated C and every miss answered 0 (bugs/
+    # CODEGEN_dict_pop_default_ignored_on_a_miss.md).
+    test_c_shape("dict_pop_default_is_passed_to_the_runtime", """\
+def f(d: Dict[Int, Int], i: Int) -> Int:
+    return d.pop(i, -1)
+""", must_have=["mojo_dict_pop_int_kw (", "-1"], must_not_have=[])
+
     # A string comparison against an untracked int64_t operand still needs a real
     # string, so that path keeps the conversion and its release.
     test_c_shape("string_compare_of_untracked_operand_keeps_the_conversion", """\

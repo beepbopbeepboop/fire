@@ -412,8 +412,9 @@ def _cpp_try_kwargs_forward_call(gen, e):
                       # in between) — don't guess, fall through to refusal
     # Every gap param must be a slot this helper has a real dict-pop
     # lowering for: `int64_t` (mojo_dict_pop_int) or `char *` (a string
-    # kwarg — the dict slot's value bits ARE the char*, so the same
-    # mojo_dict_pop_int primitive returns them, just cast). A
+    # kwarg — the dict slot's value bits ARE the char*, so
+    # mojo_dict_pop_str reads the same slot, which is why the `char *`
+    # spelling below uses that reader rather than a cast). A
     # double/_Bool-typed gap param still falls through to the honest
     # refusal rather than being mis-typed.
     gap_ctypes = ctypes[n_given:kwslot]
@@ -438,14 +439,20 @@ def _cpp_try_kwargs_forward_call(gen, e):
         pname, dflt_ast = gap_defaults[i]
         _dt, dval = gen._default_expr_to_pair(dflt_ast, cxx=True)
         gap_var = f"_kwgap{uid}_{i}"
+        # `mojo_dict_pop_*`'s third parameter is the default a MISS answers,
+        # and the pop itself never misses (the `contains` guard is there so
+        # the key is only removed when it was really present). Passing the
+        # static default for both is therefore exact: on a hit the popped
+        # value is returned, on a miss the default is.
         if gap_ctypes[i] == 'char *':
             lines.append(
                 f'char *{gap_var} = mojo_dict_contains({dict_var}, "{pname}") '
-                f'? (char *)mojo_dict_pop_int({dict_var}, "{pname}") : (char *)({dval});')
+                f'? mojo_dict_pop_str({dict_var}, "{pname}", ({dval})) : (char *)({dval});')
         else:
             lines.append(
                 f'int64_t {gap_var} = mojo_dict_contains({dict_var}, "{pname}") '
-                f'? mojo_dict_pop_int({dict_var}, "{pname}") : (int64_t)({dval});')
+                f'? mojo_dict_pop_int({dict_var}, "{pname}", (int64_t)({dval})) '
+                f': (int64_t)({dval});')
         call_args.append(gap_var)
     call_args.append(dict_var)
     lines.append(f"return {fsym}({', '.join(call_args)});")

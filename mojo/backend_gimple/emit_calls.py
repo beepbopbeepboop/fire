@@ -2424,15 +2424,34 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # `_mojo_getattr_missed` and return 0 instead of raising — then
             # select the caller's default whenever the miss flag is set.
             dt, dv = gen.lower_expr(node.args[2])
-            if dt != 'int64_t':
-                dv = gen._new_val('int64_t', f'(int64_t){dv}')
+            # The RESULT is presented in the DEFAULT's own domain, which is the
+            # domain both answers share: a `char *` default makes the whole
+            # expression a `char *`. Boxing it as `int64_t` (as this arm used
+            # to) means `print` reads it with the numeric path and prints the
+            # STRING'S OWN ADDRESS — the miss flag and the default were both
+            # already correct in the emitted C, and `_t9 = missed ? dflt :
+            # raw` was computed and then formatted with `%ld`. That is the
+            # whole of bugs/CODEGEN_dynamic_attribute_string_reads_as_pointer.md's
+            # residual 2: not a missing ternary, a missing CAST, in the
+            # opposite direction from the one that branch was looking for.
+            _res = dt if dt in ('char *', 'double') else 'int64_t'
+            if _res != 'int64_t':
+                raw_dt = dv
+            else:
+                raw_dt = dv if dt == 'int64_t' else gen._new_val('int64_t', f'(int64_t){dv}')
             gen._emit("  _mojo_getattr_missed = 0;")
             gen._emit("  _mojo_getattr_nothrow = 1;")
             raw = gen._call_expr('int64_t', '_mojo_dispatch_getattr', pairs)
             gen._emit("  _mojo_getattr_nothrow = 0;")
             _missed = gen._new_val('int', '_mojo_getattr_missed')
             cond = gen._new_val('_Bool', f'{_missed} != 0')
-            return 'int64_t', gen._new_val('int64_t', f'{cond} ? {dv} : {raw}')
+            if _res == 'int64_t':
+                return 'int64_t', gen._new_val('int64_t', f'{cond} ? {raw_dt} : {raw}')
+            # `raw` is the dispatch's own int64_t word; in a `char *` result it
+            # is either a borrowed string pointer (a hit) or 0 (the miss, which
+            # the conditional never selects).
+            hit = gen._new_val(_res, f'({_res}){raw}')
+            return _res, gen._new_val(_res, f'{cond} ? {raw_dt} : {hit}')
         return 'int64_t', gen._call_expr('int64_t', '_mojo_dispatch_getattr', pairs)
     if fname_raw == 'type'    and len(node.args) == 1:
         _, av = gen.lower_expr(node.args[0])

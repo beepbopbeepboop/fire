@@ -1,5 +1,58 @@
 # CODEGEN_dynamic_attribute_string_reads_as_pointer: a dynamically-set attribute's string value reads back as a raw int64 pointer in the compiled path
 
+## Status (2026-10-02, `work/bugs4-2`) — residual 2 (a 3-arg `getattr` whose key is absent does not answer its default) is FIXED; the mechanism is a missing CAST, in the OPPOSITE direction from the one the previous addendum was looking for
+
+The 2026-10-01 addendum below reached a dead end honestly: it saw the miss flag
+computed and unused, could not account for the emitted `missed ? default : raw`
+being right, and reverted a plausible edit rather than commit a change it could
+not explain. The edit it reverted was the fix. It was looking for a missing
+**ternary**; what was missing was a **cast**.
+
+Measured on this tree, emitted C for `print(getattr(o, "nope", "dflt"))`:
+
+```c
+  _t3 = _slit_10001;                    /* "dflt"            */
+  _t4 = (int64_t)_t3;                   /* the DEFAULT, boxed */
+  _mojo_getattr_missed = 0;
+  _mojo_getattr_nothrow = 1;
+  _t5 = _mojo_dispatch_getattr (_t6, _t2);
+  _mojo_getattr_nothrow = 0;
+  _t7 = _mojo_getattr_missed;
+  _t8 = _t7 != 0;
+  _t9 = _t8 ? _t4 : _t5;                /* RIGHT — and then   */
+  _t12 = _slit_10002;                   /* "%ld", not "%s"    */
+  sprintf (_t10, _t12, _t9);            /* prints the address */
+```
+
+So the ternary the previous addendum was looking for IS there, and the runtime
+IS exonerated exactly as it concluded: the flag is set, the default is selected,
+and the RESULT is right. What is wrong is that the whole expression is typed
+`int64_t` — so `print` takes the numeric path and formats the (correct) string
+value with `%ld`, which prints the string's own heap address as a decimal. The
+previous addendum's "`None`" reading is this same cast pointing the other way
+for the int-valued case.
+
+**Fix**: the result of a 3-arg `getattr` is presented in the DEFAULT's own
+domain, which is the one domain both answers share — a `char *` default makes
+the whole expression a `char *`, a `double` default makes it a `double`, and
+only a non-scalar default leaves it `int64_t`. That is in
+`mojo/backend_gimple/emit_calls.py`'s non-literal-name 3-arg `getattr` arm, the
+one that emits the `_mojo_getattr_nothrow` probe. The literal-name A5 arm
+beside it was already right (it takes the type from the receiver's declared
+field), which is why `getattr(o, "x", "")` for a KNOWN field always worked and
+this shape — an object whose struct does not declare the attribute — did not.
+
+Regression: `test_runtime_diff.py::getattr_default_on_a_miss`
+(CPython-comparable). It also pins the two controls that must keep working: an
+`int` default (still `int64_t`, still prints `7`) and the 2-arg `hasattr`
+probe, which shares the flag.
+
+Still open, unchanged, and both are separate mechanisms: a large integer
+assigned to a phantom field is truncated (residual 1 above — `_quick_type`
+cannot tell "a wide integer" from "nothing is known"), and the dynamic-attribute
+dict path for a receiver whose static type is genuinely unknown is still
+untyped (residual 3 above).
+
 ## Status addendum (2026-10-01, `work/bugs3-codegen-2-r2` — residual 2 re-measured and narrowed to a call site; NOT fixed)
 
 Re-measured on this tree, against CPython 3.14.7 on the same text. The

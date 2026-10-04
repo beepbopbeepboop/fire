@@ -3961,6 +3961,58 @@ print(zip([0, 1], [2, 3]))
 print({"a": 1}.items())
 """, "[('a', 1)]\n")
 
+    # `for (v) in d.items():` binds ONE name to the whole [key, value] pair,
+    # and the variable carried no evidence that it is a 2-element list, so
+    # `print(v)` / `str(v)` / an f-string reached the scalar `mojo_str_from_int`
+    # path with a `MojoList *` in hand and printed the pair's HEAP ADDRESS --
+    # a different decimal on every run, which is also exactly what breaks
+    # bootstrap's stage2-vs-stage3 byte-identity check. `v.key` / `v.value` are
+    # the two spellings that already worked and must keep working, so they are
+    # in the same program: a fix to the variable's repr that broke either would
+    # show up here. See
+    # bugs/CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer.md.
+    test_gimple_stdout("gimple_dict_items_pair_var_prints_as_a_pair", """\
+def ints():
+    d = {"a": 1, "b": 2}
+    for (v) in d.items():
+        print(v)
+        print(str(v))
+        print(f"{v}")
+        print(v.key, v.value)
+
+def strs():
+    d = {"a": "x", "b": "y"}
+    for (v) in d.items():
+        print(v)
+
+def main():
+    ints()
+    strs()
+""", "('a', 1)\n('a', 1)\n('a', 1)\na 1\n"
+       "('b', 2)\n('b', 2)\n('b', 2)\nb 2\n"
+       "('a', 'x')\n('b', 'y')\n")
+
+    # `d.pop(k, default)` answers the DEFAULT on a miss. `mojo_dict_pop_int`
+    # had no `dflt` parameter, so the `-1` the source wrote was never lowered
+    # and every miss came back 0 -- a real value in this model, so a "remove
+    # if present, else report absence" idiom got a plausible number with exit
+    # 0. `d.pop(k)` with no default is correct today (it raises KeyError), so
+    # this is specifically the two-argument form; and a str-valued dict needs
+    # the `mojo_dict_pop_str` reader or its value pops as a pointer decimal.
+    # See bugs/CODEGEN_dict_pop_default_ignored_on_a_miss.md and
+    # bugs/CODEGEN_dict_value_accessor_guessed_from_the_default.md.
+    test_gimple_stdout("gimple_dict_pop_default_on_a_miss", """\
+def main():
+    d = {}
+    d["a"] = 1
+    print(d.pop("a", -1))
+    print(d.pop("a", -1))
+    print(d.pop("zz", -1))
+    s = {"k": "hello"}
+    print(s.pop("k"))
+    print(s.pop("k", "dflt"))
+""", "1\n-1\n-1\nhello\ndflt\n")
+
     test_gimple_stdout("gimple_enumerate_start_and_strings", """\
 print(list(enumerate([7, 8], 1)))
 print(list(enumerate(["a", "b"])))

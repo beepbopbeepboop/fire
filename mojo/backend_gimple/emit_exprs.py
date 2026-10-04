@@ -5060,6 +5060,14 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # spells out a `None` among its elements — _list_repr_fn would
     # otherwise route it through mojo_repr_list_ints (no None-sentinel
     # check), silently misprinting that `None` as `0`.
+    #
+    # An EMPTY literal records `'int64_t'` here, and that is a STORAGE
+    # default, not evidence — `_elem_types` is what the list's own later
+    # consumers read, and `l = []` followed by `l.append(x)` (also through a
+    # module-level global, where nothing else seeds the table) depends on it.
+    # It is the RETURN-side publish that must not treat it as evidence, and
+    # that is `_gen_ReturnStmt`'s own guard; see bugs/
+    # CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md.
     if not (elem == 'int64_t' and gen._literal_elements_include_none(node.elements)):
         gen._elem_types[t] = elem
     # Every element is itself a tuple/list literal with a homogeneous,

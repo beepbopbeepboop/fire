@@ -326,13 +326,26 @@ def test_every_declaration_is_seen():
     # return is the ceiling-3 shape and is still refused. Read off the CALL
     # (546), the same way every other number in this ledger was.
     #
+    # 546 -> 550 (2026-10-02, `bugs4-2`): the `d.pop(k, default)` value
+    # domains on the str-key side — `mojo_dict_pop_str` / `mojo_dict_pop_double`
+    # and their `_kw` twins. `mojo_dict_pop_int` gained the `dflt` parameter
+    # Python's two-argument `pop` needs and did so by CHANGING that one
+    # signature rather than adding a parallel `..._dflt` name; the four new
+    # names are the str and double readers the same family needed, so that a
+    # str-valued dict pops its value as a `char *` instead of a pointer
+    # decimal (bugs/CODEGEN_dict_value_accessor_guessed_from_the_default.md,
+    # bugs/CODEGEN_dict_pop_default_ignored_on_a_miss.md). Read off the CALL
+    # on the MERGED header (550 = this side's 546 plus those four), which is
+    # the point the ledger exists to record: bugs4-2 counted from its own
+    # base's 543, so its `547` was right for its tree and wrong for this one.
+    #
     # Every entry here is read off the CALL, never added up, and the count is
     # read off the merged header rather than being any one branch's total plus
     # its own new names: two branches that each added names did not each add
     # them to THIS header. That is the whole reason this list is a ledger and
     # not a formula -- a name in the header that no line accounts for is the
     # only way this count can go wrong silently.
-    for header, want in (('fire_runtime.h', 546),
+    for header, want in (('fire_runtime.h', 550),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

@@ -1476,6 +1476,26 @@ def _dict_val_of(gen, name: str) -> str:
     return gen._dict_val_types.get(name, 'int64_t')
 
 
+def _dict_val_is_known(gen, name: str) -> bool:
+    """Whether `_dict_val_of`'s answer for `name` is EVIDENCE or its no-evidence
+    default.
+
+    `_dict_val_types` only gets an entry when codegen saw a store into that
+    dict, so the absent case is directly available — and it has to be, because
+    `_dict_val_of` answers `'int64_t'` both for a dict KNOWN to hold ints and
+    for a dict whose value type nobody has observed. Two readers need those
+    apart, and mixing them is not cosmetic: `dict.get`'s lowering used the
+    DEFAULT argument's type as the value type whenever `_dict_val_of` said
+    `int64_t`, so `d = {"a": 1}; d.get("a", "y")` emitted `mojo_dict_get_str`
+    on an int-valued dict and `print` called `strlen(1)`. Same shape for
+    `d.pop(k, default)`'s value accessor — see
+    bugs/CODEGEN_dict_value_accessor_guessed_from_the_default.md. Callers that
+    only compare against a concrete type (`double`, `char *`, a container) are
+    unaffected by the ambiguity and should keep reading `_dict_val_of`.
+    """
+    return name in gen._dict_val_types
+
+
 _CAST_ONLY_RE = re.compile(r'^\(\s*[A-Za-z_][A-Za-z0-9_ ]*\*?\s*\)\s*\(?\s*'
                            r'([A-Za-z_][A-Za-z0-9_]*)\s*\)?$')
 
@@ -2200,8 +2220,9 @@ def _is_fresh_operand(gen, node, val: str) -> bool:
 _KW_DICT_FNS = frozenset([
     'mojo_dict_get_int', 'mojo_dict_get_double', 'mojo_dict_get_str',
     'mojo_dict_set_int', 'mojo_dict_set_double', 'mojo_dict_set_str',
-    'mojo_dict_contains', 'mojo_dict_pop_int',
-    'mojo_dict_setdefault_int', 'mojo_dict_setdefault_str',
+    'mojo_dict_contains', 'mojo_dict_pop_int', 'mojo_dict_pop_str',
+    'mojo_dict_pop_double', 'mojo_dict_setdefault_int',
+    'mojo_dict_setdefault_str',
 ])
 
 
@@ -3499,6 +3520,30 @@ def _list_repr_fn(gen, rav: str) -> str:
 # reaches here either from the literal itself or across a `return`
 # (`gen._return_value_slot_kinds`).
 _STRUCT_KIND_BYTE = {'int': 'i', 'double': 'd', 'bytes': 's', 'str': 'p'}
+
+# A dict's VALUE ctype -> `gen._struct_slot_kinds`' long-form spelling, so a
+# value whose slot ctype the codegen knows statically can be described in that
+# table rather than only in the `_tuple_slot_types` ctype table (which means
+# "a list of inner lists" and routes to the nested-list repr). Used for
+# `for v in d.items():` with ONE target — the loop variable holds the pair, so
+# its two slot ctypes are (the key, the dict's value type) and the kinds-aware
+# `mojo_repr_list_kinds` is what renders it; without this the pair printed as
+ # its own heap address (bugs/CODEGEN_dict_items_pair_valued_loop_var_prints_
+# as_pointer.md). A container ctype has no letter in that alphabet yet and
+# folds to 'int' here, exactly as `_list_literal_slot_kinds` documents for a
+# nested slot: a raw word IS the right read for a boxed pointer.
+_STRUCT_KIND_LONG = {'char *': 'str', 'MojoStr *': 'str',
+                     'double': 'double', 'float': 'double', '__fp16': 'double',
+                     'MojoBytes *': 'bytes', 'bytes': 'bytes',
+                     'int': 'int', 'int64_t': 'int', '_Bool': 'int', '': 'int'}
+
+
+def _gmi_slot_kind_long(ctype):
+    """`gen._struct_slot_kinds`' long-form spelling of one slot's C type — see
+    `_STRUCT_KIND_LONG`. One definition, because the alphabet is the runtime's
+    (`mojo_list_set_kinds`) and a second spelling of it is how the two walkers
+    would come to disagree about the same value."""
+    return _STRUCT_KIND_LONG.get(_as_str(ctype), 'int')
 
 # The same alphabet for a list of inner lists/tuples that share one per-slot
 # pattern — `[(1.5, 2)]`, `[('a', 0, 1) for i in range(2)]`. Keyed on the CTYPE

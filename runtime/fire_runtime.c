@@ -5113,21 +5113,21 @@ int64_t mojo_dict_setdefault_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt
     return dflt;
 }
 
-static int64_t _dict_pop_k(MojoDict *d, char *key, int64_t keykind);
+static int64_t _dict_pop_k(MojoDict *d, char *key, int64_t keykind, int64_t dflt);
 
 /* The value-domain siblings of mojo_dict_pop_bytes_int. All three share
  * this body: a dict slot is one int64_t of bits, so what differs is only
  * how the caller wants them READ BACK — a double through memcpy (never a
  * pointer/int punning cast, which strict-aliasing gcc may reorder), a
- * char* straight through, an int as-is. `pop` on a str-keyed dict only ever
- * had the int spelling, so a bytes-keyed dict with str values popped its
- * value as a raw pointer decimal. */
+ * char* straight through, an int as-is — and the str-key domain now spells the
+ * same three (mojo_dict_pop_int/_str/_double), so this is the ONE pop family
+ * rather than a bytes-only one beside it. */
 static int64_t _dict_pop_bytes_raw(MojoDict *d, MojoBytes *key, int64_t dflt)
 {
     if (!d) return dflt;
     if (!mojo_dict_contains_bytes(d, key)) return dflt;
     char *k = mojo_bytes_cstr_key(key);
-    int64_t v = _dict_pop_k(d, k, 1 /* bytes key */);
+    int64_t v = _dict_pop_k(d, k, 1 /* bytes key */, dflt);
     free(k);
     return v;
 }
@@ -5135,11 +5135,14 @@ static int64_t _dict_pop_bytes_raw(MojoDict *d, MojoBytes *key, int64_t dflt)
 int64_t mojo_dict_pop_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt)
 { return _dict_pop_bytes_raw(d, key, dflt); }
 
-char *mojo_dict_pop_bytes_str(MojoDict *d, MojoBytes *key)
-{ return (char *)(uintptr_t)_dict_pop_bytes_raw(d, key, 0); }
+char *mojo_dict_pop_bytes_str(MojoDict *d, MojoBytes *key, char *dflt)
+{ return (char *)(uintptr_t)_dict_pop_bytes_raw(d, key, (int64_t)(uintptr_t)dflt); }
 
-double mojo_dict_pop_bytes_double(MojoDict *d, MojoBytes *key)
+/* Probed before the remove for the same reason as mojo_dict_pop_double: a
+ * MISS must answer `dflt` and `0` is a legitimate double. */
+double mojo_dict_pop_bytes_double(MojoDict *d, MojoBytes *key, double dflt)
 {
+    if (!d || !mojo_dict_contains_bytes(d, key)) return dflt;
     int64_t bits = _dict_pop_bytes_raw(d, key, 0);
     double v;
     memcpy(&v, &bits, sizeof(v));
@@ -8476,11 +8479,17 @@ static void _dict_remove_slot(MojoDict *d, _DictSlot *sl) {
 }
 
 /* Remove the entry for `key` in the given key DOMAIN (see _DictSlot.keykind)
- * and return its value (0 when absent). */
-static int64_t _dict_pop_k(MojoDict *d, char *key, int64_t keykind) {
-    if (!d) return 0;
+ * and return its value, or `dflt` when the key is ABSENT (or there is no
+ * dict). `dflt` is Python's `d.pop(k, default)` second argument: without it
+ * the codegen had no way to express a default at all and every miss answered
+ * 0, which is a real value in this model — see bugs/
+ * CODEGEN_dict_pop_default_ignored_on_a_miss.md. `d.pop(k)` with no default
+ * passes the domain's own absent value (0 / NULL / 0.0), which is the
+ * absent-box convention every mojo_dict_get_* already uses. */
+static int64_t _dict_pop_k(MojoDict *d, char *key, int64_t keykind, int64_t dflt) {
+    if (!d) return dflt;
     _DictSlot *sl = _dict_lookup_k(d, key, keykind);
-    if (!sl) return 0;
+    if (!sl) return dflt;
     int64_t val = sl->val;
     /* This table is plain linear-probing open addressing with NO tombstones
      * (_dict_find/_dict_lookup stop scanning at the first empty slot), so
@@ -8497,8 +8506,32 @@ static int64_t _dict_pop_k(MojoDict *d, char *key, int64_t keykind) {
     return val;
 }
 
-int64_t mojo_dict_pop_int(MojoDict *d, char *key) {
-    return _dict_pop_k(d, key, 0 /* str key */);
+/* `pop` on a str-keyed dict. Three spellings, one body: a dict slot is one
+ * int64_t of bits, so what differs is only how the caller wants it read BACK
+ * (an int as-is, a char* straight through, a double through memcpy — never a
+ * pointer/int punning cast, which strict-aliasing gcc may reorder) and what a
+ * MISS answers (the `dflt` the source wrote). Only the int spelling existed, so
+ * a str-valued dict popped its value as a raw pointer decimal
+ * (bugs/CODEGEN_dict_value_accessor_guessed_from_the_default.md) and no
+ * default could be expressed at all
+ * (bugs/CODEGEN_dict_pop_default_ignored_on_a_miss.md). */
+int64_t mojo_dict_pop_int(MojoDict *d, char *key, int64_t dflt) {
+    return _dict_pop_k(d, key, 0 /* str key */, dflt);
+}
+
+char *mojo_dict_pop_str(MojoDict *d, char *key, char *dflt) {
+    return (char *)(uintptr_t)_dict_pop_k(d, key, 0 /* str key */,
+                                          (int64_t)(uintptr_t)dflt);
+}
+
+double mojo_dict_pop_double(MojoDict *d, char *key, double dflt) {
+    if (!d) return dflt;
+    _DictSlot *sl = _dict_lookup_k(d, key, 0 /* str key */);
+    if (!sl) return dflt;
+    double v;
+    memcpy(&v, &sl->val, sizeof(v));
+    _dict_remove_slot(d, sl);
+    return v;
 }
 
 MojoDict *mojo_dict_copy(MojoDict *d) {
@@ -10144,20 +10177,48 @@ int mojo_dict_contains_kw(MojoDict *d, int64_t kw)
     return _dict_lookup_ik(d, kw) != NULL;
 }
 
-int64_t mojo_dict_pop_int_kw(MojoDict *d, int64_t kw)
+int64_t mojo_dict_pop_int_kw(MojoDict *d, int64_t kw, int64_t dflt)
 {
     char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) return mojo_dict_pop_int(d, (char *)(intptr_t)kw);
+    if (k == _KW_STR) return mojo_dict_pop_int(d, (char *)(intptr_t)kw, dflt);
     if (k == _KW_CONT) {
-        int64_t v = mojo_dict_pop_int(d, ck);
+        int64_t v = mojo_dict_pop_int(d, ck, dflt);
         mojo_dict_key_free(ck);
         return v;
     }
+    if (!d) return dflt;
     _DictSlot *sl = _dict_lookup_ik(d, kw);
-    if (!sl) return 0;
+    if (!sl) return dflt;
     int64_t val = sl->val;
     _dict_remove_slot(d, sl);
     return val;
+}
+
+char *mojo_dict_pop_str_kw(MojoDict *d, int64_t kw, char *dflt)
+{
+    return (char *)(uintptr_t)mojo_dict_pop_int_kw(d, kw,
+                                                   (int64_t)(uintptr_t)dflt);
+}
+/* The same two steps as mojo_dict_pop_double, over whichever key DOMAIN the
+ * `_kw` word selects (see _kw_kind): probe the slot, then remove it. Spelled
+ * as its own two steps rather than by re-probing after mojo_dict_pop_int_kw,
+ * because a MISS has to answer `dflt` and `0` is a legitimate double — a
+ * pop-then-probe ordering cannot tell them apart. */
+double mojo_dict_pop_double_kw(MojoDict *d, int64_t kw, double dflt)
+{
+    char *ck; int k = _kw_kind(kw, &ck);
+    _DictSlot *sl;
+    if (k == _KW_STR) sl = _dict_lookup_k(d, (char *)(intptr_t)kw, 0);
+    else if (k == _KW_CONT) {
+        sl = _dict_lookup_k(d, ck, 0);
+        mojo_dict_key_free(ck);
+    }
+    else sl = _dict_lookup_ik(d, kw);
+    if (!sl) return dflt;
+    double v;
+    memcpy(&v, &sl->val, sizeof(v));
+    _dict_remove_slot(d, sl);
+    return v;
 }
 
 /* `setdefault` is the one `_kw` twin that asks the dict TWICE (contains, then

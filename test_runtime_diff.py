@@ -463,10 +463,13 @@ BUILTIN_PROGRAMS = {
     # all (gcc "non-trivial conversion in 'var_decl'"), which is how it was
     # found; with a `char *` live it compiled and printed string ADDRESSES.
     #
-    # The comprehension is deliberately NOT inside a branch: a comprehension in
-    # an `if` body loses its RESULT list's element type, which is a separate
-    # bug (bugs/CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md)
-    # and would mask what this case is about.
+    # The comprehension is deliberately NOT inside a branch, so that this case
+    # measures the target's binding and nothing else; the branch spelling is
+    # its own case below
+    # (`comprehension_result_elem_type_across_a_branch`), which is what the
+    # branch-shaped reproducer for
+    # bugs/CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md
+    # turned out to be measuring.
     "comprehension_target_shadows_an_enclosing_local": textwrap.dedent("""\
         class Token:
             def __init__(self, kind):
@@ -494,6 +497,113 @@ BUILTIN_PROGRAMS = {
         def main():
             print(struct_pointer_live())
             print(char_star_live())
+    """),
+    # A dict value slot the runtime TAGGED as a plain int went through the
+    # generic element repr, whose 0-is-the-None-sentinel rule turned a real
+    # int 0 into `None` (`{i: i for i in range(2)}` printed `{'0': None, '1': 1}`).
+    # `_DictSlot.kind` is `0` for a plain int64_t (see its own comment: 1 =
+    # double bit-cast, 2 = char *, 3 = a Python bool), so the tag IS the
+    # evidence and `kind == 0` is `mojo_repr_int(val)`. The `kind == 1` arm is
+    # added in the same place: a double's IEEE-754 bits went to `mojo_repr_str`
+    # as a `char *`, and that pattern is pointer-shaped, so it printed garbage
+    # or faulted. See bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md.
+    #
+    # INTEGER KEYS are all this case uses, and they are all STRINGS on purpose:
+    # `{1: "a"}` prints `{'1': 'a'}`, and that needs the slot to remember
+    # whether the key ARRIVED as an integer or as the string "1" (`_canon_int`
+    # deliberately makes those one entry, as CPython does). Pinning either
+    # spelling here would make this case stop describing its own fix; the
+    # discriminator is written down at the missing arm in `module_gen.py`'s
+    # `_mojo_repr_dict` template. The last two lines are the controls: a dict
+    # LITERAL and a hand-built dict whose entries arrive by SUBSCRIPT STORE
+    # rather than through a comprehension, so the case is not measuring only
+    # one lowering.
+    #
+    # A double stored by SUBSCRIPT (`d["j"] = 1.5; print(d)` -> `{'j': 1}`) is
+    # also absent, and that one is a store-side tag the subscript-store
+    # lowering does not set -- it is recorded in the bug doc rather than pinned
+    # here, because pinning it would make this case describe two fixes.
+    "dict_repr_zero_value_is_not_the_none_sentinel": textwrap.dedent("""\
+        def main():
+            print({"k" + str(i): i for i in range(2)})
+            print({"k" + str(i): i * 1.5 for i in range(2)})
+            print({"k" + str(i): i + 1 for i in range(2)})
+            print({"a": 1, "b": 0})
+            d = {}
+            d["k"] = 0
+            d["j"] = 1
+            print(d)
+    """),
+    # `getattr(o, name, default)` computed the default-selection ternary
+    # correctly -- `_mojo_getattr_missed` was set, `_t9 = missed ? dflt : raw`
+    # was emitted -- and then BOXED the whole expression as `int64_t`, so
+    # `print` read it with the numeric path and printed the string's own heap
+    # address. The default's own C type is the domain both answers share, so
+    # the result is presented there; a `char *` default makes the expression a
+    # `char *`. The int default and the `hasattr` probe beside it are the
+    # controls: neither involves the cast. See
+    # bugs/CODEGEN_dynamic_attribute_string_reads_as_pointer.md.
+    "getattr_default_on_a_miss": textwrap.dedent("""\
+        class C:
+            pass
+
+        def main():
+            o = C()
+            print(getattr(o, "nope", "dflt"))
+            print(getattr(o, "nope", 7))
+            o.y = "set"
+            print(getattr(o, "y", "dflt"))
+            print(o.y)
+            print(hasattr(o, "nope"), hasattr(o, "y"))
+    """),
+    # An EMPTY container literal asserts no element type, and one place
+    # believed otherwise: `_lower_list_literal` /
+    # `_lower_tuple_literal` recorded `_infer_list_elem_type([])`'s
+    # `'int64_t'` no-evidence default as the temp's element type, and
+    # `_gen_ReturnStmt` publishes the returned temp's element type as the
+    # FUNCTION's return element type, last write wins. So a function whose
+    # `return []` came after a container return published `int64_t` for the
+    # whole function and `print(...)` of its result routed to
+    # `mojo_repr_list_ints`, which reads each slot with the integer accessor —
+    # a `char *` slot came back as a heap-address decimal. Measured in
+    # bugs/CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md,
+    # whose own diagnosis ("the ReturnStmt walk does not descend into an
+    # `if`") was wrong on both counts: `_collect_return_elems` has always
+    # descended, and the program WITHOUT the trailing `return []` was right.
+    #
+    # Each line is one shape, and the pair (first / second function) is the
+    # measurement: the same comprehension, the same `if`, and the only
+    # difference is whether an empty `return []` follows it. `b4`/`b5` have no
+    # branch at all and are the no-branch control.
+    "comprehension_result_elem_type_across_a_branch": textwrap.dedent("""\
+        def b2(i):
+            if i:
+                return [t for t in ["a", "b"]]
+            return []
+
+        def b7(i):
+            if i:
+                x = [t for t in ["a", "b"]]
+                return x
+            else:
+                return []
+
+        def b4(i):
+            x = [t for t in ["a", "b"]]
+            return x
+
+        def b8():
+            return []
+
+        def b9():
+            return ()
+
+        def main():
+            print(b2(1))
+            print(b7(1))
+            print(b4(1))
+            print(b8())
+            print(b9())
     """),
     # binds only `node.generators[0]` and every `_compr_*_loop` helper takes a
     # single generator, so the extra clauses were silently dropped -- exit 0,
@@ -1068,6 +1178,9 @@ CPYTHON_COMPARABLE = {
     "for_target_one_tuple_vs_paren_name",
     "for_target_one_tuple_dict_and_nested",
     "comprehension_target_shadows_an_enclosing_local",
+    "comprehension_result_elem_type_across_a_branch",
+    "dict_repr_zero_value_is_not_the_none_sentinel",
+    "getattr_default_on_a_miss",
 }
 
 

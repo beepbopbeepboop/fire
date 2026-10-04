@@ -401,6 +401,26 @@ def container_kind(ctype: str) -> str | None:
         return None
     return {'MojoDict *': 'dict', 'MojoList *': 'list', 'MojoSet *': 'set', 'MojoBytes *': 'bytes'}[ctype]
 
+def _is_empty_container_literal(node) -> bool:
+    """True when `node` is a SYNTACTICALLY EMPTY container literal — `[]`,
+    `()`, `{}`, `set()` — which carries no evidence of what it would hold.
+
+    The same shape `reify_empty_container_literal` recognises, and for the
+    same reason it needs its own test rather than reusing that one: an empty
+    literal still has a STORAGE element type (`_infer_list_elem_type([])` is
+    `'int64_t'`, so a local can be declared), it is just not a statement about
+    the values. The consumer that needs the distinction is
+    `_gen_ReturnStmt`'s publish of `_return_elem_types`, where treating that
+    storage default as evidence routed a str-valued result through
+    `mojo_repr_list_ints` and printed its slots as pointer decimals — see
+    bugs/CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md.
+    """
+    if isinstance(node, (DictExpr, ListExpr, SetExpr, TupleExpr)):
+        return not (getattr(node, 'elements', None)
+                    or getattr(node, 'pairs', None))
+    return False
+
+
 def reify_empty_container_literal(gen, value_type: str, declared_type: str, value_node) -> str | None:
     """If `value_node` is a syntactically-EMPTY container literal (`{}`,
     `[]`, `set()`, `()`) whose default lowering (`value_type`) doesn't

@@ -1162,7 +1162,9 @@ void        mojo_dict_set_int_kw(MojoDict *d, int64_t kw, int64_t v);
 void        mojo_dict_set_double_kw(MojoDict *d, int64_t kw, double v);
 void        mojo_dict_set_str_kw(MojoDict *d, int64_t kw, char *v);
 int         mojo_dict_contains_kw(MojoDict *d, int64_t kw);
-int64_t     mojo_dict_pop_int_kw(MojoDict *d, int64_t kw);
+int64_t     mojo_dict_pop_int_kw(MojoDict *d, int64_t kw, int64_t dflt);
+char       *mojo_dict_pop_str_kw(MojoDict *d, int64_t kw, char *dflt);
+double      mojo_dict_pop_double_kw(MojoDict *d, int64_t kw, double dflt);
 int64_t     mojo_dict_setdefault_int_kw(MojoDict *d, int64_t kw, int64_t dflt);
 char       *mojo_dict_setdefault_str_kw(MojoDict *d, int64_t kw, char *dflt);
 void        mojo_dict_set_double(MojoDict *d, char *key, double v);
@@ -1184,7 +1186,16 @@ MojoList   *mojo_dict_values(MojoDict *d);
 MojoList   *mojo_dict_items(MojoDict *d);
 MojoList   *mojo_dict_items_int(MojoDict *d);
 void        mojo_dict_update(MojoDict *dst, MojoDict *src);
-int64_t     mojo_dict_pop_int(MojoDict *d, char *key);
+/* `d.pop(k[, default])` on a str-keyed dict. Three value domains off ONE
+ * int64_t slot, and a MISS answers `dflt` rather than 0: only the int spelling
+ * existed, so a str-valued dict popped its value as a raw pointer decimal and no
+ * default could be expressed at all (bugs/
+ * CODEGEN_dict_pop_default_ignored_on_a_miss.md,
+ * bugs/CODEGEN_dict_value_accessor_guessed_from_the_default.md). The no-default
+ * spelling passes the domain's own absent value (0 / NULL / 0.0). */
+int64_t     mojo_dict_pop_int(MojoDict *d, char *key, int64_t dflt);
+char       *mojo_dict_pop_str(MojoDict *d, char *key, char *dflt);
+double      mojo_dict_pop_double(MojoDict *d, char *key, double dflt);
 MojoDict   *mojo_dict_copy(MojoDict *d);
 MojoDict   *mojo_dict_union(MojoDict *a, MojoDict *b);  /* a | b */
 MojoDict   *mojo_dict_from_pairs(MojoList *pairs);  /* dict(list_of_pairs) */
@@ -1304,11 +1315,11 @@ int         mojo_dict_contains_bytes(MojoDict *d, MojoBytes *key);
 int64_t     mojo_dict_setdefault_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt);
 int64_t     mojo_dict_pop_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt);
 /* str/double siblings of pop_bytes_int — same domain, read back as their own
- * type. A MISSING key pops nothing and yields 0/NULL/0.0 (the absent-box
- * convention mojo_dict_get_* already uses; Python's KeyError is not
- * modelled). */
-char       *mojo_dict_pop_bytes_str(MojoDict *d, MojoBytes *key);
-double      mojo_dict_pop_bytes_double(MojoDict *d, MojoBytes *key);
+ * type, and a MISSING key answers the `dflt` the source wrote (the no-default
+ * spelling passes 0 / NULL / 0.0, the absent-box convention mojo_dict_get_*
+ * already uses; Python's KeyError is not modelled). */
+char       *mojo_dict_pop_bytes_str(MojoDict *d, MojoBytes *key, char *dflt);
+double      mojo_dict_pop_bytes_double(MojoDict *d, MojoBytes *key, double dflt);
 void        mojo_dict_print(MojoDict *d);
 int64_t     mojo_dict_len(MojoDict *d);
 

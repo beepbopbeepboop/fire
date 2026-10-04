@@ -48,6 +48,7 @@ import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
 import mojo.backend_gimple.emit_infra as ginf
+import mojo.backend_gimple.emit_exprs as gex
 
 # Re-export shared helpers from mojo.middle.resolve_shared via explicit imports.
 # (Was globals().update(dir(_shared)); self-hosted globals() is a
@@ -3537,39 +3538,33 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         if et and et != 'int64_t':
             gen._elem_types[res] = et
     elif node.kind == 'dict':
-        kt, kv = gen.lower_expr(node.element)   # element = key expression in dict compr
-        vt, vv = gen.lower_expr(node.key)        # key field holds the value expression
-        # parser stores dict comprehension as: element=key_expr, key=val_expr
-        # Dict keys are char* in the runtime: coerce the key to a char* local
-        # via _char_to_cstr (handles a non-char* key — e.g. a genuine Int
-        # key, stringified via mojo_str_from_int, or one actually boxed as
-        # int64_t — and loads global string literals into locals first).
-        if kt != 'char *':
-            kt, kv = gen._char_to_cstr(kt, kv)
-        elif kv.startswith('_slit_'):
-            kv_tmp = gen._new_val('char *', f"{kv}")
-            kv = kv_tmp
-        if vt in gimple_ctypes._FLOAT_TYPES:
-            gen._emit(f"  mojo_dict_set_double ({res}, {kv}, {vv});")
-        elif vt == 'char *':
-            if vv.startswith('_slit_'):
-                vv_tmp = gen._new_val('char *', f"{vv}")
-                vv = vv_tmp
-            gen._emit(f"  mojo_dict_set_str ({res}, {kv}, {vv});")
-        else:
-# See the dict-literal case's identical comment: vt alone can't
-            # distinguish a real bool literal from a genuine int, so the
-            # shared store helper asks `is_python_bool_expr` instead.
-            # `node.key` is the VALUE expression here -- the parser stores a
-            # dict comprehension as element=key_expr, key=val_expr (see the
-            # comment above `kt, kv = gen.lower_expr(node.element)`).
-            #
-            # The one store, as in the dict literal: the per-slot bool kind it
-            # decides is the whole-dict `mojo_mark_dict_bool_values` marker's
-            # successor (deleted; it made one bool value render every OTHER
-            # value in the dict as True/False), and its `_emit_call` is what
-            # resolves the placeholder key `_char_to_cstr` just handed out.
-            gen._emit_dict_int_value_store(res, kt, kv, vt, vv, node.key)
+        # The parser stores a dict comprehension as element=key_expr,
+        # key=val_expr, so the pair handed over is (key, value) — the same
+        # argument order `_emit_dict_pair_store` documents for the dict LITERAL
+        # and the `dict(k=v, ...)` builtin.
+        #
+        # ONE store, because there were TWO lowerings of it and they disagreed.
+        # The comprehension's own coerced the key with
+        # `_char_to_cstr(kt, kv)` — no `transient` / `word_ok`, which is the
+        # flag pair that arms `_char_to_cstr`'s CONTAINER-key branch, the one
+        # that hands the raw word over so `_apply_kw_keys` selects the `_kw`
+        # twin and the runtime's `mojo_dict_key_for` renders the tuple's
+        # CONTENT. Without those flags a `MojoList *` key fell through to a raw
+        # `(char *)value`, so `{k: 1 for k in pairs}` stored its two tuples
+        # under their HEAP ADDRESSES as the key TEXT: different on every run
+        # (ASLR), which makes it worse than a stable wrong answer — and the
+        # repr printed those address bytes, `{'ï¬f': 1, ...}`. The
+        # literal spelling `{k: 1 for k in pairs}` reached `_repr_value` and
+        # keyed by content, so the two spellings of one key disagreed. See
+        # bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md, and
+        # bugs/CODEGEN_tuple_dict_key_hashed_by_address.md for the subscript
+        # spelling that was fixed the same way.
+        #
+        # `_emit_dict_pair_store` lowers both operands itself, so the values
+        # this used to lower here are not lowered twice, and its per-slot bool
+        # kind and `_kw`-twin key handling are the shared ones rather than this
+        # site's third copy of them.
+        gex._emit_dict_pair_store(gen, res, node.element, node.key)
 
 
 
