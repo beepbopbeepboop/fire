@@ -3688,7 +3688,13 @@ def check_one(index, args, tmpdir, lock=None):
         # over a forty-statement program names every construct it contains,
         # which is the "there is a known bug in here too" reading this exists to
         # avoid. The minimised text is kept on the record so the reproducer on
-        # disk is the one the verdict is about.
+        # disk is the one the verdict is about — and the record's `want` /
+        # `results` are the ORIGINAL's answers, which is the half of that
+        # sentence that was false: a 1966-byte finding whose file on disk is
+        # 894 bytes cannot print the `3\n` the record quotes, and a reader who
+        # takes the reproducer at its word spends an afternoon on a defect that
+        # is not in it. So the reduction's OWN answers are measured and
+        # recorded beside the original's, in `record_reduction`.
         small, _steps = shrink(text, args)
         if small == text:
             # The shrink found nothing to remove, which is common when the
@@ -3699,6 +3705,7 @@ def check_one(index, args, tmpdir, lock=None):
             small = text
         rec["reduced_from"] = len(text)
         rec["reduced_to"] = len(small)
+        record_reduction(rec, text, small, args, tmpdir, name)
         rec["text"] = small
         got = blame(small, args, tmpdir, name)
         if got:
@@ -3709,7 +3716,53 @@ def check_one(index, args, tmpdir, lock=None):
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, f"{name}.mojo"), "w") as f:
             f.write(rec["text"])
+        # …and the program the record's `want`/`results` are about, when it is
+        # not the file beside it. Two files and the record is re-derivable end
+        # to end; one file and the reader has to guess which of the two halves
+        # of the record the reproducer is.
+        original = rec.get("original_text")
+        if original is not None and original != rec["text"]:
+            with open(os.path.join(d, f"{name}.original.mojo"), "w") as f:
+                f.write(original)
     return rec
+
+
+def record_reduction(rec, original, small, args, tmpdir, name):
+    """Put the reduction's OWN answers on the record, beside the original's.
+
+    The record is about a program and its answers, and the minimiser changes the
+    program while leaving the answers in place. That is a real record of a real
+    verdict — the shrinker's predicate is `(verdict, diagnostic)` per backend, so
+    the reduction fails the same way — and it is not a reproducer: the file on
+    disk is not the program `want` and `results` describe. Both halves are
+    therefore kept:
+
+    * `original_text` — the program the verdict is about, so nothing in the
+      record needs a program this file does not have;
+    * `reduced_want` / `reduced_results` — what CPython and each backend say
+      about the reduction, measured rather than assumed to be the same, which
+      costs one build per backend on a finding (rare by construction) and buys
+      the answer to the question a reader actually has;
+    * `reduced_verdict` — the reduction run through the SAME `classify`, so a
+      reduction that stopped disagreeing is visible in `findings.json` instead
+      of in the next reader's afternoon. It is a report and never changes
+      `verdict`: the finding is about the program that produced it.
+
+    A reduction CPython cannot run has no answers at all, and that is recorded
+    as such rather than as an empty answer.
+    """
+    rec["original_text"] = original
+    ref, _err = cpython_answer(small, tmpdir, name)
+    if has_oracle(ref):
+        rec["reduced_want"] = {"exit": ref[0], "stdout": ref[1]}
+        results = {b: run_on(b, small, tmpdir, name) for b in args.backends}
+        rec["reduced_results"] = results
+        rec["reduced_verdict"] = classify(results, ref[0], ref[1], args)
+    else:
+        rec["reduced_want"] = None
+        rec["reduced_results"] = None
+        rec["reduced_verdict"] = ("CPYTHON-TIMEOUT" if ref is None
+                                  else "generator-error")
 
 
 def frame_budget_divergence(results, refusals):
@@ -3871,9 +3924,6 @@ def report(rec, args):
                          f"so this is not a capability difference")
         else:
             lines.append("      one architecture refused what the other lowered")
-        if "reduced_from" in rec:
-            lines.append(f"      reduced {rec['reduced_from']} -> "
-                         f"{rec['reduced_to']} bytes")
         for backend, r in rec["results"].items():
             if r["verdict"] == "ok":
                 lines.append(f"      {backend:<7} exit={r['rc']} "
@@ -3881,6 +3931,7 @@ def report(rec, args):
             else:
                 lines.append(f"      {backend:<7} {r['verdict']}: "
                              f"{shorten(r['diag'], 220)}")
+        lines.extend(reduction_lines(rec))
         return "\n".join(lines)
     if v == "CPYTHON-TIMEOUT":
         return (f"  CPYTHON-TIMEOUT  #{rec['index']}  (the oracle did not "
@@ -3903,9 +3954,6 @@ def report(rec, args):
         why = "; ".join(KNOWN_DIVERGENCES.get(part, part)
                         for part in v[len("KNOWN:"):].split("+"))
         lines.append(f"      attributed to {why}")
-        if "reduced_from" in rec:
-            lines.append(f"      reduced {rec['reduced_from']} -> "
-                         f"{rec['reduced_to']} bytes")
     want = rec["want"]
     lines.append(f"      want  exit={want['exit']} {shorten(want['stdout'])!r}")
     for backend, r in rec["results"].items():
@@ -3915,7 +3963,40 @@ def report(rec, args):
         else:
             lines.append(f"      {backend:<7} {r['verdict']}: "
                          f"{shorten(r['diag'], 220)}")
+    lines.extend(reduction_lines(rec))
     return "\n".join(lines)
+
+
+def reduction_lines(rec):
+    """The reduction's own answers, printed under the original's.
+
+    The two blocks above are the ORIGINAL program's, and the file
+    `programs/pN.mojo` is the reduction, so printing only the first is what
+    §4.12 of `bugs/FORMAL_fuzz_ledger.md` measured: a reproducer on disk that
+    cannot print what the record says it prints. This line is the difference
+    visible without opening `findings.json`, and it says so when the reduction
+    stopped reproducing — which is a fact about the SHRINKER, worth seeing here
+    precisely because it does not change the finding.
+    """
+    if "reduced_verdict" not in rec:
+        return []
+    if rec["reduced_want"] is None:
+        return [f"      reduced {rec['reduced_from']} -> {rec['reduced_to']} "
+                f"bytes: CPython {rec['reduced_verdict']}, so the reduction has "
+                f"no answers to compare"]
+    lines = [f"      reduced {rec['reduced_from']} -> {rec['reduced_to']} "
+             f"bytes; the reduction itself is {rec['reduced_verdict']}"]
+    want = rec["reduced_want"]
+    lines.append(f"      reduced  want  exit={want['exit']} "
+                 f"{shorten(want['stdout'])!r}")
+    for backend, r in rec["reduced_results"].items():
+        if r["verdict"] == "ok":
+            lines.append(f"      reduced  {backend:<7} exit={r['rc']} "
+                         f"{shorten(r['stdout'])!r}")
+        else:
+            lines.append(f"      reduced  {backend:<7} {r['verdict']}: "
+                         f"{shorten(r['diag'], 220)}")
+    return lines
 
 
 def audit_program(text, args):

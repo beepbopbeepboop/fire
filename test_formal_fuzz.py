@@ -643,6 +643,145 @@ def check_audit(verbose):
     return failures
 
 
+#: (name, shrunk or not, the reduction's CPython answer, the reduction's own
+#: answers per backend, the blame, the expected `reduced_verdict`).
+#:
+#: The subject is `check_one`'s record, which §4.12 of
+#: `bugs/FORMAL_fuzz_ledger.md` measured against a real 34-finding campaign:
+#: `want`/`results` are the ORIGINAL program's answers and the file written to
+#: `programs/` is the minimised one, so a reader who takes the reproducer at its
+#: word cannot reproduce the record. Four rows because the record has three
+#: outcomes beyond the obvious one — the reduction still disagrees, it stopped
+#: disagreeing, the shrinker removed nothing, and the reduction is a program
+#: CPython cannot run — and only the first is the one the old code could say.
+#: `None` for the oracle is `cpython_answer`'s TIMEOUT, and `("error", …)` is
+#: its rejection, which are two different "no answers" and both have to survive
+#: into the record rather than becoming an empty one.
+RECORD_CASES = (
+    ("the reduction_still_reproduces", True, (0, "1\n"), {"x86_64": "9\n",
+                                                          "arm64": "9\n"},
+     None, "MISMATCH-X86"),
+    ("the reduction_stopped_reproducing", True, (0, "1\n"), {"x86_64": "1\n",
+                                                             "arm64": "1\n"},
+     None, "match"),
+    ("the shrinker_removed_nothing", False, (0, "1\n"), {"x86_64": "9\n",
+                                                         "arm64": "9\n"},
+     None, "MISMATCH-X86"),
+    ("the_reduction_is_not_a_differential_test", True, ("error", "SyntaxError"),
+     {}, None, "generator-error"),
+)
+
+
+def check_record(verbose=False):
+    """A finding's record carries the program its answers are about AND the
+    reduction, each with its own answers — and says whether the reduction still
+    reproduces.
+
+    No compiler: `check_one` reaches `run_on`/`cpython_answer`/`shrink`/`blame`
+    through the module's own globals, so replacing those four here IS the runner
+    being tested, and it is the only way to reach a finding without a
+    miscompile to find. What is pinned is the SHAPE, because the shape is the
+    defect: `want`/`results` describing a program the record does not carry is
+    a record no reader can re-derive, and it was true of every finding a
+    campaign produced.
+    """
+    import contextlib
+    import tempfile
+
+    failures = 0
+    real = {name: getattr(F, name) for name in
+            ("cpython_answer", "run_on", "shrink", "blame", "make_program")}
+    original = "def main():\n    print(1)\n    print(2)\n    return 0\n"
+    reduced = "def main():\n    print(1)\n    return 0\n"
+    # The program's own answers: CPython says `1`, both machines say `9`.
+    want = (0, "1\n")
+    outs = {"x86_64": "9\n", "arm64": "9\n"}
+
+    def make_program(seed, index, mix, stmts):
+        return original
+
+    F.make_program = make_program
+    try:
+        for name, did_shrink, ref, red_outs, blamed, want_reduced in RECORD_CASES:
+            def oracle(text, tmpdir, n, argv="", _r=ref):
+                # The reduction's answers are what the case is about; the
+                # original's are the same in every row.
+                return (want, "") if text == original else (_r, "")
+
+            def answer(backend, text, tmpdir, n, _o=red_outs):
+                got = outs if text == original else _o
+                if got == {}:
+                    return {"verdict": "codegen-internal", "rc": 1,
+                            "stdout": "", "diag": "no answers"}
+                return {"verdict": "ok", "rc": 0,
+                        "stdout": got.get(backend, "9\n"), "diag": ""}
+
+            def shrunk(text, args, _d=did_shrink):
+                return (reduced if _d else text), 1
+
+            F.cpython_answer, F.run_on = oracle, answer
+            F.shrink = shrunk
+            F.blame = (lambda *a, **k: blamed)
+            args = argparse.Namespace(backends=["x86_64", "arm64"],
+                                      min_kind="any", save_all=False,
+                                      seed="pinned", mix="core", stmts=(5, 12))
+            with tempfile.TemporaryDirectory(dir=os.path.join(ROOT, ".tmp")) as work:
+                args.work = work
+                rec = F.check_one(0, args, work)
+                progs = os.path.join(work, "programs")
+
+                def say(problem):
+                    nonlocal failures
+                    failures += _fail(f"record_{name}", problem, verbose)
+
+                if rec["verdict"] != "MISMATCH-X86":
+                    say(f"the finding's own verdict is {rec['verdict']!r}; the "
+                        f"reduction's answers must not change it")
+                if rec.get("original_text") != original:
+                    say("the record does not carry the program `want`/"
+                        "`results` are about")
+                if rec["text"] != (reduced if did_shrink else original):
+                    say(f"the record's text is the wrong program: "
+                        f"{rec['text']!r}")
+                if rec["want"] != {"exit": 0, "stdout": "1\n"}:
+                    say(f"`want` moved: {rec['want']!r}")
+                if rec["results"]["x86_64"]["stdout"] != "9\n":
+                    say("`results` moved")
+                if rec["reduced_verdict"] != want_reduced:
+                    say(f"the reduction is reported as "
+                        f"{rec['reduced_verdict']!r}, expected {want_reduced!r}")
+                if ref == ("error", "SyntaxError"):
+                    if rec["reduced_want"] is not None:
+                        say("a reduction CPython rejects recorded answers")
+                elif rec["reduced_want"] != {"exit": ref[0], "stdout": ref[1]}:
+                    say(f"`reduced_want` is {rec['reduced_want']!r}")
+                # …and both programs on disk, which is what makes the record
+                # re-derivable without `original_text` at all.
+                on_disk = (os.path.join(progs, "p0.mojo"),
+                           os.path.join(progs, "p0.original.mojo"))
+                if not os.path.isfile(on_disk[0]):
+                    say("no reproducer on disk")
+                elif open(on_disk[0]).read() != rec["text"]:
+                    say("the reproducer on disk is not the record's text")
+                if did_shrink:
+                    if not os.path.isfile(on_disk[1]):
+                        say("the original program is on no disk, so the "
+                            "record's answers are about nothing")
+                    elif open(on_disk[1]).read() != original:
+                        say("the original on disk is not the original")
+                elif os.path.isfile(on_disk[1]):
+                    say("a second copy of the same program was written")
+                printed = F.report(rec, args) or ""
+                if "reduced" not in printed:
+                    say(f"the report does not mention the reduction:\n{printed}")
+    finally:
+        for name, fn in real.items():
+            setattr(F, name, fn)
+    print(f"formal fuzz: record    {'PASS' if not failures else 'FAIL'} "
+          f"{len(RECORD_CASES)} record shapes (no compiler)")
+    return failures
+
+
 def check_run(arch, count, jobs, verbose):
     """`count` pinned indexes, end to end, and every verdict accounted for."""
     argv = [sys.executable, os.path.join(ROOT, "tools", "formal_fuzz.py"),
@@ -905,6 +1044,7 @@ def main():
     mixes = [args.mix] if args.mix else sorted(F.MIXES)
     failures = check_classifier(args.verbose)
     failures += check_audit(args.verbose)
+    failures += check_record(args.verbose)
     failures += check_frame_budget(args.verbose)
     for mix in mixes:
         failures += check_generator(mix, args.gen_indexes, args.verbose)
