@@ -1,13 +1,108 @@
 # the x86-64 end-to-end chain cannot close past about a hundred steps, so the first program with a stack argument is unprovable
 
 **Area:** FORMAL (the x86-64 end-to-end prover). **Status: the premise is wrong
-and the premise was the bug. What is left is one real boundary, named exactly,
-with the measurement that says so.** Found 2026-10-02 while finishing the SysV
-stack-argument convention's proof half
+and the premise was the bug; the read at a `ret` is now EVALUATED rather than
+simplified and closed where the chain is short, two guards that could not work
+are fixed, and what is left is one real boundary — the chain's LENGTH — named
+exactly, bounded, and measured on both sides.** Found 2026-10-02 while finishing
+the SysV stack-argument convention's proof half
 (`“`x86_step_mov_rm64_mem_disp32` does not exist”`,
 deleted with its fix — the lemmas it asked for are in `lib/X86.lean` and wired in
 `formal/x86_64_endtoend_test.py`). Re-opened and rewritten 2026-10-02 on
 `work/formal8-14`.
+
+## Status (2026-10-04 — the read at a `ret` is EVALUATED rather than simplified; the chain's LENGTH is still the wall)
+
+The doc's own advice was "evaluate the closed term instead of simplifying it into
+one", and it was right, and it is now what the emitter does — **where the chain
+is short enough to pay for it, which is not where the remaining holes are.**
+Two of the three things below are bugs that were true and unpinned, and the
+third is the boundary itself, still open and now bounded instead of unbounded.
+
+**1. The read is proved, not admitted, at 19 equations of chain.**
+`formal/x86_64_endtoend_test.py::_concrete_read` unfolds the path's successor
+equations with `simp only` and then lets `native_decide` EVALUATE the result.
+That is the route this doc argued for and it is what the simplifier's failure
+hid: `s{k}.mem` is a `mem_write_bytes` chain one link per instruction and `simp`
+reduces all of it symbolically, while every one of its addresses is a LITERAL
+(`X86State.init` gives `rsp` the literal `0xfffffffffffffff0`, and this backend
+addresses memory through `rsp`/`rbp` only), so the term is closed and evaluating
+it is linear where simplifying it was not.
+
+Getting there needed a fact `lib/X86.lean` did not have: **no lemma said a
+register or flag write leaves memory alone.** A `.mem` projection stops at the
+first `x86_set_reg` — the only wrappers that return a state through a `match` or
+an opaque `def` — and brings the sixteen register fields with it, one of which
+is `rdi`, where `X86State.init` puts the program's input; `native_decide` refuses
+a term with a free variable in it. Five `_mem` lemmas now
+(`x86_set_reg_mem`, `x86_set_xmm_mem`, `x86_flags_logic_mem`,
+`x86_flags_add_mem`, `x86_flags_sub_mem`), plus the wrapper definitions and this
+file's own sixteen `[simp]` REX decodings named in the set, because the write
+ADDRESSES are projections out of the same wrappers. Measured on `const2`: 3.4 s,
+1.4 GB, `rc=0`, and with the two closing-read admissions deleted the file still
+checks — so the read is closed there, and the hole this doc's `const2` row
+carried was real.
+
+**2. `try (…) <;> all_goals sorry` never admitted anything.** Every side
+condition in every generated file was written that way, on the strength of
+B23's second point in the companion doc — and `try t1 <;> t2` does not run `t2`
+when `t1` throws. A firing side condition was therefore an `unsolved goals`
+error and the file DIED, which is the exact failure B23 exists to prevent. It
+was hidden because no side condition in the corpus failed, so nothing could tell
+a working guard from a broken one. Measured, both shapes over the same
+unsatisfiable goal:
+
+    exact (by try (first | native_decide | decide) <;> all_goals sorry)
+      -> `unsolved goals ... ⊢ a + 1 = 4`, and the file dies
+    exact (by
+      try (first | native_decide | decide)
+      all_goals sorry)
+      -> `declaration uses sorry`, and the file builds
+
+The two-line form is what the emitter writes now, and the closing read is the
+first guard in this file that CAN fire, which is why the two had to be fixed
+together.
+
+**3. A `lean` that DIED was reported as a PROOF.** `_run_lean` decided `ok` from
+`: error` lines alone, and `lean::memory_exception` ABORTS rather than reports:
+on this doc's own 8-argument fixture the process printed
+`libc++abi: terminating due to uncaught exception of type lean::memory_exception`
+on stdout and exited `-6` with no error line at all, and the report said
+`terminates: PROVED`. Every number this doc quotes was therefore a statement
+about a file that was never checked on the day the emitter's own fixture was
+aborting. The verdict is now driven by what Lean says — `declaration uses sorry`
+is the only thing that knows whether a guard's `sorry` is load-bearing — and a
+non-zero exit is a failure.
+
+**And the boundary is still there, now measured on both sides.**
+The evaluation costs the SIZE OF THE UNFOLDED CHAIN, once per crossing, and at
+the length a call with a stack argument produces the file stops elaborating:
+
+| fixture | longest unfold | wall | peak | verdict |
+|---|---|---|---|---|
+| `const2` | 19 | 3.4 s | 1.4 GB | `rc=0`, read closed |
+| 3-argument call | 77 | 127.3 s | 5.2 GB | `rc=0`, a `sorry` still live |
+| 8-argument call | 113 | 222.6 s | 6.5 GB | **`rc=-6`**, `lean::memory_exception` |
+| 24-argument call | 184 | 258.8 s | 6.0 GB | the same — **and so is the pre-change emitter** |
+
+So `_MAX_UNFOLD = 64` gates the attempt and a longer chain keeps the pre-change
+one-equation shape: the 8-argument fixture is CHECKED again at 165.9 s / 6.0 GB
+(`rc=0`, against 225.5 s / 6.0 GB before this pass), and the 24-argument one is
+no worse than it was — it aborted before this pass too, which the 2026-10-03
+table's `127 s, 5.0 GB` no longer reproduces on the current tree and nobody had
+looked. 64 is an interpolation between 19 and 77, not a crossover measurement,
+and `_MAX_UNFOLD`'s docstring says so and names the bisect.
+
+**What is left, unchanged and now the only thing in this doc.** The per-step
+separation invariant: one cheap fact per step, so a read costs O(1) in the
+chain's length instead of O(length) per crossing. It needs an emitter-side
+stack/frame tracker to make each write's address a literal, which is this doc's
+own option 1 and was never the wrong idea — it was the wrong SIZE. The 45-example
+sweep is NOT re-measured (it is a heavy run), so
+`FORMAL_x86_64_end_to_end_proof.md`'s table stands as of 2026-10-02 and the one
+prediction to check first is still `terminates proved with no sorry`.
+
+Everything below this line is earlier and is left as written.
 
 ## Status (2026-10-03 — the remaining holes are COUNTED AND NAMED, so the boundary is visible)
 
