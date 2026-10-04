@@ -1682,7 +1682,7 @@ def _emit_reflection_dispatch(self, parts):
                 "       * `{'name': True, 'ok': True}`. A literal, so `_s` is not\n"
                 "       * owned and must not be freed. */\n"
                 "      _s = d->slots[_i].val ? \"True\" : \"False\";\n"
-                  "    if (d->slots[_i].kind == 2)\n"
+                  "    else if (d->slots[_i].kind == 2)\n"
                   "      /* A str value stored via mojo_dict_set_str carries its\n"
                   "       * pointer in `val` with kind==2; `_mojo_generic_elem_repr`\n"
                   "       * would read that pointer as an int64_t, so a dict LITERAL's\n"
