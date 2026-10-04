@@ -28,13 +28,14 @@ with "Symbol not found". These tests pin the replacement behaviour:
      goes red if the order inverts — because the failure mode of getting it
      wrong is a program that binds the wrong module and computes the wrong
      answer with nothing to grep for.
- 10. a module that genuinely has no boundary symbol is REFUSED, and the
-     refusal says which of the ways it has none. 33 of the 578 swept files
-     are this one refusal; the decision and its cost are in
-     bugs/FORMAL_known_limits.md §1, and the five tests at the end of this
-     file pin both the decision and the accuracy of the message, because a
-     message that is false about the file sends the reader after a construct
-     that is not there.
+ 10. an import EDGE that binds no name the dependency could publish as one
+     boundary symbol needs no library at all, and a module that genuinely has
+     no boundary symbol is still REFUSED for every edge that does bind
+     something from it — with a message saying which of the ways it has none.
+     The decision and its cost are in bugs/FORMAL_known_limits.md §1, and the
+     tests at the end of this file pin both the rule and the accuracy of the
+     message, because a message that is false about the file sends the reader
+     after a construct that is not there.
 
 Invoked directly:
     python3 test_formal_imports.py [-v]
@@ -2329,17 +2330,30 @@ def test_a_package_that_declares_something_is_still_refused(tmpdir, _shared):
     each of these has to keep its own refusal: a generic-only body (one trie
     entry cannot be two instantiations), a body whose only declaration is
     private, and a body whose names are all C library symbols. Without the
-    `_declared_api_shape` test the branch swallowed all three, and
-    `test_a_module_with_no_boundary_symbol_is_refused` went red — which is why
+    `_declared_api_shape` test the branch swallowed all three, and the
+    generic-only module test at the end of this file went red — which is why
     that row exists and why the three are named here.
 
     The program imports the package itself (`from pkg import widen`), which is
     the spelling that makes the package's dylib get built at all; with
     `import pkg.sub` there is no package library to refuse and the case would
     pass vacuously.
+
+    **AND IT CALLS THE NAME**, which is the whole difference from 2026-10-04 and
+    the reason the `gen` row's expected wording changed. The per-edge rule
+    (`formal/imports.py::library_free_edges`) exempts an edge that binds nothing
+    but templates, so a package whose body is one generic template, imported by
+    a program that never calls it, now builds — and there is nothing to assert
+    about a refusal there. Calling it puts the edge back in the shape the gate
+    exists for: a bare call to a template has no callee, and the refusal comes
+    from the IMPORTER (`imported_callee_refusal`, naming `widen`) rather than
+    from the module's own gate. The other two shapes are unaffected: `widen` is
+    not a name either of them declares, so their edges keep their library and
+    their own sentences.
     """
     cases = {
-        "gen": ("def widen[T: Intable](v: T) -> T:\n  return v\n", "GENERIC"),
+        "gen": ("def widen[T: Intable](v: T) -> T:\n  return v\n",
+                "does not export it"),
         "private": ("def _hidden(x):\n  return x\n", "private"),
         "clib": ("def exit(x):\n  return x\n", "C library symbol"),
     }
@@ -2348,7 +2362,7 @@ def test_a_package_that_declares_something_is_still_refused(tmpdir, _shared):
         os.makedirs(root)
         write_tree(root, {"pkg/__init__.mojo": body,
                           "prog.mojo": "from pkg import widen\n"
-                                      "def main():\n  return 0\n"})
+                                      "def main():\n  return widen(1)\n"})
         fresh_cas()
         result, _out = build(root, "prog.aout", expect_ok=False)
         text = result.stderr or result.stdout
@@ -2906,37 +2920,95 @@ GENERIC_ONLY_MODULE = "def widen[T: Intable](v: T) -> T:\n  return v\n"
 CONCRETE_MODULE = "def widen(v):\n  return v\n"
 
 
-def test_a_module_with_no_boundary_symbol_is_refused(tmpdir, _shared):
-    """A module whose only public function is a GENERIC template is refused.
+def test_a_module_nobody_binds_a_concrete_name_from_needs_no_library(
+        tmpdir, _shared):
+    """A module whose every imported name is a TEMPLATE is not built, and the
+    program that imports it builds and runs.
 
-    The limit, pinned. doc/ABI.md §Generics is explicit that a generic is not
-    a single boundary symbol — each INSTANTIATION is, keyed in the CAS by its
-    type arguments — and that monomorphization is Stage 5, which this path
-    does not do. So there is no name an importer could bind, and the honest
-    answer is the refusal.
+    **THE PER-EDGE RULE, and the decision this row used to pin the other way.**
+    A module dylib exists so that something on an import EDGE can bind a symbol
+    in it, so an edge that binds no name the dependency could publish as one
+    symbol needs no library — `formal/imports.py::library_free_edges` decides
+    that per edge and `build_module_dylib` and `_resolve_imports` both act on
+    it. `BinaryHeap` is the measured case (`std/collections/__init__.mojo`
+    re-exports it and 162 of the 163 files the export gate blocked name nothing
+    it declares), and `bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §4.1 is the
+    measurement.
 
-    It is a `refuse` in substance: the build must FAIL and the message must
-    name the module and say GENERIC. If a future change makes this build, this
-    test fails — which is the point, because the only way to make it build is
-    to publish the template under its base name, and that is a run-time wrong
-    answer rather than a build error.
+    What this pins is the half that could have gone wrong silently: the program
+    RUNS and **no library for the module exists at all**, so the pass is not
+    "an empty trie happened to link". A library with an empty export table would
+    satisfy a build that never binds anything, and the assertion that would
+    catch a regression to that is the absence of the file.
+
+    It replaces `test_a_module_with_no_boundary_symbol_is_refused`, which
+    asserted the opposite and existed to stop a template being published under
+    its base name. That is still refused, and it is still pinned — by
+    `test_a_generic_template_is_not_exported_under_its_base_name` below (the
+    export set is empty) and by the next test (a bare call cannot bind). The
+    difference the reversal makes is that the module is no longer refused for
+    having no boundary symbol when NOTHING on the edge wants one.
     """
     root = os.path.join(tmpdir, "genericonly")
     os.makedirs(root)
-    write_tree(root, {"mylib/__init__.mojo": GENERIC_ONLY_MODULE,
+    write_tree(root, {"mylib.mojo": GENERIC_ONLY_MODULE,
                       "prog.mojo": "from mylib import widen\n"
                                   "def main():\n  return 0\n"})
     fresh_cas()
+    _result, out = build(root, "prog.aout")
+    code, err = run(out)
+    check(code == 0,
+          f"a program that imports a template and calls nothing returned {code} "
+          f"rather than 0: {err}")
+    built = sorted(glob.glob(os.path.join(cas_imports("arm64"),
+                                          "mylib.*.arm64.dylib")))
+    check(not built,
+          f"a library was built for a module this edge binds no concrete name "
+          f"from, so the pass above is an empty trie that happened to link "
+          f"rather than the edge needing nothing: {built}")
+
+
+def test_a_bare_call_to_a_template_is_refused_by_the_export_rule(tmpdir, _shared):
+    """The surviving half of the old limit: `widen(3)` names no instantiation,
+    so it has no callee — and the refusal says so, by NAME.
+
+    The counterpart to the test above, and the reason the per-edge rule is not a
+    hole. The edge is exempt because every name it binds is a template, and the
+    one thing that still cannot be done across it is CALL one without spelling
+    the type argument: `widen(3)` is a BL against a symbol that does not exist
+    under any spelling. So `formal/imports.py::check_library_free_calls` refuses
+    it where the edge decision was made, and with
+    `formal/model.py::imported_callee_refusal` — the same sentence every other
+    unbindable imported callee gets.
+
+    It used to be refused by the module's own export gate instead, one layer
+    away, and the message the reader gets is the part worth pinning: it must
+    NAME THE CALL and the rule that stops it, because the gate's sentence
+    ("`widen` has no boundary symbol") is about the library and a reader who
+    never knew a library was being built cannot use it. Three assertions, one
+    per fact the sentence has to carry: the callee's name, the export rule, and
+    the spelling that would work.
+    """
+    root = os.path.join(tmpdir, "genericonly_bare")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": GENERIC_ONLY_MODULE,
+                      "prog.mojo": "from mylib import widen\n"
+                                  "def main():\n  return widen(3)\n"})
+    fresh_cas()
     result, _out = build(root, "prog.aout", expect_ok=False)
-    check(result.returncode != 0,
-          "a module exporting only a generic template built successfully; one "
-          "trie entry cannot be two instantiations, so a call with different "
-          "type arguments would silently bind the first one's body")
     text = result.stderr or result.stdout
-    check("__init__.mojo" in text,
-          f"the refusal does not name the module: {text.strip()[-300:]}")
-    check("GENERIC" in text,
-          f"the refusal does not say the export is blocked by genericity: "
+    check(result.returncode != 0,
+          "a bare call to an imported template built successfully; one trie "
+          "entry cannot be two instantiations, so a call with different type "
+          "arguments would silently bind the first one's body")
+    check("widen" in text,
+          f"the refusal does not name the call it is about: "
+          f"{text.strip()[-300:]}")
+    check("doc/ABI.md" in text,
+          f"the refusal does not say which rule stops the call: "
+          f"{text.strip()[-300:]}")
+    check("widen[<a type>]" in text,
+          f"the refusal does not give the spelling that would bind: "
           f"{text.strip()[-300:]}")
 
 
@@ -3457,8 +3529,10 @@ TESTS = [
      test_a_host_module_refusal_carries_its_measured_next_step),
     ("every host-module advice entry is honest",
      test_host_module_advice_is_honest),
-    ("a module exporting only a generic template is refused",
-     test_a_module_with_no_boundary_symbol_is_refused),
+    ("a module nobody binds a concrete name from needs no library",
+     test_a_module_nobody_binds_a_concrete_name_from_needs_no_library),
+    ("a bare call to a template is refused by the export rule",
+     test_a_bare_call_to_a_template_is_refused_by_the_export_rule),
     ("a generic template is not exported under its base name",
      test_a_generic_template_is_not_exported_under_its_base_name),
     ("a C-library-named definition is not blamed on privacy",

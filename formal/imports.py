@@ -2461,6 +2461,224 @@ def reexported_names(stmts, kinds_by_module: dict = None) -> dict:
     return out
 
 
+def _edge_import_statements(stmts, in_function: bool = False) -> list:
+    """`[(statement, in_function), …]` — every import in `stmts`, bodies too.
+
+    The same SET `imported_modules` collects, for its reason and with its
+    exclusions (a `FunctionDef` body is descended, an `If`/`Try` body is not), and
+    the reason this reader cannot reuse that function's list is that it answers a
+    different question: not "which modules are dependencies" but "what does each
+    of this file's statements BIND". An import inside a function body binds a
+    name in THAT scope, and none of the top-level tables above carry it — so a
+    per-edge decision taken from those tables alone would be answering about a
+    name the edge does not bind, which is the wrong kind of answer here.
+
+    `in_function` travels with the statement because the caller treats a
+    function-local import as a reason to KEEP a library rather than to judge it
+    on the names it binds: the names are bound in a scope this pass does not
+    track, so it cannot claim the edge binds nothing.
+    """
+    out = []
+    for st in stmts or []:
+        if isinstance(st, (F.ImportStmt, F.FromImportStmt)):
+            out.append((st, in_function))
+        elif isinstance(st, F.FunctionDef):
+            out.extend(_edge_import_statements(
+                getattr(st, "body", None) or [], True))
+    return out
+
+
+def library_free_edges(importer_path: str, stmts: list,
+                       project_root: str = None, demands: dict = None) -> dict:
+    """`{dependency source path: ([(bound name, module as spelled), …], why)}` —
+    the imports of `importer_path` that need no library, the names each one binds
+    and the reason it binds no symbol.
+
+    **THE RULE IS PER EDGE, not per module**, and that is the whole of it: a
+    module dylib exists so that something on an import EDGE can bind a symbol in
+    it. An edge that binds no name the dependency could publish as ONE symbol has
+    nothing to bind, so the library it would produce has nothing in it that
+    anyone on this edge can reach — and building it anyway turns a correct
+    program into a refusal.
+
+    The measured case is `std/collections/__init__.mojo`'s
+    `from .binary_heap import BinaryHeap`. `BinaryHeap` is a generic struct
+    TEMPLATE, and `doc/ABI.md`'s public-symbol rule has never published a
+    template under its base name — `formal/build.py::no_public_api_reason` is the
+    sentence that says so and
+    `test_formal_imports.py::test_a_generic_template_is_not_exported_under_its_base_name`
+    pins the empty export set — so that edge cannot bind a symbol whatever
+    `binary_heap.mojo` exports. Before this, that one edge's non-symbol cost 163
+    swept files their build, because `build_module_dylib` refused the library
+    whether or not the importing chain wanted it
+    (`bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §4.1).
+
+    **Which names are templates is read from `reflect.export_exclusions`**, by
+    `formal/monomorph.py::template_names`, which is the SAME rule
+    `collect_exports_src` filters the export table through. So "a name this edge
+    binds that is not a symbol" and "a name this backend would not export" are
+    one decision read twice rather than two implementations that can disagree.
+
+    **FOUR reasons keep a library**, and each is a case where the edge's binder is
+    not a name in an import statement at the top level of this file:
+
+    * a bare `import m` binds the MODULE, so `m.f(…)` is a call this pass cannot
+      rule out — `formal/model.py::import_bindings` is the reader that says which
+      statement shape it is;
+    * `from m import *` binds `m`'s whole export set, which is a fact about a
+      compilation that has not happened yet (`star_imported_modules`' own
+      docstring);
+    * a `from m import …` inside a function body, for `_edge_import_statements`'s
+      reason;
+    * an INSTANTIATION of one of `m`'s templates is DEMANDED of it (`demands`).
+      This is the one thing that does make a template-only module publishable, and
+      it is how a caller reaches a template at all: `formal/monomorph.py`
+      compiles each demanded instantiation into that module's own library as a
+      concrete definition, so an edge that asks for one needs the library.
+
+    A name this file also DEFINES is not bound by the edge and is not consulted,
+    which is `imported_bound_names`' precedence and `reexported_names`' — a bare
+    call resolves to the local definition, so the dependency's same-named symbol
+    is irrelevant to it.
+
+    A `demands` argument of None means "no information", and then the last
+    reason above cannot fire; both callers pass the set they already computed
+    rather than recomputing it, because computing it is a walk of this file's
+    bracketed call sites (`formal/imports.py::instantiation_demands`) and a
+    decision that disagreed with the demands the build actually used would be a
+    decision about a different build.
+
+    The bindings are in the value, not only the names, because the caller that
+    acts on this table has to be able to NAME the module in a diagnostic
+    (`check_library_free_calls`), and the spelling a relative import is written
+    in is the only spelling the reader of the file has. Each binding is
+    `(name bound here, name the defining module published it as, module as
+    spelled)`, and the template test is over the first TWO: for an unaliased
+    import they are one name, and for `f as g` the boundary symbol is `f`'s.
+    """
+    from formal import monomorph as MM            # lazy — pulls the middle tier
+    root = project_root or importer_path
+    defined = _defined_names(stmts)
+    edges: dict = {}
+    for st, in_function in _edge_import_statements(stmts):
+        if isinstance(st, F.ImportStmt):
+            spellings = [st.module] + [m for m, _a in (st.extra or [])]
+        else:
+            spellings = [st.module]
+        for spelling in spellings:
+            if not isinstance(spelling, str) or not spelling:
+                continue
+            dep = resolve_module_path(spelling, relative_to=importer_path,
+                                      project_root=root)
+            if dep is None:
+                continue
+            edge = edges.setdefault(os.path.abspath(dep), [[], ""])
+            if isinstance(st, F.ImportStmt):
+                edge[1] = edge[1] or (
+                    f"`import {spelling}` binds the module, so `{spelling}.f(…)`"
+                    f" is a call of that module's export which an import "
+                    f"statement alone cannot rule out")
+            elif not (st.names or []):
+                edge[1] = edge[1] or (
+                    f"`from {spelling} import *` binds the module's whole "
+                    f"export set, which is a fact about a library that has not "
+                    f"been built yet")
+            elif in_function:
+                edge[1] = edge[1] or (
+                    f"`from {spelling} import …` inside a function body binds "
+                    f"a name in that scope, which this edge does not track")
+            else:
+                for bound, original, spelled in _from_import_bindings([st]):
+                    if bound and bound not in defined:
+                        edge[0].append((bound, original or bound, spelled))
+    out: dict = {}
+    for key, (bound, keep) in edges.items():
+        if keep or (demands or {}).get(key):
+            continue
+        templates = set(MM.template_names(module_source_text(key)))
+        bindings = sorted(set(bound))
+        # BOTH spellings, and the reason is an ALIAS: `from x import f as g`
+        # binds `g` here and the symbol the link line has to carry is `x`'s
+        # `f`, because the export table is keyed by the DEFINING name
+        # (`reexported_names`' third element, and `import_bindings`' "defining
+        # name"). Judging the edge by the local spelling alone would exempt an
+        # edge that binds `f` under another name — and the consumer that calls it
+        # under either spelling then has no library to bind, which is measured:
+        # `test_formal_imports.py`'s "a name the module defines wins over its own
+        # import" binds `g` for a `base` in another module and calls `base` too.
+        if templates.issuperset(n for _b, n, _s in bindings):
+            listed = ", ".join(b for b, _n, _s in bindings) or "it binds no name"
+            out[key] = (bindings,
+                        f"every name this edge binds is a GENERIC template of "
+                        f"that module — {listed} — and a template is not one "
+                        f"boundary symbol: each instantiation is, under its own "
+                        f"mangled name, and no instantiation is demanded of it "
+                        f"here")
+    return out
+
+
+def check_library_free_calls(importer_path: str, stmts: list,
+                             library_free: dict) -> None:
+    """Refuse a BARE call to a name an exempt edge binds; raise `ImportBuildError`.
+
+    The one thing an exempt edge can still be asked for, and it is a refusal
+    rather than a silent gap because a bare call to a template has no callee to
+    bind: `widen(3)` names no instantiation, so there is no symbol for it under
+    any spelling, and the image would carry a BL against nothing.
+
+    **This is the message the exemption would otherwise cost.** Before the
+    per-edge rule, that call was refused by the dependency's export gate, whose
+    sentence names the construct and the repair (`widen[Int](…)`). With the edge
+    exempt the gate is never reached, and the refusal that arrives instead is the
+    LINK-TIME bind audit's — true, and about as specific as "the image would bind
+    a symbol that nothing provides", which sends the reader to the linker rather
+    than to the brackets. So the exemption carries its own refusal, asked here
+    where the edge decision was made and before anything is emitted, and it is
+    `formal/model.py::imported_callee_refusal` verbatim: the same sentence every
+    other unbindable imported callee gets, so there is one message for this fact
+    rather than one per way of reaching it.
+
+    A BRACKETED callee (`widen[Int](3)`) cannot arrive here, and the reason is
+    structural rather than a filter: an edge whose bound names include a template
+    that is spelled at a call site is asking for that instantiation, which is the
+    fourth of `library_free_edges`' four reasons to KEEP a library — so an
+    exemption and a bracketed call of one of its names cannot both be true. A
+    demand that `formal/monomorph.py` then fails to satisfy leaves the brackets
+    in place for the bracketed-callee scan, which is the sentence that is true
+    of that case.
+
+    `importer_path` is only in the signature so the caller reads as one call per
+    file, and it is unused here: the message names the CALL and the module as
+    the reader spelled it, which `library_free_edges` carried over, and inventing
+    a path here would be a second spelling of the same fact.
+    """
+    from formal import model as M                   # lazy — cycle
+    exempt = {}
+    for bindings, _why in (library_free or {}).values():
+        for bound, defining, spelled in bindings:
+            # BOTH spellings, for the ALIAS reason `library_free_edges` gives:
+            # the call may be written as the alias or as the defining name and
+            # neither has a callee, so the refusal has to reach either.
+            exempt.setdefault(bound, spelled)
+            exempt.setdefault(defining, spelled)
+    if not exempt:
+        return
+    for st in stmts or []:
+        fn_name = st.name if isinstance(st, F.FunctionDef) else ""
+        for node in M.iter_nodes(getattr(st, "body", None) or [st]):
+            if not isinstance(node, F.CallExpr):
+                continue
+            callee = node.func
+            if not isinstance(callee, F.IdentExpr) \
+                    or callee.name not in exempt:
+                continue
+            sym = M.GlobalSymbol(callee.name, None, "imported",
+                                 exempt[callee.name],
+                                 getattr(callee, "line", 0) or 0)
+            raise ImportBuildError(
+                M.imported_callee_refusal(callee.name, sym, fn_name))
+
+
 def own_module_identity(source_path: str, project_root: str = None) -> str:
     """The dotted name `source_path` is ADDRESSED by, independent of who reached it.
 
@@ -2823,7 +3041,30 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
             merged[tmpl] = sorted(set(merged.get(tmpl, [])) | set(args))
         below[other] = merged
     dep_dylibs = []
+    # PER EDGE (`library_free_edges`): an import that binds nothing the
+    # dependency could publish as one symbol needs no library, and asking for one
+    # anyway is what turned `std/collections/__init__.mojo`'s re-export of the
+    # `BinaryHeap` TEMPLATE into the refusal of all 163 files that import the
+    # package — the module was refused for a boundary symbol nobody on that edge
+    # could bind. The four reasons that keep a library (a bare `import`, a star
+    # import, a function-local `from`, and a demanded instantiation) are that
+    # function's, so the two cannot disagree about which edges are exempt.
+    #
+    # The library is left off this module's LINK LINE as well as not built, and
+    # that is the same fact twice rather than a shortcut: a load command naming a
+    # library nothing binds through is a dependency the loader opens for
+    # nothing, and `_record_depends` below already records only the libraries
+    # that were actually built.
+    library_free = library_free_edges(source_path, stmts,
+                                      project_root=project_root or source_path,
+                                      demands=below)
+    # The refusal the exemption owes, asked BEFORE the loop so a module whose
+    # own body calls one of these names bare fails with the sentence that names
+    # the construct rather than with the link-time bind audit's.
+    check_library_free_calls(source_path, stmts, library_free)
     for _mod, dep_path in depends:
+        if os.path.abspath(dep_path) in library_free:
+            continue
         d = build_module_dylib(_mod, dep_path, out_dir, arch,
                                project_root=project_root or source_path,
                                _stack=_stack + (os.path.abspath(source_path),),
