@@ -2722,8 +2722,9 @@ theorem arm64_step_add_reg (s : Arm64State) (code : Nat → UInt8) (rd rn xm : N
 has no SP encoding and `Rn == 31` is the ZERO register — which is the `neg`
 alias. `formal/arm64_proof_gen.py`'s `_step_rhs` already rendered the `idx == 3`
 row that way, so until this fix the GENERATOR and the MODEL disagreed about
-exactly the register they disagree about; see
-`bugs/FORMAL_arm64_sub_and_subs_read_register_31_as_sp.md`. -/
+exactly the register they disagree about — they agreed for every `rn < 31` and
+disagreed for `rn = 31`, which is `neg`, and `check_step_conds` compares MASK
+LISTS rather than right-hand sides, so the disagreement had no observer. -/
 theorem arm64_step_sub_reg (s : Arm64State) (code : Nat → UInt8) (rd rn xm : Nat)
     (h_opc : arm64_read_insn code s.pc &&& 0xffe00000 = 0xcb000000)
     (h_rd : (arm64_read_insn code s.pc &&& 0x1f).toNat = rd)

@@ -88,8 +88,8 @@ FOUNDATION = set(L.AXIOM_FOUNDATION)
 # it asserted that `cmp sp, x16` reads the stack pointer, which the assembler
 # accepts and the hardware does not (SUBS reads register 31 as the zero
 # register).  It says zero now, renamed when `tools/formal_model_fuzz.py`
-# measured the CPU against the model; see
-# `bugs/FORMAL_arm64_sub_and_subs_read_register_31_as_sp.md`.
+# measured the CPU against the model (commit "four arm64 model bugs the
+# differential fuzzer measured").
 #
 # The two non-zero counts are named rather than left open, because the SHAPE is
 # the finding: `work_step_movk`'s 57 `bv_decide` sites are each a `∀ w, …` over a

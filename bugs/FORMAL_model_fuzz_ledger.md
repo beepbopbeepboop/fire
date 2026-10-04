@@ -40,20 +40,30 @@ recorded here (`MEMLIMIT` well inside the 3-4 GB line in `BLOW.md`).
 |---|---|---|---|---|---|
 | 2026-10-04 | all 10 | `model-fuzz` | 60 | AGREE 26, WRONG 9, NOSTEP 13, FAULT 10, ENC-MISMATCH 8 | the harness itself; every non-`AGREE` class below was a defect in the POOL or in the harness, and each is listed in §3 |
 | 2026-10-04 | all 10 | `sweepB` | 297 | AGREE 152, WRONG 45, NOSTEP 99, FAULT 0, ENC-MISMATCH 0 | the first clean sweep: every remaining finding is a fact about `arm64_step` |
-| 2026-10-04 | per-mix, 60 each | `ledgerA` | 596 | AGREE 238, WRONG 70, NOSTEP 172 | the coverage table in §2.1 |
+| 2026-10-04 | per-mix, 60 each | `ledgerA` | 600 | AGREE 238, WRONG 70, NOSTEP 172 | the coverage table in §2.1, BEFORE the model fixes |
+| 2026-10-04 | per-mix, 60 each | `ledgerA` | 600 | **AGREE 304, WRONG 4, NOSTEP 172** | the same corpus AFTER the four model fixes: WRONG 70 → 4, and NOSTEP unchanged, which is the shape of a fix that changes semantics rather than coverage |
+| 2026-10-04 | all 10 | `sweepB` | 296 | **AGREE 196, WRONG 1, NOSTEP 99** | after the fixes; the surviving `WRONG` is `LDR`/`STR (unsigned offset)` reading register 31 as zero |
 
 ### 2.1 Per-mix coverage (60 cases per mix, seed `ledgerA`)
 
 | mix | AGREE | WRONG | NOSTEP | what the NOSTEPs are |
 |---|---|---|---|---|
-| `shifts` | 60 | 0 | 0 | — the six shift instructions agree over the whole corpus |
-| `alu` | 50 | 10 | 0 | |
-| `ext` | 39 | 21 | 0 | |
-| `muldiv` | 47 | 13 | 0 | |
-| `flags` | 21 | 14 | 25 | `cmn` |
-| `select` | 10 | 8 | 42 | `csel`, `cmn` |
-| `mem` | 11 | 4 | 45 | `strh`, `ldrsw`, `ldrb`, `ldrh`, `ldrsh`, `ldr w`, `str w`, `ldur`, `stur` |
-| `memreg` | 0 | 0 | 60 | `ldr x, [xn, xm]` and `str x, [xn, xm]` |
+| mix | AGREE before | WRONG before | AGREE after | WRONG after | NOSTEP (unchanged) | what the NOSTEPs are |
+|---|---|---|---|---|---|---|
+| `shifts` | 60 | 0 | 60 | 0 | 0 | — the six shift instructions agree over the whole corpus |
+| `alu` | 50 | 10 | 60 | 0 | 0 | |
+| `ext` | 39 | 21 | 60 | 0 | 0 | |
+| `muldiv` | 47 | 13 | 60 | 0 | 0 | |
+| `flags` | 21 | 14 | 35 | 0 | 25 | `cmn` |
+| `select` | 10 | 8 | 18 | 0 | 42 | `csel`, `cmn` |
+| `mem` | 11 | 4 | 11 | 4 | 45 | `strh`, `ldrsw`, `ldrb`, `ldrh`, `ldrsh`, `ldr w`, `str w`, `ldur`, `stur` |
+| `memreg` | 0 | 0 | 0 | 0 | 60 | `ldr x, [xn, xm]` and `str x, [xn, xm]` |
+
+**NOSTEP does not move, and that is the reading of the table**: the four model
+fixes changed what the model COMPUTES, not which instructions it accepts, so
+every mix that could already step its instructions went to AGREE and every mix
+that could not stayed at NOSTEP. A fix that moved NOSTEP would have been a fix
+to the harness.
 
 `shifts` agreeing is worth a row of its own: `bugs/FORMAL_arm64_right_shift_
 is_always_arithmetic.md` is the history this tool would otherwise have
@@ -140,11 +150,16 @@ keeps the case's flag seed (§ the minimiser's docstring) and requires the
 reduced case to fail the SAME WAY as the original — without both of those it
 will happily delete the guilty instruction and report a different bug.
 
-| instruction | model | hardware | what it is |
-|---|---|---|---|
-| `movk x23, #54219, lsl #0` | `ffffffffffffffff` | `ffffffffffffd3cb` | MOVK modelled as an OR, so it cannot insert a halfword into an already-set field |
-| `sxtb w0, w3` | `ffffffffffffffa5` | `00000000ffffffa5` | the W-destination sign-extension is not truncated to 32 bits |
-| `sxth w5, w6` | `ffffffffffffc834` | `00000000ffffc834` | the same, 16-bit |
+| instruction | model | hardware | what it is | state |
+|---|---|---|---|---|
+| `movk x23, #54219, lsl #0` | `ffffffffffffffff` | `ffffffffffffd3cb` | MOVK modelled as an OR, so it cannot insert a halfword into an already-set field | **FIXED** |
+| `sxtb w0, w3` | `ffffffffffffffa5` | `00000000ffffffa5` | the W-destination sign-extension is not truncated to 32 bits | **FIXED** |
+| `sxth w5, w6` | `ffffffffffffc834` | `00000000ffffc834` | the same, 16-bit | **FIXED** |
+| `neg x13, x1` | `00000000000000db` | `ffffffffffffffdb` | SUB (shifted register) reads `Rn = 31` as SP; it is the zero register there, and that is the `neg` alias | **FIXED** |
+| `cmp sp, x16` | N=1 | Z=1 | SUBS reads `Rn = 31` as zero too — and the docstring above the arm, and a theorem built on it, asserted the opposite | **FIXED** |
+| `subs x11, x20, x19` | `x11` unchanged | `x11 = x20 - x19` | the same arm never wrote `Rd` | **FIXED** |
+| `ldr x0, [sp, #32]` | `0000000000000000` | `53eed1de90a7dc2e` | LDR/STR (unsigned offset) reads the base with `arm64_reg`, so `Rn = 31` is zero and the address is `imm` | filed, see below |
+| `str w30, [sp, #12]` | 8 bytes written | 4 bytes written | `mem_write_u64` in a 32-bit store | filed with the row above |
 | `cmn x0, x3` | — | — | no arm: `arm64_step` returns `none` |
 | `csel x1, x5, x1, lt` | — | — | no arm |
 | `ldrb w27, [sp, #27]` | — | — | no arm |
@@ -154,4 +169,10 @@ will happily delete the guilty instruction and report a different bug.
 | `str x29, [x9, x17]` | — | — | no arm (register-offset store) |
 
 The full set of refusals is §2.1's table; `bugs/FORMAL_arm64_step_cannot_step_
-nine_wired_encodings.md` carries the count and the encoders.
+nine_wired_encodings.md` carries the count, the encoders and the order to add
+them in. The one surviving `WRONG` is
+`bugs/FORMAL_arm64_ldr_str_unsigned_offset_reads_register_31_as_zero.md`, whose
+§4 says why it is written down instead of landed: the fix is one identifier in
+three places, and the two `work_step_*` PROOFS it breaks need a `Rn == 31` /
+`Rn < 31` case split that a light worker cannot confirm without the
+generated-proof suite.
