@@ -241,6 +241,14 @@ SAMPLES = [
      "`f(x, b=2)` is a keyword argument in a call through a VALUE, and this "
      "path has no declaration to bind it by NAME: a callee reached through a "
      "word is read as taking the arguments the call site writes"),
+    # The PASSING end rather than the calling end, and a different family
+    # because the fix is in a different place: a value call's refusal is raised
+    # by an emitter (there is no declaration to read at the call site), this one
+    # by `formal/build.py`'s name-placement walk, which is the only pass that
+    # has both ends of the call at once.
+    ("function value into a declared non-function",
+     "'dbl' is a FUNCTION of this image read as a value, and it is passed to "
+     "`call2()` in main as parameter `f`, which is declared `Int`"),
 
 ]
 
@@ -628,6 +636,15 @@ CAUSE_SAMPLES = [
      "`func(x, b=2)` is a keyword argument in a call through a VALUE, and "
      "this path has no declaration to bind it by NAME: a callee reached "
      "through a word is read as taking the arguments the call site writes"),
+    # …and the passing end. Its marker has TWO clauses on purpose: "is passed
+    # to" alone is the catch-all two rows below claim, and "read as a value"
+    # alone would be matched by any other message that says it, so the pair is
+    # what makes this row specific. Quoted from `test_formal_run.py`'s
+    # `a_function_name_passed_as_an_argument_is_named_as_one`, which is the case
+    # that raised it.
+    ("a function passed where the callee declares something else",
+     "'dbl' is a FUNCTION of this image read as a value, and it is passed to "
+     "`call2()` in main as parameter `f`, which is declared `Int`"),
 ]
 
 # The causes no arm64 message above exercises. Each one is named here with WHY,

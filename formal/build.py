@@ -11537,6 +11537,54 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # this function binds it, which is exactly what lets a callee through.
         func_names = set(_callee_defs(functions))
         placed |= func_names
+        # A FUNCTION read as a value in ARGUMENT position, where the callee's
+        # DECLARATION is in hand and says the word cannot be a function.
+        #
+        # The value itself is a code address and always was (each backend's
+        # `_load_var`), so a read is not a refusal — but the RECEIVING end is
+        # declared, and a declaration that says `Int` refutes the program:
+        # `call2(dbl, 5)` with `def call2(f: Int, a: Int): return f + a` would
+        # otherwise build, run and answer `address_of_dbl + 5`, which is a
+        # number nobody wrote with exit 0. That is the exact failure
+        # `no_public_api_reason`'s docstring calls a "build-error traded for a
+        # run-time wrong answer", so it is refused here.
+        #
+        # Only the bare `dbl(x)` spelling is checked, and that is the only one
+        # that can be: the value is definitionally an address when the
+        # argument IS a function name, and a computed argument (`call2(g, 5)`
+        # with `g` a local) is a word of unknown provenance that this check has
+        # no more to say about than the emitters do
+        # (`bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`).
+        #
+        # The reader is `model.value_callee_can_hold_a_function`, the SAME one
+        # the emitters ask about a callee reached through a value, so the two
+        # ends of one call cannot disagree about whether a declared `List[Int]`
+        # can hold a function.
+        callee_defs = _callee_defs(functions)
+        for call in M.iter_nodes(fn.body):
+            if not isinstance(call, F.CallExpr):
+                continue
+            # The callee's own name, from the two shapes a local callee is
+            # written in (`add(x)` and `add[2, 5](x)`) and one reader of each,
+            # so this cannot disagree with either backend's flattening.
+            cname = (M.subscript_callee_name(call)
+                     or (call.func.name
+                         if isinstance(call.func, F.IdentExpr) else None))
+            fdef = callee_defs.get(cname)
+            if fdef is None:
+                continue
+            shape = M.function_param_shape(fdef)
+            for i, arg in enumerate(call.args or []):
+                if not isinstance(arg, F.IdentExpr) \
+                        or arg.name not in func_names \
+                        or i >= len(shape.positional):
+                    continue
+                if not M.value_callee_can_hold_a_function(
+                        M.param_annotation(fdef, shape.positional[i])):
+                    raise CodegenError(M.function_value_argument_refusal(
+                        arg.name, fdef.name, shape.positional[i],
+                        M.param_annotation(fdef, shape.positional[i]),
+                        fn.name))
         frame_slots = dict(getattr(fn, "_frame_slots", None) or {})
         holders = set(getattr(fn, "_frame_holders", None) or ())
         # A call's CALLEE is not a read of a value: it names a symbol, and a

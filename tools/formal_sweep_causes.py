@@ -416,6 +416,8 @@ CAUSES = (
     # what the reader can write instead.
     ("a call through a value whose declared type cannot hold one",
      (("a word that is not a code address is nothing to branch through",),)),
+    ("a function passed where the callee declares something else",
+     (("is passed to", "read as a value"),)),
     ("a bracketed callee through a value, which this build cannot read",
      (("is a bracketed call through a VALUE",),)),
     ("a keyword argument in a call through a value",

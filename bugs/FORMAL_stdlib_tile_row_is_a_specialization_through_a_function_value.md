@@ -1,11 +1,21 @@
 # `algorithm/backend/tile.mojo`: a specialization call through a FUNCTION-VALUE field, and 4 stdlib files behind it
 
 **Area:** FORMAL (comptime specialization on a callee this unit does not
-compile). Found 2026-10-01 on `work/formal-re-refusal` while working the
-`other refusal` row. **NOT FIXED — and the "Whose" section below is STALE: the
-`construct:mlir-and-gpu-globals` claim it points at no longer exists, so this row
-is unowned. What is new is the measurement at the end, which shows that this
-document's own next step is necessary and NOT sufficient.**
+compile). Found 2026-10-01 on `work/formal-re-frusal` while working the
+`other refusal` row.
+
+**Status 2026-10-03 (`work/formal18-tile-specialization`): THE CONSTRUCT IS
+LOWERED, and this file is now a record of what stands BEHIND it.** The
+specialization through a function value builds, runs and answers CPython on
+both architectures, single-module and across a dylib boundary; the next wall
+for `tile.mojo` is its `*tile_size_list` variadic parameter, which is a
+different construct with its own reason. The measurement at the end of this
+document — "the dependency order for this row is four deep" — was RIGHT, and
+the first of the four is now behind us: what the file's own "next step"
+described as a declaration question turned out to be a representation
+question, and the representation turned out to be one 64-bit word holding a
+code address. Everything below the new section is history and is kept
+because each step of it is a measurement somebody would otherwise repeat.
 
 ## What was run
 
@@ -229,3 +239,161 @@ value for a function, an `Optional` of one, and only then the brackets. The
 first of those is somebody else's file and the two middle ones are a
 representation decision this document already argues correctly and cannot
 settle alone.
+
+## What landed 2026-10-03: a function value is a CODE ADDRESS, and the brackets are leading arguments
+
+**Claim** `project18:tile-specialization` on
+`work/formal18-tile-specialization`. Three decisions, all in `formal/model.py`
+so the two architectures cannot answer one construct differently, and all
+reachable from both emitters:
+
+| what | where |
+|---|---|
+| a function of THIS image read as a value is its entry ADDRESS | each backend's `_load_var`: `ADRP`+`ADD` (arm64), `LEA r, [rip+d]` (x86-64) |
+| a call through a bound word is `BLR X16` / `CALL R11` | each backend's `_emit_call`, beside the direct-call arm |
+| the specialization's bracket items are ordinary LEADING arguments, in bracket order, expanded from a comma list | `formal/monomorph.py::supplied_bracket_args` — the ONE bracket reader, shared with the demand walk |
+
+`monomorph.supplied_bracket_args` is deliberately NOT
+`comptime.specialization_args`, which is the reader for every other
+specialization on this path: that one binds the items to a DECLARED list (it
+pads a short bracket with 0 and truncates a long one), and a callee reached
+through a value has no declaration in either architecture, so there is nothing
+to pad against and nothing may be truncated. `f[3](x)` reaches the callee as
+`f(3, x)`. Putting the reader in `monomorph.py` rather than in either emitter
+is the "do not write a second specializer" rule made structural:
+`_bracket_type_args` (the demand walk's reader of the same bracket) now expands
+the comma list through the same `bracket_items`, so the two cannot disagree
+about what `f[a, b]` contains.
+
+**Measured, both architectures, against the interpreter's answer:**
+
+```
+$ python3 fire.py run .tmp/tile/prog.mojo          # the oracle
+27
+$ python3 tools/memslot.py --gb 8 --label t -- python3 fire.py build --formal \
+      --no-prove --backend=arm64 -o .tmp/t/xm-arm64 .tmp/tile/prog.mojo .tmp/tile/lib.mojo
+Built: .tmp/t/xm-arm64  [arm64/macho]      $ .tmp/t/xm-arm64 ; echo $?    → 27, 0
+… --backend=x86_64 …
+Built: .tmp/t/xm-x86_64 [x86_64/macho]     $ .tmp/t/xm-x86_64 ; echo $?   → 27, 0
+```
+
+where `lib.mojo` is the tile-shaped generator (`workgroup_function[tile_size]
+(current_offset)` inside a `while`) and `prog.mojo` is a consumer that passes
+its own generic `work`. That is the sweep's shape: a library whose callers are
+four `algorithm` plumbing files, and a function value that crosses the dylib
+boundary as DATA.
+
+Pinned by `test_formal_specialization.py`: a function passed as an argument, a
+call through a parameter, the tile shape, the same call with the callee in a
+linked module, and two brackets — each RUN and compared against CPython on both
+architectures — plus a case for the three refusals that remain. The test file's
+§5 and §5b pinned the two REFUSALS this replaces, so both were rewritten; the
+§5 rewrite also clears a row that was red on `master` for an unrelated reason
+(`bugs/FORMAL_function_value_refusal_is_defined_twice_and_the_later_one_wins.md`
+— its assertion named the wording of the shadowed copy of a duplicated
+function, and the construct it pinned does not exist any more).
+
+### The bracket is ambiguous, and the annotation is what settles it
+
+`f[3](x)` through a word is a specialization or an INDEX, and the two produce
+different code: read as a specialization, `3` is passed as a leading argument to
+the word `f` holds; read as an index, it is an element lookup and the call is of
+something else entirely. `model.value_call_bracket_reading` reads it off the
+caller's own DECLARATION, and it is a DEDUCTION rather than a pattern match:
+
+* `Some[F]` / `Optional[F]` / a `def[…](…) -> …` — **cannot be subscripted on
+  this path at all**, so the bracket cannot be an index and must be a
+  specialization. That is `tile.mojo`'s own declaration,
+  `workgroup_function: Some[Static1DTileUnitFunc]`;
+* a container (`List[Int]`, `String`, `SIMD`) — can only be indexed, so the
+  brackets are an index and an element is not callable here;
+* a scalar (`Int`, `Bool`, `DType`) — neither, and the program is wrong;
+* anything else, INCLUDING AN UNANNOTATED parameter — refused
+  (`model.value_bracket_reading_refusal`), because `f[0](x)` on an untyped `f`
+  is genuinely ambiguous.
+
+That last arm is why `stdlib/std/algorithm/backend/cpu/map.mojo` (`func(i)`, a
+BARE call) is unaffected: there is no bracket to read, and the bare call through
+an unannotated parameter lowers.
+
+**A parser limit worth knowing, because it is what the stdlib spelling has to
+work around:** a comma inside a nested type application does not parse.
+`Some[def[w: Int, h: Int](Int) -> Int]` is a `SyntaxError` — the parser reads
+`Int` and `h` as two arguments of `Some` — and a multi-line annotation is a
+`SyntaxError` too. `tile.mojo` sidesteps both by naming its function types in
+`comptime` aliases, so the two-bracket form (`workgroup_function[tile_size_x,
+tile_size_y]`, `tile2d`) has to be spelled with the function type at the top
+level of the annotation to be written at all.
+
+### What is still refused, and why each one has no answer here
+
+Three shapes, three sentences, all asked from the same place in both backends,
+and all three now in `tools/formal_sweep_causes.py` (they were in
+`other refusal`, the bucket that means nobody has looked):
+
+* **a keyword through a value** (`f(x=1)`, or a keyword item in the bracket) —
+  a keyword names a PARAMETER, and there is no parameter list in hand;
+* **a bracket this build cannot read** — the arm above;
+* **a parameter whose declared type cannot hold a function** (`List[Int]`) — the
+  declared type refutes it, so it is refused at build time rather than turned
+  into a branch through whatever word the container held.
+
+A function of ANOTHER image read as a value is still refused, by the unchanged
+`model.function_value_refusal`: this unit has the DECLARATION (it is how the
+callee's parameters are bound for an ordinary call into a linked library) and no
+CODE, and materializing an address for it needs a GOT slot this assembler does
+not fill for anything but a C symbol.
+
+## Where `tile.mojo` stands now, and what is behind it
+
+The file is still refused, and the refusal MOVED — which is the measurement:
+
+```
+$ python3 tools/memslot.py --gb 8 --label tile -- python3 fire.py build \
+      --formal --no-prove -o .tmp/tile/real \
+      ../new-modular/Mojo/stdlib/std/algorithm/backend/tile.mojo
+build: tile: the body reads 'tile_size_list', its *-parameter, and this path
+has no variadic ABI. …
+```
+
+So the 4 files of this row — and the 8-in-10 that
+`bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §4.1 measured landing here once
+the export gate lifts — now stop at the next construct, in this order:
+
+1. **`*tile_size_list` — a variadic parameter** (`tile.mojo:99`, and
+   `*primary_tile_size_list` at `:135`). Its own message is right: a formal
+   value is one 64-bit word, so the arguments a caller passes past the fixed
+   ones have nowhere to be packed, and a tuple of them is a container whose
+   frame belongs to the function that built it. **This is a change to the
+   calling convention both backends AND the Lean proof share**, so it is not a
+   light worker's row.
+2. **`Some[Static1DTileUnitFunc]` — an `Optional` of a function.** The
+   parameter annotation is READ (that is what settles the bracket, above) and
+   the word passes through, but nothing can ask whether the optional is empty:
+   `None` and a value are one word here.
+   `FORMAL_stdlib_optional_needs_a_representation.md` owns that, and it is 43
+   files of its own.
+3. **`comptime for tile_size in tile_size_list` over a `List[Int]`, and
+   `secondary_tile_size_list[i]`** — a comptime loop over a value this path
+   represents as a frame-allocated blob.
+
+**And the proof path is not the first wall, which corrects the order this
+document's last section gave.** It said the first thing needed was a model step
+for an indirect call. Measured on this tree, a program that calls a SECOND
+FUNCTION AT ALL cannot be proved, whatever the call looks like: a direct
+`work[3](5)` from `main` raises the same
+
+```
+NotImplementedError: universal theorem: the call at 0x100000438 targets
+0x10000044c, a second function in the same image. … that is interprocedural
+walking: a return-address map in the framework, not a missing case here.
+```
+
+on `master` and on this branch (both measured). So a model step for `BLR` is
+necessary and it is not what is in the way; the return-address map is. When
+that lands, the new instruction needs its own step — `encode_blr_xn` has been in
+`formal/arm64.py` since before any lowering called it, and `encode_call_r64` is
+new here — and `bugs/FORMAL_arm64_instruction_coverage.md`, which counts an
+encoder nothing emits as not-an-instruction, is where the arm64 half of that
+count lives: `blr` moved from "encoded, never emitted" to emitted, which is that
+survey's own measurement moving and not a claim about the survey.

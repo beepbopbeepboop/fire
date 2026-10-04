@@ -806,6 +806,7 @@ _REFUSAL_FAMILIES = (
     # the three.
     ("a word that is not a code address is nothing to branch through",
      "value call: declared type cannot hold a function"),
+    ("read as a value", "function value into a declared non-function"),
     ("is a bracketed call through a VALUE",
      "value call: bracket unreadable"),
     ("no declaration to bind it by NAME",

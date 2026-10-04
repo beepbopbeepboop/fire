@@ -4913,6 +4913,45 @@ def callee_value_refusal(name: str, fn, spelling: str = None,
     )
 
 
+def function_value_argument_refusal(name: str, callee: str, param: str,
+                                    ann, reader: str = None) -> str:
+    """Why a function name cannot be passed where the callee declares something
+    that cannot hold one.
+
+    Arch-free, and asked from `formal/build.py`'s name-placement walk — the one
+    pass that has both ends of the call in hand at once, which is the only place
+    this question CAN be asked: the callee cannot see its call sites and a call
+    site without a declaration cannot know the parameter.
+
+    `call2(dbl, 5)` with `def call2(f: Int, a: Int): return f + a` is the
+    program, and it is a build error in Mojo and CPython. Emitted here it would
+    be `address_of_dbl + 5` — a number nobody wrote, with exit 0, and nothing on
+    the link line to catch it, which is the failure
+    `no_public_api_reason`'s own docstring calls trading a build error for a
+    run-time wrong answer.
+
+    Only the bare `dbl(x)` spelling reaches this, because that is the only one
+    where the argument is DEFINITIONALLY a code address; a computed argument is
+    a word of unknown provenance and is named in
+    `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md` rather than
+    refused here, where the answer would be a sentence about a program this
+    check cannot see.
+    """
+    who = f" in {reader}" if reader else ""
+    declared = (f"declared `{ann.strip()}`" if isinstance(ann, str)
+                and ann.strip() else "not a type a function can go into")
+    return (
+        f"{name!r} is a FUNCTION of this image read as a value, and it is "
+        f"passed to `{callee}()`{who} as parameter `{param}`, which is "
+        f"{declared}. A function value is a code ADDRESS — one 64-bit word, "
+        f"the entry point of `{name}` — and a word of that kind is not an "
+        f"arithmetic operand, a container or a number, so the callee would "
+        f"compute with an address and answer a number the source never wrote. "
+        f"Declare `{param}` as the function type and CALL it, or pass the "
+        f"function's RESULT instead of the function"
+    )
+
+
 def value_bracket_reading_refusal(name: str, fn, ann=None) -> str:
     """Why a bracketed callee through a value cannot be read either way.
 
