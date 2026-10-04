@@ -30,7 +30,6 @@ Anything not eligible is left untouched and falls through to the existing
 gimple_cpp_* C++20-coroutine path -- incremental cutover.
 """
 from __future__ import annotations
-import copy
 import dataclasses
 
 import os
@@ -2949,9 +2948,6 @@ def _c_ident(name: str) -> N.IdentExpr:
 
 def _call(fn_name: str, args: list) -> N.CallExpr:
     return N.CallExpr(func=_c_ident(fn_name), args=list(args))
-
-
-import zlib as _zlib
 
 
 def _exc_type_tag(name: str) -> int:

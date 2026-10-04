@@ -1166,9 +1166,23 @@ _HOST_REFUSAL_HOST = ("gimple_codegen.py imports 'zlib', which is a host "
 # state, so it is the next example and the premise is asserted below rather
 # than trusted: if `bz2` is ever classified, this fails saying so.
 _HOST_UNTIERED_NAME = "bz2"
-_HOST_REFUSAL_UNTIERED = ("fire.py imports '%s', which is not a stdlib "
-                          "or sibling module, and no such file exists"
-                          % _HOST_UNTIERED_NAME)
+# **The THIRD of the three wordings `formal/imports.py::unresolvable_import_
+# error` can produce, and the one this sample has to be written in.** It used to
+# be `"… which is not a stdlib or sibling module, and no such file exists"`,
+# which was what a module in neither tier was refused with until
+# `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0 gave the function a
+# third arm: a name CPython ships and no tier names is now told it is "a
+# CPython standard-library module, which has no Mojo source in this tree and no
+# tier …". The sample is only parsed for the module name, so the words never
+# changed a count — but a fixture carrying a sentence the compiler cannot emit is
+# a fixture that teaches the wrong thing to whoever reads it, and the table's
+# own `UNTIERED` note used to quote that same dead sentence.
+_HOST_REFUSAL_UNTIERED = ("fire.py imports '%s', which is a CPython "
+                          "standard-library module, which has no Mojo source "
+                          "in this tree and no tier in `formal/imports.py` "
+                          "saying whether implementing it would need an object "
+                          "this target does not have — so nothing here can say "
+                          "whether it is reachable" % _HOST_UNTIERED_NAME)
 _HOST_CHAIN = ("build: analyze_benchmarks_types.py imports 'gimple_codegen', "
                "which cannot be built either: " + _HOST_REFUSAL_HOST)
 
@@ -1260,13 +1274,53 @@ def _host_rank_checks(failures):
               f"module in that state rather than deleting the check")
         check(d["untiered"] is True,
               f"{_HOST_UNTIERED_NAME} is in NEITHER formal/imports.py tier "
-              f"and has no model, so its refusal reads 'not a stdlib or "
-              f"sibling module, and no such file exists' — false of a CPython "
-              f"standard-library module. The row has to SAY so "
+              f"and has no model, so a file importing it is refused with "
+              f"neither an owner nor a next step. The row has to SAY so "
               f"(untiered={d['untiered']}) or a reader takes the count as a "
               f"work item")
         check(d["model"] is None,
               f"{_HOST_UNTIERED_NAME} reported a model at {d['model']!r}")
+
+        # …and the WORDS under that `UNTIERED` are the ones the build uses, asked
+        # for rather than written out here.
+        #
+        # The note used to quote "not a stdlib or sibling module, and no such
+        # file exists" — a sentence `unresolvable_import_error` stopped
+        # producing when it grew a third wording, so on every log taken since
+        # the ranking reported a clause no file could have been given. A report
+        # disagreeing with the message it reports on is the defect this file's
+        # sibling (`tools/formal_sweep.py`'s `_is_cpython_stdlib`) had before it
+        # became a delegation, and it is invisible to the ranking: the module,
+        # the count and the `untiered` flag were all right, and the sentence
+        # under them was fiction.
+        try:
+            from formal import imports as _I2
+            clause = C._host_refusal_clause(_HOST_UNTIERED_NAME, "fire.py")
+            expected = _I2.unresolvable_import_error("fire.py", _HOST_UNTIERED_NAME)
+        except Exception as exc:                             # noqa: BLE001
+            check(False, f"formal.imports is not importable here: {exc}")
+            clause, expected = None, ""
+        if clause is not None:
+            check("not a stdlib or sibling module" not in clause,
+                  f"the clause quoted for a module in no tier is {clause!r}, "
+                  f"which is the wording `unresolvable_import_error` only "
+                  f"produces for a name CPython does NOT ship. "
+                  f"{_HOST_UNTIERED_NAME} is a CPython module "
+                  f"(premise checked above), so quoting that sentence is "
+                  f"quoting one the build cannot emit")
+            check(clause in expected,
+                  f"the clause quoted for {_HOST_UNTIERED_NAME} is {clause!r} "
+                  f"and the build's own sentence for `fire.py` is "
+                  f"{expected!r}. The note has to be ASKED for from the "
+                  f"function that owns the wording, not written here: a copy "
+                  f"is right until the wording moves, and then it is wrong "
+                  f"about every file the sweep recorded")
+        else:
+            check(False,
+                  "`_host_refusal_clause` returned None, so the `UNTIERED` note "
+                  "prints no clause at all. The fallback branch exists for a "
+                  "tree where formal/imports.py cannot be imported, which is not "
+                  "this one")
 
     # A module with a model is in no tier BY DESIGN (`HOST_MODELLED`'s rule is
     # "a name LEAVES here by being WRITTEN"), and calling that a defect would
@@ -1328,14 +1382,66 @@ def _host_rank_checks(failures):
         print("  SKIP  this interpreter's stdlib is not reachable, so the "
               "`uses` spelling checks are not run")
 
+    # The `uses` fallback for a module whose NAMES cannot be read, which is four
+    # spellings and one discipline: prose is not a use.
+    #
+    # `zlib` is the case that made it a function. 29 files in the 2026-10-04
+    # arm64 sweep were filed under it and NOT ONE of them read it — the three
+    # files that import it (`gimple_codegen.py`, `mojo/middle/types.py`,
+    # `mojo/middle/coro.py`) say so in COMMENTS and in DOCSTRINGS, which is the
+    # direction this column must never be wrong in: `uses: 0` reads as "nothing
+    # to do" and `uses: 15` reads as fifteen files of work. `mojo/middle/coro.py`
+    # writes "# `_crc32_str`, NOT `zlib.crc32` (stubbed self-hosted — see its
+    # doc)" — a sentence about NOT calling it.
+    try:
+        for name, text, want in (
+                ("dead_import",
+                 "import zlib\n\n\ndef f() -> int:\n    return 1\n", False),
+                ("dead_import_comment",
+                 "import zlib\n# we use zlib.crc32 when we need a checksum\n"
+                 "\n\ndef f() -> int:\n    return 1\n", False),
+                ("dead_import_string",
+                 "import zlib\n\n\ndef f() -> str:\n    return "
+                 "'import zlib, sys\\nzlib.crc32(1)'\n", False),
+                ("alias_use", "import zlib as _z\n\n\ndef f() -> int:\n"
+                              "    return _z.crc32(1)\n", True),
+                ("member_use", "import zlib\n\n\ndef f() -> int:\n"
+                              "    return zlib.crc32(1)\n", True),
+                ("from_import_use", "from zlib import crc32\n\n\ndef f() -> int:"
+                                    "\n    return crc32(1)\n", True),
+                ("from_import_dead",
+                 "from zlib import crc32\n\n\ndef f() -> int:\n"
+                 "    return 1\n", False)):
+            p = write(name + ".py", text)
+            got = C._host_mentions_module(p, "zlib")
+            check(got is want,
+                  f"{name}.py read as {got!r} and must be {want!r}. The "
+                  f"fallback answers \"does this file USE the module\", and an "
+                  f"import with nothing read through it is a dead import; a "
+                  f"comment and a string are prose about the module rather than "
+                  f"uses of it; `import zlib as _z` binds `_z`; and "
+                  f"`from zlib import crc32` never spells `zlib` at all, so the "
+                  f"bound NAME is what has to be looked for")
+        mojo = write("looks_pythonish.mojo", "import zlib\n")
+        check(C._host_mentions_module(mojo, "zlib") is None,
+              "a `.mojo` path answered the fallback instead of refusing it. "
+              "Python's parser is not a Mojo parser, so a zero from one is a "
+              "guess, and a guess in the direction that says \"nothing to do\" "
+              "is the one direction this column must never be wrong in")
+        dead = write("dead_row.py", "import zlib\n\n\ndef f() -> int:\n"
+                                    "    return 1\n")
+        t2, _l2, _f2 = rank([line(dead, _HOST_REFUSAL_HOST)])
+        r2 = {r["module"]: r for r in t2}
+        check(r2.get("zlib", {}).get("mentions") == 0,
+              f"the row for a module with no readable names and a dead import "
+              f"reports mentions={r2.get('zlib', {}).get('mentions')!r}; 0 is "
+              f"the answer that says the row is CLOSURE rather than work")
+    except Exception as exc:                             # noqa: BLE001
+        check(False, f"the `uses` fallback raised: {exc}")
+
     # A module CPython publishes through `__all__` is ranked on `__all__`, so a
     # name the module has but does not publish cannot make a file look like a
     # user of it.
-    try:
-        with __import__("tempfile").NamedTemporaryFile() as _f:
-            pass
-    except Exception:                                    # noqa: BLE001
-        pass
     tf_names = C._host_declared_names("tempfile")
     check(tf_names is not None and "mkdtemp" in tf_names
           and not tf_names[0].startswith("_"),

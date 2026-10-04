@@ -114,6 +114,7 @@ non-empty: this tool reports on other tools' output and has no opinion about
 whether any of it is a defect.
 """
 import argparse
+import ast
 import collections
 import importlib.util
 import json
@@ -1115,6 +1116,132 @@ def _host_model_source(name: str):
     return None
 
 
+def _host_mentions_module(path: str, module: str):
+    """Whether `path` USES `module`, by AST. None when that cannot be told.
+
+    The fallback for a row whose declared NAMES could not be read (`zlib`,
+    `itertools`, `builtins` — built into the interpreter, so there is no source
+    here to parse). `_host_use_names` asks "which of this module's names does
+    this file bind", which needs the module's source; this asks the question
+    that does not — "does this file spell the module AT ALL" — and **zero is a
+    sound answer to it**: a file that never mentions the module cannot be using
+    whatever it exports, whatever that is. That is the answer that says a row of
+    N files is N files of CLOSURE, and it is the answer this row needed: 29
+    files were blocked by `zlib` and not one of them spelled it.
+
+    **AST, not a word search, and that is the whole of the discipline.** The
+    corpus says `zlib` in PROSE: `mojo/middle/coro.py` writes "#
+    `_crc32_str`, NOT `zlib.crc32` (stubbed self-hosted — see its doc)" and
+    `mojo/middle/types.py` writes "`zlib.crc32` is not available in the
+    compiled/self-hosted backend" — both in comments, both about NOT using it.
+    `tools/mem_slope.py` goes further and carries `resource.getrusage(
+    resource.RUSAGE_CHILDREN)` inside a STRING: the source of a child program it
+    writes out, not a call it makes. A regex over raw source counts those three
+    as users of two modules whose only reader is a text. Parsing reads the
+    imports and the names the code actually reads, so all three answer 0 for the
+    right reason.
+
+    All four spellings a use can have, and the first is the one that subsumes
+    the third:
+
+      * `mod.NAME` anywhere — the bound name appears as a name or an attribute
+        base;
+      * `from mod import NAME` — the module's own name is never read, so the
+        bound NAME has to be looked for instead (`from resource import
+        getrusage` uses `resource` and never spells it);
+      * `import mod as alias` — the alias is the name, not `mod`;
+      * `import mod` whose bound name is only a `Store` (a re-export) — a
+        re-export IS a use by another spelling, and this path cannot see the
+        other module's read, so it is counted as a use.
+
+    None for a `.mojo` path, because Python's own parser is not a Mojo parser
+    and a zero from it would be a guess. A row with one `.mojo` file in it
+    therefore reports no fallback number at all rather than one covering the
+    files this could read, which is the direction this tool must never be wrong
+    in.
+    """
+    if path.endswith(".mojo"):
+        return None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            tree = ast.parse(f.read(), filename=path)
+    except Exception:                                   # noqa: BLE001
+        return None
+    top = module.split(".")[0]
+    used = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            used.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            base = node
+            while isinstance(base, ast.Attribute):
+                base = base.value
+            if isinstance(base, ast.Name):
+                used.add(base.id)
+    if top in used:
+        return True
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module \
+                and node.module.split(".")[0] == top:
+            for alias in node.names:
+                if (alias.asname or alias.name) in used:
+                    return True
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] == top \
+                        and (alias.asname or top) in used:
+                    return True
+    return False
+
+
+def _host_refusal_clause(name: str, source_path: str):
+    """The clause `formal/imports.py` puts in the refusal for `name`, or None.
+
+    **READ, NOT COPIED, and that is the whole point of the function.**
+    `print_host_table` used to quote a sentence here — "not a stdlib or sibling
+    module, and no such file exists" — as what a module in neither tier is
+    refused with, and that sentence stopped being what the build says when
+    `formal/imports.py::unresolvable_import_error` grew its third wording
+    (`bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0): a name CPython
+    ships and no tier names is now told it is "a CPython standard-library module,
+    which has no Mojo source in this tree and no tier … saying whether
+    implementing it would need an object this target does not have". So the
+    ranking instrument was quoting a sentence the compiler cannot emit, on the
+    three modules the ranking itself found — which is a report disagreeing with
+    the message it reports on, the same defect `tools/formal_sweep.py`'s
+    `_is_cpython_stdlib` had before it became a delegation.
+
+    `source_path` is one of the files the row actually blocked, so the clause
+    printed is the one THAT file was given rather than a reconstruction: the
+    table's subject is what the sweep recorded, and a synthetic path would make
+    the note about a file nobody has heard of.
+
+    The `host_module_advice` sentence the same function appends is subtracted by
+    LENGTH rather than split on a delimiter, so advice of its own that contains
+    a `; ` cannot eat the end of the clause. None when `formal.imports` cannot be
+    imported here, and the caller then says the clause could not be read — the
+    same discipline every other unmeasurable column in this table follows.
+    """
+    try:
+        from formal.imports import unresolvable_import_error, host_module_advice
+        text = unresolvable_import_error(source_path, name)
+    except Exception:                                   # noqa: BLE001
+        return None
+    marker = f"imports {name!r}, which is "
+    start = text.find(marker)
+    if start < 0:
+        return None
+    clause = text[start + len(marker):]
+    try:
+        advice = host_module_advice(name)
+    except Exception:                                   # noqa: BLE001
+        advice = ""
+    tail = f"; {advice}" if advice else ""
+    if tail and clause.endswith(tail):
+        clause = clause[:-len(tail)]
+    return clause or None
+
+
 def _host_tier(name: str):
     """`formal/imports.py`'s own answer, read through its published accessor."""
     try:
@@ -1202,25 +1329,48 @@ def host_rank(log_path):
         for hit in per_file.values():
             for n in hit:
                 names[n] += 1
+        # The fallback for a module whose NAMES could not be read, and it is a
+        # different question rather than a worse answer to the same one: not
+        # "which of its names does this file bind" but "does this file spell the
+        # module AT ALL". Zero is a sound answer in that question — no file
+        # spells `zlib` in code, so no file can be using whatever `zlib` exports
+        # — and it is the answer that says a row of N files is N files of
+        # CLOSURE. One or more is a LOWER BOUND and is printed as one, and a
+        # file that does not tokenize leaves the whole column unmeasured rather
+        # than counting as a non-user.
+        mentions = None
+        if declared is None:
+            seen = [_host_mentions_module(f, mod) for f in per_file]
+            if all(s is not None for s in seen):
+                mentions = sum(1 for s in seen if s)
         out.append({
             "module": mod,
             "files": len(files),
             "uses": uses,
+            "mentions": mentions,
             "names": names.most_common(8),
             "declared_known": declared is not None,
             "declared": declared or (),
             "tier": _host_tier(mod),
             "model": _host_model_source(mod),
             # IN NO TIER is only a DEFECT when there is no model: a module that
-            # has been WRITTEN is in no tier by design (`HOST_MODELLED`'s rule
-            # is "a name LEAVES here by being WRITTEN", `HOST_ADMITTED`'s is "a
-            # name is here iff it has a source"), and its import resolves before
+            # has been WRITTEN is in no tier by design (`HOST_MODELLED`'s rule is
+            # "a name LEAVES here by being WRITTEN", `HOST_ADMITTED`'s is "a name
+            # is here iff it has a source"), and its import resolves before
             # either set is consulted. `os`, `sys` and `re` are in no tier for
             # that reason and are not mis-diagnosed; `datetime` and `builtins`
-            # are in no tier because nobody classified them, and every file
-            # that wants one is told its import "is not a stdlib or sibling
-            # module, and no such file exists", which is false.
+            # are in no tier because nobody classified them, and every file that
+            # wants one is told it is a CPython standard-library module this
+            # tree has no source or tier for — a name with no owner and no next
+            # step, which is the state worth printing. The WORDS of that are
+            # asked for rather than written here, for the reason
+            # `_host_refusal_clause` states.
             "untiered": not _host_tier(mod) and not _host_model_source(mod),
+            # ONE of the files the row blocked, and the subject of the note
+            # printed under it. Sorted, so the note names the same file on every
+            # run of the same log — a row whose note quoted a different file each
+            # time would be unreadable as a diff.
+            "example": sorted(files)[0] if files else "",
         })
     out.sort(key=lambda r: (-r["files"], r["module"]))
     return out, lines, len(files_all)
@@ -1239,13 +1389,30 @@ def print_host_table(table, minimum, lines=0, files_all=0):
         # as mis-diagnosed.
         tier = r["tier"] or ("written" if r["model"] else "UNTIERED")
         model = r["model"] or "—"
-        uses = r["uses"] if r["declared_known"] else "?"
+        uses = r["uses"] if r["declared_known"] else (
+            "?" if r["mentions"] is None
+            else ("0" if r["mentions"] == 0 else f">={r['mentions']}"))
         print(f"{r['files']:>5} {str(uses):>5}  {tier:<11} {model:<26} "
               f"{r['module']}")
-        if not r["declared_known"]:
+        if r["mentions"] == 0:
+            print(f"        uses:        0 — no blocked file READS "
+                  f"{r['module']}: not one imports it and binds something it "
+                  f"then uses in code (a comment or a string is not a use), so "
+                  f"the row is import CLOSURE whatever {r['module']} exports — "
+                  f"the imports that stopped these {r['files']} files read "
+                  f"nothing from it")
+        elif r["mentions"]:
+            print(f"        uses:        >={r['mentions']} — a LOWER BOUND: "
+                  f"{r['module']} has no source in this interpreter's stdlib, "
+                  f"so which of its names these files bind cannot be counted, "
+                  f"and this is how many of them spell it at all")
+        elif not r["declared_known"]:
             print(f"        uses:        NOT MEASURED: {r['module']} has no "
                   f"source in this interpreter's stdlib (it is built in or "
-                  f"frozen), so nothing here can be counted")
+                  f"frozen), so nothing here can be counted, and at least one "
+                  f"blocked file is not a `.py` this could read the imports of, "
+                  f"so even the fallback (does any file use the module at all) "
+                  f"is open")
         elif r["uses"] == 0:
             print(f"        uses:        0 — every blocked file names nothing "
                   f"{r['module']} declares, so the row is import CLOSURE and "
@@ -1258,11 +1425,17 @@ def print_host_table(table, minimum, lines=0, files_all=0):
             print(f"        names:       "
                   + ", ".join(f"{k} x{v}" for k, v in r["names"]))
         if r["untiered"]:
-            print(f"        UNTIERED:    {r['module']} is in NEITHER "
-                  f"formal/imports.py tier, so its refusal reads "
-                  f"\"not a stdlib or sibling module, and no such file "
-                  f"exists\" — a statement about module RESOLUTION that is "
-                  f"false of a CPython standard-library module")
+            clause = _host_refusal_clause(r["module"], r["example"])
+            if clause:
+                print(f"        UNTIERED:    {r['module']} is in NEITHER "
+                      f"formal/imports.py tier, so {r['example']} is refused "
+                      f"as \"{clause}\" — a name with no owner and no next step")
+            else:
+                print(f"        UNTIERED:    {r['module']} is in NEITHER "
+                      f"formal/imports.py tier and has no model, so a file that "
+                      f"imports it gets a refusal with no owner and no next step. "
+                      f"NOT MEASURED: formal/imports.py could not be imported "
+                      f"here, so what that refusal SAYS is not quoted")
     shown = [r for r in table if r["files"] >= minimum]
     pairs = sum(r["files"] for r in shown)
     print(f"\n{pairs} blocked file x module pairs over {files_all} files, "
@@ -1277,6 +1450,9 @@ def print_host_table(table, minimum, lines=0, files_all=0):
           "from formal/hostmods/;\nneither is copied here. 'unreachable' is a "
           "fact about the target, 'modelled' is a gap\nwith an owner, and "
           "'admitted' is a module that answers under a declared contract.")
+    print("`UNTIERED` quotes formal/imports.py::unresolvable_import_error rather "
+          "than the build's wording\nwritten out here, so the clause under a "
+          "row is the one that file was given.")
 
 
 def main():
