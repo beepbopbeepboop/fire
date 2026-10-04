@@ -3,9 +3,11 @@
 **Area:** TEST (`test_formal_sweep.py::TestDyldProbe::test_a_bind_name_that_itself_begins_with_an_underscore_resolves`)
 · **Status:** OPEN, measured 2026-10-04 on `master` at `3c3516db`
 
-Found while running the formal test files for
-`bugs/FORMAL_sweep20_std_collections_2.md` §5.4. **Not** caused by that branch's
-change: the same failure appears with `master`'s `formal/imports.py` restored.
+Found while running the 57 formal test files that
+the `std/collections` round-2 sweep ran for its import-resolution
+fix; that round's doc is deleted with its fix (commit f60f27b9) and the
+provenance is the symptom, not the doc. **Not** caused by that branch's change: the same failure appears with
+`master`'s `formal/imports.py` restored.
 
 ## 1. What is red
 

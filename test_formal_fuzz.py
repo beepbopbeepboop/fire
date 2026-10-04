@@ -82,6 +82,117 @@ def _fail(name, detail, verbose):
     return 1
 
 
+#: (file, constant name, the model's constant it must be bound to). The two
+#: container budgets, and the reason this check reads the SOURCE rather than the
+#: values: `_SCRATCH` evaluating to 131072 is what a hardcoded literal also
+#: does, and the property that matters is that the tree has ONE number.
+BUDGET_BINDINGS = (
+    ("formal/arm64_codegen.py", "_SCRATCH", "ARM64_CONTAINER_BUDGET"),
+    ("formal/x86_64_codegen.py", "_BLOB_BYTES", "X86_64_CONTAINER_BUDGET"),
+)
+
+
+def check_frame_budget(verbose=False):
+    """ONE container budget per architecture, and one that decides.
+
+    Four properties, each of which is a way this could be quietly true in the
+    tree and false in the run:
+
+    * **both emitters READ the model's constant.** Read from the source with
+      `ast`, because a value comparison passes on a literal: what has to be
+      absent is a second copy of the number, not a disagreement about it.
+    * **the refusal message this tool matches on is the model's own.** A
+      reword of `frame_blob_refusal` that moved the phrase would turn every
+      frame-budget divergence back into an unqualified parity finding, silently,
+      which is the failure `test_formal_fuzz.py`'s classifier rows cannot see
+      because they hand-write the message.
+    * **the smaller budget is the one that decides**, so
+      `formal/model.py::CONTAINER_BUDGET` is `min` and not a third number.
+    * **the corpus's `big_blob` row is sized off that same budget** — past the
+      smaller ceiling (so x86-64 refuses it) and inside the larger one (so arm64
+      lowers it), which is precisely the pair the new classifier class names.
+      Checked over generated programs, so a corpus that stopped emitting the
+      row is caught as well as a corpus that resized it wrongly.
+    """
+    failures = 0
+    import ast
+
+    for rel, name, model_const in BUDGET_BINDINGS:
+        path = os.path.join(ROOT, rel)
+        try:
+            tree = ast.parse(open(path, encoding="utf-8").read(), path)
+        except (OSError, SyntaxError) as e:
+            failures += _fail(f"{name}_is_readable", f"{rel}: {e}", verbose)
+            continue
+        assigned = [n.value for n in tree.body
+                    if isinstance(n, ast.Assign)
+                    and any(getattr(t, "id", None) == name for t in n.targets)]
+        if not assigned:
+            failures += _fail(f"{name}_is_assigned_at_module_level",
+                              f"{rel} declares no module-level `{name}`", verbose)
+            continue
+        rhs = assigned[0]
+        ok = (isinstance(rhs, ast.Attribute) and rhs.attr == model_const
+              and isinstance(rhs.value, ast.Name) and rhs.value.id == "M")
+        if not ok:
+            failures += _fail(
+                f"{name}_reads_the_models_constant",
+                f"{rel}: `{name}` is bound to {ast.dump(rhs, annotate_fields=False)}"
+                f", not `M.{model_const}` — a second literal in the tree is the "
+                f"thing this row exists to prevent", verbose)
+
+    message = F.M.frame_blob_refusal("a list literal", 17608, 16344)
+    if F.FRAME_BLOB_REFUSAL_HEAD not in message:
+        failures += _fail(
+            "the_frame_budget_head_is_the_models_own",
+            f"`frame_blob_refusal` opens {message[:70]!r}, which does not "
+            f"contain {F.FRAME_BLOB_REFUSAL_HEAD!r} — every frame-budget "
+            f"divergence in a sweep is now reported as an unqualified parity "
+            f"finding", verbose)
+
+    if F.M.CONTAINER_BUDGET != min(F.M.ARM64_CONTAINER_BUDGET,
+                                   F.M.X86_64_CONTAINER_BUDGET):
+        failures += _fail(
+            "the_smaller_budget_decides",
+            f"CONTAINER_BUDGET is {F.M.CONTAINER_BUDGET}, which is not the "
+            f"smaller of {F.M.ARM64_CONTAINER_BUDGET} and "
+            f"{F.M.X86_64_CONTAINER_BUDGET}", verbose)
+
+    small = F.M.blob_ceiling(F.M.CONTAINER_BUDGET)
+    large = F.M.blob_ceiling(F.M.ARM64_CONTAINER_BUDGET)
+    if small >= large:
+        failures += _fail(
+            "the_two_ceilings_are_distinguishable",
+            f"the smaller budget's ceiling is {small} and the larger's is "
+            f"{large}, so no literal can be refused by one machine and lowered "
+            f"by the other and the row this measures is unreachable", verbose)
+    seen = 0
+    for index in range(GEN_INDEXES):
+        src = F.make_program("suite", index, "limits")
+        for line in src.splitlines():
+            body = line.strip()
+            if not body.startswith("BL") or " = [" not in body:
+                continue
+            n = body.split(" = [", 1)[1].count(",") + 1
+            seen += 1
+            if not (small < n <= large):
+                failures += _fail(
+                    f"the_corpus_blob_is_the_shape_the_class_names",
+                    f"{n} elements is not past the smaller ceiling ({small}) "
+                    f"and inside the larger one ({large})", verbose)
+            break
+    if not seen:
+        failures += _fail(
+            "the_corpus_still_emits_a_oversized_blob",
+            f"no `limits` program in 0..{GEN_INDEXES - 1} carried a `big_blob` "
+            f"literal, so the class this row names is unreachable from the "
+            f"corpus", verbose)
+
+    print(f"formal fuzz: budgets    {'PASS' if not failures else 'FAIL'} "
+          f"{len(BUDGET_BINDINGS)} bindings, {seen} blob(s) (no compiler)")
+    return failures
+
+
 def check_generator(mix, indexes, verbose=False):
     """Every generated program is a valid differential test.
 
@@ -321,6 +432,35 @@ CLASSIFIER_CASES = [
     ("a_trap_is_not",
      {"x86_64": {"verdict": "ok", "rc": 0, "stdout": "1\n"},
       "arm64": {"verdict": "trapped", "rc": 2}}, "trapped"),
+    # …and the ONE divergence that is not about the language: a container too
+    # big for one machine's frame and small enough for the other's. The two
+    # budgets are 8x apart (`formal/model.py::CONTAINER_BUDGET` is the smaller
+    # and is the one a program must fit to build on both), so any literal
+    # between the two ceilings lands here, BY DESIGN, and a tally that counts
+    # it as a capability difference hides the parity findings that are not
+    # designed. The budgets are `formal/model.py::ARM64_CONTAINER_BUDGET` and
+    # `X86_64_CONTAINER_BUDGET`, the smaller is `CONTAINER_BUDGET`, and
+    # `frame_budget_phrase()` is the one sentence that states all three.
+    # The two rows below are the pair that matters and they are red under the
+    # un-refined classifier in both directions: the class is added when the
+    # refusal IS the frame message, and NOT added when it is anything else, so
+    # a reword that moved the phrase out of `frame_blob_refusal` would put this
+    # finding back into the unqualified bucket — which is the correct outcome,
+    # because at that point nobody could tell it apart again.
+    ("the_frame_budget_divergence_names_itself",
+     {"x86_64": {"verdict": "refusal",
+                 "diag": "build: a list literal does not fit in the frame: "
+                         "it needs 17608 bytes and this function has 16344 "
+                         "left for containers."},
+      "arm64": {"verdict": "ok", "rc": 0, "stdout": "1\n"}},
+     "REFUSAL-DIVERGES-FRAME-BUDGET-X86"),
+    ("the_frame_class_is_not_a_spare_room_for_other_refusals",
+     {"x86_64": {"verdict": "refusal",
+                 "diag": "build: a dict literal does not fit in the frame is "
+                         "not said; this is a capacity refusal: 8 slots are "
+                         "reserved for a dynamic operand"},
+      "arm64": {"verdict": "ok", "rc": 0, "stdout": "1\n"}},
+     "REFUSAL-DIVERGES-X86"),
 ]
 
 
@@ -765,6 +905,7 @@ def main():
     mixes = [args.mix] if args.mix else sorted(F.MIXES)
     failures = check_classifier(args.verbose)
     failures += check_audit(args.verbose)
+    failures += check_frame_budget(args.verbose)
     for mix in mixes:
         failures += check_generator(mix, args.gen_indexes, args.verbose)
     if not args.no_build_check:

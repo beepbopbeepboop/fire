@@ -36,7 +36,14 @@ from mojo.middle.boundnames import (
 # (each fits an imm12 SUB/ADD; a single imm12 maxes at 4095). Grows the
 # blob/spill region past the old 4032 cap that large functions exhausted
 # mid-expression (list concat / comprehension reserves left 0 free).
-_SCRATCH = 131072
+#
+# The VALUE is `formal/model.py::ARM64_CONTAINER_BUDGET` — the same number the
+# other backend's budget is, and the smaller of the two decides anything that
+# has to hold on both machines, so a corpus or a message here reads the tree's
+# one copy rather than repeating a literal that x86-64 does not share. 131072 =
+# 32 << 12, which is what makes it one scaled imm12 instruction (see
+# `_emit_imm_shift12`).
+_SCRATCH = M.ARM64_CONTAINER_BUDGET
 _SCRATCH_CHUNK = 4080
 
 
@@ -2188,8 +2195,8 @@ dylib_exports: list = None, globals_base: int = None,
                 name = stmt.target.name
                 self._check_comptime_target(name, "augmented assignment")
             else:
-                raise CodegenError(
-                    "augmented assignment target must be a plain name")
+                raise CodegenError(M.aug_assign_target_refusal(
+                    type(stmt.target).__name__))
             # fire tokens carry `+=`/`|=`/`^=`/…; the encoder table wants
             # the bare operator — same set `_emit_binop`'s ALU map accepts.
             op = stmt.op[:-1] if stmt.op.endswith('=') and stmt.op != '==' \

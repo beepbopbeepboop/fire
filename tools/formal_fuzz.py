@@ -102,6 +102,13 @@ used to reach a sweep's tally as a clean `refusal`:
     lowered (`REFUSAL-DIVERGES`) or both decline it in different words — the
     second shape is new, and it is the one that hid the `int(s, base)` pair.
 
+One of those is not a disagreement about the program. The two container budgets
+are 8x apart — `formal/model.py::CONTAINER_BUDGET` is the smaller, and is the
+one a program has to fit to build on both — so a literal between the two
+ceilings is refused by one machine and lowered by the other BY DESIGN. That
+keeps the `REFUSAL-DIVERGES` prefix and its per-architecture suffixes, and adds
+`-FRAME-BUDGET` so a tally can subtract it.
+
 A fourth, for the families whose message makes a claim ABOUT CPython — "CPython
 raises UnboundLocalError for that program" is a promise the interpreter can be
 asked to keep — is `REFUSAL-FALSE`, and the check is in `REFUSAL_CLAIMS`.
@@ -325,8 +332,27 @@ from concurrent.futures import ThreadPoolExecutor
 # fallback would be a second normaliser, which is the thing being avoided.
 import formal_sweep_parity as _SWEEP_PARITY  # noqa: E402
 
+#: The head of `formal/model.py::frame_blob_refusal`'s message — the ONE
+#: sentence both backends emit for "this container does not fit in the frame".
+#: It is spelled here rather than imported because it is a STRING, and a string
+#: that lives in the tool is exactly what `formal_sweep_causes.py`'s samples are
+#: cut from, for the same reason: `test_refusal_taxonomy.py` fails if the model's
+#: wording moves out from under a copy. The check that keeps these two copies
+#: honest is `test_formal_fuzz.py::test_the_frame_budget_head_is_the_models_own`.
+FRAME_BLOB_REFUSAL_HEAD = "does not fit in the frame: it needs "
+
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIRE = os.path.join(HERE, "fire.py")
+
+# The compiler's own frame budgets, so this corpus is sized by the tree rather
+# than by a number typed here: `formal/model.py::CONTAINER_BUDGET` is the
+# smaller of the two and the one a program has to fit to build on both machines.
+# `HERE` is the repository root, which is not on `sys.path` when this file is
+# run as `tools/formal_fuzz.py`, so the root goes on it the way it does for the
+# other tools in this directory that read the backend.
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+from formal import model as M  # noqa: E402
 
 BUILD_TIMEOUT = 120
 RUN_TIMEOUT = 30
@@ -2680,18 +2706,34 @@ class Gen:
             return
         if kind == "big_blob":
             # A container literal past ONE architecture's frame budget and
-            # inside the other's. `frame_blob_refusal`'s own docstring records
-            # the two budgets (arm64's scratch 128 KB, x86-64's blob region
-            # 16 KB), so the measured shape is a `REFUSAL-DIVERGES` rather than
-            # a bug in either lowering — a construct refused on one machine and
-            # lowered on the other, which is this fuzzer's definition of a
-            # parity finding, and `bugs/FORMAL_container_budget_differs_between_
-            # the_two_architectures.md` is what it is filed as.
-            # 2100..2400 and no wider: x86-64's blob region is 16 KB and a
-            # word-element blob is `[count][element...]`, so 2048 elements is
-            # its ceiling and anything past 2100 is refused there and lowered on
-            # arm64 (128 KB of scratch). A 4000-element literal would still work
-            # and would make every program that carries it unreadable.
+            # inside the other's, so the measured shape is a
+            # `REFUSAL-DIVERGES` rather than a bug in either lowering — a
+            # construct refused on one machine and lowered on the other, which
+            # is this fuzzer's definition of a parity finding, and
+            # `bugs/FORMAL_the_two_architectures_have_different_container_
+            # budgets.md` is what it was filed as.
+            #
+            # The SIZE is computed from `formal/model.py::CONTAINER_BUDGET` —
+            # the SMALLER of the two budgets, and the number the model declares
+            # as the one that decides — rather than being a literal here. That
+            # is the whole of that doc's "one number in the tree": a program in
+            # this corpus that is meant to fit has to fit the budget both
+            # machines share, and this row is the one place a corpus picks a
+            # size, so a budget that moves moves it.
+            #
+            # `+1` element past the ceiling, and the ceiling is the one the
+            # model prints in the refusal itself: a word-element blob is
+            # `[count][element...]`, so 8 bytes of the budget are the count.
+            # `blob_ceiling()` in `formal/model.py` is that arithmetic, and it
+            # is shared with the refusal message so the corpus and the message
+            # cannot disagree about where the edge is.
+            #
+            # The row is deliberately NOT sized to make both machines refuse:
+            # the next size past the LARGER budget is 16384 elements, ~80 KB of
+            # text per program, and a refusal has to be readable in its source
+            # to be believed. So this stays a divergence, and `classify`
+            # names WHICH one (see `frame_budget_divergence`) rather than
+            # leaving a reader to re-derive two budgets out of a comment.
             if getattr(self, "_big_blob_done", False):
                 # ONE per program, and the reason is the program's own size: a
                 # 2400-element literal is ~12 KB of text, two of them are 24 KB,
@@ -2700,7 +2742,7 @@ class Gen:
                 self.emit(indent, f"print({self.int_expr(0)})")
                 return
             self._big_blob_done = True
-            n = self.rng.choice([2100, 2200, 2400])
+            n = M.blob_ceiling(M.CONTAINER_BUDGET) + self.rng.choice([1, 128, 256])
             elems = ", ".join(str((i * 7) % 100) for i in range(n))
             name = self.fresh("BL")
             self.emit(indent, f"{name} = [{elems}]")
@@ -3670,6 +3712,43 @@ def check_one(index, args, tmpdir, lock=None):
     return rec
 
 
+def frame_budget_divergence(results, refusals):
+    """Whether a one-machine-refuses divergence is a fact about the FRAME.
+
+    It very often is, and reporting it as an unqualified parity finding costs a
+    reader the only thing a reader needs: whether the two backends DISAGREE about
+    the program or one of them simply has less room in it. arm64's frame scratch
+    is 8x x86-64's blob region (`formal/model.py::CONTAINER_BUDGET` is the
+    smaller), so any container literal between the two ceilings is refused on
+    x86-64 and lowered on arm64 — by design, and stated in both emitters.
+
+    So this is a named question with a mechanical test: EVERY refusing machine
+    refused with `formal/model.py::frame_blob_refusal`, and the machine that
+    answered did not hit any other wall. Not "the message mentions a frame", which
+    `dynamic_splat_capacity`'s capacity refusals and the spill refusals would
+    also match; this is the ONE message, matched by identity of the wording the
+    model builds, so a reword that moves the phrase out of it re-classifies the
+    finding as a capability divergence — which is the correct failure, because
+    then it IS unclassified again.
+
+    It is a classification and not an exemption: the verdict keeps its
+    `REFUSAL-DIVERGES` prefix and its per-architecture suffixes, the program is
+    still saved, and `report` still prints both machines' answers. What changes is
+    that a tally can subtract this class and be left with the parity findings
+    that are about the language.
+
+    Pinned by `test_formal_fuzz.py::check_frame_budget` (both emitters read the
+    model's constants, the needle below is the model's own message,
+    `CONTAINER_BUDGET` is the minimum, and the corpus's blob is past the smaller
+    ceiling and inside the larger one) and by the two `classify` rows either side
+    of this one, which are red under the un-refined classifier.
+    """
+    if not refusals:
+        return False
+    return all(FRAME_BLOB_REFUSAL_HEAD in results[b].get("diag", "")
+               for b in refusals)
+
+
 def classify(results, want_exit, want_out, args):
     """The one question: did every engine that produced an ANSWER produce the
     SAME answer?  A verdict names the engines that disagreed, because a
@@ -3718,8 +3797,10 @@ def classify(results, want_exit, want_out, args):
     refusals = [b for b, r in results.items() if r.get("verdict") == "refusal"]
     answered = [b for b in results if answer(b) is not None]
     if refusals and answered:
-        return "REFUSAL-DIVERGES-" + "+".join(
-            "X86" if b == "x86_64" else "ARM" for b in refusals)
+        which = "+".join("X86" if b == "x86_64" else "ARM" for b in refusals)
+        if frame_budget_divergence(results, refusals):
+            return f"REFUSAL-DIVERGES-FRAME-BUDGET-{which}"
+        return "REFUSAL-DIVERGES-" + which
     if refusals:
         # BOTH machines refusing is not automatically agreement. The two
         # architectures are ONE language implementation, so the words have to be
@@ -3777,9 +3858,19 @@ def report(rec, args):
         lines = [f"  {v}  #{rec['index']}"]
         both_refused = all(r["verdict"] == "refusal"
                            for r in rec["results"].values())
-        lines.append("      both refused it in different words"
-                     if both_refused else
-                     "      one architecture refused what the other lowered")
+        if both_refused:
+            lines.append("      both refused it in different words")
+        elif "FRAME-BUDGET" in v:
+            # The one divergence that is a fact about the FRAME and not about
+            # the two backends disagreeing about the program. Said in the line
+            # rather than left for the reader to infer from the verdict name,
+            # because the verdict name is the only thing a TALLY aggregates and
+            # this is the only line anybody reads: it names both budgets, so
+            # the next reader does not have to go and count a frame.
+            lines.append(f"      one machine has less room ({M.frame_budget_phrase()}), "
+                         f"so this is not a capability difference")
+        else:
+            lines.append("      one architecture refused what the other lowered")
         if "reduced_from" in rec:
             lines.append(f"      reduced {rec['reduced_from']} -> "
                          f"{rec['reduced_to']} bytes")

@@ -125,6 +125,14 @@ ADMITTED_COUNTS = {
     "posixpath": 0,
     "platform": 0,
     "re": 0,
+    # `quote` is a scan over bytes a string already is plus a substitution, and
+    # every one of the 1142 answers `test_formal_shlex.py` compares with
+    # CPython is computed rather than looked up — so there is no host fact left
+    # over to admit, which is what the zero is measuring and the same row
+    # `html` and `glob` carry for the same reason. `split`/`join`/`shlex` are
+    # absent from the module and refused by name, so the module's surface is
+    # one function and that function decides everything.
+    "shlex": 0,
     "shutil": 0,
     "stat": 0,
     "struct": 0,
@@ -1101,6 +1109,18 @@ def _exit_status_claims():
 # that reaches an axiom at every one of these sites as CLEAN, and the census
 # below is what replaced it.  `formal/lean.py::GENERATED_AXIOM_RE` is the shape
 # that is actually matched.
+
+
+# transitive closure, because `native_decide` and `bv_decide` close a goal by
+# running a decision procedure.
+#
+# **The axiom is not the one this file used to name.**  Lean 4.32.2 gives each
+# use its OWN axiom — `t32s_t8s._native.bv_decide.ax_1_5` — and
+# `#print axioms` over all 375 theorems in `lib/` reports `Lean.ofReduceBool`
+# for NONE of them; measured, in `AXIOM_CLOSURE` below and by
+# `test_the_closure_census_says_what_the_text_census_cannot`.  A reader grepping
+# a proof's axiom list for `Lean.ofReduceBool` finds nothing and concludes the
+# proof is kernel-checked, which is how a wrong name becomes a wrong conclusion.
 #
 # The first two rows are equalities and the third is a CEILING, and the asymmetry
 # is the point rather than an inconsistency.  An `axiom` or a `sorry` appearing
@@ -1127,10 +1147,59 @@ def _exit_status_claims():
 LIBRARY_TRUST = {
     # module    axiom  sorry  axiom_tactic ceiling (see the note above)
     "Contracts": (0, 0, 0, 0),
+    # The two casualties of the apostrophe fix, measured, because they are what
+    # makes the earlier 749 an UNDERCOUNT rather than a total: the `'` in
+    # `clang's` at `lib/ProofLib.lean:1392` was read as a character-literal
+    # opener and blanked 187 lines of real code — including the `bv_decide` in
+    # `t32s_t8s` (:1579) and the one in `t32s_t16s` (:1582) — and five
+    # declarations whose names end in `'` (`mem_read_two_writes_adjacent'`,
+    # `mem_read_after_write_u64_slot'`, `u64_toNat_sub_one'`,
+    # `MF.fieldTag_inj'`, `work.s64_to_u64_toNat'`) were invisible to any
+    # per-theorem census until the fix.  A ceiling going UP because the
+    # instrument got better is the one movement of it that is not a regression.
+    # What is pinned here is the figure AFTER the 63 replacements, so `Contracts`
+    # is 0 rather than the 1 this table held while its single site was still a
+    # `native_decide`.
     "ProofLib": (0, 0, 685, 685),
     "Refine": (0, 0, 0, 0),
     "X86": (0, 0, 3, 3),
     "work": (0, 0, 0, 0),
+}
+
+#: What the CLOSURE census measured, per module: how many theorems were asked,
+#: how many reached a decide axiom, and the two disagreements with the text
+#: census. Read out of a real `#print axioms` run over all of `lib/` through
+#: `formal/admitted.py::theorem_axiom_census`, and pinned because the number §7
+#: publishes is this one and there was nothing measuring it. **All 375 answered**
+#: and the four columns partition each module exactly, which is asserted rather
+#: than hoped for: an unanswered theorem is counted in none of them.
+#:
+#: `reaches` is the honest fact: of the 375 theorems in `lib/`, **53** rest on a
+#: decide axiom and **304** are kernel-checked. `text_only` are theorems whose
+#: source names one of the tactics and whose closure has none — a losing tactic
+#: alternative is still text, so the site census overcounts, and each row is a
+#: place where a replacement would have changed nothing. `closure_only` are
+#: theorems whose source names none and whose closure has one, because they
+#: reach it THROUGH another theorem: the site census cannot see these at all, and
+#: they are the argument for measuring the closure rather than the text. The
+#: clearest is `ProofLib.arm64_cset_{eq,le,ne}`, which carry
+#: `arm64_flag_eq._native.bv_decide.ax_1_7` through it and name no tactic.
+#:
+#: `of_reduce_bool` is 0 everywhere, and is the row that corrects the name.
+#:
+#: **A SEPARATE table from `LIBRARY_TRUST` above, and the separation is the
+#: point**: that one counts SITES in the source text and is a ceiling somebody
+#: pays down, this one counts THEOREMS by what their proof term actually reaches
+#: and is a measurement nothing can move without a Lean run. The merge of the two
+#: into one dict would make a site count and a theorem count differ by a row
+#: rather than by a table, which is how a reader ends up comparing them.
+AXIOM_CLOSURE = {
+    #            asked  reaches  clean  text_only  closure_only  ofReduceBool
+    "Contracts": (7, 0, 6, 1, 0, 0),
+    "ProofLib": (255, 51, 192, 3, 9, 0),
+    "Refine": (22, 0, 20, 0, 2, 0),
+    "X86": (73, 2, 69, 1, 1, 0),
+    "work": (18, 0, 17, 0, 1, 0),
 }
 
 
@@ -1838,6 +1907,163 @@ ONE_SITE_THEOREMS = 19
 # `bv_decide` over bit patterns, which is the right tool.  A ceiling, again: a
 # replacement lowers it, and the commit says which.
 REPLACEABLE_THEOREMS = 8
+
+
+def test_the_source_half_of_the_closure_census_is_readable(tmpdir=None):
+    """`library_theorems` — the half of the axiom census that needs no Lean.
+
+    The closure census (`AXIOM_CLOSURE`) asks Lean what a theorem rests on; this
+    asks the SOURCE what it is made of, and the join is the finding. Three
+    properties, each of which was a way the source half could be quietly wrong
+    and leave the closure half reporting nonsense:
+
+    * **namespaces are resolved.** `lib/Contracts.lean` and `lib/Refine.lean` open
+      a namespace of their own name and `lib/ProofLib.lean` opens three more, so
+      a bare name is not a name Lean answers to. An unqualified scan reports 0 of
+      7 and 0 of 22 for those modules and reads as a clean result rather than as
+      a broken instrument.
+    * **every declared name is QUALIFIED the way Lean would spell it**, and the
+      two that end in a PRIME are the check: `lib/ProofLib.lean:665` and
+      `lib/work.lean:141` both declare one, and `lean_code_regions` used to read
+      that `'` as a character-literal opener and blank the declaration away.
+      Lean answers `#print axioms u64_toNat_sub_one'` with `[propext,
+      Quot.sound]`, so the declaration is real and the scanner was wrong.
+    * **every module is represented and every row has a line**, because a count
+      with no location is the sentence `library_trust`'s docstring argues
+      against.
+    """
+    lib = A.lean_dir(HERE)
+    rows = A.library_theorems(lib)
+    check(sorted(rows) == sorted(A.library_trust(lib)),
+          f"the source census sees modules {sorted(rows)} and the trust census "
+          f"{sorted(A.library_trust(lib))}; two scans of one directory must "
+          f"agree on what is in it")
+    check(all(r["line"] >= 1 for m in rows.values() for r in m.values()),
+          "a theorem with no line is a number nobody can act on")
+    primes = [f"{mod}.{q}" for mod, m in rows.items() for q in m
+              if q.endswith("'")]
+    check(primes == ["ProofLib.mem_read_two_writes_adjacent'",
+                     "ProofLib.mem_read_after_write_u64_slot'",
+                     "ProofLib.u64_toNat_sub_one'",
+                     "ProofLib.MF.fieldTag_inj'",
+                     "work.s64_to_u64_toNat'"],
+          f"the declarations whose names end in a prime are {primes}; a scanner "
+          f"that cannot see a prime cannot see these, and two of them were "
+          f"invisible to the site census until this fix")
+    # The qualified spelling is what makes `#print axioms <name>` work at all, so
+    # check it structurally rather than against a copy of the tree: every name is
+    # either bare (a file with no namespaces) or dotted, and a dotted one starts
+    # with a namespace the file actually opens.
+    for mod, m in rows.items():
+        opens = set(re.findall(r"(?m)^namespace\s+([A-Za-z_][\w'.]*)",
+                               open(os.path.join(lib, mod + ".lean"),
+                                    encoding="utf-8").read()))
+        for q in m:
+            if "." in q:
+                check(q.split(".")[0] in opens,
+                      f"{mod}.{q} is namespaced under {q.split('.')[0]!r}, which "
+                      f"{mod}.lean does not open — Lean would answer "
+                      f"`Unknown constant` and this row would read as a theorem "
+                      f"that reaches no axiom")
+    return True, (f"{sum(len(m) for m in rows.values())} top-level theorem(s) "
+                  f"across {len(rows)} module(s), namespaced and located; "
+                  f"{len(primes)} of them end in a prime")
+
+
+def test_the_axiom_names_are_classified_not_guessed(tmpdir=None):
+    """`axiom_site_tactic` and `parse_print_axioms`, on MEASURED text.
+
+    The corpus's largest admitted assumption in the model is 751
+    `native_decide`/`bv_decide` sites, and what they put in a proof term is an
+    axiom whose NAME this project published wrongly for a year: `AXIOM_TACTICS`'s
+    own comment and FORMAL.md §7 row 10 both said `Lean.ofReduceBool`, and on
+    Lean 4.32.2 the measured answer is a fresh axiom per use,
+    `<decl>._native.<tactic>.ax_<n>_<m>`. So the classifier is the thing a reader
+    needs and it has to be pinned against what Lean PRINTS, not against what a
+    docstring claims.
+
+    The three rows are the three shapes that matter:
+
+    * the real per-use name, classified to its tactic;
+    * a standard Lean axiom, classified to nothing — and `OF_REDUCE_BOOL` is one
+      of those names today, which is why it is a constant a measurement can be
+      compared against rather than a thing to grep for and be misled by;
+    * `'name' does not depend on any axioms`, the form a parser written for the
+      `depends on axioms: [...]` shape silently drops. Every dropped row is a
+      theorem reported as unknown, so the FIRST measured run of this census
+      parsed 193 of ProofLib's 255 and the shortfall was almost entirely
+      theorems that reach nothing — the best outcome there is.
+    """
+    check(A.axiom_site_tactic("t32s_t8s._native.bv_decide.ax_1_5")
+          == "bv_decide",
+          "the measured per-use name is not classified to its tactic")
+    check(A.axiom_site_tactic("work_step_ldr_uoff._native.native_decide.ax_1_1")
+          == "native_decide",
+          "and neither is the native_decide spelling")
+    for standard in ("propext", "Classical.choice", "Quot.sound",
+                     A.OF_REDUCE_BOOL):
+        check(A.axiom_site_tactic(standard) is None,
+              f"{standard!r} is classified as a decide site; it is a standard "
+              f"Lean axiom and classifying it as ours would put a site in the "
+              f"census that does not exist")
+    check(A.axiom_site_tactic("t32s_t8s._native.exact_decide.ax_1_1") is None,
+          "a `._native.` name for a tactic outside AXIOM_TACTICS is classified "
+          "as ours; the test below asserts lib/ contains none, which is what "
+          "keeps the limit from being a silent gap")
+    measured = ("'x86_step_ret' depends on axioms: [propext, Quot.sound]\n"
+                "'nat64' does not depend on any axioms\n"
+                "'mem_read_bytes_write_same' depends on axioms: [propext, "
+                "Classical.choice, Quot.sound, "
+                "mem_read_bytes_write_same._native.bv_decide.ax_1_15, "
+                "mem_read_bytes_write_same._native.bv_decide.ax_1_20]\n")
+    got = A.parse_print_axioms(measured)
+    check(got.get("x86_step_ret") == ["propext", "Quot.sound"],
+          f"a measured `depends on axioms: [...]` line parsed as "
+          f"{got.get('x86_step_ret')!r}")
+    check(got.get("nat64") == [],
+          f"the `does not depend on any axioms` form was dropped rather than "
+          f"answered empty: {got!r}. An empty list is the result a replacement "
+          f"proof is after, so it cannot be confused with an absence.")
+    sites = [a for a in got.get("mem_read_bytes_write_same", [])
+             if A.axiom_site_tactic(a)]
+    check(len(sites) == 2,
+          f"the measured X86 row's two per-site axioms classified to {sites!r}")
+    check(A.axiom_site_tactic("") is None and A.parse_print_axioms("") == {},
+          "empty input must not raise and must not invent a row")
+    return True, ("3 axiom-name shapes and 3 `#print axioms` output shapes, "
+                  "all from a measured run")
+
+
+def test_every_native_axiom_in_lib_is_one_this_file_knows(tmpdir=None):
+    """The classifier's limit, asserted over the SOURCE rather than assumed.
+
+    `axiom_site_tactic` answers None for a `._native.` name whose tactic is not
+    in `AXIOM_TACTICS`, which is a hole by construction — a tactic this tree
+    starts using that also introduces an axiom would be counted as "not ours"
+    and the per-theorem census would under-report. Nothing can close that hole
+    without running Lean, so what this does is the half that needs no Lean: every
+    `AXIOM_TACTICS` entry must actually appear in `lib/`, so the list cannot be
+    padded with a tactic nothing uses (which would make `uses_axiom_tactic`
+    over-report) and the census's own comment is checked rather than trusted.
+    The Lean half — that lib/ introduces no `._native.` axiom for any OTHER
+    tactic — is `test_the_closure_census_says_what_the_text_census_cannot` in
+    `test_formal_sweep_truth.py`, which skips without Lean.
+    """
+    lib = A.lean_dir(HERE)
+    census = A.library_trust(lib)
+    used = set()
+    for mod in census:
+        raw = open(os.path.join(lib, mod + ".lean"), encoding="utf-8").read()
+        used |= set(re.findall(
+            r"(?<![\w.'])(" + "|".join(A.AXIOM_TACTICS) + r")(?![\w'])",
+            A.lean_code_regions(raw)))
+    check(used == set(A.AXIOM_TACTICS),
+          f"lib/ uses {sorted(used)} and AXIOM_TACTICS lists "
+          f"{sorted(A.AXIOM_TACTICS)}; a tactic in the list that nothing uses "
+          f"makes `uses_axiom_tactic` over-report and one that is missing makes "
+          f"the census silent")
+    return True, (f"every one of {sorted(used)} appears in lib/, and no other "
+                  f"tactic carries that name")
 # ── the inventory FORMAL.md publishes ─────────────────────────────────────────
 
 def _formal_md_inventory():
@@ -3138,6 +3364,14 @@ PURE = [("the emitted Lean is inert where nothing is admitted",
          test_the_replaced_native_decide_count_is_what_it_claims),
         ("the census is attributed to theorems, not only to lines",
          test_the_census_is_attributed_to_theorems_not_only_to_lines),
+
+
+        ("the source half of the closure census is readable",
+         test_the_source_half_of_the_closure_census_is_readable),
+        ("the axiom names are classified, not guessed",
+         test_the_axiom_names_are_classified_not_guessed),
+        ("every native axiom in lib/ is one this file knows",
+         test_every_native_axiom_in_lib_is_one_this_file_knows),
         ("FORMAL.md's inventory is the census",
          test_the_formal_md_inventory_agrees)]
 

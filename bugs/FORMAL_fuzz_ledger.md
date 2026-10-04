@@ -398,7 +398,17 @@ region 16 KB, so the same source builds and runs on one machine and is refused o
 the other, and `frame_blob_refusal`'s docstring says so. The refusal is TRUE on
 both machines and the parity finding is real all the same, because a construct
 one machine declines is a parity finding whatever the reason.
-`bugs/FORMAL_the_two_architectures_have_different_container_budgets.md`.
+
+**SUPERSEDED 2026-10-04.** The two budgets are now named constants
+(`formal/model.py::ARM64_CONTAINER_BUDGET` 131072 and `X86_64_CONTAINER_BUDGET`
+16384, with `CONTAINER_BUDGET = min(...)` as the documented answer to "which
+machine decides"), both emitters read them, this corpus's `big_blob` row is sized
+off `CONTAINER_BUDGET` rather than a typed-in range, and `classify` reports this
+class as `REFUSAL-DIVERGES-FRAME-BUDGET-<which>` so a tally can subtract it and be
+left with the parity findings that are about the language. The five programs of a
+hundred are now five rows that say which is which instead of five rows a reader
+had to re-derive two numbers to interpret. Pinned by
+`test_formal_fuzz.py::check_frame_budget` and the two `classify` rows beside it.
 
 The messages also differ for a second reason, worth separating from the first:
 the machines refuse at different POINTS, so arm64 got past the literal and

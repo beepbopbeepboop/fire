@@ -7994,6 +7994,64 @@ def string_compare_number_refusal(op: str, left_kind, right_kind,
         f"`{spelled(txt)}.startswith(\".\")`")
 
 
+#: The two container budgets, as NAMED CONSTANTS, and the answer to "which
+#: machine decides".
+#:
+#: They are two numbers about two frames, and they used to be two literals in
+#: two emitters (`formal/arm64_codegen.py::_SCRATCH`, `formal/x86_64_codegen.py::
+#: _BLOB_BYTES`) with the values spelled again in this function's docstring and
+#: again in the fuzzer's comment. A refusal message that states a budget, a
+#: corpus row that sizes a program to a budget, and a frame layout that is set
+#: by a budget are three facts about one number, and three copies of it is three
+#: chances to be wrong about which machine refuses what.
+#:
+#: They differ on purpose. arm64's `SUB SP, SP, #_SCRATCH` is one 12-bit-immediate
+#: scaled instruction (`_SCRATCH = 32 << 12`), and x86-64's blob region has to
+#: survive the frame arithmetic its own locals and spill area are laid out
+#: against, so raising it is a frame-layout change with a proof obligation on
+#: `lib/X86.lean`'s stack-floor and frame-bound lemmas — not a constant to edit.
+#: What IS a constant to edit is the ANSWER, and this is it: **the smaller
+#: budget decides anything that must hold on both machines.**
+#:
+#: Concretely: a program this backend calls buildable fits `CONTAINER_BUDGET`,
+#: so a corpus, a fixture or a doc that says "this program builds" is sized from
+#: the smaller of the two, and a `REFUSAL-DIVERGES` whose refusal is this one is
+#: a fact about the FRAME rather than a capability difference between the
+#: backends (`tools/formal_fuzz.py::_is_frame_budget_refusal` is what tells the
+#: two apart in a tally).
+ARM64_CONTAINER_BUDGET = 131072          # 128 KiB, the frame scratch
+X86_64_CONTAINER_BUDGET = 16384          # 16 KiB, the blob region
+
+#: The budget that decides, for anything that has to hold on BOTH machines.
+CONTAINER_BUDGET = min(ARM64_CONTAINER_BUDGET, X86_64_CONTAINER_BUDGET)
+
+
+def blob_ceiling(budget: int) -> int:
+    """How many 8-byte elements fit in `budget` bytes of frame blob region.
+
+    A word-element blob is `[count][element...]`, so eight bytes of the budget
+    are the count and the rest are elements. This is the arithmetic
+    `frame_blob_refusal` prints ("at most N element(s) fit in what is left
+    here") and it is here, once, because the corpus sizes a program against the
+    same edge — `tools/formal_fuzz.py`'s `big_blob` row — and two copies of the
+    arithmetic is two answers to "where is the ceiling".
+    """
+    return max(0, (budget - 8) // 8) if budget > 8 else 0
+
+
+def frame_budget_phrase() -> str:
+    """The one sentence that names both budgets, for a message or a comment.
+
+    It exists because `frame_blob_refusal` needs the pair and so does anything
+    that has to explain a size to a reader who is deciding which machine they
+    are on, and writing the two numbers twice is how they stop agreeing.
+    """
+    return (f"arm64's frame scratch is {ARM64_CONTAINER_BUDGET} bytes and "
+            f"x86-64's blob region is {X86_64_CONTAINER_BUDGET}, so "
+            f"{CONTAINER_BUDGET} is the budget a program has to fit to build on "
+            f"both")
+
+
 def frame_blob_refusal(what: str, wanted: int, available: int) -> str:
     """The ONE message for "this container does not fit in the frame", for both
     backends and every container shape.
@@ -8004,9 +8062,9 @@ def frame_blob_refusal(what: str, wanted: int, available: int) -> str:
     any element is evaluated (so a nested container lands above its parent
     rather than inside the region the parent is still filling). The limit is
     therefore real and architectural, and the two backends have DIFFERENT
-    budgets — arm64's scratch is 128 KB, x86-64's blob region is 16 KB — which
-    is exactly why the number has to be computed and printed by one place
-    instead of formatted at each call site.
+    budgets — `ARM64_CONTAINER_BUDGET` and `X86_64_CONTAINER_BUDGET`, both
+    declared above, and the reason the number has to be computed and printed by
+    one place instead of formatted at each call site.
 
     What each backend used to print was the two sides of its own comparison, and
     on x86-64 those are negative FRAME OFFSETS, not sizes: a 4095-element list
@@ -8024,7 +8082,7 @@ def frame_blob_refusal(what: str, wanted: int, available: int) -> str:
     building the container at run time (appending to a list literal sized for
     what the program needs) does not put the whole thing in the frame at once.
     """
-    words = max(0, (available - 8) // 8) if available > 8 else 0
+    words = blob_ceiling(available)
     return (f"{what} does not fit in the frame: it needs {wanted} bytes and "
             f"this function has {available} left for containers. A blob of "
             f"8-byte elements is [count][element...], so at most {words} "
@@ -34669,6 +34727,39 @@ def member_access_refusal(expr, fn_name, frame_holders) -> str:
     return field_access_refusal(
         spelled(expr), fn_name or "<module>", member_base_text(expr),
         member_base_text(expr) in (frame_holders or ()))
+
+
+def aug_assign_target_refusal(got: str) -> str:
+    """The fallback for an augmented-assignment target that is not a NAME, a
+    member of a receiver, or a subscript — ONE sentence for both backends.
+
+    A `MemberExpr` target that is not a frame slot of this function is a
+    DIFFERENT question and has its own refusal, the one above: the real premise
+    there is the binding of the base, and this message would say "not a plain
+    name" about an expression that is not the problem. So the two are kept apart
+    on purpose, and this one is only reachable for a node type with no lowering
+    at all.
+
+    Both backends reach it, and they used to spell it differently — arm64 "must
+    be a plain name", x86-64 "must be a plain name on the formal x86-64 path" —
+    which is the same class of defect
+    `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
+    function.md` is about: one construct, two sentences, and a reader has to
+    guess which machine wrote it. The architecture is not named, for the reason
+    `member_access_refusal` does not name one either: the two backends are ONE
+    language implementation and a message that says which of them refused is a
+    difference in this function rather than in the backend.
+
+    `got` is the node's class name, and it is in the message because "this path
+    cannot lower that" without saying WHAT is the sentence every reader has to
+    go read the source for.
+    """
+    return (
+        f"an augmented assignment target on this path must be a plain name, a "
+        f"field of a receiver this function holds, or a subscript (got {got}); "
+        f"a member whose receiver is not a frame slot of this function is "
+        f"refused by `field_access_refusal` instead, because the question there "
+        f"is the binding of the base rather than the shape of the target")
 
 
 # ── A member read through a LITERAL base: no storage, so no field ────────────

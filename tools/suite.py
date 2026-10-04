@@ -557,6 +557,10 @@ MEASURED_PEAK_GB = {
     # 65.6 MB maximum RSS, which memcap's own poll rounds to the 0.1 GB its
     # `%.1f` prints and this table records — so the number here is the kernel's.
     'formal-glob': (0.07, 'measured'),      # 40.7 s, 6 groups, 2 backends
+    # …and `formal-shlex`, registered with the module it covers, on the one fact
+    # that decides its bucket: it runs no Lean.  Measured 2026-10-04 the same
+    # way, 5 groups and 61 re-splits by CPython's own `shlex.split`.
+    'formal-shlex': (0.1, 'measured'),
     # …and the third the estate check caught, on the merge of the formal5 batch
     # (2026-10-02): `test_formal_core_hostmods.py`, measured one at a time
     # under `tools/memslot.py --gb 8` before being named, like the two above.
@@ -2994,6 +2998,28 @@ test('formal-glob', [PY, 'test_formal_glob.py'], mem='tiny',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='glob: has_magic, hidden files, symlinks and escapes, against CPython')
 
+# `shlex.quote` is the row `tools/formal_sweep_causes.py --host` ranks next
+# after `glob`, and it is ONE file (`tools/suite.py` itself spells `shlex.quote`
+# three times and builds a shell line out of the answer) — so the win is that
+# the row is CLOSED, not that it is large.  Which is why its corpus is weighted
+# towards the shapes where a wrong `quote` is EXPLOITABLE rather than visible: a
+# space, a semicolon, a dollar, a backtick, a quote of each kind and a byte above
+# 0x7F, plus the empty string (which is `''`, not `""` — a difference every
+# transcription gets wrong, and a syntax error on a shell command line).
+#
+# `check` rather than `proofs` on the one fact that decides it: this file runs
+# NO Lean, so nothing here waits on the 27 MB library build, and a host module
+# nothing runs is the coverage hole `test_suite.py`'s own estate check names.
+# Measured 2026-10-04 one at a time under `tools/memslot.py --gb 8`: 5 groups,
+# 122 + 1020 answers against CPython and 61 re-splits by CPython's own
+# `shlex.split`, both backends, 0.1 GB peak.
+test('formal-shlex', [PY, 'test_formal_shlex.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_shlex.py', 'test_formal_dylib.py',
+            'formal/hostmods/shlex.mojo', 'formal/build.py', 'formal/model.py',
+            'formal/imports.py'] + FORMAL_BUILD_INPUTS,
+     desc='shlex.quote against CPython, both backends, 5 groups')
+
 # ── not the compiler: the CPU reference the Metal path is checked against ───
 # `test_llm/` is a self-contained sub-project: a ~1M-parameter linear-attention
 # character model in pure Python, with hand-written Metal kernels and a bench C
@@ -3228,6 +3254,13 @@ BUCKETS = {
                # 2026-10-04 unregistered, registered above with their
                # measurement beside them.
                'formal-field-walk', 'formal-glob',
+               # …and `formal-shlex`, which arrived with its module in the same
+               # merge and was in neither a bucket nor `UNREGISTERED` until the
+               # estate check named it.  In `check` rather than only `proofs`
+               # because it runs no Lean: the 61 re-splits and 1142 answers
+               # against CPython cost seconds, and a shell-quoting module nobody
+               # runs is the hole the check exists to close.
+               'formal-shlex',
                # …and the two that arrived with the formal3 batch and were in
                # NO bucket and NO `UNREGISTERED`, which is what the estate check
                # in `suite-self-test` was reporting — and it is a FAIL on a test

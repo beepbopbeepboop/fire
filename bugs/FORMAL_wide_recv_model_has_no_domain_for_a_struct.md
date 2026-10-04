@@ -1,8 +1,32 @@
 # `formal/examples/wide_recv.mojo` has no proof because the semantic model has no domain for a STRUCT, and it is not in `EXPECTED_FAILURES`
 
 **Area:** FORMAL (the arm64 semantic model — `formal/arm64_proof_gen.py`'s
-`_expr_go`). Found 2026-10-03 on `work/formal18-6`; measured, not fixed. The
-nearest owner is `formal16-8` (`bugs/FORMAL_wide_receiver_by_reference.md`), which
+`_expr_go`). Found 2026-10-03 on `work/formal18-6`.
+
+**Status 2026-10-04: the CHOICE is made and it is "state it as a gap"; the marker
+is in `test_formal.py::EXPECTED_FAILURES` and the x86-64 half's honesty is pinned
+by `test_formal_call_proof_gen.py::TestAPlaceholderModelClaimsNothing`. The
+struct domain itself is NOT done and is not a light worker's row.** What the
+measurement added, which the text below did not know: **x86-64 does not refuse
+this program at all** — it catches the generator's exception, emits
+`def main_go (n : UInt64) : UInt64 := n` with a NOTE that nothing downstream is
+claimed, omits the AST bridge and the run tests with their reasons, and ends in a
+`sorry` end-to-end theorem. The image exits 4, `main_go n` is `n`, and the file
+says so. So the two backends DISAGREE on this shape (arm64 refuses, x86-64
+disclaims) and neither claims the program is proved.
+
+**The decision, and why it is not "a marker is cheaper":** the fix is a
+value-model project — `mojo` becomes a function of an ENVIRONMENT rather than of
+one word, every field read projects out of it, `Point()` starts with the class
+defaults — shared by both backends and by the Lean proof, and it is the same work
+`subscript_var` asks for one type further. It sits behind
+`bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` and
+`bugs/FORMAL_string_value_model.md`, i.e. the tagged-value convergence; a
+half-model that answers some field reads and not others is worse than none. And
+"make the two backends alike" would mean arm64 giving up an admitted theorem it
+does not have, for no coverage.
+
+The nearest owner is `formal16-8` (`bugs/FORMAL_wide_receiver_by_reference.md`), which
 owns the frame-contract half of this example and does not claim the model's
 domain.
 
@@ -85,6 +109,11 @@ session reads the marker list, sees the file is not in it, and re-derives this.
 
 ## The next step
 
+**Both directions below are now decided; what remains is the struct domain, and it
+is named in the Status at the top with the claims it sits behind.** The text is
+kept because the two directions are the two ways this could be closed and a
+reader deciding to close it needs to know which one this tree took and why.
+
 Two directions, and the choice is a decision rather than an exercise:
 
 * **give the model a struct domain** — `mojo` becomes a function of an
@@ -99,9 +128,11 @@ Two directions, and the choice is a decision rather than an exercise:
   nothing to run, and keeps the marker list an honest account of what the job
   cannot do.
 
-Which one is right is not this doc's call. What is this doc's is that the choice
-has not been made, and that until it is, the `formal` job is red for a reason no
-marker records.
+Which one is right WAS not this doc's call; it is now, and it was the second.
+`test_formal.py -j 1 wide_recv` reports `PASS=0 KNOWN-GAP=1 FAIL=0` with the
+shared generator's own refusal as the detail, so the marker list is an honest
+account of what the job cannot do rather than a list of four proofs with a fifth
+unrecorded.
 
 ## 0. The choice, made (2026-10-04, `work/formal19-5`): recorded, and the marker
 ## is pinned to the measurement

@@ -15169,6 +15169,103 @@ WAVE6_NAME_CASES = [
      "    o.v = 4242\n"
      "    return raw(o)\n",
      "refuse:is a field access through 'h'", None),
+    # ── ONE construct, THREE spellings, ONE refusal ──
+    #
+    # `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
+    # function.md` is the census finding that a class is not a subject: three of
+    # round 2's 78 items were `codegen-refused` on BOTH machines for three
+    # different reasons, and one of them was `m.x += 1` — an AUGMENTED
+    # assignment through a receiver this function does not own, which is what
+    # `mojo/backend_gimple/emit_infra.py:2983` writes (`gen.temp_counter += 1`).
+    #
+    # x86-64 had THREE sites that ask "is this member target a frame slot of
+    # mine", and one of them — the augmented assignment's — had its OWN answer
+    # for the no case:
+    #
+    #   arm64   'gen.temp_counter' is a field access through 'gen', and this
+    #           path has no way to say what 'gen' holds. …
+    #   x86_64  augmented assignment target must be a plain name on the formal
+    #           x86-64 path (got MemberExpr)      <- the words it USED to print
+    #
+    # The second sentence is FALSE about the file. A `MemberExpr` target IS
+    # lowered by that emitter — when the member is a frame slot — so the
+    # complaint is about the SPELLING and not the program, and the real premise
+    # is the binding of the base, which is the sentence above it. All three
+    # sites now ask one question in one place
+    # (`x86_64_codegen.py::_frame_member_slot`) and refuse with the shared
+    # model's words (`_refuse_member_target`).
+    #
+    # So the three rows below are ONE case written three ways, with ONE needle,
+    # and read across the table they are the invariant: the plain store, the
+    # read-modify-write and the tuple target must refuse the same access for the
+    # same reason on both machines. Each fails alone if its own site regresses —
+    # measured: the augmented-assignment row fails against the old x86-64
+    # emitter with `refused, but not with the expected words 'is a field access
+    # through 'gen''`.
+    #
+    # The receiver is a MODULE-LEVEL object, which is the shape the real source
+    # has: a `gen` handed in from a per-function emitter, not a local and not a
+    # frame holder. The parameter spelling is the same shape with the receiver
+    # bound as a parameter, and it was the second measured divergence.
+    ("field_one_member_target_three_spellings_the_plain_store",
+     "class G1:\n"
+     "    def __init__(self):\n"
+     "        self.temp_counter = 0\n\n"
+     "gen1 = G1()\n\n"
+     "def main(n):\n"
+     "    gen1.temp_counter = 1\n"
+     "    return 0\n",
+     "refuse:is a field access through 'gen1'", None),
+    ("field_one_member_target_three_spellings_the_augmented_store",
+     "class G2:\n"
+     "    def __init__(self):\n"
+     "        self.temp_counter = 0\n\n"
+     "gen2 = G2()\n\n"
+     "def main(n):\n"
+     "    gen2.temp_counter += 1\n"
+     "    return 0\n",
+     "refuse:is a field access through 'gen2'", None),
+    ("field_one_member_target_three_spellings_the_tuple_target",
+     "class G3:\n"
+     "    def __init__(self):\n"
+     "        self.temp_counter = 0\n\n"
+     "gen3 = G3()\n\n"
+     "def main(n):\n"
+     "    gen3.temp_counter, other = 1, 2\n"
+     "    return 0\n",
+     "refuse:is a field access through 'gen3'", None),
+    # The anti-rot direction for the same site: the false node-type sentence is
+    # GONE, and the shared one is still there, so a wholesale rewrite cannot
+    # pass this row by deleting the diagnosis. `refuse_without:` requires both
+    # halves — forbidden absent, needle present — which is exactly the pair that
+    # matters when a wrong sentence is being replaced by a right one.
+    ("field_an_augmented_store_no_longer_blames_the_spelling",
+     "class G4:\n"
+     "    def __init__(self):\n"
+     "        self.temp_counter = 0\n\n"
+     "gen4 = G4()\n\n"
+     "def main(n):\n"
+     "    gen4.temp_counter += 1\n"
+     "    return 0\n",
+     "refuse_without:is a field access through 'gen4':"
+     "augmented assignment target must be a plain name|"
+     "on the formal x86-64 path", None),
+    # …and the same site with a PARAMETER receiver, which is the second
+    # measured divergence and a different function (so the site prefix differs
+    # and the needle has to name the base inside the callee).
+    ("field_an_augmented_store_through_a_parameter_is_the_same_refusal",
+     "class C9:\n"
+     "    def __init__(self):\n"
+     "        self.t = 0\n\n"
+     "def bump9(c):\n"
+     "    c.t += 1\n"
+     "    return 0\n\n"
+     "def main(n):\n"
+     "    bump9(C9())\n"
+     "    return 0\n",
+     "refuse_without:is a field access through 'c':"
+     "augmented assignment target must be a plain name|"
+     "on the formal x86-64 path", None),
     # ── the same fall-through through a base that is not a NAME ──
     # (`FORMAL_an_attribute_read_through_an_unclassified_base_reads_zero`)
     #

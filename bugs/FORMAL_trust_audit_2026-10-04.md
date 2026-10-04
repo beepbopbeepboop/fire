@@ -1,10 +1,15 @@
 # The trust boundary audited: every admitted contract, every `sorry`, every axiom
 
-**Status: the audit is DONE and its findings are FIXED. What is left is written
-down at the end** — one axiom census that needs a Lean run, and one limit of the
-scope rule. This file is the table; it is kept because the audit is a reading of
-the tree that nobody can re-derive for free, and because a reading with a
-measurement beside it is what made the fifteen corrections possible.
+**Status: the audit is DONE and its findings are FIXED. The axiom census is DONE
+too, and it corrected this file's own §3 (the axiom is not `Lean.ofReduceBool`,
+the 749 sites were an undercount, and 53 of 375 theorems is the number the sites
+were standing in for). Of the two things "not fixed" below, one is now closed and
+the other is NOT this file's to close**: it is
+`bugs/FORMAL_contract_scope_rule_is_a_phrase_list.md`, claimed by another worker,
+and `formal/admitted.py::contract_text_is_scoped` is its write set. This file is
+the table; it is kept because the audit is a reading of the tree that nobody can
+re-derive for free, and because a reading with a measurement beside it is what
+made the fifteen corrections possible.
 
 Claim: `sweep20:admitted-audit`. Not one of the eight `formal19` FORMAL docs.
 
@@ -252,11 +257,32 @@ false. They are now true, and each is re-measured.
   structural notion of "the claim is about the answer" rather than a longer word
   list, and guessing at it would reject sentences that are fine. Filed as
   `bugs/FORMAL_contract_scope_rule_is_a_phrase_list.md`.
+  **NOT THIS FILE'S, and not closed here:** that doc is another worker's claim and
+  `contract_text_is_scoped` is its write set, so the only honest thing this audit
+  can say about it is where it stands — one known hole in one of its four
+  instruments, with the doc named. This audit is otherwise complete.
 - **The axiom census that needs Lean.** `library_trust` counts SITES in the
   source; `#print axioms` measures which theorems actually reach
   `Lean.ofReduceBool`, and that is transitivity no text scan can do.
   `bugs/FORMAL_native_decide_axiom.md` carries the command. Not run here: this
   worker does not launch Lean.
+  **RUN 2026-10-04, and it corrected two published sentences.** All 375 theorems
+  in `lib/` were asked, all 375 answered, and **none reports
+  `Lean.ofReduceBool`** — Lean 4.32.2 declares a fresh axiom per USE
+  (`t32s_t8s._native.bv_decide.ax_1_5`), so the name this audit and FORMAL.md §7
+  both published is wrong of the toolchain and a reader grepping for it concludes
+  the proof is kernel-checked. **53 theorems reach a decide axiom and 304 are
+  kernel-checked**; the 751 sites belong to those 53; five theorems name a decide
+  tactic in their own text and reach no axiom, and thirteen reach one through
+  another theorem and name none. And the 749 was an UNDERCOUNT:
+  `formal/admitted.py::lean_code_regions` read the apostrophe in `clang's` at
+  `lib/ProofLib.lean:1392` as a character-literal opener and blanked 187 lines of
+  code containing two `bv_decide` sites. Instrument in `formal/admitted.py`
+  (`theorem_axiom_census`, `axiom_site_tactic`, `library_theorems`), pinned by
+  `test_formal_admitted.py` (Lean-free) and
+  `test_formal_sweep_truth.py::TestAxiomClosureCensus` (runs Lean, skips without
+  it); `bugs/FORMAL_native_decide_axiom.md` is rewritten around the measurement
+  and its remainder is the replacement plan.
 
 ## Two surprises worth recording
 

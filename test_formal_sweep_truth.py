@@ -29,6 +29,8 @@ says so and skips without it. The units are the census and the classifier.
     python3 test_formal_sweep_truth.py [-v]
 """
 import ast
+import contextlib
+import glob
 import io
 import os
 import re
@@ -43,6 +45,14 @@ sys.path.insert(0, os.path.join(HERE, "tools"))
 import formal_sweep as S
 import formal_sweep_causes as C
 from formal import lean as L
+
+# The measured per-module closure census, from the file whose subject is the
+# trust boundary. Imported rather than copied because a pinned number in two
+# places is a number with two answers the first time one of them is updated —
+# and `test_formal_admitted.py` owns it, being the module that owns what a proof
+# is allowed to rest on. A cross-test import of this shape is already how
+# `test_formal_admitted.py` gets its own helpers.
+from test_formal_admitted import AXIOM_CLOSURE  # noqa: E402
 
 LIB = os.path.join(HERE, "lib")
 
@@ -1790,6 +1800,153 @@ class TestLeanLaunchEstate(unittest.TestCase):
 # `_effective_digest` is the fix: this module's own bytes AND every
 # `LIBRARY_MODULES` name its `import` lines name, transitively. These cases are
 # pure file-content arithmetic, so nothing here runs Lean.
+class TestAxiomClosureCensus(unittest.TestCase):
+    """What a proof in `lib/` actually RESTS ON, which no text scan can read.
+
+    `bugs/FORMAL_native_decide_axiom.md` named this the measurement a text
+    census cannot make and left it unrun, and it is the number FORMAL.md §7
+    publishes in row 10. It also named the wrong AXIOM: Lean 4.32.2's
+    `native_decide`/`bv_decide` each declare a fresh axiom per USE, named after
+    the declaration and the tactic (`t32s_t8s._native.bv_decide.ax_1_5`), and
+    `#print axioms` over all 375 theorems in `lib/` reports `Lean.ofReduceBool`
+    for NONE of them. So this file is where "the axiom is not the one we
+    published" is measured rather than argued, and where the two disagreements
+    between the site census and the closure census are pinned:
+
+    * `text_only` — the site's OWN text names a decide tactic and its closure has
+      no such axiom. A losing tactic alternative is still text, so
+      `library_trust`'s 751 is an overcount at theorem granularity, and each of
+      these rows is a place where replacing a site would have changed nothing.
+    * `closure_only` — no site in the text and an axiom in the closure, because
+      it is reached THROUGH another theorem. `library_trust` cannot see these at
+      all, which is the whole argument for measuring the closure.
+
+    Skipped without Lean, which is this file's own stated rule ("nothing here
+    runs Lean except where a case says so and skips without it"), so the
+    Lean-free halves — the scanner, the classifier and the `#print axioms`
+    parser — live in `test_formal_admitted.py` and cost nothing.
+    """
+
+    def setUp(self):
+        self.lean = _lean()
+        if not self.lean:
+            self.skipTest("lean not installed (see ./lean-toolchain)")
+
+    def test_the_closure_census_says_what_the_text_census_cannot(self):
+        import time
+
+        from formal import admitted as A
+        lib = A.lean_dir(HERE)
+        started = time.monotonic()
+        census = A.theorem_axiom_census(self.lean, lib)
+        summary = A.axiom_census_summary(census, lib)
+        elapsed = time.monotonic() - started
+
+        # The launcher's bound is the report, never the exit code: a census that
+        # was killed part-way has answered for a PREFIX of the theorems, and
+        # every count below would then be an undercount read as a pass.
+        for mod, asked in census["asked"].items():
+            self.assertIsNone(asked["exceeded"],
+                              f"{mod}: the census was cut short — "
+                              f"{asked['exceeded']} — so its counts are a "
+                              f"prefix and not a verdict")
+            self.assertEqual(asked["answered"], asked["asked"],
+                             f"{mod}: Lean answered for {asked['answered']} of "
+                             f"{asked['asked']} theorems it was asked about; "
+                             f"an unanswered theorem is neither clean nor "
+                             f"reaching, and reporting it as clean is how this "
+                             f"reads as a pass")
+
+        for mod, want in AXIOM_CLOSURE.items():
+            self.assertIn(mod, summary, f"{mod} is missing from the census")
+            got = summary[mod]
+            self.assertEqual(
+                (got["answered"], len(got["reaches"]), len(got["clean"]),
+                 len(got["text_only"]), len(got["closure_only"]),
+                 len(got["of_reduce_bool"])),
+                want,
+                f"{mod}: the closure census moved. asked/reaches/clean/"
+                f"text_only/closure_only/ofReduceBool = "
+                f"{(got['answered'], len(got['reaches']), len(got['clean']), len(got['text_only']), len(got['closure_only']), len(got['of_reduce_bool']))}, "
+                f"the table says {want}. A rise in `reaches` is sites being "
+                f"added; a fall in `clean` is a proof that stopped being "
+                f"kernel-checked. Either way the table moves with the commit.")
+
+        # The four columns PARTITION each module, which is the property that
+        # makes "asked == answered" enough: a theorem Lean did not answer for is
+        # in none of them, so a census that lost one would show up as a column
+        # that does not add up rather than as a clean row.
+        for mod, got in summary.items():
+            self.assertEqual(
+                len(got["reaches"]) + len(got["clean"]) + len(got["text_only"])
+                + len(got["closure_only"]),
+                got["answered"],
+                f"{mod}: the four closure columns do not partition the "
+                f"theorems answered for — a row is in two of them or in none, "
+                f"and either way one of the numbers published above is not "
+                f"about anything")
+
+        # The correction itself, as a FAILURE rather than a comment: if the
+        # toolchain ever goes back to one global `Lean.ofReduceBool`, the name
+        # this project publishes becomes right again and the classifier in
+        # `formal/admitted.py` stops matching — so both facts are asserted from
+        # the measured run rather than from a docstring.
+        every_site = [a for rows in census["axioms"].values()
+                      for axioms in rows.values() for a in axioms
+                      if A.axiom_site_tactic(a)]
+        self.assertTrue(every_site,
+                        "no theorem in lib/ reaches a decide axiom, so the "
+                        "whole mechanism this file measures is gone (or the "
+                        "classifier no longer matches Lean's spelling)")
+        self.assertTrue(all(A.axiom_site_tactic(a) in A.AXIOM_TACTICS
+                            for a in every_site),
+                        f"lib/ introduces a `._native.` axiom for a tactic "
+                        f"outside AXIOM_TACTICS: "
+                        f"{sorted({a for a in every_site if A.axiom_site_tactic(a) not in A.AXIOM_TACTICS})[:5]}; "
+                        f"the census would silently under-report it")
+        self.assertEqual(sum(len(v["of_reduce_bool"]) for v in summary.values()),
+                         0,
+                         "a theorem now reports Lean.ofReduceBool; the name "
+                         "FORMAL.md row 10 publishes is back in force and "
+                         "`axiom_site_tactic` needs to know about both")
+        self.assertLess(elapsed, 120,
+                        f"the whole-lib census took {elapsed:.0f}s; it is one "
+                        f"Lean run per module and has to stay affordable, or "
+                        f"nobody runs it and the table rots")
+
+    def test_the_source_and_the_closure_disagree_in_both_directions(self):
+        """The join is the finding, so it is asserted as a finding.
+
+        Both halves non-empty is the property. A census that only ever found one
+        direction would be indistinguishable from a text scan that happens to
+        agree with itself, and either direction going empty is a change in what
+        `lib/` proves rather than in how it is measured.
+        """
+        from formal import admitted as A
+        lib = A.lean_dir(HERE)
+        summary = A.axiom_census_summary(
+            A.theorem_axiom_census(self.lean, lib), lib)
+        text_only = {m: v["text_only"] for m, v in summary.items()
+                     if v["text_only"]}
+        closure_only = {m: v["closure_only"] for m, v in summary.items()
+                        if v["closure_only"]}
+        self.assertTrue(text_only, "no theorem has a site its closure does "
+                                   "not back, so the site census is exact at "
+                                   "theorem granularity — which the 751-site "
+                                   "table would then be measuring")
+        self.assertTrue(closure_only, "no theorem reaches a decide axiom "
+                                      "except through its own text, so the "
+                                      "closure census adds nothing over "
+                                      "`library_trust` and need not exist")
+        self.assertTrue(any("arm64_cset" in q for rows in closure_only.values()
+                            for q in rows),
+                        "the measured `closure_only` rows no longer include "
+                        "the `arm64_cset_*` trio, which is the clearest "
+                        "example in the tree: three theorems whose source "
+                        "names no tactic and whose closure carries "
+                        "`arm64_flag_eq._native.bv_decide.ax_1_7` through it")
+
+
 class TestOleanCurrency(unittest.TestCase):
     """`_effective_digest`: a module's own bytes AND its imports', transitively.
 
@@ -2717,6 +2874,144 @@ def _shared_scratch_dirs(source: str, path: str = "<snippet>"):
                     and _TMP_LITERAL.match(sub.value):
                 out.add((sub.lineno, sub.value))
     return sorted(out)
+
+
+class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
+    """The guard's own two branches, and what they cost — measured, and pinned.
+
+    `formal/x86_64_codegen.py::_emit_stack_floor_guard` puts a `call exit` and a
+    `jcc` pair in the prologue of every image with an entry, and
+    `formal/x86_64_endtoend_test.py::_BRANCH_FORMS` is what `emit()` refuses on.
+    So the compiler's OWN guard — not any branch the program wrote — is what
+    decides whether the constant-VALUE theorem can be stated at all. Measured
+    over `formal/examples/` on this tree:
+
+        emit():  emitted 0, refused 49, plan-failed 1
+        every one of the 49 names `call_rel32`
+
+    `bugs/FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_image.md`
+    says the same thing from the other side ("before the guard it covered 7 of
+    43") and asks for the guard's branches to be DECIDED rather than walked.
+    What was missing is anything that notices when that happens: `emit()` refusing
+    every example reads exactly like a corpus of programs no straight-line
+    theorem is possible for, which is a different claim and a wrong one.
+
+    So this class is the tripwire. It fails when `emit()` starts covering an
+    example, and the failure message says which of the two things moved — the
+    guard left the prologue, or the guard's branches were decided — because
+    those are the only two ways this number can change and a reader needs to
+    know which one it was. It also pins the multiplier the same doc measures,
+    since a guard that grew a THIRD branch would double the paths again and a
+    corpus that suddenly emits 30 000-step files is the same class of surprise.
+
+    Lean-free by construction: `_plan` and `_tree` are text, and nothing here
+    emits a proof. That is the point — a 100-second proof is a very expensive
+    way to learn that a number moved.
+    """
+
+    #: The doc's own table, in the units it uses: (example, leaves, steps).
+    TREES = (("formal/examples/ret42.mojo", 4, 58),
+             ("formal/examples/bittest.mojo", 10, 457),
+             # …and the one that is past what a proof can be, so the number is
+            # the REFUSAL and the refusal must say which bound it broke.
+             ("formal/examples/wide_recv.mojo", 94, 12241))
+
+    def _corpus(self):
+        return sorted(glob.glob(os.path.join(HERE, "formal", "examples",
+                                              "*.mojo")))
+
+    def test_the_guard_multiplies_every_path_and_the_numbers_hold(self):
+        """Three programs, three path counts, and the one that is too big.
+
+        `ret42` is ONE function and `wide_recv` is five, and the leaves go 4 ->
+        94 between them. That ratio is the whole subject of this class: the
+        guard's two branches per prologue are walked, so each guarded function
+        on a path doubles the number of paths through it, and there is no way to
+        share the two arms of a fork whose arms converge.
+        """
+        import formal.x86_64_endtoend_test as E
+
+        for path, want_leaves, want_steps in self.TREES:
+            with self.subTest(example=os.path.basename(path)):
+                code, info, _insns, shapes = E._plan(path)
+                root = E._tree(code, info, shapes)
+                self.assertIsNotNone(
+                    root, f"{path}: the tree is gone entirely, so the guard is "
+                          f"no longer what this measures")
+                leaves = list(E._paths(root))
+                self.assertEqual(
+                    (len(leaves), sum(len(x) for x in leaves)),
+                    (want_leaves, want_steps),
+                    f"{path}: the path tree moved to {len(leaves)} leaves / "
+                    f"{sum(len(x) for x in leaves)} steps, the table says "
+                    f"{want_leaves}/{want_steps}. A guard that grew a third "
+                    f"branch, or a program that grew a function, moves this — "
+                    f"and `wide_recv` crossing "
+                    f"{E._MAX_CHAIN_STEPS} is what turns the whole example into "
+                    f"a refusal")
+        # …and the one that is refused refuses BY NAME, with its own size in the
+        # sentence. A bare "too large" would be a bound with no reading.
+        with self.assertRaises(E._NoTree) as raised:
+            E.emit_terminates(os.path.join(HERE, "formal", "examples",
+                                           "wide_recv.mojo"))
+        self.assertEqual(raised.exception.kind, "size")
+        self.assertIn("stack-floor guard", str(raised.exception),
+                      "the size refusal must name the CAUSE — the guard is "
+                      "what makes the number large, and a bound without the "
+                      "cause is a number nobody can act on")
+
+    def test_every_value_theorem_refusal_is_the_guard_and_not_the_program(self):
+        """The claim, over the whole corpus: `call_rel32` is in EVERY refusal.
+
+        This is the row that would fail the day the doc's fix lands, and it is
+        written so the failure says what happened. A refusal that does NOT name
+        `call_rel32` is the interesting case in the other direction — it means
+        some example is now gated on a branch the PROGRAM wrote, which is a
+        different subject and needs a different look.
+        """
+        import formal.x86_64_endtoend_test as E
+
+        refused, other, emitted = [], [], []
+        for path in self._corpus():
+            stem = os.path.basename(path)[:-5]
+            try:
+                _code, _info, _insns, shapes = E._plan(path)
+            except Exception as e:                    # noqa: BLE001
+                other.append(f"{stem}: plan {type(e).__name__}")
+                continue
+            branching = sorted({f for _, f, _ in shapes} & E._BRANCH_FORMS)
+            if branching:
+                refused.append((stem, branching))
+                continue
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    E.emit(path, 0)
+            except Exception:                           # noqa: BLE001
+                pass
+            else:
+                emitted.append(stem)
+        self.assertEqual(
+            emitted, [],
+            f"emit() now covers {emitted}. Two things can do that and the "
+            f"reader needs to know which: the stack-floor guard left the "
+            f"prologue, or its two branches were DECIDED rather than walked — "
+            f"the second is what "
+            f"bugs/FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_"
+            f"image.md asks for, and the first is a much larger change. Either "
+            f"way `emit()`'s coverage number in that doc is now stale.")
+        not_the_guard = [(s, b) for s, b in refused if "call_rel32" not in b]
+        self.assertEqual(
+            not_the_guard, [],
+            f"these examples are gated on a branch the PROGRAM wrote rather "
+            f"than on the compiler's guard: {not_the_guard[:6]}. That is a "
+            f"different subject from the guard and this row no longer measures "
+            f"the guard.")
+        # The corpus itself, so the row cannot pass by the corpus emptying out.
+        self.assertGreaterEqual(len(refused), 40,
+                                f"only {len(refused)} example(s) reach the "
+                                f"branch test; `formal/examples/` has emptied "
+                                f"out or moved and this class is measuring "
+                                f"nothing")
 
 
 class TestScratchDirEstate(unittest.TestCase):

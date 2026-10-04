@@ -793,8 +793,9 @@ def contract_texts_are_unique(contracts: list) -> str:
 # things it counts because `lean_code_regions` strips comments and string
 # literals first, and its own limits are written down rather than left for a
 # reader to discover.  It reports `native_decide` SITES in the source; it does not
-# report which theorems reach `Lean.ofReduceBool`, which is the transitivity the
-# `#print axioms` route is for.
+# report which theorems reach a decide axiom, which is the transitivity
+# `theorem_axiom_census` below is for — and the two disagree in BOTH directions,
+# which is the reason both exist.
 
 # Tactics whose proof term reaches an axiom instead of the kernel.  `decide`,
 # `rfl`, `simp`, `norm_num` and `omega` are not here: they elaborate to terms the
@@ -896,6 +897,28 @@ def lean_code_regions(text: str) -> str:
             i += 1
             continue
         if ch in "\"'":
+            # A `'` IMMEDIATELY after an identifier character is a PRIME and not
+            # a character-literal opener, which is the one lexical fact this
+            # scanner had wrong and it cost two declarations: Lean's identifiers
+            # may end in `'`, `lib/ProofLib.lean:665` declares
+            # `theorem u64_toNat_sub_one'` and `lib/work.lean:141` declares
+            # `s64_to_u64_toNat'`, and reading the `'` as an opening quote
+            # blanked each of them to the end of its next quote — so both were
+            # invisible to every caller of this function, including the
+            # per-theorem census. Measured: Lean answers
+            # `#print axioms u64_toNat_sub_one'` and the answer is
+            # `[propext, Quot.sound]`, so the declaration is real and the
+            # scanner was wrong about it.
+            #
+            # IMMEDIATELY, with no space, and that is the whole rule: `f 'a'`
+            # is a call with a character argument and has a space before the
+            # quote, while `sub_one'` is a name. `.` counts as an identifier
+            # character for the same reason `'` does — `Foo.bar'` is one name.
+            if ch == "'" and i > 0 and (text[i - 1].isalnum()
+                                       or text[i - 1] in "_.'"):
+                out.append("'")
+                i += 1
+                continue
             raw = (ch == '"' and i > 0 and text[i - 1] == "r"
                    and not (i > 1 and (text[i - 2].isalnum()
                                        or text[i - 2] == "_")))
@@ -938,8 +961,10 @@ def library_trust(lean_dir: str) -> dict:
       `axiom`   an `axiom`/`opaque` declaration — none is wanted, ever (§7);
       `sorry`   a hole — countable here and, more precisely, by Lean itself;
       `axiom_tactic`  a `native_decide`/`bv_decide` site, whose proof term
-                 reaches a generated axiom rather than the kernel (see
-                 `AXIOM_TACTICS` for the name it has and is not).
+                 reaches an axiom rather than the kernel — and NOT
+                 `Lean.ofReduceBool`, which is what the generated name used to
+                 be read as (see `AXIOM_TACTICS` for the tactic spelling and
+                 `axiom_site_tactic` for the axiom's).
 
     Both the count and the LINES come back, because a count with no location is
     a number nobody can act on and a location with no count is a note.
@@ -950,6 +975,24 @@ def library_trust(lean_dir: str) -> dict:
     declaration each site is in, and `formal/lean.py::print_axioms` is the
     measurement no text scan can do: which axioms a theorem's TRANSITIVE closure
     reaches.
+
+
+    **`axiom_tactic` counts SITES, and on this toolchain that is an upper bound
+    at theorem granularity too** — measured, not guessed: see
+    `theorem_axiom_census` below, whose whole reason to exist is that this
+    number cannot answer "which theorems", and whose measurement shows seven
+    theorems whose own text names one of these tactics and whose proof term
+    reaches no axiom at all (a losing tactic alternative is still text), and
+    ten that name none and reach one anyway, through another theorem.
+
+    **And the axiom is NOT `Lean.ofReduceBool`.** Lean 4.32.2's `native_decide`
+    and `bv_decide` each declare a FRESH axiom per use, named after the
+    declaration and the tactic — `t32s_t8s._native.bv_decide.ax_1_5` — and
+    `#print axioms` over every theorem in `lib/` reports `Lean.ofReduceBool` for
+    **none** of them. So a reader who greps a proof's axiom list for
+    `Lean.ofReduceBool` finds nothing and concludes the proof is kernel-checked.
+    `axiom_site_tactic` is the classifier for the real spelling, and
+    `theorem_axiom_census` is the measurement.
     """
     out = {}
     for name in sorted(os.listdir(lean_dir)):
@@ -1303,3 +1346,281 @@ def lean_dir(root: str) -> str:
     """
     return os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), "lib")
+
+
+# ── The CLOSURE census: which theorems reach an axiom ────────────────────────
+#
+# `library_trust` above counts tactic SITES in the source text, and the ceiling
+# in `test_formal_admitted.py` is built on that.  It cannot answer the question
+# §7's inventory actually needs answered — "what does a proof currently rest
+# on" is a question about a PROOF TERM, and a proof term's transitive closure is
+# not a thing a text scan can read.  The two halves below are the two halves of
+# that question, and the join between them is the finding.
+
+#: A per-use axiom introduced by `native_decide`/`bv_decide`, as Lean spells it
+#: on this toolchain: `<declaration>._native.<tactic>.ax_<n>_<m>`.  The trailing
+#: pair is Lean's own uniquifier, not a site number a reader can use, and the
+#: prefix is the declaration the tactic appeared in — which is why the same
+#: name shows up in the closure of every theorem that USES that declaration.
+#:
+#: `Lean.ofReduceBool` is what these tactics reached in earlier Lean 4, and it
+#: is what `library_trust`'s docstring and FORMAL.md §7 row 10 used to say.  It
+#: is measurably absent here: `#print axioms` over every theorem in `lib/`
+#: reports it for none of them.  The constant is kept because "no theorem
+#: reaches it" is a MEASUREMENT and a reader needs something to compare against
+#: when the toolchain moves.
+AXIOM_SITE_RE = re.compile(
+    r"^(?P<decl>[^.]+)\._native\.(?P<tactic>" + "|".join(AXIOM_TACTICS)
+    + r")\.ax_(?P<n>\d+)_(?P<m>\d+)$")
+
+#: The name §7 and `library_trust` used to publish, kept as a constant so the
+#: correction is a MEASUREMENT with something to compare against.
+OF_REDUCE_BOOL = "Lean.ofReduceBool"
+
+
+def axiom_site_tactic(name: str):
+    """The `native_decide`/`bv_decide` a reported axiom came from, or None.
+
+    None is the answer for every OTHER axiom — `propext`, `Classical.choice`,
+    `Quot.sound` — and for any `._native.` name whose tactic is not in
+    `AXIOM_TACTICS`, which is what makes the list a scanner's limit rather than
+    an assumption: a tactic this tree starts using that also introduces an axiom
+    reads as "not ours" until somebody adds it, and `test_formal_admitted.py`
+    asserts every `._native.` name in `lib/`'s measured closures is one the list
+    knows, so the gap cannot open silently.
+    """
+    m = AXIOM_SITE_RE.match(name or "")
+    return m.group("tactic") if m else None
+
+
+def library_theorems(lean_dir: str) -> dict:
+    """`{module: {qualified name: {"line": int, "text": str}}}`.
+
+    The SOURCE half of the closure census, and the reason `library_trust`'s
+    numbers can be spent on a theorem rather than on a line. Two things it has to
+    get right and a naive scan gets wrong:
+
+      * **namespaces.** `lib/ProofLib.lean` opens `DylibExport`, `Frame` and
+        `MF`, `lib/Contracts.lean` opens `Contracts` and `lib/Refine.lean` opens
+        `Refine`, so a bare name is not the name Lean answers to — `#print axioms
+        caller_uses_contract` is `error(lean.unknownIdentifier)` and
+        `#print axioms Contracts.caller_uses_contract` is the theorem. An
+        unqualified scan therefore reports 0 of 7 and 0 of 22 for those two
+        modules and looks like a clean result rather than a broken one.
+      * **where a declaration ends.** The body of a theorem runs to the next
+        top-level declaration, and the next one is found by the same namespace
+        state — a `theorem` at column 0 inside `namespace Frame` still belongs
+        to `Frame`, while `theorem` after `end Frame` does not.
+
+    `text` is the declaration's own comment-stripped source, so a caller can ask
+    whether it NAMES one of `AXIOM_TACTICS` (`uses_axiom_tactic` below) without
+    re-reading the file. Comments are stripped for that question because
+    `library_trust` strips them too, and a census that counted a word in a
+    comment would be counting something a reader cannot act on.
+
+    **A TRAILING PRIME is part of the name**, and `lean_code_regions` above is
+    what has to get it right for this function to see the declaration at all:
+    five in `lib/` end in `'` (`ProofLib.mem_read_two_writes_adjacent'`,
+    `mem_read_after_write_u64_slot'`, `u64_toNat_sub_one'`, `MF.fieldTag_inj'`,
+    `work.s64_to_u64_toNat'`), and until the scanner learned that a `'` after an
+    identifier character is a prime rather than a character-literal opener, each
+    was blanked from its name to its next quote. `test_formal_admitted.py` lists
+    them, so a scanner that loses one again fails rather than under-reporting.
+    """
+    heads = re.compile(r"^(theorem|lemma)\s+([A-Za-z_][\w'.]*'?)")
+    opens = re.compile(r"^namespace\s+([A-Za-z_][\w'.]*)")
+    closes = re.compile(r"^end\s+([A-Za-z_][\w'.]*)")
+    out = {}
+    for name in sorted(os.listdir(lean_dir)):
+        if not name.endswith(".lean"):
+            continue
+        try:
+            with open(os.path.join(lean_dir, name), encoding="utf-8") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        code = lean_code_regions(raw)
+        raw_lines, code_lines = raw.splitlines(), code.splitlines()
+        starts, stack = [], []
+        for i, line in enumerate(code_lines):
+            m = opens.match(line)
+            if m:
+                stack.append(m.group(1))
+                continue
+            if closes.match(line) and stack:
+                stack.pop()
+                continue
+            m = heads.match(line)
+            if m:
+                starts.append((i, ".".join(stack + [m.group(2)])))
+        rows = {}
+        for idx, (i, qualified) in enumerate(starts):
+            end = starts[idx + 1][0] if idx + 1 < len(starts) else len(code_lines)
+            rows[qualified] = {
+                "line": i + 1,
+                "text": "\n".join(code_lines[i:end]),
+                "raw": "\n".join(raw_lines[i:end]),
+            }
+        out[name[:-len(".lean")]] = rows
+    return out
+
+
+def uses_axiom_tactic(decl: dict) -> bool:
+    """Whether `decl`'s own comment-stripped text names one of `AXIOM_TACTICS`."""
+    return bool(_TACTIC_RE.search(decl.get("text", "")))
+
+
+#: The two forms `#print axioms` prints, and the parser has to know both:
+#:
+#:     'name' depends on axioms: [a, b]
+#:     'name' does not depend on any axioms
+#:
+#: The second is the one a regex written for the first silently drops, and every
+#: dropped row is a theorem reported as "unknown" — so the first measured run of
+#: this census parsed 193 of `ProofLib`'s 255 and the shortfall was almost
+#: entirely theorems that reach nothing at all, which is the BEST outcome here.
+#:
+#: **The name is matched as "everything up to the SENTENCE", not as "everything
+#: up to the next quote".**  Lean's own quoting is what makes the difference:
+#: `#print axioms u64_toNat_sub_one'` prints
+#:
+#:     'u64_toNat_sub_one'' depends on axioms: [propext, Quot.sound]
+#:
+#: — a prime, then the closing delimiter, so the name itself ends in a `'`.  A
+#: `[^']+` name stops at that prime and the row does not match, which is how four
+#: of `ProofLib`'s primed theorems were reported unanswered by a census that had
+#: just been written to find exactly them.
+_PRINT_AXIOMS_RE = re.compile(
+    r"^'(?P<name>.+)'(?: depends on axioms: \[(?P<list>[^\]]*)\]"
+    r"| does not depend on any axioms)\s*$", re.M)
+
+
+def parse_print_axioms(text: str) -> dict:
+    """`{declaration: [axiom, …]}` out of one or more `#print axioms` lines.
+
+    An empty list is a real answer and not an absence: it says the declaration
+    reaches nothing, which is the result a replacement proof is after. The
+    caller tells the two apart by whether the NAME is present, and that is why
+    this returns a mapping rather than a list — a list cannot say "asked, and the
+    answer was nothing".
+    """
+    out = {}
+    for m in _PRINT_AXIOMS_RE.finditer(text or ""):
+        body = m.group("list") or ""
+        out[m.group("name")] = [a.strip() for a in body.split(",") if a.strip()]
+    return out
+
+
+def theorem_axiom_census(lean, lib_dir: str, modules=None, wall_s=None,
+                         cpu_s=None) -> dict:
+    """`{module: {qualified name: [axiom, …]}}` measured by asking Lean.
+
+    **The measurement no text scan can make**, and the one §7's inventory needed
+    before it could say what a proof rests on. One `#print axioms` line per
+    theorem, ONE Lean run per module — 375 theorems over five modules is five
+    elaborations and about five seconds, against 375 process launches, which is
+    why this is affordable at all.
+
+    Every run goes through `formal/lean.py::run_lean` under the library bounds,
+    for the reason every Lean run in this tree does: the launcher is where the
+    wall/CPU/memory bounds and the process-group kill live, and a second way to
+    start Lean is a second set of bounds.
+
+    `modules` narrows the run; the census over all of `lib/` is the default
+    because a partial census is a number with no denominator.
+
+    The return is the MEASURED half only. Join it with `library_theorems` (the
+    source half) and the disagreement between them is the finding — see
+    `axiom_census_summary`, which reports both directions, because a census that
+    only reported the direction it expected would be the defect it is measuring.
+    """
+    import tempfile
+
+    from formal import lean as _lean
+
+    lib_dir = os.path.abspath(lib_dir)
+    available = sorted(n[:-len(".lean")] for n in os.listdir(lib_dir)
+                       if n.endswith(".lean"))
+    out, asked = {}, {}
+    for mod in (available if modules is None else list(modules)):
+        if mod not in available:
+            continue
+        wanted = list(library_theorems(lib_dir).get(mod, {}))
+        with tempfile.TemporaryDirectory(prefix="axiomcensus.") as tmp:
+            src = os.path.join(tmp, "axioms.lean")
+            with open(src, "w", encoding="utf-8") as f:
+                f.write(f"import {mod}\n")
+                for qualified in wanted:
+                    f.write(f"#print axioms {qualified}\n")
+            env = os.environ.copy()
+            env["LEAN_PATH"] = os.pathsep.join((tmp, lib_dir))
+            wall, cpu = _lean.library_bounds() if wall_s is None else (
+                wall_s, cpu_s)
+            run = _lean.run_lean(lean, [os.path.basename(src)], env=env, cwd=tmp,
+                                 wall_s=wall, cpu_s=cpu)
+        if run.exceeded:
+            out[mod] = {}
+            asked[mod] = {"exceeded": run.exceeded, "answered": 0,
+                          "asked": len(wanted)}
+            continue
+        # STDOUT *and* stderr, because `#print axioms` writes its answer to
+        # stdout and Lean's errors go to the same place a reader has to read —
+        # `formal/lean.py::_run_lean`'s own docstring records a census that read
+        # only stderr and reported zero holes on a file with two.
+        out[mod] = parse_print_axioms((run.stdout or "") + (run.stderr or ""))
+        asked[mod] = {"exceeded": None, "answered": len(out[mod]),
+                      "asked": len(wanted)}
+    return {"axioms": out, "asked": asked}
+
+
+def axiom_census_summary(census: dict, lib_dir: str) -> dict:
+    """The join, and both disagreements, counted per module.
+
+    Four numbers per module, and the two in the middle are the ones a text
+    census cannot produce:
+
+      `reaches`     theorems whose closure contains a `native_decide`/
+                    `bv_decide` axiom — what a proof actually rests on;
+      `clean`       theorems that reach no axiom at all;
+      `text_only`   theorems whose SOURCE names one of the tactics and whose
+                    closure has none. A losing tactic alternative is still text,
+                    so this is the site census's overcount made visible, per
+                    theorem, and each row is a place where a replacement would
+                    not have changed anything.
+      `closure_only`  theorems whose source names none and whose closure has
+                    one — the site census cannot see these at all, because they
+                    reach the axiom THROUGH another theorem, and they are the
+                    argument for measuring the closure rather than the text.
+
+    `unanswered` is reported too and is not folded into any of the four: a
+    theorem Lean did not answer for is neither clean nor reaching, and reporting
+    it as clean is exactly how a census reads as a pass.
+    """
+    source = library_theorems(lib_dir)
+    out = {}
+    for mod, rows in census.get("axioms", {}).items():
+        declared = source.get(mod, {})
+        reaches, clean, text_only, closure_only, unanswered = [], [], [], [], []
+        for qualified, axioms in rows.items():
+            sites = [a for a in axioms if axiom_site_tactic(a)]
+            named = uses_axiom_tactic(declared.get(qualified, {"text": ""}))
+            if sites and not named:
+                closure_only.append(qualified)
+            elif sites:
+                reaches.append(qualified)
+            elif named:
+                text_only.append(qualified)
+            else:
+                clean.append(qualified)
+        for qualified in declared:
+            if qualified not in rows:
+                unanswered.append(qualified)
+        out[mod] = {
+            "declared": len(declared), "answered": len(rows),
+            "reaches": sorted(reaches), "clean": sorted(clean),
+            "text_only": sorted(text_only), "closure_only": sorted(closure_only),
+            "unanswered": sorted(unanswered),
+            "of_reduce_bool": sorted(
+                q for q, a in rows.items() if OF_REDUCE_BOOL in a),
+        }
+    return out

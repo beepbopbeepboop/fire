@@ -1429,19 +1429,39 @@ def test_a_stdlib_module_in_no_tier_is_not_reported_as_a_typo(tmpdir, _shared):
     check("shlex" in _sys.stdlib_module_names,
           "precondition: shlex is a CPython standard-library module, which is "
           "the fact the diagnostic used to deny")
-    check("shlex" in I.HOST_MODELLED,
-          "shlex is not in HOST_MODELLED: it needs nothing a freestanding "
-          "image does not have, so calling it unreachable would be a "
-          "permanent-fact claim about the target and it is not one")
     check(not I._host_tier_conflicts(),
           "a name in two tiers is a partition bug: %s"
           % I._host_tier_conflicts())
-    check(I.host_module_tier("shlex") == "modelled",
-          "host_module_tier('shlex') is %r, so a coverage report counts it as "
-          "neither tier" % I.host_module_tier("shlex"))
-    root = os.path.join(tmpdir, "shlex")
+
+    # **`shlex` HAS SINCE BEEN WRITTEN** (`formal/hostmods/shlex.mojo`, `quote`,
+    # checked against CPython's own by `test_formal_shlex.py` on both
+    # backends), so it is in NO tier — `formal/imports.py`'s own rule, and the
+    # same accounting `html` and `posixpath` went through on 2026-10-03. The
+    # diagnostic this row was written for therefore no longer fires for it at
+    # all: `import shlex` RESOLVES. So the row is split, and both halves are
+    # kept because each is a different claim about a different name.
+    #
+    # `shlex` is now the OPPOSITE assertion — a written module leaves the tier,
+    # and an import of it builds — and the "which TIER decides the wording" half
+    # moves to `datetime`, which is still `modelled` and needs nothing this
+    # target lacks (`formal/hostmods/time.mojo` already reads the clock
+    # `datetime.now()` wants; the arithmetic is integer work). `resource` is the
+    # other still-modelled name of the same shape.
+    check(not I.host_module_tier("shlex"),
+          "host_module_tier('shlex') is %r; its Mojo source exists, so an entry "
+          "left behind would refuse a file AFTER the module that answers it is "
+          "on disk, which is a false statement about the target"
+          % I.host_module_tier("shlex"))
+    check("datetime" in I.HOST_MODELLED,
+          "datetime is not in HOST_MODELLED: it needs nothing a freestanding "
+          "image does not have, so calling it unreachable would be a "
+          "permanent-fact claim about the target and it is not one")
+    check(I.host_module_tier("datetime") == "modelled",
+          "host_module_tier('datetime') is %r, so a coverage report counts it "
+          "as neither tier" % I.host_module_tier("datetime"))
+    root = os.path.join(tmpdir, "datetime")
     os.makedirs(root)
-    write_tree(root, {"prog.mojo": "import shlex\ndef main():\n  return 1\n"})
+    write_tree(root, {"prog.mojo": "import datetime\ndef main():\n  return 1\n"})
     fresh_cas()
     result = run_fire(["build", "--formal", "--no-prove", "-o",
                        os.path.join(root, "prog.aout"),
@@ -1456,6 +1476,20 @@ def test_a_stdlib_module_in_no_tier_is_not_reported_as_a_typo(tmpdir, _shared):
     check("not a stdlib or sibling module" not in text,
           "the refusal still calls a standard-library module something that "
           f"does not exist: {text[-300:]}")
+    # …and the closure, which is the other half of what became of `shlex`: a
+    # written module's import BUILDS rather than being refused, and
+    # `test_formal_shlex.py::group_resolve` is what checks the module itself.
+    written = os.path.join(tmpdir, "shlex_written")
+    os.makedirs(written)
+    write_tree(written, {"prog.mojo": ("import shlex\n\ndef main():\n"
+                                       "  return 0\n")})
+    fresh_cas()
+    ok = run_fire(["build", "--formal", "--no-prove", "-o",
+                   os.path.join(written, "prog.aout"),
+                   os.path.join(written, "prog.mojo")], cwd=written)
+    check(ok.returncode == 0,
+          "import shlex is refused although formal/hostmods/shlex.mojo answers "
+          f"it: {(ok.stderr or ok.stdout or '').strip()[-300:]}")
 
 
 def test_no_standard_library_module_is_left_in_neither_tier(tmpdir, _shared):

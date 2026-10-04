@@ -431,6 +431,18 @@ PROVIDED_NEVER_A_HOST_MODULE = {
     # directory, a symbolic link and a DANGLING one, on both backends, and which
     # is where the 50-file row in the host-import ranking is now accounted for.
     "glob": "test_formal_glob.py",
+    # `shlex` left `HOST_MODELLED` the same way and for the same reason: a state
+    # machine over a string whose `quote` half is a scan over bytes a value
+    # already is, so nothing was missing from the target and the tier entry said
+    # "the work has not been done".  Its test is `test_formal_shlex.py`, which
+    # checks `quote` against CPython's own over a 61-case corpus and every byte
+    # 1..255 alone and after a safe byte, on both backends, and which re-splits
+    # every answer with CPython's own `shlex.split` to say the quoting is one
+    # shell word -- the only property `tools/suite.py`'s three call sites need of
+    # it, since they build a command line out of the answer.  What the module
+    # does NOT have (`split`, `join`, the `shlex` reader) is refused there by
+    # name, which is what keeps a one-file row from reading as a whole module.
+    "shlex": "test_formal_shlex.py",
 }
 
 # The two `os` SUBMODULES, which are provided and are named by the file they are
@@ -535,10 +547,6 @@ HOST_SET_ADDED_TIERS = {
     # named from the other side.  `fire.py` imports `sysconfig` and never uses
     # it, so nothing this tree can write would move a file.
     "sysconfig": "unreachable",
-    # A state machine over a string (`split`/`quote`/`join`); `shlex.shlex`
-    # itself is a generator over `readline`, which is the half that is out of
-    # reach.  Reachable in principle, unwritten today: a gap with an owner.
-    "shlex": "modelled",
     # A clock `formal/hostmods/time.mojo` already reads, plus calendar
     # arithmetic.  The answer is a shaped record, which is
     # `bugs/FORMAL_time_struct_shaped_answers.md`'s to design.
