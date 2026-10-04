@@ -1686,7 +1686,14 @@ dylib_exports: list = None, globals_base: int = None,
         # The trap is three instructions: `movz x0, <status>; movz x16, 1; svc
         # #0x80` is Darwin arm64 `exit(status)`, and it is the same sequence
         # with the same shape as the divide-by-zero arm of `_emit_div_shift_pow`.
-        self.asm.label(trap_label)
+        # **The one exit on this backend that does NOT go through
+        # `_emit_exit`,** and it is the only deliberate exception: this trap can
+        # fire before the program has produced any output at all (it is the
+        # first thing a prologue does), so there is nothing for a flush to
+        # push, and `fflush` is a call — which would move the address this trap
+        # is decoded from. `lib/ProofLib.lean` reads that address out of
+        # `info["compiler_traps"]`, so a flush here would silently move the
+        # decoded trap under the proof layer.
         self.asm.emit(encode_movz_xd_imm(0, M.STACK_TRAP_STATUS))
         self.asm.emit(encode_movz_xd_imm(16, 1))
         self.asm.emit(encode_svc(0x80))
@@ -2129,10 +2136,9 @@ dylib_exports: list = None, globals_base: int = None,
             self.asm.emit_label_rel(fail_label, here_offset=-4)
             self._emit_b_to(ok_label)
             self.asm.label(fail_label)
-            # Darwin arm64: x16 = SYS_exit (1), x0 = status, svc #0x80
-            self.asm.emit(encode_movz_xd_imm(0, 1))
-            self.asm.emit(encode_movz_xd_imm(16, 1))
-            self.asm.emit(encode_svc(0x80))
+            # The one exit on this backend (`_emit_exit`), so a failed assert
+            # leaves what the program printed behind it and leaves status 1.
+            self._emit_exit(1)
             self.asm.label(ok_label)
             return
 
@@ -2466,23 +2472,74 @@ dylib_exports: list = None, globals_base: int = None,
                 self._emit_stmt(s)
         self.asm.emit(encode_ldp_sp_post(0, 31))
 
-    def _emit_diverge(self) -> None:
-        """Leave the machine: run every enclosing finally, then Darwin
-        `exit(1)`.
+    def _emit_exit(self, status) -> None:
+        """Leave the machine with `status`: flush every open stream, then the
+        raw Darwin trap.  Never returns, and nothing is emitted after it.
 
-        The ONE way control stops on this path, and both of its callers share
-        it rather than spelling the three instructions each: a `raise`, which
-        has no unwinder to route to, and a dialect trap used as a statement
-        (`model.mlir_effect_diverge_call`), which has no result and so leaves
-        nothing else to emit. Two copies of `movz x0, #1; movz x16, #1;
-        svc #0x80` is how two of them come to differ, and the finally flush is
-        the part that is easy to drop — a `raise` inside a `try` must still run
-        the `finally` on its way out.
+        **The flush is the whole reason this is one method.**  The trap itself is
+        `movz x0, #status ; movz x16, #1 ; svc #0x80` — a raw `SYS_exit`, which
+        does not touch stdio, so everything the program printed is still in
+        stdout's buffer when the process stops.  stdout is block-buffered
+        whenever it is not a terminal, which is every case a sweep or a test
+        harness creates (`subprocess.run(capture_output=True)`), so a program
+        that printed and then took an error exit printed NOTHING on arm64 while
+        printing everything on x86-64 — whose exit is a call to the C library's
+        `exit(status)` (`formal/x86_64_codegen.py::_emit_call_exit`), and `exit`
+        flushes every open stream.  Measured, both architectures, same source:
+
+            def main() -> Int32:
+                print("before")
+                xs = [1, 2, 3]
+                print(xs[7])          # the subscript traps
+                return 0
+
+        x86-64 prints `before` and exits 1; arm64 printed nothing.  It is the
+        two architectures disagreeing about what a program left on stdout, and
+        `test_formal_x86_64_parity.py` is the file that exists to keep that
+        closed — a differential-against-CPython fuzzer structurally cannot see
+        it, because every program that reaches one of these exits raises in
+        CPython and so never reaches an image.
+
+        `fflush(NULL)` is the same call `print(..., flush=True)` already emits
+        through the same `_emit_call` (see `_emit_print`), so this costs no new
+        mechanism and no new symbol: `NULL` is the C library's "every stream",
+        and there is exactly one stream this model writes, which is the fact
+        `print(file=…)`'s refusal is stated on (`M.print_kwargs`).
+
+        Twenty sites share this method, which is the point of it: twenty copies
+        of the trap is how twenty call sites come to differ, and the flush is
+        the part that is easy to forget at the twenty-first.
+
+        **What it costs the proof layer, stated rather than left to be found.**
+        `arm64_step` cannot step past a `BL` (it takes the call's target, which
+        is outside the image, and returns `none`), so a program whose image
+        contains one of these exits now HALTS the machine model at the flush
+        rather than at the trap.  That is the same boundary every extern call
+        already is, and `_unfollowable_calls` is what reports it — but it is a
+        real difference in what an arm64 theorem SAYS, so it is worth the
+        measurement rather than the assumption: every one of the 51 programs in
+        `formal/examples/` emits NO exit trap at all (measured, `svc` absent from
+        each entry function's range), so no example's proof changed.
         """
-        self._flush_pending_finally()
-        self.asm.emit(encode_movz_xd_imm(0, 1))
+        self._emit_call(F.CallExpr(func=F.IdentExpr(name="fflush"),
+                                   args=[F.IntLiteral(0)]))
+        self.asm.emit(encode_movz_xd_imm(0, status))
         self.asm.emit(encode_movz_xd_imm(16, 1))
         self.asm.emit(encode_svc(0x80))
+
+    def _emit_diverge(self) -> None:
+        """Leave the machine: run every enclosing finally, then `exit(1)`.
+
+        The ONE way control stops on this path, and both of its callers share
+        it rather than spelling the exit each: a `raise`, which has no unwinder
+        to route to, and a dialect trap used as a statement
+        (`model.mlir_effect_diverge_call`), which has no result and so leaves
+        nothing else to emit. Two copies of the exit is how two of them come to
+        differ, and the finally flush is the part that is easy to drop — a
+        `raise` inside a `try` must still run the `finally` on its way out.
+        """
+        self._flush_pending_finally()
+        self._emit_exit(1)
 
     def _emit_try(self, stmt: F.TryStmt) -> None:
         """try/except/else/finally without an exception runtime.
@@ -2604,10 +2661,9 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit_label_rel(fail_label, here_offset=-4)
         self._emit_b_to(ok_label)
         self.asm.label(fail_label)
-        # Darwin arm64 exit(1) — same signal as a failed assert.
-        self.asm.emit(encode_movz_xd_imm(0, 1))
-        self.asm.emit(encode_movz_xd_imm(16, 1))
-        self.asm.emit(encode_svc(0x80))
+        # Darwin arm64 exit(1) — same signal as a failed assert, through the
+        # one exit every site on this backend shares.
+        self._emit_exit(1)
         self.asm.label(ok_label)
         # Push e0..e(n-1); pop assigns last target first.
         #
@@ -3062,9 +3118,7 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit_label_rel(fail_label, here_offset=-4)
         self._emit_b_to(ok_label)
         self.asm.label(fail_label)
-        self.asm.emit(encode_movz_xd_imm(0, 1))
-        self.asm.emit(encode_movz_xd_imm(16, 1))
-        self.asm.emit(encode_svc(0x80))
+        self._emit_exit(1)
         self.asm.label(ok_label)
         # Keep src base and n_fixed across fixed-child unpack (X9/X1 are
         # clobbered by nested _emit_for_unpack). Push [n_fixed, src_base]:
@@ -3137,9 +3191,7 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_ldp_sp_post(0, 31))        # pop [n_fixed, src]
         self._emit_b_to(oob_end)
         self.asm.label(oob)
-        self.asm.emit(encode_movz_xd_imm(0, 1))
-        self.asm.emit(encode_movz_xd_imm(16, 1))
-        self.asm.emit(encode_svc(0x80))
+        self._emit_exit(1)
         self.asm.label(oob_end)
 
     def _range_info(self, rargs: list) -> tuple:
@@ -4639,9 +4691,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             _pop_scan()
             if why_no_room is not None:
                 self._emit_overflow_diagnostic(why_no_room)
-            self.asm.emit(encode_movz_xd_imm(0, 1))
-            self.asm.emit(encode_movz_xd_imm(16, 1))
-            self.asm.emit(encode_svc(0x80))
+            self._emit_exit(1)
         else:
             # THE INSERT. `X1` = base and `X2` = count come off the scan's own
             # pushes, the spilled VALUE is at [SP+32] (see the stack note), and
@@ -4672,9 +4722,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                 M.dict_store_overflow_message(
                     e.obj.name if isinstance(e.obj, F.IdentExpr) else "<expr>",
                     cap))
-            self.asm.emit(encode_movz_xd_imm(0, 1))
-            self.asm.emit(encode_movz_xd_imm(16, 1))
-            self.asm.emit(encode_svc(0x80))
+            self._emit_exit(1)
         self.asm.label(end_label)
 
     def _is_dict_key_subscript(self, e: F.SubscriptExpr) -> bool:
@@ -5013,9 +5061,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_mov_zr_xn(0, 4))
         self._emit_b_to(end_label)
         self.asm.label(oob_label)
-        self.asm.emit(encode_movz_xd_imm(0, 1))
-        self.asm.emit(encode_movz_xd_imm(16, 1))
-        self.asm.emit(encode_svc(0x80))
+        self._emit_exit(1)
         self.asm.label(end_label)
 
     def _emit_subscript_store(self, target: F.SubscriptExpr, value) -> None:
@@ -5453,13 +5499,11 @@ ctor_field_value=self._ctor_field_value_for(name),
         # fails runs exactly the expressions the source wrote.
         for msg in args[1:]:
             self._emit_expr(msg)
-        # Darwin arm64 exit(1): x16 = SYS_exit, x0 = status, svc #0x80. The
-        # same three instructions `AssertStmt` and `RaiseStmt` emit, so the
-        # status a failed `debug_assert` leaves behind is the one every other
-        # failing check on this path leaves behind.
-        self.asm.emit(encode_movz_xd_imm(0, 1))
-        self.asm.emit(encode_movz_xd_imm(16, 1))
-        self.asm.emit(encode_svc(0x80))
+        # The same `_emit_exit(1)` `AssertStmt` and `RaiseStmt` use, so the status a
+        # failed `debug_assert` leaves behind is the one every other failing
+        # check on this path leaves behind — and what it printed before it is
+        # still what the reader gets.
+        self._emit_exit(1)
         self.asm.label(ok_label)
 
     # ── methods on a value ───────────────────────────────────────────────
@@ -6075,9 +6119,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_overflow_diagnostic(
             M.list_append_overflow_message(
                 recv.name if isinstance(recv, F.IdentExpr) else "<expr>", cap))
-        self.asm.emit(encode_movz_xd_imm(0, 1))
-        self.asm.emit(encode_movz_xd_imm(16, 1))
-        self.asm.emit(encode_svc(0x80))
+        self._emit_exit(1)
         self.asm.label(ok)
         self.asm.emit(encode_movz_xd_imm(0, 0))     # None
 
@@ -6245,9 +6287,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_b_to(end)
         self.asm.label(trap)
         self._emit_overflow_diagnostic(M.int_parse_trap_message(base))
-        self.asm.emit(encode_movz_xd_imm(0, M.SHIFT_TRAP_STATUS))
-        self.asm.emit(encode_movz_xd_imm(16, 1))
-        self.asm.emit(encode_svc(0x80))
+        self._emit_exit(M.SHIFT_TRAP_STATUS)
         self.asm.label(end)
 
     def _emit_file_write(self, e: F.CallExpr) -> None:
@@ -8976,9 +9016,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self._emit_b_to(ok)
         self.asm.label(oob)
-        self.asm.emit(encode_movz_xd_imm(0, 1))
-        self.asm.emit(encode_movz_xd_imm(16, 1))
-        self.asm.emit(encode_svc(0x80))
+        self._emit_exit(1)
         self.asm.label(ok)
 
     def _compr_append_pair(self, res_offset: int, cap: int) -> None:
@@ -9021,9 +9059,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self._emit_b_to(ok)
         self.asm.label(oob)
-        self.asm.emit(encode_movz_xd_imm(0, 1))
-        self.asm.emit(encode_movz_xd_imm(16, 1))
-        self.asm.emit(encode_svc(0x80))
+        self._emit_exit(1)
         self.asm.label(ok)
 
     def _emit_list_star(self, expr) -> None:
@@ -9165,9 +9201,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_b(0))
             self.asm.emit_label_rel(ok_label, here_offset=-4)
             self.asm.label(div0_label)
-            self.asm.emit(encode_movz_xd_imm(0, 1))
-            self.asm.emit(encode_movz_xd_imm(16, 1))
-            self.asm.emit(encode_svc(0x80))
+            self._emit_exit(1)
             self.asm.label(ok_label)
             return
 
@@ -9688,9 +9722,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         zstep = f"{self.func_name}_slz{self._while_counter}"
         self.asm.emit(encode_cbnz_xn(0, 8))
         self.asm.emit_label_rel(zstep, here_offset=-4)
-        self.asm.emit(encode_movz_xd_imm(0, 1))
-        self.asm.emit(encode_movz_xd_imm(16, 1))
-        self.asm.emit(encode_svc(0x80))
+        self._emit_exit(1)
         self.asm.label(zstep)
 
         # i → X6, from the word the direction picks.
@@ -9875,9 +9907,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_b(0))
         self.asm.emit_label_rel(done_label, here_offset=-4)
         self.asm.label(fail_label)
-        self.asm.emit(encode_movz_xd_imm(0, 1))
-        self.asm.emit(encode_movz_xd_imm(16, 1))
-        self.asm.emit(encode_svc(0x80))
+        self._emit_exit(1)
         self.asm.label(done_label)
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self.asm.emit(encode_ldp_sp_post(0, 31))
@@ -10008,13 +10038,12 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit_label_rel(end_label, here_offset=-4)
         # The negative-amount trap, laid out after the saturating arm so both
         # arms are reached by one short forward branch and neither falls into
-        # the other. Darwin arm64 exit(status): x16 = SYS_exit, x0 = status,
-        # svc #0x80 — the same three instructions, and the same status, as the
-        # divide-by-zero arm of `_emit_div_shift_pow` above.
+        # the other. `_emit_exit(M.SHIFT_TRAP_STATUS)`, which is the one exit on
+        # this backend — and so the same status, the same flush, and the same
+        # three instructions — as the divide-by-zero arm of
+        # `_emit_div_shift_pow` above.
         self.asm.label(neg_label)
-        self.asm.emit(encode_movz_xd_imm(0, M.SHIFT_TRAP_STATUS))
-        self.asm.emit(encode_movz_xd_imm(16, 1))
-        self.asm.emit(encode_svc(0x80))
+        self._emit_exit(M.SHIFT_TRAP_STATUS)
         self.asm.label(end_label)
 
     def _emit_saturated(self, op: str, signed: bool) -> None:
@@ -10831,9 +10860,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit_label_rel(zstep, here_offset=-4)
         self._emit_b_to(zok)
         self.asm.label(zstep)
-        self.asm.emit(encode_movz_xd_imm(0, 1))
-        self.asm.emit(encode_movz_xd_imm(16, 1))
-        self.asm.emit(encode_svc(0x80))
+        self._emit_exit(1)
         self.asm.label(zok)
         # loop
         self._while_counter += 1
@@ -10900,9 +10927,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_mov_zr_xn(0, 9))
         self._emit_b_to(oob_end)
         self.asm.label(oob)
-        self.asm.emit(encode_movz_xd_imm(0, 1))
-        self.asm.emit(encode_movz_xd_imm(16, 1))
-        self.asm.emit(encode_svc(0x80))
+        self._emit_exit(1)
         self.asm.label(oob_end)
 
     def _emit_del(self, stmt) -> None:
@@ -11097,9 +11122,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_ldp_sp_post(0, 1))
         self._emit_b_to(end)
         self.asm.label(miss)
-        self.asm.emit(encode_movz_xd_imm(0, 1))
-        self.asm.emit(encode_movz_xd_imm(16, 1))
-        self.asm.emit(encode_svc(0x80))
+        self._emit_exit(1)
         self.asm.label(end)
 
     def _emit_del_slice(self, target) -> None:
