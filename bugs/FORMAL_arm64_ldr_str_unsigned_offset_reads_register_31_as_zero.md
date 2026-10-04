@@ -7,6 +7,16 @@ fixed**, deliberately, with the reason in §4. It is the one surviving `WRONG` i
 a 296-case sweep, and it is reachable: `formal/arm64_codegen.py` emits
 `encode_ldr_xt_xn_imm(_, 31, off)` at ten sites.
 
+**RE-MEASURED 2026-10-05 on `work/formal27-2`: still open. §4's SUGGESTED REPAIR
+is wrong in a way that costs an afternoon, and the real one is shorter; §5's
+step 1 understates what the build costs. Both are now measured and written down
+at the end — the repair is `by_cases h31 : … = 31 <;> simp [arm64_reg_or_sp,
+h31]` with no bound lemma and no `omega`, and its `≠ 31` half PROVES today
+against this tree's own `.olean`.** Nothing in `lib/ProofLib.lean` was changed:
+the build does not fit a bounded worker's ceiling (8.0 GB breach at `-j 1`), and
+with the eight Lean-checking formal gate tests disabled a wrong library edit has
+nothing to catch it.
+
 **Both defects are reproduced on seed `sweepC`, and NEITHER of them is what the
 296-case `sweepB` sweep reports** — that sweep is clean once X18 is excluded
 (§1). So this bug's evidence is the two one-instruction cases below, not a tally.
@@ -193,3 +203,119 @@ python3 tools/memslot.py --gb 24 --label prooflib -- python3 -c \
      os.path.join(L._default_root(),'lib'))"     # with the change applied: the two errors in §4
 grep -nE "encode_(ldr|str)_xt_xn_imm\([^)]*,\s*31\s*," formal/arm64_codegen.py
 ```
+
+## What was re-measured 2026-10-05 (`work/formal27-2`)
+
+### §4's suggested repair does not work, and the one that does is shorter
+
+§4 proposes
+
+```lean
+  by_cases h31 : ((w >>> 5) &&& 0x1f) = 31
+  · simp [h31, arm64_reg_or_sp] -- and the existing rw chain
+  · have hlt : ((w >>> 5) &&& 0x1f).toNat < 31 := by omega
+    simp [arm64_reg_or_sp_of_lt hlt]
+```
+
+and **`omega` cannot prove that `have hlt` line.** Measured, with this tree's own
+`lib/ProofLib.olean` and `formal/lean.py::run_lean` (no rebuild, so this is
+cheap — 3 s and 1.2 GB per attempt):
+
+```
+error: omega could not prove the goal:
+a possible counterexample may satisfy the constraints
+  b ≥ 32
+  0 ≤ a ≤ 4294967295
+where
+ a := ↑w.toNat
+ b := ↑(w >>> 5 &&& 31).toNat
+```
+
+`UInt32.toNat_lt w` does not help, because `omega` needs the AND's own bound
+(`(x &&& 31).toNat ≤ 31`) and only reaches it through `Nat.and_lt_two_pow`
+applied to a `Nat` expression — which needs `UInt32.toNat_and` AND
+`UInt32.toNat_shiftRight` rewritten in BOTH the hypothesis and the goal, plus
+`UInt32.toNat_ofNat` to make `5` and `UInt32.toNat 5` the same term. Getting
+there is four rewrites for a bound the repair does not need.
+
+**The repair does not need the bound at all.** `arm64_reg_or_sp` is an `if`, so
+`h31` alone reduces it:
+
+```lean
+  by_cases h31 : ((w >>> 5) &&& 0x1f).toNat = 31 <;>
+    simp [arm64_reg_or_sp, h31]
+```
+
+and this was checked the only way a light worker can check it — a scratch file
+that imports `ProofLib` and re-states `work_step_ldr_uoff` with
+`arm64_reg_or_sp` in the STATEMENT, the twenty-`hne` chain copied verbatim and
+the split appended:
+
+* the **`≠ 31` branch CLOSES today**, with the model exactly as it stands
+  (`simp [arm64_reg_or_sp, h31]`, 2.9 s, 1.2 GB, no unsolved goals in that
+  branch);
+* the **`= 31` branch does not close, and cannot** — its goal reads
+  `… ((arm64_reg 31 s).toNat + …) = … ((s.sp.toNat + …) …)`, i.e. the model's arm
+  says the ZERO register where the claim says the stack pointer. That is the
+  §3 change to the model, not a missing tactic: once `arm64_step`'s arm reads
+  `arm64_reg_or_sp`, both sides of that goal are `arm64_reg_or_sp 31 s`, which
+  is `arm64_reg_or_sp_31` (already in `lib/ProofLib.lean`, proven, at line 1584).
+
+So the shape of the fix is settled and cheap; what is missing is the ability to
+run it.
+
+### §5 step 1's build does not fit a light worker
+
+```console
+$ python3 tools/memslot.py --gb 8 --label prooflib -- python3 .tmp/buildlib.py .tmp/lib5 ProofLib
+memcap: BREACH  8.0 GB > 8.0 GB ceiling (100%), 2 procs -- killing prooflib
+memcap: peak observed before the kill: 8.0 GB
+```
+
+`formal/lean.py::run_lean` at the library bounds and **one thread** (the library
+memory cap, `LEAN_PATH` pointed at a scratch copy of `lib/`), killed after
+~2 minutes. `formal/lean.py`'s own table measures this build at **7.82 GB peak**
+at `-j 4`, so one thread buys less than the 2% margin a ceiling needs. §5 step 1
+("Build `lib/ProofLib.olean` (7.7 GB, ~100 s)") reads as a routine step because
+it was written by a worker with the machine to itself.
+
+**Consequences for whoever takes it:**
+
+1. The first thing to arrange is a build that fits — `MEMLIMIT_GB` raised for the
+   `prooflib` job, or a non-light worker. Everything else is gated on it, and the
+   measurement above is the reason it is step 1 rather than an aside.
+2. Then §3's three substitutions plus the split above, in ONE commit: the model's
+   two arms, the two lemma statements, and the two `formal/arm64_proof_gen.py`
+   `_step_rhs` rows. The generator's `idx == 18` comment already says the RHS has
+   to be the SYNTACTIC mirror of the statement, so the row and the statement must
+   change together.
+3. Then §5's step 3 (the width defect) with the helpers from
+   `bugs/FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` §4, which needs
+   the same build and is why the two are one piece of work.
+4. The fuzzer's number to move, re-measured on this tree (2026-10-05) and
+   unchanged by anything in this branch:
+
+   ```console
+   $ python3 tools/memslot.py --gb 4 --label fm -- \
+         python3 tools/formal_model_fuzz.py --cases 60 --seed ledgerC --mix mem
+   arm64 model vs hardware: x18 skipped (platform register):
+       AGREE 14  WRONG 5  NOSTEP 41  (of 60)
+   ```
+
+   All five WRONGs are this doc's two defects, and the split is legible from the
+   width of each disagreement — 4 differing bytes is the `STR Wt` width half, 8
+   or a register is the `Rn = 31` half:
+
+   | case | the memory instruction | differing | half |
+   |---|---|---|---|
+   | 16 | `str w0, [x17, #4]` | 4 bytes | width |
+   | 21 | `str x4, [sp, #8]` | 8 bytes | base |
+   | 27 | `str x11, [sp, #48]` | 8 bytes | base |
+   | 42 | `str w10, [x9, #20]` | 4 bytes | width |
+   | 48 | `ldr x14, [sp, #56]` | `x14` | base |
+
+   Case 48 is §1's case 25 in miniature: an SP-relative LOAD, so the model reads
+   address `0 + 56` and answers 0 where the hardware has the word. Fixing the
+   base alone takes `WRONG 5` to `WRONG 2`; the width helpers take the rest, and
+   they are shared with
+   `bugs/FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` §4 step 1.
