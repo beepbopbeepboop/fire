@@ -530,15 +530,18 @@ HOST_MODELLED = frozenset((
     #     Five files import it; what of it is absent is at the top of the module.
     "codecs", "copy", "abc", "types", "queue",
     "weakref", "pprint", "reprlib", "pickle",
-    #   `shlex`  — a state machine over a string, the same shape as `re` and
-    #     `fnmatch`, which are written. `split`, `quote` and `join` are pure
-    #     computation over bytes a value already is; the streaming `shlex.shlex`
-    #     reader is a GENERATOR over `readline`, which is the `fnmatch.iglob`
-    #     shape, so it is not in reach by the same argument. It is here because
-    #     it is a standard-library module, and a name in NEITHER tier made
-    #     `unresolvable_import_error` say "not a stdlib or sibling module" —
-    #     a false statement about the target, and the one diagnostic in this
-    #     family that misidentifies what kind of thing the name is.
+    #   `shlex`  — LEFT 2026-10-04 for `formal/hostmods/shlex.mojo`, and it is
+    #     the CHEAPEST row `tools/formal_sweep_causes.py --host` has left: one
+    #     file (`tools/suite.py`, which spells `shlex.quote` three times and
+    #     formats a SHELL line with it) and no dependency on anything. `quote` is
+    #     a scan over bytes a value already is plus a substitution, which is
+    #     `html.escape`'s shape; `test_formal_shlex.py` checks it against
+    #     CPython's own on both backends, over 56 corpus cases and every byte
+    #     1..255 alone and after a safe byte. What is STILL absent and why is at
+    #     the top of that module: `split` and `join` answer a LIST or a
+    #     generator (`bugs/FORMAL_listdir_no_run_time_sequence.md`), and
+    #     `shlex.shlex` is a streaming reader over `readline`, which is the
+    #     `fnmatch.iglob` shape.
     #
     #     Four more names were in NEITHER tier on 2026-10-03 for the same
     #     reason and are placed here by the RULE above rather than by reading:
@@ -595,7 +598,7 @@ HOST_MODELLED = frozenset((
     #     than a new capability. Both files that want it
     #     (`tools/mem_slope.py`, `test_selfhost_memory.py`) spell exactly
     #     `resource.getrusage(resource.RUSAGE_CHILDREN)`.
-    "shlex", "datetime", "resource",
+    "datetime", "resource",
     #   `posixpath`  — LEFT on 2026-10-03 for `formal/hostmods/posixpath.mojo`,
     #     and it is **A SPELLING, not a capability**: every one of its thirty
     #     functions is a one-line forward to
