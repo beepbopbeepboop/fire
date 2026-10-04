@@ -7373,6 +7373,62 @@ def main():
 main()
 """, "8 hi\n")
 
+    # The element-type contract's THIRD argument shape: a CALL RESULT. The
+    # two beside it were already right — a container LITERAL (`total([T(1),
+    # T(2)])`) is provable at the call site, and a caller's scanned local
+    # (`total(mylist)`) carries its own element type — but a parameter whose
+    # every call site is handed a function's return value had no evidence at
+    # all, fell to `int64_t`, and the callee's `for t in xs:` read the
+    # elements with `mojo_list_get_int`, so `t.numel()` degraded to the no-op
+    # stub and the answer was a `T *`'s own bits. Exit 0, no diagnostic: a
+    # heap address where CPython prints `21`.
+    #
+    # The evidence is the callee's RETURN (its `return [T(n), T(n + 1)]`
+    # literal), not its parameter list, which is why this is a distinct arm
+    # rather than a reuse of the callee-parameter rule. All three element
+    # kinds are in one program because the fix is exactly "the call-result
+    # shape types like the other two", and CPython is run on the same text.
+    test_gimple_stdout("gimple_param_receiving_a_call_result_has_an_element_type", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+def total(xs):
+    s = 0
+    for t in xs:
+        s = s + t.numel()
+    return s
+
+def build(n):
+    return [T(n), T(n + 1)]
+
+def total_f(xs):
+    s = 0.0
+    for x in xs:
+        s = s + x
+    return s
+
+def floats():
+    return [1.5, 2.5]
+
+def join(xs):
+    s = ""
+    for x in xs:
+        s = s + x
+    return s
+
+def strs():
+    return ["aa", "bb"]
+
+def main():
+    print(total(build(10)))
+    print(total_f(floats()))
+    print(join(strs()))
+main()
+""", "21\n4.0\naabb\n")
+
     # The `self.<field>` constructor argument, resolved from the owning
     # method's struct — and the one-hop chain that needs it: `Box(self.t)`
     # inside `Holder.go` is only observable once `Holder.t` has a `T *`

@@ -7566,6 +7566,41 @@ def gen_module_impl(self, stmts):
     for _fbn_s in all_functions:
         if isinstance(_fbn_s, FunctionDef):
             _fn_by_name[_as_str(_fbn_s.name)] = _fbn_s
+
+    # Per-callee memo of "what container ELEMENT type does this function
+    # RETURN", read by `_static_arg_elems`'s CallExpr arm below. Memoized
+    # because `_infer_return_elem_type` walks the whole body and this arm sits
+    # inside a per-call-site walk over every caller body, so an unmemoized
+    # call would re-scan the same function once per call site that passes its
+    # result onward. Keyed by name, not by node id: the same FunctionDef is
+    # reached from every call site in the program and there is exactly one
+    # answer per name.
+    _callee_ret_elem_memo: dict = {}
+
+    def _callee_return_elem(fname):
+        """The container element C type `fname` returns, or None.
+
+        The callee's OWN body is the only evidence there is for this, and it
+        is the same evidence Pass 2c's `_return_elem_types` table is built
+        from — which does not exist yet at Pass 1.3d, so it is asked directly.
+        A callee this compile has no FunctionDef for (an imported extern, a
+        method reached through a receiver) answers None, i.e. no evidence,
+        never a guess. One try/except: `_infer_return_elem_type` runs a whole
+        nested scan over AST shapes this pass has no stake in, and a decline
+        there must be silence rather than an exception out of a pre-pass.
+        """
+        if fname in _callee_ret_elem_memo:
+            return _callee_ret_elem_memo[fname]
+        _fd = _fn_by_name.get(fname)
+        if _fd is None:
+            _callee_ret_elem_memo[fname] = None
+            return None
+        try:
+            _e = self._infer_return_elem_type(_fd.body, _fd)
+        except Exception:
+            _e = None
+        _callee_ret_elem_memo[fname] = _e
+        return _e
     _scalar_obs: dict[str, dict[str, set]] = {}   # callee -> {pname -> {types}}
     # Struct-pointer observations, collected in their own map (see
     # `_arg_struct_ptr_type`'s docstring for why they must not share
@@ -7594,7 +7629,26 @@ def gen_module_impl(self, stmts):
         expression, or (None, None). IdentExpr defers to the caller's
         scanned local map; a container LITERAL is provable on the spot,
         which is what the IdentExpr-only walk above could not see either
-        (`total([1.0, 2.0])` read its argument as int64 bits)."""
+        (`total([1.0, 2.0])` read its argument as int64 bits); and a CALL
+        RESULT resolves through the callee's own return element type.
+
+        The CallExpr arm is the third shape of the same question, and its
+        absence was a hole rather than a limit: `total([T(1), T(2)])` typed
+        its argument from the literal and `total(mylist)` from the caller's
+        scan, but `total(build(10))` — a parameter whose EVERY call site is
+        handed a function's return value — had no evidence at all, fell to
+        `int64_t`, and the callee's `for t in xs:` read the elements with
+        `mojo_list_get_int`, so `t.numel()` degraded to the no-op stub and `s`
+        accumulated a `T *`'s own bits. Exit 0, no diagnostic: a heap address
+        where CPython prints `21`. Both one-hop neighbours of that shape were
+        already right, which is what makes it a gap.
+
+        What is NOT interchangeable with a callee's own parameter type: the
+        element type comes from the RETURN (`build`'s `return [T(n), T(n+1)]`
+        list literal), so this asks `_callee_return_elem` and nothing else.
+        Admission discipline is the sibling arms' unchanged: `int64_t` is
+        never positive evidence (see the IdentExpr arm), and `_record_param_
+        elem`'s conflict rule still erases rather than merges."""
         if isinstance(a, gimple_ctypes.IdentExpr):
             _n = _gmi_as_str(a.name)
             if _n in elem:
@@ -7625,6 +7679,14 @@ def gen_module_impl(self, stmts):
                 if a.elements and isinstance(a.elements[0], gimple_ctypes.ListExpr):
                     return 'MojoList *', self._infer_list_elem_type(a.elements[0].elements)
                 return _gmi_as_str(_e), None
+        if isinstance(a, gimple_ctypes.CallExpr) and isinstance(a.func, gimple_ctypes.IdentExpr):
+            # Only a bare-name callee: a `module.f(...)` / `recv.m(...)` has
+            # no FunctionDef in `_fn_by_name`, so it answers None, the same
+            # no-evidence answer every other unrecognised shape gives.
+            _e = _callee_return_elem(_gmi_as_str(a.func.name))
+            if _e is None or _e == 'int64_t' or _e == '':
+                return None, None
+            return _gmi_as_str(_e), None
         return None, None
 
     for caller_name, body in _caller_bodies:
