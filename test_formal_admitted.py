@@ -991,6 +991,49 @@ def test_the_truth_probes_reject_the_pre_audit_text(tmpdir=None):
                   f"and left as they were ({unchanged})")
 
 
+def test_every_contract_points_at_its_own_declaration(tmpdir=None):
+    """`Contract.line` is the line the assumption is ON, verified against the text.
+
+    The audit found this broken: `fire_compiler.py` builds its top-level
+    `FunctionDef` without `line=`, so `getattr(st, "line", 0) + 1` was 1 for every
+    contract in every module, and all nineteen `trust:` lines and all nineteen
+    generated Lean docstrings pointed a reader at line 1 of the module — the
+    module docstring.  A `source:line` that is always `:1` is worse than none,
+    because it looks like a location.
+
+    Both halves are checked against the file rather than against the reader that
+    produced it: the line named must be an `@admitted(` line, and the `def` it
+    decorates must be the one this contract declares.  A line that drifts to the
+    next contract's decorator would satisfy the first check alone.
+    """
+    bad = []
+    for c in A.all_contracts():
+        try:
+            with open(c.source, encoding="utf-8") as f:
+                lines = f.read().split("\n")
+        except OSError as e:
+            bad.append(f"{c.qualified}: cannot read {c.source}: {e}")
+            continue
+        if not (0 < c.line <= len(lines)):
+            bad.append(f"{c.qualified}: line {c.line} is not inside "
+                       f"{os.path.relpath(c.source, HERE)} ({len(lines)} lines)")
+            continue
+        here = lines[c.line - 1].strip()
+        nxt = lines[c.line].strip() if c.line < len(lines) else ""
+        if not here.startswith("@" + A.ADMITTED_DECORATOR + "("):
+            bad.append(f"{c.qualified}: {os.path.relpath(c.source, HERE)}:"
+                       f"{c.line} is {here[:50]!r}, not an `@admitted(` line")
+        elif not nxt.startswith("def " + c.name):
+            bad.append(f"{c.qualified}: "
+                       f"{os.path.relpath(c.source, HERE)}:{c.line} is followed "
+                       f"by {nxt[:50]!r}, so the line points at another "
+                       f"contract's assumption")
+    check(not bad, "an admitted contract's location does not name its own "
+                   "declaration:\n    " + "\n    ".join(bad))
+    return True, (f"{len(A.all_contracts())} contract(s), each pointing at its "
+                  f"own `@admitted(` line")
+
+
 def test_the_library_trust_counts_are_pinned(tmpdir=None):
     """`lib/`: no `axiom`, no `sorry`, and an axiom-carrying tactic count.
 
@@ -2351,6 +2394,8 @@ PURE = [("the emitted Lean is inert where nothing is admitted",
          test_every_contract_has_a_truth_row),
         ("every truth probe rejects the pre-audit text",
          test_the_truth_probes_reject_the_pre_audit_text),
+        ("every contract points at its own declaration",
+         test_every_contract_points_at_its_own_declaration),
         ("the Lean library's trust counts are pinned",
          test_the_library_trust_counts_are_pinned),
         ("FORMAL.md's inventory is the census",

@@ -209,8 +209,19 @@ def contracts_in_file(path: str) -> list:
     second `F.Parser` here would be free to disagree with the build's parse about
     what the source says, and the disagreement would be a missing contract in a
     proof rather than an error.
+
+    THE LINE IS FOUND IN THE SOURCE TEXT, not read off the AST, because the AST
+    does not carry one: `fire_compiler.py`'s top-level `FunctionDef(...)` is built
+    without `line=`, so `getattr(st, "line", 0) + 1` is 1 for every contract in
+    every module, and every `trust:` line and every generated Lean docstring
+    pointed a reader at line 1 of the file — the module docstring.  Fixing it in
+    the parser would mean editing a file every branch in this project parses
+    through, for a field nothing else reads, so the location is recovered where
+    it is consumed instead: the `@admitted(` lines in the text, in order, which is
+    the order the parse returns them in.
     """
     module = _module_name_for(path)
+    admitted_lines = _admitted_decorator_lines(path)
     out = []
     for st in _imports.module_statements(path):
         if not isinstance(st, F.FunctionDef) or not st.name:
@@ -220,9 +231,83 @@ def contracts_in_file(path: str) -> list:
             if text is None:
                 continue
             out.append(Contract(module, st.name, text, path,
-                                getattr(st, "line", 0) + 1))
+                                _line_for(path, st.name, len(out),
+                                          admitted_lines)))
             break
     return out
+
+
+def _admitted_decorator_lines(path: str) -> list:
+    """The 1-based line of every `@admitted(` in `path`, in source order."""
+    out = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for i, line in enumerate(f, 1):
+                if line.lstrip().startswith("@" + ADMITTED_DECORATOR + "("):
+                    out.append(i)
+    except OSError:
+        pass
+    return out
+
+
+def _line_for(path: str, name: str, index: int, admitted_lines: list) -> int:
+    """Where `@admitted(` for `name` is, 1-based; `0` if it cannot be found.
+
+    The ordinal `index` is the contract's position among the file's contracts, so
+    the `n`th `@admitted(` in the text belongs to the `n`th contract the parse
+    returned — which holds because the parse returns them in source order and
+    `contracts_in_file` collects them in that order.  The ordinal is verified
+    rather than assumed: the decorator is only taken when the `def` it decorates
+    is the one being asked about, and otherwise the name is searched for, because
+    a location that can be wrong is worse than no location.
+
+    `0` is a real answer and not a sentinel to hide behind: `Contract.line` is
+    printed in the `trust:` line and in the generated Lean, and `0` reads as "not
+    known" where `1` read as "line one" and pointed at the wrong thing.
+    """
+    if 0 <= index < len(admitted_lines):
+        start = admitted_lines[index]
+        for j in range(start, min(start + 6, start + 40)):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    line = f.readlines()[j - 1]
+            except (OSError, IndexError):
+                break
+            if _spelled(line, name):
+                return start
+            # A blank line or a new top-level statement ends the search: without
+            # it a name that is never declared under this decorator would be
+            # attributed to the NEXT contract's, which is a location that points
+            # at the wrong assumption.
+            if line.strip() and not line.startswith(" ") and \
+                    not line.lstrip().startswith(("@" + ADMITTED_DECORATOR
+                                                 + "(", ")", "#")):
+                break
+    for j, line in enumerate(_read_lines(path), 1):
+        if _spelled(line, name):
+            return j
+    return 0
+
+
+def _spelled(line: str, name: str) -> bool:
+    """Does `line` declare `name`?  A prefix match is not enough: `run` must not
+    match `run_once`, which is why the parameter list or the colon has to follow.
+    """
+    head = line.lstrip()
+    for kw in ("def ", "fn "):
+        if head.startswith(kw):
+            rest = head[len(kw):]
+            return rest == name or rest.startswith(name + "(") or \
+                rest.startswith(name + "[") or rest.startswith(name + ":")
+    return False
+
+
+def _read_lines(path: str) -> list:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().split("\n")
+    except OSError:
+        return []
 
 
 def all_contracts() -> list:
