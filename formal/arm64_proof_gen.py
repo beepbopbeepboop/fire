@@ -8093,7 +8093,24 @@ def _gen_step_lemmas(name: str, code: bytes, base: int) -> str:
     that stepping a state whose pc points at that instruction does not
     fail (the model recognises the emitted instruction). Instructions the
     model does not cover are skipped.
+
+    **The proof is the step-RESULT lemma of the same index, not a second
+    reduction of `arm64_step`.**  The statement is `arm64_step s code ≠ none`
+    and `_gen_step_result_lemmas` has already proved the strictly stronger
+    `arm64_step s code = <the state this instruction produces>` for every
+    instruction it covers, so the whole discriminator apparatus — one
+    `native_decide` per entry of the 54-entry step table (3 024 of them in
+    `formal/examples/bitops.mojo`), then `unfold arm64_step` and two `simp`
+    passes carrying all 54 as rewrite lemmas — was 3 000 redundant
+    out-of-process compilations to re-derive a corollary.  Measured on that
+    example: 37.8 s -> 18.9 s wall for the identical set of theorems.
+
+    So `_step_result_plan` decides which indices have an `sr` to lean on, and
+    the discriminator proof below is kept ONLY for an index the plan does not
+    cover (a word the model recognises but has no right-hand side for), where
+    there is nothing to derive from.
     """
+    plan = _step_result_plan(code)
     words = [int.from_bytes(code[i:i + 4], "little")
              for i in range(0, len(code) - len(code) % 4, 4)]
     blocks = []
@@ -8102,6 +8119,13 @@ def _gen_step_lemmas(name: str, code: bytes, base: int) -> str:
         if idx is None:
             continue
         pc = base + i * 4
+        if i in plan:
+            blocks.append(
+                f"theorem {name}_step_ok_{i} (s : Arm64State) (h : s.pc = {pc}) :\n"
+                f"  arm64_step s {name}_code ≠ none := by\n"
+                f"  rw [{name}_sr_{i} s h]\n"
+                f"  simp")
+            continue
         facts = []
         # EVERY branch is excluded except the one that matched -- not just
         # those before it in `_STEP_CONDS`.  The proof needs every decoder
@@ -8155,11 +8179,22 @@ def _gen_step_lemmas(name: str, code: bytes, base: int) -> str:
     return "\n\n".join(blocks)
 
 
-def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
-    """Generate per-instruction step-RESULT lemmas (arm64_step s code = <rhs>)."""
+def _step_result_plan(code: bytes) -> dict:
+    """Which instruction indices get a step-RESULT lemma, and with what.
+
+    `{index: (word, model branch, right-hand side text)}`, derived ONCE and read
+    by BOTH `_gen_step_result_lemmas` (which emits them) and `_gen_step_lemmas`
+    (which derives the step-OK lemma of the same index from them).  The two used
+    to each walk the instruction words and repeat the same two refusals — a
+    word the model does not recognise, and a word with no right-hand side — and
+    a `step_ok` lemma whose index had no `sr` to lean on was therefore not a
+    fact about the model but an accident of two agreeing filters.  One
+    derivation is what makes "the `sr` exists" a checkable consequence of the
+    plan rather than a second guess at it.
+    """
     words = [int.from_bytes(code[i:i + 4], "little")
              for i in range(0, len(code) - len(code) % 4, 4)]
-    blocks = []
+    plan = {}
     for i, w in enumerate(words):
         idx = _step_branch_index(w)
         if idx is None:
@@ -8167,6 +8202,14 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
         rhs = _step_rhs(w, idx)
         if rhs is None:
             continue
+        plan[i] = (w, idx, rhs)
+    return plan
+
+
+def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
+    """Generate per-instruction step-RESULT lemmas (arm64_step s code = <rhs>)."""
+    blocks = []
+    for i, (w, idx, rhs) in sorted(_step_result_plan(code).items()):
         pc = base + i * 4
         if idx in _WORK_STEP_BY_IDX:
             lemma, tests = _WORK_STEP_BY_IDX[idx]
@@ -8343,47 +8386,6 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
         blocks.append(
             f"theorem {name}_sr_{i} (s : Arm64State) (h : s.pc = {pc}) :\n"
             f"  arm64_step s {name}_code = {rhs} := by\n"
-            + "\n".join(f"  {t}" for t in tactics)
-        )
-    return "\n\n".join(blocks)
-    words = [int.from_bytes(code[i:i + 4], "little")
-             for i in range(0, len(code) - len(code) % 4, 4)]
-    blocks = []
-    for i, w in enumerate(words):
-        idx = _step_branch_index(w)
-        if idx is None:
-            continue
-        pc = base + i * 4
-        facts = []
-        # EVERY branch is excluded except the one that matched -- not just
-        # those before it in `_STEP_CONDS`.  The proof needs every decoder
-        # branch that precedes the matched one in the MODEL, and the table's
-        # order is not the decoder's: B.cond sat at index 51 here and at 22 in
-        # `arm64_step`, so `0..idx` left its `if` open and 40 examples failed
-        # with an unsolved goal that named no branch.  Excluding all of them is
-        # order-independent, so the two lists only have to AGREE, not agree in
-        # sequence.  `_check_step_conds` enforces that they agree.
-        _facts, fact_names = _step_facts(w, idx)
-        facts.extend(_facts)
-        tactics = [
-            f"have hinsn : arm64_read_insn {name}_code {pc} = ({w} : UInt32) "
-            f":= by native_decide",
-        ]
-        tactics.extend(facts)
-        tactics.extend([
-            "unfold arm64_step",
-            "simp [h, hinsn]",
-            f"all_goals simp [{fact_names}]",
-        ])
-        if idx == 51:  # B.cond branches on the flags, not a register
-            tactics.append(f"by_cases hp : arm64_matches_condition {w & 0xf} s.nzcv = true")
-            tactics.append(f"<;> simp [hp]")
-        if idx in (16, 17):  # CBZ / CBNZ branch on arm64_reg rn s = 0
-            rn = w & 0x1f
-            tactics.append(f"by_cases hp : arm64_reg {rn} s = 0 <;> simp [hp]")
-        blocks.append(
-            f"theorem {name}_step_ok_{i} (s : Arm64State) (h : s.pc = {pc}) :\n"
-            f"  arm64_step s {name}_code ≠ none := by\n"
             + "\n".join(f"  {t}" for t in tactics)
         )
     return "\n\n".join(blocks)
@@ -9446,8 +9448,10 @@ def generate_arm64_proof(prog, code, info) -> str:
             "externs declared but no call sites recorded (codegen gap): run test unsupported")
 
     decode_lemmas = _gen_decode_lemmas(func_name, code, base_addr)
-    step_lemmas = (_gen_step_lemmas(func_name, code, base_addr) + "\n\n"
-                   + _gen_step_result_lemmas(func_name, code, base_addr)
+    # The step-OK lemmas are DERIVED from the step-RESULT lemmas, so the
+    # results have to be declared first; see `_gen_step_lemmas`.
+    step_lemmas = (_gen_step_result_lemmas(func_name, code, base_addr) + "\n\n"
+                   + _gen_step_lemmas(func_name, code, base_addr)
                    + ("\n\n" + step_tests if step_tests else ""))
 
     # Fuel for the concrete closed correctness proof. Large enough to let the
@@ -10475,8 +10479,9 @@ def _generate_frame_proof(prog, code, info, methods, func_name, base_addr,
     concrete_fuel = max(100000, len(code) * 500)
     code_defs = _gen_code_defs(stem, code, base_addr, test_input)
     decode_lemmas = _gen_decode_lemmas(stem, code, base_addr)
-    step_lemmas = (_gen_step_lemmas(stem, code, base_addr) + "\n\n"
-                   + _gen_step_result_lemmas(stem, code, base_addr))
+    # step-OK derives from step-RESULT, so the results come first.
+    step_lemmas = (_gen_step_result_lemmas(stem, code, base_addr) + "\n\n"
+                   + _gen_step_lemmas(stem, code, base_addr))
     frame_section = _frame_section(prog, code, info, methods, stem)
     return f"""import ProofLib
 import work
@@ -11470,7 +11475,7 @@ set_option linter.unusedVariables false
 
 {_gen_decode_lemmas("dylib", code, base)}
 
-{_gen_step_lemmas("dylib", code, base) + "\n\n" + _gen_step_result_lemmas("dylib", code, base)}
+{_gen_step_result_lemmas("dylib", code, base) + "\n\n" + _gen_step_lemmas("dylib", code, base)}
 
 /- What a caller can read off a result word.  [3] left this line to me
    explicitly rather than pick it, and it matters more than it looks: the new
