@@ -341,6 +341,50 @@ def test_a_from_import_alias_calls_the_function_it_stands_for(tmpdir, _):
           f"the defaulted argument did not arrive: {text!r}")
 
 
+def test_a_library_that_CALLS_its_own_import_alias_binds_the_defining_name(
+        tmpdir, _):
+    """The alias is a property of the file that WRITES it, so the module that
+    calls it has to bind the DEFINING name — and that module is a LIBRARY.
+
+    The case above is the other direction: the alias is written by the program,
+    whose emitters have always been handed `import_bindings`. This one is
+    written by a module that is itself compiled as a dylib, and
+    `compile_formal_dylib` did not hand its emitters that table — so the call
+    bound `aliased` itself and the library's own bind audit refused the image
+    with a message about the LINK LINE, where the construct is a call the source
+    had already resolved:
+
+        build: mid.mojo: the library would bind 1 symbol(s) that nothing
+        provides, so it could not be loaded: aliased
+
+    Three files because the shape needs a boundary on BOTH sides of the alias:
+    `leaf` defines, `mid` imports under an alias and calls it, `prog` imports
+    `mid`. A two-file tree would pass with the alias handling on `prog`'s side
+    alone, which is what made this invisible.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "alias_in_library")
+    os.makedirs(root)
+    write_tree(root, {
+        "leaf.mojo": "def base(a):\n    return a + 20\n",
+        "mid.mojo": "from leaf import base as aliased\n\n\n"
+                    "def marker(a):\n    return aliased(a)\n",
+        # A LITERAL argument, not `k`: the formal entry stub hands `main` its
+        # `test_input` (10 by default) while `cpython()` here calls `main(0)`,
+        # so a case that reads its parameter is comparing the two harnesses'
+        # entry values rather than the alias. Every other alias case in this
+        # group passes constants for the same reason.
+        "prog.mojo": "from mid import marker\n\n\n"
+                     "def main(k):\n    printf(\"mid-alias=%d@@\", marker(10))\n"
+                     "    return 0\n",
+    })
+    text, rc = agrees_with_cpython(tmpdir, "alias inside a library", root,
+                                   "prog.aout", expect_exit=0)
+    check("mid-alias=30@" in text,
+          f"the aliased call inside the library did not bind leaf's function: "
+          f"{text!r}")
+
+
 def test_an_alias_of_a_non_exported_name_is_refused_by_name(tmpdir, _):
     """`from m import _private as p`, and `p()` is refused naming the module.
 
@@ -1802,6 +1846,8 @@ TESTS = [
      test_a_module_body_runs_at_load_across_the_boundary),
     ("`from m import f as g` calls the function it stands for",
      test_a_from_import_alias_calls_the_function_it_stands_for),
+    ("a LIBRARY that calls its own import alias binds the defining name",
+     test_a_library_that_CALLS_its_own_import_alias_binds_the_defining_name),
     ("an alias of a NON-exported name is refused by name",
      test_an_alias_of_a_non_exported_name_is_refused_by_name),
     ("a plain from-import keeps the bind audit's own message",

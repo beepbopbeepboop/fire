@@ -18262,6 +18262,35 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # this file's `_formal_module_functions` already returned that file's
     # StructDefs — they were collected into `structs_by_file` for
     # `_method_exports` and then not handed to the emitter.
+    #
+    # …and the IMPORT ALIASES of every file this library compiles, for the same
+    # reason and as the same kind of fact: a call site spells the name as
+    # written, so `from leaf import base as aliased` binds `aliased` here and
+    # only `import_bindings` knows it stands for `leaf`'s `base`. The
+    # executable path has always handed that table to its emitters
+    # (`compile_formal`, `_import_aliases(stmts)`) and the LIBRARY path did not,
+    # so a module that CALLED an aliased import could not be built at all — the
+    # emitter bound `aliased` itself and the library's own bind audit refused it
+    # by name, with a message about the link line where the construct is a call
+    # the source had already resolved. Measured, both architectures:
+    #
+    #     leaf.mojo    def base(x: Int) -> Int: return x + 20
+    #     mid.mojo     from leaf import base as aliased
+    #                  def marker(x: Int) -> Int: return aliased(x)
+    #     prog.mojo    from mid import marker   # -> refused: `aliased`
+    #
+    # MERGED over the library's files rather than taken from one, because a
+    # library is compiled from SEVERAL sources and each file binds its own names;
+    # `module_statements` is content-keyed and memoised, so this is a table read
+    # and not a fourth parse. `setdefault` because two files of one library
+    # binding the same local name is the collision the module-global check above
+    # refuses for constants, and the alias case is the same fact at the callee.
+    from formal.imports import module_statements as _module_statements
+    library_aliases: dict = {}
+    for source_path in source_paths:
+        for local, pair in _import_aliases(
+                _module_statements(source_path)).items():
+            library_aliases.setdefault(local, pair)
     library_structs: list = []
     for source_path in source_paths:
         module, functions, module_source, file_structs, file_slots, \
@@ -18559,7 +18588,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         elf_soname = os.path.basename(output)
         elf_deps = [os.path.basename(name) for name in dep_install]
         codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
-                                dylib_exports=dylib_exports)
+                                dylib_exports=dylib_exports,
+                                import_aliases=library_aliases)
         try:
             code, info = codegen.compile(ordered, base_addr=elf.DYLIB_BASE,
                                          emit_startup=False,
@@ -18628,7 +18658,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                                 check)
         return result
     codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
-                            dylib_exports=dylib_exports)
+                            dylib_exports=dylib_exports,
+                            import_aliases=library_aliases)
     try:
         code, info = codegen.compile(
             ordered,
@@ -18641,7 +18672,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             # no-extern offset already accounts for them; only the extern
             # segment and libSystem are discovered by the first pass.
             codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
-                                    dylib_exports=dylib_exports)
+                                    dylib_exports=dylib_exports,
+                                    import_aliases=library_aliases)
             code_file = dylib_code_offset(install_name, True, dep_install,
                                           has_globals, has_mod_init)
             code, info = codegen.compile(ordered,
