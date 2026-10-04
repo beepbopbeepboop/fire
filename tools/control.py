@@ -13,6 +13,7 @@
     control.py queue               # what is waiting
     control.py restart NAME        # snapshot, stop and continue a worker as NAME-rN from its own branch
     control.py unstick [--idle-min 25]   # restart workers that are stalled (idle log AND no CPU in their tree)
+    control.py cleanup [--dry-run] # remove worktrees whose branch is merged, clean, and not running
     control.py ps                  # our live workers (not the user's own opencode sessions)
     control.py reap [--dry-run]    # kill leftovers (lean, gcc, ...) in finished workers' trees
     control.py digest NAME         # verdict, commits, diffstat, the worker's REPORT block
@@ -482,6 +483,49 @@ def _guard_runaway(roots, a, cwd_of, kill):
             kill(int(f[0]), "runaway: %.0f min wall (limit %g)" % (wall / 60, a.runaway_min), 0, f[2])
 
 
+def cmd_cleanup(a):
+    """Remove the worktrees we created and no longer use: a `work-*` tree whose HEAD is already an ancestor of
+    master, with a clean tree (no modified or untracked-and-not-ignored files), and no live worker.
+
+    2026-10-04: 403 worktrees held 257 GB. The removal is `git worktree remove` WITHOUT --force, so git
+    itself refuses a tree with anything it would lose; unmerged work, dirty trees, running workers and
+    `integ` are listed and left alone. Branches are kept (they are merged, so they cost nothing, and the
+    registry and `control.py status` read them)."""
+    reg = load()
+    byw = {os.path.realpath(t["worktree"]): (n, t) for n, t in reg.items()}
+    wt, cur = [], {}
+    for l in subprocess.run(["git", "worktree", "list", "--porcelain"], capture_output=True, text=True,
+                            cwd=MAIN).stdout.splitlines():
+        if l.startswith("worktree "):
+            cur = {"path": l[9:]}; wt.append(cur)
+        elif l.startswith("HEAD "):
+            cur["head"] = l[5:]
+    safe, kept = [], []
+    for w in wt:
+        p = os.path.realpath(w["path"])
+        if not os.path.basename(p).startswith("work-") or os.path.basename(p) == "work-integ":
+            continue
+        t = byw.get(p)
+        if t and state_of(t[1]) == "running":
+            kept.append((p, "running")); continue
+        if subprocess.run(["git", "merge-base", "--is-ancestor", w["head"], "master"], cwd=MAIN).returncode != 0:
+            kept.append((p, "unmerged")); continue
+        if subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, cwd=p).stdout.strip():
+            kept.append((p, "dirty")); continue
+        safe.append(p)
+    done = 0
+    for p in safe:
+        if a.dry_run:
+            print("would remove", p); continue
+        r = subprocess.run(["git", "worktree", "remove", p], capture_output=True, text=True, cwd=MAIN)
+        if r.returncode == 0: done += 1
+        else: print("kept", p, r.stderr.strip()[:100])
+    subprocess.run(["git", "worktree", "prune"], cwd=MAIN)
+    from collections import Counter
+    print("%s %d worktrees; left alone: %s" % ("would remove" if a.dry_run else "removed",
+          len(safe) if a.dry_run else done, dict(Counter(r for _, r in kept))))
+
+
 def cmd_memtrim(a):
     """Right-size the memory ledger to what holders actually use, so waiting jobs are admitted.
 
@@ -657,6 +701,7 @@ def main():
     s = sub.add_parser("mark"); s.add_argument("name"); s.add_argument("state"); s.set_defaults(f=cmd_mark)
     s = sub.add_parser("log"); s.add_argument("name"); s.add_argument("-n", type=int, default=40); s.set_defaults(f=cmd_log)
     s = sub.add_parser("digest"); s.add_argument("name"); s.set_defaults(f=cmd_digest)
+    s = sub.add_parser("cleanup"); s.add_argument("--dry-run", action="store_true"); s.set_defaults(f=cmd_cleanup)
     s = sub.add_parser("guard"); s.add_argument("--limit-gb", type=float, default=55); s.add_argument("--total-gb", type=float, default=90)
     s.add_argument("--interval", type=float, default=3); s.add_argument("--once", action="store_true")
     s.add_argument("--lean-wall-min", type=float, default=45, help="kill a lean process in our trees past this many wall minutes")
