@@ -4117,7 +4117,21 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # MojoDict* reinterprets its slot layout as a MojoSet*'s and is exactly
     # the class of container-kind cast DESIGN.html's R3 flags (confirmed via
     # test_dict.mojo's `orig |= new` where both are Dict[String, Int]).
-    if op == '|' and (lt == 'MojoDict *' or rt == 'MojoDict *') and 'MojoSet *' not in (lt, rt):
+    if op == '|' and 'MojoSet *' not in (lt, rt) and (
+            lt == 'MojoDict *' or rt == 'MojoDict *'
+            # ...or BOTH operands are provably dicts by a signal other than
+            # their lowered C type. `lt == 'MojoDict *'` is not reachable for
+            # a module-level global or an unannotated parameter, because both
+            # are stored through the int64_t boxing convention and so lower
+            # to `int64_t` — `a = {'x': 1}; b = {'y': 2}; print(a | b)` then
+            # emitted a raw C `|` between two POINTERS (`_t13 | _t14`) and
+            # printed the result's address. Requiring BOTH is what keeps this
+            # from stealing `int.__or__`: a name is only "provably a dict"
+            # because a table this codegen fills for dicts says so
+            # (`resolve_shared._operand_is_dict`'s own list of signals), and
+            # `{'x': 1} | 3` has no evidence for its right operand.
+            or (gen._operand_is_dict(left_node, lt, lv)
+                and gen._operand_is_dict(right_node, rt, rv))):
         _lu = _as_dict_operand(gen, lt, lv)
         _ru = _as_dict_operand(gen, rt, rv)
         t = gen._call_expr(
@@ -5336,11 +5350,11 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # field-less struct has nothing for a field dump to say anyway; its
     # `__repr__`, if it has one, goes unreached here exactly as it does for
     # every other container repr.
-    _elem_repr = _struct_elem_repr_shim(gen, elem)
+    _elem_repr = gimple_exprtypes.struct_elem_repr_shim(gen, elem)
     if _elem_repr:
         gen._emit_call('void', '', 'mojo_list_set_elem_repr',
                        [('MojoList *', t),
-                        ('void *', _elem_repr_operand(gen, _elem_repr))])
+                        ('void *', ginf.elem_repr_operand(gen, _elem_repr))])
     gen._note_fresh_result(t)
     return 'MojoList *', t
 
@@ -5350,98 +5364,6 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
 # lowered type, which is the same int64_t every other integer has; everything
 # else is the shared element-type mapping (TypeLattice.slot_kind_byte), the
 # same one the sorters and the per-slot readers use.
-def _struct_elem_repr_shim(gen, elem_type: str) -> str:
-    """`_mojo_elem_repr_<Struct>` for a container element ctype, else ''.
-
-    The one decision behind `mojo_list_set_elem_repr`: is this element a
-    REGISTERED STRUCT this compile emitted a repr shim for? A shim exists for
-    every struct with at least one field (module_gen.reflect_structs emits it
-    beside `_mojo_repr_<Struct>` and forward-declares it), which is exactly
-    `struct_field_types[struct]` being non-empty — the same condition
-    `reflect_structs` itself filters on, restated rather than queried so this
-    needs no new cross-module table.
-
-    Returns the `void *` ALIAS of the shim — the only spelling a `__GIMPLE`
-body may use to name a function, since gcc's raw GIMPLE parser cannot convert
-a function designator to `void *` at all: a bare `_t = _mojo_elem_repr_Foo;`
-is a "non-trivial conversion in 'function_decl'", `(void *)_mojo_elem_repr_Foo`
-is "invalid operand in unary operation" (a C-style cast is not a legal GIMPLE
-operand — see `_inc_val`'s docstring), and naming it as a call argument is
-"invalid argument to gimple call". `_emit_reflection_dispatch` therefore does
-that conversion ONCE per shim, at file scope, where the C frontend lowers it
-itself (`static void * _mojo_elem_repr_ptr_Foo = (void *)_mojo_elem_repr_Foo;`),
-and this returns the alias's name.
-
-Empty string for every other element type (int, str, bytes, a nested list, a
-dict), where the runtime's own per-slot reader is already right — that is what
-makes this a strict improvement and not a new dispatch to get wrong.
-    """
-    if not elem_type or not elem_type.endswith(' *'):
-        return ''
-    sn = elem_type[:-2].strip()
-    if not sn or not gimple_exprtypes._struct_name_of(elem_type):
-        return ''
-    if not gen.struct_field_types.get(sn):
-        return ''
-    # `emit_struct_defs`, because that is the gate the shim's DEFINITION and
-    # forward declaration are behind (`_emit_reflection_dispatch`). An imported
-    # module compiles with it False -- only the main module emits struct
-    # typedefs and the reflection dispatch -- and its generated text is
-    # concatenated into the same translation unit, so a shim named there is a
-    # reference to a symbol nobody declares: "_mojo_elem_repr_IntLiteral
-    # undeclared here (not in a function)", once per list literal of a
-    # reflected struct in every imported module of the closure (measured on
-    # ast_rewriter.py, regex_compile.py, mojo/middle/solvers.py and others
-    # building mojoc).
-    #
-    # So this asks the same question the emitter asks rather than a related
-    # one. `struct_field_types` alone is not it: type information is SHARED
-    # across the closure, so an imported module knows an imported module's
-    # struct perfectly well while emitting none of that struct's shims.
-    # Nothing is lost by answering '' here -- the runtime's own per-slot
-    # reader takes over, which is the pre-existing behaviour for every
-    # element type this function declines.
-    if not getattr(gen, 'emit_struct_defs', False):
-        return ''
-    return f'_mojo_elem_repr_ptr_{sn}'
-
-
-def _elem_repr_operand(gen, shim: str) -> str:
-    """The `void *` OPERAND naming the element-repr shim, for the runtime call.
-
-    The file-scope `static void *_funcptr_<shim> = (void *)<shim>;` this codegen
-    already emits for every function-pointer target, rather than the shim's
-    bare name. A function designator is not a legal gimple OPERAND, so passing
-    it inline produced
-
-        _t42 = _mojo_elem_repr_DType;
-
-    and gcc -fgimple refused the whole closure with "non-trivial conversion in
-    'function_decl'" -- one error per list literal in every module of the
-    stdlib, so `make mojoc` did not link at all (measured on the stdlib
-    `builtin/dtype.mojo`, three per function, plus the same shape in
-    `parsing_floats.mojo`). `(void *)name` is the same problem inside a cast,
-    which is equally not an operand, so the cast has to live in a real static
-    initializer instead; that initializer is what `_funcptr_builtins_needed`
-    collects and module_gen emits.
-
-    Read into a TEMP rather than passed as the bare global, and that is not
-    tidiness: a file-scope variable is not a legal gimple operand either, so
-
-        mojo_list_set_elem_repr (_t1, _funcptr__mojo_elem_repr_P);
-
-    is "invalid argument to gimple call" even with the static defined. `_new_val`
-    is what every other function-pointer path already uses for exactly this --
-    it emits `_t = _funcptr_X;` and hands back the temp -- so the shim is named
-    and loaded the same way the lifted-closure, builtin-callable and vararg
-    paths are.
-
-    ONE spelling for every function-pointer target, which is what makes this a
-    fix rather than a third way of naming the same thing: they all reach a
-    function pointer through `_funcptr_` already.
-    """
-    gen._funcptr_builtins_needed.add(shim)
-    return gen._new_val('void *', f'_funcptr_{shim}')
 
 
 def _list_literal_slot_kind(gen, el, et) -> str:
@@ -5451,39 +5373,23 @@ def _list_literal_slot_kind(gen, el, et) -> str:
     return gimple_ctypes.TypeLattice.slot_kind_byte(et)
 
 
-def _dict_literal_spread_operand(key_expr):
-    """The mapping a `**expr` pair spreads, or None if this pair is not one.
-
-    PEP 448 mapping unpacking is spelled by the parser as a PAIR whose KEY is
-    a `UnaryOp(op='**', operand=<mapping>)` and whose VALUE is the `NoneType`
-    sentinel — `fire_compiler.py`'s `_parse_dict_entry`, and
-    `myinterpreter.py`'s `eval_DictLiteral` (whose docstring states the
-    convention) is the reference reading of it. `value is None` is the
-    discriminator, not the key's type, because a `{**d}` pair and a real
-    `{k: v}` pair both have an expression in the key slot."""
-    if isinstance(key_expr, gimple_ctypes.UnaryOp) and key_expr.op == '**':
-        return key_expr.operand
-    return None
+# `gimple_exprtypes._dict_literal_spread_operand` — the discriminator lives in
+# the middle tier, because `gimple_exprtypes.dict_literal_val_ctype` (the ONE
+# dict-literal value-type rule, which this file's caller also uses) asks the
+# same question of the same key.
 
 
 def _lower_dict_literal(gen, node: gimple_ctypes.DictExpr) -> tuple[str, str]:
     t = gen._new_temp('MojoDict *')
     gen._emit_container_new(t, 'MojoDict *')
-    # Infer value type from first pair (for subscript / iteration dispatch).
-    # The FIRST pair with a value, not `pairs[0]`: a `**spread` pair's value
-    # slot is the NoneType sentinel, so `{'a': 1, **d}`'s leading pair is not
-    # a value sample and `_quick_type(None)` says nothing about the dict.
-    for _k0, _v0 in node.pairs:
-        if _dict_literal_spread_operand(_k0) is not None:
-            continue
-        vt_sample = gen._quick_type(_v0)
-        if vt_sample in gimple_ctypes._FLOAT_TYPES:
-            gen._dict_val_types[t] = 'double'
-        elif vt_sample == 'char *':
-            gen._dict_val_types[t] = 'char *'
-        else:
-            gen._dict_val_types[t] = 'int64_t'
-        break
+    # Infer value type from the first pair (for subscript / iteration
+    # dispatch). The rule itself is `gimple_exprtypes.dict_literal_val_ctype`
+    # — shared, because the cross-call dict-value contract in
+    # `module_gen.py` stamps the same answer onto a callee PARAMETER from a
+    # literal written at the call site, and two copies of this rule could
+    # type the parameter one way while the literal stores another. Its skip of
+    # a `**spread` pair (which carries no value sample) moved in with it.
+    gen._dict_val_types[t] = gimple_exprtypes.dict_literal_val_ctype(gen, node.pairs)
     for key_expr, val_expr in node.pairs:
         # A `**expr` pair MERGES; it is not a store. Treated as a store it put
         # the spread's own dict into the KEY slot and the None sentinel into
@@ -5499,7 +5405,7 @@ def _lower_dict_literal(gen, node: gimple_ctypes.DictExpr) -> tuple[str, str]:
         # raised this on every input including an empty file and wrote a
         # 0-byte `.ci` at exit 0 — `test_selfhost.py`'s
         # `run_produced_binary` red with no gcc error anywhere.
-        _spread = _dict_literal_spread_operand(key_expr)
+        _spread = gimple_exprtypes._dict_literal_spread_operand(key_expr)
         if _spread is None:
             _emit_dict_pair_store(gen, t, key_expr, val_expr)
             continue
@@ -5642,19 +5548,11 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
     if _bytes_key:
         if vv.startswith('_slit_'):
             vv = gen._new_val('MojoBytes *', f"{vv}")
-    if vt in gimple_ctypes._FLOAT_TYPES:
-        # Through `_emit_call` when the key is a placeholder — that is where
-        # `_apply_kw_keys` runs, and it is what resolves the placeholder
-        # `_char_to_cstr(..., word_ok=True)` handed out into the `_kw` twin
-        # carrying the raw word. `vt`, not a hard `double`, is the value
-        # argument's declared type: `_FLOAT_TYPES` also holds `float` and
-        # `__fp16`, and `_emit_call` coerces to the prototype.
-        if _kw_key:
-            gen._emit_call('void', '', 'mojo_dict_set_double',
-                           [('MojoDict *', t), ('char *', kv), (vt, vv)])
-        else:
-            gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}double ({t}, {kv}, {vv});")
-    elif vt == 'char *':
+    # A FLOAT is not handled here: `emit_dict_int_value_store` is the one store
+    # of a NON-STRING value, and a float is one of the kinds it owns (it used
+    # to be this site's own float arm, which was a second spelling of it and
+    # the only one of the six that got the `kind == 1` tag right).
+    if vt == 'char *':
         if vv.startswith('_slit_'):
             vv_tmp = gen._new_val('char *', f"{vv}")
             vv = vv_tmp
@@ -5664,10 +5562,15 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         else:
             gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}str ({t}, {kv}, {vv});")
     else:
-        # The shared store, which carries the per-slot bool kind (a Python bool
-        # and an int are the same int64_t slot) AND routes through `_emit_call`
-        # so this site's placeholder key resolves to its `_kw` twin. Five
-        # call sites share it; see `emit_dict_int_value_store`'s docstring.
+        # The ONE shared non-str dict store: `emit_dict_int_value_store`
+        # picks the setter from the key's domain (`bytes_` or not) and from
+        # `is_python_bool_expr` — the one bool predicate every consumer uses —
+        # so a bool VALUE lands in a slot of its own (`mojo_dict_set_bool`,
+        # `kind == 3`) and this dict's OTHER values are untouched. This arm
+        # used to emit the whole-dict marker `mojo_mark_dict_bool_values`
+        # instead, which the runtime deleted with that per-slot replacement,
+        # so `{'k': True}` compiled to a call to a function that does not
+        # exist — a hard build failure on an ordinary literal.
         gen._emit_dict_int_value_store(t, kt, kv, vt, vv, val_expr)
 
 
@@ -5829,7 +5732,7 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     _tshim = ''
     for _tsl in range(len(lowered)):
         _tct = _as_str(lowered[_tsl][1])
-        _tsh = _struct_elem_repr_shim(gen, _tct)
+        _tsh = gimple_exprtypes.struct_elem_repr_shim(gen, _tct)
         if not _tsh:
             continue
         if _tshim and _tsh != _tshim:
@@ -5839,7 +5742,7 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     if _tshim:
         gen._emit_call('void', '', 'mojo_list_set_elem_repr',
                        [('MojoList *', t),
-                        ('void *', _elem_repr_operand(gen, _tshim))])
+                        ('void *', ginf.elem_repr_operand(gen, _tshim))])
     # Mark as a tuple AFTER the elements are in, not before. The mark is
     # what makes this value a tuple rather than a list (see
     # mojo_mark_as_tuple's doc comment in runtime/fire_runtime.c), and since

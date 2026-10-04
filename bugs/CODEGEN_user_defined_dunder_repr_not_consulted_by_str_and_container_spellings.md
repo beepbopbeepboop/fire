@@ -253,9 +253,84 @@ general case, and the row (`{"k": p}` printing `{'k': P(x='a')}` instead of
 `{'k': R<a>}`) needs that first. It is the third row of this doc's table and it
 is still open.
 
+**→ FIXED 2026-10-02; see "Status (2026-10-02)" at the bottom.** The store site
+does know the value's type (`_dict_val_types[obj_v] = vtype` is written by the
+very statement that stores it), so the "needs that first" is what the fix is.
+
 **A dunder-less element is still a divergence, deliberately not frozen in the
 test:** CPython prints `<__main__.X object at 0x...>`, this codegen prints the
 generated field dump. The shim's fallback is the field dump because this doc's
 last paragraph calls it "the honest answer"; that preference is not CPython's,
 and asserting either answer in a test would hide the disagreement rather than
 record it.
+
+## Status (2026-10-02) — the DICT VALUE row is FIXED; two shapes around it are not
+
+Re-measured the table's last row on this tree before acting, through
+`test_gimple_runner.py`'s own `compile_mojo_to_gimple_exe` against CPython on
+the same text. Rows 1-4 were already fixed by the two Status sections above;
+row 5 reproduced exactly, in both spellings:
+
+```
+CPython  : {'k': R<a>}  {'k': R<a>}
+compiled : {'k': P(x='a')}  {'k': P(x='a')}
+```
+
+and two more shapes of the same family, measured alongside it:
+
+```
+CPython  : [R<a>]   dict_items([('k', R<a>)])   dict_values([R<a>])
+compiled : [R<a>]   [('k', R<a>)]               [R<a>]
+```
+
+**Fixed — the value's repr, everywhere the value appears.** The mechanism is
+the list fix's, unchanged in shape, because the information missing was the same
+information: a struct-allocated value carries no runtime type tag, so by the
+time anything walks the dict there is nothing left to dispatch on.
+
+* `MojoDict` gains `char *(*val_repr)(int64_t)` — LAST in the struct, so every
+  existing field keeps its offset, and NULL for every dict that holds no
+  struct. `mojo_dict_set_val_repr` records it, `mojo_dict_repr_val` asks it.
+  `mojo_dict_init` is the one initialiser both construction paths
+  (`mojo_dict_new` and the stack-allocated `MojoDict` of an owned-container
+  phase-3 candidate) already go through.
+* `mojo_dict_set_struct` stores the value tagged `_DictSlot.kind == 5`, which
+  is what makes the answer independent of store order: the tag is per SLOT and
+  the function is per DICT, so a second struct type in the same dict is tagged
+  `kind == 6` ("a struct this dict's repr does not describe") and falls to the
+  generic dispatch instead of being handed the first type's repr — which would
+  read a `Q *` through `P`'s repr, a wild read rather than a wrong string.
+* `emit_dict_int_value_store` — the ONE dict store, after the 2026-10-02
+  consolidation above — is where the shim is looked up
+  (`gimple_exprtypes.struct_elem_repr_shim`, moved out of
+  `emit_exprs.py` into the middle tier for this: a list and a dict asking the
+  same question of the same ctype is exactly how the two copies would have
+  drifted) and where `mojo_dict_set_val_repr` is emitted, once per dict.
+* The recorded function travels with the values, on the same terms as
+  `mojo_list_inherit_kinds`: `mojo_dict_update` (and so `mojo_dict_copy` and
+  `|`) carries it, `mojo_dict_values` puts it on the list it builds, and
+  `mojo_dict_items` puts it on each PAIR — which is why `_mojo_repr_pair` asks
+  its list's recorded element repr for slot 1 and ONLY slot 1. Asking it for
+  slot 0 handed the KEY, a `char *`, to the struct's `__repr__` and printed
+  `R<>` for the key `'k'`; that was measured, not reasoned about.
+
+**Still open, and deliberately not frozen in the tests:**
+
+1. **`{'p': p, 'q': q}` — the second struct type** prints `'p': R<a>` (the
+   recorded function) and `'q': Q(y='b')` (the field dump, via `kind == 6`).
+   CPython prints both dunders. One function per dict cannot describe two
+   types, and the alternatives are a per-slot function pointer (8 bytes on
+   every `_DictSlot`, on the hottest data structure in the runtime) or a
+   per-dict TABLE of shims; both are real designs with real costs, and neither
+   is this doc's row.
+2. **`print(d.values())` / `print(d.items())` print the bare list**, without
+   CPython's `dict_values(...)` / `dict_items(...)` view wrapper. The VALUES
+   inside are right, which is what this fix is about; the view type is a
+   separate display gap.
+
+Regression tests: `gimple_dict_value_repr_uses_the_struct_dunder` (against
+CPython — the dict literal, `repr`, `list(d.values())`, `dict(d)`, `|`, and an
+int stored beside the struct in BOTH orders) and
+`gimple_dict_value_repr_remaining_two_shapes`, which pins the two rows above as
+they are, with the reason in the comment, so that changing either is somebody's
+decision.

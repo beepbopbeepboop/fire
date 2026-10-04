@@ -58,7 +58,7 @@ from mojo.middle.resolve_shared import (
     _as_assignstmt_node, _as_multiassignstmt_node, _as_str, _as_vardecl_node, _calls_in_stmts, _closure_value_locals,
     _collect_calls_in_stmt, _collect_local_container_elems, _collect_return_elems, _decode_str_literal_text, _dtrace, _eval_const,
     _infer_list_elem_type, _infer_local_var_types, _infer_return_elem_type, _scratch_dict_copy, _is_none_literal, _is_sys_stderr, _lbn_target_names,
-    _lbn_walk, _module_const_int, _parse_fstring_parts, _prepass_callee_key, _quick_type, _record_closure_alias,
+    _lbn_walk, _module_const_int, _operand_is_dict, _parse_fstring_parts, _prepass_callee_key, _quick_type, _record_closure_alias,
     _refine_generic_return_type, _sms_key, _str_literal_to_slit, _subst_idents, _type_expr_to_ann
 )
 from mojo.middle.calls_shared import user_dunder_repr_call
@@ -3543,8 +3543,8 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # argument order `_emit_dict_pair_store` documents for the dict LITERAL
         # and the `dict(k=v, ...)` builtin.
         #
-        # ONE store, because there were TWO lowerings of it and they disagreed.
-        # The comprehension's own coerced the key with
+        # ONE store, because there were THREE lowerings of it and they
+        # disagreed. The comprehension's own coerced the key with
         # `_char_to_cstr(kt, kv)` — no `transient` / `word_ok`, which is the
         # flag pair that arms `_char_to_cstr`'s CONTAINER-key branch, the one
         # that hands the raw word over so `_apply_kw_keys` selects the `_kw`
@@ -3553,7 +3553,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # `(char *)value`, so `{k: 1 for k in pairs}` stored its two tuples
         # under their HEAP ADDRESSES as the key TEXT: different on every run
         # (ASLR), which makes it worse than a stable wrong answer — and the
-        # repr printed those address bytes, `{'ï¬f': 1, ...}`. The
+        # repr printed those address bytes, `{'\xef\xac\x99f': 1, ...}`. The
         # literal spelling `{k: 1 for k in pairs}` reached `_repr_value` and
         # keyed by content, so the two spellings of one key disagreed. See
         # bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md, and
@@ -3561,9 +3561,10 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # spelling that was fixed the same way.
         #
         # `_emit_dict_pair_store` lowers both operands itself, so the values
-        # this used to lower here are not lowered twice, and its per-slot bool
-        # kind and `_kw`-twin key handling are the shared ones rather than this
-        # site's third copy of them.
+        # this used to lower here are not lowered twice, and its per-kind value
+        # dispatch (float, `None`, bool, struct), `_kw`-twin key handling and
+        # callable-return note are the shared ones rather than this site's
+        # third copy of each.
         gex._emit_dict_pair_store(gen, res, node.element, node.key)
 
 

@@ -819,6 +819,21 @@ def _reflect_struct_names(self) -> list:
         _rsk = _as_str(_rsk)
         if _rsk in _es_str and _rsk in _san_str:
             _rs_names.append(_rsk)
+    # ...plus every struct a CONTAINER store asked an element-repr shim for
+    # (`_elem_repr_needed`, recorded by `struct_elem_repr_shim` at the store,
+    # where the shim's NAME went into the generated C). The filter above is
+    # NARROWER than "the struct has fields" on purpose -- an imported struct a
+    # module only stores somewhere gets no `_mojo_repr_<sn>` here -- so a store
+    # that named a shim the filter would have skipped left the module with an
+    # undefined-function reference, and the self-host closure failed to LINK
+    # with `'_mojo_elem_repr_TrieNode' undeclared` (ast_rewriter.py). The
+    # request and the emission therefore cannot be decided independently: this
+    # is the emitter answering what it was asked for.
+    for _ern in sorted(self._elem_repr_needed):
+        _ern = _as_str(_ern)
+        if _ern in self.struct_field_types and _ern not in _rs_names:
+            _rs_names.append(_ern)
+
     self._reflect_structs_cache = _rs_names
     return _rs_names
 
@@ -888,8 +903,17 @@ def _emit_reflection_fwd_decls(self, parts):
         parts.append('')
     elem_repr_fwd_decls = [f"static char * _mojo_elem_repr_{sn} (int64_t v);"
                            for sn in _emitted]
-    elem_repr_fwd_decls += [f"static void * _mojo_elem_repr_ptr_{sn};"
-                            for sn in _emitted]
+    # No `void *` alias of each shim is declared here: inside a `__GIMPLE`-
+    # tagged function gcc's raw GIMPLE parser cannot name a function
+    # designator at all (a bare assignment is a "non-trivial conversion in
+    # 'function_decl'", a C-style cast is "invalid operand in unary
+    # operation" — see `_inc_val`'s docstring — and naming it as a call
+    # argument is "invalid argument to gimple call"). The conversion is made ONCE
+    # per target by `emit_infra.elem_repr_operand`, which requests a
+    # file-scope `static void *_funcptr_<shim> = (void *)<shim>;` through
+    # `_funcptr_builtins_needed` -- the ONE mechanism every function-pointer
+    # target in this backend already goes through, rather than a second alias
+    # scheme that only the element-repr shims used.
     # The `__repr__` each shim calls, when the struct has one. A declaration
     # only, so it is safe here for the same reason the rest of this block is;
     # whether a given struct HAS a `char *`-returning `__repr__` is
@@ -1100,6 +1124,17 @@ def _emit_reflection_dispatch(self, parts):
         _erep = self._struct_method_csym(sn, '__repr__', '')
         _erep_ok = self.func_return_types.get(_erep) == 'char *'
         elem_repr_names.add(sn)
+        # Published on the emitter, because "is there a shim for this struct?"
+        # is asked from the STORE lowerings (a list or a dict literal /
+        # subscript store of this struct) and the emitter's condition is
+        # NARROWER than "the struct has fields" — `reflect_structs` above is
+        # `struct_field_types` filtered by `_emitted_structs` and
+        # `_struct_allocs_needed` too, so a struct with fields can still get no
+        # shim. Re-deriving that condition at the store site produced
+        # `'_mojo_elem_repr_TrieNode' undeclared` in ast_rewriter.py's
+        # self-host compile, i.e. an undefined-function reference at C link
+        # time; this list is the emitter's own answer.
+        self._elem_repr_shims.add(sn)
         refl_parts.append(
             f"static char * _mojo_elem_repr_{sn} (int64_t v) {{\n"
             f"  {sn} *o = ({sn} *)(intptr_t)v;\n"
@@ -1107,22 +1142,6 @@ def _emit_reflection_dispatch(self, parts):
             + (f"  return {_erep} (o);\n" if _erep_ok
                else f"  return _mojo_repr_{sn} (o);\n")
             + f"}}\n"
-            # The `void *` ALIAS of the shim, and the only spelling a
-            # `__GIMPLE` body may use to name it. Inside a `__GIMPLE`-
-            # tagged function gcc's raw GIMPLE parser cannot convert a
-            # function designator to `void *` by any means: a bare
-            # `_t = _mojo_elem_repr_Foo;` is a "non-trivial conversion in
-            # 'function_decl'" and `_t = (void *)_mojo_elem_repr_Foo;` is
-            # "invalid operand in unary operation" (a C-style cast is not a
-            # legal GIMPLE operand — see `_inc_val`'s docstring), and naming
-            # it directly as a call argument is "invalid argument to gimple
-            # call". So the conversion is done ONCE, here, at file scope,
-            # where the C frontend lowers it itself, and the bodies just
-            # read the alias. Measured: without it, every list/tuple-of-
-            # struct literal in a module imported into a closure fails to
-            # compile, because these shims are defined in the root module's
-            # block and the whole-closure ordering puts them later.
-            f"static void * _mojo_elem_repr_ptr_{sn} = (void *)_mojo_elem_repr_{sn};\n"
         )
     if True:
         parts.append("/* Generic reflection dispatch (getattr/setattr/dataclasses.fields/is_dataclass) */")
@@ -1273,19 +1292,41 @@ def _emit_reflection_dispatch(self, parts):
                "  char *_b = strdup(\"(\" );\n"
                "  for (int64_t _i = 0; _i < _n; _i++) {\n"
                "    if (_i > 0) _b = mojo_str_cat(_b, \", \");\n"
-               "    int64_t _v = mojo_list_get_int(p, _i);\n"
-               "    if (_i == 0 && !(_v > 65536))\n"
-               "      _b = mojo_str_cat(_b, mojo_repr_int(_v));\n"
-               "    else\n"
-               "      _b = mojo_str_cat(_b, _mojo_generic_elem_repr(_v));\n"
+"    int64_t _v = mojo_list_get_int(p, _i);\n"
+                "    /* The list's own ELEMENT REPR, asked FIRST for slot 1 and ONLY for\n"
+                "     * slot 1: `dict.items()` records the dict's struct repr on each\n"
+                "     * PAIR (mojo_dict_items), and in a (key, value) pair that\n"
+                "     * function describes the VALUE. Asking it for slot 0 as well\n"
+                "     * handed the KEY — a char * — to the struct's own `__repr__`,\n"
+                "     * which read it as a `P *` and printed `R<>` for the key 'k'.\n"
+                "     * NULL means this pair says nothing. */\n"
+                "    char *_pr = NULL;\n"
+                "    if (_i == 1) _pr = mojo_list_repr_elem(p, _v);\n"
+                "    if (_pr) { _b = mojo_str_cat(_b, _pr); free(_pr); continue; }\n"
+                "    if (_i == 0 && !(_v > 65536))\n"
+                "      _b = mojo_str_cat(_b, mojo_repr_int(_v));\n"
+                "    else\n"
+                "      _b = mojo_str_cat(_b, _mojo_generic_elem_repr(_v));\n"
                "  }\n"
                "  if (_n == 1) _b = mojo_str_cat(_b, \",\");\n"
                "  return mojo_str_cat(_b, \")\");\n"
                "}\n"
+"static char * _mojo_cat_dict_val (char *buf, MojoDict *d, int64_t v) {\n"
+                "  /* The dict repr's STRUCT-VALUE arm as one expression: this\n"
+                "   * slot's recorded struct repr (mojo_dict_repr_val), or the\n"
+                "   * generic element repr when the dict records none — catenated,\n"
+                "   * with the temporary released. A helper rather than three\n"
+                "   * statements in the walker because gcc -fgimple does not take\n"
+                "   * a braced block as an `else if` arm, and the arm has to be one\n"
+                "   * statement to sit in the value-kind chain at all. */\n"
+                "  char *_r = mojo_dict_repr_val(d, v);\n"
+                "  if (_r) { char *_o = mojo_str_cat(buf, _r); free(_r); return _o; }\n"
+                "  return mojo_str_cat(buf, _mojo_generic_elem_repr(v));\n"
+                "}\n"
                "static char * _mojo_repr_dict (MojoDict *d) {\n"
-               "  if (!d) return \"{}\";\n"
-               "  char *_buf = strdup(\"{\");\n"
-               "  int64_t *_order = mojo_dict_order_indices(d);\n"
+                "  if (!d) return \"{}\";\n"
+                "  char *_buf = strdup(\"{\");\n"
+                "  int64_t *_order = mojo_dict_order_indices(d);\n"
                "  for (int64_t _oi = 0; _oi < d->used; _oi++) {\n"
                "    int64_t _i = _order[_oi];\n"
                "    if (_oi > 0) _buf = mojo_str_cat(_buf, \", \");\n"
@@ -1319,24 +1360,52 @@ def _emit_reflection_dispatch(self, parts):
                 "       * string values printed as garbage/0 (the `param_convs=`\n"
                 "       * / `comptime_aliases=` / `_CONST_NAME` .ast divergence).\n"
                 "       * Emit the real quoted string instead. */\n"
-                "      _buf = mojo_str_cat(_buf, mojo_repr_str((char *)(intptr_t)d->slots[_i].val));\n"
-                "    else if (d->slots[_i].kind == 1) {\n"
-                "      /* A double value is stored BIT-CAST (see _DictSlot.kind),\n"
-                "       * so the generic reader handed those bits to\n"
-                "       * mojo_repr_str as a `char *` -- which either printed\n"
-                "       * garbage or faulted, because the pattern is pointer-\n"
-                "       * shaped. Read it back as the double it is. */\n"
-                "      double _dv;\n"
-                "      memcpy(&_dv, &d->slots[_i].val, sizeof(_dv));\n"
-                "      _buf = mojo_str_cat(_buf, mojo_repr_float(_dv));\n"
-                "    } else\n"
-                "      /* kind == 0 is a plain int64_t slot. It must NOT go\n"
-                "       * through `_mojo_generic_elem_repr`, whose 0-is-the-\n"
-                "       * None-sentinel rule is right for a genuinely dynamic\n"
-                "       * list and wrong for a value the runtime TAGGED as an\n"
-                "       * int: `{i: i for i in range(2)}` printed\n"
-                "       * `{'0': None, '1': 1}`. The tag is the evidence. */\n"
-                "      _buf = mojo_str_cat(_buf, mojo_repr_int(d->slots[_i].val));\n"
+"      _buf = mojo_str_cat(_buf, mojo_repr_str((char *)(intptr_t)d->slots[_i].val));\n"
+                 "    else if (d->slots[_i].kind == 1)\n"
+                 "      /* A float value stores its IEEE-754 BITS in `val` (kind==1,\n"
+                 "       * `mojo_dict_set_double`), and `val` is all this walker ever\n"
+                 "       * had to go on: `_mojo_generic_elem_repr` reads a word above\n"
+                 "       * 65536 as a POINTER and dispatches on its type tag, so every\n"
+                 "       * float whose bits clear that bar -- 1.5 is 4609434218613702656\n"
+                 "       * -- was dereferenced as an address. `print({'x': 1.5})`\n"
+                 "       * SEGFAULTED (rc -11, no output, no diagnostic). The slot's\n"
+                 "       * own kind says what the word is; read it that way, through\n"
+                 "       * the runtime's bits->double helper rather than a C cast (a\n"
+                 "       * cast is not a legal gimple operand). */\n"
+                 "      _buf = mojo_str_cat(_buf, mojo_repr_float(mojo_double_from_bits(d->slots[_i].val)));\n"
+                 "    else if (d->slots[_i].kind == 4)\n"
+                 "      /* A `None` value is int64_t 0 with kind==4 (see\n"
+                 "       * mojo_dict_set_none): the same word a plain `0` stores,\n"
+                 "       * and only this tag tells them apart. The generic value\n"
+                 "       * repr below DOES answer \"None\" for a zero word -- it has\n"
+                 "       * to, for a NULL pointer slot -- so every plain zero in\n"
+                 "       * every dict printed as None until the store learned to\n"
+                 "       * tag itself. */\n"
+                 "      _buf = mojo_str_cat(_buf, \"None\");\n"
+                 "    else if (d->slots[_i].val == 0)\n"
+                 "      /* A kind-0 slot holding the word 0 is the INTEGER 0:\n"
+                 "       * `None` now has kind 4 and a pointer slot is non-zero.\n"
+                 "       * The generic value repr below cannot say so -- its\n"
+                 "       * `val == 0` arm answers \"None\", correctly for the NULL\n"
+                 "       * pointer it was written for -- so `{'z': 0}`,\n"
+                 "       * `{'i': 0}` and `{k: 0 for k in ks}` all printed\n"
+                 "       * `None`. A zero word with no tag says 0. */\n"
+                 "      _buf = mojo_str_cat(_buf, \"0\");\n"
+                 "    else if (d->slots[_i].kind == 5)\n"
+                 "      /* A STRUCT value (mojo_dict_set_struct): the boxed pointer,\n"
+                 "       * tagged so the walker asks the dict's own recorded repr\n"
+                 "       * instead of dispatching on a runtime type tag — which a\n"
+                 "       * stack-allocated struct does not carry, its first word being\n"
+                 "       * its first field. That is why this row printed the generated\n"
+                 "       * field dump `P(x='a')` where CPython prints the user's\n"
+                 "       * `__repr__` (`R<a>`), and why a LIST of the same struct needed\n"
+                 "       * `mojo_list_set_elem_repr` for the same reason. Asked BEFORE\n"
+                 "       * the `val == 0` arm above, which is about kind-0 slots: a NULL\n"
+                 "       * struct pointer is `None`, which is what the recorded shim\n"
+                 "       * says for it. */\n"
+                 "      _buf = _mojo_cat_dict_val (_buf, d, d->slots[_i].val);\n"
+                 "    else\n"
+                 "      _buf = mojo_str_cat(_buf, _mojo_generic_elem_repr(d->slots[_i].val));\n"
                "  }\n"
                "  free(_order);\n"
                "  return mojo_str_cat(_buf, \"}\");\n"
@@ -6860,6 +6929,29 @@ def gen_module_impl(self, stmts):
                 self._func_param_defaults[_mangled] = list(_dflts)
 
     self._param_elem_types: dict[str, dict[str, tuple]] = {}
+    # The dict-VALUE twin of the table above: callee -> {pname -> the dict
+    # value ctype every one of its call sites agrees on}. A dict is stored
+    # as one `int64_t` slot per key plus a per-slot `kind` tag, so a callee
+    # that only ever receives `{'x': '1'}` reads that slot back through
+    # `mojo_dict_get_str`, and one that receives `{'x': 1}` through
+    # `mojo_dict_get_int` -- both without a static type anywhere to consult.
+    # There is no binding SITE inside the callee to record it (unlike a
+    # local `d = {...}`, which `_lower_dict_literal` types as it lowers it),
+    # so it has to come from the call sites. Read by `gen_func` /
+    # `_gen_struct_method` at the same `_param_elem_types` seeding, into
+    # `gen._dict_val_types`. `''` means the call sites disagreed, which the
+    # reader treats as "unknown" exactly as `(None, None)` does for the
+    # element contract.
+    self._param_dict_val_types: dict[str, dict[str, str]] = {}
+    # ...and the raw per-call-site OBSERVATIONS behind it, kept apart exactly
+    # as `_scalar_obs` is kept apart from `_inferred_param_types`: a call site
+    # holding `{'x': 2}` contributes `int64_t`, which is the table's default
+    # answer and therefore worthless on its own — but its SILENCE next to a
+    # sibling site's `{'x': '1'}` is what makes the pair a disagreement
+    # instead of a vacuous agreement. Collapsing that into one table at
+    # collection time is what made `f({'x': '1'}); f({'x': 2})` resolve to
+    # `char *` and read the integer through `mojo_dict_get_str`.
+    self._param_dict_val_obs: dict[str, dict[str, set]] = {}
     _free_params: dict = {}
     for _fp_s in all_functions:
         if not isinstance(_fp_s, FunctionDef):
@@ -6904,6 +6996,105 @@ def gen_module_impl(self, stmts):
             d[pname] = (None, None)   # conflicting call sites → unknown
         else:
             d[pname] = (e, ne)
+
+    def _record_param_dict_val(callee, pname, vt):
+        """Record ONE call site's dict-value ctype for one parameter.
+
+        The dict-value twin of `_record_param_elem`, collecting into a SET
+        rather than collapsing to a value: `int64_t` is this table's default
+        answer and so carries no information by itself, but a sibling call
+        site holding `{'x': '1'}` must still be able to disagree with it. The
+        scalar contract faces the identical asymmetry and resolves it by
+        keeping `_scalar_obs` as sets until its own application loop; this is
+        that, spelled for dict values. Resolution happens in
+        `_resolve_param_dict_vals`, once both walks are done.
+        """
+        callee = _as_str(callee)
+        pname = _as_str(pname)
+        # Split the chained setdefault so the intermediate result has a static
+        # type -- the same trap the two sibling `_record_*` blocks below the
+        # collection loop already document.
+        _dv_inner = self._param_dict_val_obs.setdefault(callee, {})
+        _dv_set = _dv_inner.setdefault(pname, set())
+        _dv_set.add(_as_str(vt))
+
+    def _resolve_param_dict_vals():
+        """Turn the collected observations into the contract codegen reads.
+
+        Only a UNANIMOUS observation resolves, and an `int64_t` one resolves
+        to the `int64_t` default the reader already had -- i.e. it is a no-op,
+        recorded only so that a mixed set collapses to unknown rather than to
+        whichever side happened to be seen first.
+        """
+        for _callee, _pm in self._param_dict_val_obs.items():
+            _dst = self._param_dict_val_types.setdefault(_callee, {})
+            for _pname, _types in _pm.items():
+                if len(_types) == 1:
+                    # `sorted(...)` + index, NOT `next(iter(...))`, and this
+                    # file's own reason for it: `next(<CallExpr>)` is REFUSED
+                    # outright by the self-hosted codegen ("`next(...)` on
+                    # next(CallExpr) has no lowering in this codegen"), which
+                    # made this module — and so the whole self-host closure —
+                    # uncompilable, while iterating a str-SET lowers to
+                    # `mojo_set_iter_val_int` (0 for every string slot) and so
+                    # cannot answer the question either. `sorted` on the same
+                    # set sorts string CONTENT and indexes like a list; this is
+                    # the same two lines the struct-evidence loop above uses for
+                    # the same set-of-observations question.
+                    _sole = sorted(_types)
+                    _dst[_pname] = _as_str(_sole[0])
+                else:
+                    _dst[_pname] = ''      # disagreeing call sites → unknown
+
+    def _static_arg_dict_val(a, dict_val, caller_name=None):
+        """The dict-VALUE ctype provable for one call argument, or None.
+
+        `dict_val` is the caller body's own pre-scanned local-dict map (the
+        third thing `_scan_container_elems` returns, previously discarded at
+        both call sites). A dict LITERAL written in place is decidable on the
+        spot through the SAME rule `_lower_dict_literal` stores it with, and a
+        bare name defers to the caller's scan -- the same two shapes
+        `_static_arg_elems` accepts, and deliberately the same two: an
+        argument that is neither has no value type to propagate, and guessing
+        one is what makes the pre-existing sibling contracts refuse instead.
+
+        `caller_name` adds the one shape the local scan structurally cannot
+        see: a name that is a PARAMETER of the caller, so its type came from
+        the caller's own contract rather than from a binding site. That is a
+        forwarding chain (`def g(d): return f(d)`), which is why the
+        collection loop runs to a bounded fixpoint for this table alone --
+        the same reason the scalar and element contracts iterate.
+        """
+        if isinstance(a, gimple_ctypes.DictExpr):
+            return gimple_exprtypes.dict_literal_val_ctype(self, a.pairs)
+        if isinstance(a, gimple_ctypes.IdentExpr):
+            _n = _gmi_as_str(a.name)
+            if _n in dict_val:
+                return _gmi_as_str(dict_val[_n])
+            if caller_name is not None:
+                _fwd = self._param_dict_val_types.get(_as_str(caller_name), {})
+                if _n in _fwd and _fwd[_n]:
+                    return _fwd[_n]
+            return None
+        if isinstance(a, gimple_ctypes.BinaryOp) and a.op == '|':
+            # `f(env_defaults | os.environ | updates)` — the shape the whole
+            # dict-value contract exists for, and the one a merge produces.
+            # The union's value type is an AGREEMENT between its operands'
+            # (ginf._dict_union_val_type's own rule, for the same reason and
+            # with the same `int64_t`-is-the-default caveat); disagreement
+            # yields nothing rather than a guess.
+            _l = _static_arg_dict_val(a.left, dict_val, caller_name)
+            _r = _static_arg_dict_val(a.right, dict_val, caller_name)
+            if _l is None or _r is None:
+                return None
+            if _l == _r:
+                return _l
+            if _l == 'int64_t':
+                return _r
+            if _r == 'int64_t':
+                return _l
+            return None
+        return None
 
     def _literal_arg_elems(a):
         """`(elem, nested)` C types for a container LITERAL passed as a call
@@ -7039,7 +7230,7 @@ def gen_module_impl(self, stmts):
         return None, None
 
     for caller_name, body in _caller_bodies:
-        elem, nested, _ = self._scan_container_elems(body)
+        elem, nested, dval = self._scan_container_elems(body)
         calls = []
         self._calls_in_stmts(body, calls)
         for call in calls:
@@ -7055,6 +7246,10 @@ def gen_module_impl(self, stmts):
                 _fe, _fne = _static_arg_elems(a, elem, nested)
                 if _fe is not None:
                     _record_param_elem(callee, pnames[i], _fe, _fne)
+
+                _dv = _static_arg_dict_val(a, dval, caller_name)
+                if _dv is not None:
+                    _record_param_dict_val(callee, pnames[i], _dv)
 
                 st = _arg_scalar_type(caller_name, a)
                 if not st:
@@ -7145,22 +7340,61 @@ def gen_module_impl(self, stmts):
             # Keyword arguments name the parameter directly, so the element
             # contract reads them the same way — `show(data=[1.5, 2.5])` is
             # the same call as `show([1.5, 2.5])` and used to inherit exactly
-            # as little. Only the literal branch is added here: the scalar and
-            # struct-pointer observations above are a separate pre-existing
-            # contract with its own coverage, and widening those is not this
-            # change's business.
+            # as little. The dict-value contract reads them the same way for
+            # the same reason; the scalar and struct-pointer observations
+            # above are a separate pre-existing contract with its own
+            # coverage, and widening those is not this change's business.
             for _kw in (getattr(call, 'kwargs', None) or []):
                 _kwn = _as_str(_kw[0])
                 for _ki in range(len(pnames)):
                     if pnames[_ki] == _kwn:
                         _note_literal_arg_elems(callee, _kwn, _kw[1])
+                        _kwdv = _static_arg_dict_val(_kw[1], dval, caller_name)
+                        if _kwdv is not None:
+                            _record_param_dict_val(callee, _kwn, _kwdv)
                         break
 
+    # A CONSTRUCTOR call is a `CallExpr` whose callee is a bare `IdentExpr`
+    # (`C({...})`), so the MemberExpr-only walk below cannot see it -- which is
+    # why the `_ctor_lit_param_types` pass exists separately for this
+    # contract's scalar half. The dict-value half had no such fallback, and a
+    # constructor is THE way a dict reaches a user class (`self.d = d`), so
+    # without it every method's `self.d[k]` read the slot through
+    # `mojo_dict_get_int` and printed the stored `char *`'s own digits.
+    # Keyed `<Struct>___init__`, the same key `_method_caller_bodies` uses for
+    # that method and therefore the same key `_gen_struct_method` reads its
+    # seeds from -- one key, one consumer.
+    _ctor_init_by_struct: dict = {}
+    for _cs in (stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])):
+        if not isinstance(_cs, StructDef):
+            continue
+        for _cm in (_cs.methods or []):
+            if _as_str(_cm.name) == '__init__':
+                _ctor_init_by_struct[_as_str(_cs.name)] = _cm
+                break
+
     for caller_name, caller_struct, cbody in _method_caller_bodies:
-        _melem, _mnested, _ = self._scan_container_elems(cbody)
+        _melem, _mnested, _mdval = self._scan_container_elems(cbody)
         _mcalls = []
         self._calls_in_stmts(cbody, _mcalls)
         for _mcall in _mcalls:
+            if isinstance(_mcall.func, IdentExpr):
+                _minit = _ctor_init_by_struct.get(_as_str(_mcall.func.name))
+                if _minit is None:
+                    continue
+                _mcallee0 = _as_str(_mcall.func.name) + '___init__'
+                _mpn0 = []
+                for _pn0, _ in (_minit.params or []):
+                    _pn0 = _as_str(_pn0)
+                    if _pn0 != 'self' and not _pn0.startswith('*'):
+                        _mpn0.append(_pn0)
+                for _mi0, _ma0 in enumerate(_mcall.args):
+                    if _mi0 >= len(_mpn0):
+                        break
+                    _mdv0 = _static_arg_dict_val(_ma0, _mdval, caller_name)
+                    if _mdv0 is not None:
+                        _record_param_dict_val(_mcallee0, _mpn0[_mi0], _mdv0)
+                continue
             if not isinstance(_mcall.func, MemberExpr):
                 continue
             _mrecv = _mcall.func.obj
@@ -7206,6 +7440,36 @@ def gen_module_impl(self, stmts):
                 _me, _mne = _static_arg_elems(_ma, _melem, _mnested)
                 if _me is not None:
                     _record_param_elem(_mcallee, _mpn[_mi], _me, _mne)
+                _mdv = _static_arg_dict_val(_ma, _mdval, caller_name)
+                if _mdv is not None:
+                    _record_param_dict_val(_mcallee, _mpn[_mi], _mdv)
+
+    # ...and resolve the collected dict-value observations into the contract
+    # codegen reads, then re-run the collection once so a FORWARDING chain
+    # (`def g(d): return f(d)`) resolves through the hop this pass just
+    # settled. One extra round, not a loop to a fixpoint: `g` can only forward
+    # a dict value type that some call site of `g`'s already proved, so a
+    # second pass settles every chain that exists and a third would add
+    # nothing. `_calls_in_stmts` is memoized, so the repeat is cheap.
+    _resolve_param_dict_vals()
+    for caller_name, body in _caller_bodies:
+        elem, nested, dval = self._scan_container_elems(body)
+        calls = []
+        self._calls_in_stmts(body, calls)
+        for call in calls:
+            if not isinstance(call.func, IdentExpr):
+                continue
+            callee = _as_str(call.func.name)
+            pnames = _free_params.get(callee)
+            if not pnames:
+                continue
+            for i, a in enumerate(call.args):
+                if i >= len(pnames):
+                    break
+                _dv = _static_arg_dict_val(a, dval, caller_name)
+                if _dv is not None:
+                    _record_param_dict_val(callee, pnames[i], _dv)
+    _resolve_param_dict_vals()
 
 
     # A container param whose ELEMENTS the callee `isinstance()`-checks
@@ -10127,6 +10391,7 @@ def gen_module_impl(self, stmts):
             'extern double  __mojo_gen_send_d (int64_t);',
             'extern void    __mojo_gen_destroy (int64_t);',
             'extern void    __mojo_async_run_gen (int64_t);',
+            'extern _Bool   __mojo_async_iscoroutine (int64_t);',
             'extern void    __mojo_async_task_schedule (int64_t);',
             'extern int64_t __mojo_async_await_task (int64_t, int64_t);',
             '/* Awaitable protocol: Future/Event handles */',

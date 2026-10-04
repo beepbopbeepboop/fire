@@ -1555,11 +1555,21 @@ def _dict_union_val_type(gen, lv, rv) -> str:
     bugs/BUGFIX_ROADMAP.md item 2 for that remaining gap.
     """
     lvt = _dict_val_of_expr(gen, lv)
-    if lvt is None:
+    rvt = _dict_val_of_expr(gen, rv)
+    # `int64_t` is this table's DEFAULT answer, not a fact about the value, so
+    # an operand carrying it contributes nothing: recording it as evidence
+    # could only ever collide with a real answer from the other side. That is
+    # the same rule the cross-call parameter contract applies to its
+    # observations (`module_gen._informative_elem_ctype`), and it is what makes
+    # `e = {}; m = e | {'PATH': '/a'}` work: `{}` has no value type at all, so
+    # it is not a disagreement with the string operand, it is silence.
+    _infos = [t for t in (lvt, rvt) if t is not None and t != 'int64_t']
+    if not _infos:
         return ''
-    if lvt == _dict_val_of_expr(gen, rv):
-        return lvt
-    return ''
+    for _t in _infos:
+        if _t != _infos[0]:
+            return ''
+    return _as_str(_infos[0])
 
 
 def _scalar_arg_is_addressable_local(gen, aval) -> bool:
@@ -4819,33 +4829,91 @@ def note_container_callable_ret(gen, container_val: str, value_text: str,
         gen._container_callable_ret[container_val] = ''
 
 
+def elem_repr_operand(gen, shim: str) -> str:
+    """The `void *` OPERAND naming the element-repr shim, for the runtime call.
+
+    The file-scope `static void *_funcptr_<shim> = (void *)<shim>;` this codegen
+    already emits for every function-pointer target, rather than the shim's
+    bare name. A function designator is not a legal gimple OPERAND, so passing
+    it inline produced
+
+        _t42 = _mojo_elem_repr_DType;
+
+    and gcc -fgimple refused the whole closure with "non-trivial conversion in
+    'function_decl'" -- one error per list literal in every module of the
+    stdlib, so `make mojoc` did not link at all (measured on the stdlib
+    `builtin/dtype.mojo`, three per function, plus the same shape in
+    `parsing_floats.mojo`). `(void *)name` is the same problem inside a cast,
+    which is equally not an operand, so the cast has to live in a real static
+    initializer instead; that initializer is what `_funcptr_builtins_needed`
+    collects and module_gen emits.
+
+    Read into a TEMP rather than passed as the bare global, and that is not
+    tidiness: a file-scope variable is not a legal gimple operand either, so
+
+        mojo_list_set_elem_repr (_t1, _funcptr__mojo_elem_repr_P);
+
+    is "invalid argument to gimple call" even with the static defined. `_new_val`
+    is what every other function-pointer path already uses for exactly this --
+    it emits `_t = _funcptr_X;` and hands back the temp -- so the shim is named
+    and loaded the same way the lifted-closure, builtin-callable and vararg
+    paths are.
+
+    ONE spelling for every function-pointer target, which is what makes this a
+    fix rather than a third way of naming the same thing: they all reach a
+    function pointer through `_funcptr_` already.
+    """
+    gen._funcptr_builtins_needed.add(shim)
+    return gen._new_val('void *', f'_funcptr_{shim}')
+
+
 def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
                               val_ctype: str, val: str, val_node) -> None:
-    """The one dict store of an integer-ish VALUE, shared by the dict literal
-    (`_lower_dict_literal`), the dict comprehension (`_lower_dict_compr`), the
+    """The one dict store of a NON-STRING VALUE, shared by the dict literal
+    (`_emit_dict_pair_store`), the dict comprehension (`_gen_compr_append`), the
     subscript store `d[k] = v`, the same store under a bytes key, and the two
     `d[k] = v` shapes that reach a dict through an opaque int-typed receiver —
-    six call sites, which is how six copies of the same three lines came to
-    disagree (five had the per-slot bool kind, one had the deleted dict-wide
-    marker; one had `mojo_dict_set_int` and its `_kw` twin disagreed about an
-    integer key).
+    six copies of the same three lines, which is how they came to disagree:
+    five still spelled the store against the deleted whole-dict marker
+    `mojo_mark_dict_bool_values`, and the sixth called a
+    `gen._emit_dict_int_value_store` that was never a delegate.
 
-    A Python bool and the integer 1/0 are the same int64_t slot here (see
-    `_lower_BoolLiteral`), so the store's TYPE cannot tell them apart; the
-    expression can, and `is_python_bool_expr` is the one predicate that says
-    so. When it does, the store goes through `mojo_dict_set_bool`, which tags
-    THAT slot `_DictSlot.kind == 3` — the dict's repr then prints True/False
-    for that value alone. This replaced a whole-dict registry
-    (`mojo_mark_dict_bool_values`, since deleted): one bool value made every
-    OTHER value in the same dict print as True/False too, so
-    `{'name': p.name, 'ok': p.ok}` rendered `{'name': True, 'ok': True}`.
+    Three value shapes, three setters, and each one is chosen from something
+    the store site can still see:
 
-`key_ctype == 'MojoBytes *'` is its own key domain in the runtime (see
-    `_DictSlot.keykind`), which is what the `bytes_` prefix selects — the
-    same prefix the dict literal's float and str arms use, so the two halves of
-    one literal cannot disagree about which domain a key is in.
+    `key_ctype == 'MojoBytes *'` is its own key domain in the runtime (see
+    `_DictSlot.keykind`), which is what the `bytes_` prefix below selects — so
+    the two halves of one literal cannot disagree about which domain a key is
+    in.
 
-    `note_container_callable_ret` runs first for both branches — a stored callable
+    Every value kind is decided HERE rather than at each call site, because the
+    call sites are what disagreed:
+    * a FLOAT goes to `mojo_dict_set_double`, which stores the IEEE-754 bits
+      with `_DictSlot.kind == 1`. It used to be `_to_int64`'d into
+      `mojo_dict_set_int` on every path but the dict literal, so
+      `d['f'] = 1.5` stored the integer 1 (`print(d)` said `{'f': 1}`) and the
+      literal `{'f': 1.5}` stored 1.5 — one dict, two answers, decided by
+      which line wrote it. A C cast cannot be used instead: `(double)` and
+      `(int64_t)` casts are not legal gimple operands, which is why the
+      conversion goes through the value's own declared type and a setter.
+    * a Python bool — which is the same int64_t slot as the integer 1/0 here
+      (see `_lower_BoolLiteral`), so the store's TYPE cannot tell them apart
+      and only the EXPRESSION can — goes through `mojo_dict_set_bool`, which
+      tags THAT slot `kind == 3` and the dict's repr prints True/False for
+      that value alone. `is_python_bool_expr` is the one predicate that says
+      so. This replaced a whole-dict registry
+      (`mojo_mark_dict_bool_values`, since deleted): one bool value made every
+      OTHER value in the same dict print as True/False too, so
+      `{'name': p.name, 'ok': p.ok}` rendered `{'name': True, 'ok': True}`.
+    * a bare `None` is int64_t 0 here and so is the integer 0, for the same
+      reason, and goes through `mojo_dict_set_none` (`kind == 4`) — which is
+      what lets `{'z': 0}` print `0` and `{'n': None}` print `None` from the
+      same generic value repr. `_is_none_literal` is the predicate, and it is
+      deliberately a bare-NAME check (`None` is parsed as `IdentExpr('None')`),
+      not a value check: an `x` that HAPPENS to be None at runtime is not
+      knowable here, and such a slot keeps the plain int kind.
+
+    `note_container_callable_ret` runs first for all of them — a stored callable
     keeps its return type whatever its slot kind is.
 
     The store goes through `_emit_call`, NOT a raw `gen._emit`, because that
@@ -4854,9 +4922,49 @@ def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
     call to the `_kw` twin (`mojo_dict_set_int_kw(d, 3, v)`). A raw emit skips
     that and hands the runtime `(char *)3` as a key to hash, which segfaults."""
     gen._note_container_callable_ret(dict_val, val, val_ctype, val_node)
+    _bs = 'bytes_' if key_ctype == 'MojoBytes *' else ''
+    if gen._is_none_literal(val_node):
+        gen._emit_call('void', '', 'mojo_dict_set_' + _bs + 'none',
+                       [('MojoDict *', dict_val), (key_ctype, key_val)])
+        return
+    if val_ctype in gimple_ctypes._FLOAT_TYPES:
+        gen._emit_call('void', '', 'mojo_dict_set_' + _bs + 'double',
+                       [('MojoDict *', dict_val), (key_ctype, key_val),
+                        ('double', val)])
+        return
+    # A STRUCT value is stored TAGGED and, with the repr function this compile
+    # emitted for that struct, recorded ON THE DICT — the same bargain
+    # `mojo_list_set_elem_repr` makes for a list, for the same reason: the
+    # value's static type is known here and is unrecoverable by the time
+    # anything walks the dict, because a struct-allocated value carries no
+    # runtime type tag for `_mojo_dispatch_repr` to find. Without it
+    # `print({'k': p})` rendered the generated field dump `P(x='a')` where
+    # CPython renders the user's `__repr__`.
+    #
+    # The dict records ONE function while the tag is per SLOT, so a dict
+    # holding two different struct types cannot have both rendered by it: the
+    # first struct recorded owns `kind == 5` and any other struct value is
+    # tagged `kind == 6` — "a struct this dict's repr does not describe" — and
+    # falls back to the generic dispatch. Tagging per slot is what keeps the
+    # answer from depending on store ORDER: the record is never cleared, so
+    # `d['p'] = p; d['n'] = 5` renders `{'p': R<a>, 'n': 5}` and
+    # `d['n'] = 5; d['p'] = p` renders the same, where clearing the record on
+    # the int would have made the first of those print a field dump.
+    _shim = gimple_exprtypes.struct_elem_repr_shim(gen, val_ctype)
+    if _shim:
+        _have = gen._dict_val_repr.get(dict_val, '')
+        if not _have:
+            gen._dict_val_repr[dict_val] = _shim
+            gen._emit_call('void', '', 'mojo_dict_set_val_repr',
+                           [('MojoDict *', dict_val),
+                            ('void *', elem_repr_operand(gen, _shim))])
+        _st = 'struct' if _have in ('', _shim) else 'other_struct'
+        gen._emit_call('void', '', 'mojo_dict_set_' + _bs + _st,
+                       [('MojoDict *', dict_val), (key_ctype, key_val),
+                        (val_ctype, val)])
+        return
     vv64 = gen._to_int64(val_ctype, val)
     _suffix = 'bool' if gimple_exprtypes.is_python_bool_expr(gen, val_node) else 'int'
-    _bs = 'bytes_' if key_ctype == 'MojoBytes *' else ''
     gen._emit_call('void', '', 'mojo_dict_set_' + _bs + _suffix,
                    [('MojoDict *', dict_val), (key_ctype, key_val),
                     ('int64_t', vv64)])

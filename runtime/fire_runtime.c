@@ -4725,6 +4725,7 @@ void mojo_dict_init(MojoDict *d)
     d->cap      = MOJO_DICT_INLINE;
     d->used     = 0;
     d->next_seq = 0;
+    d->val_repr = NULL;
     d->slots    = d->inl;       /* the first table lives inside the struct */
     memset(d->inl, 0, sizeof d->inl);
     _pr_add(&_reg_dict, (uint64_t)(uintptr_t)d);
@@ -4991,6 +4992,66 @@ void mojo_dict_set_bool(MojoDict *d, char *key, int v)
     _dict_set_raw(d, key, v ? 1 : 0, 3);
 }
 
+/* A Python `None` value is int64_t 0 here (see `_lower_IdentExpr`), which is
+ * the SAME slot the integer 0 stores — so it needs its own kind for exactly
+ * the reason mojo_dict_set_bool above does, and for the same reason it has to
+ * be a per-SLOT tag rather than a whole-dict flag.
+ *
+ * Without it, `print(d)` and `print({'z': 0})` disagreed the other way:
+ * `_mojo_generic_elem_repr`'s `val == 0` arm answers "None" (it exists for a
+ * NULL pointer slot), so every plain zero in every dict printed as `None` —
+ * `{'z': 0}`, `{'i': 0}`, `{k: 0 for k in ...}` — while a real `None` was
+ * right only by coincidence. Tagging the store is what lets both be right, and
+ * the tag is decided where the value is still an AST node. */
+void mojo_dict_set_none(MojoDict *d, char *key)
+{
+    _dict_set_raw(d, key, 0, 4);
+}
+
+/* A struct stored as a dict VALUE, plus the function that renders it. See
+ * MojoDict.val_repr's own comment for why the function travels on the value
+ * rather than in a global address->type table.
+ *
+ * The SETTER is separate from the RECORD on purpose: which struct this value
+ * is is a property of the slot (hence `kind == 5`), while how to render it is
+ * a property of the dict (hence the one function). A dict holding two
+ * different struct types therefore tags both slots 5 and renders both through
+ * the most recent shim — which is wrong for the older one, and is why the
+ * codegen only records a shim for a dict whose values agree (see
+ * `emit_dict_int_value_store`); a dict that mixes structs with ints keeps
+ * recording nothing and its ints stay ints. */
+void mojo_dict_set_struct(MojoDict *d, char *key, void *obj)
+{
+    _dict_set_raw(d, key, (int64_t)(uintptr_t)obj, 5);
+}
+
+/* A struct the dict's recorded repr does NOT describe: the second struct type
+ * in one dict. Tagged apart from kind 5 so the walker can hand this slot to
+ * the generic dispatch while the kind-5 slots go to the recorded function —
+ * a dict holding two struct types gets one of them right and the other one
+ * plain, instead of getting the OTHER one's repr for both (which is a wild
+ * read, not merely a wrong string) or losing both the moment a second type
+ * appears. */
+void mojo_dict_set_other_struct(MojoDict *d, char *key, void *obj)
+{
+    _dict_set_raw(d, key, (int64_t)(uintptr_t)obj, 6);
+}
+
+void mojo_dict_set_val_repr(MojoDict *d, void *fn)
+{
+    if (!d) return;
+    d->val_repr = (char *(*)(int64_t))fn;
+}
+
+/* The recorded repr of one `kind == 5` value, or NULL when this dict says
+ * nothing about how to render it — the walker's own generic reader still runs,
+ * so a dict this was never called for is exactly as it was. */
+char *mojo_dict_repr_val(MojoDict *d, int64_t v)
+{
+    if (!d || !d->val_repr) return NULL;
+    return d->val_repr(v);
+}
+
 static _DictSlot *_dict_lookup_k(MojoDict *d, char *key, int64_t keykind)
 {
     if (!d || !d->cap || !d->slots) return NULL;
@@ -5068,6 +5129,21 @@ void mojo_dict_set_bytes_str(MojoDict *d, MojoBytes *key, char *v)
  * own key DOMAIN (see mojo_dict_set_bytes_int). */
 void mojo_dict_set_bytes_bool(MojoDict *d, MojoBytes *key, int v)
 { _dict_set_bytes_raw(d, key, v ? 1 : 0, 3); }
+
+/* ...and of mojo_dict_set_none, whose slot kind (4) is what separates a
+ * `None` value from the integer 0 it shares a representation with. */
+void mojo_dict_set_bytes_none(MojoDict *d, MojoBytes *key)
+{ _dict_set_bytes_raw(d, key, 0, 4); }
+
+/* ...and of mojo_dict_set_struct (kind 5, rendered by the dict's recorded
+ * val_repr). */
+void mojo_dict_set_bytes_struct(MojoDict *d, MojoBytes *key, void *obj)
+{ _dict_set_bytes_raw(d, key, (int64_t)(uintptr_t)obj, 5); }
+
+/* ...and of mojo_dict_set_other_struct: same value, kind 6, no recorded repr
+ * claims it. */
+void mojo_dict_set_bytes_other_struct(MojoDict *d, MojoBytes *key, void *obj)
+{ _dict_set_bytes_raw(d, key, (int64_t)(uintptr_t)obj, 6); }
 
 static _DictSlot *_dict_lookup_bytes(MojoDict *d, MojoBytes *key)
 {
@@ -5204,6 +5280,12 @@ static char *_fmt_dict_val_str(int64_t v, int64_t kind, char *dblbuf, size_t dbl
          * nothing further needed for common values. */
         return dblbuf;
     }
+    /* kind 3 (bool) and 4 (None) are the two slots whose value is a Python
+     * object rather than a number: `'%(k)s' % {'k': True}` says True and
+     * `'%(k)s' % {'k': None}` says None in CPython, and both were 1/0 here
+     * because they fell through to mojo_str_from_int. */
+    if (kind == 3) return v ? "True" : "False";
+    if (kind == 4) return "None";
     return mojo_str_from_int(v);
 }
 
@@ -8423,6 +8505,12 @@ MojoList *mojo_dict_values(MojoDict *d) {
     /* Insertion order — see mojo_dict_keys's identical note. */
     MojoList *out = mojo_list_new();
     if (!d) return out;
+    /* This list holds exactly the dict's VALUES, so the dict's struct repr
+     * describes them exactly as `mojo_list_inherit_kinds` carries a list's
+     * own elem repr across a copy: `list(d.values())` printing a raw pointer
+     * decimal where `print(d)` printed `R<a>` would be the same bug one call
+     * away. NULL for every dict that records nothing. */
+    if (d->val_repr) mojo_list_set_elem_repr(out, (void *)d->val_repr);
     int64_t *order = mojo_dict_order_indices(d);
     for (int64_t oi = 0; oi < d->used; oi++)
         mojo_list_append_int(out, d->slots[order[oi]].val);
@@ -8460,6 +8548,13 @@ MojoList *mojo_dict_items(MojoDict *d) {
          * TUPLES, so mark them — `print({"a": 1}.items())` printed
          * `[['a', 1]]` without this. */
         mojo_mark_as_tuple(pair);
+        /* The dict's struct repr belongs on the PAIR (slot 1 is the value),
+         * not on the outer list, whose elements are the pairs themselves —
+         * `_mojo_repr_pair` asks the list it walks for its recorded elem repr,
+         * the same first question `_mojo_repr_list` asks. Without this the
+         * value printed as a raw pointer decimal while the same value in the
+         * dict itself printed `R<a>`. */
+        if (d->val_repr) mojo_list_set_elem_repr(pair, (void *)d->val_repr);
         mojo_list_append_int(out, (int64_t)(intptr_t)pair);
     }
     free(order);
@@ -8510,6 +8605,13 @@ void mojo_dict_update(MojoDict *dst, MojoDict *src) {
             _dict_set_raw_seq_kind_k(dst, s->key, s->val, -1, s->kind, s->keykind);
     }
     free(order);
+    /* The struct REPR travels with the pairs it renders, on the same terms:
+     * `d.copy()`, `d | other` and `d.update(other)` all come through here,
+     * and a copied dict that rendered its struct values as a field dump (or,
+     * worse, through a stale shim from a different struct) would be the same
+     * bug one call away. The source wins where both have one, matching "src
+     * overwrites dst" for the values themselves. */
+    if (src->val_repr) dst->val_repr = src->val_repr;
 }
 
 /* dict.setdefault(key, default): return the value for `key`, inserting

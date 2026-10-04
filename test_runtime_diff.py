@@ -1143,6 +1143,47 @@ BUILTIN_PROGRAMS = {
             print(asyncio.run(c))
             print(asyncio.run(work(7)))
     """),
+    # `asyncio.iscoroutine(x)` had NO lowering at all, so it answered `False`
+    # for a value that really was a coroutine: the
+    # `if asyncio.iscoroutine(result):` guard that guards `asyncio.run` — the
+    # idiom `Android/android.py` writes — evaluated backwards. Silent, exit 0,
+    # no diagnostic, and it reads as correct because the `else` branch of a
+    # guard nobody is looking at is usually empty.
+    #
+    # Both the positive and the negative spelling are asserted, because the
+    # failure mode is the guard choosing the wrong branch rather than a value
+    # being wrong: a test with only the positive case would pass on a
+    # predicate that always answered True. `await`-free on purpose — the
+    # question is about the handle, not about suspension. (`isawaitable` is
+    # deliberately absent: it is `inspect.isawaitable` in CPython 3.14, so a
+    # compiled answer where CPython raises `AttributeError` would be the
+    # divergence, not the fix.)
+    "asyncio_iscoroutine_predicate": textwrap.dedent("""\
+        import asyncio
+
+        async def work(n):
+            await asyncio.sleep(0)
+            return n
+
+        def main():
+            c = work(5)
+            if asyncio.iscoroutine(c):
+                print('coroutine')
+            else:
+                print('not a coroutine')
+            d = 7
+            if asyncio.iscoroutine(d):
+                print('coroutine')
+            else:
+                print('not a coroutine')
+            print(asyncio.iscoroutine(5))
+            print(asyncio.iscoroutine('s'))
+            print(asyncio.iscoroutine(None))
+            # Driven at the end so CPython does not report an un-awaited
+            # coroutine at exit -- which would make this case's interpreter
+            # side fail on a warning rather than on the predicate.
+            print(asyncio.run(c))
+    """),
     "sibling_closure_kwargs": textwrap.dedent("""\
         def outer(flag):
             def probe(a, deep=False, refine=False):

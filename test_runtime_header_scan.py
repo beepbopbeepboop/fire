@@ -273,6 +273,33 @@ def test_every_declaration_is_seen():
     # list/tuple literal whose element type is a registered struct) and
     # `mojo_list_repr_elem` (what both repr walkers ask per slot). Two,
     # taken from the call.
+    # 543 -> 545 (2026-10-02, `bugs4-6-c`), for a dict slot that holds a
+    # Python `None`: `mojo_dict_set_none` and its bytes-key twin
+    # `mojo_dict_set_bytes_none`. Two, not one, for the same reason
+    # `mojo_dict_set_bytes_bool` exists beside `mojo_dict_set_bool` — a bytes
+    # key is its own key domain (`_DictSlot.keykind`), so it needs its own
+    # setter. The value kind they tag (`kind == 4`) is what lets `{'z': 0}`
+    # print `0` while `{'n': None}` prints `None` from one generic value
+    # repr, whose `val == 0` arm has to answer "None" for a NULL pointer
+    # slot; before this, every plain zero in every dict printed as `None`.
+    #
+    # NOT 544 in between: neither of these two needs a `-bytes_` DOUBLE twin
+    # for its own sake, because the float setter that already existed is
+    # dispatched by the shared `emit_dict_int_value_store` on `key_ctype`
+    # (`mojo_dict_set_bytes_double` was in the header already). A new value
+    # KIND needs a new setter; a value shape that already had one does not
+    # get a second spelling of it.
+    # 545 -> 551 (2026-10-02, `bugs4-6-c`), for a STRUCT stored as a dict
+    # value: `mojo_dict_set_struct` / `mojo_dict_set_val_repr` /
+    # `mojo_dict_repr_val` and the pair `mojo_dict_set_bytes_struct` /
+    # `mojo_dict_set_bytes_other_struct` — six, taken from the call. The
+    # `other_struct` pair exists because the dict records ONE repr function
+    # (a property of the dict) while the tag is per SLOT, so a second struct
+    # type needs its own tag (`kind == 6`) rather than being handed the first
+    # type's repr; without it `{'a': p, 'b': q}` printed q's repr twice, which
+    # is a wild read and not merely a wrong string. Four of the six are
+    # `_bytes_` twins of the same shape as `mojo_dict_set_bytes_bool`, so the
+    # key DOMAIN keeps exactly one spelling per value shape.
     #
     # NOT 542 in between: `bugs3-codegen-1-r2` added
     # `mojo_require_str_arg`, the runtime half of a str-annotated parameter
@@ -355,7 +382,18 @@ def test_every_declaration_is_seen():
     # them to THIS header. That is the whole reason this list is a ledger and
     # not a formula -- a name in the header that no line accounts for is the
     # only way this count can go wrong silently.
-    for header, want in (('fire_runtime.h', 552),
+    # 552 -> 560 (2026-10-02, `bugs4-6`): the dict's own VALUE kinds. The
+    # store moved from one integer setter to one per kind, so the runtime grew
+    # `mojo_dict_set_none` (a bare `None`, which is int64_t 0 — the same word a
+    # plain `0` stores, so only a tag tells them apart), `mojo_dict_set_struct` /
+    # `mojo_dict_set_other_struct` (a struct VALUE, tagged per slot, with the
+    # second form for "a struct this dict's repr does not describe"),
+    # `mojo_dict_set_val_repr` (the recorded repr function) and
+    # `mojo_dict_repr_val` (what the dict's own walker asks), plus the
+    # `bytes_`-keyed twin of the None one. Eight, read off the call on the
+    # MERGED header; bugs4-6 counted from its own base's 543 and wrote `551`,
+    # which was right for its tree and wrong here.
+    for header, want in (('fire_runtime.h', 560),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

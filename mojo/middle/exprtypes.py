@@ -10,7 +10,7 @@ module-level constants are byte-identical to their originals.
 """
 from __future__ import annotations
 import re
-from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG
+from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _FLOAT_TYPES
 import dataclasses
 from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _signed_int64
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
@@ -1273,12 +1273,114 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                 return None
     return ctype
 
+def _dict_literal_spread_operand(key_expr):
+    """The mapping a `**expr` pair spreads, or None if this pair is not one.
+
+    PEP 448 mapping unpacking is spelled by the parser as a PAIR whose KEY is
+    a `UnaryOp(op='**', operand=<mapping>)` and whose VALUE is the `NoneType`
+    sentinel — `fire_compiler.py`'s `_parse_dict_entry`, and
+    `myinterpreter.py`'s `eval_DictLiteral` (whose docstring states the
+    convention) is the reference reading of it. `value is None` is the
+    discriminator, not the key's type, because a `{**d}` pair and a real
+    `{k: v}` pair both have an expression in the key slot.
+
+    Lives here rather than in the backend module that first needed it because
+    two of them ask: the dict literal's STORE asks for the operand (it calls
+    `mojo_dict_update` with it) and `dict_literal_val_ctype` asks only whether
+    the pair is one (a spread pair carries no value sample).
+    """
+    if isinstance(key_expr, UnaryOp) and key_expr.op == '**':
+        return key_expr.operand
+    return None
+
+
+def dict_literal_val_ctype(gen, pairs) -> str:
+    """The dict VALUE ctype a `{k: v, ...}` LITERAL stores under, by the
+    first-pair sample rule the dict-literal lowering has always used.
+
+    ONE definition of that rule, because two callers need it and they must
+    not drift: `_lower_dict_literal` (which stamps the answer onto the temp
+    it allocates) and `module_gen.py`'s cross-call dict-value contract
+    (which stamps the same answer onto a CALLEE's unannotated parameter, from
+    a literal written at the call site instead — `f({"x": "1"})`). With two
+    copies, a call site's contract and the literal's own lowering could
+    disagree about the very dict they describe, and the parameter would be
+    typed one way while the argument is stored another.
+
+    Deliberately still a single SAMPLE rather than a join over every pair:
+    this dict representation has one `int64_t` slot plus a per-slot `kind`
+    tag, so a heterogeneous `{'x': 1, 'y': 's'}` has no single value type to
+    record anyway, and widening it to a join would be a decision about that
+    representation rather than about type inference.
+
+    The FIRST pair that CARRIES A VALUE, not `pairs[0]`: a `**spread` pair's
+    value slot is the NoneType sentinel (see
+    `_dict_literal_spread_operand`), so `{'a': 1, **d}`'s leading pair is not a
+    value sample and `_quick_type(None)` says nothing about the dict. Sampling
+    it recorded `int64_t` for a dict whose real values are strings.
+    """
+    for _pair in (pairs or ()):
+        if _dict_literal_spread_operand(_pair[0]) is not None:
+            continue
+        _vt = gen._quick_type(_pair[1])
+        if _vt in _FLOAT_TYPES:
+            return 'double'
+        if _vt == 'char *':
+            return 'char *'
+        return 'int64_t'
+    return 'int64_t'
+
+
 def _struct_name_of(ctype: str) -> str:
     """Extract the bare struct name from a C type like 'const Foo *' → 'Foo'."""
     s = ctype
     if s.startswith('const '):
         s = s[6:]
     return s.replace(' *', '').strip()
+
+def struct_elem_repr_shim(gen, ctype: str) -> str:
+    """`_mojo_elem_repr_<Struct>` for a CONTAINER-ELEMENT ctype, else ''.
+
+    The one decision behind `mojo_list_set_elem_repr` (a list or tuple) and
+    `mojo_dict_set_val_repr` (a dict, via its `kind == 5` slots), and the one
+    place that RECORDS that a shim is wanted — because the name it returns is
+    written into the generated C at the store, so the reflection preamble has
+    no choice but to emit that symbol. Asking twice (once per container, with
+    the same ctype) is what makes the two drift, and one of the two copies
+    going stale is how `struct_field_types[struct]` being non-empty stopped
+    being the same question as "a shim exists": the emitter's `reflect_structs`
+    is narrower (it also requires the struct to be emitted and allocated here),
+    so the store named `_mojo_elem_repr_TrieNode` in a module that never emits
+    it and the self-host closure failed to LINK with
+    `'_mojo_elem_repr_TrieNode' undeclared` (ast_rewriter.py). The request is
+    therefore recorded in `gen._elem_repr_needed`, and `_emit_reflection_dispatch`
+    emits a shim for every struct in it — so the two cannot disagree.
+
+    A unit compiled with `emit_struct_defs=False` emits no reflection preamble
+    at all, so it must not name a shim either: that is why the answer is ''
+    there, checked BEFORE anything is recorded.
+
+    Returns the shim's NAME, which the caller hands to the runtime as a
+    function pointer; the runtime calls it with the slot's word. Empty string
+    for every other value type (int, str, bytes, a nested list, a dict), where
+    the runtime's own per-slot reader is already right — that is what makes
+    this a strict improvement and not a new dispatch to get wrong.
+
+    Lives here, in the middle tier, rather than in the backend module that
+    first needed it: the two containers ask the same question about the same
+    ctype, and a copy per container is how the two drifted before.
+    """
+    if not getattr(gen, 'emit_struct_defs', False):
+        return ''
+    if not ctype or not ctype.endswith(' *'):
+        return ''
+    sn = ctype[:-2].strip()
+    if not sn or not _struct_name_of(ctype):
+        return ''
+    if not gen.struct_field_types.get(sn):
+        return ''
+    gen._elem_repr_needed.add(sn)
+    return f'_mojo_elem_repr_{sn}'
 
 def _struct_type_id(name: str) -> int:
     """Deterministic runtime type tag for a struct name — a pure function of

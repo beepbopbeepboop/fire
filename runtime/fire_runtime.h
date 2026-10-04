@@ -1128,8 +1128,16 @@ typedef struct {
                      * %-formatting): 0 = plain int64_t, 1 = double bit-cast,
                      * 2 = char * pointer, 3 = a Python bool (0/1, which is
                      * the same int64_t as case 0 and so is only separable
-                     * because the tag is per SLOT). Maintained by the typed
-                     * setters below; zero-defaulted everywhere else. */
+                     * because the tag is per SLOT), 4 = a Python `None`
+                     * (also int64_t 0, same reason), 5 = a boxed STRUCT
+                     * pointer, which the dict renders with the repr function
+                     * `val_repr` records on itself (see
+                     * mojo_dict_set_val_repr — a struct-allocated value has no
+                     * runtime type tag, so the walker has nothing to dispatch
+                     * on), 6 = a struct of ANOTHER type, which that one
+                     * function cannot describe and which the walker sends to
+                     * the generic dispatch. Maintained by the typed setters
+                     * below; zero-defaulted everywhere else. */
     int64_t  keykind; /* key DOMAIN, since every key is stored as its own
                      * characters in `key` and matched with strcmp: 0 = a str
                      * key, 1 = a bytes key. Keeps `d[b'x']` and `d['x']` the
@@ -1162,6 +1170,22 @@ typedef struct {
     int64_t    cap;
     int64_t    next_seq;
     _DictSlot  inl[MOJO_DICT_INLINE];
+    /* How to render a `kind == 5` value (see _DictSlot.kind). LAST in the
+     * struct so every existing field keeps its offset, and NULL when this dict
+     * holds no struct value, which is every dict whose values are scalars,
+     * strings or containers.
+     *
+     * Why a function pointer on the VALUE, the same bargain
+     * `mojo_list_set_elem_repr` makes and for the same reason: the value's
+     * static type is known where the dict is built and is unrecoverable by
+     * the time anything walks it. `_mojo_dispatch_repr` needs a runtime type
+     * TAG, which a struct-allocated value does not carry (its first word is
+     * its first field), and a global address->type registry would go stale the
+     * moment a frame is reused — handing a later struct at the same address
+     * another struct's repr, and a stale `P *` to the shim below would then be
+     * a wild read, not merely a wrong string. Recorded from the compile-time
+     * type, on the value, it has neither failure mode. */
+    char      *(*val_repr)(int64_t);
 } MojoDict;
 
 MojoDict   *mojo_dict_new(void);
@@ -1217,6 +1241,26 @@ void        mojo_dict_set_str(MojoDict *d, char *key, char *v);
  * still say True/False. Emitted by codegen wherever the stored expression is a
  * Python bool (see `is_python_bool_expr`). */
 void        mojo_dict_set_bool(MojoDict *d, char *key, int v);
+/* A Python `None` stored as a dict VALUE: also int64_t 0, also only separable
+ * from the integer 0 by the per-slot tag, so it gets its own (`kind == 4`).
+ * Emitted by codegen wherever the stored expression is a bare `None`; without
+ * it every plain `0` in a dict printed as `None`, because the generic value
+ * repr answers "None" for a zero word. */
+void        mojo_dict_set_none(MojoDict *d, char *key);
+
+/* A STRUCT stored as a dict VALUE: the boxed pointer, tagged `kind == 5` so
+ * the dict's repr asks `mojo_dict_repr_val` instead of dispatching on a type
+ * tag this value does not have. `mojo_dict_set_val_repr` records the function
+ * that answers, and is called by the same store — one setter for the value,
+ * one record for how to render it, both decided at the store site where the
+ * type is still readable. */
+void        mojo_dict_set_struct(MojoDict *d, char *key, void *obj);
+/* A struct of a DIFFERENT type than the one `mojo_dict_set_val_repr` was given
+ * (kind 6), so the walker sends this slot to the generic dispatch while the
+ * kind-5 slots go to the recorded function. */
+void        mojo_dict_set_other_struct(MojoDict *d, char *key, void *obj);
+void        mojo_dict_set_val_repr(MojoDict *d, void *fn);
+char       *mojo_dict_repr_val(MojoDict *d, int64_t v);
 
 int64_t     mojo_dict_get_int(MojoDict *d, char *key);
 double      mojo_dict_get_double(MojoDict *d, char *key);
@@ -1350,6 +1394,11 @@ void        mojo_dict_set_bytes_int(MojoDict *d, MojoBytes *key, int64_t v);
 void        mojo_dict_set_bytes_str(MojoDict *d, MojoBytes *key, char *v);
 /* The bytes-key twin of mojo_dict_set_bool. */
 void        mojo_dict_set_bytes_bool(MojoDict *d, MojoBytes *key, int v);
+/* ...and of mojo_dict_set_none. */
+void        mojo_dict_set_bytes_none(MojoDict *d, MojoBytes *key);
+/* ...and of mojo_dict_set_struct: same `kind == 5`, same recorded repr. */
+void        mojo_dict_set_bytes_struct(MojoDict *d, MojoBytes *key, void *obj);
+void        mojo_dict_set_bytes_other_struct(MojoDict *d, MojoBytes *key, void *obj);
 int64_t     mojo_dict_get_bytes_int(MojoDict *d, MojoBytes *key);
 char       *mojo_dict_get_bytes_str(MojoDict *d, MojoBytes *key);
 double      mojo_dict_get_bytes_double(MojoDict *d, MojoBytes *key);

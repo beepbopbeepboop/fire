@@ -692,6 +692,17 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str) ->
             gen._elem_types[tname] = gen._elem_types[v]
             if v in gen._nested_elem_types:
                 gen._nested_elem_types[tname] = gen._nested_elem_types[v]
+        # The dict-value twin of the arm above. Without it this function's
+        # `dst != 'int64_t'` block had exactly ONE container arm, so the one
+        # alias shape whose type lives in `_dict_val_types` rather than
+        # `_elem_types` fell off the end of it: `e = d` inside a function
+        # read `e[k]` through `mojo_dict_get_int` even with `d`'s value type
+        # known (`f(d)` where every call site passes `{'x': '1'}` printed an
+        # address, while the same call reading `d[k]` directly printed `1`).
+        if dst == 'MojoDict *' and v in gen._dict_val_types:
+            gen._dict_val_types[tname] = gen._dict_val_types[v]
+            if v in gen._dict_nested_val_types:
+                gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
         return
     if v in gen._actual_types:
         gen._actual_types[tname] = gen._actual_types[v]
@@ -707,6 +718,17 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str) ->
                 gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
     elif vtype == 'char':
         gen._actual_types[tname] = 'char'
+    # `e = d` where `d` is a BOXED dict parameter: `vtype` is `int64_t`
+    # because the parameter is declared `int64_t`, so the
+    # `vtype.endswith(' *')` arm above cannot fire — yet `_dict_val_types`
+    # holding an entry for `v` is itself proof that `v` is a dict, which is
+    # all this carry needs. Measured: with `f(d)`'s value type known from its
+    # call sites, reading `d[k]` in `f` printed the string while the alias's
+    # `e[k]` one line earlier printed the pointer's digits.
+    if v in gen._dict_val_types:
+        gen._dict_val_types[tname] = gen._dict_val_types[v]
+        if v in gen._dict_nested_val_types:
+            gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
     if v in gen._struct_field_owners:
         gen._struct_field_owners[tname] = list(gen._struct_field_owners[v])
     if tname in gen._actual_types:
@@ -798,6 +820,20 @@ def _note_global_store_types(gen, tname: str, vtype: str, v: str,
                 gen._nested_elem_types[tname] = gen._nested_elem_types[v]
     if v in gen._actual_types:
         gen._actual_types[tname] = gen._actual_types[v]
+    # …and the container KIND itself, which the two arms above do not cover
+    # because they are about the value's ELEMENT / VALUE type and a `|` result
+    # may have neither: `_dict_union_val_type` propagates only an AGREEMENT
+    # between the two operands' dict-value types, so `e = {}; d = {'PATH':
+    # '/a'}; m = e | d` merges a dict of strings with a dict of NOTHING and
+    # records no value type at all. The kind needs no such agreement — the
+    # RHS's own lowered type IS the answer — and without it the global reads
+    # back with no kind whatsoever, so `print(m)` formatted the boxed
+    # `MojoDict *` with `%s` and printed its address.
+    #
+    # `setdefault`, because an earlier pass's own conclusion for this name (a
+    # parameter usage guess, say) is not something a store site may overturn.
+    if vtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+        gen._actual_types.setdefault(tname, vtype)
     ginf.carry_callable_ret_types(gen, v, tname)
     ginf.carry_callable_ret_from_call(gen, value_node, tname)
     # A bound METHOD stored into a module global. The globals-struct FIELD is
@@ -1391,6 +1427,18 @@ def _gen_stmt_AssignStmt(gen, node):
             # read temp). Keyed by the struct owning the field.
             _dsn = gimple_exprtypes._struct_name_of(ot)
             gen._field_dict_val_types.setdefault(_dsn, {})[node.target.member] = _dv
+        elif v in gen._dict_val_types:
+            # `self.d = d` where the RIGHT-HAND SIDE's dict value type is
+            # already known — a dictionary literal passed straight to the
+            # constructor, or a parameter the cross-call contract resolved.
+            # Same carry as the annotation arm above, same table, same reader:
+            # without it the field is left untyped, so `self.d[k]` in every
+            # OTHER method reads the slot through `mojo_dict_get_int` and
+            # hands back the stored `char *`'s own bits. Gated on `v` already
+            # being a recorded dict, which is itself proof the value is one.
+            _dsn2 = gimple_exprtypes._struct_name_of(ot)
+            if _dsn2:
+                gen._field_dict_val_types.setdefault(_dsn2, {})[node.target.member] = gen._dict_val_types[v]
         if ot in ('int', 'int64_t', 'void *'):
             # Opaque Python object (e.g. `s.field = val` where `s`'s
             # static type isn't narrowed past a runtime isinstance()
@@ -1589,8 +1637,23 @@ def _gen_stmt_AssignStmt(gen, node):
                 gen._emit_call('void', '', 'mojo_dict_set_str',
                                 [('MojoDict *', obj_v), ('char *', key_tmp), ('char *', v)])
             else:
+                # The ONE shared non-str dict store, `emit_dict_int_value_store`
+                # (whose docstring is this arm's spec: a float through the
+                # double setter, a `None` through `mojo_dict_set_none`, a bool
+                # through `mojo_dict_set_bool` so THAT slot's repr says
+                # True/False, the stored callable's return type noted, the
+                # store through `_emit_call` so `_char_to_cstr`'s placeholder
+                # key resolves). It used to be re-spelled here against the
+                # whole-dict marker `mojo_mark_dict_bool_values`, which the
+                # runtime DELETED when the per-slot kind replaced it — so
+                # `d['a'] = True` compiled to a call to a function that does
+                # not exist ("implicit declaration" in the generated C, a hard
+                # build failure), and the bytes-keyed sibling two lines up
+                # called a `gen.` name that was never a delegate and raised
+                # AttributeError instead. Both were this arm's bug, and both
+                # are gone now that there is one spelling of the store.
                 gen._emit_dict_int_value_store(obj_v, 'char *', key_tmp,
-                                                vtype, v, node.value)
+                                              vtype, v, node.value)
         else:
             # Opaque int-typed container: check if it's a list or dict
             if ot in ('int', 'int64_t'):
@@ -1641,10 +1704,10 @@ def _gen_stmt_AssignStmt(gen, node):
                     gen._emit(f"  {ip} = (int64_t){obj_v};")
                     dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
                     _, key_tmp2 = gen._char_to_cstr(it, idx_v, True, True)
-# The same one store the statically-typed arm above uses;
+                    # The same one store the statically-typed arm above uses;
                     # only the dict handle is a coerced int here.
                     gen._emit_dict_int_value_store(dp, 'char *', key_tmp2,
-                                                    vtype, v, node.value)
+                                                  vtype, v, node.value)
             elif _dsw_sn and not gen._struct_defines_method(_dsw_sn, '__setitem__'):
                 # `d[k] = v` on a builtin-`dict` subclass with no
                 # `__setitem__` override: store into the backing MojoDict.
@@ -2984,7 +3047,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
             elif ot == 'MojoDict *':
                 _, key_tmp = gen._char_to_cstr(it2, idx_v, True, True)
                 gen._emit_dict_int_value_store(obj_v, 'char *', key_tmp,
-                                                vtype, v, node.value)
+                                              vtype, v, node.value)
             elif ot in ('int', 'int64_t'):
                 actual_type = gen._get_actual_type(ot, obj_v)
                 # Same read/write-symmetry rule as the other two subscript
@@ -3010,7 +3073,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                     dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
                     _, key_tmp2 = gen._char_to_cstr(it2, idx_v, True, True)
                     gen._emit_dict_int_value_store(dp, 'char *', key_tmp2,
-                                                    vtype, v, node.value)
+                                                  vtype, v, node.value)
             elif ot.endswith(' *') and gimple_exprtypes._struct_name_of(ot) not in gen.struct_field_types:
                 # Raw C pointer: use _mojo_at_ helper (GIMPLE doesn't allow
                 # ptr arithmetic) — mirrors _gen_stmt_AugAssignStmt's

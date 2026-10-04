@@ -2148,6 +2148,10 @@ class GimpleGen:
         self._global_literal_slot_ctypes: dict = {}
         self._local_def_param_types: dict = {}
         self._param_elem_types: dict = {}
+        # The dict-VALUE twin of the row above: callee -> {pname -> the dict
+        # value ctype its call sites agree on}. Read at the same place (see
+        # emit_funcs.gen_func / _gen_struct_method), into `_dict_val_types`.
+        self._param_dict_val_types: dict = {}
         # Per-function maps that `_reset_func` (a MODULE function in
         # gimple_gen_infra.py, taking `gen`) re-initialises with real
         # `dict[str, str]` annotations the `class GimpleGen` field-type
@@ -2239,6 +2243,33 @@ class GimpleGen:
         self._nested_elem_types: dict[str, str] = {}
         self._param_struct_types: dict[str, str] = {}
         self._dict_val_types: dict[str, str] = {}
+        # Per dict C name, the `_mojo_elem_repr_<Struct>` shim its `kind == 5`
+        # slots are rendered with — or '' once that dict has been seen to hold
+        # values the one function cannot render (a second struct type, or a
+        # plain int). Recorded at the STORE, where the value's type is still
+        # readable, and read by the runtime at REPR time, where it is not: the
+        # same bargain `mojo_list_set_elem_repr` makes for a list, keyed by the
+        # same `_dict_val_types` beside it and with the same lifetime.
+        self._dict_val_repr: dict[str, str] = {}
+        # The structs whose element-repr shim (`_mojo_elem_repr_<Struct>`) the
+        # reflection preamble EMITTED for this module, published by
+        # module_gen's `_emit_reflection_dispatch` and read by
+        # `gimple_exprtypes.struct_elem_repr_shim` — the one predicate the list
+        # and dict store lowerings ask. Empty until that preamble is built
+        # (which is before any body is lowered) and, for a unit compiled with
+        # `emit_struct_defs=False`, empty for good: no shim, no reference.
+        self._elem_repr_shims: set = set()
+        # The structs a CONTAINER store has asked an element-repr shim for
+        # (`gimple_exprtypes.struct_elem_repr_shim` records there when it names
+        # one). `_emit_reflection_dispatch` emits a shim for every struct in
+        # this set in addition to the ones its own filter finds, because the
+        # NAME is written into the generated C at the store site: the store and
+        # the emission cannot be decided independently without the two
+        # disagreeing, and when they did the self-host closure failed to link
+        # with `'_mojo_elem_repr_TrieNode' undeclared`. Filled while the bodies
+        # are lowered, read after, so it is complete by the time the preamble
+        # is built.
+        self._elem_repr_needed: set = set()
         self._dict_nested_val_types: dict[str, str] = {}
         self._captures: dict[str, str] = {}
         # Phase 4 (same doc, same pattern): per-top-level-statement
@@ -4893,6 +4924,8 @@ class GimpleGen:
         return ginf._dict_val_of_expr(self, expr)
     def _dict_union_val_type(self, lv, rv) -> str:
         return ginf._dict_union_val_type(self, lv, rv)
+    def _operand_is_dict(self, node, t: str, v=None) -> bool:
+        return grsl._operand_is_dict(self, node, t, v)
     def _prepare_analysis_funcs(self, stmts: list) -> None:
         self._analysis_funcs = ginf._build_analysis_funcs(stmts)
         self._analysis_structs = ginf._build_analysis_structs(stmts)
@@ -4916,6 +4949,10 @@ class GimpleGen:
     def _emit_call(self, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]],
                     arg_nodes: list = None) -> None:
         return ginf._emit_call(self, ret_type, result_var, fname, arg_pairs, arg_nodes)
+    def _emit_dict_int_value_store(self, dict_val: str, key_ctype: str, key_val: str,
+                                   val_ctype: str, val: str, val_node) -> None:
+        return ginf.emit_dict_int_value_store(self, dict_val, key_ctype, key_val,
+                                              val_ctype, val, val_node)
     def _declared_int_ctype(self, val: str) -> str | None:
         return ginf._declared_int_ctype(self, val)
     def _ensure_local(self, ctype: str, val: str) -> str:

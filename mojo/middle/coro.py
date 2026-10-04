@@ -1485,6 +1485,21 @@ def _is_asyncio_run_call(node) -> bool:
             and isinstance(node.func.obj, N.IdentExpr) and node.func.obj.name == 'asyncio')
 
 
+def _is_asyncio_awaitable_pred_call(node) -> bool:
+    """`asyncio.iscoroutine(x)`, one argument.
+
+    Only `iscoroutine`. `isawaitable` is the same question and lowers to the
+    same call, but it is NOT a member of `asyncio` in CPython 3.14 (it is
+    `inspect.isawaitable`), so a lowering for it here would make the compiled
+    path answer where CPython raises `AttributeError` -- a divergence this
+    rewrite has no business introducing. Named for what it recognises rather
+    than for the predicate's subject. See `_rewrite_asyncio_run`'s arm."""
+    return (isinstance(node, N.CallExpr) and isinstance(node.func, N.MemberExpr)
+            and node.func.member == 'iscoroutine' and len(node.args) == 1
+            and isinstance(node.func.obj, N.IdentExpr)
+            and node.func.obj.name == 'asyncio')
+
+
 def _unwrap_transfer(node):
     """Strip a leading `^` transfer sigil (`task^`)."""
     if isinstance(node, N.UnaryOp) and node.op == '^':
@@ -2834,6 +2849,24 @@ def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set, local_map: dict
             nv, npre = _rewrite_asyncio_run(v, cvar, task_vars, local_map, handle_vars)
             pre.extend(npre)
             setattr(node, k, nv)
+    if _is_asyncio_awaitable_pred_call(node):
+        # `asyncio.iscoroutine(x)` -> the SAME live-handle registry check
+        # `__mojo_async_run_gen` already performs before it drives anything,
+        # exported as a predicate of its own (`__mojo_async_iscoroutine`). No
+        # static inference is consulted and none is needed: unlike
+        # `asyncio.run`, this call does not DRIVE the value, it only asks
+        # about it, so there is no reinterpretation to refuse -- the runtime
+        # answers correctly for every shape, including the ones
+        # `asyncio.run` still refuses (a value reached through a dynamic
+        # callee, a parameter, a subscript).
+        #
+        # Which is the point: `if asyncio.iscoroutine(result): asyncio.run(result)`
+        # is the idiom, and before this the predicate itself answered `False`
+        # for a value that really is a coroutine -- the guard the source
+        # wrote evaluated backwards, silently, exit 0.
+        arg, apre = _rewrite_asyncio_run(node.args[0], cvar, task_vars, local_map,
+                                         handle_vars)
+        return _call('__mojo_async_iscoroutine', [arg]), list(apre)
     if _is_asyncio_run_call(node) or _is_task_wait_call(node, task_vars):
         _AW_COUNTER[0] += 1
         h = f'__arun{_AW_COUNTER[0]}'
@@ -5075,6 +5108,13 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('__mojo_gen_yield_tagged', 'int64_t')
     gen.func_param_types.setdefault('__mojo_async_run_gen', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_async_run_gen', 'void')
+    # The predicate half of the same registry (`asyncio.iscoroutine` /
+    # `isawaitable`). Registering it here is what stops the call lowering from
+    # emitting the generic "unavailable in compiled mode" weak stub, whose
+    # `(...)` signature then conflicts with the real definition in
+    # fire_coro_gen.c — a hard gcc error, not a silent wrong answer.
+    gen.func_param_types.setdefault('__mojo_async_iscoroutine', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_async_iscoroutine', '_Bool')
     # Eager task scheduling (bugs/COMPILE_FAIL_asyncio_queues.md gap 3).
     gen.func_param_types.setdefault('__mojo_async_task_schedule', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_async_task_schedule', 'void')

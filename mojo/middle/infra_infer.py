@@ -2262,6 +2262,17 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                     elem[v] = elem[val.name]
                     if val.name in nested:
                         nested[v] = nested[val.name]
+                elif isinstance(val, gimple_ctypes.DictExpr):
+                    # The dict-literal twin of `note_list_literal` above, and
+                    # missing for the same reason: this pre-pass only ever
+                    # replayed LIST literals, so a local `d = {"x": "1"}`
+                    # carried no value type into the cross-call contract even
+                    # though the codegen-time `_lower_dict_literal` records
+                    # one for the same literal. Same shared rule, so the two
+                    # cannot disagree about the dict they describe.
+                    dict_val[v] = gimple_exprtypes.dict_literal_val_ctype(gen, val.pairs)
+                elif isinstance(val, gimple_ctypes.IdentExpr) and val.name in dict_val:
+                    dict_val[v] = dict_val[val.name]
             elif (isinstance(n, gimple_ctypes.AssignStmt) and isinstance(n.target, gimple_ctypes.SubscriptExpr)
                     and isinstance(n.target.obj, gimple_ctypes.IdentExpr)):
                 v = n.target.obj.name

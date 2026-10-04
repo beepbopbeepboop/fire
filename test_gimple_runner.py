@@ -202,6 +202,44 @@ def test_gimple_stdout_repeated(name: str, mojo_src: str, expected_stdout: str,
                     pass
 
 
+def dict_param_reader_is_str(name: str, mojo_src: str, fn: str, want: bool):
+    """Assert whether the generated C for `fn` reads a dict slot through
+    `mojo_dict_get_str`; return the reader calls it found.
+
+    The stdout assertions cannot see this axis at all: an UNTYPED dict slot is
+    read through `mojo_dict_get_int`, so a `char *` value comes back as the
+    stored pointer's own digits — an ASLR address that differs run to run and
+    no equality assertion can pin. What IS pinnable is which accessor the
+    generated C chose, and that is the entire content of the cross-call
+    dict-value contract, so both its positive and its negative case are
+    asserted this way."""
+    global _PASS, _FAIL
+    from gimple_codegen import compile_to_gimple
+    try:
+        c = compile_to_gimple(mojo_src, do_imports=False, filename='dvt.py')
+        # The mangled DEFINITION, not the forward declaration: `c.index(f'{fn}_')`
+        # finds the prototype first, whose `\n}`-terminated "body" is some
+        # unrelated function that follows it.
+        m = re.search(rf'^[^\n]*\b{fn}_[0-9a-f]+ \([^;]*\)\n\{{', c, re.M)
+        if m is None:
+            raise AssertionError(f'no definition of {fn}_ found in the generated C')
+        body = c[m.end():c.index('\n}', m.end())]
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+        return []
+    reads = [ln.strip() for ln in body.splitlines() if 'mojo_dict_get' in ln]
+    got = any('mojo_dict_get_str' in r for r in reads)
+    if got != want:
+        print(f"FAIL  {name}: {fn} {'does' if want else 'does not'} read its "
+              f"dict slot as a string, wanted {want} (reader calls: {reads})")
+        _FAIL += 1
+        return reads
+    print(f"PASS  {name}")
+    _PASS += 1
+    return reads
+
+
 def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str):
     """Test that mojo code compiles to GIMPLE, executes, and prints exactly
     `expected_stdout`. Unlike test_gimple_execution's exit-code check, this
@@ -7369,6 +7407,94 @@ main()
        "PlainHolder(p=Q(x='b'))\n[DunderHolder(p=R(x='c'))]\n"
        "DunderHolder(p=R(x='c'))\n")
 
+    # The DICT half of the same question, which the list fix above left open:
+    # `print({'k': p})` printed the generated field dump `P(x='a')` where
+    # CPython prints the object's own `__repr__`. The dict's slots already
+    # carried a `kind`; what they did not carry was a way to render a struct
+    # VALUE, for the same reason the list needed `mojo_list_set_elem_repr` — a
+    # struct-allocated value has no runtime type tag for `_mojo_dispatch_repr`
+    # to find. So the dict records the same shim, per slot (`kind == 5`) and on
+    # the dict itself (`mojo_dict_set_val_repr`), and `mojo_dict_values` /
+    # `mojo_dict_items` carry it into the list they build, which is what makes
+    # `list(d.values())` and `d.items()` agree with `print(d)`.
+    #
+    # Against CPython, so neither of this path's remaining gaps can be quietly
+    # asserted here: what is pinned is the VALUE's repr in each place it
+    # appears, plus the shape a per-dict function has to get right — an int
+    # stored beside the struct (the tag is per slot, so both are right, and in
+    # EITHER store order). `print(d.values())` and `print(d.items())` are not in
+    # this program because both print the list without its `dict_values(...)` /
+    # `dict_items(...)` view wrapper; `list(d.values())` is the same value and
+    # does match.
+    test_gimple_matches_cpython("gimple_dict_value_repr_uses_the_struct_dunder", """\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+
+def shapes():
+    p = P("a")
+    d = {}
+    d['k'] = p
+    print(d)
+    print(repr(d))
+    print(list(d.values()))
+    print(dict(d))
+    e = d | {'z': 1}
+    print(e)
+    h = {}
+    h['p'] = p
+    h['n'] = 5
+    print(h)
+    m = {}
+    m['n'] = 5
+    m['p'] = p
+    print(m)
+
+shapes()
+""")
+
+    # The two shapes the CPython comparison above cannot carry, pinned as they
+    # are rather than as they should be, so that a change to either is a
+    # decision somebody makes:
+    #
+    #   `print(d.items())` prints `[('k', R<a>)]` where CPython wraps it in
+    #   `dict_items(...)` — the pairs are right, the VIEW type is missing. That
+    #   is the items() wrapper, not this fix.
+    #   `{'p': p, 'q': q}` prints `'p': R<a>` and `'q': Q(y='b')` — the dict
+    #   records ONE repr function and the tag is per slot, so the second
+    #   struct type is `kind == 6` and goes to the generic dispatch, which
+    #   gives the field dump. Handing it the recorded function instead would
+    #   print 'q' as `R<...>` by reading a `Q *` through `P`'s repr, which is
+    #   a wild read rather than a wrong string.
+    test_gimple_stdout("gimple_dict_value_repr_remaining_two_shapes", """\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+
+class Q:
+    def __init__(self, y):
+        self.y = y
+    def __repr__(self):
+        return "Q<" + self.y + ">"
+
+def shapes():
+    p = P("a")
+    q = Q("b")
+    d = {}
+    d['k'] = p
+    print(d.items())
+    g = {}
+    g['p'] = p
+    g['q'] = q
+    print(g)
+
+shapes()
+""", "[('k', R<a>)]\n{'p': R<a>, 'q': Q(y='b')}\n")
+
     # §4.2a: print([True, False]) printed [1, None] -- the generic list repr
     # both formats a bool slot with %d instead of True/False AND treats a
     # False (0) slot as the None sentinel.
@@ -7422,6 +7548,91 @@ print(d)
 print({'ok': True, 'count': 3})
 """, "{'k': True}\n{'k': True}\n{'k': False}\n{'k': 1}\n{'a': True}\n"
        "{'a': True, 'n': 5}\n{'ok': True, 'count': 3}\n")
+
+    # ...and EVERY dict store shape has to reach that same shared store.
+    # `emit_dict_int_value_store` is the one implementation of it, but the six
+    # lowering sites that used to spell the store out between them had drifted
+    # in two directions: five still called the whole-dict marker
+    # `mojo_mark_dict_bool_values`, which the runtime DELETED when the per-slot
+    # `kind` replaced it (so `{'k': True}` and `d['a'] = True` emitted a call
+    # to a function that does not exist — "implicit declaration" in the
+    # generated C, a hard build failure, not a wrong value), and the sixth, a
+    # bytes key with a non-str value, called `gen._emit_dict_int_value_store`,
+    # a `gen.` name that was never a delegate, so it raised AttributeError and
+    # took four registered cases with it.
+    #
+    # One program per shape, all against CPython: the dict literal, the
+    # subscript store (a local and a module-level dict), a CHAINED assignment
+    # (`d['a'] = e = False`, the MultiAssignStmt path), the dict comprehension,
+    # `dict(k=v)`'s kwarg pairs (the literal's other caller) and the bytes-key
+    # domain. Each asserts `True`/`False` for a bool slot AND leaves a plain
+    # int in the same dict, so a store that tags the whole dict instead of the
+    # one slot cannot pass.
+    test_gimple_matches_cpython("gimple_dict_store_shapes_share_one_bool_slot", """\
+def literal_store():
+    d = {}
+    d['a'] = True
+    d['n'] = 5
+    return d
+
+def chained():
+    g = {}
+    e = 0
+    g['a'] = e = False
+    return g
+
+def bytes_keyed():
+    b = {}
+    b[b'k'] = 5
+    b[b'j'] = 9
+    print(b[b'k'], b[b'j'], len(b))
+
+print(literal_store())
+print(chained())
+print({k: True for k in ['x', 'y']})
+print(dict(ok=True, n=3))
+d = {}
+d['p'] = 1 == 1
+d['r'] = 1 == 2
+d['s'] = 7
+print(d)
+bytes_keyed()
+""")
+
+    # What a dict's REPR makes of each value kind, against CPython. Three
+    # separate defects, one shared cause — the walker had a `val == 0` arm
+    # answering "None" (right for a NULL pointer slot) and no arm for `kind`,
+    # so it read every untagged word as if it were a pointer:
+    #
+    #   {'z': 0}            -> {'z': None}   a plain zero is not a None
+    #   print({'x': 1.5})   -> SEGFAULT      1.5's IEEE bits (4609434218613702656)
+    #                                       cleared 65536, so the bits were
+    #                                       dereferenced as an address
+    #   d['f'] = 1.5        -> {'f': 1}      the SUBSCRIPT store boxed the
+    #                                       float through _to_int64 while the
+    #                                       literal store used the double
+    #                                       setter, so one dict had two answers
+    #
+    # `None` now has its own slot kind (`mojo_dict_set_none`, kind 4), which is
+    # what lets a kind-0 zero print `0` in the same dict where a `None` prints
+    # `None`. `d['n']` still prints `0` where CPython says `None` — a READ
+    # does not carry the slot kind anywhere — which is deliberately NOT pinned
+    # here; see bugs/CODEGEN_dict_slot_read_loses_its_value_kind.md.
+    test_gimple_matches_cpython("gimple_dict_repr_kinds_agree_with_cpython", """\
+d = {}
+d['n'] = None
+d['z'] = 0
+d['b'] = False
+d['f'] = 1.5
+d['s'] = 'v'
+d['c'] = [1, 2]
+d['d'] = {}
+print(d)
+print({'a': None, 'z': 0, 'b': True, 'f': 2.5, 's': 'q'})
+print({k: None for k in ['p', 'q']})
+print({k: 0 for k in ['p', 'q']})
+print('%s' % d)
+""")
 
     # A `bool`-ANNOTATED struct field. `_TYPE_MAP` maps `'bool'` to `'int'`
     # on purpose (see struct_bool_fields' docstring), so the field's lowered
@@ -7766,6 +7977,159 @@ def main():
     show_int([[1, 2], [3, 4]])
 main()
 """)
+
+    # A dict's VALUE type is a compile-time fact at the call site, and there is
+    # no binding site inside the callee to record it -- so before the cross-call
+    # dict-value contract (`_param_dict_val_types`, seeded at the same
+    # Pass-1.3d site as the scalar and element contracts and read by
+    # `gen_func` / `_gen_struct_method` beside `_param_elem_types`), the
+    # callee's `d[k]` fell to the `int64_t` default and read a `char *` slot
+    # through `mojo_dict_get_int`: the stored pointer's own bits, printed as a
+    # decimal, exit 0. Two spellings that MUST agree are asserted side by
+    # side, because the same program with the literal bound to a local first
+    # was already correct -- so a test of only one of them would pass on the
+    # broken tree for the wrong reason.
+    test_gimple_stdout("gimple_dict_param_value_type_from_the_call_site", """\
+def via_next(d):
+    a, b = next(iter(d.items()))
+    print(b)
+
+def via_for(d):
+    for k, v in d.items():
+        print(v)
+
+def via_subscript(d):
+    print(d["x"])
+
+def via_get(d):
+    print(d.get("x"))
+
+def via_alias(d):
+    e = d
+    print(e["x"])
+
+def main():
+    via_next({"x": "1"})
+    via_for({"x": "1"})
+    via_subscript({"x": "1"})
+    via_get({"x": "1"})
+    via_alias({"x": "1"})
+""", "1\n1\n1\n1\n1\n")
+
+    # The constructor carrier, which is not a MemberExpr callee at all and so
+    # needs its own observation to reach `_gen_struct_method` — a dict reaches
+    # a user class through `self.d = d` more often than through any other
+    # shape. Both the field read in another method and a `show()` driven
+    # through a free function's receiver are asserted, because the receiver
+    # spelling goes through a different resolution.
+    test_gimple_stdout("gimple_dict_param_value_type_reaches_a_constructor", """\
+class Box:
+    def __init__(self, d):
+        self.d = d
+    def show(self):
+        print(self.d["x"])
+
+def drive(b):
+    b.show()
+
+def main():
+    Box({"x": "1"}).show()
+    drive(Box({"x": "1"}))
+""", "1\n1\n")
+
+    # A float-valued dict takes the same contract through the `double` lane,
+    # which is a DIFFERENT reader (`mojo_dict_get_double`) from the string one.
+    test_gimple_stdout("gimple_dict_param_float_value_type_from_the_call_site", """\
+def f(d):
+    print(d["x"])
+def main():
+    f({"x": 1.5})
+""", "1.5\n")
+
+    # `a | b` on two dicts is `dict.__or__`, which MATERIALISES a new dict.
+    # The dict-union lowering has always existed (`mojo_dict_union`) but only
+    # fired when an operand's lowered C type was literally `MojoDict *`, and
+    # that is unreachable for a module-level global or an unannotated
+    # parameter — both are stored through the int64_t boxing convention and
+    # so lower to `int64_t`. The union then became a raw C `|` between two
+    # POINTERS (`_t13 | _t14`) and `print` formatted the result's bits with
+    # `%s`: an address, exit 0, no diagnostic.
+    #
+    # Both operands must be provably dicts, which is also Python's own rule —
+    # the sibling `int |` cases are asserted below so this cannot be a
+    # general "make `|` a union" change.
+    test_gimple_stdout("gimple_dict_union_of_globals_and_through_a_return", """\
+e = {}
+o = {'PATH': '/b'}
+d = {'PATH': '/a', 'X': '1'}
+
+def merged(x, y):
+    return x | y
+
+print(e | o | d)
+print(merged(e, d))
+""", "{'PATH': '/a', 'X': '1'}\n{'PATH': '/a', 'X': '1'}\n")
+
+    # The merged dict's own read-back, which is where the doc's real instance
+    # (`merged = env_defaults | os.environ | updates`, then `merged.get(k)`)
+    # lived: the KIND has to survive the store into the global, and the VALUE
+    # type has to reach the callee parameter when the union is passed
+    # straight in. An EMPTY dict contributes no value type at all, so it is
+    # not a disagreement with a string operand — it is silence, and treating
+    # the `int64_t` default as evidence is what made `{} | {'PATH': '/a'}`
+    # record nothing.
+    test_gimple_stdout("gimple_dict_union_result_reads_and_crosses_a_call", """\
+def show(m):
+    print(m['k'])
+    print(m.get('k'))
+    print(len(m))
+
+e = {}
+d = {'k': 'v'}
+m = e | d
+print(m)
+show(e | d)
+""", "{'k': 'v'}\nv\nv\n1\n")
+
+    # `int.__or__` is untouched, through the same shapes (globals, locals, and
+    # a function's return): the new evidence is a table this codegen fills for
+    # DICTS only, so an integer pair has none of it.
+    test_gimple_stdout("gimple_int_or_is_still_bitwise_or", """\
+A = 6
+B = 3
+def either(x, y):
+    return x | y
+print(A | B)
+print(either(6, 3))
+print(either(4, 1))
+print(6 ^ 3)
+""", "7\n7\n5\n5\n")
+
+    # DISAGREEMENT, asserted on the generated C rather than on stdout: the
+    # honest answer for `f({'x': '1'}); f({'x': 2})` is the `int64_t` default,
+    # and its observable consequence at the string call site is the stored
+    # pointer's own digits — an ASLR address, which no equality assertion can
+    # pin. So what is asserted is the absence of the accessor the contract
+    # would otherwise have chosen. The agreeing program is asserted FIRST, so
+    # the disagreeing one cannot pass by the generator never producing that
+    # call at all.
+    _agree_src = '''\
+def f(d):
+    print(d["x"])
+def main():
+    f({"x": "1"})
+    f({"x": "1"})
+'''
+    dict_param_reader_is_str(
+        'gimple_dict_param_value_type_agreement_types_the_slot', _agree_src, 'f', True)
+    dict_param_reader_is_str(
+        'gimple_dict_param_value_type_disagreement_stays_untyped', '''\
+def f(d):
+    print(d["x"])
+def main():
+    f({"x": "1"})
+    f({"x": 2})
+''', 'f', False)
 
     # bugs/hard/CODEGEN_function_scoped_import_module_not_inlined.md: a
     # cross-module constructor call whose only field-type evidence is an
@@ -8647,6 +9011,107 @@ print(f"{s}")
 d = {'a': 1}
 print(str(d))
 """, "[1, 2, 3]\n[1, 2, 3]\n{1, 2}\n{'a': 1}\n")
+
+    # A user class named `Parser`, imported across a module boundary. `Parser`
+    # is a struct name this compiler hardcodes for its OWN parser
+    # (`fire_compiler.Parser`: `_tok` / `_pos` / `_filename` /
+    # `_pending_decs` / `_known_traits`), and the hardcoding used to be
+    # unconditional — so a user's `Parser` was MERGED into that layout and
+    # every one of its methods resolved against `fire_compiler.Parser`, whose
+    # `__init__` has a different signature. The generated struct was:
+    #
+    #   typedef struct Parser { ... _tok; _pos; _filename; _pending_decs;
+    #                                 _known_traits; struct Parser * toks; }
+    # and the call sites referenced `fire_compiler_Parser_peek`, which
+    # nothing defined.
+    #
+    # Both halves are asserted by RUNNING rather than by inspecting the C,
+    # because the merge's symptom is a wrong-offset field read, which prints a
+    # plausible wrong value rather than failing: this program's `p.toks[1]`
+    # reads offset 6 of a 5-field struct. The re-export variant below covers
+    # the harder disambiguation (the class crosses TWO module boundaries, via
+    # a base class, so neither the defining module's name nor the importing
+    # module's is enough).
+    _check_agrees_with_cpython("user_struct_named_parser_survives_the_selfhost_name", {
+        'pcol_def.py': "class Parser:\n"
+                       "    def __init__(self, tokens):\n"
+                       "        self.toks = tokens\n"
+                       "    def peek(self):\n"
+                       "        return self.toks[0]\n",
+        'pcol_main.py': "from pcol_def import Parser\n"
+                        "def use(src):\n"
+                        "    psr = Parser(src)\n"
+                        "    if not psr.peek():\n"
+                        "        return None\n"
+                        "    return psr\n"
+                        "p = use([1, 2])\n"
+                        "print(p.peek())\n"
+                        "print(p.toks[1])\n",
+    }, 'pcol_main.py')
+
+    # Same name, but the class is RE-EXPORTED through a third module and
+    # inherits from a base class defined in a fourth — the real instance's
+    # shape (`Cases/cases_generator/parsing.py`'s `class Parser(PLexer)`,
+    # re-exported by `parser.py`). Three modules and four hops, so a
+    # qualifier resolved from either end alone gets it wrong.
+    _check_agrees_with_cpython("user_struct_named_parser_survives_a_re_export_and_a_base", {
+        'pcol_base.py': "class PLexer:\n"
+                        "    def __init__(self, t):\n"
+                        "        self.t = t\n",
+        'pcol_parsing.py': "from pcol_base import PLexer\n"
+                           "class Parser(PLexer):\n"
+                           "    def peek(self):\n"
+                           "        return self.t[0]\n",
+        'pcol_facing.py': "from pcol_parsing import Parser\n",
+        'pcol_main.py': "from pcol_facing import Parser\n"
+                        "p = Parser([5, 6])\n"
+                        "print(p.peek())\n"
+                        "print(p.t[1])\n",
+    }, 'pcol_main.py')
+
+    # ...and the structural half, which is what makes a run-level assertion
+    # above able to mean anything: the emitted struct must carry NONE of
+    # `fire_compiler.Parser`'s own five field names, must carry the user's,
+    # and the method symbols must be mangled with the DEFINING module's
+    # qualifier. A merge or a wrong qualifier shows up here as a field or a
+    # symbol the user never wrote, with no gcc error at all.
+    #
+    # Scoped to the five selfhost names rather than "only the user's fields",
+    # because the cross-module registration has a SEPARATE defect of its own
+    # (an `__init__` parameter name leaking in as a field — see
+    # `bugs/CODEGEN_imported_class_gets_ctor_params_as_fields.md`), and an
+    # assertion about that would be red for a reason this test is not about.
+    def _parser_struct_and_symbols():
+        global _PASS, _FAIL
+        with tempfile.TemporaryDirectory() as wd:
+            open(os.path.join(wd, 'pcol_def.py'), 'w').write(
+                "class Parser:\n"
+                "    def __init__(self, tokens):\n"
+                "        self.toks = tokens\n"
+                "    def peek(self):\n"
+                "        return self.toks[0]\n")
+            entry = os.path.join(wd, 'pcol_main.py')
+            open(entry, 'w').write("from pcol_def import Parser\n"
+                                   "print(Parser([9]).peek())\n")
+            from gimple_codegen import compile_to_gimple
+            c = compile_to_gimple(open(entry).read(), do_imports=True,
+                                  filename=entry)
+        m = re.search(r'typedef struct Parser \{(.*?)\} Parser;', c, re.S)
+        fields = set(re.findall(r'\b(\w+);', m.group(1))) if m else set()
+        merged = sorted(fields & {'_tok', '_pos', '_filename',
+                                  '_pending_decs', '_known_traits'})
+        syms = sorted({s for s in re.findall(r'\b(\w*Parser_\w+)\s*\(', c)})
+        bad_syms = [s for s in syms if s.startswith('fire_compiler_')]
+        if merged or bad_syms or 'toks' not in fields \
+                or not any(s.endswith('_Parser_peek') for s in syms):
+            print("FAIL  user_struct_named_parser_emits_its_own_layout_and_qualifier: "
+                  f"fields={sorted(fields)} merged={merged} symbols={syms}")
+            _FAIL += 1
+        else:
+            print("PASS  user_struct_named_parser_emits_its_own_layout_and_qualifier")
+            _PASS += 1
+
+    _parser_struct_and_symbols()
 
 
 def main():
