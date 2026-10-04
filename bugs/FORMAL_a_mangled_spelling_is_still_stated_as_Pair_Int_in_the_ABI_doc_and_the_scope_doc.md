@@ -1,17 +1,17 @@
-# FORMAL_two_monomorph_tests_assert_a_mangled_spelling_the_mangler_no_longer_emits
+# FORMAL_a_mangled_spelling_is_still_stated_as_Pair_Int_in_the_ABI_doc_and_the_scope_doc
 
-**Area:** `formal/monomorph.py` (consumer of `monomorphize.mangle`) ·
-`test_formal_monomorph.py` · **Status:** OPEN, found 2026-10-04 while working
-`project18:export-gate` · **Layer:** 1/5 of the formal work
+**Area:** `doc/ABI.md` §Generics · `bugs/FORMAL_generic_monomorph_scope.md` ·
+**Status:** OPEN, found 2026-10-04 while working `project18:export-gate` ·
+**Layer:** 1/5 of the formal work
 
-Two tests in `test_formal_monomorph.py` fail on `master` (`86d60026`) with no
-local change, and the doc that owns the spelling says a thing that is no longer
-true. Neither is caused by the per-edge export-gate rule on
-`work/formal18-export-gate` — verified by running the suite with
-`formal/imports.py` and `formal/build.py` restored from `HEAD`, which fails
-identically.
+**The two TESTS are already fixed** — `work/formal18-tile-specialization`
+(`f6e127d5`, "tests: derive two monomorph expectations from the ONE mangler")
+derives both from `monomorphize.mangle` instead of writing the old literal, and
+its message says they were "measured pre-existing on" the tree this doc was
+written against. **What is left is the DOC half, which that commit did not
+touch** and which is what this doc is for.
 
-## 1. What is observed
+It was found as two red tests, for the record:
 
 ```sh
 export PATH=/opt/homebrew/bin:$PATH
@@ -27,7 +27,11 @@ python3 tools/memslot.py --gb 4 --label t -- python3 test_formal_monomorph.py
 formal monomorphization: PASS=9 EXPECTED=0 SKIP=0 FAIL=2
 ```
 
-## 2. The cause, and it is NOT a functional break
+(Neither failure is caused by the per-edge export-gate rule on
+`work/formal18-export-gate` — both fail identically with `formal/imports.py` and
+`formal/build.py` restored from `86d60026`.)
+
+## 1. The cause, and it is NOT a functional break
 
 `monomorphize.mangle` is deliberately injective now — its own docstring says so,
 and points at `bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`:
@@ -51,12 +55,12 @@ end-to-end differential tests (`a generic struct template is instantiated at the
 importer's type`, `an instantiation agrees with the concrete struct of the same
 shape`) PASS and print CPython's answer on both architectures.
 
-What fails is **two hard-coded expectations of the old spelling**, and one doc:
+What the two red tests were asserting, and what the docs still assert:
 
 * `test_an_instantiation_substitutes_the_parameter_and_keeps_the_self_spelling`
-  asserts `mangled == "Bag_Int"`;
-* `two demand sets are two libraries` asserts a `Pair_Int` symbol in the
-  library's export trie;
+  asserted `mangled == "Bag_Int"` and `two demand sets are two libraries`
+  asserted a `Pair_Int` symbol in the library's export trie — both now derived
+  from the mangler by `f6e127d5`;
 * `bugs/FORMAL_generic_monomorph_scope.md` §6 ("The mangling spelling, and
   `doc/ABI.md`'s example") states "`monomorphize.mangle` emits `Pair_Int`. …
   They are different strings and the tree has one mangler, which is the correct
@@ -73,28 +77,28 @@ What fails is **two hard-coded expectations of the old spelling**, and one doc:
 is illustrative and not wrong, so nothing in it has to change beyond the sentence
 that names the mangler's output.
 
-## 3. The exact next step
+## 2. The exact next step
 
-1. Read the boundary spelling off the mangler instead of writing it out:
-   `test_formal_monomorph.py`'s two assertions should compute the expected name
-   with `monomorphize.mangle` (or `MM.instantiate`'s own return), so a future
-   change to the encoding moves the test with it. The `two demand sets` case
-   should look the symbol up as
-   `formal.model.abi_method_symbol(prefix, mangled_struct_name, method)` for
-   the same reason.
-2. Correct the `Pair_Int` sentences in `doc/ABI.md` §Generics, in §6 of
+1. **Done** by `work/formal18-tile-specialization` (`f6e127d5`): both tests now
+   compute the expected name from the mangler rather than writing it out, so a
+   future change to the encoding moves them with it.
+2. **Open**: correct the `Pair_Int` sentences in `doc/ABI.md` §Generics, in §6 of
    `bugs/FORMAL_generic_monomorph_scope.md` and in that doc's §1 (three
    `Pair_Int` mentions) to the injective spelling, and say WHERE it is stated —
    one sentence, so the next reader is sent to `monomorphize.mangle` rather than
    to a string in a bug doc.
 
-This is small and it is not mine: `monomorphize.py` is shared compiled-path
-engine and the two tests are in the monomorphization suite, which
-`formal15-generic-monomorph` landed. It is filed here rather than fixed because
-`project18:export-gate` owns the import EDGE rule and not the mangler's
-spelling, and a worker editing a shared mangler to satisfy a formal test would
-be doing exactly the "change a shared engine on the strength of a caller" thing
-`formal/monomorph.py`'s `_fold_self_params` docstring warns against.
+## 3. Why it is filed and not fixed here
+
+`doc/ABI.md` is the shared ABI contract and `FORMAL_generic_monomorph_scope.md`
+is another lane's measured remainder list (`formal15-generic-monomorph` landed
+the mechanism); `project18:export-gate` owns the import EDGE rule and neither of
+those. Rewriting the boundary spelling in the ABI document from a worker whose
+change is three files away in `formal/imports.py` is the "fix the shared
+contract on the strength of your own caller" move that
+`formal/monomorph.py`'s `_fold_self_params` docstring warns against — and here
+the sentence is load-bearing for anyone reading the boundary symbol, so it
+should change with the mangler's own next change rather than in a side commit.
 
 ## 4. Reproducing
 
