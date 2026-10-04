@@ -2975,10 +2975,11 @@ def division_floors(op: str, signed: bool) -> bool:
     shift: a backend that corrected `//` and not `%` (or `//` and not `/`)
     would answer a dividing program from two different notions of Python's
     integer division, on the same machine, in the same function.
-    `bugs/FORMAL_floor_division_on_a_signed_operand_is_truncated.md` §"The
-    emitted shape" is where the correction's instruction sequence is derived;
-    the source model's half is `fdiv64`/`frem64` in `lib/ProofLib.lean`, whose
-    `fdiv_correction` is the same 0-or-1 word spelled over `sdiv64`."""
+    The correction's instruction sequence is each backend's
+    `_emit_floor_correction` (arm64 and x86-64, the same six instructions and a
+    different tail because `IDIV` consumes the dividend), and the source model's
+    half is `fdiv64`/`frem64` in `lib/ProofLib.lean`, whose `fdiv_correction` is
+    the same 0-or-1 word spelled over `sdiv64`."""
     return bool(signed) and op in ("//", "%")
 
 

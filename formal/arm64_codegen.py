@@ -9088,10 +9088,10 @@ ctor_field_value=self._ctor_field_value_for(name),
         is why `fdiv64`/`frem64` in `lib/ProofLib.lean` are spelled over
         `sdiv64` and this `MSUB`'s remainder rather than over `srem64`: the goal
         is then one proposition over bit-vectors, closed by the two
-        `arm64_cset_*` lemmas in `_VALUE_SIMP` and `bv_decide`, instead of two
-        shapes plus `srem64_sub`.
-        `bugs/FORMAL_floor_division_on_a_signed_operand_is_truncated.md` §"The
-        emitted shape" is where this shape is derived."""
+        `arm64_cset_*` lemmas in `_VALUE_SIMP`, instead of two shapes plus
+        `srem64_sub`.  The sequence itself is `model.division_floors`'s
+        instruction selection, and `_emit_floor_quotient`/`_emit_floor_remainder`
+        say which of the two operators takes which tail."""
         self.asm.emit(encode_msub_xd_xn_xm_xa(3, 2, 1, 0))
         self.asm.emit(encode_eor_xd_xn_xm(4, 3, 1))
         self.asm.emit(encode_cmp_xn_imm(3, 0))

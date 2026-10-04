@@ -2,9 +2,11 @@
 
 **Area:** FORMAL, arm64 — `lib/ProofLib.lean`'s `arm64_step` if-chain, against
 `formal/arm64.py::encode_neg_xd_xn` and `formal/arm64_codegen.py`.
-**Status: OPEN, measured, NOT FIXED — found as a blocker while landing
-`FORMAL_floor_division_on_a_signed_operand_is_truncated.md`, which had to route
-around it rather than through it. Filed from `work/formal21-4`.**
+**Status: OPEN, measured, NOT FIXED — found as a blocker while landing the floor
+correction for `//` and `%` (`formal/model.py::division_floors`,
+`lib/ProofLib.lean`'s `fdiv64`/`frem64`, both backends' `_emit_floor_correction`),
+which had to route around it rather than through it. Filed from
+`work/formal21-4`.**
 
 ## What is wrong
 
@@ -122,8 +124,7 @@ defect in one sentence: the tree has an oracle for the question, a docstring
 carrying the answer, and no check that the branch the oracle answers for is one
 the decoder can reach.
 
-`TestFloorCorrectionDecodes` (added with
-`FORMAL_floor_division_on_a_signed_operand_is_truncated.md`, in the same file)
+`TestFloorCorrectionDecodes` (added with the floor correction, in the same file)
 is that missing check for the one construct that emits into this corner: it runs
 the emitter on `n % 3`, takes the division block's words, and asks the
 generator's own decoder what each word IS.

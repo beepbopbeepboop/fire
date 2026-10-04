@@ -94,7 +94,9 @@ CASES = [
      "def main(n):\n    a = -8\n    b = a >> 2\n    if b == 0 - 2:\n        return 1\n    return 0\n", 1, None),
     ("print_negative",
      "def main(n):\n    a = -7\n    printf(\"%d\\n\", a)\n    return 3\n", 3, "-7"),
-    # `//` and `%` FLOOR (bugs/FORMAL_floor_division_on_a_signed_operand_is_truncated).
+    # `//` and `%` FLOOR -- `formal/model.py::division_floors` and
+    # `lib/ProofLib.lean`'s `fdiv64`/`frem64`, with the correction each backend
+    # emits spelled in its own `_emit_floor_correction`.
     #
     # These two rows PINNED the truncating answers — `0 - 7 // 2 == 0 - 3` and
     # `(0 - 7) % 3 == 0 - 1` — because that is what SDIV/MSUB compute and the
@@ -7320,11 +7322,11 @@ BOTH_ARCH_CASES = [
      "    return 3\n", 7, "annotated=42 untyped=43"),
     # ── the FLOOR table, both architectures, every row compared with CPython ──
     #
-    # `bugs/FORMAL_floor_division_on_a_signed_operand_is_truncated.md` §"Re-
-    # measured" is an eight-row table in which four of the eight were wrong on
-    # BOTH machines, and every wrong one is a case where the operands' signs
-    # differ: truncating division rounds toward zero and Python floors. Those
-    # eight rows are HERE rather than in `CASES` for the reason this group's own
+    # The eight-row table this change was measured against had four of its eight
+    # rows wrong on BOTH machines, and every wrong one is a case where the
+    # operands' signs differ: truncating division rounds toward zero and Python
+    # floors. Those eight rows are HERE rather than in `CASES` for the reason
+    # this group's own
     # docstring gives — the defect was identical on the two machines, but the
     # FIX is new code on each (`_emit_floor_correction` and its two callers in
     # `formal/arm64_codegen.py`; the same three in `formal/x86_64_codegen.py`,

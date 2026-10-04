@@ -841,9 +841,9 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
             # fdiv_correction a b` — the same subtraction the emitted `SUB`
             # performs, with the correction spelled over the `MSUB` remainder
             # the `CMP`s read.  Naming `sdiv64` here would make the model's
-            # answer the TRUNCATING quotient, which is the bug this row is
-            # (`bugs/FORMAL_floor_division_on_a_signed_operand_is_truncated.md`).
-            # The gate is `model.division_floors`, the same decision both
+            # answer the TRUNCATING quotient, which is what the backend used to
+            # emit and what CPython does not mean.  The gate is
+            # `model.division_floors`, the same decision both
             # emitters ask, so the generator cannot name a term for an operator
             # the machine was told not to correct.
             t = None
@@ -2458,6 +2458,15 @@ _VALUE_SIMP = (
     "mem_read_after_write_u64_slot, mem_read_after_write_u64_slot', "
     "mem_read_after_write_u64, "
     "arm64_cset_eq, arm64_cset_ne, arm64_cset_lt_s, "
+    # The FLOOR terms, for the same reason `arm64_cset_eq` is here and for the
+    # same shape of reason: a goal that mentions `fdiv64` mentions a DEF whose
+    # body is an `if` on the divisor, and `rfl` cannot get through that `if`
+    # (`withReducible` does not decide `UInt64.ofNat 7 = 0`), so the two sides of
+    # the equality stay two different expressions and every tactic in the chain
+    # declines — `bv_decide` most expensively, at 20 000 000 heartbeats, because
+    # the `sdiv64 a b` atom beside it is an `Int.tdiv` it cannot evaluate.
+    # Unfolding them in the `simp only` leaves one word on both sides.
+    "fdiv_correction, fdiv64, frem64, "
     "UInt64.add_zero, u64_ofNat_zero, UInt64.ofNat_toNat"
 )
 

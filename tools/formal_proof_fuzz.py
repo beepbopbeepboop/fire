@@ -72,9 +72,17 @@ because it is a property of the GENERATOR and not of the harness: CPython's
 integers are unbounded and a formal value is one 64-bit word, so every growing
 term is masked back into `0..0xFFFF`; the signed family is `-32..32` combined
 with `+`/`-` only; and `//`/`%` appear only over a non-negative dividend and an
-odd divisor (`| 1`), because flooring versus truncating is a DOCUMENTED model
-decision (`bugs/FORMAL_floor_division_on_a_signed_operand_is_truncated.md`) and a
-zero divisor is a trap on the oracle.
+odd divisor (`| 1`), because a zero divisor is a trap on the oracle.
+
+The dividend restriction is no longer about the FLOORING question: both backends
+floor now (`formal/model.py::division_floors` and `lib/ProofLib.lean`'s
+`fdiv64`/`frem64`), and `tools/formal_fuzz.py`'s `signed` mix puts a signed
+dividend over a signed divisor through the RUNTIME half with 100/100 matches.
+It is here because of the PROOF half: a signed dividend over a free `n` reaches
+`eval_eq_mojo`, whose rewrite is not decidable over a free `UInt64`
+(`bugs/FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`, and the sweep
+ledger `bugs/FORMAL_fuzz_ledger.md` §2.1a for the runtime side).  Lifting the
+restriction is that doc's fix, not this file's.
 
 One thing is generated ON PURPOSE and is the reason a corpus of unsigned words
 would still be worth building: comparisons MIX the two families.  A signed
@@ -334,8 +342,9 @@ class ProveGen:
         if r < 0.75:
             # A division with a non-negative dividend and an ODD divisor: `| 1`
             # cannot be zero, so this stays a program on both engines instead of
-            # becoming the documented floor-versus-truncate disagreement or a
-            # ZeroDivisionError on the oracle.
+            # becoming a ZeroDivisionError on the oracle.  The dividend stays
+            # unsigned because of the PROOF layer rather than the model — see
+            # this file's docstring.
             return (f"((({self.word_expr(1)}) & 0xFFFF) "
                     f"{self.rng.choice(['//', '%'])} "
                     f"(({self.word_expr(1)} & 0xFF) | 1))")
