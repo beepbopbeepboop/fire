@@ -19178,7 +19178,7 @@ def receiver_writeback_name(fn) -> object:
 # call site joins on the KEY and reads only the receiver, while a refusal has to
 # name the construct — and re-deriving the owner from the key at refusal time
 # would be a second lookup that can disagree with the first.
-def one_field_dropped_receiver_stores(fn, owner):
+def one_field_dropped_receiver_stores(fn, owner, one_field=None):
     """Where `fn` stores a ONE-FIELD struct's own field and the store is DROPPED.
 
     A one-field struct's receiver IS its field — `struct_is_one_field` is what
@@ -19211,7 +19211,7 @@ def one_field_dropped_receiver_stores(fn, owner):
     convention as the source spelled it, `None` for a plain `self` — or `[]` when
     the method is not at risk.
     """
-    if owner is None or not struct_is_one_field(owner):
+    if owner is None or not one_field_answer(owner, one_field):
         return []
     recv = method_receiver_name(fn)
     receivers = struct_receivers(owner)
@@ -19257,7 +19257,8 @@ ReceiverWriteback.__doc__ = (
     "(`mutating_receiver_value_refusal`).")
 
 
-def one_field_mutating_methods(functions, method_owners: dict) -> dict:
+def one_field_mutating_methods(functions, method_owners: dict,
+                              one_field=None) -> dict:
     """`{lifted method name: ReceiverWriteback}` for every one-field mutator.
 
     Keyed by the function's OWN name, which is the LIFTED `<Struct>_<member>`
@@ -19278,11 +19279,19 @@ def one_field_mutating_methods(functions, method_owners: dict) -> dict:
     FunctionDef carries no back-pointer to the class body it was written in, so
     the owner is the one thing this cannot derive for itself, and `functions` is
     what carries the receiver's convention.
+
+    `one_field` is `one_field_struct_names`' table, handed in by the caller that
+    already derived it (`formal/build.py::_prepare_functions`), because this loop
+    asks the predicate once per METHOD — 377 of them on `myinterpreter.py`, each
+    one a whole-struct walk of bodies. `None` keeps the per-method ask, which is
+    the same answer at the cost of the walk; see
+    `bugs/FORMAL_build_cost_2026-10-03.md` §6 for the measurement and §3.1 for
+    why reading the table is sound.
     """
     out = {}
     for fn in (functions or ()):
         st = (method_owners or {}).get(fn.name)
-        if st is None or not struct_is_one_field(st):
+        if st is None or not one_field_answer(st, one_field):
             continue
         recv = receiver_writeback_name(fn)
         if recv is None:
@@ -21507,7 +21516,7 @@ def field_type_one_word_struct(structs, name, decls: dict):
     return st
 
 
-def one_word_sole_field_frame(struct_def, decls: dict):
+def one_word_sole_field_frame(struct_def, decls: dict, one_field=None):
     """The FRAMED struct a ONE-FIELD struct's sole field holds, or None.
 
     **The one fact two callers need for opposite reasons, and neither of them
@@ -21544,7 +21553,7 @@ def one_word_sole_field_frame(struct_def, decls: dict):
     apart from the "disagreed" one asks `field_type_is_value`, as
     `frame_field_type_candidates`' own docstring says its callers should.
     """
-    if not struct_is_one_field(struct_def):
+    if not one_field_answer(struct_def, one_field):
         return None
     sole = struct_sole_field_name(struct_def)
     if sole is None:
@@ -25097,6 +25106,55 @@ def framed_struct_names(structs) -> dict:
     method and the pass that emits its field accesses cannot disagree about how
     wide the receiver is."""
     return {st.name: st for st in structs if struct_is_framed(st)}
+
+
+def one_field_struct_names(structs) -> dict:
+    """`{name: struct}` for every struct that is exactly ONE field.
+
+    The third predicate of the partition `framed_struct_names` and the build's
+    `wide` table already spell as module-level tables, and the reason this one
+    exists is the same: `struct_is_one_field` is `struct_fits_one_word` plus
+    `struct_field_count`, and each of those derives the struct's whole field set
+    by walking **every method body of that struct twice**. So one ask is a
+    whole-struct walk, and a per-FUNCTION asker pays it once per function per
+    struct — 1 031 of them on `myinterpreter.py` from `_prepare_functions`'s
+    loop alone, which is 2.9 s of that file's remaining 3.8 s.
+
+    **Sound by the measurement the framed table's threading was sound by**, not
+    by an invalidation argument: `formal/model.py`'s `read_before_store`
+    derivation and `bugs/FORMAL_build_cost_2026-10-03.md` §3.1 walked
+    146 779 asks of the four predicates over 7 788 (question, struct) pairs
+    across 14 files and NOT ONE pair changed its answer between two asks inside
+    one `_prepare_functions` call — `struct_is_one_field` was one of the four.
+
+    And it is not a cache: nothing is remembered across a mutation, the way
+    `framed_struct_names` is not one either. A caller with no module context
+    keeps asking `struct_is_one_field`, which is the same answer at the cost of
+    one walk, so a test reading one function's answer is unaffected.
+    """
+    return {st.name: st for st in structs if struct_is_one_field(st)}
+
+
+def one_field_answer(struct_def, one_field=None) -> bool:
+    """`struct_is_one_field(struct_def)`, read off `one_field_struct_names`'
+    table when the caller has one.
+
+    The threaded form, and a FUNCTION rather than a `name in table` at each of
+    the seven call sites because the table is OPTIONAL: a caller with no module
+    context — a test, a tool reading one function's answer, any of the model
+    functions `formal/build.py` calls before it has a module table — keeps
+    asking `struct_is_one_field`, which is the same answer at the cost of one
+    whole-struct walk rather than none.
+
+    `None` in, the predicate out, INCLUDING for `struct_def is None`, which the
+    predicate answers False and a `getattr(struct_def, "name", None)` membership
+    test also answers False. The two paths must not differ on the shape that
+    reaches both, or "the threaded table changed the answer" would be a question
+    about which path ran rather than about the struct.
+    """
+    if one_field is None:
+        return struct_is_one_field(struct_def)
+    return getattr(struct_def, "name", None) in one_field
 
 
 # The largest slot offset `LDR Xt, [Xn, #imm]` / `MOV Xt, [Xn+imm]` can name

@@ -1019,6 +1019,36 @@ def run_per_module_table_case(case, tmpdir, verbose):
         if sorted(derived) != sorted(threaded):
             return False, (f"{fn.name}: threaded enum sites {sorted(threaded)} "
                            f"are not the derived ones {sorted(derived)}")
+    # The ONE-FIELD table, which is the third predicate of the same partition
+    # and was threaded on 2026-10-03 (`bugs/FORMAL_build_cost_2026-10-03.md`
+    # §6's first residue). The assertion is the same shape as the enum half
+    # above and for the same reason: `one_field_answer(st, table)` is what the
+    # per-function askers now read, so a table that disagreed with
+    # `struct_is_one_field` would be a silent layout difference rather than a
+    # failure, and `struct_is_one_field` is a whole-struct walk of bodies —
+    # 1 541 of them on `myinterpreter.py` against 146 for the derivation.
+    one_field = M.one_field_struct_names(structs.values())
+    if sorted(one_field) != sorted(
+            n for n, st in structs.items() if M.struct_is_one_field(st)):
+        return False, (
+            f"the one-field table is {sorted(one_field)}, which is not the set "
+            f"of structs `struct_is_one_field` accepts — so the threaded reads "
+            f"and the derivation are two answers to one question")
+    for st_name, st in sorted(structs.items()):
+        if M.one_field_answer(st, one_field) != M.struct_is_one_field(st):
+            return False, (
+                f"{st_name}: `one_field_answer` with the table says "
+                f"{M.one_field_answer(st, one_field)} and the predicate says "
+                f"{M.struct_is_one_field(st)}")
+    # …and with NO table, which is what every caller without a module context
+    # gets: the same answer, by the other path. A caller that reads a function's
+    # answer with no unit in hand must not be able to tell the two apart.
+    for st_name, st in sorted(structs.items()):
+        if M.one_field_answer(st, None) != M.struct_is_one_field(st):
+            return False, (
+                f"{st_name}: `one_field_answer` with no table says "
+                f"{M.one_field_answer(st, None)} and the predicate says "
+                f"{M.struct_is_one_field(st)}")
     if verbose:
         print(f"      {len(few)} structs, per-struct asks "
               f"{ {s: {q: len(a) for q, a in v.items()} for s, v in few.items()} }")
