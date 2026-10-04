@@ -5820,8 +5820,15 @@ FLOAT_BINARY_MNEMONICS = {
 }
 
 
-def float_binary_refusal(op: str, left_kind, right_kind, spelled: str,
+def float_binary_refusal(op: str, left_kind, right_kind, spelled_expr: str,
                          left=None, right=None) -> str | None:
+    # `spelled_expr`, not `spelled`: the module-level `spelled()` reader spells
+    # the two OPERANDS and this message names both of them, and a parameter that
+    # shadows it is a `TypeError` in the middle of building a diagnostic —
+    # measured, on both architectures, as `neg_mod` and `neg_div_rem` failing
+    # with `'str' object is not callable` once `float_binary_refusal` was
+    # reached from a program with no float in it at all.  The name follows
+    # `string_binary_refusal`'s `spelled_op`, which is the same reason.
     """Why this binary operation is not a double operation here, or None.
 
     Three shapes, and the first two are MIXED operands rather than unsupported
@@ -5839,15 +5846,23 @@ def float_binary_refusal(op: str, left_kind, right_kind, spelled: str,
     lowering of each is reachable and would compute a truncation.  `7.0 // 2`
     answered `3` as an integer divide, where CPython answers `3.0`.
     """
-    if FLOAT_BINARY_MNEMONICS.get(op) is not None and not (
-            left_kind == FLOAT_KIND or right_kind == FLOAT_KIND):
-        return None                       # not a float operation at all
+    if left_kind != FLOAT_KIND and right_kind != FLOAT_KIND:
+        # Not a float operation AT ALL, whatever the operator.  The condition is
+        # about the OPERANDS and not about `op`: it used to be guarded by
+        # `op in FLOAT_BINARY_MNEMONICS`, which meant every operator outside that
+        # table reached the refusal below with two integers in hand and named
+        # them an integer and a double in the same sentence.  Measured on both
+        # architectures as `neg_div_rem` and `neg_mod` — `a // 2` over two
+        # `Int`s — failing with a message that says "one side is an IEEE double"
+        # and then prints "a is an integer, 2 is an integer".
+        return None
     if left_kind == FLOAT_KIND and right_kind == FLOAT_KIND:
         if op in FLOAT_BINARY_MNEMONICS:
             return None
         return (
-            f"`{spelled}` is an operation on two IEEE doubles that this path "
-            f"does not lower: `+`, `-`, `*` and `/` are, and `{op}` is not, "
+            f"`{spelled_expr}` is an operation on two IEEE doubles "
+            f"that this path does not lower: `+`, `-`, `*` and `/` are, "
+            f"and `{op}` is not, "
             f"because neither floating-point unit has an instruction for it "
             f"and CPython's `{op}` on doubles is not the integer `{op}` — "
             f"`7.0 {op} 2` is a floating-point answer, not a truncated one. "
@@ -5858,7 +5873,7 @@ def float_binary_refusal(op: str, left_kind, right_kind, spelled: str,
     spelled_left = spelled(left) if left is not None else "the left operand"
     spelled_right = spelled(right) if right is not None else "the right operand"
     return (
-        f"`{spelled}` mixes types this path does not promote: {where} "
+        f"`{spelled_expr}` mixes types this path does not promote: {where} "
         f"({spelled_left} is "
         f"{_float_operand_word(spelled_left, left_kind)}, {spelled_right} is "
         f"{_float_operand_word(spelled_right, right_kind)}). There is no "
@@ -10978,10 +10993,27 @@ POINTEES_REFUSED = {
                "float kind distinct from an int, so the load would put float "
                "bits in a register the program then treats as an integer — a "
                "wrong answer, not an approximation",
-    "Float64": "a Float64 is eight bytes of IEEE binary64 and this path has no "
-               "float kind distinct from an int (the same absence that refuses "
-               "__mlir_bool__), so the load would put float bits in a register "
-               "the program then treats as an integer",
+    # **CORRECTED 2026-10-04.** This row said "this path has no float kind
+    # distinct from an int", which was true and is not any more: `FLOAT_KIND`
+    # landed with the binary64 arithmetic, and a `Pointer[Float64]` dereference
+    # is bit-exact — one word holding the bit pattern, loaded with the same
+    # `LDR` an integer pointee uses.  The load is therefore still REFUSED, and
+    # for a reason that is about the CALL SITE rather than about the value: what
+    # a pointer dereference yields here is a word, and whether that word is an
+    # integer or a double is decided by the CONTEXT it lands in, and a context
+    # that has established neither answers `int` — so `Int(p.value())` on a
+    # double would read the exponent field.  Answering it means making the
+    # pointee's kind flow into the dereference and every context around it,
+    # which is a separate change; `bugs/FORMAL_float_pointer_pointee.md` is that
+    # work and this row is its starting state.  A row whose stated reason is
+    # FALSE is worse than an absent one, because the reader who finds it cannot
+    # tell which half of it still holds.
+    "Float64": "a Float64 is eight bytes of IEEE binary64 and the LOAD is "
+               "bit-exact — one word holding the bit pattern — but this "
+               "dereference path yields a word whose KIND is decided by the "
+               "context it lands in, and a context that has established none "
+               "answers `int`, so `Int(p.value())` would read the exponent "
+               "field; see bugs/FORMAL_float_pointer_pointee.md",
     "SIMD": "a SIMD is n words and a formal value is one, so the load would "
             "have to drop n-1 of them; SIMD[dtype, 1] reduces to its scalar "
             "and is the only arity answerable here",

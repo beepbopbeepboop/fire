@@ -13650,10 +13650,9 @@ POINTER_DEREF_REFUSALS = [
      "    t.b = 22\n"
      "    return read_field(t)\n",
      "refuse:a STRUCT, and a struct's value on this path is a frame ADDRESS", None),
-    # A FLOAT pointee.  A formal value has no float kind distinct from an int
-    # (the same absence that refuses `__mlir_bool__`), so a 4-byte float load
-    # would put IEEE binary32 bits in a register the program then treats as an
-    # integer — a wrong answer, not an approximation.
+    # A BINARY32 pointee.  "no float kind distinct from an int" is TRUE of it and
+    # only of it: `FLOAT_KIND` is binary64, and a `Float32`'s four bytes are not
+    # a double's eight, so a word holding one still has no kind here.
     ("deref_refuse_float_pointee",
      "def read_f(p: Pointer[Float32]) -> Int:\n"
      "    return Int(p.value())\n"
@@ -13661,6 +13660,24 @@ POINTER_DEREF_REFUSALS = [
      "    var s = \"ABCDEFGH\"\n"
      "    return read_f(s)\n",
      "refuse:this path has no float kind distinct from an int", None),
+    # A BINARY64 pointee, and the row that says why it is refused when its LOAD
+    # is not the problem.  It used to be refused for the same words as the row
+    # above, which became FALSE the moment `FLOAT_KIND` landed: the load of a
+    # `Float64` is one word holding the bit pattern, and it is bit-exact — it is
+    # an `LDR` of eight bytes.  What is missing is that the DEREFERENCE yields a
+    # word whose kind the context decides, and a context that has established
+    # none answers `int`, so `Int(p.value())` here would read the exponent
+    # field.  A row whose stated reason the tree no longer believes is worse
+    # than a missing row: nothing reports it, and the reader cannot tell which
+    # half of the sentence still holds.  `bugs/FORMAL_float_pointer_pointee.md`
+    # is the work that would let the load through.
+    ("deref_refuse_a_binary64_pointee_for_a_different_reason",
+     "def read_f(p: Pointer[Float64]) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    return read_f(s)\n",
+     "refuse:the LOAD is bit-exact", None),
     # A BLOB pointee.  A list is a frame whose FIRST word is its count, so a
     # load at the address would answer with the LENGTH — a plausible number the
     # source never wrote, which is the outcome this table exists to prevent.
