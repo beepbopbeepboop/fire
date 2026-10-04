@@ -9002,9 +9002,12 @@ def _take_the_receiver_by_reference(fn, wb) -> None:
     `IntLiteral` and has no `self` at all. `model.receiver_writeback_name` is
     asked of THIS function rather than of the entry, which is what makes the
     guard able to fire; keeping it first is what keeps the refusals true.
-    `FORMAL_std_builtin_math_slice_2026-10-03.md` §2.1 has the measurements and
-    the generalisation — an entry in a table keyed by a lifted name is not
-    evidence about the function it is looked up on.
+    The measurements and the generalisation — an entry in a table keyed by a
+    LIFTED name is not evidence about the function it is looked up on, and this
+    guard is what makes the reader ask of the FUNCTION — are at `5f7d7c54`
+    (`formal14-std-builtin-math`), whose doc was deleted with the fix. The cases
+    are `an_implicit_converting_init_next_to_a_mutating_one_is_not_a_mutator` and
+    `a_mutating_init_keeps_its_write_back_beside_a_converting_one`.
     """
     recv = M.receiver_writeback_name(fn)
     if recv is None:
