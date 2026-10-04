@@ -3141,6 +3141,42 @@ UNREGISTERED = {
         'here because this branch is a sweep scope and is not touching the '
         'registry. Next step: test(\'formal-chain-probe\', [PY, '
         '\'test_formal_chain_probe.py\'], ...) beside \'formal-sweep-truth\'.'),
+    # The AXIOM half of `test_formal_admitted.py`'s census, and the measurement
+    # that file's own header says it cannot make.  `formal/admitted.py::
+    # library_trust` counts `native_decide`/`bv_decide` SITES in the source; this
+    # asks Lean what a theorem's proof term actually closes over, which is
+    # transitive (so a theorem with no site of its own still reports its
+    # callees' axioms) and knows whether a site ran at all.  It closes the
+    # arithmetic: 687 generated axioms for 688 counted sites, every axiom
+    # attributable to a declaration the census names and every theorem's OWN
+    # count equal to its sites.
+    #
+    # It is listed rather than registered for the same reason as
+    # `test_formal_chain_probe.py` above: this branch's task says not to touch
+    # the registry.  Its cost is NOT its own reason to be listed — measured
+    # 2026-10-04, `python3 test_formal_axioms.py` is 0.8 s of Lean and 0.9 GB
+    # when `lib/*.olean` is current, so it wants a registration by CLAUDE.md's
+    # cost rule, and unlike the entry above it cannot live in `check` because it
+    # needs `deps=['prooflib']`.
+    #
+    # Exact next step, in the `proofs` bucket beside `formal-dylib` (which is
+    # the other `mem='tiny'` job with a `prooflib` dep):
+    #
+    #   test('formal-axioms', [PY, 'test_formal_axioms.py'],
+    #        deps=['preflight', 'prooflib'], mem='tiny', timeout=1200,
+    #        extra=['test_formal_axioms.py', 'test_formal_dylib.py',
+    #               'formal/admitted.py', 'formal/lean.py', 'lib'],
+    #        desc='every axiom lib/ reaches is Lean\'s foundation or one of '
+    #             'its 688 counted tactic sites, measured by #print axioms')
+    'test_formal_axioms.py': (
+        'The axiom census `test_formal_admitted.py` cannot make: #print axioms '
+        'over all 600 askable declarations of lib/, one Lean process, 0.8 s and '
+        '0.9 GB with the library current. Listed because this branch\'s task '
+        'says not to register anything; the cost does not justify the excuse '
+        '(CLAUDE.md\'s cost rule wants it registered). Next step: '
+        'test(\'formal-axioms\', [PY, \'test_formal_axioms.py\'], '
+        'deps=[\'preflight\', \'prooflib\'], mem=\'tiny\', timeout=1200, '
+        'extra=[..., \'lib\']) in the `proofs` bucket beside \'formal-dylib\'.'),
     # The same shape as the group above and CHEAP like `formal-hostmods-census`
     # below: measured 2026-10-03, `python3 test_formal_list_splat.py` is 5
     # cases x 2 backends = 10 builds plus one CPython oracle each, ~7 s
