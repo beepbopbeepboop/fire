@@ -34,6 +34,7 @@ import mlir
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+import mojo.middle.itcursor as itc
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
@@ -811,10 +812,10 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # run BEFORE the generic lower_expr(node.iterable) below, which would
     # treat `it` as a plain MojoList* and restart the scan from element 0.
     if (isinstance(it, gimple_ctypes.IdentExpr)
-            and it.name in getattr(gen, '_list_iter_cursor', {})
+            and itc.cursor_for(gen, gen._cname(it.name)) is not None
             and isinstance(var, str) and not gimple_ctypes.for_target_is_tuple(var)
             and not getattr(node, 'else_body', None)):
-        _gen_for_list_iter_cursor(gen, node, var)
+        _gen_for_iter_cursor(gen, node, var)
         return
 
     # A loop over a provably Dict[Int, V] name (`for k in d`, `d.keys()`,
@@ -2821,8 +2822,8 @@ def _emit_generator_pending_exc_check(gen, gen_val: str, base: str,
     gen._emit("  mojo_raise ();")
 
 
-def _gen_for_list_iter_cursor(gen, node, var: str) -> None:
-    """`for x in it:` over a resumable list-iterator local — see
+def _gen_for_iter_cursor(gen, node, var: str) -> None:
+    """`for x in it:` over a resumable iterator local — see
     `_gen_for_iter`'s call site. Resumes from the shared cursor and leaves
     it exhausted.
 
@@ -2849,13 +2850,11 @@ def _gen_for_list_iter_cursor(gen, node, var: str) -> None:
     `continue` is still right, precisely because the advance has already
     happened by the time the body is reached.
     """
-    li = gen._list_iter_cursor[node.iterable.name]
-    lst, cur, elem = li['list'], li['cursor'], li['elem']
-    suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
-    vct = {'str': 'char *', 'double': 'double'}.get(suf, 'int64_t')
+    rec = itc.cursor_for(gen, gen._cname(node.iterable.name))
+    cur = rec['cursor']
+    vct = itc.element_ctype(rec)
     gen._declare_var(var, vct)
-    n = gen._new_temp('int64_t')
-    gen._emit(f"  {n} = mojo_list_len ({lst});")
+    n = gen._new_val('int64_t', rec['full'])
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._emit(f"  goto {bb_cond};")
@@ -2870,7 +2869,7 @@ def _gen_for_list_iter_cursor(gen, node, var: str) -> None:
     # `Tools/cases_generator/analyzer.py::check_escaping_calls` shape) reads
     # at `cur`, so a post-body advance would make it re-read the element the
     # loop had just yielded: two elements consumed, each reported twice.
-    ev = gen._new_val(vct, f"mojo_list_get_{suf} ({lst}, {cur})")
+    _evct, ev = itc.read_at(gen, rec, cur)
     gen._emit(f"  {gen._cname(var)} = {ev};")
     nc = gen._inc_val(cur)
     gen._emit(f"  {cur} = {nc};")
@@ -2962,7 +2961,20 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
     # pointer from integer without a cast", with no correct answer anywhere
     # in the output.
     iter_fn = gen._struct_method_csym(base, '__iter__', '')
-    if iter_fn in gen.func_return_types:
+    # `__iter__` is the ONE method here that may be dispatched through its bare
+    # name, because the `else` branch below (keep the receiver's own type) is
+    # its correct answer when it is absent. But a struct that OVERLOADS
+    # `__iter__` defines neither `_0120be` nor `_0120be_2` under the bare name,
+    # so taking this branch would emit a call to a symbol nothing defines —
+    # measured, `test/itertools/test_repeat.mojo` linked with `Undefined
+    # symbols: __RepeatIterator_11_ElementType_5_Int64___iter__`, called from
+    # both of its `for` loops. Every iterator in `std/iter` overloads `__iter__`
+    # on `var self` and on `ref self`, so this is the whole family, and the
+    # `else` branch is right for all of them: `__iter__` returns
+    # `Self.IteratorOwnedType`, and `comptime IteratorOwnedType: Iterator =
+    # Self`.
+    if (iter_fn in gen.func_return_types
+            and (base, '__iter__') not in gen._ambiguous_struct_methods):
         iter_type = gen.func_return_types[iter_fn]
         iter_var  = gen._new_temp(iter_type)
         gen._emit(f"  {iter_var} = {iter_fn} ({obj_val});")

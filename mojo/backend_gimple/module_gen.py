@@ -69,6 +69,7 @@ from mojo.middle.closures import discover_closures
 import mojo.backend_gimple.device_select as _gmi_device_select
 import mojo.middle.offload as _gmi_offload
 import mojo.backend_gimple.device_glue as _gmi_device_glue
+import mojo.backend_gimple.elab_intu as _elab_intu
 import mojo.backend_gimple.emit_metal as _gmi_emit_metal
 import mojo.middle.funcs_shared as funcs_shared
 from mojo.middle.methods_shared import _is_selfhost_source_file
@@ -1998,6 +1999,33 @@ def gen_module_impl(self, stmts):
     self._register_imported_structs(stmts)
     self._register_imported_generics(stmts)
     self._register_imported_generic_structs(stmts)
+
+    # In-TU generic instantiation: materialize an imported generic as a REAL
+    # definition in this translation unit rather than an `extern` beside a
+    # separately-compiled CAS object. Must run HERE, and this position is
+    # load-bearing in both directions:
+    #
+    #   AFTER `_local_struct_names` (above) so a materialized struct is NOT
+    #   claimed as this module's own — `_struct_method_qualifier` then leaves
+    #   its method symbols BARE, which is what every call site composes via
+    #   `_struct_method_csym(name, m, '')` for a struct with no module
+    #   identity, and what the elaboration TU's own `module_name=''` build
+    #   emits. Qualifying here instead would be consistent within the TU but
+    #   would break the agreement with a CAS object.
+    #   AFTER `_local_top_level_func_names` is NOT required (a materialized
+    #   function SHOULD be claimed, so its symbol gets this module's
+    #   qualifier, consistently at both its definition and its call sites).
+    #   BEFORE `all_struct_defs` (below) and every pass derived from it:
+    #   struct registration, `func_return_types`, the struct-typedef emission
+    #   and `_local_top_level_func_names` all read `stmts` ONCE, so a struct
+    #   materialized after them would have a name and no layout.
+    #
+    # See mojo/backend_gimple/elab_intu.py for why the `.o` route cannot serve
+    # the `std/iter` iterator family at all, and
+    # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md for
+    # the experiment this replaces (which narrowed the feature instead of
+    # fixing the cause, and so produced `conflicting types` regressions).
+    stmts = list(stmts) + _elab_intu.run(self, stmts)
 
     for _s in stmts:
         if isinstance(_s, ComptimeVarStmt) and isinstance(_s.value, ListExpr):
@@ -5041,6 +5069,48 @@ def gen_module_impl(self, stmts):
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
             s = _as_structdef_node(s)  # boxed loop var -> direct field access on the compiled path
+            # Record every (struct, method) whose name is OVERLOADED — declared
+            # more than once — because the UNSUFFIXED C symbol for it is
+            # defined by NEITHER overload: two overloads of one source name are
+            # two symbols, each suffixed by a hash of its real C parameter
+            # types (`__iter___0120be`, `__iter___0120be_2`).
+            #
+            # `func_return_types` still gets its bare `{Struct}_{method}` entry
+            # (removing it was measured and it is WRONG: the
+            # forward-declaration emitter falls back to its variadic-sentinel
+            # parameter list for the suffixed names and then the definition and
+            # the declaration disagree — `error: conflicting types for
+            # 'std_collections_set_Set___iter___0120be'; have 'int64_t(Set *)'
+            # ... previous definition ... with type 'int64_t(Set *, ...)'` on
+            # std/collections/set.mojo). So the ambiguity is published as its
+            # OWN registry instead, and the two consumers that dispatch THROUGH
+            # a method by its bare name consult that:
+            #
+            #   emit_loops._gen_for_struct_iter's `if iter_fn in
+            #   gen.func_return_types:` then emits `{Struct}___iter__(obj)` —
+            #   measured, test/itertools/test_repeat.mojo linked with
+            #   `Undefined symbols: __RepeatIterator_11_ElementType_5_Int64_
+            #   ___iter__` called from both of its `for` loops, while the object
+            #   defined only `_0120be` and `_0120be_2`.
+            #   emit_calls._lower_call's `next(<struct>)` branch reads the same
+            #   key for `__iter__` to discover a possibly-different iterator
+            #   type — harmless there only because the value it then reads
+            #   (`_rit`) resolves to nothing, so the receiver's own type is
+            #   kept. Correct by accident rather than by construction.
+            #
+            # With the entry consulted, `__iter__` behaves as it must for an
+            # ambiguous method: the consumer keeps the receiver's own type,
+            # which is the correct answer for every iterator in `std/iter`
+            # (`__iter__` returns `Self` / `Self.IteratorOwnedType`, and
+            # `comptime IteratorOwnedType: Iterator = Self`).
+            _dup_names: set = set()
+            _seen_m: set = set()
+            for _dm in s.methods:
+                if _dm.name in _seen_m:
+                    _dup_names.add(_dm.name)
+                _seen_m.add(_dm.name)
+            for _dn in _dup_names:
+                self._ambiguous_struct_methods.add((_as_str(s.name), _dn))
             for m in s.methods:
                 mangled = f"{s.name}_{m.name}"
                 if m.return_type is not None:

@@ -34,18 +34,93 @@ _FN_HEAD = re.compile(r'\b(?:fn|def)\s+(\w+)\s*\[([^\]]*)\]')
 _HEAD = re.compile(r'\b(fn|def|struct)\s+(\w+)\s*\[([^\]]*)\]')
 
 
+_ALNUM = re.compile(r'[A-Za-z0-9]')
+
+
 def safe_suffix(s: str) -> str:
-    """Encode a type-arg string into a valid C identifier fragment: parametric
-    args like `List[Int]` contain `[`/`]`/`,`/spaces, which are illegal in a C
-    symbol, so map every non-[A-Za-z0-9_] char to `_` (review finding #4)."""
-    return re.sub(r'[^A-Za-z0-9_]', '_', s)
+    """Encode a type-arg string into a valid C identifier fragment, INJECTIVELY.
+
+    Parametric args like `List[Int]` contain `[`/`]`/`,`/spaces, which are
+    illegal in a C symbol, so every non-[A-Za-z0-9] char has to be escaped
+    (review finding #4). The previous implementation mapped each of them to
+    `_`, which is LOSSY and therefore not an encoding at all: `List[Int]`,
+    `List_Int`, `A B`, `A.B` and `A_B` all produced the same fragment, so two
+    different instantiations of one template could be given one C symbol.
+    Measured over 1752 generated (name, type_args) pairs: 1512 collided.
+
+    The escape is `_x` + 4 uppercase hex digits (or `_X` + 8, for a code point
+    outside the BMP). Uppercase hex is deliberate, not cosmetic: it makes an
+    escape impossible to confuse with `mojo/middle/types.py::demangle_overload`'s
+    `___([0-9a-f]{6})$` overload-hash tail, which a lowercase `_x0011` could in
+    principle grow into. The code is injective because `_` is itself escaped and
+    never appears literally, so decoding is a unique left-to-right scan: on `_`,
+    the next char says the width (`x` = 4 digits, `X` = 8) and the digits after
+    it are the code point.
+
+    `_` is escaped too, so a type argument containing one cannot manufacture a
+    separator: every structural character in a mangled name is emitted by
+    `_fields`, never by `safe_suffix`."""
+    out = []
+    for ch in s:
+        if _ALNUM.match(ch):
+            out.append(ch)
+        else:
+            c = ord(ch)
+            out.append(f'_x{c:04X}' if c < 0x10000 else f'_X{c:08X}')
+    return ''.join(out)
+
+
+def _fields(pairs) -> str:
+    """Length-prefixed concatenation of (name, value) pairs — injective on the
+    ordered sequence.
+
+    Each component is `{len(key)}_{key}_{len(value)}_{value}`, so both the
+    key/value boundary and the component/component boundary are fixed by a
+    count rather than by a separator character that a value could itself
+    contain. The old scheme joined the VALUES under `_` with no keys at all,
+    which is what made `mangle('Box', {'T': 'A_B'})` and
+    `mangle('Box', {'T': 'A', 'o': 'B'})` the same string — two different
+    instantiations, one symbol. Keying on the parameter NAME as well as its
+    value also separates two templates that share a base name and differ only
+    in what they call their parameter (`struct Foo[T]` vs `struct Foo[U]`),
+    which a value-only key cannot.
+
+    Decodable left to right, uniquely: the maximal digit run is a count, the
+    next `_` separates, and each count is followed by exactly that many
+    characters."""
+    out = []
+    for k, v in pairs:
+        ks, vs = safe_suffix(str(k)), safe_suffix(str(v))
+        out.append(f'{len(ks)}_{ks}_{len(vs)}_{vs}')
+    return '_'.join(out)
 
 
 def mangle(name: str, type_args: dict) -> str:
-    """Stable monomorphized symbol name, e.g. box_id + {T:Int64} -> box_id_Int64.
-    Suffixes are sanitized to valid C identifiers."""
-    suffix = '_'.join(safe_suffix(str(type_args[k])) for k in sorted(type_args))
-    return f"{name}_{suffix}" if suffix else name
+    """Stable, INJECTIVE monomorphized symbol name.
+
+    `mangle(box, {T: Int64})` is now `box_1_T_5_Int64`, not `box_Int64`. The
+    bytes change for every existing instantiation, deliberately: the old scheme
+    was not injective, so the name was not a function of the instantiation, and
+    the CAS key (`cas.instantiation_key`) folds in `compiler_fingerprint()`,
+    which hashes this file — every previously cached object is therefore
+    unreachable rather than silently served under the new spelling. See
+    `bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`.
+
+    A name with no type arguments is returned unchanged, so a template's
+    zero-parameter instantiation keeps its own name (`empty` -> `empty`)."""
+    if not type_args:
+        return name
+    return f"{name}_{_fields((k, type_args[k]) for k in sorted(type_args))}"
+
+
+def mangle_signature(name: str, parts) -> str:
+    """Injective symbol for an overload of `name` selected by its parameter
+    types (the `elaborate.Elaborator.elaborate_overload_call` route). Same
+    encoding as `mangle`, keyed by positional index, so two overloads whose
+    parameter types differ only in segmentation cannot share a symbol — the
+    same defect `mangle` had."""
+    parts = list(parts)
+    return f"{name}__{_fields(enumerate(parts))}" if parts else f"{name}__void"
 
 
 def _check_no_value_shadow(src: str, type_params) -> None:
@@ -159,7 +234,26 @@ def monomorphize_source(template_src: str, type_args: dict) -> tuple:
     `[params]` block, rename the definition, and replace each type-param
     identifier with its concrete type as a whole word — except inside a
     NESTED function that re-declares (shadows) that same type-param name as
-    its own independent bracket parameter (see `_shadowed_spans`)."""
+    its own independent bracket parameter (see `_shadowed_spans`).
+
+    `Self.<param>` is substituted as a UNIT, in a pass of its own that runs
+    BEFORE the bare-word one, so the `Self.` qualifier is dropped along with
+    the name it qualifies. `Self.T` inside `struct Box[T]` is the enclosing
+    type's own name for the parameter `T`, so for the instantiation
+    `Box[int64_t]` it denotes exactly `int64_t`; the bare-word pass alone
+    could only rewrite its `T` and leave the `Self.` glued to the argument,
+    producing `Self.int64_t` — a member name that means nothing, which
+    `_mojo_type` then silently answered as `int64_t`. That silence is what
+    made the whole `next(<user-defined iterator struct>)` family a declared
+    red: stdlib's `_PeekableIterator[InnerIterator]` declares
+    `var _inner: Self.InnerIterator` and `std/itertools`' iterators declare
+    `var _inner: Self.InnerIteratorType`, so the monomorphized struct's field
+    was boxed `int64_t` instead of `<iterator> *`, the receiver of
+    `next(self._inner)` / `next(it)` had no resolvable struct type, and the
+    `for`-loop over the same object degraded to `mojo_unsupported_iter`
+    (see bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md).
+    Substituting the qualified form first also keeps the bare pass from
+    double-substituting it — by then no `Self.<param>` text survives."""
     m = _HEAD.search(template_src)
     if not m:
         raise ValueError("monomorphize: no generic `fn`/`struct name[...]` found")
@@ -173,9 +267,12 @@ def monomorphize_source(template_src: str, type_args: dict) -> tuple:
     # Drop the [type-params] block and rename the definition (fn or struct).
     src = template_src[:m.start()] + f"{kind} {mangled}" + template_src[m.end():]
     # Substitute each type parameter with its concrete type (whole-word),
-    # skipping any nested scope that shadows this specific name.
+    # skipping any nested scope that shadows this specific name. The
+    # `Self.<param>` pass runs FIRST and consumes those occurrences whole.
     for tp, concrete in type_args.items():
         spans = _shadowed_spans(src, tp)
+        src = _sub_outside_spans(rf'\bSelf\.{re.escape(tp)}\b', str(concrete),
+                                 src, spans)
         src = _sub_outside_spans(rf'\b{re.escape(tp)}\b', str(concrete), src, spans)
     return mangled, src
 
@@ -299,7 +396,31 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
         mfile = os.path.join(wd, mangled + '.mojo')
         with open(mfile, 'w') as f:
             f.write(concrete)
-        gen = GimpleGen(emit_entry_points=False, module_name=mangled, no_mangle={mangled})
+        # `module_name=''`, NOT `module_name=mangled`. This is load-bearing and
+        # was a real defect (measured 2026-10-02): a struct method's C symbol
+        # is composed as `{home-module}_{Struct}_{method}{overload_suffix}`
+        # (`mojo/middle/funcs_shared.py::_struct_method_qualifier`), and
+        # passing `mangled` as the module name made the instantiation TU emit
+        #
+        #     MoveOnly_Int64_MoveOnly_Int64___init__      <- what the TU defined
+        #
+        # while the CALLER — `_register_generic_struct`, which declares
+        # `extern void MoveOnly_Int___init__ (MoveOnly_Int *, int64_t);` and
+        # keys `func_return_types` on the same bare name, because a
+        # materialized generic struct has no entry in `_imported_struct_home`
+        # and therefore no qualifier — declared
+        #
+        #     MoveOnly_Int___init__                        <- what the caller wants
+        #
+        # Two names, one link. Verified by linking `test/collections/
+        # test_array.mojo`'s generated C against its own CAS instantiation
+        # object: `ld: undefined _MoveOnly_Int___init__`. So every generic
+        # struct this elaborator had ever materialized produced an artifact
+        # that could not link, and `compile_stdlib.py` (`gcc -fsyntax-only`)
+        # cannot see it. The top-level function needs no qualifier either and
+        # is protected by `no_mangle` below, so `''` changes nothing about it
+        # (`empty_Int` measures identical before and after).
+        gen = GimpleGen(emit_entry_points=False, module_name='', no_mangle={mangled})
         gen._current_filename = mfile
         c = gen.gen_module(Parser(py_tokenize(concrete)).with_filename(mfile).parse_module())
         cfile, ofile = os.path.join(wd, mangled + '.c'), os.path.join(wd, mangled + '.o')

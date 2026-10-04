@@ -1539,7 +1539,8 @@ def _type_expr_to_ann(gen, node) -> str:
     return ''
 
 def _refine_generic_return_type(gen, info: dict, module_src: str, g: str,
-                                 mangled_type_args: list, arg_count: int) -> None:
+                                 mangled_type_args: list, arg_count: int,
+                                 materialize=None) -> None:
     """elaborate.py's _signature() resolves a generic's return type via the
     bare, stateless _mojo_type(), which has no notion of a struct newly
     monomorphized by _ensure_generic_struct just above (e.g. "MoveOnly_Int")
@@ -1550,7 +1551,25 @@ def _refine_generic_return_type(gen, info: dict, module_src: str, g: str,
     template's own return annotation, substituted with the mangled type
     args — and only override info['ret'] when that yields something more
     specific than the generic int64_t default, so ordinary (non-struct)
-    generics are unaffected."""
+    generics are unaffected.
+
+    `materialize` is an optional `ann -> ann` hook the CALLER supplies, and it
+    exists because the materializer itself lives one layer up
+    (`emit_resolve._materialize_generic_struct_mentions`, which is the gimple
+    backend's, and this file is the middle tier that backend imports). It is
+    given the substituted return annotation and returns it with every generic
+    struct instantiation it mentions (`_Empty[Int]` -> `_Empty_Int64`)
+    REGISTERED as a side effect, so the `_resolve_type` below sees a name
+    this compile knows. Without it `empty[Int]() -> _Empty[T]` erases to
+    `int64_t`, `var it = empty[Int]()` types `it` as a boxed integer, and
+    `next(it)` has no receiver type to dispatch the iterator protocol
+    through — the refusal in `emit_calls.py::_lower_call` (see
+    bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md).
+
+    Nothing here INFER anything new: it is the already-shipped materializer
+    applied at the one further site that needed it, and an annotation naming
+    no elaborable generic struct comes back unchanged, so every other generic
+    keeps its existing byte-for-byte result."""
     import elaborate
     tmpl = elaborate.extract_fn_source(module_src, g, arg_count=arg_count)
     if not tmpl:
@@ -1563,6 +1582,8 @@ def _refine_generic_return_type(gen, info: dict, module_src: str, g: str,
             ret_ann = s.return_type
             for tp, concrete in zip(params, mangled_type_args):
                 ret_ann = gimple_ctypes.re.sub(rf'\b{gimple_ctypes.re.escape(tp)}\b', concrete, ret_ann)
+            if materialize is not None:
+                ret_ann = materialize(ret_ann.strip())
             better_ret = gen._resolve_type(ret_ann)
             if better_ret != 'int64_t':
                 info['ret'] = better_ret

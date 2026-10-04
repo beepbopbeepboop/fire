@@ -241,8 +241,8 @@ def test_stage5_monomorphization(wd):
     # the cached instantiation links + runs
     cmain = os.path.join(wd, 'um.c')
     open(cmain, 'w').write('#include <stdint.h>\n#include <stdio.h>\n'
-                           'extern int64_t s5_id_Int64(int64_t);\n'
-                           'int main(void){printf("%lld\\n",(long long)s5_id_Int64(7));return 0;}\n')
+                           'extern int64_t s5_id_1_T_5_Int64(int64_t);\n'
+                           'int main(void){printf("%lld\\n",(long long)s5_id_1_T_5_Int64(7));return 0;}\n')
     exe = os.path.join(wd, 'um')
     subprocess.run([GCC, '-o', exe, cmain, o1, os.path.join(RUNTIME, 'fire_runtime.c')], check=True)
     check("stage5: cached instantiation links + runs", _run(exe).stdout.strip() == '7')
@@ -310,9 +310,9 @@ def test_elaboration_generic_call(wd):
     i32 = el.elaborate_generic_call(tmpl_mod, 'box', ['Int32'])
     again = el.elaborate_generic_call(tmpl_mod, 'box', ['Int64'])
     check("elaborate: generic instantiated to a concrete symbol",
-          bool(i64) and i64['symbol'] == 'box_Int64' and i64['ret'] == 'int64_t')
+          bool(i64) and i64['symbol'] == 'box_1_T_5_Int64' and i64['ret'] == 'int64_t')
     check("elaborate: distinct type args → distinct instantiations",
-          i64['object'] != i32['object'] and i32['symbol'] == 'box_Int32')
+          i64['object'] != i32['object'] and i32['symbol'] == 'box_1_T_5_Int32')
     check("elaborate: re-instantiation is a CAS hit (same object)",
           again['object'] == i64['object'])
     # codegen wiring: a generic call site emits an extern + concrete call and
@@ -322,8 +322,19 @@ def test_elaboration_generic_call(wd):
     try:
         client = "from el_genlib import box\nfn main():\n    var y = box[Int64](42)\n"
         code, dylibs, objects, _cpp, _cxx = compile_linked(client)
+        # `len(objects) == 1` and the call names a concrete instantiation.
+        # NOTE (2026-10-02): an in-TU instantiation route was built and
+        # measured for this shape — see
+        # bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md
+        # — which would make `objects` 0 and the definition in-TU. It is NOT
+        # landed: it regressed five currently-compiling files, because
+        # `monomorphize.mangle` keys only on the sorted bracket-parameter
+        # values, so two templates selected for the same call can mangle two
+        # DIFFERENT functions to one name and gcc reports `conflicting types`.
+        # Until that is resolved the `.o` route stays, and this assertion is
+        # the contract it has to keep.
         check("elaborate: client emits extern + concrete call + records object",
-              'extern int64_t box_Int64' in code and 'box_Int64 (' in code
+              'extern int64_t box_1_T_5_Int64' in code and 'box_1_T_5_Int64 (' in code
               and len(objects) == 1)
     finally:
         os.remove(gl)
@@ -347,7 +358,7 @@ def test_elaboration_inference_and_comptime(wd):
         code, _d, objs, _cpp, _cxx = compile_linked("from el_box import box\n"
                                         "fn main():\n    var y = box(42)\n")
         check("slice2: inferred generic call elaborates (no explicit [..])",
-              ('box_Int64' in code or 'box_Int' in code) and len(objs) == 1)
+              ('box_1_T_5_Int64' in code or 'box_1_T_3_Int' in code) and len(objs) == 1)
         # slice 3: comptime call to an imported fn resolved at compile time
         src = ("from el_ct import fib\n"
                "fn main():\n"
@@ -370,7 +381,7 @@ def test_elaboration_generic_struct(wd):
            "    fn unbox(self) -> T:\n        return self.value\n")
     info = elaborate.Elaborator().elaborate_generic_struct(mod, 'Box', ['Int64'])
     check("slice5: generic struct instantiated to a concrete type",
-          bool(info) and info['name'] == 'Box_Int64'
+          bool(info) and info['name'] == 'Box_1_T_5_Int64'
           and ('value', 'int64_t') in info['fields'])
     check("slice5: struct methods monomorphized",
           ('unbox', 'int64_t', []) in info['methods'])
@@ -381,7 +392,7 @@ def test_elaboration_generic_struct(wd):
             "from el_boxlib import Box\n"
             "fn main():\n    var b = Box[Int64](42)\n    var y = b.unbox()\n")
         check("slice5: client materializes struct + calls method + records object",
-              'typedef struct Box_Int64' in code and 'Box_Int64_unbox' in code
+              'typedef struct Box_1_T_5_Int64' in code and 'Box_1_T_5_Int64_unbox' in code
               and len(objs) == 1)
     finally:
         os.remove(bl)
@@ -434,7 +445,7 @@ def test_elaboration_failure_is_not_cached(wd):
             check("elaborate: a failed struct elaboration still compiles "
                   "(the template fallback is load-bearing)", True)
             check("elaborate: ... and the fallback is the un-elaborated one",
-                  'Box_Int64' not in code,
+                  'Box_1_T_5_Int64' not in code,
                   "the instantiation went through despite the failure")
         except Exception as e:
             check("elaborate: a failed struct elaboration still compiles "
@@ -496,7 +507,8 @@ def test_elaboration_overload(wd):
     i64 = el.elaborate_overload_call(mod, 'pick', ['int64_t'])
     i32 = el.elaborate_overload_call(mod, 'pick', ['int32_t'])
     check("slice4: overload selected by argument type",
-          i64['symbol'] == 'pick__Int64' and i32['symbol'] == 'pick__Int32'
+          i64['symbol'] == 'pick__1_0_5_Int64'
+          and i32['symbol'] == 'pick__1_0_5_Int32'
           and i64['object'] != i32['object'])
     ol = os.path.join(RUNTIME, 'el_ovlib.mojo')
     open(ol, 'w').write(mod)
@@ -505,7 +517,7 @@ def test_elaboration_overload(wd):
             "from el_ovlib import pick\n"
             "fn main():\n    var a: Int64 = 5\n    var y = pick(a)\n")
         check("slice4: client calls the signature-mangled overload",
-              'pick__Int64' in code and len(objs) == 1)
+              'pick__1_0_5_Int64' in code and len(objs) == 1)
     finally:
         os.remove(ol)
 
@@ -549,9 +561,9 @@ def test_elaboration_trait_conformance(wd):
     fi = el.elaborate_generic_call(mod, 'run', ['Num'])
     si = el.elaborate_generic_struct(mod, 'Box', ['Num'])
     check("slice6: bounded generic fn instantiates for a conforming type",
-          bool(fi) and fi['symbol'] == 'run_Num')
+          bool(fi) and fi['symbol'] == 'run_1_T_3_Num')
     check("slice6: bounded generic struct instantiates for a conforming type",
-          bool(si) and si['name'] == 'Box_Num'
+          bool(si) and si['name'] == 'Box_1_T_3_Num'
           and ('run', 'int64_t', []) in si['methods'])
     # Non-conforming: a clear ConformanceError, for both fn and struct.
     raised_fn = raised_struct = False
@@ -1387,10 +1399,11 @@ def test_review_fixes_monomorphize_overload(wd):
     check("review#3: type-param-as-binding raises (no silent miscompile)", raised)
     check("review#3: a normal generic still instantiates",
           mm.monomorphize_source("fn box[T](x: T) -> T:\n    return x\n",
-                                 {'T': 'Int64'})[0] == 'box_Int64')
+                                 {'T': 'Int64'})[0] == 'box_1_T_5_Int64')
     # #4.2: parametric type args mangle to a valid C identifier (no []/, etc.)
     check("review#4: parametric mangle is a valid C identifier",
-          mm.mangle('box', {'T': 'List[Int]'}) == 'box_List_Int_'
+          mm.mangle('box', {'T': 'List[Int]'})
+          == 'box_1_T_19_List_x005BInt_x005D'
           and '[' not in mm.safe_suffix('List[Int]'))
     # #4.1: no matching overload returns None rather than silently picking the first
     mod = ("fn pick(x: Int64) -> Int64:\n    return x\n"
@@ -1419,6 +1432,534 @@ def test_review_fixes_monomorphize_overload(wd):
           _mojo_type(None) == 'int64_t' and _TYPE_MAP.get(None, 'int64_t') == 'int64_t')
 
 
+def test_self_qualified_type_param_substitution(wd):
+    """`Self.<param>` inside a generic struct substitutes to the CONCRETE type,
+    `Self.` and all — not to `Self.<concrete>`.
+
+    The bare-word substitution pass can only rewrite the `T` in `Self.T`, which
+    leaves `Self.int64_t`: a member name that means nothing, which `_mojo_type`
+    then answers as `int64_t`. That silence is what boxed stdlib's
+    `_PeekableIterator[InnerIterator]`'s `var _inner: Self.InnerIterator` (and
+    every other generic iterator's `_inner`), leaving `next(self._inner)` with
+    no receiver type to dispatch the iterator protocol through — the declared
+    red in bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md.
+    See monomorphize_source's own docstring."""
+    import monomorphize as mm
+
+    _name, concrete = mm.monomorphize_source(
+        "struct Wrap[T]:\n"
+        "    var _inner: Self.T\n"
+        "    var _raw: T\n"
+        "    var _opt: Optional[Self.T]\n"
+        "    var _ptr: Pointer[Self.T]\n"
+        "    var _other: Self.NotAParam\n",
+        {'T': 'int64_t'})
+    check("self#1: mangled name is the injective spelling of the same key",
+          _name == 'Wrap_1_T_12_int64_x005Ft')
+    check("self#2: `Self.T` substitutes to the concrete type, not `Self.int64_t`",
+          'var _inner: int64_t' in concrete and 'Self.int64_t' not in concrete)
+    check("self#3: a bare `T` still substitutes (unchanged behaviour)",
+          'var _raw: int64_t' in concrete)
+    check("self#4: `Self.T` inside a container type argument substitutes too",
+          'var _opt: Optional[int64_t]' in concrete
+          and 'var _ptr: Pointer[int64_t]' in concrete)
+    check("self#5: `Self.<non-param member>` is NOT substituted",
+          'var _other: Self.NotAParam' in concrete)
+
+    # A struct-typed argument must survive as the mangled name of that struct,
+    # so the layout the caller registers and the layout the instantiated
+    # object carries are computed from the SAME text.
+    _name2, concrete2 = mm.monomorphize_source(
+        "struct Wrap2[T]:\n"
+        "    var _inner: Self.T\n",
+        {'T': 'Inner_int64_t'})
+    check("self#6: a struct-typed argument substitutes verbatim",
+          'var _inner: Inner_int64_t' in concrete2
+          and 'Self.Inner_int64_t' not in concrete2)
+
+    # A nested function that re-declares the same name as its own bracket
+    # parameter still shadows it — the qualified pass must respect the same
+    # spans the bare one does, not rewrite a nested declaration.
+    _name3, concrete3 = mm.monomorphize_source(
+        "fn outer[T](x: Self.T) -> T:\n"
+        "    def inner[T](y: T) -> T:\n"
+        "        return y\n"
+        "    return inner[T](x)\n",
+        {'T': 'int64_t'})
+    check("self#7: `Self.T` still respects a nested shadowing bracket param",
+          'def inner[T](y: T) -> T:' in concrete3)
+    check("self#8: the outer `Self.T` still substitutes",
+          'fn outer_1_T_12_int64_x005Ft(x: int64_t) -> int64_t:' in concrete3)
+
+
+def test_type_param_markers_and_simd_unification(wd):
+    """`type_param_names` must not report a positional-only/keyword-only
+    separator as a type parameter, and `infer_type_args` must bind a type
+    parameter that appears NESTED in a parameter's annotation.
+
+    Both were one-line defects with a large blast radius, and both are silent:
+    the elaborator declines, the call site falls through to a bare
+    `extern int64_t f (...)`, and `gcc -fsyntax-only` cannot see that nothing
+    defines it. Measured over the stdlib sweep, the `//` marker alone accounted
+    for 383 of 1254 elaborator declines — every template in the numeric library
+    is written with it (`def ceildiv[T: CeilDivable, //](...)`). See
+    bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md."""
+    import elaborate as el
+
+    check("marker#1: `//` is a separator, not a type param",
+          el.type_param_names(
+              'def ceildiv[T: CeilDivable, //](n: T, d: T) -> T:\n'
+              '    return n\n') == ['T'])
+    check("marker#2: a bare `**` is a separator; `**kw` is a parameter",
+          el.type_param_names('def f[T, **](x: T) -> T:\n    return x\n')
+          == ['T']
+          and el.type_param_names('def g[T, **kw](x: T) -> T:\n    return x\n')
+          == ['T', '**kw'])
+    check("marker#3: the legacy `/` and `*` still work",
+          el.type_param_names('def f[T, /](x: T) -> T:\n    return x\n')
+          == ['T']
+          and el.type_param_names('def g[T, *](x: T) -> T:\n    return x\n')
+          == ['T'])
+    check("marker#4: real params are untouched",
+          el.type_param_names('struct Box[T, U]:\n    pass\n') == ['T', 'U'])
+    check("marker#5: a bounds parse skips the marker too",
+          el.parse_bounds('def ceildiv[T: CeilDivable, //](n: T) -> T:\n'
+                          '    return n\n') == {'T': 'CeilDivable'})
+    check("marker#6: an origin param is still reported (it is not a marker)",
+          el.type_param_names(
+              'def black_box[T: AnyType, origin: Origin, //]'
+              '(ref[origin] value: T) -> ref[origin] T:\n'
+              '    return value\n') == ['T', 'origin'])
+
+    _simd = ('def copysign[\n    dtype: DType, width: Int, //\n'
+             '](magnitude: SIMD[dtype,width], sign: SIMD[dtype,width])'
+             ' -> SIMD[dtype,width]:\n    return magnitude\n')
+    check("unify#1: a type param nested in `SIMD[dtype, width]` binds",
+          el.infer_type_args(_simd, ['double', 'double'])
+          == ['Float64', '1'])
+    check("unify#2: `x: T` still binds as before",
+          el.infer_type_args('def f[T](x: T) -> T:\n    return x\n',
+                             ['char *']) == ['String'])
+    check("unify#3: an un-understood shape still declines (no partial bind)",
+          el.infer_type_args(
+              'def f[T, U](a: Pointer[T], b: U) -> U:\n    return b\n',
+              ['int64_t *', 'double']) is None)
+    check("unify#4: a non-SIMD wrapper still declines",
+          el.infer_type_args(
+              'def f[T](a: Some[T]) -> T:\n    return a\n',
+              ['int64_t']) is None)
+    check("unify#5: too few arguments still declines",
+          el.infer_type_args('def f[T, U](a: T, b: U) -> T:\n    return a\n',
+                             ['int64_t']) is None)
+
+
+def test_generic_instantiation_symbol_agreement(wd):
+    """The instantiation TU's symbols and the caller's declarations must be the
+    SAME strings — and the only way to find out is to LINK, because
+    `compile_stdlib.py` runs `gcc -fsyntax-only` and cannot see a symbol that is
+    declared and never defined.
+
+    `monomorphize.instantiate` used to build the monomorphized TU with
+    `module_name=mangled`, and a struct method's C symbol is
+    `{home-module}_{Struct}_{method}{overload_suffix}`, so it emitted
+
+        MoveOnly_Int64_MoveOnly_Int64___eq__      <- what the TU defined
+        MoveOnly_Int64___eq__                    <- what the caller declared
+
+    The caller has no module identity for a materialized generic struct (no
+    `_imported_struct_home` entry), so it has no qualifier. Verified by linking
+    `test/collections/test_array.mojo`'s generated C against its own CAS
+    instantiation object: `ld: undefined _MoveOnly_Int___eq__` — i.e. EVERY
+    generic struct this compiler had ever materialized produced an artifact
+    that could not link, and no gate step can see it.
+
+    The second half is `_struct_name_of` being used as an "is this a struct?"
+    test. It is a pure spelling operation (`_struct_name_of('int64_t')` is
+    `'int64_t'`), so the `next(<struct>)` struct-protocol branch's
+    `if _struct_name_of(ret):` guard was true for the scalar `int64_t` too, and
+    it dispatched `__next__` on `int64_t` — a symbol nothing defines. That is
+    the family `bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_
+    unlowered.md` is about, and the guard has to consult the registry."""
+    import elaborate as el
+    from module_loader import STDLIB_PATH
+    import os as _os
+
+    iter_src_path = _os.path.join(STDLIB_PATH, 'std', 'iter', '__init__.mojo')
+    if not _os.path.exists(iter_src_path):
+        check("symbols#0: std/iter is reachable", False)
+        return
+    iter_src = open(iter_src_path).read()
+
+    # 1. The TU names its methods the way the caller's registry declares them.
+    info = el.Elaborator().elaborate_generic_struct(iter_src, '_Empty', ['Int'])
+    check("symbols#1: `_Empty[Int]` elaborates", bool(info and info['name']))
+    if not info:
+        return
+    # The mangled STRUCT name is derived, not spelled out: this test's subject
+    # is that the TU and the caller agree on ONE string, and hardcoding the
+    # spelling here would make every change to `monomorphize.mangle` look like
+    # a change to that agreement. `mangle`'s own spelling is pinned separately,
+    # by `test_mangle_is_injective`.
+    import monomorphize as _mm
+    _m = _mm.mangle('_Empty', {'T': 'Int'})
+    check("symbols#1b: `_Empty[Int]` mangles injectively", _m == '_Empty_1_T_3_Int')
+    # `nm` on Mach-O prints the object format's leading underscore; strip
+    # exactly one, so a C name that itself starts with one survives.
+    names = {s[1:] if s.startswith('_') else s for s in (info.get('symbols') or ())}
+    check("symbols#2: the object defines the UNQUALIFIED method name the caller "
+          "declares (`_Empty_Int___next__`, not "
+          "`_Empty_Int__Empty_Int___next__`)",
+          f'{_m}___next__' in names)
+    check("symbols#3: no symbol carries the mangled name as a module prefix",
+          not any(n.startswith(_m + _m) for n in names))
+    check("symbols#4: an overloaded method is reported under its real suffixed "
+          "name and NOT under a bare name — the elaborator's view of two "
+          "overloads of `__iter__` is identical, so it cannot invent one, and "
+          "`_register_generic_struct` refuses such a struct rather than "
+          "declaring a symbol nothing defines",
+          any(n.startswith(f'{_m}___iter___') for n in names)
+          and f'{_m}___iter__' not in names)
+    _finfo = el.Elaborator().elaborate_generic_call(iter_src, 'empty', ['Int'])
+    check("symbols#5: `empty[Int]` elaborates to the bare symbol `empty_1_T_3_Int` "
+          "(the TU's module name does not reach the top-level function)",
+          bool(_finfo) and _finfo['symbol'] == _mm.mangle('empty', {'T': 'Int'}))
+
+    # 2. `_struct_name_of` is not a "is this a struct" predicate; the guard that
+    #    needs one must ask the registry.
+    import mojo.backend_gimple.emit_calls as ggc
+
+    class _G:
+        struct_field_types = {'It': {}}
+
+    check("symbols#6: a scalar return is not read as a struct",
+          ggc._struct_ptr_name(_G(), 'int64_t') == ''
+          and ggc._struct_ptr_name(_G(), 'char *') == '')
+    check("symbols#7: a registered struct pointer IS read as a struct",
+          ggc._struct_ptr_name(_G(), 'It *') == 'It')
+    check("symbols#8: an unregistered name is not either",
+          ggc._struct_ptr_name(_G(), 'Nope *') == '')
+    import mojo.middle.types as _t
+    _G.struct_field_types = {'Int': {}}
+    check("symbols#9: a scalar newtype that IS a real stdlib struct is still "
+          "erased to its C scalar (this codegen's `_TYPE_MAP` convention wins)",
+          ggc._struct_ptr_name(_G(), 'Int *') == '')
+
+
+def test_mangle_is_injective(wd):
+    """`monomorphize.mangle` must be a FUNCTION of the instantiation.
+
+    It used to be `'_'.join(safe_suffix(v) for v in sorted(type_args.values()))`:
+    no key names, and a LOSSY escape that mapped every non-alphanumeric
+    character (including `_` itself) to `_`. Two independent collisions, both
+    measured before the fix over the same generated corpus this test builds:
+
+        mangle('Box', {'T': 'A_B'})        == 'Box_A_B'
+        mangle('Box', {'T': 'A', 'o': 'B'}) == 'Box_A_B'   # ambiguous segmentation
+        mangle('Box', {'T': 'List[Int]'})   == 'Box_List_Int_'
+        mangle('Box', {'T': 'List_Int'})    == 'Box_List_Int'  # lossy escape
+        mangle('Box', {'T': '_'}) == mangle('Box', {'T': ' '}) == mangle('Box', {'T': '.'})
+
+    1512 of 1752 pairs collided. A non-injective name is not a naming
+    inconvenience: two genuinely different instantiations shared one C symbol,
+    which is `error: conflicting types for '<name>'` when both are defined in
+    one TU and `ld: duplicate symbol` when they are not.
+
+    The corpus is generated, not hand-listed, so it covers the separator
+    characters the old scheme collapsed on (`_`, space, `.`, `[`, `]`, `,`)
+    plus a digit that a length prefix has to be told apart from."""
+    import itertools as _it
+    _alpha = ['A', 'B', '_', ' ', '.', '[', ']', ',', '1']
+    _vals = [''.join(p) for n in range(0, 4)
+             for p in _it.product(_alpha, repeat=n)]
+    _targs = []
+    for v in _vals:
+        _targs += [{'T': v}, {'T': 'A', 'o': v}, {'T': v, 'o': 'B'},
+                   {'T': v, 'o': 'C'}, {'x': v, 'y': 'B', 'z': 'C'},
+                   {'T': v, 'ArgC': '3'}]
+    _seen: dict = {}
+    _coll: list = []
+    for t in _targs:
+        for nm in ('Box', '_Empty', 'T', 'A_1'):
+            m = mm.mangle(nm, t)
+            if m in _seen and _seen[m] != (nm, t):
+                _coll.append((_seen[m], (nm, t), m))
+            _seen[m] = (nm, t)
+    check(f"mangle#1: no two distinct (name, type_args) share a symbol "
+          f"({len(_seen)} generated instantiations)", not _coll)
+
+    _ident = re.compile(r'[A-Za-z_][A-Za-z0-9_]*\Z')
+    check("mangle#2: every mangled name is a legal C identifier",
+          all(_ident.match(m) for m in _seen))
+    # `mojo/middle/types.py::demangle_overload` recognises `___<6 lowercase
+    # hex>$` as an overload-hash tail. The escapes are UPPERCASE hex for
+    # exactly this reason, so a mangled type argument can never grow one.
+    check("mangle#3: a mangled name cannot be mistaken for an overload-suffixed "
+          "one (no `___` at all)",
+          not any('___' in m for m in _seen))
+
+    # The specific collisions the fix is about, named individually so a
+    # regression reports WHICH one came back.
+    check("mangle#4: {'T':'A_B'} and {'T':'A','o':'B'} are distinct",
+          mm.mangle('Box', {'T': 'A_B'}) != mm.mangle('Box', {'T': 'A', 'o': 'B'}))
+    check("mangle#5: {'T':'List[Int]'} and {'T':'List_Int'} are distinct",
+          mm.mangle('Box', {'T': 'List[Int]'}) != mm.mangle('Box', {'T': 'List_Int'}))
+    check("mangle#6: the escaped chars the old scheme collapsed are distinct",
+          len({mm.mangle('Box', {'T': c}) for c in ('_', ' ', '.', '[', ',')}) == 5)
+    check("mangle#7: the parameter NAME is part of the key (two templates that "
+          "differ only in what they call their parameter do not collide)",
+          mm.mangle('Foo', {'T': 'Int64'}) != mm.mangle('Foo', {'U': 'Int64'}))
+    check("mangle#8: a zero-parameter instantiation keeps the bare name",
+          mm.mangle('empty', {}) == 'empty')
+
+    # `elaborate_overload_call` had the same defect on a different spelling:
+    # `safe_suffix('_'.join(ptypes))` is ambiguous segmentation AND lossy.
+    check("mangle#9: the overload signature mangling is injective too",
+          mm.mangle_signature('pick', ['A_B']) != mm.mangle_signature('pick', ['A', 'B'])
+          and mm.mangle_signature('pick', ['A_B']) != mm.mangle_signature('pick', ['A.B'])
+          and mm.mangle_signature('pick', []) != mm.mangle_signature('pick', ['void']))
+
+    # Round-trip: the length-prefixed components are DECODABLE, which is the
+    # direct evidence that the count — not a guess about which `_` is
+    # structural — is what disambiguates. The decoder lives here, not in
+    # monomorphize.py, because nothing in the compiler needs it: injectivity is
+    # the property everything depends on and it is property #1 above.
+    def _unescape(t: str) -> str:
+        out, i = [], 0
+        while i < len(t):
+            if t[i] != '_':
+                out.append(t[i]); i += 1; continue
+            w = 4 if t[i + 1] == 'x' else 8
+            out.append(chr(int(t[i + 2:i + 2 + w], 16))); i += 2 + w
+        return ''.join(out)
+
+    def _decode(suffix: str):
+        pairs, i = [], 0
+        while i < len(suffix):
+            j = suffix.index('_', i)
+            klen = int(suffix[i:j]); k = suffix[j + 1:j + 1 + klen]
+            i = j + 1 + klen + 1
+            j = suffix.index('_', i)
+            vlen = int(suffix[i:j]); v = suffix[j + 1:j + 1 + vlen]
+            pairs.append((_unescape(k), _unescape(v)))
+            i = j + 1 + vlen + 1
+        return pairs
+
+    _rt_bad = []
+    for t in _targs:
+        nm = 'Box'
+        suffix = mm.mangle(nm, t)[len(nm) + 1:]
+        try:
+            if sorted(_decode(suffix)) != sorted((str(k), str(v)) for k, v in t.items()):
+                _rt_bad.append(t)
+        except Exception as e:
+            _rt_bad.append((t, e))
+    check(f"mangle#10: every mangled suffix decodes back to its (key, value) "
+          f"pairs ({len(_targs)} round-trips)", not _rt_bad)
+
+
+def test_in_tu_instantiation(wd):
+    """An imported generic whose methods OVERLOAD is materialized in this
+    translation unit, not declared `extern` beside a CAS object.
+
+    The `.o` route cannot serve this shape, and the reason is measured rather
+    than argued: `_register_generic_struct` reads the object's symbols with
+    `nm`, sees two `__iter__` definitions (`..._0120be` and `..._0120be_2`),
+    knows the caller can only compose the UNSUFFIXED name, and refuses the
+    struct — so the caller's receiver types as a boxed `int64_t` and `next(obj)`
+    has nothing to dispatch on. Every iterator in `std/iter` is in this class
+    (`__iter__` on `var self` and on `ref self`, both erasing to
+    `(Struct *)`), which is what `bugs/CODEGEN_next_on_a_user_defined_iterator_
+    struct_is_unlowered.md` is about.
+
+    Driven through `build_stdlib_dylib.compile_module_to_c` — the SAME entry
+    point `compile_stdlib.py` uses — on two real stdlib test files, because the
+    properties below are only meaningful against the real generic and `gcc
+    -fsyntax-only` (the gate step) structurally cannot see any of them.
+
+    Pinned per property:
+      - the instantiation's methods are DEFINED in the module's own C, under the
+        names this codegen gave them;
+      - no `extern` claims them and no CAS object is contributed, i.e. exactly
+        one route took the instantiation;
+      - both `__iter__` overloads are DEFINED and the bare name is never
+        CALLED — two overloads define neither, so nothing may dispatch on it;
+      - `next(<struct>)` lowered for real, to the instantiation's own
+        `__next__`, not to the always-declared variadic `next`;
+      - the boundary predicate itself, on the real stdlib templates: an
+        iterator whose only overloads are protocol ones is carried, and one
+        whose overloads are NOT is refused (the `.o` route keeps it).
+    """
+    import os as _os
+    import threading as _th
+    from module_loader import STDLIB_PATH
+    import build_stdlib_dylib as bsd
+    import mojo.backend_gimple.elab_intu as EI
+
+    def _compile(rel):
+        path = _os.path.join(STDLIB_PATH, rel)
+        if not _os.path.exists(path):
+            return None
+        src = open(path).read()
+        mod = rel.replace('/', '.').replace('.mojo', '')
+        box = {}
+        _th.stack_size(1 << 30)
+        t = _th.Thread(target=lambda: box.update(
+            c=bsd.compile_module_to_c(src, path, mod)))
+        t.start(); t.join()
+        return box.get('c')
+
+    once_src = _os.path.join(STDLIB_PATH, 'std', 'iter', '__init__.mojo')
+    iter_src = open(once_src).read() if _os.path.exists(once_src) else ''
+
+    # The boundary predicate, on the real templates. This is the line the
+    # feature is drawn on, and it is a measurement rather than a whitelist:
+    # in-TU carries a struct whose ONLY duplicated method names are iteration
+    # protocol ones, because the two consumers resolve `__iter__` by the bare
+    # name and correctly keep the receiver's own type when it is absent, while
+    # every other overloaded method is dispatched through its signature hash and
+    # this codegen cannot yet pick an overload at a call site from real C
+    # parameter types. Measured counter-examples, all refused:
+    #   MoveCounter/ArcPointer/BitSet/StaticTuple  dup ['__init__']
+    #   Optional   ['__eq__', '__init__', '__iter__']
+    #   List       ['__getitem__', '__init__', '__iter__', 'extend', 'pop',
+    #               'resize']
+    #   Coord      ['__init__', '__len__', 'product']
+    class _G:
+        _imported_generic_structs = {
+            '_Empty': once_src, '_Once': once_src,
+            '_RepeatIterator': _os.path.join(STDLIB_PATH, 'std', 'itertools',
+                                             'itertools.mojo'),
+            'Optional': _os.path.join(STDLIB_PATH, 'std', 'collections',
+                                      'optional.mojo'),
+            'List': _os.path.join(STDLIB_PATH, 'std', 'collections',
+                                  'list.mojo'),
+        }
+        struct_field_types: dict = {}
+    check("intu#1: an iterator whose only overload is `__iter__` is carried "
+          "(`_Empty`, `_Once`, `_RepeatIterator`)",
+          all(EI._protocol_only_overloads(_G(), n)
+              for n in ('_Empty', '_Once', '_RepeatIterator')))
+    check("intu#2: an overload OUTSIDE the iteration protocol is REFUSED "
+          "(`Optional`, `List`) — the `.o` route keeps it",
+          not any(EI._protocol_only_overloads(_G(), n)
+                  for n in ('Optional', 'List')))
+
+    for rel, base, targs in (('test/iter/test_once.mojo', '_Once', {'T': 'Int64'}),
+                             ('test/iter/test_empty.mojo', '_Empty', {'T': 'Int'}),
+                             ('test/itertools/test_repeat.mojo',
+                              '_RepeatIterator', {'ElementType': 'Int64'})):
+        code = _compile(rel)
+        if code is None:
+            check(f"intu#3: {rel} is reachable in the stdlib tree", False)
+            continue
+        m = mm.mangle(base, targs)
+        check(f"intu#3: `{rel}` DEFINES `{m}` in its own C (in-TU, not extern)",
+              f'typedef struct {m} ' in code
+              and f'extern int64_t {m}___next__' not in code)
+        check(f"intu#4: `{rel}` defines `__next__` and both `__iter__` "
+              f"overloads, and CALLS no bare `__iter__`",
+              f'{m}___next__ (' in code
+              and code.count(f'{m}___iter___') >= 2
+              and f'= {m}___iter__ (' not in code)
+        check(f"intu#5: `{rel}` lowered `next(...)` to the instantiation's own "
+              f"`__next__`, not the variadic `next`",
+              f'= {m}___next__ (' in code and ' _next (' not in code)
+
+
+def test_ambiguous_overload_is_refused_not_first_picked(wd):
+    """An overload set this resolver cannot rank must RAISE, not return the
+    first candidate.
+
+    `myinterpreter.MojoOverloadSet` dispatches on argument count and keyword
+    names only — the interpreter is untyped, so parameter types are not
+    available to it. Two candidates that agree on both are therefore genuinely
+    unrankable, and returning the first in source order is a silent wrong
+    answer whenever they differ in parameter type, parameter convention
+    (`ref`/`var`/`mut`) or return type.
+
+    The stdlib's own shape is `peekable` (`std/iter/__init__.mojo`):
+    `def peekable(ref iterable: Some[Iterable]) -> _PeekableIterator[...]`
+    versus `def peekable(var iterable: Some[IterableOwned]) -> ...`. Same
+    arity, no keywords, differing only in a trait bound and a convention.
+
+    Pinned per property, because each is a distinct way this could rot back
+    into a first-pick:
+      - an unrankable tie RAISES, and the message names the tie;
+      - the candidates are still enumerated in the message, so the caller can
+        see WHICH overloads collided;
+      - a tie that IS rankable (differing arity) still DISPATCHES — refusing
+        every overload set would be a different regression, and this is what
+        keeps the refusal from over-reaching;
+      - the pre-existing no-match error still fires, unchanged, with its own
+        message.
+
+    The candidates are REAL `MojoFunction`s, built by parsing and executing
+    source, not stubs: the overload set is reached through the same path a call
+    site reaches it, and a stub cannot drift out of step with the invocation
+    protocol `MojoOverloadSet.__call__` actually uses without this test failing
+    for the wrong reason (which is exactly what happened when this test was
+    merged into a tree whose `MojoFunction.__call__` had grown `_invoke`).
+    """
+    import myinterpreter as MI
+    from fire_compiler import py_tokenize, Parser
+
+    src = '''
+def peekable(ref iterable: Some[Iterable]) -> _PeekableIterator:
+    return 1
+
+
+def peekable(var iterable: Some[IterableOwned]) -> _PeekableIterator:
+    return 2
+
+
+def f(a):
+    return 10
+
+
+def f(a, b):
+    return 20
+'''
+    interp = MI.Interpreter(filename='ovl.mojo')
+    for stmt in Parser(py_tokenize(src)).parse_module():
+        interp.execute(stmt)
+
+    # The stdlib `peekable` shape: same arity, same parameter name, no
+    # keywords, differing only in what `_matches` cannot see.
+    tie = interp.scope.vars['peekable']
+    check("ovl#0: the parsed source really does produce a 2-candidate tie",
+          len(tie.candidates) == 2, f'{len(tie.candidates)} candidates')
+    try:
+        got = tie([1, 2, 3])
+        check("ovl#1: an unrankable tie RAISES rather than returning the first "
+              "candidate", False, f'returned {got!r}')
+    except MI._NoOverloadMatch as e:
+        msg = str(e)
+        check("ovl#1: an unrankable tie RAISES rather than returning the first "
+              "candidate", 'AMBIGUOUS' in msg, msg[:120])
+        check("ovl#2: the refusal names the tie — 'peekable', the candidate "
+              "count, and the call shape",
+              'peekable' in msg and '2 of 2' in msg and '1 positional' in msg,
+              msg[:120])
+
+    # Rankable: arity differs, so this MUST still dispatch. A refusal here
+    # would be over-reaching, and `test_runtime_diff.py` is the backstop for
+    # that; this pins it at the unit.
+    ranked = interp.scope.vars['f']
+    check("ovl#3: a RANKABLE overload set (differing arity) still dispatches",
+          ranked(1) == 10 and ranked(1, 2) == 20,
+          f'{ranked(1)!r} / {ranked(1, 2)!r}')
+
+    # The pre-existing no-match error, unchanged.
+    try:
+        ranked(1, 2, 3)
+        check("ovl#4: no-match still raises the original error", False,
+              'returned instead of raising')
+    except MI._NoOverloadMatch as e:
+        check("ovl#4: no-match still raises the original error",
+              'AMBIGUOUS' not in str(e) and 'no overload' in str(e),
+              str(e)[:120])
+
+
 def main():
     wd = tempfile.mkdtemp(prefix='mojo_modcache_test_')
     # Isolate the CAS so cold/warm/invalidation assertions are deterministic and
@@ -1439,7 +1980,12 @@ def main():
         test_elaboration_trait_conformance(wd)
         test_reflected_struct_import(wd)
         test_module_qualified_struct_symbols(wd)
+        test_mangle_is_injective(wd)
+        test_in_tu_instantiation(wd)
         test_review_fixes_monomorphize_overload(wd)
+        test_self_qualified_type_param_substitution(wd)
+        test_type_param_markers_and_simd_unification(wd)
+        test_generic_instantiation_symbol_agreement(wd)
         test_def_overload_not_dangling_export(wd)
         test_cross_module_free_func_mangling_agrees(wd)
         test_sb1_cross_module_same_c_param_overload_mangling(wd)
@@ -1448,6 +1994,7 @@ def main():
         test_module_attr_class_alias_constructs_that_class(wd)
         test_root_module_circular_import_symbol(wd)
         test_underscore_prefixed_sibling_import_symbol(wd)
+        test_ambiguous_overload_is_refused_not_first_picked(wd)
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     print()

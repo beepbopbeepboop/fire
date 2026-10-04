@@ -35,6 +35,7 @@ import mojo.backend_gimple.emit_funcs as _ggf
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+import mojo.middle.itcursor as itc
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
@@ -2707,6 +2708,23 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         api = gen._generator_var_api.get(ov)
         if api is not None:
             return ggc._lower_generator_next(gen, ov, api)
+
+    # `it.__next__()` on a resumable iterator local is `next(it)` — Python
+    # spells the same operation both ways, and this branch used to fall
+    # through to the stub that answers 0 for an unrecognised method call. A
+    # caller draining an iterator with the explicit spelling therefore read
+    # 0 and advanced nothing, silently, and `test/collections/test_span.mojo`
+    # ends `test_iter` with exactly that call inside `assert_raises()`.
+    # Routed to `_lower_next_iter_cursor` — the SAME body `next()` uses, not a
+    # second copy — with an empty argument list, so exhaustion raises rather
+    # than yielding a default.
+    if (method == '__next__' and not node.args
+            and not getattr(node, 'kwargs', None)
+            and not gen._locally_binds_name('__next__')
+            and isinstance(func.obj, gimple_ctypes.IdentExpr)):
+        _cur = itc.cursor_for(gen, gen._cname(func.obj.name))
+        if _cur is not None:
+            return ggc._lower_next_iter_cursor(gen, node, _cur, ())
 
     # struct.Struct instance namespace — receiver holds a compiled
     # `MojoStructFmt *`. Deliberately TOTAL (not gated on a method-name

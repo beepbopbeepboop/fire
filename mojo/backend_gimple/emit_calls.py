@@ -35,6 +35,7 @@ import mojo.backend_gimple.device_glue as _gmi_glue
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+import mojo.middle.itcursor as itc
 import mojo.middle.lambdareduce as _gld
 import gimple_codegen
 import mojo.backend_gimple.emit_exprs as gex
@@ -842,8 +843,17 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     mlir_call = gen._maybe_lower_mlir_op(node)
     if mlir_call is not None:
         return mlir_call
-    if isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.IdentExpr) \
-            and node.func.obj.name in gen._imported_generic_structs:
+    if (isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+            and node.func.obj.name in gen._imported_generic_structs) or \
+           (isinstance(node.func, gimple_ctypes.IdentExpr) and node.func.name in gen._imported_generic_structs):
+        # The BARE-name form (`ThinAllocation(unsafe_owned_ptr=x)`) is the
+        # common spelling in the stdlib — Mojo writes the constructor's types
+        # in the parameters, so the bracket arguments are usually omitted
+        # entirely. Without this arm every one of those fell through to the
+        # ordinary call path and emitted a bare call to a symbol nothing
+        # defines; `elaborate_generic_struct_inferred` recovers the type args
+        # from the `__init__` annotations. See
+        # bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md.
         res = gen._elaborate_generic_struct_call(node)
         if res is not None:
             return res
@@ -1601,9 +1611,11 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `default` argument opts out — real Python `next(it, default)` semantics.
     if (fname_raw == 'next' and 1 <= len(node.args) <= 2
             and isinstance(node.args[0], gimple_ctypes.IdentExpr)
-            and node.args[0].name in getattr(gen, '_list_iter_cursor', {})
+            and itc.cursor_for(gen, gen._cname(node.args[0].name)) is not None
             and not gen._locally_binds_name('next')):
-        return _lower_next_list_iter(gen, node)
+        return _lower_next_iter_cursor(
+            gen, node, itc.cursor_for(gen, gen._cname(node.args[0].name)),
+            node.args)
     if fname_raw == 'next' and len(node.args) == 1:
         at, av = gen.lower_expr(node.args[0])
         at = gen._get_actual_type(at, av)
@@ -1665,7 +1677,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if fname_raw == 'next' and len(node.args) >= 1 and _next_is_builtin:
         _recv_t, _recv_v = gen.lower_expr(node.args[0])
         _recv_t = gen._get_actual_type(_recv_t, _recv_v)
-        _rbase = gimple_exprtypes._struct_name_of(_recv_t or '')
+        _rbase = _struct_ptr_name(gen, _recv_t)
         if _rbase:
             # `gen._struct_method_csym`, the tree's ONE composer for a struct
             # method's C name, not an f-string `{Struct}___{method}__` spelled
@@ -1681,11 +1693,18 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # for-loop path resolves that, so this must too, or `next()` and
             # `for` would advance different objects.
             _ritr = gen._struct_method_csym(_rbase, '__iter__', '')
-            if _ritr in gen.func_return_types:
+            # An OVERLOADED `__iter__` is not callable under the bare name, so
+            # it cannot say which iterator type `__iter__` hands back — which is
+            # the same guard `emit_loops._gen_for_struct_iter` applies, for the
+            # same measured reason (see its comment). Keeping the receiver's own
+            # type is the correct answer for every `std/iter` iterator.
+            if (_ritr in gen.func_return_types
+                    and (_rbase, '__iter__') not in gen._ambiguous_struct_methods):
                 _rit = gen.func_return_types[_ritr]
-                if gimple_exprtypes._struct_name_of(_rit or ''):
+                _rnext_base = _struct_ptr_name(gen, _rit)
+                if _rnext_base:
                     _rnext = gen._struct_method_csym(
-                        gimple_exprtypes._struct_name_of(_rit), '__next__', '')
+                        _rnext_base, '__next__', '')
             if _rnext in gen.func_return_types:
                 return _lower_next_struct_iter(
                     gen, node, _recv_t, _recv_v, _rnext)
@@ -1715,8 +1734,23 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             type(node.args[0]).__name__
             if len(node.args) == 1
             else '%s, default' % (type(node.args[0]).__name__,))
+        # The receiver's C TYPE is the load-bearing half of this message and
+        # was missing: "no lowering for next(IdentExpr)" says the shape is
+        # unsupported, when the actual question is always "why did the
+        # receiver not type as a struct?". `int64_t` there means the value
+        # came from an un-elaborated imported generic (see
+        # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md),
+        # which is a different bug with a different fix than an unsupported
+        # shape. Re-lowering here is safe precisely because every branch
+        # above that lowers the receiver has already returned by now.
+        _rt_shape = ''
+        try:
+            _rt_shape = gen._get_actual_type(*gen.lower_expr(node.args[0])) or '?'
+        except Exception:
+            _rt_shape = '?'
         raise RuntimeError(
-            f"cannot compile module: `next(...)` on {_shape} has no lowering "
+            f"cannot compile module: `next(...)` on {_shape} "
+            f"(receiver typed `{_rt_shape}`) has no lowering "
             f"in this codegen — every fall-through here emitted a call to a "
             f"`next` symbol that does not exist, which fails at LINK rather "
             f"than here. Supported: next(<MojoGenerator*>), "
@@ -2568,6 +2602,19 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
 
 
 def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    # A resumable iterator local answers with what is LEFT, not with its
+    # container's total length — this branch has to come before the storage
+    # dispatch below, which would otherwise read `mojo_list_len(it)` and
+    # report the length the container had BEFORE any `next()` ran. It was
+    # silent and exit 0, and it is what `test/collections/test_span.mojo`'s
+    # `assert_equal(len(it), 0)` after draining the iterator is written
+    # against. See mojo/middle/itcursor.py's `remaining`.
+    _cur = None
+    if (isinstance(node.args[0], gimple_ctypes.IdentExpr)
+            and not gen._locally_binds_name('len')):
+        _cur = itc.cursor_for(gen, gen._cname(node.args[0].name))
+    if _cur is not None:
+        return 'int64_t', itc.remaining(gen, _cur)
     at, av = gen.lower_expr(node.args[0])
     _LEN_FNS = {
         'MojoStr *':  f'mojo_str_len ({av})',
@@ -2896,30 +2943,40 @@ def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, s
     return 'int', t
 
 
-def _lower_next_list_iter(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
-    """`next(it)` / `next(it, default)` where `it` is a resumable list-iterator
-    local (see `_try_bind_list_iter`). Advances the shared cursor; raises a
-    tagged StopIteration on exhaustion (1-arg) or yields `default` (2-arg)."""
-    li = gen._list_iter_cursor[node.args[0].name]
-    lst, cur, elem = li['list'], li['cursor'], li['elem']
-    suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
-    vct = {'str': 'char *', 'double': 'double'}.get(suf, 'int64_t')
+def _lower_next_iter_cursor(gen, node, rec, args) -> tuple[str, str]:
+    """`next(it)` / `next(it, default)` on a resumable iterator local (see
+    `_try_bind_iter_cursor`), and the `it.__next__()` spelling of the same
+    operation — Python's `__next__` IS `next()`, so it is lowered here rather
+    than by a second implementation.
+
+    Advances the shared cursor; raises a tagged StopIteration on exhaustion
+    (1-arg) or yields `default` (2-arg). Every question about the cursor — its
+    element type, how to read the element at the cursor, how many are left —
+    is asked of `mojo/middle/itcursor.py`, which is also what the `for` and
+    `len` paths ask, so the three cannot disagree.
+    """
+    cur = rec['cursor']
+    vct = itc.element_ctype(rec)
     result = gen._new_temp(vct)
-    n = gen._new_val('int64_t', f"mojo_list_len ({lst})")
+    # Exhaustion is `cursor >= full`, NOT `cursor >= remaining`: the cursor is
+    # an INDEX and the remaining count is `full - cursor`, so the second test
+    # would be true only while the cursor sits below the count itself and
+    # would declare a five-element iterator exhausted after two `next()`s.
+    n = gen._new_val('int64_t', rec['full'])
     bb_ok = gen._new_bb(); bb_miss = gen._new_bb(); bb_merge = gen._new_bb()
     cond = gen._new_val('_Bool', f"{cur} < {n}")
     gen._emit(f"  if ({cond}) goto {bb_ok}; else goto {bb_miss};")
     gen._emit_label(bb_ok)
-    ok = gen._new_val(vct, f"mojo_list_get_{suf} ({lst}, {cur})")
-    gen._safe_coerce_emit(vct, vct, ok, result)
+    _rvct, ok = itc.read_at(gen, rec, cur)
+    gen._safe_coerce_emit(_rvct, vct, ok, result)
     nxt = gen._inc_val(cur)
     gen._emit(f"  {cur} = {nxt};")
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_miss)
-    if len(node.args) == 2:
+    if len(args) == 2:
         # `default` only evaluated on the exhausted branch (real Python
         # semantics — a non-trivial default expr must not run on a hit).
-        dt, dv = gen.lower_expr(node.args[1])
+        dt, dv = gen.lower_expr(args[1])
         gen._safe_coerce_emit(dt, vct, dv, result)
     else:
         gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
@@ -2927,6 +2984,7 @@ def _lower_next_list_iter(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_merge)
     return vct, result
+
 
 
 def _lower_next_over_comprehension(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
@@ -3083,6 +3141,33 @@ def _lower_next_iter_container(gen, node: gimple_ctypes.CallExpr) -> tuple[str, 
     gen._emit(f"  goto {bb_done};")
     gen._emit_label(bb_done)
     return elem, result
+
+
+def _struct_ptr_name(gen, ctype) -> str:
+    """The struct `ctype` POINTS AT, or '' when it points at nothing this
+    compile registered — the test `struct_name_of` cannot be used for.
+
+    `_struct_name_of` is a pure spelling operation: it strips `const` and the
+    pointer star, so it answers `'int64_t'` for `'int64_t'`, `'char'` for
+    `'char *'`, and `''` only for the empty string. Every caller that wants to
+    know "is this a STRUCT" must therefore ask the registry, and the `next()`
+    struct-protocol branch did not: it used `_struct_name_of(_rit)` as a
+    boolean, so a `__iter__` whose erased return type is the scalar `int64_t`
+    read as "yes, a different iterator struct" and the branch then dispatched
+    `__next__` on `int64_t` — a symbol nothing defines, for the one family of
+    structs whose `__iter__` returns something other than a struct pointer.
+
+    A struct name in `_TYPE_MAP` is excluded too: the scalar newtypes (`Int`,
+    `UInt8`, `Bool`, …) really are `struct X` definitions in the stdlib and so
+    can appear in `struct_field_types`, but this codegen erases them to raw C
+    scalars on purpose, and that convention must win here or `alloc[Int64]`'s
+    return would be read back as a struct pointer."""
+    if not isinstance(ctype, str) or not ctype.endswith(' *'):
+        return ''
+    name = gimple_exprtypes._struct_name_of(ctype)
+    if not name or name in gimple_ctypes._TYPE_MAP:
+        return ''
+    return name if name in gen.struct_field_types else ''
 
 
 def _lower_next_struct_iter(gen, node: gimple_ctypes.CallExpr, recv_t: str,
@@ -6704,7 +6789,28 @@ def _lower_struct_constructor(gen, struct_name: str,
                     gen._safe_coerce_emit(_have_t, _want, _have_v, _cv)
                     arg_pairs[_ai] = (_want, _cv)
         gen._emit_call('void', '', init_fname, arg_pairs, _arg_nodes)
-    if (not _did_init_call) and (_n_kw > 0 or _n_args > 0):
+    # `Span(<list>)` is a VIEW of the list's element buffer, not a
+    # reinterpretation of the list pointer, and the by-position field writer
+    # below gets both halves of that wrong: it assigns the list POINTER to
+    # `_data` (a `char *` cast of a `MojoList *`, so every `span[i]` read the
+    # list's own header) and assigns nothing at all to `_len`, so `len(span)`
+    # answered whatever the fresh allocation happened to hold. Both silent,
+    # both exit 0. Recognized here, lowered ONCE, and emitted correctly in the
+    # Span branch below; the generic by-position writer is skipped for it so
+    # the two do not both write the same struct.
+    _span_list = None
+    if (struct_name == 'Span' and not _did_init_call
+            and _n_args == 1 and _n_kw == 0):
+        _sat, _sav = gen.lower_expr(args[0])
+        if gen._get_actual_type(_sat, _sav) == 'MojoList *':
+            _span_list = _sav
+    elif (struct_name == 'Span' and not _did_init_call
+            and _n_args == 0 and _n_kw == 1
+            and _as_str((kwargs or [('', '')])[0][0]) == 'list'):
+        _sat, _sav = gen.lower_expr((kwargs or [('', '')])[0][1])
+        if gen._get_actual_type(_sat, _sav) == 'MojoList *':
+            _span_list = _sav
+    if (not _did_init_call) and (_span_list is None) and (_n_kw > 0 or _n_args > 0):
         # Positional args + keyword args — assign fields by position then by
         # name. Iterate `gen.struct_field_types[struct_name]` (a real dict)
         # directly rather than `list(... .items())` / `dict(...)` — on the
@@ -6744,7 +6850,39 @@ def _lower_struct_constructor(gen, struct_name: str,
         # byte-oriented behavior unchanged.
         kw = dict(kwargs or [])
         elem_ct = None
-        if 'ptr' in kw and isinstance(kw['ptr'], gimple_ctypes.IdentExpr):
+        if _span_list is not None:
+            # `_data` is the list's ELEMENT buffer (MojoList.data is
+            # `int64_t *`, per runtime/fire_runtime.h) and `_len` its length.
+            # The element type comes from the same `_elem_types` side-table
+            # `Span(list)` already registered, so `span[i]`, `len(span)` and
+            # the cursor `iter(span)` binds all read one consistent type.
+            # `MojoList.data` is `int64_t *` (runtime/fire_runtime.h). Two
+            # GIMPLE grammar constraints shape the next three statements, both
+            # measured against gcc-15 -fgimple and both about a CAST in an
+            # assignment RHS:
+            #   - applied directly to a COMPONENT_REF it is `error: invalid
+            #     operand in unary operation` (the cast folds onto a MEM_REF,
+            #     which a unary op cannot take), so the field is read into a
+            #     temp first;
+            #   - NESTED (`(char *)(int64_t *)x`) it is `error: expected
+            #     expression before '(' token`, so each conversion is its own
+            #     statement and a conversion that would be a no-op is dropped
+            #     rather than written out.
+            # A `char * _data` field must receive a `char *`: handing it the
+            # `int64_t *` buffer as-is is `-Wincompatible-pointer-types`.
+            _lraw = gen._new_val('int64_t *', f"{_span_list}->data")
+            _lelem = gen._elem_of(_span_list) or 'int64_t'
+            _lptr = _lelem + ' *'
+            _lval = _lraw
+            if _lptr != 'int64_t *':
+                _lval = gen._new_val(_lptr, f"({_lptr}){_lraw}")
+            _dct = gen.struct_field_types.get('Span', {}).get('_data') or 'char *'
+            _dbuf = _lval if _dct == _lptr else gen._new_val(_dct, f"({_dct}){_lval}")
+            gen._emit(f"  {t}->_data = {_dbuf};")
+            _llen = gen._new_val('int64_t', f"mojo_list_len ({_span_list})")
+            gen._emit(f"  {t}->_len = {_llen};")
+            elem_ct = _lelem
+        elif 'ptr' in kw and isinstance(kw['ptr'], gimple_ctypes.IdentExpr):
             ptr_ct = gen.var_types.get(kw['ptr'].name)
             if ptr_ct:
                 elem_ct = gimple_ctypes._elem_type(ptr_ct)
@@ -7313,7 +7451,13 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     if (ot.endswith(' *') and not ot[:-2].endswith(' *')
             and gimple_exprtypes._struct_name_of(ot) in gen.struct_field_types):
         tracked = gen._elem_types.get(ov)
-        if tracked and tracked in gen.struct_field_types:
+        # ANY tracked element type, not only a known struct. Gating on
+        # `tracked in gen.struct_field_types` made the tracked path
+        # unreachable for every SCALAR span, so `span[2]` on a `Span([1,2,3])`
+        # fell to the byte-oriented fallback below and read ONE BYTE where the
+        # element is eight — silently, exit 0, and the byte happened to be
+        # part of the right number often enough to look plausible.
+        if tracked:
             # Span's hardcoded {_data, _len} model always assumes a raw
             # byte element (see struct_field_types['Span'] and
             # _struct_data_field) — but this particular Span * was

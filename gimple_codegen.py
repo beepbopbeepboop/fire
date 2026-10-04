@@ -870,6 +870,20 @@ class GimpleGen:
         # generic instantiation's own symbol, which is already uniquely named by
         # its type args and is referenced by that exact name from call sites.
         self._extra_no_mangle: set = set(no_mangle)
+        # (struct name, method name) pairs that are OVERLOADED in this compile —
+        # declared more than once on one struct. The UNSUFFIXED C symbol for
+        # such a pair is defined by NEITHER overload (each carries a hash of its
+        # real C parameter types: `__iter___0120be`, `__iter___0120be_2`), so a
+        # consumer that dispatches through the bare name has nothing to call.
+        # Published as its own registry rather than inferred from
+        # `func_return_types`, which cannot express it: the bare entry must
+        # STAY there for the forward-declaration emitter (removing it was
+        # measured — see mojo/backend_gimple/module_gen.py's registration loop).
+        # Read by `emit_loops._gen_for_struct_iter` and by
+        # `emit_calls._lower_call`'s `next(<struct>)` branch; both are the
+        # struct-protocol dispatch this project relies on, and both used to
+        # emit a call to a symbol nothing defines.
+        self._ambiguous_struct_methods: set = set()
         # Milestone B (C++20-coroutine generator codegen): name -> FunctionDef
         # for every top-level generator in THIS module that gen_module's
         # pre-pass found to match the narrow supported shape (see
@@ -4885,6 +4899,9 @@ class GimpleGen:
         return ginf._compr_range_loop(self, node, gen0, res, res_type)
     def _compr_list_loop(self, node, gen0, res, res_type, it_val):
         return ginf._compr_list_loop(self, node, gen0, res, res_type, it_val)
+
+    def _compr_cursor_loop(self, node, gen0, res, res_type, rec):
+        return ginf._compr_cursor_loop(self, node, gen0, res, res_type, rec)
     def _compr_generator_loop(self, node, gen0, res, res_type, it_val):
         return ginf._compr_generator_loop(self, node, gen0, res, res_type, it_val)
     def _compr_dict_loop(self, node, gen0, res, res_type, it_val):
@@ -5003,8 +5020,8 @@ class GimpleGen:
         return grsl._static_generic_return_ctype(self, func_name)
     def _elaborate_generic_call(self, node: CallExpr):
         return grsl._elaborate_generic_call(self, node)
-    def _refine_generic_return_type(self, info: dict, module_src: str, g: str, mangled_type_args: list, arg_count: int) -> None:
-        return grsl._refine_generic_return_type(self, info, module_src, g, mangled_type_args, arg_count)
+    def _refine_generic_return_type(self, info: dict, module_src: str, g: str, mangled_type_args: list, arg_count: int, materialize=None) -> None:
+        return grsl._refine_generic_return_type(self, info, module_src, g, mangled_type_args, arg_count, materialize=materialize)
     def _ensure_generic_struct(self, base_name: str, type_args: list) -> str | None:
         return grsl._ensure_generic_struct(self, base_name, type_args)
     def _elaborate_generic_struct_call(self, node: CallExpr):

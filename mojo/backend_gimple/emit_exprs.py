@@ -36,6 +36,7 @@ import mlir
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+import mojo.middle.itcursor as itc
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
@@ -5791,6 +5792,20 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
     is_range = (isinstance(gen0.iterable, gimple_ctypes.CallExpr) and
                 isinstance(gen0.iterable.func, gimple_ctypes.IdentExpr) and
                 gen0.iterable.func.name == 'range')
+
+    # A comprehension whose iterable is a RESUMABLE ITERATOR LOCAL walks the
+    # shared cursor rather than the container from index 0 — see
+    # `_compr_cursor_loop`, which is `_gen_for_iter_cursor`'s comprehension
+    # twin. Declined for a tuple target, so that shape keeps falling through
+    # to the container arms exactly as `_gen_for_iter_cursor`'s call site
+    # declines it for the `for`-statement form.
+    _cur = None
+    if (isinstance(gen0.iterable, gimple_ctypes.IdentExpr)
+            and not gimple_ctypes.for_target_is_tuple(_as_str(gen0.target))):
+        _cur = itc.cursor_for(gen, gen._cname(gen0.iterable.name))
+    if _cur is not None:
+        gen._compr_cursor_loop(node, gen0, res, res_type, _cur)
+        return res_type, res
 
     it_type = ''
     if not is_range:
