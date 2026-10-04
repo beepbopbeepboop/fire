@@ -4272,7 +4272,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.label(trap)
         self._emit_overflow_diagnostic(M.int_parse_trap_message(base))
         self._emit_call_exit(M.SHIFT_TRAP_STATUS)
-        self.asm.label(endl)
+        # ONCE, and the arm64 twin is the reason to say so: this carried a
+        # second, identical `self.asm.label(endl)` from the commit that added the
+        # parse (`05d720ef`), and the assembler's own duplicate-label check then
+        # refused every x86-64 image containing an `int(...)` — so the whole
+        # parse was arm64-only and it read as a LIMIT rather than as the internal
+        # error it was ("label 'main_ip1_end' is defined twice, at 0x... and at
+        # 0x...", a sentence naming a label and naming no construct). Measured on
+        # `print(int("12"))`: arm64 printed 12, x86-64 refused. Both labels were
+        # at the same offset, so dropping the duplicate moves no branch;
+        # `test_formal_x86_64_parity.py`'s `int_parse_*` rows are the pin.
         self.asm.label(endl)
 
     def _emit_overflow_diagnostic(self, text: str) -> None:
