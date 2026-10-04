@@ -13872,6 +13872,91 @@ def print_format(fragments: list, sep=" ", end="\n") -> str:
     return "".join(parts)
 
 
+# The keywords `print` accepts on this path. `backend` is the word the refusal
+# messages quote ("the formal arm64 path"), because the messages have always
+# named the machine and a message that named neither would be a third answer.
+PRINT_KWARG_NAMES = ("sep", "end", "file", "flush")
+
+
+def print_kwargs(e, backend: str):
+    """`print`'s `sep=` / `end=` / `file=` / `flush=`, as `(sep, end, flush)`.
+
+    **THE ONE COPY, and it is here because the two emitters had one each.**
+    `_print_kwargs` was a private method in `arm64_codegen.py` and the same
+    method again in `x86_64_codegen.py`, differing only in the backend word
+    three messages quote — which is the shape that lets two architectures come
+    to disagree about what a `print` means, and this file already says so about
+    the sibling decision (`printf_format_refusal`: "two emitters that each had
+    to remember both is exactly how arm64 and x86-64 come to disagree"). It is
+    the same argument with a worse ratio: the sibling was at least a refusal.
+
+    **THE KEYWORD IS DISPATCHED BEFORE ITS VALUE IS INSPECTED, and that order
+    is the whole of the `flush=` fix.** The private copies asked "is this value a
+    string literal?" FIRST and only then looked at the name, so a keyword whose
+    value is not text at all was refused with a sentence about the two keywords
+    that do want text:
+
+        print(..., flush=True)
+          ->  print(flush=...) must be a string literal on the formal arm64
+              path (got Constant): the separator and the line ending are baked
+              into the format string, which is built before the call is emitted
+
+    Every clause of that is about `sep` and `end`, and `flush` is neither: it is
+    a bool that asks whether to flush the stream, it is not baked into anything,
+    and it is the single most common keyword in this repository's own source —
+    nine of the sixty items `tools/formal_proof_breadth.py` measures reach this
+    refusal on arm64, and every one of the nine is the same `print(…, flush=True)`
+    in a test's `check` helper
+    (`bugs/FORMAL_proof_coverage_census_2026-10-03.md` §0.2, the largest
+    `codegen-refused` family there).
+
+    `flush` is answered as a LITERAL bool only, and `False` is the default so it
+    costs nothing: the emitters ask for the answer and emit `fflush(NULL)` after
+    the `printf` when it is true. `fflush(NULL)` rather than
+    `fflush(stdout)` because this model has exactly one stream, which is the same
+    fact `file=`'s refusal below is stated on; stderr is unbuffered by default,
+    so the extra stream it also flushes is one nothing writes to.
+
+    `sep` and `end` come back as the literal NODES and not as `.value`, which is
+    the whole reason this signature is unchanged while its body is not:
+    `print(sep=r"\\t")` must print a backslash and a `t`, and `print_literal`
+    can only know that from the node. The defaults are plain strings, which
+    `print_literal` takes at face value — they are already-decoded text."""
+    sep, end, flush = " ", "\n", False
+    for k, v in e.kwargs:
+        if k in ("sep", "end"):
+            if not isinstance(v, F.StringLiteral):
+                raise CodegenError(
+                    f"print({k}=...) must be a string literal on the formal "
+                    f"{backend} path (got {type(v).__name__}): the separator "
+                    f"and the line ending are baked into the format string, "
+                    f"which is built before the call is emitted")
+            if k == "sep":
+                sep = v
+            else:
+                end = v
+        elif k == "file":
+            if not (isinstance(v, F.MemberExpr) and v.member == "stdout"):
+                raise CodegenError(
+                    f"print(file=...) other than sys.stdout is not lowered "
+                    f"on the formal {backend} path: this model has one output "
+                    f"stream")
+        elif k == "flush":
+            if not isinstance(v, F.BoolLiteral):
+                raise CodegenError(
+                    f"print(flush=...) must be True or False on the formal "
+                    f"{backend} path (got {type(v).__name__}): it becomes an "
+                    f"`fflush` the emitter writes after the `printf`, and a "
+                    f"value it cannot read at build time is a flush this path "
+                    f"cannot express")
+            flush = v.value
+        else:
+            raise CodegenError(
+                f"print() has no keyword argument {k!r} on the formal "
+                f"{backend} path (supports {', '.join(PRINT_KWARG_NAMES)})")
+    return sep, end, flush
+
+
 # ── What a value is ────────────────────────────────────────────────────────
 #
 # A formal value is one 64-bit word. A string is a bare `char *` with no header

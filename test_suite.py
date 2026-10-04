@@ -3294,6 +3294,17 @@ UNREGISTERED = {
         'six type readers, the three shapes that must stay undecided, and the '
         'two stdlib declaration bugs the readers found.',
 
+    'test_formal_frame_field_census.py': 'The frame-field census TOOL, and '
+        'the same shape as the entry above: a parse and a walk, no build and no '
+        'Lean (7 cases, 0.3 s). Not registered because this session\'s task '
+        'says not to register anything; listed here for the reason the estate '
+        "check below exists. It covers `tools/formal_frame_field_census.py`'s "
+        'two filters — each with a case that turns it OFF, because the first '
+        "cut of that instrument reported 52 sites of which 28 were a word — the "
+        'delegating constructor that is 13 of its 14 corpus sites, and the one '
+        '`other` row, both read off the real tree rather than written for the '
+        'test.',
+
     # `test_formal_proof_breadth.py` was listed here when it landed on
     # 2026-10-03 with the note that the registering commit deletes the excuse,
     # and is REGISTERED now (`formal-proof-breadth-tool` in the `proofs`

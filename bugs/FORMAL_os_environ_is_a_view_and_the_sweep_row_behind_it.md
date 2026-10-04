@@ -159,6 +159,11 @@ there), `pop` 11, `copy` 9, `setdefault` 6, `update` 2, `keys`/`items` 2 each
 `setdefault`/`update` stay two calls each, which is a limit of one-word returns
 and not a missing function.
 
+**§3's last sentence is CORRECTED for `update` by §4's second status block:
+`update` is ONE call** (`environ_update`), because the limit is one word per
+CALL and `update`'s whole answer is that one word. `setdefault` stays two,
+since it must hand back the value it kept as well as the view.
+
 **The row's own verdict does not move: 4 files off the `os.environ` refusal and 0
 to `pass`**, because these are the SPELLINGS a file has to be rewritten into, not
 constructs it was waiting on. §2's two-line rewrites are still the whole of what
@@ -181,6 +186,39 @@ a reader can do today.
   * **`os.environ` as a VALUE read bare** (`v = os.environ`) is still refused —
     it is `FORMAL_module_state_no_storage.md`'s §(4) and no part of this change
     touches it. `module_attribute_refusal`'s answer for it is unchanged.
+
+**Status 2026-10-03 (`work/formal18-5`): `update` is ONE call, and the doc's
+"two calls each" was wrong for exactly that one.** §3's list — `environb`,
+`update`, `popitem`, the exported slot — is one shorter. `environ_update(e,
+other)` is in the module, differentially tested against CPython on both
+architectures, and it is ONE call for the reason §3 gives the wrong answer: the
+limit that forces `setdefault` to be two calls is **one word of answer**, and
+`update` has nothing to say except the view, so the view IS the answer and the
+loop that grows the blob happens inside where the intermediate pointers are
+words in a register. `environ_set`'s contract carries over exactly — the answer
+is `e` itself when every key was already there, a new blob when one was appended,
+0 when the growth failed — because a `realloc` may move.
+
+Two things the implementation had to answer that the doc did not ask about:
+
+  * **`update(e, e)` is safe, and that is a property of the layout rather than
+    a promise.** Every key of `other` is then already a key of the receiver, so
+    every store takes `environ_set`'s in-place branch, no `realloc` happens and
+    `e` never moves. That is not sufficient on its own — `environ_set` frees the
+    old value buffer before duplicating the new one, and for an aliasing
+    `other` the buffer being freed is the one being read — so the value is
+    duplicated first on that path and released after. `d.update(d)` is legal in
+    CPython and leaves every pair equal, so it is a case rather than a refusal.
+  * **A `0` receiver is a `0` and a `0` other view changes nothing**, which is
+    CPython's rule for updating from an absent mapping.
+
+What is left in §3 is `environb`, `popitem`, the exported slot and the bare
+value read. `popitem` joins `setdefault` as a genuine two-word limit (it must
+hand back a key AND a value, and this path returns one thing per call), and
+`environb` is a NAME over the same blob rather than a second representation —
+`str` and `bytes` are both a `char *` here — which is why it is not simply
+added. **And the row's own verdict still does not move: 4 files off the
+`os.environ` refusal and 0 to `pass`.**
 
 ## 5. The one thing here that is not the environment
 
@@ -214,3 +252,10 @@ The two sweep rows behind the rewrite table in §2 are re-measured on
 `bugs/FORMAL_sweep_work_map_2026-10-03_b8.md`; a re-sweep belongs to whoever
 runs the gate. `test_formal_os_backing.py` is 58/58 on this tree (three
 consecutive full runs) and `test_formal_os.py` is 5/5 groups.
+
+**Re-measured 2026-10-03 (`work/formal18-5`) with `environ_update` in:** the
+same two counts — 58/58 and 6/6 groups — and `environ_view` is now **77 answers
+per architecture** against CPython rather than the 58 it had, the 19 new ones
+being the `update` rows of §4's second status block. `test_formal_os.py` is 6/6
+groups here rather than 5/5: its `blob` group is the sixth and is not a recent
+addition.

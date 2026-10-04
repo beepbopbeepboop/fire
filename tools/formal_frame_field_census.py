@@ -3,10 +3,11 @@
 
     python3 tools/formal_frame_field_census.py
 
-The measurement `bugs/FORMAL_receiver_stored_in_a_field.md` asks for before its
-row A is attempted ("lift the field-store branch behind a temporary guard,
-re-sweep the 24, and record where each lands"), done WITHOUT a sweep: parse plus
-one walk per method, over this repository and the stdlib.
+The measurement that decides whether the field-store refusal
+(`formal/build.py`'s `_refuse_holder_use`) is worth lifting, done WITHOUT a
+sweep: parse plus one walk per method, over this repository and the stdlib. It
+was written for a bug doc that is now closed, and this docstring is what
+replaces that doc's §3 for a reader who wants to know what the numbers mean.
 
 **Why not the sweep.** A sweep answers "does this FILE build", which is the
 wrong question for a check that is one of six late checks in a pipeline: a file
