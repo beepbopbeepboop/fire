@@ -952,6 +952,10 @@ CLASS_ORDER = ["pass", "admitted", "lean-rejected", "bound-exceeded",
                "proof-emitted", "proof-refused", "proof-crash",
                "codegen-refused", "refused-import", "build-crash"]
 
+# Classes that name no CONSTRUCT: a pass, and the phase-A-only row. An item in
+# one of them has nothing to disagree about — see `disagreements`.
+NOT_A_CONSTRUCT = frozenset({"pass", "proof-emitted"})
+
 # A class that is NOT a verdict on a proof, and says so where it is printed.
 NOT_A_VERDICT = {
     "proof-emitted": "phase A only (--no-check): the generator wrote a proof "
@@ -1005,7 +1009,58 @@ def report(results, arch_list):
         detail = ", ".join(f"{c}={counts[c]}" for c in CLASS_ORDER
                            if counts.get(c))
         lines.append(f"   {n:4d}  {cause[:96]:96s} [{detail}]")
+    lines.append(disagreements(results, arch_list))
     return "\n".join(lines)
+
+
+def disagreements(results, arch_list):
+    """The items whose two architectures refused DIFFERENT CONSTRUCTS.
+
+    A class is not a subject. Two machines can report the same class for one
+    function and mean two different things by it — measured on this tree's
+    round-2 census, where one item's arm64 refusal named a module constant and
+    its x86-64 refusal named a string operator two lines later, and the census's
+    class column said only `codegen-refused` for both. A cross-architecture
+    column is only worth reading if the cells are about the same thing, and this
+    is the one place in the report that says whether they are.
+
+    Only rows where BOTH machines REFUSED are listed, and that word is doing the
+    work. An arm64 refusal beside an x86-64 `proof-emitted` is x86-64's
+    documented degradation (`bugs/FORMAL_proof_coverage_census_2026-10-03.md`
+    §6's last bullet), which is expected and is not a disagreement about a
+    construct; and two `proof-emitted` rows differ in their detail because the
+    two generators wrote proofs of different LENGTHS (`--no-check`'s own line
+    count), which is a fact about the generators and not about a construct
+    either. Listing either would be crying wolf on 46 of 78 items.
+    """
+    if len(arch_list) < 2:
+        return ""
+    a, b = arch_list[0], arch_list[1]
+    by = collections.defaultdict(dict)
+    for v in results:
+        by[v.ident][v.arch] = v
+    rows = []
+    for ident, per in sorted(by.items()):
+        va, vb = per.get(a), per.get(b)
+        if not va or not vb or va.cls != vb.cls:
+            continue
+        if va.cls in NOT_A_CONSTRUCT:
+            continue
+        if va.detail == vb.detail:
+            continue
+        rows.append((ident, va, vb))
+    if not rows:
+        return ("\n== architectures agree on the refusal for every item that "
+                "refused on both")
+    out = [f"\n== {len(rows)} item(s) refused DIFFERENT CONSTRUCTS on the two "
+           f"architectures (same class, different subject — see "
+           f"bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_"
+           f"same_function.md)"]
+    for ident, va, vb in rows:
+        out.append(f"   {ident}")
+        out.append(f"      {a:7s} {va.cls:16s} {va.detail[:150]}")
+        out.append(f"      {b:7s} {vb.cls:16s} {vb.detail[:150]}")
+    return "\n".join(out)
 
 
 def main(argv=None):

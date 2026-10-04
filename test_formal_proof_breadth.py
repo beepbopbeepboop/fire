@@ -461,6 +461,68 @@ class TestClassifier(unittest.TestCase):
         self.assertIn("not a verdict", text)
         self.assertIn("proved at all       0 (0.0%)", text)
 
+    def test_the_report_says_when_the_two_architectures_mean_different_things(self):
+        """A class is not a subject, and the report has to say so.
+
+        Measured on this tree's round-2 census: one item's arm64 refusal named a
+        module constant and its x86-64 refusal named a string operator two lines
+        later, and the census's class column said `codegen-refused` for both. A
+        cross-architecture column is only worth reading if its cells are about
+        the same thing, so the report names the items where they are not —
+        `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
+        function.md` is the finding and this is the instrument for it.
+
+        The other half of the rule matters as much: an arm64 refusal beside an
+        x86-64 `proof-emitted` is that generator's documented degradation, and
+        listing it as a disagreement would be crying wolf on 29 of 78 items.
+        """
+        V = B.Verdict
+        results = [
+            V("x.py:1:f", "arm64", "codegen-refused",
+              "'A' has no home: this module declares no module-level name",
+              "build", 0.1, None, 0),
+            V("x.py:1:f", "x86_64", "codegen-refused",
+              "'%' is refused when the left operand is a string", "build", 0.1,
+              None, 0),
+            V("y.py:2:g", "arm64", "codegen-refused", "the same words",
+              "build", 0.1, None, 0),
+            V("y.py:2:g", "x86_64", "codegen-refused", "the same words",
+              "build", 0.1, None, 0),
+            V("z.py:3:h", "arm64", "proof-refused",
+              "model: a ListExpr has no value in the semantic model", "generate",
+              0.1, None, 0),
+            V("z.py:3:h", "x86_64", "proof-emitted", "phase A only: 100 lines",
+              "generate", 0.1, None, 100),
+        ]
+        text = B.report(results, ["arm64", "x86_64"])
+        self.assertIn("DIFFERENT CONSTRUCTS", text)
+        self.assertIn("x.py:1:f", text)
+        self.assertIn("'A' has no home", text)
+        self.assertIn("'%' is refused", text)
+        self.assertNotIn("y.py:2:g\n", text.split("DIFFERENT CONSTRUCTS")[1],
+                         "an item both machines refused identically is not a "
+                         "disagreement")
+        self.assertNotIn("z.py:3:h", text.split("DIFFERENT CONSTRUCTS")[1],
+                         "x86-64 emitting a proof where arm64 refuses is the "
+                         "documented degradation, not a disagreement")
+        # Two `proof-emitted` rows differ in their detail because the two
+        # generators wrote proofs of different LENGTHS, which is a fact about
+        # the generators and not a disagreement about a construct either.
+        both = [V("w.py:4:k", "arm64", "proof-emitted",
+                  "phase A only: 5348 lines of proof written", "generate", 0.1,
+                  None, 5348),
+                V("w.py:4:k", "x86_64", "proof-emitted",
+                  "phase A only: 524 lines of proof written", "generate", 0.1,
+                  None, 524)]
+        self.assertIn("architectures agree on the refusal",
+                      B.report(both, ["arm64", "x86_64"]),
+                      "a proof-length difference is not a construct "
+                      "disagreement and listing it would cry wolf on 46 of 78")
+        # …and with nothing to report it says so rather than printing a header.
+        same = [v for v in results if v.ident == "y.py:2:g"]
+        self.assertIn("architectures agree on the refusal",
+                      B.report(same, ["arm64", "x86_64"]))
+
     def test_a_codegen_refusal_is_not_counted_against_the_proof_layer(self):
         """A string comparison the code generator refuses.
 
