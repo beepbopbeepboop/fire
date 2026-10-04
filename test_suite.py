@@ -3422,6 +3422,42 @@ UNREGISTERED = {
     'test_formal_trait_module.py': _FORMAL_SUITE_REASON,
     'test_formal_type_application.py': _FORMAL_SUITE_REASON,
     'test_formal_x86_64_parity.py': _FORMAL_SUITE_REASON,
+
+    # ── STRINGS AND UNICODE against CPython, both machines ──
+    #
+    # NOT the reason above, and it is cheap: measured 2026-10-04 on
+    # `work/formal26-unicode`, `python3 test_formal_unicode.py` —
+    # **47.3 s wall, 53.8 MB peak** (`/usr/bin/time -l`, 80 cases: 35 answered
+    # against CPython, 10 refusals whose words both machines must share, and 36
+    # in-process rows over `formal/model.py`'s TEXT ENCODING block).  That is
+    # the same cost class as `formal-globals` and `formal-hostmods-census`, so
+    # by the cost rule in CLAUDE.md it WANTS a registration; it is listed rather
+    # than registered because this branch's task says not to register anything,
+    # and nothing else stands in the way.
+    #
+    # Its own `extra` matters more than its row, and the reason is the one this
+    # whole project keeps meeting: the 36 in-process rows read
+    # `formal/model.py`'s decision functions and would otherwise replay a
+    # recorded PASS over an encoding block that had moved, which is the wrong
+    # answer with a green tick.  `FORMAL_BUILD_INPUTS` already covers
+    # `formal/`; the encoding block's own table is what the keys need.
+    'test_formal_unicode.py':
+        'STRINGS AND UNICODE against CPython: builds and RUNS both '
+        'architectures and requires byte equality with what CPython prints for '
+        'the same program, so the expectation is not a constant this tree\'s '
+        'author wrote about a lowering the same author wrote. 35 answered rows '
+        '(the character-count and character-position FOLDS), 10 refusals that '
+        'both machines must word identically and that must name the non-ASCII '
+        'case, and 17 rows for the operations measured RIGHT already '
+        '(`count`/`in`/`startswith`/`endswith`/`lstrip`/`==`/truthiness/`%s` '
+        'with no width) with the reason recorded so they are not re-derived. '
+        '47.3 s and 53.8 MB measured, no Lean, well under the cost rule -- it '
+        'is listed because this branch\'s task says not to register anything. '
+        'Exact next step, in `check` beside `formal-run`: test(\'formal-unicode\', '
+        '[PY, \'test_formal_unicode.py\'], mem=\'tiny\', extra=[\'formal\', '
+        '\'fire_compiler.py\'], desc=\'len/find/index/%%s-width answer in CODE '
+        'POINTS for non-ASCII text on both formal backends, or are refused by '
+        'name\').',
     # NOT the reason above, and deliberately said so: this one is CHEAP.
     # Measured 2026-10-02 on the merge of work/merge-formal4, `python3
     # tools/memslot.py --gb 8 -- python3 test_formal_hostmods_census.py`:
