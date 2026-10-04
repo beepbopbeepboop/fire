@@ -393,7 +393,15 @@ def test_every_declaration_is_seen():
     # `bytes_`-keyed twin of the None one. Eight, read off the call on the
     # MERGED header; bugs4-6 counted from its own base's 543 and wrote `551`,
     # which was right for its tree and wrong here.
-    for header, want in (('fire_runtime.h', 560),
+    #
+    # 560 -> 561 (2026-10-02, `bugs4-8`): `mojo_sprintf_ptr` — the
+    # `<function f at 0x...>` spelling `print(f)` needs, because a function
+    # value is a `void *` and `TypeLattice.printf_fmt` has no format for a
+    # pointer, so `print(f)` used to `sprintf` one with `%d` (undefined
+    # behaviour; a decimal address on this target). One name: the codegen half
+    # is a `print` dispatch arm, which adds no runtime entry point. bugs4-8
+    # counted from its own base's 543 and wrote `544`.
+    for header, want in (('fire_runtime.h', 561),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

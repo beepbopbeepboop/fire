@@ -7698,6 +7698,66 @@ main()
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_print_of_a_function_value_is_not_a_decimal_address():
+        """`print(f)` on a function object is a `str()` spelling, and it used
+        to be undefined behaviour.
+
+        A function VALUE is a `void *` — the pre-declared `_funcptr_<csym>`
+        static, because GIMPLE forbids `&func_name` as an rvalue. Nothing
+        downstream of that knew it was anything but a pointer, so `print`
+        reached its generic `sprintf(fmt, val)` arm and
+        `TypeLattice.printf_fmt('void *')` answered `%d`, because it has no
+        format for a pointer and its default is the integer one. Formatting a
+        64-bit pointer with `%d` is undefined behaviour; on this target it
+        prints the low half in decimal, which is where `print(step)` -> a bare
+        number like `74387272` came from.
+
+        The ADDRESS was never the wrong answer — CPython prints
+        `<function step at 0x...>` — so the `%d` was the whole bug, and it is
+        independent of the decorator-application defect this fixture is
+        reduced from (see
+        bugs/COMPILE_FAIL_decorator_application_dropped.md, whose defect 2
+        names it as separable). The fixture keeps the decorator because that
+        is the reduction the doc measured, and because a decorated `def` is
+        the ordinary way a program ends up holding a function value.
+
+        The address is asserted by SHAPE and not by value: it differs per
+        build, per process and per platform, which is why CPython cannot be
+        compared for equality here and the comparison is against the same
+        regex on both sides."""
+        global _PASS, _FAIL
+        name = "print_of_a_function_value_is_not_a_decimal_address"
+        src = '''\
+def deco(f):
+    return 99
+
+@deco
+def step(x):
+    return x + 1
+
+print(step)
+step(7)
+'''
+        got = _compiled_stdout(src, 'single-TU')
+        if isinstance(got, tuple):
+            print(f"FAIL  {name}: gcc -fgimple failed:\n{got[1][:800]}")
+            _FAIL += 1
+            return
+        m = re.fullmatch(r'<function step at 0x[0-9a-f]+>\n', got or '')
+        if not m:
+            print(f"FAIL  {name}: compiled stdout {got!r} is not "
+                  f"'<function step at 0x...>'")
+            _FAIL += 1
+            return
+        # And the decimal-address failure mode specifically: a bare integer is
+        # what the `%d` produced, so assert it is NOT that.
+        if re.fullmatch(r'[0-9]+\n', got or ''):
+            print(f"FAIL  {name}: still formatting the pointer as a decimal")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not():
         """`next(<user-defined iterator struct>)` is a real call, and the
         `for` loop over the same object is a NAMED refusal.
@@ -10544,6 +10604,7 @@ print(run('x/y.txt'))
     test_ctor_of_a_container_reaches_the_comprehension()
     test_a_returned_heterogeneous_list_keeps_its_slot_kinds()
     test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not()
+    test_print_of_a_function_value_is_not_a_decimal_address()
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

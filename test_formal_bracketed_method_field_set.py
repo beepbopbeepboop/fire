@@ -1119,7 +1119,7 @@ def run_cpython(source, tmpdir):
     """The oracle: the same program under CPython, whose stdout the formal
     image has to match.
 
-    Not `mojo run` and not this repository's own interpreter: a differential
+    Not `fire.py run` and not this repository's own interpreter: a differential
     case is worth something because the two answers come from two independent
     implementations of the language, and `myinterpreter.py` shares the AST, so a
     mistake in the AST cannot be caught by comparing against it.

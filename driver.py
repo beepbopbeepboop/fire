@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""driver.py — `mojo build`/`run`, thin by design (MODULE_CACHE_DESIGN.md).
+"""driver.py — `fire build`/`run`, thin by design (MODULE_CACHE_DESIGN.md).
 
 `import` does the work: as the codegen resolves each import it builds the module's
 dylib (CAS), wires its `__mojo_reflect` ABI, and *records the dylib on the link
@@ -233,7 +233,8 @@ def compile_program(input_file, src, output=None, run=True,
             objects.append(cas.get_or_build(_key, '.o', _mk)[0])
 
     # Optional runtime units (build_config's registry -- see
-    # bugs/CODEGEN_optional_runtime_units_not_linked.md). runtime/ holds six C
+    # build_config.py's own header, where the bug is described). runtime/
+    # holds six C
     # units and only fire_runtime.c was in a build path, while the headers of
     # the other four are `#include`d into EVERY generated TU (module_gen.py's
     # preamble) and all their signatures sit in gimple_codegen._KNOWN_SIGS --
@@ -312,7 +313,7 @@ def _expand_dylib_modules(input_files):
     Since `bsd.build()` already treats every module explicitly PASSED to it
     as unconditionally exporting its own full top-level API (that's exactly
     how the real 664-file stdlib dylib works — no module in that list is
-    "unused"), the fix is to make `mojo dylib` walk each input file's own
+    "unused"), the fix is to make `fire dylib` walk each input file's own
     `from X import ...` statements (any form, not just `*` — a normal named
     import of a name nothing else calls has the identical problem) and add
     every LOCAL (non-stdlib) module it names to the build list too, so their
@@ -374,7 +375,7 @@ def compile_dylib(input_files, output=None, jobs=1, opt_flag=None):
     no separate mojo runtime dylib to also manage.
 
     `input_files`: a single path or a list of paths — every module's own
-    exported symbols land in the same output dylib (mirrors `mojo dylib
+    exported symbols land in the same output dylib (mirrors `fire dylib
     a.mojo b.mojo -o combined.dylib` bundling multiple library modules
     together, the same way `build_stdlib_dylib.py`'s own CLI already
     accepts multiple module args). Each input file's own `from X import ...`
@@ -386,7 +387,7 @@ def compile_dylib(input_files, output=None, jobs=1, opt_flag=None):
 
     `opt_flag` defaults to '-O2': unlike the internal stdlib dylib (compiled
     once, at -O0, optimized for build time and CAS cache-friendliness — see
-    build_stdlib_dylib.build()'s own docstring), a `mojo dylib` artifact is
+    build_stdlib_dylib.build()'s own docstring), a `fire dylib` artifact is
     meant to be linked into a real program and actually run — fire.py's CLI
     passes through an explicit -O0/-O1/-O3/-Os/-Oz/-Og if the caller gave
     one (via the same `_extract_codegen_flags` every other subcommand uses),

@@ -133,7 +133,7 @@ ledger's arithmetic already enforces.
 
 Disabled tests
 --------------
-A test can be REGISTERED AND NOT RUN. `test('x', ..., disabled='bugs/Y.md')` is
+A test can be REGISTERED AND NOT RUN. `test('x', ..., disabled='bugs/<doc>.md')` is
 in `--list`, in its buckets, in the plan and in the tally, and it spawns
 nothing: no process, no memory ceiling, no reservation, no wall time, no peak.
 It reports as its own status, `DISABLED`, with the doc, and does not fail the
@@ -493,7 +493,7 @@ MEASURED_PEAK_GB = {
 
     # The eleven `expect=`-marked tests that were registered and in NO BUCKET,
     # so no run ever executed them and no `expect=` anti-rot could fire on any
-    # of them (bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md). Same
+    # of them (that bug's doc, deleted with its fix). Same
     # instrument and the same day as the rows above: one at a time under
     # `tools/memslot.py --gb 8`, `procrun.tree_rss` polled every 50 ms, because
     # all eleven are under what memcap's own 0.1 GB report resolves.
@@ -515,7 +515,7 @@ MEASURED_PEAK_GB = {
     'x86-containers':          (0.06, 'measured'),   # 47.6 s, 60 cases x 2 backends
     'gimple-async-runner':     (0.04, 'measured'),   # 0.6 s, 38 cases
     # …and the three that were registered, ungated, and NOT expect-marked —
-    # the wider census in bugs/TEST_registered_tests_in_no_bucket_never_run.md.
+    # the wider census; that doc is deleted with its fix.
     # All three measured GREEN before being given a bucket, which is the only
     # reason they are cheap to gate: a registration nobody runs cannot be
     # known to pass.
@@ -1305,7 +1305,35 @@ test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
 # 1.1 s and 0.04 GB, which is what the everyday bucket is for.
 test('cli-usage-text', [PY, 'test_cli_usage_text.py'], cache=True, mem='tiny',
      extra=['test_cli_usage_text.py', 'fire.py', 'fire_main.py', 'fire_compiler.py'],
+     extraglob=['**/*.py'],
      desc='the tool prints the name it was invoked as, in usage, -v and every error')
+# `extraglob=['**/*.py']` is the same hole `suite-self-test` documents, one
+# subject over: `test_no_stale_command_name_in_prose` WALKS every `.py` file in
+# the tree (it ratchets `mojo <command>` out of the prose, and its doc was
+# deleted with the sweep that emptied it), so its subject is a SET that no
+# entry in `extra` can name. Keyed on the four files above, adding the old
+# command name to `module_loader.py` would move no key, the recorded PASS would
+# be replayed, and the check written to catch exactly that would not run. A
+# cached job is a promise that its inputs are its subject.
+
+# The other ratchet, and the one with the larger corpus. CLAUDE.md deletes a bug
+# doc when its bug is fixed, and every citation of that doc is left pointing at
+# nothing: 480 of them, across 156 files, at last measurement. A `check()` over
+# the corpus cannot land while it is that size — it would be red on arrival and
+# in every branch that did not cause it — so this is the one shape that can:
+# `--ratchet` fails only when a file GAINS a citation, against per-file ceilings
+# in `tools/dangling_refs_baseline.py`. It is green today, and the campaign is
+# 480 one-line prose edits that each of them now makes easier to bank.
+#
+# The key covers `**/*.md` and `**/*.py` because the walk's subject is every
+# `.md` and `.py` in the tree — `fire_compiler.py` alone is 24 of the citations,
+# and a key that cannot see a change there serves the last green run. Same
+# promise `suite-self-test` makes with `**/test_*.py`.
+test('doc-refs', [PY, 'tools/dangling_doc_refs.py', '--ratchet'], cache=True,
+     extra=['tools/dangling_doc_refs.py', 'tools/dangling_refs_baseline.py',
+            'checked_run.py'],
+     extraglob=['**/*.md', '**/*.py'],
+     desc='no file cites a deleted bug doc more than it used to')
 # `nonlocal` on both execution paths. Its own test because the feature spans
 # the parser (a new statement node), the interpreter (scope resolution) and
 # the closure-capture pass (by-reference capture), and a regression in any one
@@ -1556,8 +1584,7 @@ test('preflight', [PY, '-c',
 # in `test_suite.py`, so the two cannot drift about what a test file is.
 #
 # That is the whole of the bug this doc used to point at
-# (`bugs/UNTESTED_estate_check_is_red_and_outside_the_gate.md`, closed and
-# DELETED with the fix) in one mechanism: the check existed, and the cache in
+# (that bug's doc, closed and DELETED with the fix) in one mechanism: the check existed, and the cache in
 # front of it was a hole exactly the shape of the thing the check looks for.
 test('suite-self-test', [PY, 'test_suite.py'], cache=True,
      extra=['test_suite.py', 'tools/suite.py', 'tools/procrun.py',
@@ -2323,8 +2350,8 @@ test('formal-toplevel', [PY, 'test_formal_toplevel.py'], mem='tiny',
 # ── the formal backend's other three unregistered files, same shape ─────────
 # Registered here rather than beside the eight above because they were not part
 # of that count: they arrived on master AFTER it, each with a merged branch
-# behind it, and `bugs/UNTESTED_estate_check_is_red_and_outside_the_gate.md`
-# (closed and deleted with this) is the hole they walked through one file at a
+# behind it, and the unregistered-test-files hole (closed and deleted with
+# this) is the one they walked through one file at a
 # time. `mem='tiny'` for the same reason the eight have it, and `proofs` rather
 # than `check` because none of the three is in the everyday inner loop.
 
@@ -2378,9 +2405,8 @@ test('formal-os-backing', [PY, 'test_formal_os_backing.py'], mem='tiny',
 # `suite-self-test`'s estate check is red with exactly these ten, and every one
 # of them arrived in the batch that the integrator merged in one commit
 # (`0aaf9806`, `git log --merges master..HEAD`) with a merged branch behind it
-# and no registration. That is the same hole
-# `bugs/UNTESTED_estate_check_is_red_and_outside_the_gate.md` was opened for and
-# closed for, walked through again one file at a time — which is what the check
+# and no registration. That is the same unregistered-test-files hole,
+# opened and closed, walked through again one file at a time — which is what the check
 # is FOR, and this paragraph is the receipt: it fired on the batch rather than
 # on the next reader.
 #
@@ -2802,7 +2828,7 @@ BUCKETS = {
               # so it already runs in almost every gate — as a dependency
               # rather than as a counted test, which is why an estate failure
               # is a FAIL on a test the tally does not mention.
-              'preflight', 'suite-self-test',
+'preflight', 'suite-self-test', 'doc-refs',
               # The four cheapest of the eight formal host-module suites, and
               # the only formal BUILD-AND-RUN coverage in the gate. 4-7 s and
               # 0.04-0.06 GB each, against the same two backends the proofs
@@ -2822,8 +2848,8 @@ BUCKETS = {
               # real GPU and a full codegen run, which is not a thing a
               # registration can be assumed to be true of" — the honest answer
               # to which was to run it, not to keep it out of a bucket
-              # (bugs/TEST_registered_tests_in_no_bucket_never_run.md, deleted
-              # with the fix). Measured GREEN on 2026-10-01 (arm64, `--no-cache`,
+              # (that census's doc, deleted with the fix). Measured GREEN on
+              # 2026-10-01 (arm64, `--no-cache`,
               # 107 s, 0.37 GB peak), which is what makes putting it here safe
               # rather than a guess: `llm-reference` is its CPU reference and
               # these two disagreeing is the signal. The cost, stated where it
@@ -3004,8 +3030,8 @@ BUCKETS = {
     # `expect=`-marked suites that were registered and in no bucket, so the
     # gate walked past ~69 declared failing cases and reported nothing, and no
     # `expect=` anti-rot could fire on any of them
-    # (bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md, deleted with
-    # the fix). They are the largest block of unrun failures in the tree, and
+    # (that doc, deleted with the fix). They are the largest block of unrun
+    # failures in the tree, and
     # every one of them is a real compile-and-run of Mojo source. All ten are
     # here rather than in `check` for one reason stated once: they are
     # `expect=`-marked, and an `expect` in `check` puts a permanently-

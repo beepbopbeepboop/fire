@@ -10853,6 +10853,30 @@ char *mojo_str_from_double(double v) {
     return out;
 }
 
+/* `printf`-a pointer through a caller-supplied format, for the ONE place a
+ * pointer needs `%p` spelled in a literal the code generator owns:
+ * `print(f)` on a function object, where CPython prints
+ * `<function f at 0x...>`. `sprintf` itself is not a GIMPLE-callable
+ * builtin here (the generated code reaches it through the non-GIMPLE
+ * prelude), and inlining the format+argument pair at the call site would
+ * put a `%p` conversion in generated code -- which is what
+ * `TypeLattice.printf_fmt` exists to avoid, since it cannot know a value is
+ * a pointer from its C type alone. So the format stays a literal and the
+ * conversion happens here.
+ *
+ * strdup'd because the result is handed straight to `mojo_print`, which
+ * treats its argument as its own; the pooled `_int_str_block` families are
+ * for transient numeric formatting and are released by their own callers. */
+char *mojo_sprintf_ptr(const char *fmt, void *p) {
+    char tmp[128];
+    int n = snprintf(tmp, sizeof tmp, fmt, p);
+    if (n < 0) n = 0;
+    if ((size_t)n >= sizeof tmp) n = (int)sizeof tmp - 1;
+    char *out = (char *)malloc((size_t)n + 1);
+    memcpy(out, tmp, (size_t)n + 1);
+    return out;
+}
+
 char *mojo_str_from_int(int64_t v) {
     /* A string that is KEPT (concatenated into a result, stored as a dict
      * value, bound to a local) gets an exact-size allocation. The pooled

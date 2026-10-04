@@ -677,6 +677,199 @@ def _infer_return_maybe_kinds(gen, body, params=None,
             gen.var_types = _saved_vt
 
 
+# The container kinds a `return` slot can hold, as one name. A function whose
+# `return`s can produce MORE THAN ONE of these has no single container type,
+# so its return slot is the box — see `_infer_multi_kind_return` beside it,
+# and `DESIGN.html` R2 for why a cast between two of them is a reinterpreting
+# of one struct's memory rather than a conversion. A tuple, not a set,
+# because this file is in the subset the self-hosted backend lowers and that
+# subset has no set literals (see `_ast_child_nodes`' own note).
+_CONTAINER_RETURN_KINDS = ('MojoDict *', 'MojoList *', 'MojoSet *')
+
+
+def _infer_multi_kind_return(gen, body, params=None,
+                             callee_set=None,
+                             callee_kinds=None,
+                             sibling_lifted=None) -> tuple:
+    """The set of container KINDS this body can hand back through a `return`.
+
+    The whole-program half of the multi-kind box, and the same question
+    `_infer_return_maybe_kinds` asks about per-slot kinds: whether a value
+    travelling out through a `return` still needs the runtime registries to
+    be read. Where that one is about a value that CARRIES kinds, this is
+    about the container KIND itself — `MojoList *` / `MojoDict *` /
+    `MojoSet *` are three distinct runtime structs with three distinct slot
+    layouts (DESIGN.html R2), so a caller's "`MojoList *`" is a guess, and a
+    wrong guess reads another container's memory rather than converting it.
+
+    The answer is the SET rather than a boolean because a function with a
+    single container return is NOT this shape, and the caller needs to be
+    able to tell those two apart from the other side: a callee that returns
+    one kind is passed that kind to its own callers (`callee_kinds` below),
+    which is how a function whose two branches return calls to DIFFERENT
+    single-kind functions is itself found.
+
+    Four ways the disagreement arrives, each needing its own test:
+
+      * two `return`s of container literals of different kinds
+        (`if k: return [1, 2]` / `return {"a": 1}`);
+      * two `return`s of CALLS to functions of different kinds
+        (`if k: return as_list(x)` / `return as_dict(x)`) — the literal test
+        cannot see it and the callee test below cannot either, because
+        neither callee is multi-kind; only comparing the two answers can;
+      * one `return` of a LOCAL bound to two kinds (`box = [1, 2]` in one
+        arm, `box = {"a": 1}` in another, `return box`) — the disagreement
+        is in the local's BINDINGS and never appears in the returns at all,
+        which is why the local-shaped case needs the body walk below;
+      * one `return` FORWARDING another function's box
+        (`def outer(k): return inner(k)`) — a callee's answer, one hop
+        away, and what `callee_set` carries.
+
+    `callee_set` is the set of names already known to hand back MORE THAN ONE
+    kind, exactly the role it plays in `_infer_return_maybe_kinds`, and for
+    the same reason: a value that travels out through two frames must be
+    found rather than missed. `callee_kinds` is the weaker fact — each known
+    callee's own single kind, if it has one — which is what lets shape 2 be
+    answered without a fixpoint, since a callee's own kind is known from its
+    own body in the same round.
+
+    `sibling_lifted` maps a BARE nested-`def` name to the `Outer_inner`
+    spelling the rest of this mechanism uses, for the call shapes where the
+    bare name is what the AST carries and the lifted name is what the answer
+    is filed under: a closure calling a SIBLING closure, and an enclosing
+    free function calling its own closure. Both are the same spelling
+    mismatch `_infer_return_maybe_kinds`' `_valued` handles by matching both
+    forms; it is a parameter rather than a lookup inside this function
+    because the map is a property of the CLOSURE SET and threading it
+    through the fixpoint's callee arguments would have made the memo key
+    depend on the enclosing name.
+
+    Runs BEFORE any body is lowered, which is the whole point. The lowering
+    handler (`emit_stmts._gen_stmt_ReturnStmt`) records the same verdict into
+    `gen._multi_kind_return_funcs`, and that recording is only visible to a
+    caller emitted LATER: a caller declared BEFORE its callee saw an empty
+    set, applied the `int64_t`-returning branch's default of "`_actual_types`
+    says `MojoList *`", and printed `[0]` where CPython prints `{'a': 1}` —
+    silent, exit 0, and order-dependent, which is the worst property a
+    typing rule can have. The lowering recording is kept, because it is the
+    only place the local-shaped verdict can be read against the ACTUAL
+    lowered value kinds; this pre-pass is what makes it order-independent.
+
+    `params` is threaded for the same reason as in `_infer_return_maybe_kinds`
+    — a `return` of a parameter or of an expression over one is the most
+    ordinary shape there is, and without them every parameter reads as the
+    erased `int64_t`.
+    """
+    _ck = callee_set if callee_set is not None else set()
+    _cg = callee_kinds if callee_kinds is not None else {}
+    _sl = sibling_lifted if sibling_lifted is not None else {}
+    _saved_vt = gen.var_types if gen is not None else None
+    _saved_cur = getattr(gen, 'current_func_name', '')
+    _saved_body = getattr(gen, '_cur_func_body', None)
+    kinds: set = set()
+    if gen is not None:
+        gen.var_types = dict(_as_dict(_saved_vt))
+        for _p in (params or []):
+            try:
+                _pname, _ptype = _p[0], _p[1]
+            except (TypeError, IndexError):
+                continue
+            if isinstance(_ptype, str) and _ptype:
+                gen.var_types[_as_str(_pname)] = gimple_ctypes._mojo_type(_ptype)
+    _saved_cur = getattr(gen, 'current_func_name', '')
+    _saved_body = getattr(gen, '_cur_func_body', None)
+    kinds: set = set()
+    try:
+        # The local-shaped case: a name this function binds to more than one
+        # container kind has no container type of its own, so returning it
+        # hands back the box whatever its `ReturnStmt` says. Asked of
+        # `gen._cur_func_body` for the same reason `mixed_container_locals`
+        # asks it there — it is the body of the function being emitted, and
+        # it is what makes the answer about THIS function rather than
+        # whichever one happened to be lowered last.
+        gen._cur_func_body = body
+        gen._mixed_container_locals = None
+        # Imported HERE rather than at module scope: `gimple_codegen.py`
+        # imports this module before it imports `emit_infra`, so a top-level
+        # `import ... emit_infra` in this file is a circular import that
+        # raises `cannot import name '_FC_SEP' from partially initialized
+        # module 'mojo.middle.infra_infer'` on the `import
+        # mojo.backend_gimple.module_gen` path. Same reason
+        # `emit_infra`'s own sibling imports are function-local.
+        import mojo.backend_gimple.emit_infra as _ein
+        _mixed = _ein.mixed_container_locals(gen)
+        gen._cur_func_body = _saved_body
+        for nd in _walk_ast(body):
+            if not isinstance(nd, gimple_ctypes.ReturnStmt):
+                continue
+            _v = getattr(nd, 'value', None)
+            if _v is None:
+                continue
+            if isinstance(_v, gimple_ctypes.CallExpr):
+                # The forwarding case first: it is the cheapest test and the
+                # one that makes the fixpoint move, since a chain of
+                # forwarders is only settled once its last real producer is
+                # known. The bare name is checked against `_sl` first
+                # because that is the spelling the AST has and `_ck` alone
+                # would miss a closure.
+                _f = _v.func
+                if isinstance(_f, gimple_ctypes.IdentExpr):
+                    _fn = _as_str(_f.name)
+                    if _fn in _ck or _sl.get(_fn) in _ck:
+                        # Kind genuinely unknown: every container kind is a
+                        # possible answer, which is what stops a caller's
+                        # single-kind guess from being trusted.
+                        return tuple(_CONTAINER_RETURN_KINDS)
+                    _k = _cg.get(_fn)
+                    if _k:
+                        kinds.add(_k)
+                    continue
+                if (isinstance(_f, gimple_ctypes.MemberExpr)
+                        and isinstance(_f.obj, gimple_ctypes.IdentExpr)):
+                    _mn = f'{_as_str(_f.obj.name)}_{_as_str(_f.member)}'
+                    if _mn in _ck:
+                        return tuple(_CONTAINER_RETURN_KINDS)
+                    _k = _cg.get(_mn)
+                    if _k:
+                        kinds.add(_k)
+                continue
+            if isinstance(_v, gimple_ctypes.IdentExpr):
+                _vn = _as_str(_v.name)
+                if _vn in _mixed:
+                    return tuple(_CONTAINER_RETURN_KINDS)
+                if _vn in _ck:
+                    return tuple(_CONTAINER_RETURN_KINDS)
+                # A local's container kind is NOT resolvable from this body
+                # walk — the pre-pass has none of the local-type tables the
+                # lowering path builds as it goes — so a returned local
+                # contributes NOTHING unless it is known mixed, rather than
+                # contributing a guess. Guessing here would file a single-kind
+                # answer for `return names` and a caller would trust it, which
+                # is the same wrong answer this whole mechanism exists to
+                # prevent; contributing nothing only costs this function the
+                # single-kind credit that lets ITS caller compare kinds.
+                #
+                # The lowering-time recording (`emit_stmts.
+                # _gen_stmt_ReturnStmt`) reads the real lowered type and is
+                # kept for exactly this, so the two together lose nothing and
+                # the pre-pass is only responsible for what it can answer
+                # without a lowering pass.
+                continue
+            # A container literal handed straight back. `_quick_type` is the
+            # same estimator the lowering path uses for the value, so the two
+            # cannot disagree about what this arm holds.
+            _qt = gen._quick_type(_v) if gen is not None else None
+            if _qt in _CONTAINER_RETURN_KINDS:
+                kinds.add(_qt)
+        return tuple(sorted(kinds))
+    finally:
+        if gen is not None:
+            gen.var_types = _saved_vt
+            gen.current_func_name = _saved_cur
+            gen._cur_func_body = _saved_body
+            gen._mixed_container_locals = None
+
+
 def _homogeneous_tuple_ann_elem(self, _ret_ann):
     """`tuple[T, T, ...]` / `Tuple[...]` return annotation whose slots are all
     the SAME resolved C type → that element ctype (else None). Used to seed
@@ -9148,6 +9341,120 @@ def gen_module_impl(self, stmts):
             del self.selfhost_param_ctype
         except AttributeError:
             pass
+
+    # `self._multi_kind_return_funcs` names the functions whose return slot
+    # is the box because they hand back a container whose kind a caller cannot
+    # know statically. Recorded during lowering by
+    # `emit_stmts._gen_stmt_ReturnStmt` — which is right about the ACTUAL
+    # lowered value kinds, and is the only place the local-shaped verdict can
+    # be read — but a recording made while lowering function B is invisible
+    # to a caller A emitted BEFORE B, and A's `_lower_named_call` then
+    # applied the `int64_t`-returning branch's default of "`_actual_types`
+    # says `MojoList *`": another container's memory, read out of bounds,
+    # printing `[0]` where CPython prints `{'a': 1}`. Silent, exit 0, and
+    # dependent on which of two functions is spelled first — which is why
+    # this is a whole-program PRE-PASS rather than a comment on the lowering
+    # recording, which is kept.
+    #
+    # HERE and not beside `_mk_round` above, because `self._all_closures` is
+    # empty until `discover_closures` has run, and a closure whose return is
+    # a box is one of the three shapes `_infer_multi_kind_return` tests: put
+    # it earlier and the closure arm walked nothing, which is measured, and
+    # the caller still printed the box's own decimal address.
+    #
+    # A fixpoint for the same reason `_mk_round` above is one: the third shape
+    # (`def outer(k): return inner(k)`) makes a function's answer depend on
+    # its callee's, so a chain of forwarders is only settled once its last
+    # real producer is known. Bounded at four rounds for the same reason:
+    # `self._multi_kind_return_funcs` only ever GROWS, so the bound is a
+    # depth limit rather than a convergence guess.
+    def _mkrf_round(callee_set):
+        _mkrf_cache: dict = {}
+        # Each KNOWN function's single container return kind, filled as this
+        # round walks. A function that returns containers of more than one
+        # kind is recorded in `self._multi_kind_return_funcs` instead and
+        # deliberately gets NO entry here: "more than one" and "one" must
+        # stay distinguishable, because that is the whole difference between
+        # a caller's single-kind answer and the box.
+        _cg: dict = {}
+        for _nm in _mkrf_callee_kinds:
+            _cg[_nm] = _mkrf_callee_kinds[_nm]
+
+        def _mkrf(name, body, params=None, sibling_lifted=None):
+            # Memo key includes the sibling map's ID: the answer depends on
+            # it, and two functions can share a body node identity while
+            # their enclosing scopes give different maps.
+            _k = (id(body), id(sibling_lifted))
+            _kinds = _mkrf_cache.get(_k)
+            if _kinds is None:
+                _kinds = _mkrf_cache[_k] = _infer_multi_kind_return(
+                    self, body, params, callee_set, _cg, sibling_lifted)
+            if len(_kinds) > 1:
+                self._multi_kind_return_funcs[name] = True
+            elif len(_kinds) == 1:
+                _cg[name] = _kinds[0]
+            return _kinds
+
+        # Every closure's BARE nested-def name paired with the `Outer_inner`
+        # name it is filed under, passed to EVERY function in this round. Two
+        # call shapes need it and neither can see the other spelling: a
+        # closure calling a sibling (`return f()` inside `outer`, both bare),
+        # and an enclosing free function calling its own closure
+        # (`return consume(flag)` inside `outer`). Both spell the callee bare
+        # in the AST while the answer is filed under the lifted name, so
+        # without the pair neither matched and the caller printed the box's
+        # own decimal address.
+        #
+        # Deliberately ONE map for all outers rather than one per enclosing
+        # scope: a bare name shared by two different outers is already a
+        # bare-name collision that `_func_csym` documents as outside this
+        # mechanism's reach, and resolving it here could only over-approximate
+        # -- which is safe in this direction because `_repr_boxed_container`
+        # falls back to `mojo_str_from_int` for a value that turns out not to
+        # be a container, so a false positive costs a boxed read and a false
+        # negative costs a wrong answer.
+        #
+        # Index by outer name and NOT unpack through a nested `.items()`, for
+        # the reason the identical walk at the closure forward-declaration
+        # site gives: the SECOND unpack target boxes on the self-hosted path
+        # and its attributes then read off a mis-typed handle.
+        _mkrf_bare: dict = {}
+        for _outer_name in self._all_closures:
+            _inner_map = self._all_closures[_outer_name]
+            for _bare in _inner_map:
+                _mkrf_bare[_bare] = _inner_map[_bare].lifted_name
+        for s in all_functions:
+            if not _is_foreign_main(s) and isinstance(s, FunctionDef):
+                _mkrf(s.name, s.body, s.params, _mkrf_bare)
+        for s in all_structs_for_methods:
+            if isinstance(s, StructDef):
+                _sk = _as_structdef_node(s)
+                for _m in _sk.methods:
+                    _mkrf(f"{_sk.name}_{_m.name}", _m.body, _m.params,
+                          _mkrf_bare)
+        # Lifted CLOSURES under the same `Outer_inner` spelling the lowering
+        # records them and the call sites read (`_lower_closure_call`'s
+        # `lifted`, and `emit_stmts`' `gen.current_func_name`) -- a different
+        # spelling from the free-function `s.name` above, which is why this is
+        # its own arm and not the same call.
+        for _outer_name in self._all_closures:
+            _inner_map = self._all_closures[_outer_name]
+            for _ci in _inner_map.values():
+                _mkrf(_ci.lifted_name, _ci.inner_def.body,
+                      _ci.inner_def.params, _mkrf_bare)
+        _mkrf_callee_kinds.clear()
+        for _nm in _cg:
+            _mkrf_callee_kinds[_nm] = _cg[_nm]
+
+    # Round 1 reads an empty set and an empty kind map -- it is the round that
+    # finds the producers; rounds 2+ read what the earlier rounds filed.
+    _mkrf_callee_kinds: dict = {}
+    _mkrf_round(set())
+    for _mkrf_iter in range(3):
+        _mkrf_before = len(self._multi_kind_return_funcs)
+        _mkrf_round(set(self._multi_kind_return_funcs))
+        if len(self._multi_kind_return_funcs) == _mkrf_before:
+            break
 
     for _p3b_s in all_functions:
         if isinstance(_p3b_s, FunctionDef) and _p3b_s.return_type is None:

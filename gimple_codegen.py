@@ -2441,6 +2441,19 @@ class GimpleGen:
         self._emitted_dispatch_typedefs: set[str] = set()  # Track typedef names already emitted
         self._emitted_dispatch_tables: set[str] = set()    # Track table names already emitted
         self._funcptr_builtins_needed: set[str] = set()    # builtin C names needing static void* vars
+        # Value name -> the source-level function name, for the values that
+        # are FUNCTION OBJECTS rather than any other `void *`. A function
+        # value has no `char *` spelling, so every consumer of one used to
+        # fall through to `TypeLattice.printf_fmt`'s `%d` default and format
+        # the POINTER as a decimal — undefined behaviour on a 64-bit target,
+        # and the source of the decimal address `print(f)` used to emit where
+        # CPython prints `<function f at 0x...>`. Recorded by the two
+        # `_lower_IdentExpr` function-value branches and read only by `print`,
+        # which is the one consumer whose output is a `str()` spelling.
+        # Value-keyed like `_boxed_vals` and `_boxed_container_vals` beside
+        # it, and reset per function for the same reason they are: these are
+        # SSA temp names and temps do not outlive their function.
+        self._func_value_names: dict[str, str] = {}
         # Name -> C source for small non-GIMPLE accessor functions that a
         # __GIMPLE body needs to call. Two operations are legal in ordinary C
         # but are NOT valid GIMPLE primary expressions:
@@ -2717,7 +2730,7 @@ class GimpleGen:
         # IdentExpr` to route a bare read of the imported name through a
         # real cross-translation-unit call into the DEFINING module's own
         # accessor function, instead of the "unknown identifier" zero/NULL
-        # placeholder a per-module-independent `mojo dylib` compile
+        # placeholder a per-module-independent `fire dylib` compile
         # previously fell through to for this shape.
         self._imported_global_accessors: dict = {}
         # Concrete imported structs used as parameter types here: their StructDefs

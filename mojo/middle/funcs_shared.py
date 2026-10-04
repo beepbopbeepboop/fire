@@ -956,7 +956,7 @@ def _parsed_import(gen, module: str):
             # degrade to "not found" the same as any other unresolvable
             # module). They are not harmless, and the first place they
             # turned into a genuine crash was `_register_link_imports`
-            # (link mode's `mojo build`): failing to resolve `.base` meant
+            # (link mode's `fire build`): failing to resolve `.base` meant
             # `triple` never got registered at all, `f = triple` fell
             # through to the generic "undeclared identifier" placeholder
             # (a literal `0`), and calling through that placeholder
@@ -1011,7 +1011,7 @@ def _local_sibling_module_exports(gen, module: str):
     which case the caller falls back to the existing weak-stub/
     unresolved-alias behavior.
 
-    `mojo dylib` (driver.compile_dylib -> build_stdlib_dylib.build)
+    `fire dylib` (driver.compile_dylib -> build_stdlib_dylib.build)
     compiles each module SEPARATELY — one private GimpleGen instance per
     file, do_imports=False, link_imports=False — so neither
     _register_link_imports (link_imports-only) nor the do_imports

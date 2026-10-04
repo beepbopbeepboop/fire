@@ -17,7 +17,8 @@ def find_gcc() -> str:
         conflicting types for 'build_config_find_gcc'; have 'char *(void)'
 
     and `make mojoc` fails.  Measured, and it is what stopped this registry the
-    first time round (bugs/CODEGEN_optional_runtime_units_not_linked.md).  The
+    first time round -- that bug's doc is deleted with its fix, and what it
+    was filed against is the error above.  The
     annotation makes the scanner agree with the body.  Anything added to this
     module needs one for the same reason.
     """
@@ -59,7 +60,7 @@ from module_loader import STDLIB_PATH, TEST_PATH
 # all, so a program calling any of them compiled clean and died at link with
 # `Undefined symbols ... _mojo_sqlite3_open`.  This table is that missing
 # build rule, and `referenced_optional_runtime_units` is the probe the link
-# pipelines use.  See bugs/CODEGEN_optional_runtime_units_not_linked.md.
+# pipelines use.  (That doc is deleted with its fix.)
 #
 # fire_python.c is deliberately NOT here.  Its entire surface is behind
 # `#if USE_PYTHON 0` stubs, so linking it would trade a loud link error for a

@@ -1649,6 +1649,11 @@ void mojo_setattr(void *obj, char *attr, int64_t val);
 void mojo_delattr(void *obj, char *attr);
 char *mojo_str_cat(char *a, char *b);
 char *mojo_str_from_int(int64_t v);
+/* `printf` a pointer through a caller-owned format — the `<function f at
+ * 0x...>` spelling `print(f)` needs, because a function value is a `void *`
+ * and `TypeLattice.printf_fmt` has no format for one. See
+ * mojo_sprintf_ptr's own comment in fire_runtime.c. */
+char *mojo_sprintf_ptr(const char *fmt, void *p);
 /* str(float) for a float dict key — see mojo_str_from_double's own comment in
  * fire_runtime.c for why the key has to be materialized as text at all. */
 char *mojo_str_from_double(double v);

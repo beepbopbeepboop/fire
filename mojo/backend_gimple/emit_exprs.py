@@ -441,7 +441,7 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     # via a real cross-translation-unit call into the DEFINING module's
     # own synthesized accessor, instead of falling through to the
     # "unknown identifier" zero/NULL placeholder further below (which
-    # a per-module-independent `mojo dylib` compile previously always
+    # a per-module-independent `fire dylib` compile previously always
     # hit for this shape, silently reading zero or a stale/garbage
     # pointer). `name not in self.var_types`: an ordinary same-named
     # LOCAL variable always shadows the imported global, exactly like
@@ -489,6 +489,10 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             gen._funcptr_builtins_needed.add(c_name)
             static_name = f'_funcptr_{c_name}'
             t = gen._new_val('void *', f'{static_name}')
+            # The BARE name, not `c_name`: CPython's repr is the name the
+            # source wrote (`<function step at 0x...>`), and `c_name` is the
+            # mangled C symbol (`step_9f63a2`) or a module qualifier.
+            gen._func_value_names[t] = name
             return 'void *', t
         else:
             # For non-identifier expressions like ((int)0), emit directly
@@ -556,6 +560,11 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # `_bound_method_ret_types`, and a lambda records
         # `_callable_ret_types` in `_lower_LambdaExpr`.
         gen._callable_ret_types[t] = gen.func_return_types.get(name, 'int64_t')
+        # And the BARE name, so `print(f)` can render `<function f at 0x...>`
+        # where CPython does. `c_name` cannot answer that: it is the mangled C
+        # symbol (`step_9f63a2`) or a module qualifier (`mod_a_thing`), while
+        # CPython's repr is the name the source wrote.
+        gen._func_value_names[t] = name
         return 'void *', t
     # Module-level global variable (persistent type known across functions).
     # Also catches `global x` declarations inside functions (_func_declared_globals).
@@ -1594,7 +1603,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # case used to fall through to a dummy "class attr" stub that
             # always emitted the literal 0 regardless of the alias's real
             # value — e.g. `IfStmt.KIND` printed 0 under --jit/--dump
-            # instead of its declared value under `mojo run`.
+            # instead of its declared value under `fire run`.
             aliases = gen._struct_comptime_aliases.get(module_name)
             if aliases and node.member in aliases:
                 return gen.lower_expr(aliases[node.member])

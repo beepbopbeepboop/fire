@@ -1456,7 +1456,7 @@ def test_every_job_is_reserved_before_it_starts():
     `make` are one process each and `make` starts the workload as a
     grandchild, while a fanout is one SPEC that expands into N jobs — the case
     that actually collapsed the machine, because `build_cmd` used to skip the
-    whole wrapper for a `Fanout` and eighteen `./mojo --dump` runs at 30-43 GB
+    whole wrapper for a `Fanout` and eighteen `./mojoc --dump-full` runs at 30-43 GB
     each went out with no ceiling and no reservation.
 
     The jobs report the ledger's own number from inside themselves, so what is

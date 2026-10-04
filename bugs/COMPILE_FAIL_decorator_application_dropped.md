@@ -5,6 +5,150 @@ Found 2026-09-27 while closing
 opposite kind of problem, and the reason that file needed a separate
 correctness caveat even after it started building.
 
+## Status (2026-10-02, later — defect 2 is FIXED; the feature is not, and the remaining call-site defect is unchanged)
+
+Defect 2 below — the `sprintf("%d", (void *)ptr)` — is closed, and the entry
+that called it "independent of the feature and fixable on its own" was right.
+
+```
+                       before        after
+CPython 3.14.7      <function step at 0x7f...>   (unchanged)
+fire.py run         99                             (unchanged — interpreter half)
+compiled + run      74387272         <function step at 0x10469cf48>
+```
+
+A function VALUE lowers to a `void *` (the pre-declared `_funcptr_<csym>`
+static, because GIMPLE forbids `&func_name` as an rvalue). Nothing downstream
+knew it was a function rather than a pointer, so `print` reached its generic
+`sprintf(fmt, val)` arm and `TypeLattice.printf_fmt('void *')` answered `%d`
+— it has no format for a pointer and its default is the integer one.
+Formatting a 64-bit pointer with `%d` is undefined behaviour; on this target
+it prints the low half in decimal. **The address was never the wrong answer**
+(CPython prints one too), so the `%d` was the whole bug and the NAME was the
+missing half.
+
+Fixed at both sites that spell one: both `_lower_IdentExpr` function-value
+branches now record the value name in `gen._func_value_names`, and `print`'s
+dispatch has an arm for it. The format string stays a literal and the `%p`
+conversion happens in a new runtime helper `mojo_sprintf_ptr` — because
+`printf_fmt` cannot know a value is a pointer from its C type alone, which is
+exactly why it was the wrong place for this. Regression:
+`test_gimple.py::print_of_a_function_value_is_not_a_decimal_address`, which
+compares the SHAPE rather than the value (the address differs per build and
+per platform) and fails with the fix reverted.
+
+**Deliberately NOT changed**, so the next reader does not read it as an
+oversight: `printf_fmt`'s `%d` default for every OTHER unlisted pointer type.
+Widening it to `%p` would alter the printed form of every struct pointer in
+the tree on no evidence that any of them wants it. That is a separate
+measurement and a separate decision.
+
+### What is still open, unchanged
+
+**Defect 3 — the actual bug — is untouched.** The call site still resolves the
+bare name to the C symbol, so `step(7)` still answers `1` where CPython
+raises `TypeError: 'int' object is not callable`. It needs the module-level
+rebinding data model the 2026-10-02 entry lays out in three steps, and its
+own measurement stands: refusing decorated `def`s wholesale is ruled out
+because the stdlib decorates 426 definitions with names outside the
+compile-time-only set, 11 of them on free functions. Defect 1 (the decorator's
+own parameter typed `int64_t`, because the decoration is its only call site
+and is never emitted) is likewise unchanged and is a prerequisite of step 2.
+
+**And the three-step plan in the entry below is still the plan**, with defect 2
+now off the list: (1) the module-level rebinding data model, (2) the
+decorator's parameter typed from that new call site, (3) a refusal for the
+one unrepresentable case. Step 3 remains cheap and safe to land on its own
+precisely because that case is silently wrong today.
+
+**One thing the plan does not yet account for**, found while fixing defect 2:
+`print` now formats a function value correctly, but the CLOSURE form does not
+compile at all on this tree, so the arm is not exercised for the
+`MojoBoundMethod *` spelling a capturing closure lowers to. Filed as
+`bugs/CODEGEN_a_closure_value_in_a_local_does_not_declare.md`.
+
+## Status (2026-10-02 — re-measured: the compiled half is STILL wrong, and the two candidate fixes are now MEASURED, one of them ruled out)
+
+Same verdict, from the doc's own minimal repro compiled through
+`compile_to_gimple` + `gcc -fgimple` and run (`deco(f) -> 99`, `@deco def
+step`, `print(step)` / `print(step(7))`). The doc's 2026-09-30 entry read the
+compiled address as `35260224` and this tree prints `7901000`; the value is an
+address and moves per build, which is itself the answer to whether it is a
+correct one:
+
+| | result |
+|---|---|
+| CPython 3.14.7 | `99`, then `TypeError: 'int' object is not callable` |
+| `fire.py run` | `99`, then the same `TypeError` — the interpreter half is fixed |
+| compiled + run | `7901000`, then `1` — the UNDECORATED result |
+
+**The generated C, because it splits this into three separable defects and two
+of them are prerequisites rather than the feature:**
+
+```c
+int64_t deco_9f63a2 (int64_t f) { ... return 99LL; }   /* (1) */
+static void * _funcptr_step_9f63a2 = (void *)step_9f63a2;
+  _t1 = _funcptr_step_9f63a2;
+  sprintf (_t2, "%d", _t1);                              /* (2) */
+  _t6 = step_9f63a2 (_t7);                               /* (3) */
+```
+
+1. **The decorator's own parameter is `int64_t`.** The decoration is the only
+   call site of `deco` and it is never emitted, so the call-site observation
+   that types an unannotated parameter has nothing to observe and the default
+   stands. This is the ordering hazard the 2026-10-01 entry below already names
+   (`CODEGEN_string_arg_type_lost_across_forwarding_hop.md`): the free-function
+   scalar-observation pass runs BEFORE any body's parameters are refined, so
+   whatever makes the decoration visible has to survive that.
+2. **`sprintf("%d", (void *)ptr)`.** `print(step)` reads the function value as
+   a `void *` and formats it with `%d`, which on a 64-bit target is undefined
+   behaviour and is where the decimal address comes from. CPython prints
+   `<function step at 0x…>`, so the *address* is not the wrong answer — the
+   `%d` is. This one is independent of the feature and fixable on its own.
+3. **The call site resolves the bare name to the C symbol**, so `step(7)` runs
+   the undecorated body. This is the bug.
+
+**The obvious cheap fix — refuse a decorated `def` at compile time — is
+RULED OUT by measurement, and this is the useful part of this entry.** The
+interpreter's compile-time-only decorator name set has ten names; the stdlib
+(249 `.mojo` modules under `build_stdlib_dylib.STDLIB_PATH`) decorates
+**426** definitions with names outside it — `doc_hidden`, `stable`,
+`deprecated`, `explicit_destroy`, `unavailable`, `implicit`,
+`__nonmaterializable`, `__allow_legacy_custom_self_type`,
+`__unsafe_nested_origins_read_only`, `lldb_formatter_wrapping_type`,
+`__annotation` — and 11 of those are on FREE functions. Refusing them would drop real
+stdlib modules, which is exactly the `stdlib-dylib` `skip` regression
+CLAUDE.md makes a judgement call about. So the fix has to be *application*, and
+it has to decide per NAME whether a decorator is a declaration annotation (which
+the stdlib shows is most of them, and which the Mojo front end strips) or a real
+callable — a bigger question than "apply the decorator".
+
+**So the first commit of the real fix is three things, in this order:**
+
+1. a module-level REBINDING data model: `@deco def step` becomes a module-scope
+   variable `step` holding the decoration's value, the same
+   `_lower_IdentExpr` closure-value branch (`emit_exprs.py:764`) that already
+   handles `return add` for a LOCAL, lifted to module scope;
+2. the decorator's parameter typed from that new call site (defect 1 above),
+   which is a chicken-and-egg with the observation pass and is the delicate
+   part;
+3. a compile-time refusal for the one case that cannot be represented —
+   `step` bound to a decoration whose inferred return type is a scalar, then
+   CALLED (`step(7)` where CPython raises `TypeError`). Cheap, and safe to land
+   on its own precisely because it is a case that is silently wrong today; it
+   is NOT the same as refusing decorated `def`s, which is what the 426 above
+   rules out.
+
+Defect 2 is independent of all three and can be landed whenever.
+
+Not attempted this session, and not attempted by any of the three commits above:
+the codegen half is feature-sized, `mojo/backend_gimple/*` is mid-merge under
+other claims, and a mistake in it is a silent wrong value in the compiler's own
+compiled path. The interpreter half remains fixed; the compiled half remains
+the work.
+
+Doc kept open.
+
 ## Status (2026-10-01 — re-measured, the compiled half is STILL exactly as the entry below describes; not attempted)
 
 Confirmed unchanged on this tree, from the doc's own minimal repro
