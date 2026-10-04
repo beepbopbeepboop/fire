@@ -592,6 +592,135 @@ EMITTED = [
      "    return stop()\n"),
 ]
 
+# ── THE SHARED WALK, asked directly ────────────────────────────────────────
+#
+# `a_dialect_operation_lowers_inside_a_keyword_argument` above pins the walk
+# through a BUILD, and that is not redundant with what follows: a build is the
+# only way the defect it guards was ever findable, because an emptied
+# `kwargs` list took the build down in `model.struct_construction_plan` with
+# `not enough values to unpack (expected 2, got 0)` — a crash, not a wrong
+# answer, so it announced itself. What a build cannot do is pin the RULE, and
+# the rule is the whole content of the walk: a child-rewriting walk has three
+# container shapes and only two of them can return a replacement.
+#
+#     a single-attribute child   replaced through `setattr`
+#     a TUPLE                    not assignable, so one with a replaced element
+#                                comes back as a LIST and the slot it was read
+#                                from takes it
+#     a LIST                     assignable, so it is mutated IN PLACE and the
+#                                caller has nothing to do
+#
+# The shape that was written in the two dialect walks kept a `changed` flag set
+# from `repl is not None` for a LIST as readily as for a TUPLE, and returned the
+# accumulator — which is empty for a list, because the list branch never appends
+# to it. A list that is itself an ELEMENT of another list then had its parent's
+# `node[i] = repl` fire on that empty list, and the elements were gone.
+#
+# Asked of `formal/build.py::_rewrite_dialect_in` rather than of a program
+# because that is where the rule lives now: it is the one walk for both dialect
+# passes, and its docstring states the rule. The last check below goes through a
+# real PARSE, because `CallExpr.kwargs` being a list of `(name, value)` PAIRS is
+# what makes a list nested inside a list reachable in this tree at all — the
+# one shape the dialect walks can hit and the reason the defect was latent in
+# `pop.select` and reachable in the arithmetic pass.
+WALK_SOURCE = ("def f(a, b):\n"
+               "    return g(a, tag=0, v=[h(a, b), b])\n")
+
+
+def walk_rule_is_honoured() -> tuple:
+    """The walk's container rule, on a real parse and on the bare containers.
+
+    Returns `(ok, detail)`, the shape `census_is_complete` returns, so a failure
+    here prints one row rather than a traceback out of a driver.  An EXCEPTION
+    from inside is a failure and not a crash of this file: reverse-applied, the
+    walk as the two dialect passes wrote it empties the list literal in check 4,
+    and the `pairs[1][1].elements[0]` below is then an IndexError — which is the
+    measured symptom (`not enough values to unpack (expected 2, got 0)`, one
+    level further on) arriving through the check instead of through a build.  A
+    pin that raises is a pin that fails for the wrong reason.
+    """
+    try:
+        return _walk_rule()
+    except Exception as e:                          # noqa: BLE001
+        return False, (f"{type(e).__name__}: {e} — the walk emptied a container "
+                       f"it was supposed to mutate in place, so the tree it was "
+                       f"handed no longer has the shape it started with")
+
+
+def _walk_rule() -> tuple:
+    sys.path.insert(0, HERE)
+    import fire_compiler as F
+    import formal.build as B
+    import formal.model as M
+    bad = []
+
+    # 1. A list inside a list — the shape that emptied. Plain Python containers,
+    #    because the walk is generic over list/tuple/dict and this is the shape
+    #    itself rather than any particular node that holds one.
+    a, b, c, d = object(), object(), object(), object()
+    inner = [a, b]
+    outer = [inner, c, d]
+    count = [0]
+    got = B._rewrite_dialect_in(outer, lambda n: "R" if n is b else None, count)
+    if got is not None:
+        bad.append(f"a list returned {got!r}; a list is mutated in place and "
+                   f"never returned, or its parent's element assignment "
+                   f"overwrites it")
+    if outer[0] is not inner or inner != [a, "R"] or outer[1:] != [c, d]:
+        bad.append(f"the nested list came back as {outer!r}; a replacement in "
+                   f"it must land in place with every other element intact")
+    if count[0] != 1:
+        bad.append(f"one replacement counted {count[0]} times, not once")
+
+    # 2. A tuple: replaced element comes back as a LIST, untouched tuple comes
+    #    back as None — and the None is load-bearing, because it is what keeps
+    #    the common case from rewriting the list the tuple lives in.
+    got = B._rewrite_dialect_in((a, b), lambda n: "R" if n is b else None, [0])
+    if got != [a, "R"]:
+        bad.append(f"a tuple with a replaced element came back as {got!r}; it "
+                   f"is not assignable, so it comes back as a LIST")
+    got = B._rewrite_dialect_in((a, b), lambda n: None, [0])
+    if got is not None:
+        bad.append(f"an untouched tuple came back as {got!r}; returning a copy "
+                   f"of it would rewrite every list it lives in")
+
+    # 3. `_KEEP_WHOLE`: left whole AND not descended into, which is what a
+    #    dialect template this build cannot answer needs.
+    stmts = F.Parser(F.py_tokenize(WALK_SOURCE)).parse_module()
+    call = stmts[0].body[0].value
+    inner_call = [n for n in M.iter_nodes(call)
+                  if isinstance(n, F.CallExpr)
+                  and getattr(n.func, "name", None) == "h"][0]
+    kept = B._rewrite_dialect_in(
+        call, lambda n: B._KEEP_WHOLE if n is inner_call else None, [0])
+    if kept is not None or inner_call not in list(M.iter_nodes(call)):
+        bad.append("a `_KEEP_WHOLE` node was descended into or returned")
+
+    # 4. The reachable shape, on a real parse: a replacement inside a keyword
+    #    argument, whose value is a list literal — a list nested inside the list
+    #    of `kwargs` pairs. `call.kwargs` must still be two pairs afterwards,
+    #    which is exactly what `not enough values to unpack` was about.
+    count = [0]
+    got = B._rewrite_dialect_in(call, lambda n: "R" if n is inner_call else
+                                None, count)
+    pairs = call.kwargs
+    if got is not None:
+        bad.append(f"the outer call came back as {got!r}; it was not replaced, "
+                   f"so the walk answers None and the caller's slot keeps it")
+    if count[0] != 1 or len(pairs) != 2 or any(len(p) != 2 for p in pairs):
+        bad.append(f"kwargs came back as {pairs!r} after {count[0]} "
+                   f"replacement(s); two pairs of two is what the frame-"
+                   f"argument reader unpacks")
+    if pairs[1][1].elements[0] != "R" or len(pairs[1][1].elements) != 2:
+        bad.append(f"the list literal in the keyword argument came back as "
+                   f"{pairs[1][1].elements!r}; its other element is gone")
+
+    if bad:
+        return False, ("; ".join(bad))
+    return True, ("a list is mutated in place and never returned, a tuple with "
+                  "a replacement comes back as a list, and the keyword-"
+                  "argument list survives a replacement in it")
+
 
 def run_refused(name, source, needle, absent, tmpdir, verbose):
     src = os.path.join(tmpdir, name + ".mojo")
@@ -870,6 +999,15 @@ def main() -> int:
             print(f"        {detail}")
         else:
             print(f"  FAIL  the_classification_covers_the_whole_corpus: {detail}")
+
+        # The walk's container rule, asked of the walk. Also not a property of
+        # any one build, and it COUNTS in the tally rather than printing beside
+        # it: the census above can be SKIPPED for want of a corpus, this cannot
+        # be skipped at all, and a check whose failure did not reach the exit
+        # code would be a check nobody runs.
+        ok, detail = walk_rule_is_honoured()
+        checks.append(("the_shared_walk_mutates_a_list_in_place_and_never_"
+                       "returns_one", ok, detail))
 
     passed = failed = 0
     for name, ok, detail in checks:
