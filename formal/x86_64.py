@@ -845,11 +845,22 @@ def encode_call_r64(reg: Reg) -> bytes:
     address), and routing it through a GOT slot would mean inventing a memory
     location the loader has to fill for a symbol this image already has.
 
-    Two bytes for RAX..RDI and three for R8..R15 (the REX.B prefix), which is
-    why the REX is emitted first rather than folded into the ModRM byte.
+    **No REX.W**, and that is not an omission: in 64-bit mode `call r/m64`'s
+    default operand size is already 64 bits, so `as` emits a bare `ff d2` for
+    `*%rax`. Putting `w` in the REX byte is not merely redundant — it is a
+    different instruction's prefix: measured against clang,
+    `_rex(w=1, b=1)` produced `49 ff d3` where `41 ff d3` is `callq *%r11`, and
+    `49` sets the R (ModRM.reg) extension bit for an operand that has no
+    extension. The extension this operand needs is B, because the register is
+    in the r/m field.
+
+    Two bytes for RAX..RDI and three for R8..R15, both pinned byte-for-byte in
+    `test_x86_64_encoders.py` — which is how the REX mistake above was found,
+    and which is the reason a new encoder gets a case in the same commit as the
+    lowering that calls it.
     """
     if reg.value >= 8:
-        return bytes([_rex(w=1, b=1), 0xFF, _modrm(3, 2, reg.value & 7)])
+        return bytes([_rex(b=1), 0xFF, _modrm(3, 2, reg.value & 7)])
     return bytes([0xFF, _modrm(3, 2, reg.value & 7)])
 
 

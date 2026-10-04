@@ -150,6 +150,14 @@ CASES = [
     ("callq .+0x1239", lambda: X.encode_call_rel32(0x1234)),
     ("callq *0x1234(%rip)", lambda: X.encode_call_rm64(0x1234)),
     ("jmpq *0x1234(%rip)", lambda: X.encode_jmp_rm64(0x1234)),
+    # The REGISTER form of the same opcode — `FF /2` with mod=11 — and the one
+    # a call through a function VALUE is, because the value is already a word
+    # (`formal/x86_64_codegen.py`'s `_emit_call`, the twin of arm64's `BLR`).
+    # Both register widths, since the REX.B prefix is what makes the second one
+    # three bytes rather than two and a case that only had the low register
+    # would not see it.
+    ("callq *%rax", lambda: X.encode_call_r64(R["RAX"])),
+    ("callq *%r11", lambda: X.encode_call_r64(R["R11"])),
 ]
 
 
