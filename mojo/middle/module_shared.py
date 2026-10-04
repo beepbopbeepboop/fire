@@ -153,8 +153,11 @@ def _selfhost_parsed_modules(sd: str) -> list:
     extra-field scans). A file that fails to parse is cached as a FAILURE and
     contributes an empty statement list.
     """
-    from gimple_codegen import _selfhost_impl_py_files
-    _files = sorted(_selfhost_impl_py_files(sd)
+    # Qualified, for the reason `funcs_shared._selfhost_extracted_fn_index`
+    # states in full: a function-level `from gimple_codegen import name` binds
+    # an int64_t on the self-hosted path, and this name is a FUNCTION value.
+    import gimple_codegen
+    _files = sorted(gimple_codegen._selfhost_impl_py_files(sd)
                     + [os.path.join(sd, n) for n in
                        ('fire_compiler.py', 'module_loader.py', 'monomorphize.py',
                         'ast_rewriter.py', 'imports.py', 'generated_dispatch.py',

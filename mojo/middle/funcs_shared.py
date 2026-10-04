@@ -1651,9 +1651,19 @@ def _selfhost_extracted_fn_index() -> dict:
     _validated = _SELFHOST_FNIDX_VALIDATED.get('idx')
     if _validated is not None:
         return _validated
-    from gimple_codegen import _SELFHOST_DIR, _selfhost_impl_py_files
-    _sd = _SELFHOST_DIR
-    _files = sorted(_selfhost_impl_py_files(_sd))
+    # `gimple_codegen._SELFHOST_DIR`, not `from gimple_codegen import
+    # _SELFHOST_DIR`: on the SELF-HOSTED path a function-level `from X import
+    # name` binds an int64_t and the assignment to a `char *` is a hard gcc
+    # error (`assignment to 'char *' from 'int64_t' makes pointer from integer
+    # without a cast`), while the qualified read is the shape
+    # `_seed_selfhost_module_globals` already types for this call site — see
+    # `methods_shared._is_selfhost_source_file`, whose own comment names the
+    # boxed-int64_t hazard and guards it with `if not _base`. Measured: the
+    # function-level spelling fails `test_selfhost.py`'s whole-closure compile
+    # at `mojo/middle/funcs_shared.py:1654`, which is the only error in it.
+    import gimple_codegen
+    _sd = gimple_codegen._SELFHOST_DIR
+    _files = sorted(gimple_codegen._selfhost_impl_py_files(_sd))
     _key = 'fnidx#' + _selfhost_files_key(_files)
     _hit = _SELFHOST_EXTRA_FIELD_CACHE.get(_key)
     if _hit is not None:
