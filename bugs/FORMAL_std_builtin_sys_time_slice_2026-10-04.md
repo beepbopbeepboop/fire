@@ -193,7 +193,7 @@ to bind — the receiver's type is written down and the CALLEE is what is
 missing.
 ```
 
-Byte-identical on arm64 and x86-64 (measured, §1). Five refusal sentences now
+Byte-identical on arm64 and x86-64 (measured, §1). Six refusal sentences now
 exist for "the type is known and it still is not a receiver" — a CONSTRUCTION
 (`Box()` names its struct, but a one-word struct's frame is never built at an
 argument position; measured: lifting it reads address 0 and answers 0), a
@@ -201,6 +201,18 @@ multi-field struct, a method the struct does not declare, an overloaded one, a
 derived one, and a type this unit does not declare. Before this commit the
 CONSTRUCTION case and this one got the SAME sentence, and for both of them it
 was false.
+
+**One cross-reference for whoever owns the construction case.**
+`bugs/FORMAL_method_call_on_a_construction_is_not_rewritten.md` (`formal13-4`)
+quotes the OLD sentence for `Box().get()` in its Status, twice, and says the
+advice it gives is the shape that crashes. All three halves of that still hold —
+the construct is still refused, for the same reason, by the same rule — but the
+message it quotes no longer exists, and the new one names the REPRESENTATION
+(`… because a CONSTRUCTION is not a value this path can pass as a receiver: the
+struct is named, and a one-word struct's fields live in a frame that the
+construction in an argument position never builds`) instead of asking the reader
+for a type the source already states. That doc is not this round's to edit; this
+paragraph is the note its next reader needs.
 
 Verified: `python3 test_formal_run.py` **PASS=956 FAIL=0** and
 `python3 test_formal_receiver_position.py` **PASS=37 FAIL=0**, each on BOTH
