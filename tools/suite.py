@@ -1398,10 +1398,28 @@ test('nonlocal', [PY, 'test_nonlocal.py'], cache=True,
 # not `'mem'`: they invoke gcc directly on a snippet-sized translation unit,
 # the same `small`-workload shape `test_gimple.py` is, and a cap on a job
 # that never loads the whole closure buys nothing (see the MEMCLASS note).
+# Marked `expect=` rather than `disabled=`, and the reason is what the two
+# markers are FOR: this job's answer is not known, only four of its 376 cases
+# are, and it is the only instrument in the tree that compiles a real Mojo
+# program and EXECUTES it. `disabled=` would stop all 376 for the sake of the
+# 4, trading 372 passing rows of signal for a tidier screen — which is the
+# coverage hole the marker exists to prevent, not create. Cost is not the
+# blocker `disabled=` is for either: 0.2 GB and 270 s is not a machine-sized
+# reservation being spent on a known answer.
+#
+# The 4 are not bugs in the branch that added them — each passes there — but
+# interactions the merge of ten branches exposed, so the marker is a count-
+# CHECKED claim: a 5th failure, or a fix that leaves 3, is a FAILURE rather
+# than silently absorbed, and a run where all 4 are fixed reports "marked
+# expect= … but it PASSES". Each has its reproduction and next step in
+# bugs/MERGE_bugs4_gimplerunner_four_remaining.md.
 test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True,
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
+     expect='4 of 376: compile-and-execute rows the merge of ten branches '
+            'left red — none fails on the branch that added it; see '
+            'bugs/MERGE_bugs4_gimplerunner_four_remaining.md',
      desc='compile-and-execute: plain programs, structs, closures, stdlib calls')
 test('gimplegenerators', [PY, 'test_gimple_generator_runner.py'], cache=True,
      extra=GIMPLE_SOURCES + ['test_gimple_generator_runner.py',
