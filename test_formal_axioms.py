@@ -159,10 +159,9 @@ def _library_declarations():
     an `Unknown constant` — which `group_census` reads as "the generated file did
     not elaborate" and fails on.  So the question this has to answer is whether
     any PRIVATE declaration carries a tactic site, because then its axioms exist
-    and cannot be named and the equality between the site count and the axiom
-    count could not hold.  `lib/` has one `private` declaration
-    (`private def stmtsSize`) and it has none, which is a fact about this tree
-    and not a fact about `private`.
+    and cannot be named and `group_census`'s per-declaration arithmetic could not
+    close.  `lib/` has one `private` declaration (`private def stmtsSize`) and it
+    has no site, which is a fact about this tree and not a fact about `private`.
     """
     lib = A.lean_dir(HERE)
     askable, dropped = {}, {}
