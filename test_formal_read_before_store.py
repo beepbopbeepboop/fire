@@ -177,17 +177,53 @@ CASES = [
     ("for_target_stays_bound",
      "    for i in range(3):\n        if i > 1:\n            break\n"
      "    return i\n", "ok"),
-    # THE RECORDED DIVERGENCE, and the reason a `for` target is a definition
-    # in the loop's header rather than something the body stores: CPython
-    # leaves it unbound for an EMPTY iterable, so this raises there and the
-    # analysis does not. Refusing the legal shape to catch the illegal one
-    # would break `for i in range(0, 100): if i > 3: break` then `return i`
-    # (returns 4) — `test_formal_run.py`'s `for_range_break`, and the shape
-    # real code is written in. A register the caller left something in is a
-    # better answer for a program that ran than a refusal is.
-    ("empty_range_target_stays_bound",
-     "    for i in range(0):\n        pass\n    return i\n", "ok",
-     "CPython leaves a `for` target unbound for an empty iterable"),
+    # THE DIVERGENCE, NARROWED. The target is a definition in the loop's header
+    # (see `_cfg_block_defs`), because CPython leaves it unbound for an EMPTY
+    # iterable and refusing the legal shape to catch the illegal one would
+    # break `for i in range(0, 100): if i > 3: break` then `return i` (returns
+    # 4) — `test_formal_run.py`'s `for_range_break`, and the shape real code is
+    # written in. What changed on 2026-10-03 is that the divergence is only
+    # about a range whose emptiness this build cannot decide: both emitters lay
+    # the loop out with the head test on `range()`'s own start and the store
+    # into the counter AFTER it, which is the only layout that gives CPython's
+    # answer for `i = 7; for i in range(0, 0)`, so a target that provably never
+    # gets bound is no longer defined by anything and a read of it has to be
+    # the refusal it has always been on every other path. `_for_target_never_binds`
+    # is the reader, and it is asked only about a range of literals, so
+    # `range(3)` and `range(0, n)` keep the answer below.
+    ("empty_literal_range_target_is_not_a_definition",
+     "    for i in range(0):\n        pass\n    return i\n", "refuse"),
+    ("empty_two_argument_range_target_is_not_a_definition",
+     "    for i in range(3, 3):\n        pass\n    return i\n", "refuse"),
+    # The step's SIGN decides emptiness too, and getting that wrong would leave
+    # a definition for a loop that never runs — `range(0, 5, -1)` is the
+    # spelling `_range_is_nonempty` already answers for the zero-iteration edge.
+    ("descending_empty_range_target_is_not_a_definition",
+     "    for i in range(0, 5, -1):\n        pass\n    return i\n", "refuse"),
+    # …and the read in a CALL rather than a `return`, because that is the
+    # position the rest of this file's later rows are about and the fix has to
+    # reach it as well.
+    ("empty_range_target_read_in_a_call_refused",
+     "    for i in range(0, 0):\n        pass\n    sink(i)\n", "refuse"),
+    # THE OTHER HALF, and the reason the rule above is not "a `for` target is
+    # not a definition": a name that already held a value is DEFINITELY stored
+    # before the loop, so it dominates the read whether or not the loop runs —
+    # and CPython agrees, because the loop simply does not assign it. This is
+    # the shape the emitters' `init:` label exists for.
+    ("preassigned_target_survives_an_empty_range",
+     "    i = 7\n    for i in range(0, 0):\n        pass\n    return i\n", "ok"),
+    # THE DIVERGENCE THAT REMAINS, stated as a case so it cannot rot: an
+    # emptiness decided at RUN time (`range(0, n)` with `n <= 0`) still counts
+    # the target as defined, and a read of it then returns whatever the caller
+    # left in the register. CPython raises for `n == 0`. Deciding it needs the
+    # value of `n`, which is what
+    # `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`
+    # is about.
+    ("unknown_bound_keeps_the_target_defined",
+     "    for i in range(0, n):\n        pass\n    return i\n", "ok",
+     "CPython leaves the target unbound when a runtime-empty range is read"),
+    ("nonempty_literal_range_target_is_still_a_definition",
+     "    for i in range(3):\n        pass\n    return i\n", "ok"),
     # The shape the old walk could not see at all: a store in a loop body,
     # read after the loop. `range(n)` may be empty, so the store does not
     # dominate — and CPython raises at n == 0, so this one is not a

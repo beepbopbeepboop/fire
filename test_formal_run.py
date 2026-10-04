@@ -6104,6 +6104,18 @@ BOTH_ARCH_CASES = [
     # that left the word null and a lowering that brought the frame up and
     # initialized it to its defaults both have to agree on the reservation being
     # there, and only one of them survives the fault.
+    #
+    # **AND IT IS A REFUSAL NOW** (2026-10-03, `261543f8`, on master): the read
+    # half joined the write half. `Box()` fills the WORD, not the frame that word
+    # will hold, so `self.inner.v` is a load at address 0 and CPython raises
+    # `AttributeError` here — there is no number to compare against, so the honest
+    # answer is a refusal rather than a zero. This row was left pinning the old
+    # number and was RED on master; it is a `refuse:` row now, and the words are
+    # pinned because the message names `b.inner` where an earlier one named
+    # `b.v`, and the source says `b.inner.v`. The row above it — the same
+    # program WITH `b.inner = Opt()` — still builds and answers 155, which is
+    # what keeps this a refusal about the unbuilt frame rather than about the
+    # construct.
     ("one_word_holder_of_a_frame_read_before_it_is_written",
      "struct Opt:\n"
      "    var v: Int\n"
@@ -6117,7 +6129,8 @@ BOTH_ARCH_CASES = [
      "\n"
      "def main() -> int:\n"
      "    var b = Box()\n"
-     "    return b.get()\n", 0, None),
+     "    return b.get()\n",
+     "refuse:nothing in this function has put a frame there", None),
     # **TWO SITES IN ONE FUNCTION**, which is the half of the fix the row above
     # cannot reach: the frame is reserved in the PROLOGUE, one block per call
     # site, laid out in walk order by `model.struct_constructor_sites`, and the
@@ -6130,6 +6143,15 @@ BOTH_ARCH_CASES = [
     # constructions, `bx.setboth(4, 5)` writes through the FIRST site's frame and
     # `by.setboth(1, 2)` through the second's, and 9 / 3 is what survives only if
     # the two blocks are disjoint. CPython prints the same two numbers.
+    #
+    # …and it is a REFUSAL now, for the same reason as the row above it and by
+    # the same commit: `bx.setboth(4, 5)` is a method call, not
+    # `bx.inner = Opt()`, so nothing ever built the frame either site names. The
+    # disjointness this row was written for is covered where the frames DO get
+    # built — `one_word_holder_of_a_frame_reads_through_its_method` above and the
+    # `b.inner = Opt()` form of it — so what is pinned here is the refusal, and
+    # the words, because a message that named `bx.v` instead of `bx.inner` would
+    # send the reader after a name the source does not have.
     ("two_one_word_constructions_get_two_different_frames",
      "struct Opt:\n"
      "    var v: Int\n"
@@ -6151,7 +6173,8 @@ BOTH_ARCH_CASES = [
      "    var by = Box()\n"
      "    by.setboth(1, 2)\n"
      "    printf(\"%d %d\", bx.get(), by.get())\n"
-     "    return 0\n", 0, "54 21"),
+     "    return 0\n",
+     "refuse:nothing in this function has put a frame there", None),
     # THE TRAP, which is the one assertion about augmented division that has no
     # CPython oracle: `DIV`/`IDIV` by zero is a HARDWARE fault (SIGFPE on this
     # target), and CPython raises ZeroDivisionError, so neither answer is a
@@ -11968,12 +11991,86 @@ WAVE6_TRUTHY_CASES = [
     # rather than taken on trust. The counter after a loop is CPython's LAST
     # BOUND value, which for a step of 2 is not one less than the exit value.
     #
-    # The one case still wrong, and it is a bug doc rather than a row here:
-    # pinning "prints 0" where CPython prints 7 would make the defect the
-    # expectation. `for i in range(0, 0)` over a counter that already held a
-    # value stores `start` before it tests, and CPython's `for` binds the target
-    # only when the iteration produces one —
-    # `bugs/FORMAL_for_range_over_an_empty_range_overwrites_a_preassigned_counter.md`.
+    # The ONE case that was still wrong, and it was a doc rather than a row here
+    # because pinning "prints 0" where CPython prints 7 would have made the
+    # defect the expectation. CPython's `for` binds the target only when the
+    # iteration PRODUCES a value, so a range that yields nothing must leave a
+    # name that already held one alone — and `for i in range(0, 0)` stored
+    # `start` into the counter before testing it, on both architectures. The
+    # emitters' head test now reads `range()`'s own start and the store is
+    # emitted after it (`_emit_loop`, per backend), which is the only layout
+    # that can produce CPython's answer.
+    ("both_arch_empty_for_range_leaves_a_preassigned_counter",
+     "def main(n):\n"
+     "    i = 7\n"
+     "    for i in range(0, 0):\n"
+     "        x = 1\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=7"),
+    # The same rule where the emptiness is a RUN-TIME fact, which is the shape
+    # that matters: `range(0, 0)` could be folded at compile time and `k`
+    # cannot, and a fix that only handled the literal would have looked complete.
+    ("both_arch_runtime_empty_for_range_leaves_a_preassigned_counter",
+     "def main(n):\n"
+     "    k = n\n"
+     "    if k > 3:\n"
+     "        k = 0\n"
+     "    i = 7\n"
+     "    for i in range(0, k):\n"
+     "        x = 1\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=7"),
+    # A DESCENDING empty range, which is a second spelling of the same fact and
+    # the one the parser makes harder: `-1` is `UnaryOp('-', IntLiteral(1))`,
+    # so a reader that only folds `IntLiteral` cannot see that `range(0, 5, -1)`
+    # yields nothing. That is `_range_is_nonempty`'s business in `formal/model.py`
+    # and this row is what says the two agree about the ANSWER.
+    ("both_arch_descending_empty_for_range_leaves_a_preassigned_counter",
+     "def main(n):\n"
+     "    i = 7\n"
+     "    for i in range(0, 5, -1):\n"
+     "        x = 1\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=7"),
+    # The `else` arm is the other reader of the counter after an empty loop,
+    # and it runs on the very path where the loop did not, so it is where a
+    # store-then-test head test is visible a second time.
+    ("both_arch_empty_for_range_else_sees_the_preassigned_counter",
+     "def main(n):\n"
+     "    i = 7\n"
+     "    for i in range(0, 0):\n"
+     "        x = 1\n"
+     "    else:\n"
+     "        printf(\"else i=%d\", i)\n"
+     "    return 0\n", 0, "else i=7"),
+    # …and the counter in a FUNCTION, where it is a spill slot rather than a
+    # register, so the store that moved cannot pass by working on the register
+    # home only.
+    ("both_arch_empty_for_range_over_a_spilled_counter",
+     "def last():\n"
+     "    i = 7\n"
+     "    for i in range(0, 0):\n"
+     "        x = 1\n"
+     "    return i\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"i=%d\", last())\n"
+     "    return 0\n", 0, "i=7"),
+    # THE OTHER HALF, and the reason this is not "store nothing for an empty
+    # range": a name NOTHING else binds is UNBOUND after such a loop, CPython
+    # raises UnboundLocalError for it, and an emitted image has no way to say
+    # so — so the read has to be the refusal the "Read before store" analysis
+    # exists to be, by name, on both architectures. Before the head test moved,
+    # this program printed 0; with the move and no analysis to match it, it
+    # printed the caller's leftover register, which is the failure the refusal
+    # exists to prevent (and differed between the two backends).
+    ("both_arch_read_of_a_counter_an_empty_range_never_bound_is_refused",
+     "def main(n):\n"
+     "    for q in range(0, 0):\n"
+     "        x = 1\n"
+     "    printf(\"q=%d\", q)\n"
+     "    return 0\n",
+     "refuse:'q' is read at line", None),
     ("both_arch_for_range_leaves_the_counter_at_the_last_value_it_bound",
      "def main(n):\n"
      "    for i in range(0, 3):\n"
@@ -12429,7 +12526,20 @@ def run_both_arch_case(name, source, want_exit, want_stdout, tmpdir, verbose):
     `main(n: Int)` signature).  Each constant is stated in the case's comment
     with its arithmetic, which is the property a constant has to have for this
     to be an assertion rather than a transcript of the lowering.
+
+    A `refuse:` row is not that: there is no image to run, so this defers to
+    `run_case`, which already asserts exactly what a refusal row has to assert
+    (both backends, and the same words from each). Delegating rather than
+    growing a second refusal path here is the point — two copies of "did it
+    refuse, with these words" would be two answers to one question, and the
+    group a construct sits in is a reading convenience rather than a claim
+    about what the case checks. Two rows need it: the one-word HOLDER's method
+    reading a nested frame nothing built, which is refused rather than answered
+    (see `one_word_holder_of_a_frame_read_before_it_is_written`).
     """
+    if isinstance(want_exit, str) and want_exit.startswith(
+            ("refuse:", "refuse_either:")):
+        return run_case(name, source, want_exit, want_stdout, tmpdir, verbose)
     src = os.path.join(tmpdir, name + ".mojo")
     with open(src, "w") as f:
         f.write(source)
