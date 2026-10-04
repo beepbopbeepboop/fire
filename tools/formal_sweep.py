@@ -817,6 +817,16 @@ _REFUSAL_FAMILIES = (
     # a broad marker produces silently.
     ("is a struct field declared to hold", "container operation on a scalar slot"),
     ("carries no count at offset 0", "element of a value that is not a container"),
+    # The FRAME half of the same gate — `model.NON_CONTAINER_SLOT_KINDS` grew
+    # FRAME_KIND on 2026-10-04 — and it needs its own marker because the
+    # message's KIND clause is "a FRAME ADDRESS", which the row above does not
+    # match, and because lumping it into "container operation on a scalar slot"
+    # would send a planner looking for a scalar when the slot holds an ADDRESS.
+    # Its own fix (a subscript of a struct is `__getitem__`) is not the scalar
+    # row's, so they are two causes.  Position is load-bearing in the ordinary
+    # way: first match wins, and every message in this family opens with "asks
+    # for a container element", which is deliberately not a marker.
+    ("is a FRAME ADDRESS", "container operation on a frame slot"),
     ("is a value this function bound to an integer",
      "container operation on a non-container"),
     ("is a CONTAINER operation on a", "container operation on a frame address"),

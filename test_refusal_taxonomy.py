@@ -110,6 +110,49 @@ def _string_composition_messages():
 
 _FSTRING_REFUSAL, _CONCAT_REFUSAL = _string_composition_messages()
 
+
+def _frame_slot_message():
+    """The FRAME-SLOT container refusal, built not copied.
+
+    The third built sample, and the only one of the three that is not a
+    COMPOSITION message.  It has to be built for the same reason the pair above
+    is: the sample's whole job is to prove that a marker matches the sentence
+    the backend emits, and `scalar_container_base_evidence` / `…_refusal` are
+    the two functions that decide and word this one — a hand-copy of a 900-
+    character message is exactly the rot this file exists to catch, and this
+    message is the longest in the family.
+
+    The node is built rather than parsed because the refusal reads the base as a
+    `MemberExpr` and nothing else: `spelled()` renders `w.d` from it, and the
+    frame arm fires only for a FIELD.  A parsed `w.d[0]` would need a `Wrap` in
+    scope to parse cleanly and would buy nothing the hand-built node does not
+    already exercise.
+    """
+    import fire_compiler as FC
+    base = FC.MemberExpr(obj=FC.IdentExpr(name="w"), member="d")
+    evidence = FM.scalar_container_base_evidence(base, FM.FRAME_KIND)
+    if evidence is None:
+        raise AssertionError(
+            "formal/model.py no longer refuses a subscript over a field whose "
+            "kind is FRAME_KIND (NON_CONTAINER_SLOT_KINDS is "
+            f"{FM.NON_CONTAINER_SLOT_KINDS!r}). A sample of a message the "
+            "backend cannot produce is a sample that can only rot — see this "
+            "file's docstring, point 3 — so it goes with the refusal rather "
+            "than outliving it.")
+    return FM.scalar_container_base_refusal(
+        "a subscript", "w.d", evidence, "main", FM.FRAME_KIND)
+
+
+_FRAME_SLOT_REFUSAL = _frame_slot_message()
+
+# The planner's spelling of the same cause, and it is spelled here independently
+# of `formal_sweep_causes.py::CAUSES` for the reason `STRING_COMPOSITION_CAUSE`
+# is: the two tables are keyed on different things, so the pair of samples below
+# is what proves the two spellings still agree.  A label that drifted would make
+# `check_cause_table` report a cause that matches nothing while reading as one
+# that blocks nothing.
+FRAME_SLOT_CAUSE = "container operation on a frame slot"
+
 # (family, a real message, truncated only at a clause boundary)
 SAMPLES = [
     # The frame-address families. All one design defect, five costumes; the
@@ -153,6 +196,15 @@ SAMPLES = [
     ("container operation on a non-container",
      "a subscript of `a` asks for a container element, and `a` is a value this "
      "function bound to an integer"),
+    # The FRAME SLOT, which joined this family on 2026-10-04 when
+    # `model.NON_CONTAINER_SLOT_KINDS` grew FRAME_KIND.  Its own row because its
+    # KIND clause is "a FRAME ADDRESS" — which the scalar row's marker does not
+    # match, so without this one it would land in `other refusal` — and because
+    # its fix ("a subscript of a struct is `__getitem__`") is not the scalar
+    # row's.  BUILT, not copied: `_frame_slot_message` calls the two functions
+    # that decide and word this refusal, so a reword cannot leave the sample
+    # behind (see the docstring's point 3 and the pair above).
+    ("container operation on a frame slot", _FRAME_SLOT_REFUSAL),
     ("container operation on a frame address",
      "xs is a CONTAINER operation on a Opt FRAME ADDRESS, and a frame is not a "
      "container"),
@@ -800,6 +852,13 @@ CAUSE_SAMPLES = [
     # spellings still agree.
     (STRING_COMPOSITION_CAUSE, _FSTRING_REFUSAL),
     (STRING_COMPOSITION_CAUSE, _CONCAT_REFUSAL),
+    # The PLANNER's row for the frame slot, from the same built message as its
+    # family row above. `scalar_container_base_evidence` decides both halves and
+    # `scalar_container_base_refusal` words both, so a build change that reached
+    # one without the other would show up here as a message the family claims
+    # and the cause does not — which is the disagreement a reader of either
+    # table has to be able to see.
+    (FRAME_SLOT_CAUSE, _FRAME_SLOT_REFUSAL),
 ]
 
 # The causes no arm64 message above exercises. Each one is named here with WHY,

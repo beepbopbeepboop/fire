@@ -6568,12 +6568,45 @@ def non_container_element_refusal(op: str, spelled: str, function: str,
 #: cannot read, and refusing it would refuse every `h.xs[i]` on a field whose
 #: declaration is in another module.
 #:
-#: `FRAME_KIND` is absent too, and for a different reason — a field whose
-#: declared type is a framed struct of this module holds an ADDRESS, and reading
-#: that as a container is a wrong ANSWER rather than a fault, which is its own
-#: defect and not this one:
-#: `bugs/FORMAL_a_subscript_of_a_field_declared_a_framed_struct_is_a_wrong_answer.md`.
-NON_CONTAINER_SLOT_KINDS = (INT_KIND, TYPE_KIND)
+#: **`FRAME_KIND` is IN this set, and it was deliberately absent until
+#: 2026-10-04.**  The exclusion was recorded as "a field whose declared type is
+#: a framed struct of this module holds an ADDRESS, and reading that as a
+#: container is a wrong ANSWER rather than a fault, which is its own defect"
+#: (`bugs/FORMAL_a_subscript_of_a_field_declared_a_framed_struct_is_a_wrong_answer.md`),
+#: and the reasoning was sound: the two defects want different messages.  What
+#: made the exclusion untenable is that the wrong answer was MEASURED rather than
+#: argued, and both ways out of it were worse than a refusal — so it is now the
+#: same gate with its own evidence sentence rather than a new mechanism:
+#:
+#:     struct Deep:  var x: Int;  var y: Int
+#:     struct Wrap:  var d: Deep;  var t: Int
+#:     w.d.x = 3 ; w.d.y = 4 ; printf("%d", w.d[0])
+#:
+#: | | arm64 | x86-64 |
+#: |---|---|---|
+#: | `w.d[0]` | **4**, exit 0 | **4**, exit 0 |
+#: | `h.d[1]` where `Deep` declares `__getitem__` | **0**, exit 0 | **-1927469536**, exit 0 |
+#:
+#: Two architectures, two different wrong answers, exit 0 — which is the failure
+#: mode this backend exists to prevent, and the arithmetic says why: the blob walk
+#: reads `count = mem_read_u64(w + 0)`, which is `Deep`'s FIRST FIELD, and then
+#: `addr = w + 8 + 8·count`.  So the number is `Deep`'s SECOND field, and which
+#: field an index reaches is decided by the values in the frame rather than by the
+#: index.  (CPython refuses both: `TypeError: 'Deep' object is not subscriptable`.
+#:  There is no oracle number, which is the other half of why this is a refusal
+#: and not a better lowering — see `subscript_of_a_frame_field_refusal`.)
+#:
+#: The corpus cost is measured and is nothing that worked: re-running the census
+#: in `scalar_container_base_evidence` with the corrections this doc called for (a
+#: type name in a shared table is not re-read out of the module's own struct
+#: table, and the SLOT's kind is `struct_field_kind`'s answer rather than the
+#: annotation alone) leaves **2** `FRAME_KIND` sites out of 537 `X.<field>[i]`
+#: sites in 252 files, both of them `self._dict[key]` inside
+#: `std/collections/dict.mojo`'s own `StringDict.__getitem__`/`__setitem__` —
+#: i.e. the dict subscript that the language has a METHOD for, and which prints
+#: the two wrong answers above rather than a value.  So the gate fires on 2 sites
+#: that are already wrong, and on 0 sites that were right.
+NON_CONTAINER_SLOT_KINDS = (INT_KIND, TYPE_KIND, FRAME_KIND)
 
 
 def scalar_container_base_evidence(expr, kind) -> str | None:
@@ -6589,7 +6622,7 @@ def scalar_container_base_evidence(expr, kind) -> str | None:
     DECLARED type says nothing, and it is how a slot that says it holds a
     number reached the blob walk.
 
-    Three arms, and every one of them is a CLAIM rather than a default — which
+    Four arms, and every one of them is a CLAIM rather than a default — which
     is the whole difficulty, because `INT_KIND` is this model's default for a
     word and reading it as a claim is what `own_shape_kind` exists to prevent
     (its own table: an unannotated parameter, a call result and a loop target
@@ -6600,23 +6633,34 @@ def scalar_container_base_evidence(expr, kind) -> str | None:
         `NON_CONTAINER_SLOT_KINDS`, and the gate is the kind rather than the
         base's SPELLING because a kind is returned only where the source says
         what the slot holds. Why `None` is excluded from that tuple is measured
-        rather than argued: every `X.<field>[i]` in the 610-file stdlib corpus,
-        classified by its field's declared type —
+        rather than argued: every `X.<field>[i]` in the stdlib corpus, classified
+        by the SLOT's kind (`struct_field_kind`, so the annotation AND the gate
+        on what the slot's value is) rather than by the annotation alone, and
+        with a type name that a shared table already classifies left out of the
+        module's own struct table:
 
-        | declared kind | sites |
+        | slot kind | sites |
         |---|---|
-        | nothing reachable in the file (a module attribute, or a struct from another module) | 2 446 |
-        | a POINTER (`Pointer` / `OptionalPointer`) | 85 |
-        | a declared name this path has no kind for | 66 |
-        | a container (`List` / `Dict` / `Tuple` / `Array` / `Optional` / …) | 37 |
-        | a string | 1 |
-        | a framed struct of the module | 7 |
+        | nothing reachable in the file (a module attribute, or a struct from another module) | 404 |
+        | an IDENTITY type ctor (`String` / `Pointer` / `UnsafePointer` / …) | 65 |
+        | a declared name this path has no kind for | 62 |
+        | a container (`List` / `Dict` / `Tuple` / …) | 3 |
+        | a frame | 2 |
+        | a POINTER | 1 |
         | **an integer or a type tag** | **0** |
 
-        So the refusal costs the corpus nothing, and the permissive `None` is
-        what the other 2 446 sites get — which is the right answer for them: an
-        unclassified slot is a word, a word is a container as far as this path
-        can tell, and the corpus's untyped parameter and module-attribute
+        537 sites over 252 files. The earlier table said 2 642 sites and 7 in the
+        frame row, and those two numbers were wrong in the same direction: a
+        `Dict[...]` annotation was read through `structs_declared` and found the
+        module's OWN `struct Dict` — the misattribution
+        `bugs/FORMAL_a_subscript_of_a_field_declared_a_framed_struct_is_a_wrong_answer.md`
+        §"Why the fix for the sibling doc left it out, and why that was right"
+        predicted. 7 − 2 is not a smaller cost, it is a right number.
+
+        So the refusal costs the corpus nothing that WORKED, and the permissive
+        `None` is what the other 404 sites get — which is the right answer for
+        them: an unclassified slot is a word, a word is a container as far as this
+        path can tell, and the corpus's untyped parameter and module-attribute
         subscripts are the bulk of the language.
       * **A scalar LITERAL.** `5[0]`, `1.5[i]`, `True[0]`. The node IS the
         value, so there is no default and no declaration to disagree with, and
@@ -6632,6 +6676,26 @@ def scalar_container_base_evidence(expr, kind) -> str | None:
         no count. This is the one arm both halves of the family reach for the
         same construct, which is why it is asked once here rather than once in
         each.
+      * **A FRAME ADDRESS.** `kind == FRAME_KIND`, a field declared a framed
+        struct of this module. It is a FIELD arm and not the bare-name one
+        because `frame_container_operand_refusal` already owns the bare name,
+        and the two are asked at the same choke point with the bare-name one
+        first — so this arm only ever sees the spelling its recogniser cannot.
+
+        **The alternative was a LOWERING, and it was rejected by measurement
+        rather than by taste.** `w.d[i]` could be given the answer `w.d.<i>` gets
+        — a load at `base + 8i` — and it is not offered, for two reasons that are
+        both facts rather than preferences. First, CPython has no such operation
+        (`TypeError: 'Deep' object is not subscriptable`), so there is no oracle
+        for a lowering to be right about. Second, and decisively: **when the
+        declared struct declares `__getitem__` the subscript is a METHOD CALL
+        and not a slot load**, so `base + 8i` is not one lowering but two, and the
+        second is dispatch — a mechanism this backend does not have for a field's
+        declared type. Measured, and the measurement is why the alternative looks
+        like a fix at all: `h.d[1]` with `Deep.__getitem__` returning `a + k`
+        printed **0** on arm64 and **-1927469536** on x86-64, exit 0 on both. Two
+        architectures, two different wrong answers, and neither of them is
+        `base + 8i`.
 
     **Not refused, and the reasons are the same two the rest of the family
     gives.** `None` for the kind — an unclassified base keeps the container
@@ -6651,12 +6715,20 @@ def scalar_container_base_evidence(expr, kind) -> str | None:
                 "tag is a hash of a type's name — so it carries no count at "
                 "offset 0 and no memory behind it either, and there is nothing "
                 "for the container walk to read")
+    if field and kind == FRAME_KIND:
+        return ("a FRAME ADDRESS — the address of a block of 8-byte slots that is "
+                "one struct's fields in declaration order, and a frame carries no "
+                "header word, so there is no count in it for a container "
+                "operation to read. Read the field you mean: a subscript of a "
+                "struct on this path is `__getitem__`, and this backend calls a "
+                "method of the declared struct when it declares one and refuses "
+                "the spelling when it does not")
     if field and kind in NON_CONTAINER_SLOT_KINDS:
         return ("a struct field declared to hold an integer — a frame slot is "
                 "ONE word, and a subscript needs a pointer plus a stride, so "
-                "there is nothing in the slot to compute a stride from, which "
-                "is why this is a refusal rather than a cheaper index — and it "
-                "is classified as that because the SOURCE says so, not because "
+                "there is nothing in the slot to compute a stride from, which is "
+                "why this is a refusal rather than a cheaper index — and it is "
+                "classified as that because the SOURCE says so, not because "
                 "the image could read it")
     if isinstance(expr, (F.IntLiteral, F.FloatLiteral, F.BoolLiteral)):
         return ("a number — the literal carries no count at offset 0 and no "
@@ -6666,8 +6738,8 @@ def scalar_container_base_evidence(expr, kind) -> str | None:
 
 
 def scalar_container_base_refusal(op: str, spelled_obj: str, evidence: str,
-                                  function: str) -> str:
-    """Why a base this path PROVES to be a scalar is refused as a container.
+                                  function: str, kind=None) -> str:
+    """Why a base this path PROVES cannot hold a container is refused.
 
     The fourth arm of the family `frame_container_operand_refusal`,
     `string_iteration_refusal` and `non_container_element_refusal` belong to,
@@ -6675,8 +6747,21 @@ def scalar_container_base_refusal(op: str, spelled_obj: str, evidence: str,
     statement of this function bound to a number: it is a word the SOURCE says
     is a number or a type, whatever the name it arrives under.
 
-    **What it was, measured on both architectures, and the reason this is a
-    refusal rather than a better lowering.** `s.n[0]` and `s.d[0]` on a struct
+    **The CLOSING paragraph is a function of `kind`, and that is not
+    decoration.** `evidence` is the first half of the message and it is the
+    shared half; the second half says what this base DOES when the walk runs,
+    and for a SCALAR that is a SIGSEGV (the walk uses the integer as an address)
+    while for a FRAME ADDRESS it is a plausible number (the walk uses the
+    struct's first field as a COUNT and then indexes the frame's own scratch).
+    One paragraph cannot be both, and the wrong one is a message that is false
+    about the file — which is the defect `formal/model.py::multi_index_refusal_for`
+    opens on.  So `kind` is a REQUIRED argument at all three call sites rather
+    than a default: a caller that has not been taught to pass it fails loudly
+    instead of quietly saying "SIGSEGV" about a base that segfaults on neither
+    architecture.
+
+    The scalar half's history, which is why its evidence reads the way it does:
+    `s.n[0]` and `s.d[0]` on a struct
     whose only field is annotated `Int` / `DType`:
 
     | | arm64 | x86-64 |
@@ -6712,20 +6797,41 @@ def scalar_container_base_refusal(op: str, spelled_obj: str, evidence: str,
     assignment, a slice, a membership test and a for-in iteration all answer
     with the same sentence and the two backends cannot part company.
     """
-    return (f"{op} of `{spelled_obj}` asks for a container element, and "
-            f"`{spelled_obj}` is {evidence}. Every container lowering starts by "
-            f"reading eight bytes at offset 0 of its base and calling the "
-            f"result a COUNT, then reads at `base + 8 + 8k`, so the element "
-            f"address here is the scalar itself plus 8. Measured on BOTH "
-            f"architectures: this builds, links, and dies of SIGSEGV at run "
-            f"time with the build green, because it reads through a scalar "
-            f"rather than through an address into anything. Refused rather "
-            f"than emitted: a scalar's container reading is not merely wrong, "
-            f"it is unmapped, and no subscript spelling of one means anything "
-            f"else. What the same source can do instead: index a list or a "
-            f"tuple you built, take the container as a PARAMETER of {function} "
-            f"where the caller's value decides, or pass the value itself to the "
-            f"function that wants it")
+    head = (f"{op} of `{spelled_obj}` asks for a container element, and "
+            f"`{spelled_obj}` is {evidence}.")
+    if kind == FRAME_KIND:
+        return (
+            head +
+            " Every container lowering starts by reading eight bytes at offset 0 "
+            "of its base and calling the result a COUNT, so here the number it "
+            "used as a bound was the struct's FIRST FIELD and the address it "
+            "then read was `base + 8 + 8·that` — the frame's own scratch. "
+            "Measured on BOTH architectures: `w.d[0]` printed 4 with exit 0, "
+            "which is `Deep`'s SECOND field, and on a field whose declared type "
+            "declares `__getitem__` the two machines printed 0 and -1927469536 — "
+            "two different wrong answers for one source, neither of them a "
+            "crash, which is the outcome this refusal exists to replace. "
+            "Refused rather than given the answer `w.d.x` already has: CPython "
+            "has no such operation (`TypeError: 'Deep' object is not "
+            "subscriptable`), so there is no number to be right about, and one "
+            "lowering would have to mean two things — a METHOD CALL when the "
+            "declared struct declares `__getitem__`, a slot load when it does "
+            "not. Read the field you mean, or index a list or a tuple you built, "
+            "or take the container as a PARAMETER of "
+            f"{function} where the caller's value decides")
+    return (head +
+            " Every container lowering starts by reading eight bytes at offset 0 "
+            "of its base and calling the result a COUNT, then reads at "
+            "`base + 8 + 8k`, so the element address here is the scalar itself "
+            "plus 8. Measured on BOTH architectures: this builds, links, and "
+            "dies of SIGSEGV at run time with the build green, because it reads "
+            "through a scalar rather than through an address into anything. "
+            "Refused rather than emitted: a scalar's container reading is not "
+            "merely wrong, it is unmapped, and no subscript spelling of one "
+            "means anything else. What the same source can do instead: index a "
+            "list or a tuple you built, take the container as a PARAMETER of "
+            f"{function} where the caller's value decides, or pass the value "
+            "itself to the function that wants it")
 
 def string_iteration_refusal(where: str, function: str) -> str:
     """Why ITERATING a `char *` is refused. Always a refusal.

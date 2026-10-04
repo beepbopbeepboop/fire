@@ -38,19 +38,30 @@ harness's calling convention.
 
 ## Why it is pre-existing
 
-Both halves are at `master`, checked out of the object store rather than out of
-the working tree (there is no `git checkout <path>` in this pass):
+Run out of a `git archive master` tree, which removes this branch's diff from
+the question entirely (and is the reason there is no `git checkout <path>` in
+this pass):
 
 ```console
-$ git show HEAD:test_formal_monomorph.py | grep -n 'def test_the_census_reads_the_measured_shapes_out_of_the_corpus'
+$ rm -rf .tmp/master && mkdir -p .tmp/master && git archive master | tar -x -C .tmp/master
+$ cd .tmp/master && python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_monomorph.py
+  ERROR the census reads the measured shapes out of the corpus
+        TypeError: test_the_census_reads_the_measured_shapes_out_of_the_corpus()
+        takes 0 positional arguments but 1 was given
+formal monomorphization: PASS=18 EXPECTED=0 SKIP=0 FAIL=1
+```
+
+and both halves are at `master`, read out of the object store:
+
+```console
+$ git show master:test_formal_monomorph.py | grep -n 'def test_the_census_reads_the_measured_shapes_out_of_the_corpus'
 1336:def test_the_census_reads_the_measured_shapes_out_of_the_corpus():
-$ git show HEAD:test_formal_monomorph.py | grep -n 'fn(tmpdir)'
+$ git show master:test_formal_monomorph.py | grep -n 'fn(tmpdir)'
 1539:                    fn(tmpdir)
 ```
 
-The branch's diff to that file is additive (`git diff --stat` at the time of
-this note: `test_formal_monomorph.py | 142 +++`, two new cases and two new
-`TESTS` rows) and touches neither line 1336 nor the loop.
+The branch's diff to that file is additive (`git diff --stat`: two new cases and
+two new `TESTS` rows) and touches neither line 1336 nor the loop.
 
 ## What it costs, and why it is not tidiness
 

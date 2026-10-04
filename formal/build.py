@@ -10531,7 +10531,7 @@ def _refuse_container_operands_on_scalar_slots(fn, structs_by_name: dict,
             continue
         raise CodegenError(M.scalar_container_base_refusal(
             op, _member_chain(base), evidence,
-            getattr(fn, "name", None) or "<module>"))
+            getattr(fn, "name", None) or "<module>", kind))
 
 
 def _rewrite_class_constants(fn, structs_by_name: dict, owner=None,

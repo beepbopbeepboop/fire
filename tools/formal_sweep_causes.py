@@ -224,6 +224,17 @@ CAUSES = (
     # would collect the bare-name and slot rows as well.
     ("element of a value that is not a container",
      (("carries no count at offset 0",),)),
+    # THE FRAME SLOT, its own row and its own fix, and the marker is the clause
+    # only THIS base's message carries.  It is not the row above because the two
+    # are different representations with different next steps — the row above is
+    # "annotate it or bind it to a container", and this one is "a subscript of a
+    # struct on this path is `__getitem__`" — and because lumping them would put
+    # every finding in one bucket whose advice is wrong for half of them.  The
+    # marker is deliberately NOT the opening clause every message in this family
+    # shares ("asks for a container element"), for the reason the row above
+    # gives.
+    ("container operation on a frame slot",
+     (("is a FRAME ADDRESS",),)),
     # ABOVE the two rows below it, and for a reason that is a fact about the
     # messages rather than about this construct: they are all one family — a
     # representation the target does not have — and the broad ones end with a

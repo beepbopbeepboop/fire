@@ -56,11 +56,23 @@ reaches.
 
 ## Why it is pre-existing
 
-The case source at `test_formal_run.py:11523` is a single file with no `import`
-statement and no bracket, so nothing `work/formal25-1` changed
-(`formal/monomorph.py`'s `type_arg_text`, reached only from
-`formal/imports.py`'s import-driven demand walk) is on its path at all. Running
-the same file by hand reproduces the same message.
+Run out of a `git archive master` tree:
+
+```console
+$ rm -rf .tmp/master && mkdir -p .tmp/master && git archive master | tar -x -C .tmp/master
+$ cd .tmp/master && python3 tools/memslot.py --gb 8 --label t -- \
+      python3 test_formal_run.py constr_refuse_an_undeclared_base_by_name
+  FAIL  constr_refuse_an_undeclared_base_by_name: --backend=arm64 refused, but not
+        with the expected words "derives from 'Widget', which this image does not
+        declare": …
+formal run: PASS=36 FAIL=1
+```
+
+and the reason nothing this branch changed is on its path at all: the case
+source at `test_formal_run.py:11523` is a single file with no `import` statement
+and no bracket, so nothing `work/formal25-1` changed (`formal/monomorph.py`'s
+`type_arg_text`, reached only from `formal/imports.py`'s import-driven demand
+walk) is reachable from it.
 
 ## The next step
 

@@ -4760,12 +4760,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         iteration all get this answer and the two architectures cannot come to
         disagree about which bases qualify.
         """
-        evidence = M.scalar_container_base_evidence(
-            obj, self._expr_str_kind(obj))
+        kind = self._expr_str_kind(obj)
+        evidence = M.scalar_container_base_evidence(obj, kind)
         if evidence is None:
             return
         raise CodegenError(M.scalar_container_base_refusal(
-            op, M.spelled(obj), evidence, self.func_name or "<module>"))
+            op, M.spelled(obj), evidence, self.func_name or "<module>", kind))
 
     def _emit_subscript_addr(self, e: F.SubscriptExpr,
                              for_store: bool = False) -> None:
