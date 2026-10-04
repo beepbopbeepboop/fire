@@ -5075,16 +5075,59 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     _PATH0 = max(1, sum(len(b["instrs"]) for b in blocks))
     if _tree:
         _PATH0 = 512
-    FUEL0 = ("(200000 + 1000 * 2 ^ n.toNat)" if _tree
-             else f"(200000 + {_PATH0} * n.toNat)")
+    _FUEL_BASE = ("200000 + 1000 * 2 ^ n.toNat" if _tree
+                  else f"200000 + {_PATH0} * n.toNat")
+    FUEL0 = f"({_FUEL_BASE})"
     if fuel is not None:
         FUEL0 = f"({fuel})"
+        _FUEL_BASE = str(fuel)
     if fuel_lean is not None:
         # The emitted fuel is the library's own function, never a number, so it
         # cannot drift from `runExport`'s.  `fuel` above stays a python int for
         # the budget CHECK, which is about the walk's own step accounting and is
         # separate from what the theorem says the run's fuel is.
         FUEL0 = f"({fuel_lean})"
+        _FUEL_BASE = fuel_lean
+    # **THE FUEL IS ONE `Nat` SUBTRACTION AGAINST ITS BASE, and it is that
+    # rather than a chain — which is the whole of `bugs/
+    # FORMAL_a_generated_proof_over_leans_memory_ceiling_is_rejected.md`.**
+    #
+    # A block's remaining budget used to be spelled as a NESTED chain:
+    # `(((FUEL - 8) - 1) - 3) - 2) …`, because `emit_block` threaded the fuel as
+    # a STRING and concatenated `- k` onto whatever it was given.  Every `have`,
+    # every `rw [show … = … from by omega]` and every library call then spelled
+    # the whole chain again, so one budget appeared **298 times** in
+    # `formal/examples/either.mojo`'s generated proof (688 KB, 7259 lines) and
+    # the `theorem either_compiles_correctly_universal` body alone — everything
+    # after `def either_prog : Prog :=` — took the file past Lean's
+    # `maxMemory`.  Measured by bisecting the generated file and running each
+    # variant through `formal/lean.py::run_lean`:
+    #
+    # | the generated file | wall | peak RSS | verdict |
+    # |---|---|---|---|
+    # | as emitted | 208.8 s | 8.00 GB | `(kernel) excessive memory consumption detected` |
+    # | **truncated immediately after `def either_prog : Prog := …`** | **21.0 s** | **2.51 GB** | **rc=0 — it checks** |
+    # | the 298 chains rewritten as one subtraction each | 18.9 s | 2.56 GB | elaborates; only this change's own syntax damage remained |
+    #
+    # So the record is NOT the cost, and neither is the file's size or Lean's
+    # ceiling: with `maxMemory` lifted the same file crosses 8 GB of RSS and is
+    # killed (measured), which is a rejection turned into the memory debt
+    # `bugs/PERF_memory_over_4gb_is_a_bug.md` is about.  `(x - a) - b` and
+    # `x - (a + b)` are the SAME `Nat` value (`Nat.sub` truncates, so both are
+    # `max 0 (x - a - b)`), which is why this is a change to what is emitted and
+    # not to what it means: each site's statement is unchanged up to `omega`,
+    # and `omega` still sees the `200000` literal because `FUEL0` stays INLINE —
+    # naming it would hide that literal and every fuel obligation would go
+    # unproved (measured: `arm64_go_exit_hit`'s `0 < fuel` is what fails first).
+    _fuel_off = re.compile(r"\(" + re.escape(_FUEL_BASE) + r"(?: - (\d+))?\)\Z")
+
+    def _fuel_minus(fuel, k: int) -> str:
+        """`fuel - k`, folded into the ONE subtraction against the base."""
+        m = _fuel_off.match(fuel) if isinstance(fuel, str) else None
+        if m is None:
+            return f"({fuel} - {k})"
+        total = int(m.group(1) or 0) + k
+        return f"({_FUEL_BASE} - {total})" if total else f"({_FUEL_BASE})"
 
     def _pc_fact_lookup(sc: str):
         sc = sc.strip()
@@ -5113,9 +5156,9 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         cert_name, mid_name, exit_expr, m_run, def_names, is_ret, run_last_pc, run_pcs = run_info[bi]
         IND = "  " * (depth + 1)
         path = path | {bi}
-        fuel_next = (f"({fuel_n} - {m_run})" if isinstance(fuel_n, str)
+        fuel_next = (_fuel_minus(fuel_n, m_run) if isinstance(fuel_n, str)
                      else fuel_n - m_run)
-        fuel_1 = (f"({fuel_next} - 1)" if isinstance(fuel_next, str)
+        fuel_1 = (_fuel_minus(fuel_next, 1) if isinstance(fuel_next, str)
                   else fuel_next - 1)
         # establish entry pc for the run
         run_start = block["instrs"][0] if block["instrs"] else block["start"]
