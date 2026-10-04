@@ -527,15 +527,17 @@ def test_keyword_arguments_cross_the_boundary(tmpdir, _):
     this unit's registry, so the shape is read off `_extern_decls` — the
     declaration carried by the export manifest, keyed by the SYMBOL the call
     binds. Before that table existed the call's keywords had no parameter list to
-    match, and `bugs/FORMAL_host_import_row_5_measured.md` recorded the
-    consequence for four host modules as a compiler limitation.
+    match, and four rows of the sweep's host-import ranking recorded the
+    consequence as a compiler limitation.
 
     It was not one, and the measurement that says so is what this case pins.
     `need_two`'s default is 511 and `need_one` returns its argument, so a
     keyword that bound the wrong slot, dropped an argument, or filled a
     parameter from a register nobody wrote cannot produce these numbers by
     accident — and the CPython half is the SAME text, so the expected binding is
-    computed rather than written down.
+    computed rather than written down. The claim that was wrong, and the
+    measurement that corrected it, are `test_a_host_module_call_takes_keywords`
+    and `test_a_keyword_binds_with_the_callees_source_gone` below.
     """
     fresh_cas()
     root = os.path.join(tmpdir, "keywords")
@@ -601,11 +603,10 @@ def test_a_positional_and_a_keyword_on_one_parameter_are_refused(tmpdir, _):
 def test_a_host_module_call_takes_keywords(tmpdir, _):
     """`pathlib.match_path(b=…, bn=…, an=…, a=…)` — keywords OUT OF ORDER.
 
-    The claim this pins is the one
-    `bugs/FORMAL_host_import_row_5_measured.md` made and
-    `bugs/FORMAL_host_import_row_5_measured.md`'s own numbers rested on: that "a
-    keyword argument to a host module is REFUSED", which was measured on a
-    program that asked for `match(path=…, pattern=…)` — names `pathlib.match`
+    The claim this pins is one the sweep's host-import ranking rested on until it
+    was measured: that "a keyword argument to a host module is REFUSED". It was
+    measured false on 2026-10-02, on a program that asked for
+    `match(path=…, pattern=…)` — names `pathlib.match`
     does not declare, because its parameters are `p` and `pat`. The refusal was
     the language's own rule, correctly applied to a call that had the names
     wrong; it was not a boundary that drops keywords.
@@ -665,10 +666,9 @@ def test_a_keyword_binds_through_the_manifest_when_the_source_is_gone(tmpdir,
     `two(b=2, a=1)` is 12 and `two(nope=2)` is refused by name.
 
     So the whole of the "a keyword argument to a host module is REFUSED" claim
-    in `bugs/FORMAL_host_import_row_5_measured.md` reduces to the language's own
-    rule: the keyword must name a parameter the callee DECLARES, and every one
-    of the nine modules in that document is one whose author chooses the
-    declaration.
+    the host-import ranking rested on reduces to the language's own rule: the
+    keyword must name a parameter the callee DECLARES, and every module of that
+    ranking is one whose author chooses the declaration.
     """
     import json
     fresh_cas()

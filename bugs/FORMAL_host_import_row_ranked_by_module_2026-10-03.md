@@ -16,9 +16,16 @@ export PATH=/opt/homebrew/bin:$PATH
 python3 tools/formal_sweep_causes.py --host bugs/sweeps/sweep-arm-7.txt
 ```
 
-which is a mode that landed with this work. It is the successor to
-`bugs/FORMAL_host_import_row_5_measured.md` (the `-5` sweep's ranking, and
-`formal8-7-r2`'s claim — **not edited here**) and to §4 of
+which is a mode that landed with this work. It is the successor to the `-5`
+sweep's ranking (`formal8-7-r2`'s claim, whose doc was **deleted 2026-10-04 with
+its last module** — `glob`, `formal/hostmods/glob.mojo`, so every module it
+decided is either written or recorded as not-to-be-written, and its `glob`,
+`subprocess`, `copy`, `ctypes` and `concurrent.futures` sections are each
+superseded: `glob` by
+`bugs/FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell.md`,
+`subprocess` by `bugs/FORMAL_subprocess_row_measured_b7.md`, the other three by
+`bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` and
+`formal/imports.py`'s own tier entries) and to §4 of
 `bugs/FORMAL_sweep_work_map_2026-10-02_b7.md`, whose `by module: tempfile x111,
 importlib x48, glob x18 …` line was written by hand off the log and is now a
 tool's output.
