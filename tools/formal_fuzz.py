@@ -709,10 +709,16 @@ MIXES = {
     #   unpack    `a, b, c = t` — the element-kind family, found by this mix:
     #             it was refused outright by `print` on both architectures
     #             (fixed in `formal/model.py`'s `_unpacked_element_kind`).
-    #   bignum    word-boundary literals under bitwise ops and shifts, every one
-    #             of them reduced by a mask before it is stored or printed — so
-    #             the word-size MODEL is not reported as a miscompile and the
-    #             SIGN and SHIFT boundaries are what is left to disagree.
+    #   bignum    word-boundary integers under the operations that agree on them
+    #             — and the discipline that IS the family, because getting it
+    #             wrong produces a `MISMATCH` that is about the CORPUS rather
+    #             than about a backend: CPython's integers are unbounded and a
+    #             formal value is ONE 64-bit word, so a literal that does not fit
+    #             is WRAPPED rather than refused (measured on both
+    #             architectures: `print(18446744073709551615)` prints `-1`,
+    #             `print(2147483647 << 33)` prints `-8589934592`) and a family
+    #             that generated one would report that deliberate wrapping
+    #             hundreds of times. `big_expr` carries the measurement.
     #   chains    `a < b < c` as a CONDITION and as a VALUE, which is a
     #             different lowering from `a < b`: CPython evaluates the middle
     #             operand ONCE, so a lowering that re-reads it answers a
@@ -742,6 +748,16 @@ MIXES = {
                ("if", 3), ("print", 3), ("augassign", 2)),
     "chains": (("chain_cmp", 7), ("assign", 2), ("cmp", 3), ("if", 3),
                ("print", 3)),
+    #   tryfinally  a `try`'s `finally` arm, which is the half of `try` this
+    #             path lowers — a handler with a body is REFUSED
+    #             (`unemitted_handler_arm`), so a corpus that generated one would
+    #             measure a refusal and not a lowering. The arm has three exits
+    #             to run on (fall through, `break` out of an enclosing loop,
+    #             `return` out of the function) and the emitters run the pending
+    #             arms from three places, so each is its own family.
+    "tryfinally": (("try_finally", 5), ("try_finally_loop", 4),
+                   ("try_finally_return", 4), ("assign", 2), ("if", 3),
+                   ("print", 2)),
     "strfmt": (("str_bind", 3), ("str_count", 3), ("str_find", 3),
                ("str_startswith", 3), ("str_endswith", 2), ("str_lstrip", 2),
                ("str_meth_len", 2), ("if", 3), ("print", 2)),
@@ -766,6 +782,11 @@ MAX_CLASSES = 2
 #: stack, and a signature with defaults is a longer definition per function.
 MAX_CLOSURES = 2
 MAX_ARGFUNCS = 3
+#: The same bound for the `try_finally_return` helper: it is a module-level
+#: definition like `define_function`'s, and it exists to carry a `return` that
+#: must not end `main` (a `return` in `main` truncates the program there and
+#: every statement after it is dead code on both engines).
+MAX_TRYFUNCS = 2
 
 
 class Gen:
@@ -803,6 +824,7 @@ class Gen:
         self.closures = []    # (name, params, captured, outer, is_nested)
         self.closure_defs = []   # the `def` lines, spliced into main's body
         self.argfuncs = []    # (name, params, required count, defaults)
+        self.tryfuncs = []    # (name, param) helpers with a return in a try
         self.classes = []     # (name, fields, methods) definitions
         self.objs = []        # (var, class name, fields, methods) instances
         self.fields = []      # field names, inside a method body
@@ -1031,13 +1053,15 @@ class Gen:
             "global_container", "generic_define", "generic_call",
             "environ_get", "environ_len", "environ_cmp",
             "loop_else", "loop_nested", "closure_def", "closure_call",
+            "try_finally", "try_finally_loop", "try_finally_return",
             "arg_define", "arg_call", "slice_read", "slice_step",
             "unpack_bind", "big_int", "big_shift", "chain_cmp", "str_interp")
         if budget <= 0 and kind in ("if", "while", "for", "call",
                                     "nested_call", "recursion",
                                     "list_in_loop", "dict_iter",
                                     "tuple_iter", "loop_nested",
-                                    "loop_else", "closure_def"):
+                                    "loop_else", "closure_def",
+                                    "try_finally", "try_finally_loop"):
             # A walk is a LOOP: it is what `budget` exists to bound, since a
             # nest of them is a nest of stack frames rather than a nest of
             # branches. Folding one into an assignment keeps the depth of the
@@ -1127,6 +1151,8 @@ class Gen:
             self.object_stmt(indent, kind)
         elif kind in ("loop_else", "loop_nested"):
             self.loop_else_stmt(indent, kind)
+        elif kind in ("try_finally", "try_finally_loop", "try_finally_return"):
+            self.try_stmt(indent, kind)
         elif kind in ("closure_def", "closure_call"):
             self.closure_stmt(indent, kind)
         elif kind in ("arg_define", "arg_call"):
@@ -2023,6 +2049,84 @@ class Gen:
             self.emit(indent + 1, f"print({name}[{i}])")
             self.loop_depth -= 1
 
+    # ── a `try`'s `finally` arm ──
+    #
+    # The one half of `try` this path lowers. A handler arm with a BODY is
+    # REFUSED (`formal/model.py`'s `unemitted_handler_arm`, measured on both
+    # architectures: a `try` whose handler printed built, ran, printed nothing
+    # and exited 0), so a corpus that generated one would measure a refusal; an
+    # arm whose body is `pass` BUILDS and does nothing, which is also not
+    # generatable here — this path has no exception VALUES, so the only way to
+    # reach a handler is an operation that TRAPS (a division by zero exits 1 on
+    # both architectures where CPython would have taken the handler and printed
+    # `0`), and a program whose answer depends on a trap is not a differential
+    # test.
+    #
+    # `finally` is the opposite: it is unconditional, it is lowered, and it has
+    # three exits it has to run on — falling out of the `try`, a `break` out of
+    # an enclosing loop, and a `return` out of the function. The emitters keep
+    # the pending arms in a list and run them from three places
+    # (`arm64_codegen._flush_pending_finally`: depth 0 for a return, the loop's
+    # entry depth for `break`/`continue`), so all three are the same bug class
+    # and all three build and exit 0 when they are wrong. Every family below is
+    # one of those three exits, and the observable is always the ORDER of the
+    # prints: a `finally` that runs late or not at all reorders the output.
+    def try_stmt(self, indent, kind):
+        acc = self.declare(self.fresh("w"), "0")
+        self.words.append(acc)
+        marker = self.rng.randint(1, 99)
+        if kind == "try_finally_return":
+            # A `return` INSIDE the `try`, with the marker printed by the
+            # `finally` after it — in a HELPER, because a `return` in `main`
+            # ends the program there and every statement after it is dead code
+            # (which both engines agree about, so it measures nothing). The
+            # only observable is whether the arm ran BEFORE the return, which is
+            # why the marker is a `print` and not a store: a store into a local
+            # the function has already left is invisible on both engines.
+            if len(self.tryfuncs) >= MAX_TRYFUNCS:
+                self.emit(indent, "try:")
+                self.loop_depth += 1
+                self.emit(indent + 1,
+                          f"{acc} = ({acc} + 3) & 0xFFFF")
+                self.loop_depth -= 1
+                self.emit(indent, "finally:")
+                self.emit(indent + 1, f"{acc} = ({acc} + 100) & 0xFFFF")
+                self.emit(indent + 1, f"print({marker}, {acc} & 0xFF)")
+                return
+            name = self.fresh("tf")
+            param = self.fresh("q")
+            self.defs.append(f"def {name}({param}):")
+            self.defs.append(f"    acc = 0")
+            self.defs.append(f"    try:")
+            self.defs.append(f"        acc = ({param} + 7) & 0xFFFF")
+            self.defs.append(f"        return acc & 0xFF")
+            self.defs.append(f"    finally:")
+            self.defs.append(f"        print({marker})")
+            self.tryfuncs.append((name, param))
+            self.emit(indent, f"print({name}({self.rng.randint(0, 200)}))")
+            return
+        self.emit(indent, "try:")
+        self.loop_depth += 1
+        self.emit(indent + 1, f"{acc} = ({acc} + {self.rng.randint(1, 9)})"
+                              f" & 0xFFFF")
+        if kind == "try_finally_loop":
+            counter = self.fresh("i")
+            self.emit(indent + 1, f"for {counter} in range(2):")
+            self.emit(indent + 2, f"{acc} = ({acc} + {counter}) & 0xFFFF")
+            self.emit(indent + 2, "try:")
+            self.emit(indent + 3, f"print({acc} & 0xFF)")
+            if self.rng.random() < 0.5:
+                self.emit(indent + 3, "break")
+            self.emit(indent + 2, "finally:")
+            self.emit(indent + 3, f"print({marker})")
+            self.loop_depth -= 1
+            self.emit(indent, "finally:")
+            self.emit(indent + 1, f"print({marker})")
+            return
+        self.emit(indent, "finally:")
+        self.emit(indent + 1, f"{acc} = ({acc} + 100) & 0xFFFF")
+        self.emit(indent + 1, f"print({marker}, {acc} & 0xFF)")
+
     # ── a loop's `else` arm, and the loop that decides it ──
     #
     # `while c: … else: …` runs the `else` when the loop finished WITHOUT a
@@ -2037,6 +2141,7 @@ class Gen:
     # `range(lo, hi)`) for the reason that docstring gives, and the `else` body
     # is never empty: an empty block is an `IndentationError` in CPython and a
     # syntax error in the parser, so it goes through `block` like every other.
+
     def loop_else_stmt(self, indent, kind):
         if kind == "loop_nested":
             inner = self.fresh("j")
@@ -2333,30 +2438,44 @@ class Gen:
     # CPython's integers are unbounded and a formal value is ONE 64-bit word,
     # so a program that lets a big number grow reports the word-size MODEL as a
     # miscompile — hundreds of times, and the signal is worthless. What IS
-    # answerable is the boundary arithmetic itself: `&`, `|`, `^` and `>>` are
-    # bit-for-bit the same on both sides for any 64-bit pattern, and `<<` is too
-    # as long as the result is masked back down. So every literal here is a word
-    # boundary (`2**63 - 1`, `2**63`, `2**64 - 1`, `-2**63`, `2**32`, …), every
-    # operator is one of those, and every RESULT is masked to 16 bits in the
-    # same statement — which is also what keeps a `print` of it from being the
-    # one thing the two engines disagree about.
+    # answerable is the boundary arithmetic itself: `&`, `|`, `^` and `<<`/`>>`
+    # are bit-for-bit the same on both sides for any pattern that FITS the word,
+    # and a `>>` of a negative is an arithmetic shift in both.
     #
-    # The masks are the interesting part and they are also the constraint: the
-    # only place the 64-bit word and CPython's unbounded integer can be made to
-    # agree is after the value has been folded back inside 16 bits, so a family
-    # that skipped the mask would be measuring `formal/model.py`'s deliberate
-    # wrapping rather than any lowering of it.
+    # **Every literal here is inside the word, and that is the measured part
+    # rather than the obvious one.** The first version of this family masked its
+    # operands with `& 0xFFFFFFFFFFFFFFFF` and included 2**64-1, and the sweep
+    # (`--mix bignum`, seed `sweep19c`, index 7000) found it in one program of
+    # a hundred:
+    #
+    #     B = (((18446744073709551615 & 0xFFFFFFFFFFFFFFFF) >> 63) & 0xFFFF)
+    #     print(B)        CPython 1     both images 65535
+    #
+    # Both halves of that are the corpus's invariant, not a lowering: the literal
+    # does not fit a signed word, so it is WRAPPED to -1 (measured directly:
+    # `print(18446744073709551615)` prints `-1` on both architectures), and
+    # `-1 >> 63` is an arithmetic shift — while CPython's shift of the
+    # UNBOUNDED 2**64-1 is logical and answers 1. `& 0xFFFFFFFFFFFFFFFF` made it
+    # worse rather than better: in CPython that mask is the IDENTITY on a
+    # non-negative value and in this path the mask itself is already wrapped to
+    # -1, so it moved a negative operand to a positive one on one side only.
+    # The mask that belongs here is the one at the END, which folds the answer
+    # back inside 16 bits where the two representations agree again.
+    #
+    # The literals that survive are the ones with a real boundary to find:
+    # 2**31-1, 2**31, 2**32-1, 2**32, 2**63-1, -2**31, -2**63+1, and two
+    # arbitrary patterns. A shift count is at most 63 because CPython answers a
+    # larger one and this path has to answer the same way — a count of 64 is a
+    # different question, not a boundary of this one.
     BIG_WORDS = (0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0x100000000,
-                 0x7FFFFFFFFFFFFFFF, 0x8000000000000000, 0xFFFFFFFFFFFFFFFF,
-                 -0x80000000, -0x7FFFFFFFFFFFFFFF, 0xDEADBEEF, 0x123456789ABC)
+                 0x7FFFFFFFFFFFFFFF, -0x80000000, -0x7FFFFFFFFFFFFFFF,
+                 0xDEADBEEF, 0x123456789ABC)
 
     def big_expr(self):
         a = self.rng.choice(self.BIG_WORDS)
         b = self.rng.choice(self.BIG_WORDS)
         op = self.rng.choice(["&", "|", "^"])
-        left = f"({a})" if a < 0 else f"({a} & 0xFFFFFFFFFFFFFFFF)"
-        right = f"({b})" if b < 0 else f"({b} & 0xFFFFFFFFFFFFFFFF)"
-        return f"(({left} {op} {right}) & 0xFFFF)"
+        return f"(({a} {op} {b}) & 0xFFFF)"
 
     def bignum_stmt(self, indent, kind):
         name = self.declare(self.fresh("B"), "0")
@@ -2364,11 +2483,9 @@ class Gen:
         if kind == "big_shift":
             # A shift count near the word width is the boundary that matters: a
             # count of 63 on a one-bit value is 2**63 in CPython and the sign
-            # bit here, and `>>` by 64 or more is a count CPython answers and
-            # this path has to answer the same way, so the count is kept at or
-            # below 63.
+            # bit here, and both wrap the same way once the low 16 bits are read
+            # back out.
             src = self.rng.choice(self.BIG_WORDS)
-            src = f"({src})" if src < 0 else f"({src} & 0xFFFFFFFFFFFFFFFF)"
             count = self.rng.choice([1, 7, 31, 32, 63])
             op = self.rng.choice(["<<", ">>"])
             self.emit(indent, f"{name} = (({src} {op} {count}) & 0xFFFF)")
