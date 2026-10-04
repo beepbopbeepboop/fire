@@ -235,17 +235,22 @@ def _hidden_stmt_holder(statement):
 
     Built here rather than parsed because no spelling produces one — which is
     the whole point: the shape is not representable in source today, so the only
-    way to prove the census can see it is to hand the census one. Named after
-    the convention `_is_statement_node` reads (`…Stmt`), so it is a "statement"
-    to the walk's own test and a non-container to the descent.
-    """
-    @dataclasses.dataclass
-    class HiddenStmt:
-        only: object = None
-        line: int = 0
-        col: int = 0
+    way to prove the census can see it is to hand the census one. Named after the
+    convention `_is_statement_node` reads (`…Stmt`), so it is a "statement" to the
+    walk's own test and a non-container to the descent.
 
-    return HiddenStmt(only=statement)
+    `dataclasses.make_dataclass` rather than the decorator, and that is not a
+    style choice: `test_dataclasses_formal.py`'s corpus discovery treats any file
+    containing the decorator's own spelling as a real user of the transform and
+    builds it through the formal path, so writing it here — even inside this
+    sentence — would add a case to that suite that is a test helper rather than a
+    dataclass. It would pass, and it would be a case about nothing.
+    """
+    return dataclasses.make_dataclass(
+        "HiddenStmt",
+        [("only", object, dataclasses.field(default=None)),
+         ("line", int, dataclasses.field(default=0)),
+         ("col", int, dataclasses.field(default=0))])(only=statement)
 
 
 def _struct_with_a_statement_behind_a_scalar_field():
