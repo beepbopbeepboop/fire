@@ -3,10 +3,12 @@
 **Status: the audit is DONE and its findings are FIXED. The axiom census is DONE
 too, and it corrected this file's own §3 (the axiom is not `Lean.ofReduceBool`,
 the 749 sites were an undercount, and 53 of 375 theorems is the number the sites
-were standing in for). Of the two things "not fixed" below, one is now closed and
-the other is NOT this file's to close**: it is
-`bugs/FORMAL_contract_scope_rule_is_a_phrase_list.md`, claimed by another worker,
-and `formal/admitted.py::contract_text_is_scoped` is its write set. This file is
+were standing in for). BOTH of the two things "not fixed" below are closed, the
+second one by the worker whose claim it was**:
+`formal/admitted.py::contract_text_is_scoped` has a third, structural rule
+(`value_attached_claim`) and `test_formal_admitted.py`'s `SCOPE_PROBES` is its
+instrument — 34 rows, one per connective, built rather than written, a row in
+both directions per rule. This file is
 the table; it is kept because the audit is a reading of the tree that nobody can
 re-derive for free, and because a reading with a measurement beside it is what
 made the fifteen corrections possible.
@@ -248,19 +250,31 @@ false. They are now true, and each is re-measured.
 
 ## Not fixed, and why
 
-- **`contract_text_is_scoped` has a hole, and it is not a phrase list away.**
+- **`contract_text_is_scoped` had a hole, and it was not a phrase list away.
+  CLOSED 2026-10-04, in the worker's own file.**
   `ctypes.CDLL`'s admission carried "meaning no library of that name is on this
   target" and the module's own docstring claimed the scope rule refuses such a
   text. It does not: the seven banned phrases are all behavioural adverbs, and a
   claim about the host's filesystem attached to a VALUE (`0` "meaning" …) is
   grammatical and passes. The text is fixed here; closing the rule needs a
   structural notion of "the claim is about the answer" rather than a longer word
-  list, and guessing at it would reject sentences that are fine. Filed as
-  `bugs/FORMAL_contract_scope_rule_is_a_phrase_list.md`.
-  **NOT THIS FILE'S, and not closed here:** that doc is another worker's claim and
-  `contract_text_is_scoped` is its write set, so the only honest thing this audit
-  can say about it is where it stands — one known hole in one of its four
-  instruments, with the doc named. This audit is otherwise complete.
+  list, and guessing at it would reject sentences that are fine — so it was filed
+  as its own document rather than fixed here.
+  **What closed it, and it is the shape this bullet asked for rather than a
+  longer word list:** `formal/admitted.py::contract_text_is_scoped` now runs
+  three named rules (`SCOPE_RULES`), of which `value_attached_claim` is the
+  structural one — an admission is a set of constraints on one word, so a writer
+  who also wants to say something about the host's STATE has to attach it with an
+  explanatory connective (`meaning`, `i.e.`, `namely`, `read as`, …), and the
+  clause that connective introduces has to be about the word before it or carry a
+  numeral. Measured on this tree it fires on the pre-audit `ctypes` sentence and
+  on nothing else — all nineteen live admissions pass, and the corrected `ctypes`
+  text is an accept row pinned against the live contract.
+  `test_formal_admitted.py::SCOPE_PROBES` is the instrument: 34 rows over the
+  three rules, one row per connective, a row in both directions per rule, and two
+  LIMIT rows for what a text check cannot see (a world claim with no connective,
+  and one that happens to share a word with the answer).
+  This audit is otherwise complete.
 - **The axiom census that needs Lean.** `library_trust` counts SITES in the
   source; `#print axioms` measures which theorems actually reach
   `Lean.ofReduceBool`, and that is transitivity no text scan can do.
