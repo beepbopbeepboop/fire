@@ -62,6 +62,32 @@ REF = re.compile(r'bugs/((?:hard/|consolidated/)?[A-Za-z0-9_][A-Za-z0-9_./+-]*'
                  r'\.md)')
 SUFFIXES = ('.md', '.py')
 
+# A BARE citation: a bug-doc stem with no `bugs/` in front of it. This is the
+# second spelling of the same reference and the ratchet above could not see it,
+# which is why a whole class of dangling citations survived: the tool's `REF`
+# requires the `bugs/` prefix, so a comment that wrote
+# `FORMAL_dataclass_partial_construction` with no directory — which is how all
+# eleven sites in `formal/` and its tests were written, and how the survey at
+# `bugs/FORMAL_arm64_instruction_coverage.md` still cites its deleted bit-test
+# doc — was invisible to a census whose entire job is to find those.
+#
+# It is a SEPARATE class rather than a second regex over one list, because the
+# two cannot be told apart by the reader: a bare stem is only a citation if no
+# file of that name exists ANYWHERE in the tree, and `doc/ELABORATION.md` and
+# `doc/MODULE_CACHE_DESIGN.md` are cited bare by four files each and are real.
+# So the resolution is by EXISTENCE, not by spelling: the name counts as a
+# citation when `bugs/<stem>.md` is absent AND no `.md` of that basename exists
+# anywhere in the repository.
+#
+# Reported, and deliberately NOT in the ratchet. The ratchet is a per-file
+# ceiling, and a bare-name citation has no convention that separates the ~20
+# historical "was X, deleted" sentences from a new one — a ledger for it would
+# have to bless every existing sentence, and this tree is worked from dozens of
+# worktrees at once, so any branch that fixes prose in a file another branch is
+# editing would move a number the ledger owns. Making it visible is the part
+# that pays; a verdict on it is a decision for whoever owns the tool.
+BARE_REF = re.compile(r'(?<![/\w.-])([A-Z][A-Za-z0-9_]{4,})\.md\b')
+
 # The ratchet's ledger. A `.py` and not a JSON so that the two entries which
 # need a WHY — the deliberate self-referential fixtures in `test_suite.py` —
 # can carry it next to the number.
@@ -127,6 +153,63 @@ def candidates():
                 rel = os.path.relpath(os.path.join(dirpath, name), ROOT)
                 out.append(rel.replace(os.sep, '/'))
     return out
+
+
+def all_markdown_basenames():
+    """Every `.md` basename anywhere in the repository, for the bare check.
+
+    One walk rather than a per-candidate `os.path.exists`, because a candidate
+    that resolves is the common case on a tree with `doc/` full of design notes
+    and this is the instrument that has to stay cheap enough to run in the
+    census. Derived directories are dropped by the same rule as everything else
+    here (`checked_run.is_derived_dir`).
+    """
+    out = set()
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        dirnames[:] = sorted(d for d in dirnames
+                             if not checked_run.is_derived_dir(d) and d != '.git')
+        for name in filenames:
+            if name.endswith('.md'):
+                out.add(name)
+    return out
+
+
+def bare_find(skip=()):
+    """(by_doc, by_file) for every BARE reference to a doc that is nowhere.
+
+    Skip a candidate when the name exists in `bugs/`, when a `.md` of that name
+    exists anywhere in the tree (`doc/`, the repo root, or beside the citing
+    file), and when the citing line already says the doc was deleted — the three
+    historical conventions `bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md`
+    §2 established, which are what keeps a sentence that is *about* a deleted
+    doc from being counted as one that *needs* it.
+    """
+    have = existing_docs()
+    names = all_markdown_basenames() - {n.rsplit('/', 1)[-1] for n in have}
+    deleted_convention = re.compile(
+        r'\b(deleted|git rm|now closed|no longer|used to (?:give|cite|carry))',
+        re.I)
+    by_doc, by_file = {}, {}
+    for rel in candidates():
+        if rel in skip:
+            continue
+        try:
+            text = open(os.path.join(ROOT, rel), encoding='utf-8',
+                        errors='replace').read()
+        except OSError:
+            continue
+        beside = os.path.basename(rel)
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if deleted_convention.search(line):
+                continue
+            for stem in BARE_REF.findall(line):
+                name = stem + '.md'
+                if name in names or os.path.exists(
+                        os.path.join(ROOT, os.path.dirname(rel), name)):
+                    continue
+                by_doc.setdefault(name, []).append((rel, lineno))
+                by_file.setdefault(rel, []).append((name, lineno))
+    return by_doc, by_file
 
 
 def find(skip=()):
@@ -313,9 +396,14 @@ def main() -> int:
         return 1
 
     if args.json:
+        bare_by_doc, bare_by_file = bare_find(skip=set(args.skip))
         print(json.dumps({
             'deleted_names': len(by_doc),
             'citations': n_cites,
+            'bare_deleted_names': len(bare_by_doc),
+            'bare_citations': sum(len(v) for v in bare_by_doc.values()),
+            'bare_by_doc': {k: [f'{f}:{n}' for f, n in v]
+                            for k, v in sorted(bare_by_doc.items())},
             'by_doc': {k: [f'{f}:{n}' for f, n in v]
                        for k, v in sorted(by_doc.items())},
             'by_file': {k: [f'{d}@{n}' for d, n in v]
@@ -323,8 +411,16 @@ def main() -> int:
         }, indent=2, sort_keys=True))
         return 1 if by_doc else 0
 
+    bare_by_doc, bare_by_file = bare_find(skip=set(args.skip))
+    n_bare = sum(len(v) for v in bare_by_doc.values())
     print(f'{n_cites} citations of {len(by_doc)} bugs/ docs that are not there, '
           f'across {len(by_file)} files')
+    print(f'{n_bare} BARE citations (no `bugs/` prefix) of {len(bare_by_doc)} '
+          f'doc names that are nowhere in the tree, across '
+          f'{len(bare_by_file)} files — the spelling the count above cannot see, '
+          f'and the reason a whole class of them survived it. NOT in --ratchet; '
+          f'see BARE_REF\'s comment for why, and for the decision that would '
+          f'have to be made to put it there.')
     if args.by_file:
         for rel, cites in sorted(by_file.items(), key=lambda kv: -len(kv[1])):
             names = sorted({d for d, _n in cites})

@@ -153,9 +153,9 @@ CASES = [
     # writes for these two aliases carries two or more type arguments
     # (`OptionalPointer[UInt8, ImmUntrackedOrigin]`, `OpaquePointer[mut=False]`),
     # and a multi-parameter generic application is currently refused EARLIER, as
-    # a subscript whose index is a tuple — which is
-    # `FORMAL_external_call_a_multiparameter_type_in_the_bracket`, owned
-    # by another lane, and the same wall `env_round_trip` below is sitting on. So
+    # a subscript whose index is a tuple — the wall this doc's own deletion left
+    # (it was filed as a bug, fixed, and deleted with its fix), and the same wall
+    # `env_round_trip` below is sitting on. So
     # this row pins the classification the moment that wall comes down, and until
     # then it is the only spelling of a nullable pointer this path can be asked
     # about at all. It is a real build-and-run row, not a unit test of the model:

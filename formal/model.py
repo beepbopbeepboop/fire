@@ -2144,7 +2144,8 @@ def type_position_nodes(root, structs_by_name=None, callee_defs=None) -> set:
     `_CPointer[UInt8, UntrackedOrigin[…]] is a compile-time explicit-parameter
     list on a generic, not a subscript`, for a program the backend lowers
     correctly the moment the walk stops asking about a type as a value
-    (`FORMAL_external_call_a_multiparameter_type_in_the_bracket`).
+    (the multi-parameter-type-in-the-bracket refusal, filed 2026-09 and closed;
+    `test_formal_external_call.py` still pins the refusal).
 
     **What it does not do.** It does not widen `_base_name`, and it does not
     exempt a subscript whose BASE is a value: `h.tag[Int, s]` is a genuine index
@@ -5836,9 +5837,9 @@ def list_clear_refusal(dotted: str, kind, shape: str) -> str:
 # ── Methods on a string ───────────────────────────────────────────────────
 #
 # A string on this path is a bare `char *` with no header and no length: see
-# the note on ValueKinds below, and FORMAL_x86_64_formal_backend_gaps
-# for why that also makes `len` of a *string* a real question rather than a
-# field load. That single fact SPLITS the string methods into two classes, and
+# the note on ValueKinds below, and the 2026-09 x86-64 backend-gap survey
+# (deleted with its fixes; `len` of a *string* is the case it named) for why
+# that also makes `len` of a string a real question rather than a field load. That single fact SPLITS the string methods into two classes, and
 # which side a method falls on decides whether it can be lowered at all:
 #
 #   POINTER-BOUNDED — the answer is a function of the bytes from the receiver
@@ -17883,10 +17884,10 @@ def dylib_callee_export(by_name: dict, by_module: dict, forwarded: dict,
     unexamined: `pkg.f(1)` read the second parameter out of whatever the caller
     last left in that register (measured, 80905394 where the callee says 12) and
     `pkg.f(1, 2, 3)` dropped the third and returned the answer to `pkg.f(1, 2)`.
-    Both are the failure `FORMAL_cross_module_call_arity_is_never_checked`
-    records for the BARE spelling, which `bind_call_arguments` had already
-    closed — so the two spellings of one export disagreed about the same
-    contract, and only one of them was checked.
+    Both are the cross-module call-arity failure as it was filed for the BARE
+    spelling (that doc is deleted with its fix; `bind_call_arguments` had
+    already closed it) — so the two spellings of one export disagreed about the
+    same contract, and only one of them was checked.
 
     `None` means nothing on this link line publishes the name, which is the
     caller's cue to keep whatever answer it has for a callee it cannot resolve
@@ -24443,8 +24444,8 @@ def field_type_one_word_struct(structs, name, decls: dict):
     **Why the DEMOTION that produced the one-field struct is not in question.**
     This was filed as "the two passes disagree about `struct_is_framed`", with
     an offer to stop the demotion (its option B) as the semantically honest
-    repair; the filing was `FORMAL_class_level_default_flips_a_nested_frames_width`
-    and it is deleted, its defect fixed and measured. Measured here: the same
+    repair; that filing is deleted, its defect fixed and measured. Measured
+    here: the same
     refusal, byte-identical, with a `struct Inner` that declares exactly ONE
     field and no class-level default at all — so the demotion is not the
     trigger and there is no layout to un-cement. What was missing was the
@@ -26723,8 +26724,9 @@ def construction_arity_refusal(name: str, got: int, summary: str,
     default to fall back on, which is a different fact with a different
     repair: a field WITH a declared default is filled from it, so
     `Config(7)` on `width = 80, height = 24` is a program and this is not
-    that.  `FORMAL_dataclass_partial_construction` records the
-    measurement and why the two cannot share an answer.
+    that.  The partial-construction measurement is why the two cannot share an
+    answer (its doc is deleted with the fix; `test_dataclasses_formal.py` and
+    `test_formal_run.py` both carry rows for the prefix fill).
 
     `bases` is the bases this unit does not declare, and it is the clause that
     keeps the message honest about WHY the field list is short. A class with a

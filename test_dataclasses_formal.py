@@ -161,9 +161,9 @@ def main(n):
 # path's construction fills DECLARATION ORDER from positional arguments and
 # refuses a count that does not match (`check_construction_shapes`), so
 # `Config(7)` is a construction-shape refusal rather than a dataclasses one.
-# It is recorded in `FORMAL_dataclass_partial_construction`; putting it
-# in this case would have tested the construction check and called it a
-# dataclasses failure.
+# It was filed as a bug of its own and fixed (that doc is deleted with
+# the fix); putting it in this case would have tested the construction
+# check and called it a dataclasses failure.
 FIELD_DEFAULT = """
 from dataclasses import dataclass, field
 
@@ -459,8 +459,8 @@ def main(n):
 # has a signature per field — `def __init__(self, width=80, height=24)` — so a
 # call may supply a PREFIX of the fields and a KEYWORD spelling, and the rest
 # come from their own defaults. `Config(7)` is `width = 7, height = 24`, which
-# CPython says and which this backend used to refuse
-# (`FORMAL_dataclass_partial_construction`, now closed).
+# CPython says and which this backend used to refuse (fixed; the doc that
+# recorded it is deleted with the fix).
 #
 # Every row is here because each of the four spellings has a DIFFERENT answer if
 # one of the rules is wrong, and a program that prints 7 24 7 24 7 3 cannot tell

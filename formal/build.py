@@ -3998,8 +3998,9 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # loop: `params_of` is complete before the fixpoint runs and nothing in the
     # loop below mutates `holders`/`hstruct`/`declared_holders`, so a function
     # the loop skips is published from the same settled tables the loop would
-    # have read.  `bugs/FORMAL_cross_image_frame_contract_is_not_published_
-    # for_a_free_function.md` measured this and named the misattributed
+    # have read.  The cross-image free-function frame-contract measurement (its
+    # doc is deleted with the fix, and `test_formal_cross_module.py`'s
+    # `BOTH_ARCH_CASES` rows are the proof) named the misattributed
     # sentence; the refusal it turns into is `cross_image_plain_parameter_
     # refusal`, which is true of a parameter the callee's own compilation
     # compiled as a word.

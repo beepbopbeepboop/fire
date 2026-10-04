@@ -203,7 +203,8 @@ CASES = [
     # symbol that does not exist.  Both backends therefore returned whatever
     # the call left in the return register — measured, -6 for `len(range(10))`
     # on BOTH — and one architecture being right would have been as much a bug
-    # as both being wrong.  (`FORMAL_x86_64_formal_backend_gaps`.)
+    # as both being wrong.  (The 2026-09 x86-64 backend-gap survey named this
+    # case; its doc is deleted with its fixes and this comment is the record.)
     #
     # Four operand shapes in one line, because the fix is not one rule and the
     # four are the four ways to be wrong about it:
