@@ -5887,7 +5887,22 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # these self-emitted prototypes through), and every later call site
     # sees a real prototype.
     _ensure_libc_self_extern(gen, fname_raw)
-    ret_type = gen.func_return_types.get(fname_raw, 'int64_t')
+    # `fname` first, `fname_raw` second. `fname` is the symbol THIS call site
+    # emits (computed a few lines above, which is why it is available here), and
+    # `_func_csym` has already mirrored the defining unit's own return type
+    # under it — reading it therefore asks "what does the function I am calling
+    # return", while the bare name asks "what does some function of this name
+    # somewhere in the translation unit return". Those differ exactly when two
+    # modules of one closure define one bare name (measured: offload.py's
+    # `_mentions(...) -> bool` typed as `MojoList *` after
+    # elab_intu.py's unannotated `_mentions` claimed the shared bare slot, so
+    # the call temp was declared `MojoList *` and gcc rejected the assignment).
+    # The bare entry stays the fallback, and `fname` is also the right first
+    # choice for a name only one module defines — there the two agree.
+    # Nothing consults the bare slot before this that a per-definition answer
+    # would contradict, so the whole correction is this one lookup order.
+    ret_type = gen.func_return_types.get(
+        fname, gen.func_return_types.get(fname_raw, 'int64_t'))
 
     # Self-host hardcoded functions declared via concrete prototypes in
     # gen_module's `_is_selfhost_file` block.  Their return types are not

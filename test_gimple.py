@@ -10188,6 +10188,150 @@ walk_span()
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_two_modules_one_same_named_function_keep_their_own_return_types():
+        """Two modules of ONE translation unit, one SAME-NAMED private function
+        each with a different return type, each called from inside the module
+        that defines it — asserted against CPython's own stdout.
+
+        `func_return_types` is keyed by the BARE function name, and both the
+        inference passes and `gen_func` write that one slot once per module
+        that defines the name. Two modules defining one bare name therefore
+        share a single answer, and whichever wrote last typed BOTH modules'
+        call sites.
+
+        The real instance is this compiler's own closure:
+        `mojo/middle/offload.py`'s `_mentions(node, name) -> bool` against
+        `mojo/backend_gimple/elab_intu.py`'s unannotated
+        `_mentions(ann) -> MojoList *`. offload's `rewrite_fused_loop_walk`
+        declared its call temp `MojoList *`, ran `mojo_list_len` on a bool, and
+        gcc failed the whole self-host build on exactly one
+        `-Wint-conversion` — `assignment to 'MojoList *' from 'int'` at
+        generated line 885606, which was the self-host build's last gcc error
+        (doc deleted with the fix; the store it needed is
+        `GimpleGen._home_def_return_types`).
+
+        FOUR details of the fixture are load-bearing, and each was measured
+        rather than guessed — earlier versions of this test PASSED against the
+        unfixed compiler, which is what found them. A test that cannot fail is
+        worse than no test, so they are recorded here:
+
+        * `found` is defined BEFORE `_mentions` in `p/checker.py`. Emission
+          follows source order, so with the definition first its `gen_func`
+          writes the correct answer into the shared slot before the call site
+          reads it, and the collision is invisible. In the real instance the
+          mis-typed call site (generated line 885606) precedes the definition
+          (885849), which is why it bit there and not here.
+        * `p/checker.py` imports `p.lister`, so both same-named definitions
+          really are in ONE `gen_module`'s `all_functions`. Two siblings that
+          never import each other each get a closure of one and cannot
+          collide; only the ROOT gen's `all_functions` spans both, and its
+          bodies make no `_mentions` call.
+        * `main` imports `p/checker` only. Two importers of `p.lister` (a
+          diamond) is a separate link-mode defect, measured independent of
+          this one — bugs/CODEGEN_link_mode_diamond_import_gives_an_imported_
+          function_a_void_prototype.md.
+        * The two return types are `MojoList *` and `char *`, not `char *` and
+          `int`. An `int`-returning `_mentions` degenerates to `int64_t` in
+          this file's process (importing `mojo.middle.infra_infer` at module
+          scope changes unannotated-param inference), and with nothing but
+          `int64_t` in play there is no disagreement left to detect.
+
+        SINGLE-TU ONLY, and that is where the class lives: link mode compiles
+        each module as its own translation unit, so two same-named definitions
+        are never in one table and there is nothing to collide.
+        """
+        global _PASS, _FAIL
+        name = "two_modules_one_same_named_function_keep_their_own_return_types"
+        files = {
+            # UNANNOTATED, so its `MojoList *` return is INFERRED — the shape
+            # that published the wrong shared answer in the real instance.
+            'p/lister.py': (
+                'def _mentions(items, name):\n'
+                '    out = []\n'
+                '    for it in items:\n'
+                '        if it == name:\n'
+                '            out.append(it)\n'
+                '    return out\n'
+                '\n'
+                'def hits(items, name):\n'
+                '    return len(_mentions(items, name))\n'
+            ),
+            # `found` BEFORE `_mentions`, and importing p.lister so both
+            # definitions land in one translation unit.
+            'p/checker.py': (
+                'from p.lister import hits\n'
+                '\n'
+                'def found(items, name):\n'
+                '    n = hits(items, name)\n'
+                '    if _mentions(items, name) == "yes":\n'
+                '        n = n + 1\n'
+                '    return n\n'
+                '\n'
+                'def _mentions(items, name) -> str:\n'
+                '    for it in items:\n'
+                '        if it == name:\n'
+                '            return "yes"\n'
+                '    return "no"\n'
+            ),
+            'p/main.py': (
+                'from p.checker import found, hits\n'
+                '\n'
+                'def main():\n'
+                '    items = ["a", "b", "b", "c"]\n'
+                '    print(hits(items, "b"))\n'
+                '    print(found(items, "b"))\n'
+                '    print(found(items, "zz"))\n'
+                '    print(hits(items, "zz"))\n'
+                '\n'
+                'main()\n'
+            ),
+        }
+        with tempfile.TemporaryDirectory() as td:
+            for rel, body in files.items():
+                fp = os.path.join(td, rel)
+                os.makedirs(os.path.dirname(fp), exist_ok=True)
+                with open(fp, 'w') as fh:
+                    fh.write(body)
+            entry = os.path.join(td, 'p', 'main.py')
+            # PYTHONPATH=td, not just cwd: running a script puts the SCRIPT'S
+            # OWN directory on sys.path, and this program imports `p` as a
+            # sibling of it — see the same note in
+            # `aliased_and_reexported_imports_resolve_to_the_defining_module`.
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60,
+                                env=dict(os.environ, PYTHONPATH=td))
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:400]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            c_src = gimple_codegen._run_pipeline(
+                files['p/main.py'], filename=entry, do_imports=True)[0]
+            c_file = os.path.join(td, 'same_name.c')
+            exe = os.path.join(td, 'same_name.exe')
+            with open(c_file, 'w') as fh:
+                fh.write(c_src)
+            cc = subprocess.run(
+                [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                 os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=300)
+            if cc.returncode != 0:
+                print(f"FAIL  {name}: gcc -fgimple failed:\n"
+                      f"{cc.stderr[:1200]}")
+                _FAIL += 1
+                return
+            run = subprocess.run([exe], capture_output=True, text=True,
+                                 timeout=30)
+            if run.stdout != py.stdout:
+                print(f"FAIL  {name}: printed {run.stdout!r}, CPython "
+                      f"printed {py.stdout!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_a_program_written_inside_the_checkout_is_not_the_compiler():
         """A user program's LOCATION must not change its generated C.
 
@@ -10324,6 +10468,7 @@ print(run('x/y.txt'))
     test_user_defined_dunder_repr_is_called()
     test_user_defined_dunder_repr_value()
     test_aliased_and_reexported_imports_resolve_to_the_defining_module()
+    test_two_modules_one_same_named_function_keep_their_own_return_types()
     test_gen_taking_middle_helper_is_never_reached_by_a_local_import()
     test_dotted_import_two_hop_attribute_call()
     test_dedup_variadic_externs_cache_is_a_faithful_parse()

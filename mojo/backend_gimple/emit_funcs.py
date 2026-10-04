@@ -1715,6 +1715,72 @@ def _record_home_def_pts(gen, bare_name: str, pts: list) -> None:
         store[key] = list(pts)
 
 
+def _record_home_def_return_type(gen, stmt, bare_name: str, ctype: str) -> None:
+    """Publish one free function's DEFINITION-side return ctype into the
+    whole-program-shared `_home_def_return_types`, under the qualifier its own
+    emitted symbol was built from — the return-type twin of
+    `_record_home_def_pts`, for the same reason `func_return_types[bare_name]`
+    cannot be trusted on its own (see that store's declaration).
+
+    `stmt` is how "this unit actually DEFINES the name" is decided, and it has
+    to be: every return-type inference pass walks `all_functions` — this
+    module's own `stmts` PLUS the flat transitive closure — so most of the
+    statements it visits belong to a sibling whose own unit publishes them.
+    Publishing from here without that test would let a sibling's answer land
+    under THIS unit's key for any bare name the two share, and since `stmts`
+    comes FIRST in `all_functions` the sibling would be the last writer and
+    would win. The test is statement IDENTITY against this unit's own top-level
+    FunctionDefs rather than the name-based `_local_top_level_func_names`,
+    because a name in that set can still be a sibling's definition being
+    visited here — it is exactly the same two-modules-one-bare-name case.
+
+    Plain assignment, NOT `_record_home_def_pts`'s first-wins `setdefault`: the
+    value is REFINED by three successive passes in the same unit (Pass 1.3's
+    first inference, then Pass 2.3e's and Pass 3b's re-inference once param
+    and closure-value inference have run), so the last writer is the one that
+    knows most. That is the discipline `func_return_types[bare_name]` itself
+    follows, and it is why `_func_csym` re-mirrors on every call rather than
+    freezing the first value it sees.
+    """
+    store = getattr(gen, '_home_def_return_types', None)
+    if store is None or not ctype:
+        return
+    if id(stmt) not in getattr(gen, '_local_top_level_func_stmt_ids', ()):
+        return
+    # Never raises for a name this unit defines: `_func_qualifier`'s tier-1
+    # check (`bare_name in _local_top_level_func_names`) answers from the
+    # module being compiled itself, ahead of the `_AMBIGUOUS_FUNC_HOME`
+    # refusal that tiers 2/3 can raise.
+    store[_pair_key(_func_qualifier(gen, bare_name), bare_name)] = ctype
+
+
+def _home_def_return_type(gen, qualifier: str, bare_name: str):
+    """The return ctype the DEFINING unit published for `bare_name` under
+    `qualifier`, or None when this name has no per-definition entry (a name no
+    unit in the closure defines, or a definition that is not being inlined into
+    this unit at all — a dylib in link mode, whose return type comes from
+    `imported_symbols` instead).
+
+    `qualifier` is passed in rather than resolved here, and that is deliberate:
+    the caller is `_func_csym`, which has ALREADY called `_func_qualifier` to
+    build the symbol this entry is about to be mirrored under. Asking again
+    would be a second walk of the same tiers whose only added effect could be
+    the `_AMBIGUOUS_FUNC_HOME` RuntimeError, on a path that already raises it
+    microseconds later. Reusing the one answer is also what makes the two
+    halves agree by construction rather than by two independent computations
+    happening to match.
+
+    The empty qualifier is a real key, not a wildcard: it is what a unit with
+    no module identity of its own publishes under, and only such a unit can
+    write it, so a reference that resolves to the empty qualifier is asking
+    about exactly that definition.
+    """
+    store = getattr(gen, '_home_def_return_types', None)
+    if not store:
+        return None
+    return store.get(_pair_key(qualifier, bare_name))
+
+
 def _imported_def_pts(gen, bare_name: str):
     """BUG-2026-024 helper: the parameter ctypes recorded for `bare_name` by
     its HOME module at FromImportStmt registration time
@@ -2160,6 +2226,31 @@ def _func_qualifier(gen, bare_name: str) -> str:
     return ''
 
 
+def _func_home_qualifier(gen, bare_name: str) -> str:
+    """`_func_qualifier`'s answer for `bare_name`, or `''` when the reference
+    is the genuinely-AMBIGUOUS one that function refuses to answer — never an
+    exception.
+
+    For the readers that want a per-definition answer but must not be able to
+    fail: `_quick_type` is a pure ESTIMATOR that runs over speculative paths
+    all over inference, and turning "this reference is ambiguous" into a
+    hard error there would introduce a failure mode that does not exist
+    today, in a place that is not the one that reports it. `''` is the right
+    "no answer" for such a reader anyway: it means no definition of its own to
+    consult, so the caller falls back to the shared bare slot exactly as it
+    did before.
+
+    Same disposition as `_imported_def_pts`, which resolves to `None` for an
+    `_AMBIGUOUS_FUNC_HOME` entry with the same reasoning written out; the
+    authoritative refusal stays in `_func_qualifier`, which every `_func_csym`
+    call — i.e. every call this compiler actually EMITS — runs anyway.
+    """
+    try:
+        return _func_qualifier(gen, bare_name)
+    except RuntimeError:
+        return ''
+
+
 def _locally_binds_name(gen, bare_name: str) -> bool:
     """Whether the module CURRENTLY being compiled itself defines or
     imports a free function named `bare_name` — i.e. tiers 1/2 of
@@ -2294,10 +2385,10 @@ def _func_csym(gen, bare_name: str) -> str:
     # `func_return_types['_join_abb124'] = 'int64_t'` permanently;
     # `_t8 = _join_abb124(_t5, _t7);` (a real char*-returning call
     # assigned into an int64_t temp with no cast) then failed
-    # -Wint-conversion. Always re-mirroring the CURRENT bare-name value
-    # is strictly more correct than freezing at first use — the whole
-    # reason `func_return_types`/`func_param_types` get corrected after
-    # the fact is that later passes have STRICTLY MORE information than
+    # -Wint-conversion. Always re-mirroring the CURRENT value is strictly
+    # more correct than freezing at first use — the whole reason
+    # `func_return_types`/`func_param_types` get corrected after the
+    # fact is that later passes have STRICTLY MORE information than
     # earlier ones, never less.
     if mangled != base:
         # Mirror from the SAME effective param types _overload_suffix just
@@ -2312,8 +2403,28 @@ def _func_csym(gen, bare_name: str) -> str:
         _eff_pts = _effective_param_types(gen, bare_name)
         if _eff_pts is not None:
             gen.func_param_types[mangled] = _eff_pts
-        if bare_name in gen.func_return_types:
-            gen.func_return_types[mangled] = gen.func_return_types[bare_name]
+        # The RETURN-type twin of `_effective_param_types` above, and the same
+        # discipline for the same reason: read the DEFINING unit's answer, not
+        # the shared bare-name slot. `func_return_types[bare_name]` cannot serve
+        # a name two modules of this translation unit both define — it holds
+        # whichever module's pass wrote last, so one of the two call sites is
+        # typed by the other module's return type. Measured: offload.py's
+        # `_mentions(...) -> bool` read `MojoList *` (elab_intu.py's
+        # unannotated `_mentions`), so the call site's temp was declared
+        # `MojoList *`, `mojo_list_len` was applied to a bool, and gcc failed
+        # the whole self-host build with one -Wint-conversion. `qualifier` is
+        # the same string this symbol's prefix was just built from, so the
+        # entry consulted is by construction the one belonging to the
+        # definition this call site actually emits a call to.
+        #
+        # Fallback stays the bare slot, so a name with no per-definition entry
+        # (no unit in the closure defines it here — a dylib in link mode, whose
+        # return type comes from `imported_symbols`) behaves exactly as before.
+        _eff_ret = _home_def_return_type(gen, qualifier, bare_name)
+        if _eff_ret is None:
+            _eff_ret = gen.func_return_types.get(bare_name)
+        if _eff_ret is not None:
+            gen.func_return_types[mangled] = _eff_ret
     return mangled
 
 
@@ -2549,6 +2660,22 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     gen.func_ret_type = ret_type
     # Sync so forward declarations (Phase 2b) match Phase 2a inference
     gen.func_return_types[node.name] = ret_type
+    # ...and so does every CALL SITE of this definition, which reaches this
+    # function's answer through `_home_def_return_type` rather than through
+    # the bare slot above. `gen_func` is the DEFINITION-side writer and the
+    # most authoritative one there is — it has the real emitted body, and the
+    # annotation when there is one — so its answer has to be the one a call
+    # site uses, in preference to whatever any inference pass guessed.
+    #
+    # It is also the writer that made the collision observable in the first
+    # place: definitions emit in source order, so a definition late in a file
+    # lands in the shared slot AFTER a sibling module's inference passes had
+    # put theirs there, and any bare reader in between sees whichever ran last
+    # rather than whichever it means. Real: `offload._mentions`'s call site
+    # (generated line 885606) precedes its own definition (885849), so the
+    # definition's own answer was not in the slot yet and the call site read
+    # elab_intu's `MojoList *`.
+    _record_home_def_return_type(gen, node, node.name, ret_type)
 
     # Run layout solver for struct locals
     solver = gimple_solvers.LayoutSolver(gen.struct_field_types)
