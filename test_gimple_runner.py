@@ -2039,6 +2039,35 @@ print(j())
 print(k())
 """)
 
+    # The MATERIALIZED half, and a captured PARAMETER beside it. The case
+    # above inlines every lambda at its reference site, so it never builds the
+    # env struct or the `mojo_bound_method_new(fnaddr, env)` pair — the shape
+    # where the captured `double` has to survive being homogenized into an
+    # `int64_t` and read back out of the env. A `double` is the only capture
+    # with no `int64_t` spelling, so it is the only one that cannot; an `int`
+    # capture of the same shape is right, which is exactly why this needs its
+    # own case. `n` returns the callable and the CALLER invokes it, so the
+    # env pointer round-trips through the call boundary.
+    test_gimple_matches_cpython("gimple_materialized_lambda_keeps_a_double_capture", """\
+def m():
+    q = 2.5
+    fn = lambda: q + 1
+    return fn()
+
+def n():
+    q = 2.5
+    fn = lambda: q + 1
+    return fn
+
+def k(p: float):
+    fn = lambda: p * 2
+    return fn()
+
+print(m())
+print(n()())
+print(k(2.5))
+""")
+
     test_gimple_runtime_error("gimple_iterating_a_non_container_raises", """\
 def ident(x):
     return x
