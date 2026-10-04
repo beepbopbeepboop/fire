@@ -29134,6 +29134,17 @@ def fold_module_value(node, names=None):
     folded = fold_literal_expr(node, names)
     if folded is not None:
         return folded
+    folded = fold_module_int_expr(node, names)
+    if folded is not None:
+        # ONE range check, here, on the value that would be substituted: a
+        # module-level slot is a word in `__DATA` and a read of this name is
+        # replaced by this value, so a value outside the word is not folded and
+        # the read keeps the refusal it already had. Inside the folder nothing
+        # is range-checked, because every operator there is exact on Python ints
+        # and what the machine computes is decided once, at the end.
+        if isinstance(folded, int) and not isinstance(folded, bool) \
+                and _FOLD_INT_MIN <= folded <= _FOLD_INT_MAX:
+            return folded
     got = target_template(node)
     if got is not None and got[0] == "value":
         return got[1]
@@ -29147,6 +29158,132 @@ def fold_module_value(node, names=None):
         try:
             return int(node.value)
         except (TypeError, ValueError, OverflowError):
+            return None
+    return None
+
+
+# The integer binary operators a MODULE-LEVEL initializer may be folded with,
+# and what each one does to the folded word. A separate table from
+# `_FOLD_BINOPS` for the reason `fold_module_value`'s own docstring gives for
+# keeping its arms out of the shared literal folder: `fold_literal_expr` is also
+# the struct-field, class-constant and default-parameter reader, and those have
+# no target to consult. This one does, so this is where an operator whose
+# machine answer is worth being exact about belongs.
+#
+# **Six of these are RING operations, which is what makes folding them safe
+# without checking their operands.** Each of `+ - * & | ^ << **` (with a
+# non-negative exponent) is a homomorphism modulo 2**64: the machine computes
+# every intermediate in a 64-bit word and wraps, Python computes it exactly, and
+# the two agree on the low 64 bits however large the intermediate was. So a
+# final value that FITS a signed word is the machine's value, and
+# `MAX64 = 2 ** 63 - 1` is answerable even though its `2 ** 63` does not fit on
+# its own. What must be checked is the RESULT, and only the result.
+#
+# `>>` is not in that set and is why it is handled apart: a right shift of a
+# wrapped intermediate is not the shift of the exact one, so both of its
+# operands have to be words before it is applied.
+#
+# `%` is deliberately NOT here. Python's `%` floors (it answers `-7 % 3 == 2`)
+# and both machines' `sdiv`/`idiv` truncate (`-1`), so folding it would put a
+# number in the constant that no image on either architecture computes. It is
+# the one operator that would be a wrong answer rather than a missing one, and
+# the formal path's own integer semantics live in `mojo/middle/comptime.py`.
+_FOLD_MODULE_BINOPS = {
+    "**": lambda a, b: a ** b,
+    "<<": lambda a, b: a << b,
+    ">>": lambda a, b: a >> b,
+    "&": lambda a, b: a & b,
+    "|": lambda a, b: a | b,
+    "^": lambda a, b: a ^ b,
+}
+
+# `>>` alone, for the reason `_FOLD_MODULE_BINOPS` gives: it is the one
+# operator here whose answer depends on the operand being a word rather than on
+# its low bits, so both of its operands are range-checked before it is applied.
+_FOLD_WORD_OPERANDS = frozenset({">>"})
+
+# The signed 64-bit range a folded module constant has to land in. The formal
+# path's word is 64 bits wide (`formal/arm64_proof_gen.py`'s `UInt64` model, and
+# `formal/types.py`'s `DEFAULT_INT_TYPE`), and a module-level slot is a word in
+# `__DATA`: an initializer whose value does not fit one has no representation
+# here, so it is not folded and its read keeps the refusal it already had.
+_FOLD_INT_MIN = -(1 << 63)
+_FOLD_INT_MAX = (1 << 63) - 1
+
+
+def fold_module_int_expr(node, names=None):
+    """The EXACT value of an int-only `BinaryOp`/`UnaryOp` initializer, or None.
+
+    **No range check happens here** — `fold_module_value` makes that one, once,
+    on the value it is about to substitute. That is what lets the folder answer
+    `MAX64 = 2 ** 63 - 1` and `MIN64 = -(2 ** 63)`, whose own intermediates are
+    a word outside the word: the machine computes every intermediate in a 64-bit
+    word and wraps, and each operator here is a homomorphism modulo 2**64, so
+    the low 64 bits of the exact result are the machine's word whatever the
+    intermediates were. Whether that word is a value the SOURCE has is the
+    caller's question and not this function's.
+
+    **The one gap this closes is a refusal whose stated reason was false.**
+    `A = 1 << 20`, `A = 2 ** 62` and `A = MASK & n` are how this repository's
+    own source spells a constant, and none of them folded, because
+    `_FOLD_BINOPS` had four arithmetic operators and no bitwise or shift among
+    them. The name then read as `rebound` rather than `assigned`, so the read
+    reached the emitter as a bare `IdentExpr` and the build refused
+    "print() cannot tell whether IdentExpr is a string or a number" — a message
+    about print's materialization for a name the build had read and simply could
+    not fold. Measured on `test_formal_math.py:isqrt_source`
+    (`MAX64 = 2 ** 63 - 1`, `bugs/FORMAL_proof_coverage_census_2026-10-03.md`
+    §0.6), where it also made the two backends report DIFFERENT subjects for one
+    function: arm64 stopped at the constant, x86-64 got as far as the string
+    operand two lines later.
+
+    Both operands must be ints — a string operand makes the whole expression a
+    format or a concatenation, which is `FORMAL_string_value_model.md`'s subject
+    and not this table's — and every operator is one whose Python answer is the
+    machine's.
+    """
+    def operand(child):
+        value = fold_literal_expr(child, names)
+        if value is None:
+            value = fold_module_int_expr(child, names)
+        return value
+
+    def as_int(value):
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        return None
+
+    if isinstance(node, F.UnaryOp) and node.op in _FOLD_UNARY:
+        value = as_int(operand(node.operand))
+        return None if value is None else _FOLD_UNARY[node.op](value)
+    if not isinstance(node, F.BinaryOp):
+        return None
+    a = as_int(operand(node.left))
+    b = as_int(operand(node.right))
+    if a is None or b is None:
+        return None
+    if node.op in _FOLD_MODULE_BINOPS:
+        # `>>` is the one operator here whose answer is not a function of the low
+        # 64 bits: a shift of a wrapped intermediate is not the shift of the
+        # exact one, so both of its operands have to be WORDS before it is
+        # applied. Every other operator in the table is exact whatever the
+        # intermediates were, which is why this check is not the general one.
+        if node.op in _FOLD_WORD_OPERANDS and not (
+                _FOLD_INT_MIN <= a <= _FOLD_INT_MAX
+                and _FOLD_INT_MIN <= b <= _FOLD_INT_MAX):
+            return None
+        try:
+            return _FOLD_MODULE_BINOPS[node.op](a, b)
+        except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+            return None
+    if node.op in _FOLD_BINOPS:
+        # The four operators that were already here, unchanged: a constant too
+        # big for a word has been getting a truncated one since before this
+        # table existed, and tightening that is a separate change with its own
+        # blast radius (every module-level integer in the tree).
+        try:
+            return _FOLD_BINOPS[node.op](a, b)
+        except (TypeError, ValueError, ZeroDivisionError):
             return None
     return None
 

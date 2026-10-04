@@ -62,6 +62,18 @@ make the census report a CALL-SITE refusal as if it were a statement about the
 function. Nothing is filtered by whether the backend can lower it: which is the
 thing being measured.
 
+ONE SAMPLE, OR SEVERAL
+----------------------
+The selectors above are a function of the tree, so two calls give the same
+sample and two runs are comparable. That is the property the first census's
+numbers rest on, and it is also what makes a SECOND census impossible without a
+way to ask for a different sample — so `--round-offset` / `--example-offset`
+shift the selection rather than the defaults: round 0 (the default) is each
+file's largest eligible function, round 1 is each file's second, and the example
+stride starts at `--example-offset`. A second round over the same tree therefore
+measures a DIFFERENT set of functions with the same rule, and round 0 still means
+what it meant when round 0's numbers were taken.
+
 TWO PHASES, because a Lean run costs 100x a codegen run
 ------------------------------------------------------
 Phase A builds each program with `prove=True, check=False`: the codegen runs and
@@ -404,13 +416,16 @@ def _module_defs(tree):
     return out
 
 
-def _eligible(fn, defs, lines):
+def _eligible(fn, defs, lines, admit_returns=False):
     """`(emitted_source, dep_names)` for one candidate, or `(None, reason)`.
 
     The emitted module is the function plus every module-level definition it
     transitively reads, each VERBATIM: this census is about the backend's
     ability to prove the repository's real source, and a paraphrase of it would
     be a measurement of the paraphrase.
+
+    `admit_returns` relaxes ONE rule, and only one, for a second census over a
+    bigger pool (see `RETURN_ANNOTATIONS`).
     """
     if fn.decorator_list:
         return None, "decorated (the decorator's own semantics are the subject)"
@@ -427,7 +442,8 @@ def _eligible(fn, defs, lines):
     if fabricated:
         return None, ("parameter " + fabricated + " is used as a container, so "
                       "the stub's integer is not the value the source passes")
-    if fn.returns is not None and _ann_text(fn.returns) != "int":
+    if not admit_returns and fn.returns is not None and \
+            _ann_text(fn.returns) != "int":
         return None, f"return annotation {_ann_text(fn.returns)}"
     if not 2 <= len(fn.body) <= MAX_STMTS:
         return None, f"{len(fn.body)} top-level statements"
@@ -577,6 +593,35 @@ def _ann_text(node):
         return "?"
 
 
+RETURN_ANNOTATIONS = """
+A candidate was excluded for its RETURN annotation (`-> str`, `-> bool`,
+`-> list`, …) by the same rule that excludes a PARAMETER annotated with
+anything but `int`, and the rule's stated reason is about a CALL SITE: "the
+synthesised `main` calls the function with the startup stub's integer, and a
+mismatch there would make the census report a CALL-SITE refusal as if it were a
+statement about the function."
+
+A return annotation is not a call-site mismatch. `main` returns whatever the
+function returns and nothing in the harness asserts a type on that result, so a
+`-> bool` function and the same function with the annotation deleted build
+identically — measured, both architectures, on `def f(n: int) -> bool` with a
+two-arm `if`: arm64 refuses it for the SECOND-FUNCTION-CALL reason the census
+already counts, x86-64 emits 785 lines of proof either way, and `-> str`,
+`-> list` and `-> None` behave the same. So the rule was excluding ~550 real
+functions over a hazard it cannot have, and it was the reason the first
+census's 45-function sample had to come out of a pool of 76: a second census of
+80 functions that shares none of the first's needs the pool to be wider, and
+this is the one widening that does not fabricate a value or paraphrase a source.
+`--admit-returns` is therefore a flag rather than a change of default: round 0
+still selects what round 0 selected.
+
+The PARAMETER annotation rule stays absolute, and the asymmetry is the point:
+`_entry_call` passes the stub's integer to every parameter, so a `str`
+parameter is a value the source never passes, and `-> str` is a promise about a
+value the harness never inspects.
+"""
+
+
 def _entry_call(fn):
     """`main`'s one line, calling `fn` with the stub's integer.
 
@@ -592,7 +637,8 @@ def _entry_call(fn):
     return f"def main(x):\n    return {fn.name}({args})\n"
 
 
-def repo_function_workload(limit=REPO_FUNCTION_TARGET, verbose=False):
+def repo_function_workload(limit=REPO_FUNCTION_TARGET, verbose=False,
+                           round_offset=0, admit_returns=False, exclude=()):
     """One eligible function per file, then a second, and so on, in path order.
 
     The one per file is the file's LARGEST eligible function, not its first.
@@ -601,6 +647,10 @@ def repo_function_workload(limit=REPO_FUNCTION_TARGET, verbose=False):
     file, which in this repository is usually a two-statement accessor. The
     largest eligible one is still a small-to-medium function by construction
     (`MAX_STMTS`) and is where the constructs are.
+
+    `round_offset` is what makes a SECOND census possible over the same tree
+    without changing the first one's sample (see `OFFSETS`), and `exclude` is
+    the other half of it: a ledger of an earlier census's idents.
     """
     files = []
     for root, dirs, names in os.walk(HERE):
@@ -627,7 +677,7 @@ def repo_function_workload(limit=REPO_FUNCTION_TARGET, verbose=False):
         for st in tree.body:
             if not isinstance(st, ast.FunctionDef):
                 continue
-            emitted, why = _eligible(st, defs, lines)
+            emitted, why = _eligible(st, defs, lines, admit_returns)
             if emitted is None:
                 skipped[why.split("(")[0].strip()[:48]] += 1
                 continue
@@ -640,18 +690,17 @@ def repo_function_workload(limit=REPO_FUNCTION_TARGET, verbose=False):
                 weight=len(st.body)))
         if found:
             found.sort(key=lambda w: (-w.weight, w.ident))
-            per_file.append(found)
+            per_file.append([w for w in found
+                             if function_key(w.ident) not in exclude])
     items, round_no = [], 0
-    while len(items) < limit:
-        added = False
-        for found in per_file:
-            if round_no < len(found):
-                items.append(found[round_no])
-                added = True
-                if len(items) == limit:
-                    break
-        if not added:
-            break
+    rounds_available = max((len(f) for f in per_file), default=0)
+    while len(items) < limit and round_no < rounds_available:
+        if round_no >= round_offset:
+            for found in per_file:
+                if round_no < len(found):
+                    items.append(found[round_no])
+                    if len(items) == limit:
+                        break
         round_no += 1
     if verbose:
         for why, n in skipped.most_common(12):
@@ -659,14 +708,14 @@ def repo_function_workload(limit=REPO_FUNCTION_TARGET, verbose=False):
     return items
 
 
-def example_workload(limit=EXAMPLE_STRIDE_TARGET):
+def example_workload(limit=EXAMPLE_STRIDE_TARGET, offset=0):
     """A fixed stride over `formal/examples`, so the sample is reproducible."""
     d = os.path.join(HERE, "formal", "examples")
     stems = sorted(f[:-5] for f in os.listdir(d) if f.endswith(".mojo"))
     if not stems:
         return []
     stride = max(1, len(stems) // max(1, limit))
-    picked = stems[::stride][:limit]
+    picked = stems[offset::stride][:limit]
     out = []
     for stem in picked:
         path = os.path.join(d, stem + ".mojo")
@@ -679,14 +728,70 @@ def example_workload(limit=EXAMPLE_STRIDE_TARGET):
 
 
 def build_workload(repo=REPO_FUNCTION_TARGET, examples=EXAMPLE_STRIDE_TARGET,
-                   verbose=False):
-    items = example_workload(examples) + repo_function_workload(repo, verbose)
+                   verbose=False, round_offset=0, example_offset=0,
+                   admit_returns=False, exclude=()):
+    exclude = set(exclude)
+    if exclude:
+        # …and everything the DEFAULT sample selects TODAY. A ledger's idents
+        # carry a line number, so a second census keyed on them alone shares
+        # items with what `--list` prints on the current tree: measured on this
+        # tree's own first census, only 10 of its 45 repo idents still exist and
+        # 22 of its 41 files are no longer sampled at all, so excluding the
+        # ledger is not enough for "a different sample" to mean one. Round 0 —
+        # the DEFAULTS, not this request's size — is what a reader compares
+        # against, so it is what is excluded.
+        exclude |= {function_key(w.ident) for w in build_workload()}
+    items = example_workload(examples, example_offset) + \
+        repo_function_workload(repo, verbose, round_offset, admit_returns,
+                               exclude)
     seen, out = set(), []
     for item in items:
-        if item.ident in seen:
+        if item.ident in seen or function_key(item.ident) in exclude:
             continue
         seen.add(item.ident)
         out.append(item)
+    return out
+
+
+def function_key(ident):
+    """The identity of a workload item, for "have I measured this already?".
+
+    An ident is `path:lineno:name`, and the LINE NUMBER is the wrong half of
+    that key. Any edit above a function renames it, so a ledger keyed on the
+    ident forgets a function the moment anything above it changes — measured on
+    this tree's own first census, whose 45 repo functions are **35 of them**
+    absent from today's `--list` for exactly that reason, and whose 15 examples
+    are 13 of them absent because `formal/examples` grew a file and the stride
+    moved. `path:name` is the function, and it is what an exclusion wants.
+    """
+    path, _, rest = ident.partition(":")
+    if ":" not in rest:
+        return ident                       # an `examples/*.mojo` item
+    return f"{path}:{rest.split(':', 1)[1]}"
+
+
+def ledger_idents(paths):
+    """Every function a previous census's ledger(s) recorded, for
+    `--exclude-seen`.
+
+    A ledger is one JSON object per line, with a `#` header line the tool wrote
+    itself, and it holds one line per item PER ARCHITECTURE — so the idents have
+    to be de-duplicated here or an item measured on both machines would be
+    excluded twice and counted once. A ledger that cannot be read is an error
+    rather than a warning: a second census that quietly re-measures the first
+    one's sample is a census of the same 60 functions wearing a new date.
+    """
+    out = set()
+    for path in paths:
+        with open(path) as f:
+            for n, line in enumerate(f, 1):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                try:
+                    out.add(function_key(json.loads(line)["ident"]))
+                except (ValueError, KeyError) as e:
+                    raise SystemExit(f"{path}:{n}: not a ledger line: {e}")
     return out
 
 
@@ -735,7 +840,7 @@ def _instrument_generators():
     _instrument_generators.done = True
 
 
-def run_item(item, arch, timeout, workdir):
+def run_item(item, arch, timeout, workdir, check=True):
     """Build one program with proofs and check it, and classify the outcome.
 
     The two calls are `formal.build.compile_formal`'s own, in its own order:
@@ -751,6 +856,13 @@ def run_item(item, arch, timeout, workdir):
     the check, run from this module rather than from inside `compile_formal`
     only so that the bound above can be stated. Nothing between the two calls
     touches the proof file.
+
+    `check=False` is PHASE A ALONE and it reports the class `proof-emitted`,
+    which is not a verdict: it says the code generator and the proof generator
+    both produced something and nobody has asked Lean about it. The census doc
+    §0.3 needed exactly this mode on a tree where Lean's own memory ceiling is
+    the binding constraint, and it is the only mode a worker may run who is not
+    allowed to start Lean at all.
     """
     import formal.build as FB
     from formal.lean import check_proof_cached
@@ -806,6 +918,11 @@ def run_item(item, arch, timeout, workdir):
                        phase="generate", wall=phase_a)
     with open(proof_path) as f:
         proof_lines = sum(1 for _ in f)
+    if not check:
+        return verdict("proof-emitted",
+                       f"phase A only: {proof_lines} lines of proof written, "
+                       f"not asked of Lean (--no-check)", phase="generate",
+                       wall=phase_a, proof_lines=proof_lines)
     check_started = time.monotonic()
     try:
         ok, detail, cached, n_sorries = check_proof_cached(
@@ -855,8 +972,19 @@ def _bound_detail(detail):
 
 # ── Reporting ────────────────────────────────────────────────────────────────
 CLASS_ORDER = ["pass", "admitted", "lean-rejected", "bound-exceeded",
-               "proof-refused", "proof-crash", "codegen-refused",
-               "refused-import", "build-crash"]
+               "proof-emitted", "proof-refused", "proof-crash",
+               "codegen-refused", "refused-import", "build-crash"]
+
+# Classes that name no CONSTRUCT: a pass, and the phase-A-only row. An item in
+# one of them has nothing to disagree about — see `disagreements`.
+NOT_A_CONSTRUCT = frozenset({"pass", "proof-emitted"})
+
+# A class that is NOT a verdict on a proof, and says so where it is printed.
+NOT_A_VERDICT = {
+    "proof-emitted": "phase A only (--no-check): the generator wrote a proof "
+                     "and nobody has asked Lean about it",
+    "bound-exceeded": "run_lean killed it — not a verdict on the proof",
+}
 
 
 def _cause_key(v):
@@ -885,7 +1013,9 @@ def report(results, arch_list):
         lines.append(f"== {arch}: {len(vs)} items")
         for cls in CLASS_ORDER:
             if counts.get(cls):
-                lines.append(f"   {cls:16s} {counts[cls]:4d}")
+                mark = ("   <- not a verdict: " + NOT_A_VERDICT[cls]
+                        if cls in NOT_A_VERDICT else "")
+                lines.append(f"   {cls:16s} {counts[cls]:4d}{mark}")
         proven = counts["pass"] + counts["admitted"]
         lines.append(f"   {'proved at all':16s} {proven:4d} "
                      f"({100.0 * proven / max(1, len(vs)):.1f}%)")
@@ -898,7 +1028,7 @@ def report(results, arch_list):
     lines.append("== causes, ranked over every arch")
     causes = collections.defaultdict(lambda: collections.Counter())
     for v in results:
-        if v.cls in ("pass",):
+        if v.cls in ("pass", "proof-emitted"):
             continue
         causes[_cause_key(v)][v.cls] += 1
     ranked = sorted(causes.items(), key=lambda kv: -sum(kv[1].values()))
@@ -907,7 +1037,58 @@ def report(results, arch_list):
         detail = ", ".join(f"{c}={counts[c]}" for c in CLASS_ORDER
                            if counts.get(c))
         lines.append(f"   {n:4d}  {cause[:96]:96s} [{detail}]")
+    lines.append(disagreements(results, arch_list))
     return "\n".join(lines)
+
+
+def disagreements(results, arch_list):
+    """The items whose two architectures refused DIFFERENT CONSTRUCTS.
+
+    A class is not a subject. Two machines can report the same class for one
+    function and mean two different things by it — measured on this tree's
+    round-2 census, where one item's arm64 refusal named a module constant and
+    its x86-64 refusal named a string operator two lines later, and the census's
+    class column said only `codegen-refused` for both. A cross-architecture
+    column is only worth reading if the cells are about the same thing, and this
+    is the one place in the report that says whether they are.
+
+    Only rows where BOTH machines REFUSED are listed, and that word is doing the
+    work. An arm64 refusal beside an x86-64 `proof-emitted` is x86-64's
+    documented degradation (`bugs/FORMAL_proof_coverage_census_2026-10-03.md`
+    §6's last bullet), which is expected and is not a disagreement about a
+    construct; and two `proof-emitted` rows differ in their detail because the
+    two generators wrote proofs of different LENGTHS (`--no-check`'s own line
+    count), which is a fact about the generators and not about a construct
+    either. Listing either would be crying wolf on 46 of 78 items.
+    """
+    if len(arch_list) < 2:
+        return ""
+    a, b = arch_list[0], arch_list[1]
+    by = collections.defaultdict(dict)
+    for v in results:
+        by[v.ident][v.arch] = v
+    rows = []
+    for ident, per in sorted(by.items()):
+        va, vb = per.get(a), per.get(b)
+        if not va or not vb or va.cls != vb.cls:
+            continue
+        if va.cls in NOT_A_CONSTRUCT:
+            continue
+        if va.detail == vb.detail:
+            continue
+        rows.append((ident, va, vb))
+    if not rows:
+        return ("\n== architectures agree on the refusal for every item that "
+                "refused on both")
+    out = [f"\n== {len(rows)} item(s) refused DIFFERENT CONSTRUCTS on the two "
+           f"architectures (same class, different subject — see "
+           f"bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_"
+           f"same_function.md)"]
+    for ident, va, vb in rows:
+        out.append(f"   {ident}")
+        out.append(f"      {a:7s} {va.cls:16s} {va.detail[:150]}")
+        out.append(f"      {b:7s} {vb.cls:16s} {vb.detail[:150]}")
+    return "\n".join(out)
 
 
 def main(argv=None):
@@ -926,6 +1107,38 @@ def main(argv=None):
                          "bound-exceeded and is not a verdict on the proof.")
     ap.add_argument("--repo", type=int, default=REPO_FUNCTION_TARGET)
     ap.add_argument("--examples", type=int, default=EXAMPLE_STRIDE_TARGET)
+    ap.add_argument("--no-check", action="store_true",
+                    help="PHASE A ONLY: build with prove=True and do not ask "
+                         "Lean anything. Every item that reaches a proof is "
+                         "reported as `proof-emitted`, which is not a verdict — "
+                         "it is the mode for a run that must not start Lean at "
+                         "all, and it is a strictly weaker claim than a checked "
+                         "census (see the census doc §0.3)")
+    ap.add_argument("--exclude-seen", action="append", default=[],
+                    metavar="LEDGER",
+                    help="exclude every ident a previous census's ledger "
+                         "already recorded (may be repeated). This is what "
+                         "makes a SECOND census a different sample rather "
+                         "than a re-measurement: `bugs/sweeps/"
+                         "proof_breadth_2026-10-03.jsonl` is the first "
+                         "round's, and the exclusion is applied to the repo "
+                         "half's round-robin as well as to the dedup")
+    ap.add_argument("--admit-returns", action="store_true",
+                    help="eligibility widening for a second census over a "
+                         "bigger pool: a candidate is no longer excluded for "
+                         "its RETURN annotation. See RETURN_ANNOTATIONS in this "
+                         "file for the measurement that says why that rule "
+                         "excluded 550 functions over no hazard")
+    ap.add_argument("--round-offset", type=int, default=0, metavar="N",
+                    help="the repo half's round-robin starts at round N — 0 is "
+                         "each file's LARGEST eligible function (the sample of "
+                         "the first census, and the default), 1 is each file's "
+                         "second, and so on. A second census over the same tree "
+                         "needs a second sample; changing the DEFAULT instead "
+                         "would silently redefine the first one's numbers")
+    ap.add_argument("--example-offset", type=int, default=0, metavar="N",
+                    help="the same idea for `formal/examples`: the stride over "
+                         "the sorted stems starts at N")
     ap.add_argument("--ledger", default=None,
                     help="append one JSON line per verdict here (default: "
                          "$TMPDIR/formal_proof_breadth.ledger.jsonl)")
@@ -939,7 +1152,11 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     items = build_workload(repo=args.repo, examples=args.examples,
-                           verbose=args.verbose_select)
+                           verbose=args.verbose_select,
+                           round_offset=args.round_offset,
+                           example_offset=args.example_offset,
+                           admit_returns=args.admit_returns,
+                           exclude=ledger_idents(args.exclude_seen))
     arches = ["arm64", "x86_64"] if args.arch == "both" else [args.arch]
     if args.list:
         for it in items:
@@ -964,13 +1181,18 @@ def main(argv=None):
     results = []
     ledger = open(ledger_path, "a")
     ledger.write(f"# formal_proof_breadth {time.strftime('%F %T')} "
-                 f"timeout={args.timeout} arches={','.join(arches)}\n")
+                 f"timeout={args.timeout} arches={','.join(arches)} "
+                 f"check={not args.no_check} round_offset={args.round_offset} "
+                 f"example_offset={args.example_offset} repo={args.repo} "
+                 f"admit_returns={args.admit_returns} "
+                 f"examples={args.examples}\n")
 
     def work(job):
         item, arch, workdir = job
         os.makedirs(workdir, exist_ok=True)
         try:
-            return run_item(item, arch, args.timeout, workdir)
+            return run_item(item, arch, args.timeout, workdir,
+                            check=not args.no_check)
         except Exception as e:                  # noqa: BLE001 — a class here
             return Verdict(item.ident, arch, "build-crash",
                            _first_line(f"{type(e).__name__}: {e}"), "harness",

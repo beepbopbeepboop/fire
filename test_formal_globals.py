@@ -286,6 +286,104 @@ CASES = [
      "    print(x)\n"
      "    return 0\n", "7\n"),
 
+    # The THIRD position where a name is a READ and the walk that folds module
+    # constants treated the enclosing node as a store, after `x = G` and the
+    # `elif` arm above. `out[K] = v` stores into `out` and READS both `out` and
+    # `K`, and the walk skipped the whole target — so `K` reached the emitter as a
+    # bare `IdentExpr` and the build refused "'K' has no home" on BOTH
+    # architectures, blaming the register allocator for a disagreement between
+    # two walks. Measured on `tools/memslot.py:held_env`
+    # (`bugs/FORMAL_proof_coverage_census_2026-10-03.md` §0.6's round-2
+    # census), whose `out[POOL] = str(pool)` is this shape exactly.
+    #
+    # Four shapes in one case, because "the index of a store target is a read"
+    # is one rule and the four are the four places it can be written: a bare
+    # subscript store, an AUGMENTED one (whose target walk is a separate
+    # statement type), a MULTI-assign, and a constant read in a body the walk
+    # has to reach through a branch. The dict subscript is the one that RUNS —
+    # a list indexed by a string has no meaning, so it is a refusal rather than
+    # a number, and the refusal it earns now names the SUBSCRIPT (`xs['k']`)
+    # instead of the constant.
+    # A module constant whose initializer is an OPERATOR, which is how this
+    # repository's own source spells one: `1 << 20` is a bit mask,
+    # `2 ** 62 - 1` is `MAX64`, `MASK & n` is the third of a family. Only four
+    # arithmetic operators were folded (`+ - * //`) and no bitwise or shift among
+    # them, so a constant written any other way read as `rebound` rather than
+    # `assigned`, reached the emitter as a bare `IdentExpr`, and was refused —
+    # with a message about PRINT's materialization, for a name the build had read
+    # and simply could not fold. Measured on `test_formal_math.py:isqrt_source`
+    # by the proof-breadth census, where it also made the two backends report
+    # different subjects for one function.
+    #
+    # All thirteen in one case, and the numbers are the assertion: a fold that
+    # got three of the six operators right would build and print wrong ones.
+    # Three of the thirteen are there because of WHERE the range check lives:
+    # `BIG` and `MINV` are the word's own top and bottom values, and their
+    # intermediates (`2 ** 63`) are not words, so a folder that checked each
+    # operator as it went would refuse exactly the two constants that are
+    # representable. `REF` reads an EARLIER module-level binding through `>>`,
+    # which is the one operator here whose answer is not a function of the low
+    # 64 bits and so is the one whose operands are checked.
+    ("module_constant_folded_through_its_operators",
+     "POW = 2 ** 3 - 1\n"
+     "SHL = 1 << 20\n"
+     "SHR = 100 >> 2\n"
+     "REF = SHL >> 4\n"
+     "AND = 7 & 3\n"
+     "OR = 7 | 8\n"
+     "XOR = 7 ^ 3\n"
+     "MIX = 3 * 4 + (1 << 5)\n"
+     "NEG = -8 >> 2\n"
+     "BIG = 2 ** 62 - 1\n"
+     "MINV = -(2 ** 63)\n"
+     "NOTV = ~(1 << 3)\n"
+     "TOP = (1 << 62) | 7\n"
+     "\n"
+     "def main(n):\n"
+     "    print(POW)\n"
+     "    print(SHL)\n"
+     "    print(SHR)\n"
+     "    print(REF)\n"
+     "    print(AND)\n"
+     "    print(OR)\n"
+     "    print(XOR)\n"
+     "    print(MIX)\n"
+     "    print(NEG)\n"
+     "    print(BIG)\n"
+     "    print(MINV)\n"
+     "    print(NOTV)\n"
+     "    print(TOP)\n"
+     "    return 0\n",
+     "7\n1048576\n25\n65536\n3\n15\n4\n44\n-2\n4611686018427387903\n"
+     "-9223372036854775808\n-9\n4611686018427387911\n"),
+
+    ("read_global_as_a_subscript_index_in_a_store",
+     "KEY = 'k'\n"
+     "IDX = 1\n"
+     "\n"
+     "def store() -> Int:\n"
+     "    d = {'a': 1}\n"
+     "    d[KEY] = 7\n"
+     "    return d[KEY]\n"
+     "\n"
+     "def aug() -> Int:\n"
+     "    xs = [1, 2, 3]\n"
+     "    xs[IDX] += 10\n"
+     "    xs[0], xs[2] = 7, 9\n"
+     "    return xs[0] + xs[1] + xs[2]\n"
+     "\n"
+     "def branchy() -> Int:\n"
+     "    xs = [4, 5]\n"
+     "    if 2 > 0:\n"
+     "        xs[IDX - 1] = 6\n"
+     "    return xs[0] * 10 + xs[1]\n"
+     "\n"
+     "def main(n):\n"
+     "    print(store())\n"
+     "    print(aug())\n"
+     "    print(branchy())\n"
+     "    return 0\n", "7\n28\n65\n"),
+
     # ── containers ──
     # A module-level list is an address-valued slot: the slot holds a POINTER to
     # the blob, so it is the case that exercises the initializer at all — an

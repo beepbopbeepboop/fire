@@ -266,6 +266,263 @@ class TestClassifier(unittest.TestCase):
                "    return f(x)\n")
         self.assertEqual(self._class_of(src), "proof-refused")
 
+    def test_a_second_census_is_a_different_sample(self):
+        """`--round-offset` / `--example-offset` / `--exclude-seen` / `--admit-returns`.
+
+        **The workload is a function of the tree, which is what makes two runs
+        comparable — and which is also what makes a SECOND census impossible
+        without asking for a different sample.** Round 0 is each file's largest
+        eligible function; the first census took 45 of them over 41 files, and
+        the whole eligible pool is 76 functions, so a second spread of ~80 that
+        shares none of the first cannot be reached by continuing the same
+        round-robin. Three things make it reachable and each is checkable
+        without a build:
+
+          * the offsets move the SELECTION, never the defaults, so round 0 still
+            means what round 0's committed ledger says it means;
+          * `--exclude-seen` reads an earlier census's committed ledger — keyed by
+            `path:name`, because a `path:lineno:name` ident forgets a function
+            the moment anything above it changes (10 of this tree's own 45 first-
+            census idents still exist) — and it excludes round 0's CURRENT sample
+            as well, because that is what a reader compares against;
+          * `--admit-returns` widens the POOL, and the measurement that says why
+            it may is in `RETURN_ANNOTATIONS` (a `-> bool`/`-> str`/`-> None`
+            return annotation is not a call-site mismatch — `main` returns the
+            value and nothing asserts a type on it).
+        """
+        first = {B.function_key(w.ident) for w in B.build_workload()}
+        # The defaults are untouched: this is the first census's sample.
+        self.assertEqual(
+            {B.function_key(w.ident) for w in B.build_workload(
+                round_offset=0, example_offset=0, admit_returns=False,
+                exclude=())},
+            first,
+            "the offsets changed the default sample, so every number taken "
+            "before this option existed now describes a different 60 functions")
+
+        # The second census: the same rule, a new sample, drawn off the first
+        # census's own committed ledger.
+        ledger = os.path.join(HERE, "bugs", "sweeps",
+                              "proof_breadth_2026-10-03.jsonl")
+        self.assertTrue(os.path.isfile(ledger),
+                        f"the first census's ledger is gone: {ledger}")
+        seen = B.ledger_idents([ledger])
+        self.assertTrue(seen,
+                        "the committed ledger carries no identifiers at all")
+        second = B.build_workload(repo=60, examples=45, example_offset=1,
+                                  admit_returns=True, exclude=seen)
+        second_ids = {B.function_key(w.ident) for w in second}
+        self.assertEqual(second_ids & seen, set(),
+                         "the second census re-measures a function the first "
+                         "census's ledger already recorded")
+        self.assertEqual(second_ids & first, set(),
+                         "the second census re-measures what `--list` prints "
+                         "today, which is the comparison a reader makes")
+        self.assertGreaterEqual(len(second), 75,
+                                f"the second census is {len(second)} items; "
+                                "the point of the widening is a ~80-function "
+                                "spread")
+        # …and it SPREADS, which is the property the first census's own
+        # `test_the_repo_half_spreads_over_files` protects: a sample of one
+        # file's second candidates would be a census of that file. The floor is
+        # 30 files and not the 40 round 0 reaches, because excluding round 0
+        # costs the widest files their FIRST candidate — `formal/model.py` alone
+        # is 16 of them — and that cost is the price of the disjointness.
+        files = {w.ident.split(":")[0] for w in second if w.origin == "repo"}
+        self.assertGreaterEqual(len(files), 30,
+                                f"the second census reached {len(files)} files")
+        # …and every item is still a CLOSED module, which is the property the
+        # census's verdicts rest on (a refusal about a name the sample forgot to
+        # carry is not a fact about the proof layer).
+        for w in second:
+            if w.origin != "repo":
+                continue
+            with self.subTest(item=w.ident):
+                try:
+                    ast.parse(w.source)
+                except SyntaxError as e:
+                    self.fail(f"{w.ident}: the widened sample emits a module "
+                              f"that does not parse: {e}")
+
+    def test_an_ident_is_not_a_stable_key_and_the_line_number_is_why(self):
+        """`function_key`: `path:lineno:name` forgets a function on any edit
+        above it, which is measured on this tree's own first census — 10 of its
+        45 repo idents still exist today, 16 more exist at a moved line, and 22
+        of its 41 files are no longer sampled at all. A second census keyed on
+        the ident would share 38 of its 78 items with `--list`; keyed on
+        `path:name` it shares none."""
+        self.assertEqual(B.function_key("a/b.py:1036:_short_repr"),
+                         "a/b.py:_short_repr")
+        self.assertEqual(B.function_key("a/b.py:1040:_short_repr"),
+                         B.function_key("a/b.py:1036:_short_repr"))
+        self.assertEqual(B.function_key("a/b.py:10:f"), "a/b.py:f")
+        # An `examples/*.mojo` item has no line number and is its own key.
+        self.assertEqual(B.function_key("examples/pair.mojo"),
+                         "examples/pair.mojo")
+
+    def test_a_ledger_that_is_not_one_is_refused(self):
+        """`ledger_idents` reads a previous census's ledger, so it must not
+        guess: a file of anything else would silently exclude nothing and the
+        second census would be the first one wearing a new date."""
+        with tempfile.TemporaryDirectory() as d:
+            bad = os.path.join(d, "not-a-ledger.jsonl")
+            with open(bad, "w") as f:
+                f.write('{"not": "a verdict"}\n')
+            with self.assertRaises(SystemExit):
+                B.ledger_idents([bad])
+            # A header line and a blank line are the tool's own, and are skipped;
+            # the two architectures of one item are one key, not two.
+            good = os.path.join(d, "good.jsonl")
+            with open(good, "w") as f:
+                f.write("# formal_proof_breadth 2026-10-03 timeout=400.0\n"
+                        '{"ident": "a.py:1:f", "arch": "arm64", "cls": "pass"}\n'
+                        '\n'
+                        '{"ident": "a.py:1:f", "arch": "x86_64", '
+                        '"cls": "pass"}\n'
+                        '{"ident": "examples/p.mojo", "arch": "arm64", '
+                        '"cls": "pass"}\n')
+            self.assertEqual(B.ledger_idents([good]),
+                             {"a.py:f", "examples/p.mojo"})
+
+    def test_a_return_annotation_is_not_a_call_site_mismatch(self):
+        """The one eligibility rule `--admit-returns` relaxes, and why.
+
+        The rule it relaxes is stated in terms of a CALL SITE: "the synthesised
+        `main` calls the function with the startup stub's integer, and a
+        mismatch there would make the census report a CALL-SITE refusal as if it
+        were a statement about the function". That is true of a PARAMETER
+        (`_entry_call` passes the stub's integer to every one of them, so a
+        `str` parameter is a value the source never passes) and false of a
+        RETURN: `main` returns whatever the function returns and nothing in the
+        harness asserts a type on that result.
+
+        So each fixture asks whether its annotation is what excludes it — and the
+        PARAMETER annotation must stay excluded either way, because that one
+        really can mismatch the stub.
+        """
+        def _eligible(source, **kw):
+            return B._eligible(ast.parse(source).body[0], {},
+                               source.splitlines(), **kw)
+
+        plain = "def f(n):\n    if n > 3:\n        return True\n    return False\n"
+        self.assertIsNotNone(_eligible(plain)[0],
+                             "the unannotated fixture must be eligible, or "
+                             "this test is measuring the wrong thing")
+        annotated = ("def f(n: int) -> bool:\n"
+                     "    if n > 3:\n"
+                     "        return True\n"
+                     "    return False\n")
+        self.assertIsNone(_eligible(annotated)[0],
+                          "a RETURN annotation must not exclude a candidate")
+        emitted, deps = _eligible(annotated, admit_returns=True)
+        self.assertIsNotNone(emitted,
+                             "admit_returns must admit a return-annotated "
+                             f"candidate: {deps}")
+        self.assertIn("-> bool", emitted,
+                      "the emitted module carries the annotation verbatim, not "
+                      "a paraphrase of it")
+        # The asymmetry: a PARAMETER annotated `str` is still out, widened or
+        # not, because the stub's integer is not the value the source passes.
+        for source in ("def f(text: str) -> bool:\n"
+                       "    return True\n",
+                       "def f(text: str):\n"
+                       "    return 1\n"):
+            self.assertIsNone(_eligible(source, admit_returns=True)[0],
+                              "a str PARAMETER must stay ineligible: the "
+                              "harness has no str to hand it")
+
+    def test_a_census_that_does_not_ask_lean_says_so(self):
+        """`--no-check` is the mode a worker may run who may not start Lean.
+
+        It reports `proof-emitted`, which is not a verdict, and the class is
+        printed with that said — a census that reported a proof nobody checked
+        as a row without a name would be counting a hope."""
+        self.assertIn("proof-emitted", B.CLASS_ORDER)
+        self.assertIn("proof-emitted", B.NOT_A_VERDICT)
+        src = "def main(x):\n    y = x * 3\n    print(y)\n    return y\n"
+        item = B.Workload(ident="t", origin="repo", source=src, detail="",
+                          weight=0)
+        tmp = tempfile.mkdtemp(prefix="pbc-nocheck-")
+        try:
+            v = B.run_item(item, "arm64", timeout=60, workdir=tmp,
+                           check=False)
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertEqual(v.cls, "proof-emitted")
+        self.assertGreater(v.proof_lines, 0,
+                           "a proof was written; that is what the class says")
+        self.assertIsNone(v.n_sorries,
+                          "no Lean ran, so no hole count can be reported — a "
+                          "number here would be invented")
+        # …and it is not counted as a proof in the report's own tally.
+        text = B.report([v], ["arm64"])
+        self.assertIn("proof-emitted", text)
+        self.assertIn("not a verdict", text)
+        self.assertIn("proved at all       0 (0.0%)", text)
+
+    def test_the_report_says_when_the_two_architectures_mean_different_things(self):
+        """A class is not a subject, and the report has to say so.
+
+        Measured on this tree's round-2 census: one item's arm64 refusal named a
+        module constant and its x86-64 refusal named a string operator two lines
+        later, and the census's class column said `codegen-refused` for both. A
+        cross-architecture column is only worth reading if its cells are about
+        the same thing, so the report names the items where they are not —
+        `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
+        function.md` is the finding and this is the instrument for it.
+
+        The other half of the rule matters as much: an arm64 refusal beside an
+        x86-64 `proof-emitted` is that generator's documented degradation, and
+        listing it as a disagreement would be crying wolf on 29 of 78 items.
+        """
+        V = B.Verdict
+        results = [
+            V("x.py:1:f", "arm64", "codegen-refused",
+              "'A' has no home: this module declares no module-level name",
+              "build", 0.1, None, 0),
+            V("x.py:1:f", "x86_64", "codegen-refused",
+              "'%' is refused when the left operand is a string", "build", 0.1,
+              None, 0),
+            V("y.py:2:g", "arm64", "codegen-refused", "the same words",
+              "build", 0.1, None, 0),
+            V("y.py:2:g", "x86_64", "codegen-refused", "the same words",
+              "build", 0.1, None, 0),
+            V("z.py:3:h", "arm64", "proof-refused",
+              "model: a ListExpr has no value in the semantic model", "generate",
+              0.1, None, 0),
+            V("z.py:3:h", "x86_64", "proof-emitted", "phase A only: 100 lines",
+              "generate", 0.1, None, 100),
+        ]
+        text = B.report(results, ["arm64", "x86_64"])
+        self.assertIn("DIFFERENT CONSTRUCTS", text)
+        self.assertIn("x.py:1:f", text)
+        self.assertIn("'A' has no home", text)
+        self.assertIn("'%' is refused", text)
+        self.assertNotIn("y.py:2:g\n", text.split("DIFFERENT CONSTRUCTS")[1],
+                         "an item both machines refused identically is not a "
+                         "disagreement")
+        self.assertNotIn("z.py:3:h", text.split("DIFFERENT CONSTRUCTS")[1],
+                         "x86-64 emitting a proof where arm64 refuses is the "
+                         "documented degradation, not a disagreement")
+        # Two `proof-emitted` rows differ in their detail because the two
+        # generators wrote proofs of different LENGTHS, which is a fact about
+        # the generators and not a disagreement about a construct either.
+        both = [V("w.py:4:k", "arm64", "proof-emitted",
+                  "phase A only: 5348 lines of proof written", "generate", 0.1,
+                  None, 5348),
+                V("w.py:4:k", "x86_64", "proof-emitted",
+                  "phase A only: 524 lines of proof written", "generate", 0.1,
+                  None, 524)]
+        self.assertIn("architectures agree on the refusal",
+                      B.report(both, ["arm64", "x86_64"]),
+                      "a proof-length difference is not a construct "
+                      "disagreement and listing it would cry wolf on 46 of 78")
+        # …and with nothing to report it says so rather than printing a header.
+        same = [v for v in results if v.ident == "y.py:2:g"]
+        self.assertIn("architectures agree on the refusal",
+                      B.report(same, ["arm64", "x86_64"]))
+
     def test_a_codegen_refusal_is_not_counted_against_the_proof_layer(self):
         """A string comparison the code generator refuses.
 

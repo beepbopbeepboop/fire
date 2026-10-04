@@ -10755,7 +10755,10 @@ def _apply_module_constant_sites(node, sites: dict, stores: set) -> None:
         node[:] = out_items
         return node
     if isinstance(node, (F.AssignStmt, F.AugAssignStmt, F.VarDecl)):
-        # The target is a store: leave it, and walk the value side only.
+        # The target is a store: leave it, and walk the value side only —
+        # except for the positions INSIDE the target that are reads, which
+        # `_rewrite_store_target` names. `out[K] = v` stores into `out`, and it
+        # READS both `out` and `K`.
         #
         # …through `_rewrite_child`, which RETURNS a replacement, and not
         # through this function, which rewrites in place. That is the whole
@@ -10774,6 +10777,20 @@ def _apply_module_constant_sites(node, sites: dict, stores: set) -> None:
         # matters — a `MemberExpr` store target is the shape this backend uses
         # for every struct field write, so the uncovered position was reached by
         # ordinary code rather than by an assignment to a bare local.
+        #
+        # The SUBSCRIPT index was the one read position left in a store target
+        # when this was measured (`tools/formal_proof_breadth.py`'s round-2
+        # census, `tools/memslot.py:held_env`): `out[POOL] = v` skipped the whole
+        # target, so `POOL` reached the emitter as a bare `IdentExpr` and the
+        # build refused "'POOL' has no home" on both architectures.
+        _rewrite_store_target(getattr(node, "target", None), sites, stores)
+        node.value = _rewrite_child(getattr(node, "value", None), sites,
+                                    stores)
+        return
+    if isinstance(node, F.MultiAssignStmt):
+        # The same position, in the statement that has a LIST of them.
+        for target in (getattr(node, "targets", None) or []):
+            _rewrite_store_target(target, sites, stores)
         node.value = _rewrite_child(getattr(node, "value", None), sites,
                                     stores)
         return
@@ -10802,6 +10819,49 @@ def _apply_module_constant_sites(node, sites: dict, stores: set) -> None:
                 if isinstance(getattr(node, name), (list,)) else
                 _rewrite_child(getattr(node, name), sites, stores))
     return
+
+
+def _rewrite_store_target(target, sites: dict, stores: set):
+    """Rewrite the READS inside a store target, and leave the store itself.
+
+    `out[K] = v` is a store into `out`, and `out[K] += v` and `(a[K], b) = v`
+    are the same shape. What it does not do is store anything INTO `out` or `K`:
+    both are read to compute the address being stored to. So the target's
+    subscript INDEX is a read position, and it was the last one this walk did
+    not cover — the whole target was skipped, so a module constant used as an
+    index was left in place and reached the emitter as a bare `IdentExpr`:
+
+        POOL = 'MEMSLOT_POOL'
+        def held_env(gb, pool):
+            out = {}
+            out[POOL] = str(pool)      # 'POOL' has no home, on both backends
+            return out
+
+    Which is the `has no home` refusal `tools/memslot.py:448:held_env` measured
+    in `bugs/FORMAL_proof_coverage_census_2026-10-03.md`'s round-2 census, and
+    the third instance of one shape: a position where a name is a READ and the
+    walk treated the enclosing node as a store. The two before it are the
+    assignment value (`x = G`) and the `elif` arm, both fixed in the branch
+    above.
+
+    **The base of the subscript is left alone**, deliberately: `out` is a read
+    too, but a module-level constant is not something this path can subscript
+    into — a container global has no storage (`FORMAL_module_state_no_storage.md`)
+    — so rewriting the base would trade one honest refusal for a wrong answer.
+    The INDEX is always an ordinary value expression, and that is the whole of
+    what this walks.
+    """
+    if target is None:
+        return
+    if isinstance(target, (F.TupleExpr, F.ListExpr)):
+        # A tuple or list target is a run of targets, not one expression: its
+        # ELEMENTS are stores, each with its own subscript index to reach.
+        for element in (getattr(target, "elements", None) or []):
+            _rewrite_store_target(element, sites, stores)
+        return
+    if isinstance(target, F.SubscriptExpr):
+        target.index = _rewrite_child(getattr(target, "index", None), sites,
+                                      stores)
 
 
 def _rewrite_child(child, sites: dict, stores: set):

@@ -47,6 +47,17 @@ runs compared with CPython — and it took TWO generator blockers out of the
 proof layer to be able to ask it at all. Its corpus is not §0.2's, so none of its
 counts are comparable with §0.2's or §0.4's; §0.5 opens by saying which.
 
+**§0.6 is new, and it is the SECOND ROUND over the same subject: 78 functions
+that share NONE of the first round's, both architectures, every non-pass
+classified.** It exists because a census of 60 functions answers one question
+about one sample, and §0.6 is what the answer looks like on a different 78 —
+of which **46 reach the proof layer against §2's 21**, and the largest single
+cause is a construct no amount of corpus would have found. It is phase A only
+(`--no-check`, no Lean at all) and says so in its own first paragraph; the two
+fixes it carries are in `formal/build.py` and `formal/model.py`, and both are
+measured on round 0's own sample so the movement is a `Counter` over two
+committed ledgers rather than a claim.
+
 **What this measures, and the one number nobody had.** `tools/formal_sweep.py`
 covers the *code generator's* language coverage and deliberately builds
 `--no-prove`, and says so in its own docstring:
@@ -419,6 +430,188 @@ corpus it is 37 of 60 programs, against 0 of 60 for the default `plain` mix —
 carries the measurement and why closing it is three layers deep rather than a
 ten-line arm.
 
+## 0.6 Round 2: 78 functions that share NONE of round 1's, and what stops each
+
+**This is phase A only, and the Lean-dependent classes of §2 are therefore NOT
+MEASURED here.** The run is `tools/formal_proof_breadth.py --no-check`, which
+builds with `prove=True` and does not ask Lean anything: every item that reaches
+a proof is reported as `proof-emitted`, a class the report prints as *not a
+verdict* because nobody has checked it. So there is no `pass`, no `admitted`, no
+`lean-rejected` and no `bound-exceeded` row below, and their absence is a
+property of the run rather than a measurement of zero. §0.3 is the precedent and
+the reason: a worker who may not start Lean gets the phase-A half, which is
+exactly the half that separates "the code generator refused" from "the proof
+generator refused", and the tool grew a mode for it rather than a flag that
+quietly lowered the wall bound.
+
+```console
+$ python3 tools/memslot.py --gb 8 --label proofbreadth2 -- \
+    python3 -u tools/formal_proof_breadth.py --no-check --arch both -j 4 -t 400 \
+      --repo 60 --examples 45 --example-offset 1 --admit-returns \
+      --exclude-seen bugs/sweeps/proof_breadth_2026-10-03.jsonl \
+      --ledger bugs/sweeps/proof_breadth_2026-10-04_round2-phaseA.jsonl
+156/156 verdicts in 2s; peak 0.1 GB
+```
+
+Every number in this section is a `Counter` over that committed ledger.
+
+### 0.6.1 The sample, and the three things a second census over one tree needed
+
+**The eligible pool is 76 functions and round 1 took 45 of them, so a ~80-function
+sample that shares none of the first is arithmetically out of reach without
+changing something.** Three changes to the SELECTOR made it reachable, and all
+three leave round 0 — the first census's sample — exactly as it was, because a
+number already quoted from this document has to keep meaning what it meant:
+
+  * **`--round-offset` / `--example-offset`** shift the selection (round 1 is
+    each file's *largest* eligible function; offset 1 is each file's second).
+  * **`--exclude-seen`** reads an earlier census's committed ledger. The key is
+    `path:name` and not `path:lineno:name`, and that is a measurement rather than
+    a preference: **only 10 of round 1's 45 repo idents still exist on this
+    tree**, 16 more exist at a moved line, and **22 of its 41 files are no longer
+    sampled at all**. An ident is not a stable key, so an exclusion keyed on it
+    forgets a function the moment anything above it changes — a second census so
+    keyed shares 38 of its 78 items with `--list`. It also excludes round 0's
+    CURRENT sample, because that is the comparison a reader makes.
+  * **`--admit-returns`** widens the pool, and it relaxes exactly one eligibility
+    rule. The rule it relaxes is stated in terms of a CALL SITE — "the synthesised
+    `main` calls the function with the startup stub's integer, and a mismatch
+    there would make the census report a CALL-SITE refusal as if it were a
+    statement about the function" — which is true of a **parameter** (`str` is a
+    value the harness cannot supply) and **false of a return** (`main` returns
+    whatever the function returns and nothing asserts a type on it). Measured,
+    both architectures: `def f(n: int) -> bool` builds and emits its proof exactly
+    as the same function without the annotation does, and so do `-> str` and
+    `-> None`. That one rule was excluding ~550 real functions over no hazard.
+
+The result is **78 items — 18 `formal/examples` programs and 60 functions from
+this repository's own `*.py`, over 32 files, with zero overlap with round 1's
+ledger or with `--list` today.** Two biases, both stated rather than hidden: 32
+files is fewer than round 1's 41, because excluding round 0 costs the widest
+files their best candidate (`formal/model.py` alone is 16 of them); and the two
+samples are NOT two independent draws from one population, so §0.6's percentages
+and §2's are not comparable — round 1's sample is string-heavy in a way this
+one is not, which is itself the finding below.
+
+### 0.6.2 The classes
+
+| | arm64 | x86-64 |
+|---|---|---|
+| `pass` / `admitted` / `lean-rejected` / `bound-exceeded` | **not measured** (§0.6's first paragraph) | **not measured** |
+| `proof-emitted` — a proof was written, nobody asked Lean | **17** | **46** |
+| `proof-refused` — the generator refused, by name | **29** | **0** |
+| `codegen-refused` — the code generator refused | **32** | **32** |
+| reached the proof layer at all | **46 of 78 (59 %)** | **46 of 78 (59 %)** |
+
+By item, which is the unit worth reading in: **32 items are `codegen-refused` on
+both machines, 29 are `proof-refused` on arm64 and `proof-emitted` on x86-64, and
+17 emit a proof on both.** arm64's `proof-refused` is never a crash — every one is
+a `NotImplementedError` from a raise site that names its reason, which is what
+`tools/formal_proof_breadth.py`'s `_PHASE` instrumentation exists to tell apart
+from a generator bug.
+
+**The x86-64 column has no `proof-refused` at all, and that is its designed
+degradation rather than a capability.** It catches the same refusals arm64
+propagates and emits a documented placeholder instead (§6's last bullet), so its
+column answers a different question: how much the generator could state, against
+arm64's how much it could state *without inventing*. Both columns are reported;
+neither is the coverage number.
+
+### 0.6.3 Every non-pass, by the construct that stops it
+
+61 of the 78 items meet a refusal; the other 17 emit a proof on both machines and
+have no row here. The subject is read off the refusal's own words, and each row
+is a `Counter` over the ledger.
+
+| items | class | the construct | whose it is |
+|---|---|---|---|
+| **20** | arm64 `proof-refused` | **a call to a second function in the same image** — `universal theorem: the call at 0x… targets 0x…, a second function in the same image. The machine model follows it -- every byte is present, and the callee's `ret` returns through x30 -- but the CFG walk is per-function` | `bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md` (filed here) |
+| **16** | both `codegen-refused` | **a string VALUE**: `'+'` on two strings, `'%'`/`<=`/`==` with a string operand, `join()`, `strip()`, `replace`, an f-string reaching `print()` | `FORMAL_string_value_model.md` (formal16-7) |
+| **7** | both `codegen-refused` | **a field access through a value** (`x.y`), which the path has no way to type | `FORMAL_pointer_value_model.md` (formal13-5) |
+| **6** | both `codegen-refused` | **a call this path does not lower**, refused by the LINK AUDIT rather than by name — `list`, `enumerate`, `max`, `min`, `REPORT.append`, `_DISPATCH_TABLE_GLOBAL_CTYPES.get` | `FORMAL_an_unlowered_callee_is_refused_by_a_link_audit.md` |
+| **4** | arm64 `proof-refused` | **a container literal with no value in the model** — `model: a ListExpr has no value in the semantic model`, and its Tuple/Dict/Ternary arms | the representation work; §6 |
+| **4** | arm64 `proof-refused` | **a call with no model** — `model: call to \`str\` has no model in this image`, `…to \`int\`…` | the same, one layer out |
+| 1 | arm64 `proof-refused` | `model: \`None\` is read here and this generator binds it to nothing` | §6 |
+| 1 | both `codegen-refused` | a method call on a value (`value.to_bytes()`) | — |
+| 1 | both `codegen-refused` | a module-level constant with storage but no initializer (`BIG_N = [2 ** 32, …]`) | — |
+| 1 | both `codegen-refused` | a `range()` literal over the frame budget (524296 bytes, 131072 left on arm64 / 16384 on x86-64) | — |
+
+**Two of the three biggest rows are claimed by other workers and are listed here
+so nobody re-derives them.** The largest, by a factor of two and a half, is the
+one with no doc of its own until this section filed one.
+
+**The string row is 16 of the 61 and it is one subject**, so the arithmetic of
+this section is worth doing once: a string is a bare `char *` on this path, so
+`+` is integer arithmetic on two addresses, `%` is an integer operation with a
+string where a number belongs, and a comparison needs `strcmp`, which dereferences.
+Every one of those is a refusal with a named reason and none is a proof-layer
+fact. 59 % of this corpus reaching the proof layer is therefore bounded by a
+construct that has nothing to do with proofs.
+
+### 0.6.4 What this round fixed, measured on round 0's sample
+
+Two false refusals, both in the module-constant machinery, both found by the
+census and both with the same shape: **a name the build HAD read was reported as a
+name it could not place**, and the message named something else entirely.
+
+| | the construct | before | after |
+|---|---|---|---|
+| `formal/build.py` | **a subscript index is a READ even when the subscript is a store** — `out[K] = v` stores into `out` and reads `K` | `codegen-refused` on both: *"'POOL' has no home: the register allocator collected no home for it, so the emitter and the allocation walk disagree about this function's locals"* | arm64 `proof-refused` (the DictExpr model gap), x86-64 `proof-emitted` (2292 lines) |
+| `formal/model.py` | **a module constant is folded through its own operators** — `MAX64 = 2 ** 63 - 1`, `SHL = 1 << 20` | `codegen-refused`, and **the two backends named DIFFERENT subjects for the same function**: arm64 *"'MAX64' has no home: this module declares no module-level name by that spelling"*, x86-64 *"'%' is refused when the left operand is a string"* | both refuse it on the string |
+
+The second is the more interesting of the two and not for the item it moved. A
+census with one column per architecture is only worth reading if the columns are
+about the same thing, and one item in 78 was quietly comparing arm64's answer to
+a module constant against x86-64's answer to a string operator — **before this,
+3 of the 32 `codegen-refused` items had a different refusal text on the two
+machines, and after it, 2 do** (one is the frame budget genuinely differing, one
+is a real construct divergence and is filed).
+
+Both fixes are measured on **round 0's own 60-item sample**, before and after, as
+two committed ledgers with the same 120 keys:
+
+| | `codegen-refused` | `proof-refused` | `proof-emitted` |
+|---|---|---|---|
+| `…_round0-phaseA-before-both-fixes.jsonl` | 66 | 12 | 42 |
+| `…_round0-phaseA.jsonl` | 64 | 13 | 43 |
+
+**What was run to cover them**, so the integrator does not have to guess which
+suites this touches: `test_formal_globals.py` 53/53 (three engines per case,
+which is where both fixes' pins live), `test_formal_run.py` **954/954**,
+`test_formal_toplevel.py` 111/111 — the module-level statements are the fold's
+blast radius — `test_formal_target_queries.py` 32/32 (the other reader of the
+module-level folder), `test_formal_x86_64_parity.py` 51/51 (the refusals both
+machines have to word identically), `test_formal_proof_breadth.py` 14/14 and
+`test_suite.py` 299/299. **No gate, no Lean, no stdlib sweep** — this worker may
+run neither, and §0.6.5's last bullet is what is left. One static fact that
+bounds the stdlib verdicts by construction: **no `.mojo` file in this tree has a
+module-level constant whose initializer uses `**`, `<<`, `>>`, `|`, `&` or `^`**
+(250 module-level bindings scanned, 0 hits), so the two module-level folders
+cannot reclassify a stdlib module's body from this change.
+
+Two verdicts changed, both `tools/memslot.py:448:held_env`, and both off the
+code generator's frontier into the proof layer. It is worth being precise about
+what that is worth: `held_env` is not yet proved, it is now *provable-shaped* —
+arm64 refuses it for the DictExpr model gap and x86-64 emits a proof nobody has
+checked. The census counts a hole as not a pass and this is the same discipline
+one layer earlier: a function that reaches the proof layer is not a function that
+has a proof.
+
+### 0.6.5 What this round did NOT fix, and why
+
+* **The arm64 universal theorem cannot follow a call into the same image — 20 of
+  78 items, the largest cause in the census.** It is a per-function CFG walk, and
+  the callee's `ret` dispatches on `x30`, whose value is a property of the call
+  path rather than of the block. Closing it is a return-address map in the
+  machine framework, not an arm in the generator, and it cannot be verified by a
+  worker who may not run Lean — a machine-model change whose only oracle is the
+  proof it produces. Filed, with the reduce and the two ends of the limit.
+* **A container and a string still have no value in the model** — 24 of the 61
+  refusals between them, and every one of them is somebody else's claim.
+* **The Lean half of this round is not measured**, so nothing here says whether
+  any of the 46 proofs Lean would accept. The integrator has the budget for it;
+  §0.3 says what to expect when it is spent.
+
 ## 1. The workload, and why it is 60 functions and not 60 files
 
 15 `formal/examples` programs verbatim (a fixed stride over the sorted stems, so
@@ -643,10 +836,23 @@ python3 tools/memslot.py --gb 8 --label proofbreadth -- \
   python3 tools/formal_proof_breadth.py -j 1 -t 400             # both arches
 python3 tools/formal_proof_breadth.py --arch x86_64 -j 1 -t 300 # one arch
 python3 test_formal_proof_breadth.py                            # the instrument
+
+# ROUND 2 (§0.6): a different sample, and phase A only — no Lean is started.
+python3 tools/memslot.py --gb 8 --label proofbreadth2 -- \
+  python3 -u tools/formal_proof_breadth.py --no-check --arch both -j 4 -t 400 \
+    --repo 60 --examples 45 --example-offset 1 --admit-returns \
+    --exclude-seen bugs/sweeps/proof_breadth_2026-10-03.jsonl \
+    --ledger bugs/sweeps/proof_breadth_2026-10-04_round2-phaseA.jsonl
 ```
 
 The published run's ledger is committed, so re-deriving any count is a
 `Counter` over `bugs/sweeps/proof_breadth_2026-10-03.jsonl` and not a run.
+**Three ledgers carry §0.6's numbers and they are named for what they are:**
+`proof_breadth_2026-10-04_round2-phaseA.jsonl` (round 2's 78 items, phase A),
+`proof_breadth_2026-10-04_round0-phaseA.jsonl` (round 0's own 60 items, after
+the two fixes of §0.6.4) and `…_round0-phaseA-before-both-fixes.jsonl` (the same
+120 keys before them, so §0.6.4's table is a diff of two files rather than a
+claim).
 
 Every Lean run is content-addressed, so a re-run with nothing changed is a file
 read per item (17 s for all 120 above); changing anything under `formal/`,
