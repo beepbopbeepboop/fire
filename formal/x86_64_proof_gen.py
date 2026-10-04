@@ -556,8 +556,10 @@ def _run_tests_section(func_name: str, test_input: int, externs: list = None,
     because that call is one the model provably never executes (the guard's
     `JAE` is always taken; `formal/x86_64_codegen.py::_emit_stack_floor_guard`
     spells out the sequence and the argument).  Reading the trap as a program
-    call is what removed every run test from this backend:
-    bugs/FORMAL_x86_64_run_tests_are_gone_since_the_stack_floor_guard_emits_exit.md
+    call is what removed every run test from this backend, for every program on
+    it.  `test_formal_call_proof_gen.py::TestCompilerTrapIsNotAProgramCall` is
+    what pins that they are back and that a real extern call still suppresses
+    them.
     """
     if placeholder:
         # The run test's whole value is that it compares the MODEL against the
@@ -632,8 +634,7 @@ def _program_externs(info: dict) -> list:
     in EVERY image with an entry.  Subtracting it here is what puts the run
     tests back: they are the one part of an x86-64 proof that is evidence about
     the machine rather than about the model, and they were absent from every
-    program on this backend until this function existed
-    (bugs/FORMAL_x86_64_run_tests_are_gone_since_the_stack_floor_guard_emits_exit.md).
+    program on this backend until this function existed.
 
     Subtract by ADDRESS, not by symbol.  An image that both traps and prints
     has two `exit`-vs-`printf` facts to tell apart, and dropping every `exit`

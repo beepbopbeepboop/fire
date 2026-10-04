@@ -1316,8 +1316,7 @@ class TestLoopContractBlocks(unittest.TestCase):
     loop matched anywhere: measured, none of `formal/examples/*.mojo` emitted a
     loop contract, and `wdiff` / `countdown` / `wge` refused with "no loop
     contract matches" — an UNEXPECTED failure of the `formal` suite job, since
-    `wdiff` is not in its `EXPECTED_FAILURES`
-    (bugs/FORMAL_wdiff_has_no_loop_contract.md).
+    `wdiff` is not in its `EXPECTED_FAILURES`.
 
     The loop test is the target of the loop's `b` BACK EDGE, and the caller
     already computes that, so it is passed in.  Three things are pinned:
@@ -1439,8 +1438,7 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
     obligations for the whole corpus, and it had emitted them before `e11f066d`.
     Those are the theorems that compare the machine's result register against
     `mojo` by `native_decide`, and they are what caught the fabricated string
-    `0` above without a human reading anything
-    (bugs/FORMAL_x86_64_run_tests_are_gone_since_the_stack_floor_guard_emits_exit.md).
+    `0` above without a human reading anything.
 
     arm64 does not have it, and the asymmetry was the bug: arm64's trap is a
     raw `svc`, which is IN the image, so its `extern_calls` stayed empty.  The

@@ -5521,8 +5521,9 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         # two-block loop has; on any other layout Lean reports
                         # those as `Unknown identifier` hundreds of lines after
                         # the branch that wanted them, and that is how `wdiff`
-                        # stayed red even once the contract was found at all
-                        # (bugs/FORMAL_wdiff_has_no_loop_contract.md).
+                        # stayed red even once the contract was found at all.
+                        # `test_formal_call_proof_gen.py::TestLoopContractBlocks`
+                        # is what pins both halves of this.
                         #
                         # The three obligations the contract's signature asks
                         # for, and where each comes from:

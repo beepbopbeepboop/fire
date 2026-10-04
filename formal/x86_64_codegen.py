@@ -710,8 +710,8 @@ class X86_64Codegen:
         # `formal/x86_64_proof_gen.py` so a call site the COMPILER emitted is not
         # read as a call site the PROGRAM makes.  See `_emit_stack_floor_guard`
         # for why that distinction is the difference between a run test and no
-        # run test, and `bugs/FORMAL_x86_64_run_tests_are_gone_since_the_stack_floor_guard_emits_exit.md`
-        # for the measurement.
+        # run test, and `test_formal_call_proof_gen.py::
+        # TestCompilerTrapIsNotAProgramCall` for what is asserted about it.
         self._compiler_trap_addrs: list = []
         # The functions whose prologue carries the stack-floor guard, filled by
         # `compile()` once the whole image's call graph is known — see
@@ -1592,8 +1592,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         test for an image with any extern call, on the true ground that the model
         has no memory for a `__TEXT,__stubs` trampoline; measured, that
         suppression then fired on every program on this backend, so x86-64
-        emitted ZERO run tests and ZERO termination obligations
-        (bugs/FORMAL_x86_64_run_tests_are_gone_since_the_stack_floor_guard_emits_exit.md).
+        emitted ZERO run tests and ZERO termination obligations.
         So the trap's address goes into `_compiler_trap_addrs` and is published as
         `info["compiler_traps"]`, and the generator subtracts those addresses from
         the list it refuses on.  The unreachability the subtraction rests on is
