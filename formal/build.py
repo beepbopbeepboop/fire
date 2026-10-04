@@ -4931,7 +4931,18 @@ def _collect_receiver_frame_escapes(fn, owner, structs_by_name,
     for node in M.iter_nodes(getattr(fn, "body", None) or []):
         if not isinstance(node, (F.AssignStmt, F.VarDecl)):
             continue
-        target = node.target
+        # `VarDecl` has no `.target`: it binds a NAME, and a name is never the
+        # `recv.<field>` store two lines down is looking for.  Reading
+        # `node.target` off one raised `AttributeError` out of the collector
+        # before it reached the statement it was written for — measured, both
+        # architectures: `def swap(out self) -> Pair: var old = self._p; …`
+        # crashed here and reported no refusal at all, so the diagnostic that
+        # case is pinned on never ran.  The same two-line idiom every other
+        # collector in this family uses (`_collect_receiver_rebinds`,
+        # `receiver_own_type_names`), rather than a narrowing of the isinstance
+        # test, so a `VarDecl` keeps being walked and simply cannot match.
+        target = (node.target if isinstance(node, F.AssignStmt)
+                  else getattr(node, "name", None))
         if not (isinstance(target, F.MemberExpr)
                 and target.member == field
                 and isinstance(target.obj, F.IdentExpr)

@@ -13522,16 +13522,75 @@ POINTER_DEREF_REFUSALS = [
      "    if ru(t) != 4294967295:\n"
      "        return 2\n"
      "    return 0\n", 0, None),
-    # AN UNDECLARED receiver: a parameter with no annotation.  This is the other
-    # untyped direction, and it is the 14-of-47 `unsafe_value` case — a pointer
-    # that crossed a call boundary and lost its pointee on the way.
+        # AN UNDECLARED receiver: a parameter with no annotation.  This is the other
+    # untyped direction, and it was the 14-of-47 `unsafe_value` case — a pointer
+    # that crossed a call boundary and lost its pointee on the way.  It is now
+    # the case the image has NOTHING to say about: `read_x` has no call site in
+    # this unit at all, which is what an exported function looks like from inside
+    # the library that defines it and is the one shape no amount of walking this
+    # image can answer.  The two cases below are the other two shapes, and they
+    # are separate cases because a reader who hits one of them has a different
+    # fix from a reader who hits this one.
     ("deref_refuse_undeclared_receiver",
      "def read_x(p) -> Int:\n"
      "    return Int(p.value())\n"
      "def main(n: Int) -> Int:\n"
      "    var s = \"ABCDEFGH\"\n"
-     "    return read_x(s)\n",
+     "    return 0\n",
      "refuse:it is a word from the caller and its pointee is not recorded here", None),
+    # …and the ANSWERED half: the same unannotated parameter, reached only with
+    # arguments this image establishes, is now loaded at the pointee's width.  The
+    # value is the same word `deref_four_widths_at_one_address` reads with an
+    # ANNOTATION, so this case is the measure of the fix: 5208208757389214273 is
+    # `struct.unpack('<q', b'ABCDEFGH')` and 65 is what a one-byte read of the
+    # same address would say, so a callee that loaded the wrong width would be
+    # caught rather than agreeing with itself.
+    #
+    # `through` is the second hop on purpose: the pointee travels `main`'s
+    # declared `Pointer[Int64]` into `read_x` through a parameter of its own that
+    # nothing declares either, so the chain is walked rather than one level, and
+    # a reader who takes `seen` for a loop guard can see it terminate here.
+    ("deref_call_site_pointee_of_an_unannotated_parameter",
+     "def read_x(p) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def through(x) -> Int:\n"
+     "    return read_x(x)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    var q: Pointer[Int64] = s\n"
+     "    if through(q) != 5208208757389214273:  # struct.unpack('<q', b'ABCDEFGH')\n"
+     "        return 1\n"
+     "    return 0\n", 0, None),
+    # …and the first wrong answer this could have had: the same parameter reached
+    # with a `Pointer[UInt8]`.  One parameter has one pointee, the load's width is
+    # chosen per parameter, and one answer cannot serve both — so it is refused
+    # with both call sites named rather than compiled at whichever width was seen
+    # first.
+    ("deref_refuse_two_call_site_pointees",
+     "def read_x(p) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    var q8: Pointer[Int64] = s\n"
+     "    var q1: Pointer[UInt8] = s\n"
+     "    return read_x(q8) + read_x(q1)\n",
+     "refuse:this image reaches it with two different pointees", None),
+    # …and the third shape, which is the one a reader is most likely to hit: the
+    # image reads one call site and cannot place another's argument.  A string
+    # literal is a bare `char *` here, and `POINTEES_REFUSED` says in as many
+    # words that a list is a BLOB — a frame whose FIRST word is its count — so a
+    # width taken from the sites that DO answer would be a guess about the one
+    # that does not, and a blob would answer with a length the source never
+    # wrote.  The refusal names the site it cannot read, because the reader
+    # standing at that call is the one who can fix it.
+    ("deref_refuse_a_call_site_the_image_cannot_place",
+     "def read_x(p) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    var q: Pointer[Int64] = s\n"
+     "    return read_x(q) + read_x(s)\n",
+     "refuse:this image cannot say what one of its call sites passes", None),
     # The OFFSET, and the one that is still refused: the ALU scales an integer
     # offset it can read a POINTER and an ELEMENT WIDTH off a declaration for,
     # and this program's `k` has no annotation, so there is nothing to say

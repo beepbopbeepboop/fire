@@ -10413,9 +10413,17 @@ def _name_pointee(fn, name, decls, functions, seen=()):
     if param_ann is not None:
         bindings = [(param_ann, None)] + bindings
     if not bindings:
-        return (None, f"nothing in this function binds {name!r} from anything "
-                      f"this path can read, so it is a word from the caller "
-                      f"and its pointee is not recorded here")
+        # Nothing in this body says what the word is, which for an
+        # UNANNOTATED PARAMETER is the common case rather than the end of it:
+        # every call site of it is in this image, so the image is asked the same
+        # question this function asks a declaration.  With nothing to decide
+        # there, this sentence — which names the absence in the callee — is the
+        # right one.
+        return _pointee_from_the_image_or(
+            fn, name, decls, functions, seen,
+            f"nothing in this function binds {name!r} from anything this path "
+            f"can read, so it is a word from the caller and its pointee is not "
+            f"recorded here")
     found, found_why = None, None
     for ann, rhs in bindings:
         if ann:
@@ -10438,8 +10446,30 @@ def _name_pointee(fn, name, decls, functions, seen=()):
                           f"has no single width and one of the two would be "
                           f"the wrong word")
     if found is None:
-        return (None, found_why)
+        # A parameter nothing in ITS OWN body declares is still a word this
+        # image passes, and every call site of it is in the same function tree.
+        return _pointee_from_the_image_or(
+            fn, name, decls, functions, seen, found_why)
     return (found, found_why)
+
+
+def _pointee_from_the_image_or(fn, name, decls, functions, seen, fallback_why):
+    """`(pointee_base, why)` from the image's call sites, or `(None,
+    fallback_why)` when there was nothing to decide.
+
+    The one place `_name_pointee`'s two exits share, and it exists because
+    "nothing to decide" and "refused" are both `(None, why)` one level down:
+    a caller that only tested the base would silently keep its own sentence for a
+    DISAGREEMENT between two call sites, which is the one case where the reader
+    needs the other two sentences most.  `fallback_why` is what this function
+    already knew — an absence in the callee — and it stays the answer whenever
+    the image has nothing to add.
+    """
+    base, why = parameter_pointee_from_call_sites(fn, name, decls, functions,
+                                                  seen)
+    if base is not None or why:
+        return (base, why)
+    return (None, fallback_why)
 
 
 def _name_declared_struct(fn, name, decls):
@@ -10621,7 +10651,7 @@ def dotted_receiver(node) -> str:
     return "<expr>"
 
 
-def pointer_pointee(fn, expr, decls: dict, functions: dict = None):
+def pointer_pointee(fn, expr, decls: dict, functions: dict = None, seen=()):
     """`(pointee_base, why)` for a POINTER receiver, or `(None, why)`.
 
     THE entry point both backends ask before emitting any load, and the reason
@@ -10647,13 +10677,21 @@ def pointer_pointee(fn, expr, decls: dict, functions: dict = None):
     `decls` is `{name: StructDef}` for the structs this image declares, and
     `functions` is `{name: FunctionDef}` for the same image; both are the
     backend's own tables, so nothing here re-walks a tree another pass walked.
+
+    **`seen` is the chain of `(id(fn), name)` pairs already being derived**, and
+    it is threaded here rather than inside `_name_pointee` alone because a NAME
+    with no declaration of its own now asks the IMAGE (`parameter_call_site_
+    pointees`), which asks about the CALLER's arguments, which are names again:
+    `a(p) → b(p) → a(p)` is three functions and one name. A pair already on the
+    chain contributes no observation rather than looping, which is
+    `parameter_call_site_pointers`' rule for the same reason.
     """
     if isinstance(expr, F.IdentExpr):
-        return _name_pointee(fn, expr.name, decls, functions)
+        return _name_pointee(fn, expr.name, decls, functions, seen)
     if isinstance(expr, F.MemberExpr):
         return _member_pointee(fn, expr, decls, functions)
     if isinstance(expr, F.CallExpr):
-        return _rhs_pointee(fn, expr, decls, functions)
+        return _rhs_pointee(fn, expr, decls, functions, seen)
     return (None, "the receiver is an expression that declares no type, so no "
                   "pointee is established")
 
@@ -11625,6 +11663,162 @@ def parameter_call_site_pointers(fn, name, decls: dict, functions: dict,
         # gives, reached the long way round.
         return None
     return ("load", width, signed, spellings)
+
+
+def parameter_call_site_pointees(fn, name, decls: dict, functions: dict,
+                                 structs_by_name: dict = None, seen=()):
+    """What THIS IMAGE passes for one unannotated parameter of `fn` —
+    `("pointee", base, spellings)`, `("disagree", groups)`, `("silent", rows)`,
+    or None.
+
+    `None` means "nothing to decide on", exactly as in
+    `parameter_call_site_pointers`: no call site in this image, only the callee's
+    own recursion, or no position to look at.  `groups` is `{pointee: [call
+    spelling, …]}` and `rows` is `[(call spelling, why that site says
+    nothing), …]`.
+
+    **What a parameter POINTS AT is a property of the IMAGE and not of the
+    callee, and this is the function that says so.**  The pointer value model
+    recovers a pointee from a *declaration* (`pointee_of_type_text`), so a
+    parameter nothing declares — `def r8(p): return Int(p.value())`, which is
+    how the stdlib spells a helper on this path — had no pointee at all, and
+    `p.value()` was refused with the four-questions sentence on BOTH
+    architectures.  Within one image every call site of the callee is in the
+    same function tree, so the fact the callee cannot see IS derivable, and the
+    rule is the one `parameter_call_site_pointers` already states for the
+    SUBSCRIPT spelling of the same question: ask the caller what it already
+    establishes for that argument, through the SAME reader
+    (`pointer_pointee`), and take the answer only when there is exactly one.
+
+    **All of them have to answer, which is where the other function's blob
+    hazard is refused rather than inherited.**  `parameter_call_site_pointers`
+    records a site that answers `None` as saying *nothing*, because there its
+    `None` is the container walk and the other sites' answers are memory: a
+    container reaching a helper through an untyped parameter and a raw buffer
+    reaching it are the same word, and mixing them moves every such subscript a
+    whole element.  Here a site that says nothing is a site whose argument this
+    image cannot place — a blob is exactly that (`POINTEES_REFUSED`: "a list is
+    a BLOB on this path — a frame whose FIRST word is its count"), and reading
+    eight bytes at a blob's frame base reads its COUNT.  So one silent site
+    makes the whole parameter undecided, and it is reported as its own state
+    rather than dropped, because the reader standing at that call is the one who
+    can fix it and the message has to be able to name it.
+
+    A call from ANOTHER image is not visible here, so an exported function's
+    unannotated parameter keeps the refusal — the same open half
+    `parameter_call_site_pointers` names, and the same one: carrying a
+    parameter's kind across a dylib edge is the manifest's job, beside
+    `frame_params`.
+    """
+    if fn is None or not isinstance(name, str) or not name:
+        return None
+    callee = getattr(fn, "name", None)
+    if not callee or not functions:
+        return None
+    if declared_parameter_annotation(fn, name) is not None:
+        return None                      # the declaration already decided
+    position = _parameter_position(fn, name)
+    if position is None:
+        return None
+    key = (id(fn), name)
+    if key in seen:
+        return None                      # a cycle, not a contradiction
+    seen = tuple(seen) + (key,)
+    groups: dict = {}
+    silent: list = []
+    for caller in (functions or {}).values():
+        for site in iter_nodes(getattr(caller, "body", None) or []):
+            if not isinstance(site, F.CallExpr) \
+                    or not isinstance(site.func, F.IdentExpr) \
+                    or site.func.name != callee:
+                continue
+            args = list(getattr(site, "args", None) or [])
+            if position >= len(args):
+                # A call that does not reach this position says nothing about
+                # what the parameter holds, for `parameter_call_site_pointers`'
+                # reason: reading it as though it spoke for the position would
+                # be a claim about a call that is not there.
+                continue
+            arg = args[position]
+            if caller is fn and isinstance(arg, F.IdentExpr) \
+                    and arg.name == name:
+                # RECURSION passing the parameter on to itself: the same word
+                # and the same ignorance, not a second pointee.
+                continue
+            inner, why = pointer_pointee(caller, arg, decls, functions, seen)
+            if inner is None:
+                silent.append((call_spelling(site), why))
+                continue
+            groups.setdefault(inner, []).append(call_spelling(site))
+    if len(groups) > 1:
+        return ("disagree", groups)
+    if silent:
+        # A site this image cannot read VETOES, even beside sites it can: the
+        # parameter is a pointer where the reader can see one and an unplaced
+        # word at the site it cannot, and a width derived from the sites that do
+        # answer is a guess about that one.  The message names it, because the
+        # reader standing at that call is the one who can fix it.
+        return ("silent", (silent, groups))
+    if not groups:
+        return None
+    base, spellings = next(iter(groups.items()))
+    return ("pointee", base, spellings)
+
+
+def parameter_pointee_from_call_sites(fn, name, decls: dict, functions: dict,
+                                      seen=()):
+    """`(pointee_base, why)` for a PARAMETER the image agrees about, or
+    `(None, None)` for "nothing to decide on" and `(None, why)` for a refusal.
+
+    The `_name_pointee` hook, and it is three lines over
+    `parameter_call_site_pointees` because the four answers are four different
+    sentences.  A pointee this returns is a base name and nothing else: the
+    width, the signedness, a float, a blob and a struct pointee are
+    `dereference_lowering`'s questions and it asks them of this answer exactly
+    as it asks them of a declared one, so the two routes cannot reach different
+    widths for the same bytes.
+    """
+    derived = parameter_call_site_pointees(fn, name, decls, functions, decls,
+                                           seen)
+    if derived is None:
+        return (None, None)
+    callee = getattr(fn, "name", None)
+    kind = derived[0]
+    if kind == "pointee":
+        base, spellings = derived[1], derived[2]
+        return (base, f"nothing in {callee}()'s own body declares what {name!r} "
+                      f"points at, and every call site of {callee}() in this "
+                      f"image passes an argument this module establishes as a "
+                      f"pointer to {base} ({'; '.join(spellings)}) — one "
+                      f"parameter has one pointee, so the load is at that "
+                      f"width")
+    if kind == "disagree":
+        sides = [f"a pointer to {pointee} at {' and '.join(spellings)}"
+                 for pointee, spellings in sorted(derived[1].items())]
+        return (None, f"{callee}()'s parameter {name!r} is read through, and "
+                      f"this image reaches it with two different pointees — "
+                      f"{' and '.join(sides)}. The load's WIDTH is chosen per "
+                      f"parameter, so `p.value()` would be compiled at one "
+                      f"width and reached at the other at one of these calls, "
+                      f"and the difference is a plausible number rather than a "
+                      f"crash. Give {name!r} one pointee at every call site, "
+                      f"or declare it — a `Pointer[…]` at the declaration "
+                      f"settles it without changing a single call")
+    rows, groups = derived[1]
+    sites = "; ".join(f"{spelling} — {why}" for spelling, why in rows)
+    if groups:
+        sites += ("; and the site(s) this image CAN read pass "
+                  + " or ".join(
+                      f"{spelling} (a pointer to {pointee})"
+                      for pointee, spellings in sorted(groups.items())
+                      for spelling in spellings))
+    return (None, f"{callee}()'s parameter {name!r} is read through, and this "
+                  f"image cannot say what one of its call sites passes: "
+                  f"{sites}. A parameter that is a pointer at the sites this "
+                  f"image can read and something else at a site it cannot is a "
+                  f"word of no particular width at that site, so a load sized "
+                  f"from the others would be a guess about this one. Declare "
+                  f"{name!r} a pointer type, or make every call site pass one")
 
 
 def declared_parameter_annotation(fn, name):
