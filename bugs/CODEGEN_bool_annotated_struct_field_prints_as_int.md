@@ -77,10 +77,10 @@ bytes-dict tests) was missing. All of it is back, and `emit_dict_int_value_store
 has exactly the five callers its own docstring names.
 
 The merge damage was measured rather than inferred: the same missing delegate
-and the same four test failures are recorded in
-`bugs/CODEGEN_merge_dropped_the_emit_dict_int_value_store_delegate.md`, filed
-independently by another worker, and this change fixes that doc's subject (its
-doc is deleted with this commit).
+and the same four test failures were filed independently by another worker as
+their own bug doc, and this change fixes that doc's subject (its doc is deleted
+with this commit). `test_suite.py` now checks the whole family — every
+`gen.X(...)` the backend calls must be a method `GimpleGen` has.
 
 ## What is STILL wrong
 

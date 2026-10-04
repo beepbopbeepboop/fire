@@ -2719,6 +2719,59 @@ def test_the_compiler_imports_from_every_real_entry_point():
           f'stale and this check is vacuous')
 
 
+def test_every_backend_call_of_a_gen_method_has_the_delegate():
+    """`mojo/backend_gimple/*` calls the codegen's methods as `gen.X(...)`,
+    and every one of them has to be a method `GimpleGen` actually has.
+
+    The backend is a set of module-level functions that take the generator as
+    their first argument, so `gimple_codegen.py`'s `GimpleGen` is nothing but
+    the delegating half of one API — and the two halves are edited separately.
+    A merge that takes `gimple_codegen.py` from one side and `emit_stmts.py`
+    from the other produces a call to a method nobody defined, and the only
+    symptom is an `AttributeError` raised during codegen, on the four test
+    cases that happen to reach that store. It is invisible to `gcc`, to the
+    linker and to every exit code: the failure never gets far enough to have
+    an artifact. That is how a doc could sit open describing a one-line fix —
+    `'GimpleGen' object has no attribute '_emit_dict_int_value_store'`, on
+    four bytes-dict tests — while every gate stayed green.
+
+    Checked statically over CALLS only. A bare `gen._registry` read of an
+    attribute `__init__` assigns is not this defect — and there are ~330 of
+    them, so including reads would drown the ~2 real ones in noise.
+    `mojo/backend_gimple/spec_gen.py` is excluded because its `gen` is the
+    spec generator's own object, not a `GimpleGen`; it is the only backend
+    module whose `gen` is not one.
+    """
+    import glob
+
+    import gimple_codegen
+    cls = gimple_codegen.GimpleGen
+    known = set(vars(cls))
+    tree = ast.parse(open(os.path.join(HERE, 'gimple_codegen.py')).read())
+    cdef = next(n for n in tree.body
+                if isinstance(n, ast.ClassDef) and n.name == 'GimpleGen')
+    for n in ast.walk(cdef):
+        # `self.x = ...` inside any method, plus the class-level constants.
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) \
+                and n.value.id == 'self':
+            known.add(n.attr)
+        if isinstance(n, ast.Name):
+            known.add(n.id)
+    bad = []
+    for path in sorted(glob.glob(os.path.join(HERE, 'mojo/backend_gimple/*.py'))):
+        if os.path.basename(path) == 'spec_gen.py':
+            continue
+        for n in ast.walk(ast.parse(open(path).read())):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and isinstance(n.func.value, ast.Name)
+                    and n.func.value.id in ('gen', 'gen0')
+                    and n.func.attr not in known):
+                bad.append(f'{os.path.relpath(path, HERE)}:{n.lineno} '
+                           f'gen.{n.func.attr}')
+    check('the backend never calls a gen method GimpleGen does not have',
+          not bad, '; '.join(bad))
+
+
 def test_bucket_dedup():
     """`make gate` contains both `native` and `bootstrap`; a test reachable
     from both must be scheduled once, not twice."""

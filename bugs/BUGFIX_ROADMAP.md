@@ -204,10 +204,13 @@ the number it was assigned when it was filed.
   `CODEGEN_generator_iterating_a_string_parameter_yields_nothing.md` and
   `CODEGEN_calling_a_nested_def_fetched_from_a_container_answers_zero.md`.
   A merge in the same batch restored the
-  `emit_dict_int_value_store` delegate that another worker's doc
-  (`CODEGEN_merge_dropped_the_emit_dict_int_value_store_delegate.md`, on
-  another branch) says was dropped — that doc can be retired at integration
-  rather than re-fixed.
+  `emit_dict_int_value_store` delegate that another worker's doc said was
+  dropped (`'GimpleGen' object has no attribute
+  '_emit_dict_int_value_store'`, on four bytes-dict tests); that doc is
+  deleted, and `test_suite.py`'s "the backend never calls a gen method
+  GimpleGen does not have" now checks the whole delegation family rather than
+  the one name, because a missing delegate is an `AttributeError` during
+  codegen that no exit code anywhere reports.
 - **The nested-`def` closure environment is freed**
   (`CODEGEN_closure_env_and_boxed_local_never_freed.md`, doc kept — its
   OPEN 2, the `{mut}` capture box, is still open and is now the only thing in
