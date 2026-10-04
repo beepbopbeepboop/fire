@@ -62,6 +62,53 @@ sys.path.insert(0, os.path.join(HERE, "tools"))
 
 import formal_sweep as S  # noqa: E402
 import formal_sweep_causes as C  # noqa: E402
+import formal.model as FM  # noqa: E402
+
+# ── the two samples that are BUILT rather than copied ──────────────────────
+# Every other sample in this file is a hand-copy of a message, which is what
+# this file's own docstring calls the rot it exists to catch — and a hand-copy
+# cannot catch it: if `formal/model.py` rewords the message, the marker still
+# matches the stale copy, `check_cause_table` still passes, and the sample is
+# now a sample of a sentence nothing emits. The first two tables below grew a
+# pair that is immune, because they are produced by CALLING the functions that
+# emit them: a reword cannot leave them behind, so a marker that stops matching
+# the live message fails here instead of quietly emptying a row.
+#
+# The construct is string COMPOSITION — the missing buffer — and it is the
+# largest unowned row in the 2026-10-04 b11 corpus (114 of 722 files). Both
+# wordings are here because `classify_message` and `_refusal_family` each see
+# only the message, and one sample is one proof a marker matches: the
+# interpolated literal (refused over the whole module body) and the binary
+# operator on two strings (refused at the operator) share no clause.
+STRING_COMPOSITION_FAMILY = "string composition has no buffer"
+STRING_COMPOSITION_CAUSE = "string composition: nothing to compose into"
+
+
+class _AnInterpolatedLiteral:
+    """The node shape `interpolated_literal_refusal` reads: `.value` and the
+    source token in it. Hand-built rather than parsed, because the refusal is
+    asked about the VALUE the parser preserved (`f"n={n}"`, prefix, braces and
+    all) and a parsed f-string is the only way to be sure that is the value."""
+
+    value = 'f"n={n}"'
+
+
+def _string_composition_messages():
+    """`(the f-string refusal, the two-strings refusal)`, built not copied."""
+    lit = FM.interpolated_literal_refusal(_AnInterpolatedLiteral(), 451)
+    cat = FM.string_concat_refusal("+", FM.STR_KIND, FM.STR_KIND)
+    if lit is None or cat is None:
+        raise AssertionError(
+            "formal/model.py no longer refuses one of the two string "
+            f"composition wordings (f-string: {lit is not None}, "
+            f"`+` on two strings: {cat is not None}). A sample of a message "
+            "the backend cannot produce is a sample that can only rot — see "
+            "this file's docstring, point 3 — so the pair goes with the "
+            "refusal rather than outliving it.")
+    return lit, cat
+
+
+_FSTRING_REFUSAL, _CONCAT_REFUSAL = _string_composition_messages()
 
 # (family, a real message, truncated only at a clause boundary)
 SAMPLES = [
@@ -273,6 +320,12 @@ SAMPLES = [
     ("function value into a declared non-function",
      "'dbl' is a FUNCTION of this image read as a value, and it is passed to "
      "`call2()` in main as parameter `f`, which is declared `Int`"),
+    # …and the pair built above. `STRING_COMPOSITION_FAMILY` names the FAMILY
+    # and the label in `formal_sweep._REFUSAL_FAMILIES` is spelled independently
+    # in that file, which is the same duplication every other row here has and
+    # the reason this one is asserted by value rather than by import.
+    (STRING_COMPOSITION_FAMILY, _FSTRING_REFUSAL),
+    (STRING_COMPOSITION_FAMILY, _CONCAT_REFUSAL),
 
 ]
 
@@ -737,6 +790,16 @@ CAUSE_SAMPLES = [
     ("a function passed where the callee declares something else",
      "'dbl' is a FUNCTION of this image read as a value, and it is passed to "
      "`call2()` in main as parameter `f`, which is declared `Int`"),
+    # …and the PLANNER's row for the same pair, from the same two built
+    # messages. This is the corpus's largest unowned construct (114 of the 722
+    # files on the b11 sweep) and it is a CAUSE here rather than only a family:
+    # the two tables are keyed on different things, so a construct that one of
+    # them can name and the other cannot is a construct a planner cannot
+    # prioritise. `STRING_COMPOSITION_CAUSE` is spelled independently in
+    # `formal_sweep_causes.py::CAUSES`, and this pair is what proves the two
+    # spellings still agree.
+    (STRING_COMPOSITION_CAUSE, _FSTRING_REFUSAL),
+    (STRING_COMPOSITION_CAUSE, _CONCAT_REFUSAL),
 ]
 
 # The causes no arm64 message above exercises. Each one is named here with WHY,
