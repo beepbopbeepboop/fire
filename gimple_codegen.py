@@ -3097,6 +3097,7 @@ class GimpleGen:
         'mojo_str_center':       ('char *',     ['char *', 'int64_t', 'char *']),
         'mojo_str_splitlines':   ('MojoList *', ['char *']),
         'mojo_str_count':        ('int64_t',    ['char *', 'char *']),
+        'mojo_str_count_from':   ('int64_t',    ['char *', 'char *', 'int64_t', 'int64_t']),
         'mojo_str_rsplit':       ('MojoList *', ['char *', 'char *', 'int64_t']),
         'mojo_str_partition':    ('MojoList *', ['char *', 'char *']),
         'mojo_str_rpartition':   ('MojoList *', ['char *', 'char *']),
@@ -3177,7 +3178,8 @@ class GimpleGen:
         'mojo_subprocess_stderr':     ('char *',  ['MojoCompletedProcess *']),
         'mojo_str_find':         ('int64_t',   ['char *', 'char *']),
         'mojo_str_rfind':        ('int64_t',   ['char *', 'char *']),
-        'mojo_str_find_from':    ('int64_t',   ['char *', 'char *', 'int64_t']),
+        'mojo_str_rfind_from':   ('int64_t',   ['char *', 'char *', 'int64_t', 'int64_t']),
+        'mojo_str_find_from':    ('int64_t',   ['char *', 'char *', 'int64_t', 'int64_t']),
         'mojo_str_cat':          ('char *',    ['char *', 'char *']),
         'mojo_str':              ('char *',    ['void *']),
         # mojo_map/mojo_filter (runtime/fire_runtime.{h,c}): `void *mojo_map(void
@@ -3332,6 +3334,13 @@ class GimpleGen:
                                            'int64_t *', 'int64_t *', 'int64_t *', 'int64_t *']),
         'mojo_regex_lastgroup':  ('char *', ['const char * *', 'int', 'int64_t *']),
         'mojo_regex_substr':     ('char *', ['char *', 'int64_t', 'int64_t']),
+        # `re.Pattern.split(text)` over this codegen's own regex engine — the
+        # entry point that makes fire_compiler.py's `_source_lines` (and so the
+        # whole self-hosted tokenizer) work; see its own comment in
+        # emit_methods.py's `<pattern>.split(...)` arm.
+        'mojo_regex_split':      ('MojoList *', ['const ReNode *', 'const ReRange *',
+                                                'const ReClassInfo *', 'int', 'int',
+                                                'char *']),
         # Matches runtime/fire_runtime.h's own declaration exactly
         # (`int mojo_getattr(int obj, char *attr)` — the honest
         # always-return-0 stub). The old entry here claimed
@@ -3355,7 +3364,9 @@ class GimpleGen:
         'mojo_set_discard_int':  ('void',      ['MojoSet *', 'int64_t']),
         'mojo_set_discard_str':  ('void',      ['MojoSet *', 'char *']),
         'mojo_str_startswith':   ('int',       ['char *', 'char *']),
+        'mojo_str_startswith_from': ('int',    ['char *', 'char *', 'int64_t', 'int64_t']),
         'mojo_str_endswith':     ('int',       ['char *', 'char *']),
+        'mojo_str_endswith_from':   ('int',     ['char *', 'char *', 'int64_t', 'int64_t']),
         'mojo_str_startswith_char': ('int',    ['char *', 'char']),
         'mojo_str_endswith_char':   ('int',    ['char *', 'char']),
         'strcmp':                ('int',       ['char *', 'char *']),
@@ -4116,8 +4127,8 @@ class GimpleGen:
         return gmp._lower_pointer_method(self, ov, ot, method, args)
     def _lower_file_method(self, ov: str, method: str, args: list) -> tuple:
         return gmp._lower_file_method(self, ov, method, args)
-    def _lower_str_method(self, ov: str, method: str, args: list) -> tuple:
-        return gmp._lower_str_method(self, ov, method, args)
+    def _lower_str_method(self, ov: str, method: str, args: list, kwargs=None) -> tuple:
+        return gmp._lower_str_method(self, ov, method, args, kwargs)
     def _lower_bytes_method(self, ov: str, method: str, args: list, kwargs=None) -> tuple:
         return gmp._lower_bytes_method(self, ov, method, args, kwargs)
     def _lower_memoryview_method(self, ov: str, method: str, args: list, kwargs=None) -> tuple:
@@ -4229,8 +4240,8 @@ class GimpleGen:
     def _lower_fnptr_call_value(self, fp_type: str, fp_raw: str, node: CallExpr, ret_type: str='int64_t') -> tuple[str, str]:
         return ggc._lower_fnptr_call_value(self, fp_type, fp_raw, node, ret_type)
 
-    def _default_expr_to_pair(self, _dflt, cxx: bool = False) -> tuple:
-        return ggc._default_expr_to_pair(self, _dflt, cxx=cxx)
+    def _default_expr_to_pair(self, _dflt, cxx: bool = False, param_ctype=None) -> tuple:
+        return ggc._default_expr_to_pair(self, _dflt, cxx=cxx, param_ctype=param_ctype)
 
     def _pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread=False):
         return ggc._pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread)

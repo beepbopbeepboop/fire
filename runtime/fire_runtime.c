@@ -4087,13 +4087,41 @@ char *mojo_chr(int64_t code) {
 }
 
 
-int mojo_str_startswith(char *s, char *prefix) {
+/* Clamp an optional `[start[, end]]` window the way Python's str methods do,
+ * for a NUL-terminated `char *`. `MOJO_SLICE_STOP_OMITTED` means "end was not
+ * given"; a negative bound is relative to the end and clamps to 0; an
+ * over-large one clamps to len.
+ *
+ * Unlike `mojo_bytes_clamp_range` this does NOT collapse an inverted window
+ * (`start > end`) to an empty one, because Python does not: `"abc"[5:9]`
+ * raises, and `"abc".find("", 2, 1)` / `.rfind("", 2, 1)` answer -1 rather
+ * than the empty-slice answer a collapsed window would give. Every caller
+ * below tests `stop < start` itself, and the predicate family wants the
+ * count as `stop - start` (negative there means "no room", which is the
+ * right answer) rather than as a clamped zero. */
+static void mojo_str_clamp_range(char *s, int64_t *start, int64_t *stop) {
+    int64_t len = s ? (int64_t)strlen(s) : 0;
+    int64_t lo = *start, hi = *stop;
+    if (hi == MOJO_SLICE_STOP_OMITTED) hi = len;
+    if (lo < 0) lo += len;
+    if (hi < 0) hi += len;
+    if (lo < 0) lo = 0;
+    if (hi > len) hi = len;
+    *start = lo; *stop = hi;
+}
+
+int mojo_str_startswith_from(char *s, char *prefix, int64_t start, int64_t stop) {
     if (!s || !prefix) return 0;
-    while (*prefix) {
-        if (!*s || *s != *prefix) return 0;
-        s++; prefix++;
-    }
-    return 1;
+    mojo_str_clamp_range(s, &start, &stop);
+    if (stop < start) return 0;
+    int64_t plen = (int64_t)strlen(prefix);
+    if (plen == 0) return 1;
+    if (stop - start < plen) return 0;
+    return memcmp(s + start, prefix, (size_t)plen) == 0;
+}
+
+int mojo_str_startswith(char *s, char *prefix) {
+    return mojo_str_startswith_from(s, prefix, 0, MOJO_SLICE_STOP_OMITTED);
 }
 
 /* Python str character-class predicates. All require at least one character
@@ -4125,12 +4153,18 @@ int mojo_str_isprintable(char *s) { return mojo_cstr_is(s, MOJO_IS_PRINT); }
  * this answered before. */
 int mojo_str_isnumeric(char *s) { return mojo_cstr_is(s, MOJO_IS_NUMERIC); }
 
-int mojo_str_endswith(char *s, char *suffix) {
+int mojo_str_endswith_from(char *s, char *suffix, int64_t start, int64_t stop) {
     if (!s || !suffix) return 0;
-    int slen = strlen(s);
-    int suflen = strlen(suffix);
-    if (suflen > slen) return 0;
-    return strcmp(s + slen - suflen, suffix) == 0;
+    mojo_str_clamp_range(s, &start, &stop);
+    if (stop < start) return 0;
+    int64_t slen = (int64_t)strlen(suffix);
+    if (slen == 0) return 1;
+    if (stop - start < slen) return 0;
+    return memcmp(s + stop - slen, suffix, (size_t)slen) == 0;
+}
+
+int mojo_str_endswith(char *s, char *suffix) {
+    return mojo_str_endswith_from(s, suffix, 0, MOJO_SLICE_STOP_OMITTED);
 }
 
 int mojo_str_startswith_char(char *s, char c) {
@@ -4152,40 +4186,48 @@ int64_t mojo_str_find(char *s, char *needle) {
     return (int64_t)(found - s);
 }
 
-/* str.rfind(needle): index of the LAST occurrence of needle in s, or -1.
- * Empty needle matches at strlen(s) (CPython: "ab".rfind("") == 2). */
-int64_t mojo_str_rfind(char *s, char *needle) {
+/* str.rfind(needle[, start[, end]]) over a window. An empty needle matches at
+ * the window's END (CPython: "abc".rfind("", 1) == 3, "abc".rfind("", 0, 2)
+ * == 2), and an inverted or out-of-range window is a miss rather than the
+ * empty-slice answer. Mirrors mojo_bytes_rfind_from, which is the same
+ * search over a length-tagged buffer. */
+int64_t mojo_str_rfind_from(char *s, char *needle, int64_t start, int64_t stop) {
     if ((intptr_t)s < 65536 || (intptr_t)needle < 65536) return -1;
     if (!s || !needle) return -1;
+    mojo_str_clamp_range(s, &start, &stop);
+    if (stop < start) return -1;
     int64_t nlen = (int64_t)strlen(needle);
-    int64_t slen = (int64_t)strlen(s);
-    if (nlen == 0) return slen;
-    if (nlen > slen) return -1;
-    for (int64_t i = slen - nlen; i >= 0; i--) {
+    if (nlen == 0) return stop;
+    for (int64_t i = stop - nlen; i >= start; i--) {
         if (memcmp(s + i, needle, (size_t)nlen) == 0) return i;
     }
     return -1;
 }
 
-/* str.find(needle, start) with CPython semantics: negative start is relative
- * to the end (clamped to 0 after adjustment); start beyond the string length
- * is a guaranteed miss (-1); an empty needle matches at `start` itself, as
- * long as start <= len (e.g. "ab".find("", 2) == 2 but "ab".find("", 3) ==
- * -1). On a hit the returned index is absolute (relative to `s`, not to
- * `s + start`). */
-int64_t mojo_str_find_from(char *s, char *needle, int64_t start) {
+/* str.rfind(needle): index of the LAST occurrence of needle in s, or -1.
+ * Empty needle matches at strlen(s) (CPython: "ab".rfind("") == 2). */
+int64_t mojo_str_rfind(char *s, char *needle) {
+    return mojo_str_rfind_from(s, needle, 0, MOJO_SLICE_STOP_OMITTED);
+}
+
+/* str.find(needle[, start[, end]]) with CPython semantics: negative bounds are
+ * relative to the end (clamped to 0 after adjustment); a start beyond the
+ * string length is a guaranteed miss (-1), as is an inverted window; an empty
+ * needle matches at `start` itself, as long as start <= len (e.g. "ab".find("",
+ * 2) == 2 but "ab".find("", 3) == -1). On a hit the returned index is absolute
+ * (relative to `s`, not to `s + start`). */
+int64_t mojo_str_find_from(char *s, char *needle, int64_t start, int64_t stop) {
     if ((intptr_t)s < 65536 || (intptr_t)needle < 65536) return -1;
     if (!s || !needle) return -1;
     int64_t len = (int64_t)strlen(s);
-    if (start < 0) {
-        start += len;
-        if (start < 0) start = 0;
+    mojo_str_clamp_range(s, &start, &stop);
+    if (start > len || stop < start) return -1;
+    int64_t nlen = (int64_t)strlen(needle);
+    if (nlen == 0) return start;
+    for (int64_t i = start; i + nlen <= stop; i++) {
+        if (memcmp(s + i, needle, (size_t)nlen) == 0) return i;
     }
-    if (start > len) return -1;
-    if (!*needle) return start;
-    char *found = strstr(s + start, needle);
-    if (!found) return -1;
-    return (int64_t)(found - s);
+    return -1;
 }
 
 /* Deliberately NOT named mojo_getenv: `getenv` is in _FORCE_RENAME_RESERVED
@@ -4447,20 +4489,33 @@ MojoList *mojo_str_split(char *s, char *sep) {
     return l;
 }
 
-/* Python str.count(sub): number of non-overlapping occurrences. `str.count`
- * had no lowering at all before (any call fell through to the generic
- * "unknown char* method" stub, always returning 0) — real bug found via
- * mojo_compiler.py's own multi-line-string handling, which counts '\n' in a
- * matched docstring to preserve line numbers after collapsing it to a
- * placeholder; every count silently came back 0, undoing that fix once
- * self-hosted. */
-int64_t mojo_str_count(char *s, char *sub) {
-    if (!s || !sub || !*sub) return 0;
-    size_t sub_len = strlen(sub);
+/* Python str.count(sub[, start[, end]]): number of non-overlapping
+ * occurrences. `str.count` had no lowering at all before (any call fell
+ * through to the generic "unknown char* method" stub, always returning 0) —
+ * real bug found via mojo_compiler.py's own multi-line-string handling, which
+ * counts '\n' in a matched docstring to preserve line numbers after
+ * collapsing it to a placeholder; every count silently came back 0, undoing
+ * that fix once self-hosted.
+ *
+ * An empty `sub` matches at every boundary of the window plus its end, which
+ * is CPython's `stop - start + 1` ("abc".count("") == 4) — this used to answer
+ * 0, which was both wrong and, worse, wrong DIFFERENTLY depending on whether
+ * the caller spelled the window out. */
+int64_t mojo_str_count_from(char *s, char *sub, int64_t start, int64_t stop) {
+    if (!s || !sub) return 0;
+    mojo_str_clamp_range(s, &start, &stop);
+    if (stop < start) return 0;
+    int64_t nlen = (int64_t)strlen(sub);
+    if (nlen == 0) return stop - start + 1;
     int64_t n = 0;
-    const char *p = s;
-    while ((p = strstr(p, sub)) != NULL) { n++; p += sub_len; }
+    for (int64_t i = start; i + nlen <= stop; i++) {
+        if (memcmp(s + i, sub, (size_t)nlen) == 0) { n++; i += nlen - 1; }
+    }
     return n;
+}
+
+int64_t mojo_str_count(char *s, char *sub) {
+    return mojo_str_count_from(s, sub, 0, MOJO_SLICE_STOP_OMITTED);
 }
 
 /* Python str.splitlines(): splits on \n, \r\n or \r, but — unlike
@@ -11330,6 +11385,52 @@ char *mojo_regex_substr(const char *text, int64_t start, int64_t end) {
     char *out = (char *)malloc((size_t)len + 1);
     memcpy(out, text + start, (size_t)len);
     out[len] = '\0';
+    return out;
+}
+
+/* re.Pattern.split(text) over this file's own engine (the `finditer` scan,
+ * accumulated into a list): each match's span is removed, every CAPTURING
+ * group that participated in it is emitted between the surrounding pieces
+ * (Python's rule -- `re.split(r'(,)', 'a,b')` is ['a', ',', 'b']), and a
+ * zero-width match advances one character so the scan terminates.
+ *
+ * The tail after the last match is appended, so a text ENDING in a separator
+ * keeps Python's trailing empty field ("a\nb\n" -> ['a', 'b', '']).
+ * `_source_lines` (fire_compiler.py) pops that one itself, which is why this
+ * has to be Python's shape and not "no trailing empty".
+ *
+ * This is the entry point that makes `fire_compiler.py`'s tokenizer work at
+ * all self-hosted: `_LINE_TERMINATORS = re.compile(r'\r\n|\r|\n')` is asked
+ * for `split(src)` there, and with no lowering for it the compiled path cast
+ * the compiled-pattern object to `char *` and called `mojo_str_split` with it
+ * as the SEPARATOR -- so every source tokenized as ZERO lines and every dump
+ * came out empty (see bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md). */
+MojoList *mojo_regex_split(const ReNode *prog, const ReRange *ranges,
+                           const ReClassInfo *classinfo, int root, int ngroups,
+                           char *src) {
+    MojoList *out = mojo_list_new();
+    if (!src) return out;
+    int64_t slen = (int64_t)strlen(src);
+    int64_t *gstart = (int64_t *)malloc(sizeof(int64_t) * (size_t)(ngroups + 2));
+    int64_t *gend = (int64_t *)malloc(sizeof(int64_t) * (size_t)(ngroups + 2));
+    int64_t last = 0;
+    int64_t pos = 0;
+    int64_t ms = 0, me = 0;
+    while (pos <= slen) {
+        if (!mojo_regex_search(prog, ranges, classinfo, root, ngroups, src, slen,
+                               pos, &ms, &me, gstart, gend))
+            break;
+        mojo_list_append_str(out, mojo_regex_substr(src, last, ms));
+        for (int i = 1; i <= ngroups; i++) {
+            if (gstart[i] >= 0)
+                mojo_list_append_str(out, mojo_regex_substr(src, gstart[i], gend[i]));
+        }
+        last = me;
+        pos = (me == ms) ? ms + 1 : me;
+    }
+    mojo_list_append_str(out, mojo_regex_substr(src, last, slen));
+    free(gstart);
+    free(gend);
     return out;
 }
 

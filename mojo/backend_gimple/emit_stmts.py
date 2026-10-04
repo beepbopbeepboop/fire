@@ -50,6 +50,7 @@ from mojo.middle.stmts_shared import (
     _pair_key, _seed_genexp_list_narrowing, _with_item_alias_name
 )
 from mojo.middle.types import _is_empty_container_literal
+from mojo.middle.calls_shared import _is_pointer_ctype
 
 
 def gen_stmt(gen, node):
@@ -3818,8 +3819,21 @@ def _gen_stmt_ExprStmt(gen, node):
                 _dv = None
                 if _dflts and 0 <= _pos - _n_req < len(_dflts):
                     _dv = _dflts[_pos - _n_req][1]
+                # The declared parameter type decides the shape of "no
+                # value": a POINTER slot has to be padded with a typed NULL,
+                # because an integer 0 handed to a `char *` is coerced
+                # through `mojo_cstr_or_int_str` into the one-character
+                # string "0" — a true, non-null pointer. Same fix and same
+                # reason as `_lower_named_call`'s identical loop (see
+                # `_default_expr_to_pair`'s `param_ctype`); this is the
+                # statement-level twin, so a bare `f()` that discards its
+                # result needs it too.
+                _pct = (expected_params[_pos]
+                        if 0 <= _pos < len(expected_params) else None)
                 if _dv is not None:
-                    arg_pairs.append(gen._default_expr_to_pair(_dv))
+                    arg_pairs.append(gen._default_expr_to_pair(_dv, param_ctype=_pct))
+                elif _is_pointer_ctype(_pct):
+                    arg_pairs.append((_pct, '0'))
                 else:
                     arg_pairs.append(('int', '0'))
 

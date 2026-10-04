@@ -1441,10 +1441,10 @@ test('nonlocal', [PY, 'test_nonlocal.py'], cache=True,
 # the same `small`-workload shape `test_gimple.py` is, and a cap on a job
 # that never loads the whole closure buys nothing (see the MEMCLASS note).
 # Marked `expect=` rather than `disabled=`, and the reason is what the two
-# markers are FOR: this job's answer is not known, only four of its 376 cases
+# markers are FOR: this job's answer is not known, only four of its 378 cases
 # are, and it is the only instrument in the tree that compiles a real Mojo
-# program and EXECUTES it. `disabled=` would stop all 376 for the sake of the
-# 4, trading 372 passing rows of signal for a tidier screen — which is the
+# program and EXECUTES it. `disabled=` would stop all 378 for the sake of the
+# 4, trading 374 passing rows of signal for a tidier screen — which is the
 # coverage hole the marker exists to prevent, not create. Cost is not the
 # blocker `disabled=` is for either: 0.2 GB and 270 s is not a machine-sized
 # reservation being spent on a known answer.
@@ -1459,7 +1459,7 @@ test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True,
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
-     expect='4 of 376: compile-and-execute rows the merge of ten branches '
+     expect='4 of 378: compile-and-execute rows the merge of ten branches '
             'left red — none fails on the branch that added it; see '
             'bugs/MERGE_bugs4_gimplerunner_four_remaining.md',
      desc='compile-and-execute: plain programs, structs, closures, stdlib calls')

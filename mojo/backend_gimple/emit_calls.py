@@ -48,6 +48,7 @@ import mojo.backend_gimple.emit_calls as ggc
 from mojo.middle.calls_shared import *  # noqa: F401,F403
 from mojo.middle.types import _SCALAR_INT_TYPES, _SCALAR_FLOAT_TYPES  # underscore: `import *` won't carry them
 from mojo.middle.calls_shared import (
+    _is_pointer_ctype,
     _as_str, _build_call_args_for_candidate, _callable_default_generator,
     _callable_param_generator_apis, _callable_param_ret_types, _callable_value_symbol, _default_expr_to_pair,
     _ident_call_name, _isinstance_type_name, _pack_kwargs_dict,
@@ -6592,8 +6593,22 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             _dv = None
             if _dflts and 0 <= _pos - _first_dflt < len(_dflts):
                 _dv = _dflts[_pos - _first_dflt][1]
+            # `expected_params[_pos]` is this slot's DECLARED parameter type,
+            # and it is what decides the shape of "no value": for a POINTER
+            # parameter the padding has to be a typed NULL, because an integer
+            # 0 handed to a `char *` is coerced through
+            # `mojo_cstr_or_int_str` into the one-character string "0" — a
+            # true, non-null pointer. That is not hypothetical: it made every
+            # `self._expect("LPAREN")` in the self-hosted parser believe a
+            # value had been passed (`Parser._expect(self, kind, value: str =
+            # None)`), so the parser refused every file with "Expected '0'
+            # got ')'". See `_default_expr_to_pair`'s `param_ctype`.
+            _pct = (expected_params[_pos]
+                    if 0 <= _pos < len(expected_params) else None)
             if _dv is not None:
-                arg_pairs.append(gen._default_expr_to_pair(_dv))
+                arg_pairs.append(gen._default_expr_to_pair(_dv, param_ctype=_pct))
+            elif _is_pointer_ctype(_pct):
+                arg_pairs.append((_pct, '0'))
             else:
                 arg_pairs.append(('int', '0'))
 
