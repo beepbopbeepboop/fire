@@ -2923,6 +2923,103 @@ class _AutoStubValue(int):
         return 0
 
 
+class _MojoModuleObject(types.SimpleNamespace):
+    """A MODULE OBJECT that is a live view of an imported module's own scope,
+    rather than a `SimpleNamespace` snapshot of it taken the moment the module
+    body finished.
+
+    **The snapshot was a silent wrong answer, and it was wrong in the one place
+    that matters.** `types.SimpleNamespace(**mod_interp.scope.vars)` COPIED the
+    module's top-level bindings, while the module's own functions kept reading
+    and writing `mod_interp.scope.vars` — the live dict. So for any name the
+    module's own code assigns, there were two homes:
+
+        i_lib.mojo:  G = 5
+                     def setg(v): global G; G = v
+                     def get_it(): global G; return G
+        i_prog.mojo: import i_lib
+                     i_lib.setg(9)
+                     print(i_lib.get_it())   # 9 — the live scope
+                     print(i_lib.G)          # 5 — the snapshot
+
+    Two reads of the same module disagreeing inside one program, with no
+    diagnostic and no error: `G = v` visibly did nothing as far as any other
+    reader of `i_lib` was concerned. CPython answers 9 and 9, because a module
+    object's attribute IS its `__dict__` and the module's functions read that
+    same dict.
+
+    So this delegates instead of copying. Every direction Python has:
+
+      * `mod.X` reads `scope.vars['X']` — through the parent chain, so a name
+        the module never declared but inherited from its own enclosing scope
+        still resolves, exactly as `mod_interp.scope.get` would;
+      * `mod.X = v` writes `scope.vars['X']`, which is what the module's own
+        `global X` writes, so an assignment from outside is visible to the
+        module's functions immediately and in the other direction too. Before
+        this, such an assignment created a FOURTH home: an attribute on the
+        snapshot, which no function ever reads;
+      * `del mod.X` removes it from `scope.vars`;
+      * `dir(mod)` lists what the module currently has, so a REPL-ish
+        `dir(mod)` after a `global` write shows the write.
+
+    Subclasses `types.SimpleNamespace` rather than replacing it, for one
+    concrete reason: `_bind_dotted_import` walks a dotted import chain with
+    `isinstance(nxt, types.SimpleNamespace)`, and every other reader of a
+    module object in this file does the same. `SimpleNamespace.__init__` is NOT
+    called, so the instance `__dict__` stays empty, which is what makes
+    `__getattr__` fire for EVERY name instead of shadowing it — and `__setattr__`
+    is overridden so that an assignment cannot quietly land in that `__dict__`
+    and become the fourth home this class exists to remove.
+
+    Two attribute names are therefore NOT delegated, and both are dunder-shaped
+    (`__modvars__`, `__modname__`, trailing underscores so no name mangling
+    applies) because the alternative was worse: Python resolves an instance
+    attribute before it calls `__getattr__`, so any plain name held here would
+    shadow a module global of the same name, and `__slots__` does not help —
+    a subclass of `SimpleNamespace` inherits its `__dict__` regardless. They
+    are excluded from `__dir__` for the same reason. No Mojo source in this
+    repository defines either.
+
+    The reference keeps the module's `Interpreter` alive — the thing whose
+    scope the module's own functions read — which is what makes a write through
+    the module object and a write through `global` the same write.
+    """
+
+    def __init__(self, scope_vars, modname):
+        # Bypass SimpleNamespace.__init__ (which would populate __dict__) and
+        # write the two fields through object.__setattr__ so the overridden
+        # __setattr__ below — which needs __modvars__ to exist — is not
+        # re-entered.
+        object.__setattr__(self, '__modvars__', scope_vars)
+        object.__setattr__(self, '__modname__', modname)
+
+    def __getattr__(self, name):
+        # Only reached for a name NOT in the instance __dict__, which is every
+        # module name, because __init__ deliberately left it empty.
+        try:
+            return self.__modvars__[name]
+        except KeyError:
+            raise AttributeError(
+                f"module '{self.__modname__}' has no attribute '{name}'")
+
+    def __setattr__(self, name, value):
+        self.__modvars__[name] = value
+
+    def __delattr__(self, name):
+        try:
+            del self.__modvars__[name]
+        except KeyError:
+            raise AttributeError(
+                f"module '{self.__modname__}' has no attribute '{name}'")
+
+    def __dir__(self):
+        return sorted(set(self.__modvars__) | set(object.__dir__(self))
+                      - {'__modvars__', '__modname__'})
+
+    def __repr__(self):
+        return f"<module {self.__modname__}>"
+
+
 class _AutoStubNamespace:
     """Auto-stubbing namespace: any attribute access returns AutoStubValue(0)
     which behaves as integer 0 in arithmetic, is callable (returns 0), and
@@ -3178,7 +3275,6 @@ class Interpreter:
         # unshared cache and recurse forever instead of hitting a cache entry.
         if found in cache:
             return cache[found]
-        cache[found] = types.SimpleNamespace()
 
         with open(found) as f:
             src = f.read()
@@ -3187,10 +3283,18 @@ class Interpreter:
         mod_stmts = Parser(tokens).parse_module()
         mod_interp = Interpreter(filename=found, argv=self.argv)
         mod_interp._mojo_module_cache = cache  # shared, so cycles hit the guard above
+        # The CYCLE GUARD is installed before the body runs and it is the SAME
+        # object the import returns, not a placeholder that is replaced at the
+        # end. That is the fix as much as the copy was: a package that imports
+        # itself must terminate (which is why the slot is marked here at all),
+        # and a placeholder would make a cyclic importer see an empty module
+        # while every other importer saw the live one. Installing the view here
+        # means a cyclic importer sees the same half-built module, which is what
+        # CPython's partially-initialised module object does.
+        namespace = _MojoModuleObject(mod_interp.scope.vars, module_name)
+        cache[found] = namespace
         for stmt in mod_stmts:
             mod_interp.execute(stmt)
-        namespace = types.SimpleNamespace(**mod_interp.scope.vars)
-        cache[found] = namespace
         return namespace
 
     def _bind_dotted_import(self, module_name, mod):

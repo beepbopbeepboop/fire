@@ -33,8 +33,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 MOJO = os.path.join(HERE, 'fire.py')
 TIMEOUT = 120
 
-# name -> source. Valid Mojo AND valid Python; `main()` is appended by the
-# runner, so the programs must define it and must not call it themselves.
+# name -> source, or name -> {stem: source} for a case that needs SIBLING
+# MODULES. Both spellings are the same promise: valid Mojo AND valid Python,
+# `main()` appended by the runner, so the program defines `main` and does not
+# call it itself. A dict case is written out under BOTH extensions for every
+# stem (`i_lib` becomes `i_lib.py` and `i_lib.mojo`) and the program is the
+# stem `prog` — one text, two engines, and `import i_lib` resolves to
+# `i_lib.py` under CPython and to `i_lib.mojo` under `fire.py run`, which is
+# the only reason the dict form can exist at all. The sources are therefore
+# annotation-free: `def f(v):` is a Mojo parameter list and a Python one.
 CORPUS = {
     # `@classmethod` binds the CLASS. The interpreter had no classmethod
     # support at all: `Paths.who()` returned the raw unbound function, so the
@@ -288,6 +295,51 @@ def main():
     print(shadowed_local())
     print(loop_target_still_binds())
 ''',
+    # A module object is a LIVE VIEW of the module's scope, and it used to be a
+    # `SimpleNamespace` SNAPSHOT of it taken when the module body finished. So a
+    # name the module's own code assigns had two homes: `i_lib.get_it()` read
+    # the live scope and answered 9, while `i_lib.G` read the copy and answered
+    # the value from before `setg` ran — two reads of one module disagreeing
+    # inside one program, with no error and no diagnostic, and `G = v` looking
+    # like it had done nothing. CPython answers 9 and 9.
+    #
+    # This is the shape `test_runtime_diff.py` structurally CANNOT see, which is
+    # why it is here: that suite compares the two ENGINES, and the compiled
+    # path had this bug too (a module global a module writes was published as
+    # a constant, `bugs/FORMAL_module_state_no_storage.md` §(2)) — so a
+    # diff between them was clean while both were wrong. This case is the third
+    # opinion.
+    #
+    # The last two lines are the directions that had no home at all: an
+    # assignment THROUGH the module object (`i_lib.G = 21`, CPython's rule) used
+    # to create a fourth home — an attribute on the snapshot that no function
+    # ever read — and `hasattr` on a name the module does not have must still be
+    # a `False` and not an auto-stubbed 0.
+    "module_object_is_a_live_view_of_the_module_scope": {
+        'i_lib': '''\
+G = 5
+
+def setg(v):
+    global G
+    G = v
+
+def get_it():
+    global G
+    return G
+''',
+        'prog': '''\
+import i_lib
+
+def main():
+    print(i_lib.get_it())
+    i_lib.setg(9)
+    print(i_lib.get_it())
+    print(i_lib.G)
+    i_lib.G = 21
+    print(i_lib.get_it())
+    print(hasattr(i_lib, "nope"))
+''',
+    },
 }
 
 # Shapes CPython CANNOT EXPRESS, so the corpus above cannot hold them: a
@@ -437,16 +489,30 @@ def _run(argv, cwd):
 
 
 def check(name, source):
-    """Run one program through both engines; return (ok, detail)."""
+    """Run one program through both engines; return (ok, detail).
+
+    `source` is either the program's text or a `{stem: text}` dict of a
+    program plus its imported siblings. `prog` is the program either way.
+    """
+    files = {'prog': source} if isinstance(source, str) else dict(source)
     with tempfile.TemporaryDirectory(prefix='mojo_oracle_') as wd:
-        body = source if source.rstrip().endswith('main()') else source + '\nmain()\n'
-        # The SAME text is both the Mojo source and the Python source: the
-        # whole point is that this subset means the same thing to both.
+        for stem, text in files.items():
+            # Only the PROGRAM gets the appended `main()` call: a library that
+            # defines no `main` must not grow one, and one that does would have
+            # its entry point invoked by the sibling-module loader.
+            body = text
+            if stem == 'prog' and not text.rstrip().endswith('main()'):
+                body = text + '\nmain()\n'
+            # The SAME text is both the Mojo source and the Python source: the
+            # whole point is that this subset means the same thing to both.
+            with open(os.path.join(wd, stem + '.py'), 'w') as f:
+                f.write(body)
+            with open(os.path.join(wd, stem + '.mojo'), 'w') as f:
+                f.write(body)
         path = os.path.join(wd, 'prog.py')
-        with open(path, 'w') as f:
-            f.write(body)
         cpy_out, cpy_rc, cpy_err = _run([sys.executable, path], wd)
-        mojo_out, mojo_rc, mojo_err = _run([sys.executable, MOJO, 'run', path], HERE)
+        mojo_out, mojo_rc, mojo_err = _run(
+            [sys.executable, MOJO, 'run', os.path.join(wd, 'prog.mojo')], HERE)
     if cpy_out is None or mojo_out is None:
         return False, f'{"cpython" if cpy_out is None else "interp"} timed out'
     if cpy_rc != 0:
@@ -503,7 +569,12 @@ def main():
     print('=' * 68)
     npass = nfail = 0
     for name, source in CORPUS.items():
-        ok, detail = check(name, textwrap.dedent(source))
+        if isinstance(source, str):
+            source = textwrap.dedent(source)
+        else:
+            source = {stem: textwrap.dedent(text)
+                      for stem, text in source.items()}
+        ok, detail = check(name, source)
         print(f'{"PASS" if ok else "FAIL"}  {name}: {detail}')
         if ok:
             npass += 1
