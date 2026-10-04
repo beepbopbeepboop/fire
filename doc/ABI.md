@@ -99,6 +99,69 @@ These cross the boundary as opaque pointers to the runtime types in
 | `Dict` / `dict` | `MojoDict *` |
 | `Set` / `set` | `MojoSet *` |
 
+### A `String` at the boundary holds BYTES, and `len()` counts CODE POINTS
+
+**Revised 2026-10-04** (`work/formal26-unicode`), for the `String` / `str` row
+above only. The row is unchanged — a `String` is still `char *` — but a `char *`
+is NUL-terminated **bytes** and a Mojo `String` is a sequence of **characters**,
+and a client binding this ABI has to know which questions that makes
+unanswerable across it. Read `formal/model.py`'s TEXT ENCODING block for the
+decision and `test_formal_unicode.py` for the 80 measured rows; the short form:
+
+| on the formal backends | what it is | CPython's is | agree? |
+|---|---|---|---|
+| `len(s)` | a `strlen` over the bytes, or a folded count of a literal's characters | characters | **only for ASCII** |
+| `s.find(p)` | a `strstr` offset in bytes | a character offset | **only for ASCII** |
+| `s[i]` | the byte at `s + i` | a one-character `str` | **only for ASCII**, and the types differ even then |
+| `printf("%<w>s", s)` | a byte width (C has no characters) | a character width | **only for ASCII** |
+| `s == t`, `p in s`, `s.count(p)`, `s.startswith/endswith(p)`, `s.lstrip()`, `bool(s)` | a byte compare / scan | the same question over characters | **yes** — UTF-8 is self-synchronising, so the BOOLEAN, the COUNT and the prefix/suffix answer are the same |
+
+Three rows in that table are a **silent wrong answer** for non-ASCII text and are
+now either folded or refused by name rather than answered in bytes; measured
+before, on both architectures, all of it building and running with exit 0:
+`len("héllo")` was 6 where CPython says 5, `len("日本")` was 6 where CPython says
+2, `"héllo".find("llo")` was 3 where CPython says 2, `printf("%6s", "héllo")`
+printed `[héllo]` where CPython prints `[ héllo]`, and `s[1]` on `"日本"` produced
+one `0x9c` — the second byte of `本`, which is not a character and is not valid
+UTF-8 on its own.
+
+**What a client has to know, and it is three rules rather than one:**
+
+1. **A string that can hold non-ASCII text cannot cross this boundary for
+   `len`/`find`/indexing.** The formal backends refuse those operations by name
+   in any image that contains a non-ASCII string literal, and a literal's own
+   `len()`/`find()` is answered at compile time from its text. So the encoding is
+   a property of the **unit**, not of the value: an all-ASCII image lowers all of
+   them with `strlen`/`strstr`/pointer arithmetic, and one accented literal
+   anywhere in the module changes the answer for strings whose text the build
+   cannot see. That is the sound reading of the representation — every string
+   value is a literal's interned bytes or an interior pointer into them — and it
+   is the reason this row is about the ABI and not about one function.
+2. **A `%s` at this boundary copies bytes, which is what it should do.** It is
+   CPython's `sys.stdout` behaviour too; the divergence is the WIDTH and the
+   PRECISION, which `printf` measures in bytes and `%` in Python measures in
+   characters. Use no width for text that is not ASCII.
+3. **A NUL cannot appear in a `String` here.** It ends the object, so `len`
+   truncates at it and `==` compares only up to it. Latent — nothing lowered
+   today can produce one — and recorded here because it is an ABI fact a client
+   can hit, not because a program in this repository has.
+
+**What is NOT decided here, deliberately.** `upper`/`lower`/`strip`/`replace`/
+`join`/`split`/`reverse` and f-string composition are refused, for one reason
+that is not about encoding: a composed string is a NEW buffer, and a `String`
+value here is a pointer into an image section mapped read+execute. The full
+missing-capability list is `formal/model.py::LENGTH_DEPENDENT_METHODS` and
+`bugs/FORMAL_string_composition_has_no_buffer.md`; the encoding question is
+downstream of both and is the easier half.
+
+**And the escape spellings are a front-end gap, not an ABI one.** `\uXXXX`,
+`\UXXXXXXXX`, `\N{…}` and multi-digit octal escapes are not decoded by any engine
+in this repository, so a Mojo literal `"\u00e9"` is a six-character string where
+CPython's is one character — on the interpreter, the compiled path and both
+formal backends alike. A client that sends text as an escape spelling rather than
+as UTF-8 bytes crosses this boundary with the wrong bytes. Measured, and filed:
+`bugs/LEXER_unicode_escapes_are_not_decoded.md`.
+
 ### `Optional[T]` on the formal backends: the payload word, and a NICHE for `None`
 
 **A formal value is one 64-bit word, so an `Optional[T]` is one word: the

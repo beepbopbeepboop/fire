@@ -30,6 +30,14 @@ conversion and through a bare expression is closed with its doc deleted.
 re-introducing the spelling to say it is missing would put this file back on
 its own census.)**
 
+**Wave 9 (`work/formal26-unicode`, 2026-10-04) is the bottom of this document
+and it is about something this one never asked: `strlen` counts BYTES and
+Python's `len()` counts CHARACTERS, so every answer above was right about a
+`char *` and silent about what a `char *` HOLDS.** Non-ASCII text made `len`,
+`find`, `s[i]` and a `%<width>s` wrong on both machines — measured numbers, a
+table, and the three answers now in `formal/model.py`'s TEXT ENCODING block at
+the very bottom. The representation decision at the top is untouched.
+
 ## The decision, and the reasoning that decides it
 
 A formal value is one 64-bit word. A string on this path is a bare `char *`.
@@ -975,3 +983,89 @@ So the collision is refused by name and nothing in this document has to
 re-derive it. **What that does not do is make the collision resolvable** — the
 two representations are still in force at once, and this refusal is what stands
 between them. A `String`-shaped frame on this path is still the project.
+
+---
+
+# Wave 9: `strlen` counts BYTES and `len()` counts CHARACTERS
+
+**`work/formal26-unicode`, 2026-10-04.** Every answer in this document is right
+about a `char *`, and none of them ever said what a `char *` HOLDS. It holds
+**bytes**, and a Python `str` is a sequence of **code points**, and for ASCII
+those are the same number — which is the only reason any of the answers above
+was right, and it was right by accident. For anything else they are not, and
+the divergence is not a rounding error: it changes **which character a position
+names**, so a program that uses one reads out of range. Measured on both
+architectures, every case building, running and exiting 0:
+
+| source | before | CPython |
+|---|---|---|
+| `len("héllo")` | **6** | 5 |
+| `len("日本")` | **6** | 2 |
+| `len("a😀b")` | **6** | 3 |
+| `"héllo".find("llo")` | **3** | 2 |
+| `s = "日本"; printf("[%c]", s[1])` | **one `0x9c`** — the second byte of `本` | `[本]` |
+| `printf("%6s", "héllo")` | **`[héllo]`** | `[ héllo]` |
+| `printf("%-6s", "héllo")` | **`[héllo]`** | `[héllo ]` |
+
+The representation decision at the top of this document **stands and is not
+revisited**. What is new is the one question it never asked, and it is asked in
+one place — `formal/model.py`'s TEXT ENCODING block — with three answers rather
+than one, so the two machines cannot answer differently about one source file:
+
+* **A LITERAL's text is known at compile time**, so its character count is a
+  folded immediate. That is a new CAPABILITY, not a repair: `len("日本")` is 2 on
+  both backends where it answered 6, and `"héllo".find("llo")` is 2 where it
+  answered 3.
+* **Otherwise, an image with no non-ASCII string literal in it has every string
+  in it ASCII**, so `strlen` IS `len()` and nothing changes. This condition is
+  sound rather than convenient, and the argument is this document's own point 3:
+  every string value is a literal's interned bytes or an interior pointer into
+  them, so an image's literals are exactly its possible string CONTENTS. It is
+  also what keeps the block from costing the corpus anything — the corpus is
+  ASCII, and 212 existing string/`len`/`printf`/truthy cases in
+  `test_formal_run.py` pass unchanged.
+* **Otherwise it is a REFUSAL naming the non-ASCII case** and quoting the
+  offending literals. A byte count presented where a character count belongs is
+  the most plausible wrong number in the file: small, positive, stable across
+  runs and identical on both architectures.
+
+**What is measured RIGHT and deliberately left alone**, with the reason, because
+the alternative is a block whose only evidence is that it did not break
+something nobody measured. `==`, `in`, `count`, `startswith`, `endswith`,
+`lstrip`, truthiness and a `%s` with no width are all byte operations, and for
+**well-formed UTF-8 a byte answer IS CPython's answer**: the encoding is
+self-synchronising, so a byte substring test has the same BOOLEAN result, the
+same COUNT and the same PREFIX/SUFFIX answer as a code point test, and a string
+is empty iff its first byte is the terminator. Measured on both architectures in
+`test_formal_unicode.py`, 17 rows.
+
+**What is refused rather than folded, and why the reason differs from `len`'s.**
+`s[i]` on non-ASCII text: the answer CPython wants is a one-CHARACTER object,
+which is a new object, and a string value here is a `char *` into text the
+image maps read+execute and interns by content — so there is nowhere to put it.
+That is the missing BUFFER `LENGTH_DEPENDENT_METHODS` names, reached from an
+index instead of from `upper()`, and it is why this is a refusal where `len` is a
+fold. A `%<width>s` on non-ASCII text: `printf` is a C function and C has no
+characters, so `%6s` pads to six BYTES — which is why this needed a width column
+nothing had (`printf_text_widths`, the second reader of the conversion regex;
+a PRECISION is the same defect and `%.3s` is refused for the same reason).
+
+**The `s[i]` bullet in "what was found while looking" above is now CONDITIONAL
+rather than deleted, and that is the honest state of it.** For an ASCII string it
+still gives the byte where CPython gives a one-character `str` — a type
+divergence, recorded there and not fixed here. For a non-ASCII string it gave a
+byte from the MIDDLE of a multi-byte sequence, which is a wrong VALUE, and that
+is refused by name.
+
+## The next step, which is not in this document's subject
+
+**`\uXXXX`, `\UXXXXXXXX`, `\N{…}` and octal escapes are not decoded by any engine
+in this repository**, so `len("\u00e9")` is 6 here and 1 in CPython, on the
+interpreter, the compiled path and both formal backends alike. That is
+`fire_compiler.decode_c_escapes` and it is a FRONT-END defect, not a
+string-value-model one: `bugs/LEXER_unicode_escapes_are_not_decoded.md`, with the
+four-row measurement and the reason "an unknown escape keeps its backslash" and
+"a known escape is missing" are the same behaviour here and opposite behaviours
+in CPython. It is worth knowing that the encoding block above makes the formal
+half of that fix free: `len("\u00e9")` is 1 on both backends the moment the
+decoder knows the escape, because the fold reads the decoded text.
