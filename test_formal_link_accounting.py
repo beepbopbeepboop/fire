@@ -443,6 +443,25 @@ PROVIDED_NEVER_A_HOST_MODULE = {
     # does NOT have (`split`, `join`, the `shlex` reader) is refused there by
     # name, which is what keeps a one-file row from reading as a whole module.
     "shlex": "test_formal_shlex.py",
+    # `traceback` and `signal` left `HOST_UNREACHABLE` on 2026-10-04 the way
+    # `shutil` and `tempfile` did, and for the same half of the reason: the
+    # OBJECT half of their entries is still true — there is no unwinder for
+    # `traceback` to format and no disposition table for `signal` to change —
+    # and the part a program READS is computed. `traceback` answers CPython's own
+    # text for the one state this target can be in, and `signal` answers this
+    # platform's `<signal.h>` numbers plus two libc calls. Both are zero-admission
+    # for the `fcntl` reason, so they sit in NO tier rather than in
+    # `HOST_ADMITTED`, and one test file checks both because they are the same
+    # shape (a handful of names whose answers are CPython's to give).
+    "traceback": "test_formal_core_hostmods.py",
+    "signal": "test_formal_core_hostmods.py",
+    # `operator` left `HOST_MODELLED` on 2026-10-04 by being written — the
+    # `posixpath`/`html`/`glob` shape, a name that had been classified and then
+    # answered. It is the word-arithmetic half of CPython's `operator` and its
+    # test is in the same file as `traceback` and `signal` for the reason that
+    # file's docstring gives: a handful of names whose answers are CPython's to
+    # give.
+    "operator": "test_formal_core_hostmods.py",
 }
 
 # The two `os` SUBMODULES, which are provided and are named by the file they are
@@ -803,7 +822,14 @@ def test_host_tiers():
     # over `IMPLEMENTED_HOST_MODULE_TESTS` above already says about every
     # written name, and a second copy of it would be the duplicate the pair
     # above exists to prevent.
-    for m in ('asyncio', 'socket', 'zlib', 'traceback',
+    # `traceback` left this list on 2026-10-04 for the same reason and the same
+    # half of it: there is still no unwinder for it to format and no exception
+    # object to hand it — `formal/hostmods/traceback.mojo` answers
+    # `format_exc`/`print_exc` for the ONE state this target can be in (nothing
+    # in flight, which is CPython's own `'NoneType: None\n'`) and every name that
+    # needs a live traceback is absent from it. What survives of the entry is the
+    # frames, and the module's docstring says so.
+    for m in ('asyncio', 'socket', 'zlib',
               'getpass', 'webbrowser', 'logging', 'unittest'):
         check(I.host_module_tier(m) == 'unreachable',
               f'{m} is unreachable (needs an object the target does not have)')

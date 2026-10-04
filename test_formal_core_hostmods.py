@@ -62,9 +62,12 @@ Run:  python3 test_formal_core_hostmods.py [-v] [group]
 """
 
 import argparse
+import builtins
 import enum
+import operator
 import os
 import platform
+import signal
 import subprocess
 import sys
 import tempfile
@@ -115,6 +118,26 @@ def run(out):
           f"image exited {r.returncode}: "
           f"{(r.stderr or b'').decode('utf-8', 'replace').strip()[-300:]}")
     return r.stdout.decode("latin-1")
+
+
+def run_streams(out):
+    """Execute the image and return `(stdout, stderr)`, both as latin-1 text.
+
+    Needed by the `tb` group and by nothing else here: `traceback.print_exc`
+    writes to descriptor 2 by definition, so a driver that kept only stdout
+    would report the module's one effect as silence and the group would pass on
+    a `print_exc` that wrote nothing at all — which is the specific wrong
+    answer the module's docstring says CPython does NOT give.
+
+    latin-1 for both, for the reason `run` gives: it round-trips every byte, so
+    a body that contains one is not silently mangled into the separator.
+    """
+    r = subprocess.run([out], capture_output=True, timeout=J.RUN_TIMEOUT,
+                       cwd=HERE)
+    check(r.returncode == 0,
+          f"image exited {r.returncode}: "
+          f"{(r.stderr or b'').decode('utf-8', 'replace').strip()[-300:]}")
+    return (r.stdout.decode("latin-1"), r.stderr.decode("latin-1"))
 
 # The corpus for `enum-value`, as (class name, member, value) triples.
 # Deliberately includes the shapes that are easy to get wrong: 0 (which a "read
@@ -488,7 +511,7 @@ def group_resolve(tmpdir, verbose):
     being written, because an entry left behind would refuse a file after the
     module that answers it is in the tree."""
     import formal.imports as I
-    for mod in ("enum", "contextlib"):
+    for mod in ("enum", "contextlib", "traceback", "signal", "operator"):
         path = os.path.join(HOSTMODS, mod + ".mojo")
         check(os.path.isfile(path), f"no Mojo source for {mod}")
         got = I.resolve_module_path(mod)
@@ -498,8 +521,10 @@ def group_resolve(tmpdir, verbose):
               f"{mod} is still in HOST_MODELLED; its Mojo source exists, so the "
               f"entry is now a false statement about the target")
     if verbose:
-        print("    both resolve into formal/hostmods/, both out of the set")
-    return True, "enum and contextlib resolve, and both left HOST_MODELLED"
+        print("    all five resolve into formal/hostmods/, all five out of "
+              "the set")
+    return True, ("enum, contextlib, traceback, signal and operator resolve, "
+                  "and all five left HOST_MODELLED")
 
 
 def group_functools_absent(tmpdir, verbose):
@@ -602,6 +627,562 @@ def group_functools_absent(tmpdir, verbose):
     return True, f"{len(absent) + 1} absent functools names refused"
 
 
+# ── `traceback` and `signal` ───────────────────────────────────────────────────
+#
+# BOTH IN THIS FILE for the reason the docstring's second section gives: a
+# handful of names whose answers are CPython's (or the C library's) to give, and
+# a file each that wanted one of them. Neither module is large enough to be worth
+# a suite of its own and both are in the same shape — a vocabulary plus a
+# function or two, with the absences carrying the argument.
+#
+# `SIGNAL_NAMES` is a list of NAMES and not of numbers, read off this process's
+# live `signal`, for the reason `IO_ANSWERS` in `test_formal_small_hosts.py` is:
+# the oracle is the interpreter's own module, so a number typed here could be
+# wrong without anything noticing, and a name CPython stopped exporting would be
+# a corpus row testing a name that does not exist. The image and CPython are
+# therefore always asked about the SAME set of names, computed once.
+SIGNAL_NAMES = [n for n in dir(signal) if n.startswith("SIG")] + \
+               [n for n in dir(signal) if n.startswith("ITIMER_")]
+# Sorted so the generated program's order does not depend on `dir()`'s, which is
+# a set order and would otherwise make a diff of the two sides unreadable.
+SIGNAL_NAMES.sort()
+
+
+def group_tb(tmpdir, verbose):
+    """`traceback.format_exc()` and `print_exc()`, against CPython's, on BOTH backends.
+
+    The whole module, so this group is the module's argument. **Both streams are
+    compared**, and the stderr half is the one that matters: `print_exc` writing
+    NOTHING is the plausible wrong answer — it is what a reader would expect of a
+    module with no exceptions — and it is wrong about this host, which prints
+    `NoneType: None` for every call that finds no exception in flight. CPython's
+    answer is computed here, in this process, rather than written down.
+
+    The `format_exc` case is asked FIRST and printed to stdout, so a group that
+    only ever compared stdout would see a difference even if `print_exc` were
+    deleted — the two halves are independent reads of the same string.
+    """
+    want_fmt = __import__("traceback").format_exc()
+    want_print = __import__("traceback").format_exc()
+    src = ("import traceback\n\ndef main() -> int:\n"
+           '    printf("F=[%s]\\n", traceback.format_exc())\n'
+           "    traceback.print_exc()\n"
+           "    return 0\n")
+    for backend in BACKENDS:
+        out = build(src, f"tb_{backend}", backend=backend)
+        got_out, got_err = run_streams(out)
+        check(got_out == f"F=[{want_fmt}]\n",
+              f"[{backend}] traceback.format_exc() answered {got_out!r}, CPython "
+              f"{want_fmt!r} — this target has no exception in flight and "
+              f"CPython prints this exact text in that state, so a difference "
+              f"here is a difference about the text and not about the state")
+        check(got_err == want_print,
+              f"[{backend}] traceback.print_exc() wrote {got_err!r} to "
+              f"descriptor 2, CPython writes {want_print!r}. Writing NOTHING "
+              f"is the wrong answer here and this group is what says so")
+    if verbose:
+        print(f"    format_exc and print_exc, on {len(BACKENDS)} backends, "
+              f"stdout AND stderr")
+    return True, f"traceback agrees with CPython on {len(BACKENDS)} backends"
+
+
+def group_tb_absent(tmpdir, verbose):
+    """Each absent `traceback` name is a refusal that NAMES ITSELF.
+
+    The list is the module's "WHAT IS NOT HERE, AND WHY" verbatim, and the two
+    entries that could have gone the other way are in it for the reason that
+    section gives: `print_stack`/`format_stack` are about the CURRENT stack,
+    which this target HAS, so a fixed string there would be a plausible wrong
+    answer about the program it claimed to describe; and `clear_frames` is about
+    MUTATING a traceback the caller holds, which a one-word value has nowhere to
+    put.
+    """
+    absent = ["format_exception", "print_exception", "format_exception_only",
+              "format_stack", "print_stack", "print_tb", "format_tb",
+              "extract_tb", "walk_tb", "clear_frames", "TracebackException",
+              "FrameSummary", "StackSummary", "print_exception_only"]
+    for name in absent:
+        # A CALL, not a bare name: a bare `traceback.format_stack` is a read of a
+        # module-level name, refused for a different and vaguer reason that does
+        # not name the name being asked for. Same reason `group_ctx_absent` and
+        # `test_formal_small_hosts.py`'s `absent` group give.
+        src = (f"import traceback\n\ndef main() -> int:\n"
+               f"  printf(\"%s\", traceback.{name}(0))\n  return 0\n")
+        tmp = os.path.join(TEMP, f"absent_tb_{name}.mojo")
+        with open(tmp, "w") as f:
+            f.write(src)
+        r = subprocess.run(
+            [sys.executable, FIRE, "build", "--formal", "--no-prove",
+             "-o", os.path.join(TEMP, f"absent_tb_{name}"), tmp],
+            capture_output=True, text=True, timeout=J.BUILD_TIMEOUT, cwd=HERE)
+        check(r.returncode != 0,
+              f"traceback.{name} resolved, but the module documents it as absent "
+              f"— either the docstring is wrong or the module grew a name")
+        msg = r.stderr or r.stdout
+        check(name in msg,
+              f"traceback.{name} failed without naming itself: "
+              f"{msg.strip()[-300:]}")
+    if verbose:
+        print(f"    {len(absent)} absent names refused, each naming itself")
+    return True, f"{len(absent)} absent traceback names refused"
+
+
+def group_sig(tmpdir, verbose):
+    """Every `signal` NAME against CPython's live `signal`, plus two libc calls.
+
+    Three things, and each is a different kind of claim:
+
+      * **the vocabulary** — every name CPython's `signal` exports, compared one
+        by one. It is a list of NAMES read off this process's module, so the two
+        sides are always asked about the same set, and a constant that were wrong
+        on one platform only (`SIGSTKFLT` is 16 on Linux and absent here;
+        `SIGCHLD` is 17 on Linux and 20 here) cannot pass unnoticed. NO SKIP on a
+        non-Darwin host: a disagreement there is a true statement about this file,
+        and a skip would be how a platform-specific model becomes a
+        platform-independent one by accident;
+      * **`strsignal`** over every signal number the platform has, byte for byte.
+        Not a table: the C library's own text is what has to match, and on this
+        platform it carries the number (`"Terminated: 15"`), which is why a
+        hand-written table would have been right on Linux and wrong here;
+      * **`raise_signal`**, with `SIGCONT` and nothing else — it is the only
+        signal whose default disposition continues a running process, so it is
+        the only one a test may send to itself.
+    """
+    src = ["import signal", "", "def main() -> int:"]
+    for n in SIGNAL_NAMES:
+        src.append(f'    printf("{n}=%d\\n", signal.{n})')
+    src.append("    return 0")
+    src = "\n".join(src) + "\n"
+    want = {}
+    for n in SIGNAL_NAMES:
+        want[n] = str(getattr(signal, n))
+    for backend in BACKENDS:
+        got = _parse_image(run(build(src, f"sig_{backend}", backend=backend)))
+        bad = {n: (got.get(n), want[n]) for n in SIGNAL_NAMES
+               if got.get(n) != want[n]}
+        check(not bad,
+              f"[{backend}] signal vocabulary disagrees with CPython on "
+              f"{len(bad)} name(s): "
+              + ", ".join(f"{n}: image {a!r} CPython {b!r}"
+                          for n, (a, b) in sorted(bad.items()))
+              + " — these are this platform's <signal.h> numbers and they are "
+                "the ones CPython's own module reports on this host")
+
+    # `strsignal`, one build per backend, every number the platform has.
+    sig_src = ["import signal", "", "def main() -> int:"]
+    for n in range(1, int(signal.NSIG)):
+        sig_src.append(f'    printf("{n}=%s|", signal.strsignal({n}))')
+    sig_src.append("    return 0")
+    sig_src = "\n".join(sig_src) + "\n"
+    for backend in BACKENDS:
+        got = _parse_image(run(build(sig_src, f"sig_str_{backend}",
+                                     backend=backend)))
+        bad = {}
+        for n in range(1, int(signal.NSIG)):
+            answer = signal.strsignal(n)
+            if got.get(str(n)) != answer:
+                bad[n] = (got.get(str(n)), answer)
+        check(not bad,
+              f"[{backend}] signal.strsignal disagrees with CPython on "
+              f"{len(bad)} of {int(signal.NSIG) - 1} signal number(s): "
+              + ", ".join(f"{n}: image {a!r} CPython {b!r}"
+                          for n, (a, b) in sorted(bad.items()))
+              + " — the answer is the C library's own text, so any difference "
+                "here is a difference about which strsignal(3) ran")
+
+    # `raise_signal(SIGCONT)`: CPython answers None, which is the word 0 here.
+    raise_src = ("import signal\n\ndef main() -> int:\n"
+                 '    printf("r=%d\\n", signal.raise_signal(signal.SIGCONT))\n'
+                 "    return 0\n")
+    want_raise = 0 if signal.raise_signal(signal.SIGCONT) is None else \
+        signal.raise_signal(signal.SIGCONT)
+    for backend in BACKENDS:
+        got = run(build(raise_src, f"sig_raise_{backend}", backend=backend))
+        check(got == f"r={want_raise}\n",
+              f"[{backend}] signal.raise_signal(SIGCONT) answered {got!r}, "
+              f"CPython answers None and None is the word 0 on this path "
+              f"(model.NONE_WORD) — see the module's docstring")
+    if verbose:
+        print(f"    {len(SIGNAL_NAMES)} signal names, "
+              f"{int(signal.NSIG) - 1} strsignal answers and raise_signal, on "
+              f"{len(BACKENDS)} backends")
+    return True, (f"{len(SIGNAL_NAMES)} signal names and "
+                  f"{int(signal.NSIG) - 1} strsignal answers agree with CPython "
+                  f"on {len(BACKENDS)} backends")
+
+
+def group_sig_absent(tmpdir, verbose):
+    """Each absent `signal` name is a refusal that NAMES ITSELF.
+
+    `signal` is the module where an omission is most dangerous, and that is why
+    the list is the module's own "WHAT IS NOT HERE" verbatim rather than a
+    sample: `signal(signum, handler)` would build, record nothing and let the
+    program believe it had installed a handler, which is the silent-wrong-answer
+    shape `functools-absent` above is entirely about. `Signals` is the other one
+    worth naming — `signal.Signals(15).name` is real, useful CPython and needs
+    the number and the name to be one value with two readings.
+    """
+    absent = ["signal", "getsignal", "sigpending", "sigwait",
+              "pthread_sigmask", "pthread_kill", "siginterrupt",
+              "set_wakeup_fd", "pause", "alarm", "setitimer", "getitimer",
+              "valid_signals", "Signals", "Sigmasks", "Handlers",
+              "ItimerError", "default_int_handler"]
+    for name in absent:
+        src = (f"import signal\n\ndef main() -> int:\n"
+               f"  printf(\"%s\", signal.{name}(0))\n  return 0\n")
+        tmp = os.path.join(TEMP, f"absent_sig_{name}.mojo")
+        with open(tmp, "w") as f:
+            f.write(src)
+        r = subprocess.run(
+            [sys.executable, FIRE, "build", "--formal", "--no-prove",
+             "-o", os.path.join(TEMP, f"absent_sig_{name}"), tmp],
+            capture_output=True, text=True, timeout=J.BUILD_TIMEOUT, cwd=HERE)
+        check(r.returncode != 0,
+              f"signal.{name} resolved, but the module documents it as absent — "
+              f"either the docstring is wrong or the module grew a name")
+        msg = r.stderr or r.stdout
+        check(name in msg,
+              f"signal.{name} failed without naming itself: "
+              f"{msg.strip()[-300:]}")
+    if verbose:
+        print(f"    {len(absent)} absent names refused, each naming itself")
+    return True, f"{len(absent)} absent signal names refused"
+
+
+# ── `operator` ─────────────────────────────────────────────────────────────────
+#
+# A CORPUS OF OPERANDS, and it is a table because a table is the thing that makes
+# a corpus a corpus: the point is not that `operator.add(3, 4)` is 7, it is that
+# every answer agrees with CPython's over operands chosen to separate one rule
+# from another.
+#
+# The four rows that exist to catch a specific wrong answer:
+#
+#   (0, 0)             — every name must answer 0 or 1 here, and `floordiv`/`mod`
+#                        must be the -1 status rather than a crash;
+#   a NEGATIVE operand  — `mod` FLOORS in CPython (`(0-7) % 2` is 1), which is the
+#                        one arithmetic rule a truncating implementation gets
+#                        wrong and it is in the table for that;
+#   an operand PAST 32 BITS — `%lld` and not `%d`, for the reason every other
+#                        test in this tree gives (`bugs/FORMAL_string_value_model.md`
+#                        §2): `%d` is 32 bits on this path, so the first version of
+#                        this corpus printed `operator.lshift(1, 40)` as 0 where
+#                        CPython says 1099511627776, and the test was comparing a
+#                        truncation against a power of two;
+#   the overflow word   — `(1 << 62) * 4` is 0 HERE and 2**64 in CPython, which is
+#                        the value model rather than a defect, so the expected
+#                        side of that row is computed by asking the C library what
+#                        a 64-bit word does rather than by asking CPython.
+OP_CASES = [
+    # (name, a, b)
+    ("add", 3, 4), ("add", 0 - 3, 4), ("add", 0, 0),
+    ("sub", 3, 4), ("sub", 4, 3), ("mul", 6, 7), ("mul", 0 - 1, 0 - 1),
+    ("floordiv", 7, 2), ("floordiv", 0 - 7, 2), ("floordiv", 8, 2),
+    ("mod", 7, 3), ("mod", 0 - 7, 2), ("mod", 8, 2),
+    ("and_", 12, 10), ("or_", 12, 10), ("xor", 12, 10),
+    ("and_", 0, 0 - 1), ("or_", 0, 0 - 1), ("xor", 0 - 1, 0 - 1),
+    ("lt", 3, 4), ("lt", 4, 3), ("lt", 3, 3),
+    ("le", 3, 4), ("le", 4, 3), ("le", 3, 3),
+    ("eq", 3, 4), ("eq", 4, 3), ("eq", 3, 3),
+    ("ne", 3, 4), ("ne", 4, 3), ("ne", 3, 3),
+    ("gt", 3, 4), ("gt", 4, 3), ("gt", 3, 3),
+    ("ge", 3, 4), ("ge", 4, 3), ("ge", 3, 3),
+    ("lshift", 1, 40), ("lshift", 1, 0), ("lshift", 1, 1),
+    ("lshift", 255, 8), ("rshift", 256, 4), ("rshift", 0 - 1, 1),
+    ("rshift", 1099511627776, 40),
+    # Past the word's width a right shift is a DEFINED answer on both sides
+    # (0 for a non-negative word, -1 for a negative one), so these two rows are
+    # ordinary comparisons against CPython rather than a status. They are in the
+    # corpus because the machine's own `>>` MASKS the distance to six bits and
+    # answers 0 for both (measured), which is a silent wrong answer the module's
+    # `rshift` exists to avoid.
+    ("rshift", 0 - 1, 64), ("rshift", 0 - 3, 100), ("rshift", 1, 100),
+    ("lshift", 0, 64), ("lshift", 0, 200),
+]
+
+# The UNARY names, as (name, operand), and the two-argument `pow`/`pow_mod` rows
+# kept apart because their expected side is computed differently.
+OP_UNARY = [
+    ("neg", 5), ("neg", 0 - 5), ("neg", 0),
+    ("pos", 5), ("pos", 0 - 5),
+    ("abs", 5), ("abs", 0 - 5), ("abs", 0),
+    ("invert", 0), ("invert", 5),
+    ("index", 42), ("index", 0 - 42), ("index", 0),
+    ("truth", 0), ("truth", 1), ("truth", 0 - 1),
+    ("not_", 0), ("not_", 1), ("not_", 0 - 1),
+]
+
+OP_POW = [
+    (2, 10), (3, 39), (2, 0), (0, 0), (5, 1), (0 - 2, 3), (2, 62),
+]
+OP_POW_MOD = [
+    (2, 10, 1000), (3, 39, 1000000007), (2, 0, 7), (0, 0, 7),
+    (0 - 2, 3, 7), (5, 13, 1),
+]
+
+# Where CPython RAISES and this path answers -1. Each row is
+# `(the call as this module spells it, WHERE CPython SPELLS IT, its arguments,
+# the exception CPython raises)` — four fields because the two `pow` rows resolve
+# to different places. CPython's `operator.pow_mod` does not exist: the
+# three-argument power is the BUILTIN `pow` and `operator.pow` is two-argument
+# only, so a group that asked `operator.pow_mod` got `AttributeError` and one
+# that asked `operator.pow` for three arguments got `TypeError` — both of which
+# are a test that measured nothing. The module is named WITH its module, so one
+# table holds both.
+#
+# The group asserts the image answers -1 AND that CPython raises the named
+# exception, so a status that stopped standing in for the thing it names fails
+# rather than passing a comparison against a constant.
+OP_STATUSES = [
+    ("floordiv(5, 0)", "operator.floordiv", (5, 0), "ZeroDivisionError"),
+    ("mod(5, 0)", "operator.mod", (5, 0), "ZeroDivisionError"),
+    ("pow_mod(2, 3, 0)", "builtins.pow", (2, 3, 0), "ValueError"),
+    ("lshift(1, -1)", "operator.lshift", (1, -1), "ValueError"),
+    ("rshift(1, -1)", "operator.rshift", (1, -1), "ValueError"),
+]
+
+# THE OTHER TWO WAYS CPython'S ANSWER IS NOT A WORD, as two tables because the
+# first version of this group had ONE table for all three and every one of its
+# rows was checked, which is how it was found to be two thirds wrong.
+#
+# `operator.pow(2, -1)` was listed as a `ValueError` and CPython answers `0.5`;
+# `operator.lshift(1, 64)` was listed as an `OverflowError` and CPython answers
+# `2**64`. Neither is a refusal — CPython answers something — so they do not
+# belong beside a `ZeroDivisionError`, and a single table over all three asserts
+# a claim about CPython that two of its rows do not make.
+#
+# A FLOAT answer: this path has no float arithmetic at all (a `double` does not
+# travel in an integer register on either ABI — `formal/hostmods/math.mojo`), so
+# the module answers -1. Each row asserts its own claim about CPython, that the
+# answer is a `float` and is not integral.
+OP_NOT_A_WORD = [("pow(2, -1)", (2, -1)), ("pow(3, -2)", (3, -2))]
+
+# A BIGGER integer than one word holds: CPython's `int` is arbitrary-precision,
+# this target's is a signed 64-bit word, and `1 << 63` is the first shift whose
+# answer does not fit (it is 2**63, and the word's top bit is the sign). The
+# hardware MASKS the distance to its low 6 bits, which is why this is a status
+# and not `0`.
+OP_TOO_BIG = [("lshift(1, 64)", (1, 64)), ("lshift(1, 200)", (1, 200))]
+
+WORD_LIMIT = 1 << 63
+
+# And the FOURTH shape, which is not a refusal and not a wrong answer: an
+# operation whose CPython result needs more than a SIGNED word, and which
+# therefore WRAPS here. `1 << 63` is 2**63 — inside the 64 bits and outside the
+# signed range, so the machine's answer is its own negative. This is the value
+# model (`formal/model.py`, "What a value is") and the module's docstring says
+# every answer wraps, so it is pinned here against the WRAP rather than against
+# CPython: comparing it with CPython would be comparing a 64-bit word with an
+# arbitrary-precision integer, which is the category error the other three tables
+# exist to keep separate.
+#
+# The expected value is computed by masking to 64 bits and reinterpreting as
+# signed, which is what the C the image is made of does.
+OP_WRAPS = [
+    ("lshift(1, 63)", (1, 63)),
+    ("mul(4611686018427387904, 4)", (4611686018427387904, 4)),
+    ("mul(4000000000, 5000000000)", (4000000000, 5000000000)),
+]
+
+
+def _wrap64(v: int) -> int:
+    """`v` as a signed 64-bit word: the two's-complement wrap the machine does."""
+    v &= (1 << 64) - 1
+    return v - (1 << 64) if v >= (1 << 63) else v
+
+
+
+def group_op(tmpdir, verbose):
+    """Every `operator` name against CPython's live `operator`, on BOTH backends.
+
+    Three corpora and three kinds of oracle, which is the whole shape of the
+    module:
+
+      * `OP_CASES` / `OP_UNARY` / `OP_POW` / `OP_POW_MOD` — compared against
+        CPython's own functions applied to the same operands. `operator.pow` is
+        CPython's `pow`; `operator.pow_mod` is CPython's three-argument `pow`,
+        which is a different SPELLING on this path (the module's docstring says
+        why a default cannot express "no modulus") and the same function;
+      * the comparisons and `truth`/`not_` answer 1 or 0 where CPython answers a
+        `bool`, so the expected side reads CPython's answer through `int()` — the
+        oracle is still CPython and the conversion is this path's, and it is
+        stated in both places rather than left to be discovered;
+      * `OP_STATUSES` — the places CPython raises. There are no exceptions on this
+        path, so each answers -1, and the group checks BOTH halves: the image
+        answers -1 and CPython raises the exception named beside the row. A
+        status that stopped standing in for the thing it names would still pass a
+        comparison against a constant.
+    """
+    src = ["import operator", "", "def main() -> int:"]
+    for name, a, b in OP_CASES:
+        src.append(f'    printf("{name}({a},{b})=%lld|", operator.{name}({a}, {b}))')
+    for name, a in OP_UNARY:
+        src.append(f'    printf("{name}({a})=%lld|", operator.{name}({a}))')
+    for a, b in OP_POW:
+        src.append(f'    printf("pow({a},{b})=%lld|", operator.pow({a}, {b}))')
+    for a, b, m in OP_POW_MOD:
+        src.append(f'    printf("pow_mod({a},{b},{m})=%lld|", '
+                   f'operator.pow_mod({a}, {b}, {m}))')
+    src.append("    return 0")
+    src = "\n".join(src) + "\n"
+
+    want = {}
+    # The six COMPARISONS answer 1 or 0 where CPython answers a `bool`, so their
+    # expected side is read through `int()`. That is this path's conversion and
+    # not a fudge: the first version of this group compared them directly and 18
+    # of 76 cases failed with `image '1' CPython 'True'`, which is the shape of
+    # a test that forgot to say which of the two representations it is asserting.
+    COMPARISONS = ("lt", "le", "eq", "ne", "gt", "ge")
+    for name, a, b in OP_CASES:
+        f = getattr(operator, name)
+        want[f"{name}({a},{b})"] = str(int(f(a, b)) if name in COMPARISONS
+                                       else f(a, b))
+    for name, a in OP_UNARY:
+        want[f"{name}({a})"] = str(int(getattr(operator, name)(a)))
+    for a, b in OP_POW:
+        want[f"pow({a},{b})"] = str(operator.pow(a, b))
+    for a, b, m in OP_POW_MOD:
+        want[f"pow_mod({a},{b},{m})"] = str(pow(a, b, m))
+
+    # And the status rows, in the same program, so one build answers everything.
+    status_src = ["import operator", "", "def main() -> int:"]
+    for call, _attr, _args, _exc in OP_STATUSES:
+        status_src.append(f'    printf("{call}=%lld|", operator.{call})')
+    for call, _args in OP_NOT_A_WORD + OP_TOO_BIG + OP_WRAPS:
+        status_src.append(f'    printf("{call}=%lld|", operator.{call})')
+    status_src.append("    return 0")
+    status_src = "\n".join(status_src) + "\n"
+
+    for backend in BACKENDS:
+        got = _parse_image(run(build(src, f"op_{backend}", backend=backend)))
+        bad = {k: (got.get(k), v) for k, v in want.items() if got.get(k) != v}
+        check(not bad,
+              f"[{backend}] operator disagrees with CPython on {len(bad)} of "
+              f"{len(want)} case(s): "
+              + ", ".join(f"{k}: image {a!r} CPython {b!r}"
+                          for k, (a, b) in sorted(bad.items()))
+              + " — every name here is word arithmetic and wraps at 64 bits "
+                "like the machine's, which is the value model and not a defect")
+
+        got = _parse_image(run(build(status_src, f"op_status_{backend}",
+                                     backend=backend)))
+        for call, _attr, _args, exc in OP_STATUSES:
+            check(got.get(call) == "-1",
+                  f"[{backend}] operator.{call} answered {got.get(call)!r}, not "
+                  f"the -1 status — CPython raises {exc} there and this path "
+                  f"has no exceptions, so -1 is the answer that is visible "
+                  f"rather than plausible (math.mojo's precedent)")
+
+    # The oracle for the statuses is CPython's OWN behaviour, read here, and the
+    # exception CLASSES are resolved by name rather than written as objects so
+    # the table stays a table of spellings that agree with the module docstring.
+    for call, attr, args, exc in OP_STATUSES:
+        cls = getattr(builtins, exc, None)
+        check(cls is not None and issubclass(cls, BaseException),
+              f"OP_STATUSES names {exc!r}, which is not an exception in this "
+              f"interpreter, so the status row for {call} has nothing to stand "
+              f"in for")
+        ns_name, _, bare = attr.partition(".")
+        ns = {"operator": operator, "builtins": builtins}.get(ns_name)
+        f = getattr(ns, bare, None) if ns is not None else None
+        check(f is not None,
+              f"OP_STATUSES asks CPython for {attr!r}, which names no module "
+              f"this interpreter has, so the status row for {call} has no "
+              f"oracle")
+        try:
+            f(*args)
+            check(False,
+                  f"CPython's {attr}{args} no longer raises {exc}, so the -1 "
+                  f"status this module answers for {call} stands in for "
+                  f"nothing and the module's docstring and OP_STATUSES are "
+                  f"both stale")
+        except cls:
+            pass
+    # And the two "not a word" tables. Each row asserts its OWN claim about
+    # CPython — a float and not integral, or an integer past the word — as well
+    # as the image's -1, because a table whose rows are checked on one side only
+    # is how `pow(2, -1)` came to be filed as a `ValueError`.
+    got = _parse_image(run(build(status_src, "op_noword", backend=BACKENDS[0])))
+    for call, args in OP_NOT_A_WORD:
+        cpy = operator.pow(*args)
+        check(isinstance(cpy, float) and cpy != int(cpy),
+              f"CPython's operator.pow{args} answered {cpy!r}, which is an "
+              f"integer, so the -1 this module answers for {call} is standing "
+              f"in for a different thing than the module's docstring says")
+        check(got.get(call) == "-1",
+              f"operator.{call} answered {got.get(call)!r}; CPython's answer "
+              f"is a float and there is no float here, so the answer is the -1 "
+              f"status")
+    for call, args in OP_TOO_BIG:
+        name, _, rest = call.partition("(")
+        cpy = getattr(operator, name)(*args)
+        check(abs(cpy) >= WORD_LIMIT,
+              f"CPython's operator.{call} answered {cpy!r}, which FITS in a "
+              f"signed 64-bit word, so the -1 this module answers for it is "
+              f"standing in for nothing and OP_TOO_BIG is stale")
+        check(got.get(call) == "-1",
+              f"operator.{call} answered {got.get(call)!r}; CPython answers "
+              f"{cpy} and this path has 64 bits, so the answer is the -1 "
+              f"status")
+    for call, args in OP_WRAPS:
+        name, _, rest = call.partition("(")
+        cpy = getattr(operator, name)(*args)
+        check(abs(cpy) >= WORD_LIMIT,
+              f"CPython's operator.{call} answered {cpy!r}, which FITS in a "
+              f"signed 64-bit word, so the wrap OP_WRAPS pins is not a wrap at "
+              f"all and the row is stale")
+        check(got.get(call) == str(_wrap64(cpy)),
+              f"operator.{call} answered {got.get(call)!r}, and the 64-bit wrap "
+              f"of CPython's {cpy} is {_wrap64(cpy)} — a formal value is one "
+              f"signed 64-bit word (formal/model.py), so wrapping is the "
+              f"value model and not a defect")
+    if verbose:
+        print(f"    {len(want)} answers, {len(OP_STATUSES)} status rows, "
+              f"{len(OP_NOT_A_WORD)} not-a-word rows and {len(OP_WRAPS)} wrap "
+              f"rows, on {len(BACKENDS)} backends")
+    return True, (f"{len(want)} operator answers agree with CPython on "
+                  f"{len(BACKENDS)} backends, and {len(OP_STATUSES)} refusal "
+                  f"statuses stand in for the exceptions CPython raises")
+
+
+def group_op_absent(tmpdir, verbose):
+    """Each absent `operator` name is a refusal that NAMES ITSELF.
+
+    Three rows of this list are there because they are the ones a later reader
+    would try to add, and the module's docstring gives the reason for each:
+    `truediv` (a `float`, and `truediv(4, 2)` would agree while `truediv(7, 2)`
+    would not), `iadd` and its eleven siblings (each returns `a + b` AND writes
+    it back through a name, so a program that wrote `i = operator.iadd(i, 1)`
+    would run and lose the increment), and `itemgetter` (a first-class callable
+    as a return value).
+    """
+    absent = ["truediv", "divmod", "concat", "contains", "countOf", "indexOf",
+              "getitem", "setitem", "delitem", "itemgetter", "attrgetter",
+              "methodcaller", "call", "length_hint",
+              "iadd", "isub", "imul", "itruediv", "ifloordiv", "imod", "ipow",
+              "ilshift", "irshift", "iand", "ior", "ixor"]
+    for name in absent:
+        src = (f"import operator\n\ndef main() -> int:\n"
+               f"  printf(\"%lld\", operator.{name}(3, 4))\n  return 0\n")
+        tmp = os.path.join(TEMP, f"absent_op_{name}.mojo")
+        with open(tmp, "w") as f:
+            f.write(src)
+        r = subprocess.run(
+            [sys.executable, FIRE, "build", "--formal", "--no-prove",
+             "-o", os.path.join(TEMP, f"absent_op_{name}"), tmp],
+            capture_output=True, text=True, timeout=J.BUILD_TIMEOUT, cwd=HERE)
+        check(r.returncode != 0,
+              f"operator.{name} resolved, but the module documents it as absent "
+              f"— either the docstring is wrong or the module grew a name")
+        msg = r.stderr or r.stdout
+        check(name in msg,
+              f"operator.{name} failed without naming itself: "
+              f"{msg.strip()[-300:]}")
+    if verbose:
+        print(f"    {len(absent)} absent names refused, each naming itself")
+    return True, f"{len(absent)} absent operator names refused"
+
+
 GROUPS = {
     "enum-value": group_enum_value,
     "enum-shape": group_enum_shape,
@@ -609,6 +1190,12 @@ GROUPS = {
     "ctx": group_ctx,
     "ctx-absent": group_ctx_absent,
     "functools-absent": group_functools_absent,
+    "tb": group_tb,
+    "tb-absent": group_tb_absent,
+    "sig": group_sig,
+    "sig-absent": group_sig_absent,
+    "op": group_op,
+    "op-absent": group_op_absent,
     "resolve": group_resolve,
 }
 

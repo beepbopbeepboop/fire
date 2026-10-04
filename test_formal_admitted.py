@@ -112,6 +112,15 @@ ADMITTED_COUNTS = {
     "io": 0,
     "json": 0,
     "math": 0,
+    # `operator` is 0 because every name it exports is either the machine's own
+    # word arithmetic or a status this module computes: 27 functions over one
+    # 64-bit word, checked name by name against CPython's live `operator` by
+    # `test_formal_core_hostmods.py`'s `op` group on both backends. The three
+    # places CPython raises (a zero divisor, a zero modulus, a shift distance
+    # outside 0..63) answer -1 and are compared against CPython's exceptions
+    # rather than against CPython's values, which is what the group does with
+    # them. No host fact is left over to admit.
+    "operator": 0,
     "os": 0,
     "os._syscalls": 0,
     "os.path": 0,
@@ -134,6 +143,14 @@ ADMITTED_COUNTS = {
     # one function and that function decides everything.
     "shlex": 0,
     "shutil": 0,
+    # `signal` is 0 and the reason is the `fcntl` one: every name it exports is
+    # either this platform's `<signal.h>` number (computed from the same header
+    # CPython reads, and compared with CPython's live `signal` name by name by
+    # `test_formal_core_hostmods.py`'s `sig` group on both backends) or a libc
+    # call (`strsignal(3)`, `kill(2)`). The dispositions — `signal()`, the
+    # itimers, `getsignal` — are ABSENT rather than admitted, so there is no
+    # host fact left over to trust, which is what the zero measures.
+    "signal": 0,
     "stat": 0,
     "struct": 0,
     "subprocess": 12,               # run/call/check_call/check_output/getoutput/
@@ -154,6 +171,17 @@ ADMITTED_COUNTS = {
     # `fcntl` situation. Five files in this repository import it, spelling
     # `dedent` 78 times and `indent` twice, with no keywords.
     "textwrap": 0,
+    # `traceback` is 0 because its only two functions COMPUTE CPython's answer
+    # rather than assert one: `format_exc()` returns the text
+    # `format_exception_only(None, None)` produces, which is what CPython itself
+    # prints when `sys.exc_info()` is `(None, None, None)` — and on this target
+    # it always is, because there is no `raise` and no unwinder. `print_exc()`
+    # writes that same text to descriptor 2 through `sys.write_stderr`. Every
+    # name that would need a live exception, a traceback object or a frame list
+    # is absent from the module rather than admitted, so no host fact is left
+    # over to trust, which is what the zero measures.
+    "traceback": 0,
+    "typing": 0,
     "threading": 3,               # Thread.start, Thread.join, Lock.acquire
     "textwrap": 0,                # every name it exports is arithmetic over
                                   # bytes a string already is: dedent's margin
