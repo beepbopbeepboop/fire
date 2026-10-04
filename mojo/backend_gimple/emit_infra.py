@@ -5160,6 +5160,70 @@ def _note_global_callable_store(gen, gname: str, value_text: str) -> None:
         gen._global_container_callable_ret[gname] = _drt
 
 
+# The repr/format helpers whose return the CALLER OWNS ON EVERY PATH, so a
+# consumer may `free` it as soon as it has copied what it needs out.
+#
+# This is a table rather than a convention because the ownership is genuinely
+# not uniform, and getting it wrong in the direction that looks safe is a crash:
+# `free`ing a string literal is a heap corruption, not a leak. Every name here
+# was read, body by body, and each one `strdup`s or `malloc`s its buffer
+# unconditionally — which is what makes the set closed under the question.
+#
+# The ones DELIBERATELY ABSENT, each with the arm that makes it unsafe:
+#   mojo_repr_bool        `return b ? "True" : "False";` — literals
+#   mojo_bool_to_str      `return b ? t : f;`          — literals
+#   mojo_repr_float       `return "nan"` / `"inf"` / `"-inf"` on three arms, and a
+#                         fresh `strdup(buffer)` on the rest
+#   mojo_repr_boxed       its `'d'` arm returns `mojo_repr_float(...)`, which is
+#                         one of the three above
+#   mojo_cstr_or_int_str  returns the caller's OWN string when the word is not a
+#                         string at all; its pooled block has its own release
+#                         entry point, `mojo_cstr_or_int_release` (see
+#                         `_release_transient_cstr_args`)
+# Those five are what the doc's own measurement is about: `print(<container>)`
+# leaked 16 B per iteration because the walker arm had no release at all, while
+# the `sprintf` arm four lines below it always did.
+#
+# The GENERATED walkers (`_mojo_repr_list`, `_mojo_repr_dict`, `_mojo_repr_set`,
+# `_mojo_repr_none`, `_mojo_repr_pair`, `_mojo_generic_elem_repr`) are in this
+# set by construction: each ends in `return strdup(...)` or
+# `mojo_str_cat_free(strdup(...), ...)`, and `_mojo_repr_list`'s own body says
+# so — "OWNS its return, on EVERY branch".
+_OWNED_REPR_FNS = frozenset({
+    # the uniform container walkers
+    'mojo_repr_list_ints', 'mojo_repr_list_doubles', 'mojo_repr_list_bools',
+    'mojo_repr_list_bytes', 'mojo_repr_list_slotkinds', 'mojo_repr_list_kinds',
+    'mojo_repr_list_intlists', 'mojo_repr_list_pairs',
+    'mojo_repr_list_pairs_d', 'mojo_repr_list_pairs_s',
+    # the generated per-module walkers
+    '_mojo_repr_list', '_mojo_repr_dict', '_mojo_repr_set', '_mojo_repr_none',
+    '_mojo_repr_pair', '_mojo_repr_intlists', '_mojo_repr_pairlist',
+    '_mojo_generic_elem_repr',
+    # the scalar formatters that malloc unconditionally
+    'mojo_str_from_int', 'mojo_repr_int', 'mojo_repr_str',
+    'mojo_bytes_repr', 'mojo_memoryview_repr', 'mojo_sprintf_ptr',
+})
+
+
+def _own_repr(gen, fn: str, value: str, out: list) -> str:
+    """Record `value` for release after the print that consumes it, when `fn`
+    is one whose return the caller owns on EVERY path (`_OWNED_REPR_FNS`).
+
+    Deferred rather than freed inline because `mojo_print` is emitted per
+    argument with the separator and newline print calls between them, and the
+    release is owed only after the LAST of those has copied out of the buffer.
+    Same shape, and the same reason, as `_cstr_held` a few lines below: `print`
+    copies out of each argument in turn and nothing else refers to the buffer
+    in between, so holding several at once is safe and freeing one early is
+    not.
+
+    Returns `value` so the call sites read as `rv = _own_repr(gen, fn, rv, _owned)`.
+    """
+    if fn in _OWNED_REPR_FNS:
+        out.append(value)
+    return value
+
+
 def _gen_print(gen, args: list, kwargs: list = None):
     # print(..., file=sys.stderr): kwargs used to be silently dropped
     # entirely (the file= expression was never even inspected), so every
@@ -5228,6 +5292,15 @@ def _gen_print(gen, args: list, kwargs: list = None):
     # "Transient keys". Holding several at once is fine: `mojo_print` copies
     # out of each, and the block is still owned by nobody else in between.
     _cstr_held: list = []
+    # `(fn, value)` pairs whose buffer the CALLER owns and releases after the
+    # last `print_fn` call below — the repr walkers, which all `strdup` their
+    # result and which nothing freed. 16.4 B per printed container, measured
+    # flat over a 4x loop range; see
+    # `bugs/CODEGEN_print_of_a_container_never_frees_the_repr_it_asked_for.md`
+    # and `_OWNED_REPR_FNS` above for which helpers may be released and which
+    # three may not (each has a `return "<literal>"` arm, where a `free` is
+    # heap corruption rather than a leak).
+    _owned_reprs: list = []
     for _pi, (atype, aval) in enumerate(parts):
         # A DYNAMIC tagged nested-generator-tuple element (see
         # _lower_IdentExpr's _tagged_dyn_src branch): the real kind is only
@@ -5323,7 +5396,9 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 atype = 'char *'
             elif real == 'MojoDict *':
                 dp = gen._coerce_to_type('int64_t', 'MojoDict *', aval)
-                rv = gen._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', dp)])
+                rv = _own_repr(gen, '_mojo_repr_dict',
+                               gen._call_expr('char *', '_mojo_repr_dict',
+                                              [('MojoDict *', dp)]), _owned_reprs)
                 aval = rv
                 atype = 'char *'
             elif real in ('MojoList *', 'MojoSet *'):
@@ -5332,7 +5407,8 @@ def _gen_print(gen, args: list, kwargs: list = None):
                     fn, fn_args = gen._list_repr_call(aval, lp)
                 else:
                     fn, fn_args = '_mojo_repr_set', [(real, lp)]
-                rv = gen._call_expr('char *', fn, fn_args)
+                rv = _own_repr(gen, fn, gen._call_expr('char *', fn, fn_args),
+                               _owned_reprs)
                 aval = rv
                 atype = 'char *'
         resolved_parts.append((atype, aval))
@@ -5370,13 +5446,19 @@ def _gen_print(gen, args: list, kwargs: list = None):
             # the raw boxed pointer as a decimal address — Python prints
             # a real `[elem, ...]` repr. Reuse the reflection-generated
             # list repr rather than a separate formatter.
-            rv = gen._call_expr('char *', *gen._list_repr_call(aval))
+            _lf, _largs = gen._list_repr_call(aval)
+            rv = _own_repr(gen, _lf, gen._call_expr('char *', _lf, _largs),
+                           _owned_reprs)
             gen._emit(f'  {print_fn} ({rv});')
         elif atype == 'MojoDict *':
-            rv = gen._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', aval)])
+            rv = _own_repr(gen, '_mojo_repr_dict',
+                           gen._call_expr('char *', '_mojo_repr_dict',
+                                          [('MojoDict *', aval)]), _owned_reprs)
             gen._emit(f'  {print_fn} ({rv});')
         elif atype == 'MojoBytes *':
-            rv = gen._call_expr('char *', 'mojo_bytes_repr', [('MojoBytes *', aval)])
+            rv = _own_repr(gen, 'mojo_bytes_repr',
+                           gen._call_expr('char *', 'mojo_bytes_repr',
+                                          [('MojoBytes *', aval)]), _owned_reprs)
             gen._emit(f'  {print_fn} ({rv});')
         elif atype == 'MojoSet *':
             # print({1, 2}) with no boxing involved (a set LITERAL's lowered
@@ -5386,7 +5468,9 @@ def _gen_print(gen, args: list, kwargs: list = None):
             # below and printed the set's own ADDRESS -- len() and iteration
             # on the very same value were already correct, so this was
             # purely a missing dispatch arm, not a missing repr helper.
-            rv = gen._call_expr('char *', '_mojo_repr_set', [('MojoSet *', aval)])
+            rv = _own_repr(gen, '_mojo_repr_set',
+                           gen._call_expr('char *', '_mojo_repr_set',
+                                          [('MojoSet *', aval)]), _owned_reprs)
             gen._emit(f'  {print_fn} ({rv});')
         elif _stat in ('MojoList *', 'MojoSet *', 'MojoDict *', 'MojoBytes *') \
                 and atype not in ('MojoList *', 'MojoSet *', 'MojoDict *', 'MojoBytes *', 'char *'):
@@ -5399,7 +5483,9 @@ def _gen_print(gen, args: list, kwargs: list = None):
             if _stat == 'MojoDict *':
                 _dp = gen._coerce_to_type(atype if atype in ('int64_t', 'int', 'void *') else 'int64_t',
                                           'MojoDict *', aval)
-                rv = gen._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', _dp)])
+                rv = _own_repr(gen, '_mojo_repr_dict',
+                               gen._call_expr('char *', '_mojo_repr_dict',
+                                              [('MojoDict *', _dp)]), _owned_reprs)
             else:
                 _lp = gen._coerce_to_type(atype if atype in ('int64_t', 'int', 'void *') else 'int64_t',
                                           _stat, aval)
@@ -5407,7 +5493,8 @@ def _gen_print(gen, args: list, kwargs: list = None):
                     _fn, _fargs = gen._list_repr_call(aval, _lp)
                 else:
                     _fn, _fargs = '_mojo_repr_set', [(_stat, _lp)]
-                rv = gen._call_expr('char *', _fn, _fargs)
+                rv = _own_repr(gen, _fn, gen._call_expr('char *', _fn, _fargs),
+                               _owned_reprs)
             gen._emit(f'  {print_fn} ({rv});')
         elif atype == '_Bool' or (_stat == '_Bool' and atype in ('int', 'int64_t', 'char *', 'long')):
             # Python prints True/False; the generic numeric path below would
@@ -5456,6 +5543,12 @@ def _gen_print(gen, args: list, kwargs: list = None):
         gen._emit_call('void', '', 'mojo_cstr_or_int_release',
                        [('int64_t', _cstr_held[_ch_i][0]),
                         ('char *', _cstr_held[_ch_i][1])])
+    # …and the repr walkers' own buffers, by the plain `free` the `sprintf`
+    # arm above has always done for its own. AFTER the newline print, not
+    # before it: the newline is the last thing `mojo_print` reads, and the
+    # separator prints in between read the previous argument's buffer too.
+    for _or_i in range(len(_owned_reprs)):
+        gen._emit(f"  free ({_owned_reprs[_or_i]});")
     _emit_literal_print('\\n', print_fn)
 
 

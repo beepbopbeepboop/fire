@@ -4260,6 +4260,39 @@ def main():
 main()
 """, _PRINTED * 60000, 40)
 
+    # …and the SAME leak at a size and a ceiling that can SEE it, which is the
+    # half the case above cannot be. Its own docstring says why: "size the loop
+    # so the leak, if present, is several times limit_mb", and 40 MB against
+    # ~9.6 MB of leaked repr buffers measures nothing.
+    #
+    # One shape, four times the iterations, and a ceiling that sits between the
+    # two answers. Measured on this tree (peak RSS, `/usr/bin/time -l`):
+    #
+    #     50 000 iterations    2.52 MB with the leak    1.69 MB without
+    #   200 000 iterations    4.92 MB with the leak    1.69 MB without
+    #
+    # i.e. 16.4 B per printed container, flat, exactly the size of the buffer
+    # `_mojo_repr_list` `strdup`s and nobody freed. 3 MB therefore passes with
+    # ~1.8x headroom and fails by ~1.65x if the free is ever removed, and the
+    # run takes 0.7 s.
+    #
+    # Which helpers may be released at all is `_OWNED_REPR_FNS` in
+    # `mojo/backend_gimple/emit_infra.py`, and it is a table rather than a
+    # convention because the ownership is not uniform: three helpers return a
+    # string LITERAL on some arm (`mojo_repr_bool`, `mojo_bool_to_str`, and
+    # `mojo_repr_float`'s nan/inf arms), where a `free` is heap corruption
+    # rather than a leak. `MallocScribble=1` is set by
+    # `test_gimple_bounded_memory`'s own probe, so a free of the wrong buffer
+    # shows up as a scrambled one rather than passing quietly.
+    # See bugs/CODEGEN_print_of_a_container_never_frees_the_repr_it_asked_for.md.
+    test_gimple_bounded_memory("gimple_printed_container_repr_is_released", """\
+def main():
+    xs = [1, 2, 3]
+    for i in range(200000):
+        print(xs)
+main()
+""", "[1, 2, 3]\n" * 200000, 3)
+
     # The text of every walker above, printed ONCE, against CPython. Separate
     # from the memory case because the memory case would still pass if a repr
     # printed something else and leaked nothing, and because this is the half
