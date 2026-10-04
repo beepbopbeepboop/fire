@@ -6185,6 +6185,18 @@ STRING_COMPARE_SYMBOL = "strncmp"
 # is None, and None is a REFUSAL — see `len_refusal`.
 LEN_FROM_BLOB_FIELD = "blob_count_field"
 LEN_FROM_STRLEN = "strlen"
+# The THIRD length lowering, and the only one that is not a machine operation:
+# when the build KNOWS the operand's text, the number of code points in it is
+# `len()` of that text, folded here and materialised as an immediate. It is the
+# answer for every string whose bytes are known and no answer at all for the
+# ones whose bytes are not, which is why `len_operand_lowering` below cannot
+# return it on the KIND alone — see `string_codepoint_verdict`.
+LEN_FROM_CODPOINT_FOLD = "codepoint_fold"
+# The same three-way split for a POSITION rather than a length, and it is
+# `string_position_verdict`'s rather than this table's because the question has
+# two operands. See that function for why one of them is enough.
+STRING_POSITION_STRLEN = "strstr_offset"
+STRING_POSITION_FOLD = "codepoint_offset_fold"
 
 # `is` / `is not` on two strings. The one string comparison that wants the
 # POINTER and not the bytes, and the reason the content comparison above cannot
@@ -6385,6 +6397,463 @@ def len_refusal(kind, spelled: str, slot_ann: str = None,
         f"over its bytes to the NUL and a list's is the count field at offset "
         f"0 of its blob; nothing else here carries one, and returning the word "
         f"itself would be a plausible-looking wrong number")
+
+
+# ── TEXT ENCODING: when is a BYTE count a CODE POINT count? ─────────────────
+#
+# `strlen` is the length of a NUL-terminated `char *`. A Python `str` is a
+# sequence of CODE POINTS. For an ASCII string those are the same number, and
+# every answer on this path has been right for that reason without anyone
+# saying so. For anything else they are not, and the difference is not a
+# rounding error — it is the whole question:
+#
+#     len("héllo")   CPython 5    strlen of its UTF-8 bytes  6
+#     len("日本")     CPython 2    strlen of its UTF-8 bytes  6
+#     "héllo".find("llo")   CPython 2    strstr offset  3
+#
+# All three BUILD, all three RUN, all three exit 0, and all three are wrong on
+# both architectures. That is what makes this block necessary rather than
+# tidying: a byte answer presented where CPython gives a code-point answer is a
+# MISCOMPILE — a program that indexes by the answer then reads out of range,
+# and a program that only prints it is wrong in a way no reader of the output
+# would catch. The representation decision above (`bugs/FORMAL_string_value_model.md`
+# §"The decision": a formal value is one word and a string is a bare `char *`)
+# does not change, and neither does anything above this value model; what
+# changes is that the ONE question "is this byte count a code point count" is
+# now asked, in one place, and answered one of three ways.
+#
+# The three ways, and why there are three:
+#
+#   ASCII_BYTES   every string this image can hold is ASCII, so a byte count
+#                 IS a code point count. The ordinary `strlen` and nothing
+#                 else changes, and this is the answer for every program in the
+#                 corpus — which is why the non-ASCII answer is a refusal with
+#                 a condition on it rather than a refusal.
+#   CODEPOINTS    the build KNOWS this operand's text — it is a string literal,
+#                 or `lstrip`/`find`/`count` of one — so the number of code
+#                 points is `len()` of that text, computable HERE with no
+#                 machine operation at all. This is a new capability, not a
+#                 repair: `len("日本")` answered 2 on both backends after this
+#                 and refused before it.
+#   REFUSE        the operand's bytes are not something this build can see AND
+#                 this image holds a string with a byte >= 0x80, so a `strlen`
+#                 is not Python's `len()` and nothing else here computes one.
+#
+# The condition on the refusal is what keeps it from being a whole-corpus
+# regression, and it is SOUND rather than convenient: on this path every string
+# value is either a literal's interned bytes or an interior pointer into them
+# (`string_has_static_storage`, the decision this backend landed on), so the set
+# of possible string CONTENTS in an image is exactly the set of decoded string
+# LITERALS compiled into it. If none of them has a byte >= 0x80 then no string
+# in the image can, and `strlen` is right for all of them — including the ones
+# whose value this build cannot name, which is the case a per-operand analysis
+# could never answer.
+#
+# WHAT IS NOT HERE, and each is a decision rather than an omission:
+#
+#   * No runtime UTF-8 walk. The loop is four instructions per byte and both
+#     backends would need their own copy, and this file's own history is the
+#     argument: `lstrip`'s hand-written byte loop existed in two copies and had
+#     one bug in each (see `STRIP_CHARS`), which is why it is a `strspn` call
+#     now. A second copy of a byte walk is a second thing to be wrong.
+#   * No libc wide-character call. `mbstowcs(NULL, s, 0)` IS a code point count,
+#     and it answers in the CURRENT LOCALE: in the C locale it fails for every
+#     byte >= 0x80 and returns `(size_t)-1`. A locale is not a decidable
+#     answer, so it is not an answer.
+#   * No `\u` / `\U` / `\N{}` ESCAPE decoding. That is a front-end question —
+#     `fire_compiler.decode_c_escapes` — and all three engines share it, so it
+#     is not a formal-backend divergence to fix here. Filed:
+#     `bugs/LEXER_unicode_escapes_are_not_decoded.md`.
+
+# The two facts about a piece of TEXT, named so a reader can see which question
+# a call site is asking. `ASCII` is the permissive one and it is a fact about
+# the BYTES, not about the language: a 0x7F DEL is ASCII, a 0x80 is not, and no
+# multi-byte sequence has a lead byte below 0xC2.
+def text_is_ascii(text: str) -> bool:
+    """True when every character of `text` is one byte in UTF-8."""
+    return isinstance(text, str) and text.isascii()
+
+
+def codepoint_count(text: str) -> int:
+    """How many CODE POINTS `text` has — which is `len()`, said out loud.
+
+    A named reader rather than a bare `len(text)` at four call sites, because
+    the whole block above exists to say that this number and the number of
+    bytes are different quantities and the difference is easy to reintroduce
+    with a subscript.
+    """
+    return len(text)
+
+
+def string_literal_text(node) -> str | None:
+    """`node`'s DECODED text when it is a string literal, else None.
+
+    The one reader of "what text does this expression carry", asked by every
+    construct in this block. Decoded through `fire_compiler.decoded_literal`,
+    which is the tree's one decoder (the same one both backends' `_intern_string`
+    calls), so a text compared here and bytes emitted there cannot disagree —
+    `fire.py`'s note on that function says the raw form is what a C compiler
+    would have decoded and nothing else here does.
+    """
+    if isinstance(node, F.StringLiteral):
+        return F.decoded_literal(node)
+    return None
+
+
+# The IMAGE's text fact, published rather than threaded: the consumers are a
+# per-function walk inside a backend and a refusal asked from `build.py` before
+# any emitter runs, and neither has the module's statements in hand. Same shape
+# as `_MODULE_SYMBOLS` and NOT its rule — see `publish_non_ascii_strings`.
+_NON_ASCII_STRINGS: list = []
+
+
+def publish_non_ascii_strings(texts: list) -> None:
+    """ADD `texts` to the current unit's non-ASCII string literals.
+
+    **ACCUMULATES, where `publish_module_symbols` REPLACES, and the difference is
+    the direction each mistake goes.** A module-global table must not accumulate,
+    because a name one unit declares and another does not is a real conflict and
+    a union would invent a binding — and two units compiled in one process must
+    not see each other's globals at all. A non-ASCII string list must
+    accumulate, because the question it answers is "can a string value in this
+    IMAGE be non-ASCII", and the honest answer for a multi-module image is the
+    union over every module in it: a string one module interns is a value another
+    module can hold, through a return value or a parameter, however many of that
+    other module's own literals are ASCII.
+
+    Measured on both architectures, before this accumulated, with two imported
+    modules where only the FIRST carries the accented literal:
+
+        h2.mojo   def tag() -> String: return "héllo"
+        h3.mojo   def plain() -> Int: return 3
+        e2.mojo   from h2 import tag
+                  from h3 import plain
+                  def main(n): printf("len=%d n=%d", len(tag()), plain())
+
+    `len(tag())` printed **6** where CPython prints 5, exit 0, on arm64 and on
+    x86-64 — because `_prepare_functions` runs for the ENTRY first and for each
+    imported module after it, so a REPLACE left the table holding whichever unit
+    was compiled LAST, and `h3` has no non-ASCII literal. A replace is a correct
+    answer to "what does THIS module hold" and a wrong one to "what can a string
+    in this IMAGE be".
+
+    The cost of accumulating is over-conservatism across two top-level builds in
+    one process, which is to say none in practice: `fire.py` builds one image
+    per invocation, and the entries are a refusal that a later build would have
+    to earn back by being an all-ASCII image, which it can only be if no earlier
+    one was not.
+    """
+    global _NON_ASCII_STRINGS
+    have = set(_NON_ASCII_STRINGS)
+    for text in texts or []:
+        if text not in have:
+            have.add(text)
+            _NON_ASCII_STRINGS.append(text)
+
+
+def non_ascii_strings() -> list:
+    """The published non-ASCII literals, in the order they were first seen."""
+    return list(_NON_ASCII_STRINGS)
+
+
+def clear_non_ascii_strings() -> None:
+    """Start a NEW IMAGE's accumulation over.
+
+    The one caller that is not a test is `formal/build.py`'s `compile_formal`,
+    at the top of the image: `publish_non_ascii_strings` accumulates because a
+    union is the sound direction WITHIN an image, and this is what keeps that
+    union from being per-PROCESS instead. Two images built by one harness must
+    not see each other's literals, or the second refuses `len()` over text that
+    never had any — a false refusal, which is the expensive direction here
+    rather than the cheap one.
+    """
+    global _NON_ASCII_STRINGS
+    _NON_ASCII_STRINGS = []
+
+
+# How many examples a refusal quotes. A message that listed every one would be
+# unbounded on a file with a large non-ASCII table in it, and the point of the
+# examples is to let a reader recognise the case, not to inventory it.
+_NON_ASCII_EXAMPLES = 3
+
+
+def _non_ascii_examples(texts) -> str:
+    shown = [repr(t) for t in list(texts)[:_NON_ASCII_EXAMPLES]]
+    if not shown:
+        return ""
+    more = len(texts) - len(shown)
+    tail = f" (and {more} more)" if more > 0 else ""
+    return ", ".join(shown) + tail
+
+
+def non_ascii_strings_in(stmts: list, limit: int = 32) -> list:
+    """The decoded TEXT of every non-ASCII string literal under `stmts`.
+
+    `limit` bounds what is KEPT, not what is looked for: the callers only ever
+    need to know that the set is non-empty and quote a few examples, and a file
+    with a megabyte of non-ASCII text in it should not make the answer's size
+    the size of the question. The walk is over the module's own statements —
+    body, every function, every nested def — and it is the WHOLE unit, which is
+    the soundness argument in the block comment above: interning is by content
+    from these statements and nothing else can put a byte in the string pool.
+
+    **The DECODED TEXT and not the node**, because this list exists to be quoted
+    in a diagnostic: `repr()` of the dataclass is a line and a half of field
+    assignments, and a reader who is being told which string in their file is
+    non-ASCII needs the string.
+
+    A BYTES literal (`b"…"`) is not one of these, and a RAW string is not
+    scanned at all: `b"\\xff"`'s bytes are a blob's element width rather than a
+    string's — a bytes blob is not a string on this path, see
+    `bugs/FORMAL_bytearray_and_bytes_have_no_representation.md` — and a raw
+    string's backslashes are content, so decoding it would invent the escapes it
+    deliberately did not ask for.
+    """
+    out: list = []
+    stack = list(stmts or [])
+    visited = set()
+    texts = set()
+    while stack:
+        node = stack.pop()
+        if id(node) in visited:
+            continue
+        visited.add(id(node))
+        if (isinstance(node, F.StringLiteral)
+                and not getattr(node, "is_raw", False)
+                and not getattr(node, "is_bytes", False)):
+            text = F.decoded_literal(node)
+            if not text_is_ascii(text) and text not in texts:
+                texts.add(text)
+                out.append(text)
+                if len(out) >= limit:
+                    return out
+        if isinstance(node, (list, tuple, set, frozenset)):
+            # A child can be a TUPLE of (name, node) pairs and not a node:  a
+            # `CallExpr`'s own `kwargs` is declared `list of (str, Expr)`, so a
+            # walk that only descends into dataclasses skips the VALUE of every
+            # keyword argument — and `printf("%s", s="héllo")` put a non-ASCII
+            # string in the image while the scan reported the image ASCII. That
+            # is the unsound direction: the scan exists to make the encoding
+            # block CONSERVATIVE, and a literal it cannot see makes it
+            # permissive. Measured, both engines identical, before this arm:
+            #   $ python3 -c '… non_ascii_strings_in(<that module>)'
+            #   []
+            stack.extend(node)
+        elif isinstance(node, dict):
+            stack.extend(node.keys())
+            stack.extend(node.values())
+        elif dataclasses.is_dataclass(node):
+            for field in dataclasses.fields(node):
+                value = getattr(node, field.name, None)
+                if (dataclasses.is_dataclass(value)
+                        or isinstance(value, (list, tuple, set, frozenset,
+                                              dict))):
+                    stack.append(value)
+    return out
+
+
+def string_codepoint_verdict(construct: str, operand, spelled: str):
+    """`(verdict, why)` for a construct that needs a CODE POINT quantity.
+
+    `LEN_FROM_STRLEN` — a byte count is a code point count here; emit the
+    `strlen` as before. `LEN_FROM_CODPOINT_FOLD` — `why` is the INTEGER to
+    materialise, and the build knew it without running anything.
+    `(None, message)` — refuse, and `message` is `codepoint_refusal`'s.
+
+    `operand` is the node whose text decides it and `construct` names the thing
+    being asked for, because the two refusals differ in what a reader has to
+    change: a wrong LENGTH is fixed by not asking for a length over text whose
+    bytes the build cannot see, and a wrong POSITION additionally says the
+    offset a `strstr` returns is a byte offset.
+    """
+    text = string_literal_text(operand)
+    if text is not None:
+        if text_is_ascii(text):
+            return LEN_FROM_STRLEN, None
+        return LEN_FROM_CODPOINT_FOLD, str(codepoint_count(text))
+    if non_ascii_strings():
+        return None, codepoint_refusal(construct, spelled)
+    return LEN_FROM_STRLEN, None
+
+
+def codepoint_refusal(construct: str, spelled: str) -> str:
+    """Why a byte quantity is not this construct's answer, in one message.
+
+    `construct` is the whole thing as the source spells it (`len(s)`,
+    `s.find(p)`), so the first clause needs no assembly and the two machines
+    cannot describe one source file differently. `spelled` is the OPERAND, and
+    the half of the sentence that names it is what tells a reader which of the
+    two things to change — a construct whose operand is a literal is folded and
+    never reaches here, so reaching here means the operand's bytes are behind a
+    `char *` at run time and no amount of annotating it will help.
+
+    Shared by every construct in this block, for the same reason
+    `string_concat_refusal` and `LENGTH_DEPENDENT_METHODS` share one message:
+    there is ONE place a reader is told what the representation cannot do, and a
+    second copy of that sentence is a second thing to fall out of step.
+    """
+    examples = _non_ascii_examples(non_ascii_strings())
+    where = (f" This image holds a string literal that is not ASCII — {examples}"
+             f" — so a `strlen` somewhere in it is not Python's `len()`."
+             if examples else "")
+    return (
+        f"{construct} is refused: on this path it would answer in BYTES where "
+        f"CPython answers in CHARACTERS. A string here is a bare `char *` to "
+        f"NUL-terminated bytes, and a UTF-8 byte is not a Python character — "
+        f"`é` is two bytes and one character, `日本` is six bytes and two — so "
+        f"`strlen` counts bytes, a `strstr` offset counts bytes from the start "
+        f"of the text, and a `%<width>s` pads to a byte width.{where} The "
+        f"operand is {spelled}, and this build cannot see what text it holds: "
+        f"it is a name, a parameter or a call, and its bytes are behind a "
+        f"`char *` only at run time. Refused rather than emitting the byte "
+        f"answer, because a byte count presented as a character count is the "
+        f"most plausible wrong number in this file — a small positive integer, "
+        f"stable across runs and identical on both architectures — and a "
+        f"program that uses it as an index then reads out of range. What this "
+        f"path CAN do: bind the operand to a string literal in the source, "
+        f"where the number of characters in it is known at compile time and the "
+        f"answer is folded — `len(\"日本\")` is 2 here and was refused before "
+        f"this; or keep the text ASCII, which is what every other answer on "
+        f"this path already assumes and the only thing that makes `strlen`, a "
+        f"`strstr` offset and a `%s` width mean what Python means by them")
+
+
+# ── `ord` / `chr` / `hash`: a character as a NUMBER, and back ───────────────
+#
+# All three are in `FRAME_VALUE_ONLY_CALLS` already — a frame address handed to
+# any of them is a category error — and all three reached the LINKER as a
+# dangling symbol instead, because none of them is in `EMITTER_BUILTINS`.  That
+# is the wrong message four stages late, and it is the same shape as
+# `bugs/FORMAL_bytearray_and_bytes_have_no_representation.md`'s §"why the
+# message is the wrong one to stop at":
+#
+#   build: the image would bind 1 symbol(s) that nothing provides, so it could
+#   not be loaded: ord. … (Provider check: asked the C library (dlsym).)
+#
+# for `ord("A")` — an ASCII case, which is the point: this is not an encoding
+# question, it is a question this path never answered, and the encoding work in
+# the block above had nothing to add to it.  Measured on both architectures, all
+# three the same way, ASCII operands included.
+#
+# ONE of the three has an answer here and two do not, and the reason is the
+# direction the value has to travel:
+#
+#   ord  character -> NUMBER.  A number is one word, which is what a formal
+#        value already is, and for a LITERAL the character is known at compile
+#        time — so the fold is `ord()` of the decoded text, with no machine
+#        instruction and no libc call.  This is a new capability and it is the
+#        unicode-relevant one: `ord("é")` is 233 and `ord("\U0001F600")` is
+#        128512, neither of which is reachable by reading a byte.
+#
+#   chr  NUMBER -> character.  The answer is a NEW one-character object, and a
+#        string value on this path is a `char *` into an image section mapped
+#        read+execute and interned by content, so there is nowhere to put one.
+#        That is `LENGTH_DEPENDENT_METHODS`'s missing buffer reached from the
+#        other direction — and it is why `ord` folds where `chr` cannot, which
+#        looks asymmetric until you ask where each answer would live.
+#
+#   hash  text -> NUMBER, and the number is NOT A FUNCTION OF THE TEXT.  CPython
+#        randomises `str` hashing per process unless `PYTHONHASHSEED` is fixed,
+#        so there is no answer to be right about: two runs of the same program
+#        disagree by design.  Refusing is not a gap here; it is the only honest
+#        option, and it is why `hash` belongs in this block rather than in a
+#        list of constructs nobody has reached yet.
+
+# The two with no lowering, named so the emitters' dispatch and this comment
+# cannot come apart.  `ord` is deliberately NOT here: it has an arm.
+TEXT_BUILTINS_WITHOUT_A_LOWERING = ("chr", "hash")
+
+
+def ord_fold(args: list):
+    """The code point of `args[0]` when the build knows it, else None.
+
+    `ord()` of one character, which is CPython's whole rule — `ord("")` and
+    `ord("ab")` are both a `TypeError`, so a literal of any other length is not
+    folded and `text_builtin_refusal` says which of the two reasons it is.
+
+    The DECODED text, through `string_literal_text`, so `ord("\xe9")` is 233 and
+    not the two bytes' worth of something else.  That is the whole interaction
+    with the TEXT ENCODING block above and it is worth stating: a code point is
+    not a byte, so this is one of the two places (the other being `chr`) where
+    the encoding question is a question at all.
+    """
+    if len(args) != 1:
+        return None
+    text = string_literal_text(args[0])
+    if text is None or codepoint_count(text) != 1:
+        return None
+    return ord(text)
+
+
+def text_builtin_refusal(name: str, args: list) -> str:
+    """Why `name(...)` is refused here, with the reason that is specific to it.
+
+    One function for the three so the two machines cannot word one construct
+    differently, and one message per name because the three reasons have nothing
+    in common: `ord`'s is about what the build can SEE, `chr`'s is about where
+    the answer would LIVE, and `hash`'s is that CPython does not define one.
+    Spelling them as one sentence would make at least two of them false.
+    """
+    # NOT named `spelled`: that is this module's function for spelling an
+    # expression, and a local of the same name shadows it inside the
+    # comprehension below — which is a NameError at build time rather than a
+    # wrong answer, and one that only fires on the REFUSAL path, so the six
+    # `ord` rows that answer would have stayed green.
+    shown = ", ".join(spelled(a) for a in args) if args else ""
+    if name == "ord":
+        text = string_literal_text(args[0]) if len(args) == 1 else None
+        if text is not None:
+            return (
+                f"ord({shown}) is refused: CPython's `ord` takes exactly ONE "
+                f"character and this literal has "
+                f"{codepoint_count(text)}, which is a TypeError there rather "
+                f"than a number. Nothing to lower, and lowering it anyway — to "
+                f"the first byte, or to the last — would be a wrong answer in "
+                f"the shape of a right one")
+        return (
+            f"ord({shown}) is refused: `ord` is the code point of ONE "
+            f"character, and this build cannot see what character "
+            f"{shown or 'the operand'} holds — it is a name, a parameter or "
+            f"a call, and its bytes are behind a `char *` only at run time. "
+            f"The answer would be a NUMBER, which is the easy direction (a "
+            f"formal value is one 64-bit word), but the code point of a "
+            f"multi-byte character is not any of its bytes: `ord(\"é\")` is 233 "
+            f"where the byte is 195, and `ord(\"\\U0001F600\")` is 128512 where "
+            f"the bytes are four. Reading the byte would be right for ASCII "
+            f"and wrong everywhere else, which is the byte-versus-character "
+            f"answer this path does not give. What it CAN do: `ord` a string "
+            f"LITERAL, whose one character is known at compile time and is "
+            f"folded — or keep the text ASCII, where the byte is the character "
+            f"and the arithmetic is written out")
+    if name == "chr":
+        return (
+            f"chr({shown}) is refused: its answer is a NEW one-character "
+            f"`String`, and a string on this path is a bare `char *` to bytes "
+            f"in the image's own text section — which is mapped read+execute "
+            f"and interned BY CONTENT, so there is nowhere to put one and "
+            f"nothing to intern it into. `ord`, the other direction, is folded, "
+            f"and the asymmetry is the representation rather than the effort: a "
+            f"number is one word and a character is an object. This is the same "
+            f"missing buffer `upper()`/`join()`/`replace()` are refused for "
+            f"(`LENGTH_DEPENDENT_METHODS`), reached from the other side. What "
+            f"this path CAN do: build the character from its code point as "
+            f"bytes the program already has — `String([n as UInt8])` over a "
+            f"list you built — for a character below 128, where one byte is "
+            f"the whole of it")
+    if name == "hash":
+        return (
+            f"hash({shown}) is refused, and the reason is not a gap: "
+            f"CPython RANDOMISES the hash of a `str` per process unless "
+            f"`PYTHONHASHSEED` is fixed, so two runs of one program disagree "
+            f"by design and there is no value of the text for this to be right "
+            f"about. A build that folded one would answer with a number CPython "
+            f"disagrees with, and a build that called libc would be right about "
+            f"neither. If what the program wants is a DICTIONARY KEY, use the "
+            f"string as one — `d[{shown or 'k'}]` — where the comparison is "
+            f"the content compare and the hash never appears")
+    return (f"{name}({shown}) is a text builtin this path does not lower, "
+            f"and no reason is recorded for it, which is a table entry with no "
+            f"arm rather than a construct")
 
 
 def frame_container_operand_refusal(op: str, spelled: str, struct_names):
@@ -7147,8 +7616,115 @@ def printf_conversion_specifiers(fmt_text) -> list | None:
         pos = m.end()
 
 
+# The QUANTIFIER of one conversion specification — the flags, the width and
+# the precision — or None when it carries neither. A separate scanner rather
+# than a column of `printf_conversion_specifiers` because that function's output
+# is deliberately COUNT-based — it yields one entry per consumed argument, `*`
+# for a `*` width — and a quantifier is a property of the specification text,
+# not of the argument list. Two readers of one regular expression, which is the
+# alternative and is worse: the two would have to agree about where a
+# specification starts.
+#
+# A PRECISION is here with the width because it is the same defect: `%.3s` of
+# `"héllo"` emits three BYTES on this path (half a character, and invalid UTF-8)
+# where CPython emits three characters. `-` is a flag rather than a width, but
+# it is in the capture because the whole quantifier is what the message quotes.
+_PRINTF_QUANTIFIER_RE = re.compile(
+    r"^%([-+ #0\']*)((?:[0-9]+|\*)?)(?:\.([0-9]+|\*))?")
+
+
+def printf_text_widths(fmt_text) -> list | None:
+    """The quantifier of each conversion in `fmt_text`, in argument order, or None.
+
+    Same shape as `printf_conversion_specifiers` — one entry per CONSUMED
+    argument — and None for text that does not parse, for the same permissive
+    reason. The value is `None` for a conversion with no width and no precision,
+    `"*"` for one whose quantifier reads its width or precision from an argument
+    (which this build cannot see), and the quantifier's own TEXT otherwise —
+    flags included, because `%-6s` and `%6s` pad on opposite sides and a
+    message that quoted only the digits would not say which one is meant.
+    """
+    if not isinstance(fmt_text, str):
+        return None
+    out = []
+    pos = 0
+    while True:
+        at = fmt_text.find("%", pos)
+        if at < 0:
+            return out
+        m = _PRINTF_CONVERSION_RE.match(fmt_text, at)
+        if m is None:
+            return None
+        spec = m.group(0)
+        if spec[-1] != "%":
+            qm = _PRINTF_QUANTIFIER_RE.match(spec)
+            flags, width, prec = qm.groups() if qm else ("", None, None)
+            stars = spec.count("*")
+            if width == "*" or prec == "*":
+                out.append("*")
+            elif width or prec:
+                out.append(flags + (width or "")
+                           + ("." + prec if prec else ""))
+            else:
+                out.append(None)
+            out.extend([None] * (stars - (1 if "*" in (width, prec) else 0)))
+        pos = m.end()
+
+
+def printf_text_width_refusal(callee: str, fmt_text, args: list,
+                              text_of_arg) -> str | None:
+    """Why a WIDTH on a `%s` of non-ASCII text is refused, or None.
+
+    The third way a format string can mean something other than what it says,
+    and the only one that is about the TEXT rather than about what kind of
+    value it is.
+
+    **A `%<width>s` pads to a BYTE width, because `printf` is a C function and
+    C has no characters.** CPython's `"%6s" % "héllo"` pads to six CHARACTERS,
+    which is one space; C's `printf("%6s", "héllo")` pads to six BYTES, which is
+    none, because the text is already six bytes. Measured on both formal
+    backends, `%6s` of the literal `"héllo"` printed `[héllo]` where CPython
+    prints `[ héllo]`, and `%-6s` printed `[héllo]` where CPython prints
+    `[héllo ]` — the same wrongness in both directions, and the left-aligned row
+    is the one that makes it visible at all, because the right-aligned row looks
+    like a truncation.
+
+    `text_of_arg(arg)` is the emitter's own question — the DECODED TEXT of an
+    argument, or None when the build cannot see it — and None is the permissive
+    direction for the reason `printf_text_conversion_refusal`'s own None row is:
+    the whole-image condition below is what decides, not this hook.
+
+    **The condition is the image's, not the argument's**, and that is the same
+    TEXT ENCODING argument as everywhere else in this file: a `%s` of a
+    KNOWN non-ASCII literal is refused because its own text says so, and a `%s`
+    whose argument's text the build cannot see is refused whenever the image
+    holds a non-ASCII literal AT ALL — because only then can that argument be
+    one, and a `%6s` whose operand might be `é` cannot be emitted with a byte
+    width and hope. So an image of pure ASCII never sees this refusal, which is
+    every program in the corpus, and an image with a non-ASCII table in it gets
+    it for the one conversion it can be wrong about.
+    """
+    if text_of_arg is None or callee not in PRINTF_TEXT_CONVERSIONS_CALLEES:
+        return None
+    widths = printf_text_widths(fmt_text)
+    if widths is None:
+        return None
+    for j, width in enumerate(widths):
+        if width is None or width == "*" or j >= len(args):
+            continue
+        text = text_of_arg(args[j])
+        if text_is_ascii(text):
+            continue
+        if text is None and not non_ascii_strings():
+            continue
+        return codepoint_refusal(
+            f"the `%{width}s` conversion in {callee}'s format string",
+            spelled(args[j]))
+    return None
+
+
 def printf_text_conversion_refusal(callee: str, fmt_text, args: list,
-                                   text_of) -> str | None:
+                                   text_of, text_of_arg=None) -> str | None:
     """Why a `%s` conversion of an argument that is not text is refused.
 
     `args` is the call's arguments with the format string ALREADY REMOVED, so
@@ -7202,6 +7778,9 @@ def printf_text_conversion_refusal(callee: str, fmt_text, args: list,
     """
     if callee not in PRINTF_TEXT_CONVERSIONS_CALLEES:
         return None
+    why = printf_text_width_refusal(callee, fmt_text, args, text_of_arg)
+    if why is not None:
+        return why
     convs = printf_conversion_specifiers(fmt_text)
     if convs is None:
         return None
@@ -7510,23 +8089,35 @@ def printf_missing_operand_refusal(callee: str, fmt_text, nargs: int):
     )
 
 
-def printf_format_refusal(callee: str, fmt_text, args: list, text_of):
+def printf_format_refusal(callee: str, fmt_text, args: list, text_of,
+                         text_of_arg=None):
     """Any reason `callee`'s FORMAT cannot be used, or None if it can.
 
     **The one entry point both backends ask**, and the reason it exists rather
-    than two: there are now two ways a format string fails here — a `%s` handed
-    something that is not text (`printf_text_conversion_refusal`) and a
-    conversion with no argument behind it (`printf_missing_operand_refusal`) —
-    and two emitters that each had to remember both is exactly how arm64 and
-    x86-64 come to disagree about what a `printf` means. One function, one
-    order, one message table.
+    than two: there are now three ways a format string fails here — a `%s`
+    handed something that is not text (`printf_text_conversion_refusal`), a
+    conversion with no argument behind it
+    (`printf_missing_operand_refusal`), and a WIDTH on a `%s` whose argument is
+    text that is not ASCII (`printf_text_width_refusal`) — and two emitters that
+    each had to remember them is exactly how arm64 and x86-64 come to disagree
+    about what a `printf` means. One function, one order, one message table.
 
-    The order is the one that matters if both could fire: a missing operand is
-    the more basic fact about the call, and naming it first is the more useful
-    refusal, since the fix is in the format rather than in the argument.
+    The order is the one that matters if two could fire: a missing operand and
+    a `%s` of a non-text argument are both more basic facts about the CALL than
+    the width is, and naming them first is the more useful refusal, since the
+    fix is in the format rather than in the argument's text.
+
+    `text_of_arg` is the fourth hook and it is the only one that is optional:
+    it answers "what TEXT does this argument carry" (None for anything whose
+    text this build cannot see) where `text_of` answers "is this argument text
+    at all". The width question needs the first and the conversion question
+    needs the second, and a caller that has no way to answer the first passes
+    None — which is the permissive direction, exactly as `text_of`'s own None
+    row is.
     """
     return (printf_missing_operand_refusal(callee, fmt_text, len(args))
-            or printf_text_conversion_refusal(callee, fmt_text, args, text_of))
+            or printf_text_conversion_refusal(callee, fmt_text, args, text_of,
+                                             text_of_arg))
 
 
 
@@ -10249,6 +10840,101 @@ def unstated_base_string_index_refusal(base_is_dict: bool, base_kind,
         f"because the fallback read the key's address as an element offset and "
         f"the bounds check failed on it. Annotate the parameter, bind the "
         f"container to a name, or read the value another way")
+
+
+def string_position_verdict(construct: str, haystack, needle, hay_text=None):
+    """`(verdict, why)` for a construct whose answer is a POSITION in a string.
+
+    The sibling of `string_codepoint_verdict`, and the reason it is a separate
+    function is that a position has TWO operands where a length has one — the
+    text searched and the text searched for — and only one of them has to be
+    known.
+
+    `STRING_POSITION_STRLEN` — the offset a `strstr` returns is a character
+    offset; emit the call as before. `STRING_POSITION_FOLD` — `why` is the
+    INTEGER Python's `str.find` returns for this pair, and neither machine
+    instruction nor libc call is involved. `(None, message)` — refuse.
+
+    **Why a known-ASCII HAYSTACK alone is enough**, and this is the whole reason
+    the needle's text is not needed in the permissive row: UTF-8 is
+    self-synchronising, so a byte substring of two well-formed UTF-8 strings
+    can only begin at a character boundary, and a Python `str` always begins
+    with either an ASCII byte or a lead byte — so a non-ASCII needle cannot
+    match anywhere inside ASCII text at all. `strstr`'s offset over ASCII text
+    is therefore a character offset whatever the needle holds.
+    """
+    hay = string_literal_text(haystack) if hay_text is None else hay_text
+    if hay is not None and text_is_ascii(hay):
+        return STRING_POSITION_STRLEN, None
+    if hay is not None and string_literal_text(needle) is not None:
+        return STRING_POSITION_FOLD, str(
+            hay.find(string_literal_text(needle)))
+    if non_ascii_strings():
+        return None, codepoint_refusal(construct, spelled(haystack))
+    return STRING_POSITION_STRLEN, None
+
+
+def string_element_refusal(base, index) -> str | None:
+    """Why `base[index]` is not a CHARACTER of `base`, or None when it is.
+
+    A string element on this path is one BYTE at `base + index`, and CPython's
+    `s[i]` is a one-CHARACTER `str`. Those agree about WHICH BYTE to read and
+    disagree about everything else: for ASCII the byte is the character, and for
+    anything else `base + index` walks into the middle of a multi-byte sequence
+    and reads a continuation byte that is not a character at all.
+
+    **This is a REFUSAL and not a fold, and the difference from `len` is the
+    answer itself.** The character count is a NUMBER and a literal's text gives
+    it here; a one-character string is a NEW OBJECT, and a string value on this
+    path is a bare `char *` to bytes in the image's text section — which is
+    mapped read+execute and is interned by content, so there is nowhere to put
+    the two bytes of an `é` and no way to intern a one-character string per
+    character position. That is `LENGTH_DEPENDENT_METHODS`'s missing buffer,
+    reached from an index instead of from `upper()`.
+
+    Measured on both architectures, `s = "日本"; printf("[%c]", s[1])` printed a
+    single `0x9c` — the second byte of `本` (`E6 9C AC`) — which is not a
+    character, is not printable, and makes the program's own output invalid
+    UTF-8. `s = "héllo"; s[1]` printed `0xc3` for the same reason.
+
+    An index a KNOWN TEXT makes answerable is still not answerable, because the
+    obstacle is where the answer would live rather than what it is: so this
+    fires for a non-ASCII LITERAL receiver exactly as it does for a name. The
+    one thing that does clear it is the condition on the whole image, which is
+    the TEXT ENCODING block's argument: no literal with a byte >= 0x80 anywhere
+    means no string in the image can have one, so every element read is a
+    character.
+    """
+    if not non_ascii_strings():
+        return None
+    text = string_literal_text(base)
+    known = (f" The receiver is the literal {text!r}, so this build does know "
+             f"which bytes it has — and that is the problem rather than the "
+             f"cure: the answer Python wants is a one-CHARACTER `str`, which is "
+             f"a new object, and this representation has nowhere to put one."
+             if text else
+             f" This build cannot see what text the receiver holds, and neither "
+             f"could it place the answer: see the sentence on the missing "
+             f"buffer.")
+    return (
+        f"{spelled(base)}[{spelled(index)}] is refused on a string whose text "
+        f"is not ASCII. A string here is a bare `char *` to BYTES, so the "
+        f"subscript is `base + index` and what it reads is one byte — while "
+        f"CPython's `s[i]` is one CHARACTER. For ASCII those are the same byte; "
+        f"for a multi-byte character they are not, and `base + index` lands in "
+        f"the middle of the sequence: measured on both architectures, "
+        f"`s = \"日本\"; printf(\"[%c]\", s[1])` printed a single `0x9c` — the "
+        f"second byte of `本` — which is not a character and is not even valid "
+        f"UTF-8 on its own. This image holds a string literal that is not ASCII, "
+        f"so some string in it can have a character `base + 1` walks into.{known} "
+        f"Refused rather than emitting the byte, because a byte where a "
+        f"character belongs is a wrong value AND a wrong one that reads "
+        f"plausible: for `s = \"héllo\"`, `s[0]` is 104 and `s[2]` is 108, "
+        f"which is `l`, and the wrong answers are the right answers for the "
+        f"NEIGHBOURING indices. What this path CAN do: keep the text ASCII, "
+        f"which is what every other answer here assumes; or read the byte "
+        f"deliberately, with a `Pointer[UInt8]` subscript and the arithmetic "
+        f"written out, which is what a program that wants bytes wants")
 
 
 def string_index_refusal(base_kind, index_kind,
@@ -13630,6 +14316,17 @@ EMITTER_BUILTINS = {
     "range": "range_list",
     "len": "len",
     "print": "print",
+    # `ord`, `chr` and `hash` are here for a reason that is not "the backend can
+    # do them": ONE of them can and two cannot, and all three reached the LINKER
+    # as dangling symbols before, because a name absent from this table is a
+    # call the backend does not compile and the extern path turns into a `BL` to
+    # a symbol no library defines.  Intercepting them here is what lets the two
+    # refusals be refusals — with the reason that is specific to each — instead
+    # of a link-time message about a symbol, produced four stages after the one
+    # that could have named the construct.  See the `ord`/`chr`/`hash` block.
+    "ord": "text_builtin",
+    "chr": "text_builtin",
+    "hash": "text_builtin",
 }
 
 

@@ -1594,6 +1594,19 @@ def compile_formal(source_path: str, output: str = None,
     # the two front ends cannot describe one target two ways.
     M.publish_target(M.target_for(arch, fmt))
 
+    # …and the IMAGE's string-encoding facts start EMPTY here, for the same
+    # reason the target is republished below: this is one image, and the units
+    # compiled into it accumulate their non-ASCII literals as they go (see
+    # `model.publish_non_ascii_strings` — accumulating is the sound direction
+    # here, where `publish_module_symbols` replaces). Resetting at the START of
+    # the image is what makes that accumulation per-image rather than
+    # per-process: `fire.py` builds one image per invocation, so this line is
+    # belt-and-braces for a harness that builds several in one process — and it
+    # is exactly what a test needs, since without it the second program a test
+    # builds inherits the first program's accented literals and refuses
+    # `len()` over text that never had any.
+    M.clear_non_ascii_strings()
+
     # Structural acceptance: only FunctionDefs matter for codegen; imports /
     # module-level statements are fine (filtered here + in the codegen).
     # The modules this file imports contribute their struct declarations
@@ -14856,6 +14869,18 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # from either backend would be a second copy of one decision — which is how
     # the executable and dylib paths come to answer differently about one file.
     M.refuse_interpolated_literals(stmts)
+    # The unit's STRING TEXT facts, published here for the same reason and in the
+    # same place as the two lines above: the consumers are a per-function walk
+    # inside a backend and a refusal asked before any emitter runs, and neither
+    # has the module statements in hand.  The question is "does this image hold
+    # a string whose bytes are not one byte per character", and it decides
+    # whether a `strlen` is Python's `len()` for EVERY string in the unit —
+    # including the ones no operand-level analysis could see — because on this
+    # path every string value is a literal's interned bytes or an interior
+    # pointer into them.  `model.py`'s TEXT ENCODING block has the argument and
+    # the three answers; this is the scan, and it is O(literals) because it has
+    # to be asked before the first emission to be an answer rather than a guess.
+    M.publish_non_ascii_strings(M.non_ascii_strings_in(stmts))
     # The module's own statement list is the ONE place a module-level name's
     # home is stated, so it is read here and PUBLISHED, for the same reason
     # `attach_field_evidence` and `attach_placed_frame_callees` carry what
