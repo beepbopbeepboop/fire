@@ -3848,9 +3848,41 @@ def _reduced_sp_num(pcs: list, words: dict):
     return sp
 
 
+def _block_defs(flow_defs) -> dict:
+    """`{block index: that block's per-block state definitions}`.
+
+    The definitions the walk has emitted so far, grouped by the block they
+    belong to, read off the `_b<N>_q…` name every one of them carries.  The
+    range back-edge arm needs exactly this to state a register's value one
+    block at a time instead of unfolding the whole executed path into one
+    term, and the `_b<N>_q` convention is the only thing that says which
+    block a definition belongs to -- so it is read in one place rather than
+    by a regex written again at each use.
+    """
+    out: dict = {}
+    for d in flow_defs or ():
+        m = re.search(r'_b(\d+)_q', d)
+        if m:
+            out.setdefault(int(m.group(1)), []).append(d)
+    return out
+
+
 def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
-                        exit_pc: int, blocks: list, fn) -> str:
+                        exit_pc: int, blocks: list, fn, cbz_bi: int):
     """Generate state definitions and a loop contract for countdown-style while loops.
+
+    `cbz_bi` is the loop's CHECK block, and it is passed in rather than found
+    here because the caller's answer and this function's used to be two
+    different questions with two different answers.  This one took "the first
+    block of kind `cbz`", which was the loop test only while every program's
+    first branch was its loop test; `e11f066d` put the stack-floor guard's
+    `CBNZ` in every prologue, so the first `cbz`-kinded block is now the
+    guard's in EVERY image and no countdown loop matched at all (measured: none
+    of `formal/examples/*.mojo` emitted a loop contract, and `wdiff` /
+    `countdown` / `wge` refused with "no loop contract matches").  The caller
+    already computes the real answer -- the target of a `b` back edge, i.e. the
+    loop top -- and used it for the contract's own `cbz_start`, so passing it
+    in is also the only way the two halves of one contract can agree.
 
     Emits:
     - State definitions for cbz prefix (ck), body (ci), exit (cz) paths
@@ -3863,13 +3895,7 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
     L = []
     A = L.append
 
-    # Locate cbz block
-    cbz_bi = None
-    for bi, b in enumerate(blocks):
-        if b["kind"] == "cbz":
-            cbz_bi = bi
-            break
-    if cbz_bi is None:
+    if cbz_bi is None or blocks[cbz_bi]["kind"] != "cbz":
         return None
     cbz_block = blocks[cbz_bi]
     cbz_start = cbz_block["start"]
@@ -4194,7 +4220,8 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
 
 
 def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
-                    exit_pc: int, blocks: list, fn, vregs: dict) -> str:
+                    exit_pc: int, blocks: list, fn, vregs: dict,
+                    cbz_bi: int) -> str:
     """Generate state definitions and a loop contract for
     `for i in range(n)` accumulator loops.
 
@@ -4206,7 +4233,9 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     - The contract itself: a thin wrapper over `while_lt_exit_contract`
 
     Returns None when the blocks are not a 1-arg range loop (the caller then
-    falls back to the countdown detection).
+    falls back to the countdown detection).  `cbz_bi` is the caller's loop-top
+    block -- see `_gen_countdown_loop` for why it is passed in rather than
+    found again here.
     """
     pat = _range_loop_pattern(fn)
     if pat is None:
@@ -4217,17 +4246,8 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     L = []
     A = L.append
 
-    # --- locate the loop-top cbz block (target of the `b` back edge) ---
-    cbz_bi = None
-    for b in blocks:
-        if b["kind"] == "b":
-            for j, cb in enumerate(blocks):
-                if cb["kind"] == "cbz" and b["targets"][0] == cb["start"]:
-                    cbz_bi = j
-                    break
-        if cbz_bi is not None:
-            break
-    if cbz_bi is None:
+    # The loop-top cbz block is the caller's `cbz_bi`.
+    if cbz_bi is None or blocks[cbz_bi]["kind"] != "cbz":
         return None
     cbz_block = blocks[cbz_bi]
     cbz_start = cbz_block["start"]
@@ -5424,11 +5444,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}-- The back-edge register facts are established as a")
                         A(f"{IND}-- CHAIN of shallow per-block facts (one block each),")
                         A(f"{IND}-- so the kernel never unfolds the deep chain.")
-                        _bdd = {}
-                        for _d in ctx['flow_defs']:
-                            _mm = re.search(r'_b(\d+)_q', _d)
-                            if _mm:
-                                _bdd.setdefault(int(_mm.group(1)), []).append(_d)
+                        _bdd = _block_defs(ctx["flow_defs"])
                         _bdefs = lambda _i: ', '.join(_bdd.get(_i, []))
                         # bound (x19): preserved by every block, set to n by the prologue
                         for _i in range(1, bi + 1):
@@ -5493,60 +5509,72 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}all_goals {_HOLE}  "
                           f"-- TODO(range): terminal loop invariant")
                     else:
-                        # The loop contract needs st.pc = cbz_start and st.x0 = arg.
-                        # st.pc = cbz_start is trivially true (we just set pc := tgt).
-                        # st.x0 = arg requires value-flow reasoning (structured placeholder).
-                        # Apply the loop contract with arg = n - 1
-                        # Need: st.pc = cbz_start (trivial), st.x0 = n - 1 (value flow)
-                        _body_pc = _lc.get("body_pc", 0)
-                        A(f"{IND}have hx0_arg : ({s_cur}).x0 = n - 1 := by")
-                        A(f"{IND}  rw [hsid_{bi}]")
-                        A(f"{IND}  change arm64_reg 0 ({name}_b2_qT6 ({{s_1 with pc := {_body_pc}}})) = n - 1")
-                        A(f"{IND}  have h7 : arm64_reg 0 ({name}_b2_qT6 ({{s_1 with pc := {_body_pc}}})) = arm64_reg 0 ({name}_b2_qS6 ({{s_1 with pc := {_body_pc}}})) := by")
-                        A(f"{IND}    rw [{name}_b2_qT6]")
-                        A(f"{IND}    simp [arm64_reg, arm64_set_reg, arm64_reg_0_arm64_set_reg_19]")
-                        A(f"{IND}  have h6 : arm64_reg 0 ({name}_b2_qS6 ({{s_1 with pc := {_body_pc}}})) = arm64_reg 0 ({name}_b2_qS5 ({{s_1 with pc := {_body_pc}}})) - arm64_reg 1 ({name}_b2_qS5 ({{s_1 with pc := {_body_pc}}})) := by")
-                        A(f"{IND}    rw [{name}_b2_qS6, {name}_b2_qT5]")
-                        A(f"{IND}    simp [arm64_reg, arm64_set_reg, arm64_set_reg_reg_eq]")
-                        A(f"{IND}  have hsp : ({name}_b2_qS4 ({{s_1 with pc := {_body_pc}}})).sp = ({name}_b2_qS1 ({{s_1 with pc := {_body_pc}}})).sp - UInt64.ofNat 16 := by")
-                        A(f"{IND}    rw [{name}_b2_qS4, {name}_b2_qT3, {name}_b2_qS3, {name}_b2_qT2, {name}_b2_qS2]")
-                        A(f"{IND}    rfl")
-                        A(f"{IND}  have h5 : arm64_reg 0 ({name}_b2_qS5 ({{s_1 with pc := {_body_pc}}})) = arm64_reg 0 ({name}_b2_qS1 ({{s_1 with pc := {_body_pc}}})) := by")
-                        A(f"{IND}    rw [{name}_b2_qS5, {name}_b2_qT4]")
-                        A(f"{IND}    simp only [arm64_reg, arm64_set_reg, arm64_set_reg_reg_eq]")
-                        A(f"{IND}    have hmem : ({name}_b2_qS4 ({{s_1 with pc := {_body_pc}}})).mem = mem_write_u64 (mem_write_u64 ({name}_b2_qS1 ({{s_1 with pc := {_body_pc}}})).mem (({name}_b2_qS1 ({{s_1 with pc := {_body_pc}}})).sp - UInt64.ofNat 16).toNat (arm64_reg 0 ({name}_b2_qS1 ({{s_1 with pc := {_body_pc}}})))) ((({name}_b2_qS1 ({{s_1 with pc := {_body_pc}}})).sp - UInt64.ofNat 16) + 8).toNat (arm64_reg 2 ({name}_b2_qS1 ({{s_1 with pc := {_body_pc}}}))) := by rfl")
-                        A(f"{IND}    rw [hmem, hsp]")
-                        A(f"{IND}    exact mem_read_push_low ({name}_b2_qS1 ({{s_1 with pc := {_body_pc}}})).mem ({name}_b2_qS1 ({{s_1 with pc := {_body_pc}}})).sp (arm64_reg 0 ({name}_b2_qS1 ({{s_1 with pc := {_body_pc}}}))) (arm64_reg 2 ({name}_b2_qS1 ({{s_1 with pc := {_body_pc}}})))")
-                        A(f"{IND}  have h3 : arm64_reg 0 ({name}_b2_qS3 ({{s_1 with pc := {_body_pc}}})) = 1 := by")
-                        A(f"{IND}    simp [arm64_reg, arm64_set_reg, arm64_set_reg_reg_eq, {name}_b2_qS3, {name}_b2_qT2, {name}_b2_qS2]")
-                        A(f"{IND}  have h4 : arm64_reg 1 ({name}_b2_qS5 ({{s_1 with pc := {_body_pc}}})) = 1 := by")
-                        A(f"{IND}    simp [arm64_reg, arm64_set_reg, arm64_set_reg_reg_eq, {name}_b2_qS5, {name}_b2_qT4, {name}_b2_qS4, {name}_b2_qT3, {name}_b2_qS3, {name}_b2_qT2, {name}_b2_qS2]")
-                        A(f"{IND}  have h1 : arm64_reg 0 ({name}_b2_qS1 ({{s_1 with pc := {_body_pc}}})) = arm64_reg 19 ({{s_1 with pc := {_body_pc}}}) := by")
-                        A(f"{IND}    rw [{name}_b2_qS1, {name}_b2_qT0, {name}_b2_qS0]")
-                        A(f"{IND}    simp [arm64_reg, arm64_set_reg, arm64_reg_0_arm64_set_reg_19]")
-                        A(f"{IND}  rw [h7, h6, h5, h4, h1]")
-                        A(f"{IND}  rw [hsid_1, hsid_0]")
-                        A(f"{IND}  simp [arm64_reg, arm64_set_reg, arm64_reg_0_arm64_set_reg_19, arm64_reg_19_arm64_set_reg_0, arm64_reg_19_arm64_set_reg_1, arm64_reg_1_arm64_set_reg_19, {', '.join(ctx['flow_defs'])}]")
-                        A(f"{IND}  all_goals try rfl")
-                        A(f"{IND}  all_goals try grind")
-                        A(f"{IND}  all_goals try omega")
-                        A(f"{IND}  all_goals (first | done | sorry)  -- value flow steps")
+                        # The countdown contract, applied at the back edge.
+                        #
+                        # Every block number, state name and hypothesis below
+                        # is DERIVED -- the loop's test block from the contract
+                        # (`check_bi`), the executed path's states from `ctx` --
+                        # and none of it is the block numbering of
+                        # one example.  The previous version of this arm named
+                        # `hsrc_1`, `hsid_1`, `hsid_0` and the body chain
+                        # `{name}_b2_qT6`, which are the numbering a
+                        # two-block loop has; on any other layout Lean reports
+                        # those as `Unknown identifier` hundreds of lines after
+                        # the branch that wanted them, and that is how `wdiff`
+                        # stayed red even once the contract was found at all
+                        # (bugs/FORMAL_wdiff_has_no_loop_contract.md).
+                        #
+                        # The three obligations the contract's signature asks
+                        # for, and where each comes from:
+                        #
+                        #   st.pc = cbz_start   `rfl` -- the walk has just set
+                        #                          `pc := tgt` and `tgt` IS
+                        #                          `cbz_start` (the branch above
+                        #                          matched on it).
+                        #   st.x19 = n - 1      the loop's own decrement: the
+                        #                          test does not write the
+                        #                          counter, the body subtracts
+                        #                          one from it, and the
+                        #                          prologue put `n` there.  All
+                        #                          three are facts about the
+                        #                          executed path, so the proof
+                        #                          unfolds the path rather than
+                        #                          restating one example's
+                        #                          chain.
+                        _check_bi = _lc["check_bi"]
+                        _bsrc = ctx.get("branch_src")
+                        if not _bsrc:
+                            raise NotImplementedError(
+                                f"loop back-edge in block {bi}: the countdown "
+                                f"contract's fuel obligation needs the loop's "
+                                f"own test to be known FALSE, which is the fact "
+                                f"the enclosing conditional block emitted as "
+                                f"`hsrc_{_check_bi}`. This walk reached the back "
+                                f"edge with no enclosing branch condition to "
+                                f"take it from. Refusing rather than naming a "
+                                f"hypothesis this path never emitted: a `have` "
+                                f"that cites `hsrc_1` reads as proved and is an "
+                                f"`Unknown identifier` in Lean.")
                         A(f"{IND}have hx19_arg : ({s_cur}).x19 = n - 1 := by")
-                        A(f"{IND}  rw [← hx0_arg, hsid_{bi}, {name}_b2_qT6]")
-                        A(f"{IND}  simp [arm64_reg, arm64_set_reg, u64_add_ofNat_zero_r]")
+                        A(f"{IND}  rw [{', '.join(list(reversed(ctx['flow_hsid'])))}]")
+                        A(f"{IND}  simp only [{', '.join(ctx['flow_defs'])}, arm64_reg, arm64_set_reg, Arm64State.init]")
+                        A(f"{IND}  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, mem_read_two_writes_same]")
+                        A(f"{IND}  all_goals (first | grind | omega | rfl | "
+                          f"simp <;> grind | sorry)  -- the counter's decrement")
                         A(f"{IND}have hframe_arg : mem_read_u64 ({{ {s_cur} with pc := {tgt} }}).mem "
                           f"(({{ {s_cur} with pc := {tgt} }}).sp + UInt64.ofNat "
                           f"{ctx['loop_contract'].get('slot', 0)}).toNat "
                           f"= UInt64.ofNat {_lc_exit} := by")
-                        A(f"{IND}  rw [hsid_{bi}, hsid_1, hsid_0]")
+                        A(f"{IND}  rw [{', '.join(list(reversed(ctx['flow_hsid'])))}]")
                         A(f"{IND}  simp only [{', '.join(ctx['flow_defs'])}, arm64_reg, arm64_set_reg, Arm64State.init]")
                         A(f"{IND}  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, mem_read_two_writes_same]")
+                        A(f"{IND}  all_goals (first | done | sorry)  -- the frame slot")
                         A(f"{IND}have hlc_{bi} := {_lc_name}_cd_loop (n - 1) ({{ {s_cur} with pc := {tgt} }})")
                         A(f"{IND}  (by rfl) hx19_arg hframe_arg")
                         A(f"{IND}  ({fuel_1}) (by")
-                        A(f"{IND}    have hnz : n ≠ 0 := by intro h0; rw [h0] at hsrc_1; simp at hsrc_1")
+                        A(f"{IND}    have hnz : n ≠ 0 := by intro h0; rw [h0] at {_bsrc}; simp at {_bsrc}")
                         A(f"{IND}    have hnge1 : 1 ≤ n.toNat := Nat.pos_of_ne_zero (fun h0 => hnz (UInt64.toNat_inj.mp (by rw [h0]; rfl)))")
-                        A(f"{IND}    rw [toNat_sub_one n (by intro h; subst h; simp at hsrc_1)]")
+                        A(f"{IND}    rw [toNat_sub_one n (by intro h; subst h; simp at {_bsrc})]")
                         A(f"{IND}    omega")
                         A(f"{IND}  )")
                         A(f"{IND}rcases hlc_{bi} with ⟨sf_{bi}, heqf_{bi}, hx0f_{bi}⟩")
@@ -6714,7 +6742,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             # `for i in range(n)` first (its prefix is a CMP-register + CSET
             # with a spill pair); countdown (`while n > 0`) otherwise.
             rl = _gen_range_loop(name, code, base, func_entry, exit_pc,
-                                 blocks, fn, _var_regs)
+                                 blocks, fn, _var_regs, cbz_bi)
             if rl is not None:
                 A(rl[0])
                 _loop_contract = {
@@ -6726,7 +6754,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 }
             else:
                 cd = _gen_countdown_loop(name, code, base, func_entry, exit_pc,
-                                         blocks, fn)
+                                         blocks, fn, cbz_bi)
                 if cd is not None:
                     A(cd[0])
                     _loop_contract = {
@@ -6736,6 +6764,11 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         "exit_pc": exit_pc,
                         "body_pc": blocks[cbz_bi]["targets"][0],
                         "slot": cd[1],
+                        # The loop's TEST block, so the back-edge arm names it
+                        # instead of assuming a numbering: the contract's
+                        # hypotheses are stated at `s_{check_bi}`, and the
+                        # caller's branch matched `cbz_start` against it.
+                        "check_bi": cbz_bi,
                     }
 
     # --- universal theorem: walk the CFG path ---

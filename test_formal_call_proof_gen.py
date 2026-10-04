@@ -1306,6 +1306,124 @@ class TestAstBridgeCallLimit(unittest.TestCase):
                          "file quietly admitting something new")
 
 
+class TestLoopContractBlocks(unittest.TestCase):
+    """Which block is a loop's TEST, asked once and asked right.
+
+    `_gen_countdown_loop` found its loop by taking "the first block of kind
+    `cbz`", which was the loop test only while every program's first branch was
+    its loop test.  `e11f066d` put the stack-floor guard's `CBNZ` in EVERY
+    prologue, so that block is now the guard's in every image and no countdown
+    loop matched anywhere: measured, none of `formal/examples/*.mojo` emitted a
+    loop contract, and `wdiff` / `countdown` / `wge` refused with "no loop
+    contract matches" — an UNEXPECTED failure of the `formal` suite job, since
+    `wdiff` is not in its `EXPECTED_FAILURES`
+    (bugs/FORMAL_wdiff_has_no_loop_contract.md).
+
+    The loop test is the target of the loop's `b` BACK EDGE, and the caller
+    already computes that, so it is passed in.  Three things are pinned:
+
+    * **the prologue's guard branch is NOT the loop test** — the fact that made
+      the old discovery wrong, asserted on the image rather than on the
+      generator's intent, so it keeps holding while the guard exists and fails
+      loudly the day it does not;
+    * **a loop's proof carries a contract** (`while_dec_exit_contract`), which
+      is the regression itself;
+    * **no hypothesis is cited that the file does not define** — the use site
+      used to name `hsrc_1` / `hsid_1` / `hsid_0` and the body chain
+      `{name}_b2_qT6`, which are one example's block numbering, and Lean reports
+      those as `Unknown identifier` hundreds of lines after the branch that
+      wanted them.  This is the same check as `TestDec1PathContext` below, for
+      the same reason, over a different arm.
+    """
+
+    LOOP = ("def wdiff(n):\n"
+            "    while n != 0:\n"
+            "        n = n - 1\n"
+            "    return n\n")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="a2-loopblocks-")
+        cls.proof, cls.error = _generate(cls.tmp, cls.LOOP, "loopblocks")
+        cls.result = None
+        if cls.error is None:
+            import formal.build as fb
+            src = os.path.join(cls.tmp, "loopblocks.mojo")
+            cls.result = fb.compile_formal(src, arch="arm64",
+                                           output=os.path.join(cls.tmp,
+                                                               "loopblocks2.aout"),
+                                           prove=False, check=False)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_it_generates(self):
+        self.assertIsNone(self.error, self.error)
+        self.assertIsNotNone(self.proof)
+
+    def test_the_prologues_guard_branch_is_not_the_loop_test(self):
+        """The premise the old discovery rested on, measured on the image.
+
+        `arm64_proof_gen._cfg_blocks` is the walk both the caller and
+        `_gen_countdown_loop` read, so this is the same partition the generator
+        sees — not a re-derivation of it.
+        """
+        import formal.arm64_proof_gen as G
+        info = self.result["info"]
+        code = self.result["code"]
+        base = info["base_addr"]
+        words = {base + i: int.from_bytes(code[i:i + 4], "little")
+                 for i in range(0, len(code) - len(code) % 4, 4)}
+        entry = info["func_offset"]
+        rets = [pc for pc, w in words.items()
+                if w == 0xd65f03c0 and pc >= entry]
+        blocks = G._cfg_blocks(words, entry, max(rets) + 4)
+        first_cbz = next((b for b in blocks if b["kind"] == "cbz"), None)
+        start_to_bi = {b["start"]: i for i, b in enumerate(blocks)}
+        back_edge = next((b for b in blocks if b["kind"] == "b"
+                          and start_to_bi.get(b["targets"][0]) is not None
+                          and blocks[start_to_bi[b["targets"][0]]]["kind"]
+                          == "cbz"), None)
+        self.assertIsNotNone(first_cbz, "no conditional branch in the image at "
+                            "all, so this row is not about the prologue's")
+        self.assertIsNotNone(back_edge, "no loop back edge in the image, so "
+                              "there is no loop test to confuse the guard with")
+        self.assertNotEqual(
+            first_cbz["start"], start_to_bi and
+            blocks[start_to_bi[back_edge["targets"][0]]]["start"],
+            "the first conditional branch IS the loop test, so taking it would "
+            "work -- this row is about the prologue's stack-floor guard "
+            "(`e11f066d`) being that branch, and that has changed")
+
+    def test_the_proof_carries_a_loop_contract(self):
+        text = open(self.proof).read()
+        self.assertIn("while_dec_exit_contract", text,
+                      "no loop contract in the proof: the generator found no "
+                      "loop test, which is the failure this class is about")
+
+    def test_no_hypothesis_is_cited_that_the_file_does_not_define(self):
+        text = open(self.proof).read()
+        # Each stem's DEFINING form, because they are not one form: `hsrc`,
+        # `hsid` and `hframe` are typed `have`s, `hlc` is a bare `have ... :=`,
+        # and `hc` is the `by_cases` that splits a conditional block. Reading
+        # the file for one spelling of "defined" and finding the other three
+        # would report every one of them as dangling.
+        for stem, defines in (
+                ("hsrc", r"have {n}\s*:"),
+                ("hsid", r"have {n}\s*:"),
+                ("hlc", r"have {n}\s*:?="),
+                ("hc", r"by_cases {n}\s*:")):
+            cited = set(re.findall(rf"\b({stem}_\d+)\b", text))
+            self.assertTrue(cited, f"this test is vacuous for {stem}_: the "
+                           f"emitted proof cites none")
+            defined = {n for n in cited
+                       if re.search(defines.format(n=re.escape(n)), text)}
+            self.assertEqual(cited - defined, set(),
+                             f"{stem}_ cited but never defined: "
+                             f"{sorted(cited - defined)}")
+
+
 class TestDec1PathContext(unittest.TestCase):
     """The recursive-call arm's unfolding set and the hypothesis it cites.
 
