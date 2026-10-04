@@ -28,6 +28,8 @@ says so and skips without it. The units are the census and the classifier.
 
     python3 test_formal_sweep_truth.py [-v]
 """
+import contextlib
+import glob
 import io
 import os
 import re
@@ -2530,6 +2532,144 @@ def _shared_scratch_dirs(source: str, path: str = "<snippet>"):
                     and _TMP_LITERAL.match(sub.value):
                 out.add((sub.lineno, sub.value))
     return sorted(out)
+
+
+class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
+    """The guard's own two branches, and what they cost — measured, and pinned.
+
+    `formal/x86_64_codegen.py::_emit_stack_floor_guard` puts a `call exit` and a
+    `jcc` pair in the prologue of every image with an entry, and
+    `formal/x86_64_endtoend_test.py::_BRANCH_FORMS` is what `emit()` refuses on.
+    So the compiler's OWN guard — not any branch the program wrote — is what
+    decides whether the constant-VALUE theorem can be stated at all. Measured
+    over `formal/examples/` on this tree:
+
+        emit():  emitted 0, refused 49, plan-failed 1
+        every one of the 49 names `call_rel32`
+
+    `bugs/FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_image.md`
+    says the same thing from the other side ("before the guard it covered 7 of
+    43") and asks for the guard's branches to be DECIDED rather than walked.
+    What was missing is anything that notices when that happens: `emit()` refusing
+    every example reads exactly like a corpus of programs no straight-line
+    theorem is possible for, which is a different claim and a wrong one.
+
+    So this class is the tripwire. It fails when `emit()` starts covering an
+    example, and the failure message says which of the two things moved — the
+    guard left the prologue, or the guard's branches were decided — because
+    those are the only two ways this number can change and a reader needs to
+    know which one it was. It also pins the multiplier the same doc measures,
+    since a guard that grew a THIRD branch would double the paths again and a
+    corpus that suddenly emits 30 000-step files is the same class of surprise.
+
+    Lean-free by construction: `_plan` and `_tree` are text, and nothing here
+    emits a proof. That is the point — a 100-second proof is a very expensive
+    way to learn that a number moved.
+    """
+
+    #: The doc's own table, in the units it uses: (example, leaves, steps).
+    TREES = (("formal/examples/ret42.mojo", 4, 58),
+             ("formal/examples/bittest.mojo", 10, 457),
+             # …and the one that is past what a proof can be, so the number is
+            # the REFUSAL and the refusal must say which bound it broke.
+             ("formal/examples/wide_recv.mojo", 94, 12241))
+
+    def _corpus(self):
+        return sorted(glob.glob(os.path.join(HERE, "formal", "examples",
+                                              "*.mojo")))
+
+    def test_the_guard_multiplies_every_path_and_the_numbers_hold(self):
+        """Three programs, three path counts, and the one that is too big.
+
+        `ret42` is ONE function and `wide_recv` is five, and the leaves go 4 ->
+        94 between them. That ratio is the whole subject of this class: the
+        guard's two branches per prologue are walked, so each guarded function
+        on a path doubles the number of paths through it, and there is no way to
+        share the two arms of a fork whose arms converge.
+        """
+        import formal.x86_64_endtoend_test as E
+
+        for path, want_leaves, want_steps in self.TREES:
+            with self.subTest(example=os.path.basename(path)):
+                code, info, _insns, shapes = E._plan(path)
+                root = E._tree(code, info, shapes)
+                self.assertIsNotNone(
+                    root, f"{path}: the tree is gone entirely, so the guard is "
+                          f"no longer what this measures")
+                leaves = list(E._paths(root))
+                self.assertEqual(
+                    (len(leaves), sum(len(x) for x in leaves)),
+                    (want_leaves, want_steps),
+                    f"{path}: the path tree moved to {len(leaves)} leaves / "
+                    f"{sum(len(x) for x in leaves)} steps, the table says "
+                    f"{want_leaves}/{want_steps}. A guard that grew a third "
+                    f"branch, or a program that grew a function, moves this — "
+                    f"and `wide_recv` crossing "
+                    f"{E._MAX_CHAIN_STEPS} is what turns the whole example into "
+                    f"a refusal")
+        # …and the one that is refused refuses BY NAME, with its own size in the
+        # sentence. A bare "too large" would be a bound with no reading.
+        with self.assertRaises(E._NoTree) as raised:
+            E.emit_terminates(os.path.join(HERE, "formal", "examples",
+                                           "wide_recv.mojo"))
+        self.assertEqual(raised.exception.kind, "size")
+        self.assertIn("stack-floor guard", str(raised.exception),
+                      "the size refusal must name the CAUSE — the guard is "
+                      "what makes the number large, and a bound without the "
+                      "cause is a number nobody can act on")
+
+    def test_every_value_theorem_refusal_is_the_guard_and_not_the_program(self):
+        """The claim, over the whole corpus: `call_rel32` is in EVERY refusal.
+
+        This is the row that would fail the day the doc's fix lands, and it is
+        written so the failure says what happened. A refusal that does NOT name
+        `call_rel32` is the interesting case in the other direction — it means
+        some example is now gated on a branch the PROGRAM wrote, which is a
+        different subject and needs a different look.
+        """
+        import formal.x86_64_endtoend_test as E
+
+        refused, other, emitted = [], [], []
+        for path in self._corpus():
+            stem = os.path.basename(path)[:-5]
+            try:
+                _code, _info, _insns, shapes = E._plan(path)
+            except Exception as e:                    # noqa: BLE001
+                other.append(f"{stem}: plan {type(e).__name__}")
+                continue
+            branching = sorted({f for _, f, _ in shapes} & E._BRANCH_FORMS)
+            if branching:
+                refused.append((stem, branching))
+                continue
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    E.emit(path, 0)
+            except Exception:                           # noqa: BLE001
+                pass
+            else:
+                emitted.append(stem)
+        self.assertEqual(
+            emitted, [],
+            f"emit() now covers {emitted}. Two things can do that and the "
+            f"reader needs to know which: the stack-floor guard left the "
+            f"prologue, or its two branches were DECIDED rather than walked — "
+            f"the second is what "
+            f"bugs/FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_"
+            f"image.md asks for, and the first is a much larger change. Either "
+            f"way `emit()`'s coverage number in that doc is now stale.")
+        not_the_guard = [(s, b) for s, b in refused if "call_rel32" not in b]
+        self.assertEqual(
+            not_the_guard, [],
+            f"these examples are gated on a branch the PROGRAM wrote rather "
+            f"than on the compiler's guard: {not_the_guard[:6]}. That is a "
+            f"different subject from the guard and this row no longer measures "
+            f"the guard.")
+        # The corpus itself, so the row cannot pass by the corpus emptying out.
+        self.assertGreaterEqual(len(refused), 40,
+                                f"only {len(refused)} example(s) reach the "
+                                f"branch test; `formal/examples/` has emptied "
+                                f"out or moved and this class is measuring "
+                                f"nothing")
 
 
 class TestScratchDirEstate(unittest.TestCase):

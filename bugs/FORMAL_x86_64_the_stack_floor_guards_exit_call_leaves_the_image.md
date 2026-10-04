@@ -1,7 +1,9 @@
 # the stack-floor guard's `exit(2)` call target is outside the image: the path tree now ends there, and the theorem is a disjunction over halt addresses
 
 **Status: the path tree is FIXED (2026-10-04, `work/gatefix6`); what the guard
-still costs is written down below and is not fixed.** The defect this doc filed
+still costs is MEASURED and PINNED as of a second 2026-10-04, and the decision
+itself is NOT made** — see the Status section at the end for why, and for the
+next step with today's numbers. The defect this doc filed
 — "no end-to-end path tree exists", every example reporting `body loops, or
 branches out of the function` — no longer happens, and the theorem that is
 emitted instead is one the model can support.
@@ -116,6 +118,84 @@ EVERY example: measured, `ret42` reports `value: - (branches: call_rel32,
 jcc_rel32)`. Before the guard it covered 7 of 43. Fixing it is the same
 decide-the-guard project plus `by_cases` in an emitter that has none; it is not
 started.
+
+## Status 2026-10-04: the guard is MEASURED and PINNED; the decision is not made
+
+**The numbers above are still exact on this tree, and one of them is sharper
+than this doc states it.** Re-measured, Lean-free, over `formal/examples/`:
+
+| | this doc, 2026-10-03 | 2026-10-04 |
+|---|---|---|
+| `ret42` | 4 leaves, 58 steps | **4 leaves, 58 steps** |
+| `bittest` | 10 leaves, 457 steps | **10 leaves, 457 steps** |
+| `wide_recv` | 94 leaves, 12241 steps, refused as `size` | **94, 12241, refused as `size`** |
+| `emit()` — the VALUE theorem | "declines EVERY example", "before the guard it covered 7 of 43" | **emitted 0, refused 49, plan-failed 1 — and every one of the 49 names `call_rel32`** |
+
+**The sharp part: `emit()`'s coverage of 0 is gated on the `call_rel32`, not on
+the `jcc_rel32`.** Every refusal names the guard's CALL, and a program with no
+branch of its own (`ret42`, `seven`, `swapadd`) is declined for the compiler's
+own guard rather than for anything it wrote. So the payoff of deciding the guard
+is a NUMBER — `0` back to the 7 of 43 the guard cost — and not a proportion, and
+it is `call_rel32` that has to go first.
+
+### What landed, and what it is for
+
+`test_formal_sweep_truth.py::TestTheStackFloorGuardIsWhatGatesTheValueTheorem`,
+beside the class that already checks this emitter's text. Lean-free by
+construction (`_plan` and `_tree` are text), 0.96 s, on every run:
+
+* the three path counts, with the failure message naming BOTH ways the number can
+  move — a third guard branch, or a function added — and what crossing
+  `_MAX_CHAIN_STEPS` does to the example;
+* `wide_recv`'s refusal is `size` and its sentence names the CAUSE;
+* **`emit()` covers nothing and every refusal names `call_rel32`** — the
+  tripwire, whose failure message says which of the two things happened (the
+  guard left the prologue, or its branches were DECIDED), because those are the
+  only two ways this number can change. The other direction is pinned too: a
+  refusal that does NOT name `call_rel32` means some example is now gated on a
+  branch the PROGRAM wrote, which is a different subject;
+* the corpus itself, so the row cannot pass by `formal/examples/` emptying out.
+
+Before this, nothing noticed when any of it moved, and `emit()` refusing every
+example reads exactly like a corpus no straight-line theorem is possible for —
+which is a different claim and a wrong one.
+
+### What is NOT attempted here, and the reason
+
+Deciding `JNE done` and `JAE ok` means emitting a `have` that the surviving arm
+closes with `simp [that] at <the by_cases hypothesis>`, and **whether those
+obligations close is a Lean question.** This doc's own instrument for it is
+
+```console
+$ python3 formal/x86_64_endtoend_test.py formal/examples/ret42.mojo formal/examples/wide_recv.mojo
+```
+
+which is 43 Lean proofs and is not in a gate bucket. Landing the decision without
+running it is exactly the "a pin nobody can run is not a pin" failure this project
+already has a rule about, so what landed here is the measurement and the tripwire
+and the next step below is unchanged.
+
+### The exact next step, restated with today's numbers
+
+1. **`JNE done` first, and it is the cheaper of the two.** In `main`'s guard the
+   floor word reads 0 (`X86State.init`'s memory is zero, and
+   `lib/X86.lean::x86_init_mem_reads_zero` says so), so the branch is NOT taken;
+   in a CALLEE's it IS. The library has both shapes — `mem_read_bytes_write_above`
+   (already emitted as `key`) and `mem_read_bytes_write_same`
+   (`lib/X86.lean:2452`) — so the obligation is that read followed by `v ≠ 0`
+   for a ground `v`. `wide_recv` is 4 of its 94 leaves in callee guards, so this
+   half alone is a 2x.
+2. **`JAE ok` second, and it needs no model change.** The floor word is
+   `SP_at_first_guard − model.STACK_FLOOR_BUDGET_BYTES`, and SP on a path is a sum
+   of literal frame sizes (`push`, `sub rsp, imm32`, and the `call`'s own 8), so
+   the emitter can keep a LOWER BOUND on the depth below the entry and conclude
+   "not trapped" whenever it is inside the budget. 7.5 MiB against a measured
+   worst case of 76 frames (1.2 MiB on x86-64,
+   `tools/formal_call_depth_census.py`). Whether the wrapping `UInt64` comparison
+   closes is a `simp … <;> decide` away and has still not been tried.
+3. **Measure after each, with `emit_terminates` alone** — leaves and steps are
+   the numbers the tripwire pins, so a decision that does not halve them has not
+   worked, and that is visible without a proof.
 
 ## Reproducing
 
