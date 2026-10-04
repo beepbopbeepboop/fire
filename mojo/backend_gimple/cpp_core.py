@@ -41,7 +41,8 @@ import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
 import mojo.backend_gimple.emit_exprs as gex
-from mojo.middle.module_shared import module_qualifier
+from mojo.middle.module_shared import (
+    module_qualifier, builtin_module_constant, builtin_module_constant_names)
 
 # Sentinel for "this dict has no such key", so a caller can tell a key
 # that is ABSENT from one whose value happens to be falsy. Used by
@@ -1036,7 +1037,175 @@ def _cpp_expr_static_ctype(gen, e):
                 rt = gen.func_return_types.get(f"{struct_name}_{e.member}")
             if rt in ('char *', 'int64_t', 'double', '_Bool'):
                 return rt
+    if (isinstance(e, gimple_ctypes.MemberExpr)
+            and isinstance(e.obj, gimple_ctypes.IdentExpr)):
+        # A module-level CONSTANT read as a value (`os.linesep`) — the same
+        # real field read `_cpp_expr`'s MemberExpr case now emits, and the
+        # same ctype, so a `not os.linesep` / `x == os.linesep` test is
+        # decided on the string's emptiness rather than on a null pointer.
+        _mglob = _cpp_module_global_field(gen, e.obj.name, e.member)
+        if _mglob is not None:
+            return _mglob[0]
     return None
+
+
+# The C types this emitter's value model can carry for a module-level
+# global's VALUE. Deliberately the same scalar set `exprtypes.
+# _infer_simple_expr_ctype` answers everywhere else, so a global typed here
+# can be typed the same way by a local bound to it, and the two halves of
+# this feature cannot disagree about one name. A container-typed or
+# struct-pointer-typed global is NOT in it: this model stores those boxed as
+# a raw `int64_t` (see `_cpp_struct_ptr_local`'s own note on the struct-
+# field boxing convention), and reading the mirror's typed field back out
+# would need the pointee's layout to be emitted into this TU — a separate
+# question from "is the value a scalar".
+_CPP_MODULE_GLOBAL_CTYPES = ('int', 'int64_t', 'double', '_Bool', 'char *')
+
+
+def _cpp_module_global_field(gen, marker, name):
+    """`(ctype, read_expr)` for reading module-level global `marker.name` as a
+    VALUE in a coroutine body, or None when there is no such field to read.
+
+    `marker` is a bound MODULE name (`import os` / `from pkg import submod`
+    / `import submod`) and `name` its attribute. The answer comes from
+    `gen._module_global_field_type`, i.e. the very `(name, c_type, g_mtype)`
+    triple the module's globals struct typedef, its initializer and its
+    `_<mod>_mojo_global_get_<name>` accessors are generated from — so the
+    read agrees with the emitted field BY CONSTRUCTION, and two modules with
+    a same-named global can never be confused for one another (which the
+    shared, name-keyed `_global_var_types`/`_global_to_module` tables cannot
+    promise; see `_module_global_field_type`'s own docstring).
+
+    This is the coroutine-body twin of the ordinary GIMPLE path's
+    `submod.GLOBAL` read (`emit_exprs._lower_MemberExpr`'s `_module_global_
+    field_type` branch), and it registers `(safe_module, name)` in
+    `_cpp_module_global_refs` so the .cpp preamble declares this module's
+    mirror struct + `extern` instance — the same mechanism the bare-name
+    module-global READ at `_cpp_expr`'s IdentExpr case already uses.
+
+    The returned expression carries the same boxing/cast conversions that
+    path applies, because the mirror declares each field with the module
+    global's own C declaration type while a `char *`-valued global is stored
+    boxed in an `int64_t` field (and vice versa).
+    """
+    if gen._cpp_declared is not None and marker in gen._cpp_declared:
+        # A declared local/param sharing an early-global's bare name is a
+        # real local, not a module marker. Never resolved through the module
+        # globals mirror — the same guard the member-read stub and the
+        # bare-name global read both apply.
+        return None
+    bound = (gen.imported_symbols.get(marker) or {}).get('module')
+    if not bound:
+        return None
+    # A constant this compiler knows BY VALUE rather than by compiled module
+    # body: `os` and `signal` are never inlined into this TU, so the
+    # per-module field lookup below has nothing for them — see
+    # `builtin_module_constant`'s own table comment. The SAME table the
+    # ordinary GIMPLE path reads `os.linesep` through, so one program cannot
+    # see `'\n'` in one function and `''` in another.
+    _bm_const = builtin_module_constant(str(bound), name)
+    if _bm_const is not None:
+        _bm_ctype, _bm_val = _bm_const
+        if _bm_ctype == 'char *':
+            return _bm_ctype, _cpp_string_literal_expr(gen, _bm_val)
+        return _bm_ctype, f'({_bm_ctype}){_bm_val}'
+    found = gen._module_global_field_type(bound, name)
+    key = bound
+    if found is None:
+        # `_module_globals` is keyed by the SANITIZED module name the mirror
+        # struct is emitted under (`_<key>_globals`), which is what the .cpp
+        # preamble looks up; the ordinary path passes the dotted name
+        # straight through, which only coincides with the key for a
+        # single-component module name. Try the sanitized spelling too and
+        # report the key that actually answered, so the emitted symbol is
+        # always the one the preamble declared.
+        key = gimple_ctypes._c_field_name(str(bound))
+        found = gen._module_global_field_type(key, name)
+    if found is None:
+        return None
+    c_decl_type, gtype = found
+    gtype = 'int64_t' if gtype in ('MojoDict *', 'MojoList *', 'MojoSet *') else gtype
+    if gtype not in _CPP_MODULE_GLOBAL_CTYPES:
+        return None
+    field = gimple_ctypes._c_field_name(name)
+    if field in gimple_ctypes._CPP_KEYWORD_FIELDS:
+        field = f'_kw_{field}'
+    gen._cpp_module_global_refs.add((key, name))
+    ref = f"_{gimple_ctypes._c_field_name(str(key))}_globals.{field}"
+    if gtype == 'int64_t' and c_decl_type.endswith(' *'):
+        # A container/pointer-semantic global stored in a boxed `int64_t`
+        # field: read it as the raw value this model boxes.
+        return gtype, f'(int64_t)(void *){ref}'
+    if gtype == 'char *' and c_decl_type == 'int64_t':
+        # The inverse: a `char *`-valued global (a boxed path/separator
+        # string) whose field is `int64_t`. Cast the load back so a later
+        # string operation on it is not a bare integer.
+        return gtype, f'(char *){ref}'
+    return gtype, ref
+
+
+def _cpp_module_global_ctypes(gen):
+    """`{"<module marker>.<name>": ctype}` for every module-level global
+    reachable as a bare `marker.name` VALUE in a coroutine body — the shape
+    `_infer_simple_expr_ctype` is given as `module_global_types` so a local
+    bound to such a read (`div = os.linesep`) gets that global's REAL type
+    instead of the `int64_t` default a MemberExpr with no `self` receiver
+    used to fall through to.
+
+    Built per generator/coroutine unit rather than memoized: `_module_globals`
+    can still grow while imported modules are compiled into this same
+    translation unit, so a cached snapshot could answer "no such global" for
+    a field a module registered since. The cost is a few dict lookups per
+    bound module per unit, against a generator body that already costs far
+    more.
+    """
+    out: dict[str, str] = {}
+    markers = getattr(gen, '_cpp_early_global_names', None) or ()
+    declared = gen._cpp_declared
+    for _marker in markers:
+        if declared is not None and _marker in declared:
+            continue
+        bound = (gen.imported_symbols.get(_marker) or {}).get('module')
+        if not bound:
+            continue
+        # The by-VALUE constants first, for the same reason
+        # `_cpp_module_global_field` asks for them first: a marker that is
+        # never inlined has no field row, so without this half `os.linesep`
+        # would be typed by neither table and fall to the `int64_t` default.
+        for _cname in builtin_module_constant_names(str(bound)):
+            _bc = builtin_module_constant(str(bound), _cname)
+            if _bc is not None:
+                out[f'{_marker}.{_cname}'] = _bc[0]
+        for _key in (bound, gimple_ctypes._c_field_name(str(bound))):
+            for _entry in (gen._module_globals.get(_key) or ()):
+                _gtype = gimple_exprtypes._as_str(_entry[2])
+                if _gtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+                    continue
+                if _gtype not in _CPP_MODULE_GLOBAL_CTYPES:
+                    continue
+                out[f'{_marker}.{gimple_exprtypes._as_str(_entry[0])}'] = _gtype
+            if _key in gen._module_globals:
+                break
+    return out
+
+
+def _cpp_exc_ctor_value(gen, node) -> bool:
+    """True iff `node` is an exception class CONSTRUCTOR call used as a value
+    — `Exception('...')`, `ValueError(...)`, `TypeError()` — i.e. the shape
+    `_cpp_expr`'s CallExpr case lowers to that exception's message. One
+    predicate shared by the emitter and the local-typing site so the value's
+    emitted type and its declared local type cannot disagree.
+
+    Bounded to `_KNOWN_EXCEPTION_NAMES` rather than
+    `_is_exc_class_name`, which also accepts a user STRUCT name: a foreign
+    struct constructor reaching this far is a genuine unresolved-callee
+    refusal (`Pair(...)` from another module — see that refusal's own
+    comment), and must stay one.
+    """
+    return (isinstance(node, gimple_ctypes.CallExpr)
+            and isinstance(node.func, gimple_ctypes.IdentExpr)
+            and node.func.name in gen._KNOWN_EXCEPTION_NAMES
+            and len(node.args) <= 1 and not (node.kwargs or []))
 
 
 def _cpp_resolve_generator_call_api(gen, func):
@@ -1466,14 +1635,21 @@ def _cpp_expr(gen, e) -> str:
                 and e.name not in gen._cpp_declared
                 and (e.name in gen._global_var_types
                      or e.name in gen._cpp_early_global_names)):
-            safe_mod = gimple_ctypes._c_field_name(
-                str(gen._current_module_ctx or "root"))
+            # Registered under the module's RAW `_module_globals` key, which
+            # is what the .cpp preamble looks the field rows up by; the
+            # preamble sanitizes it for the symbol names it emits (a dotted
+            # module name is not a legal C identifier). Registering the
+            # sanitized spelling instead silently found no rows for any
+            # dotted module — `from . import foreign` under `fpp/` compiles
+            # as `_.foreign` — and emitted an empty mirror struct.
+            mod_key = str(gen._current_module_ctx or "root")
+            safe_mod = gimple_ctypes._c_field_name(mod_key)
             field = gimple_ctypes._c_field_name(e.name)
             # Same C++-keyword escaping the .cpp globals-struct typedef
             # uses (`operator`/`new`/... are fine in C, not in C++).
             if field in gimple_ctypes._CPP_KEYWORD_FIELDS:
                 field = f"_kw_{field}"
-            gen._cpp_module_global_refs.add((safe_mod, e.name))
+            gen._cpp_module_global_refs.add((mod_key, e.name))
             return f"_{safe_mod}_globals.{field}"
         # A bare module-level function name referenced as a value (e.g.
         # tokenize.py's `encode = detect_encoding`) — the generator body
@@ -1677,6 +1853,22 @@ def _cpp_expr(gen, e) -> str:
                 and gen._cpp_declared is not None
                 and e.obj.name not in gen._cpp_declared
                 and e.obj.name in gen._cpp_early_global_names):
+            # A module-level CONSTANT read as a value (`os.linesep`,
+            # `fsutil.USE_CWD`, `signal.SIGTERM`) is NOT a module OBJECT —
+            # it is a field of that module's globals struct, which this
+            # translation unit can already name (the .cpp preamble declares
+            # the mirror struct + `extern` instance, exactly as the bare-name
+            # module-global read in the IdentExpr case above does). Read the
+            # real field, using the module's OWN field triple so the read
+            # agrees with the emitted field by construction.
+            _mglob = _cpp_module_global_field(gen, e.obj.name, e.member)
+            if _mglob is not None:
+                return _mglob[1]
+            # Anything else off a module name really is the opaque
+            # module-OBJECT case the stub below describes (a submodule
+            # attribute, a C function re-export, a name that no compiled
+            # module declares a global for), and a diagnosed 0 is the only
+            # honest answer left for it.
             gimple_ctypes._debug_note('stubbed operation',
                         f'generator-body module-member value read '
                         f'{e.obj.name}.{e.member}')
@@ -3644,6 +3836,29 @@ def _cpp_expr(gen, e) -> str:
                 if _lsr is not None:
                     _lsr.add(fname)
                 return f"{fname}({', '.join(args)})"
+            # An exception CONSTRUCTOR used as a VALUE — `onempty =
+            # Exception('no filenames provided')` in scriptutil.py's
+            # `_iter_filenames`, then `raise onempty`. As the OPERAND of a
+            # `raise` this is handled with a real tagged `_MojoCppExc`
+            # (`_cpp_raise_stmt`); as a plain value there is nothing to call
+            # and no such tag to attach, because this model's one exception
+            # representation IS the message (see `_cpp_raise_stmt`'s own
+            # `raise <IdentExpr>` case, which throws exactly that), so the
+            # value IS its message. That is also what the ordinary
+            # (non-coroutine) GIMPLE path already does for the same shape —
+            # `_lower_opaque_ctor` returns a lone string argument unchanged,
+            # so `e` there is a `char *` holding the message text — which is
+            # why there is no second representation to invent here.
+            #
+            # `raise onempty` then takes the EXISTING untagged(0) lenient
+            # match, the same one a handler-bound `except ... as e; raise e`
+            # already takes in both backends. Not a new looseness: a
+            # constructed-but-not-raised exception has had its type tag
+            # discarded by the time it is raised, on either path.
+            if _cpp_exc_ctor_value(gen, e):
+                if not e.args:
+                    return 'const_cast<char *>("")'
+                return gen._cpp_expr(e.args[0])
             # Everything else reaching this point would be emitted as a
             # bare, undeclared C++ identifier call — which g++ always
             # rejects ("'X' was not declared in this scope") or, worse,
@@ -4801,11 +5016,33 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 # would mismatch the real `std::function<...>`-
                 # convertible value `_cpp_expr` actually emits for it.
                 ctype = gimple_ctypes._CPP_CALLABLE_CTYPE
+            elif _cpp_exc_ctor_value(gen, s.value):
+                # `e = ValueError('boom')` — `_cpp_expr` lowers the RHS to
+                # the exception's MESSAGE (see its exception-constructor
+                # case), so the local must be that message's own type rather
+                # than the int64_t default, which would make the later
+                # `raise e` throw an integer where CPython throws a
+                # message. With no argument the emitted expression is a `char
+                # *` empty literal by construction; with one, the type is
+                # deliberately the ARGUMENT's own inference, so a message
+                # this model cannot spell as a `char *` still lands on the
+                # honest default instead of claiming a type the emitted
+                # expression does not have.
+                ctype = 'char *' if not s.value.args else \
+                    gimple_exprtypes._infer_simple_expr_ctype(
+                        s.value.args[0], declared,
+                        getattr(gen, '_cpp_gen_self_fields', None),
+                        gen._async_api,
+                        fn_return_types=_cpp_trusted_fn_return_types(gen),
+                        module_global_types=getattr(
+                            gen, '_cpp_module_global_ctypes', None))
             else:
                 ctype = gimple_exprtypes._infer_simple_expr_ctype(
                     s.value, declared, getattr(gen, '_cpp_gen_self_fields', None),
                     gen._async_api,
-                    fn_return_types=_cpp_trusted_fn_return_types(gen))
+                    fn_return_types=_cpp_trusted_fn_return_types(gen),
+                    module_global_types=getattr(
+                        gen, '_cpp_module_global_ctypes', None))
             if ctype is None:
                 ctype = 'int64_t'  # default for unknown-type locals
             declared[name] = ctype
@@ -6656,6 +6893,31 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
             lines.append(f"{indent}}}")
             return lines
+        # An iterable that is a CALL is almost always one shape here — a callable
+        # bound to a local or to a parameter (`for row in _get_reader(lines,
+        # ...)`, `for entry in _walk(root)`) — and the flat "type: CallExpr"
+        # it used to report named neither the callee nor why it could not be
+        # typed, so ONE real blocker looked like an undifferentiated gap in
+        # five unrelated places (c_common/tables.py's `read_table`,
+        # c_analyzer/__init__.py's `check_all`, c_common/fsutil.py's
+        # `glob_tree`/`_walk_tree`, Lib/glob.py's `_iglob`, Lib/os.py's
+        # `walk`). Naming the callee is what lets those share ONE next step
+        # instead of each re-deriving it.
+        #
+        # Gated on the callee being a bare name this unit has DECLARED, which
+        # is the whole shape: a module-level or imported function callee is
+        # resolved earlier in this function and never reaches here.
+        if (isinstance(s.iterable, gimple_ctypes.CallExpr)
+                and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
+                and s.iterable.func.name in declared):
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                f"a `for` over a call through the callable-valued "
+                f"local/parameter '{s.iterable.func.name}(...)' is not "
+                "supported in a compiled generator/coroutine body: what that "
+                "call RETURNS is not knowable here (it depends on which "
+                "callable the caller passes), and a `for` target needs the "
+                "returned ITERATOR's element type. It needs the callable's "
+                "signature discovered from its call sites first.")
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"unsupported for-loop iterable type: {type(s.iterable).__name__}")
     raise gimple_exprtypes._UnsupportedGeneratorShape(

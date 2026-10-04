@@ -611,6 +611,244 @@ main()
 """)
 
 
+def _foreign_cpp_module_global_value():
+    # A MODULE-LEVEL CONSTANT of one module, read as a VALUE in a cpp-path
+    # coroutine body of another (`div = foreign.SEP`, `foreign.SEP.endswith`)
+    # — real: scriptutil.py's `iter_marks` doing `div = os.linesep` beside
+    # `end = f'{mark}{os.linesep}'`, and `track_progress_compact`'s
+    # `last.endswith(os.linesep)`.
+    #
+    # Two independent failures hid behind this one shape, and the second is
+    # why the test asserts the compiled BINARY's output rather than "it
+    # compiles":
+    #
+    #   1. `_cpp_expr`'s member-read case stubbed any `<module marker>.<name>`
+    #      read to a diagnosed `0` — a WRONG ANSWER, not an error, so
+    #      `div` became `''` where CPython has `'|'`. Anywhere that did not
+    #      also trip a type check, the generator compiled, ran, exited 0 and
+    #      printed the wrong text.
+    #   2. With the real value read, the module's OWN field triple types it
+    #      `char *`, so `div` binds a `char *` local and the generator's
+    #      yields now agree — before, `div` took the `int64_t` default that a
+    #      `self`-less MemberExpr used to fall through to, disagreed with its
+    #      sibling `end`, and the whole generator was refused outright with
+    #      "every `yield` must ... agree on one scalar type". That refusal is
+    #      what kept this shape off the compiled path entirely until now.
+    #
+    # The `*, start=[]` default is the A3 gate's rejection trigger (see
+    # `_foreign_a3_generator_handle_next`), so the body really is compiled by
+    # the cpp C++20-coroutine emitter rather than the A3 stack-switch pass.
+    T_FOREIGN_CPP_PKG_FILES = {
+        '__init__.py': '',
+        # A STRING constant and an INT one, plus an EMPTY string, so the
+        # comparison/`not`/length cases below can tell a real read from a
+        # stubbed 0: `0 == '|'` is False, `len(0)` is not 1.
+        'foreign.py': ("SEP = '|'\n"
+                       "EMPTY = ''\n"
+                       "WIDTH = 4\n"),
+    }
+    _saved_pkg_files = _FOREIGN_PKG_FILES
+    try:
+        globals()['_FOREIGN_PKG_FILES'] = T_FOREIGN_CPP_PKG_FILES
+        # A local bound to the read, yielded beside a string sibling: the
+        # mixed-kind refusal fires without the fix, and with only the value
+        # read fixed it would print `''`.
+        _test_foreign_a3_generator_handle(
+            "cpp_coroutine_body_reads_foreign_module_constant",
+            "from . import foreign\n"
+            "\n"
+            "def lines(prefix, *, start=[]):\n"
+            "    div = foreign.SEP\n"
+            "    end = f'{prefix}{foreign.SEP}'\n"
+            "    yield end\n"
+            "    yield div\n"
+            "\n"
+            "def main():\n"
+            "    for s in lines('a'):\n"
+            "        print(repr(s))\n"
+            "\n"
+            "main()\n",
+            "'a|'\n'|'\n")
+        # The truthiness/comparison/length/arithmetic half. Every yield is
+        # wrapped in a one-or-zero ternary because this model gives a
+        # generator ONE value-slot type: yielding the `==` result directly
+        # would widen to `char *` and the four yields would disagree — a
+        # genuine mixed-kind generator, not this test's subject.
+        #
+        # `_cpp_expr_static_ctype` answers the same question the value read
+        # does, so `foreign.SEP` in a CONDITION must be decided on the
+        # string's emptiness rather than on a null pointer. That is what
+        # makes the first case discriminating: the stub's `0` is ALSO
+        # falsy, but as a NULL it says `''` where the real `'|'` says true.
+        _test_foreign_a3_generator_handle(
+            "cpp_coroutine_body_compares_foreign_module_constant",
+            "from . import foreign\n"
+            "\n"
+            "def probe(*, start=[]):\n"
+            "    yield 1 if foreign.SEP else 0\n"
+            "    yield 1 if foreign.SEP == '|' else 0\n"
+            "    yield len(foreign.SEP)\n"
+            "    yield foreign.WIDTH * 2\n"
+            "\n"
+            "def main():\n"
+            "    for s in probe():\n"
+            "        print(s)\n"
+            "\n"
+            "main()\n",
+            "1\n1\n1\n8\n")
+    finally:
+        globals()['_FOREIGN_PKG_FILES'] = _saved_pkg_files
+
+
+def _cpp_for_over_callable_local_is_named():
+    # `for x in <call through a callable-valued local/parameter>` must name
+    # the callee. The refusal it used to raise was a flat
+    # "unsupported for-loop iterable type: CallExpr", which named neither
+    # the call nor the reason — so the SAME blocker read as five unrelated
+    # gaps (c_common/tables.py `read_table`, c_analyzer/__init__.py
+    # `check_all`, c_common/fsutil.py `glob_tree`/`_walk_tree`,
+    # bugs/CODEGEN_generator_function_Lib_glob.md's `_iglob`,
+    # bugs/CODEGEN_generator_function_Lib_os.md's `walk`) and each doc had to
+    # re-derive what to do about it. It stays a refusal — the callee's
+    # return type genuinely is not knowable in this body model — but now says
+    # which call and what would unblock it.
+    #
+    # The default `walk=os.walk` is the real shape: a kw-only parameter
+    # defaulting to the function itself, which is also what keeps the
+    # generator off the A3 path (see `_foreign_a3_generator_handle_next`).
+    test_generator_refused(
+        "cpp_for_over_callable_param_names_the_callee", """\
+def walk_tree(root, *, walk=len, start=[]):
+    for entry in walk(root):
+        yield entry
+
+def main():
+    print(sum(walk_tree('a')))
+""", "callable-valued local/parameter 'walk(...)'")
+    # The negative half: an iterable this emitter DOES support must keep its
+    # own path, and a call this emitter CAN resolve must never reach the new
+    # branch — both would be silent behaviour changes if the gate were too
+    # wide. `sum` is the resolved-callee case for the second.
+    test_generator_stdout("cpp_for_over_callable_param_leaves_resolved_callees_alone", """\
+def rows(xs, *, start=[]):
+    for x in xs:
+        yield x * 2
+
+def main():
+    print(sum(rows([1, 2, 3])))
+""", "12\n")
+
+
+def _cpp_coroutine_builtin_module_constant():
+    # A constant read off a module MARKER that is NEVER INLINED — `os` and
+    # `signal` bind to an opaque marker with no compiled body in this TU, so
+    # there is no `_module_globals['os']` field to read and no emitted struct
+    # to name. Real: scriptutil.py's `iter_marks` (`div = os.linesep` beside
+    # `end = f'{mark}{os.linesep}'`), bugs/COMPILE_FAIL_Tools_c-analyzer_c_
+    # common_scriptutil.md.
+    #
+    # Those few constants are known BY VALUE instead (fixed by the OS ABI
+    # and by os.py's own literals). The table is SHARED with the ordinary
+    # GIMPLE path, which already read them correctly — and that sharing is
+    # the point of the test's shape: the generator body and the ORDINARY
+    # function in the same program read the same constant, so the two
+    # backends cannot answer differently without one of the two lines going
+    # wrong. When the coroutine emitter had its own stub-to-0, the ordinary
+    # line still printed '/' while the generator line printed ''.
+    #
+    # Asserted against CPython run on a reference twin AT TEST TIME, because
+    # the failure mode is a silent wrong value on both halves.
+    _mojo = (
+        "import os\n"
+        "import signal\n"
+        "\n"
+        "def strings(*, start=[]):\n"
+        "    div = os.linesep\n"
+        "    end = f'x{os.linesep}'\n"
+        "    yield end\n"
+        "    yield div\n"
+        "\n"
+        "def numbers(*, start=[]):\n"
+        "    yield signal.SIGTERM + 0\n"
+        "    yield signal.SIGKILL * 2\n"
+        "    yield 1 if signal.SIGPIPE else 0\n"
+        "    yield 1 if os.sep else 0\n"
+        "    yield 1 if os.pathsep else 0\n"
+        "\n"
+        "def ordinary():\n"
+        "    print(repr(os.linesep))\n"
+        "    print(os.pathsep)\n"
+        "    print(signal.SIGTERM)\n"
+        "\n"
+        "def main():\n"
+        "    for s in strings():\n"
+        "        print(repr(s))\n"
+        "    for n in numbers():\n"
+        "        print(n)\n"
+        "    ordinary()\n"
+        "\n"
+        "main()\n")
+    # The reference twin drops only the A3-gate triggers (`*, start=[]`);
+    # everything the compiled program computes is identical source.
+    _cpy = (_mojo.replace("def strings(*, start=[]):", "def strings():")
+                .replace("def numbers(*, start=[]):", "def numbers():"))
+    test_generator_matches_cpython(
+        "cpp_coroutine_body_reads_marker_module_constant", _mojo, _cpy)
+
+
+def _cpp_coroutine_exc_ctor_value():
+    # `e = ValueError('boom')` then `raise e` — real: scriptutil.py's
+    # `_iter_filenames` (`onempty = Exception('no filenames provided')` /
+    # `raise onempty`), which refused the whole generator with "a call to
+    # unresolved callee 'Exception(...)' is not supported in a compiled
+    # generator/coroutine body".
+    #
+    # What the local HOLDS is unchanged by this: this model's one exception
+    # representation is the message, which is what `_cpp_raise_stmt`'s own
+    # `raise <handler variable>` case already throws and what the ordinary
+    # (non-coroutine) GIMPLE path already produces for the same source
+    # (`_lower_opaque_ctor` returns the lone string argument, so `e` there
+    # is a `char *`). So the fix is an emission site plus the matching local
+    # type, not a second representation. The type tag is consequently the
+    # existing untagged(0) lenient match — the same one a
+    # constructed-then-raised exception gets on the ordinary path, where the
+    # tag set at construction is not carried onto the variable at all.
+    #
+    # Asserted against the BINARY's output, not just "it compiles": the
+    # failure this shape had was a compile refusal, but a `int64_t`-typed
+    # local would have compiled and thrown an integer as the message.
+    test_generator_stdout("cpp_coroutine_exception_ctor_as_value", """\
+def probe(*, start=[]):
+    e = ValueError('boom')
+    raise e
+    yield 'never'
+
+def main():
+    try:
+        for s in probe():
+            print(s)
+    except ValueError as err:
+        print('caught', err)
+""", "caught boom\n")
+    # The no-argument form: `TypeError()` is legal Python and the message is
+    # the empty string, which is what the emitted `char *` empty literal
+    # carries. Kept because it is the shape whose typing needs no argument to
+    # infer from — the one place a "just use args[0]" shortcut is wrong.
+    test_generator_stdout("cpp_coroutine_exception_ctor_as_value_no_arg", """\
+def probe(*, start=[]):
+    e = TypeError()
+    raise e
+    yield 'never'
+
+def main():
+    try:
+        for s in probe():
+            print(s)
+    except TypeError as err:
+        print('caught', repr(str(err)))
+""", "caught ''\n")
+
+
 def run_next_method_tests():
     test_generator_stdout("generator_next_method_values_and_shared_cursor", """\
 def counter():
@@ -4185,6 +4423,10 @@ def main():
 
     _foreign_a3_generator_handle_next()
     _foreign_a3_generator_handle_for_loop()
+    _foreign_cpp_module_global_value()
+    _cpp_for_over_callable_local_is_named()
+    _cpp_coroutine_builtin_module_constant()
+    _cpp_coroutine_exc_ctor_value()
 
     # ── `async for` over a compiled async generator, driven by an ORDINARY
     # function. An async generator is consumed by `async for`, and the

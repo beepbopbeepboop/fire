@@ -3855,19 +3855,56 @@ def _try_lower_slice_region_eq(gen, slice_node, other_node, negate: bool):
     return '_Bool', t
 
 
-def _sprintf_one(gen, c_spec: str, arg_val: str) -> str:
-    """sprintf a single value through a heap buffer into `char *`, using
-    a compile-time-known C format spec. Same malloc+sprintf shape
+def _sprintf_n(gen, c_spec: str, arg_vals: list) -> str:
+    """sprintf `len(arg_vals)` values through a heap buffer into `char *`,
+    using a compile-time-known C format spec. Same malloc+sprintf shape
     print() already uses for its non-string/list/dict operands (see
-    the print()-builtin lowering) -- factored out here since
-    %-formatting needs it once per spec rather than once per call."""
+    the print()-builtin lowering) -- factored out here since %-formatting
+    needs it once per spec rather than once per call.
+
+    More than one value because a spec may carry a `*`-width and/or a
+    `.*`-precision, each of which consumes an operand of its own BEFORE the
+    value (`'%0*X' % (4, 255)`). C spells that dynamic width with its own
+    `*`, so the Python spec text passes through unchanged and only the
+    argument list grows -- see `_format_percent_spec`."""
     buf = gen._new_temp('char *')
     vp = gen._new_temp('void *')
     fmt_t = gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape(c_spec)))
     gen._emit(f'  {vp} = malloc (256);')
     gen._emit(f'  {buf} = (char *) {vp};')
-    gen._emit(f'  sprintf ({buf}, {fmt_t}, {arg_val});')
+    # Explicit accumulation, not `', '.join(arg_vals)`: the args arrive as a
+    # list built in a loop, and this file's rule for a list built that way is
+    # to iterate it plainly (see `_lower_percent_format`'s `parts` comment for
+    # the same reasoning at more length).
+    arg_text = ''
+    for _a in arg_vals:
+        arg_text = arg_text + ', ' + _a
+    gen._emit(f'  sprintf ({buf}, {fmt_t}{arg_text});')
     return buf
+
+
+def _sprintf_one(gen, c_spec: str, arg_val: str) -> str:
+    """`_sprintf_n` for the single-value case, which is every spec without a
+    `*`-width/`.*`-precision. Kept as its own name because that is what every
+    caller outside %-formatting asks for, and because its one-value argument
+    list is what makes its emitted line byte-identical to the pre-`_sprintf_n`
+    form."""
+    return _sprintf_n(gen, c_spec, [arg_val])
+
+
+def _to_c_int_arg(gen, ctype: str, val: str) -> str:
+    """A %-format width/precision operand as a plain C `int` lvalue.
+
+    C reads a `*` width out of the varargs as an `int`, and this codebase's
+    integers are `int64_t` everywhere, so the operand has to be narrowed
+    explicitly rather than passed as-is: on a varargs boundary that is not
+    merely untidy, it is the classic UB that prints a 4-digit width as
+    3850227328. Emitted through a temp (never a bare cast expression) because
+    every call-argument position in this emitter wants an lvalue."""
+    nv = _to_int64(gen, ctype, val)
+    t = gen._new_temp('int')
+    gen._emit(f'  {t} = (int) {nv};')
+    return t
 
 
 def _to_int64(gen, ctype: str, val: str) -> str:

@@ -12923,7 +12923,16 @@ def gen_module_impl(self, stmts):
                 _mref_mod = _mref_pair[0]
                 if _mref_mod not in _mref_modules:
                     _mref_modules.append(_mref_mod)
-            for _mref_safe_mod in sorted(_mref_modules):
+            for _mref_mod in sorted(_mref_modules):
+                # The refs carry the module's RAW `_module_globals` key,
+                # because that is what the field rows below are looked up
+                # by; the SYMBOL names need the sanitized spelling, because
+                # a relative-import module name (`_.foreign`, from
+                # `from . import foreign`) is not a legal C identifier.
+                # Registering the sanitized spelling instead found no rows
+                # for any dotted module and emitted an EMPTY mirror struct,
+                # so every field read through it was a hard g++ error.
+                _mref_safe_mod = _c_field_name(_mref_mod)
                 _mt = f"_{_mref_safe_mod}_toplev"
                 _mg = f"_{_mref_safe_mod}_globals"
                 # A mirror field typed `SomeStruct *` is only emittable if
@@ -12947,7 +12956,7 @@ def gen_module_impl(self, stmts):
                 # .ci side owns the real typed accesses).
                 _mirror_extra_structs: list = []
                 for _gl in self._module_globals.get(
-                        'root' if _mref_safe_mod == 'root' else _mref_safe_mod, []):
+                        'root' if _mref_mod == 'root' else _mref_mod, []):
                     _mdm = re.match(r'^(\w+) \*$', _gl[1])
                     if not _mdm:
                         continue
@@ -12988,7 +12997,7 @@ def gen_module_impl(self, stmts):
                     _cpp_preamble_typedef_structs.update(_mirror_extra_structs)
                 cpp_parts.append(f'typedef struct {_mt} {{')
                 for _gl in self._module_globals.get(
-                        'root' if _mref_safe_mod == 'root' else _mref_safe_mod, []):
+                        'root' if _mref_mod == 'root' else _mref_mod, []):
                     _gct = _as_str(_gl[1]).replace('_Bool', 'bool')
                     _gfname = _c_field_name(_as_str(_gl[0]))
                     if _gfname in _CPP_KEYWORD_FIELDS:

@@ -7310,6 +7310,62 @@ print([1, 2])
 print({"a": 1})
 """, "S<a>\nS<a>\nS<a>\nQ<b>\nQ<b>\nR<a>\nR<a>\nQ<b>\n1\nx\n[1, 2]\n{'a': 1}\n")
 
+    # A `*`-width and a `.*`-precision in a %-format spec, each of which
+    # consumes an operand of its own BEFORE the value. The compiler's spec
+    # parser treated `*` as the conversion character, so the template's
+    # operand count never matched its spec count and the WHOLE template
+    # degraded to its literal text — `'0x%0*X' % (precision, t)` printed
+    # `0x%0*X` (bugs/COMPILE_FAIL_Tools_unicode_gencodec.md's reported
+    # `    (): (0x%0*X, 0x%0*X),` entry lines).
+    #
+    # Every conversion is exercised, not just the hex one, because the
+    # operand ordering has to be right for each: C reads the dynamic width
+    # out of the varargs in the same position Python consumes it, so
+    # `'%.*f' % (3, x)` passing `x` where the precision belongs is the
+    # failure this shape invites, and it would print something plausible.
+    # `%%` rides along because an escaped percent inside a template that
+    # also has a dynamic spec used to defeat the whole thing.
+    #
+    # Compared against CPython rather than a hand-written expectation: the
+    # widths, the zero padding and the rounding are exactly what this is
+    # checking, and a hand-written string is one more thing to keep in sync.
+    test_gimple_matches_cpython("gimple_percent_format_star_width_and_precision", """\
+def hexdigits(precision, item):
+    return '0x%0*X' % (precision, item)
+
+def main():
+    for p in [2, 4, 6]:
+        print(hexdigits(p, 255))
+    print('%*d|' % (6, 42))
+    print('%-*d|' % (5, 3))
+    print('%.*f' % (3, 3.14159))
+    print('%*.*f|' % (8, 2, 3.14159))
+    print('%*x %*o' % (5, 255, 6, 8))
+    print('%*s|' % (5, 'x'))
+    print('%*r|' % (5, 'y'))
+    print('%*c|' % (4, 65))
+    print('a%%b %*s' % (5, 'x'))
+    print('%s=%r %d %05.2f' % ('k', 'v', 7, 1.5))
+main()
+""")
+
+    # The `bytes` spelling shares the SAME parser now, so a template whose
+    # lit/spec split the parser gets wrong is caught here too — the two copies
+    # had drifted into agreeing only by accident. It deliberately stops short
+    # of the `*`-width shapes: `MojoBytes` is `{data, len}`, not a C string, so
+    # a width cannot be applied through `sprintf` there without truncating at
+    # an embedded NUL, and that half is still open (see
+    # `_lower_bytes_percent_format`'s own comment).
+    test_gimple_matches_cpython("gimple_bytes_percent_format_shares_the_parser", """\
+def main():
+    print(b'0x%02X' % 255)
+    print(b'%d-%s' % (3, b'bb'))
+    print(b'%% plain')
+    print(b'%5d|%-5d|' % (42, 3))
+    print(b'%s' % b'a\\x00b')
+main()
+""")
+
     # A container of structs prints its ELEMENTS through the element's own
     # `__repr__` — the container rows of
     # bugs/CODEGEN_user_defined_dunder_repr_not_consulted_by_str_and_
@@ -8904,6 +8960,159 @@ def main():
                           "    print(y.show())\n"
                           "main()\n",
     }, 'colln3_main.py')
+
+    # A submodule that FAILS to compile must not leave its per-translation-unit
+    # "already emitted this" marks behind. `_compile_imported_module` inlines a
+    # module's whole subtree into the ONE generated translation unit, so every
+    # `static char * _slit_N;` forward declaration, `_mojo_sizeof_*`/`_mojo_fnaddr_*`
+    # helper, compiled-regex table, list-marshalling pair, type-name singleton and
+    # "unavailable in compiled mode" stub lives in the FAILING module's own text —
+    # which the except handler throws away whole. The marks used to survive it, so
+    # every LATER module computed "already declared", emitted nothing, and gcc
+    # rejected the surviving reference sites: `error: '_slit_10000' undeclared
+    # (first use in this function)`.
+    #
+    # The nesting is what makes it reachable from a module's OWN code: a module's
+    # own string-pool block is appended near the very END of gen_module_impl, so a
+    # module can only leave a stale mark for a NESTED module that compiled
+    # successfully first. Hence `badmod` -> `innermod` (succeeds, emits the
+    # declaration) -> `badmod` itself raises, and `goodmod` — a sibling that
+    # survives and uses the same literal — is the one that dies.
+    #
+    # `next(it)` on an unannotated parameter is the refusal that makes `badmod`
+    # fail: it has no lowering at all (`emit_calls.py`'s own diagnostic, which
+    # refuses rather than emit a call to a symbol that does not exist), so it
+    # raises even under the `relaxed_imports=True` every imported module is
+    # compiled with, and takes the rollback path this asserts on. CPython runs
+    # the identical text fine (`pick` is never called), which is what makes the
+    # compiled-vs-CPython comparison below a real expectation rather than a
+    # hardcoded string.
+    _check_agrees_with_cpython("failed_submodule_rollback_string_pool_marks", {
+        'rb_inner.py': "def show():\n"
+                       "    print('rb_shared_literal')\n",
+        'rb_bad.py': "import rb_inner\n"
+                     "def pick(it):\n"
+                     "    return next(it)\n"
+                     "def go():\n"
+                     "    return rb_inner.show()\n",
+        'rb_good.py': "def shout():\n"
+                      "    print('rb_shared_literal')\n",
+        'rb_main.py': "import rb_bad\n"
+                      "import rb_good\n"
+                      "def main():\n"
+                      "    rb_good.shout()\n"
+                      "main()\n",
+    }, 'rb_main.py')
+
+    # A CPython source checkout's `Lib/` is a SIBLING of `Tools/`, not an
+    # ancestor, so the inline importer's bounded upward walk from a
+    # `Tools/<tool>/x.py` entry file can never arrive there and every CPython
+    # `Lib/` import used to degrade to a receiver stub with the source tree
+    # sitting right there on disk (bugs/
+    # COMPILE_FAIL_cpython_lib_is_invisible_outside_it.md). The layout below is
+    # a real one — `<root>/Lib/os.py` is what marks the root as a checkout, and
+    # `<root>/Tools/probe/entry.py` is the entry — and the expectation is
+    # CPython's own, run with `Lib` on its `PYTHONPATH` (which is how the
+    # interpreter finds it), so a stub or a silently-empty result fails rather
+    # than merely compiling.
+    #
+    # `_compile_n_files_and_run` cannot express this shape: it writes every
+    # fixture flat into one directory and runs CPython with that directory as
+    # cwd, which would make `libmod` a plain sibling and prove nothing. So this
+    # one gets its own helper, and the only difference from the shared one is
+    # the nested layout and the interpreter's `PYTHONPATH`.
+    def _compile_cpython_checkout_and_run(root, entry_relpath, timeout=120):
+        entry = os.path.join(root, entry_relpath)
+        from gimple_codegen import compile_to_gimple
+        c_code = compile_to_gimple(open(entry).read(), do_imports=True,
+                                   filename=entry)
+        cp_env = dict(os.environ)
+        cp_env['PYTHONPATH'] = os.path.join(root, 'Lib')
+        cp = subprocess.run([sys.executable, entry], capture_output=True,
+                            text=True, timeout=timeout, env=cp_env)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.c',
+                                         delete=False) as f:
+            f.write(c_code)
+            c_file = f.name
+        exe_file = c_file.replace('.c', '.exe')
+        try:
+            runtime_dir = os.path.join(HERE, 'runtime')
+            result = subprocess.run(
+                [find_gcc(), '-fgimple', f'-I{runtime_dir}', '-o', exe_file,
+                 c_file, os.path.join(runtime_dir, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=timeout)
+            if result.returncode != 0:
+                raise RuntimeError(f"gcc -fgimple failed: {result.stderr[:400]}")
+            return run_executable_stdout(exe_file), cp.stdout
+        finally:
+            for p in (c_file, exe_file):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+    def _check_cpython_lib_is_visible(name, lib_mod_src, entry_src):
+        global _PASS, _FAIL, _TIMEOUT
+        try:
+            with tempfile.TemporaryDirectory() as wd:
+                root = os.path.join(wd, 'cpy')
+                os.makedirs(os.path.join(root, 'Lib'))
+                os.makedirs(os.path.join(root, 'Tools', 'probe'))
+                # The marker `cpython_lib_root` recognises. Contents irrelevant:
+                # only its EXISTENCE is the contract, which is why a real
+                # checkout's `os.py` (a top-level module every CPython `Lib/`
+                # has, and not something an ordinary project directory
+                # contains) is a sound thing to test for.
+                open(os.path.join(root, 'Lib', 'os.py'), 'w').write("# marker\n")
+                open(os.path.join(root, 'Lib', 'libmod.py'), 'w').write(lib_mod_src)
+                open(os.path.join(root, 'Tools', 'probe', 'entry.py'),
+                     'w').write(entry_src)
+                got, want = _compile_cpython_checkout_and_run(
+                    root, os.path.join('Tools', 'probe', 'entry.py'))
+        except subprocess.TimeoutExpired as e:
+            print(f"TIMEOUT {name}: {e}")
+            _TIMEOUT += 1
+            return
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        if got == want:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: compiled {got!r} != CPython {want!r}")
+            _FAIL += 1
+
+    _check_cpython_lib_is_visible(
+        "cpython_checkout_lib_is_visible_from_a_tools_entry",
+        "VALUE = 40\n"
+        "\n"
+        "def bump():\n"
+        "    return VALUE + 2\n",
+        "import libmod\n"
+        "\n"
+        "def main():\n"
+        "    print(libmod.bump())\n"
+        "\n"
+        "main()\n")
+
+    # A `from mod import name` binding, not just a module-qualified call: the
+    # two go through different resolution paths in the inline importer
+    # (`_gen_stmt_FromImportStmt` consults `_submodule_source_path`, which
+    # reuses `_module_candidate_paths` rather than re-implementing it), so
+    # fixing only the qualified-call spelling would leave the binding one
+    # unresolved and still stubbed.
+    _check_cpython_lib_is_visible(
+        "cpython_checkout_lib_from_import_binds_the_real_module",
+        "def twice(n):\n"
+        "    return n * 2\n",
+        "from libmod import twice\n"
+        "\n"
+        "def main():\n"
+        "    print(twice(21))\n"
+        "\n"
+        "main()\n")
 
     # A `from mod import Dialog as X` binding must not change which class a
     # module-qualified construction picks, and the two classes must stay

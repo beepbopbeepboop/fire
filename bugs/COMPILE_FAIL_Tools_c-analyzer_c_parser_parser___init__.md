@@ -4,6 +4,94 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_parser/parser/__in
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-10-02 — the two gcc errors this doc named are GONE; what is left is ONE root cause, and it is the self-host doc's `_module_globals` lead
+
+Fresh `python3 fire.py build -o .tmp/out/ca/p
+.tmp/ca/c-analyzer/c_parser/parser/__init__.py` on `ad7ffd96` (sources
+copied from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/`), arm64.
+Eight `error:` lines, all in TWO files, and every one of them is the same
+shape:
+
+```
+c_parser/parser/_common.py:16:27   'struct ___common_toplev' has no member named '_logger'
+c_parser/parser/_common.py:18:27   'struct ___common_toplev' has no member named '_logger'
+c_parser/parser/_common.py:25:27   'struct ___common_toplev' has no member named '_logger'
+c_parser/parser/_common.py:50:26   'struct ___common_toplev' has no member named 'STRING_LITERAL'
+c_parser/parser/_common.py:50:7    assignment to 'char *' from 'int' makes pointer from integer without a cast
+c_parser/parser/_common.py:50:9    implicit declaration of function 'parser__regexes__ind_15d274'
+c_parser/parser/_func_body.py:81:31 'struct ___func_body_toplev' has no member named 'DECL_BODY_PARSERS'
+c_parser/parser/_global.py:125:3   implicit declaration of function 'mojo_mark_dict_bool_values'
+```
+
+### Both blockers this doc's previous entry listed are cleared
+
+* Its item 1, `c_parser/info.py`'s "cannot materialize a generator as a
+  list: no known generator API for 'rendered'", is gone — and it needed no
+  fix here: `_generator_method_api` and the method-returns-a-generator
+  counterpart now both exist, so `cls.<genmethod>(...)` is drivable.
+  Measured directly before starting: `rendered = self._gen(x); a, = rendered`
+  compiles and runs for an instance method, a bare-name "classmethod", and
+  a real `@classmethod` (`r = cls._fmt(v); a, = r` prints 42 in all three).
+* Its items 2 and 3, `cannot coerce MojoDict * to MojoList *` in
+  `_func_body.py` and `cannot coerce MojoSet * to MojoList *` in
+  `match.py`, are gone as well — no coercion error remains in this file's
+  closure.
+
+### The one root cause, measured rather than guessed
+
+`___common_toplev` is `_<_c_field_name('._common')>_toplev`, and the struct
+it names is emitted WITH fields — `VAR_DECL`, `_PAREN_RE`, `re` — just not
+with `_logger` or `STRING_LITERAL`. So this is not the "no field row at
+all" case the previous entry described; it is a name that IS a global of
+`._common` by the bare-name read's own gate and is NOT a field of the
+struct the same module emits.
+
+Which half is wrong is decidable from the code:
+
+* the WRITE side registers into `_module_globals[current_mod_name]`
+  (`module_gen.py`'s module-globals pass) and the struct is emitted from
+  `_module_globals[mod]` a few lines later (`gen_module_impl`'s
+  `_<mod>_toplev` block);
+* the READ side (`emit_exprs._lower_IdentExpr`'s bare-name global branch)
+  decides "this name is a global of THIS module" from the SHARED,
+  whole-transitive-tree, name-keyed `_global_var_types` /
+  `_global_to_module` / `_own_overlay_global_ctype`, and then emits
+  `_<mod>_globals.<name>`.
+
+`_logger` is a FUNCTION-SCOPED `from . import _logger` inside
+`c_parser/parser/_common.py`'s `log_match`, bound as a VALUE; that is a
+name in `_global_var_types` that no module-globals pass ever registers, so
+the gate passes and the field does not exist. Same for the
+`STRING_LITERAL` import and `_func_body`'s `DECL_BODY_PARSERS`. This is
+the same family as `bugs/CODEGEN_selfhost_red_on_the_merged_tree_149_gcc_
+errors.md`'s `has no member named 'TEST_PATH'` / `'_module_loader'` half,
+one module smaller and therefore directly observable.
+
+### Next step, in order
+
+1. **Make the bare-name read consult the module's OWN field list first.**
+   `gen._module_global_field_type(gen.module_name, name)` is authoritative
+   and already exists (it is what the qualified `submod.NAME` half uses,
+   and what `_cpp_module_global_field` in this branch's `cpp_core.py` now
+   uses); if it answers None, the name is not a field of this module's
+   struct and a `_<mod>_globals.<name>` read is wrong whatever the shared
+   tables say. This can only remove errors, never add them: today every
+   name the authoritative list rejects is already a gcc error. The same
+   registry is the one `_cpp_module_global_refs` keys the .cpp mirror off
+   (commit `12106a4b`), so the two sides agree by construction once this is
+   done.
+   **Do this before anything else**: it is small, it is testable on this
+   one file, and every remaining error here is downstream of it.
+2. `mojo_mark_dict_bool_values` (`_global.py:125`) is a separate defect
+   with its own trail in this repo (`mojo/backend_gimple/emit_stmts.py`'s
+   dict-bool marking, and the same name in the self-host doc's error set).
+   Trace it after (1), when the rest of this file is down to it.
+3. `parser__regexes__ind_15d274` (`_common.py:50`) is the previous
+   entry's item 1 residue — `c_parser/parser/_regexes.py` contributes no
+   code because its own compile is discarded. Re-check it AFTER (1): the
+   dangling reference it is part of may be a consequence of the same
+   field-registry gap rather than a separate one.
+
 ## Status 2026-09-30 — one gcc blocker fixed; this file is still far from building (three imported modules fail first)
 
 Re-verified against the current tree (`python3 fire.py build`, sources copied

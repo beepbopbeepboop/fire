@@ -226,6 +226,25 @@ def _module_candidate_paths(gen, module_name: str) -> list:
                 break
             _anc = _parent
     search_dirs += ['.', '..', script_dir]
+    # A CPython source checkout's `Lib/`, when the IMPORTING FILE is inside one.
+    # Appended LAST on purpose: every directory above it is more specific — the
+    # project's own tree, the CWD, this compiler's installation — so a name both
+    # of those and CPython's `Lib` provide still resolves the way it did before,
+    # and the ONLY thing that changes is a name nothing else provides. That is
+    # the whole gap: `Lib` is a SIBLING of `Tools`, not an ancestor, so the
+    # bounded upward walk above can never reach it from a `Tools/<tool>/x.py`
+    # entry file and `import argparse` used to degrade to a receiver stub with
+    # the source tree sitting right there on disk. Detection itself (and its
+    # memo) lives in `imports.py` because this resolver's own `_find` needs the
+    # same answer — see bugs/COMPILE_FAIL_cpython_lib_is_invisible_outside_it.md.
+    try:
+        import imports as _imp_cpy
+        _cpython_lib = _imp_cpy.cpython_lib_root(importer_dir) if importer_dir else None
+    except Exception as e:
+        _cpython_lib = None
+        gimple_ctypes._debug_note(f'CPython Lib/ detection failed for {importer_dir!r}', e)
+    if _cpython_lib:
+        search_dirs.append(_cpython_lib)
     mojo_paths = []
     _seen_dirs: list = []
     for d in search_dirs:
@@ -536,31 +555,55 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
             # reference (their referencing text was discarded with it).
             funcptr_needed_before = set(gen._funcptr_builtins_needed)
             funcptr_emitted_before = set(gen._emitted_funcptr_builtins)
-            # The string pool, for the SAME reason as the funcptr marks above
-            # and for the same failure: `_str_pool_declared` is what stops each
-            # module re-declaring every name interned before it, and an
-            # imported module emits `static char * _slit_N;` for the names it
-            # finds NOT yet declared. A failed subtree's generated text is
-            # discarded here, but its marks were not rolled back, so every name
-            # it interned was left marked declared with nothing declaring it --
-            # and the root's real definition comes near the END of the
-            # translation unit, after the function bodies that reference it.
-            # The result is "_slit_10001 undeclared (first use in this
-            # function)" on hundreds of references, from a subtree that was
-            # never in the output at all. Rolling the mark back keeps the pair
-            # symmetric, and a name interned only by the failed subtree is
-            # simply never declared because nothing references it.
-            strpool_declared_before = set(gen._str_pool_declared)
-            # `_c_helpers_needed` is the same shape of mark as the string pool:
-            # a helper is emitted INLINE at the point that needs it, and
-            # `_emitted_c_helpers` is what keeps a second module from emitting
-            # a duplicate `static` definition. A failed subtree's text is
-            # discarded, so its helpers' definitions went with it -- but the
-            # marks said they were already emitted, and every surviving
-            # reference became an implicit declaration. Measured: 100+
-            # "implicit declaration of function '_mojo_sizeof_<Struct>'", one
-            # per AST node class in fire_compiler.py.
+            # Every remaining per-TRANSLATION-UNIT "I already emitted this
+            # definition" registry, for the same reason and with the same
+            # consequence as the two above: the DEFINITION each of these
+            # marks is keyed to lands in the module's OWN `parts`, and this
+            # except handler throws those parts away whole. A mark that
+            # survives its own text leaves every LATER module believing the
+            # definition is already in the unit, so it emits nothing and the
+            # surviving reference sites die on an undeclared name — the
+            # *same* class of failure as `_funcptr_mojo_len` above, in the
+            # four other registries that carry a definition rather than a
+            # type:
+            #
+            #   `_str_pool_declared`        `static char * _slit_N;`
+            #   `_emitted_c_helpers`        `static int64_t _mojo_sizeof_X (void)`
+            #                               `static void * _mojo_fnaddr_f (void)`
+            #   `_regex_progs_defined`      `static const ARRAY[] = {...}`
+            #   `_emitted_list_marshalling` `_mg_pack_*`/`_mg_unpack_*`
+            #   `_emitted_singletons`       `static char * _mojo_type_name (...)`
+            #   `_emitted_unresolved_stub_syms` / `_auto_stubbed`  the
+            #                               `#ifndef`-guarded "unavailable in
+            #                               compiled mode" stub definitions
+            #
+            # Measured on Tools/c-analyzer/c_analyzer/__main__.py before this
+            # fix: 13 distinct `_slit_N` names and `_mojo_elem_repr_*` used
+            # with only their root-preamble definition, thousands of lines
+            # later, because c_parser/info.py, c_parser/parser/_func_body.py,
+            # c_parser/match.py and c_common/scriptutil.py each raise
+            # mid-compile and their marks outlived their text.
+            #
+            # Rolling a mark back can only ever ADD an emission, never
+            # remove one — and every one of these emissions is legal to
+            # repeat (`static char * x;` is a tentative definition, and the
+            # stubs are `#ifndef`-guarded), which is what makes the rollback
+            # unconditionally safe. The registries deliberately NOT listed
+            # here are the ones that hold KNOWLEDGE rather than an emission
+            # mark — `_str_pool` (name identity for a literal must stay
+            # stable across a retry, or the recompiled module would mint a
+            # second `_slit_N` for the same text), `_external_protos`,
+            # `struct_field_types`, `func_param_types`/`func_return_types`,
+            # `_module_globals` — and `_struct_allocs_needed`, whose actual
+            # emission is gated on `_emitted_allocs` (rolled back just above),
+            # so a stale entry there cannot lose a definition.
+            str_pool_declared_before = set(gen._str_pool_declared)
             emitted_c_helpers_before = set(gen._emitted_c_helpers)
+            regex_progs_defined_before = set(gen._regex_progs_defined)
+            emitted_list_marshalling_before = set(gen._emitted_list_marshalling)
+            emitted_singletons_before = set(gen._emitted_singletons)
+            stub_syms_before = set(gen._emitted_unresolved_stub_syms)
+            auto_stubbed_before = set(gen._auto_stubbed)
             gen._compiling_file_paths.add(_ap_key)
             try:
                 with open(path, 'r') as f:
@@ -1049,14 +1092,23 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                     gen._funcptr_builtins_needed.discard(_n)
                 for _e in list(gen._emitted_funcptr_builtins - funcptr_emitted_before):
                     gen._emitted_funcptr_builtins.discard(_e)
-                for _sp in list(gen._str_pool_declared - strpool_declared_before):
-                    gen._str_pool_declared.discard(_sp)
-                for _ch in list(gen._emitted_c_helpers - emitted_c_helpers_before):
-                    gen._emitted_c_helpers.discard(_ch)
-                # See `sub_toplevels_before` above: a declaration with no body
-                # behind it is a link error attributed to the wrong module.
-                if len(gen._sub_toplevels) > sub_toplevels_before:
-                    del gen._sub_toplevels[sub_toplevels_before:]
+                # The other per-TU "already emitted" registries — see the
+                # snapshot block above for why each of these marks is tied to
+                # text this handler is about to discard.
+                for _d in list(gen._str_pool_declared - str_pool_declared_before):
+                    gen._str_pool_declared.discard(_d)
+                for _h in list(gen._emitted_c_helpers - emitted_c_helpers_before):
+                    gen._emitted_c_helpers.discard(_h)
+                for _p in list(gen._regex_progs_defined - regex_progs_defined_before):
+                    gen._regex_progs_defined.discard(_p)
+                for _m in list(gen._emitted_list_marshalling - emitted_list_marshalling_before):
+                    gen._emitted_list_marshalling.discard(_m)
+                for _s in list(gen._emitted_singletons - emitted_singletons_before):
+                    gen._emitted_singletons.discard(_s)
+                for _y in list(gen._emitted_unresolved_stub_syms - stub_syms_before):
+                    gen._emitted_unresolved_stub_syms.discard(_y)
+                for _b in list(gen._auto_stubbed - auto_stubbed_before):
+                    gen._auto_stubbed.discard(_b)
                 # doc/OWNERSHIP_MODEL.md Phase 3's per-function state
                 # (gimple_gen_infra.py's begin_function/_owned_free_
                 # candidates) is NOT tied to modules_before/etc like the
@@ -2380,27 +2432,49 @@ def _intern_string(gen, escaped: str) -> str:
 
 
 def _format_percent_spec(gen, full_spec: str, conv: str, et: str, ev: str,
-                         enode=None) -> str:
+                         enode=None, width_ints: list | None = None) -> str:
     """Render one %-spec's operand to `char *`, applying any width or
-    precision in `full_spec` via a real C sprintf (see _sprintf_one)
+    precision in `full_spec` via a real C sprintf (see _sprintf_n)
     rather than reimplementing printf-style padding by hand.
 
     `enode` is the operand's AST node when the caller has it. It carries the
     only thing that distinguishes a bool from an int 0/1 — a bool's lowered C
     type is a plain `int` — so `'%r' % (b,)` has no other way to print True
-    (see `is_python_bool_expr` and `_repr_value`)."""
+    (see `is_python_bool_expr` and `_repr_value`).
+
+    `width_ints` are the already-lowered C `int` values a `*`-width and/or a
+    `.*`-precision consumed, in that order; empty for every spec without one.
+    They go in FRONT of the value, because that is where C reads them too —
+    `'%0*X' % (4, 255)` is `sprintf (buf, "%0*llX", 4, 255LL)`. The spec text
+    itself needs no rewriting for this: C spells a dynamic width with the same
+    `*`, and the 64-bit length modifier the integer conversions add lands
+    AFTER the width, which is exactly where C's grammar wants it
+    (`%[flags][width][.precision][length]conv`)."""
+    if width_ints is None:
+        width_ints = []
     if conv == 's':
         sval = gen._stringify_value(et, ev, enode)
         if full_spec == '%s':
             return sval
-        return gen._sprintf_one(full_spec[:-1] + 's', sval)
+        args = list(width_ints)
+        args.append(sval)
+        return gen._sprintf_n(full_spec[:-1] + 's', args)
     if conv == 'r':
         rval = gen._repr_value(et, ev, enode)
         if full_spec == '%r':
             return rval
-        return gen._sprintf_one(full_spec[:-1] + 's', rval)
+        args = list(width_ints)
+        args.append(rval)
+        return gen._sprintf_n(full_spec[:-1] + 's', args)
     if conv == 'c':
         nv = gen._to_int64(et, ev)
+        if width_ints:
+            # `%*c`: C takes the code as an `int`, so route it through sprintf
+            # rather than the `mojo_char_to_str` path below (which has no width
+            # to apply and takes a `char`).
+            args = list(width_ints)
+            args.append(nv)
+            return gen._sprintf_n(full_spec[:-1] + 'c', args)
         cv = gen._new_val('char', f'(char){nv}')
         return gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
     if conv in 'diouxX':
@@ -2411,10 +2485,14 @@ def _format_percent_spec(gen, full_spec: str, conv: str, et: str, ev: str,
         # undefined behavior (only 32 bits of the varargs int64_t are
         # consumed on most ABIs). "%5d" -> "%5lld", etc.
         c_spec = full_spec[:-1] + 'll' + conv
-        return gen._sprintf_one(c_spec, nv)
+        args = list(width_ints)
+        args.append(nv)
+        return gen._sprintf_n(c_spec, args)
     if conv in 'fFeEgG':
         dv = ev if et == 'double' else gen._new_val('double', f'(double){ev}')
-        return gen._sprintf_one(full_spec, dv)
+        args = list(width_ints)
+        args.append(dv)
+        return gen._sprintf_n(full_spec, args)
     # Unknown/unsupported conversion (e.g. '%a') -- degrade to str().
     return gen._stringify_value(et, ev)
 

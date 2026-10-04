@@ -745,7 +745,7 @@ def _is_known_struct_ptr_ctype(ctype, known_structs) -> bool:
     re-deriving a second notion of "is this really a struct pointer"."""
     return known_structs is not None and isinstance(ctype, str) and ctype.endswith(' *') and (ctype[:-2] in known_structs)
 
-def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, self_struct_ctype: str | None=None) -> str | None:
+def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, self_struct_ctype: str | None=None, module_global_types: dict | None=None) -> str | None:
     """Best-effort scalar C++ type of a narrow-generator-body expression —
     used both to pick each first-assigned local's declared type and to infer
     a generator's single yielded-value type. Deliberately conservative:
@@ -780,7 +780,23 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
     like every other compiled struct-method call site already resolves it)
     is one. Reuses this codegen's ALREADY-established per-struct dict-value-
     type/method-return-type registries rather than inventing new tracking —
-    see CODEGEN_generator_function_Lib_enum.md's 2026-08-20 update."""
+    see CODEGEN_generator_function_Lib_enum.md's 2026-08-20 update.
+
+    `module_global_types` (optional, default None — every existing caller
+    that doesn't pass it keeps this function's original behaviour) is a
+    `"<module marker>.<name>" -> ctype` map of module-level constants this
+    compile can read by name (`os.linesep`, `fsutil.USE_CWD`). A MemberExpr
+    rooted at one of those names is the value of a real field of that
+    module's globals struct, so it has a real type; without the map it fell
+    through to `return None` and every local bound to one took this
+    function's `int64_t` default — a string constant became an `int64_t`
+    local, which then disagreed with its sibling string locals and turned a
+    generator that yields strings everywhere into the mixed-kind refusal
+    (scriptutil.py's `iter_marks`: `div = os.linesep` beside
+    `end = f'{mark}{os.linesep}'`, bugs/COMPILE_FAIL_Tools_c-analyzer_c_
+    common_scriptutil.md). The map is the coroutine-body half of the
+    ordinary GIMPLE path's `submod.GLOBAL` read, which resolves the same
+    field's own `(c_type, mojo_type)` triple."""
     if isinstance(e, IntLiteral):
         return 'int64_t'
     if isinstance(e, FloatLiteral):
@@ -789,6 +805,9 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
         return '_Bool'
     if isinstance(e, StringLiteral):
         return 'char *'
+    if isinstance(e, MemberExpr) and module_global_types is not None \
+            and isinstance(e.obj, IdentExpr):
+        return module_global_types.get(f"{e.obj.name}.{e.member}")
     if isinstance(e, MemberExpr) and isinstance(e.obj, IdentExpr) and (e.obj.name == 'self'):
         if self_fields is None:
             return None
@@ -807,19 +826,19 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             return known[e.name]
         return 'int64_t'
     if isinstance(e, UnaryOp):
-        return _infer_simple_expr_ctype(e.operand, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types)
+        return _infer_simple_expr_ctype(e.operand, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types, module_global_types=module_global_types)
     if isinstance(e, TernaryExpr):
-        ct = _infer_simple_expr_ctype(e.condition, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types)
-        tt = _infer_simple_expr_ctype(e.then_val, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types)
-        et = _infer_simple_expr_ctype(e.else_val, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types)
+        ct = _infer_simple_expr_ctype(e.condition, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types, module_global_types=module_global_types)
+        tt = _infer_simple_expr_ctype(e.then_val, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types, module_global_types=module_global_types)
+        et = _infer_simple_expr_ctype(e.else_val, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types, module_global_types=module_global_types)
         if tt is not None:
             return tt
         if et is not None:
             return et
         return 'int64_t'
     if isinstance(e, BinaryOp):
-        lt = _infer_simple_expr_ctype(e.left, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types)
-        rt = _infer_simple_expr_ctype(e.right, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types)
+        lt = _infer_simple_expr_ctype(e.left, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types, module_global_types=module_global_types)
+        rt = _infer_simple_expr_ctype(e.right, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types, module_global_types=module_global_types)
         if lt is None or rt is None:
             return None
         if 'char *' in (lt, rt):
@@ -845,7 +864,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             if isinstance(_next_arg, IdentExpr) and _next_arg.name == 'self':
                 recv_ctype = self_struct_ctype
             else:
-                recv_ctype = _infer_simple_expr_ctype(_next_arg, known, self_fields, async_api, closure_api, known_structs, dict_val_types, method_return_types, fn_return_types, self_struct_ctype=self_struct_ctype)
+                recv_ctype = _infer_simple_expr_ctype(_next_arg, known, self_fields, async_api, closure_api, known_structs, dict_val_types, method_return_types, fn_return_types, self_struct_ctype=self_struct_ctype, module_global_types=module_global_types)
             if _is_known_struct_ptr_ctype(recv_ctype, known_structs):
                 rt = method_return_types.get(f'{recv_ctype[:-2]}___next__')
                 if rt in ('int64_t', 'double', '_Bool', 'char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
@@ -894,7 +913,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
                 if _is_known_struct_ptr_ctype(vt, known_structs):
                     return vt
         if method_return_types is not None and (not getattr(e, 'kwargs', None)) and (e.func.member != 'get'):
-            recv_ctype = _infer_simple_expr_ctype(e.func.obj, known, self_fields, async_api, closure_api, known_structs, dict_val_types, method_return_types)
+            recv_ctype = _infer_simple_expr_ctype(e.func.obj, known, self_fields, async_api, closure_api, known_structs, dict_val_types, method_return_types, module_global_types=module_global_types)
             if _is_known_struct_ptr_ctype(recv_ctype, known_structs):
                 rt = method_return_types.get(f'{recv_ctype[:-2]}_{e.func.member}')
                 if rt in ('int64_t', 'double', '_Bool', 'char *'):
@@ -1154,7 +1173,7 @@ def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None,
             slots = merged
     return (found, slots)
 
-def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_api: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, include_returns: bool=True, self_struct_ctype: str | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None) -> str | None:
+def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_api: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, include_returns: bool=True, self_struct_ctype: str | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None, module_global_types: dict | None=None) -> str | None:
     """The single scalar C++ type every `yield <value>` / `yield from
     <call>` in fn's own body must agree on (mixed types, a bare `yield` with
     no value, or a `yield from` that doesn't resolve to a known compiled
@@ -1186,7 +1205,12 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
     case already consults) let a `yield from self.<field>`/`yield from
     <local list>` site resolve its REAL element type instead of always
     defaulting to char* — see `_yield_from_delegate_ctype`'s matching
-    case. Real: Lib/tarfile.py's `TarFile.__iter__`."""
+    case. Real: Lib/tarfile.py's `TarFile.__iter__`. `module_global_types`
+    (`"<module marker>.<name>" -> ctype`, threaded straight through to
+    `_infer_simple_expr_ctype` below exactly as `known_structs` and friends
+    are) lets a `yield <module constant>` site resolve that constant's real
+    type instead of reporting the kind as unresolved — see
+    `_infer_simple_expr_ctype`'s own `module_global_types` entry."""
     ctype = None
     for n in _walk_own_body(fn.body):
         if isinstance(n, YieldExpr):
@@ -1201,7 +1225,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
             elif isinstance(n.value, (ListExpr, DictExpr, SetExpr)):
                 return None
             else:
-                t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api, known_structs, dict_val_types, method_return_types, fn_return_types, self_struct_ctype=self_struct_ctype)
+                t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api, known_structs, dict_val_types, method_return_types, fn_return_types, self_struct_ctype=self_struct_ctype, module_global_types=module_global_types)
                 if t is None:
                     t = 'int64_t'
             if ctype is None:
@@ -1264,7 +1288,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                 continue
             if n.value is None:
                 continue
-            t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api, known_structs, dict_val_types, method_return_types, fn_return_types)
+            t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api, known_structs, dict_val_types, method_return_types, fn_return_types, module_global_types=module_global_types)
             if t is None:
                 return None
             if ctype is None:
