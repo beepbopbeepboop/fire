@@ -55,6 +55,7 @@ which is what makes it cheap enough to belong in `check`.
 ## Groups
 
   census     FORMAL.md §2.2's runtime-ABI census, read out of the document
+  decisions  §4's decisions, and the tests they say pin them
   constants  the limits and budgets FORMAL.md and OPUS.md publish
   closed     the holes FORMAL.md §7 struck, and the ones it must not re-publish
   citations  every named claim in FORMAL.md / doc/ABI.md / OPUS.md resolves
@@ -858,8 +859,88 @@ def group_opus():
         check(said in text, f'OPUS.md §1 names the `{clause}` exclusion')
 
 
+# ── 7. §4's decisions, and the tests they say pin them ─────────────────────
+
+#: FORMAL.md §4 states a decision and then says what pins it. Both halves are
+#: checkable and both rot: a decision reverted while its prose stays, and a test
+#: renamed while the document keeps naming it. `(document, the file the document
+#: says pins it, the identifiers it names)`.
+DECISION_PINS = [
+    ('FORMAL.md', 'test_formal_run.py', (
+        # §4.5 — the shift decision
+        'ushift_u64_by_typed_int_amount',
+        'ushift_u64_by_typed_u64_amount',
+        'ushift_u64_by_literal_amount',
+        'ushift_u64_by_variable_amount',
+        'signed_shift_by_unsigned_amount_stays_arithmetic',
+        # §4.6 — the context-manager PROTOCOL decision
+        'with_on_a_word_is_the_context_manager_protocol_or_a_refusal',
+        'with_enter_binds_the_alias_before_the_body',
+        # §4.7 — the `finally` fall-through decision
+        'with_exit_runs_on_an_early_return',
+        'with_exit_runs_on_a_continue_inside_a_loop',
+    )),
+]
+
+
+def group_decisions():
+    """The decisions are the part of FORMAL.md most likely to be re-litigated.
+
+    §4 is a list of things a future reader is most likely to propose undoing --
+    "add the missing operator", "restore the suppression to save bytes", "add a
+    `with` lowering to a backend" -- and each one carries the reason it was not
+    done. Two of those reasons are MEASUREMENTS (CPython rejects `>>>` too; a
+    dropped `finally` printed nothing), and a measurement nobody can re-take is a
+    measurement that decays into folklore. So the measurements are re-taken here
+    and the test names the document leans on are checked in BOTH directions.
+    """
+    import fire_compiler as F
+    run = '\n'.join(_lines_of('test_formal_run.py'))
+
+    for document, path, names in DECISION_PINS:
+        for name in names:
+            check(f'`{name}`' in doc(document),
+                  f'{document} still names the case `{name}` that pins a decision')
+            check(name in run,
+                  f'{path} really has a case named {name}',
+                  'the document cites a test that does not exist')
+
+    # §4.5: no `>>>`, in this compiler's grammar AND in the oracle's. The second
+    # half is the load-bearing one and it is a property of the INTERPRETER this
+    # runs under, so it is re-measured rather than remembered -- which is the
+    # whole reason the decision says "measured rather than remembered".
+    check('>>>' not in F._PREC,
+          "fire_compiler.py's `_PREC` has no `>>>`, as FORMAL.md §4.5 states")
+    check('<<' in F._PREC and '>>' in F._PREC,
+          "and it does have `<<` and `>>`, which is the other half of the claim")
+    for how, fn in (('ast.parse', lambda: __import__('ast').parse('a >>> b')),
+                    ('exec', lambda: exec('a = 1; b = 2; a >>> b')),
+                    ('eval', lambda: eval('1 ' + '>' * 3 + ' 2'))):
+        try:
+            fn()
+            check(False, f'CPython accepts `>>>` through {how}, as FORMAL.md §4.5 '
+                         f'claims it does not')
+        except SyntaxError:
+            check(True, f'CPython rejects `>>>` through {how}')
+    check('CPython 3.14.7 rejects it too' in doc('FORMAL.md')
+          or 'CPython 3.14.7 rejects it too' in ' '.join(doc('FORMAL.md').split()),
+          'FORMAL.md §4.5 names the interpreter version it measured against',
+          f'this tree runs {sys.version.split()[0]}, so the version is a claim '
+          f'that goes stale on its own')
+
+    # §4.6 and §4.7: the two functions the decisions say own the behaviour, on
+    # the backends the decisions say.
+    import formal.model as M
+    check(hasattr(M, 'struct_is_context_manager'),
+          "FORMAL.md §4.6's `struct_is_context_manager` exists")
+    for path in ('formal/arm64_codegen.py', 'formal/x86_64_codegen.py'):
+        check('def _emit_try' in '\n'.join(_lines_of(path)),
+              f"FORMAL.md §4.7's `_emit_try` is in {path}")
+
+
 GROUPS = {
     'census': group_census,
+    'decisions': group_decisions,
     'constants': group_constants,
     'closed': group_closed,
     'citations': group_citations,

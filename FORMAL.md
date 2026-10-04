@@ -353,8 +353,12 @@ true.
    `common_type`'s signed-wins rule is right for `/` and `%`, where the operands
    genuinely combine, and wrong here. A program that wants zeros shifted in says
    so with an unsigned type. Pinned by `test_formal_run.py`'s
-   `ushift_u64_by_typed_int_amount`, `…_typed_u64_amount`, `…_literal_amount`,
-   `…_variable_amount` and `signed_shift_by_unsigned_amount_stays_arithmetic`.
+   `ushift_u64_by_typed_int_amount`, `ushift_u64_by_typed_u64_amount`,
+   `ushift_u64_by_literal_amount`, `ushift_u64_by_variable_amount` and
+   `signed_shift_by_unsigned_amount_stays_arithmetic` - **spelled out in full
+   rather than abbreviated after the first**, because
+   `test_formal_doc_truth.py` checks each of these names in both directions and
+   `…_typed_u64_amount` is not a name anything can grep.
 
    **Do not add `>>>`.** It is not a way to spell this, and the reason is
    measured rather than remembered: `fire_compiler.py`'s `_PREC` has `<<` and
@@ -374,7 +378,11 @@ true.
    FRAMED struct declaring both dunders, whose receiver is the frame's address —
    which is the by-reference receiver, so no part of the value model moves. Every
    other `with` is refused by name, which is what CPython does with a value that
-   has no `__enter__`.
+   has no `__enter__`. Pinned by `test_formal_run.py`'s
+   `with_on_a_word_is_the_context_manager_protocol_or_a_refusal` and
+   `with_enter_binds_the_alias_before_the_body` - the first for the refusal, the
+   second for the half that must still work, since a decision that refused
+   everything would pass a check that only looked for a refusal.
 
    **The lowering this replaced bound the name to the expression's value and ran
    the body, and that is a wrong-but-exit-0 answer with nothing on the link line
@@ -394,7 +402,11 @@ true.
    loop, are different paths through the same block and are still reachable —
    measured on both machines: `try: if n > 0: return 1 … finally: print()`
    printed nothing at all when `n` was 0. `formal/arm64_codegen.py`'s
-   `_emit_try` and its x86-64 twin.
+   `_emit_try` and its x86-64 twin, pinned on both architectures by
+   `test_formal_run.py`'s `with_exit_runs_on_an_early_return` (the conditional
+   `return`) and `with_exit_runs_on_a_continue_inside_a_loop` (the back edge) -
+   two shapes, because the defect was that both were being treated as the
+   unconditional one.
 
    **Do not restore the suppression to save bytes.** The copy is dead code in the
    unconditional case, and dead code costs bytes; the suppression costs a cleanup
@@ -447,9 +459,11 @@ removes.
 Add `fire_sqlite3.c` to the runtime build. Add a registered suite entry that builds
 **and runs** `test_sqlite3.mojo`. Decide the other four translation units: compile
 them, or stop `#include`ing their headers unconditionally — a declaration with no
-definition is a latent link failure either way. **The 2026-09-27 decision:** the
-four are registered in `build_config.OPTIONAL_RUNTIME_UNITS` and compiled on
-demand; `fire_python.c` is deliberately NOT, because its whole surface is
+definition is a latent link failure either way. **The decision, as it stands:**
+the optional units are rows of `build_config`'s registry (`_OPTIONAL_RUNTIME_UNITS`,
+read through `optional_unit_names()`, which answers `sqlite3`, `zlib`, `ssl`,
+`ncurses` and `metal`) and are compiled on demand;
+`fire_python.c` is deliberately NOT, because its whole surface is
 `#if USE_PYTHON 0` stubs and linking it would convert a loud link error into a
 silent NULL. Its header was never `#include`d either, so the failure stays loud.
 
@@ -541,9 +555,18 @@ Extend `arm64_step`'s `BL` (`lib/ProofLib.lean`) with a call frame, a
 callee entry, and return-to-`x30`. **This is the part that is still open.**
 `arm64_step`'s `BL` arm is still a bare transfer — `{ s with x30 := …, pc := … }`
 — and the consequence is still visible in the generated file as the named
-premise `…_post_extern_given_callee_returns`. The x86-64 `call_rel32`
-(`x86_step_call_rel32`, `lib/X86.lean`) is wired and verified, and
-`bugs/OPEN_WORK.md` A1's substance holds.
+premise `…_post_extern_given_callee_returns`.
+
+**The x86-64 half of this phase is DONE and this paragraph used to say it was
+not.** `call_rel32` is wired: `x86_step_call_rel32` in `lib/X86.lean` is named by
+`_FORMS` and reached through the successor expression and the literal-address
+substitution in `formal/x86_64_endtoend_test.py`, `lib/X86.lean` grew the
+call/return pairing section (`x86_call_post`, `x86_ret_post`, `x86_at_target`
+and the stack round-trip theorem), and `bugs/OPEN_WORK.md` A1 records it as
+wired with `call_rel32` named as a missing lemma by **0 of 45** examples. What
+A1 still asks for is a verification run, and A1 also records that its own
+mechanism claim was stale — the trio lives in `x86_64_endtoend_test.py`, not in
+the generator — which is the correction §11.2's [1] entry carries.
 
 Then, in this order — **all three are DONE**, and §3.1's table is the
 before/after:
