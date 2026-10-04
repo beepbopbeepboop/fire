@@ -8,6 +8,40 @@ next step with today's numbers. The defect this doc filed
 branches out of the function` — no longer happens, and the theorem that is
 emitted instead is one the model can support.
 
+**ADDENDUM 2026-10-04 (`work/formal25-6`): the decision below IS ALREADY MADE —
+on `work/formal22-guard-branches`, which is NOT merged.** That branch carries
+two commits this doc's next step asks for, and a queue that reads only `master`
+would re-derive a day of work:
+
+* `55f45626` "formal: decide the stack-floor guard's two branches instead of
+  walking both" — `_Abs` (constant propagation over the instruction forms), an
+  `_abs_cond` that transcribes `x86_cond`'s own `match`, and `_tree` asking it
+  at every `jcc`, so a settled condition is followed into ONE arm and the other
+  is never built. Each decision is emitted as `have hdec{k} : x86_cond … = …`
+  with NO `sorry` in it, so a decision the analysis gets wrong makes Lean reject
+  the file rather than admit a claim. Measured, `emit_terminates` alone over
+  `formal/examples` (Lean-free): emitted 38 → 39 of 50, leaves 218 → 69, step
+  equations 6 315 → 2 718, emitted bytes 4.31 MB → 3.02 MB; `ret42` 4 leaves /
+  58 steps → 1 leaf / 16 steps; `wide_recv` REFUSED-too-large → 1 leaf / 150
+  steps. Lean, on the two files this doc's own Reproducing line names: `ret42`
+  3.9 s, `wide_recv` 161.6 s, no errors, five admitted facts on `wide_recv` (four
+  `hpop`s and the closing `hrip`).
+* `8c338ced` updates this doc's Status with the same table, plus the emitter
+  tidy-ups the measurement found (`_abs_step`'s REX detection is the high
+  nibble, `lea`'s RIP-relative address uses the instruction's length, `cqo` is
+  handled before the ModRM decode, and `_MAX_CHAIN_STEPS`'s table is labelled the
+  BEFORE state).
+
+**What is left for whoever picks this up, and it is smaller than the section
+below says:** merge that branch (or rebase its two commits), then re-measure the
+VALUE theorem, because the payoff the section predicts — "`emit()`'s coverage of
+0 back to the 7 of 43 the guard cost" — is still open and the guard's `call_rel32`
+is still in every prologue even with both its branches decided. The tripwire
+`test_formal_sweep_truth.py::TestTheStackFloorGuardIsWhatGatesTheValueTheorem`
+pins the three path counts and that `emit()` covers nothing, so merging the
+branch should move the first three and leave the last alone; if it moves the
+last one too, that is worth a measurement rather than a surprise.
+
 ## What landed
 
 1. **`_tree`: a `call_rel32` whose target is not in the image is a LEAVE**, with
