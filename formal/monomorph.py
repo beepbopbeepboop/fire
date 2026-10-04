@@ -420,13 +420,13 @@ def instantiate(src: str, name: str, args) -> tuple:
 
 
 def type_arg_text(expr, values=()) -> str:
-    """The ABI spelling of a type ARGUMENT, or "" when it is not one.
+    """The ABI spelling of a bracket ARGUMENT, or "" when there is not one.
 
-    "" is the answer for everything that is not a type spelling, and it is a
-    refusal rather than a fallback: a computed argument has no single name, and
+    "" is the answer for everything that is not a spelling, and it is a refusal
+    rather than a fallback: a computed argument has no single name, and
     inventing one is how a call binds another instantiation's body (the reason
     `no_public_api_reason` refuses to export a template under its base name).
-    The accepted shapes are the three a type argument is written in:
+    The accepted shapes are the three a TYPE argument is written in:
 
         `Int`            an identifier
         `simd.float32`   a dotted name
@@ -434,6 +434,39 @@ def type_arg_text(expr, values=()) -> str:
                          name is a legal symbol fragment through the ONE
                          mangler (`monomorphize.safe_suffix`) rather than a
                          second copy of that rule here
+
+    **and ONE value shape, a LITERAL DISPLAY** — `[1, 2, 3]`, `(Int, String)`,
+    nested to any depth, with every element itself one of the three above or a
+    literal (`_display_element_text` is the one reader).  That is
+    `std/collections/type_dict.mojo`'s own use site
+    (`TypeDict[T=Int, Trait=AnyType, [1,2,3], Int, String, Float64]`), where
+    every parameter is a VALUE, and it was refused by the multi-index rule in
+    `formal/model.py` long before the monomorphizer could be asked — so the
+    bracket was never a demand and the call was never rewritten.
+
+    **A literal is accepted only INSIDE a display, and the asymmetry is the
+    point rather than an accident.**  `tile[2, 3](…)` is a comptime
+    specialization of a value parameter, and both backends already answer it
+    through `mojo/middle/comptime.specialization_args`; demanding `tile_2_3`
+    for it as well would publish a boundary symbol for a specialization the
+    build already emitted under its own name.  `Pair[2]` therefore stays a
+    non-demand (pinned by `test_formal_monomorph.py`), and what a DISPLAY buys
+    is the case where the value is a SEQUENCE, which a specialization bracket
+    never is and a boundary symbol has to be able to tell apart.
+
+    **The display's spelling is also its mangling, and it has to be all three
+    of stable, legal as a symbol fragment and DISTINCT** — two instantiations
+    differing only in a value argument must be two symbols or the second
+    overwrites the first.  All three come from the spelling being a FUNCTION of
+    the value: `safe_suffix` is injective on the text it is given, so the only
+    question left is whether two different displays can render the same text.
+    They cannot, because the rendering keeps each element's own brackets and
+    each separator, `repr` for a string, and the parenthesised comma for a
+    one-element tuple (`(1,)`), so `[1]` and `(1,)` and `1` are three texts and
+    therefore three symbols.  The rendering is ALSO the text substituted into
+    the body (`monomorphize_source` substitutes it whole-word), which is why an
+    element has to be a literal or a type spelling rather than an expression:
+    the substituted text has to be the same program.
 
     **A BARE IDENTIFIER must not be a name the reading scope BINDS AS A VALUE,
     and this is the sharp edge of the whole module, so it is worth being exact
@@ -469,9 +502,11 @@ def type_arg_text(expr, values=()) -> str:
     documented limit (`bugs/FORMAL_generic_monomorph_scope.md`): a type
     declared in the CONSUMER's own file is refused rather than instantiated.
 
-    `F.IntLiteral` and every expression form are refused, which is also what
-    keeps `tile[2, 3](…)` — a comptime specialization whose bracket items are
-    VALUES — from being read as a demand for `tile_2_3`.
+    `F.IntLiteral` and every expression form are refused at the TOP LEVEL, which
+    is also what keeps `tile[2, 3](…)` — a comptime specialization whose bracket
+    items are VALUES — from being read as a demand for `tile_2_3`; inside a
+    display a literal is a value the argument NAMES, which is the whole
+    difference between the two.
     """
     if isinstance(expr, F.IdentExpr):
         return "" if expr.name in (values or ()) else (expr.name or "")
@@ -485,7 +520,67 @@ def type_arg_text(expr, values=()) -> str:
             return ""
         import monomorphize                         # lazy — module docstring
         return f"{obj}_{monomorphize.safe_suffix(inner)}"
+    if isinstance(expr, (F.ListExpr, F.TupleExpr)):
+        return _display_text(expr, values)
     return ""
+
+
+def _display_element_text(expr, values) -> str:
+    """One ELEMENT of a literal display: a literal, or a type spelling.
+
+    Deliberately not `type_arg_text`, which refuses a bare literal because a
+    bare literal at the TOP level of a bracket is the `tile[2, 3]` case. Inside a
+    display the same node is a value the argument names rather than a
+    specialization to be answered by the local machinery, and refusing it would
+    refuse `type_dict.mojo`'s own use site.
+
+    The set is closed on purpose — literals, and the three type spellings by
+    delegating to `type_arg_text` — because this text is SUBSTITUTED into the
+    instantiated body. `f(1)`, `a + b` and `x.y()` have no closed form here and
+    would be a second question (what is the value of this expression) asked by
+    a function whose whole job is to name one.
+    """
+    if isinstance(expr, (F.ListExpr, F.TupleExpr)):
+        return _display_text(expr, values)
+    spelled = type_arg_text(expr, values)
+    if spelled:
+        return spelled
+    if isinstance(expr, F.IntLiteral):
+        return str(expr.value)
+    if isinstance(expr, F.FloatLiteral):
+        return repr(expr.value)
+    if isinstance(expr, F.StringLiteral):
+        return repr(expr.value)
+    if isinstance(expr, F.BoolLiteral):
+        return "True" if expr.value else "False"
+    if isinstance(expr, F.NoneLiteral):
+        return "None"
+    if isinstance(expr, F.UnaryOp) and expr.op in ("-", "+"):
+        inner = _display_element_text(expr.operand, values)
+        return f"{expr.op}{inner}" if inner else ""
+    return ""
+
+
+def _display_text(expr, values) -> str:
+    """A list or tuple display as one bracket-argument spelling, or "".
+
+    `""` when ANY element has no spelling, and all-or-nothing on purpose: a
+    partial display would substitute a body built from half the values the
+    source wrote, which is the fabricated-answer outcome this module refuses
+    everywhere else.
+
+    The one-element tuple keeps its comma. `(1)` in the substituted body is the
+    integer `1`, so a one-element tuple has to render as `(1,)` to stay the
+    tuple the source wrote — and the same character is what keeps it a
+    different symbol from the list `[1]` and from the bare `1`.
+    """
+    items = [_display_element_text(e, values) for e in (expr.elements or ())]
+    if not items or not all(items):
+        return ""
+    body = ", ".join(items)
+    if isinstance(expr, F.ListExpr):
+        return f"[{body}]"
+    return f"({body}{',' if len(items) == 1 else ''})"
 
 
 def all_instantiation_calls(consumer_src: str) -> dict:
