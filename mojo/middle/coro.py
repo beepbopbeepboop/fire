@@ -723,20 +723,88 @@ def _yield_from_ok(fn: N.FunctionDef) -> bool:
     return total == bare
 
 
+def _lambda_shape_ok(lam: N.LambdaExpr) -> bool:
+    """Is this `lambda`'s parameter shape one the shared call lowering gets
+    RIGHT? The measured answer, one clause per shape, all compiled + linked +
+    run against CPython inside a compiled generator body:
+
+    | shape | compiled | CPython |
+    |---|---|---|
+    | `lambda *a: add(a[0], a[1])`, called `e(4, 5)` | `9` | `9` |
+    | `lambda *a: addall(a)`, called `e(1, 2, 3)` | `6` | `6` |
+    | `lambda *args, **kwargs: add(n, args[0])`, capturing `n` | `13` | `13` |
+    | a variadic lambda ESCAPING as a call argument | `13` | `13` |
+    | a variadic lambda RETURNED out of the generator and called after | `3` | `3` |
+    | a variadic lambda behind an ordinary local, called there | right | right |
+    | `lambda x=n: x + 1` / `lambda x, y=n: x + y` / `lambda x, *, k=n:` | right | right |
+    | `lambda *, x=n: x + 1` | right | right |
+    | `lambda x=n, *a: x + a[0]`, called `e(0, 5)` | **`8`** | **`5`** |
+    | `lambda x, y=n, z=10: x + y + z`, called `e(4)` | **`135`** | **`17`** |
+
+    So the two clauses are the two wrong rows and nothing else: a DEFAULTED
+    parameter that a `*`/`**` parameter FOLLOWS, and two or more defaulted
+    parameters. Everything else -- including every `*args`/`**kwargs` shape,
+    which is what this guard used to refuse wholesale -- is correct.
+
+    The refusals stay because the failure they prevent is SILENT: both wrong
+    rows exit 0 with a plausible-looking integer, which is the worst verdict
+    a check can produce and the reason the guard is a refusal rather than a
+    warning. Their root cause is not this file's: a lambda's defaults are
+    stripped from the lifted signature (`_lower_LambdaExpr`'s `syn_params`,
+    which keeps only `(pname, None)`), so they are applied somewhere on the
+    call side, and both wrong rows are a call-site packing of more than one
+    substituted argument around a variadic tail. Filed as
+    `bugs/CODEGEN_two_lambda_defaults_are_mis_packed.md`.
+
+    One reading of the parameter list is load-bearing here. The parser DROPS a
+    bare `*` (the keyword-only marker), so `lambda *, x=n: ...` reaches this
+    function as `('x', <default>)` and is indistinguishable from
+    `lambda x=n: ...` — which is why the "a `*`/`**` parameter FOLLOWS" test
+    below is an index comparison against the first starred parameter rather
+    than a flag, and why that row is measured correct while
+    `lambda x=n, *a: ...` is not: the star is gone in one and present in the
+    other.
+
+    Variadic lambdas are no longer refused because they are no longer
+    miscompiled. `MojoVarargFn` (`runtime/fire_runtime.h`, "Variadic
+    callables") carries the callee, the env, the count of ordinary leading
+    parameters and which of the three variadic shapes it has, and
+    `mojo_fnptr_call_N` dispatches on it -- so the packing happens in the
+    runtime, at the one place that knows both the call's arity and the
+    callee's real parameter list. The forward-declaration bug that used to
+    make this a hard "conflicting types" error went with it. That was
+    measured on the ordinary path in 2026-09-26 and had never been
+    re-checked on the GENERATOR path, where this guard is what stands
+    between the shape and the A3 stack-switch lowering; so the rows above are
+    the re-check.
+    """
+    first_star = next((i for i, (pname, _d) in enumerate(lam.params)
+                       if pname.startswith('*')), None)
+    defaulted = 0
+    for i, (pname, pdefault) in enumerate(lam.params):
+        if pname.startswith('*'):
+            continue
+        if pdefault is None:
+            continue
+        defaulted += 1
+        if first_star is not None and i < first_star:
+            # A defaulted parameter BEFORE the variadic tail: measured `8`
+            # where CPython says `5`.
+            return False
+    return defaulted < 2
+
+
 def _lambdas_ok(fn: N.FunctionDef) -> bool:
-    """A `lambda` literal in the body is fine -- the desugared body is
+    """A `lambda` literal in a generator body is fine -- the desugared body is
     ordinary code and the ordinary codegen path lifts it to a top-level C
-    function -- EXCEPT for shapes that path miscompiles: a `*args`/
-    `**kwargs` parameter (emits a broken forward declaration) or a
-    parameter with a default value (silently reads garbage for the
-    defaulted slot). Refuse those so the module falls through to the cpp
-    path's own honest refusal instead of emitting broken/wrong C.
-    (bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md)"""
+    function -- EXCEPT for the parameter shapes that path gets wrong, which
+    `_lambda_shape_ok` above enumerates by measurement. Refuse those so the
+    module falls through to the cpp path's own honest refusal instead of
+    emitting broken/wrong C. (bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md)"""
     for n in _walk(fn):
         if isinstance(n, N.LambdaExpr):
-            for pname, pdefault in n.params:
-                if pname.startswith('*') or pdefault is not None:
-                    return False
+            if not _lambda_shape_ok(n):
+                return False
     return True
 
 

@@ -4928,6 +4928,176 @@ def main():
 main()
 """, "2\n2\n")
 
+    # ── a VARIADIC lambda inside a compiled generator body ────────────────
+    # `mojo/middle/coro.py`'s `_lambdas_ok` used to refuse EVERY lambda with a
+    # `*args`/`**kwargs` parameter (or a defaulted one) in a generator body,
+    # written when the shared gimple path emitted a broken forward declaration
+    # for that shape. `MojoVarargFn` — the callee, the env, the count of
+    # ordinary leading parameters, and which of the three variadic shapes it
+    # has, dispatched on by `mojo_fnptr_call_N` — fixed that, and the broken
+    # forward declaration with it, but the guard was never revisited. So the
+    # refusal was the last thing standing between the shape and the A3
+    # stack-switch lowering, for a reason that no longer existed.
+    #
+    # These four are the ways a variadic lambda is HELD, because they are
+    # four different materialization and call sites: called through its own
+    # local, capturing an enclosing local, escaping as a call argument, and
+    # returned out of the generator to be called after it is destroyed.
+    test_generator_stdout("generator_variadic_lambda_called_through_its_local", """\
+def add(a, b):
+    return a + b
+
+def gen(n):
+    e = lambda *a: add(a[0], a[1])
+    yield e(n, n + 1)
+
+def main():
+    for v in gen(4):
+        print(v)
+
+main()
+""", "9\n")
+
+    test_generator_stdout("generator_variadic_lambda_captures_an_enclosing_local", """\
+def add(a, b):
+    return a + b
+
+def gen(n):
+    e = lambda *args, **kwargs: add(n, args[0])
+    yield e(n + 3)
+
+def main():
+    for v in gen(5):
+        print(v)
+
+main()
+""", "13\n")
+
+    test_generator_stdout("generator_variadic_lambda_escapes_as_a_call_argument", """\
+def apply(f, x):
+    return f(x, x + 1)
+
+def add(a, b):
+    return a + b
+
+def gen(n):
+    e = lambda *a: add(a[0], a[1])
+    yield apply(e, n)
+
+def main():
+    for v in gen(6):
+        print(v)
+
+main()
+""", "13\n")
+
+    test_generator_stdout("generator_variadic_lambda_returned_and_called_after", """\
+def add(a, b):
+    return a + b
+
+def gen(n):
+    e = lambda *a: add(a[0], a[1])
+    yield e
+
+def main():
+    var f = None
+    for v in gen(7):
+        f = v
+    print(f(1, 2))
+
+main()
+""", "3\n")
+
+    # One defaulted parameter is fine and must STAY fine: `_lambda_shape_ok`'s
+    # second refusal clause is about two of them, and a guard that refused
+    # every default would be the blanket refusal this whole change removed.
+    test_generator_stdout("generator_lambda_with_one_default_is_still_admitted", """\
+def gen(n):
+    e = lambda x, y=n: x + y
+    yield e(4)
+
+def main():
+    for v in gen(3):
+        print(v)
+
+main()
+""", "7\n")
+
+    # …and four ORDINARY leading parameters before the `*args`, which is the
+    # limit the runtime's packing supports. Five is refused by
+    # `_lower_LambdaExpr` itself (below), so this row pins the edge of what is
+    # admitted rather than a shape someone hoped for.
+    test_generator_stdout("generator_variadic_lambda_with_four_leading_params", """\
+def add(a, b):
+    return a + b
+
+def gen(n):
+    e = lambda f, g, h, i, *a: add(f + g + h + i, a[0])
+    yield e(1, 2, 3, 4, 5)
+
+def main():
+    for v in gen(0):
+        print(v)
+
+main()
+""", "15\n")
+
+    # The two shapes `_lambda_shape_ok` still refuses, and the reason each is
+    # a refusal rather than a warning: both exit 0 with a plausible integer.
+    # Measured with CPython alongside — `lambda x=n, *a: x + a[0]` called
+    # `e(0, 5)` is 8 where CPython says 5, and `lambda x, y=n, z=10: x + y + z`
+    # called `e(4)` is 135 where CPython says 17 — so the test is that they do
+    # NOT compile, and the numbers are here so the next reader can check them
+    # rather than take them on trust.
+    # bugs/CODEGEN_two_lambda_defaults_are_mis_packed.md.
+    test_generator_refused("generator_lambda_default_before_star_args_refused", """\
+def gen(n):
+    e = lambda x=n, *a: x + a[0]
+    yield e(0, 5)
+
+def main():
+    for v in gen(3):
+        print(v)
+
+main()
+""", "lambda")
+
+    test_generator_refused("generator_lambda_with_two_defaults_refused", """\
+def gen(n):
+    e = lambda x, y=n, z=10: x + y + z
+    yield e(4)
+
+def main():
+    for v in gen(3):
+        print(v)
+
+main()
+""", "lambda")
+
+    # Five ordinary leading parameters before the `*args` is the backend's own
+    # deliberate refusal (`_lower_LambdaExpr`): the runtime passes at most four
+    # leading scalars through un-packed, so five would be a wrong value. Kept
+    # as a test because it is now the outermost boundary of the admitted set,
+    # and a boundary nobody asserts is a boundary that moves silently.
+    test_generator_refused("generator_variadic_lambda_five_leading_params_refused", """\
+def add(a, b):
+    return a + b
+
+def gen(n):
+    e = lambda f, g, h, i, j, *a: add(f + g + h + i + j, a[0])
+    yield e(1, 2, 3, 4, 5, 6)
+
+def main():
+    for v in gen(0):
+        print(v)
+
+main()
+""", "ordinary parameters before its *args")
+
+    if _FAIL:
+        print(f"\n{_PASS} passed, {_FAIL} failed")
+        raise SystemExit(1)
+
     # A nested `def` or a nested `class` inside a coroutine body is its OWN
     # function scope, and the A3 rewrite used to descend into it: every
     # `_rewrite_*_stmts` in `mojo/middle/coro.py` recurses into a statement's

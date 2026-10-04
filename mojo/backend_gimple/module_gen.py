@@ -8249,7 +8249,8 @@ def gen_module_impl(self, stmts):
         ann: dict = {}
         for _an_pn, _an_pt in (fn.params or []):
             ann[_as_str(_an_pn)] = _an_pt
-        # A METHOD RECEIVER, or a direct argument to a struct CONSTRUCTOR call.
+        # A METHOD RECEIVER, a direct argument to a struct CONSTRUCTOR call,
+        # or an argument FORWARDED to another function in this body.
         # Receiver: not rooted at a subscript/slice of the param, which is a
         # container (`p[0].m()`) and not this param at all.
         #
@@ -8262,23 +8263,38 @@ def gen_module_impl(self, stmts):
         # re-boxed on the way in and `x.numel()` printed the box's decimal
         # (the module-scope/module-global cases of the same family).
         #
-        # Scoped to a BARE identifier argument (`L(t)`, never `L(t.n)` or
-        # `L(self.t)`), because that is the shape where the argument's own
-        # type IS the parameter's type; any derivation would make the
-        # observation about the derived expression rather than about `pname`.
-        receiver_params: set = set()
+        # Forwarding: the same one-hop shape again, one level of pure
+        # indirection further out. `def b(w): return a(w).numel()` with
+        # `a(w) -> L(w)` is a dataclass travelling through two thin wrappers,
+        # and `w` is in `b`'s body only as `a(w)`'s argument — a bare
+        # identifier, which is the shape whose own type IS the callee's
+        # parameter type. Without this arm `b`'s parameter kept the `int64_t`
+        # default, `a`'s argument was read as a boxed integer at `a`'s call
+        # site, and `L.__init__`'s slot saw no struct anywhere, so every
+        # `self.<field>.<method>()` down the chain hit the generic no-op stub
+        # and returned the pointer's own bits: exit 0, no diagnostic.
+        #
+        # All three arms are scoped to a BARE identifier argument (`L(t)`,
+        # `a(t)`, never `L(t.n)` or `a(self.t)`), because that is the shape
+        # where the argument's own type IS the parameter's type; any
+        # derivation would make the observation about the derived expression
+        # rather than about `pname`. Widening WHICH callee a bare identifier
+        # may be forwarded to does not widen the EVIDENCE: every gate below
+        # still has to pass, and it now also has to survive the propagation
+        # fixpoint that follows.
+        struct_evidence_params: set = set()
         _rcalls: list = []
         self._calls_in_stmts(fn.body, _rcalls)
         for _rc in _rcalls:
             if isinstance(_rc.func, MemberExpr):
                 if isinstance(_rc.func.obj, IdentExpr):
-                    receiver_params.add(_as_str(_rc.func.obj.name))
-            elif isinstance(_rc.func, IdentExpr) and _ctor_init_params.get(_as_str(_rc.func.name)):
+                    struct_evidence_params.add(_as_str(_rc.func.obj.name))
+            elif isinstance(_rc.func, IdentExpr):
                 for _rc_a in _rc.args:
                     if isinstance(_rc_a, IdentExpr):
-                        receiver_params.add(_as_str(_rc_a.name))
+                        struct_evidence_params.add(_as_str(_rc_a.name))
         for pname in sorted(pmap):
-            if pname not in receiver_params:
+            if pname not in struct_evidence_params:
                 continue
             types = pmap[pname]
             # Not unanimous -> the parameter is genuinely polymorphic here and
@@ -8303,6 +8319,92 @@ def gen_module_impl(self, stmts):
             if cur is not None and cur not in _STRUCT_FALLBACKS:
                 continue
             self._inferred_param_types.setdefault(callee, {})[pname] = _st
+
+    # The same contract one hop FURTHER OUT, and the reason the arm above is
+    # not enough on its own. Admission above resolves a parameter from its own
+    # CALL SITES; `a`'s parameter in `b(w) -> a(w) -> L(w)` has none, because
+    # nothing in the module calls `a` directly. The evidence is one level up —
+    # in `b`'s body, where `w`'s own type is now known — so it has to be
+    # PROPAGATED, and propagation has to run to a fixpoint because each hop can
+    # only see the previous one.
+    #
+    # This is the struct-pointer twin of the container rule
+    # `_infer_param_types` already applies ("passing the param to a user
+    # function whose own parameter at that position was inferred as a
+    # container is iteration evidence"), and of the ctor caller-side twin
+    # further down this function, which does the same one hop for a
+    # constructor argument. All three are the same rule at three positions in
+    # the call graph, and this is the only one that could cross free
+    # functions.
+    #
+    # Every gate the ctor twin uses is reused here, unchanged: an explicit
+    # annotation wins, a defaulted parameter keeps its default-derived type
+    # (a call site that omits the argument would otherwise feed the default
+    # through the refined C type), only a no-evidence type is replaced, and —
+    # the gate the twins do not need — CONTRARY call-site evidence vetoes the
+    # hop. That last one is what keeps the chain honest: if `a`'s own callers
+    # unanimously pass something other than a `T *`, this hop is refused even
+    # though `b` says otherwise, which is the same disagreement a real
+    # overload would produce.
+    #
+    # Bounded, for the reason the ctor fixpoint is: a chain longer than a
+    # handful of hops is a closure, and an unbounded walk here is a loop over a
+    # graph being mutated by the walk. Four rounds is the same bound the
+    # constructor fixpoint uses, for the same reason. Idempotent by
+    # construction: a second round over the same evidence finds every hop
+    # already at its final value.
+    for _fwd_round in range(4):
+        _fwd_changed = False
+        for _fcaller, _fbody in _caller_bodies:
+            _fcalls: list = []
+            self._calls_in_stmts(_fbody, _fcalls)
+            for _fc in _fcalls:
+                if not isinstance(_fc.func, IdentExpr):
+                    continue
+                _fcallee = _as_str(_fc.func.name)
+                _fpns = self._func_param_names.get(_fcallee)
+                _ffn = _fn_by_name.get(_fcallee)
+                if not _fpns or not _ffn:
+                    continue
+                _fann: dict = {}
+                for _fp, _fpt in (_ffn.params or []):
+                    _fann[_as_str(_fp)] = _fpt
+                _fdflt = getattr(_ffn, 'param_defaults', {}) or {}
+                for _fi, _fa in enumerate(_fc.args):
+                    if _fi >= len(_fpns):
+                        break
+                    if not isinstance(_fa, IdentExpr):
+                        continue
+                    _fan = _as_str(_fa.name)
+                    _fst = self._inferred_param_types.get(
+                        _fcaller, {}).get(_fan)
+                    if not (isinstance(_fst, str) and _fst.endswith(' *')
+                            and _fst[:-2] in self.struct_field_types):
+                        continue
+                    _fq = _as_str(_fpns[_fi])
+                    if _fann.get(_fq) is not None:
+                        continue            # respect explicit annotation
+                    if _fq in _fdflt:
+                        continue            # respect default-value inference
+                    _fcur = self._inferred_param_types.get(
+                        _fcallee, {}).get(_fq)
+                    if _fcur is not None and _fcur not in _STRUCT_FALLBACKS:
+                        continue            # only a no-evidence type
+                    _fobs = (_struct_obs.get(_fcallee) or {}).get(_fq)
+                    if _fobs:
+                        # Contrary call-site evidence vetoes the hop. Compared
+                        # through `sorted(...)` + index for the same
+                        # self-hosted reason as the admission loop above.
+                        _fsole = sorted(_fobs)
+                        if len(_fsole) != 1 or _fsole[0] != _fst:
+                            continue
+                    if _fcur == _fst:
+                        continue
+                    _fwd_changed = True
+                    self._inferred_param_types.setdefault(
+                        _fcallee, {})[_fq] = _fst
+        if not _fwd_changed:
+            break
 
     # Coroutine-bound functions (generators/async defs about to go down the
     # C++20-coroutine pre-pass) never get an ordinary gen_func compile, so

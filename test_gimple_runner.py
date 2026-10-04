@@ -7163,6 +7163,74 @@ def main():
 main()
 """, "15\n")
 
+    # The same contract one hop FURTHER OUT: a dataclass travelling through
+    # two thin free-function wrappers, `b(w) -> a(w) -> L(w)`, where `w` is in
+    # `b`'s body only as `a(w)`'s argument and NOTHING calls `a` directly, so
+    # `a`'s own parameter has no call-site evidence at all. It gets the
+    # struct from `b`'s body, and `b` gets it from `b(T(9))` — so admission and
+    # propagation have to run to a fixpoint, one hop per round, or the chain
+    # stops at whichever function was reached first.
+    #
+    # Before the forwarding arm this printed the `T *`'s own bits (measured
+    # 4377466752 where CPython says 9): `self.w.numel()` degraded to the
+    # generic no-op stub at every level, exit 0, no diagnostic.
+    test_gimple_stdout("gimple_struct_ptr_param_forwarded_through_two_free_functions", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class L:
+    def __init__(self, w):
+        self.w = w
+    def numel(self):
+        return self.w.numel()
+
+def a(w):
+    return L(w)
+
+def b(w):
+    return a(w).numel()
+
+def main():
+    print(b(T(9)))
+
+main()
+""", "9\n")
+
+    # Three hops, so the bound is asserted rather than assumed: the fixpoint is
+    # capped at four rounds, and this is the case that would notice if the cap
+    # were lowered or the propagation removed.
+    test_gimple_stdout("gimple_struct_ptr_param_forwarded_through_three_free_functions", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class L:
+    def __init__(self, w):
+        self.w = w
+    def numel(self):
+        return self.w.numel()
+
+def a(w):
+    return L(w)
+
+def b(w):
+    return a(w)
+
+def c(w):
+    return b(w).numel()
+
+def main():
+    print(c(T(11)))
+
+main()
+""", "11\n")
+
+
     # The same fix reached through a FREE FUNCTION's parameter instead of
     # through a field, and with a second (`char *`) constructor argument
     # beside it, so the struct answer has to be admitted per SLOT and not
