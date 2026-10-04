@@ -64,6 +64,7 @@ answer is a claim about a host nobody checked.
 """
 
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -120,8 +121,36 @@ class Contract:
         return "admitted_" + _lean_ident(f"{self.module}_{self.name}")
 
     def docstring(self) -> str:
-        """The `/-- … -/` body for the generated Lean declaration."""
+        """The `/-- … -/` body for the generated Lean declaration.
+
+        `THE WORD IS THE MODEL'S` is stamped here rather than written into
+        nineteen `@admitted` texts, and the reason is that it is not an
+        ASSUMPTION: it is a statement about the shape of the declaration this
+        module generates, which is `UInt64 → UInt64` because a value on this path
+        is one 64-bit word.  The decorator stays the only place an ASSUMPTION is
+        written, which is the rule the module header states and the one a reader
+        of the Mojo source relies on; a shape is not an assumption, and repeating
+        it nineteen times is nineteen chances for the copies to disagree.
+
+        It is here because it is the largest standing gap in the mechanism and
+        nothing said so.  For most of these operations CPython does not return a
+        word at all: `check_call`, `Thread.join` and `Executor.shutdown` return
+        `None`, `Popen` and `run` return objects, `getstatusoutput` and
+        `communicate` return pairs, `Executor.submit` returns a `Future`, and
+        `Lock.acquire` returns `True`.  So `admitted_subprocess_check_call : UInt64 →
+        UInt64` is a claim about what THIS MODEL answers, and a proof that reads
+        it as CPython's return type is reading a different claim from the one the
+        declaration makes.  `bugs/FORMAL_trust_audit_2026-10-04.md` §"the word is
+        the model's" carries the measurement and the per-operation table.
+        """
         return (f"ADMITTED: {self.qualified}.\n"
+                f"    THE WORD IS THE MODEL'S: this declaration is "
+                f"`UInt64 -> UInt64` because a value on this path is one 64-bit "
+                f"word, so what it admits is the answer THIS MODEL gives to the "
+                f"question the caller asked.  For most of these operations "
+                f"CPython returns something that is not a word -- `None`, a "
+                f"`Popen`, a `CompletedProcess`, a pair, a `Future`, a `bool` -- "
+                f"so this is not a restatement of CPython's return type.\n"
                 f"    ASSUMES OF THE HOST: {self.assumes}\n"
                 f"    Nothing else about the host's answer is assumed or proved. "
                 f"Declared at {self.source}:{self.line}.")
@@ -396,3 +425,206 @@ def contract_texts_are_unique(contracts: list) -> str:
                     f"two contracts")
         seen[c.lean_name] = c
     return ""
+
+
+# ── the Lean library's own trust ──────────────────────────────────────────────
+#
+# The other half of the boundary.  `formal/admitted.py` above is about the HOST:
+# what a proof must assume about a second process, a thread, a loader and a
+# kernel lock.  This half is about LEAN ITSELF — what the hand-written library
+# every generated proof rests on is already trusting, written in a language where
+# the trust has to be spelled `axiom`, `sorry`, or a tactic whose proof term
+# reaches an axiom.
+#
+# FORMAL.md §7 states the project's position as *no Lean `axiom` and no `opaque`
+# anywhere; everything is assumed in the `sorry` sense*.  Measured on `lib/` on
+# 2026-10-04 (`bugs/FORMAL_trust_audit_2026-10-04.md`): the first half of that
+# sentence is true of the SOURCE TEXT and false of a theorem's transitive
+# closure.  There is no `axiom` declaration and no `sorry` in any of the five
+# modules — and 749 proof sites are closed by `native_decide` or `bv_decide`,
+# which do not go through the kernel: they compile a decision procedure and run
+# it, and close the goal through Lean's `Lean.ofReduceBool` axiom.
+# `#print axioms` on such a theorem reports `Lean.ofReduceBool`, and `OPUS.md` §1
+# already says so about a generated theorem ("plus the project's usual
+# `native_decide`/`bv_decide` step-lemma axioms") without FORMAL.md's inventory
+# having a row for it.  That 749 is a CEILING rather than an equality, because it
+# is a debt being paid down and `lib/ProofLib.lean` is edited by many hands at
+# once; `test_formal_admitted.py` pins it, reports it, and fails when it rises.
+#
+# WHY THIS IS NOT A BUG AND WHY IT IS STILL COUNTED
+# -------------------------------------------------
+# `native_decide` cannot prove a false statement: it evaluates the goal's decision
+# procedure and answers `True` only when the evaluation says so.  What it moves
+# is WHERE the trust sits — from the kernel to the generated C code and the C
+# compiler — and that is a legitimate trade (it is why a 1.4M-step machine
+# simulation finishes at all) rather than a hole.  It is counted because a trust
+# boundary nobody can see is worth nothing, and because the alternative — a
+# library that quietly depends on an axiom while §7 says it depends on none — is
+# the failure this module exists to prevent.  `bugs/FORMAL_native_decide_axiom.md`
+# carries the replacement plan and the exact `#print axioms` measurement that
+# belongs to the integrator.
+#
+# TEXT SCAN, AND WHAT IT IS NOT
+# -----------------------------
+# This is a TEXT census and `formal/lean.py` says, about `sorry` itself, that a
+# text scan is the wrong instrument: whether a hole was ADMITTED is elaboration,
+# so the sound instrument is what Lean reports.  It is here anyway, for three
+# reasons stated rather than assumed: it needs no Lean run (so it can sit in a
+# test that runs every time, which the axiom census cannot), it is exact for the
+# things it counts because `lean_code_regions` strips comments and string
+# literals first, and its own limits are written down rather than left for a
+# reader to discover.  It reports `native_decide` SITES in the source; it does not
+# report which theorems reach `Lean.ofReduceBool`, which is the transitivity the
+# `#print axioms` route is for.
+
+# Tactics whose proof term reaches an axiom instead of the kernel.  `decide`,
+# `rfl`, `simp`, `norm_num` and `omega` are not here: they elaborate to terms the
+# kernel checks.  `exact_decide` is not a Lean 4 tactic and `implemented_by` is
+# not used in `lib/`; both are checked by the test that pins this list, so a
+# library that starts using one cannot be counted correctly.
+AXIOM_TACTICS = ("native_decide", "bv_decide")
+
+
+def lean_code_regions(text: str) -> str:
+    """`text` with every comment and string literal's CONTENTS blanked out.
+
+    Blanked rather than deleted, so every offset — and therefore every line
+    number — survives, which is what lets the callers report where a hit is.
+
+    Lean's lexical shapes that matter here, and why each is handled:
+
+      * `-- …` to the end of the line;
+      * `/- … -/` **nested**, which Lean allows and which a regex cannot do;
+      * `"…"` with `\\` escapes, and `r"…"` without them (a raw string's
+        backslash does not escape its own closing quote, so treating it as an
+        ordinary string mis-lexes every `r"` in the file);
+      * `'…'` character literals, because a `'/'` or `'-'` inside one would
+        otherwise open a comment that swallows the rest of the file.
+
+    Lean's multi-line string delimiter (three double quotes) is deliberately
+    absent from the list above: `lib/` contains none, and a scanner that guessed
+    at one would be guessing.  The test that pins the census asserts there is
+    none, so the omission cannot rot silently.
+    """
+    out = []
+    i, n = 0, len(text)
+    depth = 0                     # block-comment nesting
+    while i < n:
+        ch = text[i]
+        if depth:
+            if text.startswith("/-", i):
+                depth += 1
+                out.append("  ")
+                i += 2
+                continue
+            if text.startswith("-/", i):
+                depth -= 1
+                out.append("  ")
+                i += 2
+                continue
+            out.append("\n" if ch == "\n" else " ")
+            i += 1
+            continue
+        if text.startswith("--", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            out.append(" " * (j - i))
+            i = j
+            continue
+        if text.startswith("/-", i):
+            depth = 1
+            out.append("  ")
+            i += 2
+            continue
+        if ch in "\"'":
+            raw = (ch == '"' and i > 0 and text[i - 1] == "r"
+                   and not (i > 1 and (text[i - 2].isalnum()
+                                       or text[i - 2] == "_")))
+            quote = text[i:i + 3] if text.startswith(ch * 3, i) else ch
+            j = i + len(quote)
+            while j < n:
+                if not raw and text[j] == "\\":
+                    j += 2
+                    continue
+                if text.startswith(quote, j):
+                    j += len(quote)
+                    break
+                j += 1
+            j = min(j, n)
+            out.append("".join("\n" if c == "\n" else " " for c in text[i:j]))
+            i = j
+            continue
+        out.append(ch)
+        i += 1
+    out.append(" " * (n - i))
+    return "".join(out)
+
+
+# An `axiom`/`opaque` DECLARATION, as opposed to either word inside prose.  Both
+# are at the head of a line in Lean source and both take a name, so the
+# declaration form is anchored at the start and the prose forms are not.
+_AXIOM_DECL_RE = re.compile(r"(?m)^[ \t]*(?:@\[[^\]\n]*\][ \t\n]*)*"
+                            r"(?:private\s+|protected\s+)?"
+                            r"(axiom|opaque)\s+([A-Za-z_][\w'.]*)")
+_SORRY_RE = re.compile(r"(?<![\w.])sorry(?![\w.])")
+_TACTIC_RE = re.compile(r"(?<![\w.'])(" + "|".join(AXIOM_TACTICS) + r")(?![\w'])")
+
+
+def library_trust(lean_dir: str) -> dict:
+    """`{module: {kind: (count, (lines…))}}` for every `*.lean` in `lean_dir`.
+
+    Three kinds, and they are the three ways a Lean declaration can rest on
+    something unproved:
+
+      `axiom`   an `axiom`/`opaque` declaration — none is wanted, ever (§7);
+      `sorry`   a hole — countable here and, more precisely, by Lean itself;
+      `axiom_tactic`  a `native_decide`/`bv_decide` site, whose proof term
+                 reaches `Lean.ofReduceBool` rather than the kernel.
+
+    Both the count and the LINES come back, because a count with no location is
+    a number nobody can act on and a location with no count is a note.
+    """
+    out = {}
+    for name in sorted(os.listdir(lean_dir)):
+        if not name.endswith(".lean"):
+            continue
+        path = os.path.join(lean_dir, name)
+        try:
+            with open(path, encoding="utf-8") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        code = lean_code_regions(raw)
+        line_of = lambda off: raw.count("\n", 0, off) + 1     # noqa: E731
+        kinds = {}
+        for kind, regex in (("axiom", _AXIOM_DECL_RE),
+                            ("sorry", _SORRY_RE),
+                            ("axiom_tactic", _TACTIC_RE)):
+            hits = sorted({line_of(m.start()) for m in regex.finditer(code)})
+            kinds[kind] = (len(hits), tuple(hits))
+        out[name[:-len(".lean")]] = kinds
+    return out
+
+
+def library_trust_lines(lean_dir: str) -> list:
+    """`library_trust` as `module: kind=n at L…` lines, for a report."""
+    out = []
+    for mod, kinds in sorted(library_trust(lean_dir).items()):
+        for kind in ("axiom", "sorry", "axiom_tactic"):
+            count, lines = kinds[kind]
+            if count:
+                shown = ",".join(str(x) for x in lines[:6])
+                more = "" if len(lines) <= 6 else f",+{len(lines) - 6}"
+                out.append(f"{mod}: {kind}={count} at {shown}{more}")
+    return out
+
+
+def lean_dir(root: str) -> str:
+    """The hand-written Lean library directory for a checkout.
+
+    One function rather than a path spelled at each of its call sites, for the
+    reason `HOSTMODS_ROOT` is defined through `formal/imports.py`'s root: two
+    spellings of one directory drift, and the drift is invisible.
+    """
+    return os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "lib")

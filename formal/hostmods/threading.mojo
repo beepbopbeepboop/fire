@@ -126,7 +126,10 @@ def lock_locked(state: int) -> int:
 # ── the admitted half ────────────────────────────────────────────────────────
 
 ADMITTED_EXIT_STATUS = 125
-"""The status an admitted call exits with; `formal/hostmods/subprocess.mojo` says why."""
+"""The status an admitted call exits with; `formal/hostmods/subprocess.mojo` says why,
+and the measurement that corrected its reason is there too: 125 is INSIDE 0..255 and
+no exit code can be outside it, so this is a RESERVED nonzero status and the
+diagnostic on stdout is the channel that says "refused", not the number."""
 
 def _admitted(what: str) -> int:
     """Refuse to answer, naming the contract that would have to be trusted."""
@@ -136,7 +139,7 @@ def _admitted(what: str) -> int:
     exit(ADMITTED_EXIT_STATUS)
     return 0
 
-@admitted("the thread exists and has run the target callable, and nothing is assumed about what the callable computed or when")
+@admitted("the thread exists and has BEGUN running the target callable, and nothing is assumed about what the callable computed or when it finishes")
 def thread_start(target: int) -> int:
     """`Thread(target=fn).start()`: begin running `fn` on a second thread.
 
@@ -148,15 +151,23 @@ def thread_start(target: int) -> int:
     separate contract for that reason: "a thread will run this" and "that thread
     has stopped" are independent facts, and a program that only joins a thread it
     did not start trusts less than one that does both.
+
+    "Has BEGUN running" is the whole content of the admission, and the word was
+    put there by measurement: `Thread.start()` returns once `Thread._bootstrap`
+    has set its `_started` event, which happens BEFORE `run()` is entered, so a
+    callable that sleeps for a second is still running when `start()` returns.
+    The admission this replaced said the thread "has run the target callable",
+    which is true under one reading and false under the other, and a claim that is
+    true or false depending on which reading a proof happens to use is not a claim.
     """
     return _admitted("threading.Thread.start")
 
-@admitted("the thread has stopped, and nothing is assumed about what it computed")
+@admitted("the thread has stopped, for a join with no timeout; nothing is assumed about what it computed")
 def thread_join(target: int) -> int:
     """`Thread.join()`: wait for the thread to finish."""
     return _admitted("threading.Thread.join")
 
-@admitted("the lock is held by the kernel on a descriptor, and whether it is granted depends on every other holder")
+@admitted("the lock is a per-object mutual exclusion inside THIS process: CPython's threading.Lock is a userspace semaphore that names no descriptor, and fcntl.flock on any descriptor neither waits for it nor is waited on by it")
 def lock_acquire(fd: int) -> int:
     """`Lock.acquire()`: take the lock, blocking until it is available.
 
@@ -164,6 +175,16 @@ def lock_acquire(fd: int) -> int:
     is a duplication this project does not permit: two modules that both take a
     kernel lock must go through ONE function, or a fix to how the lock is spelled
     has to be made twice and the two copies can disagree about what the lock is.
+
+    What the admission does NOT say any more, because it was false and the audit
+    measured it: it used to claim "the lock is held by the kernel on a
+    descriptor".  CPython's `threading.Lock` is a `_thread.lock` — a userspace
+    semaphore with no `fileno`, no `_handle` and no descriptor of any kind — and
+    it does not interact with `fcntl.flock` at all: a child process took
+    `LOCK_EX` on a file while this process held a `threading.Lock` over the same
+    file's directory, and got it.  A lock the caller can also take from outside
+    the process is not the lock `Lock.acquire` takes, and the admission now says
+    which one it is.
 
     Two parameters in CPython's `acquire(blocking=True, timeout=-1)` and ONE
     here, and both words of that are settled by `formal/hostmods/fcntl.mojo`:

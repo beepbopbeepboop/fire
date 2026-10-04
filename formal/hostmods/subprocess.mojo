@@ -62,13 +62,22 @@ files.
 WHAT A CALL ACTUALLY DOES AT RUN TIME
 -------------------------------------
 `run` and the rest do not compute an answer and do not invent one.  They print a
-diagnostic naming the contract they rest on and exit with a status the caller
-cannot mistake for a child's: `ADMITTED_EXIT_STATUS` is 125, which is outside
-`0..255` and therefore cannot be read as the exit status of a process this image
-did not run.  A program that calls `subprocess.run` on this target stops with a
-number that says so, rather than printing a number the source never wrote — the
-failure this project treats as its worst, recorded in
-`bugs/FORMAL_known_limits.md` §"fabricated a value".
+diagnostic naming the contract they rest on and exit with `ADMITTED_EXIT_STATUS`.
+A program that calls `subprocess.run` on this target stops with a number that says
+so, rather than printing a number the source never wrote — the failure this
+project treats as its worst, recorded in `bugs/FORMAL_known_limits.md`
+§"fabricated a value".
+
+**What that status can and cannot do**, because this file's earlier version of
+this paragraph claimed something false about it and the claim was worth more
+than the sentence it stood in.  125 is *inside* `0..255`, not outside it: it is
+an ordinary child exit status (`sh -c 'exit 125'` is reported by CPython as 125),
+and no exit code can be outside the range, because the kernel masks one —
+`sh -c 'exit 300'` is reported as 44.  So the status cannot DISTINGUISH a refusal
+from an answer, and the diagnostic printed on stdout is the channel that does;
+125's real job is that it is nonzero and reserved by this tree.  The audit that
+established this is `bugs/FORMAL_trust_audit_2026-10-04.md`, and
+`test_formal_admitted.py`'s `truth` group re-measures both halves on every run.
 
 That is a deliberate refusal to answer, and it is what makes the admission
 honest rather than convenient.  The alternative — returning 0 — is what
@@ -135,19 +144,41 @@ Every `@admitted` below states an assumption about the RETURNED WORD and nothing
 else; `formal/admitted.py`'s `contract_text_is_scoped` enforces that rule by
 refusing any contract text containing a claim about host behaviour.  They are:
 
-  * `run` / `call` / `check_call` / `check_output` — the child's exit status, an
-    integer in 0..255; the captured output bytes are an arbitrary byte string;
-    and for the two that check, a non-zero status is what would raise.
-  * `getoutput` / `getstatusoutput` — the same, through a shell.
+  * `run` / `call` / `check_call` — the child's exit status word, which is
+    `0..255` for a normal exit and `-N` for a death by signal N.  **Both halves,
+    and the second is not optional**: CPython's `Popen.returncode` is negative
+    when the child was killed, `subprocess.run(["sh","-c","kill -9 $$"])
+    .returncode` is `-9`, and a contract claiming `0..255` alone is claiming
+    something the host does not do.  `check_call` additionally returns NOTHING
+    in CPython, and says so.
+  * `check_output` / `getoutput` — the child's output on stdout, up to the first
+    NUL byte, because a `str` on this path is a NUL-terminated `char *` and
+    CPython's own answer really does contain NULs (`check_output(["sh","-c",
+    "printf 'a\\0b'"])` is three bytes).  The admission states the truncation
+    rather than the host's byte string, because a word that cannot hold a NUL
+    cannot admit it.
+  * `getstatusoutput` — the same status word, through a shell, with the output
+    not carried in this word.
   * `Popen` — the child's process id, a positive integer.  THAT is the handle,
     and `popen_*` take it unchanged.
-  * `popen_wait` / `popen_poll` — the exit status word, and for `poll` the word
-    `-1` while the child has not been collected.
-  * `popen_kill` / `popen_terminate` — the signal reaches the child the handle
-    names.  Separate contracts because they are separate operations with separate
-    defaults (`SIGKILL` and `SIGTERM`), and a file that trusts one is not
-    trusting the other.
-  * `popen_communicate` — the child's output, an arbitrary byte string.
+  * `popen_wait` / `popen_poll` — the same status word, and for `poll` the
+    model's own `POLL_NOT_COLLECTED` while the child is still running.  The
+    sentinel is a constant and not `-1`, because `-1` IS an answer: CPython
+    reports `-1` for a child killed by `SIGHUP`, so `-1` would make "not
+    collected" and "killed by SIGHUP" the same word.
+  * `popen_kill` / `popen_terminate` — the signal reaches the child this handle
+    names **while that child is still running**; once it has been collected
+    CPython sends nothing at all and returns without raising.  Separate contracts
+    because they are separate operations with separate defaults (`SIGKILL` and
+    `SIGTERM`), and a file that trusts one is not trusting the other.
+  * `popen_communicate` — the child's output on stdout and stderr, concatenated
+    and truncated at the first NUL for the same reason as `check_output`'s.
+
+  The one fact that applies to all twelve is in `formal/admitted.py` rather than
+  repeated twelve times: the Lean declaration is `UInt64 → UInt64`, so the word is
+  the MODEL's answer to the question the caller asked, and for most of these
+  operations CPython returns something that is not a word at all (`None`, a
+  `CompletedProcess`, a `Popen`, a pair).
 """
 
 # ── the constants ────────────────────────────────────────────────────────────
@@ -378,12 +409,47 @@ def TimeoutExpired(cmd, timeout, output=0, stderr=0) -> int:
 # image says which admission stopped it.
 
 ADMITTED_EXIT_STATUS = 125
-"""The status an admitted call exits with.
+"""The status an admitted call exits with: NONZERO and RESERVED, not out of range.
 
-125 is outside `0..255`, so it cannot be read as a child's exit status — which is
-the whole point.  A refusal that returned a plausible number would be a
-fabricated answer wearing a diagnostic's clothes, and the number has to make the
-mistake impossible rather than unlikely.
+The earlier version of this comment said 125 was outside `0..255` and therefore
+could not be read as a child's exit status.  Both halves of that were false, and
+both are measurable:
+
+  * 125 is INSIDE `0..255`.  `subprocess.run(["/bin/sh","-c","exit 125"])
+    .returncode` is 125 — an ordinary child, dying the ordinary way.
+  * no exit code can be outside the range.  The kernel masks one: `exit 300` is
+    reported as 44, and `_exit(-1)` is reported as 255.  So no number at all
+    would have done the job this comment claimed for it.
+
+What 125 IS for, therefore: it is nonzero, so a caller that only checks whether
+the image answered sees that it did not, and it is the one value this tree
+reserves for a refusal.  What it cannot do is tell a refusal apart from an
+answer, and the diagnostic `_admitted` prints on stdout is the channel that
+does.  A refusal that RETURNED a plausible number would be a fabricated answer
+wearing a diagnostic's clothes; exiting is what makes the mistake impossible,
+and the number only says which kind of failure it was.
+
+`test_formal_admitted.py`'s `truth` group re-measures both halves — that a child
+can exit 125, and that the OS masks a code above 255 — so the claim above cannot
+rot back into the one it replaced.
+"""
+
+POLL_NOT_COLLECTED = -65
+"""What `popen_poll` answers while the child is still running.
+
+A CONSTANT of this model and not a fact about the host, which is why it is here
+rather than in `popen_poll`'s `@admitted` text alone: a sentinel is a choice, and
+a choice that lands inside the set of answers the host can give is a value the
+caller cannot interpret.
+
+`-1`, which this replaced, is exactly that.  CPython reports `-1` for a child
+killed by `SIGHUP` — measured — so `-1` meant both "still running" and "died of
+signal 1", and any proof about `poll`'s answer could not tell the two apart.
+
+-65 is outside the whole answer set: the status of a child is `0..255` or `-N`
+for a signal, and the largest signal number on this host is 31 (Linux's
+`SIGRTMAX` is 64, so 65 is outside both).  The only way for a caller to see it is
+for the model to have chosen it, which is the point of a sentinel.
 """
 
 def _admitted(what: str) -> int:
@@ -402,7 +468,7 @@ def _admitted(what: str) -> int:
     exit(ADMITTED_EXIT_STATUS)
     return 0
 
-@admitted("the child's exit status, an integer in 0..255, and the captured output bytes are an arbitrary byte string")
+@admitted("the child's exit status word: 0..255 for a normal exit, or -N for a death by signal N")
 def run(args, capture_output=0, text=0, timeout=0, check=0, input=0, cwd="",
         env="", stdout=0, stderr=0, stdin=0, shell=0, errors="") -> int:
     """`subprocess.run(argv, capture_output=…)`: run a program, wait, report.
@@ -417,10 +483,16 @@ def run(args, capture_output=0, text=0, timeout=0, check=0, input=0, cwd="",
     Which is why they are declared rather than collected: a `**kwargs` is a
     run-time-length mapping (`bugs/FORMAL_listdir_no_run_time_sequence.md`), and
     12 named parameters that bind are the same program with a representation.
+
+    The admitted status is the SIGNED one and CPython's return is not this word
+    either: `run` hands back a `CompletedProcess`, and this path cannot, so what
+    the caller gets here is the status `CompletedProcess.returncode` would have
+    held.  `formal/admitted.py`'s generated docstring says that once for every
+    contract rather than twelve times.
     """
     return _admitted("subprocess.run")
 
-@admitted("the child's exit status, an integer in 0..255, and nothing is raised for a non-zero status")
+@admitted("the child's exit status word: 0..255 for a normal exit, or -N for a death by signal N; a non-zero status is returned rather than raised")
 def call(args, timeout=0, cwd="", env="", shell=0) -> int:
     """`subprocess.call(argv)`: run a program and return its status.
 
@@ -429,31 +501,48 @@ def call(args, timeout=0, cwd="", env="", shell=0) -> int:
     no exception for a failing child, so a file that only calls it is trusting
     strictly less.  It also has no `capture_output`, and CPython agrees: passing
     one to `call` is `Popen.__init__() got an unexpected keyword argument`.
+    Both are about CPython's own behaviour, and both are what the admission
+    states rather than what this file decides: `check_returncode` above is the
+    decidable half, and this contract is the rest.
     """
     return _admitted("subprocess.call")
 
-@admitted("the child's exit status, an integer in 0..255")
+@admitted("CPython answers 0 when the child succeeded and raises CalledProcessError otherwise, so the status word is not one of the two answers it gives; the word below is the child's own status (0..255 for a normal exit, or -N for a death by signal N) and not a value CPython returns")
 def check_call(args, cwd="", env="", shell=0) -> int:
     """`subprocess.check_call(argv)`: run a program, raise if it failed.
 
     The RAISE is the admitted part rather than the status: this path has no
     exception mechanism (FORMAL.md phase 7), so what is admitted is the fact that
     a non-zero status would raise, and `check_returncode` above is where the
-    decidable half of that judgement lives.  There is no `timeout` parameter
+    decidable half of that judgement lives.
+
+    What CPython actually hands back is worth recording, because it is not what
+    the admission used to say: `check_call` returns **0** on success and raises
+    otherwise.  Measured on CPython 3.14 — the `return 0` is in
+    `subprocess.py`'s own `check_call` — so the word this model declares is a
+    status the host never gives through this function, and the `@admitted` text
+    says so.  A proof concluding `check_call(p) = n` for the child's `n` would
+    be reading a claim CPython does not make, and one concluding it for CPython's
+    `0` would be reading a claim this model does not make; the honest admission
+    names both.  There is no `timeout` parameter
     because CPython's `check_call` has none — it forwards everything to `Popen` —
     and a parameter CPython does not have is a call this module would accept and
     CPython would not.
     """
     return _admitted("subprocess.check_call")
 
-@admitted("the child's output on stdout, an arbitrary byte string")
+@admitted("the child's output on stdout up to the first NUL byte, because a str on this path is a NUL-terminated char *; CPython's own answer is the whole byte string and may contain NULs")
 def check_output(args, timeout=0, input=0, stderr=0, text=0, errors="",
                  cwd="", env="") -> str:
     """`subprocess.check_output(argv)`: run a program and return its stdout.
 
-    Returns a `str` and not bytes because a `char *` is what this path has: the
-    content is arbitrary and NUL-terminated, which is a restriction the contract
-    states rather than hides.
+    Returns a `str` and not bytes because a `char *` is what this path has, and
+    that has a consequence the contract now STATES rather than leaves implicit: a
+    NUL-terminated word cannot carry the NUL bytes CPython's answer really
+    contains.  `check_output(["/bin/sh","-c","printf 'a\\0b'"])` is three bytes
+    in CPython; a word on this path can hold two characters and the terminator.
+    The earlier admission said "an arbitrary byte string", which is true of the
+    host and false of the model — an admission this file could not honour.
 
     No `stdout` and no `check` parameter, and their absence is the model's
     `ARG_STDOUT_NOT_ALLOWED`/`ARG_CHECK_NOT_ALLOWED`: CPython refuses both
@@ -461,12 +550,12 @@ def check_output(args, timeout=0, input=0, stderr=0, text=0, errors="",
     """
     return _admitted("subprocess.check_output")
 
-@admitted("the child's output on stdout, an arbitrary byte string")
+@admitted("the child's output on stdout up to the first NUL byte, because a str on this path is a NUL-terminated char *; CPython's own answer is the whole byte string and may contain NULs")
 def getoutput(cmd, encoding="", errors="") -> str:
     """`subprocess.getoutput(cmd)`: run a shell command line, return its output."""
     return _admitted("subprocess.getoutput")
 
-@admitted("the shell command's exit status, an integer in 0..255, and its output is an arbitrary byte string")
+@admitted("the shell command's exit status word: 0..255 for a normal exit, or -N if the shell itself was killed by signal N; the output is not carried in this word")
 def getstatusoutput(cmd, encoding="", errors="") -> int:
     """`subprocess.getstatusoutput(cmd)`: run a command line, return `(status, output)`.
 
@@ -498,23 +587,28 @@ def Popen(args, bufsize=0, stdin=0, stdout=0, stderr=0, shell=0, cwd="",
     """
     return _admitted("subprocess.Popen")
 
-@admitted("the child's exit status, an integer in 0..255")
+@admitted("the child's exit status word: 0..255 for a normal exit, or -N for a death by signal N")
 def popen_wait(handle, timeout=0) -> int:
     """`Popen(argv).wait(timeout=…)`: wait for the child and report its status."""
     return _admitted("Popen.wait")
 
-@admitted("the child's exit status word, an integer in 0..255, and -1 while the child has not been collected")
+@admitted("the child's exit status word once it is known (0..255 for a normal exit, or -N for a death by signal N), or -65 while the child is still running; CPython answers None there")
 def popen_poll(handle) -> int:
-    """`Popen(argv).poll()`: the status if it is known, `-1` while it is not.
+    """`Popen(argv).poll()`: the status if it is known, `-65` while it is not.
 
     A separate contract from `popen_wait` and not a second spelling of it,
     because the two answer different questions and one of them has a second
     answer: `wait` blocks until there is a status, `poll` says there is not one
-    yet.  That is why the `-1` is in THIS admission and not in `wait`'s.
+    yet.  That is why the sentinel is in THIS admission and not in `wait`'s.
+
+    `-65` and not the `-1` this used to say: CPython reports `-1` for a child
+    killed by `SIGHUP`, so `-1` was simultaneously "still running" and "died of
+    signal 1", and a caller could not tell which.  `POLL_NOT_COLLECTED` above is
+    the constant and carries the argument.
     """
     return _admitted("Popen.poll")
 
-@admitted("the signal reaches the child this handle names")
+@admitted("the signal reaches the child this handle names while that child is still running; once the child has been collected CPython sends nothing and raises no exception")
 def popen_kill(handle) -> int:
     """`Popen(argv).kill()`: stop the child.
 
@@ -523,15 +617,22 @@ def popen_kill(handle) -> int:
     `popen_terminate` is a separate contract because it is a separate operation
     with its own default signal, and a file that trusts one is not trusting the
     other.
+
+    "Delivery" is bounded by the child still running, and that bound was found by
+    measurement rather than assumed: `Popen.send_signal` calls `poll()` and
+    RETURNS if the child has already been collected, so `kill()` on a child this
+    process has waited for sends nothing and raises nothing at all.  An admission
+    about delivery with no bound claimed a signal arrives for a child that has
+    been dead for an hour.
     """
     return _admitted("Popen.kill")
 
-@admitted("the signal reaches the child this handle names")
+@admitted("the signal reaches the child this handle names while that child is still running; once the child has been collected CPython sends nothing and raises no exception")
 def popen_terminate(handle) -> int:
     """`Popen(argv).terminate()`: ask the child to stop."""
     return _admitted("Popen.terminate")
 
-@admitted("the child's output on stdout and stderr, an arbitrary byte string")
+@admitted("the child's output on stdout and stderr, concatenated and truncated at the first NUL byte because a str on this path is a NUL-terminated char *; CPython's own answer is a pair of byte strings that may contain NULs")
 def popen_communicate(handle, input=0, timeout=0) -> str:
     """`Popen(argv).communicate(input=…, timeout=…)`: write, close, read.
 
@@ -539,6 +640,7 @@ def popen_communicate(handle, input=0, timeout=0) -> str:
     is the CONCATENATION and not either half: a caller that needs them apart has
     no word to put them in, and a word that claimed to be one of the two would be
     a value this file chose.  The contract says "stdout and stderr" for that
-    reason and not "stdout".
+    reason and not "stdout".  It also says where the concatenation stops, because
+    a `char *` stops at the first NUL and `communicate`'s own answer does not.
     """
     return _admitted("Popen.communicate")
