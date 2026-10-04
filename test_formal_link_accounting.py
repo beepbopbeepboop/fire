@@ -422,6 +422,15 @@ PROVIDED_NEVER_A_HOST_MODULE = {
     # against CPython's own `html.escape` over a corpus whose four `&`-bearing
     # cases exist to pin the ORDER, plus every byte 1..255.
     "html": "test_formal_html.py",
+    # `glob` left `HOST_MODELLED` the same way and for the same reason: it is
+    # reachable with nothing missing from the target -- a directory listing is
+    # `readdir(3)` and a `malloc`, both of which `os.listdir` and `os.walk`
+    # already had -- so the tier entry said "the work has not been done". Its
+    # test is `test_formal_glob.py`, which checks whole ordered answers against
+    # CPython's own `glob` over a fixture tree with a dotfile, a hidden
+    # directory, a symbolic link and a DANGLING one, on both backends, and which
+    # is where the 50-file row in the host-import ranking is now accounted for.
+    "glob": "test_formal_glob.py",
 }
 
 # The two `os` SUBMODULES, which are provided and are named by the file they are
@@ -511,6 +520,12 @@ ADMITTED_HOST_MODULE_TESTS = {
 # differs only in that `IMPLEMENTED_HOST_MODULE_TESTS` already had a row for it,
 # which is why its departure was caught by that table's own staleness rather than
 # by this one.
+#
+# `glob` is the largest of that ordinary shape -- 50 files blocked in the
+# 2026-10-03 sweep's host-import ranking and 15 of them naming it -- and it is
+# named here for the same reason `textwrap` is not: it was in `PRE_SPLIT_HOST_MODULES`
+# and in a tier, so writing `formal/hostmods/glob.mojo` took it out of both and
+# `IMPLEMENTED_HOST_MODULE_TESTS` is where its test belongs.
 HOST_SET_ADDED_TIERS = {
     # `set(dir(builtins))` asks the interpreter to enumerate ITSELF.  A formal
     # image is a Mach-O binary with an embedded CPython to compile it and none to
