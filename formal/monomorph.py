@@ -153,8 +153,9 @@ def _derived_from_source(tag: str, src: str, compute, subkey=None):
     stored here is derived that way; the docstring above names the callers and
     each of their derivations is a `reflect`/`elaborate` question about source
     text.  `tag` names the QUESTION, so two questions about one source cannot
-    read each other's answers, and `subkey` carries the one caller that asks a
-    per-name question about a source (`template_kind`).
+    read each other's answers, and `subkey` carries the two callers that ask a
+    per-name question about a source (`template_kind` and `_template_source`,
+    which `instantiate` asks in a row).
     """
     key = (tag, subkey,
            hashlib.blake2b(src.encode("utf-8", "surrogatepass"),
@@ -221,7 +222,6 @@ def template_kind(src: str, name: str) -> str:
     only caches a value that is not None, so a name no extractor finds is
     re-derived (and re-refused) every time, which is what happened before.
     """
-    import elaborate                                # lazy — see the module docstring
     return _derived_from_source("template_kind", src,
                                 lambda: _kind_of(src, name), subkey=name)
 
