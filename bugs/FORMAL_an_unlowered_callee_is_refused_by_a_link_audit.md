@@ -87,3 +87,54 @@ deliberate: the mix is the one place a construct the corpus cannot produce is
 measured, and a family that produces a finding is a family that measures. The
 tally line is `refusal audit: true=N, unnamed=M, false=0, no-predicate=K` — the
 `unnamed` count IS this bug's count.
+
+## Measured over a real corpus, 2026-10-04: 6 of 78 functions, and the
+## builtins that cause them are half the census's `BUILTIN_NAMES`
+
+`bugs/FORMAL_proof_coverage_census_2026-10-03.md` §0.6's second round (78
+functions from this repository's own source, both architectures, phase A) puts a
+number on this doc's subject:
+
+    python3 tools/memslot.py --gb 8 --label proofbreadth2 -- \
+      python3 -u tools/formal_proof_breadth.py --no-check --arch both -j 4 -t 400 \
+        --repo 60 --examples 45 --example-offset 1 --admit-returns \
+        --exclude-seen bugs/sweeps/proof_breadth_2026-10-03.jsonl \
+        --ledger bugs/sweeps/proof_breadth_2026-10-04_round2-phaseA.jsonl
+
+**6 of the 78 items are refused by this message**, byte-identically on both
+machines, and the symbols are `list`, `enumerate`, `max`, `min`,
+`REPORT.append` and `_DISPATCH_TABLE_GLOBAL_CTYPES.get`. That is 7.7 % of the
+corpus, and it is the fifth row of §0.6.3's family table.
+
+**What is new here is the overlap with the census instrument's own allow-list.**
+`tools/formal_proof_breadth.py`'s `BUILTIN_NAMES` is the set of names a
+synthesised `main` may have in reach, and the same list is also this
+backend's to lower — but it is not: of the names in it that take only ints,
+`max`, `min`, `bool`, `divmod`, `chr`, `ord` and `float` are all emitted as calls
+to functions nothing provides (`abs` is lowered, which is why
+`FORMAL_an_unlowered_callee_is_refused_by_a_link_audit.md`'s own `abs(x)`
+measurement is stale). Measured on both architectures, two-line programs:
+
+    def main(x):
+        a = x + 3
+        b = x * 2
+        return max(a, b)          # the image binds `max`
+
+So the census's allow-list and the backend's implemented set are two lists that
+have drifted, and the drift is invisible until a corpus meets it. Two ways to
+answer it, and they are different jobs: **narrow `BUILTIN_NAMES` to what the
+path lowers** (which would remove these items from the census and with them the
+measurement of a real gap — the wrong direction for a census, whose job is to
+report the frontier), or **lower the int-valued ones** (`max`/`min` are a compare
+and a select, and both emitters already have that: `formal/model.py`'s
+`MLIR_SELECT_OP` rewrite turns `a if c else b` into a `TernaryExpr` that arm64
+emits as one `CSEL`). The second also wants a `MojoExpr.max` arm in
+`lib/ProofLib.lean` before the item can be *proved* rather than merely built, and
+that invalidates every cached Lean verdict — so it is a change with the formal
+suite behind it, not one item.
+
+**The naming half of this doc's next step is unaffected by all of that and is
+still the cheapest thing on it.** Six items in a real corpus is a measurement
+that would have been a measurement months ago with one program; the message is
+still the only one in the backend that names a file and a symbol and never the
+call.
