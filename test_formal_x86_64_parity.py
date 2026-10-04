@@ -829,6 +829,128 @@ CASES = [
      "    o.n.put(7)\n"
      '    sys.stdout.write("%d %d %d" % (o.n.a, o.n.b, o.n.get() * 10 + o.n.a))\n'
      "    return 0\n"),
+    # The row above with `Out`'s `pad` DELETED, so `n` is the struct's ONLY
+    # field — and with it the whole shape changes, because a struct of one
+    # field has no frame of its own: its receiver IS that field, and
+    # `model.struct_constructor_site_bytes` reserves the NESTED block alone
+    # because "there is no object: the VALUE is the nested frame's address".
+    # `o.n` is therefore `o`, and `o.n.a` is ONE load at `o + 8·slot(a)` — not
+    # the two-hop read a "the first hop was thrown away" reading of the symptom
+    # suggests, and not the field access of a plain word either.  Before the
+    # fix BOTH backends refused the read by name with
+    #
+    #     main: 'o.a' is a field access through 'o', and this path has no way
+    #     to say what 'o' holds … Bind the base from a constructor whose
+    #     declaration THIS IMAGE can see (`x = S()`)
+    #
+    # about a constructor they had just compiled and could see perfectly well:
+    # the holder analysis seeded the METHOD receiver of such a struct
+    # (`_frame_receivers`) and had no case for the LOCAL, so the word the
+    # constructor put an address in was still classified as a plain word.
+    # `bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_frame.md`.
+    #
+    # The `put(7)` is the METHOD-call half and the reads are the direct half,
+    # so the two shapes that share the word are both here: with only the call
+    # the program already built, which is why the row looked like a working
+    # family rather than a broken one.
+    ("one_field_struct_whose_only_field_is_a_nested_frame",
+     "struct In:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def put(out self, v: Int) -> Int:\n"
+     "        self.a = v\n"
+     "        return self.a\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.a\n"
+     "\n"
+     "struct Out:\n"
+     "    var n: In\n"
+     "\n"
+     "def main(k):\n"
+     "    var o = Out()\n"
+     "    o.n.put(7)\n"
+     '    printf("%d %d %d", o.n.a, o.n.b, o.n.get() * 10 + o.n.a)\n'
+     "    return 0\n",
+     "class In:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "\n"
+     "    def put(self, v):\n"
+     "        self.a = v\n"
+     "        return self.a\n"
+     "\n"
+     "    def get(self):\n"
+     "        return self.a\n"
+     "\n"
+     "class Out:\n"
+     "    def __init__(self):\n"
+     "        self.n = In()\n"
+     "\n"
+     "import sys\n"
+     "\n"
+     "def main():\n"
+     "    o = Out()\n"
+     "    o.n.put(7)\n"
+     '    sys.stdout.write("%d %d %d" % (o.n.a, o.n.b, o.n.get() * 10 + o.n.a))\n'
+     "    return 0\n"),
+    # The same shape TWO NESTED LEVELS DOWN, and it is its own row because it
+    # fails a different way: the row above reads slots the nested frame already
+    # had, while this one reads a frame the nested frame itself holds, and the
+    # one-word construction used to bring that grandchild's DEFAULTS up and
+    # never store its ADDRESS (`_emit_fresh_one_word` stopped after
+    # `_emit_frame_nested` + `_emit_frame_defaults` on the reasoning that its
+    # own address is the result, which says nothing about the frames inside
+    # it).  The slot stayed at the zero those defaults wrote, so the first read
+    # through it was a load at address 0: measured on both architectures,
+    # `o.n.d.x = 5` built, ran and died of SIGSEGV, exit 139, while `o.n.a` and
+    # `o.n.d.y` answered correctly in the same program.
+    ("one_field_struct_whose_only_field_is_a_nested_frame_two_levels_down",
+     "struct Deep:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "struct In:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var d: Deep\n"
+     "\n"
+     "struct Out:\n"
+     "    var n: In\n"
+     "\n"
+     "def main(k):\n"
+     "    var o = Out()\n"
+     "    o.n.a = 7\n"
+     "    o.n.d.x = 5\n"
+     "    o.n.d.y = 6\n"
+     '    printf("%d %d %d %d", o.n.a, o.n.b, o.n.d.x, o.n.d.y)\n'
+     "    return 0\n",
+     "class Deep:\n"
+     "    def __init__(self):\n"
+     "        self.x = 0\n"
+     "        self.y = 0\n"
+     "\n"
+     "class In:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "        self.d = Deep()\n"
+     "\n"
+     "class Out:\n"
+     "    def __init__(self):\n"
+     "        self.n = In()\n"
+     "\n"
+     "import sys\n"
+     "\n"
+     "def main():\n"
+     "    o = Out()\n"
+     "    o.n.a = 7\n"
+     "    o.n.d.x = 5\n"
+     "    o.n.d.y = 6\n"
+     '    sys.stdout.write("%d %d %d %d" % (o.n.a, o.n.b, o.n.d.x, o.n.d.y))\n'
+     "    return 0\n"),
     ("nested_frame_chain_three_levels",
      "struct In:\n"
      "    var v: Int\n"

@@ -9917,10 +9917,21 @@ SOLE_FIELD_CTOR_STORE_CASES = [
      "    return 0\n",
      "refuse:constructing Box with argument 'o' as field 'inner'", None),
     # (b) A frame built HERE, which the receiver rule already stood down from
-    # (`_value_may_be_a_frame` recognises the construction) and which another
-    # rule answers — the field read at the call site, not the store.  It is a
-    # row because "unchanged" is an answer worth pinning: the exemption must not
-    # change which rule answers this one.
+    # (`_value_may_be_a_frame` recognises the construction) and which used to be
+    # answered by ANOTHER RULE — the field read at the call site, refused as
+    # `'b.v' is a field access through 'b'`, because the holder analysis
+    # classified a local bound from a ONE-FIELD struct's constructor as a plain
+    # word.  It no longer needs an answer from any rule: `b`'s word IS the
+    # address of the `Opt` frame (`model.struct_construction_yields_frame_
+    # address`), so `b.inner.v` is one load at `b + 8·0` and the two fields read
+    # as the zeros a fresh `Opt` holds.  `v=0 h=0` is CPython's answer, so this
+    # is a positive row now rather than a `refuse:` one — the numbers are the
+    # assertion and they are not weak: they are only reachable if `Box()`
+    # reserved and initialised the frame, so a lowering that left the word null
+    # and one that read the wrong slot both fail it.  It stayed in this group
+    # because the group's question is WHICH RULE ANSWERS each of the three ctor
+    # stores, and "none of them" is the answer for this one now.
+    # `bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_frame.md`.
     ("sole_field_ctor_store_of_a_frame_built_here_is_another_rules",
      "struct Opt:\n"
      "    var v: Int\n"
@@ -9936,7 +9947,7 @@ SOLE_FIELD_CTOR_STORE_CASES = [
      "    var b = Box()\n"
      "    printf(\"v=%d h=%d\", b.inner.v, b.inner.has)\n"
      "    return 0\n",
-     "refuse:'b.v' is a field access through 'b'", None),
+     0, "v=0 h=0"),
     # (c) A frame the CALLEE made — which the doc predicted would BUILD, and
     # which does NOT: `init_body_stores` only substitutes a BARE PARAMETER for a
     # right-hand side, because only a bare parameter has the caller's own

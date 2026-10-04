@@ -25279,6 +25279,44 @@ def one_word_nested_frame_structs(decls: dict) -> dict:
     return out
 
 
+def struct_construction_yields_frame_address(struct_def, decls: dict) -> bool:
+    """Whether constructing this struct puts a FRAME ADDRESS in the name.
+
+    Two shapes, and the second is the one this function exists for:
+
+      * a struct with a frame of its own — the construction reserves a block and
+        the value IS that block's address (`struct_constructor_sites`);
+      * **a ONE-FIELD struct whose sole field holds a placed nested frame** —
+        there is no object, so there are no slots of its own to reserve and the
+        value the caller receives is the NESTED frame's address.
+        `struct_constructor_site_bytes` reserves the nested block alone and says
+        why in its own words ("that struct's own 8 bytes are not reserved,
+        because there is no object: the VALUE is the nested frame's address"),
+        and both backends' `_emit_fresh_one_word` bring that frame up and hand
+        back its address.
+
+    It is asked by `formal/build.py::_value_may_be_a_frame`, which is the ONE
+    recogniser in that file for "can this value put a frame in a name", and the
+    second shape used to be missing from it: `struct_is_framed` is False for
+    every one-field struct, so `var b = Box()` was not a frame value and the
+    checks that ask the question refused the program —
+    `check_one_word_frame_receivers` with "nothing in this function has put a
+    frame there: `b` was built by `Box()`, whose construction fills the WORD
+    rather than the frame that word will hold" — about a construction that has
+    filled the frame since `4af77b16`. Two tests were red on the tree for it
+    (`test_formal_run.py`'s `one_word_holder_of_a_frame_read_before_it_is_
+    written` and `two_one_word_constructions_get_two_different_frames`).
+
+    Both shapes read `struct_is_framed` / `one_word_sole_field_frame` rather than
+    a second opinion about either, because a disagreement here is a load at
+    address 0 rather than a wrong message.
+    """
+    if struct_def is None:
+        return False
+    return (struct_is_framed(struct_def)
+            or one_word_sole_field_frame(struct_def, decls or {}) is not None)
+
+
 def struct_constructor_site_bytes(struct_def, decls: dict) -> int:
     """Bytes ONE construction site of this struct reserves in the prologue.
 

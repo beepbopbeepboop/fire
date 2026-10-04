@@ -3233,7 +3233,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         one_word = {_fn_key(fn): {} for fn in functions}
         for fn in functions:
             _seed_one_word_bindings(fn, structs_by_name, functions,
-                                    holders, one_word)
+                                    holders, hstruct, one_word)
         # …and the CALL-SITE edges, iterated here rather than left to the main
         # path's fixpoint, because this early return IS the whole analysis for a
         # module with no framed struct — and a module whose structs are all one
@@ -3504,7 +3504,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
             holders[_fn_key(fn)].add(name)
             hstruct[_fn_key(fn)].setdefault(name, []).append(st)
         _seed_one_word_bindings(fn, structs_by_name, functions, holders,
-                                one_word)
+                                hstruct, one_word)
     for _round in range(_HOLDER_FIXPOINT_ROUNDS):
         grew = False
         changed = True
@@ -4653,10 +4653,24 @@ def _value_may_be_a_frame(value, structs_by_name, holders, alias=None,
     method receiver of a framed struct, a construction of a framed struct, a
     copy of another holder, and a callee parameter some call site reaches with a
     frame address.  Three of those four are ASSIGNMENTS with a value, and they
-    are the two spellings below plus a constructor call:
+    are the three spellings below plus a constructor call:
 
       * `S(...)` where `S` is a framed struct this module declares — the
         construction, whose result IS the address of a fresh block;
+      * `S(...)` where `S` is a ONE-FIELD struct whose sole field holds a
+        PLACED NESTED FRAME. There is no object and no slot of its own, so the
+        construction's value is the NESTED frame's address, and this is the
+        shape `struct_is_framed` cannot see (it is False for every one-field
+        struct). `model.struct_construction_yields_frame_address` is what the
+        question is asked through, rather than a copy of the same two facts
+        derived here. It used to be missing from this list, which is why
+        `check_one_word_frame_receivers` refused a `Box()` whose constructor has
+        brought the frame up since `4af77b16` — naming a construction that
+        "fills the WORD rather than the frame that word will hold", about a
+        program whose word holds exactly that frame's address. Two rows of
+        `test_formal_run.py` were red on the tree for it
+        (`one_word_holder_of_a_frame_read_before_it_is_written`,
+        `two_one_word_constructions_get_two_different_frames`);
       * another holder's name — a copy, which copies the address;
       * (a method's receiver is a PARAMETER, so it is not a value at all.)
 
@@ -4693,9 +4707,11 @@ def _value_may_be_a_frame(value, structs_by_name, holders, alias=None,
     if isinstance(value, F.CallExpr) and isinstance(value.func, F.IdentExpr):
         name = value.func.name
         if alias is not None and name == "Self":
-            return M.struct_is_framed(alias)
+            return M.struct_construction_yields_frame_address(alias,
+                                                              structs_by_name)
         st = (structs_by_name or {}).get(name)
-        return st is not None and M.struct_is_framed(st) \
+        return st is not None \
+            and M.struct_construction_yields_frame_address(st, structs_by_name) \
             and M.type_constructor_kind(name) is None
     return False
 
@@ -7544,10 +7560,12 @@ def _one_word_constructor_bindings(fn, structs_by_name, functions=()) -> dict:
     return out
 
 
-def _seed_one_word_bindings(fn, structs_by_name, functions, holders,
+def _seed_one_word_bindings(fn, structs_by_name, functions, holders, hstruct,
                             one_word) -> None:
-    """Seed `one_word[fn]` for `fn` — a LOCAL construction and a DECLARED
-    parameter, the two ways a name becomes a one-field struct's value.
+    """Seed `one_word[fn]` for `fn`, and the HOLDER half of the same fact.
+
+    A LOCAL construction and a DECLARED parameter, the two ways a name becomes
+    a one-field struct's value.
 
     One function because there are two arms that need it and a module whose
     structs are ALL one field takes the early-return arm — which is the case
@@ -7558,10 +7576,58 @@ def _seed_one_word_bindings(fn, structs_by_name, functions, holders,
     keeps THAT classification: the same precedence the framed seeding above
     states for its own evidence, because a name in both tables is a name with
     two layouts and only one of them is the truth.
+
+    **The holder arm is the LOCAL twin of the method seeding in
+    `_frame_receivers`' first loop, and it is the same one fact.**
+    `model.one_word_sole_field_frame` answers "the FRAMED struct this one-field
+    struct's sole field holds", and the construction of such a struct puts that
+    frame's ADDRESS in the word — `model.struct_constructor_site_bytes` says so
+    in its own words ("that struct's own 8 bytes are not reserved, because
+    there is no object: the VALUE is the nested frame's address"), so the word
+    a local receives from `Outer()` is an address from the first instruction
+    and `o.n.<f>` is ONE load at `o + 8·slot(f)`. The METHOD receiver has been
+    a holder of that frame since that function was written; the LOCAL had no
+    case, so the frame analysis still believed `o` was a plain word and the
+    read was refused by name —
+
+        main: 'o.a' is a field access through 'o', and this path has no way to
+        say what 'o' holds. … Bind the base from a constructor whose
+        declaration THIS IMAGE can see (`x = S()`)
+
+    — about a constructor the image had just compiled and can see perfectly
+    well. Both architectures, identical words; measured before this arm, and
+    `bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_frame.md` has
+    the table. The one-word REWRITE was never the defect and is not what
+    changed: `o.n` IS `o`, and after it the chain is `o.a`, which is `Inner`'s
+    own field read — so all the walk needed was to be told that `o` names a
+    frame, and every consumer downstream (the field walk's slot table, the
+    escape check, `_check_method_receiver_types`) gets that from one place.
+
+    **A DECLARED PARAMETER is deliberately not seeded, and that is the same
+    limit `check_one_word_frame_receivers` states rather than a second one.**
+    Whether a parameter's word holds an address is a fact about the CALLER:
+    `def f(h: Outer) -> Int: return h.n.a` is right for a caller that wrote
+    `f(o)` with `o` built by `Outer()` and a load at address 0 for one that did
+    not, and this pass cannot see the call sites. The local case has no such
+    gap precisely because `struct_constructor_site_bytes` guarantees the block
+    exists before the constructor returns. `bugs/FORMAL_a_parameter_of_a_one_
+    field_struct_whose_sole_field_is_a_frame_is_not_a_holder.md` records the
+    parameter half.
     """
     key = _fn_key(fn)
-    one_word[key].update(_one_word_constructor_bindings(
-        fn, structs_by_name, [f.name for f in functions]))
+    bound = _one_word_constructor_bindings(fn, structs_by_name,
+                                           [f.name for f in functions])
+    one_word[key].update(bound)
+    for name, sts in bound.items():
+        if name in holders[key]:
+            continue
+        for st in sts:
+            inner = M.one_word_sole_field_frame(st, structs_by_name)
+            if inner is None:
+                continue
+            holders[key].add(name)
+            hstruct[key][name] = [inner]
+            break
     # A PARAMETER declared as a one-field struct is the same fact about the
     # same word: `def eq(a: Plain, b: Plain)` hands the caller two values that
     # ARE their fields, so inside `eq` they are that struct and their `==` is

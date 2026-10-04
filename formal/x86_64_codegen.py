@@ -8943,6 +8943,26 @@ ctor_field_value=self._ctor_field_value_for(name),
             base = self._blob_base + site[1]
             self._emit_frame_nested((nested, site[1], ()))
             self._emit_frame_defaults(nested, base)
+            # …and the nested struct's OWN nested frames' ADDRESSES, which is
+            # the third step and the one whose absence was a NULL SLOT. The
+            # frame-valued sole field used to stop after the two above, on the
+            # reasoning that its own address is the result — which is true and
+            # says nothing about the frames INSIDE it. A `nested` whose own
+            # typed-nested field holds a frame had that field's slot left at the
+            # zero `_emit_frame_defaults` just wrote, so the first read through
+            # it was a load at address 0: measured, both architectures,
+            # `struct Deep: x, y` / `struct Inner: a, b, d: Deep` /
+            # `struct Outer: n: Inner` with `o.n.d.x = 5` built, ran and died of
+            # SIGSEGV (exit 139), while the depth-1 and depth-2 reads of the same
+            # three structs answered correctly.
+            # `bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
+            # frame.md` §2 has the disassembly.
+            #
+            # AFTER the defaults above and for the framed path's reason
+            # (`_emit_frame_positional`): the slot this stores into is one of
+            # the slots they wrote. `base` is ABSOLUTE here, as
+            # `_emit_nested_frame_addresses` documents.
+            self._emit_frame_nested_addresses(base, (nested, site[1], ()))
             # The ADDRESS last: every store above left something else in RAX.
             self._emit_blob_base(base, Reg.RAX)
             return
