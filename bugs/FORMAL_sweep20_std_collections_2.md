@@ -53,7 +53,6 @@ done
 
 Four runs, all 56 files, all complete (each run's own summary line is the
 authority and it sums to its file count):
-
 | run | files | classes | CAS | log |
 |---|---|---|---|---|
 | arm64, before | 56 | 4 pass, 6 codegen, 46 codegen/dependency | 0 hit / 56 miss | `bugs/sweeps/sweep20-std-collections-2-arm64-BEFORE-the-resolution-fix.txt` |
@@ -65,6 +64,19 @@ All four logs are committed. `--stdlib-subtrees collections,memory` does **not**
 find these: the subtrees are looked up directly under the stdlib root, so the
 spellings that work are `std/collections,std/memory,…` or explicit paths, and
 the paths above are what ran.
+
+**The tree is named, and it is not the tip.** These four runs are on `3c3516db`
+plus this branch; `master` took **78 commits** from other workers' merges while
+this round was running (it is at `dd6a8849`), and it moves `formal/model.py`
+(1237 lines), `formal/build.py` (492), `formal/monomorph.py` (186) and
+`formal/imports.py` (41). So **the class counts here are a measurement of that
+tree, not of current `master`**, and a reader who needs the latter should re-run
+§1's command. Two things about the merge are settled rather than hoped: master's
+41 lines of `formal/imports.py` are two hunks (`HOST_MODELLED` at `:302` and
+`HOST_OWNED_BLOBS` at `:2030`) and this branch's are `:1744`-`:1975`, so the
+fix does not conflict; and **master still has the interleaved `_candidates`
+search** — `git show master:formal/imports.py` has it at `:1774` — so nobody
+else found this while these 78 commits landed.
 
 Peak **0.3 GB** across up to 5 processes against the 8 GB reservation, on all
 four runs; no memory breach; no `tool` row and no `not-answerable` row on either
