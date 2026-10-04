@@ -29444,6 +29444,18 @@ def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
     `comptime.specialization_name` by design.  All three are listed with the
     exact next step in `bugs/FORMAL_generic_monomorph_scope.md`, which is the
     single home for what the mechanism does not cover.
+
+    **And the last sentence says the BARE case is CORRECT SOURCE, because it
+    was telling a reader to edit working stdlib.** In Mojo a template call's type
+    arguments are inferred: `FormatStruct(writer, "Allocation")` with no bracket
+    is the spelling the stdlib uses, and the previous wording — "spell it as
+    `name[<a type>](…)` and the library will carry the instantiation" — asked
+    exactly that file to be changed for a gap in this path. That is the
+    `refuse_without:` defect in its purest form: a repair that is wrong about
+    correct code. So the sentence now names what is missing (the inference),
+    points at the measured 123 files and the inference's shape
+    (`bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`),
+    and says the bracket is a WORKAROUND rather than the fix.
     """
     who = f"{fn_name}: " if fn_name else ""
     mod = getattr(sym, "module", None)
@@ -29461,11 +29473,22 @@ def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
             f"module's library when an importer asks for them "
             f"(`formal/monomorph.py`), so this call is one that asked for "
             f"none — it names no type argument, or names one that is a value "
-            f"rather than a type, or spells the template as `module.{name}`; "
-            f"spell it as `{name}[<a type>](…)` and the library will carry the "
-            f"instantiation. Write the operation in this module, or call a "
-            f"public function that does it — which is the same program with a "
-            f"definition this image can bind")
+            f"rather than a type, or spells the template as `module.{name}`. "
+            f"**If the call names no type argument at all, the SOURCE is right "
+            f"and this path is short**: Mojo infers a template call's type "
+            f"arguments, so `{name}(…)` with no bracket is correct code — the "
+            f"stdlib's own `FormatStruct(writer, \"Allocation\")` is spelled that "
+            f"way — and this path does not infer them yet. Its demand pipeline "
+            f"reads type arguments off an explicit bracket, so a bare call "
+            f"arrives here with no instantiation to bind; the inference, the 123 "
+            f"measured files it is worth, and the shape of the missing piece are "
+            f"in "
+            f"bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md. "
+            f"So write the operation in this module, or call a public function "
+            f"that does it — which is the same program with a definition this "
+            f"image can bind. Spelling it `{name}[<a type>](…)` will carry the "
+            f"instantiation, and is a workaround for this gap rather than a "
+            f"correction to your code")
 
 
 def module_attribute_refusal(spelling: str, module: str, leaf: str,

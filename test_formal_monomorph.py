@@ -434,6 +434,33 @@ def test_a_bare_call_to_an_imported_generic_is_still_refused(tmpdir):
         check("does not export it" in bare,
               f"[{arch}] a bare call to an imported generic must be refused as "
               f"an export gap: {bare.strip()[-400:]}")
+        # …and the refusal must not tell this file its SOURCE is wrong. It used
+        # to end "spell it as `widen[<a type>](…)` and the library will carry
+        # the instantiation", which is a repair for correct code: in Mojo a
+        # template call's type arguments are INFERRED, `widen(5)` is the spelling
+        # the stdlib uses (`FormatStruct(writer, "Allocation")` is 68 files of
+        # it), and the gap is in this path's demand pipeline. That is the
+        # `refuse_without:` defect — a next step that is wrong about the code
+        # being compiled — so the sentence now says which side the fault is on,
+        # names the inference and its measurement, and calls the bracket a
+        # WORKAROUND. The property is pinned here rather than in the message's
+        # own test because it is a property of the REFUSAL a program gets.
+        check("the SOURCE is right" in bare
+              and "does not infer them yet" in bare,
+              f"[{arch}] the refusal does not say the bare spelling is correct "
+              f"source and that the inference is what is missing: "
+              f"{bare.strip()[-600:]}")
+        check("workaround" in bare,
+              f"[{arch}] the bracket is offered without saying it is a "
+              f"workaround for this path rather than a correction: "
+              f"{bare.strip()[-400:]}")
+        check("FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_"
+              "inferrable.md" in bare,
+              f"[{arch}] the refusal does not point at the measurement of the "
+              f"inference it is short of")
+        check("spell it as `widen[" not in bare,
+              f"[{arch}] the old imperative is back: a reader sent to edit "
+              f"correct stdlib")
         bracketed = run_pair_case(
             tmpdir, arch, "mm_brack", lib,
             ("from pairlib import widen\n"
