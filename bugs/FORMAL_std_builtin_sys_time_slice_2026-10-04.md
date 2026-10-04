@@ -41,11 +41,11 @@ python3 tools/memslot.py --gb 8 --label sweep20-arm -- \
 python3 tools/formal_sweep_causes.py --min 1 bugs/sweeps/sweep20-std-builtin-sys-time-arm64-AFTER.txt
 ```
 
-Three logs committed: `…-arm64-BEFORE.txt` (this tree before §5's commit),
-`…-arm64-AFTER.txt` (after), and `…-x86_64.txt`. `peak 0.3 GB` against the 8 GB
-reservation on every arm — this is a `--no-prove` codegen sweep, so no lean
-runs, and `formal_sweep.py`'s own comment is the standing statement of what
-that does and does not cover.
+Three logs committed: `…-arm64-BEFORE.txt` (this tree before §5's two
+commits), `…-arm64-AFTER.txt` (the final tree), and `…-x86_64.txt` (the final
+tree). `peak 0.3 GB` against the 8 GB reservation on every arm — this is a
+`--no-prove` codegen sweep, so no lean runs, and `formal_sweep.py`'s own comment
+is the standing statement of what that does and does not cover.
 
 | class | arm64 | x86-64 |
 |---|---|---|
@@ -56,14 +56,19 @@ that does and does not cover.
 | not-answerable / backend-crash / tool | 0 | 0 |
 | **codegen coverage** | **11/85 = 12.9 %** | **11/85 = 12.9 %** |
 
-**The two architectures are the same sweep, file for file and message for
-message.** All **74** classified paths carry the same class, and **73 of the 74
-carry byte-identical refusal text**; the 74th is `float_literal.mojo`, and the
-reason is bookkeeping rather than arch drift — the arm64 log was taken before
-§5's last refinement (the `other module` sentence), and re-running that one
-file on both backends gives identical text (measured, quoted in §5). That is
-the standing measurement of `FORMAL_sweep_work_map_2026-10-03_b9.md` §2.2,
-re-measured over a slice that is a third of the corpus.
+**The two architectures are the same sweep, file for file and MESSAGE for
+message.** All **74** classified paths carry the same class and **all 74 carry
+byte-identical refusal text** — checked mechanically, not by eye
+(`bugs/sweeps/sweep20-std-builtin-sys-time-arm64-AFTER.txt` against
+`…-x86_64.txt`, one line per refused path). That is the standing measurement of
+`FORMAL_sweep_work_map_2026-10-03_b9.md` §2.2, re-measured over a slice that is
+a third of the corpus.
+
+Both logs are of the FINAL tree, which matters because §5's commit changed a
+message: the arm64 log was re-run after the `receiverless` guard landed, and it
+differs from the intermediate one in exactly one line — `float_literal.mojo`'s,
+ which is the row §5 changed. Nothing else moved, and the class of all 85 files
+is the same on both logs.
 
 The 11 passes: `builtin/{__init__,_closure,floatable,identifiable,inline_level,swap}.mojo`,
 `math/constants.mojo`, `utils/{_select,_visualizers}.mojo`, and one more — the
@@ -219,7 +224,11 @@ Verified: `python3 test_formal_run.py` **PASS=956 FAIL=0** and
 architectures — the first including three new CPython-pair rows for the lift
 (a function's `-> T`, a method's `-> T`, and a two-hop chain so the recursion
 is pinned at depth 2) and the second five new refusal rows for the guards.
-`python3 test_refusal_taxonomy.py` 216/216.
+`python3 test_refusal_taxonomy.py` 216/216.  A third commit on this branch
+(`7e1cc023`) added the `receiverless` guard — a `@staticmethod` on a call
+result, where passing no receiver means the call is never EVALUATED — after a
+measurement showed the lift silently dropping it; the counts above are
+re-measured with it in.
 
 ---
 
