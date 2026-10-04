@@ -435,6 +435,43 @@ def test_link_line_is_the_dylibs_exports():
                f"reachable without a heap handle ({len(handles)} need one the "
                f"path cannot obtain)")
 
+        # …and the two library-dependent halves of that triple are what
+        # FORMAL.md §6 phase 2 PUBLISHES, so they are checked against the
+        # document rather than only printed. They live here rather than in
+        # `test_formal_doc_truth.py` because that file is import-and-compare and
+        # must not compile six translation units to answer them; `report` alone
+        # was not enough, because a printed figure nobody reads is how §6's
+        # "0 of the word-shaped calls are callable" survived a whole phase.
+        published = _published_phase2_surface()
+        check(published is not None,
+              'FORMAL.md §6 phase 2 still publishes the callable-surface figure')
+        if published:
+            check(len(linked) == published['exported'],
+                  f"{arch}: {len(linked)} word-shaped entry points exported, "
+                  f"FORMAL.md §6 phase 2 publishes {published['exported']}")
+            check(len(linked) - len(handles) == published['reachable'],
+                  f"{arch}: {len(linked) - len(handles)} reachable with no heap "
+                  f"handle, FORMAL.md §6 phase 2 publishes {published['reachable']}")
+
+
+def _published_phase2_surface():
+    """FORMAL.md §6 phase 2's three-row table, read out of the document.
+
+    `(exported, reachable)` as published, or `None` when the rows are gone — and
+    gone is a FAILURE at the call site, not a skip: the rows are the phase's exit
+    criterion, and a document that quietly dropped them has stopped reporting
+    whether the phase is done.
+    """
+    import re
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'FORMAL.md')
+    text = open(path, encoding='utf-8').read()
+    exp = re.search(r'…of which the runtime dylib actually \*\*exports\*\*\s*\|\s*'
+                    r'(\d+)', text)
+    reach = re.search(r'\*\*(\d+) word-shaped calls are callable', text)
+    if not (exp and reach):
+        return None
+    return {'exported': int(exp.group(1)), 'reachable': int(reach.group(1))}
+
 
 def test_manifest_round_trips():
     from build_stdlib_dylib import runtime_dylib
