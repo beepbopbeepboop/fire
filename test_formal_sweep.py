@@ -574,6 +574,17 @@ class TestDyldProbe(unittest.TestCase):
           goes through the export trie, which is the only place `_macho_symbol`
           is used, so an arm64-only fixture would leave the function that
           replaced the `lstrip` untested.
+
+        The precondition is asked of the binds the FIXTURE creates, which is not
+        every bind on the link line. An image also binds whatever its ENTRY STUB
+        calls, and on x86-64 that includes libc's `exit` — a name no fixture can
+        give a leading underscore to, so asserting the precondition over the
+        whole bind list failed on a bind this test never made (measured: arm64
+        binds `['__pkg__helper_twice_9f63a2']`, x86_64 binds that plus `exit`).
+        The fixture's own binds are selected STRUCTURALLY rather than by
+        position: a bind the imported library exports under its mangled
+        spelling is this fixture's, and one only libSystem provides is the
+        stub's. Position would be a coin flip — it used to be, and `exit` won.
         """
         from formal import build as FB
         for arch, image in self.leading_underscore.items():
@@ -586,7 +597,13 @@ class TestDyldProbe(unittest.TestCase):
             self.assertIsNotNone(foreign, f"[{arch}] no imported library on "
                                           f"the link line: {dylibs}")
             exports = set(FB.macho_dylib_exports(foreign))
-            for name in names:
+            fixture_binds = [n for n in names if S._macho_symbol(n) in exports]
+            self.assertTrue(
+                fixture_binds,
+                f"[{arch}] precondition: no bind is one {foreign!r} exports, "
+                f"so this fixture made no bind to normalise — binds {names}, "
+                f"exports {sorted(exports)}")
+            for name in fixture_binds:
                 self.assertTrue(
                     name.startswith("_"),
                     f"[{arch}] precondition: the bind {name!r} does not begin "
