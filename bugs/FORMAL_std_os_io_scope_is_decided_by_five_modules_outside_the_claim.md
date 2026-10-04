@@ -6,25 +6,50 @@ files** — that is the finding, and it is the answer to the question the sweep
 cannot answer. What is left open is the chain, link by link, with an owner per
 link.
 
-**Status (2026-10-03): the one IN-FILE refusal in this scope is FIXED.**
-`std/sys/debug.mojo` moved `codegen` → `pass` on both architectures and the
-scope's `codegen` class is 0; the scope's codegen coverage went **4.3 % → 6.5 %**
-(2/46 → 3/46). That is the whole of what this claim could move, and §3 says why.
+**Status (2026-10-03, second pass — the chain has MOVED and two of its three
+links now point at closed or mis-owned work).** Re-measured on this tree, both
+architectures, the same 46 files, one `fire.py build --formal --no-prove` each
+(§4 has the loop): **still 3 build, still 0 in-file refusals, still 43
+dependency refusals — and the chain's links are different ones.**
+
+| link | was (2026-10-03, first pass) | is (now) |
+|---|---|---|
+| 1, 40 files | `binary_heap.mojo`: `BinaryHeap.pop() both changes its receiver and returns a value` | **the EXPORT GATE**: `formal dylib has no public functions: binary_heap.mojo exports nothing under doc/ABI.md's rules: it declares only the generic struct template(s) BinaryHeap` — the mutator-ABI refusal is GONE (`work/formal15-mutator-return-abi`) and §3 of the original doc predicted this exact wall |
+| 2 | `tile.mojo`: the bracketed `workgroup_function[…](…)` specialization | unchanged, still the refusal on both architectures — and now `project18:tile-specialization` is working it |
+| 3, 3 files | `builtin_slice.mojo`: two refusals (a receiver rebind, and a frame-holder return) | **`builtin_slice.mojo: self.step.or_else() is an Optional unwrap`**, which is neither of them, and is owned by `FORMAL_stdlib_optional_needs_a_representation.md` (`formal16-7`) — not by the two docs this table used to name |
+
+**And there is a fourth refusal inside link 1's module, which this table did not
+have:** `binary_heap.mojo` built on its own now reports row **1** of its own
+doc's §3 table —
+
+```
+build: self.clear() is a method call on a value, and this backend lowers only
+append, close, write (on a file descriptor) and the string methods count,
+endswith, find, lstrip, startswith …
+```
+
+— which is `List.clear`, "count = 0, one store", missing from the emitter's
+method table. It is the cheapest thing in the whole chain and it moves NOTHING
+here (row 2 is `unsafe_ptr`, a pointer model), and it is not this claim's:
+`bugs/FORMAL_binary_heap_mojo_after_the_len_value.md` is `formal18-2`'s and its
+§3 already names it as row 1. Recorded here so the next reader of this chain
+knows the link has a next row and who owns it.
+
+The original status note stands: **the one IN-FILE refusal in this scope is
+FIXED.** `std/sys/debug.mojo` moved `codegen` → `pass` on both architectures and
+the scope's `codegen` class is 0; the scope's codegen coverage went **4.3 % →
+6.5 %** (2/46 → 3/46). §3 says why that is the whole of what this claim could
+move.
 
 ---
 
-## 1. The sweep, both architectures, and what it does not say
+## 1. The census, both architectures, and what it does not say
 
 `../new-modular/Mojo/stdlib/std/{os,io,pathlib,sys,time,hashlib,base64,ffi}` is
-**46 `.mojo` files**. Swept whole, `-j 2 -t 120`, both architectures, on
-`work/formal14-std-os-io` at `cabcc936` (after the fix in §2):
-
-```
-python3 tools/memslot.py --gb 8 --label sweep -- \
-  python3 tools/formal_sweep.py -j 2 -t 120          <the 46 files>
-python3 tools/memslot.py --gb 8 --label sweep -- \
-  python3 tools/formal_sweep.py -j 2 -t 120 --arch x86_64 <the 46 files>
-```
+**46 `.mojo` files**. At the first pass they were swept whole (`tools/formal_sweep.py
+-j 2 -t 120`, both arms, on `work/formal14-std-os-io` at `cabcc936`); at this pass
+they were each built once with `--no-prove` (§4), which reads the same three
+classes off the refusal and says which module fired:
 
 | class | arm64 | x86-64 |
 |---|---|---|
@@ -33,44 +58,64 @@ python3 tools/memslot.py --gb 8 --label sweep -- \
 | **codegen** (a refusal IN the file) | **0** | **0** |
 | codegen/dependency | 43 | 43 |
 | **codegen coverage** | **3/46 = 6.5 %** | **3/46 = 6.5 %** |
-| peak RSS | 0.3 GB over ≤6 procs | 0.3 GB over ≤6 procs |
+| peak RSS | 0.1 GB, one build at a time | 0.1 GB, one build at a time |
 
-The three that build, read off the same builds: **`std/os/pathlike.mojo`,
+**The counts are the first pass's and they still hold**, which is the one thing
+this pass measured about them: 3 build, 0 refuse in their own file, 43 refuse on
+a module they import, and the 43 split 40 / 3 between two refusing modules that
+are not in this scope. The three that build are the same three: **`std/os/pathlike.mojo`,
 `std/sys/_io.mojo`, `std/sys/debug.mojo`** — and the third of those is the one
-this branch fixed. The two architectures agree on every file, which is the same
-result `…_b7.md` §2.5 reports for the whole 668-file scope: this backend's
-remaining coverage is not a per-architecture question.
+the first pass fixed. **Both architectures agree on every file, verified by
+diffing the two runs' per-file verdicts rather than by counting them twice**:
+
+```
+$ diff <(cut -d' ' -f1,2 .tmp/scope/out46.txt | sort) \
+       <(cut -d' ' -f1,2 .tmp/scope/out46_x86.txt | sort) && echo SAME
+SAME
+```
+
+and the three files behind link 3 are the same three on both arms
+(`std/io/file.mojo`, `std/pathlib/__init__.mojo`, `std/ffi/unsafe_union.mojo`).
+That is the same result `…_b7.md` §2.5 reports for the whole 668-file scope: this
+backend's remaining coverage is not a per-architecture question.
+
+**A sweep row is a FAMILY LABEL and this doc needs a module name**, which is why
+the second pass stopped using it here: `binary_heap.mojo` has two independent
+walls (§2's row 1 and the binary-heap doc's §2), and a family label reads the
+same for both. The refusal text names the wall; the label does not.
 
 **The sweep reports ONE link of a chain**, the terminal refusal its build walk
-reaches, so these 43 lines are 43 answers to "what is the FIRST thing this file
+reaches, so those 43 lines are 43 answers to "what is the FIRST thing this file
 cannot build" and not 43 answers to "what is wrong with this file". §2 is the
 chain; §3 is why the chain cannot be walked by the worker holding this claim.
 
 ## 2. The chain, measured link by link
 
-`tools/formal_sweep.py` has no `--depth` flag, so the chain was measured with
-`tools/formal_chain_probe.py`: it copies the stdlib to `.tmp/chain-probe`, asks
-every path for its terminal refusal, replaces the refusing module in the COPY
-with a stub plus a dropped import line, and asks again. The original
-`../new-modular` tree is only ever read, and the tool's own docstring states the
-limit that decides how far its numbers are worth reading (neutering a module
-also removes the names its users call).
+**RE-MEASURED 2026-10-03 (second pass).** The numbers and the refusals below are
+this pass's; the first pass's are kept in the Status table at the top so a reader
+can see what moved. `tools/formal_chain_probe.py` is still not needed for links
+1–3: every one of them is reachable by building the scope's own files and reading
+the refusal, because none of them is behind another (§4 has the loop).
 
 | link | refusing module | files | what it refuses | owner |
 |---|---|---|---|---|
-| **1** | `std/collections/binary_heap.mojo` | **40** | `BinaryHeap.pop() both changes its receiver and returns a value` — a PREP-time refusal (`mutating_receiver_return_refusal`), so it preempts every emitter refusal in that file | `sweep14:std-collections`; `FORMAL_binary_heap_mojo_after_the_len_value.md` §3 row 0 already names this as "the cheapest real step … a decision about the ABI" |
-| **2** | `std/algorithm/backend/tile.mojo` | **40** | `workgroup_function[…](…) calls a name this unit does not compile` — a bracketed specialization | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value` (`formal13-6`) |
-| **3** | `std/builtin/builtin_slice.mojo` | **3** | two different refusals in the same function: `self is assigned other in StridedSlice___init__()` (receiver rebind), and `StridedSlice___init__ returns a frame address, so it cannot be compiled into a dylib` | `FORMAL_one_field_receiver_rebound_propagates` (`formal13-5`) and `FORMAL_builtin_slice_optional_field_is_a_frame_holder` (`formal13-3`) |
-| 4+ | `std/format/format_int.mojo`, `std/reflection/function.mojo`, `std/reflection/reflect.mojo`, `std/builtin/{rebind,constrained,movable,copyable,deinitable,globals}.mojo` | 1–22 each | a bracketed `b[…](…)`, `__mlir_attr` comptime bindings, a re-export of `downcast` nothing publishes, `pop.global_constant` | `sweep14:std-builtin-math`, `formal13-6`, `FORMAL_stdlib_tile_row_…` |
+| **1** | `std/collections/binary_heap.mojo` | **40** | **the export gate**, not a codegen refusal: `formal dylib has no public functions: binary_heap.mojo exports nothing under doc/ABI.md's rules: it declares only the generic struct template(s) BinaryHeap, and the template itself is not a boundary symbol. Its INSTANTIATIONS are — formal/monomorph.py compiles each one an importer asks for … so this message means nothing asked for one` | `FORMAL_binary_heap_mojo_after_the_len_value.md` §2 (`formal18-2`), and behind it §2b's measurement: lifting this wall moves 8 of 10 sampled files onto link 2 and 2 onto link 3 |
+| 1′ | `std/collections/binary_heap.mojo`, built alone | (0 of this scope — it is what link 1 would hit next) | `self.clear() is a method call on a value …` — `List.clear` has no entry in the emitter's method table | same doc, §3 row 1 |
+| **2** | `std/algorithm/backend/tile.mojo` | 0 today (behind link 1) | `workgroup_function[…](…) calls a name this unit does not compile, so the brackets cannot be bound` — re-measured on BOTH architectures, unchanged | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value` (`formal16-7`) and `project18:tile-specialization` |
+| **3** | `std/builtin/builtin_slice.mojo` | **3** | `self.step.or_else() is an Optional unwrap: it answers by knowing which of two words was the empty one, and on this path there is no way to know` | `FORMAL_stdlib_optional_needs_a_representation` (`formal16-7`) — which names this exact refusal as `builtin_slice.mojo`'s terminal cause. The two docs the first pass named here (`FORMAL_one_field_receiver_rebound_propagates`, `FORMAL_builtin_slice_optional_field_is_a_frame_holder`) are not what fires |
 
-**Links 4 and beyond are a lower bound on the depth, not a measurement of it**,
-and the reason is a real limit of the method rather than a caveat to wave at:
-neutering a module removes the names its USERS call, so from link 4 the probe is
-measuring what the neutered module's users need rather than the next link in the
-chain. Links 1–3 were each measured with the whole closure intact and are the
-part worth acting on; `round 2` of the output is where the two readings part
-company, and it says so in its own counts (22 files move to a different module
-the moment `tile.mojo` is stubbed, which is a probe artefact and not a chain).
+The three files behind link 3 are the same three the first pass found —
+`std/ffi/unsafe_union.mojo`, `std/io/file.mojo` and `std/pathlib/__init__.mojo`
+— and they reach `builtin_slice.mojo` without `binary_heap` at all, so their
+chain is one link shorter and it is the shortest one here. **Whoever takes link
+3 gets three files**, which is the whole prize, and the work behind it is a
+value-model decision for `Optional` shared by both backends and the Lean proof.
+
+**Why the sweep reports ONE link and this table has three** is unchanged and is
+worth restating, because it is the reason the two disagree: the sweep reports the
+terminal refusal its build walk REACHES, so its 43 lines are 43 answers to "what
+is the FIRST thing this file cannot build". Link 2 is not in the sweep's output
+at all because link 1 fires first — not because link 2 is gone.
 
 **Zero links are in this scope's own packages.** Not one of the 46 files' own
 refusals survives once the shared modules are out of the way, which is the same
@@ -80,49 +125,84 @@ one file per link.**
 
 ## 3. Why this claim cannot walk its own chain, which is the part to act on
 
-**Link 1's repair is a STDLIB edit, and a repository worktree cannot make one.**
-`mutating_receiver_return_refusal` names its two repairs — split the method into
-a mutator and a reader, or make it read the receiver instead of writing it — and
-both are edits to `../new-modular/Mojo/stdlib/std/collections/binary_heap.mojo`,
-which is outside every worker worktree and outside this repository. So for the
-one link that gates 40 of 46 files in this scope:
+**What was true at the first pass and is now HISTORY: link 1's codegen half is
+fixed.** `mutating_receiver_return_refusal` named two repairs — split the method
+into a mutator and a reader, or make it read the receiver instead of writing it
+— and this paragraph argued that both are edits to
+`../new-modular/Mojo/stdlib/std/collections/binary_heap.mojo`, outside every
+worker worktree, and that the backend repair needs a `lib/work.lean` step. **The
+second half of that is what landed** (`work/formal15-mutator-return-abi`, commit
+`11558f0d`, recorded in the binary-heap doc's §0): the receiver is handed over by
+reference, so no extra register was needed and the refusal is gone from the file
+entirely. The first half was never the wall.
 
-* the source repair is not deliverable from here, and
-* the backend repair — a one-field mutator gets a second return word, or its
-  receiver is passed by reference — is `FORMAL_wide_receiver_by_reference`
-  (`formal13-7`) and needs a `lib/work.lean` step for the extra register, which
-  is exactly the kind of change a light worker must not make unverified.
-
-**And closing link 1 does not move the row.** `FORMAL_binary_heap_mojo_after_the_len_value.md` §2 measured it: past every codegen refusal in that file the module-dylib build fails at the **export gate** (`binary_heap.mojo exports nothing under doc/ABI.md's rules: it declares only the generic struct template(s) BinaryHeap`), which costs a monomorphizer. That is 40 files waiting on a project, not on a patch, and link 2 (`tile.mojo`) is what 40 files see the moment link 1 is out of the way.
+**What link 1 IS now is the export gate, and it is not a patch either.** §2's row
+1 is the measurement: `binary_heap.mojo` declares only the generic struct template
+`BinaryHeap`, a template is not a boundary symbol under `doc/ABI.md`, and nothing
+asks for an instantiation. The binary-heap doc's §2b measured what lifting that
+wall does — 8 of 10 sampled files move onto link 2 and 2 onto link 3 — and named
+the decision it needs ("does the importing module bind any CONCRETE name of the
+dependency?"), together with the pinned test that decision would reverse. So link
+1 is a project with a named decision and a named owner, and **40 files are waiting
+on it rather than on a patch.**
 
 **The three files behind link 3 are the cheapest thing here and they are still
 not free.** `std/ffi/unsafe_union.mojo`, `std/io/file.mojo` and
-`std/pathlib/__init__.mojo` reach `builtin_slice.mojo` without `binary_heap`
-at all, so their chain is one link shorter — and it ends in
-`std/builtin/globals.mojo`'s `pop.global_constant` ("its value is the
-linker-resolved content of a symbol, and this path compiles each module to its
-own image"). Whoever takes link 3 gets three files; that is the whole prize and
-it is worth stating so nobody re-derives it.
+`std/pathlib/__init__.mojo` reach `builtin_slice.mojo` without `binary_heap` at
+all, so their chain is one link shorter — and it now ends in `Optional`'s missing
+representation (`self.step.or_else()`), which is a value-model decision shared by
+both backends and the Lean proof, owned by
+`FORMAL_stdlib_optional_needs_a_representation`. The first pass said this chain
+ended in `std/builtin/globals.mojo`'s `pop.global_constant`; that is behind
+link 3 now and was not re-measured, because §2's table stops at links a reader can
+act on. Whoever takes link 3 gets three files; that is the whole prize and it is
+worth stating so nobody re-derives it.
 
 ## 4. Reproducing
 
+**This pass's numbers come from 46 individual builds, not from a sweep** — one
+`fire.py build --formal --no-prove` per file, which is what makes the class of
+each refusal readable (the refusal names the module) and costs ~4 minutes per
+architecture on an idle box:
+
 ```sh
 export PATH=/opt/homebrew/bin:$PATH
-S=../new-modular/Mojo/stdlib/std
-
-# the scope sweep, both arms (2 min each; the CAS makes a re-run ~free)
-python3 tools/memslot.py --gb 8 --label sweep -- \
-  python3 tools/formal_sweep.py -j 2 -t 120 $S/{os,io,pathlib,sys,time,hashlib,base64,ffi}
-python3 tools/memslot.py --gb 8 --label sweep -- \
-  python3 tools/formal_sweep.py -j 2 -t 120 --arch x86_64 $S/{os,io,pathlib,sys,time,hashlib,base64,ffi}
-
-# one link at a time, on a COPY of the stdlib
-python3 tools/memslot.py --gb 8 --label chain -- \
-  python3 tools/formal_chain_probe.py 9 arm64 $S/{os,io,pathlib,sys,time,hashlib,base64,ffi}
+cd "$(git rev-parse --show-toplevel)"
+S=$PWD/../new-modular/Mojo/stdlib/std
+mkdir -p .tmp/scope
+for f in "$S"/{os,io,pathlib,sys,time,hashlib,base64,ffi}/*.mojo \
+         "$S"/{os,io,pathlib,sys,time,hashlib,base64,ffi}/*/*.mojo; do
+  python3 tools/memslot.py --gb 8 --label scope -- \
+    python3 fire.py build --formal --no-prove -o .tmp/scope/x.aout "$f"
+done
 ```
 
-**Links 1–3 are the ones a reader should trust**, and they are the first three
-rounds of that last command:
+which is what `.tmp/scope/sweep46.sh` does, and `--backend=x86_64` for the second
+arm (`out46.txt` and `out46_x86.txt`; 6 min per arm on this box, most of it the
+x86-64 arm's first pass at compiling dylibs the CAS did not have). The first pass
+used the sweep and the chain probe, and both are still the right tools for a
+census (`tools/formal_sweep.py -j 2 -t 120 …`) — the reason for switching is that
+a sweep row is a FAMILY LABEL, so it cannot say which of the two
+`binary_heap.mojo` walls fired, and this doc's whole content is which wall.
+
+Links 1–3 are also reachable one at a time, with no probe and no copy of the
+stdlib:
+
+```sh
+python3 tools/memslot.py --gb 8 --label chain -- \
+  python3 fire.py build --formal --no-prove -o .tmp/scope/y.aout \
+  "$S/collections/binary_heap.mojo"                       # link 1, row 1′
+python3 tools/memslot.py --gb 8 --label chain -- \
+  python3 fire.py build --formal --no-prove -o .tmp/scope/y.aout \
+  "$S/algorithm/backend/tile.mojo"                        # link 2
+python3 tools/memslot.py --gb 8 --label chain -- \
+  python3 fire.py build --formal --no-prove -o .tmp/scope/y.aout \
+  "$S/io/file.mojo"                                       # link 3
+```
+
+The first pass's chain probe output, kept because it is the only measurement here
+of what is BEHIND links 1–3, and because its limit is the reason this doc's table
+stops at three:
 
 ```
 round 0:  3 built, 2 refusing modules    40 binary_heap.mojo   3 builtin_slice.mojo
@@ -133,7 +213,10 @@ round 2:  3 built, 2 refusing modules    22 format_int.mojo    21 tile.mojo
 Round 2 is where the reading changes: stubbing `tile.mojo` moved 18 files from
 it onto `format_int.mojo`, which is the probe's own artefact (the stub removed
 names `tile.mojo`'s users call) rather than a link in the chain, and it is the
-round the doc's §2 table stops at.
+round the doc's §2 table stops at. The binary-heap doc's §2b re-measured the same
+thing with a lighter probe (skip the library the export gate refuses) and got
+8-in-10 on `tile.mojo` — the same answer, from a method that does not neuter
+anything.
 
 `…_b7.md` §1.1's caveat applies and is worth repeating: **a `-t` is a CPU budget
 divided by the load.** These 46 files are refusals, so they are cheap — ~2 s of
@@ -174,5 +257,18 @@ behind link 1. Recorded because the next worker on this scope will otherwise
 propose it, and the reason it is not a one-liner is in the source rather than
 being obvious.
 
-**Left, with the owner for each:** links 1–4 of §2. None of them is in this
-claim, and §3 says why each one is not a patch.
+**Left, with the owner for each** — re-measured, so this is the whole list as of
+this pass:
+
+| what | how many of the 46 | owner |
+|---|---|---|
+| link 1, the export gate on `binary_heap.mojo` | 40 | `FORMAL_binary_heap_mojo_after_the_len_value.md` §2 / §2b (`formal18-2`) |
+| link 1′, `List.clear` has no lowering (what link 1's module hits next) | 0 | same doc, §3 row 1 |
+| link 2, `tile.mojo`'s bracketed specialization | 0 today | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value` (`formal16-7`), `project18:tile-specialization` |
+| link 3, `Optional`'s missing representation in `builtin_slice.mojo` | 3 | `FORMAL_stdlib_optional_needs_a_representation.md` (`formal16-7`) |
+
+**None of the four is in this claim, and §3 says why each one is not a patch.**
+The one thing this pass changed is the map: at the first pass two of the three
+links named a refusal that no longer fires and an owner that does not hold it,
+and a reader following the old table would have gone to fix a wall that had
+already been rebuilt into a different one.

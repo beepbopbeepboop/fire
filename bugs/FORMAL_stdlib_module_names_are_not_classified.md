@@ -83,6 +83,64 @@ names are named as unclassified (so a coverage report counts them as "no verdict
 rather than as either tier), and the queue for the 222 is a bounded piece of
 per-name work with the readings §"The next step" already lists.
 
+## 0.2 What landed on the second pass (`work/formal18-6`): §0.1's measurement is
+now a TEST, and one sentence that claimed more than the code did was corrected
+
+**The open question in §"The next step" — "which of the 120 a swept file actually
+imports is the number that decides how much of this is worth doing … Until that is
+counted, 120 is an upper bound" — is now answered permanently and in the
+direction that decides it.** `test_formal_imports.py::
+test_no_unclassified_stdlib_name_is_imported_by_anything` walks every `.mojo` file
+in this repository **and** in the stdlib, parses each with
+`formal/imports.py`'s own `parse_module_for_closure` + `imported_modules`, and
+asserts that not one of them imports a CPython standard-library name that no tier
+classifies and no module answers:
+
+```
+217 names in no tier (no `host_module_tier`, no `resolve_module_path` hit)
+>100 .mojo files scanned (this repository + ../new-modular/Mojo/stdlib/std)
+0 files import one of them
+```
+
+1.8 s, no build, no Lean, and it is a **tripwire with a direction**: the day a
+file imports `binascii`, it goes red and the fix is to place the name by the
+rule in `formal/imports.py` — which is the only thing that can answer the
+question the new consumer has asked. Until then the 217 are inert, which is the
+measurement §0.1 made and the reason this doc's remaining work is not urgent.
+
+**Two details of that test that are load-bearing, because the obvious version of
+it is wrong:**
+
+* **"in no tier" is not `host_module_tier(n) == ''`.** A name this tree has
+  WRITTEN leaves its tier (that is `formal/imports.py`'s own rule), so `os`,
+  `sys` and `os._syscalls` all answer `''` while being the three most-imported
+  modules in the corpus. The set is the doc's own — no tier AND no module —
+  resolved through `resolve_module_path`, which is also what makes a SUBMODULE of
+  an answered package (`os._syscalls`) count as answered. The first version of
+  the test used the tier alone and reported 11 consumers, every one of them a
+  module that is written.
+* **the stdlib half is optional and the repository half is not.** The stdlib
+  lives outside this repository, so it is walked only when present and the
+  repository is always walked: "there is no corpus here" must not print the same
+  word as "every consumer of these names is classified", which is the reason
+  `test_formal_mlir_precedence.py`'s census returns SKIPPED rather than PASS.
+
+**And one sentence in the area was false and is now true.**
+`formal/imports.py::_host_tier_conflicts`'s docstring claimed it reported "names in
+both tiers, and (for auditing a future edit) names in neither". The code has only
+ever returned the intersection, and the "neither" half is not implementable as
+written: 217 names are in neither tier by design, so asserting that half empty
+would be a red suite rather than a discipline. The docstring now says what the
+function returns, says why the other half cannot exist, and points at the test
+above as the place the "neither" question is actually kept.
+
+**What is still not done, unchanged:** the 217 per-name judgements. §0.1's
+reason still stands — nothing imports them, so there is no measurement to tell a
+right entry from a plausible one, and filling them by category from a distance is
+the failure `formal/imports.py:101` warns about. The census test is what makes
+that deferral safe rather than merely convenient: the work is now queued by the
+consumer that arrives, not by a reader's guess about which names matter.
+
 ## What I ran
 
 ```console
