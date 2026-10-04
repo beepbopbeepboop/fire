@@ -4767,6 +4767,32 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         raise CodegenError(M.scalar_container_base_refusal(
             op, M.spelled(obj), evidence, self.func_name or "<module>"))
 
+    def _refuse_frame_slot_element(self, op: str, obj) -> None:
+        """Raise if `obj` is a struct FIELD the BLOB fallback would read through.
+
+        **Asked where the blob fallback BEGINS, not beside
+        `_refuse_scalar_container_operand`**, and the placement is the corpus:
+        `model.NON_CONTAINER_SLOT_KINDS` is asked before the string and dict
+        readings are dispatched, and a frame-typed field is exactly what a dict
+        lookup's base looks like — `self._dict` in
+        `std/collections/dict.mojo` is annotated `Dict[...]`, which
+        `declared_type_kind` resolves against that module's own `struct Dict`, so
+        the emitter's kind for it is a frame. Refusing from the earlier gate
+        would refuse a dict lookup that works.
+
+        `model.frame_slot_element_refusal`'s docstring has the arithmetic, the
+        measured `4` where a reader means `3`, and why this is a refusal rather
+        than a load at `base + 8i`. It has the corpus census too
+        (`tools/formal_frame_slot_subscript_census.py`), whose whole frame row is
+        two sites and both of them the dict case this placement routes around.
+        """
+        if not isinstance(obj, F.MemberExpr):
+            return
+        why = M.frame_slot_element_refusal(
+            op, self._expr_str_kind(obj), M.spelled(obj))
+        if why is not None:
+            raise CodegenError(why)
+
     def _emit_subscript_addr(self, e: F.SubscriptExpr,
                              for_store: bool = False) -> None:
         """RAX = the ADDRESS of `obj[index]` (not its value).
@@ -4858,6 +4884,14 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R11))
             self._sub_width = 1
             return
+        # A FRAME-valued FIELD, asked HERE — after the dict and string readings
+        # above and before `subscript_base_lowering`'s blob fallback, which is
+        # the only reading left at this point. `_refuse_frame_slot_element` has
+        # the arithmetic and the placement argument; the short version is that
+        # the blob's COUNT is offset 0 of the base, and offset 0 of a frame is
+        # its first FIELD, so `w.d[0]` read `w.d` as a container and answered 4
+        # where the frame held 3 in its first slot.
+        self._refuse_frame_slot_element("a subscript", e.obj)
         shape, width, signed, sub_why = M.subscript_base_lowering(
             self._cur_fn, e.obj, self._structs, self._functions, self._structs)
         if shape is None:
@@ -5242,6 +5276,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._refuse_frame_container_operand("a membership test", right)
         self._refuse_scalar_container_operand("a membership test", right)
         self._refuse_non_container_operand("a membership test", right)
+        self._refuse_frame_slot_element("a membership test", right)
         # The dict question, asked here for the same reason the `for`-in walk
         # asks it and for the same reason `model.walk_stride` exists: a dict is
         # a PAIR blob, so at the element stride this scan compares half the
@@ -5329,6 +5364,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._refuse_frame_container_operand("a for-in iteration", it)
             self._refuse_scalar_container_operand("a for-in iteration", it)
             self._refuse_non_container_operand("a for-in iteration", it)
+            self._refuse_frame_slot_element("a for-in iteration", it)
             self._refuse_string_iteration("a for-in iteration", it)
             from mojo.middle.boundnames import _lbn_target_names
             tnames = _lbn_target_names(stmt.target) \
@@ -7286,6 +7322,7 @@ preference.
         self._refuse_frame_container_operand("a slice", obj)
         self._refuse_scalar_container_operand("a slice", obj)
         self._refuse_non_container_operand("a slice", obj)
+        self._refuse_frame_slot_element("a slice", obj)
         sreason = M.string_slice_refusal(
             self._expr_str_kind(obj), M.spelled(obj))
         if sreason is not None:

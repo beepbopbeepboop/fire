@@ -62,8 +62,20 @@ def one_field(name, decls):
     return st is not None and M.struct_is_one_field(st)
 
 
-def frame_bound_names(fn, struct_names, decls):
+def frame_bound_names(fn, decls):
     """Names this function can hold a MULTI-FIELD struct's frame address in.
+
+    The SET half of `frame_bound_structs`, kept because a count is what this
+    census is for and a set of names is the shape its own reader wants.  It used
+    to take this file's struct NAMES as a second argument, which every caller
+    passed as `set(decls)` and which therefore said nothing the declarations do
+    not already say.
+    """
+    return set(frame_bound_structs(fn, decls))
+
+
+def frame_bound_structs(fn, decls):
+    """`{name: StructDef}` — which frame each of these names holds, not just that.
 
     Two sources, and both are declarations rather than guesses:
 
@@ -78,13 +90,23 @@ def frame_bound_names(fn, struct_names, decls):
     first cut of this census that used "used as a receiver" reported 52 sites of
     which 28 were a word. That is the same over-approximation the sweep's
     `FILES BLOCKED` column warns about, one level down.
+
+    **The MAPPING, and why the set alone was not enough.** A consumer that has a
+    NAME in hand needs the STRUCT: `x.<field>`'s declared type is a fact about
+    the struct `x` holds, so `formal_frame_slot_subscript_census.py` cannot ask
+    "is `x` frame-bound" and then look the struct up by the name's own spelling.
+    A parameter is called `self`, `q`, `other` and nothing that says which struct
+    it is. So the struct travels with the name from here, once, instead of being
+    re-derived per consumer — and a name that is NOT in the mapping may still be
+    frame-bound through a caller this file cannot type, which is the same
+    under-count both censuses state.
     """
-    out = set()
+    out = {}
     for p in (getattr(fn, "params", None) or ()):
         pname, ann = (p[0], p[1]) if isinstance(p, (tuple, list)) else (p, None)
         base = M.annotation_base_name(ann) if ann else None
-        if base in struct_names and not one_field(base, decls):
-            out.add(pname)
+        if base in (decls or {}) and not one_field(base, decls):
+            out[pname] = decls[base]
     for node in M.iter_nodes(getattr(fn, "body", None) or []):
         if not isinstance(node, (F.AssignStmt, F.VarDecl)):
             continue
@@ -98,9 +120,10 @@ def frame_bound_names(fn, struct_names, decls):
         if not isinstance(value, F.CallExpr):
             continue
         callee = M.call_callee_name(value.func)
-        if callee in struct_names and not one_field(callee, decls):
-            out.add(name)
+        if callee in (decls or {}) and not one_field(callee, decls):
+            out[name] = decls[callee]
     return out
+
 
 
 def local_names(fn):
@@ -119,12 +142,11 @@ def scan(path, rows):
         return
     decls = {getattr(s, "name", None): s for s in stmts
              if isinstance(s, F.StructDef)}
-    struct_names = set(decls)
     for fn in M.iter_nodes(stmts):
         if not isinstance(fn, F.FunctionDef):
             continue
         pn = param_names(fn)
-        recv_used = frame_bound_names(fn, struct_names, decls)
+        recv_used = frame_bound_names(fn, decls)
         locals_ = local_names(fn) - pn
         for node in M.iter_nodes(getattr(fn, "body", None) or []):
             if not isinstance(node, F.AssignStmt):
