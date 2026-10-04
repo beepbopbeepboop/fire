@@ -4,7 +4,16 @@
 `formal/hostmods/os/__init__.mojo` (`bugs/FORMAL_os_environ_is_a_view_and_the_
 sweep_row_behind_it.md` §4). It is a **silent wrong answer**, not a refusal, on
 **both architectures**, and it is in the shared model rather than in either
-emitter.
+emitter. **The trigger is not the missing annotation but the ABSENT POINTER
+TYPE**: a parameter annotated `Int` does it too, and an unannotated one that
+receives a `char *` reads text-section bytes rather than the caller's string.
+
+**The corpus case is FIXED by hand and pinned** — `environ_update`'s parameter
+is annotated, and `test_formal_os_backing.py`'s `environ_view` is 77 answers
+against CPython on both architectures with it. What is open is that nothing
+REQUIRES the annotation, nothing refuses its absence, and the answer without one
+is wrong rather than refused, which is the one combination this backend is
+written to never produce. §"The exposure" measures what a fix would cost.
 
 ## The smallest source that shows it, and what it says
 
@@ -63,61 +72,113 @@ for a negative one, and the honest statement is the observable one: **an
 unannotated parameter that receives a pointer does not subscript where the
 source says.**
 
-## Why it is worth a document rather than a patch from the session that found it
+## It is not "unannotated" — it is "not established to be a POINTER", and an
+## `Int`-annotated parameter does it too
 
-The shape is COMMON in this repository's host modules, and every one of those
-functions is a public export of a module dylib, so the wrong answer is
-reachable from any importer. `formal/hostmods/os/__init__.mojo`'s own
-`environ_*` family is the case in point: `environ_update(e, other)` written the
-way every other function there is written —
+| shape | arm64 | x86-64 | CPython |
+|---|---|---|---|
+| `def f(e: Pointer[Int64]): return e[0]`, called with a blob | 53 | 53 | 53 |
+| `def f(e): return e[0]`, called with a blob | **7** | **7** | 53 |
+| **`def f(e: Int): return e[0]`, called with a blob** | **7** | **7** | `TypeError` |
+| `def f(s: Pointer[UInt8]): return s[0]`, called with `"AB"` | 65 | 65 | 65 |
+| `def f(s): return s[0]`, called with `"AB"` | **1953459822** | **1953459822** | 65 |
 
-```mojo
-def environ_update(e: Pointer[Int64], other) -> Pointer[Int64]:
-    var n = other[0]          # 7209024, not 52
+The third row is the one that makes this a value-model question and not a
+missing annotation: the parameter says `Int` **out loud**, so no annotation
+fixes it, and the answer is the blob header's neighbour rather than a refusal.
+The last row is worse than a wrong number in the sense that matters — those four
+bytes are not the caller's string at all, they are text-section bytes read at
+`base + 8` from an address whose first word happened to be small.
+
+## Why it happens: it is the residual `subscript_base_lowering` NAMES and does
+## not measure
+
+`formal/model.py`'s `subscript_base_lowering` routes `obj[i]` three ways: a
+`load` at the pointee's width when the base is established to be a pointer, a
+refusal when it is a pointer whose pointee has no width, and — for **every base
+whose kind nothing establishes** — the container reading, where element `i` is at
+`base + 8 + 8*count`. That third answer is right for a list and **wrong by one
+whole element** for a word holding an address: a blob's first word is its count
+and an address has no count there. Both emitters ask the same function, which is
+why the two machines agree to the byte.
+
+Its own docstring states the trade, declines it, and then says where the number
+is:
+
+> What is deliberately NOT refused: a base whose kind nothing establishes. […]
+> "refuse every unestablished base" would refuse every `p[i]` where `p` came
+> from a caller. Measured over the 395 `.mojo` files of the sweep corpus that is
+> ~2 200 sites whose base is a word […] The remaining wrong-number case — a base
+> that IS an address and says nothing — is recorded, with the number, in that
+> bug doc.
+
+**The bug doc it names is DELETED** (`bugs/FORMAL_subscript_of_a_pointer_reads_
+a_blob_count.md`, fixed when `p[i]` was routed to the pointer path for a base
+that says it is one) and five files still cite it, so the residual it recorded
+had nowhere left to live. This document is that residual, and the measurement
+below is the number its author did not take.
+
+## The exposure, measured: a blanket refusal is NOT the fix
+
+`tools/formal_unstated_base_subscript_census.py` (new, and a parse plus one
+walk — no build, no Lean, no sweep, for the reason
+`tools/formal_frame_field_census.py` gives) asks the real
+`subscript_base_lowering` and the real `model.ValueKinds` over the corpus:
+
+```
+$ python3 tools/memslot.py --gb 8 --label t -- \
+      python3 tools/formal_unstated_base_subscript_census.py
+scanned 377 .mojo files
+subscripts that take the BLOB reading: 5510 sites in 174 files
+…whose base is a LIST, so the reading is RIGHT: 43
+…whose base is NOT a list — THE EXPOSURE, an upper bound: 5467 sites in 170 files
+
+the exposure, by what the base's kind is:
+  NOTHING                  4017
+  int                      1015
+  type                      418
+  str                        17
+
+the exposure, by how the base is spelled:
+  a name                   3781
+  a field read             1389
+  a call result             273
+  a subscript                24
 ```
 
-— looped over garbage and never terminated. Annotating the parameter
-(`other: Pointer[Int64]`) is the whole fix and the module now does that, so the
-rows this document is about are **not** a known failure: they are a rule about
-how a parameter has to be written. What is left open is that nothing REQUIRES
-the annotation, nothing refuses its absence, and the answer without it is wrong
-rather than refused — which is the one combination this backend is written to
-never produce (`bugs/FORMAL_pointer_value_model.md`'s subject, and the reason
-every reader in `formal/model.py` refuses rather than guesses).
+**Read it as an UPPER BOUND and it is still too big to refuse.** The 418 `type`
+sites are the type-parameter subscripts (`List[Int]`) that are refused further
+down the same path, which is the "most of them" the docstring predicted — but
+4017 bases are `NOTHING`, i.e. nothing in the image says what they are, and many
+of those really are containers this instrument cannot see (a local bound from a
+callee that returns a blob). So the number settles ONE question — "is refusing
+the unestablished base cheap?" — and the answer is **no**, which is why the
+existing design is right and why the fix has to be narrower than a refusal.
 
-## What I know and what I do not
+## What the next step is, precisely
 
-**Measured:** the table above, both architectures, byte-identical; the
-four-element mapping; the caller-side fact that `blob_count(b)` in the same
-program answers 53, so the POINTER is intact and only the subscript is wrong;
-and that annotating the parameter fixes it, on both backends, with no other
-change (the `environ_update` case in `test_formal_os_backing.py` is 77 answers
-against CPython on arm64 and on x86-64 with the annotation in place).
+Two candidate rules, and which one is correct is a decision rather than a
+derivation:
 
-**Not measured, and it is where the next session starts.** I did not find the
-subscript's element-width reader. The shape of the bug says it is a WIDTH
-question and not an address one — the address is right, because the same
-pointer read through an annotated parameter is right — so the reader to look at
-is whichever one answers "how wide is the element of this subscript's base" for a
-base whose type the source never states, and the answer it must be returning is
-`DEFAULT_INT_TYPE`'s width applied to a base it should have refused. Two
-candidates, both in `formal/`, and both named here rather than guessed at:
+  * **Refuse a subscript whose base's kind the image states as a NUMBER.**
+    That is the 1015 `int` row plus the third row of the table above, it is the
+    one shape where the blob reading is certainly wrong (an integer has no
+    elements) and where the source itself is nonsense, and it costs nothing
+    outside itself. The reader is `subscript_element_kind` /
+    `subscript_base_lowering`'s own `("blob", 8, False, None)` arm: it already
+    has the kind in hand when it answers `blob`, and `int` is not a list kind.
+  * **Refuse it for a base that IS a parameter with no annotation**, which is
+    the shape found here and is narrower still — but it is a SPELLING rule
+    dressed as a type rule, and `FORMAL_a_local_read_before_its_first_
+    assignment.md`'s instrument exists because spelling rules are how this corpus
+    gets its false positives.
 
-  * `formal/model.py`'s subscript element-kind reader — the one
-    `subscript_element_kind` and `_note_binding` use, whose answer for a `char *`
-    is "a byte" and whose answer for a name with no stated type is "nothing"
-    (`docs` on `len()` of an unclassified value refuse for exactly that reason:
-    `len(items) is len() of a value classified as 'int'`).
-  * the `_offset_scale` guard `bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_
-    behind_it.md` §3 records, which is about a DECLARED pointee and deliberately
-    does not fire at a subscript whose base has no declared pointee at all.
-
-The first thing to write down is a refusal that is TRUE, because a refusal is
-the correct answer for `e[0]` where `e` has no stated type: the module would
-then have to annotate, which is what the fix here did by hand. Whether the
-refusal or a width answer is better is a value-model decision and belongs to
-`FORMAL_pointer_value_model.md`'s owner; the shape of the hole is measured here
-and the decision is not.
+Either way the change is in `formal/model.py` and both emitters inherit it, so
+the measurement to make afterwards is the sweep's own refusal count — the
+integrator's — and the pin is a `test_formal_run.py` row per shape in the table
+above. I did not choose between them: the choice is between two wrong answers for
+a base nothing types, and `FORMAL_pointer_value_model.md`'s owner is the one who
+should make it.
 
 ## Reproducing
 
