@@ -7,6 +7,10 @@ fixed**, deliberately, with the reason in §4. It is the one surviving `WRONG` i
 a 296-case sweep, and it is reachable: `formal/arm64_codegen.py` emits
 `encode_ldr_xt_xn_imm(_, 31, off)` at ten sites.
 
+**Both defects are reproduced on seed `sweepC`, and NEITHER of them is what the
+296-case `sweepB` sweep reports** — that sweep is clean once X18 is excluded
+(§1). So this bug's evidence is the two one-instruction cases below, not a tally.
+
 There are TWO defects in the two arms and they are independent:
 
 1. **the base register** — `arm64_step` reads it with `arm64_reg`, so `Rn = 31`
@@ -18,14 +22,42 @@ There are TWO defects in the two arms and they are independent:
 ## 1. What was run, and what it printed
 
 ```
-$ python3 tools/memslot.py --gb 4 --label fm -- python3 tools/formal_model_fuzz.py \
+$ python3 tools/memslot.py --gb 8 --label sweepB -- python3 tools/formal_model_fuzz.py \
       --cases 300 --seed sweepB
-arm64 model vs hardware: AGREE 196  WRONG 1  NOSTEP 99  (of 296)
-  case 74 [flags]: ...
+arm64 model vs hardware: x18 skipped (platform register): AGREE 197  NOSTEP 99  (of 296)
+
+$ python3 tools/memslot.py --gb 8 --label sweepC -- python3 tools/formal_model_fuzz.py \
+      --cases 300 --seed sweepC
+arm64 model vs hardware: x18 skipped (platform register): AGREE 208  WRONG 2  NOSTEP 86  (of 296)
+  case 120 [flags]:
+      x11  model=0000000000000000 hardware=cc3886474dac2e47
+  case 123 [flags]:
+      mem[+292] model=ff hardware=49
+      mem[+293] model=ff hardware=ce
+      mem[+294] model=ff hardware=fd
 ```
 
-Per mix, 60 cases each (seed `ledgerA`), the four `WRONG` cases are all in `mem`
-and all three are memory effects:
+The two `sweepC` cases ARE these two defects, one each, and each is two
+instructions (a `cmp` to establish the flags and the access itself):
+
+| case | instructions | difference |
+|---|---|---|
+| 120 | `cmp x3, x20; ldr x11, [sp, #64]` | `x11 model=0000000000000000 hardware=cc3886474dac2e47` |
+| 123 | `cmp x1, x13; mvn x26, x27; eor x29, x1, x18; sub x6, x28, x1; str w25, [x9, #32]` | three bytes above the 32-bit store: `model=ff` where the hardware has the memory's own `49 ce fd` |
+
+**And the X18 note, because a reader comparing the two sweeps will hit it.**
+`sweepB` at 296 cases reports ONE `WRONG`, and it is NOT this bug: it is X18, the
+register AArch64 reserves for platform use. In a multi-hundred-case run the
+hardware's X18 comes back 0 where the model had a non-zero value (36 of 600 cases
+on seed `sweepC`), and every one of them agrees when run on its own — nothing in
+the generated stub writes X18 after the table load, so the clobber is the
+platform's. `tools/formal_model_fuzz.py` now EXCLUDES X18 from the comparison and
+says so on every line it prints. That is a measurement, not a convenience, and it
+is the reason the `sweepB` figure above has no `WRONG` in it.
+
+Before the four model fixes landed, the per-mix sweep (`ledgerA`) also showed
+four `WRONG` in `mem`; §2 of `bugs/FORMAL_model_fuzz_ledger.md` carries that
+table. They were this bug:
 
 | case | instructions | difference |
 |---|---|---|

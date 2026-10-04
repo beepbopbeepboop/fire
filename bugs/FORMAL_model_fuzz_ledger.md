@@ -42,7 +42,9 @@ recorded here (`MEMLIMIT` well inside the 3-4 GB line in `BLOW.md`).
 | 2026-10-04 | all 10 | `sweepB` | 297 | AGREE 152, WRONG 45, NOSTEP 99, FAULT 0, ENC-MISMATCH 0 | the first clean sweep: every remaining finding is a fact about `arm64_step` |
 | 2026-10-04 | per-mix, 60 each | `ledgerA` | 600 | AGREE 238, WRONG 70, NOSTEP 172 | the coverage table in §2.1, BEFORE the model fixes |
 | 2026-10-04 | per-mix, 60 each | `ledgerA` | 600 | **AGREE 304, WRONG 4, NOSTEP 172** | the same corpus AFTER the four model fixes: WRONG 70 → 4, and NOSTEP unchanged, which is the shape of a fix that changes semantics rather than coverage |
-| 2026-10-04 | all 10 | `sweepB` | 296 | **AGREE 196, WRONG 1, NOSTEP 99** | after the fixes; the surviving `WRONG` is `LDR`/`STR (unsigned offset)` reading register 31 as zero |
+| 2026-10-04 | all 10 | `sweepB` | 296 | **AGREE 197, NOSTEP 99, WRONG 0** | after the fixes, and with X18 excluded (§5) — every instruction the model can step agrees with the CPU |
+| 2026-10-04 | all 10 | `sweepC` | 296 | **AGREE 208, WRONG 2, NOSTEP 86** | a different seed, and the two `WRONG` are the two filed memory defects: `LDR`/`STR (unsigned offset)` reading register 31 as zero, and `STR Wt` writing eight bytes |
+| 2026-10-04 | all 10 | `sweepC` | 600 | AGREE 410, WRONG 7, NOSTEP 183 | 41 s at 1.3 GB peak with `--lean-chunk` (§6) |
 
 ### 2.1 Per-mix coverage (60 cases per mix, seed `ledgerA`)
 
@@ -64,6 +66,12 @@ fixes changed what the model COMPUTES, not which instructions it accepts, so
 every mix that could already step its instructions went to AGREE and every mix
 that could not stayed at NOSTEP. A fix that moved NOSTEP would have been a fix
 to the harness.
+
+**A tally of 0 `WRONG` is a statement about a corpus, not a clean bill of
+health**, and the `sweepC` row is the proof of that: 296 cases of the same mixes
+on a different seed disagree twice, both times in memory. Two hundred cases of
+`mem` is not many; the ledger's job is to say so rather than to let `WRONG 0` be
+read as "memory is fine".
 
 `shifts` agreeing is worth a row of its own: `bugs/FORMAL_arm64_right_shift_
 is_always_arithmetic.md` is the history this tool would otherwise have
@@ -119,6 +127,24 @@ was about the harness and would have been filed as a model bug.**
     disassembles both words with `otool -tv` and compares the mnemonics, so
     `movz w0, #1` vs `movz x0, #1` — a real finding — is still caught.
 
+## 3a. Two things the tool learned about the PLATFORM
+
+Both are measurements, both are load-bearing, and both cost a sweep to find.
+
+**`MSR`/`MRS NZCV` are no-ops in EL0** — see the note above `DUMP_OFF`. The flags
+are set with a `cmp` both engines execute and read back with four conditional
+branches.
+
+**X18 is not a register this harness can make a claim about.** X18 is the one A64
+reserves for platform use, and on macOS something clobbers it: in a 600-case run
+36 cases ended with X18 = 0 on the hardware where the model had a non-zero
+initial value, and every one of them agrees when run on its own — nothing in the
+generated stub writes X18 after the table load. So `SKIP_REGS = (18,)`, X18 is
+still dumped (the artefact is visible rather than invisible) and the tally line
+says it was skipped. The first reading of this was `WRONG 1` on seed `sweepB`
+that no amount of minimising could reproduce, which is what made it a platform
+fact rather than a model fact.
+
 ## 4. What is NOT covered, and why
 
 Written down because a tally that reads as coverage is worse than a gap that
@@ -143,6 +169,14 @@ names itself:
   the window by construction, which is a property of the generator and is
   stated in `gen_mem`'s docstring.
 
+## 6. Chunking, and why the model's side is batched
+
+`--lean-chunk N` (default 25) cases per Lean process. Lean's elaborator keeps
+every `#eval`'s intermediate values alive for the life of the process, so the
+same 50 cases peaked above 8 GB in one process and 1.9 GB in four, with no
+difference in the cases. With the chunk in, a 600-case sweep is 41 s at 1.3 GB
+peak, so `--cases` is a number a person can turn up.
+
 ## 5. The findings, minimised
 
 Each row is a one-instruction counterexample produced by `--minimise`, which
@@ -158,8 +192,8 @@ will happily delete the guilty instruction and report a different bug.
 | `neg x13, x1` | `00000000000000db` | `ffffffffffffffdb` | SUB (shifted register) reads `Rn = 31` as SP; it is the zero register there, and that is the `neg` alias | **FIXED** |
 | `cmp sp, x16` | N=1 | Z=1 | SUBS reads `Rn = 31` as zero too — and the docstring above the arm, and a theorem built on it, asserted the opposite | **FIXED** |
 | `subs x11, x20, x19` | `x11` unchanged | `x11 = x20 - x19` | the same arm never wrote `Rd` | **FIXED** |
-| `ldr x0, [sp, #32]` | `0000000000000000` | `53eed1de90a7dc2e` | LDR/STR (unsigned offset) reads the base with `arm64_reg`, so `Rn = 31` is zero and the address is `imm` | filed, see below |
-| `str w30, [sp, #12]` | 8 bytes written | 4 bytes written | `mem_write_u64` in a 32-bit store | filed with the row above |
+| `ldr x11, [sp, #64]` | `0000000000000000` | `cc3886474dac2e47` | LDR/STR (unsigned offset) reads the base with `arm64_reg`, so `Rn = 31` is zero and the address is `imm` | **FILED** |
+| `str w25, [x9, #32]` | 8 bytes written | 4 bytes written | `mem_write_u64` in a 32-bit store | **FILED**, same doc |
 | `cmn x0, x3` | — | — | no arm: `arm64_step` returns `none` |
 | `csel x1, x5, x1, lt` | — | — | no arm |
 | `ldrb w27, [sp, #27]` | — | — | no arm |
