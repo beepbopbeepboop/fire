@@ -4924,6 +4924,12 @@ ctor_field_value=self._ctor_field_value_for(name),
                 M.spelled(e.index))
             if ireason is not None:
                 raise CodegenError(ireason)
+            # A byte is not a CHARACTER: the TEXT ENCODING half of the same
+            # question, and asked here because this is the single choke point a
+            # read, a store and an augmented assignment all pass through.
+            why = M.string_element_refusal(e.obj, e.index)
+            if why is not None:
+                raise CodegenError(why)
             self._sub_width = 1
             self._emit_expr(e.obj)
             self.asm.emit(encode_stp_sp_pre(0, 2))
@@ -5163,6 +5169,19 @@ ctor_field_value=self._ctor_field_value_for(name),
         read, which is the third row of `len_operand_lowering` and the reason
         it exists: there is no shape for which reading offset 0 is right unless
         the source has said what the operand holds.
+
+        THE THIRD ROW, and it is `model.string_codepoint_verdict` rather than
+        this function: a `strlen` counts BYTES and Python's `len()` counts
+        CHARACTERS, which are the same number only for ASCII.  Measured on this
+        backend and on x86-64, all of it building and running with exit 0:
+        `len("héllo")` answered 6 where CPython says 5, `len("日本")` answered
+        6 where CPython says 2, and `len("a\U0001F600b")` answered 6 where
+        CPython says 3.  Two answers and neither is a machine operation:
+        a literal's text is known HERE, so the character count is a folded
+        immediate, and an operand whose bytes the build cannot see is refused
+        by name rather than given the byte count — which is the whole of the
+        TEXT ENCODING block in `model.py` and the reason it is asked from both
+        backends rather than decided here.
         """
         args = list(e.args)
         if len(args) != 1 or e.kwargs:
@@ -5178,6 +5197,18 @@ ctor_field_value=self._ctor_field_value_for(name),
                 slot[0] if slot else None,
                 slot[1] if slot else None))
         if how == M.LEN_FROM_STRLEN:
+            verdict, folded = M.string_codepoint_verdict(
+                f"len({M.spelled(operand)})", operand, M.spelled(operand))
+            if verdict is None:
+                raise CodegenError(folded)
+            if verdict == M.LEN_FROM_CODPOINT_FOLD:
+                # `_emit_mov_imm` rather than a bare `MOVZ`: it is this
+                # backend's one wide-immediate materialiser (MOVZ + MOVK), and
+                # a character count is a length, so truncating one to sixteen
+                # bits would be a wrong answer in a program long before it was
+                # a plausible one.
+                self._emit_mov_imm("X0", int(folded))
+                return
             self._emit_expr(operand)          # X0 = the char *
             self._emit_extern_call(M.STRING_LENGTH_SYMBOL)
             return
@@ -5321,6 +5352,19 @@ ctor_field_value=self._ctor_field_value_for(name),
                     self._one_word_candidates.get(name.name),
                     TYPE_NAMES, STRING_TYPE_NAMES, self._structs)))
 
+    def _printf_arg_text(self, arg):
+        """The DECODED TEXT of a `printf` vararg, or None when unseen.
+
+        The second hook of the two `model.printf_format_refusal` takes, and it
+        is a different question from `_printf_arg_is_text`: that one asks
+        whether the argument is text at all, this one asks WHICH text, because
+        a `%<width>s` pads to a byte width and only a non-ASCII operand makes
+        that differ from what CPython means. None for anything whose text this
+        build cannot see, which is the permissive direction — the model decides
+        the rest from the image's own literals.
+        """
+        return M.string_literal_text(arg)
+
     def _refuse_unusable_printf_format(self, name, e: F.CallExpr) -> None:
         """Raise when `e`'s FORMAT cannot be used, for either of the two reasons.
 
@@ -5351,7 +5395,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             name, F.decoded_literal(fmt) if isinstance(fmt, F.StringLiteral)
             else None,
             args[idx + 1:] if idx is not None else args[1:],
-            self._printf_arg_is_text)
+            self._printf_arg_is_text, self._printf_arg_text)
         if reason is not None:
             raise CodegenError(reason)
 
@@ -5871,12 +5915,31 @@ ctor_field_value=self._ctor_field_value_for(name),
         it backwards does not crash and does not look wrong in the image — it
         returns -1 for every haystack that contains its needle, which is every
         real use of `find`. `strncmp` is symmetric and does not care; `strstr`
-        is not, and this one was backwards in a first version of this code."""
+        is not, and this one was backwards in a first version of this code.
+
+        THE OFFSET IS A BYTE OFFSET, which is the same question `len` has and
+        is asked by `model.string_position_verdict` rather than here.  Measured
+        on this backend and on x86-64, `"héllo".find("llo")` answered 3 where
+        CPython says 2: `strstr` found the needle three bytes in, and the two
+        extra bytes are the `é`.  A byte offset presented as a character offset
+        is a wrong index rather than a wrong display, so a program that slices
+        or subscripts with it reads from the wrong place — and for a needle that
+        lands after a multi-byte character, past the end.  Where both operands
+        are literals the answer is Python's and is folded here instead, which
+        is why the two literals never reach `strstr` at all."""
         args = list(e.args)
         if len(args) != 1:
             raise CodegenError(
                 f"str.find() takes exactly one argument on this path "
                 f"(got {len(args)})")
+        verdict, folded = M.string_position_verdict(
+            f"{M.spelled(e.func.obj)}.find({M.spelled(args[0])})",
+            e.func.obj, args[0])
+        if verdict is None:
+            raise CodegenError(folded)
+        if verdict == M.STRING_POSITION_FOLD:
+            self._emit_mov_imm("X0", int(folded))
+            return
         self._while_counter += 1
         no_label = f"{self.func_name}_find{self._while_counter}_no"
         done_label = f"{self.func_name}_find{self._while_counter}_done"

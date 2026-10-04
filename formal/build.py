@@ -14813,6 +14813,18 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # from either backend would be a second copy of one decision — which is how
     # the executable and dylib paths come to answer differently about one file.
     M.refuse_interpolated_literals(stmts)
+    # The unit's STRING TEXT facts, published here for the same reason and in the
+    # same place as the two lines above: the consumers are a per-function walk
+    # inside a backend and a refusal asked before any emitter runs, and neither
+    # has the module statements in hand.  The question is "does this image hold
+    # a string whose bytes are not one byte per character", and it decides
+    # whether a `strlen` is Python's `len()` for EVERY string in the unit —
+    # including the ones no operand-level analysis could see — because on this
+    # path every string value is a literal's interned bytes or an interior
+    # pointer into them.  `model.py`'s TEXT ENCODING block has the argument and
+    # the three answers; this is the scan, and it is O(literals) because it has
+    # to be asked before the first emission to be an answer rather than a guess.
+    M.publish_non_ascii_strings(M.non_ascii_strings_in(stmts))
     # The module's own statement list is the ONE place a module-level name's
     # home is stated, so it is read here and PUBLISHED, for the same reason
     # `attach_field_evidence` and `attach_placed_frame_callees` carry what
