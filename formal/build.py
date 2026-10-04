@@ -11934,6 +11934,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             # one the emitter lowers.
             value_callee = (isinstance(sub, F.SubscriptExpr)
                             and id(root_ident) in bracket_callee_roots
+                            and sub.obj is root_ident
                             and M.callee_is_a_bound_value(fn, root_ident.name))
             why = M.mlir_template_refusal(sub)
             if why is None and isinstance(sub, F.SubscriptExpr) \
@@ -12031,6 +12032,17 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # used to be refused here is silently dropped; it is asked
                 # where the declaration would have been read.
                 #
+                # `sub.obj is root_ident`, and it is load-bearing: `root_ident`
+                # is the BARE NAME at the root of a dotted chain, so without it
+                # this exemption also covers `p.unsafe_load[width=4]()`, whose
+                # base is the MEMBER `p.unsafe_load` and whose root is the
+                # parameter `p` — a bracketed callee this path cannot name at
+                # all, and which
+                # `test_formal_run.py::deref_refuse_unsafe_load_bracketed_width`
+                # pins a refusal for. The emitters ask the same question with
+                # `comptime.specialization_name` and refuse anything that is not
+                # a bare name, and this is that question asked at the scan.
+                #
                 # `root_ident.name` and not `model.subscript_callee_name`:
                 # that one takes the CALL, and `iter_nodes` hands this loop the
                 # subscript with no parent to find the call through. Membership
@@ -12043,7 +12055,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         and not base_name.startswith(M.MLIR_DIALECT_PREFIX)
                         and not M.is_external_call_template(sub)
                         and not M.debug_assert_callee(sub)
-                        and not M.callee_is_a_bound_value(fn, base_name)):
+                        and not (sub.obj is root_ident
+                                 and M.callee_is_a_bound_value(fn, base_name))):
                     why = (M.ambiguous_method_specialization_refusal(
                         M.member_chain_text(sub.obj), sub.obj.member,
                         _ambiguous_method_owners(sub.obj, structs_by_name))
