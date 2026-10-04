@@ -47,9 +47,145 @@ from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
 # spelling is kept, because it costs nothing and the alternative is a
 # one-character edit that can only lose.  The figure that actually matters is
 # `formal/lean.py`'s census, which counts the holes LEAN reports rather than
-# the ones this file spells, and the seven emission sites are what it measures.
+# the ones this file spells, and the emission sites are what it measures.
 # Defined once, before its first use (`_COND_ARITH_DEFAULT`).
 _HOLE = "so" + "rry"
+
+# ── The CFG leaves that admit ────────────────────────────────────────────────
+# A CFG leaf is a place where the walk has followed every edge it can and the
+# generated proof still has a goal it cannot close from the value flow.  Each
+# one below ends in an admission: a `sorry` FALLBACK in a `first | ... | sorry`
+# chain, or a bare `all_goals sorry`.  They are honest gaps -- the proof still
+# elaborates, and says by its own weight in the census that it did not close.
+#
+# They used to be fifteen anonymous copies of one string in fifteen places, and
+# the two documents that enumerate them had already drifted from each other
+# because of it: FORMAL.md §7 row 7 cited SEVEN line numbers, and the trust
+# audit of 2026-10-04 cited a different EIGHT.  A census a reader has to
+# reconstruct by grepping a source file for a word rots on the next edit,
+# silently.  So each leaf now carries its site's NAME into the generated Lean,
+# and:
+#
+#   * `cfg_leaf_sites()` is ONE fact about this file, which a test pins a
+#     CEILING on -- a ceiling rather than an equality because the correct
+#     direction is down and several of these are still live.
+#   * `cfg_leaf_census(proof)` reads a generated proof back and says which
+#     sites it reaches, so "which leaves can admit" is a measurement rather
+#     than a reading of line numbers.
+#   * A proof handed to Lean with the fallbacks removed (`no_admission_fallback`,
+#     which the tests use) then names the site that failed in Lean's own
+#     diagnostic, at the line of the leaf.
+#
+# The name is the site's IDENTITY: never reused, never renamed for cosmetics.
+# A census is a series, and a series that renames its points cannot be read.
+CFG_LEAF_TAG = "arm64-cfg-leaf"
+
+#: The eight CFG leaves the trust audit's table named, and the five range-loop
+#: ones and two loop-contract ones it did not, because the audit enumerated
+#: `all_goals (first | done | sorry)` and the other seven are spelled
+#: differently.  All fifteen are here: a registry that quietly omits the
+#: admissions it was built to account for is the same defect one level up.
+CFG_LEAF_SITES = {
+    # `emit_block`'s frame-contract terminal: a method receiver's value flow
+    # into a structured contract.  Carries NO fallback under `strict` (see the
+    # emission), because there the gap is meant to be a build failure.
+    "frame-contract-terminal",
+    # The `dec`-while loop contract's back edge: the counter's own decrement
+    # and the frame slot that pins the exit value, read off the executed path.
+    "dec-while-back-edge-decrement",
+    "dec-while-back-edge-frame-slot",
+    # `emit_runs`' terminal, split by what it has to establish: the value the
+    # run leaves in x0, the link register it restores, and the caller's frame
+    # window that the callee's memory is only reachable through.
+    "runs-ret-x0",
+    "runs-ret-x30",
+    "runs-ret-frame-ok-window",
+    # A branch the walk must follow: the `BL`'s step (a call rewrites the link
+    # register, so the state chain has to be re-derived through it) and the
+    # compare-and-branch's own condition -- the leaf that IS the flags and
+    # signedness reasoning the documentation talks about.
+    "runs-bl-step",
+    "runs-cbz-condition",
+    # The `for i in range(...)` loop contract's four obligations.
+    "range-loop-frame-preservation",
+    "range-loop-exit-x30",
+    "range-loop-model-invariance",
+    "range-loop-back-edge-target",
+    "range-loop-terminal-invariant",
+    # The two closers both loop contracts share: the branch's flag predicate
+    # against the loop's exit condition, and the branch's own step.
+    "loop-cond-flag",
+    "loop-cond-step",
+}
+
+
+def _tag_leaf(tactic: str, site: str, note: str = "") -> str:
+    """`tactic` with this leaf's site named in a trailing comment.
+
+    The admission keyword itself is untouched, so the emitted proof has the
+    same shape as before and the tag costs one comment.
+    """
+    if site not in CFG_LEAF_SITES:
+        raise ValueError(f"unregistered CFG leaf site: {site!r}")
+    tail = f" -- {note}" if note else ""
+    return f"{tactic}  -- {CFG_LEAF_TAG}: {site}{tail}"
+
+
+def _cfg_leaf(A, ind: str, site: str, tactic: str, *, note: str = "") -> None:
+    """Emit one CFG leaf's closing tactic, tagged with the site that owns it.
+
+    `tactic` is the leaf's own chain -- `first | done | sorry`, or the
+    countdown decrement's longer one.
+    """
+    A(f"{ind}{_tag_leaf(tactic, site, note)}")
+
+
+def cfg_leaf_sites() -> list:
+    """Every CFG leaf site this generator can admit at, sorted."""
+    return sorted(CFG_LEAF_SITES)
+
+
+def cfg_leaf_census(proof_text: str) -> dict:
+    """`{site: leaves reached}` for one generated proof.
+
+    A REACHED leaf, not an ADMITTED one: this reads the emitted text, so it
+    counts a `sorry` fallback whose earlier alternative won, which is a
+    hypothetical hole and not a real one.  The real figure is what Lean
+    reports (`formal/lean.py`), and this says which sites to look at.
+    """
+    counts: dict = {}
+    for line in proof_text.splitlines():
+        m = re.search(rf"{re.escape(CFG_LEAF_TAG)}: ([A-Za-z0-9-]+)", line)
+        if m:
+            counts[m.group(1)] = counts.get(m.group(1), 0) + 1
+    return counts
+
+
+def no_admission_fallback(proof_text: str) -> str:
+    """`proof_text` with every TAGGED leaf's admission replaced by `done`.
+
+    The instrument behind "which of these leaves is live".  A `sorry` fallback
+    closes whatever reaches it, so a proof that admits three times looks the
+    same whether one leaf or three were the problem; replacing the fallback
+    with `done` makes Lean report `unsolved goals` **at the line of the leaf
+    that failed**, and the tag on that line names the site.  That is a
+    measurement; the census of what the corpus really admits is what Lean
+    reports with the fallbacks left in place, and both are wanted.
+
+    Only TAGGED leaves are touched.  The other admissions in a generated proof
+    -- the host contracts (`admitted_*`), the dylib export stubs, the extern
+    step -- are a different family with their own owners, and silently
+    converting them to `done` would report a failure this function is not
+    measuring.
+    """
+    out = []
+    for line in proof_text.splitlines():
+        if CFG_LEAF_TAG in line and "sorry" in line:
+            head, _, tail = line.rpartition("sorry")
+            line = f"{head}done{tail}"
+        out.append(line)
+    return "\n".join(out) + ("\n" if proof_text.endswith("\n") else "")
+
 
 # The terminal proposition `_gen_universal_e2e_cfg` uses when the caller does
 # not supply one.  Named so the emitted comment can recognise the default and
@@ -3441,7 +3577,8 @@ def loop_test(words: dict, pc: int):
 # a reason rather than being quietly dropped.
 _COND_ARITH: dict = {}
 _COND_ARITH_DEFAULT = [
-    f"all_goals first | decide | omega | grind | done | {_HOLE}",
+    _tag_leaf(f"all_goals first | decide | omega | grind | done | {_HOLE}",
+              "loop-cond-flag"),
 ]
 
 
@@ -3510,10 +3647,22 @@ def _cond_step_tactic(qsym: str) -> str:
     predicate the instruction branches on, so the case split retires it
     outright: both branches are then closed by `simp` on the pc rewrite.  That
     is the whole reason this obligation is no longer a hole.
+
+    NOT tagged here, although it is a CFG leaf that admits: its text is spliced
+    into the middle of a larger term by `_cond_step_arg`, and a `--` comment
+    runs to end of line, so a tag appended here would swallow the caller's
+    closing paren and the file would not parse.
     """
     return (f"by_cases hc : {qsym} s = true <;> simp [{qsym}, hs, hc] <;> "
             f"all_goals (first | decide | native_decide | omega | rfl | done | "
             f"{_HOLE})")
+
+
+def _cond_step_arg(name: str, cbz_idx: int, qsym: str) -> list:
+    """The `hstep` obligation's argument, with its leaf named on its own line."""
+    return [f"-- {CFG_LEAF_TAG}: loop-cond-step",
+            f"(by intro s hs; rw [{name}_sr_{cbz_idx} s hs]; "
+            f"{_cond_step_tactic(qsym)})"]
 
 
 def _source_cond_code(block, words: dict):
@@ -4525,8 +4674,8 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
     A(f"    (by intro s pc h; simpa using h)")
     A(f"    (by intro s hs h; exact {name}_loop_frame_cond s hs h)")
     A(f"    (by intro s hs h; exact {name}_loop_frame_body s hs h)")
-    A(f"    (by intro s hs; rw [{name}_sr_{cbz_idx} s hs]; "
-      f"{_cond_step_tactic(_qsym)})")
+    for _l in _cond_step_arg(name, cbz_idx, _qsym):
+        A(f"    {_l}")
     A(f"    {cc}_runs")
     A(f"    (fun st hs => {cc}_mid {exit_pc} st hs (by simp))")
     A(f"    (by intro s hs; rfl)")
@@ -4812,7 +4961,8 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
               f"{_slot} < 2^63)]")
             A(f"  all_goals try rw [h]")
             A(f"  all_goals try grind")
-            A(f"  all_goals {_HOLE}  -- TODO(range): frame preservation value flow")
+            A(_tag_leaf(f"all_goals {_HOLE}", "range-loop-frame-preservation",
+                      note="frame preservation value flow"))
         elif hname in (f"{name}_loop_exit_x30", f"{name}_loop_exit_pc"):
             # The RET return address is the x30 loaded from the frame slot; the
             # epilogue restores sp so x30 sits 8 bytes into the saved pair.
@@ -4826,7 +4976,8 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
             A(f"  all_goals try grind")
             A(f"  all_goals try decide")
             A(f"  all_goals try rfl")
-            A(f"  all_goals {_HOLE}  -- TODO(range): exit x30 value flow")
+            A(_tag_leaf(f"all_goals {_HOLE}", "range-loop-exit-x30",
+                      note="exit x30 value flow"))
         elif hname == f"{name}_loop_cond_rb":
             # Counter and bound are both preserved by the condition prefix.
             # Reuse the per-instruction register-chain generator (as countdown
@@ -4847,7 +4998,8 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
             A(f"  all_goals try rw [mem_read_push_low s.mem s.sp]")
             A(f"  all_goals try grind")
             A(f"  all_goals try omega")
-            A(f"  all_goals {_HOLE}  -- TODO(range): model invariance under prefix")
+            A(_tag_leaf(f"all_goals {_HOLE}", "range-loop-model-invariance",
+                      note="model invariance under the condition prefix"))
         elif hname == f"{name}_loop_body_inc":
             # Counter is incremented by one across the body.  The back-edge
             # state bbody is bqt with only its pc rewritten, so prove the bqt
@@ -4914,7 +5066,8 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
             A(f"  rw [hpceq]")
             A(f"  all_goals try rfl")
             A(f"  all_goals try grind")
-            A(f"  all_goals {_HOLE}  -- TODO(range): back-edge B target")
+            A(_tag_leaf(f"all_goals {_HOLE}", "range-loop-back-edge-target",
+                      note="back-edge B target"))
         else:
             raise ValueError(f"unsupported range helper theorem: {hname}")
         A("")
@@ -4941,8 +5094,8 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     A(f"    (by intro s pc h; simpa using h)")
     A(f"    (by intro s hs h; exact {name}_loop_frame_cond s hs h)")
     A(f"    (by intro s hs h; exact {name}_loop_frame_body s hs h)")
-    A(f"    (by intro s hs; rw [{name}_sr_{cbz_idx} s hs]; "
-      f"{_cond_step_tactic(_qsym)})")
+    for _l in _cond_step_arg(name, cbz_idx, _qsym):
+        A(f"    {_l}")
     A(f"    {cc}_runs")
     A(f"    (fun st hs => {cc}_mid {exit_pc} st hs (by simp))")
     A(f"    (by intro s hs; rfl)")
@@ -5890,8 +6043,11 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 # whole point of the exercise is that this is the proof, and a
                 # fallback here is a theorem nobody has checked.  A gap in the
                 # terminal value flow is a hard error, not an admission.
-                A(f"{IND}all_goals done" if (frame or {}).get("strict")
-                  else f"{IND}all_goals (first | done | sorry)")
+                if (frame or {}).get("strict"):
+                    A(f"{IND}all_goals done")
+                else:
+                    _cfg_leaf(A, IND, "frame-contract-terminal",
+                              "all_goals (first | done | sorry)")
         elif kind == "seq":
             nxt_pc = block["instrs"][-1] + 4
             nxt_bi = start_to_bi.get(nxt_pc)
@@ -6028,8 +6184,9 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}all_goals try rw [hx19, hx21, hx20]")
                         A(f"{IND}all_goals try simp [UInt64.toNat_ofNat]")
                         A(f"{IND}all_goals try exact ({_lc_name}_loop_go_one_step n)")
-                        A(f"{IND}all_goals {_HOLE}  "
-                          f"-- TODO(range): terminal loop invariant")
+                        _cfg_leaf(A, IND, "range-loop-terminal-invariant",
+                                  f"all_goals {_HOLE}",
+                                  note="terminal loop invariant")
                     else:
                         # The countdown contract, applied at the back edge.
                         #
@@ -6082,8 +6239,10 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}  rw [{', '.join(list(reversed(ctx['flow_hsid'])))}]")
                         A(f"{IND}  simp only [{', '.join(ctx['flow_defs'])}, arm64_reg, arm64_set_reg, Arm64State.init]")
                         A(f"{IND}  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, mem_read_two_writes_same]")
-                        A(f"{IND}  all_goals (first | grind | omega | rfl | "
-                          f"simp <;> grind | sorry)  -- the counter's decrement")
+                        _cfg_leaf(A, IND + "  ", "dec-while-back-edge-decrement",
+                                  f"all_goals (first | grind | omega | rfl | "
+                                  f"simp <;> grind | sorry)",
+                                  note="the counter's decrement")
                         A(f"{IND}have hframe_arg : mem_read_u64 ({{ {s_cur} with pc := {tgt} }}).mem "
                           f"(({{ {s_cur} with pc := {tgt} }}).sp + UInt64.ofNat "
                           f"{ctx['loop_contract'].get('slot', 0)}).toNat "
@@ -6091,7 +6250,9 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}  rw [{', '.join(list(reversed(ctx['flow_hsid'])))}]")
                         A(f"{IND}  simp only [{', '.join(ctx['flow_defs'])}, arm64_reg, arm64_set_reg, Arm64State.init]")
                         A(f"{IND}  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, mem_read_two_writes_same]")
-                        A(f"{IND}  all_goals (first | done | sorry)  -- the frame slot")
+                        _cfg_leaf(A, IND + "  ", "dec-while-back-edge-frame-slot",
+                                  "all_goals (first | done | sorry)",
+                                  note="the frame slot")
                         A(f"{IND}have hlc_{bi} := {_lc_name}_cd_loop (n - 1) ({{ {s_cur} with pc := {tgt} }})")
                         A(f"{IND}  (by rfl) hx19_arg hframe_arg")
                         A(f"{IND}  ({fuel_1}) (by")
@@ -6814,14 +6975,16 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             A(f"{IND}  all_goals try rfl")
             A(f"{IND}  all_goals try omega")
             A(f"{IND}  all_goals try grind")
-            A(f"{IND}  all_goals (first | done | sorry)")
+            _cfg_leaf(A, IND + "  ", "runs-ret-x0",
+                      "all_goals (first | done | sorry)")
             if hx30fr_name:
                 A(f"{IND}· simp only [{', '.join([f'hsid_{n}', f'{name}_b{bi}_qT{m_run - 1}'] + [hx30fr_name])}]")
             else:
                 A(f"{IND}· simp only [{', '.join(_hs + _sd)}]")
             A(f"{IND}  all_goals try rfl")
             A(f"{IND}  all_goals try grind")
-            A(f"{IND}  all_goals (first | done | sorry)")
+            _cfg_leaf(A, IND + "  ", "runs-ret-x30",
+                      "all_goals (first | done | sorry)")
             _fs = ', '.join(_hs + _sd)
             A(f"{IND}· clear {' '.join(ctx.get('avoid_facts', []))}")
             A(f"{IND}  have h8 : (8 : UInt64) = UInt64.ofNat 8 := rfl")
@@ -6899,7 +7062,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             A(f"{IND}  all_goals try rfl")
             A(f"{IND}  all_goals rfl")
             A(f"{IND}· exact {ctx['hmid']}")
-            A(f"{IND}all_goals (first | done | sorry)")
+            _cfg_leaf(A, IND, "runs-ret-frame-ok-window",
+                      "all_goals (first | done | sorry)")
             return
         if kind == "bl":
             ret, entry = block["targets"]
@@ -6915,7 +7079,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{IND}  rw [{cur_pc}]")
             A(f"{IND}  all_goals try rfl")
             A(f"{IND}  all_goals try grind")
-            A(f"{IND}  all_goals (first | done | sorry)")
+            _cfg_leaf(A, IND + "  ", "runs-bl-step",
+                      "all_goals (first | done | sorry)")
             A(f"{IND}have hr_{n} : arm64_runs {C} 1 ({cur}) = some {call_state} := by")
             A(f"{IND}  rw [runs_cons_jump ({cur}) {call_state} {C} 0 hs_{n} "
               f"(by dsimp only; rw [{cur_pc}]; decide)]")
@@ -7150,7 +7315,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{IND}  all_goals try (simp only [{', '.join(list(defs_acc) + ['arm64_reg', 'arm64_set_reg', 'arm64_subs_flags', 'arm64_matches_condition', 'Arm64State.init'])}])")
                 A(f"{IND}  all_goals try rfl")
                 A(f"{IND}  all_goals try grind")
-                A(f"{IND}  all_goals (first | done | sorry)")
+                _cfg_leaf(A, IND + "  ", "runs-cbz-condition",
+                          "all_goals (first | done | sorry)")
             A(f"{IND}have hr_{n} : arm64_runs {C} 1 ({cur}) = some {tgt_state} := by")
             A(f"{IND}  rw [runs_cons_jump ({cur}) {tgt_state} {C} 0 hs_{n} "
               f"(by dsimp only; rw [{cur_pc}]; decide)]")
