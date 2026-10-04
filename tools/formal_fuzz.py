@@ -271,6 +271,31 @@ holds), and `fstrings` found one that BUILDS and LIES (an interpolated literal
 printed its own source spelling, exit 0, on both). The other six are coverage
 with nothing found yet, which is the state a row is worth having in.
 
+The four the fuzz-5 sweep added, one per construct this corpus could not produce
+at all, each PROBED ON BOTH ARCHITECTURES before it was written down: `comps`
+(the comprehension walks and the `*` splice — the other two walks that bind one
+thing per COUNT, beside `for k in d` and `k in d`, and §3.10 of the ledger is
+the bug they found), `refs` (aliasing and mutation through a REFERENCE: two
+names for one blob, a write through the second read through the first, a
+container in a struct field, a write through a parameter across a call, a `del`,
+and the ORDER a walk yields), `objs` (a class whose `__init__` takes ARGUMENTS,
+`__len__` reached through a builtin rather than a method call, and nested data
+in a struct field) and `sets` (a set, which lowers as a LIST — so `len` and
+membership agree with CPython and the iteration order does not, which is the
+`set_order` row).
+
+**Two disciplines in those four that are worth more than the families
+themselves**, because both are about what an OBSERVATION can see:
+
+  * an ACCUMULATOR is blind to ORDER. `(acc + k)` over the same keys is
+    commutative, so a walk that yields `k0, k1, k2` and one that yields
+    `k0, v0, k1` produce the same sum, and the corpus's own `dict_iter` printed
+    one per family. The order families now PRINT one element per line.
+  * a COUNT is blind to CONTENT, for the same reason from the other side: three
+    PAIRS and three WORDS are the same number, which is why `len` of a
+    comprehension over a dict agreed with CPython on the buggy program (§3.10)
+    and why the content families WALK their result.
+
 Deliberately absent, each for a stated reason:
 
   * `struct` with DECLARED fields (`var a: int`) — `var` is a keyword CPython
@@ -1319,6 +1344,14 @@ MIXES = {
              ("assign", 2), ("if", 2), ("print", 2)),
 }
 
+#: `--max-min-steps` is not optional for `sets` in practice, and the reason is
+#: the same one `signed` and `limits` carry.  Two thirds of a `sets` sweep
+#: disagrees with CPython, every one of them by `set_order`, and each pays for a
+#: full reduction that `blame` then neutralises — measured: 465 s for 100
+#: programs at 30 steps against the 20 minutes a full budget costs per program
+#: for `strings` (§5 of `bugs/FORMAL_fuzz_ledger.md`).
+SETS_MIN_STEPS = 30
+
 #: mix -> (a pattern the mix must still PRODUCE, why it must).
 #:
 #: **This is a different table from `KNOWN_DIVERGENCES` and the difference is
@@ -1418,6 +1451,21 @@ class Gen:
         self.objs = []        # (var, class name, fields, methods) instances
         self.ctorclasses = []  # (name, fields, ctor params) classes WITH ctor args
         self.sets = []        # (name, elements) set locals of ints
+        # (name, key-or-index) pairs a `del` has ALREADY removed, so a second
+        # `del` on the same name draws from what is left.  A `del` compacts a
+        # list and removes a dict key, so an index or key drawn against the
+        # name's original size is out of range on the second statement — a
+        # CPython failure and therefore a generator error, not a measurement.
+        self._deleted = set()
+        # name -> the name whose deletions also count against it.  `A = xs` and
+        # `A = h.xs` are ALIASES, so a `del` through any of them shortens all
+        # of them, and a family that tracks liveness per name would hand a
+        # three-element alias a list of one.  Canonicalising the key is what
+        # makes "which elements are left" one fact rather than N.
+        self._canon = {}
+        # Names (canonicalised through `_canon`) that a `del` has already
+        # removed from — see `del_stmt` for why it is one per name.
+        self._del_done = set()
         self.fields = []      # field names, inside a method body
         self.funcs = []       # (name, [parameter names])
         self.decls = []       # (name, initial value text) for the preamble
@@ -3770,12 +3818,19 @@ class Gen:
 
     def alias_pair_stmt(self, indent):
         """`b = a` then a write through `b`, read back through `a`."""
-        pool = ([("list", n, name) for name, n in self.lists]
+        # A source a `del` has already shortened is EXCLUDED.  `A = L` is an
+        # ALIAS, so a `del L[i]` shortens `A` too, and this family writes
+        # `A[idx]` — an IndexError in CPython, measured on 11 of the first 100
+        # programs of the first sweep of this mix before the exclusion.  One
+        # `del` per name (`del_stmt`) is what keeps the exclusion exact.
+        pool = ([("list", n, name) for name, n in self.lists
+                 if self.canon(name) not in self._del_done]
                 + [("tuple", n, name) for name, n in self.tuples])
         if not pool:
             self.list_stmt(indent, "list_build")
             return
         kindname, n, src = self.rng.choice(pool)
+        n = self.live_len(src, n) if kindname == "list" else n
         alias = self.fresh("A")
         idx = self.rng.randrange(n)
         if kindname == "tuple":
@@ -3792,6 +3847,7 @@ class Gen:
         # branch is an UnboundLocalError in the oracle wherever a later
         # statement picks it (`del_stmt` did exactly that).
         self.declare(alias, "[" + ", ".join(["0"] * n) + "]")
+        self._canon[alias] = self.canon(src)
         self.emit(indent, f"{alias} = {src}")
         self.emit(indent, f"{alias}[{idx}] = {self.rng.randint(1, 90)}")
         tmp = self.declare(self.fresh("w"), "0")
@@ -3835,6 +3891,7 @@ class Gen:
         alias = self.fresh("A")
         tmp = self.declare(self.fresh("w"), "0")
         self.declare(alias, "[" + ", ".join(["0"] * self.n_of(name, blob)) + "]")
+        self._canon[alias] = f"{var}.{blob}"
         self.emit(indent, f"{alias} = {var}.{blob}")
         self.emit(indent, f"{alias}[0] = {self.rng.randint(1, 90)}")
         self.emit(indent, f"{tmp} = {var}.{blob}[0]")
@@ -3961,6 +4018,23 @@ class Gen:
         self.mutfns = [(name, 0)]
         return self.mutfns[0]
 
+    def canon(self, name):
+        """The name whose `_deleted` entries also count against `name`."""
+        return self._canon.get(name, name)
+
+    def live_len(self, name, n):
+        """How many of `name`'s `n` elements a `del` has not already removed.
+
+        An ALIAS records the length its SOURCE had when the alias was made, and
+        a source shortened by a `del` before that point hands the alias fewer
+        elements than it claims — so `A = L` after `del L[0]` is a one-element
+        list under the name of a four-element one, and every later family that
+        indexes `A` is an IndexError in CPython (measured: 8 of 200 programs of
+        the `refs` mix before this).
+        """
+        c = self.canon(name)
+        return n - len([i for i in range(n) if (c, i) in self._deleted])
+
     def del_stmt(self, indent):
         """`del d[k]` and `del xs[i]`, then `len` of what is left.
 
@@ -3969,21 +4043,46 @@ class Gen:
         the oracle would fail and the program would measure nothing. The
         straight-line `del` is a real lowering on both backends and `len` after
         it is the observable that sees a `del` that removed nothing.
+
+        **ONE `del` PER NAME PER PROGRAM, and that is a decision rather than a
+        limitation.**  `del xs[0]` COMPACTS, so every element above the hole
+        moves down one — which makes "which positions are still live" a
+        function of the ORDER the deletions happened in, and an alias made after
+        one (`A = xs`, `A = h.xs`) inherits the shift as well.  Tracking that
+        exactly needs a per-name list of removed ORIGINAL indices and a
+        position-to-original map, and getting it wrong is an IndexError in the
+        oracle rather than a measurement: measured at 11 of the first 100
+        programs of the first sweep of this mix with a per-name SET of deleted
+        positions, and still 4 of 200 with alias canonicalisation on top.  So
+        the family draws each name once, which is what it was written to measure
+        — a `del` that removed nothing shows up in the `len` and in the
+        membership re-test — and the sweep's cost is one `del` statement per
+        name instead of one per program.
         """
         if self.dicts and self.rng.random() < 0.5:
-            var, kind, keys = self.rng.choice(self.dicts)
-            key = self.rng.choice(keys)
-            self.emit(indent, f"del {var}[{key}]")
-            self.emit(indent, f"print(len({var}))")
-            # Read the deleted key back: a `del` that only decremented the
-            # count answers a count and a miss at the same time.
-            self.emit(indent, f"print(1 if {key} in {var} else 0)")
-            return
+            cand = [(var, keys) for var, kind, keys in self.dicts
+                    if self.canon(f"{var}.d") not in self._del_done]
+            if cand:
+                var, keys = self.rng.choice(cand)
+                key = self.rng.choice(keys)
+                self._del_done.add(self.canon(f"{var}.d"))
+                self.emit(indent, f"del {var}[{key}]")
+                self.emit(indent, f"print(len({var}))")
+                # Read the deleted key back: a `del` that only decremented the
+                # count answers a count and a miss at the same time.
+                self.emit(indent, f"print(1 if {key} in {var} else 0)")
+                return
         if not self.lists:
             self.list_stmt(indent, "list_build")
             return
-        name, n = self.rng.choice(self.lists)
+        cand = [(name, n) for name, n in self.lists
+                if self.canon(name) not in self._del_done]
+        if not cand:
+            self.new_word(indent)
+            return
+        name, n = self.rng.choice(cand)
         idx = self.rng.randrange(n)
+        self._del_done.add(self.canon(name))
         self.emit(indent, f"del {name}[{idx}]")
         # The LENGTH and nothing else. An element read after a `del` is not a
         # differential program at all: CPython's `del xs[0]` COMPACTS, so index
