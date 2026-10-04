@@ -958,13 +958,18 @@ def model_cases():
     # `function_value_refusal`, which had two different sentences for one
     # refusal and spoke the second. Both are gone.
     #
-    # `formal/build.py` and `formal/imports.py` each have one of their own; they
-    # are other lanes' files and are recorded in
-    # `bugs/FORMAL_a_module_level_name_bound_twice.md` rather than edited here,
-    # so this case deliberately reads ONE file and says so.
-    out.append(("no_module_level_name_is_bound_twice",
-                _module_level_names_bound_twice(
-                    os.path.join(HERE, "formal", "model.py")), []))
+    # All THREE files, and the other two joined the list when the instances in
+    # them were deleted rather than when this case was written:
+    # `formal/imports.py`'s `HOST_MODULES` was bound twice with the second
+    # binding one term wider, which read as "`HOST_ADMITTED` is deliberately
+    # OUTSIDE the set" — the opposite of what the file says — and
+    # `formal/build.py`'s `_expr_spelling` was an alias over a second local
+    # implementation that shadowed it. So this case reads every file the doc
+    # named, and the comment above it no longer has to say it reads one.
+    for _path in ("model.py", "build.py", "imports.py"):
+        out.append((f"no_module_level_name_is_bound_twice_in_{_path[:-3]}",
+                    _module_level_names_bound_twice(
+                        os.path.join(HERE, "formal", _path)), []))
     # The variadic calling convention, in BOTH directions, against the platform's
     # own headers. See the section comment above for why this is here and what
     # each direction is protecting against; the short version is that a missing

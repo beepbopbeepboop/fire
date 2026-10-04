@@ -3580,6 +3580,7 @@ dylib_exports: list = None, globals_base: int = None,
             func_kind=lambda callee: self._callee_kind(callee, stack | {name}),
             slot_key=_member_slot_key,
             declared_kind=self._declared_kind_for(name),
+            declared_is_dict=self._declared_is_dict_for(name),
 ctor_field_value=self._ctor_field_value_for(name),
             callee_is_dict=lambda callee: self._callee_is_dict(
                 callee, stack | {name}),
@@ -3656,6 +3657,38 @@ ctor_field_value=self._ctor_field_value_for(name),
             return None
 
         return kind_of_slot
+
+    def _declared_is_dict_for(self, fn_name):
+        """`declared_is_dict` bound to the function `fn_name`, for `ValueKinds`.
+
+        The dict-ness twin of `_declared_kind_for`, over the same three shapes
+        and the same `model.method_owner_struct` lookup, because the question
+        "which struct's field is `self.seen`" must have one answer in this
+        emitter: `self` is the receiver of `fn_name`'s method, and the frame-slot
+        tables have already settled which candidates a local holder has.
+
+        `None` — "this path cannot say" — is the answer for every other case,
+        and it is what leaves the emitter's dict dispatch exactly where it was:
+        an unannotated field, a field two candidates disagree about, and a base
+        that is not a frame slot all read None, and `is_dict_value`'s binding
+        evidence still wins where both exist."""
+        owner = M.method_owner_struct(self._structs, fn_name)
+        frame_candidates = dict(self._frame_candidates)
+        structs = self._structs
+
+        def slot_candidates(expr):
+            """The structs whose FIELD `expr.member` is, or None."""
+            if not isinstance(expr, F.MemberExpr) \
+                    or not isinstance(expr.obj, F.IdentExpr):
+                return None
+            root = expr.obj.name
+            if owner is not None and root in M.struct_receivers(owner):
+                return [owner]
+            return frame_candidates.get(root)
+
+        return lambda expr: M.frame_slot_field_is_dict(
+            slot_candidates(expr), getattr(expr, "member", None),
+            DICT_TYPE_NAMES, structs)
 
     def _ctor_field_value_for(self, fn_name):
         """`ctor_field_value` bound to `fn_name`, for `ValueKinds`.
@@ -8034,6 +8067,20 @@ ctor_field_value=self._ctor_field_value_for(name),
             _emit_add_imm(self.asm, 31, 31, stack_bytes)
         if ext_return is not None:
             self._emit_extern_return(ext_return)
+        elif is_extern:
+            # A BARE call to a C symbol: no `external_call` bracket means no
+            # DECLARED return type, and a declared type is where
+            # `external_call_return_kind` reads the ABI rule from. The rule does
+            # not go away for want of a declaration — it is the C library's
+            # prototype that says how wide the answer is, and
+            # `model.BARE_C_RETURN_KINDS` is that prototype for every C symbol
+            # this tree calls bare. `None` when the callee is a Mojo export some
+            # linked library publishes, which is a word whatever it is spelled;
+            # the decision and the export test are shared, so x86-64 cannot
+            # disagree with this about one call.
+            self._emit_extern_return(M.bare_c_return_kind(
+                name, self._dylib_by_name, self._dylib_by_module,
+                self._dylib_forwarded, self._import_aliases, self._dylib_syms))
 
     def _emit_extern_return(self, kind) -> None:
         """Put the return register into the shape the DECLARED return type says.
@@ -8051,8 +8098,15 @@ ctor_field_value=self._ctor_field_value_for(name),
         instruction, and `NoneType` returns nothing at all.  The width
         normalization itself is `_emit_extend` — the same one an `Int32(x)`
         conversion uses, so there is one implementation of "make this word
-        this width" per architecture rather than two."""
-        if kind == M.EXTERN_RETURN_VOID or kind == M.EXTERN_RETURN_WORD:
+        this width" per architecture rather than two.
+
+        `None` is the fourth caller, and it means the same as `WORD`: the
+        callee's return width is not established anywhere, so the register is
+        handed on as it arrived.  `external_call_return_kind` cannot answer
+        `None` (a declared type it does not know is refused, not passed
+        through), so only the BARE-C-call path reaches this line with one."""
+        if kind is None or kind == M.EXTERN_RETURN_VOID \
+                or kind == M.EXTERN_RETURN_WORD:
             return
         width, signed = kind
         self._emit_extend(0, 0, IntType(width, signed))
@@ -8065,7 +8119,30 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         Single-generator over a list/tuple literal uses its length; nested
         generators multiply. Unknown iterables fall back to a frame-safe
-        default (runtime append still bounds-checks)."""
+        default (runtime append still bounds-checks).
+
+        **A LITERAL's length is `model.list_literal_reserved_slots`, not
+        `len(elements)`, and the difference is a program that used to exit 1.**
+        A generator's iterable is evaluated inside the comprehension's own
+        reservation, so a `[*a]` literal builds its blob by APPENDING and
+        contributes up to `dynamic_splat_capacity` elements — while
+        `len([*a].elements)` is the one `*` written in it. `[v * 10 for v in
+        [*a]]` therefore reserved a ONE-element result, `[*a]` appended three,
+        and the second append hit the capacity guard: no output, exit 1, on
+        every array size. The rule is the same one
+        `list_literal_reserved_slots` states for the append path ("what it
+        occupies is the cap it reserved, not the number of `*` operands
+        written in it"), asked of the same shared function x86-64's `_compr_cap`
+        reaches through `_blob_est`, so the two backends now size one
+        comprehension's reservation identically.
+
+        Nothing here is a WIDENING of a cap: the number is what the iterable
+        can actually produce, stated in the units the reservation is in. The
+        frame budget is one sequential ledger (`_list_cursor` against
+        `_blob_cap`, every `_reserve_blob` a step along it), so the two
+        reservations are added whether or not this function counts the second
+        one — and a pair that does not fit is `_reserve_blob`'s refusal, not a
+        write past the blob."""
         gens = expr.generators or []
         if not gens:
             return 0
@@ -8082,7 +8159,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         for g in gens:
             it = g.iterable
             if isinstance(it, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-                m = len(it.elements)
+                m = M.list_literal_reserved_slots(it)
             elif isinstance(it, F.CallExpr) and isinstance(it.func, F.IdentExpr) \
                     and it.func.name == "range" and it.args:
                 if len(it.args) == 1:
@@ -8798,7 +8875,13 @@ ctor_field_value=self._ctor_field_value_for(name),
         if sreason is not None:
             raise CodegenError(sreason)
         if isinstance(obj, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-            src_cap = len(obj.elements)
+            # `list_literal_reserved_slots`, for the reason `_compr_cap` gives:
+            # a `[*a]` literal fills its blob by appending, so what a slice of
+            # it can hold is the cap it reserved and not the one `*` written.
+            # Measured before this, `[*a][0:2]` with a three-element `a` exited
+            # 1 on this backend and answered `2 3 4` on x86-64, whose slice
+            # reservation never counted `elements` at all.
+            src_cap = M.list_literal_reserved_slots(obj)
         elif isinstance(obj, F.Comprehension):
             src_cap = self._compr_cap(obj)
         else:

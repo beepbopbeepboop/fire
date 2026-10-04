@@ -2049,6 +2049,160 @@ def external_call_return_kind(text):
     return None
 
 
+# ── The same ABI rule for a BARE C call, which has no declared type to read it from
+#
+# `external_call_return_kind` above answers "what does the DECLARED return type
+# say about the return register", and the emitters' `_emit_extern_return` turns
+# that into the conversion.  A BARE call — `return mkdir(p, mode)`, which is how
+# every `formal/hostmods/os/_syscalls.mojo` wrapper reaches libSystem — has no
+# declaration, so the answer was `None`, so the register was handed on exactly as
+# the callee left it.  And the C ABI does not promise that is usable: AAPCS64
+# puts the low 32 bits of a narrow integer return in X0 and leaves the rest
+# UNSPECIFIED, so whether a `-1` arrives as `0xFFFFFFFF_FFFFFFFF` or as
+# `0x00000000_FFFFFFFF` is a property of the host library's syscall sequence and
+# not of anything the source says.  Measured on both architectures, 2026-10-03:
+#
+#     printf("%d", mkstemps(b, 0) == -1)   ->  0     (the host returned -1)
+#     printf("%d", mkstemps(b, 0) == 4294967295)  ->  1
+#
+# while `access(p, 2) == -1`, the identical signature, answers 1 — so the
+# exposure is per CALL SITE, and no rule about which symbols "need" fixing
+# survives a libsystem update.  The answer is the same one the comment above
+# `EXTERN_RETURN_INTS` already gives for a declared return: a value model may
+# not take its correctness from one libc's internal choice about a register the
+# ABI leaves unspecified, so the conversion is emitted from the C PROTOTYPE
+# instead.
+#
+# WHY A TABLE OF PROTOTYPES RATHER THAN "SIGN-EXTEND EVERY BARE CALL", which is
+# the smaller change and is wrong: a `size_t`, an `off_t` or a `uint64_t` return
+# has bit 31 set in ordinary use, and sign-extending it fabricates a negative
+# number.  `formal/hostmods/time.mojo`'s `time_ns()` is
+# `clock_gettime_nsec_np(0)` — 1.7e18 nanoseconds, bit 31 long since set — and a
+# blanket `sxtw` there would make `time.time_ns()` negative on every run.  A
+# prototype table has no such case: it says what each callee RETURNS, which is
+# a stable property of the C library's header, and the conversion it asks for is
+# idempotent — sign-extending an already sign-extended `-1` is a no-op, which is
+# why the one instruction covers both of the arrival conventions above instead
+# of only the broken one.
+#
+# The `VOID` and `WORD` entries are no-ops in the emitter and are here anyway so
+# the table is TOTAL over the corpus: `bare_c_return_kind` can then answer for
+# every bare C call this tree makes, and `test_formal_libc_symbol.py`'s
+# `every_bare_c_call_in_the_hostmods_has_a_prototype` can demand an entry for
+# each one, so a host module that starts calling something new cannot arrive
+# unnormalised and silently.  A 64-bit integer is spelled `WORD` because it is
+# the same instruction — none — and two spellings of one answer is two things to
+# keep in step.
+#
+# Every width here was read out of this SDK's headers rather than from memory,
+# with `clang -Xclang -ast-dump` over a probe that references each symbol.
+BARE_C_RETURN_KINDS = {
+    # ── `int`: the low 32 bits are the answer, sign-extended. The whole
+    # failure-check vocabulary of the C library is here — every one of these
+    # returns 0 or -1, and `-1` compared as a 64-bit word is the bug.
+    "access": (32, True),
+    "atoi": (32, True),
+    "chdir": (32, True),
+    "chmod": (32, True),
+    "close": (32, True),
+    "closedir": (32, True),
+    "fcntl": (32, True),
+    "fclose": (32, True),
+    "fflush": (32, True),
+    "flock": (32, True),
+    "memcmp": (32, True),
+    "mkdir": (32, True),
+    "mkstemps": (32, True),       # the row that measured the bug
+    "open": (32, True),
+    "printf": (32, True),
+    "remove": (32, True),
+    "rename": (32, True),
+    "rmdir": (32, True),
+    "setenv": (32, True),
+    "snprintf": (32, True),
+    "stat": (32, True),
+    "strcmp": (32, True),
+    "strncmp": (32, True),
+    "sysctlbyname": (32, True),
+    "truncate": (32, True),
+    "uname": (32, True),
+    "unlink": (32, True),
+    "unsetenv": (32, True),
+    "usleep": (32, True),
+    "utimes": (32, True),
+    "lstat": (32, True),
+
+    # ── 64-bit integers and sizes: the whole register is the answer. The
+    # `clock_gettime_nsec_np` row is the one that says why this group exists.
+    "clock_gettime_nsec_np": EXTERN_RETURN_WORD,
+    "fread": EXTERN_RETURN_WORD,
+    "fwrite": EXTERN_RETURN_WORD,
+    "lseek": EXTERN_RETURN_WORD,
+    "read": EXTERN_RETURN_WORD,
+    "strcspn": EXTERN_RETURN_WORD,
+    "strlen": EXTERN_RETURN_WORD,
+    "strspn": EXTERN_RETURN_WORD,
+    "write": EXTERN_RETURN_WORD,
+
+    # ── pointers: an address, which is below `0x0000_8000_0000_0000` on every
+    # user-space target this backend emits, so a NULL compares as 0 either way.
+    "dlopen": EXTERN_RETURN_WORD,
+    "dlsym": EXTERN_RETURN_WORD,
+    "fopen": EXTERN_RETURN_WORD,
+    "getcwd": EXTERN_RETURN_WORD,
+    "getenv": EXTERN_RETURN_WORD,
+    "malloc": EXTERN_RETURN_WORD,
+    "memcpy": EXTERN_RETURN_WORD,
+    "memmove": EXTERN_RETURN_WORD,
+    "memset": EXTERN_RETURN_WORD,
+    "mkdtemp": EXTERN_RETURN_WORD,
+    "opendir": EXTERN_RETURN_WORD,
+    "readdir": EXTERN_RETURN_WORD,
+    "realloc": EXTERN_RETURN_WORD,
+    "realpath": EXTERN_RETURN_WORD,
+    "strcat": EXTERN_RETURN_WORD,
+    "strchr": EXTERN_RETURN_WORD,
+    "CC_MD5": EXTERN_RETURN_WORD,
+    "CC_SHA1": EXTERN_RETURN_WORD,
+    "CC_SHA224": EXTERN_RETURN_WORD,
+    "CC_SHA256": EXTERN_RETURN_WORD,
+    "CC_SHA384": EXTERN_RETURN_WORD,
+    "CC_SHA512": EXTERN_RETURN_WORD,
+
+    # ── nothing comes back.
+    "arc4random_buf": EXTERN_RETURN_VOID,
+    "exit": EXTERN_RETURN_VOID,
+    "free": EXTERN_RETURN_VOID,
+    "rewinddir": EXTERN_RETURN_VOID,
+}
+
+
+def bare_c_return_kind(callee: str, by_name: dict, by_module: dict,
+                       forwarded: dict, aliases: dict, dylib_syms: dict):
+    """What a BARE call's C prototype says about the return register, or None.
+
+    `None` means two different things and both are the same answer to the
+    question the emitters ask ("emit a conversion here?"): the callee is a
+    function a linked Mojo library PUBLISHES — so its return is a Mojo value
+    whose width is this path's own 64-bit word whatever the symbol is spelled —
+    or the callee is a C symbol with no entry above.
+
+    The export half is not optional and it is the whole reason the decision is
+    not one line at the `BL`.  A name is extern exactly when this unit does not
+    compile it, and a call into another host module is extern too, so `read`,
+    `stat`, `remove`, `walk` and `isdir` all reach this line whether the callee
+    is libc's `read` or this project's own.  Which library answered is asked of
+    `dylib_callee_export` — the ONE resolution, in `dylib_extern_symbol`'s order
+    — rather than here, because a caller that asked in a different order could
+    normalise a call to somebody's Mojo function as though libc had declared it."""
+    if callee in dylib_syms:
+        return None
+    if dylib_callee_export(by_name, by_module, forwarded, aliases,
+                           callee) is not None:
+        return None
+    return BARE_C_RETURN_KINDS.get(callee)
+
+
 def is_external_call_template(e) -> bool:
     """True when `e` is `external_call[...]` — the template, whatever it is
     applied to.
@@ -7860,6 +8014,45 @@ def frame_slot_declared_annotation(candidates, name, decls=None) -> str | None:
     if len(bases) != 1 or any(base is None for _sn, base, _a, _w, _e in rows):
         return None
     return rows[0][2]
+
+
+def frame_slot_field_is_dict(candidates, name, dict_names=(), decls=None):
+    """Whether a FRAME SLOT's field is declared a DICT, agreed over candidates.
+
+    The dict-ness TWIN of `frame_slot_field_kind`, and it is a separate function
+    for the reason `global_slot_is_dict` is a separate function from
+    `global_slot_kind`: on this path all four container annotations are ONE word
+    — `List[Int]`, `Tuple[Int, Int]`, `Set[Int]` and `Dict[String, Int]` are a
+    pointer to a blob with an 8-byte count header — so the kind answers "how wide
+    is an element" and cannot answer "does a subscript with a string index mean
+    a key lookup". Carrying it on the kind would make one of the two answers
+    wrong.
+
+    Same agree-or-refuse, same reader: `frame_slot_declared_annotation` over the
+    candidates and `declared_type_is_dict` over the agreed annotation, so a
+    holder two candidate structs disagree about is None rather than a pick.
+
+    **What it deliberately does NOT carry is `struct_field_kind`'s VALUE gate,
+    and the difference is a decision rather than an omission.** That gate exists
+    because `len(self.xs)` on a field whose slot nothing established is a load
+    from address 0 — and the gate's own docstring records that with the gate
+    lifted the program BUILT on both architectures and died of SIGSEGV. The same
+    hazard is real here, and the caller is what makes it decidable: a dict
+    subscript is only a key scan when the INDEX is a string, and the emitter's
+    dict dispatch asks that first
+    (`bugs/FORMAL_a_dict_subscript_has_no_value_kind.md`'s per-key gate, which
+    this doc's taker is told to reuse rather than re-derive). So the shape that
+    is refused on the value axis is `len`, and the shape that is refused here is
+    `d[0]` — an integer index against a field declared `Dict`, which is a blob
+    element read and always was.
+
+    A field with no DECLARED type, or one whose candidates disagree, is None:
+    that is "this path cannot say", which every reader of a dict-ness boolean
+    must keep as its own answer rather than reading as False."""
+    ann = frame_slot_declared_annotation(candidates, name, decls)
+    if ann is None:
+        return None
+    return declared_type_is_dict(ann, dict_names)
 
 
 def frame_slot_field_kind(candidates, name, int_names=(), string_names=(),
@@ -13923,18 +14116,31 @@ class ValueKinds:
         with "print() cannot tell whether MemberExpr is a string or a number".
         `None` leaves every existing decision exactly where it was, which is
         why this is consulted after `declared_kind` and not instead of it.
+      * `declared_is_dict(expr)` — whether a FRAME SLOT's field is declared a
+        DICT.  `declared_kind`'s twin on the axis a kind cannot carry (all four
+        container annotations are one word here), for the same reason
+        `callee_is_dict` is separate from `func_kind`: `self.seen[k]` on a field
+        declared `Dict[String, Int]` was refused with "the INDEX is a string and
+        nothing in the source says what `self.seen` holds" — false about a
+        declaration that is right there on the struct.  Asked only where the
+        binding evidence has said nothing, and a `None` leaves every existing
+        decision exactly where it was.  See `frame_slot_field_is_dict` for why
+        this carries no value gate and `is_dict_value` for where it is read.
     """
 
     def __init__(self, fn, *, int_names=(), string_names=(), func_kind=None,
                  slot_key=None, declared_kind=None, ctor_field_value=None,
                  callee_is_dict=None, dict_names=("Dict", "dict"),
-                 param_kind=None):
+                 param_kind=None, declared_is_dict=None):
         self._int_names = frozenset(int_names)
         self._string_names = frozenset(string_names)
         self._func_kind = func_kind or (lambda name: None)
         self._param_kind = param_kind or (lambda name: None)
         self._slot_key = slot_key or (lambda expr: None)
         self._declared_kind = declared_kind or (lambda expr: None)
+        # The dict-ness twin of the line above, and consulted only where
+        # `_dict_names` has nothing to say — see the hook's own paragraph.
+        self._declared_is_dict = declared_is_dict or (lambda expr: None)
         self._ctor_field_value = ctor_field_value or (
             lambda struct_name, call, field: None)
         # The SIXTH hook, and the one the KIND axis cannot express: whether a
@@ -14650,7 +14856,16 @@ class ValueKinds:
             key = self._slot_key(e)
             if key is not None and key in self._dict_conflicts:
                 return None
-            return self._dict_names.get(key) if key is not None else None
+            if key is not None and key in self._dict_names:
+                return self._dict_names[key]
+            # Nothing this function bound says, so the DECLARATION is what is
+            # left: `self.seen` is a frame slot, and its field's annotation is
+            # the only statement anywhere about what the slot holds. Asked after
+            # `_dict_names` and not instead of it, so a binding statement keeps
+            # its precedence over a declaration — the same order
+            # `declared_kind` is consulted in.
+            answer = self._declared_is_dict(e)
+            return None if answer is None else bool(answer)
         if isinstance(e, F.CallExpr):
             callee = _flat_callee(e) or subscript_callee_name(e)
             if callee is None:

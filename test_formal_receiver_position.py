@@ -410,6 +410,81 @@ DIFF_CASES = [
      '    print("v=%d %d" % (bs[i].get(), bs[i].k), end="")\n'
      "    return 0\n\n"
      "main()\n"),
+
+    # **GUARD** — a one-field holder of a nested frame, BUILT, which is the
+    # positive half of the two refusals below and the reason they are two
+    # refusals rather than one: `b.inner = Opt()` puts a frame address in the
+    # word `Box`'s receiver IS, and `b.get()` then reads through it. Adding the
+    # refusal must not have cost this program, and it is what says the check
+    # asks "did anything build it" rather than "is this a one-field holder" — a
+    # rule that refused the shape outright would be green on the two refusals
+    # and wrong here.
+    #
+    # The SECOND field on the second program is the other half of that: `var
+    # pad: Int` makes `Box` a frame in its own right, its receiver is an
+    # address into scratch rather than a field's storage, and the unwritten
+    # slot reads 0. CPython raises `AttributeError` for that program, so 0 is
+    # this path's documented answer where the source does not say what the slot
+    # holds, and `test_formal_run.py`'s
+    # `two_field_holder_reads_its_nested_frame_through_a_method` pins it from
+    # the other direction.
+    ("GUARD_a_one_field_holder_built_through_its_own_field_answers",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n\n"
+     "struct Box:\n"
+     "    var inner: Opt\n\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.v * 10 + self.inner.has\n\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    b.inner = Opt()\n"
+     "    b.inner.v = 4\n"
+     "    b.inner.has = 1\n"
+     '    printf("v=%d", b.get())\n'
+     "    return 0\n",
+     "class Opt:\n"
+     "    def __init__(self, v, has):\n"
+     "        self.v = v\n"
+     "        self.has = has\n\n"
+     "class Box:\n"
+     "    def __init__(self, inner):\n"
+     "        self.inner = inner\n"
+     "    def get(self):\n"
+     "        return self.inner.v * 10 + self.inner.has\n\n"
+     "def main():\n"
+     "    b = Box(Opt(4, 1))\n"
+     '    print("v=%d" % b.get(), end="")\n'
+     "    return 0\n\n"
+     "main()\n"),
+    ("GUARD_a_two_field_holder_reads_its_nested_frame_as_zero",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "    var pad: Int\n\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.v\n\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     '    printf("v=%d", b.get())\n'
+     "    return 0\n",
+     "class Opt:\n"
+     "    def __init__(self, v, has):\n"
+     "        self.v = v\n"
+     "        self.has = has\n\n"
+     "class Box:\n"
+     "    def __init__(self, inner, pad):\n"
+     "        self.inner = inner\n"
+     "        self.pad = pad\n"
+     "    def get(self):\n"
+     "        return self.inner.v\n\n"
+     "def main():\n"
+     "    b = Box(Opt(0, 0), 0)\n"
+     '    print("v=%d" % b.get(), end="")\n'
+     "    return 0\n\n"
+     "main()\n"),
 ]
 
 # ── the refusals ────────────────────────────────────────────────────────────
@@ -721,6 +796,55 @@ REFUSALS = [
      "def main() -> int:\n"
      "    return Box().get()\n",
      "`Box().get(…)` cannot be lowered"),
+
+    # A ONE-FIELD holder's method reading the nested frame NOTHING built. The
+    # same `Box` as the row above and the same ten lines without the
+    # construction, and the difference is the whole of it: a one-word struct's
+    # receiver IS its field's storage, `model.one_word_sole_field_frame` made
+    # that storage an ADDRESS, and `Box()` fills the WORD rather than the frame
+    # the word will hold — so `self.inner.v` is a load at address 0. Measured on
+    # both architectures as SIGSEGV, exit 139, with no output at all.
+    #
+    # CPython raises `AttributeError` for this program (`Box` has no attribute
+    # `inner`), so there is no number to be differential against and a REFUSAL
+    # is the whole of the answer — which is why this is in this table and not
+    # in the differential one. The needle is the middle of the sentence, so a
+    # refusal that lost its repair would still fail the row.
+    ("refuse_a_one_field_holder_reading_a_frame_nothing_built",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n\n"
+     "struct Box:\n"
+     "    var inner: Opt\n\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.v\n\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    return b.get()\n",
+     "reads Box's only field 'inner', a slot whose declared type is the "
+     "framed struct Opt, and nothing in this function has put a frame there"),
+
+    # THE SAME CONSTRUCT WRITTEN THROUGH instead of read, which is the write
+    # half of the pair and used to be answered by a DIFFERENT rule — one that
+    # named `b.v` where the source says `b.inner.v`, so the refusal pointed at
+    # an expression the reader never wrote. It is pinned here because a rule that
+    # took the read half over must not have lost the write half with it, and
+    # because the repair this one names (`b.inner = Opt()` before the call) is
+    # the repair for both.
+    ("refuse_a_store_through_a_one_field_holders_unbuilt_frame",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n\n"
+     "struct Box:\n"
+     "    var inner: Opt\n\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.v\n\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    b.inner.v = 5\n"
+     "    return b.get()\n",
+     "reads Box's only field 'inner', a slot whose declared type is the "
+     "framed struct Opt, and nothing in this function has put a frame there"),
 ]
 
 # ── the comptime ABI, now on BOTH architectures ────────────────────────────

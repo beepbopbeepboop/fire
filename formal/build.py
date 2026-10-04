@@ -2079,6 +2079,11 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     # shadowed by a local read.
     check_frame_holder_rebinds(functions)
     check_receiver_rebinds(functions)
+    # …and the READ half of the one-word receiver, which `check_receiver_rebinds`
+    # has no case for: it is about the callee's own store, and this is about the
+    # word the CALLER handed it. After it, deliberately — see the function's
+    # docstring.
+    check_one_word_frame_receivers(functions)
     # …and the one that names a value-position METHOD read for what it is. The
     # field-set derivation already stopped it being a zero, so this is the
     # diagnosis rather than a second verdict, and it is here rather than in the
@@ -4480,6 +4485,14 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # no holder set, which is why it is not folded into the call above: a
     # receiver is not a name the holder analysis knows anything about.
     _collect_receiver_rebinds(functions, structs_by_name)
+    # …and the READ half of the one-word receiver, parked here beside the write
+    # half above and raised in the late checks after `check_receiver_rebinds`
+    # has had its turn. Both halves are about the same two facts
+    # (`model.one_word_sole_field_frame`), and a call site is in the frame pass's
+    # domain because the rewrites that put a receiver in argument position 0 run
+    # here.
+    _collect_one_word_frame_receivers(functions, structs_by_name,
+                                      by_name_returns_frame)
     _park_construction_mismatches(functions, framed)
 
 
@@ -7564,6 +7577,208 @@ def _seed_one_word_bindings(fn, structs_by_name, functions, holders,
         if M.type_constructor_kind(getattr(pst, "name", "")) is not None:
             continue
         one_word[key][pname] = [pst]
+
+
+def _one_word_frame_words(fn, st, sole, structs_by_name, returns_frame) -> set:
+    """Names this function puts a FRAME ADDRESS into, directly or by copy.
+
+    The question `check_one_word_frame_receivers` asks about a receiver, asked
+    here rather than at the call site because the answer is about the WHOLE
+    FUNCTION: a receiver is safe if anything in the body gave its word an
+    address, and the thing that does it can be twenty lines above the call.
+
+    Every shape of evidence is `_value_may_be_a_frame` — the ONE recogniser
+    this tree has for "this value puts a frame in a name" (`S(...)` of a framed
+    struct, another holder's name, a call this image knows returns a frame), and
+    asking it rather than writing a second list is what keeps this check and
+    `_collect_receiver_rebinds` from disagreeing about what a frame is.  Four
+    places such a value lands:
+
+      * `b.<sole> = <frame>` — the store the landed one-field program is written
+        with;
+      * `b = Box(<frame>)` — the CONSTRUCTION ARGUMENT, which is how
+        `StridedSlice(Slice(1, 2, 3))` fills its one field and the case a
+        store-only rule got wrong (measured: it refused
+        `std/builtin/builtin_slice.mojo`'s own `StridedSlice_emit_all`, whose
+        receiver is a frame the constructor was handed);
+      * `x = <frame>` and `x.<sole> = y` — a copy of a word that is an address,
+        which is the same fact one hop further.
+
+    The last two make it a FIXPOINT rather than one pass, because a chain
+    `var c = b; b.inner = Opt(); …; return c.get()` puts the address in `b`
+    after `c` was copied from it and a single pass would have to guess an order.
+    `iter_nodes` has no parent, so each node is asked what it can answer about
+    itself and nothing needs one."""
+    words = set()
+    changed = True
+    while changed:
+        changed = False
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            for target, value in _frame_value_stores(node, sole):
+                fresh = _value_may_be_a_frame(value, structs_by_name, words,
+                                              None, returns_frame)
+                # …and the construction ARGUMENT, which is inside the holder's
+                # own constructor call rather than a value in its own right.
+                if not fresh and isinstance(value, F.CallExpr) \
+                        and isinstance(value.func, F.IdentExpr) \
+                        and value.func.name == st.name:
+                    fresh = any(
+                        _value_may_be_a_frame(a, structs_by_name, words,
+                                              None, returns_frame)
+                        for a in (value.args or []))
+                if not fresh or target in words:
+                    continue
+                words.add(target)
+                changed = True
+    return words
+
+
+def _frame_value_stores(node, sole):
+    """`[(name, value)]` for the bindings in `node` that can put a frame.
+
+    Two target shapes, and the second is why this is a function rather than four
+    lines in the loop above: `x = <frame>` names the holder, and `x.<sole> =
+    <frame>` names a FIELD of it — the holder is the base, which is the same fact
+    about a different node. A `VarDecl` and an `AssignStmt` are the two
+    spellings of the first, for the reason every other walk in this file treats
+    them as one."""
+    if isinstance(node, F.VarDecl):
+        return [(node.name, getattr(node, "value", None))]
+    if isinstance(node, F.AssignStmt):
+        target = getattr(node, "target", None)
+        if isinstance(target, F.IdentExpr):
+            return [(target.name, node.value)]
+        if isinstance(target, F.MemberExpr) and target.member == sole \
+                and isinstance(target.obj, F.IdentExpr):
+            return [(target.obj.name, node.value)]
+    return []
+
+def check_one_word_frame_receivers(functions) -> None:
+    """Refuse a method call whose receiver holds a frame NOTHING built.
+
+    **Placed after `check_receiver_rebinds`, and the order is the point.** Both
+    rules are about a one-field struct whose sole field is a frame, and both
+    refuse `var b = Box(); b.set(o)` — the receiver rule because `set`'s
+    `self.inner = o` is `self = o` after the identity, and this one because
+    nothing put a frame in `b`'s word. The receiver rule is the older and the
+    more specific (it names the METHOD and the store), so it answers first and
+    this one is the READ half it has no case for.
+    `test_formal_run.py::a_method_not_the_constructor_still_gets_the_receiver_
+    refusal` pins that precedence, and it is why this is a late check beside the
+    others rather than another arm of the frame pass above.
+
+    The crash this replaces, on both architectures:
+
+        struct Opt:  var v: Int;  var has: Int
+        struct Box:  var inner: Opt
+                     def get(self): return self.inner.v
+        var b = Box()
+        return b.get()                      ->  SIGSEGV, exit 139
+
+    A one-word struct's receiver IS its field, and `model.one_word_sole_field_frame`
+    made that field's storage an ADDRESS — which is what lets `self.inner.v`
+    lower to the one load at `self + 8k` it always was.  `Box()`'s construction
+    initialises the WORD, not the frame it will hold, so that address is still
+    zero and the read is a load at address 0.
+
+    **The program never asks for the nested frame, and reads it anyway.** The
+    write half was made loud by the same commit that seeded the receiver
+    (`b.inner = Opt()` is measured working on both architectures); a method that
+    READS the slot has no store to catch, so the unestablished read walked
+    straight into the load.  CPython raises `AttributeError` here — `Box` has no
+    attribute `inner` — so there is no number to compare against and the honest
+    answer is a refusal, not a zero.
+
+    **Only a receiver this function can see is refused**, and that is the whole
+    limit: a name `fn` binds is decidable here, and a PARAMETER of that type is
+    not — whether its word holds an address is a fact about the CALLER
+    (`def f(h: Box): return h.get()` is correct for a caller that wrote
+    `h.inner = Opt()` and a crash for one that did not), and that is the
+    whole-image question `_check_frame_escapes` answers for containers and this
+    pass cannot.  So the parameter case keeps today's behaviour rather than
+    gaining a refusal that would be wrong for every working program of that
+    shape; `bugs/FORMAL_a_method_of_a_one_field_holder_reads_a_nested_frame_
+    nothing_built.md` recorded the crash and this is the half of it that is
+    decidable here."""
+    for fn in functions:
+        parked = getattr(fn, "_one_word_frame_receiver", None)
+        if not parked:
+            continue
+        recv, method, st, sole, inner = parked
+        raise CodegenError(
+            f"{recv}.{method}() reads {st.name}'s only field '{sole}', a slot "
+            f"whose declared type is the framed struct {inner.name}, and "
+            f"nothing in this function has put a frame there: {recv} was "
+            f"built by {st.name}(), whose construction fills the WORD rather "
+            f"than the frame that word will hold, so the method loads "
+            f"{inner.name}'s fields at address 0 and the image dies of "
+            f"SIGSEGV. Write `{recv}.{sole} = {inner.name}()` before the "
+            f"call, which is the same program with a value — or give "
+            f"{st.name} a second field, so it is a frame in its own right and "
+            f"its zeroed slot reads as 0")
+
+
+def _collect_one_word_frame_receivers(functions, structs_by_name,
+                                      returns_frame) -> None:
+    """PARK the calls `check_one_word_frame_receivers` will refuse.
+
+    Parked rather than raised, and the reason is the same one
+    `check_receiver_rebinds` exists for: the receiver rule and this one are both
+    about a one-field struct whose sole field is a frame, and the order they
+    answer in is the order the refusal a reader gets. Parking here — in the
+    frame pass, where `returns_frame` and the rewrites are — and raising in the
+    late checks after `check_receiver_rebinds` is what gives the older, more
+    specific rule its turn first.
+
+    A name the function does not BOUND is left alone, and that is the whole
+    limit of this check: whether a PARAMETER's word holds an address is a fact
+    about the caller, which is the whole-image question
+    `check_holder_agreements` asks for containers and this pass cannot.
+    """
+    owners = M.method_owner_names(structs_by_name.values())
+    for fn in functions:
+        _park_one_word_frame_receivers(fn, owners, structs_by_name,
+                                       returns_frame)
+
+
+def _park_one_word_frame_receivers(fn, owners, structs_by_name,
+                                   returns_frame) -> None:
+    for node in M.iter_nodes(getattr(fn, "body", None)):
+        if not isinstance(node, F.CallExpr) or not node.args:
+            continue
+        if not isinstance(node.func, F.IdentExpr):
+            continue
+        st = owners.get(node.func.name)
+        if st is None or st.name not in structs_by_name:
+            continue
+        inner = M.one_word_sole_field_frame(st, structs_by_name)
+        if inner is None:
+            continue
+        recv = node.args[0]
+        if not isinstance(recv, F.IdentExpr):
+            continue
+        sole = M.struct_sole_field_name(st)
+        method = node.func.name[len(st.name) + 1:] \
+            if node.func.name.startswith(st.name + "_") else node.func.name
+        if recv.name not in _local_names(fn):
+            continue
+        if recv.name in _one_word_frame_words(fn, st, sole, structs_by_name,
+                                              returns_frame):
+            continue
+        fn._one_word_frame_receiver = (recv.name, method, st, sole, inner)
+        return
+
+
+def _local_names(fn) -> set:
+    """Every name `fn` binds: parameters, `var` declarations and assignments."""
+    out = set(getattr(M.function_param_shape(fn), "names", ()) or ())
+    for node in M.iter_nodes(getattr(fn, "body", None)):
+        if isinstance(node, F.VarDecl):
+            out.add(node.name)
+        elif isinstance(node, F.AssignStmt) \
+                and isinstance(node.target, F.IdentExpr):
+            out.add(node.target.name)
+    return out
 
 
 def _check_method_receiver_types(fn, holders, by_name, owners,

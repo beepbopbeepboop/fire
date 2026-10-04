@@ -814,7 +814,6 @@ def _admitted_tier_conflicts() -> list:
 # fact worth keeping: **macOS's `flock` and `F_SETLK` SHARE a lock space**, the
 # opposite of Linux, so a reader who assumes Linux gets this backwards.
 
-HOST_MODULES = HOST_UNREACHABLE | HOST_MODELLED
 HOST_MODULES = HOST_UNREACHABLE | HOST_MODELLED | HOST_ADMITTED
 
 

@@ -755,6 +755,63 @@ MODULE_GLOBAL_CASES = [
      "    show({\"a\": 1})\n"
      "    return 0\n",
      "1|"),
+    # ── a DICT FIELD, which is the one base shape no BINDING statement reaches ──
+    #
+    # `self.seen` is not a name this function bound and not a parameter, so
+    # `_dict_names` has nothing to say about it and the emitter's dict dispatch
+    # fell through to the blob walk: the string index became an ELEMENT OFFSET,
+    # the bounds check failed, and the build was REFUSED with "the INDEX is a
+    # string and nothing in the source says what `self.seen` holds" — a sentence
+    # about a declaration (`var seen: dict`) that is right there on
+    # the struct. Both architectures, and `model.frame_slot_field_is_dict` is the
+    # twin of `model.frame_slot_field_kind` that reads it.
+    #
+    # Two rows and both are needed, because they are the two ways the field's
+    # value gets there: a MODULE-LEVEL frame's slots are laid out in `__DATA` by
+    # `model.module_frame_slot_initializer`, and a LOCAL's are inlined from the
+    # constructor's own body at the construction site (`init_body_stores`). A
+    # rule that only knew the first would be green here and wrong on the shape
+    # most real code writes.
+    #
+    # `{"a": 7, "b": 9}` rather than `{}` because the READ is the capability:
+    # a dict STORE of a key the blob does not hold is the dict-INSERT wall
+    # (`bugs/FORMAL_a_dict_store_of_an_absent_key_exits_1.md`), which is a
+    # different construct and is not what this row is about.
+    ("a_dict_field_read_through_its_method",
+     "class Loader:\n"
+     "    seen: dict\n"
+     "    hits: int\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.seen = {\"a\": 7, \"b\": 9}\n"
+     "        self.hits = 0\n"
+     "\n"
+     "    def get(self, k):\n"
+     "        return self.seen[k]\n"
+     "\n"
+     "_loader = Loader()\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"%d %d\", _loader.get(\"a\"), _loader.get(\"b\"))\n"
+     "    return 0\n",
+     "7 9"),
+    ("a_dict_field_read_through_its_method_on_a_local",
+     "class Loader:\n"
+     "    seen: dict\n"
+     "    hits: int\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.seen = {\"a\": 7, \"b\": 9}\n"
+     "        self.hits = 0\n"
+     "\n"
+     "    def get(self, k):\n"
+     "        return self.seen[k]\n"
+     "\n"
+     "def main(n):\n"
+     "    l = Loader()\n"
+     "    printf(\"%d %d\", l.get(\"a\"), l.get(\"b\"))\n"
+     "    return 0\n",
+     "7 9"),
 ]
 
 # (name, source, needle the refusal must contain)
