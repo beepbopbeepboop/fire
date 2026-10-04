@@ -1343,6 +1343,123 @@ DIFF_CASES = [
      '    print("eq=%d" % (1 if t == make(10, 20) else 0), end="")\n'
      "    return 0\n\n"
      "main()\n"),
+
+    # A FUNCTION WHOSE RETURN VALUE IS A CONSTRUCTION — `return A(v, v + 1)`,
+    # with no name in the callee for the frame to live in.  This is the shape
+    # every other factory here avoids, and it is the only spelling most of real
+    # code uses: without it, `def mk(v: Int) -> A` was classified a word-returning
+    # function, so `var t = mk(1)` bound a name nothing had a block for and
+    # `t.x` was REFUSED by name — a refusal about a NAME for a decision made
+    # about the FUNCTION.  Lifting it is only half the work; these four
+    # arrangements are the other half, because the answer is an address of a
+    # frame in an activation that has already been reclaimed, and a case that
+    # happened to read the dead block before anything reused it would be RIGHT
+    # for no reason.
+    #
+    # `two_of_them` is the one that decides the case: two names bound to
+    # returned frames, read in the order they were built, is the use-after-free
+    # this convention exists to prevent, and it is silent when it goes wrong.
+    ("a_construction_returned_as_a_frame_reaches_the_caller",
+     "struct A:\n"
+     "    var x: Int\n"
+     "    var y: Int\n\n"
+     "def mk(v: Int) -> A:\n"
+     "    return A(v, v + 1)\n\n"
+     "def main(n) -> Int:\n"
+     "    var t = mk(1)\n"
+     '    printf("x=%d y=%d", t.x, t.y)\n'
+     "    return 0\n",
+     "class A:\n"
+     "    def __init__(self, x, y):\n"
+     "        self.x = x\n"
+     "        self.y = y\n\n"
+     "def mk(v):\n"
+     "    return A(v, v + 1)\n\n"
+     "def main():\n"
+     "    t = mk(1)\n"
+     '    print("x=%d y=%d" % (t.x, t.y), end="")\n'
+     "    return 0\n\n"
+     "main()\n"),
+
+    ("a_returned_construction_is_compared_by_its_eq_method",
+     "struct A:\n"
+     "    var x: Int\n"
+     "    var y: Int\n\n"
+     "    def __eq__(self, other: A) -> Bool:\n"
+     "        if other.y != self.y:\n"
+     "            return False\n"
+     "        return self.x == other.x\n\n"
+     "def mk(v: Int) -> A:\n"
+     "    return A(v, v + 1)\n\n"
+     "def main(n) -> Int:\n"
+     "    var t = mk(1)\n"
+     '    printf("same=%d diff=%d", 1 if t == mk(1) else 0,'
+     " 1 if t == mk(2) else 0)\n"
+     "    return 0\n",
+     "class A:\n"
+     "    def __init__(self, x, y):\n"
+     "        self.x = x\n"
+     "        self.y = y\n\n"
+     "    def __eq__(self, other):\n"
+     "        if other.y != self.y:\n"
+     "            return False\n"
+     "        return self.x == other.x\n\n"
+     "def mk(v):\n"
+     "    return A(v, v + 1)\n\n"
+     "def main():\n"
+     "    t = mk(1)\n"
+     '    print("same=%d diff=%d" % (1 if t == mk(1) else 0,'
+     " 1 if t == mk(2) else 0), end=\"\")\n"
+     "    return 0\n\n"
+     "main()\n"),
+
+    ("two_returned_constructions_are_two_blocks",
+     "struct A:\n"
+     "    var x: Int\n"
+     "    var y: Int\n\n"
+     "def mk(v: Int) -> A:\n"
+     "    return A(v, v + 1)\n\n"
+     "def main(n) -> Int:\n"
+     "    var t = mk(1)\n"
+     "    var u = mk(20)\n"
+     '    printf("%d %d", t.x, u.x)\n'
+     "    return 0\n",
+     "class A:\n"
+     "    def __init__(self, x, y):\n"
+     "        self.x = x\n"
+     "        self.y = y\n\n"
+     "def mk(v):\n"
+     "    return A(v, v + 1)\n\n"
+     "def main():\n"
+     "    t = mk(1)\n"
+     "    u = mk(20)\n"
+     '    print("%d %d" % (t.x, u.x), end="")\n'
+     "    return 0\n\n"
+     "main()\n"),
+
+    # A field read straight off the CALL, with no name bound at all: the block
+    # is reserved per call SITE (`model.struct_returned_frame_sites`) so this
+    # needs no holder, and it is the arrangement a reader is most likely to
+    # write.
+    ("a_returned_construction_read_through_the_call",
+     "struct A:\n"
+     "    var x: Int\n"
+     "    var y: Int\n\n"
+     "def mk(v: Int) -> A:\n"
+     "    return A(v, v + 1)\n\n"
+     "def main(n) -> Int:\n"
+     '    printf("%d %d", mk(1).x, mk(2).x)\n'
+     "    return 0\n",
+     "class A:\n"
+     "    def __init__(self, x, y):\n"
+     "        self.x = x\n"
+     "        self.y = y\n\n"
+     "def mk(v):\n"
+     "    return A(v, v + 1)\n\n"
+     "def main():\n"
+     '    print("%d %d" % (mk(1).x, mk(2).x), end="")\n'
+     "    return 0\n\n"
+     "main()\n"),
 ]
 
 

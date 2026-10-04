@@ -3336,6 +3336,13 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # that agrees until the day it does not.
     param0 = {}
     params_of = {}
+    # The image's function NAMES, for `model.call_lowers_as_framed_construction`
+    # — which asks "is this name BOTH a function and a struct", a question about
+    # the image rather than about one expression, so it needs the list of names
+    # and not the list of definitions.  Passing the definitions answers it
+    # wrongly and silently (`callee in definitions` is False for every string),
+    # which is a dispatch-order question silently answered in one direction.
+    fn_names = [f.name for f in functions]
     for fn in functions:
         # `model.function_param_shape`, so the variadic table has ONE reader.
         # A `*rest` / `**kw` entry used to land in this list as a name spelled
@@ -3712,7 +3719,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
             for fn in functions:
                 status, st, holder = _frame_return_status(
                     fn, holders[_fn_key(fn)], hstruct[_fn_key(fn)],
-                    by_name_returns_frame)
+                    by_name_returns_frame, structs_by_name, fn_names)
                 fn._frame_return_status = status
                 key = _fn_key(fn)
                 if status == _RETURN_FRAME and returns_frame.get(key) is not st:
@@ -6865,7 +6872,69 @@ _RETURN_UNSOUND = "unsound"
 # reconcile them — and this is that.
 
 
-def _frame_return_status(fn, holders, by_name, returns_by_name):
+def _returned_frame_construction(fn, value, callee, structs_by_name, fns):
+    """The framed struct this `return` hands back, when the returned VALUE is a
+    CONSTRUCTION — or None.
+
+    The third way a `return` can be frame-valued, and it is the one the two
+    above cannot see: `def mk(v: Int) -> A: return A(v, v + 1)` returns an
+    expression that has no name in this function at all.  `_emit_frame_return`
+    emits the expression and copies `struct_frame_block_layout`'s bytes out of
+    it, so a construction's ADDRESS is exactly the source the copy wants — the
+    block is in this function's own scratch (`model.struct_constructor_sites`,
+    reserved in the prologue) and the copy lands in the block the caller
+    reserved.  No emitter change is needed; what was missing was the
+    CLASSIFICATION, and without it the whole arrangement was unreachable: the
+    callee was `_RETURN_WORD`, so `model.struct_returned_frame_sites` gave no
+    caller a block to copy into, and `def mk` actually returned the address of
+    a frame in an activation that had already been reclaimed.  A caller that
+    compared two such results read the dead block and was RIGHT anyway,
+    because nothing had reused it yet — an answer that is right for no reason,
+    which is the outcome this file treats as the worst one available.
+
+    **Every part is asked in the EMITTER's terms, not re-derived here.**  The
+    site is `model.struct_constructor_sites`' own table — the one both backends
+    reserve their prologue scratch from — and `model.call_lowers_as_framed_
+    construction` is the build pass's single reader of the construction-vs-type-
+    conversion dispatch order, which is what keeps `String()` in a module that
+    declares `struct String` a WORD (a conversion to an interned address) while
+    `A(v, v + 1)` is a frame.  A second implementation of "is this call a
+    frame" would agree with the emitters until the day one of them was edited,
+    and the disagreement is a copy of the wrong width rather than a failure.
+
+    `fns` is the image's function names, because the dispatch order is
+    "a name that is BOTH a function and a struct falls through to the
+    construction branch" and that is a fact about this image and not about this
+    expression.
+
+    None for every other shape, which is the safe direction: a word return is
+    what the two tables above already answer for everything else, and the
+    refusal machinery (`_RETURN_UNSOUND`, and `check_returned_frame_blob_writes`
+    on the caller) is there to catch a genuine disagreement.
+    """
+    if callee is None or not isinstance(value, F.CallExpr):
+        return None
+    built = M.struct_constructor_sites(fn, structs_by_name or {}).get(id(value))
+    if built is None:
+        return None
+    # `struct_is_framed` and not "is in the table": the table also holds a
+    # ONE-FIELD struct whose sole field holds a frame (`one_word_nested_frame_
+    # structs`), and THAT construction's value is a plain word — the nested
+    # frame's address, which is the field.  The returned-frame convention is
+    # about a block the caller reserves and the callee COPIES, and a one-field
+    # struct has no block, so classifying it as a frame return would have every
+    # caller reserve a block nothing copies into.
+    if not M.struct_is_framed(built[0]):
+        return None
+    if not M.call_lowers_as_framed_construction(
+            callee, structs_by_name or {},
+            len(value.args or []) + len(value.kwargs or []), fns):
+        return None
+    return built[0]
+
+
+def _frame_return_status(fn, holders, by_name, returns_by_name,
+                         structs_by_name=None, fns=()):
     """`(status, struct_or_None, holder_or_None)` — what `fn` gives back.
 
     The decision the returned-frame convention turns on, and it is asked of
@@ -6890,12 +6959,15 @@ def _frame_return_status(fn, holders, by_name, returns_by_name):
         resolve, and a refusal raised from inside it is reported in place of
         the import diagnosis.
 
-A value is frame-valued in exactly two ways, and they are the two the holder
-    analysis can recognise: a bare name that holds a frame address, and a
-    call to a function already known to return one.  Anything else is a
-    word — including a field read (`self.x` is a VALUE read out of the frame,
-    not the frame) and a copy construction, which is a frame in THIS function's
-    own scratch and is copied out by the same convention when it is returned.
+A value is frame-valued in three ways, and they are the three the holder
+    analysis can recognise: a bare name that holds a frame address, a call to a
+    function already known to return one, and a CONSTRUCTION of a framed struct
+    (`return A(v, v + 1)` — `_returned_frame_construction`, which is this
+    function's own reader of the emitters' construction table).  Anything else
+    is a word — including a field read (`self.x` is a VALUE read out of the
+    frame, not the frame) and a construction of a ONE-FIELD struct, whose value
+    is a plain word that IS the field and is already covered by the first case.
+
 
     **…and a third way that is not one of them: a RECEIVER WRITE-BACK.**
     `_return_the_receiver` appends `return <receiver>` to every exit of a
@@ -6974,6 +7046,11 @@ A value is frame-valued in exactly two ways, and they are the two the holder
                 if st is not None:
                     frames.append(([st], f"{callee}()"))
                     continue
+            built = _returned_frame_construction(fn, value, callee,
+                                                 structs_by_name, fns)
+            if built is not None:
+                frames.append(([built], f"{callee}()"))
+                continue
         words.append(_expr_spelling(value))
     if not frames:
         return _RETURN_WORD, None, None

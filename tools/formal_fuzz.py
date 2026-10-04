@@ -213,8 +213,13 @@ Deliberately absent, each for a stated reason:
     key scan that misses, and the miss signal on this path is `exit(1)` with
     nothing printed; `xs.append(v)` inside a loop overflows the blob's
     capacity, which is the number of append SITES in the function that built
-    it. Both are limits with a diagnostic rather than defects, and both are
-    measured: `bugs/FORMAL_a_dict_store_of_a_new_key_is_a_run_time_miss.md`.
+    it. Both are limits with a diagnostic rather than defects, and the append
+    one was measured as such. The dict half is no longer a limit: `d[k] = v`
+    for an absent key is CPython's INSERT, the pair blob is reserved at the
+    literal for the pairs it wrote plus one per store SITE
+    (`formal/model.py`'s `dict_store_capacity`), and the two stores the
+    `containers` mix generates here are therefore programs the corpus
+    measures.
   * a variadic `printf` with more than five operands — arm64 refuses a variadic
     call whose arguments pass the register file, so a program with more than
     seven of them is not a two-architecture case at all. The stack-argument
@@ -1393,13 +1398,12 @@ class Gen:
     #     `print(d["a"])` is refused on both backends — "print() cannot tell
     #     whether SubscriptExpr is a string or a number" — and a family that is
     #     95% refused is a family that finds nothing.
-    #   * a STORE names a key the LITERAL wrote. A key the table does not
-    #     contain is a key scan that misses, and the miss signal on this path is
-    #     `exit(1)` with nothing printed: measured on both architectures for
-    #     `d = {"a": 1}; d["b"] = 2; print(len(d))`, which CPython answers 2 and
-    #     both images answer by dying. That is the grow-a-dict limit
-    #     (`bugs/FORMAL_a_dict_store_of_a_new_key_is_a_run_time_miss.md`), so the
-    #     corpus stays on the half that works.
+    #   * a STORE may name a key no table wrote, and half the time it does. That
+    #     is CPython's INSERT and this path lowers it as one now — reserved pair,
+    #     pair written at the count, count bumped — so it is a construct the
+    #     corpus can measure rather than a limit it had to route around. The
+    #     other half still names a written key, because that is the arm the
+    #     SCAN takes and the two must keep disagreeing about nothing.
     #   * a dict with MIXED key kinds claims nothing, so a table here has one
     #     kind of key throughout — a string-keyed table and an integer-keyed
     #     one, never both. See `model.dict_literal_key_kind`'s gate.
@@ -1418,8 +1422,21 @@ class Gen:
             self.words.append(tmp)
             return
         if kind == "dict_write":
-            self.emit(indent, f"{var}[{self.rng.choice(keys)}] = "
-                              f"{self.rng.randint(0, 40)}")
+            # Half the time a key NO table in this program wrote, because
+            # `d[k] = v` for an absent key is CPython's INSERT and this path now
+            # lowers it as one: the pair blob is reserved at the literal for the
+            # pairs it wrote plus one per store SITE
+            # (`formal/model.py`'s `dict_store_capacity`), the miss arm writes
+            # the pair at the count and bumps it, and `len(d)` afterwards is one
+            # more than it was. Before that it was a key scan that missed and
+            # stopped the program having printed nothing, which is why the
+            # `containers` mix stayed on the half that worked and reported the
+            # limit as a `MISMATCH-*` finding on every program that contained
+            # it. (The doc that recorded that limit is deleted with the fix,
+            # which is the repository's rule for a fixed bug.)
+            key = (self.absent_key(key_kind) if self.rng.random() < 0.5
+                   else self.rng.choice(keys))
+            self.emit(indent, f"{var}[{key}] = {self.rng.randint(0, 40)}")
             return
         if kind == "dict_len":
             self.emit(indent, f"print(len({var}))")
@@ -1475,11 +1492,13 @@ class Gen:
     def build_dict(self):
         """One dict local, string-keyed or integer-keyed, never mixed.
 
-        The keys are the SPELLINGS the rest of the generator uses to subscript,
-        test and store, and they are collected as such: a table whose key list
+        The keys are the SPELLINGS the rest of the generator uses to READ,
+        test and iterate, and they are collected as such: a table whose key list
         disagrees with its own text is a program that reads a key the table does
         not have, which is a run-time miss on this path and a KeyError in
-        CPython — an oracle failure, not a finding.
+        CPython — an oracle failure, not a finding. A `dict_write` may still
+        store a key from OUTSIDE this list, because that is an insert and both
+        engines perform one; see `dict_stmt`.
         """
         name = self.fresh("D")
         key_kind = self.rng.choice(["str", "int"])

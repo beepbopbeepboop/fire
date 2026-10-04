@@ -10,6 +10,13 @@ nothing in the pair knows the callee returns nothing.
 — the fix is a decision about what this path does with `None`, and it has a
 blast radius this session did not have the budget to measure (§4).**
 
+**Re-measured 2026-10-03 (`work/formal18-1`): §2's objection to direction (a) —
+"the blast radius is unmeasured, and measuring it means the two counts that are
+the integrator's jobs" — is now HALF answered, and the half that could be
+measured cheaply says the refusal is much narrower than §2 feared. §0 has the
+census; §2's recommendation stands and its reason is now a number rather than an
+admission.**
+
 Found 2026-10-03 on `work/formal17-fuzz-continue-a` by `tools/formal_fuzz.py`,
 on the `strings` mix, seeds 0-3 — and, worth saying because it is unusual,
 **not from the generator**: the generated program agreed on everything except a
@@ -19,6 +26,57 @@ statements, and a helper whose body is left with no `return` is a program with a
 different defect in it). The reduced program is the minimal one and it is below.
 The full program and the reduced program are both in
 `.tmp/fz/sweep/strings/findings.json` in the worktree it was found in.
+
+---
+
+## 0. The census §2 asked for, over the repository AND the stdlib
+
+§4's step 1 is "measure `compile_stdlib.py`'s `FAILED: N (E expected, U
+unexpected)` and `build_stdlib_dylib.py`'s `skip <module>:` count". Those are two
+hours and two gigabytes and they belong to the integrator. What can be measured
+without either is the question the refusal would actually be asked about: **how
+many call sites in this corpus consume the value of a function that has no
+`return`?** A census over `fire_compiler.Parser`'s own AST, over this worktree's
+`*.mojo` and all 252 under `../new-modular/Mojo/stdlib/std`:
+
+| | |
+|---|---|
+| files scanned | every `*.mojo` under `.` and `../new-modular/Mojo/stdlib/std` |
+| functions whose body has no value-returning `return` | **1586** |
+| call sites of one, from the same module | **682** |
+| …of which the call's VALUE is consumed (it is an argument of another call) | **48**, in **4 files** |
+
+**And every one of those 48 is an artefact of the census being NAME-keyed.**
+The four files are `utils/coord.mojo`, `testing/prop/strategy/string_strategy.mojo`,
+`itertools/itertools.mojo` and `_gpu/host/info.mojo`, and the call sites are
+`self.value()`, `self._flatten()`, `self.normalize_target_arch()` — calls through
+a receiver. `coord.mojo` declares `def value` **three times** (lines 59, 150,
+395) and `info.mojo` declares `normalize_target_arch` twice (214, 224); at least
+one definition of each RETURNS a value, and a `{name: has-no-return}` set cannot
+tell which. That is the imprecision every by-name table in `formal/build.py`
+already refuses to have ("a name whose definitions disagree about whether they
+return a frame is absent from it"), and a census that repeats it answers a
+question nobody asked.
+
+**So: zero free-function call sites in the whole corpus consume the value of a
+return-less function, and the only rows a syntactic census reports are
+overloaded method names.** That is a strong result for direction (a) and it is
+not sufficient on its own, for two reasons the reader should not skip:
+
+  * **it is syntactic and same-module.** A call through a receiver, and a call
+    into an IMPORTED module, are both outside it, and a method's value being
+    consumed is exactly the case the doc's own §1 shape is (`self.value()` is
+    how a `DType`-like accessor reads). The right census keys on the resolved
+    DEFINITION (`formal/build.py`'s `_name_defs`), not on the name.
+  * **`compile_stdlib.py`'s `U` count is a different question.** It counts files
+    that stop compiling, and the four files above are inside the stdlib the gate
+    builds. Whether each of them is a genuinely `None`-printing row is still the
+    question §4's step 4 asks, and it is answerable only by the two counts.
+
+The census's script is `.tmp/census_none.py` in the worktree that wrote this
+section, and it is deliberately left in `.tmp` rather than promoted: a census
+whose own imprecision is this large is not a tool, it is a measurement with a
+footnote.
 
 ## 1. What is wrong
 
@@ -131,6 +189,12 @@ holds, and because a refusal is a sentence a reader can act on where `0` is not.
 
 ## 4. The exact next step
 
+0. **Re-do §0's census keyed on the resolved DEFINITION** (`formal/build.py`'s
+   `_name_defs`), not on the name, and include calls through a receiver and into
+   an imported module. §0's zero is a floor, not the count: it is the count with
+   every overloaded method name removed by hand. That is a half-day and it is the
+   difference between "direction (a) reaches four stdlib files" and "direction
+   (a) reaches none".
 1. Measure `compile_stdlib.py`'s `FAILED: N (E expected, U unexpected)` and
    `build_stdlib_dylib.py`'s `skip <module>:` count on master, and keep them.
 2. Add to `formal/model.py` a refusal with the shape of

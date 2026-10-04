@@ -7116,6 +7116,180 @@ def literal_splat_operand_is_static(op) -> bool:
     return isinstance(op, (F.ListExpr, F.TupleExpr, F.SetExpr))
 
 
+def dict_literal_static_pairs(literal) -> int:
+    """The pairs a dict literal's own construction writes into its blob.
+
+    `len(pairs)` minus the ones a `**`/`*` splat contributes nothing to: a
+    splat pair is evaluated for its side effects and then skipped, so the blob's
+    `count` word is this number and not the number of pairs written.
+
+    **This is the rule `_emit_dict` used to state for itself, and it now reads
+    it from here**, because the reservation the insert path needs is `this +
+    the number of store sites` and a count computed two ways is two numbers
+    that agree until the day one of them is edited — which is a write past the
+    blob rather than a failure.
+    """
+    n = 0
+    for k, v in (getattr(literal, "pairs", None) or ()):
+        if isinstance(k, F.UnaryOp) and k.op in ("**", "*"):
+            continue
+        if v is None:            # `**` with the operand in the key slot
+            continue
+        n += 1
+    return n
+
+
+def dict_store_sites(fn) -> dict:
+    """`{name: sites}` — this function's `d[k] = v` count, per dict NAME.
+
+    A plain ASSIGNMENT only, and that is a language fact rather than a
+    narrowing: CPython's `d[k] = v` INSERTS when the key is absent, while
+    `d[k] += v` first READS and so raises `KeyError` on a missing key. The
+    augmented form therefore belongs to the read path — which is where it
+    already is, and where exiting on a miss is the right answer.
+
+    A bare NAME base only, for the same reason `list.append`'s capacity is
+    counted per receiver name: `_emit_dict` has the literal NODE and the store
+    has the NAME, so a table keyed by both is the only shape both ends can read
+    (`list_literal_reserved_slots`'s own note says the same about appends).
+    """
+    out: dict = {}
+    for node in iter_nodes(getattr(fn, "body", None) or []):
+        if not isinstance(node, F.AssignStmt):
+            continue
+        target = getattr(node, "target", None)
+        if not isinstance(target, F.SubscriptExpr):
+            continue
+        if not isinstance(target.obj, F.IdentExpr):
+            continue
+        out[target.obj.name] = out.get(target.obj.name, 0) + 1
+    return out
+
+
+def _literals_bound_to(fn, name: str) -> list:
+    """Every container literal `fn` binds `name` to, whatever its kind."""
+    out = []
+    for node in iter_nodes(getattr(fn, "body", None) or []):
+        value = None
+        if isinstance(node, F.AssignStmt):
+            if _target_binds_name(node.target, name):
+                value = node.value
+        elif isinstance(node, F.VarDecl) and node.name == name:
+            value = node.value
+        if isinstance(value, (F.ListExpr, F.DictExpr, F.SetExpr, F.TupleExpr)):
+            out.append(value)
+    return out
+
+
+def _target_binds_name(target, name: str) -> bool:
+    if isinstance(target, F.IdentExpr):
+        return target.name == name
+    if isinstance(target, (F.TupleExpr, F.ListExpr)):
+        return any(_target_binds_name(el, name) for el in target.elements)
+    return False
+
+
+def dict_store_capacity(fn, sites) -> tuple:
+    """`({id(literal): pairs}, {name: pairs})` — the room a dict literal must
+    reserve for the `d[k] = v` that follow it.
+
+    The `list.append` arrangement exactly (`_scan_list_caps` in both backends),
+    and for the same reason: a dict pair-blob is `[count][k0][v0]…` carved out
+    of the frame at a COMPILE-TIME size, so an insert has nowhere to write
+    unless the literal reserved the room, and the number of store SITES in the
+    function that built it is a sound bound for straight-line code. Every
+    EXECUTION of a site counts against it, and the store is checked against it
+    at run time — so a store in a loop stops the program loudly instead of
+    writing past the blob.
+
+    Two tables because the two ends are different places and both must be
+    computed from one pass: `_emit_dict` has the literal, the store has the
+    name. A name bound to more than one literal takes the smallest capacity, so
+    the bound holds whichever blob is live.
+
+    **A name this function also binds to a NON-dict container gets no entry.**
+    Its capacity would be a promise about the wrong blob, and a promise about
+    the wrong blob is a write past the end of the right one. The same guard as
+    `_scan_list_caps`'s `is_list_kind` test, for the same reason — the store
+    then says it cannot insert rather than inserting into a list.
+    """
+    by_node: dict = {}
+    by_name: dict = {}
+    for name, count in (sites or {}).items():
+        bound = _literals_bound_to(fn, name)
+        literals = [lit for lit in bound if isinstance(lit, F.DictExpr)]
+        if not literals or len(literals) != len(bound):
+            continue
+        want = min(dict_literal_static_pairs(lit) for lit in literals) + count
+        for literal in literals:
+            prev = by_node.get(id(literal))
+            by_node[id(literal)] = want if prev is None else min(prev, want)
+        by_name[name] = want
+    return by_node, by_name
+
+
+def dict_store_overflow_message(name: str, capacity: int) -> str:
+    """The ONE text a `d[k] = v` that has run out of room writes to fd 2.
+
+    `list_append_overflow_message`'s sibling and its exact twin in purpose: a
+    run-time message rather than a compile-time refusal, because the capacity
+    is the number of store SITES and every EXECUTION of a site counts against
+    it, so `while i < 3: d["k"] = i` is one site run three times and no pass
+    over the source can say it fits.
+
+    Shared by both backends for the reason that one is: two architectures
+    printing two different sentences for one limit is how a reader ends up
+    looking for a construct one of them invented.
+    """
+    return (f"formal: a dict store into {name!r} overflowed its pair blob: its "
+            f"capacity is {capacity} pairs — the number the literal wrote plus "
+            f"one for each `d[k] = v` SITE in the function that built it — and "
+            f"every EXECUTION of a site counts against it, so a dict built in a "
+            f"loop outgrows the room the frame reserved for it. There is no heap "
+            f"on this path, so the blob cannot grow. Build the dict with the "
+            f"keys it needs at construction time, or move the stores into a "
+            f"function of their own so the capacity each one sees is its own.")
+
+
+def dict_store_no_room_message(name: str, key: str) -> str:
+    """Why a `d[k] = v` on a blob this build cannot size stopped.
+
+    The two cases a reservation cannot reach, and they are DIFFERENT problems
+    with different repairs, so they say different sentences:
+
+      * the base is not a local bound to a dict LITERAL in the function being
+        emitted — a struct field, a call's result, a `Dict[…]` parameter. The
+        blob was built somewhere else, so this build never saw its pairs and
+        cannot reserve for an insert. The repair is to give the table the key
+        at the place that builds it.
+      * the key is a statically-known CONTAINER, which this path compares
+        element-wise against canonical values and never materialises, so there
+        is no key WORD to write on an insert. The repair is a key this path
+        can hold in one word.
+
+    Before this the second case and the first were one silent `exit(1)`, which
+    is the worst of the three answers this path can give: not a wrong number a
+    reader can compare, not a named refusal they can act on, but silence.
+    """
+    return (f"formal: a dict store of {key!r} into {name!r} needs a pair this "
+            f"build cannot reserve. The key is a statically-known container, "
+            f"and this path compares such a key element-wise against "
+            f"canonical values without ever materialising it, so an insert has "
+            f"no single word to write — nothing about the table's size is "
+            f"wrong; the key spelling is. Use a key this path holds in one "
+            f"word (a string or an integer).")
+
+
+def dict_store_other_blob_message(name: str, key: str) -> str:
+    return (f"formal: a dict store of {key!r} into {name!r} needs a pair this "
+            f"build cannot reserve, because the blob was not built by a dict "
+            f"LITERAL in this function: its pairs were written somewhere else, "
+            f"so there is no reservation here to add to and the count this "
+            f"store would bump has no room behind it. Give the table the key "
+            f"where it is built — a dict literal with the entry already in it "
+            f"— or copy it into one built here first.")
+
+
 def list_literal_reserved_slots(literal) -> int:
     """How many element slots a list literal's own construction occupies.
 
