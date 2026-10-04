@@ -10196,27 +10196,14 @@ SOLE_FIELD_CTOR_STORE_CASES = [
      "    printf(\"v=%d h=%d\", b.inner.v, b.inner.has)\n"
      "    return 0\n",
      "refuse:constructing Box with argument 'o' as field 'inner'", None),
-    # (b) A frame built HERE, which the receiver rule already stood down from
-    # (`_value_may_be_a_frame` recognises the construction) and which another
-    # rule answers — the field read at the call site, not the store.  It is a
-    # row because "unchanged" is an answer worth pinning: the exemption must not
-    # change which rule answers this one.
-    ("sole_field_ctor_store_of_a_frame_built_here_is_another_rules",
-     "struct Opt:\n"
-     "    var v: Int\n"
-     "    var has: Int\n"
-     "\n"
-     "struct Box:\n"
-     "    var inner: Opt\n"
-     "\n"
-     "    def __init__(out self):\n"
-     "        self.inner = Opt()\n"
-     "\n"
-     "def main() -> Int:\n"
-     "    var b = Box()\n"
-     "    printf(\"v=%d h=%d\", b.inner.v, b.inner.has)\n"
-     "    return 0\n",
-     "refuse:'b.v' is a field access through 'b'", None),
+    # (b) A frame built HERE was answered by the FIELD READ at the call site,
+    # and that answer was a REFUSAL — "'b.v' is a field access through 'b'", a
+    # name the source never writes, because `Box` has exactly one field and
+    # `_rewrite_self_fields` collapses `b.inner` onto `b`.  It is a BUILD now,
+    # measured against CPython on both architectures, and it lives in
+    # `ONE_FIELD_MUTATOR_CASES` as
+    # `one_word_outer_over_a_nested_frame` because that group carries a CPython
+    # oracle and this one carries refusal needles: a row cannot be both.
     # (c) A frame the CALLEE made — which the doc predicted would BUILD, and
     # which does NOT: `init_body_stores` only substitutes a BARE PARAMETER for a
     # right-hand side, because only a bare parameter has the caller's own
@@ -18453,6 +18440,61 @@ SOLE_FIELD_CALLEE_CASES = [
 ]
 
 ONE_FIELD_MUTATOR_CASES = [
+    # A ONE-WORD struct whose sole field is a nested FRAME, which is the one
+    # case the one-word identity cannot lower on its own: `b.inner` collapses
+    # onto `b`, so the source's `b.inner.v` reaches the emitter as `b.v` — a
+    # field of `Opt` read through a local whose only classification was "a
+    # word" — and both machines REFUSED it by name, with a message about an
+    # expression the source does not contain
+    # (`bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_frame.md`).
+    #
+    # The answer is the two-hop read and it needs no new table: `Box`'s word IS
+    # the address of the `Opt` frame the construction site reserved for it
+    # (`model.struct_nested_frame_fields`), so once `b` is a holder of `Opt`,
+    # `b.v` is one load at `[b + 8*slot(v)]` — the two hops the source wrote. A
+    # MULTI-field outer keeps `model._frame_nested_slots`' tuple instead,
+    # because a slot there survives the collapse.
+    #
+    # It is in the MUTATOR group rather than beside the constructor-store rows
+    # it came from because that group carries a CPython oracle and those carry
+    # refusal needles, and the point of the row is the answer, not the refusal.
+    ("one_word_outer_over_a_nested_frame",
+     "struct Opt:\n"
+     "    var v: Int = 5\n"
+     "    var has: Int = 7\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self.inner = Opt()\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var b = Box()\n"
+     "    printf(\"A %d %d\", b.inner.v, b.inner.has)\n"
+     "    b.inner.v = 41\n"
+     "    var c = Box()\n"
+     "    c.inner.has = 9\n"
+     "    printf(\" B %d C %d %d\", b.inner.v, c.inner.v, c.inner.has)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Opt:\n"
+     "    def __init__(self):\n"
+     "        self.v = 5\n"
+     "        self.has = 7\n"
+     "\n"
+     "class Box:\n"
+     "    def __init__(self):\n"
+     "        self.inner = Opt()\n"
+     "\n"
+     "def main():\n"
+     "    b = Box()\n"
+     "    sys.stdout.write(\"A %d %d\" % (b.inner.v, b.inner.has))\n"
+     "    b.inner.v = 41\n"
+     "    c = Box()\n"
+     "    c.inner.has = 9\n"
+     "    sys.stdout.write(\" B %d C %d %d\" % (b.inner.v, c.inner.v,\n"
+     "                                            c.inner.has))\n"),
     ("one_field_mutator_no_args",
      "struct Cell:\n"
      "    var _value: Int\n"

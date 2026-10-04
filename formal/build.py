@@ -3346,7 +3346,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         one_word = {_fn_key(fn): {} for fn in functions}
         for fn in functions:
             _seed_one_word_bindings(fn, structs_by_name, functions,
-                                    holders, one_word, one_field)
+                                    holders, hstruct, one_word, one_field)
         # …and the CALL-SITE edges, iterated here rather than left to the main
         # path's fixpoint, because this early return IS the whole analysis for a
         # module with no framed struct — and a module whose structs are all one
@@ -3625,7 +3625,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
             holders[_fn_key(fn)].add(name)
             hstruct[_fn_key(fn)].setdefault(name, []).append(st)
         _seed_one_word_bindings(fn, structs_by_name, functions, holders,
-                                one_word, one_field)
+                                hstruct, one_word, one_field)
     for _round in range(_HOLDER_FIXPOINT_ROUNDS):
         grew = False
         changed = True
@@ -7834,7 +7834,7 @@ def _one_word_constructor_bindings(fn, structs_by_name, functions=()) -> dict:
     return out
 
 
-def _seed_one_word_bindings(fn, structs_by_name, functions, holders,
+def _seed_one_word_bindings(fn, structs_by_name, functions, holders, hstruct,
                             one_word, one_field=None) -> None:
     """Seed `one_word[fn]` for `fn` — a LOCAL construction and a DECLARED
     parameter, the two ways a name becomes a one-field struct's value.
@@ -7848,10 +7848,58 @@ def _seed_one_word_bindings(fn, structs_by_name, functions, holders,
     keeps THAT classification: the same precedence the framed seeding above
     states for its own evidence, because a name in both tables is a name with
     two layouts and only one of them is the truth.
+
+    `hstruct` is written for exactly one case — a one-word local whose sole
+    field is a nested FRAME — and a caller that has no `hstruct` to write has no
+    case: `model.one_word_sole_field_frame` needs a FRAMED struct to find, and
+    the one place this is called with a module that declares none (`framed`
+    empty, the early return in the `==`-dispatch analysis) cannot produce one.
     """
     key = _fn_key(fn)
-    one_word[key].update(_one_word_constructor_bindings(
-        fn, structs_by_name, [f.name for f in functions]))
+    bound = _one_word_constructor_bindings(fn, structs_by_name,
+                                           [f.name for f in functions])
+    one_word[key].update(bound)
+    # …and the same bindings read for the FRAME half, which is the case the
+    # one-word VALUE table above cannot see and the frame pass had no case for.
+    #
+    # **A one-word struct's word is its sole field, and that field can be a
+    # nested FRAME, so the word is an ADDRESS.** `struct Outer: var n: Inner`
+    # has no frame of its own — `struct_is_framed` is False, so
+    # `_constructor_bindings` above skips it — and the block for `Inner` is
+    # reserved for the construction SITE (`struct_nested_frame_fields`), so `o`
+    # holds that block's address. Nothing said so, and the read half was refused
+    # by name about an expression the source never spells:
+    #
+    #     struct Inner: var a: Int; var b: Int
+    #     struct Outer: var n: Inner          # <- the only difference
+    #     def main(k):
+    #         var o = Outer()
+    #         o.n.put(7)                      # refused: 'o.a' is a field access
+    #         printf("%d %d", o.n.a, o.n.b)   #   through 'o' — and 'a' is not
+    #         return o.n.get() * 10 + o.n.a   #   a field of Outer
+    #
+    # **Why the read becomes answerable rather than needing a two-hop table.**
+    # `_rewrite_self_fields` collapses `o.n` onto `o` by the one-word identity,
+    # so the source's `o.n.a` arrives at the emitter as `o.a` — and once `o` is
+    # a holder of `Inner`, `o.a` is one load at `[o + 8*slot(a)]`, which is
+    # exactly the two hops the source wrote. `model._frame_nested_slots`' tuple
+    # is for a chain that SURVIVES the collapse (a multi-field outer, where `o`
+    # is a frame and `o.n` is a slot in it); a one-word outer has no slot to
+    # survive, so the same read is one hop on a different base.
+    #
+    # **A name already classified stays classified**, for the precedence
+    # `_constructor_bindings` states: two layouts for one name, and only one of
+    # them is the truth.
+    for name, sts in bound.items():
+        if name in holders[key]:
+            continue
+        for st in sts:
+            inner = M.one_word_sole_field_frame(st, structs_by_name, one_field)
+            if inner is None:
+                continue
+            holders[key].add(name)
+            hstruct[key].setdefault(name, []).append(inner)
+            break
     # A PARAMETER declared as a one-field struct is the same fact about the
     # same word: `def eq(a: Plain, b: Plain)` hands the caller two values that
     # ARE their fields, so inside `eq` they are that struct and their `==` is

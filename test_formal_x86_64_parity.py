@@ -874,6 +874,65 @@ CASES = [
      "    o.n.n.w = 4\n"
      "    sys.stdout.write(\"%d %d %d %d\" % (o.v, o.n.v, o.n.n.v, o.n.n.w))\n"
      "    return 0\n"),
+    # The chain at ONE FIELD, which is the row `nested_frame_chain_three_levels`
+    # could not reach: `Out` above has `v` to spare, so `Out` is a frame and
+    # `o.n.n.v` is three loads off a frame base. Drop `v` and `Out` is a ONE-WORD
+    # struct, `_rewrite_self_fields` collapses `o.n` onto `o`, and the source's
+    # `o.n.a` reaches the emitter as `o.a` — a field of `Inner` read through a
+    # local whose only classification was "a word". It was REFUSED on both
+    # machines with a message naming `o.a`, which the source never writes, and
+    # the refusal's own repair ("bind the base from a constructor this image can
+    # see") was satisfied by the line above it.
+    #
+    # The answer is the two-hop read and it needs no new table: `Outer`'s word
+    # IS the address of the `Inner` frame the construction site reserved
+    # (`struct_nested_frame_fields`), so once `o` is a holder of `Inner`,
+    # `o.a` is one load at `[o + 8*slot(a)]` — the same two hops the source
+    # wrote. A multi-field outer keeps `model._frame_nested_slots`' tuple,
+    # because a slot there SURVIVES the collapse.
+    ("one_word_outer_over_a_nested_frame",
+     "struct In:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def put(out self, v: Int) -> Int:\n"
+     "        self.a = v\n"
+     "        return self.a\n"
+     "    def get(self) -> Int:\n"
+     "        return self.a\n"
+     "\n"
+     "struct Out:\n"
+     "    var n: In\n"
+     "\n"
+     "def main():\n"
+     "    var o = Out()\n"
+     "    o.n.put(7)\n"
+     # The value is PRINTED rather than returned: `run_case` requires the
+     # oracle to exit 0, and a Mojo entry stub makes `main`'s return the exit
+     # status while `cpython_answer`'s bare `main()` call discards it — so a
+     # returned 77 here compares 77 against 0 and the case asserts nothing.
+     "    printf(\"%d %d %d\", o.n.a, o.n.b, o.n.get() * 10 + o.n.a)\n"
+     "    return 0\n",
+     "class In:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "    def put(self, v):\n"
+     "        self.a = v\n"
+     "        return self.a\n"
+     "    def get(self):\n"
+     "        return self.a\n"
+     "\n"
+     "class Out:\n"
+     "    def __init__(self):\n"
+     "        self.n = In()\n"
+     "\n"
+     "import sys\n\n"
+     "def main():\n"
+     "    o = Out()\n"
+     "    o.n.put(7)\n"
+     "    sys.stdout.write(\"%d %d %d\" % (o.n.a, o.n.b,\n"
+     "                                o.n.get() * 10 + o.n.a))\n"
+     "    return 0\n"),
     # The same chain HANDED TO A CALLEE, which is the `_emit_frame_copy` half and
     # not the `_emit_frame_nested_addresses` half: the copy reserves its own
     # block and has to lay the nested frames out in it identically, so a fix
