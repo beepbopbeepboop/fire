@@ -7287,17 +7287,37 @@ static char *_mojo_repr_pairlist(MojoList *l, int _kind) {
         free(_s);
         _buf = mojo_str_cat_free(_buf, ", ");
         int64_t _v = mojo_list_get_int(_pair, 1);
-        if (_kind == 1) {
+        /* The pair's own recorded value repr, asked for slot 1 and ONLY for
+         * slot 1 — the same question the codegen's emitted `_mojo_repr_pair`
+         * asks, and for the same reason (asking for slot 0 hands the KEY, a
+         * char *, to a struct shim). `mojo_dict_items` records the slot's
+         * value kind here, so this arm is what makes `dict.items()` of a
+         * dict holding a zero, a bool or a float describe them: without it
+         * the static `_kind` guess below is all there is, and a zero printed
+         * as `None` and a float faulted in mojo_read_type_tag_safe. NULL
+         * means this pair says nothing, which is every codegen-built pair
+         * (a literal `[(1, 'a')]`) — so the guess stays for those. */
+        char *_pr = mojo_list_repr_elem(_pair, _v);
+        if (_pr) {
+            _buf = mojo_str_cat_free(_buf, _pr);
+            free(_pr);
+        } else if (_kind == 1) {
             _s = mojo_repr_str((char *)(intptr_t)_v);
+            _buf = mojo_str_cat_free(_buf, _s);
+            free(_s);
         } else if (_kind == 2) {
             _s = mojo_repr_float(mojo_list_get_double(_pair, 1));
+            _buf = mojo_str_cat_free(_buf, _s);
+            free(_s);
         } else if (mojo_boxed_is_str(_v)) {
             _s = mojo_repr_str((char *)(intptr_t)_v);
+            _buf = mojo_str_cat_free(_buf, _s);
+            free(_s);
         } else {
             _s = mojo_repr_int(_v);
+            _buf = mojo_str_cat_free(_buf, _s);
+            free(_s);
         }
-        _buf = mojo_str_cat_free(_buf, _s);
-        free(_s);
         _buf = mojo_str_cat_free(_buf, ")");
     }
     return mojo_str_cat_free(_buf, "]");
@@ -8660,6 +8680,114 @@ int64_t int_parse_module(int parser) {
 
 /* ── Additional dict/list/set runtime helpers ──────────────────────────── */
 
+/* THE rendering of one dict slot's VALUE, from the (word, kind) pair the store
+ * recorded. One implementation, three callers that used to have their own:
+ * the codegen's emitted `_mojo_repr_dict` chain (mojo/backend_gimple/
+ * module_gen.py), this file's own `_mojo_repr_pairlist`, and the per-slot
+ * repr function `mojo_dict_items` records on each pair below. They disagreed:
+ * the emitted chain understood every kind, `_mojo_repr_pairlist` had a static
+ * three-way guess, and `.items()`'s pair carried NO kind at all — so
+ * `sorted({'mid': 0}.items())` printed `[('mid', None)]` and
+ * `print({'a': 1.5}.items())` SEGFAULTED (the IEEE-754 bits are a
+ * pointer-shaped word, which the generic reader sends to
+ * mojo_read_type_tag_safe). The store tags every value; nothing above it was
+ * reading the tag.
+ *
+ * REPR semantics (this is what `print` of a container wants: a str value
+ * comes back quoted), and ALWAYS an owned heap string, so every caller frees
+ * it the same way.
+ *
+ * NULL means "this kind is not this function's to render": the two struct
+ * kinds, whose rendering is a property of the DICT (`val_repr` — the
+ * codegen's shim for the one struct type it knows) rather than of the word,
+ * and a kind-0 slot holding a non-zero word, which is a raw int64_t the
+ * caller's own generic reader already handles correctly. */
+char *mojo_dict_slot_repr(int64_t v, int64_t kind)
+{
+    switch (kind) {
+        case 1:
+            /* bits -> double through the runtime's helper, never a C cast:
+             * the slot is an `int64_t` in a struct and reading it as a
+             * `double` is a strict-aliasing violation (mojo_dict_slot_double
+             * copies for the same reason). */
+            return mojo_repr_float(mojo_double_from_bits(v));
+        case 2:
+            /* A str value stored with mojo_dict_set_str carries its pointer
+             * in `val`; `mojo_repr_int` on that pointer printed the string's
+             * own address. */
+            return mojo_repr_str((char *)(intptr_t)v);
+        case 3:
+            /* A Python bool: the same 0/1 a real int stores, so only this
+             * per-SLOT tag separates them. */
+            return strdup(v ? "True" : "False");
+        case 4:
+            /* `None` is int64_t 0 with kind 4 — the same word a plain 0
+             * stores, and only this tag tells them apart. */
+            return strdup("None");
+        default:
+            /* kind 0. The word 0 is the INTEGER 0, which the generic reader
+             * cannot say (its `val == 0` arm answers "None", right for the
+             * NULL pointer it was written for) — so it is answered here and
+             * a non-zero kind-0 word is left to that reader. */
+            return v == 0 ? strdup("0") : NULL;
+    }
+}
+
+/* `mojo_dict_slot_repr` in the shape `mojo_list_set_elem_repr` records: a
+ * function of the VALUE ALONE, so a heterogeneous dict cannot use one — which
+ * is why each `.items()` pair gets the thunk for ITS OWN slot's kind below,
+ * and the dict-level `val_repr` (a struct shim) keeps precedence over all of
+ * them. Indices are `_DictSlot.kind`; 5/6 have no thunk and are NULL, which
+ * `mojo_list_repr_elem`'s contract already treats as "this says nothing". */
+static char *_dict_val_repr_int(int64_t v)    { return mojo_dict_slot_repr(v, 0); }
+static char *_dict_val_repr_double(int64_t v) { return mojo_dict_slot_repr(v, 1); }
+static char *_dict_val_repr_str(int64_t v)    { return mojo_dict_slot_repr(v, 2); }
+static char *_dict_val_repr_bool(int64_t v)   { return mojo_dict_slot_repr(v, 3); }
+static char *_dict_val_repr_none(int64_t v)   { return mojo_dict_slot_repr(v, 4); }
+
+static char *(*const _dict_val_repr_fn[7])(int64_t) = {
+    _dict_val_repr_int,     /* 0 int    */
+    _dict_val_repr_double,  /* 1 double */
+    _dict_val_repr_str,     /* 2 str    */
+    _dict_val_repr_bool,    /* 3 bool   */
+    _dict_val_repr_none,    /* 4 None   */
+    NULL,                   /* 5 struct — the dict's own recorded shim */
+    NULL,                   /* 6 other struct                        */
+};
+
+/* The recorded per-slot value repr for ONE slot of `d`: the thunk for this
+ * slot's own kind, or NULL when the slot is a struct (the dict's own
+ * `val_repr` covers that, and the caller records that separately) or a kind
+ * with no thunk. */
+static char *(*_dict_val_repr_for_slot(MojoDict *d, int64_t i))(int64_t)
+{
+    if (!d || i < 0 || i >= d->cap) return NULL;
+    int64_t kind = d->slots[i].kind;
+    if (kind < 0 || kind > 4) return NULL;
+    return _dict_val_repr_fn[kind];
+}
+
+/* A dict's ONE value kind, when its slots agree — the only case a single
+ * list-level repr function can describe, since `mojo_list_set_elem_repr`
+ * records one function for every element. -1 when they do not agree, and -1
+ * for a struct kind (the dict's own `val_repr` covers that, and the caller
+ * sets that separately). */
+static int _dict_uniform_val_kind(MojoDict *d)
+{
+    if (!d || d->used == 0) return -1;
+    int kind = -1;
+    int64_t *order = mojo_dict_order_indices(d);
+    if (!order) return -1;
+    for (int64_t oi = 0; oi < d->used; oi++) {
+        int k = (int)d->slots[order[oi]].kind;
+        if (k < 0 || k > 4) { free(order); return -1; }
+        if (kind < 0) kind = k;
+        else if (k != kind) { free(order); return -1; }
+    }
+    free(order);
+    return kind;
+}
+
 MojoList *mojo_dict_keys(MojoDict *d) {
     /* Walks in insertion order (mojo_dict_order_indices), matching Python's
      * dict.keys() guarantee — not raw hash-slot order. */
@@ -8680,8 +8808,20 @@ MojoList *mojo_dict_values(MojoDict *d) {
      * describes them exactly as `mojo_list_inherit_kinds` carries a list's
      * own elem repr across a copy: `list(d.values())` printing a raw pointer
      * decimal where `print(d)` printed `R<a>` would be the same bug one call
-     * away. NULL for every dict that records nothing. */
+     * away. NULL for every dict that records nothing.
+     *
+     * The VALUE KIND is the other half of the same bargain, and it is what a
+     * bool/float/zero value needs: this list's elements are raw int64_t
+     * words, so `list(d.values())` of `{'a': 0}` printed `None` and of
+     * `{'a': 1.5}` printed the float's own IEEE-754 bits (or faulted). One
+     * function describes the whole list only when the slots AGREE on a kind,
+     * which is why `_dict_uniform_val_kind` returns -1 otherwise rather than
+     * recording a wrong answer. */
     if (d->val_repr) mojo_list_set_elem_repr(out, (void *)d->val_repr);
+    else {
+        int uk = _dict_uniform_val_kind(d);
+        if (uk >= 0) mojo_list_set_elem_repr(out, (void *)_dict_val_repr_fn[uk]);
+    }
     int64_t *order = mojo_dict_order_indices(d);
     for (int64_t oi = 0; oi < d->used; oi++)
         mojo_list_append_int(out, d->slots[order[oi]].val);
@@ -8724,8 +8864,22 @@ MojoList *mojo_dict_items(MojoDict *d) {
          * `_mojo_repr_pair` asks the list it walks for its recorded elem repr,
          * the same first question `_mojo_repr_list` asks. Without this the
          * value printed as a raw pointer decimal while the same value in the
-         * dict itself printed `R<a>`. */
+         * dict itself printed `R<a>`.
+         *
+         * And the VALUE KIND belongs on it for the same reason and by the
+         * same route: the pair's slot 1 is a raw int64_t word with the kind
+         * discarded, and `mojo_list_repr_elem` — which both pair walkers ask
+         * for slot 1 and ONLY slot 1, because asking it for slot 0 would hand
+         * the char* KEY to a struct shim — is the channel that carries it.
+         * One thunk per pair, chosen by THAT slot's kind, so a dict mixing
+         * an int and a bool describes both correctly; the struct shim still
+         * wins, because a kind-5 value is the one thing `val_repr` knows and
+         * these thunks do not. */
         if (d->val_repr) mojo_list_set_elem_repr(pair, (void *)d->val_repr);
+        else {
+            char *(*_rf)(int64_t) = _dict_val_repr_for_slot(d, i);
+            if (_rf) mojo_list_set_elem_repr(pair, (void *)_rf);
+        }
         mojo_list_append_int(out, (int64_t)(intptr_t)pair);
     }
     free(order);
@@ -8747,6 +8901,12 @@ MojoList *mojo_dict_items_int(MojoDict *d) {
                              : (s->key ? (int64_t)strtoll(s->key, NULL, 10) : 0));
         mojo_list_append_int(pair, s->val);
         mojo_mark_as_tuple(pair);
+        /* The value kind, on the same terms as mojo_dict_items above — this
+         * is the same pair shape from the int-keyed reader, and dropping the
+         * kind here would be the same bug in a different door. */
+        char *(*_rf)(int64_t) = (s->kind >= 0 && s->kind <= 4)
+                               ? _dict_val_repr_fn[s->kind] : NULL;
+        if (_rf) mojo_list_set_elem_repr(pair, (void *)_rf);
         mojo_list_append_int(out, (int64_t)(intptr_t)pair);
     }
     free(order);

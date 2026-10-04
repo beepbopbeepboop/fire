@@ -1461,6 +1461,15 @@ char *mojo_dict_slot_key(MojoDict *d, int64_t i);
  * int64_t and handing it to the generic element reader SIGSEGV'd. See
  * mojo_dict_slot_double's own comment in fire_runtime.c. */
 double mojo_dict_slot_double(MojoDict *d, int64_t i);
+/* The one implementation of "what a dict slot's VALUE looks like", from the
+ * (word, kind) pair the store recorded — REPR semantics, always an owned heap
+ * string. NULL for the two struct kinds (whose rendering is a property of the
+ * dict's `val_repr`, not of the word) and for a kind-0 slot holding a non-zero
+ * word, which the caller's generic reader already handles. Consumers: the
+ * emitted `_mojo_repr_dict`, `mojo_dict_items`' per-pair value repr, and this
+ * file's `_mojo_repr_pairlist`; they all went their own way before, which is
+ * why `.items()` of a zero read back as `None` and of a float SIGSEGV'd. */
+char *mojo_dict_slot_repr(int64_t v, int64_t kind);
 int64_t mojo_dict_iter_key_int(MojoDictIter *it);
 int64_t        mojo_dict_iter_val_int(MojoDictIter *it);
 double         mojo_dict_iter_val_double(MojoDictIter *it);

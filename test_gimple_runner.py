@@ -4557,6 +4557,45 @@ print(zip([0, 1], [2, 3]))
 print({"a": 1}.items())
 """, "[('a', 1)]\n")
 
+    # A pair's VALUE slot kept no kind, so every reader of it guessed: the
+    # zero word printed `None` (the generic element repr's `val == 0` arm, right
+    # for a NULL pointer slot and wrong for a dict value, since `None` is stored
+    # as 0 with kind 4 and a plain `0` as 0 with kind 0), a bool printed 1, and
+    # a float's IEEE-754 bits are a POINTER-SHAPED word, so `print({'a': 1.5}
+    # .items())` SIGSEGVed in mojo_read_type_tag_safe — exit -11, no output.
+    # `mojo_dict_items` now records the slot's own value kind on each pair via
+    # `mojo_list_set_elem_repr`, the channel both pair walkers already ask for
+    # slot 1, and `mojo_dict_slot_repr` is the one implementation both they and
+    # the emitted `_mojo_repr_dict` render through. The MIXED dict is in the same
+    # program on purpose: the thunk is chosen per pair, so one repr function for
+    # the whole dict would get only half of these right.
+    test_gimple_stdout("gimple_dict_items_value_kinds_survive", """\
+def c() -> dict:
+    return {"mid": 0}
+print(sorted(c().items()))
+print({"a": 1}.items())
+print({"a": None}.items())
+print({"a": True}.items())
+print({"a": False}.items())
+print({"a": 1.5}.items())
+print({"a": "x"}.items())
+print({"a": 0, "b": None, "c": True, "d": 1.5}.items())
+for k, v in {"a": 0}.items():
+    print(k, v)
+print(list({"a": 0}.values()))
+print(list({"a": 1.5}.values()))
+""", "[('mid', 0)]\n"
+       "[('a', 1)]\n"
+       "[('a', None)]\n"
+       "[('a', True)]\n"
+       "[('a', False)]\n"
+       "[('a', 1.5)]\n"
+       "[('a', 'x')]\n"
+       "[('a', 0), ('b', None), ('c', True), ('d', 1.5)]\n"
+       "a 0\n"
+       "[0]\n"
+       "[1.5]\n")
+
     # `for (v) in d.items():` binds ONE name to the whole [key, value] pair,
     # and the variable carried no evidence that it is a 2-element list, so
     # `print(v)` / `str(v)` / an f-string reached the scalar `mojo_str_from_int`

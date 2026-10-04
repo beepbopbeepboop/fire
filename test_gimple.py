@@ -10200,13 +10200,15 @@ print({'p': 1} | {'q': 2})
         what decides a key collision, so a merge that reorders is a wrong
         answer), a spread whose operand is a dict COMPREHENSION (the shape
         `_reset_func` uses), and a spread that overwrites a literal key.
-        Returns are inline for the same reason as the test above, and the
-        one literal value is `7` rather than `0` because a ZERO integer read
-        back out of a dict prints `None` on this backend — a separate,
-        pre-existing defect with no spread anywhere in it (verified against
-        `HEAD~4`), filed as
-        bugs/CODEGEN_dict_int_value_zero_reads_back_as_none.md, and pinning it
-        here would make this test red for the wrong reason."""
+        The `0` literals below are the load-bearing part of that list: a
+        ZERO integer read back out of a dict used to print `None` on this
+        backend — `.items()` discarded the slot's value kind, so the pair's
+        value slot was read by the generic element repr whose `val == 0`
+        arm answers `None` for a NULL pointer. Fixed by recording the slot
+        kind on each pair (`mojo_dict_items` -> `mojo_list_set_elem_repr`)
+        and rendering every value kind through the runtime's one
+        implementation, `mojo_dict_slot_repr`, so this row can no longer
+        sidestep the defect by avoiding a zero."""
         global _PASS, _FAIL
         name = "dict_literal_star_star_pair_merges_instead_of_storing"
         src = '''\
@@ -10217,7 +10219,7 @@ def b(x: dict) -> dict:
     return {**x, 'b': 2}
 
 def c(x: dict, y: dict) -> dict:
-    return {**x, 'mid': 7, **y}
+    return {**x, 'mid': 0, **y}
 
 def d(x: dict) -> dict:
     return {**{k: v for k, v in x.items() if k != 'skip'}}
