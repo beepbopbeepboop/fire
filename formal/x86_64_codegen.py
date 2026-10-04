@@ -6206,7 +6206,19 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         built out of `SUB`/`MVN` (`~(c-1)`), which is the same value by a
         different route.
 
-        **The `MOV` is load-bearing and was the bug this row found.** Negating
+        **Why this backend masks where arm64 multiplies the corrected quotient.** arm64's
+`%` is `n - d*(q - c)` — two instructions, `SUB` and `MSUB` — which is
+`a - b * fdiv64 a b` and therefore the same expression
+`lib/ProofLib.lean`'s `frem64` is written as, so the terminal value flow closes
+on `rfl`. **This backend cannot spell that**: `IDIV` consumes the dividend
+(`CQO` sign-extends RAX into RDX and the divide overwrites RAX), so `a` is gone
+by the time the product is available and there is nothing left to subtract it
+from. `RDX` still holds `r`, which is why the mask of the DIVISOR is the route
+here — and the cost is one bit-vector identity in the proof that the arm64 shape
+does not need. That asymmetry is a fact about the two divide instructions, not a
+preference.
+
+**The `MOV` is load-bearing and was the bug this row found.** Negating
         R9 in place negates `c2`, the second `SETcc`, and `c = c1 AND c2` is
         zero whenever EITHER factor is — so negating `c2` computes `-c2` where
         the answer needs `-c`. The two agree on every row that is not

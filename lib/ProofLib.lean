@@ -830,18 +830,35 @@ def srem64 (a b : UInt64) : UInt64 :=
     dividend is not needed after the divide and `IDIV` (which leaves the dividend
     nowhere) can still floor.
 
+    **Every clause is written in the form the machine's own `CMP`/`CSET` steps
+    LEAVE, and that is not a stylistic choice.** `arm64_cset_ne` leaves
+    `if r ≠ 0 then 1 else 0` and `arm64_cset_lt_s` leaves
+    `if (r ^^^ d ^^^ M) < M then 1 else 0` for `M = 0x8000000000000000`; both are
+    in `formal/arm64_proof_gen.py`'s `_VALUE_SIMP`, so the terminal value flow's
+    `simp only` rewrites the machine's two `CSET`s into these two clauses and the
+    goal then closes on `rfl`.  Spelled the equivalent-but-different ways this
+    was first written — `(if r = 0 then 0 else 1)` and
+    `(if (r ^^^ d) >>> 63 = 1 then 1 else 0)` — every tactic in the chain failed
+    instead: `rfl` cannot see `x >>> 63 = 1` is `x ^^^ M < M`, and `bv_decide`
+    spends its whole budget trying (20 000 000 heartbeats, exhausted) because
+    the `sdiv64 a b` atom in the same goal is an `Int.tdiv` it cannot evaluate.
+    **A model written for the reader and a model written for `rfl` are the same
+    model only when the reader's spelling is the machine's**, and here the
+    machine's is the one that also reads fine.
+
     **Why the remainder is spelled `a - sdiv64 a b * b` and not `srem64 a b`.**
     The two are the same word — `srem64_sub` in `work.lean` is the proof, and it
     is the identity this function exists to avoid needing.  The machine computes
     the remainder with an `MSUB` over two registers, so what reaches the `CMP`
     is `a - sdiv64 a b * b`; spelling the model the same way makes the residual
     goal of a dividing block a proposition over bit-vectors in which `sdiv64 a b`
-    is the only atom on BOTH sides, and `bv_decide` closes it.  Spelled through
-    `srem64` instead, the left side carries `Int.tmod` and the goal needs that
-    bridge lemma to become the same proposition at all. -/
+    is the only atom on BOTH sides.  Spelled through `srem64` instead, the left
+    side carries `Int.tmod` and the goal needs that bridge lemma to become the
+    same proposition at all. -/
 def fdiv_correction (a b : UInt64) : UInt64 :=
   let r := a - sdiv64 a b * b
-  (if r = 0 then 0 else 1) &&& (if (r ^^^ b) >>> 63 = 1 then 1 else 0)
+  (if r ≠ 0 then 1 else 0) &&&
+    (if (r ^^^ b ^^^ 0x8000000000000000) < 0x8000000000000000 then 1 else 0)
 
 /-- Signed 64-bit division that **floors**, which is what the language's `//`
     means; `0` when the divisor is 0 (codegen's div0 path traps before this).
@@ -852,13 +869,25 @@ def fdiv_correction (a b : UInt64) : UInt64 :=
 def fdiv64 (a b : UInt64) : UInt64 :=
   if b = 0 then 0 else sdiv64 a b - fdiv_correction a b
 
-/-- The language's `%`, which takes the sign of the DIVISOR:
-    `a - b * fdiv64 a b`, spelled with the same `fdiv_correction` the machine
-    computes and as the same `a - sdiv64 a b * b + b * c` the emitted
-    `MSUB`/`SUB` pair produces. -/
+/-- The language's `%`, which takes the sign of the DIVISOR: exactly
+    `a - b * fdiv64 a b`.
+
+    **Spelled through `fdiv64` and not through the remainder, and that is the
+    whole reason this definition has the shape it does.**  The emitters compute
+    `%` as `n - d * (q - c)` — the floor-corrected QUOTIENT is what gets
+    multiplied, by one `MSUB` — so a model written as `r + b*c` states the same
+    number and the residual goal of a dividing block is then two different
+    expressions over the same atoms, which `bv_decide` declined: it has to know
+    `mask(c) AND d = d*c` for a `c` built out of two `ite`s, and it does not
+    split that on its own.  Written this way the goal is
+    `n - 7 * (sdiv64 n 7 - c) = n - 7 * fdiv64 n 7`, both sides the same word
+    once `fdiv64` is unfolded, and `rfl` closes it.
+
+    So this is `a - b * fdiv64 a b` on purpose: it is both the most readable
+    statement of Python's `%` available and the one the machine's own `MSUB`
+    spells. -/
 def frem64 (a b : UInt64) : UInt64 :=
-  if b = 0 then 0
-  else a - sdiv64 a b * b + b * fdiv_correction a b
+  if b = 0 then 0 else a - b * fdiv64 a b
 
 /-- Arithmetic (sign-extending) shift right of a 64-bit pattern by `sh` (mod 64). -/
 def asr64 (x : UInt64) (sh : UInt64) : UInt64 :=
@@ -3554,27 +3583,23 @@ theorem arm64_cset_le (a b : UInt64) :
     differs from the divisor's exactly when `remainder ^^^ divisor` reads
     negative.  Written from `arm64_flag_lt_s` like the three above rather than
     as a fresh `bv_decide`, so the CSET bridge has ONE shape in this file
-    instead of one per condition code. -/
+    instead of one per condition code.
+
+    **This is what closes a dividing block, together with `arm64_cset_ne`**,
+    and both are in `formal/arm64_proof_gen.py`'s `_VALUE_SIMP`, so the
+    terminal value flow's `simp only […, _VALUE_SIMP]` rewrites the machine's
+    two `CSET` steps into the source model's `fdiv_correction` — the goal then
+    has `fdiv_correction a b` on one side and `(if r = 0 …) &&& (if …)` on the
+    other with the same `r`, and `rfl` finishes it.  Nothing names either lemma
+    directly; they are in the value-flow simp set because that is where the
+    generator puts every such bridge (`arm64_cset_eq` has been there since the
+    comparison lowering needed one). -/
 theorem arm64_cset_lt_s (a b : UInt64) :
     (if arm64_matches_condition 11 (arm64_subs_flags a b) then (1 : UInt64) else 0)
       = (if (a ^^^ 0x8000000000000000) < (b ^^^ 0x8000000000000000) then 1 else 0) := by
   by_cases h : (a ^^^ 0x8000000000000000) < (b ^^^ 0x8000000000000000)
   · rw [if_pos ((arm64_flag_lt_s a b).mpr h), if_pos h]
   · rw [if_neg (fun hc => h ((arm64_flag_lt_s a b).mp hc)), if_neg h]
-
-/-- **The floor correction, as the machine's `CMP`/`CSET` pair states it.**
-    `fdiv_correction` is the SOURCE model's version and is spelled over
-    `a - sdiv64 a b * b`; this is the same 0-or-1 word read out of the two
-    registers the emitter actually compared (`r` and `r ^^^ b`).  The two agree
-    by `bv_decide`, which is what closes a dividing block's terminal value flow
-    — the point of stating it is that the goal is then ONE proposition over
-    bit-vectors instead of two shapes plus the bridge that relates them. -/
-theorem fdiv_correction_of_flags (r t b : UInt64) :
-    (if arm64_matches_condition 1 (arm64_subs_flags r 0) then (1 : UInt64) else 0)
-        &&& (if arm64_matches_condition 11 (arm64_subs_flags t 0) then (1 : UInt64) else 0)
-      = (if r = 0 then 0 else 1) &&& (if t >>> 63 = 1 then 1 else 0) := by
-  simp only [arm64_cset_ne, arm64_cset_lt_s]
-  bv_decide
 
 /-! # Generic countdown-style while-loop contract
 

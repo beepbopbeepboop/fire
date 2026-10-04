@@ -700,17 +700,15 @@ _FLOOR_DIV_TAIL = [
      "some (arm64_set_reg 0 s (arm64_reg 2 s - arm64_reg 5 s))"),
 ]
 
+# The remainder multiplies the FLOOR-CORRECTED QUOTIENT, which is why it costs
+# one `SUB` and one `MSUB` rather than a mask and an `IMUL`: `n - d*(q - c)` is
+# `a - b * fdiv64 a b`, which is what `lib/ProofLib.lean`'s `frem64` says.
 _FLOOR_MOD_TAIL = [
-    ("sub x6, x5, #1",
-     "some (arm64_set_reg 6 s (arm64_reg 5 s - UInt64.ofNat 1))"),
-    # ~(c - 1): all ones when c is 1, zero when it is 0 — the MASK.
-    ("mvn x6, x6",
-     "some (arm64_set_reg 6 s (arm64_reg 31 s "
-     "||| ((arm64_reg 6 s) ^^^ 0xffffffffffffffff)))"),
-    ("and x5, x6, x1",
-     "some (arm64_set_reg 5 s (arm64_reg 6 s &&& arm64_reg 1 s))"),
-    ("add x0, x3, x5",
-     "some (arm64_set_reg 0 s (arm64_reg 3 s + arm64_reg 5 s))"),
+    ("sub x6, x2, x5",
+     "some (arm64_set_reg 6 s (arm64_reg 2 s - arm64_reg 5 s))"),
+    ("msub x0, x1, x6, x0",
+     "some (arm64_set_reg 0 s (arm64_reg 0 s "
+     "- (arm64_reg 1 s * arm64_reg 6 s)))"),
 ]
 
 #: The two spellings this construct has already emitted once and whose words the
@@ -720,6 +718,11 @@ def _neg_word():
     """`neg x6, x5` — the word the obvious spelling of `-(d*c)` emits."""
     import formal.arm64 as A
     return A.encode_neg_xd_xn(6, 5)
+
+
+def _and_word():
+    import formal.arm64 as A
+    return A.encode_and_xd_xn_xm(5, 6, 1)
 
 
 def _msub_xzr_word():
@@ -736,11 +739,19 @@ def _msub_xzr_word():
 
 
 _FLOOR_FORBIDDEN = (
-    # Reads as `s.sp - xm`: NEG is shadowed by the SUB-register arm.
+    # Reads as `s.sp - x5`: NEG is shadowed by the SUB-register arm.
     ("neg x6, x5", _neg_word, "arm64_reg 31 s -"),
     # Reads as `x1 * x5`: MUL is tested before MSUB and both masks accept it.
     ("msub x6, x1, x5, xzr", _msub_xzr_word,
      "arm64_set_reg 6 s (arm64_reg 1 s * arm64_reg 5 s)"),
+    # Reads CORRECTLY on both machines and still is not what arm64 emits: the
+    # mask `(~(c-1)) AND d` IS `d*c`, so this spelling answers the same numbers,
+    # and the residual goal of a dividing block then needs `bv_decide` to split
+    # the `ite`s inside `c` to see it — which it declined. arm64 multiplies the
+    # corrected quotient instead; x86-64 still masks, because `IDIV` consumes
+    # the dividend and `a - b*(q-c)` needs `a`.
+    ("and x5, x6, x1", _and_word,
+     "arm64_set_reg 5 s (arm64_reg 6 s &&& arm64_reg 1 s)"),
 )
 
 
@@ -811,23 +822,27 @@ class TestFloorCorrectionDecodes(unittest.TestCase):
     def test_the_floor_remainder_block_decodes_as_written(self):
         self._check("n % 3", _FLOOR_MOD_TAIL)
 
-    def test_the_two_words_the_model_reads_as_something_else_are_not_emitted(self):
-        """The NEG and the MSUB-with-XZR, pinned by their DECODE rather than by
-        the reason they were dropped.
+    def test_the_three_words_arm64_must_not_emit_are_pinned_by_their_decode(self):
+        """`NEG`, the MSUB-with-XZR and the mask-AND, pinned by what each word
+        DECODES to rather than by the reason it was dropped.
 
         Each is asserted twice: that the word the encoding produces decodes as
-        the wrong instruction (which is why it was dropped — and which is the
-        claim the two bugs' write-ups make), and that the emitter does not emit
-        it (which is what has to stay true).
+        the row says (two of the three are mis-decoded by the model, and the
+        third decodes correctly and is excluded for a different reason — a proof
+        that will not close), and that the emitter does not produce it (which is
+        what has to stay true).  The first half is what keeps the second from
+        rotting into "the docstring says not this one".
         """
         for form, encode, wrong_reading in _FLOOR_FORBIDDEN:
             with self.subTest(form):
                 _idx, got = _decode(encode())
                 self.assertIn(
                     wrong_reading, got,
-                    f"`{form}` now decodes correctly, so the reason it was "
-                    f"dropped no longer holds — that is worth knowing, and it "
-                    f"is not a reason to start emitting it without measuring")
+                    f"the word for `{form}` no longer decodes as "
+                    f"{wrong_reading!r} — whichever of the three reasons it was "
+                    f"dropped for (a mis-decoded word, or a proof that will not "
+                    f"close) may no longer hold, and that is worth measuring "
+                    f"rather than assuming")
         for expr in ("n // 3", "n % 3"):
             words = self._block(expr)
             for form, encode, _wrong in _FLOOR_FORBIDDEN:

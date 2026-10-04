@@ -9110,43 +9110,48 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_sub_xd_xn_xm(0, 2, 5))
 
     def _emit_floor_remainder(self) -> None:
-        """`%` on a SIGNED operand: `X0 = r + d*c`, from `_emit_floor_correction`'s
-        `c` in X5, `r` in X3 and `d` in X1.
+        """`%` on a SIGNED operand: `X0 = n - d*(q - c)`, i.e. `r + d*c`.
 
-            SUB X6, X5, #1        X6 = c - 1
-            MVN X6, X6            X6 = ~(c - 1)  — the MASK of c
-            AND X5, X6, X1        X5 = d * c     (a mask AND, not a multiply)
-            ADD X0, X3, X5        X0 = r + d*c
+        Called after the `SDIV` with X0 the dividend, X1 the divisor and X2 the
+        truncating quotient, and it finishes with the answer in X0:
 
-        **`c` is 0 or 1, so `~(c - 1)` is all-ones when `c` is 1 and zero when it
-        is 0** — that is the mask, and masking the divisor by it IS the product
-        `d*c` without an `IMUL` (x86-64's `_emit_floor_remainder` spells the same
-        value with `NEG`/`AND`, for the same reason).  Two other spellings were
-        measured and are the reason this one is here:
+            SUB  X6, X2, X5        X6 = q - c      the FLOORED QUOTIENT
+            MSUB X0, X1, X6, X0    X0 = n - d*(q - c) = r + d*c
 
-        * **`NEG X6, X5 ; MSUB X0, X1, X6, X3`** (the obvious one) computes
+        **Two instructions, and the second one is the reason `%` costs no more
+        than `//`.**  `a - b * fdiv64 a b` is what both backends' `%` computes —
+        the FLOOR-CORRECTED QUOTIENT is the thing that gets multiplied, which is
+        the same `q - c` `_emit_floor_quotient` already materialises — so the
+        source model's `frem64` is the same expression and a dividing block's
+        terminal value flow closes on `rfl` instead of on a bit-vector identity.
+
+        Two other spellings were measured and are the reason this one is here,
+        and both emit a word `ProofLib.arm64_step` reads as a DIFFERENT
+        instruction:
+
+        * **`NEG X6, X5 ; MSUB X0, X1, X6, X3`** — the obvious one — computes
           `SP - c` in the model, because `NEG Xd, Xn` is `SUBS Xd, XZR, Xn` with
-          `Rn = 31`, and `ProofLib.arm64_step`'s SUB-register arm reads
-          `arm64_reg_or_sp 31 s` — SP, not XZR.  Every generated proof of a
-          program with a NEG then fails with `native_decide … is false`, on every
-          input including the ones where `c = 0`.  That is
+          `Rn = 31` and `arm64_step`'s SUB-register arm reads
+          `arm64_reg_or_sp 31 s`. Every generated proof of a program with a NEG
+          then fails with `native_decide … is false`, on every input including
+          the ones where `c = 0`. That is
           `bugs/FORMAL_arm64_neg_is_shadowed_by_the_sub_register_arm.md`, and it
-          is live on `master` today through unary minus (line 3352), so it is
-          routed around rather than fixed here.
-        * **`MSUB X6, X1, X5, XZR`** avoids the NEG but its encoding collides
-          with `MUL` in the model's mask scheme (`MUL`'s `0xffe07c00` and `MSUB`'s
-          `0xffe08000` both accept a word with `Ra = 31`), so `arm64_step` reads
-          it as `X1 * X5` — `+d*c` — and the goal comes out as `r - d*c`.  The
-          model's decode of each word is pinned by
-          `test_formal_run.py`'s `the_floor_correction_decodes_as_the_arms_it_meant`.
+          is live on `master` today through unary minus (line 3352).
+        * **`SUB`/`MVN`/`AND`/`ADD`** — masking the divisor by `~(c-1)` instead
+          of negating it — is correct on both machines (it is what x86-64's
+          `_emit_floor_remainder` still does) and it does NOT close the proof:
+          the model's `r + b*c` and the machine's `r + (mask(c) AND b)` are two
+          expressions, and `bv_decide` declined to split the `ite`s inside `c`.
+          Multiplying the corrected quotient removes the question instead of
+          answering it.
 
-        The model's `frem64` is `a - sdiv64 a b * b + b * c`, which is this same
-        `r + d*c`, so `bv_decide` reads the two as the same word."""
+        `formal/arm64.py`'s `encode_msub_xd_xn_xm_xa` range assert and
+        `test_formal_call_proof_gen.py::TestFloorCorrectionDecodes` both record
+        what the words decode to, and the second of those is what would have
+        caught either of these."""
         self._emit_floor_correction()
-        self.asm.emit(encode_sub_xd_xn_imm(6, 5, 1))
-        self.asm.emit(encode_mvn_xd_xn(6, 6))
-        self.asm.emit(encode_and_xd_xn_xm(5, 6, 1))
-        self.asm.emit(encode_add_xd_xn_xm(0, 3, 5))
+        self.asm.emit(encode_sub_xd_xn_xm(6, 2, 5))
+        self.asm.emit(encode_msub_xd_xn_xm_xa(0, 1, 6, 0))
 
     def _emit_compare_chain(self, e: F.CompareChain) -> None:
         """`a < b < c` — each operand evaluated once; results ANDed.
