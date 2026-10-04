@@ -5557,9 +5557,10 @@ BUILTIN_VALUE_METHODS = {
     # on this path, so the blob's capacity is a compile-time bound — the count
     # of append sites in the function — and the store is checked against it.
     "append": "list_append",
-    # `list.clear()`: store 0 at the count, which empties the blob. ONE store,
-    # and it needs none of the machinery `append` needs: no capacity (an append
-    # has to know there is room; an empty needs none), no element type, and no
+    # `list.clear()` (and `dict.clear()`, which is the same store — see the
+    # guard): store 0 at the count, which empties the blob. ONE store, and it
+    # needs none of the machinery `append` needs: no capacity (an append has to
+    # know there is room; an empty needs none), no element type, and no
     # traversal. It writes the very word `len` reads, so the guard is the same
     # question `len` asks — `is_list_kind` of the receiver's kind — and it is
     # POSITIVE evidence rather than the absence of a refusal, because a name in
@@ -5579,7 +5580,17 @@ BUILTIN_VALUE_METHODS = {
 # architectures that name one limit differently cost a reader the difference
 # between the limit and the architecture.
 def list_clear_refusal(dotted: str, kind, shape: str) -> str:
-    """Why `dotted.clear()` is not lowered here."""
+    """Why `dotted.clear()` is not lowered here.
+
+    The guard is `is_list_kind`, and a DICT passes it — deliberately, and by
+    measurement rather than by accident: a dict on this path is a counted blob
+    too (`len_operand_lowering` reads its count from the same offset 0), so
+    zeroing that word empties it exactly as CPython's `dict.clear` does.
+    Measured on both architectures, `{"a": 1, "b": 2}` reports 2, clears to 0,
+    and a SECOND dict built after the clear still reports 1 — the third number
+    is the one that makes the store a store rather than a coincidence.
+    `test_formal_run.py::list_clear_empties_a_dict_blob` is that row.
+    """
     return (f"{dotted}() lowers to one store — the blob's count word set to 0, "
             f"which is the word `len` of the same receiver reads — so the "
             f"receiver has to be a list, and this one is "

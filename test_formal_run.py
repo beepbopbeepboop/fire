@@ -2916,6 +2916,25 @@ CASES = [
      "    xs.clear()\n"
      "    printf(\"after=%d\", len(xs))\n"
      "    return 0\n", 0, "before=3@@after=0"),
+    # The same store on a DICT, which passes the same guard and is right for the
+    # same reason: a dict here is a counted blob as well, and `len` reads its
+    # count from the same offset 0.  So this row is not the list row twice --
+    # it is the row that says the guard's POSITIVE evidence ("a counted blob")
+    # rather than its NAME is what admits the call, because a guard keyed on
+    # "list" would refuse a program CPython answers correctly.
+    #
+    # `other=1` is the number that matters: a second dict built AFTER the clear
+    # still has its pair, so the store landed on the receiver's own count rather
+    # than on something the two blobs share.
+    ("list_clear_empties_a_dict_blob",
+     "def main(n):\n"
+     "    var d = {\"a\": 1, \"b\": 2}\n"
+     "    printf(\"before=%d@@\", len(d))\n"
+     "    d.clear()\n"
+     "    printf(\"after=%d@@\", len(d))\n"
+     "    var e = {\"c\": 3}\n"
+     "    printf(\"other=%d\", len(e))\n"
+     "    return 0\n", 0, "before=2@@after=0@@other=1"),
 ]
 
 # ── what a method on a VALUE means, per RECEIVER KIND ──────────────────────

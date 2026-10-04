@@ -416,7 +416,18 @@ declined.  What is NOT covered is a receiver whose struct is declared in another
 module AND annotated `List[...]` at the call site — which is a program whose
 source says "a list" and calls `clear` on it, so the lowering is right anyway.
 
-**Three rows of test, in `test_formal_run.py`, and one of them is a row that
+**A DICT passes the same guard, and that is measured rather than accidental.**
+`is_list_kind` admits a dict kind, because a dict on this path is a counted blob
+too — `len_operand_lowering` reads its count from the same offset 0 — so zeroing
+that word empties it exactly as CPython's `dict.clear` does.  Measured on both
+architectures: `{"a": 1, "b": 2}` reports 2, clears to 0, and a **second dict
+built after the clear still reports 1**, which is the number that makes the store
+a store rather than a coincidence.  So the guard's evidence is "a counted blob"
+and not the word "list", and `test_formal_run.py::list_clear_empties_a_dict_blob`
+is the row that says so; a guard keyed on the NAME would have refused a program
+CPython answers correctly.
+
+**Four rows of test, in `test_formal_run.py`, and one of them is a row that
 CHANGED KIND.**
 
 * `list_clear_empties_a_list_literal` (new, in `CASES`) — a local list,
