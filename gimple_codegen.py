@@ -3097,6 +3097,7 @@ class GimpleGen:
         'mojo_str_center':       ('char *',     ['char *', 'int64_t', 'char *']),
         'mojo_str_splitlines':   ('MojoList *', ['char *']),
         'mojo_str_count':        ('int64_t',    ['char *', 'char *']),
+        'mojo_str_count_from':   ('int64_t',    ['char *', 'char *', 'int64_t', 'int64_t']),
         'mojo_str_rsplit':       ('MojoList *', ['char *', 'char *', 'int64_t']),
         'mojo_str_partition':    ('MojoList *', ['char *', 'char *']),
         'mojo_str_rpartition':   ('MojoList *', ['char *', 'char *']),
@@ -3177,7 +3178,8 @@ class GimpleGen:
         'mojo_subprocess_stderr':     ('char *',  ['MojoCompletedProcess *']),
         'mojo_str_find':         ('int64_t',   ['char *', 'char *']),
         'mojo_str_rfind':        ('int64_t',   ['char *', 'char *']),
-        'mojo_str_find_from':    ('int64_t',   ['char *', 'char *', 'int64_t']),
+        'mojo_str_rfind_from':   ('int64_t',   ['char *', 'char *', 'int64_t', 'int64_t']),
+        'mojo_str_find_from':    ('int64_t',   ['char *', 'char *', 'int64_t', 'int64_t']),
         'mojo_str_cat':          ('char *',    ['char *', 'char *']),
         'mojo_str':              ('char *',    ['void *']),
         # mojo_map/mojo_filter (runtime/fire_runtime.{h,c}): `void *mojo_map(void
@@ -3355,7 +3357,9 @@ class GimpleGen:
         'mojo_set_discard_int':  ('void',      ['MojoSet *', 'int64_t']),
         'mojo_set_discard_str':  ('void',      ['MojoSet *', 'char *']),
         'mojo_str_startswith':   ('int',       ['char *', 'char *']),
+        'mojo_str_startswith_from': ('int',    ['char *', 'char *', 'int64_t', 'int64_t']),
         'mojo_str_endswith':     ('int',       ['char *', 'char *']),
+        'mojo_str_endswith_from':   ('int',     ['char *', 'char *', 'int64_t', 'int64_t']),
         'mojo_str_startswith_char': ('int',    ['char *', 'char']),
         'mojo_str_endswith_char':   ('int',    ['char *', 'char']),
         'strcmp':                ('int',       ['char *', 'char *']),
@@ -4116,8 +4120,8 @@ class GimpleGen:
         return gmp._lower_pointer_method(self, ov, ot, method, args)
     def _lower_file_method(self, ov: str, method: str, args: list) -> tuple:
         return gmp._lower_file_method(self, ov, method, args)
-    def _lower_str_method(self, ov: str, method: str, args: list) -> tuple:
-        return gmp._lower_str_method(self, ov, method, args)
+    def _lower_str_method(self, ov: str, method: str, args: list, kwargs=None) -> tuple:
+        return gmp._lower_str_method(self, ov, method, args, kwargs)
     def _lower_bytes_method(self, ov: str, method: str, args: list, kwargs=None) -> tuple:
         return gmp._lower_bytes_method(self, ov, method, args, kwargs)
     def _lower_memoryview_method(self, ov: str, method: str, args: list, kwargs=None) -> tuple:

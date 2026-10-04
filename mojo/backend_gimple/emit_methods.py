@@ -3714,7 +3714,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
 
     # char* string method calls
     if ot == 'char *':
-        _sres = gen._lower_str_method(ov, method, node.args)
+        _sres = gen._lower_str_method(ov, method, node.args, node.kwargs)
         # `s.lower().lstrip()`: these methods always return a COPY, so a
         # temporary receiver (a `+`, or a call known to return a fresh string)
         # is dead once the call has read it. Only methods whose lowering
@@ -3959,7 +3959,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if _sn == 'MojoSet':
         return gen._lower_set_method(ov, method, node.args)
     if _sn == 'MojoStr':
-        return gen._lower_str_method(ov, method, node.args)
+        return gen._lower_str_method(ov, method, node.args, node.kwargs)
     if _sn == 'MojoBytes':
         return gen._lower_bytes_method(ov, method, node.args, node.kwargs)
     if (len(_sn) > 0
@@ -4863,7 +4863,7 @@ def _lower_file_method(gen, ov: str, method: str, args: list) -> tuple:
     return 'int', gen._new_val('int', '0')
 
 
-def _lower_str_method(gen, ov: str, method: str, args: list) -> tuple:
+def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tuple:
     """Lower char * string method calls."""
     # Lower each argument exactly once. Calling self.lower_expr(a) twice
     # per argument (once for [0], once for [1]) used to re-run codegen for
@@ -4952,68 +4952,95 @@ def _lower_str_method(gen, ov: str, method: str, args: list) -> tuple:
         t = gen._new_temp('char *')
         gen._emit(f"  {t} = {cstr_ov};  /* join: no iterable */")
         return 'char *', t
-    if method == 'startswith' and arg_vals:
-        t = gen._new_temp('int')
+    # ── the `[start[, end]]` window family ───────────────────────────────────
+    # startswith/endswith/find/index/rfind/rindex/count all take an optional
+    # window, and it used to be DROPPED on every one of them: each arm took
+    # only its needle and called the no-window runtime helper, so
+    # `s.startswith(p, i)` compared from byte 0 and `s.rfind(sep, 0, n)` /
+    # `s.count(sep, 0, n)` searched the WHOLE string.
+    #
+    # That is not a local imprecision — it is what stopped the self-hosted
+    # compiler from compiling its own source. `fire_compiler.py`'s
+    # `_scan_string_end` asks `src.startswith(delim, j)` whether the literal
+    # opening at `i` closes at `j`, and `_unterminated_quote_pos` asks
+    # `line.startswith(delim, i)` the same; answered against byte 0 they are
+    # "does the whole FILE start with this delimiter", which is false for every
+    # file not beginning with a quote. So every source with an ordinary string
+    # literal was refused as "unterminated string literal" (25 of the 46
+    # bootstrap inputs, exit 1) and the 21 that DO begin with a `"""` docstring
+    # matched at every position instead — so every literal "ended" one
+    # character in and the file collapsed to a 2-token stream (just EOF) where
+    # the reference has tens of tokens. The exit-1 class and the
+    # silent-empty-dump class of bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md
+    # are therefore the SAME defect. `_src_loc`'s `src.count('\n', 0, pos)` /
+    # `src.rfind('\n', 0, pos)` are how those diagnostics came to report a
+    # NEGATIVE column.
+    #
+    # `_range_opts` is the resolver the bytes half of this file already uses
+    # for the identical Python surface (`mojo_bytes_find_from` and friends),
+    # and the `_from` runtime helpers clamp the window the same way; the no-
+    # window call site still gets the 2-argument helper, so nothing that does
+    # not pass a window changes shape.
+    if method in ('startswith', 'endswith') and arg_vals:
+        is_start = method == 'startswith'
         arg0_type = arg_pairs[0][0] if arg_pairs else 'char *'
         arg0_val = arg_vals[0]
-        if arg0_type == 'char':
-            gen._emit_call('int', t, 'mojo_str_startswith_char', [('char *', cstr_ov), ('char', arg0_val)])
+        st, sp, full_window = _str_window(gen, args, kwargs)
+        if full_window:
+            if arg0_type == 'char':
+                fn = 'mojo_str_startswith_char' if is_start else 'mojo_str_endswith_char'
+                t = gen._new_temp('int')
+                gen._emit_call('int', t, fn, [('char *', cstr_ov), ('char', arg0_val)])
+                return 'int', t
+            fn = 'mojo_str_startswith' if is_start else 'mojo_str_endswith'
+            return 'int', gen._call_expr('int', fn,
+                                         [('char *', cstr_ov), (arg0_type, arg0_val)])
+        fn = 'mojo_str_startswith_from' if is_start else 'mojo_str_endswith_from'
+        ntype, nval = _cstr_needle(gen, arg0_type, arg0_val)
+        return 'int', gen._call_expr('int', fn, [
+            ('char *', cstr_ov), (ntype, nval),
+            ('int64_t', st), ('int64_t', sp)])
+    if method in ('find', 'index', 'rfind', 'rindex', 'count') and arg_vals:
+        # index/rindex are find/rfind with ValueError instead of -1 on a miss,
+        # which nothing in this tree relies on (see rindex's note below), so
+        # they share the same helper and differ only in that the old separate
+        # arms did.
+        sep_type = arg_pairs[0][0] if arg_pairs else 'char *'
+        st, sp, full_window = _str_window(gen, args, kwargs)
+        if full_window:
+            fn = {'count': 'mojo_str_count',
+                  'rfind': 'mojo_str_rfind', 'rindex': 'mojo_str_rfind',
+                  'find': 'mojo_str_find', 'index': 'mojo_str_find'}[method]
+            return 'int64_t', gen._call_expr('int64_t', fn,
+                                             [('char *', cstr_ov), (sep_type, arg_vals[0])])
+        if method == 'count':
+            fn = 'mojo_str_count_from'
+        elif method in ('rfind', 'rindex'):
+            # str.rindex(sub) — like rfind but real Python raises ValueError on
+            # a miss instead of returning -1; this codebase's `index`/`rindex`
+            # callers never actually rely on that exception (they've already
+            # checked `sub in s` or a bracket-match count first), so mapping to
+            # the same runtime helper as rfind (rather than inventing a raising
+            # variant) is safe here. It had NO lowering case at all before that
+            # fix — confirmed via a full grep for "rindex" across every
+            # gimple_gen_*.py — so it silently fell through to the generic
+            # unknown-method stub, returning a bare `int 0` regardless of the
+            # real string/substring. Found via module_loader.py's own
+            # export-signature scanner: `paren_end = sig.rindex(')')` read back
+            # 0 self-hosted (instead of the real closing-paren index),
+            # truncating `params_str` to '' and silently dropping every
+            # parameter from every scanned function's exported C signature
+            # whose Mojo source used generic bracket parameters (e.g.
+            # `def listdir[PathLike: stdPathLike](path: PathLike)`, which has a
+            # second, later ')' the plain .index('(')-paired .rindex(')')
+            # pattern needs to actually find).
+            fn = 'mojo_str_rfind_from'
         else:
-            gen._emit_call('int', t, 'mojo_str_startswith', [('char *', cstr_ov), (arg0_type, arg0_val)])
-        return 'int', t
-    if method == 'endswith' and arg_vals:
-        t = gen._new_temp('int')
-        arg0_type = arg_pairs[0][0] if arg_pairs else 'char *'
-        arg0_val = arg_vals[0]
-        if arg0_type == 'char':
-            gen._emit_call('int', t, 'mojo_str_endswith_char', [('char *', cstr_ov), ('char', arg0_val)])
-        else:
-            gen._emit_call('int', t, 'mojo_str_endswith', [('char *', cstr_ov), (arg0_type, arg0_val)])
-        return 'int', t
-    if method == 'find' and arg_vals:
-        sep_type = arg_pairs[0][0] if arg_pairs else 'char *'
-        if len(arg_vals) >= 2:
-            start_type = arg_pairs[1][0] if len(arg_pairs) >= 2 else 'int64_t'
-            start_v = gen._to_int64(start_type, arg_vals[1])
-            return 'int64_t', gen._call_expr('int64_t', 'mojo_str_find_from',
-                [('char *', cstr_ov), (sep_type, arg_vals[0]), ('int64_t', start_v)])
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_str_find', [('char *', cstr_ov), (sep_type, arg_vals[0])])
-    if method == 'rfind' and arg_vals:
-        sep_type = arg_pairs[0][0] if arg_pairs else 'char *'
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_str_rfind', [('char *', cstr_ov), (sep_type, arg_vals[0])])
-    if method == 'rindex' and arg_vals:
-        # str.rindex(sub) — like rfind but real Python raises ValueError on
-        # a miss instead of returning -1; this codebase's `index`/`rindex`
-        # callers never actually rely on that exception (they've already
-        # checked `sub in s` or a bracket-match count first), so mapping to
-        # the same mojo_str_rfind runtime helper as rfind (rather than
-        # inventing a raising variant) is safe here, exactly like `index`
-        # just below reuses mojo_str_find/mojo_str_find_from. Had NO
-        # lowering case at all before this fix — confirmed via a full grep
-        # for "rindex" across every gimple_gen_*.py — so it silently fell
-        # through to the generic unknown-method stub, returning a bare
-        # `int 0` regardless of the real string/substring. Found via
-        # module_loader.py's own export-signature scanner: `paren_end =
-        # sig.rindex(')')` read back 0 self-hosted (instead of the real
-        # closing-paren index), truncating `params_str` to '' and silently
-        # dropping every parameter from every scanned function's exported
-        # C signature whose Mojo source used generic bracket parameters
-        # (e.g. `def listdir[PathLike: stdPathLike](path: PathLike)`,
-        # which has a second, later ')' the plain .index('(')-paired
-        # .rindex(')') pattern needs to actually find).
-        sep_type = arg_pairs[0][0] if arg_pairs else 'char *'
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_str_rfind', [('char *', cstr_ov), (sep_type, arg_vals[0])])
-    if method == 'index' and arg_vals:
-        sep_type = arg_pairs[0][0] if arg_pairs else 'char *'
-        if len(arg_vals) >= 2:
-            start_type = arg_pairs[1][0] if len(arg_pairs) >= 2 else 'int64_t'
-            start_v = gen._to_int64(start_type, arg_vals[1])
-            return 'int64_t', gen._call_expr('int64_t', 'mojo_str_find_from',
-                [('char *', cstr_ov), (sep_type, arg_vals[0]), ('int64_t', start_v)])
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_str_find', [('char *', cstr_ov), (sep_type, arg_vals[0])])
-    if method == 'count' and arg_vals:
-        sub_type = arg_pairs[0][0] if arg_pairs else 'char *'
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_str_count', [('char *', cstr_ov), (sub_type, arg_vals[0])])
+            fn = 'mojo_str_find_from'
+        ntype, nval = _cstr_needle(gen, sep_type, arg_vals[0])
+        return 'int64_t', gen._call_expr('int64_t', fn, [
+            ('char *', cstr_ov), (ntype, nval),
+            ('int64_t', st), ('int64_t', sp)])
     if method == 'split':
         # No-arg split() (or split(None)) means whitespace-split — was
         # `and arg_vals`-gated, so the no-arg call fell through to the
@@ -5265,6 +5292,43 @@ def _range_opts(gen, args, kwargs, first_optional):
     if len(args) > first_optional + 1:
         stop = gen._to_int64(*gen.lower_expr(args[first_optional + 1]))
     return start, stop
+
+
+def _str_window(gen, args, kwargs):
+    """`(start, stop, is_no_window)` for a `str` method's optional
+    `[start[, end]]`, over `_range_opts`'s sentinel spelling.
+
+    Module-level and called only from the arms that actually take a window, for
+    the reason `_range_opts` itself is not called at the top of
+    `_lower_str_method`: it LOWERS the optional arguments it is handed, so
+    calling it for a method that does not have them (`s.replace(a, b, n)`'s
+    `b`/`n`) would emit a second, dead copy of those subexpressions into the
+    function body — the exact duplication `_lower_str_method`'s own header
+    comment is about. Deliberately not a nested closure for the same reason
+    `fire_compiler.py` inlines its `pending_pad` flushes.
+    """
+    start, stop = _range_opts(gen, args, kwargs, 1)
+    return start, stop, start == '0' and stop == 'MOJO_SLICE_STOP_OMITTED'
+
+
+def _cstr_needle(gen, needle_type: str, needle_val: str) -> tuple:
+    """`(ctype, value)` for a search needle, ready to drop into a call's
+    argument list.
+
+    A one-character argument can arrive typed `char` (`src.find('\\n', i)`),
+    which is not a `char *` at all — so it is materialised through
+    `mojo_char_to_str` here. Every OTHER type is passed through with its own
+    type, NOT with the callee's: `_emit_call` coerces a mismatched argument
+    against the callee's pinned parameter types (which is how an unannotated
+    `delim = None` local — typed `int64_t` by its first assignment — reaches a
+    `char *` parameter), and declaring the argument's type as what it is not
+    would switch that coercion off and hand gcc an `int64_t` where it wants a
+    pointer.
+    """
+    if needle_type == 'char':
+        return 'char *', gen._call_expr('char *', 'mojo_char_to_str',
+                                        [('char', needle_val)])
+    return needle_type, needle_val
 
 
 def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> tuple:

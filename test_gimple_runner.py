@@ -5341,6 +5341,69 @@ fn main():
      "True False False\nTrue False False\nTrue True False\n"
      "True True True\nFalse False\nTrue False False False\n")
 
+    # The optional `[start[, end]]` window of startswith/endswith/find/index/
+    # rfind/rindex/count was DROPPED: every one of those arms passed only the
+    # needle to the no-window runtime helper, so `s.startswith(p, i)` compared
+    # from byte 0 and `s.rfind(sep, 0, n)`/`s.count(sep, 0, n)` searched the
+    # whole string. The damage was not local — `fire_compiler.py`'s own
+    # `_scan_string_end` asks `src.startswith(delim, j)` whether the literal
+    # opening at `i` closes at `j`, so the SELF-HOSTED tokenizer answered
+    # "does the whole FILE start with this delimiter", refused 25 of the 46
+    # bootstrap inputs as "unterminated string literal" (exit 1) and gave the
+    # 21 that begin with a `"""` docstring a 2-token stream — so this one
+    # defect was both bootstrap-stage2-dumps' failure and the
+    # dumps-nothing class behind bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md.
+    #
+    # CPython is the oracle, so this states no expected output: the grid below
+    # is the whole clamping surface (negative, zero, past-the-end and inverted
+    # windows against a 1-char, a 2-char, an over-long and an EMPTY needle),
+    # and the compiled program has to agree with CPython on every cell. `b()`
+    # is there because a `bool` reaching `print` through an unannotated
+    # parameter is typed `int64_t` and prints 0/1, which is a repr question
+    # this test is not about.
+    test_gimple_matches_cpython("gimple_str_window_matches_cpython", """\
+def b(x):
+    if x:
+        return 1
+    return 0
+
+def row(s, needle):
+    print('row', repr(s), repr(needle),
+          b(s.startswith(needle)), b(s.endswith(needle)),
+          s.find(needle), s.rfind(needle), s.count(needle))
+
+def win(s, needle, a, c):
+    print('win', repr(s), repr(needle), a, c,
+          b(s.startswith(needle, a, c)), b(s.endswith(needle, a, c)),
+          s.find(needle, a, c), s.rfind(needle, a, c), s.count(needle, a, c))
+
+def main():
+    row("abcabc", "b")
+    row("abcabc", "z")
+    row("abcabc", "abc")
+    row("abcabc", "bcab")
+    row("abcabc", "")
+    for a in (-2, 0, 1, 2, 5, 6, 9):
+        for c in (-1, 0, 1, 2, 5, 6, 9):
+            win("abcabc", "b", a, c)
+            win("abcabc", "bc", a, c)
+            win("abcabc", "", a, c)
+            win("abcabc", "cabc", a, c)
+    # A needle in a VARIABLE, and a one-character one: `_scan_string_end` asks
+    # about `delim` (a `char *` local) and `_src_loc` asks about a literal
+    # '\\n', and a one-character argument arrives typed `char` rather than
+    # `char *` — the shape the windowed arms have to materialise.
+    q = "\\n"
+    t = "x\\ny\\nz"
+    print('var', t.find(q), t.rfind(q), t.count(q))
+    print('varwin', t.find(q, 2), t.rfind(q, 0, 3), t.count(q, 0, 3),
+          b(t.startswith(q, 2)), b(t.endswith(q, 0, 3)))
+    print('scan', b(t.startswith("x\\n", 0)), b(t.startswith("\\ny", 1)),
+          b(t.endswith("y\\n", 1, 4)), t.rfind("\\n", 0, 4))
+
+main()
+""")
+
     # partition/rpartition return a TUPLE in CPython and were returning an
     # unmarked list here, so the three expected strings below said `[...]`
     # where CPython says `(...)`. Two more divergences in the same function,

@@ -817,7 +817,24 @@ int64_t     mojo_str_to_int(MojoStr *s);
 double      mojo_str_to_float(MojoStr *s);
 
 /* String method operations on char* */
+/* The `[start[, end]]`-window family. Each has a plain 2-argument form for the
+ * no-window call site and an `_from` form taking the window, with
+ * MOJO_SLICE_STOP_OMITTED meaning "end not given" — the same split the
+ * bytes-side search helpers use (see mojo_bytes_find_from below), so a window
+ * cannot mean two different things by receiver type. The windows were
+ * silently DROPPED before: `s.startswith(p, i)` compared from byte 0, which is
+ * how the self-hosted tokenizer's `src.startswith(delim, j)` ended up testing
+ * the whole source against a one-character prefix. */
 int mojo_str_startswith(char *s, char *prefix);
+int mojo_str_startswith_from(char *s, char *prefix, int64_t start, int64_t stop);
+int mojo_str_endswith(char *s, char *suffix);
+int mojo_str_endswith_from(char *s, char *suffix, int64_t start, int64_t stop);
+int64_t mojo_str_find(char *s, char *needle);
+int64_t mojo_str_find_from(char *s, char *needle, int64_t start, int64_t stop);
+int64_t mojo_str_rfind(char *s, char *needle);
+int64_t mojo_str_rfind_from(char *s, char *needle, int64_t start, int64_t stop);
+int64_t mojo_str_count(char *s, char *sub);
+int64_t mojo_str_count_from(char *s, char *sub, int64_t start, int64_t stop);
 int mojo_str_isalnum(char *s);
 int mojo_str_isdigit(char *s);
 int mojo_str_isalpha(char *s);
@@ -832,17 +849,12 @@ int mojo_str_istitle(char *s);
 int mojo_str_isascii(char *s);
 int mojo_str_isprintable(char *s);
 int mojo_str_isnumeric(char *s);
-int mojo_str_endswith(char *s, char *suffix);
 int mojo_str_startswith_char(char *s, char c);
 int mojo_str_endswith_char(char *s, char c);
 int mojo_cstr_cmp(char *a, char *b);
 int mojo_str_contains(char *haystack, char *needle);
-int64_t mojo_str_find(char *s, char *needle);
-int64_t mojo_str_rfind(char *s, char *needle);
-int64_t mojo_str_find_from(char *s, char *needle, int64_t start);
 MojoList *mojo_str_split(char *s, char *sep);
 MojoList *mojo_str_splitlines(char *s);
-int64_t mojo_str_count(char *s, char *sub);
 MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit);
 MojoList *mojo_str_partition(char *s, char *sep);
 MojoList *mojo_str_rpartition(char *s, char *sep);
