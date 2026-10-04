@@ -1,3 +1,45 @@
+## Status (2026-10-04 — the CFG leaves are NAMED and the census is a measurement; `Still open 3` below is unchanged)
+
+Every `sorry` the CFG walk can emit now carries the name of the site that emits
+it (`formal/arm64_proof_gen.py`'s `CFG_LEAF_SITES`), and the two documents that
+used to enumerate them by line number had already disagreed — §7 row 7 of
+`FORMAL.md` said **seven**, the trust audit of 2026-10-04 said **eight**. Both
+were reading a list nobody had written down. That is fixed; §7 row 7 now names
+the registry.
+
+**The census over the corpus, which is what the 2026-10-01 entry above could not
+give.** 47 of `formal/examples`' 50 files generate an arm64 proof (`subscript_var`
+and `wide_recv` are refused by the model, and `sum_range` raises
+`ValueError: unsupported cbz taken continuation to 0x100000330` — see
+`bugs/FORMAL_sum_range_generation_refused_and_it_is_not_an_expected_failure.md`).
+Over those 47:
+
+| site | leaves reached | admits (measured by stripping the fallback and reading Lean) |
+|---|---|---|
+| `walk-terminal` | 324 | 0, over `identity` (4), `udivmod`/`threevar`/`bitops` (4 each), `ifonly` (8), `absval` (8), `sign` (12) |
+| `runs-cbz-condition` | 36 | **2 of 6 in `count`** — `bugs/FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md` |
+| `runs-ret-x0`, `runs-ret-x30`, `runs-ret-frame-ok-window` | 12 each | 0 in `count` |
+| `runs-bl-step` | 7 | 0 in `count` |
+| `dec-while-back-edge-decrement`, `-frame-slot` | 12 each | 0 in `wdiff` |
+| `loop-cond-flag`, `loop-cond-step` | 3 each | 0 in `wdiff` |
+| the five `range-loop-*` sites | 0 | unreachable in this corpus |
+
+`wdiff` with **all fourteen** of its leaves' fallbacks replaced by `done`
+typechecks with zero holes, which is the strongest single result here: the
+`dec`-while contract's two back-edge obligations and both loop-contract closers
+are not holes at all for the shape they were written for.
+
+**Two reds this entry's `PASS=39 KNOWN-GAP=6 FAIL=0` no longer describes, both
+pre-existing and neither a `sorry`:** `count` fails at proof line 5330
+(`bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md`), and `sgt8`/`sle8` fail
+on the obligation `⊢ t32s (t8s n) = n`
+(`bugs/FORMAL_arm64_a_narrow_typed_parameter_makes_the_universal_contract_false.md`).
+Neither stem is in `test_formal.py`'s `EXPECTED_FAILURES`.
+
+**`Still open 3` below is unchanged and is still the whole of what is left here.**
+What is new is that the work is now pinned to two model changes with the sites
+that will need them named, instead of "a model change somewhere".
+
 ## Status (2026-10-01 — "Still open 3" re-measured; the loop MODELS are still the whole of it)
 
 `test_formal.py` (arm64) on this tree: **`PASS=39 KNOWN-GAP=6 FAIL=0`**, and the

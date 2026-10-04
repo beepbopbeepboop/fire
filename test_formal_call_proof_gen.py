@@ -1915,5 +1915,198 @@ class TestDec1PathContext(unittest.TestCase):
                           f"and defined nowhere in the file")
 
 
+# ── The CFG leaves that admit ────────────────────────────────────────────────
+# `formal/arm64_proof_gen.py` used to spell its admissions out longhand, one
+# anonymous `all_goals (first | done | sorry)` per leaf.  The two documents
+# that enumerate them disagreed with each other about how many there were --
+# FORMAL.md §7 row 7 said seven and the trust audit of 2026-10-04 said eight --
+# because nobody had written the list down.  These tests are the list: the
+# registry is pinned by NAME, an admission added without a name fails, and the
+# instrument that says which leaf is live is itself pinned.
+
+#: The fifteen, spelled out.  A CEILING and not an equality would be the modern
+#: thing to want, but an equality is stronger here and is what makes a removal
+#: deliberate: dropping a name is the visible act that closes a leaf, and the
+#: corpus figures in the class docstring say which ones are still live.
+EXPECTED_CFG_LEAF_SITES = {
+    # the eight the trust audit's table named
+    "walk-terminal",
+    "dec-while-back-edge-decrement",
+    "dec-while-back-edge-frame-slot",
+    "runs-ret-x0",
+    "runs-ret-x30",
+    "runs-ret-frame-ok-window",
+    "runs-bl-step",
+    "runs-cbz-condition",
+    # five `for i in range(...)` obligations, spelled `all_goals sorry` and so
+    # invisible to a search for the eight above
+    "range-loop-frame-preservation",
+    "range-loop-exit-x30",
+    "range-loop-model-invariance",
+    "range-loop-back-edge-target",
+    "range-loop-terminal-invariant",
+    # the two closers both loop contracts share
+    "loop-cond-flag",
+    "loop-cond-step",
+}
+
+
+class TestCfgLeafCensus(unittest.TestCase):
+    """Every admission the arm64 generator can emit is a NAMED leaf.
+
+    Nothing here runs Lean.  These are invariants of the generator and of the
+    census it feeds; the Lean half -- "which leaf does the corpus actually
+    admit at" -- is `no_admission_fallback` plus a Lean run, which is what
+    `test_formal.py`'s census reports and what
+    `bugs/FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md`
+    records.
+    """
+
+    def test_the_registry_is_exactly_the_pinned_fifteen(self):
+        import formal.arm64_proof_gen as G
+        self.assertEqual(set(G.cfg_leaf_sites()),
+                         EXPECTED_CFG_LEAF_SITES)
+
+    def test_no_admission_in_the_generator_is_untagged(self):
+        """Every statement that can emit a `sorry` names the site it emits at.
+
+        The admission keyword the CFG walk writes into generated Lean is
+        `_HOLE`, assembled from two halves so a source grep cannot see it --
+        which is precisely why a grep is not the check, and why this test
+        exists: a NEW `all_goals sorry` written the old way has to fail here
+        rather than join a census that never counted it.
+
+        Only `_HOLE`, deliberately.  The literal word appears in this file for
+        three other families, none of them CFG leaves and each with its own
+        owner: the host contracts (`_decide_or_admit`, `_admitted_lean`), the
+        dylib export stubs (`_dylib_contract_proof`) and the extern step
+        (`_gen_extern_test`).
+        """
+        import formal.arm64_proof_gen as G
+        src = open(PROOF_GEN).read()
+        tree = ast.parse(src)
+        sites = set(G.cfg_leaf_sites())
+
+        # The three ways this file is allowed to name a leaf, and no fourth.
+        # An enumerable set is the point: "somewhere in this statement there is
+        # a tag" would let a function that tags one leaf hide an untagged
+        # admission in the same function.
+        NAMERS = ("_tag_leaf(", "_cfg_leaf(", "_leaf_tag_line(")
+
+        def named(seg):
+            return any(f'"{s}"' in seg for s in sites) or any(
+                n in seg for n in NAMERS)
+
+        untagged, covered = [], []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.stmt):
+                continue
+            if any(lo <= node.lineno <= hi for lo, hi in covered):
+                continue        # inside a statement already accounted for
+            seg = ast.get_source_segment(src, node) or ""
+            # `_HOLE` as SOURCE TEXT, not as its value: the value is the word
+            # `sorry`, which this file also spells out in prose and in three
+            # other families' code.  The identifier is what the CFG walk
+            # interpolates into generated Lean, and it is the only spelling
+            # those use.
+            if "_HOLE" not in seg or seg.lstrip().startswith("_HOLE "):
+                continue
+            if named(seg):
+                covered.append((node.lineno, node.end_lineno or node.lineno))
+                continue
+            head = seg.splitlines()[0].strip()[:70]
+            untagged.append(f"line {node.lineno}: {head}")
+        self.assertEqual(untagged, [], "an admission with no leaf name: "
+                         + "; ".join(untagged))
+        self.assertTrue(covered, "no admission found at all: this test would "
+                                 "pass on a generator that had stopped emitting")
+
+    def test_a_generated_proof_reaches_only_registered_sites(self):
+        """Over a slice of the corpus, the census is well formed.
+
+        `formal/examples` as a whole is 50 files and each build compiles and
+        links an image; this takes the shapes that are cheap and that between
+        them reach nine of the fifteen sites -- a recursion (every `runs-*`
+        site), a `while` (both `dec-while` back edges and both loop-contract
+        closers), and a plain leaf (the frame-contract terminal).  The point is
+        not coverage of the sites but that a census nobody has checked is not a
+        census.
+        """
+        import formal.arm64_proof_gen as G
+        corpus = os.path.join(HERE, "formal", "examples")
+        stems = ["ret42", "wdiff", "count"]
+        reached = set()
+        with tempfile.TemporaryDirectory(prefix="cfg-leaf-") as tmp:
+            for stem in stems:
+                src = os.path.join(corpus, stem + ".mojo")
+                out = os.path.join(tmp, stem + ".aout")
+                r = _generate_dir(tmp, src, stem, out)
+                with open(r["proof_path"]) as fh:
+                    proof = fh.read()
+                census = G.cfg_leaf_census(proof)
+                self.assertTrue(census, f"{stem}: no CFG leaf reached at all, "
+                                        "so the census read nothing")
+                for site, n in census.items():
+                    self.assertIn(site, EXPECTED_CFG_LEAF_SITES,
+                                  f"{stem}: unregistered site {site}")
+                    self.assertGreater(n, 0)
+                reached |= set(census)
+        # The three shapes are chosen so that this is a real assertion: a
+        # generator that stopped reaching the recursion or loop leaves would
+        # otherwise pass every test above.
+        self.assertLessEqual(
+            {"runs-bl-step", "runs-cbz-condition", "runs-ret-x0",
+             "dec-while-back-edge-decrement", "loop-cond-step",
+             "walk-terminal"} - reached, set(),
+            "the corpus slice no longer reaches the leaves it was chosen for")
+
+    def test_removing_the_fallback_leaves_no_admission_on_a_tagged_line(self):
+        """`no_admission_fallback` is the instrument; this is its own contract.
+
+        If it stopped removing the admission, a stripped proof would still
+        elaborate and every measurement taken with it would be a measurement of
+        nothing -- silently, because the run would come back green.
+        """
+        import formal.arm64_proof_gen as G
+        corpus = os.path.join(HERE, "formal", "examples")
+        with tempfile.TemporaryDirectory(prefix="cfg-leaf-") as tmp:
+            r = _generate_dir(tmp, os.path.join(corpus, "count.mojo"),
+                              "count", os.path.join(tmp, "count.aout"))
+            with open(r["proof_path"]) as fh:
+                proof = fh.read()
+        stripped = G.no_admission_fallback(proof)
+        self.assertIn(G.CFG_LEAF_TAG, stripped)
+        left = [l.strip()[:80] for l in stripped.splitlines()
+                if G.CFG_LEAF_TAG in l and "sorry" in l]
+        # a leaf whose tag is on its OWN line (the loop contract's `hstep`
+        # closer) is named by the line before it, so look one back too
+        lines = stripped.splitlines()
+        for i, l in enumerate(lines):
+            if "sorry" not in l:
+                continue
+            if G.CFG_LEAF_TAG in l or (i and G.CFG_LEAF_TAG in lines[i - 1]):
+                left.append(l.strip()[:80])
+        self.assertEqual(left, [], "a tagged CFG leaf still admits after "
+                                   "stripping: " + "; ".join(left))
+        # and the OTHER admissions are still there, because this function
+        # measures CFG leaves and nothing else: `strict`-free frame contracts
+        # are the only family it owns.
+        self.assertEqual(
+            sorted(G.cfg_leaf_census(proof)),
+            sorted(G.cfg_leaf_census(stripped)),
+            "stripping changed which sites the proof reaches, which it cannot")
+
+
+def _generate_dir(tmp, src_path, name, out):
+    """`compile_formal` on an existing `.mojo`, with NO Lean check.
+
+    The same call `_generate` makes, for a program already on disk rather than
+    written out of a dict; `check=False` is what keeps this class Lean-free.
+    """
+    import formal.build as fb
+    return fb.compile_formal(src_path, arch="arm64", output=out,
+                             prove=True, check=False)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
