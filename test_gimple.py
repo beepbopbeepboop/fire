@@ -10189,47 +10189,55 @@ walk_span()
         _PASS += 1
 
     def test_two_modules_one_same_named_function_keep_their_own_return_types():
-        """Two modules of one package, one SAME-NAMED private function each
-        with a different return type, called from inside each module — on
-        both pipelines, with CPython's own stdout as the expectation.
+        """Two modules of ONE translation unit, one SAME-NAMED private function
+        each with a different return type, each called from inside the module
+        that defines it — asserted against CPython's own stdout.
 
-        `func_return_types` is keyed by the BARE function name, and every
-        return-type inference pass in `gen_module_impl` walks `all_functions`
-        — this module's own `stmts` plus the flat transitive closure — so it
-        writes that one slot once per module that defines the name. Two
-        modules defining one bare name with different return types therefore
-        share a single answer, and whichever module's pass wrote last typed
-        BOTH modules' call sites.
+        `func_return_types` is keyed by the BARE function name, and both the
+        inference passes and `gen_func` write that one slot once per module
+        that defines the name. Two modules defining one bare name therefore
+        share a single answer, and whichever wrote last typed BOTH modules'
+        call sites.
 
         The real instance is this compiler's own closure:
         `mojo/middle/offload.py`'s `_mentions(node, name) -> bool` against
         `mojo/backend_gimple/elab_intu.py`'s unannotated
         `_mentions(ann) -> MojoList *`. offload's `rewrite_fused_loop_walk`
-        declared its call temp `MojoList *`, ran `mojo_list_len` on a bool,
-        and gcc failed the whole self-host build on exactly one
-        `-Wint-conversion` (bugs/CODEGEN_two_private_functions_of_one_name_
-        share_one_return_type.md). Here BOTH orders are exercised, so the
-        answer cannot depend on which sibling happened to be compiled last:
-        the list caller needs `len()` and the bool caller needs a truth test,
-        and each is wrong under the other's type — as a gcc error on one
-        pipeline, and as a silently wrong printed value if a compiler were
-        lenient enough to accept the cast.
+        declared its call temp `MojoList *`, ran `mojo_list_len` on a bool, and
+        gcc failed the whole self-host build on exactly one
+        `-Wint-conversion` — `assignment to 'MojoList *' from 'int'` at
+        generated line 885606 (bugs/CODEGEN_two_private_functions_of_one_name_
+        share_one_return_type.md).
 
-        Deliberately NOT aliases (`from p.lister import _mentions as ...`):
-        the shape here is a call to a same-named function from INSIDE the
-        module that defines it, which is what the real instance is, and it
-        exercises `_func_csym`'s tier-1 qualifier. The importers call
-        differently-named wrappers, which is what gives the test an
-        observable printed value at all.
+        FOUR details of the fixture are load-bearing, and each was measured
+        rather than guessed — earlier versions of this test PASSED against the
+        unfixed compiler, which is what found them. A test that cannot fail is
+        worse than no test, so they are recorded here:
 
-        `found` folds its bool into an `int64_t` rather than returning it,
-        because `print` of a bare `-> bool` call prints `1`/`0` where CPython
-        prints `True`/`False` — measured on this tree with no name collision
-        present at all, so it is a separate defect this test must not be
-        measuring. What it still exercises is exactly the real shape: the
-        bool-returning `_mentions` used as a CONDITION, which is what
-        `offload.rewrite_fused_loop_walk`'s `if _mentions(call.args, ...)`
-        does.
+        * `found` is defined BEFORE `_mentions` in `p/checker.py`. Emission
+          follows source order, so with the definition first its `gen_func`
+          writes the correct answer into the shared slot before the call site
+          reads it, and the collision is invisible. In the real instance the
+          mis-typed call site (generated line 885606) precedes the definition
+          (885849), which is why it bit there and not here.
+        * `p/checker.py` imports `p.lister`, so both same-named definitions
+          really are in ONE `gen_module`'s `all_functions`. Two siblings that
+          never import each other each get a closure of one and cannot
+          collide; only the ROOT gen's `all_functions` spans both, and its
+          bodies make no `_mentions` call.
+        * `main` imports `p/checker` only. Two importers of `p.lister` (a
+          diamond) is a separate link-mode defect, measured independent of
+          this one — bugs/CODEGEN_link_mode_diamond_import_gives_an_imported_
+          function_a_void_prototype.md.
+        * The two return types are `MojoList *` and `char *`, not `char *` and
+          `int`. An `int`-returning `_mentions` degenerates to `int64_t` in
+          this file's process (importing `mojo.middle.infra_infer` at module
+          scope changes unannotated-param inference), and with nothing but
+          `int64_t` in play there is no disagreement left to detect.
+
+        SINGLE-TU ONLY, and that is where the class lives: link mode compiles
+        each module as its own translation unit, so two same-named definitions
+        are never in one table and there is nothing to collide.
         """
         global _PASS, _FAIL
         name = "two_modules_one_same_named_function_keep_their_own_return_types"
@@ -10247,24 +10255,25 @@ walk_span()
                 'def hits(items, name):\n'
                 '    return len(_mentions(items, name))\n'
             ),
-            # ANNOTATED `-> bool`, so this one contributed nothing to the
-            # bare slot at all and read whatever the other one wrote.
+            # `found` BEFORE `_mentions`, and importing p.lister so both
+            # definitions land in one translation unit.
             'p/checker.py': (
-                'def _mentions(items, name) -> bool:\n'
-                '    for it in items:\n'
-                '        if it == name:\n'
-                '            return True\n'
-                '    return False\n'
+                'from p.lister import hits\n'
                 '\n'
                 'def found(items, name):\n'
-                '    n = 0\n'
-                '    if _mentions(items, name):\n'
-                '        n = 1\n'
+                '    n = hits(items, name)\n'
+                '    if _mentions(items, name) == "yes":\n'
+                '        n = n + 1\n'
                 '    return n\n'
+                '\n'
+                'def _mentions(items, name) -> str:\n'
+                '    for it in items:\n'
+                '        if it == name:\n'
+                '            return "yes"\n'
+                '    return "no"\n'
             ),
             'p/main.py': (
-                'from p.lister import hits\n'
-                'from p.checker import found\n'
+                'from p.checker import found, hits\n'
                 '\n'
                 'def main():\n'
                 '    items = ["a", "b", "b", "c"]\n'
@@ -10283,6 +10292,10 @@ walk_span()
                 with open(fp, 'w') as fh:
                     fh.write(body)
             entry = os.path.join(td, 'p', 'main.py')
+            # PYTHONPATH=td, not just cwd: running a script puts the SCRIPT'S
+            # OWN directory on sys.path, and this program imports `p` as a
+            # sibling of it — see the same note in
+            # `aliased_and_reexported_imports_resolve_to_the_defining_module`.
             py = subprocess.run([sys.executable, entry], capture_output=True,
                                 text=True, cwd=td, timeout=60,
                                 env=dict(os.environ, PYTHONPATH=td))
@@ -10293,32 +10306,28 @@ walk_span()
                       f"wrong, not the compiler")
                 _FAIL += 1
                 return
-            want = py.stdout
-            for mode in ('single-TU', 'link-mode'):
-                c_src = gimple_codegen._run_pipeline(
-                    files['p/main.py'], filename=entry,
-                    **({'do_imports': True} if mode == 'single-TU'
-                       else {'link_mode': True}))[0]
-                c_file = os.path.join(td, f'same_name_{mode}.c')
-                exe = os.path.join(td, f'same_name_{mode}.exe')
-                with open(c_file, 'w') as fh:
-                    fh.write(c_src)
-                cc = subprocess.run(
-                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
-                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
-                if cc.returncode != 0:
-                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
-                          f"{cc.stderr[:1200]}")
-                    _FAIL += 1
-                    return
-                run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
-                if run.stdout != want:
-                    print(f"FAIL  {name} [{mode}]: printed {run.stdout!r}, "
-                          f"CPython printed {want!r}")
-                    _FAIL += 1
-                    return
+            c_src = gimple_codegen._run_pipeline(
+                files['p/main.py'], filename=entry, do_imports=True)[0]
+            c_file = os.path.join(td, 'same_name.c')
+            exe = os.path.join(td, 'same_name.exe')
+            with open(c_file, 'w') as fh:
+                fh.write(c_src)
+            cc = subprocess.run(
+                [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                 os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=300)
+            if cc.returncode != 0:
+                print(f"FAIL  {name}: gcc -fgimple failed:\n"
+                      f"{cc.stderr[:1200]}")
+                _FAIL += 1
+                return
+            run = subprocess.run([exe], capture_output=True, text=True,
+                                 timeout=30)
+            if run.stdout != py.stdout:
+                print(f"FAIL  {name}: printed {run.stdout!r}, CPython "
+                      f"printed {py.stdout!r}")
+                _FAIL += 1
+                return
         print(f"PASS  {name}")
         _PASS += 1
 

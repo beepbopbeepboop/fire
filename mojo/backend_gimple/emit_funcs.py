@@ -2660,6 +2660,22 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     gen.func_ret_type = ret_type
     # Sync so forward declarations (Phase 2b) match Phase 2a inference
     gen.func_return_types[node.name] = ret_type
+    # ...and so does every CALL SITE of this definition, which reaches this
+    # function's answer through `_home_def_return_type` rather than through
+    # the bare slot above. `gen_func` is the DEFINITION-side writer and the
+    # most authoritative one there is — it has the real emitted body, and the
+    # annotation when there is one — so its answer has to be the one a call
+    # site uses, in preference to whatever any inference pass guessed.
+    #
+    # It is also the writer that made the collision observable in the first
+    # place: definitions emit in source order, so a definition late in a file
+    # lands in the shared slot AFTER a sibling module's inference passes had
+    # put theirs there, and any bare reader in between sees whichever ran last
+    # rather than whichever it means. Real: `offload._mentions`'s call site
+    # (generated line 885606) precedes its own definition (885849), so the
+    # definition's own answer was not in the slot yet and the call site read
+    # elab_intu's `MojoList *`.
+    _record_home_def_return_type(gen, node, node.name, ret_type)
 
     # Run layout solver for struct locals
     solver = gimple_solvers.LayoutSolver(gen.struct_field_types)
