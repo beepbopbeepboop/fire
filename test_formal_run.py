@@ -6721,6 +6721,78 @@ BOTH_ARCH_CASES = [
      "    r.zero()\n"
      "    printf(\"a=%d b=%d\", r.a, r.b)\n"
      "    return 0\n", 0, "a=0 b=0"),
+    # …and the LOCAL spelling of the same rebinding, which is the other half of
+    # `model.receiver_own_type_names` and was refused until 2026-10-04. `t` is
+    # callee-private, so Python's later stores through the rebound receiver
+    # mutate something nobody outside can name — and a MULTI-FIELD receiver is
+    # an address, so repointing it is exactly Python's own rebinding and the
+    # caller's frame is untouched. CPython 3.14 on this source answers
+    # `a=7 b=8`: `t`'s 5 and 6 are written into `t`, which goes out of scope,
+    # and `r` still holds what the caller built it with.
+    ("both_arch_receiver_rebound_to_a_local_leaves_the_callers_object",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def zero(self):\n"
+     "        var t = R()\n"
+     "        t.a = 5\n"
+     "        t.b = 6\n"
+     "        self = t\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    r.b = 8\n"
+     "    r.zero()\n"
+     "    printf(\"a=%d b=%d\", r.a, r.b)\n"
+     "    return 0\n", 0, "a=7 b=8"),
+    # A rebinding to a plain WORD whose word nobody reads again: there is no
+    # store after it to drop and no field read to load at `[5 + 8·slot]`, and a
+    # multi-field receiver is never handed back to its caller
+    # (`model.receiver_writeback_name` is a ONE-FIELD mutator's mechanism and
+    # answers None here), so the caller's slot is exactly as it was. CPython 3.14
+    # answers `read=7` and this path now agrees on both architectures; it used to
+    # be refused, which is the over-broad refusal
+    # `receiver_rebound_to_a_word_then_read_is_refused` is the hazard half of.
+    ("both_arch_receiver_rebound_to_a_word_nobody_reads_again_leaves_the_callers_object",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def rebind(self):\n"
+     "        self = 5\n"
+     "\n"
+     "    def read(self):\n"
+     "        return self.a\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    r.b = 8\n"
+     "    r.rebind()\n"
+     "    printf(\"read=%d\", r.read())\n"
+     "    return 0\n", 0, "read=7"),
+    # The GUARD on that row, and it is what says the liveness test is positional
+    # rather than "is the name mentioned anywhere": the store is BEFORE the
+    # rebinding, so it lands in the caller's frame and survives it. CPython 3.14
+    # answers `a=9`, and a test written as "the receiver is not mentioned again"
+    # would refuse this program for the row above's reason.
+    ("both_arch_a_store_before_the_rebinding_still_reaches_the_caller",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def rebind(self):\n"
+     "        self.a = 9\n"
+     "        self = 5\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    r.rebind()\n"
+     "    printf(\"a=%d\", r.a)\n"
+     "    return 0\n", 0, "a=9"),
 
     # ── a class-level constant and a field default are LITERAL expressions ──
     #
@@ -17152,12 +17224,25 @@ EQ_DISPATCH_CASES = [
     # different word and the write never gets back. CPython rejects the shape
     # outright, which is why the message says the source does not mean what it
     # looks like rather than that it computes a different answer.
-    ("receiver_rebound_to_a_word_is_refused",
+    #
+    # **The store that makes it a defect is a store AFTER the rebinding**, and
+    # this row is where that is decided.  Until 2026-10-04 this row's program
+    # had NO store after the rebinding either — `rebind` assigns and returns,
+    # and the reads are in another method — and it was refused anyway.  That
+    # refusal was over-broad: CPython runs it and answers `read() == 7`, because
+    # a rebinding whose word nobody reads cannot drop a store (there is none
+    # left to drop) and a multi-field receiver is never handed back, so the
+    # caller's slot is untouched.  It is now answered in
+    # `BOTH_ARCH_CASES` as `both_arch_receiver_rebound_to_a_word_nobody_reads_
+    # again_leaves_the_callers_object`, and the row below is the same program
+    # with the one store that makes the hazard real.
+    ("receiver_rebound_to_a_word_then_read_is_refused",
      "struct R:\n"
      "    var a: Int\n"
      "    var b: Int\n"
      "    def rebind(self):\n"
      "        self = 5\n"
+     "        self.a = 1\n"
      "    def read(self):\n"
      "        return self.a\n"
      "def main(n):\n"
@@ -17168,13 +17253,16 @@ EQ_DISPATCH_CASES = [
      "refuse:self is assigned 5 in R_rebind()", None),
     # The receiver spelled something other than `self`, which is why the rule
     # reads the receiver SET rather than the literal name. Without this row a
-    # fix that hard-coded `self` would pass the one above.
+    # fix that hard-coded `self` would pass the one above.  The store after the
+    # rebinding is what keeps this a refusal (see the row above), so it is also
+    # the row that says the liveness test reads the receiver SET and not `self`.
     ("receiver_rebound_under_another_spelling_is_refused",
      "struct R:\n"
      "    var a: Int\n"
      "    var b: Int\n"
      "    def rebind(this):\n"
      "        this = 5\n"
+     "        this.a = 1\n"
      "def main(n):\n"
      "    var r = R()\n"
      "    r.rebind()\n"
@@ -17182,18 +17270,68 @@ EQ_DISPATCH_CASES = [
      "refuse:this is assigned 5 in R_rebind()", None),
     # A CALL is a refusal too, and it is the shape a real rotation helper uses
     # (`self = self.unsafe_offset(offset)` in stdlib `memory/pointer.mojo`), so
-    # this is the row that says the rule is not merely "not a literal".
+    # this is the row that says the rule is not merely "not a literal".  `f` is
+    # DEFINED here, which it was not before 2026-10-04: a rebinding nothing
+    # reads is answered now, so a row whose only defect was an undefined callee
+    # would now be reporting the linker's diagnosis instead of this rule's.
     ("receiver_rebound_to_a_call_is_refused",
      "struct R:\n"
      "    var a: Int\n"
      "    var b: Int\n"
      "    def rebind(self):\n"
      "        self = f()\n"
+     "        self.a = 1\n"
+     "def f() -> Int:\n"
+     "    return 5\n"
      "def main(n):\n"
      "    var r = R()\n"
      "    r.rebind()\n"
      "    return r.a\n",
      "refuse:self is assigned f() in R_rebind()", None),
+    # …and the ONE-WORD holder of a placed frame is not a multi-field receiver,
+    # so neither exemption reaches it even with nothing read afterwards: there
+    # the receiver WORD is the frame address the caller still holds, and the same
+    # assignment destroys it.  This row is what keeps the two exemptions honest
+    # — a fix that asked only "is the receiver read again" would let this build
+    # and answer a load at `5 + 8·slot`.
+    ("receiver_rebound_to_a_word_is_refused_on_a_one_word_holder_of_a_frame",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def poke(self):\n"
+     "        self = 5\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var b = Box()\n"
+     "    b.inner = Opt()\n"
+     "    b.poke()\n"
+     "    return b.inner.v\n",
+     "refuse:self is assigned 5 in Box_poke()", None),
+    # And the CONSTRUCTOR half of the local exemption: a `__init__` is a
+    # spelling this path never CALLS (`model.init_body_stores` inlines the
+    # stores at the construction site), so the frame a rebinding would point at
+    # is one no caller ever wrote, and the caller reads zeros where CPython
+    # raises `AttributeError`.  Refused, and by `init_body_stores` rather than
+    # by this rule — which is the point of pinning the program: the exemption
+    # must not be what turns this into a silent zero.
+    ("a_constructor_rebound_to_a_local_is_refused",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "        var t = R()\n"
+     "        t.a = 1\n"
+     "        self = t\n"
+     "def main() -> Int:\n"
+     "    var r = R()\n"
+     "    return r.a\n",
+     "refuse:whose body this path does not inline", None),
     # THE GUARDS, and they are what make the three above mean something: a rule
     # written as "never rebind a receiver" would refuse all of these, and nine
     # real stdlib files with it.

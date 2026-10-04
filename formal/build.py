@@ -5036,6 +5036,17 @@ def _collect_receiver_rebinds(functions, structs_by_name: dict,
     reimplementing it, because a second copy of "what can be a frame" is how
     the two came to disagree about `self = Self(...)` in the first place.
 
+    **Two of "everything else" are answered here rather than refused, and both
+    are the 2026-10-04 narrowing of a rule that was over-broad for a
+    multi-field receiver** (`bugs/FORMAL_one_field_receiver_rebound_
+    propagates.md` §3). A name of the receiver's own type that the method binds
+    for ITSELF is a copy like a parameter is, and a rebinding nothing reads
+    afterwards drops no store — the two exemptions are spelled out where they
+    are taken, and both are gated on `receiver_is_an_address`, because a
+    one-word struct's receiver is a VALUE (or, when its sole field holds a
+    placed frame, the very address the caller still holds) and neither reading
+    holds there.
+
     Parked on the function and raised by `check_receiver_rebinds`, like every
     other finding in this family, so the refusal does not preempt the import
     diagnosis (`_run_late_checks` is called after imports resolve)."""
@@ -5130,6 +5141,52 @@ def _collect_receiver_rebinds(functions, structs_by_name: dict,
                 continue
             if own_name and M.annotation_base_name(ann, own_name) == own_name:
                 same_type.add(pname)
+        # The two EXEMPTIONS, and both are about the receiver being an ADDRESS.
+        # This collector is reached by three kinds of owner (the gate above):
+        # a multi-field struct, whose receiver is the address of a frame of
+        # 8-byte slots; a one-field struct whose sole field holds a placed
+        # nested FRAME, whose receiver is that one word and is therefore the
+        # address the CALLER still holds; and a one-field `__init__`, whose
+        # receiver is a value.  For the last two the caller's own storage is
+        # what a rebinding overwrites, so neither exemption may fire there and
+        # `receiver_is_an_address` is what says so — from `one_field_answer`,
+        # the same predicate the write-back that makes a one-field receiver a
+        # value in the first place is decided by.
+        member = M.method_member_name(owner, fn)
+        receiver_is_an_address = not M.one_field_answer(owner, one_field)
+        # A LOCAL of the receiver's own type is a copy, for the same reason a
+        # parameter is: `var t = R()` is an address of the receiver's own frame
+        # layout whatever else happens to it, so `self = t` repoints the method
+        # at a frame Python also repoints it at, and the caller's slot keeps the
+        # address its own fields live at — which is Python's answer too,
+        # measured (`a=7 b=8` on CPython 3.14 and on both backends).
+        # `receiver_own_type_names` is the ONE recogniser of "a name this
+        # function can hold a reference to an object of the receiver's own type
+        # in", and it is asked here for the half `_collect_one_field_receiver_
+        # rebinds` uses, because the one-field answer needs BOTH halves (there
+        # the copy is the defect) and this one needs only the local half (there
+        # it is the repair).
+        #
+        # **A CONSTRUCTOR is not this repair, and it is the one exclusion.**
+        # This path never CALLS a constructor — `model.init_body_stores` inlines
+        # `self.<field> = …` into the fresh block AT THE CONSTRUCTION SITE, in
+        # the calling function — so a constructor is a spelling that runs
+        # nowhere, and the frame a rebinding would repoint at is one no caller
+        # ever wrote: the caller reads zeros where CPython raises
+        # `AttributeError`.  Measured over the corpus
+        # (`tools/formal_receiver_rebind_census.py`): exactly one site of this
+        # spelling exists and it IS a constructor (`std/utils/index.mojo`), so
+        # allowing it would buy 0 files and trade a refusal for a silent zero on
+        # the only program that uses it.
+        #
+        # **Asked lazily, below, and not here.**  It walks the body a second
+        # time and this collector already walks it once for every method of
+        # every struct in the module, so the answer is fetched on the first
+        # rebinding that needs it — which is a body that has one — rather than
+        # by every method that does not (`bugs/PERF_struct_field_split_asked_
+        # once_per_function.md` is the same lesson about a whole-struct
+        # derivation asked per function).
+        own_locals = None
         findings = []
         for node in M.iter_nodes(getattr(fn, "body", None)):
             if not isinstance(node, (F.AssignStmt, F.VarDecl)):
@@ -5149,11 +5206,105 @@ def _collect_receiver_rebinds(functions, structs_by_name: dict,
                     continue        # a copy of the receiver itself
                 if value.name in same_type:
                     continue        # a parameter of the same struct: also a copy
+                if receiver_is_an_address and member != "__init__" \
+                        and own_locals is None:
+                    own_locals = M.receiver_own_type_names(
+                        fn, owner, structs_by_name)[1]
+                if own_locals and value.name in own_locals:
+                    continue        # a local of the same struct: also a copy
             if _value_may_be_a_frame(value, structs_by_name, receivers, owner):
                 continue            # a construction of the receiver's own struct
+            # The THIRD exemption, and the only one that is flow rather than a
+            # fact about a declaration: a rebinding nobody reads again.  The
+            # defect this rule reports is a DROPPED STORE, so a receiver that is
+            # dead from the assignment to the end of the method cannot drop one
+            # — there is no store left to drop and no later field read to load
+            # at `[base + 8·slot]`, and the caller's slot is untouched because a
+            # multi-field receiver is never handed back
+            # (`model.receiver_writeback_name` is a one-field mutator's
+            # mechanism and answers None here).  Measured: `def rebind(self):
+            # self = 5` with the reads in another method answers `read() == 7`,
+            # which is CPython's answer, on both architectures.
+            #
+            # It is asked ONLY for an address receiver, because the one-word
+            # holder of a placed frame is the case where the caller's storage is
+            # the receiver: there the same assignment destroys the frame address
+            # the CALLER holds, and no liveness test can make that sound.  And it
+            # is asked only once a finding exists, so a body with no receiver
+            # rebinding — which is every body but this one — pays nothing.
+            if receiver_is_an_address and _receiver_unused_after(fn, target, node):
+                continue
             findings.append((target, _expr_spelling(value)))
         if findings:
             fn._receiver_rebinds = (findings, owner)
+
+
+def _mentions_name(node, name: str) -> bool:
+    """Does `node`'s own subtree READ OR WRITE the bare name `name`?
+
+    The one reader of "a field read or a store through this receiver", and it is
+    deliberately just the bare `IdentExpr`: `recv.f` is `MemberExpr(obj =
+    IdentExpr(recv))`, so the object node is in the tree and this answers for it,
+    and a spelling that reached the receiver some other way (a `return recv`, a
+    call's argument, `recv` as a callee's receiver) is a use of the word as
+    well.  A name that merely APPEARS in an annotation is a string in this tree,
+    not an `IdentExpr`, so a parameter declared `self: R` is not a use.
+    """
+    if isinstance(node, F.IdentExpr):
+        return getattr(node, "name", None) == name
+    if isinstance(node, F.VarDecl):
+        return getattr(node, "name", None) == name
+    return False
+
+
+def _receiver_unused_after(fn, name: str, stmt) -> bool:
+    """Is the receiver `name` dead from the rebinding `stmt` to the end of
+    `fn`?
+
+    **The one POSITION-SENSITIVE walk in this family**, and it is position
+    sensitive because the fact it asks about is: `self.a = 1` BEFORE `self = 5`
+    is a store that reaches the caller and `self.a = 1` AFTER it is a store into
+    whatever word `5` is.  So this cannot be "is the name mentioned anywhere",
+    which would refuse the first program for the second one's reason.
+
+    It walks `fn`'s body ONCE, in `model.iter_nodes_with_parent`'s pre-order, to
+    get each node's parent beside it — `iter_nodes` alone cannot answer "is this
+    node inside that one", and a second private copy of the traversal is the
+    thing `model.iter_nodes`'s own docstring exists to prevent.  A node's
+    subtree is the run of nodes after it whose ancestor chain reaches it, and
+    the question is whether any node PAST that run mentions the name.
+
+    Over-approximating is the safe direction here and it is deliberate: a
+    nested `def`/lambda body that mentions the receiver counts as a use even
+    though it may never be called, because a closure that outlives the method
+    and reads `self.<field>` is the same load this rule is about.
+    """
+    body = getattr(fn, "body", None)
+    order, parents, index = [], [], {}
+    for node, parent in M.iter_nodes_with_parent(body):
+        index.setdefault(id(node), len(order))
+        order.append(node)
+        parents.append(parent)
+    start = index.get(id(stmt))
+    if start is None:
+        return False
+
+    def inside(j: int) -> bool:
+        """Is `order[j]` inside `order[start]`'s own subtree?"""
+        parent = parents[j]
+        while parent is not None:
+            at = index.get(id(parent))
+            if at is None:
+                return False
+            if at == start:
+                return True
+            parent = parents[at]
+        return False
+
+    j = start + 1
+    while j < len(order) and inside(j):
+        j += 1
+    return not any(_mentions_name(node, name) for node in order[j:])
 
 
 def check_receiver_rebinds(functions) -> None:
