@@ -2226,6 +2226,31 @@ def _func_qualifier(gen, bare_name: str) -> str:
     return ''
 
 
+def _func_home_qualifier(gen, bare_name: str) -> str:
+    """`_func_qualifier`'s answer for `bare_name`, or `''` when the reference
+    is the genuinely-AMBIGUOUS one that function refuses to answer — never an
+    exception.
+
+    For the readers that want a per-definition answer but must not be able to
+    fail: `_quick_type` is a pure ESTIMATOR that runs over speculative paths
+    all over inference, and turning "this reference is ambiguous" into a
+    hard error there would introduce a failure mode that does not exist
+    today, in a place that is not the one that reports it. `''` is the right
+    "no answer" for such a reader anyway: it means no definition of its own to
+    consult, so the caller falls back to the shared bare slot exactly as it
+    did before.
+
+    Same disposition as `_imported_def_pts`, which resolves to `None` for an
+    `_AMBIGUOUS_FUNC_HOME` entry with the same reasoning written out; the
+    authoritative refusal stays in `_func_qualifier`, which every `_func_csym`
+    call — i.e. every call this compiler actually EMITS — runs anyway.
+    """
+    try:
+        return _func_qualifier(gen, bare_name)
+    except RuntimeError:
+        return ''
+
+
 def _locally_binds_name(gen, bare_name: str) -> bool:
     """Whether the module CURRENTLY being compiled itself defines or
     imports a free function named `bare_name` — i.e. tiers 1/2 of

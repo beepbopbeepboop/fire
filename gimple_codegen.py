@@ -4200,6 +4200,31 @@ class GimpleGen:
         return gfn._overload_suffix(self, bare_name)
     def _note_own_func_home(self, bare_name: str, module_name: str, record_scope: bool=True) -> None:
         return gfn._note_own_func_home(self, bare_name, module_name, record_scope)
+    def _func_return_type_for_call(self, bare_name: str, default: str = 'int64_t') -> str:
+        """`func_return_types[bare_name]`, unless the module this reference
+        resolves to PUBLISHED its own answer for that definition, which wins.
+
+        `func_return_types` is keyed by the BARE name and a whole-translation-
+        unit closure routinely has several modules defining one bare name with
+        different return types, so its single slot holds one arbitrary module's
+        answer. An INFERENCE reader is as exposed to that as emission is, and
+        the exposure compounds: `def found(x): return _mentions(x, 'b')` infers
+        `found`'s own return type from whatever `_mentions` the shared slot
+        holds, so the wrong answer does not stay confined to the colliding
+        pair — it propagates into every function that forwards the call. The
+        per-definition store (`_home_def_return_types`) is what stops it, and
+        this is the one place a caller with no emitted symbol in hand can reach
+        it.
+
+        Reads the store through `_func_home_qualifier`, which never raises: an
+        ambiguous reference has no definition of its own to consult, so `''` is
+        the honest "no answer" and the bare slot remains the fallback.
+        """
+        _hit = gfn._home_def_return_type(
+            self, gfn._func_home_qualifier(self, bare_name), bare_name)
+        if _hit is not None:
+            return _hit
+        return self.func_return_types.get(bare_name, default)
     def _push_import_scope(self) -> dict:
         return gfn._push_import_scope(self)
     def _pop_import_scope(self) -> None:
