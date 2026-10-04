@@ -321,6 +321,50 @@ BINDS, and `reexported_names` records the name the defining module gave it, so
 the consumer's `aliased(21)` cannot bind. Measured, with the build refusing to
 emit an image whose symbol nothing provides.
 
+### MEASURED 2026-10-04 (`formal25-3`): that item is TWO items, one of them
+### fixed here and the other still open — and the one that was open was not the
+### one the sentence describes
+
+The sentence above names the RE-EXPORT (a consumer importing an alias a module
+published). Re-measured on this tree, the alias is refused in **three** places,
+and the two halves have nothing to do with each other:
+
+| # | shape | before | after |
+|---|---|---|---|
+| A | the PROGRAM imports under an alias and calls it (`from deflib import need_two as nt; nt(1)`) | worked | worked — `test_formal_cross_module.py`'s case, 2024 |
+| B | the PROGRAM imports under an alias, and the program calls **the library's own function**, which calls the alias | **refused** — `mid.mojo: the library would bind 1 symbol(s) that nothing provides, so it could not be loaded: aliased` | **FIXED** — `compile_formal_dylib` hands its emitters `import_bindings` now |
+| C | a MODULE re-exports an alias and a consumer imports it (`from mid import aliased`) | **refused** — “`aliased` is called, and it is imported from `mid` … That module does not export it, and the reason is `doc/ABI.md`'s export rule” | **still refused** |
+
+**B is the one the sentence does not describe and the one that was silently
+whole.** The alias is a property of the file that WRITES it, so a module that
+calls one has to bind the DEFINING name — and `compile_formal_dylib` passed
+`dylib_syms` and `dylib_exports` to its emitters and nothing else, where
+`compile_formal` has always passed `import_bindings`. Two files and one
+boundary would not have shown it: the existing case for A is a two-file tree, and
+it passes on the program's side alone. B needs three (leaf defines, mid imports
+under an alias and calls it, prog imports mid) and it is now
+`test_formal_cross_module.py`'s `a LIBRARY that calls its own import alias binds
+the defining name`, differential against CPython on both architectures.
+
+**C is still open and is a smaller question than it looks.** `reexported_names`
+already returns BOTH spellings — measured in process on this tree:
+
+```python
+>>> reexported_names(module_statements("mid.mojo"))
+{'base': ('leaf', …, 'base'), 'aliased': ('leaf', …, 'base')}
+```
+
+so the publication table is right and the drop is downstream of it: both entries
+name ONE symbol in `leaf`'s trie, and whatever writes the manifest keeps one
+spelling. **The exact next step is to find where a re-export entry's NAME stops
+being the key** — `compile_formal_dylib`'s `_formal_exports`/`module_prefixes`,
+or the export trie — and to decide which spelling wins, because a consumer that
+spells `aliased` and a consumer that spells `base` both have to bind, and that
+is an ABI question (`doc/ABI.md`'s export rule) rather than a reader's fix. Until
+it is decided, the honest state of this item is the sentence above plus the two
+rows: B landed, C refused by name with a message that now names the export rule
+rather than the link line.
+
 ## 5. The histogram that found the last false clause
 
 The name histogram per arm (over the 41, which is what a cause table prints per
