@@ -291,11 +291,15 @@ def string_at(pointer: str) -> str:
 ADMITTED_EXIT_STATUS = 125
 """The status an admitted call exits with.
 
-The same 125, and the same reason, as `formal/hostmods/subprocess.mojo`: it is
-outside `0..255`, so it cannot be read as an exit status a foreign function
-produced.  Repeated rather than imported for the reason the file gives for not
-importing `struct`'s arithmetic -- `ctypes` is imported alone, and a shared
-constant across two hostmods is a second thing to keep in step.
+The same 125 as `formal/hostmods/subprocess.mojo`, and the same CORRECTED reason:
+it is INSIDE `0..255`, so it cannot be read as an exit status a foreign function
+produced is NOT what makes it safe — nothing can, because the kernel masks every
+exit code into 0..255.  What makes it safe is that it is nonzero and reserved by
+this tree, and that `_admitted` prints the contract that stopped the call; the
+diagnostic is the channel, the number is the marker.  Repeated rather than
+imported for the reason the file gives for not importing `struct`'s arithmetic --
+`ctypes` is imported alone, and a shared constant across two hostmods is a second
+thing to keep in step.
 """
 
 def _admitted(what: str) -> int:
@@ -306,7 +310,7 @@ def _admitted(what: str) -> int:
     exit(ADMITTED_EXIT_STATUS)
     return 0
 
-@admitted("the loader handle is 0, meaning no library of that name is on this target, or a non-zero word this target's dynamic loader owns")
+@admitted("the loader handle is 0 when dlopen(3) failed: the file may be absent, may not be a loadable image, or a symbol may be unresolvable, and CPython raises OSError for all three, or else a non-zero word this target's dynamic loader owns")
 def cdll_open(name: str) -> int:
     """`ctypes.CDLL(name)`: load a shared library and return a handle.
 
@@ -318,12 +322,18 @@ def cdll_open(name: str) -> int:
     cannot load, which is the same statement.
 
     The contract is about the HANDLE'S SHAPE, and that is all it may be: whether
-    a library of that name exists is a fact about the host's filesystem, and
-    `contract_text_is_scoped` refuses an admission here that tried to say so.
+    a library of that name exists is a fact about the host's filesystem.  The
+    admission used to cross that line — "0, meaning no library of that name is on
+    this target" — and it was not merely out of scope, it was FALSE, which the
+    audit measured: a file that exists and is not a loadable image makes
+    `dlopen` fail and `ctypes.CDLL` raise `OSError: slice is not valid mach-o
+    file`, so handle 0 does not mean the library is absent.  The text now says
+    what `dlopen(3)` actually promises, which is a fact about an API rather than
+    about this filesystem.
     """
     return _admitted("ctypes.CDLL")
 
-@admitted("the value the foreign function returns is one word, and nothing is assumed about which value it is")
+@admitted("under ctypes' default restype of c_int the foreign function's answer is one word, and nothing is assumed about which value it is; a caller that sets restype, to a struct or to None, is asking a question this declaration does not answer")
 def cdll_call(handle: int) -> int:
     """`lib.func(...)`: call a function in a loaded library.
 
@@ -340,6 +350,13 @@ def cdll_call(handle: int) -> int:
     function takes and returns is exactly the thing the loader's caller is
     supposed to know and this tree does not, so there is no prototype to state
     and no prototype is guessed.
+
+    "One word" is bounded by the DEFAULT `restype`, and the admission says so
+    because the audit found the unbounded version false twice: set
+    `lib.getpid.restype = None` and CPython answers `None`, not a word, and a
+    function declared to return a struct has no word at all.  `ctypes`' default is
+    `c_int`, which is a word, so the default case the model serves is the one the
+    contract covers.
 
     This is a separate contract from `cdll_open`'s on purpose: a file that opens
     a library and calls nothing through it rests on one admission, one that calls

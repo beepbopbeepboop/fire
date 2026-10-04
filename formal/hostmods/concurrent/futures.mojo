@@ -139,7 +139,10 @@ def future_cancelled(state: int) -> int:
 # ── the admitted half ────────────────────────────────────────────────────────
 
 ADMITTED_EXIT_STATUS = 125
-"""The status an admitted call exits with; `formal/hostmods/subprocess.mojo` says why."""
+"""The status an admitted call exits with; `formal/hostmods/subprocess.mojo` says why,
+and corrects the reason: 125 is INSIDE 0..255, and no exit code can be outside
+it, so this is a RESERVED nonzero status and the diagnostic is what says
+"refused"."""
 
 def _admitted(what: str) -> int:
     """Refuse to answer, naming the contract that would have to be trusted."""
@@ -149,7 +152,7 @@ def _admitted(what: str) -> int:
     exit(ADMITTED_EXIT_STATUS)
     return 0
 
-@admitted("the submitted callable runs on some thread and its result is one word, and nothing is assumed about which or when")
+@admitted("the submitted callable runs on some thread of this process or in some process of this machine; the two executors differ in which, and this model merges them, and its result is one word; nothing is assumed about which or when")
 def executor_submit(callable_word: int) -> int:
     """`ThreadPoolExecutor.submit(fn, …)` / `ProcessPoolExecutor.submit(fn, …)`.
 
@@ -165,10 +168,16 @@ def executor_submit(callable_word: int) -> int:
     (`bugs/FORMAL_module_state_no_storage.md`), so what crosses here is the
     ADDRESS, and the contract says the answer is one word without saying anything
     about what running that address computes.
+
+    "Runs on some THREAD" is the model's merger and the admission now says so,
+    because the admission used to say it as if it were CPython's: a
+    `ProcessPoolExecutor` runs its callables in another PROCESS, so a caller who
+    meant that executor is trusting something the old text did not say it was
+    trusting.
     """
     return _admitted("concurrent.futures.Executor.submit")
 
-@admitted("every thread the pool started has stopped by the time this returns")
+@admitted("every thread the pool's OWN workers started has stopped by the time this returns; a thread a submitted callable started itself is not one of them")
 def executor_shutdown(pool: int) -> int:
     """`Executor.shutdown(wait=True)`: stop the pool and, with `wait`, join it.
 
@@ -178,5 +187,13 @@ def executor_shutdown(pool: int) -> int:
     about whether any callable ever ran.  One contract for both would make a file
     that only tears a pool down read as trusting as much as one that submits work
     to it.
+
+    QUIESCENT means the pool's OWN workers, and the word "own" is in the
+    admission because the audit found the wider reading false: a submitted
+    callable that started its own `threading.Thread` had that thread still
+    running when `Executor.shutdown(wait=True)` returned, because the pool joins
+    its workers and nothing else.  "Every thread the pool started" was true on
+    the narrow reading and false on the one a caller would assume, and a contract
+    that is only true under its narrowest reading is a trap.
     """
     return _admitted("concurrent.futures.Executor.shutdown")

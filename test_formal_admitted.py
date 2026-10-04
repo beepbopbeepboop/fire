@@ -30,6 +30,16 @@ admission that grew a claim about the host's BEHAVIOUR -- "always", "never",
 "deterministic" -- is refused.  An admission is a claim of trust; a claim that
 reaches past the answer is an unproved assertion wearing a proof's clothes.
 
+FOURTH, and the one the audit of 2026-10-04 added: an admission must be TRUE.
+Scoping cannot tell a true assumption from a false one -- both are sentences
+about the answer -- and fifteen of the nineteen contracts were false of the real
+host while every group above was green.  The `truth` group asks CPython or the
+OS what the host actually does and requires each contract's own text to cover
+it; `test_the_truth_probes_reject_the_pre_audit_text` puts every pre-audit
+sentence back through its own probe, so a probe that stops testing what it was
+written for fails rather than passing quietly.  `bugs/FORMAL_trust_audit_2026-10-04.md`
+is the audit, with the table.
+
 ## Groups
 
   registry   the partition, the Lean shapes, the scope rule, the ratchet
@@ -41,6 +51,7 @@ reaches past the answer is an unproved assertion wearing a proof's clothes.
 """
 import argparse
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -209,6 +220,1014 @@ def group_scope(tmpdir, cas_root, verbose):
     return True, f"{len(A.all_contracts())} contract(s) are scoped to the answer"
 
 
+# ── the TRUTH half: every contract against the real host ──────────────────────
+#
+# Everything above checks that an admission is SCOPED (it constrains the answer
+# and not the host's behaviour) and that it is COUNTED.  Neither of those can
+# tell a TRUE admission from a FALSE one, and the difference is the whole subject
+# of `bugs/FORMAL_trust_audit_2026-10-04.md`: on 2026-10-04, FIFTEEN of the
+# nineteen contracts asserted something the host does not do (three more were
+# true only under a reading the audit had to choose), and all nineteen were green
+# in every other group in this file.
+#
+# The shape of the check is deliberately the shape of the existing differential
+# groups: ask CPython, or the OS, and compare its answer with the model's.  What
+# is new is that the thing being compared is an ASSUMPTION rather than a return
+# value, so each row asks what the contract has to cover and then checks that the
+# contract's own text covers it.  A row is allowed to disagree with a contract;
+# it is not allowed to disagree with CPython.
+#
+# Every contract must appear in TRUTH exactly once
+# (`test_every_contract_has_a_truth_row`), which is the ratchet that matters
+# here: a contract nobody probed is a contract nobody checked, and adding one
+# without a row would otherwise be silent.
+
+TRUTH: dict = {}
+
+
+def _truth(name):
+    """Register a probe as the truth row for one contract, and return it."""
+    def deco(fn):
+        TRUTH[name] = fn
+        return fn
+    return deco
+
+
+def _low(text):
+    return (text or "").lower()
+
+
+def _missing(c, *markers):
+    """Problems when the admission does not say what it has to say."""
+    low = _low(c.assumes)
+    if any(m.lower() in low for m in markers):
+        return []
+    return [f"{c.qualified}: the admission has to say "
+            f"{' or '.join(repr(m) for m in markers)} — it is what the "
+            f"measurement below turned on — and it says {c.assumes!r}"]
+
+
+def _forbidden(c, *phrases):
+    """Problems when the admission says something measured to be false."""
+    low = _low(c.assumes)
+    return [f"{c.qualified}: {c.assumes!r} says {p!r}, which is false of the "
+            f"real host" for p in phrases if p.lower() in low]
+
+
+# ── the probes, measured ──────────────────────────────────────────────────────
+
+def _status_probes():
+    """`(label, status)` over the ways a child's status can come out.
+
+    Six rows and every one of them earns its place.  `0`, `3` and `255` are the
+    ordinary answers, and `255` is the top of the range the old admission
+    claimed, so a probe without it could not tell "the contract admits the whole
+    range" from "it admits 0..3".  The three signals are the rows that make the
+    answer NEGATIVE, and `SIGHUP` is in the table for a second reason: CPython
+    reports a SIGHUP death as `-1`, which is the value the `popen_poll` model
+    used to answer "not collected" with.
+    """
+    out = []
+    for label, script in (("normal exit 0", "exit 0"),
+                          ("normal exit 3", "exit 3"),
+                          ("normal exit 255", "exit 255"),
+                          ("SIGHUP", "kill -1 $$"),
+                          ("SIGTERM", "kill -15 $$"),
+                          ("SIGKILL", "kill -9 $$")):
+        out.append((label, subprocess.run(["/bin/sh", "-c", script],
+                                         capture_output=True).returncode))
+    return out
+
+
+def _status_probe_cache():
+    global _STATUS_PROBES
+    try:
+        return _STATUS_PROBES
+    except NameError:
+        _STATUS_PROBES = _status_probes()
+        return _STATUS_PROBES
+
+
+def _status_uncovered(c, v):
+    """Why `c`'s text does not admit the status word `v`, or ''."""
+    if not re.search(r"0\.\.255", c.assumes):
+        return ("CPython reports a normal exit status as the exit code itself, "
+                "so the admission has to carry the `0..255` range")
+    if v >= 0:
+        return ""
+    if re.search(r"-\s*N\b", c.assumes):
+        return ""
+    return (f"CPython reports a death by signal {-v} as the NEGATIVE word {v}, "
+            f"which no `0..255` range admits")
+
+
+@_truth("subprocess.run")
+def _truth_run(c):
+    return [_f for _l, v in _status_probe_cache()
+            for _f in ([f"{c.qualified} [{_l}]: {_status_uncovered(c, v)}"]
+                       if _status_uncovered(c, v) else [])]
+
+
+@_truth("subprocess.call")
+def _truth_call(c):
+    bad = _truth_run(c)
+    # `call` returns a failing child's status and raises nothing: the second half
+    # of its admission, and the reason it is a separate contract from `run`.
+    try:
+        got = subprocess.call(["/bin/sh", "-c", "exit 7"])
+        raised = None
+    except BaseException as e:                             # noqa: BLE001
+        got, raised = None, type(e).__name__
+    if raised is not None:
+        bad.append(f"{c.qualified}: CPython's `call` raised {raised} for a child "
+                   f"that exited 7, so \"returned rather than raised\" is not "
+                   f"what it does")
+    elif got != 7:
+        bad.append(f"{c.qualified}: CPython's `call` answered {got} for a child "
+                   f"that exited 7, so the status word it returns is not the "
+                   f"child's")
+    bad += _missing(c, "returned rather than raised")
+    return bad
+
+
+@_truth("subprocess.check_call")
+def _truth_check_call(c):
+    """What CPython's `check_call` HANDS BACK, measured rather than remembered.
+
+    The obvious answer is wrong on the toolchain this tree runs on: `check_call`
+    does not return `None` and does not return the child's status either, it
+    returns **0** on success and raises `CalledProcessError` otherwise (the
+    `return 0` is in `subprocess.py`).  An admission that said "the child's exit
+    status" therefore described a value no caller of CPython's `check_call` has
+    ever received, which is why the row compares against the real return and not
+    against an assumption about it.
+    """
+    bad = []
+    got = subprocess.check_call(["/bin/sh", "-c", "exit 0"])
+    if got != 0:
+        bad.append(f"{c.qualified}: CPython's `check_call` returned {got!r} for "
+                   f"a child that exited 0, so the admission's account of what "
+                   f"CPython hands back is stale")
+    try:
+        subprocess.check_call(["/bin/sh", "-c", "exit 7"])
+        raised = None
+    except BaseException as e:                             # noqa: BLE001
+        raised = type(e).__name__
+    if raised != "CalledProcessError":
+        bad.append(f"{c.qualified}: a non-zero status raised {raised or 'nothing'}, "
+                   f"so the admission has to say the raise rather than imply a "
+                   f"returned word")
+    bad += _missing(c, "CalledProcessError")
+    bad += _forbidden(c, "CPython returns nothing")
+    bad += [_f for _l, v in _status_probe_cache()
+            for _f in ([f"{c.qualified} [{_l}]: {_status_uncovered(c, v)}"]
+                       if _status_uncovered(c, v) else [])]
+    return bad
+
+
+@_truth("subprocess.getstatusoutput")
+def _truth_getstatusoutput(c):
+    return [_f for _l, v in _status_probe_cache()
+            for _f in ([f"{c.qualified} [{_l}]: {_status_uncovered(c, v)}"]
+                       if _status_uncovered(c, v) else [])]
+
+
+@_truth("subprocess.popen_wait")
+def _truth_popen_wait(c):
+    return [_f for _l, v in _status_probe_cache()
+            for _f in ([f"{c.qualified} [{_l}]: {_status_uncovered(c, v)}"]
+                       if _status_uncovered(c, v) else [])]
+
+
+def _nul_in_output():
+    """`(bytes, str)` for a child whose stdout contains a NUL, from CPython."""
+    return subprocess.run(["/bin/sh", "-c", "printf 'a\\0b'"],
+                          capture_output=True).stdout
+
+
+@_truth("subprocess.check_output")
+def _truth_check_output(c):
+    out = _nul_in_output()
+    bad = []
+    if b"\0" not in out:
+        bad.append(f"{c.qualified}: CPython's own answer came back as {out!r} "
+                   f"with no NUL, so the probe is not measuring the case the "
+                   f"admission is about")
+    bad += _missing(c, "first NUL")
+    return bad
+
+
+@_truth("subprocess.getoutput")
+def _truth_getoutput(c):
+    out = subprocess.getoutput("printf 'a\\0b'")
+    bad = []
+    if "\0" not in out:
+        bad.append(f"{c.qualified}: CPython's own answer came back as {out!r} "
+                   f"with no NUL, so the probe is not measuring the case the "
+                   f"admission is about")
+    bad += _missing(c, "first NUL")
+    return bad
+
+
+@_truth("subprocess.popen_communicate")
+def _truth_popen_communicate(c):
+    """Two facts, both measured: the answer is a PAIR, and either half can hold a NUL."""
+    p = subprocess.Popen(["/bin/sh", "-c", "printf 'x\\0y'"],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = p.communicate()
+    bad = []
+    if b"\0" not in out:
+        bad.append(f"{c.qualified}: CPython's own answer came back as {out!r} "
+                   f"with no NUL, so the probe is not measuring the case the "
+                   f"admission is about")
+    if not isinstance(err, bytes):
+        bad.append(f"{c.qualified}: `communicate` answered {err!r} for stderr, "
+                   f"which is not the byte string the admission concatenates")
+    bad += _missing(c, "first NUL", "pair")
+    return bad
+
+
+@_truth("subprocess.popen_poll")
+def _truth_poll(c):
+    """The sentinel must be a MODEL's choice and not an answer the host gives.
+
+    Two halves, and both were false of the model this replaced.  CPython answers
+    `None` while a child is running, so `-65` is a convention and has to be
+    named as one; and `-1` is an answer CPython really gives (a SIGHUP death), so
+    a sentinel equal to it would make two different situations one word.
+    """
+    bad = []
+    p = subprocess.Popen(["/bin/sh", "-c", "sleep 0.5"])
+    try:
+        while_running = p.poll()
+        bad += _missing(c, "None")
+        if while_running is not None:
+            bad.append(f"{c.qualified}: CPython's `poll()` answered "
+                       f"{while_running!r} for a running child, so the sentinel "
+                       f"is CPython's value rather than the model's own")
+        sentinel = model_const("subprocess", "POLL_NOT_COLLECTED")
+    finally:
+        p.kill()
+        p.wait()
+    # Every status the host can produce, and the sentinel must not be one of them.
+    for label, v in _status_probe_cache():
+        if sentinel == v:
+            bad.append(f"{c.qualified}: POLL_NOT_COLLECTED is {v}, which is "
+                       f"exactly what CPython reports for [{label}] — the "
+                       f"model's \"not collected\" marker has to be outside "
+                       f"every answer the host can give")
+    if f"-{abs(sentinel)}" not in c.assumes and str(sentinel) not in c.assumes:
+        bad.append(f"{c.qualified}: the admission does not state the sentinel "
+                   f"({sentinel}) it answers with, so the range a proof may "
+                   f"assume is not the range the model uses")
+    return bad
+
+
+@_truth("subprocess.popen_kill")
+def _truth_kill(c):
+    return _truth_signal(c)
+
+
+@_truth("subprocess.popen_terminate")
+def _truth_terminate(c):
+    return _truth_signal(c)
+
+
+def _truth_signal(c):
+    """Delivery is bounded by the child still running, and that is measured.
+
+    `Popen.send_signal` calls `poll()` and RETURNS when the child has already
+    been collected, so a `kill()` on a child this process waited for delivers
+    nothing and raises nothing.  The evidence is CPython's own source rather than
+    an inference about it: a test that asserted "no exception" would also pass on
+    a host where the signal was delivered.
+    """
+    import inspect
+    src = inspect.getsource(subprocess.Popen.send_signal)
+    early = "returncode is not None" in src and "Skip signalling" in src
+    bad = []
+    p = subprocess.Popen(["/bin/sh", "-c", "exit 0"])
+    p.wait()
+    if p.returncode is None:
+        return [f"{c.qualified}: the probe's child was not collected, so it is "
+                f"not measuring the case the admission is about"]
+    try:
+        p.kill()
+        raised = None
+    except BaseException as e:                             # noqa: BLE001
+        raised = type(e).__name__
+    if raised is not None:
+        bad.append(f"{c.qualified}: CPython's `kill()` on a collected child "
+                   f"raised {raised}, so nothing here is bounded by the child "
+                   f"still running")
+    if not early:
+        bad.append(f"{c.qualified}: CPython's `Popen.send_signal` no longer has "
+                   f"the `returncode is not None` early return this row rests "
+                   f"on, so re-measure whether a collected child is signalled "
+                   f"before trusting the admission's bound")
+    bad += _missing(c, "still running", "collected")
+    return bad
+
+
+@_truth("subprocess.Popen")
+def _truth_pid(c):
+    bad = []
+    p = subprocess.Popen(["/bin/sh", "-c", "exit 0"])
+    try:
+        pid = p.pid
+    finally:
+        p.wait()
+    if not (isinstance(pid, int) and pid > 0):
+        bad.append(f"{c.qualified}: CPython reported the child's process id as "
+                   f"{pid!r}, so \"a positive integer\" is not what it gives")
+    if pid == os.getpid():
+        bad.append(f"{c.qualified}: the id CPython reports is THIS process's "
+                   f"own, so it is not the child's pid the admission claims")
+    bad += _forbidden(c, "a negative integer")
+    return bad
+
+
+@_truth("ctypes.cdll_open")
+def _truth_loader(c, tmpdir=None):
+    """Handle 0 does NOT mean the library is absent, and this is the counterexample.
+
+    The admission this replaces said "0, meaning no library of that name is on
+    this target".  A file that EXISTS and is not a loadable image makes `dlopen`
+    fail, so the implication is false on the host the tree runs on; the text now
+    names the three reasons `dlopen` can fail instead.
+    """
+    import ctypes
+    path = os.path.join(tmpdir or tempfile.gettempdir(), "admitted_truth.so")
+    with open(path, "w") as f:
+        f.write("not a Mach-O file at all\n")
+    bad = _forbidden(c, "no library of that name", "meaning no library")
+    try:
+        ctypes.CDLL(path)
+        failed = False
+    except OSError:
+        failed = True
+    if not failed:
+        bad.append(f"{c.qualified}: dlopen accepted a file that is not a "
+                   f"library, so the probe is not measuring the case")
+    bad += _missing(c, "dlopen")
+    return bad
+
+
+@_truth("ctypes.cdll_call")
+def _truth_foreign(c):
+    """\"One word\" is true of `ctypes`' default `restype` and of nothing else.
+
+    Two measurements, because either alone is a half-answer: with the default
+    `restype` CPython converts to `c_int`, which is a word, and with
+    `restype = None` it returns `None`, which is not one.
+    """
+    import ctypes
+    bad = []
+    lib = ctypes.CDLL(None)
+    default = lib.getpid()
+    if not isinstance(default, int):
+        bad.append(f"{c.qualified}: with the default restype CPython answered "
+                   f"{default!r}, which is not a word either")
+    lib.getpid.restype = None
+    as_none = lib.getpid()
+    if as_none is not None:
+        bad.append(f"{c.qualified}: with `restype = None` CPython answered "
+                   f"{as_none!r}, and the admission has to exclude that case "
+                   f"rather than admit it")
+    bad += _missing(c, "restype")
+    return bad
+
+
+@_truth("concurrent.futures.executor_submit")
+def _truth_submit(c):
+    """`ProcessPoolExecutor` runs the callable in a PROCESS, not on a thread.
+
+    Measured by having the callable report its own pid: the whole reason the
+    admission mentions processes is that this row can tell the two executors
+    apart, and an admission that said \"some thread\" was claiming a thread for
+    an executor that never makes one.
+    """
+    import concurrent.futures as CF
+    bad = []
+    try:
+        with CF.ProcessPoolExecutor(max_workers=1) as pool:
+            where = pool.submit(os.getpid).result(timeout=60)
+    except Exception as e:                                 # noqa: BLE001
+        return [f"{c.qualified}: a ProcessPoolExecutor could not be measured "
+                f"({type(e).__name__}: {e}), so this row is not checking the "
+                f"claim it exists for"]
+    if where == os.getpid():
+        bad.append(f"{c.qualified}: a ProcessPoolExecutor ran the callable in "
+                   f"THIS process, so \"some process of this machine\" is not "
+                   f"what it does either")
+    bad += _missing(c, "process")
+    return bad
+
+
+@_truth("concurrent.futures.executor_shutdown")
+def _truth_shutdown(c):
+    """Quiescent means the pool's OWN workers, and this is the counterexample.
+
+    A submitted callable that started its own thread had that thread still
+    running when `shutdown(wait=True)` returned, because the pool joins the
+    workers it started and nothing else.  \"Every thread the pool started\" was
+    true under its narrowest reading and false under the reading a caller has.
+    """
+    import concurrent.futures as CF
+    import threading as T
+    started = T.Event()
+    still_running = []
+
+    def _inner():
+        started.set()
+        T.Event().wait(0.4)
+        still_running.append(1)
+
+    def _outer():
+        th = T.Thread(target=_inner)
+        th.start()
+        return th
+
+    with CF.ThreadPoolExecutor(max_workers=2) as pool:
+        pool.submit(_outer).result(timeout=60)
+    bad = []
+    if not started.is_set():
+        bad.append(f"{c.qualified}: the callable's own thread never started, so "
+                   f"this row is not measuring the case the admission is about")
+    if still_running:
+        bad.append(f"{c.qualified}: `shutdown(wait=True)` waited for the thread "
+                   f"a submitted callable started, so the admission's bound is "
+                   f"not what was measured")
+    bad += _missing(c, "OWN")
+    return bad
+
+
+@_truth("threading.thread_start")
+def _truth_start(c):
+    """`start()` returns when the callable has BEGUN, not when it has finished."""
+    import threading as T
+    import time
+    done = []
+
+    def _slow():
+        time.sleep(0.4)
+        done.append(1)
+
+    th = T.Thread(target=_slow)
+    th.start()
+    bad = []
+    if done:
+        bad.append(f"{c.qualified}: the callable had finished when `start()` "
+                   f"returned, so the row is not measuring the distinction")
+    th.join()
+    bad += _missing(c, "BEGUN")
+    bad += _forbidden(c, "has run the target callable,")
+    return bad
+
+
+@_truth("threading.thread_join")
+def _truth_join(c):
+    """`join()` with no timeout returns after the callable has finished."""
+    import threading as T
+    import time
+    done = []
+
+    def _slow():
+        time.sleep(0.2)
+        done.append(1)
+
+    th = T.Thread(target=_slow)
+    th.start()
+    th.join()
+    bad = []
+    if not done:
+        bad.append(f"{c.qualified}: `join()` returned before the callable had "
+                   f"finished, so \"the thread has stopped\" needs re-measuring")
+    bad += _missing(c, "timeout")
+    return bad
+
+
+@_truth("threading.lock_acquire")
+def _truth_lock(c, tmpdir=None):
+    """A `threading.Lock` is not a kernel lock on a descriptor, and this is it.
+
+    Two measurements.  The object has no `fileno` and no `_handle`, so there is
+    no descriptor to hold; and a CHILD PROCESS took `flock(LOCK_EX)` on a file
+    while this process held a `threading.Lock`, so the two do not exclude each
+    other at all.  The admission this replaces said "the lock is held by the
+    kernel on a descriptor".
+    """
+    import fcntl
+    import threading as T
+    bad = _forbidden(c, "the kernel on a descriptor")
+    lk = T.Lock()
+    if hasattr(lk, "fileno") or hasattr(lk, "_handle"):
+        bad.append(f"{c.qualified}: this `threading.Lock` grew a descriptor "
+                   f"({[a for a in ('fileno', '_handle') if hasattr(lk, a)]}), "
+                   f"so re-measure before trusting the admission's wording")
+    path = os.path.join(tmpdir or tempfile.gettempdir(), "admitted_truth.lock")
+    with open(path, "w") as f:
+        f.write("")
+    lk.acquire()
+    try:
+        child = subprocess.run(
+            [sys.executable, "-c",
+             "import fcntl,sys\n"
+             "fd = open(sys.argv[1], 'r+')\n"
+             "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+             "print('taken')\n", path],
+            capture_output=True, text=True, timeout=60)
+    finally:
+        lk.release()
+    if "taken" not in child.stdout:
+        bad.append(f"{c.qualified}: a child process could NOT take flock while "
+                   f"this one held a threading.Lock ({child.stdout.strip()!r} "
+                   f"{child.stderr.strip()[:120]!r}), so the two may interact "
+                   f"and the admission needs re-measuring")
+    bad += _missing(c, "THIS process", "this process")
+    return bad
+
+
+# The contracts whose probe needs a scratch file, so they are called with the
+# run's temp directory rather than with a directory of their own.
+TRUTH_NEEDS_TMPDIR = frozenset({"ctypes.cdll_open", "threading.lock_acquire"})
+
+
+def test_every_contract_has_a_truth_row(tmpdir=None):
+    """Every contract is probed, and every probe is a real function.
+
+    Both directions, for the reason the count ratchet gives: a contract with no
+    row is a claim of trust nobody checked, and a row with no contract is a probe
+    that lost its subject and will keep passing after the admission it was
+    written for is gone.
+    """
+    have = {c.qualified for c in A.all_contracts()}
+    missing = sorted(have - set(TRUTH))
+    extra = sorted(set(TRUTH) - have)
+    check(not missing,
+          "these admitted contracts have no truth row, so nothing in this file "
+          "asks the real host whether they are true:\n    "
+          + "\n    ".join(missing))
+    check(not extra,
+          "these truth rows name a contract that does not exist:\n    "
+          + "\n    ".join(extra))
+    bad = [f"{name}: {fn!r} is not callable"
+           for name, fn in sorted(TRUTH.items()) if not callable(fn)]
+    check(not bad, "a truth row is not a function:\n    " + "\n    ".join(bad))
+    return True, (f"{len(TRUTH)} row(s) for {len(have)} contract(s), one each")
+
+
+def group_truth(tmpdir, cas_root, verbose):
+    """Every admitted contract, checked against CPython or the OS.
+
+    The group that found the eight false admissions of 2026-10-04, and the one
+    that keeps them from coming back: a contract whose text has to say `0..255`
+    AND the `-N` of a signal death, a byte-string contract whose text has to say
+    where the word stops, a poll sentinel that is not an answer the host gives.
+    """
+    cs = {c.qualified: c for c in A.all_contracts()}
+    probes, bad = 0, []
+    for name in sorted(TRUTH):
+        c = cs.get(name)
+        if c is None:
+            continue
+        probes += 1
+        try:
+            out = TRUTH[name](c, tmpdir) if name in TRUTH_NEEDS_TMPDIR \
+                else TRUTH[name](c)
+        except Exception as e:                             # noqa: BLE001
+            bad.append(f"{name}: the probe itself failed — {type(e).__name__}: "
+                       f"{e}")
+            continue
+        bad += [str(x) for x in (out or [])]
+    # The refusal marker, whose claim was the most-read false statement in the
+    # mechanism: 125 is inside 0..255, and no exit code is outside it.
+    bad += _exit_status_claims()
+    check(not bad,
+          "an admitted contract does not say what the real host does:\n    "
+          + "\n    ".join(bad))
+    if verbose:
+        for line in sorted(_status_probe_cache()):
+            print(f"    a child that {line[0]:16s} is reported by CPython as "
+                  f"{line[1]}")
+    return True, (f"{probes} contract(s) checked against CPython/the OS; "
+                  f"the refusal marker is RESERVED, not out of range")
+
+
+# Words that make a sentence about `0..255` a CORRECTION rather than the claim.
+# The mechanism needs them because the corrected text has to be able to QUOTE
+# the false one — a ratchet that forbade the phrase outright would forbid the
+# sentence that says it was wrong, which is the sentence a reader needs.
+_CORRECTION_NEGATORS = ("not ", "no ", "never", "false", "earlier", "was",
+                        "corrected", "instead", "rather", "inside")
+
+
+def _exit_status_claims():
+    """Problems with any hostmod's claim about what `ADMITTED_EXIT_STATUS` does.
+
+    Read off the SOURCE window after the declaration, SENTENCE by sentence,
+    because the thing being checked is a sentence rather than a substring.  The
+    measurement: a child can exit 125 (`sh -c 'exit 125'` is reported as 125), so
+    the status is INSIDE `0..255`; and no exit code can be outside it at all,
+    because the kernel masks one (`sh -c 'exit 300'` is reported as 44).  A
+    sentence that puts `outside` and `0..255` together without a word that makes
+    it a correction is the false claim, whichever way it is punctuated.
+    """
+    bad = []
+    for _rel, full in A.hostmod_files():
+        with open(full, encoding="utf-8") as f:
+            lines = f.read().split("\n")
+        for i, line in enumerate(lines):
+            if not re.match(r"\s*ADMITTED_EXIT_STATUS\s*=", line):
+                continue
+            window = "\n".join(lines[i:i + 14])
+            low = _low(window)
+            for sentence in re.split(r"(?<=[.;])\s+", window):
+                slow = _low(sentence)
+                if "outside" in slow and "0..255" in slow:
+                    if not any(n in slow for n in _CORRECTION_NEGATORS):
+                        bad.append(f"{os.path.relpath(full)}:{i + 1}: "
+                                   f"{sentence.strip()!r} claims the refusal "
+                                   f"status is outside 0..255. 125 is INSIDE it "
+                                   f"(`sh -c 'exit 125'` is reported as 125) and "
+                                   f"no exit code is outside it at all (`exit "
+                                   f"300` is reported as 44), so the number "
+                                   f"RESERVES rather than escapes and the "
+                                   f"diagnostic on stdout is what says "
+                                   f"\"refused\"")
+            if "reserved" not in low:
+                bad.append(f"{os.path.relpath(full)}:{i + 1}: does not say the "
+                           f"status is RESERVED by this tree, which is what it "
+                           f"is for now that it cannot be out of range")
+            if "inside" not in low:
+                bad.append(f"{os.path.relpath(full)}:{i + 1}: does not state "
+                           f"that 125 is inside 0..255, so the measurement that "
+                           f"corrected the claim is not next to it")
+    return bad
+
+
+# ── the Lean LIBRARY's own trust ──────────────────────────────────────────────
+#
+# `ADMITTED_COUNTS` above is the census of what this tree admits about the HOST.
+# This is the census of what the hand-written library every generated proof rests
+# on already trusts, and it was not counted anywhere: FORMAL.md §7's "no axiom and
+# no opaque anywhere" is true of the SOURCE TEXT and not of a theorem's
+# transitive closure, because `native_decide` and `bv_decide` close a goal
+# through `Lean.ofReduceBool`.  `bugs/FORMAL_native_decide_axiom.md` carries the
+# `#print axioms` measurement that needs a Lean run.
+#
+# The first two rows are equalities and the third is a CEILING, and the asymmetry
+# is the point rather than an inconsistency.  An `axiom` or a `sorry` appearing
+# in `lib/` is a NEW EVENT — there are none, FORMAL.md §7's position depends on
+# there being none, and nothing in this tree is working to add one.  A tactic
+# site count is a DEBT being paid down, in a file several branches edit at once,
+# so pinning it as an equality would turn every unrelated merge into a failure
+# while teaching nobody anything; a ceiling fails when the number RISES, which is
+# the direction that matters, and reports the figure on every run so the debt is
+# visible while it is being paid.
+LIBRARY_TRUST = {
+    # module    axiom  sorry  axiom_tactic ceiling (see the note above)
+    "Contracts": (0, 0, 1, 1),
+    "ProofLib": (0, 0, 744, 744),
+    "Refine": (0, 0, 0, 0),
+    "X86": (0, 0, 4, 4),
+    "work": (0, 0, 0, 0),
+}
+
+
+# The text each contract carried BEFORE the audit of 2026-10-04, for the
+# eighteen it changed, and the point of keeping them HERE rather than in a bug
+# doc: an instrument that has only ever agreed with the tree proves nothing.  Each
+# row is the pre-audit sentence, and each must make its own probe complain — so a
+# future rewrite of a contract, or of a probe, that quietly stops testing what it
+# was written for fails this check rather than passing silently.
+#
+# `subprocess.Popen` is absent on purpose: "the child's process id, a positive
+# integer" is the one contract the audit found TRUE, and a row asserting a
+# complaint about it would be asserting something false about the toolchain.
+PRE_AUDIT_TEXT = {
+    "concurrent.futures.executor_shutdown":
+        "every thread the pool started has stopped by the time this returns",
+    "concurrent.futures.executor_submit":
+        "the submitted callable runs on some thread and its result is one word, "
+        "and nothing is assumed about which or when",
+    "ctypes.cdll_call":
+        "the value the foreign function returns is one word, and nothing is "
+        "assumed about which value it is",
+    "ctypes.cdll_open":
+        "the loader handle is 0, meaning no library of that name is on this "
+        "target, or a non-zero word this target's dynamic loader owns",
+    "subprocess.call":
+        "the child's exit status, an integer in 0..255, and nothing is raised "
+        "for a non-zero status",
+    "subprocess.check_call":
+        "the child's exit status, an integer in 0..255",
+    "subprocess.check_output":
+        "the child's output on stdout, an arbitrary byte string",
+    "subprocess.getoutput":
+        "the child's output on stdout, an arbitrary byte string",
+    "subprocess.getstatusoutput":
+        "the shell command's exit status, an integer in 0..255, and its output "
+        "is an arbitrary byte string",
+    "subprocess.popen_communicate":
+        "the child's output on stdout and stderr, an arbitrary byte string",
+    "subprocess.popen_kill":
+        "the signal reaches the child this handle names",
+    "subprocess.popen_poll":
+        "the child's exit status word, an integer in 0..255, and -1 while the "
+        "child has not been collected",
+    "subprocess.popen_terminate":
+        "the signal reaches the child this handle names",
+    "subprocess.popen_wait":
+        "the child's exit status, an integer in 0..255",
+    "subprocess.run":
+        "the child's exit status, an integer in 0..255, and the captured output "
+        "bytes are an arbitrary byte string",
+    "threading.lock_acquire":
+        "the lock is held by the kernel on a descriptor, and whether it is "
+        "granted depends on every other holder",
+    "threading.thread_join":
+        "the thread has stopped, and nothing is assumed about what it computed",
+    "threading.thread_start":
+        "the thread exists and has run the target callable, and nothing is "
+        "assumed about what the callable computed or when",
+}
+
+
+def test_the_truth_probes_reject_the_pre_audit_text(tmpdir=None):
+    """Every probe still rejects the claim the audit found false.
+
+    The direction that keeps the `truth` group honest.  A checker that only ever
+    passes is indistinguishable from no checker, and this file's own history is
+    the argument: the contracts were SCOPED, COUNTED, EMITTED and inert where
+    they did not apply for a long time while fifteen of them were false of the
+    host.  So each pre-audit sentence goes back through its own probe, and a
+    probe that stopped complaining about the text it was written for is the
+    failure this asserts on.
+    """
+    live = {c.qualified for c in A.all_contracts()}
+    stale = sorted(set(PRE_AUDIT_TEXT) - live)
+    check(not stale,
+          "PRE_AUDIT_TEXT names contracts that no longer exist:\n    "
+          + "\n    ".join(stale)
+          + "\n    A row about a contract that is gone tests nothing.")
+    quiet = []
+    for name in sorted(PRE_AUDIT_TEXT):
+        if name not in live or name not in TRUTH:
+            continue
+        # `rsplit`, not `split`: `concurrent.futures.executor_submit` is a
+        # DOTTED module name, and splitting on the first dot would build a
+        # contract whose own `qualified` says `concurrent.submit` -- a different
+        # name from the key, so every message it produced would name something
+        # that does not exist.
+        module, _, fn = name.rpartition(".")
+        c = A.Contract(module, fn, PRE_AUDIT_TEXT[name], "<pre-audit>", 0)
+        try:
+            out = TRUTH[name](c, tmpdir) if name in TRUTH_NEEDS_TMPDIR \
+                else TRUTH[name](c)
+        except Exception as e:                             # noqa: BLE001
+            quiet.append(f"{name}: the probe raised {type(e).__name__}: {e}")
+            continue
+        if not out:
+            quiet.append(f"{name}: the probe accepts the pre-audit text "
+                         f"{PRE_AUDIT_TEXT[name]!r}, so it is not testing the "
+                         f"thing it was written for")
+    check(not quiet,
+          "a truth probe no longer rejects the claim it was written to reject:\n    "
+          + "\n    ".join(quiet))
+    unchanged = sorted(live - set(PRE_AUDIT_TEXT))
+    return True, (f"{len(PRE_AUDIT_TEXT)} pre-audit sentence(s) all rejected "
+                  f"by their own probe; {len(unchanged)} contract(s) audited "
+                  f"and left as they were ({unchanged})")
+
+
+def test_every_contract_points_at_its_own_declaration(tmpdir=None):
+    """`Contract.line` is the line the assumption is ON, verified against the text.
+
+    The audit found this broken: `fire_compiler.py` builds its top-level
+    `FunctionDef` without `line=`, so `getattr(st, "line", 0) + 1` was 1 for every
+    contract in every module, and all nineteen `trust:` lines and all nineteen
+    generated Lean docstrings pointed a reader at line 1 of the module — the
+    module docstring.  A `source:line` that is always `:1` is worse than none,
+    because it looks like a location.
+
+    Both halves are checked against the file rather than against the reader that
+    produced it: the line named must be an `@admitted(` line, and the `def` it
+    decorates must be the one this contract declares.  A line that drifts to the
+    next contract's decorator would satisfy the first check alone.
+    """
+    bad = []
+    for c in A.all_contracts():
+        try:
+            with open(c.source, encoding="utf-8") as f:
+                lines = f.read().split("\n")
+        except OSError as e:
+            bad.append(f"{c.qualified}: cannot read {c.source}: {e}")
+            continue
+        if not (0 < c.line <= len(lines)):
+            bad.append(f"{c.qualified}: line {c.line} is not inside "
+                       f"{os.path.relpath(c.source, HERE)} ({len(lines)} lines)")
+            continue
+        here = lines[c.line - 1].strip()
+        nxt = lines[c.line].strip() if c.line < len(lines) else ""
+        if not here.startswith("@" + A.ADMITTED_DECORATOR + "("):
+            bad.append(f"{c.qualified}: {os.path.relpath(c.source, HERE)}:"
+                       f"{c.line} is {here[:50]!r}, not an `@admitted(` line")
+        elif not nxt.startswith("def " + c.name):
+            bad.append(f"{c.qualified}: "
+                       f"{os.path.relpath(c.source, HERE)}:{c.line} is followed "
+                       f"by {nxt[:50]!r}, so the line points at another "
+                       f"contract's assumption")
+    check(not bad, "an admitted contract's location does not name its own "
+                   "declaration:\n    " + "\n    ".join(bad))
+    return True, (f"{len(A.all_contracts())} contract(s), each pointing at its "
+                  f"own `@admitted(` line")
+
+
+def test_the_library_trust_counts_are_pinned(tmpdir=None):
+    """`lib/`: no `axiom`, no `sorry`, and an axiom-carrying tactic count.
+
+    The Lean half of the audit of 2026-10-04, and the assertion that makes §7's
+    position checkable rather than asserted: this tree's stated trust boundary is
+    "no `axiom` and no `opaque` anywhere, everything assumed in the `sorry`
+    sense", and two of those three words are decided by a text census.
+    """
+    lib = A.lean_dir(HERE)
+    census = A.library_trust(lib)
+    got = sorted(census)
+    want = sorted(LIBRARY_TRUST)
+    check(got == want,
+          f"lib/ modules {got} and the pinned table {want} disagree — add the "
+          f"module with its counts, or delete the row for one that is gone")
+    grown, shrank, errors = [], [], []
+    for mod in want:
+        if mod not in census:
+            continue
+        want_axiom, want_sorry, _have, ceiling = LIBRARY_TRUST[mod]
+        kinds = census[mod]
+        got_axiom, axiom_lines = kinds["axiom"]
+        got_sorry, sorry_lines = kinds["sorry"]
+        got_tactic, tactic_lines = kinds["axiom_tactic"]
+        if got_axiom != want_axiom:
+            errors.append(f"{mod}: {got_axiom} axiom/opaque declaration(s) at "
+                          f"{list(axiom_lines)}, the table says {want_axiom}. "
+                          f"An `axiom` in `lib/` is invisible to the hole census, "
+                          f"which is the entire reason FORMAL.md §7 forbids "
+                          f"them.")
+        if got_sorry != want_sorry:
+            errors.append(f"{mod}: {got_sorry} `sorry` site(s) at "
+                          f"{list(sorry_lines)}, the table says {want_sorry}. "
+                          f"`formal/lean.py`'s census measures the elaborated "
+                          f"form of this; a text count that disagrees with it is "
+                          f"a scanner that has stopped being honest.")
+        if got_tactic > ceiling:
+            grown.append(f"{mod}: {got_tactic} native_decide/bv_decide site(s), "
+                         f"the ceiling is {ceiling} (+{got_tactic - ceiling}). "
+                         f"Each one is an axiom in the transitive closure of "
+                         f"every theorem proved with it "
+                         f"(bugs/FORMAL_native_decide_axiom.md).")
+        elif got_tactic < ceiling:
+            shrank.append(f"{mod}: {got_tactic} native_decide/bv_decide site(s) "
+                          f"and the ceiling says {ceiling}. Sites were replaced "
+                          f"by kernel-checked proofs, which is the BEST outcome "
+                          f"here: lower the ceiling with the change and say in "
+                          f"the commit which ones.")
+    check(not errors,
+          "the Lean library's trust census moved in a way that is not a debt "
+          "being paid:\n    " + "\n    ".join(errors))
+    check(not grown and not shrank,
+          "the axiom-carrying tactic count moved:\n  MORE THAN THE CEILING:\n    "
+          + "\n    ".join(grown) + "\n  FEWER THAN THE CEILING:\n    "
+          + "\n    ".join(shrank))
+    # The scanner's own limits, asserted rather than assumed: the delimiter it
+    # does not handle and the axiom-carrying tactic it would not count.
+    for mod in census:
+        with open(os.path.join(lib, mod + ".lean"), encoding="utf-8") as f:
+            raw = f.read()
+        check('"""' not in raw,
+              f"lib/{mod}.lean contains a three-quote string delimiter, which "
+              f"`formal/admitted.py`'s `lean_code_regions` does not lex — the "
+              f"census would be counting inside a string literal")
+        check(not re.search(r"(?<![\w'])(exact_decide|implemented_by|unsafe)"
+                            r"(?![\w'])", A.lean_code_regions(raw)),
+              f"lib/{mod}.lean uses a construct the trust census does not "
+              f"count (`exact_decide`, `implemented_by` or `unsafe`); extend "
+              f"`AXIOM_TACTICS`/the regexes in formal/admitted.py first")
+    # VACUITY, which is the third way a Lean declaration can assert nothing and
+    # the only one of the three that a text scan decides.  `formal/lean.py::
+    # vacuous_declarations` finds the two shapes it knows: a `def` whose declared
+    # return type is `Prop` and whose body is `True`, and a `∀ …, … → True` -- a
+    # statement no inhabitant can contradict.  Both are read over the
+    # comment-stripped text, for the same reason this census is.  The two shapes
+    # are the detector's, not this file's, and a third vacuous shape would need
+    # `vacuous_declarations` to learn it.
+    #
+    # The EMITTED contracts are checked here too, not only `lib/`: a `sorry` is
+    # the one thing this project admits on purpose, and a contract whose
+    # STATEMENT were vacuous would be a hole over nothing at all.
+    from formal import lean as _L
+    vacuous_lib = []
+    for mod in sorted(census):
+        with open(os.path.join(lib, mod + ".lean"), encoding="utf-8") as f:
+            raw = f.read()
+        vacuous_lib += [f"lib/{mod}.lean:{ln} {name} ({shape})"
+                        for name, shape, ln in
+                        _L.vacuous_declarations(A.lean_code_regions(raw))]
+    vacuous_admitted = []
+    for c in A.all_contracts():
+        emitted = A.lean_trust_header([c]) + "\n" + A.lean_declarations([c])
+        vacuous_admitted += [
+            f"the declaration for {c.qualified} at {c.source}:{c.line} ({shape})"
+            for name, shape, _ln in _L.vacuous_declarations(emitted)]
+    check(not vacuous_lib and not vacuous_admitted,
+          "a declaration that asserts nothing:\n    "
+          + "\n    ".join(vacuous_lib + vacuous_admitted)
+          + "\n    `True` as a statement, or `∀ …, … → True`, is a shape no "
+            "proof of it can repair -- and over an ADMITTED contract it is a "
+            "`sorry` over nothing.")
+    total = sum(kinds["axiom_tactic"][0] for kinds in census.values())
+    return True, (f"0 axiom, 0 sorry and 0 vacuous across {len(census)} lib/ "
+                  f"module(s) and {len(A.all_contracts())} emitted contract(s); "
+                  f"{total} native_decide/bv_decide site(s), within the ceiling")
+
+
+# ── the inventory FORMAL.md publishes ─────────────────────────────────────────
+
+def _formal_md_inventory():
+    """`(total, modules, {module: n})` as §7 and §7a of FORMAL.md publish them.
+
+    Read out of the document rather than compared against a copy of it, and the
+    reason is the one the audit ran into: §7a's table said `subprocess` admits 7
+    and `fcntl` 1, and it admits 12 and 0, and row 8 said 15 contracts across
+    five modules when there are 19 across four.  Nothing checked any of it, so a
+    paragraph about the trust boundary was free to describe a boundary that no
+    longer existed.  A census that is published in prose is a census with two
+    copies, and the instrument has to be the one that can fail — so this reads
+    the document and the caller compares.
+
+    The three shapes come from three places in it: row 8's figure and module
+    list, and §7a's per-module table.  Each is found by the structure it has
+    rather than by a line number, because §7 grows rows above it.
+    """
+    path = os.path.join(HERE, "FORMAL.md")
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    row8 = re.search(r"^\|\s*8\s*\|.*?(\d+)\s+of them across\s+(.*)$",
+                     text, re.M)
+    if not row8:
+        return None, None, None, (
+            "FORMAL.md §7's row 8 no longer states how many admitted contracts "
+            "there are, so the inventory cannot be checked against the tree; "
+            "either put the figure back or delete the row and say why")
+    total = int(row8.group(1))
+    # The list is the RUN of backticked names right after the figure, and nothing
+    # else: a follow-up clause naming a module that admits nothing (`fcntl`) is
+    # not part of it.  `fcntl` WAS inside the list until the audit, which is how
+    # a stale row 8 passed every other check in the tree.  (Splitting the tail on
+    # a `.` to end the sentence does NOT work: `concurrent.futures` has one.)
+    listed = re.match(r"((?:`[\w.]+`)(?:\s*(?:,|and)\s*(?:`[\w.]+`))*)",
+                      row8.group(2))
+    if not listed:
+        return None, None, None, (
+            f"FORMAL.md §7 row 8 reads {row8.group(2)[:60]!r} after its figure, "
+            f"which is not a list of modules, so the modules it claims cannot "
+            f"be compared with the ones that admit contracts")
+    mods = sorted(re.findall(r"`([\w.]+)`", listed.group(1)))
+    counts = {m: int(n) for m, n in
+              re.findall(r"^\|\s*`([\w.]+)`\s*\|\s*(\d+)\s*\|", text, re.M)}
+    if not counts:
+        return None, None, None, (
+            "FORMAL.md §7a's per-module table no longer has rows this can read, "
+            "so the published counts cannot be checked against the modules")
+    return total, mods, counts, ""
+
+
+def test_the_formal_md_inventory_agrees(tmpdir=None):
+    """FORMAL.md's published inventory IS the census, in both directions."""
+    want_total, want_mods, want_counts, why = _formal_md_inventory()
+    check(not why, why)
+    counts = A.counts_by_module()
+    live_total = sum(counts.values())
+    live_counts = {m: n for m, n in counts.items() if n}
+    check(want_total == live_total,
+          f"FORMAL.md §7 says {want_total} admitted contract(s) and there are "
+          f"{live_total}. A published census that does not match the tree "
+          f"describes a trust boundary nobody has.")
+    check(want_mods == sorted(live_counts),
+          f"FORMAL.md §7 row 8 names {want_mods} as the modules that admit "
+          f"contracts and the modules that declare any are "
+          f"{sorted(live_counts)}")
+    bad = []
+    for mod in sorted(set(want_counts) | set(live_counts)):
+        got, want = live_counts.get(mod), want_counts.get(mod)
+        if got != want:
+            bad.append(f"{mod}: FORMAL.md §7a publishes {want}, the modules "
+                       f"declare {got}")
+    check(not bad,
+          "FORMAL.md §7a's per-module table has drifted from "
+          "formal/hostmods/:\n    " + "\n    ".join(bad))
+    return True, (f"FORMAL.md publishes {want_total} contract(s) across "
+                  f"{len(want_counts)} module(s), as declared")
 def test_the_count_per_module_is_pinned():
     """THE RATCHET.  The per-module count, in both directions.
 
@@ -417,12 +1436,30 @@ def model_const(module, name):
         if isinstance(st, F.AssignStmt):
             tgt = getattr(st.target, "name", None)
             if tgt == name:
-                v = getattr(st.value, "value", None)
-                if v is None:
-                    v = getattr(st.value, "raw", None)
-                return int(v)
+                return _folded_int(st.value, f"{module}.{name}")
     raise TestFailure(f"{module}.{name} is not a module-level integer constant "
                       f"in formal/hostmods/{module}.mojo")
+
+
+def _folded_int(node, what):
+    """`node` as an int, folding a unary minus; raise if it is not one.
+
+    A NEGATIVE module constant is a `UnaryOp` over an `IntLiteral` and not an
+    `IntLiteral` with a negative `value`, which is worth knowing because
+    `POLL_NOT_COLLECTED = -65` is negative and `int(getattr(node, "value"))` is
+    `None` for it -- so the first version of this reader reported `None` for a
+    sentinel whose whole job is to be a number outside every answer the host
+    gives.  Folding here rather than in a second reader is the point: there is
+    one place that turns a hostmod's literal into a Python int.
+    """
+    import fire_compiler as F
+    if isinstance(node, F.IntLiteral):
+        return int(node.value)
+    if isinstance(node, F.UnaryOp) and getattr(node, "op", None) in ("-", "−"):
+        return -_folded_int(node.operand, what)
+    raise TestFailure(f"{what} is not a module-level integer constant; its value "
+                      f"is a {type(node).__name__}, which this reader does not "
+                      f"fold")
 
 
 # ── the differential groups ───────────────────────────────────────────────────
@@ -725,7 +1762,9 @@ def group_subprocess_surface(tmpdir, cas_root, verbose):
     `test_formal_subprocess.py`, which fails if a name appears without being
     modelled — and asserts two things per program on BOTH backends: it builds,
     and running it stops with `ADMITTED_EXIT_STATUS` and names the contract that
-    stopped it.  A model that accepted a keyword and then answered differently
+    stopped it.  (The status is a RESERVED value inside `0..255`, not a value
+    outside it; `group_runtime` measures why and `group_truth` keeps the tree
+    from claiming otherwise.)  A model that accepted a keyword and then answered differently
     would fail the second half, which is the failure `formal/admitted.py`'s scope
     rule exists to prevent.
 
@@ -753,8 +1792,10 @@ def group_subprocess_surface(tmpdir, cas_root, verbose):
                   f"stdout was {p.stdout[:200]!r}")
             check(p.returncode == A_ADMITTED_EXIT_STATUS,
                   f"{name}: exited {p.returncode}, and an admitted call must "
-                  f"exit {A_ADMITTED_EXIT_STATUS} — outside 0..255, so it cannot "
-                  f"be read as a child's status")
+                  f"exit {A_ADMITTED_EXIT_STATUS} — this tree's reserved "
+                  f"nonzero refusal status, which is inside 0..255 and so is "
+                  f"NOT what identifies the refusal; the contract name on "
+                  f"stdout is (see `group_runtime`)")
             # WHICH operation it came from.  A row that nests two admissions
             # (`popen_wait(Popen(...))`) is stopped by the inner one, so the row
             # names every operation whose refusal is a correct answer for it —
@@ -1097,13 +2138,22 @@ def group_threading(tmpdir, cas_root, verbose):
 
 
 def group_runtime(tmpdir, cas_root, verbose):
-    """An admitted call REFUSES, and its status cannot be read as a child's.
+    """An admitted call REFUSES, and says WHICH contract refused.
 
     The runtime half of the policy, and the one that stops `admit` from being a
     licence to invent.  `subprocess.run` on this target cannot answer, so the
-    image prints which contract stopped it and exits 125 — and 125 is outside
-    0..255, which is the whole reason for that particular number: a refusal that
-    exited 0 would be a fabricated success wearing a diagnostic's clothes.
+    image prints which contract stopped it and exits 125; a refusal that exited 0
+    would be a fabricated success wearing a diagnostic's clothes.
+
+    **125 is RESERVED, not out of range**, and this used to assert the opposite.
+    The claim it made — that 125 is outside `0..255` and so cannot be read as a
+    child's exit status — is false twice over, and both halves are measured right
+    here rather than in a comment: a child CAN exit 125, and no exit code is
+    outside `0..255` at all.  So the assertions are the two that hold: the
+    refusal exits with this tree's reserved nonzero status, and it NAMES the
+    contract — which is the channel that actually distinguishes a refusal from an
+    answer.  `group_truth`'s `_exit_status_claims` keeps the tree from putting the
+    false sentence back.
     """
     src = os.path.join(tmpdir, "sp_run.mojo")
     with open(src, "w") as f:
@@ -1117,18 +2167,38 @@ def group_runtime(tmpdir, cas_root, verbose):
     check(r.returncode == 0, "the admitted-call image did not build:\n    "
           f"{(r.stderr or r.stdout or '').strip()[:300]}")
     p = subprocess.run([out], capture_output=True, text=True, timeout=60)
-    check(p.returncode == 125,
-          f"subprocess.run exited {p.returncode}; it must exit 125, which is "
-          f"outside 0..255 and so cannot be read as a child's exit status. A "
-          f"refusal that returned a plausible number would be a fabricated "
-          f"answer.")
+    check(p.returncode == A_ADMITTED_EXIT_STATUS,
+          f"subprocess.run exited {p.returncode}; it must exit "
+          f"{A_ADMITTED_EXIT_STATUS}, this tree's reserved refusal status. It is "
+          f"NOT outside 0..255 and cannot be: the kernel masks every exit code "
+          f"into that range, and a child can exit "
+          f"{A_ADMITTED_EXIT_STATUS} like any other — which is why the check "
+          f"below, that the refusal NAMES its contract, is the one that "
+          f"distinguishes it from an answer.")
+    # The two measurements the corrected claim rests on.  Asserted rather than
+    # assumed: a comment that says "125 is a legal child status" is worth
+    # exactly as much as the next run, and this is the next run.
+    child_125 = subprocess.run(["/bin/sh", "-c", "exit 125"],
+                               capture_output=True).returncode
+    check(child_125 == 125,
+          f"a child that exits 125 is reported by CPython as {child_125}, so "
+          f"the reserved status is inside the legal range after all and "
+          f"whatever this file says about it is wrong")
+    child_300 = subprocess.run(["/bin/sh", "-c", "exit 300"],
+                               capture_output=True).returncode
+    check(0 <= child_300 <= 255,
+          f"a child that exits 300 is reported as {child_300}; the kernel is "
+          f"supposed to mask it into 0..255, and if it does not then a status "
+          f"outside the range IS available and this tree should use one")
     check("ADMITTED contract" in p.stdout,
           f"the refusal must NAME the contract that stopped it; stdout was "
           f"{p.stdout[:200]!r}")
     if verbose:
         print(f"    exit {p.returncode}, stdout names the contract")
-    return True, (f"an admitted call refuses with status 125 (outside 0..255), "
-                  f"naming its contract")
+    return True, (f"an admitted call refuses with the reserved status "
+                  f"{p.returncode} and names its contract; a child can exit "
+                  f"{A_ADMITTED_EXIT_STATUS} too, so the name is what "
+                  f"identifies the refusal")
 
 
 def _run(name, src_lines, tmpdir, cas_root, backend="arm64"):
@@ -1138,6 +2208,7 @@ def _run(name, src_lines, tmpdir, cas_root, backend="arm64"):
 GROUPS = {
     "registry": group_registry,
     "scope": group_scope,
+    "truth": group_truth,
     "counts": group_counts,
     "emitted": group_emitted,
     "subprocess": group_subprocess,
@@ -1361,7 +2432,17 @@ def _modelled_subprocess_params(name):
 PURE = [("the emitted Lean is inert where nothing is admitted",
          test_a_file_that_reaches_none_generates_no_hole),
         ("the modelled surface covers what the tree spells",
-         test_the_modelled_surface_covers_what_the_tree_spells)]
+         test_the_modelled_surface_covers_what_the_tree_spells),
+        ("every admitted contract has a truth row",
+         test_every_contract_has_a_truth_row),
+        ("every truth probe rejects the pre-audit text",
+         test_the_truth_probes_reject_the_pre_audit_text),
+        ("every contract points at its own declaration",
+         test_every_contract_points_at_its_own_declaration),
+        ("the Lean library's trust counts are pinned",
+         test_the_library_trust_counts_are_pinned),
+        ("FORMAL.md's inventory is the census",
+         test_the_formal_md_inventory_agrees)]
 
 
 def _pure_call(fn, tmpdir):
