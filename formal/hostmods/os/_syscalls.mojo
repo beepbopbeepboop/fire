@@ -28,18 +28,24 @@ writing it.
    question with a short, complete answer, and it is the answer in this file.
    Every name below was measured to bind on this target before it was relied
    on.
+`shutil` is in the list because it is the one module in `formal/hostmods/`
+  that COPIES BYTES, and the stdio calls are how: `fopen`/`fwrite`/`fread`/
+  `fclose` rather than the three-argument `open`/`write`/`read`, because
+  `fs_open_ro` below says in so many words that this path lowers `open` itself
+  and refuses the C library's own spelling of it — there is no `open(p, flags,
+  mode)` to call. A `FILE *` is a POINTER, so it is a word, and `fopen` takes a
+  MODE STRING, which is the one thing this path does have a literal spelling
+  for. `fs_read`'s docstring says "this path has no `FILE`", which is about the
+  struct and not about the pointer and is worth keeping in mind when reading
+  the two against each other: there is no `FILE` to declare a field on, and
+  every `FILE *` is one word, which is all a descriptor needs to be.
 
-   `shutil` is in the list because it is the one module in `formal/hostmods/`
-   that COPIES BYTES, and the stdio calls are how: `fopen`/`fwrite`/`fread`/
-   `fclose` rather than the three-argument `open`/`write`/`read`, because
-   `fs_open_ro` below says in so many words that this path lowers `open` itself
-   and refuses the C library's own spelling of it — there is no `open(p, flags,
-   mode)` to call. A `FILE *` is a POINTER, so it is a word, and `fopen` takes a
-   MODE STRING, which is the one thing this path does have a literal spelling
-   for. `fs_read`'s docstring says "this path has no `FILE`", which is about
-   the struct and not about the pointer and is worth keeping in mind when
-   reading the two against each other: there is no `FILE` to declare a field
-   on, and every `FILE *` is one word, which is all a descriptor needs to be.
+  `signal` is in the list for the same reason and by the same rule, and it is
+  the one case where the collision is not avoidable by renaming the WRAPPER:
+  CPython spells its own wrapper `strsignal`, so the name this tree wants is
+  the name the C library already has, and the two implementations have to live
+  in different units. `fs_strsignal` below is the whole of it.
+
 
 3. THE STRING PRIMITIVES ARE NOT STRING FEATURES. Concatenation, `strip`,
    `replace` and `split` are refused on this path because a string is a bare
@@ -913,6 +919,49 @@ def fs_fcntl(fd, cmd, arg) -> int:
     integer: `F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL`.
     """
     return fcntl(fd, cmd, arg)
+
+
+def fs_strsignal(sig) -> str:
+    """`strsignal(sig)`: the C library's own description of a signal number.
+
+    **HERE FOR THE NAME COLLISION RULE AT THE TOP OF THIS FILE**, and it is the
+    rule's second kind of case: `strsignal` is a libc function AND the name
+    `formal/hostmods/signal.mojo`'s API wants, because CPython spells its
+    wrapper the same way. A unit that both declares `def strsignal(sig)` and
+    calls `strsignal(sig)` emits a call to ITSELF — measured, not argued: the
+    first version of `signal.mojo` did exactly that and the image died with
+    exit 2 and printed nothing, which is a silent recursion wearing the costume
+    of a crash.
+
+    NOT A TABLE OF STRINGS, which is the other reason it is here rather than
+    written out: on this platform `strsignal(15)` is `"Terminated: 15"` — the
+    number is IN the text — while Linux's is `"Terminated"`, so any table
+    written in this tree would be right on one platform and a plausible wrong
+    answer on the other. A signal number that is not a signal has no answer and
+    the C library's answer for that is the empty string.
+    """
+    return strsignal(sig)
+
+
+def fs_getpid() -> int:
+    """`getpid()`: this process's pid, which is never 0 and never negative."""
+    return getpid()
+
+
+def fs_kill(pid, sig) -> int:
+    """`kill(pid, sig)`: 0 on success, -1 with ESRCH if there is no such process.
+
+    The send half of `signal.raise_signal`, which is what CPython's own source
+    does (`raise_signal` is `kill(getpid(), signum)`), and it is here so that
+    `signal.mojo` contains no libc call of its own and the question "what does
+    this tree ask of the operating system" keeps the short complete answer this
+    file's header promises.
+
+    `SIGKILL` and `SIGSTOP` cannot be caught, blocked or ignored, so a caller
+    that sends one of those to itself ends the image; that is the platform's
+    rule and not a choice this wrapper makes.
+    """
+    return kill(pid, sig)
 
 
 def fs_mkdir(p, mode) -> int:

@@ -154,7 +154,18 @@ HOST_UNREACHABLE = frozenset((
     # --host`) all spell `set(dir(builtins))` — they ask the INTERPRETER to
     # enumerate its own namespace, which is the one question on this page with
     # no answer at all here.
-    "traceback", "gc", "atexit", "signal", "warnings", "dis", "builtins",
+    # `traceback` and `signal` WERE here, in the same line, and left on
+    # 2026-10-04 by being WRITTEN — the way `shutil` and `tempfile` left. The
+    # entry above them says what this heading means: an interpreter's own
+    # frames, allocation set or shutdown path. `traceback`'s frames and
+    # `signal`'s dispositions are still missing, and both modules say so at the
+    # names concerned; what is not missing is the part a program READS, and that
+    # part is computed rather than admitted. `traceback` answers CPython's own
+    # text for the one state this target can be in (no exception in flight) and
+    # `signal` answers the platform's `<signal.h>` vocabulary plus two libc
+    # calls, so neither leaves a host fact over to trust — which is why both sit
+    # in NO tier rather than in `HOST_ADMITTED` (the `fcntl` precedent, verbatim).
+    "gc", "atexit", "warnings", "dis", "builtins",
     # Process-wide reporting machinery, which is a host object by construction.
     "logging", "unittest", "unittest.mock",
 # A terminal. `tempfile` WAS here too — under this heading, for the

@@ -443,6 +443,18 @@ PROVIDED_NEVER_A_HOST_MODULE = {
     # does NOT have (`split`, `join`, the `shlex` reader) is refused there by
     # name, which is what keeps a one-file row from reading as a whole module.
     "shlex": "test_formal_shlex.py",
+    # `traceback` and `signal` left `HOST_UNREACHABLE` on 2026-10-04 the way
+    # `shutil` and `tempfile` did, and for the same half of the reason: the
+    # OBJECT half of their entries is still true — there is no unwinder for
+    # `traceback` to format and no disposition table for `signal` to change —
+    # and the part a program READS is computed. `traceback` answers CPython's own
+    # text for the one state this target can be in, and `signal` answers this
+    # platform's `<signal.h>` numbers plus two libc calls. Both are zero-admission
+    # for the `fcntl` reason, so they sit in NO tier rather than in
+    # `HOST_ADMITTED`, and one test file checks both because they are the same
+    # shape (a handful of names whose answers are CPython's to give).
+    "traceback": "test_formal_core_hostmods.py",
+    "signal": "test_formal_core_hostmods.py",
 }
 
 # The two `os` SUBMODULES, which are provided and are named by the file they are

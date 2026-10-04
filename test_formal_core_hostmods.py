@@ -65,6 +65,7 @@ import argparse
 import enum
 import os
 import platform
+import signal
 import subprocess
 import sys
 import tempfile
@@ -115,6 +116,26 @@ def run(out):
           f"image exited {r.returncode}: "
           f"{(r.stderr or b'').decode('utf-8', 'replace').strip()[-300:]}")
     return r.stdout.decode("latin-1")
+
+
+def run_streams(out):
+    """Execute the image and return `(stdout, stderr)`, both as latin-1 text.
+
+    Needed by the `tb` group and by nothing else here: `traceback.print_exc`
+    writes to descriptor 2 by definition, so a driver that kept only stdout
+    would report the module's one effect as silence and the group would pass on
+    a `print_exc` that wrote nothing at all — which is the specific wrong
+    answer the module's docstring says CPython does NOT give.
+
+    latin-1 for both, for the reason `run` gives: it round-trips every byte, so
+    a body that contains one is not silently mangled into the separator.
+    """
+    r = subprocess.run([out], capture_output=True, timeout=J.RUN_TIMEOUT,
+                       cwd=HERE)
+    check(r.returncode == 0,
+          f"image exited {r.returncode}: "
+          f"{(r.stderr or b'').decode('utf-8', 'replace').strip()[-300:]}")
+    return (r.stdout.decode("latin-1"), r.stderr.decode("latin-1"))
 
 # The corpus for `enum-value`, as (class name, member, value) triples.
 # Deliberately includes the shapes that are easy to get wrong: 0 (which a "read
@@ -488,7 +509,7 @@ def group_resolve(tmpdir, verbose):
     being written, because an entry left behind would refuse a file after the
     module that answers it is in the tree."""
     import formal.imports as I
-    for mod in ("enum", "contextlib"):
+    for mod in ("enum", "contextlib", "traceback", "signal"):
         path = os.path.join(HOSTMODS, mod + ".mojo")
         check(os.path.isfile(path), f"no Mojo source for {mod}")
         got = I.resolve_module_path(mod)
@@ -498,8 +519,10 @@ def group_resolve(tmpdir, verbose):
               f"{mod} is still in HOST_MODELLED; its Mojo source exists, so the "
               f"entry is now a false statement about the target")
     if verbose:
-        print("    both resolve into formal/hostmods/, both out of the set")
-    return True, "enum and contextlib resolve, and both left HOST_MODELLED"
+        print("    all four resolve into formal/hostmods/, all four out of "
+              "the set")
+    return True, ("enum, contextlib, traceback and signal resolve, and all "
+                  "four left HOST_MODELLED")
 
 
 def group_functools_absent(tmpdir, verbose):
@@ -602,6 +625,228 @@ def group_functools_absent(tmpdir, verbose):
     return True, f"{len(absent) + 1} absent functools names refused"
 
 
+# ── `traceback` and `signal` ───────────────────────────────────────────────────
+#
+# BOTH IN THIS FILE for the reason the docstring's second section gives: a
+# handful of names whose answers are CPython's (or the C library's) to give, and
+# a file each that wanted one of them. Neither module is large enough to be worth
+# a suite of its own and both are in the same shape — a vocabulary plus a
+# function or two, with the absences carrying the argument.
+#
+# `SIGNAL_NAMES` is a list of NAMES and not of numbers, read off this process's
+# live `signal`, for the reason `IO_ANSWERS` in `test_formal_small_hosts.py` is:
+# the oracle is the interpreter's own module, so a number typed here could be
+# wrong without anything noticing, and a name CPython stopped exporting would be
+# a corpus row testing a name that does not exist. The image and CPython are
+# therefore always asked about the SAME set of names, computed once.
+SIGNAL_NAMES = [n for n in dir(signal) if n.startswith("SIG")] + \
+               [n for n in dir(signal) if n.startswith("ITIMER_")]
+# Sorted so the generated program's order does not depend on `dir()`'s, which is
+# a set order and would otherwise make a diff of the two sides unreadable.
+SIGNAL_NAMES.sort()
+
+
+def group_tb(tmpdir, verbose):
+    """`traceback.format_exc()` and `print_exc()`, against CPython's, on BOTH backends.
+
+    The whole module, so this group is the module's argument. **Both streams are
+    compared**, and the stderr half is the one that matters: `print_exc` writing
+    NOTHING is the plausible wrong answer — it is what a reader would expect of a
+    module with no exceptions — and it is wrong about this host, which prints
+    `NoneType: None` for every call that finds no exception in flight. CPython's
+    answer is computed here, in this process, rather than written down.
+
+    The `format_exc` case is asked FIRST and printed to stdout, so a group that
+    only ever compared stdout would see a difference even if `print_exc` were
+    deleted — the two halves are independent reads of the same string.
+    """
+    want_fmt = __import__("traceback").format_exc()
+    want_print = __import__("traceback").format_exc()
+    src = ("import traceback\n\ndef main() -> int:\n"
+           '    printf("F=[%s]\\n", traceback.format_exc())\n'
+           "    traceback.print_exc()\n"
+           "    return 0\n")
+    for backend in BACKENDS:
+        out = build(src, f"tb_{backend}", backend=backend)
+        got_out, got_err = run_streams(out)
+        check(got_out == f"F=[{want_fmt}]\n",
+              f"[{backend}] traceback.format_exc() answered {got_out!r}, CPython "
+              f"{want_fmt!r} — this target has no exception in flight and "
+              f"CPython prints this exact text in that state, so a difference "
+              f"here is a difference about the text and not about the state")
+        check(got_err == want_print,
+              f"[{backend}] traceback.print_exc() wrote {got_err!r} to "
+              f"descriptor 2, CPython writes {want_print!r}. Writing NOTHING "
+              f"is the wrong answer here and this group is what says so")
+    if verbose:
+        print(f"    format_exc and print_exc, on {len(BACKENDS)} backends, "
+              f"stdout AND stderr")
+    return True, f"traceback agrees with CPython on {len(BACKENDS)} backends"
+
+
+def group_tb_absent(tmpdir, verbose):
+    """Each absent `traceback` name is a refusal that NAMES ITSELF.
+
+    The list is the module's "WHAT IS NOT HERE, AND WHY" verbatim, and the two
+    entries that could have gone the other way are in it for the reason that
+    section gives: `print_stack`/`format_stack` are about the CURRENT stack,
+    which this target HAS, so a fixed string there would be a plausible wrong
+    answer about the program it claimed to describe; and `clear_frames` is about
+    MUTATING a traceback the caller holds, which a one-word value has nowhere to
+    put.
+    """
+    absent = ["format_exception", "print_exception", "format_exception_only",
+              "format_stack", "print_stack", "print_tb", "format_tb",
+              "extract_tb", "walk_tb", "clear_frames", "TracebackException",
+              "FrameSummary", "StackSummary", "print_exception_only"]
+    for name in absent:
+        # A CALL, not a bare name: a bare `traceback.format_stack` is a read of a
+        # module-level name, refused for a different and vaguer reason that does
+        # not name the name being asked for. Same reason `group_ctx_absent` and
+        # `test_formal_small_hosts.py`'s `absent` group give.
+        src = (f"import traceback\n\ndef main() -> int:\n"
+               f"  printf(\"%s\", traceback.{name}(0))\n  return 0\n")
+        tmp = os.path.join(TEMP, f"absent_tb_{name}.mojo")
+        with open(tmp, "w") as f:
+            f.write(src)
+        r = subprocess.run(
+            [sys.executable, FIRE, "build", "--formal", "--no-prove",
+             "-o", os.path.join(TEMP, f"absent_tb_{name}"), tmp],
+            capture_output=True, text=True, timeout=J.BUILD_TIMEOUT, cwd=HERE)
+        check(r.returncode != 0,
+              f"traceback.{name} resolved, but the module documents it as absent "
+              f"— either the docstring is wrong or the module grew a name")
+        msg = r.stderr or r.stdout
+        check(name in msg,
+              f"traceback.{name} failed without naming itself: "
+              f"{msg.strip()[-300:]}")
+    if verbose:
+        print(f"    {len(absent)} absent names refused, each naming itself")
+    return True, f"{len(absent)} absent traceback names refused"
+
+
+def group_sig(tmpdir, verbose):
+    """Every `signal` NAME against CPython's live `signal`, plus two libc calls.
+
+    Three things, and each is a different kind of claim:
+
+      * **the vocabulary** — every name CPython's `signal` exports, compared one
+        by one. It is a list of NAMES read off this process's module, so the two
+        sides are always asked about the same set, and a constant that were wrong
+        on one platform only (`SIGSTKFLT` is 16 on Linux and absent here;
+        `SIGCHLD` is 17 on Linux and 20 here) cannot pass unnoticed. NO SKIP on a
+        non-Darwin host: a disagreement there is a true statement about this file,
+        and a skip would be how a platform-specific model becomes a
+        platform-independent one by accident;
+      * **`strsignal`** over every signal number the platform has, byte for byte.
+        Not a table: the C library's own text is what has to match, and on this
+        platform it carries the number (`"Terminated: 15"`), which is why a
+        hand-written table would have been right on Linux and wrong here;
+      * **`raise_signal`**, with `SIGCONT` and nothing else — it is the only
+        signal whose default disposition continues a running process, so it is
+        the only one a test may send to itself.
+    """
+    src = ["import signal", "", "def main() -> int:"]
+    for n in SIGNAL_NAMES:
+        src.append(f'    printf("{n}=%d\\n", signal.{n})')
+    src.append("    return 0")
+    src = "\n".join(src) + "\n"
+    want = {}
+    for n in SIGNAL_NAMES:
+        want[n] = str(getattr(signal, n))
+    for backend in BACKENDS:
+        got = _parse_image(run(build(src, f"sig_{backend}", backend=backend)))
+        bad = {n: (got.get(n), want[n]) for n in SIGNAL_NAMES
+               if got.get(n) != want[n]}
+        check(not bad,
+              f"[{backend}] signal vocabulary disagrees with CPython on "
+              f"{len(bad)} name(s): "
+              + ", ".join(f"{n}: image {a!r} CPython {b!r}"
+                          for n, (a, b) in sorted(bad.items()))
+              + " — these are this platform's <signal.h> numbers and they are "
+                "the ones CPython's own module reports on this host")
+
+    # `strsignal`, one build per backend, every number the platform has.
+    sig_src = ["import signal", "", "def main() -> int:"]
+    for n in range(1, int(signal.NSIG)):
+        sig_src.append(f'    printf("{n}=%s|", signal.strsignal({n}))')
+    sig_src.append("    return 0")
+    sig_src = "\n".join(sig_src) + "\n"
+    for backend in BACKENDS:
+        got = _parse_image(run(build(sig_src, f"sig_str_{backend}",
+                                     backend=backend)))
+        bad = {}
+        for n in range(1, int(signal.NSIG)):
+            answer = signal.strsignal(n)
+            if got.get(str(n)) != answer:
+                bad[n] = (got.get(str(n)), answer)
+        check(not bad,
+              f"[{backend}] signal.strsignal disagrees with CPython on "
+              f"{len(bad)} of {int(signal.NSIG) - 1} signal number(s): "
+              + ", ".join(f"{n}: image {a!r} CPython {b!r}"
+                          for n, (a, b) in sorted(bad.items()))
+              + " — the answer is the C library's own text, so any difference "
+                "here is a difference about which strsignal(3) ran")
+
+    # `raise_signal(SIGCONT)`: CPython answers None, which is the word 0 here.
+    raise_src = ("import signal\n\ndef main() -> int:\n"
+                 '    printf("r=%d\\n", signal.raise_signal(signal.SIGCONT))\n'
+                 "    return 0\n")
+    want_raise = 0 if signal.raise_signal(signal.SIGCONT) is None else \
+        signal.raise_signal(signal.SIGCONT)
+    for backend in BACKENDS:
+        got = run(build(raise_src, f"sig_raise_{backend}", backend=backend))
+        check(got == f"r={want_raise}\n",
+              f"[{backend}] signal.raise_signal(SIGCONT) answered {got!r}, "
+              f"CPython answers None and None is the word 0 on this path "
+              f"(model.NONE_WORD) — see the module's docstring")
+    if verbose:
+        print(f"    {len(SIGNAL_NAMES)} signal names, "
+              f"{int(signal.NSIG) - 1} strsignal answers and raise_signal, on "
+              f"{len(BACKENDS)} backends")
+    return True, (f"{len(SIGNAL_NAMES)} signal names and "
+                  f"{int(signal.NSIG) - 1} strsignal answers agree with CPython "
+                  f"on {len(BACKENDS)} backends")
+
+
+def group_sig_absent(tmpdir, verbose):
+    """Each absent `signal` name is a refusal that NAMES ITSELF.
+
+    `signal` is the module where an omission is most dangerous, and that is why
+    the list is the module's own "WHAT IS NOT HERE" verbatim rather than a
+    sample: `signal(signum, handler)` would build, record nothing and let the
+    program believe it had installed a handler, which is the silent-wrong-answer
+    shape `functools-absent` above is entirely about. `Signals` is the other one
+    worth naming — `signal.Signals(15).name` is real, useful CPython and needs
+    the number and the name to be one value with two readings.
+    """
+    absent = ["signal", "getsignal", "sigpending", "sigwait",
+              "pthread_sigmask", "pthread_kill", "siginterrupt",
+              "set_wakeup_fd", "pause", "alarm", "setitimer", "getitimer",
+              "valid_signals", "Signals", "Sigmasks", "Handlers",
+              "ItimerError", "default_int_handler"]
+    for name in absent:
+        src = (f"import signal\n\ndef main() -> int:\n"
+               f"  printf(\"%s\", signal.{name}(0))\n  return 0\n")
+        tmp = os.path.join(TEMP, f"absent_sig_{name}.mojo")
+        with open(tmp, "w") as f:
+            f.write(src)
+        r = subprocess.run(
+            [sys.executable, FIRE, "build", "--formal", "--no-prove",
+             "-o", os.path.join(TEMP, f"absent_sig_{name}"), tmp],
+            capture_output=True, text=True, timeout=J.BUILD_TIMEOUT, cwd=HERE)
+        check(r.returncode != 0,
+              f"signal.{name} resolved, but the module documents it as absent — "
+              f"either the docstring is wrong or the module grew a name")
+        msg = r.stderr or r.stdout
+        check(name in msg,
+              f"signal.{name} failed without naming itself: "
+              f"{msg.strip()[-300:]}")
+    if verbose:
+        print(f"    {len(absent)} absent names refused, each naming itself")
+    return True, f"{len(absent)} absent signal names refused"
+
+
 GROUPS = {
     "enum-value": group_enum_value,
     "enum-shape": group_enum_shape,
@@ -609,6 +854,10 @@ GROUPS = {
     "ctx": group_ctx,
     "ctx-absent": group_ctx_absent,
     "functools-absent": group_functools_absent,
+    "tb": group_tb,
+    "tb-absent": group_tb_absent,
+    "sig": group_sig,
+    "sig-absent": group_sig_absent,
     "resolve": group_resolve,
 }
 
