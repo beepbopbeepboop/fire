@@ -6572,8 +6572,8 @@ def non_container_element_refusal(op: str, spelled: str, function: str,
 #: 2026-10-04.**  The exclusion was recorded as "a field whose declared type is
 #: a framed struct of this module holds an ADDRESS, and reading that as a
 #: container is a wrong ANSWER rather than a fault, which is its own defect"
-#: (`bugs/FORMAL_a_subscript_of_a_field_declared_a_framed_struct_is_a_wrong_answer.md`),
-#: and the reasoning was sound: the two defects want different messages.  What
+#: (the `w.d[0]` doc, deleted with the 2026-10-04 fix below), and the reasoning
+#: was sound: the two defects want different messages.  What
 #: made the exclusion untenable is that the wrong answer was MEASURED rather than
 #: argued, and both ways out of it were worse than a refusal — so it is now the
 #: same gate with its own evidence sentence rather than a new mechanism:
@@ -6652,10 +6652,10 @@ def scalar_container_base_evidence(expr, kind) -> str | None:
         537 sites over 252 files. The earlier table said 2 642 sites and 7 in the
         frame row, and those two numbers were wrong in the same direction: a
         `Dict[...]` annotation was read through `structs_declared` and found the
-        module's OWN `struct Dict` — the misattribution
-        `bugs/FORMAL_a_subscript_of_a_field_declared_a_framed_struct_is_a_wrong_answer.md`
-        §"Why the fix for the sibling doc left it out, and why that was right"
-        predicted. 7 − 2 is not a smaller cost, it is a right number.
+        module's OWN `struct Dict` — the misattribution the `w.d[0]` doc
+        predicted when it declined to widen the set, and the reason it is a
+        DECISION rather than a hunch. 7 − 2 is not a smaller cost, it is a right
+        number.
 
         So the refusal costs the corpus nothing that WORKED, and the permissive
         `None` is what the other 404 sites get — which is the right answer for
