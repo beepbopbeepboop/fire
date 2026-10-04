@@ -226,6 +226,11 @@ class _Harvester:
         self.stats = stats
         self.direct = {}
         self.alias = []
+        self.methods = {}
+        # The helpers currently being inlined, so a helper that calls itself
+        # terminates. A name rather than a depth count, because the thing that
+        # would recurse is a NAME.
+        self.inlining = set()
 
     # bindings ──────────────────────────────────────────────────────────────
 
@@ -240,6 +245,32 @@ class _Harvester:
                         self.alias.append(alias.asname or alias.name)
         self.direct = {k: v for k, v in self.direct.items()
                        if v in self.wanted}
+        self._read_methods(tree)
+
+    def _read_methods(self, tree):
+        """Every `def` of every class, as a HELPER this harvester can inline.
+
+        CPython's test files put their cases in a helper and call it with
+        literals more often than not -- `test_posixpath.py`'s `splitextTest`
+        is twelve calls whose body holds six `splitext` cases each, so the
+        whole `splitext` corpus of that file is invisible without this, and
+        `splitext` is one of the four tuple-returning functions `posixpath`
+        exists to forward.
+
+        **Only helpers that actually CALL a function of the module are kept**,
+        which is what stops `test_re.py`'s 147 `self.checkPatternError(...)`
+        calls from being walked at all: they call `assertRaises` and nothing
+        this table wants.
+        """
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for member in node.body:
+                if not isinstance(member, ast.FunctionDef):
+                    continue
+                if not _calls_any_of(member, self.wanted):
+                    continue
+                self.methods[member.name] = member
 
     # the constant folder ────────────────────────────────────────────────────
 
@@ -412,7 +443,39 @@ class _Harvester:
         for child in ast.iter_child_nodes(node):
             self.descend(child, env)
 
+    def inline(self, node, env):
+        """A `self.helper(literals…)` call: walk the helper's body with them.
+
+        `None` when this is not a helper call this harvester can inline, which
+        is the common answer and the one every other path falls through to.
+        """
+        function = node.func
+        if not (isinstance(function, ast.Attribute)
+                and isinstance(function.value, ast.Name)
+                and function.value.id == "self"):
+            return None
+        method = self.methods.get(function.attr)
+        if method is None or node.keywords or function.attr in self.inlining:
+            return None
+        names = [a.arg for a in method.args.args]
+        if names and names[0] == "self":
+            names = names[1:]
+        if len(node.args) != len(names):
+            return None
+        values = [self.const(a, env) for a in node.args]
+        if any(v is None for v in values):
+            return None
+        scoped = dict(env)
+        for name_, value in zip(names, values):
+            scoped[name_] = value
+        self.inlining.add(function.attr)
+        self.body(method.body, scoped)
+        self.inlining.discard(function.attr)
+        return True
+
     def call(self, node, env):
+        if self.inline(node, env) is not None:
+            return
         name = None
         function = node.func
         if isinstance(function, ast.Name) and function.id in self.direct:
@@ -466,6 +529,24 @@ class _Harvester:
         })
 
     path = "<unknown>"
+
+
+def _calls_any_of(function, wanted):
+    """Whether `function`'s body calls one of `wanted`, by name or qualified.
+
+    A NAME test over the function's own subtree, so it does not follow calls
+    out of it: the question is "does this helper hold a case", and a helper
+    that delegates everything to another helper holds none of its own.
+    """
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func
+        if isinstance(callee, ast.Name) and callee.id in wanted:
+            return True
+        if isinstance(callee, ast.Attribute) and callee.attr in wanted:
+            return True
+    return False
 
 
 class _ParentTagger(ast.NodeTransformer):
@@ -818,7 +899,11 @@ RE_EMIT = """\
         bit = 1
     emit_i({k}, bit)"""
 
-# The value the model emits for "this pattern is not one I compile".
+# The value a module with a THREE-VALUED answer emits for "I do not compile
+# this". It is only read for a case whose `Fn` entry declares an `emit`, which
+# is what stops it colliding with an ordinary answer: `struct.calcsize("h")` is
+# 2, and the first version of this read that as a refusal and reported
+# `struct` as declining a CPython case it had actually answered.
 REFUSED = 2
 
 
@@ -955,8 +1040,12 @@ NOT_YET = [
     ("json", "test_json/ is a package with 18 files and the model has `loads`, "
              "`dumps` and a scanner; needs the byte-string value model worked "
              "out before it can be driven at all."),
-    ("ast", "204 literal `parse`/`literal_eval` cases, but the model's surface "
-            "is its own and the mapping is unmeasured."),
+    ("ast", "the model is a TOKENIZER (`tokenize`, `token_bound`, `parse`, "
+            "`parse_reason`, `token_name`) and CPython's `test_ast.py` "
+            "exercises `ast.parse`/`literal_eval`/`dump`, which it does not "
+            "have; the suite for what it does have is `test_tokenize.py`, and "
+            "every case in that one drives `generate_tokens` through a "
+            "`StringIO`, so there is no literal call to harvest either."),
     ("re", "1768 literal cases, and CPython's pattern language is far larger "
            "than the subset `formal/hostmods/re.mojo` implements; the selection "
            "rule has to be the module's own docstring, which is a project of its "
@@ -1312,7 +1401,8 @@ def run_group(spec, verbose, backends):
                                 f"({case.fn}): the image emitted NO record")
                 continue
             got = model_parts(case, answers[case.case_number])
-            if len(want) == 1 and got[0] == REFUSED:
+            if (case.emit is not None and len(want) == 1
+                    and got[0] == REFUSED):
                 # The model's own documented refusal for a pattern it does not
                 # compile. Counted and printed, and NOT a pass either: a table
                 # that could not say how many of CPython's patterns this
@@ -1352,13 +1442,15 @@ def run_group(spec, verbose, backends):
         # counting the list would double the headline on a two-backend run and
         # make the number a function of the backend count.
         cases_refused = {case.case_number for _b, case in refused}
-        distinct = sorted({(case.fn, case.args[0]) for _b, case in refused})
+        distinct = sorted({(case.fn, repr(case.args[0]))
+                           for _b, case in refused})
         print(f"    {spec.name}: {len(cases_refused)} of CPython's own cases "
-              f"are a pattern this engine REFUSES (its own STATUS_UNSUPPORTED / "
-              f"STATUS_LIMIT), which is a documented limit and not an "
-              f"agreement. {len(distinct)} distinct (function, PATTERN) pairs:")
-        for fn, pattern in distinct[:14]:
-            print(f"      refused: {fn}({pattern!r})")
+              f"are one this engine REFUSES with its own STATUS_UNSUPPORTED / "
+              f"STATUS_LIMIT, which is a documented limit and not an "
+              f"agreement. {len(distinct)} distinct (function, argument 0) "
+              f"pairs:")
+        for fn, first in distinct[:14]:
+            print(f"      refused: {fn}({first}, ...)")
         if len(distinct) > 14:
             print(f"      ... and {len(distinct) - 14} more")
     check(not failures,
