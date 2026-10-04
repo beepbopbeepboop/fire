@@ -293,22 +293,36 @@ RED   a dotted stdlib import resolves to the module it names
 ```
 
 `test_formal_imports.py` is **72/72**. Because `formal/imports.py` is on
-CLAUDE.md's "owes a full `make gate`" list, I also ran the 37 formal test files
-whose subject touches import resolution (`grep -l 'formal\.imports\|resolve_module_path\|from formal import imports' test_*.py`),
-three at a time under `tools/memslot.py --gb 8`: **32 exit 0**, including
-`test_formal_run.py` at 954/954, `test_formal_link_accounting.py` at 246/246,
-`test_formal_cross_module.py` at 33/33 and `test_formal_monomorph.py` at 11/11.
-The **5 that exit 1 fail identically with `master`'s `formal/imports.py`
-restored** — measured, by `cp`-ing the committed file back over mine, running,
-and `cp`-ing mine back:
+CLAUDE.md's "owes a full `make gate`" list, I also ran **57 formal test files**,
+three at a time under `tools/memslot.py --gb 8`, and A/B'd every red against
+`master`'s `formal/imports.py` (restored with `cp` from `git show`, never
+`git checkout`, and mine `cp`-ed back):
+
+| batch | what it is | exit 0 | red |
+|---|---|---|---|
+| the 30 files whose imports mention `formal.imports` / `resolve_module_path` (`grep -l`) | the resolution contract | **25** | 5 |
+| 23 further formal files that build stdlib programs or a hostmod | the closure a moved binding reaches | **20** | 3 |
+| 4 more from the wider grep (`*_encoders`, `call_proof_gen`, `typed_flag`) | the emitters and their tables | 3 | 1 |
+
+**51 of 57 green; all 6 reds are red on `master` too, measured.** The
+interesting ones are in the first table below — `test_formal_manifest_atomic`
+fails inside the file I edited, on a line I did not touch.
 
 | file | why it is red on `master` too |
 |---|---|
 | `test_ab_native` | needs a `mojoc` this worker may not build |
-| `test_formal_manifest_atomic` | `ValueError: not enough values to unpack (expected 3, got 2)` at `formal/imports.py:3461` — `depends` is appended as a 2-tuple and read as a 3-tuple. **Pre-existing, in the file I edited but not in the code I changed**; someone is mid-flight in `_record` |
+| `test_formal_manifest_atomic` | `ValueError: not enough values to unpack (expected 3, got 2)` at `formal/imports.py:3461` — `depends` is appended as a 2-tuple and read as a 3-tuple. **In the file I edited, on a line I did not touch**; `_record` is mid-flight |
 | `test_formal_sweep` | one failure whose own message says its fixture "tests nothing" (the bind it resolved is `exit`, which `lstrip('_')` cannot change) |
 | `test_formal_sweep_truth` | 6 errors, all `no step lemma wired for: alu_ri32:sub_reg, lea_r64_rip` in the x86-64 end-to-end emitter |
 | `test_re_formal` | 2 failures on a `typedef` regex in `formal/re`'s corpus-pattern table |
+| `test_formal_libc_symbol` | a stale `HOSTMOD_NON_C_CALLEES` entry (`str_alloc`) |
+| `test_formal_type_application` | a refusal-message mismatch on the bracketed-specialization sentence |
+| `test_formal_dylib` | `a receiver write-back is not a returned frame` — a constructor that ASSIGNS a frame to its own one word; `FORMAL_a_one_word_ctor_of_a_nested_frame_is_unexportable` (`formal8-5`) |
+| `test_arm64_encoders` | the survey wants `blr` reported as NOT covered and it is now emitted — `FORMAL_arm64_instruction_coverage` (`formal18-2`), and `FORMAL_stdlib_tile_row…`'s last section records that move as its own measurement |
+
+The two green ones worth naming from batch 1: **`test_formal_run.py` 954/954**
+and **`test_formal_link_accounting.py` 246/246**, plus
+`test_formal_cross_module.py` 33/33 and `test_formal_monomorph.py` 11/11.
 
 ### 5.5 What the re-measurement shows: 0 classes moved, and that is the point
 
@@ -397,8 +411,9 @@ python3 .tmp/probe_dylib.py build --formal --no-prove -o .tmp/asan.out \
 # §5.4, that the two new tests are red under the old ordering
 python3 .tmp/prove_red.py
 
-# §5.4, the 37 resolution test files, three at a time
-bash .tmp/run_import_tests.sh
+# §5.4, the resolution test files and the stdlib-building ones, three at a time
+bash .tmp/run_import_tests.sh      # 30 files, the resolution contract
+bash .tmp/run_more_tests.sh        # 23 files, stdlib programs and hostmods
 ```
 
 `.tmp/probe_dylib.py`, `.tmp/leaf_census.py`, `.tmp/closure_moved.py`,
