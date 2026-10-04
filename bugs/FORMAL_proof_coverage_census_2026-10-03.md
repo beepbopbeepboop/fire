@@ -13,6 +13,15 @@ master rather than about this census. Everything below §0 is the state of the
 tree the first run was taken on, kept because §0's numbers are only readable
 against it, and §3's family table is superseded by §0.2's.**
 
+**§0.4 is new, and it is a DIFFERENT measurement of the same subject.** §2–§4
+count what the proof generator emits over a hand-built corpus of 60 functions.
+§0.4 counts what happens over a GENERATED corpus, because that is the only way to
+ask the question the rest of this document cannot: whether a proof Lean ACCEPTS
+is a proof about what the program MEANS. On this tree the answer is **64 of 64
+programs (40 x86-64, 24 arm64) with zero soundness findings**, over 372 image
+runs compared with CPython — and it took TWO generator blockers out of the
+proof layer to be able to ask it at all.
+
 **What this measures, and the one number nobody had.** `tools/formal_sweep.py`
 covers the *code generator's* language coverage and deliberately builds
 `--no-prove`, and says so in its own docstring:
@@ -162,6 +171,148 @@ phase A — `codegen-refused`, `proof-refused` and `proof-crash` are all decided
 before Lean runs — plus whatever Lean verdicts the content-addressed CAS already
 held, which is where the `pass`/`lean-rejected`/`bound-exceeded` rows come from.
 **That is a weaker claim than §2's table and is labelled as one.**
+
+## 0.4 The Lean half, over a GENERATED corpus: is an accepted proof about what
+## the program MEANS? (`work/formal17-fuzz-continue-b`, 2026-10-04)
+
+**The question §2–§4 do not ask.** Every row above is a verdict about a FILE:
+the generator emitted a proof, and Lean accepted or rejected it. None of them
+compares the thing the proof is *about* with the thing the program does. A proof
+can check, cleanly and with zero holes, and be about a model that is not the
+source — §6's third bullet is one (`~x` modelled as a logical `not`), and it was
+found by a concrete `native_decide` instance rather than by a corpus, because a
+corpus of hand-written programs cannot be trusted to contain the case.
+
+**The instrument.** `tools/formal_proof_fuzz.py`. It generates programs in the
+shape the semantic model can state — one entry function, a few straight-line
+`int` statements, one final `print`, nothing else — builds each with
+`prove=True`, checks the emitted proof through `formal/lean.py::run_lean`'s
+bounds, and puts Lean's verdict in one column and the image's answer against
+CPython in the other. The cell the tool exists for is **`MISMATCH` under a proof
+Lean ACCEPTED**: Lean has checked that the compiled bytes compute the semantic
+model, and the image says the model is not what the program means, so the proof
+is a proof about a wrong model. That is a soundness bug, and no amount of fixing
+the code generator touches it. `tools/formal_fuzz.py` measures the other half
+(`--no-prove`, image against CPython) and shares this one's oracle, runner,
+classifier, minimiser and `KNOWN_DIVERGENCES` by import — there is one of each in
+the repository.
+
+**The run.** Seed `formal-proof-fuzz`, `--mix plain`, 6 inputs per program (its
+own, drawn from the seed, plus `0 1 3 7 32768`). Ledgers are committed, one JSON
+line per program, so every number here is a `Counter` over a file in the tree:
+
+```sh
+export PATH=/opt/homebrew/bin:$PATH
+python3 tools/memslot.py --gb 8 --label ppf-x86 -- \
+  python3 -u tools/formal_proof_fuzz.py --count 40 --arch x86_64 -j 2 -t 400 \
+  --work .tmp/ppf/x86            # 555 s wall, 6.8 GB peak — the COLD run
+python3 tools/memslot.py --gb 8 --label ppf-arm -- \
+  python3 -u tools/formal_proof_fuzz.py --count 24 --arch arm64 -j 1 -t 900 \
+  --work .tmp/ppf/arm           # ~2 min a program, 6.0 GB peak
+```
+
+`bugs/sweeps/proof_fuzz_2026-10-04_x86_64.jsonl` (40 programs) and
+`…_arm64.jsonl` (24). The x86-64 warm re-run is
+**52 s** for all 40 verdicts — every Lean verdict is content-addressed
+(`formal/lean.py`'s CAS) and the rest is codegen — and it reproduced the cold
+run's classes exactly, which is the CAS doing its job and not a claim that the
+corpus is easy. arm64 is `-j 1`: two Lean proofs BREACH the 8 GB reservation
+(the same measurement §0.1 records for this census), and arm64 is where the
+hole-free `pass` rows come from, so it is the half worth spending the memory on.
+
+| | x86-64 | arm64 |
+|---|---|---|
+| programs | 40 | 24 |
+| image runs compared against CPython | **228** | **144** |
+| `pass` — proof typechecks, **0 holes** | 0 | **8** |
+| `admitted` — typechecks, N holes | **30**, every one at **N = 2** | 0 |
+| `lean-rejected` | 10 | 2 |
+| `lean-memory-exceeded` (not a verdict — §0.3) | 0 | **14** |
+| `proof-refused` / `codegen-refused` / `proof-crash` | 0 | 0 |
+| reached Lean at all | **40 of 40** | **24 of 24** |
+| `match` — image and CPython agreed at every input | **40** | **24** |
+| **`SOUNDNESS-MISMATCH`** | **0** | **0** |
+
+**The x86-64 row moved while this section was being written, and the movement is
+the point.** It read `admitted 33 / lean-rejected 7` when the first 40-program
+run finished. Then the x86-64 half of the environment fix below landed, and the
+same 40 programs read **30 / 10**. Ten of the forty are two-parameter entries,
+and for **all ten** the `eval_eq_mojo` bridge was silently OMITTED before
+(`AST bridge omitted: this function's shape (recursive/looping)` — a shape
+claim FALSE of a straight-line program) and is now EMITTED. Seven of the ten
+close with Lean; three now fail to elaborate, on the §0.4-tactic gap below. So
+the fix removed ten holes and turned three quiet passes into reds, which is the
+direction this census argues for throughout: **a hole is not a pass**, and
+`bugs/FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md` is where the three
+reds go to be finished.
+
+The one-argument half is unmoved (23 admitted / 7 rejected before and after),
+which is what "at arity one the two environments are the same single entry"
+predicts and is the reason `formal/examples` is byte-identical throughout.
+
+**What the zero is and is not.** It is 372 comparisons over 64 programs in which
+every image answered CPython, and every proof Lean accepted was therefore a proof
+about a model that computes those programs correctly. Only 38 of the 64 had a
+proof Lean accepted at all (30 x86-64 `admitted` + 8 arm64 `pass`); the other 26
+are the honest half of the measurement — 16 of them Lean could not hold in
+memory, and 12 it rejected — and a verdict nobody read is not a verdict.
+
+It is NOT a statement that the model is right. It is bounded by the corpus (one
+function, `int` only, no loop, no call, no container — the shape the model can
+state at all, and `bugs/FORMAL_known_limits.md` owns the rest) and by the typed
+model being absent (CPython has no `Int8`, so every typed program would need a
+hand-written wrap-around oracle, and an oracle built from the same reading of
+the language as the model under test cannot catch that model). §6's `~x` row is outside this
+corpus by construction: it is in `formal/macho_linker.py`, not in a program.
+
+**The `pass` rows are the ones worth having** — 8 of them on arm64, against 14
+programs Lean could not hold in memory and 2 it rejected. Those 8 are proofs
+with **no hole anywhere in the chain** — machine ≡ bytes ≡ AST ≡ `mojo` — for
+generated programs nobody wrote. On x86-64 a hole-free `pass` is not reachable at
+all (the generator's declared floor is exactly 2), so the tool's `--holes-below`
+defaults to each architecture's floor rather than to 0: at the floor the
+AST-to-`mojo` half is still fully proved, and that is the half a wrong model
+lives in.
+
+**What it cost, and what it found.** Getting 40 of 40 to *reach* Lean was one
+generator blocker: `_cond_nodes`/`_collect_conds_t` rendered every branch
+condition in `{param: param}` and folded no assignment into the environment, so
+any program whose `if` reads a local raised `model: 'b' is read here and this
+generator binds it to nothing` — a message false about the source, on 34 of 60
+generated programs. The rule was written out at FIVE call sites — two of them folding no assignment
+at all, one accepting an `env` argument and discarding it, and two mapping the
+entry's parameters the wrong way round — and is now at two helpers
+(`_bind_one`, `_entry_env`), which both backends call. Before/after, programs
+generating a proof:
+
+| | arm64 | x86-64 |
+|---|---|---|
+| before | 26 of 60 | 51 of 60 |
+| after | **60 of 60** | **60 of 60** |
+
+Two more findings, and both are coverage:
+
+* **`bugs/FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`** — the x86-64
+  rejections, 7 of 40 before the environment fix and 10 of 40 after it. `eval_eq_mojo`'s goal over a free `n` is not closed by
+  `simp`, and neither `simp (maxSteps …)` nor `bv_decide` recovers it, so it is
+  not a fuel limit.
+* **A refusal that was a crash.** A program with two calls out of the image
+  raised `ValueError: unsupported: recursion argument bound (not a dec1
+  pattern)` — about recursion, for a program with none — because the walk halts
+  at ONE address and a second call has paths of its own. It now refuses by name.
+* **The x86-64 fallback model was written at arity 1**, so the promise its own
+  comment makes ("rather than failing the build") held only for an entry of one
+  argument, which is every program in `formal/examples`. Over the `ternary` mix
+  it was 9 of 60 there and 0 of 60 after; arm64 is unmoved because it propagates
+  the shared generator's refusal rather than degrading.
+
+**And the largest thing still in the way** is a construct, not a bug in a
+generator: a conditional expression has no value in the arm64 semantic model, and
+the CODE GENERATOR already lowers it (`_emit_csel_ternary`). Over the same
+corpus it is 37 of 60 programs, against 0 of 60 for the default `plain` mix —
+`bugs/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`
+carries the measurement and why closing it is three layers deep rather than a
+ten-line arm.
 
 ## 1. The workload, and why it is 60 functions and not 60 files
 

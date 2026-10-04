@@ -127,6 +127,55 @@ def _range_args_of(for_stmt) -> list:
     return rargs
 
 
+def _bind_one(env: dict, st, param: str, render, vtypes: dict = None,
+              call_types: dict = None, scope=None, wrap=None) -> dict:
+    """`env` extended by ONE binding statement; `env` itself for anything else.
+
+    The single definition of "an assignment binds this name to this term", and
+    it exists because the rule was written FOUR times — once each in `_stmts_go`
+    and `_stmts_go_t` (the model's own statement fold) and once each in
+    `_cond_nodes` and `_collect_conds_t` (the walks that collect branch
+    conditions for the `by_cases` hypotheses).  The two copies in the collectors
+    were the ones that DIVERGED, and they diverged by being incomplete: they
+    walked only `IfStmt`/`WhileStmt`/`ForStmt`, so an `if` whose condition reads
+    a local bound by an earlier assignment raised
+
+        model: `b` is read here and this generator binds it to nothing
+        (the model's environment is ['n'])
+
+    which is FALSE about the source — `_stmts_go` binds `b` — and costs the
+    proof of every program whose condition mentions any local at all (measured
+    by `tools/formal_proof_fuzz.py`: 34 of its 60 plain programs on arm64, and
+    the class grew with every new local the corpus could reach).  One
+    definition, called from all four sites, is what makes the collectors unable
+    to disagree with the fold again.
+
+    `render` is `_expr_go` or `_expr_go_t` — the two models differ only in how a
+    value is carried, so the binder takes the renderer as an argument rather than
+    having two copies of itself.  `wrap` is the same split for a name's DECLARED
+    type, and only the typed model passes one (`_t_wrap`, below); it is a
+    parameter rather than a branch in here so that "which of the two models am I"
+    is answered once, by the caller, at every call site.
+    """
+    def value_of(value, name):
+        term = render(value, param, env_of, vtypes, call_types, scope)
+        return wrap(term, name) if wrap else term
+
+    if isinstance(st, (Assign, AugAssign, VarDecl)):
+        name = _target_name(st)
+        env_of = env
+        if isinstance(st, AugAssign):
+            # The model's `+=` is the source-level binary operator over the
+            # name's CURRENT binding, which is why this builds a `BinaryOp` over
+            # the old environment rather than reading a slot.
+            kind = st.op.rstrip("=")
+            value = F.BinaryOp(op=kind, left=Var(name=name), right=st.value)
+        else:
+            value = st.value
+        return {**env, name: value_of(value, name)}
+    return env
+
+
 def _call_name(e) -> str:
     """Name of a CallExpr callee (fire stores an expression, not a bare str).
 
@@ -532,8 +581,46 @@ def _truth_go(e, param: str, env: dict, vtypes: dict, call_types: dict,
     return f"({_expr_go(e, param, env, vtypes, call_types, scope)} \u2260 0)"
 
 
-def _cond_nodes(fn, param: str, vtypes: dict = None, call_types: dict = None,
-                scope=None):
+def _entry_env(fn, arity: int, typed: bool = False,
+               vtypes: dict = None) -> dict:
+    """The environment the ENTRY's parameters are rendered in.
+
+    One entry per SOURCE parameter, bound to the theorem's binder at the same
+    POSITION (`_entry_arg_names`, which is what every one of these theorems is
+    stated over).  `typed` wraps each value at its declared type's 64-bit
+    representation, for the typed model's sites.
+
+    This exists because the rule was written out at THREE sites and each of them
+    wrote it slightly differently, which is how a two-parameter entry came to
+    have an environment holding only its first parameter: `{_p: _p}` bound the
+    first name to itself and nothing else, so every condition reading a later
+    parameter raised
+
+        model: `m` is read here and this generator binds it to nothing
+
+    — a claim FALSE about the source (`main_go`'s own environment binds every
+    parameter by source name) and, on the universal-theorem path, one that cost
+    the proof of most programs with more than one parameter.  The bug is not the
+    arithmetic; it is that "which name is this parameter in a theorem" was
+    decided at each call site, and three sites decided it three ways.
+
+    At arity one all three sites agreed with this — the first source parameter
+    and the first theorem binder are both `n` in the corpus — which is why the
+    divergence was invisible until a corpus generated a two-parameter entry.
+    """
+    params = [p[0] for p in (fn.params or [])]
+    names = _entry_arg_names(arity)
+    span = min(len(params), len(names))
+    if typed:
+        return {params[i]: _t_wrap(names[i],
+                                   (vtypes or {}).get(params[i])
+                                   or DEFAULT_INT_TYPE)
+                for i in range(span)}
+    return {params[i]: names[i] for i in range(span)}
+
+
+def _cond_nodes(fn, param: str, env: dict = None, vtypes: dict = None,
+                call_types: dict = None, scope=None):
     """`(node, env)` for every condition `_collect_conds` renders, in ITS order.
 
     The walk is the single definition of "which conditions does this function
@@ -546,13 +633,31 @@ def _cond_nodes(fn, param: str, vtypes: dict = None, call_types: dict = None,
     its start value rather than to the parameter.  `param`/`vtypes`/
     `call_types`/`scope` are the caller's rendering context, needed only for
     that binding.
+
+    It is carried for EVERY binding statement, not only the `for` counter, and
+    that is the whole of this function's correctness: a condition is rendered in
+    the environment the model has at that point in the source, so
+    `a = n + 1` then `if a > 3:` must render `a`.  Before it did, the walk
+    looked at `IfStmt`/`WhileStmt`/`ForStmt` only and every such program raised
+    `model: 'a' is read here and this generator binds it to nothing`, which is
+    FALSE — `_stmts_go` binds it — and which cost the proof of most programs
+    whose condition mentions a local at all.  Each binding goes through
+    `_bind_one`, the same binder the model's own fold uses, so the two cannot
+    drift apart again; and a BRANCH body starts from the incoming environment and
+    folds its own assignments, rather than folding them into a shared one, so a
+    name bound only in the `then` arm is not visible to the `else` arm's
+    conditions (which is what the model's CPS fold does too — it hands each arm
+    the same incoming `env`).
     """
     out = []
-    base = {param: param}
+    base = {param: param} if env is None else env
 
     def walk(stmts, env):
         for st in stmts:
-            if isinstance(st, IfStmt):
+            if isinstance(st, (Assign, AugAssign, VarDecl)):
+                env = _bind_one(env, st, param, _expr_go, vtypes or {},
+                                call_types or {}, scope)
+            elif isinstance(st, IfStmt):
                 _c0, _tb0, _eb0 = _if_expand(st)
                 out.append((_c0, env))
                 walk(_tb0, env)
@@ -572,8 +677,8 @@ def _cond_nodes(fn, param: str, vtypes: dict = None, call_types: dict = None,
                                          call_types or {}, scope)
                 out.append((BinOp(op="<", left=Var(name=_tname), right=_re),
                             _env2))
-                walk(st.body, env)
-                walk((st.else_body or []), env)
+                walk(st.body, _env2)
+                walk((st.else_body or []), _env2)
 
     walk(fn.body, base)
     return out
@@ -582,11 +687,23 @@ def _cond_nodes(fn, param: str, vtypes: dict = None, call_types: dict = None,
 def _collect_conds(fn, param: str, env: dict, vtypes: dict = None,
                    call_types: dict = None, scope=None) -> list:
     """Collect the if-statement conditions of a function body (pre-order),
-    as normalized Lean terms used for `by_cases`."""
+    as normalized Lean terms used for `by_cases`.
+
+    `env` is the environment the CALLER renders the model in — one entry per
+    source parameter, each bound to the theorem's binder at the same position —
+    and it is passed through to `_cond_nodes` because the conditions are part of
+    the same model.  It used to be accepted and DISCARDED, with `_cond_nodes`
+    building `{param: param}` of its own, so every parameter past the first was
+    unbound in every condition: `def f(a, b): if b > 3: …` raised the same
+    "binds it to nothing" refusal the model itself does not raise, and the
+    caller's own comment at that call site is about precisely the trap of
+    leaving a name unbound (there, an unbound name reads as `0` and the model
+    comes out a function of the right arity and the wrong value).
+    """
     vtypes = vtypes or {}
     call_types = call_types or {}
     return [_norm_uint(_cmp_go(node, param, node_env, vtypes, call_types, scope))
-            for node, node_env in _cond_nodes(fn, param, vtypes, call_types,
+            for node, node_env in _cond_nodes(fn, param, env, vtypes, call_types,
                                               scope)]
 
 
@@ -785,37 +902,11 @@ def _stmts_go(stmts, param: str, env: dict, fname: str, loop_counter: list,
     if isinstance(st, (Pass, ExprStmt)):
         return _stmts_go(rest, param, env, fname, loop_counter, helpers,
                          vtypes, call_types, scope)
-    if isinstance(st, Assign):
-        env = dict(env)
-        env[_target_name(st)] = _expr_go(st.value, param, env, vtypes, call_types, scope)
-        return _stmts_go(rest, param, env, fname, loop_counter, helpers,
-                         vtypes, call_types, scope)
-    if isinstance(st, AugAssign):
-        env = dict(env)
-        _base = st.op.rstrip("=")
-        _bin = F.BinaryOp(op=_base, left=Var(name=_target_name(st)), right=st.value)
-        env[_target_name(st)] = _expr_go(_bin, param, env, vtypes, call_types, scope)
-        return _stmts_go(rest, param, env, fname, loop_counter, helpers,
-                         vtypes, call_types, scope)
-    if isinstance(st, VarDecl):
-        # `var a = 1` IS `a = 1` for a `UInt64 → UInt64` model: the keyword
-        # spells a fresh local, and a local is exactly what the environment
-        # already is.  This used to fall off the end of the chain, and the end
-        # of the chain was `return "(0 : UInt64)"` — so the declaration was read
-        # as a statement whose value is 0, and because `_stmts_go` is a FOLD the
-        # 0 is what the rest of the function was then evaluated from.  A
-        # `return 2` after `var a = 1` failed as hard as `return a`, which is
-        # what showed it was the declaration and not the read.
-        #
-        # The alternative was a refusal, and it was the worse answer: the model
-        # can state this exactly, so refusing would be refusing a construct it
-        # has.  `bug:FORMAL_lean_model_call_semantics.md`'s territory is already
-        # the "the model must be RIGHT, not merely present" position, and a
-        # `var a = 1` the model reads as 0 is the false model `_no_value_model`
-        # exists to stop.
-        env = dict(env)
-        env[_target_name(st)] = _expr_go(st.value, param, env, vtypes,
-                                         call_types, scope)
+    if isinstance(st, (Assign, AugAssign, VarDecl)):
+        # One binder for all three (`_bind_one`), because they are one statement
+        # in three spellings: each binds exactly one name in the model's
+        # environment and the value is the same kind of term in each case.
+        env = _bind_one(env, st, param, _expr_go, vtypes, call_types, scope)
         return _stmts_go(rest, param, env, fname, loop_counter, helpers,
                          vtypes, call_types, scope)
     if isinstance(st, (ForStmt, Break, Continue)):
@@ -1014,24 +1105,14 @@ def _stmts_go_t(stmts, param: str, env: dict, fname: str, vtypes: dict,
     if isinstance(st, (Pass, ExprStmt)):
         return _stmts_go_t(rest, param, env, fname, vtypes, call_types,
                            loop_counter, helpers)
-    if isinstance(st, Assign):
-        env = dict(env)
-        env[_target_name(st)] = _expr_go_t(st.value, param, env, vtypes, call_types, scope)
-        return _stmts_go_t(rest, param, env, fname, vtypes, call_types,
-                           loop_counter, helpers)
-    if isinstance(st, AugAssign):
-        env = dict(env)
-        _kind = st.op.rstrip("=")
-        _b = F.BinaryOp(op=_kind, left=Var(name=_target_name(st)), right=st.value)
-        env[_target_name(st)] = _expr_go_t(_b, param, env, vtypes, call_types, scope)
-        return _stmts_go_t(rest, param, env, fname, vtypes, call_types,
-                           loop_counter, helpers)
-    if isinstance(st, VarDecl):
-        # The typed twin of `_stmts_go`'s `VarDecl` arm, and the same statement:
-        # a fresh local bound in the environment, with the value carried at the
-        # local's DECLARED type's 64-bit representation (`_t_wrap`), which is
-        # what makes `var a: Int8 = 3` model as the sign-extended 3 the machine
-        # keeps rather than as the bare word.
+    if isinstance(st, (Assign, AugAssign, VarDecl)):
+        # The typed twin of `_stmts_go`'s binder, and the SAME binder with one
+        # difference: a name's value is carried at its DECLARED type's 64-bit
+        # representation (`_t_wrap`), which is what makes `var a: Int8 = 3`
+        # model as the sign-extended 3 the machine keeps rather than as the bare
+        # word.  `VarDecl` is the only arm that wraps — a plain `Assign` has no
+        # annotation of its own and takes the type `formal.types.
+        # function_var_types` inferred for the name.
         #
         # The type comes from `vtypes` and not from `st.type_ann`, because
         # `formal.types.function_var_types` is the one reader of that question —
@@ -1040,11 +1121,10 @@ def _stmts_go_t(stmts, param: str, env: dict, fname: str, vtypes: dict,
         # second read of the annotation here is a second answer waiting to
         # disagree. An absent name is the default type, which is the same
         # "an absent answer IS the answer" rule the pointer value model states.
-        env = dict(env)
-        name = _target_name(st)
-        env[name] = _t_wrap(
-            _expr_go_t(st.value, param, env, vtypes, call_types, scope),
-            vtypes.get(name) or DEFAULT_INT_TYPE)
+        env = _bind_one(env, st, param, _expr_go_t, vtypes, call_types, scope,
+                        wrap=lambda term, name: _t_wrap(
+                            term, vtypes.get(name) or DEFAULT_INT_TYPE)
+                        if isinstance(st, VarDecl) else term)
         return _stmts_go_t(rest, param, env, fname, vtypes, call_types,
                            loop_counter, helpers)
     if isinstance(st, IfStmt):
@@ -1069,12 +1149,28 @@ def _collect_conds_t(fn, param: str, env: dict, vtypes: dict,
     """Typed source-level conditions (for branch-condition leaves), pre-order.
 
     Comparisons are emitted as the sign-flipped unsigned form for signed types
-    so they match the `arm64_flag_*_s` lemmas used by the branch proofs."""
+    so they match the `arm64_flag_*_s` lemmas used by the branch proofs.
+
+    The walk folds assignments into the environment it renders the next
+    condition in, through the same `_bind_one` the typed model fold uses and for
+    the same reason `_cond_nodes` does: a condition reads the source's locals,
+    and a walk that only looked at `IfStmt`/`WhileStmt`/`ForStmt` rendered every
+    such local as unbound.  It used to close over one `env` for the whole
+    function, which is a second thing wrong with it and the reason `walk` takes
+    the environment as an argument here.
+    """
     conds = []
 
-    def walk(stmts):
+    def walk(stmts, env):
         for s in stmts:
-            if isinstance(s, IfStmt):
+            if isinstance(s, (Assign, AugAssign, VarDecl)):
+                env = _bind_one(env, s, param, _expr_go_t, vtypes,
+                                call_types, scope,
+                                wrap=lambda term, name: _t_wrap(
+                                    term, vtypes.get(name)
+                                    or DEFAULT_INT_TYPE)
+                                if isinstance(s, VarDecl) else term)
+            elif isinstance(s, IfStmt):
                 l = _expr_go_t(s.condition.left, param, env, vtypes, call_types,
                                scope) if isinstance(s.condition, BinOp) else None
                 r = _expr_go_t(s.condition.right, param, env, vtypes, call_types,
@@ -1086,16 +1182,16 @@ def _collect_conds_t(fn, param: str, env: dict, vtypes: dict,
                 else:
                     conds.append(_norm_uint(_expr_bool_go_t(
                         s.condition, param, env, vtypes, call_types, scope)))
-                walk(s.then_body)
-                walk((s.else_body or []))
+                walk(s.then_body, env)
+                walk((s.else_body or []), env)
             elif isinstance(s, WhileStmt):
-                walk(s.body)
-                walk((s.else_body or []))
+                walk(s.body, env)
+                walk((s.else_body or []), env)
             elif isinstance(s, ForStmt):
-                walk(s.body)
-                walk((s.else_body or []))
+                walk(s.body, env)
+                walk((s.else_body or []), env)
 
-    walk(fn.body)
+    walk(fn.body, env)
     return conds
 
 
@@ -4725,23 +4821,55 @@ def _call_boundary(code: bytes, base: int, func_entry: int,
     came from: a call to a two-argument function was reported as a recursion
     problem.
     """
+    out = _unfollowable_calls(code, base, func_entry, func_end)
+    return out[0] if out else None
+
+
+def _unfollowable_calls(code: bytes, base: int, func_entry: int,
+                        func_end: int) -> list:
+    """Every `BL` in `[func_entry, func_end)` the CFG walk cannot follow, in
+    address order — the LIST `_call_boundary` takes its first element from.
+
+    The list exists because one is not always enough.  The walk discharges a
+    call out of the image by HALTING at it (`exit_at`), and it halts only on the
+    path whose last instruction sits immediately before that one address.  A
+    program with TWO such calls has a path that reaches the second without ever
+    passing the first, and the walk walks it and executes the `BL` as if it were
+    a self-call — which ended at
+
+        ValueError: unsupported: recursion argument bound (not a dec1 pattern)
+
+    an error about recursion for a program with no recursion, raised past every
+    refusal this module classifies as one (the generator's refusal type is
+    `NotImplementedError`).  `formal_proof_fuzz.py` found it on
+
+        def main(n) -> Int:
+            if n > 100:
+                print(1)
+            print(2)
+            return 0
+
+    where the `else` path reaches `print(2)` without touching `print(1)`.
+    Turning that into a named refusal is `generate_arm64_proof`'s job (it knows
+    whether the caller can say anything better); this function's job is only to
+    be able to tell it there are two.
+    """
     words = {base + i: int.from_bytes(code[i:i + 4], "little")
              for i in range(0, len(code) - len(code) % 4, 4)}
     rets = [pc for pc, w in words.items() if w == 0xd65f03c0 and pc >= func_entry]
     end = max(rets) + 4 if rets else base + len(code)
     if func_end is not None:
         end = func_end
+    out = []
     for pc in sorted(p for p in words if func_entry <= p < end - 4):
         if _step_branch_index(words[pc]) != 15:       # 15 = BL
             continue
         tgt = _branch_target(words, pc)
         if tgt is None or tgt == func_entry:
             continue                                   # self-call: contracted
-        if not (func_entry <= tgt < end):
-            return {"kind": "opaque", "pc": pc, "target": tgt, "func_end": end}
-        return {"kind": "intralocal", "pc": pc, "target": tgt,
-                "func_end": end}
-    return None
+        kind = ("opaque" if not (func_entry <= tgt < end) else "intralocal")
+        out.append({"kind": kind, "pc": pc, "target": tgt, "func_end": end})
+    return out
 
 
 def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
@@ -4854,13 +4982,16 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     _ast_conds = []
     if fn is not None and fn.params:
         _p = fn.params[0][0]
-        if tc and tc.get("typed"):
-            _pt = tc["vtypes"].get(_p) or DEFAULT_INT_TYPE
-            _ast_conds = _collect_conds_t(fn, _p, {_p: _t_wrap(_p, _pt)},
-                                          tc["vtypes"], tc["call_types"])
-        else:
-            _ast_conds = _collect_conds(fn, _p, {_p: _p},
-                                        tc["vtypes"], tc["call_types"])
+        _typed_here = bool(tc and tc.get("typed"))
+        _ast_conds = (
+            _collect_conds_t(fn, _p,
+                             _entry_env(fn, entry_arity, _typed_here,
+                                        (tc or {}).get("vtypes")),
+                             tc["vtypes"], tc["call_types"])
+            if _typed_here else
+            _collect_conds(fn, _p,
+                           _entry_env(fn, entry_arity),
+                           tc["vtypes"], tc["call_types"]))
     # Map each conditional-branch block to its source condition by block (pc
     # order), not by emission order: a block reached from several paths is
     # emitted once per path, so a running counter desyncs.
@@ -4911,10 +5042,11 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     _sc_by_merge = {}
     if fn is not None and fn.params:
         _sp = fn.params[0][0]
-        _senv = {fn.params[0][0]: fn.params[0][0]}
+        _senv = _entry_env(fn, entry_arity)
         _svt = tc["vtypes"] if tc else None
         _sct = tc["call_types"] if tc else None
-        for _i, (_node, _nenv) in enumerate(_cond_nodes(fn, _sp, _svt, _sct)):
+        for _i, (_node, _nenv) in enumerate(
+                _cond_nodes(fn, _sp, _senv, _svt, _sct)):
             if not (isinstance(_node, BinOp) and _node.op in ("and", "or")):
                 continue
             if _i >= len(_cond_pairs):
@@ -5001,7 +5133,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 _first_cbz["start"] in _cbz_src_map
                 or (fn is not None and fn.params
                     and bool(_collect_conds(fn, fn.params[0][0],
-                                            {fn.params[0][0]: "n"},
+                                            _entry_env(fn, entry_arity),
                                             tc["vtypes"], tc["call_types"])))):
             entry_cond_needed = True
         # ...unless that branch is a B.cond.  The entry seed states a fact about
@@ -5078,7 +5210,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         # entry condition must be the typed (sign-flipped) source condition.
         entry_condition = _cbz_src_map.get(_entry_bpc)
         if entry_condition is None and fn is not None and fn.params:
-            _ec = _collect_conds(fn, fn.params[0][0], {fn.params[0][0]: "n"},
+            _ec = _collect_conds(fn, fn.params[0][0],
+                                 _entry_env(fn, entry_arity),
                                  tc["vtypes"], tc["call_types"])
             if _ec:
                 entry_condition = _ec[0]
@@ -8256,15 +8389,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         )
     elif (not _is_recursive(fn) and not _has_while(fn.body)):
         param = fn.params[0][0] if fn.params else "n"
-        # One env entry per SOURCE parameter, each bound to the theorem's
-        # binder at the same POSITION -- `n0` for the first, `n1` for the
-        # second.  `{param: param}` bound the first and left every later one
-        # unbound, and an unbound name is `0` in `MojoEnv`, so the model of
-        # `def f(a, b): return a + b` came out as `f_go n + 0`: a function of
-        # the right arity and the wrong value.
-        _sp = [p[0] for p in (fn.params or [])]
-        env = ({n: _sp[i] if _sp[i] == _sp[0] else n
-                for i, n in enumerate(enames[:len(_sp)])} if _sp else {})
+        env = _entry_env(fn, arity)
         conds = _collect_conds(fn, param, env)
         by_cases = " ".join(f"by_cases h{i} : {c} <;>" for i, c in enumerate(conds))
         hs = ", ".join(f"h{i}" for i in range(len(conds)))
@@ -8414,7 +8539,8 @@ def generate_arm64_proof(prog, code, info) -> str:
     # function up to the call", not "and returns the model".  `_opaque_call_
     # boundary` finds the first such call; when there is one, the halt address
     # is that call and the terminal proposition is the reachability of it.
-    _opaque = _call_boundary(code, base_addr, func_entry_addr, None)
+    _calls = _unfollowable_calls(code, base_addr, func_entry_addr, None)
+    _opaque = _calls[0] if _calls else None
     if _opaque is not None and _opaque["kind"] == "intralocal":
         raise NotImplementedError(
             f"universal theorem: the call at {_opaque['pc']:#x} targets "
@@ -8428,6 +8554,29 @@ def generate_arm64_proof(prog, code, info) -> str:
             f"not a missing case here.  The semantic model for the call is "
             f"correct and emitted (see the `_go` definitions above); what is "
             f"missing is the machine half.")
+    if len(_calls) > 1:
+        # The halt address is ONE address and the walk reaches it only on the
+        # paths that pass it, so a second unfollowable call has a path of its own
+        # and the walk executes it as if it were a self-call — landing in the
+        # recursion arm of `_gen_universal_e2e_cfg` and raising
+        # `ValueError: unsupported: recursion argument bound (not a dec1
+        # pattern)` for a program with no recursion.  That is a crash where a
+        # refusal is what the generator owes the reader: `NotImplementedError` is
+        # the type every other limit in this file raises, and it is the one
+        # `tools/formal_proof_breadth.py` classifies as `proof-refused` rather
+        # than as a defect in the generator.
+        where = ", ".join(f"{c['pc']:#x} -> {c['target']:#x} ({c['kind']})"
+                          for c in _calls)
+        raise NotImplementedError(
+            f"universal theorem: {len(_calls)} calls this walk cannot follow "
+            f"({where}), and ONE halt address cannot discharge them.  The run "
+            f"reaches {_opaque['pc']:#x} only on the paths that pass it, so a "
+            f"second call has paths of its own -- the honest statement would be "
+            f"a disjunction over the call addresses, which is one exit address "
+            f"more than this framework has.  The semantic model is emitted and "
+            f"correct for all of them; what is missing is the machine half.  "
+            f"Raised here rather than left to the walk, which reported this as "
+            f"a recursion problem.")
     # The AST bridge's own limit, asked AFTER the machine half's so that the
     # refusal a two-function program gets names the bigger of the two gaps: the
     # CFG walk cannot follow the call at all, where the bridge could be fixed
