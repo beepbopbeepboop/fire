@@ -16,8 +16,17 @@ import mlir
 from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
-import gimple_codegen  # constants used by some extracted helpers
-from gimple_codegen import _selfhost_impl_py_files
+# NO top-level `import gimple_codegen` here, and that is the layering rule
+# rather than an omission. `gimple_codegen` imports the whole
+# `mojo/backend_gimple/*` tier at its own top level (gimple_codegen.py:738) and
+# that tier reads this module back at ITS top level
+# (`mojo/backend_gimple/emit_funcs.py`), so a top-level import here means this
+# module cannot be a process's first `mojo.*` import -- and the failure it
+# produces is an `ImportError` about a name in a half-built module, a long way
+# from the edge that closed the loop. The two names this file wanted
+# (`_SELFHOST_DIR`, `_selfhost_impl_py_files`) are read at their use site
+# instead, inside `_selfhost_extracted_fn_index`, which is where both are used
+# and which validates once per top-level compile rather than per call.
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -1642,7 +1651,8 @@ def _selfhost_extracted_fn_index() -> dict:
     _validated = _SELFHOST_FNIDX_VALIDATED.get('idx')
     if _validated is not None:
         return _validated
-    _sd = gimple_codegen._SELFHOST_DIR
+    from gimple_codegen import _SELFHOST_DIR, _selfhost_impl_py_files
+    _sd = _SELFHOST_DIR
     _files = sorted(_selfhost_impl_py_files(_sd))
     _key = 'fnidx#' + _selfhost_files_key(_files)
     _hit = _SELFHOST_EXTRA_FIELD_CACHE.get(_key)

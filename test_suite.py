@@ -2632,10 +2632,10 @@ def test_selfhost_key_hashes_nothing_dead():
 def test_the_compiler_imports_from_every_real_entry_point():
     """Every module the compiler is entered through must import FIRST.
 
-    The middle tier and the gimple backend are mutually recursive by design —
+    The middle tier and the gimple backend WERE mutually recursive —
     `mojo/middle/funcs_shared.py` and `mojo/middle/module_shared.py` both
     `import gimple_codegen`, which imports the backend, which imports them
-    back — so the graph has a load order it tolerates and a set it does not,
+    back — so the graph had a load order it tolerated and a set it did not,
     and Python resolves a cycle by letting whichever module the process
     reached first finish, which is why this failure reads as an unrelated
     `ImportError` a long way from the import that closed the loop.
@@ -2668,11 +2668,39 @@ def test_the_compiler_imports_from_every_real_entry_point():
     The probe is EVERY module under `mojo/middle/` and `mojo/backend_gimple/`
     plus the top-level entry points, not a hand-kept shortlist, so a new
     module that closes a cycle is caught by being added rather than by
-    somebody remembering to extend a list. `_LOAD_ORDER_DEPENDENT` is the
-    declared exemption, and it is checked in BOTH directions — a new entry
-    appearing in the failure set fails, and so does an entry in the
-    declaration that no longer fails, because a stale exemption is a hole
-    the next reader cannot see through.
+    somebody remembering to extend a list. `declared` is the exemption list,
+    and it is checked in BOTH directions — a new entry appearing in the
+    failure set fails, and so does an entry in the declaration that no longer
+    fails, because a stale exemption is a hole the next reader cannot see
+    through.
+
+    **It is EMPTY, and getting it that way was nine cycles' worth of work
+    rather than a decision.** Until 2026-10-04 it named eight
+    `mojo/middle/*` modules, with a comment saying each is "load-order
+    dependent" by design — `mojo/middle/funcs_shared.py` and
+    `mojo/middle/module_shared.py` both `import gimple_codegen`, which
+    imports the backend, which imports them back. That was accurate and it
+    was also the thing the check exists to prevent: an exemption is a
+    permanent hole, and nine modules' worth of "already broken" means a NEW
+    cycle in any of them is absorbed into a row that was already red, so the
+    guard guarded nothing for them. The design was never the constraint — the
+    constraint was that nobody had noticed the cycle had only two ends. Each
+    middle module now reaches `gimple_codegen` at its USE SITE (four of the
+    eight imported a module they never read; the other four wanted
+    `_SELFHOST_DIR` / `_selfhost_impl_py_files`, which is what
+    `mojo/backend_gimple/module_gen.py` was already forced to do for the same
+    reason), and every module in both directories imports on its own:
+
+        $ for m in mojo/middle/*.py mojo/backend_gimple/*.py; do
+        >   python3 -c "import ${m%.py}" | tr / .; done
+        36 OK
+
+    So the rule a new cycle has to beat is the middle tier's own: the
+    direction that stays top-level is `backend -> middle`, and an edge the
+    other way is at its use site. `declared` is kept as the declaration
+    rather than deleted, because the two directions are the anti-rot: if a
+    module can no longer be imported first, its entry has to be DELETED in the
+    same commit, which is only a rule if there is a list to delete from.
     """
     import glob
     import subprocess
@@ -2691,23 +2719,7 @@ def test_the_compiler_imports_from_every_real_entry_point():
             last = [l for l in r.stderr.strip().splitlines() if l.strip()]
             bad.append(f'{mod}: {last[-1] if last else "failed"}')
     failed = {b.split(':', 1)[0] for b in bad}
-    # The eight `mojo/middle/*` modules that each `import gimple_codegen`,
-    # which imports the gimple backend, which imports them back. That is the
-    # middle tier's pre-existing shape — measured identical on master, before
-    # any of the branches this test was written for — so none of the eight can
-    # be the first `mojo.*` import a program makes, and every one of them
-    # DOES import fine behind `gimple_codegen` or `fire.py`. Named rather than
-    # omitted so a reader who finds one of them broken learns it was already
-    # load-order-dependent instead of concluding the exemption is where to
-    # start looking. No `mojo/backend_gimple/*` module is exempt: the backend
-    # sits downstream of `gimple_codegen`, so every one of them is reachable
-    # first and a new cycle among them would be caught here.
-    declared = {
-        'mojo.middle.calls_shared', 'mojo.middle.funcs_shared',
-        'mojo.middle.infra_infer', 'mojo.middle.loops_shared',
-        'mojo.middle.methods_shared', 'mojo.middle.module_shared',
-        'mojo.middle.resolve_shared', 'mojo.middle.stmts_shared',
-    }
+    declared: set = set()
     check('imports: every real entry point imports first',
           failed <= declared, '; '.join(bad))
     check('imports: the load-order exemption list is not stale',

@@ -62,13 +62,19 @@ from mojo.middle.solvers import *  # noqa: F401,F403
 # into the middle tier is at its use site, so importing EITHER middle module
 # first works. See `funcs_shared._struct_method_qualifier._sanitize_qualifier`
 # for the same rule on the other side.
-# Closure-scan leaf helpers live in mojo/middle.closures (formal + gimple
+#
+# …and this file's own `gimple_codegen` edge is at its use site too, for the
+# same reason one tier up: `gimple_codegen.py:738` reaches the whole
+# `mojo/backend_gimple/*` tier at module scope and `emit_funcs.py` reads
+# `_selfhost_impl_py_files` out of THIS module there, so a top-level import
+# here would make `mojo.middle.module_shared` unable to be a process's first
+# `mojo.*` import. See `funcs_shared`'s header for the same rule stated from
+# its side.
+# Closure-scan leaf helpers live in mojo.middle.closures (formal + gimple
 # share one copy; closures must not import this module — it pulls gimple_codegen).
 from mojo.middle.closures import (
     _gmi_all_stmts_nonfunc, _selfhost_fn_reassigns_method,
 )
-import gimple_codegen  # constants used by some extracted helpers
-from gimple_codegen import _selfhost_impl_py_files
 from mojo.middle.funcs_shared import _selfhost_parsed_source
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
@@ -147,6 +153,7 @@ def _selfhost_parsed_modules(sd: str) -> list:
     extra-field scans). A file that fails to parse is cached as a FAILURE and
     contributes an empty statement list.
     """
+    from gimple_codegen import _selfhost_impl_py_files
     _files = sorted(_selfhost_impl_py_files(sd)
                     + [os.path.join(sd, n) for n in
                        ('fire_compiler.py', 'module_loader.py', 'monomorphize.py',
