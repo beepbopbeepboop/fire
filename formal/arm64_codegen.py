@@ -5376,6 +5376,8 @@ ctor_field_value=self._ctor_field_value_for(name),
                or M.string_identity_method(method))
         if how == "list_append":
             self._emit_list_append(e)
+        elif how == "list_clear":
+            self._emit_list_clear(e)
         elif how == "file_write":
             self._emit_file_write(e)
         elif how == "file_close":
@@ -5877,6 +5879,38 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_svc(0x80))
         self.asm.label(ok)
         self.asm.emit(encode_movz_xd_imm(0, 0))     # None
+
+    def _emit_list_clear(self, e: F.CallExpr) -> None:
+        """`xs.clear()` — store 0 at the blob's count, which empties it.
+
+        ONE store, and that is the whole difference from `append`: there is no
+        capacity to know (an append has to know there is room, an empty needs
+        none), no element type to agree on, and no traversal. The blob is
+        `[count:i64][elem0]…` and a list value IS its address, so this is the
+        word `len` of the same receiver reads — which is why the guard is
+        `model.list_clear_refusal`'s question and not a capacity lookup, and why
+        it is POSITIVE evidence (`is_list_kind`) rather than the absence of a
+        refusal: a name in `BUILTIN_VALUE_METHODS` with no kind guard would zero
+        the first eight bytes of ANY word.
+
+        Returns 0, this model's `None`, for the reason `_emit_list_append` gives:
+        `list.clear` returns None and nothing in the language can tell that from
+        a zero.
+        """
+        if list(e.args) or e.kwargs:
+            raise CodegenError(
+                f"list.clear() takes no arguments on this path "
+                f"(got {len(e.args) + len(e.kwargs)})")
+        recv = e.func.obj
+        kind = self._method_recv_kind(e)
+        if not M.is_list_kind(kind):
+            raise CodegenError(M.list_clear_refusal(
+                _dotted(e.func), kind, M.receiver_shape(recv)))
+        self._emit_expr(recv)                      # X0 = the blob base
+        self.asm.emit(encode_mov_zr_xn(1, 0))      # X1 = base
+        self.asm.emit(encode_movz_xd_imm(2, 0))    # X2 = 0
+        self.asm.emit(encode_str_xt_xn_imm(2, 1, 0))   # [X1+0] = X2
+        self.asm.emit(encode_movz_xd_imm(0, 0))    # None
 
     def _emit_overflow_diagnostic(self, text: str) -> None:
         """`write(2, text, len)` — say WHICH bound was hit before stopping.

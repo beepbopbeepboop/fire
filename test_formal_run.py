@@ -2898,6 +2898,24 @@ CASES = [
      "    h = Holder(41)\n"
      "    printf(\"p=%d\", h.peek())\n"
      "    return 0\n", 0, "p=41"),
+    # ── `list.clear()` \u2014 the count word, and only the count word ──
+    #
+    # `List.clear` is `count = 0`: one store to the word `len` of the same
+    # receiver reads, with no capacity, no element type and no traversal, which
+    # is why it lowers where `append` cannot (`bugs/FORMAL_binary_heap_mojo_
+    # after_the_len_value.md` \u00a73 row 1, which is this construct in the
+    # stdlib).  The two numbers are BEFORE and AFTER because a `clear` that did
+    # nothing would still print `0` for the second one: the first is what makes
+    # the second mean anything.
+    #
+    # 7 and 0 are CPython's answers for `[7, 8, 9].clear()`.
+    ("list_clear_empties_a_list_literal",
+     "def main(n):\n"
+     "    xs = [7, 8, 9]\n"
+     "    printf(\"before=%d@@\", len(xs))\n"
+     "    xs.clear()\n"
+     "    printf(\"after=%d\", len(xs))\n"
+     "    return 0\n", 0, "before=3@@after=0"),
 ]
 
 # ── what a method on a VALUE means, per RECEIVER KIND ──────────────────────
@@ -2918,7 +2936,8 @@ CASES = [
 # the characterised group would have been mis-implemented.
 #
 # What the cases assert is the SHAPE of the refusal, not just that there is
-# one. A refusal that says "this backend lowers only append, close, write and
+# one. A refusal that says "this backend lowers only append, clear, close,
+# write and
 # the string methods …" is worse than no refusal for a non-string receiver: it
 # reads as "add it to the string table". So each needle here names what is
 # actually missing.
@@ -9008,6 +9027,27 @@ ONE_WORD_FIELD_METHOD_REFUSALS = [
      "    var b = Box(3)\n"
      "    return b.go()\n",
      "refuse:is a method call on a value", None),
+    # `List.clear` lowered in 2026-10-04, so this row is the boundary it must not
+    # cross: a one-word struct whose field is a SCALAR, method-called with
+    # `clear`, is a store of zero to the first eight bytes of an integer \u2014 a
+    # silent wrong answer that leaves the program running.  It is refused, and
+    # by `model.list_clear_refusal`'s own sentence rather than by the generic
+    # "not one of those methods", because the generic one would tell a reader to
+    # add the name to a table when the name IS in the table and the RECEIVER is
+    # what is wrong.
+    ("one_word_field_method_clear_on_a_scalar_field_is_still_refused",
+     "struct Box:\n"
+     "    var n: Int\n"
+     "\n"
+     "    def go(mut self):\n"
+     "        self.n.clear()\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Box()\n"
+     "    b.n = 3\n"
+     "    b.go()\n"
+     "    return b.n\n",
+     "refuse:the receiver has to be a list", None),
 ]
 
 # ── a CONDITIONAL ARM: `elif` and `comptime if`, and a walk that stops at them ──
@@ -18354,37 +18394,6 @@ SOLE_FIELD_CALLEE_REFUSALS = [
      "    return 0\n",
      "refuse:`c.f` is a call of a VALUE rather than of a function of this "
      "unit", None),
-    # A METHOD CALLEE whose name the receiver's own struct declares as a method.
-    # `check_value_position_method_reads` walks the body's member expressions and
-    # cannot tell a callee from a value read, so `self.clear` in
-    # `self._data.clear()` -- `_data` collapsed into the receiver by
-    # `_rewrite_self_fields`, because a one-field struct's receiver IS its field
-    # -- was reported as a field READ of a method, with the message "Call it
-    # (`self.clear(...)`), which is a receiver and a call and lowers" about an
-    # expression that IS already a call.  This is the construct
-    # `bugs/FORMAL_binary_heap_mojo_after_the_len_value.md` §3 row 0a names, and
-    # it is the file's reported verdict.
-    #
-    # The expectation is the METHOD-TABLE refusal, not a build: with `_data`
-    # collapsed into `self`, the emitter is asked for `clear` on a receiver it
-    # cannot type, and `List.clear` is not in its table (row 1 of the same
-    # table).  So this row pins that the diagnosis names the REAL remaining gap
-    # -- and `refuse:` is a substring match, so the old message would fail it.
-    ("a_method_callee_through_a_collapsed_field_is_not_a_field_read",
-     "struct Wrap:\n"
-     "    var _data: List[Int]\n"
-     "\n"
-     "    def __init__(out self):\n"
-     "        self._data = List[Int]()\n"
-     "\n"
-     "    def clear(mut self):\n"
-     "        self._data.clear()\n"
-     "\n"
-     "def main(n: Int) -> Int:\n"
-     "    var w = Wrap()\n"
-     "    w.clear()\n"
-     "    return 0\n",
-     "refuse:'clear' is not one of those methods of those receivers", None),
 ]
 
 # The two spellings that must keep BUILDING, as the CPython-pair shape, because
@@ -18450,6 +18459,59 @@ SOLE_FIELD_CALLEE_CASES = [
      "def main():\n"
      "    b = Box(Leaf(5))\n"
      "    sys.stdout.write(\"%d\" % b._leaf.get())\n"),
+    # THE SHAPE THIS GROUP WAS BUILT FOR, and it is now a CASE rather than a
+    # refusal: a METHOD CALLEE whose name the receiver's own struct declares as
+    # a method.  `check_value_position_method_reads` walks the body's member
+    # expressions and cannot tell a callee from a value read, so `self.clear` in
+    # `self._data.clear()` -- `_data` collapsed into the receiver by
+    # `_rewrite_self_fields`, because a one-field struct's receiver IS its field
+    # -- was reported as a field READ of a method, with the message "Call it
+    # (`self.clear(...)`), which is a receiver and a call and lowers" about an
+    # expression that IS already a call
+    # (`bugs/FORMAL_binary_heap_mojo_after_the_len_value.md` §3 row 0a).
+    #
+    # It sat in the REFUSALS table for two rounds, on the METHOD-TABLE
+    # refusal: with `_data` collapsed into `self`, the emitter was asked for
+    # `clear` on a receiver it could not type, and `List.clear` was not in its
+    # table (row 1 of that same table).  Both of those are gone -- row 0a by
+    # `model.is_call_callee`, row 1 by the `list_clear` lowering -- and the row
+    # moved here rather than being deleted, because the shape is the one the
+    # group is about and a group whose central case vanished would have stopped
+    # testing it.  The assertion is CPython's answer now, so the row says the
+    # collapse is CORRECT rather than merely survivable: `before=3` says the blob
+    # was there and `after=0` says the store landed on it.
+    ("a_method_callee_through_a_collapsed_field_empties_the_field",
+     "struct Wrap:\n"
+     "    var _data: List[Int]\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self._data = [1, 2, 3]\n"
+     "\n"
+     "    def clear(mut self):\n"
+     "        self._data.clear()\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return len(self._data)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var w = Wrap()\n"
+     "    printf(\"before=%d@@\", w.size())\n"
+     "    w.clear()\n"
+     "    printf(\"after=%d\", w.size())\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Wrap:\n"
+     "    def __init__(self):\n"
+     "        self._data = [1, 2, 3]\n"
+     "    def clear(self):\n"
+     "        self._data.clear()\n"
+     "    def size(self):\n"
+     "        return len(self._data)\n"
+     "def main():\n"
+     "    w = Wrap()\n"
+     "    sys.stdout.write(\"before=%d@@\" % w.size())\n"
+     "    w.clear()\n"
+     "    sys.stdout.write(\"after=%d\" % w.size())"),
 ]
 
 ONE_FIELD_MUTATOR_CASES = [

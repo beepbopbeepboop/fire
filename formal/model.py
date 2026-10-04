@@ -5557,6 +5557,14 @@ BUILTIN_VALUE_METHODS = {
     # on this path, so the blob's capacity is a compile-time bound — the count
     # of append sites in the function — and the store is checked against it.
     "append": "list_append",
+    # `list.clear()`: store 0 at the count, which empties the blob. ONE store,
+    # and it needs none of the machinery `append` needs: no capacity (an append
+    # has to know there is room; an empty needs none), no element type, and no
+    # traversal. It writes the very word `len` reads, so the guard is the same
+    # question `len` asks — `is_list_kind` of the receiver's kind — and it is
+    # POSITIVE evidence rather than the absence of a refusal, because a name in
+    # this table with no kind guard would zero the first word of anything.
+    "clear": "list_clear",
     # `f.write(s)`: a text-mode write of a C string to a file descriptor.
     # `open(...)` already lowers to the C library's `open`, so the receiver
     # IS a descriptor and this is `write(fd, s, strlen(s))`.
@@ -5564,6 +5572,22 @@ BUILTIN_VALUE_METHODS = {
     # `f.close()`: the C library's `close` on the same descriptor.
     "close": "file_close",
 }
+
+
+# `xs.clear()` on a receiver this path has not established to be a blob.  Shared
+# by both backends for the reason `list_append_overflow_message` is: two
+# architectures that name one limit differently cost a reader the difference
+# between the limit and the architecture.
+def list_clear_refusal(dotted: str, kind, shape: str) -> str:
+    """Why `dotted.clear()` is not lowered here."""
+    return (f"{dotted}() lowers to one store — the blob's count word set to 0, "
+            f"which is the word `len` of the same receiver reads — so the "
+            f"receiver has to be a list, and this one is "
+            f"{shape or 'a plain word'} classified as "
+            f"{kind if kind is not None else 'nothing this path can establish'}"
+            f". Cleared anyway it would zero the first eight bytes of whatever "
+            f"the word holds, and the program would keep running with a wrong "
+            f"length: that is the silent wrong answer this path does not emit.")
 
 # ── Methods on a string ───────────────────────────────────────────────────
 #

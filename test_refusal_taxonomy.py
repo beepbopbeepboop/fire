@@ -566,9 +566,22 @@ CAUSE_SAMPLES = [
     ("variadic call has no ABI",
      "tile: the body reads 'tile_size_list', its *-parameter, and this path "
      "has no variadic ABI"),
+    # The sample carries the message's TAIL, not just its head, and that is the
+    # point of it: the cause's marker is the clause that states the fact ("is
+    # not one of those methods of those receivers"), so a sample abbreviated
+    # before it would fall through to the "method call on a value" cause one
+    # entry above — which is the same precedence trap the entry below records.
+    # The marker itself moved off the model's enumeration of lowered names
+    # (`lowers only append, close, write`) when `List.clear` joined that table,
+    # because a marker keyed on a list a change to the list invalidates is a row
+    # that reads as a cause that blocks nothing. See
+    # `tools/formal_sweep_causes.py`'s row for the measurement.
     ("method call on a value receiver is not one of the lowered methods",
      "value.write_repr_to() is a method call on a value, and this backend "
-     "lowers only append, close, write"),
+     "lowers only append, clear, close, write (on a file descriptor) and the "
+     "string methods count, endswith, find, lstrip, startswith — the receiver "
+     "is a name on this path, and 'write_repr_to' is not one of those methods "
+     "of those receivers"),
     ("multi-index subscript",
      "size_of[type, target] is a subscript whose index is a tuple. A value "
      "here is one 64-bit word and a list is a flat blob of words, so a tuple "
