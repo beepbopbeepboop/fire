@@ -377,7 +377,8 @@ class _DylibGeneratedCppError(RuntimeError):
     bugs/CODEGEN_dylib_module_path_drops_generated_cpp.md."""
 
 
-def compile_module_to_c(src: str, path: str, module_name: str) -> str:
+def compile_module_to_c(src: str, path: str, module_name: str,
+                        linkable: bool = True) -> str:
     """Transpile one library module to GIMPLE C with no main/entry points.
 
     Deep-but-finite generic-instantiation chains (a module pulling in nested
@@ -445,7 +446,27 @@ def compile_module_to_c(src: str, path: str, module_name: str) -> str:
             # `fire.py dylib` over a project's own Python-family modules where
             # it bites, which is a tree whose `.py` files are in neither list.
             # See bugs/CODEGEN_dylib_module_path_drops_generated_cpp.md.
-            if box.get('cpp'):
+            #
+            # `linkable=False` for a caller that has NO link line — which is
+            # `compile_stdlib.py`'s syntax sweep, the one instrument that reads
+            # this function's return value and checks that the emitted C PARSES.
+            # Every word of the argument above is about the link: a dangling
+            # `_mojogen_*` reference is a link-line fact, and a sweep that never
+            # links cannot observe it. Refusing there turned three REAL modules
+            # into `stdlib-syntax` failures for a property they do not have:
+            #
+            #   test/runtime/test_asyncrt.mojo
+            #   test/runtime/test_locks.mojo
+            #   test/runtime/test_raising_asyncrt.mojo
+            #
+            # `FAILED: 18 (18 expected, 0 unexpected)` on master became
+            # `21 (18 expected, 3 unexpected)` — three UNEXPECTED, which is the
+            # direction CLAUDE.md's `stdlib-syntax` rule names as a regression.
+            # bugs4-2's own measurement missed it because it looked at the two
+            # module lists that SHIP and this sweep walks `test/runtime/` too.
+            # So the switch is the honest shape: the emitter reports what it
+            # produced, and the LINKER decides whether it can use it.
+            if box.get('cpp') and linkable:
                 raise _DylibGeneratedCppError(
                     f"{module_name}: {len(box['cpp'])} bytes of C++20 coroutine "
                     f"definitions (gen.generated_cpp) that this path cannot "
@@ -488,7 +509,8 @@ def last_degradations() -> list:
 _stdlib_compile_cache: dict = {}  # in-process L1 for compile_module_to_c_cached
 
 
-def compile_module_to_c_cached(src: str, path: str, module_name: str) -> str:
+def compile_module_to_c_cached(src: str, path: str, module_name: str,
+                              linkable: bool = True) -> str:
     """Like compile_module_to_c but CAS-cached under stdlib-compile/<hash>.
 
     The key folds in the compiler fingerprint (a codegen change invalidates
@@ -515,7 +537,13 @@ def compile_module_to_c_cached(src: str, path: str, module_name: str) -> str:
     duplicated, not a second cache: the same key, the same L1, the same
     `cas.stats` accounting, in the same order.
     """
-    key = cas.stdlib_compile_key(src, path, module_name)
+    # The `‘linkable’ half is part of the KEY, not of the cache: a `.ci`
+    # published by a `linkable=False` call has had no link-line check made on
+    # it, and handing it to `build()` would republish the very hole the refusal
+    # exists to refuse. One extra character in the key, and the two artifacts
+    # can never be confused for each other.
+    key = cas.stdlib_compile_key(src, path, module_name,
+                                 extra='' if linkable else '|nolink')
     if key in _stdlib_compile_cache:
         return _stdlib_compile_cache[key]
     cached = cas.lookup(key, '.ci')
@@ -525,7 +553,7 @@ def compile_module_to_c_cached(src: str, path: str, module_name: str) -> str:
             text = f.read()
     else:
         cas.stats['misses'] += 1
-        text = compile_module_to_c(src, path, module_name)
+        text = compile_module_to_c(src, path, module_name, linkable=linkable)
         degraded = last_degradations()
         if degraded:
             sys.stderr.write(

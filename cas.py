@@ -615,17 +615,26 @@ def compile_key(source: str, do_imports: bool, filename: str = "",
     )
 
 
-def stdlib_compile_key(source: str, path: str, module_name: str) -> str:
+def stdlib_compile_key(source: str, path: str, module_name: str,
+                       extra: str = '') -> str:
     """Key (`stdlib-compile/<hash>`) for caching compile_module_to_c output (.ci).
 
     Covers the module source, its file path, its module name, the compiler
     fingerprint, and the stdlib fingerprint — a stdlib module's generated C
     depends on its imports' signatures/layouts, and those imports are
     themselves stdlib modules, so the whole-stdlib fingerprint covers the
-    closure without tracing it."""
+    closure without tracing it.
+
+    `extra` is for a caller whose ARTIFACT differs from the default one for the
+    same three inputs. `compile_module_to_c_cached`'s `linkable=False` uses it:
+    a `.ci` published with no link-line check on it must not be reachable by a
+    caller that will link it, or the dylib build would republish the dangling
+    `_mojogen_*` reference its refusal exists to refuse. Without `extra` the two
+    artifacts would share one key, and a cache is exactly where a distinction
+    that exists only in a parameter would be lost."""
     return 'stdlib-compile/' + _hash(
         'mojo-stdlib-compile-v1', ABI_VERSION, compiler_fingerprint(),
-        stdlib_fingerprint(), source, path, module_name,
+        stdlib_fingerprint(), source, path, module_name, extra,
     )
 
 
