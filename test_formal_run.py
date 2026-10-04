@@ -6767,7 +6767,8 @@ BOTH_ARCH_CASES = [
     # only one of them was a build crash:
     #
     #   * `100000` does not fit MOVZ's 16-bit unsigned field, and the arm64
-    #     emitter reached for `encode_movz_xn_imm` directly instead of this
+    #     emitter reached for the immediate MOVZ (`encode_movz_wd_imm`, called
+    #     `encode_movz_xd_imm` at the time) directly instead of this
     #     backend's own `_emit_mov_imm`, so it died on `assert 0 <= imm16 <=
     #     0xffff`. x86-64 was fine — its three twins all call `_emit_mov_imm`.
     #     A wide default has been buildable on one architecture and not the

@@ -293,29 +293,35 @@ def gen_moves(rng, free):
     """The move-immediate family, one encoder per width.
 
     `formal/arm64.py` has TWO `movz` encoders and they are not
-    interchangeable: `encode_movz_xn_imm` is the 64-bit one (base `0xd2800000`)
-    and `encode_movz_xd_imm` is the 32-bit one (base `0x52800000`), which is
+    interchangeable: `encode_movz_xd_imm` is the 64-bit one (base `0xd2800000`)
+    and `encode_movz_wd_imm` is the 32-bit one (base `0x52800000`), which is
     what every `arm64_codegen.py` call site emits. The pool pairs each encoder
     with the WIDTH ITS OWN BASE ENCODES, because the alternative — pairing a
     32-bit encoder with the text `movz xN` — makes every one of those draws an
     `ENC-MISMATCH` and buries the real findings under a defect in the pool.
-    (`bugs/FORMAL_arm64_movz_encoder_is_named_xd_and_encodes_wd.md` is the
-    encoder half of this, measured by the same check.)
+
+    **The two names used to be the other way round**, which is why the pairing
+    is worth stating: the 32-bit encoder was called `encode_movz_xd_imm` and the
+    64-bit one `encode_movz_xn_imm`, so pairing by NAME gave the wrong width
+    for both and `ENC-MISMATCH 8 of 60` on the first sweep. Each is named after
+    the width it encodes now, and `test_arm64_encoders.py` checks both widths
+    of both names against `as -arch arm64` — so this pool's rule is now also
+    the encoder table's, rather than a convention this one file remembers.
     """
     d, n = _dst(rng, free), _r(rng, free)
     i = rng.randrange(0x10000)
     k = rng.randrange(5)
     if k == 0:
-        return "movz x%d, #%d" % (d, i), A.encode_movz_xn_imm(d, i)
+        return "movz x%d, #%d" % (d, i), A.encode_movz_xd_imm(d, i)
     if k == 1:
-        return "movz w%d, #%d" % (d, i), A.encode_movz_xd_imm(d, i)
+        return "movz w%d, #%d" % (d, i), A.encode_movz_wd_imm(d, i)
     if k == 2:
         return "mov x%d, x%d" % (d, n), A.encode_mov_zr_xn(d, n)
     if k == 3:
         p = 16 * rng.randrange(4)      # the encoder's `pos` is a BIT offset
         return "movk x%d, #%d, lsl #%d" % (d, i, p), \
             A.encode_movk_xd_imm(d, i, p)
-    return "movn w%d, #%d" % (d, i), A.encode_movn_xd_imm(d, i)
+    return "movn w%d, #%d" % (d, i), A.encode_movn_wd_imm(d, i)
 
 
 def gen_flags(rng, free):
@@ -486,11 +492,20 @@ def gen_memreg(rng, free):
 #:     every one of them the harness's fault and none of them a fact about
 #:     `arm64_step`. `arm64_step` has arms for both (0xa9800000, 0xa8c00000) and
 #:     they are untested here.
-#:   * `LDP Xd1, Xd2, [SP, #imm]`, which the model DOES step (0xa9400000). No
-#:     wired encoder emits it, so a pool built from the wired encoders cannot
-#:     produce it — and the one encoder that claims to (`encode_ldp_xn_xt_sp`)
-#:     emits something else: see
-#:     `bugs/FORMAL_arm64_ldp_sp_encoder_emits_a_single_register_load.md`.
+#:   * `LDP Xd1, Xd2, [SP, #imm]` (signed offset, 0xa9400000), which the model
+#:     DOES step. No encoder in `formal/arm64.py` emits it and that is now a
+#:     decision with a reason rather than an accident: the encoder that claimed
+#:     it under that name encoded a single-register load off a REGISTER base
+#:     with its two arguments swapped and its offset in EIGHTIES, so a caller
+#:     that used it would have got a proof about one instruction (the model's
+#:     0xa9400000 arm) and an image containing another. It was deleted rather
+#:     than repaired, because nothing wants the instruction — frame traffic is
+#:     the writeback pairs above and a single SP-relative word is
+#:     `encode_ldr_xt_sp_imm` — and a correct encoder no lowering calls is a
+#:     table entry rather than an instruction any image can contain. So this
+#:     absence is permanent until a lowering wants the form, and the byte-exact
+#:     `ldp`/`stp` cases in `test_arm64_encoders.py` are what would catch it if
+#:     one landed wrong.
 MIXES = {
     "alu": (gen_alu, gen_moves),
     "flags": (gen_flags, gen_alu),
