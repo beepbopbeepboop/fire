@@ -333,6 +333,99 @@ def test_an_agreeing_overload_still_builds_and_runs(tmpdir):
                  status == 78, f"exit {status}, expected 78")
 
 
+# ── the CONTAINER twin: a blob that does not outlive its frame ─────────────
+#
+# `returns_frame` above is the machinery that makes a returned STRUCT sound: the
+# caller reserves a block in its OWN scratch and passes its address as a hidden
+# trailing argument, and the callee copies into it
+# (`model.struct_returned_frame_sites`, `returned_frame_convention_refusal`).
+# A CONTAINER has no such copy, because its words are laid out in the frame by
+# `_blob_est` — so `return xs` hands the caller an address into memory that dies
+# with the call. The case is here because it is the same subject the rest of this
+# file is about (what a function may hand back) and a DIFFERENT answer, and
+# because the hazard is invisible: the values are right immediately after the
+# call and wrong after the next one.
+CONTAINER_ESCAPE = """\
+def lit() -> List[Int]:
+    return [11, 22, 33]
+
+
+def litter(n) -> Int:
+    var junk = []
+    junk.append(n)
+    junk.append(n + 1)
+    junk.append(n + 2)
+    return len(junk)
+
+
+def main(n) -> Int:
+    var p = lit()
+    printf("right after: %d %d %d\\n", p[0], p[1], p[2])
+    var k = litter(7)
+    printf("after: %d %d %d\\n", p[0], p[1], p[2])
+    return 0
+"""
+
+# The CONTROL, and it is why the refusal is at the READ: the same function read
+# before this one calls anything else is correct, and this tree has a dozen of
+# those on purpose — `formal/hostmods/struct.mojo`'s `unpack_from` is one and its
+# docstring records the measurement ("a list built here is in this frame, which is
+# correct for the corpus's immediate `[0]`"), and
+# `formal/x86_64_decode.py` reads `struct.unpack_from("<i", code, at)[0]` that
+# way. A refusal at the RETURN would take that module out, for a use its own
+# author measured as sound.
+CONTAINER_IMMEDIATE = """\
+def lit() -> List[Int]:
+    return [11, 22, 33]
+
+
+def main(n) -> Int:
+    var p = lit()
+    printf("%d %d %d\\n", p[0], p[1], p[2])
+    return 0
+"""
+
+
+def test_a_container_read_after_a_call_is_refused(tmpdir):
+    """The escape, on both architectures, and the immediate read beside it.
+
+    The measurement this pins is a WRONG ANSWER rather than a refusal, and it is
+    the reason the check exists at all: `arm64` read `7 8 9` after `litter(7)` —
+    that function's own scratch — and `x86-64` read `8 9 33`, a mix of the two
+    frames, for the same source. CPython answers `11 22 33` in both. A program
+    that builds, runs, exits 0 and prints a plausible answer is the one failure
+    mode this backend exists to prevent, so the case is a build-and-refuse on
+    both machines rather than a property read out of the model.
+    """
+    ok = True
+    for backend in ("arm64", "x86_64"):
+        rc, text, _image = build(CONTAINER_ESCAPE, "container_escape",
+                                 tmpdir, backend)
+        ok &= check(
+            f"[{backend}] a container read after another call is refused", rc != 0,
+            f"rc={rc}; the program built, so the values it read back were "
+            f"whatever the next call left there: {text[:200]}")
+        ok &= check(
+            f"[{backend}] the refusal names the frame reuse",
+            "does not outlive that function" in text
+            and "read again" in text,
+            f"{text[:400]}")
+    # The control, and it must BUILD and answer: 11 22 33 on both machines.
+    for backend in ("arm64", "x86_64"):
+        rc, text, image = build(CONTAINER_IMMEDIATE, "container_immediate",
+                                tmpdir, backend)
+        if not check(f"[{backend}] a container read BEFORE any call builds",
+                     rc == 0, f"rc={rc} {text[:300]}"):
+            ok = False
+            continue
+        status, stdout = run(image)
+        ok &= check(
+            f"[{backend}] …and answers CPython's answer",
+            status == 0 and stdout.split() == ["11", "22", "33"],
+            f"exit {status}, stdout {stdout!r}, expected 11 22 33")
+    return ok
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -350,6 +443,8 @@ def main():
              lambda: test_the_hang_shape_terminates(tmpdir)),
             ("an_agreeing_overload_still_builds_and_runs",
              lambda: test_an_agreeing_overload_still_builds_and_runs(tmpdir)),
+            ("a_container_read_after_a_call_is_refused",
+             lambda: test_a_container_read_after_a_call_is_refused(tmpdir)),
         ]
         failed = 0
         for name, fn in tests:

@@ -12057,6 +12057,14 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
     # `_unit_field_annotations` rather than read twice, so a field name two
     # structs declare differently is dropped by ONE rule and not by two.
     unit_fields = _unit_field_annotations(structs_by_name)
+    # …and which of THIS unit's functions hand back a container of their own, for
+    # the same reason and because it is read once per function below. It is a
+    # fixpoint over the unit's own names (`model.functions_returning_containers`),
+    # so a call to a host module is never in it — `os.listdir` `malloc`s, and that
+    # is the difference between a blob that outlives the call and one that does
+    # not. Measured once per unit rather than per function: the answer is the same
+    # for every function in the module and it costs a walk of every body.
+    returns_container = M.functions_returning_containers(functions)
     unstored: list = []
     for fn in functions:
         shape = M.function_param_shape(fn)
@@ -13187,6 +13195,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             raise CodegenError(M.unresolved_name_refusal(
                 name, fn.name, _why_unplaced(node, fn, frame_slots)))
         _refuse_variadic_reads(functions, fn, shape)
+        _refuse_returned_container_blobs(fn, returns_container)
         unstored.append(_unstored_read(fn, placed, frame_slots))
     # Raised LAST, and that ordering is the design rather than an accident of
     # where the call landed. A read-before-store is a SYMPTOM — the name has a
@@ -13409,6 +13418,35 @@ def _why_unplaced(node, fn, frame_slots: dict) -> str:
     return ("the module-level symbol table is empty for this unit, and the "
             "reading function declares no local or parameter by that "
             "spelling")
+
+
+def _refuse_returned_container_blobs(fn, returns_container) -> None:
+    """Refuse a READ of a handed-back container that comes after another call.
+
+    **A wrong answer, refused rather than emitted**, which is the whole of this
+    function. Measured on both architectures: the values are right immediately
+    after the call and wrong after the caller's NEXT call, and the two machines
+    disagree about what wrong looks like — arm64 reads the later function's
+    scratch whole, x86-64 reads a mix of the two frames. CPython answers the
+    same in both, so there is no answer to be right about.
+
+    It sits beside `_refuse_variadic_reads` because that is the other place in
+    this function where a decidable static fact decides what a callee may do with
+    its own storage, and because both are asked per function at the end of the
+    name walk, where a refusal costs one message.
+
+    **The check is at the READ and not at the callee's RETURN**, and that is the
+    design rather than a limitation: a returned container the caller reads before
+    it calls anything else is sound, this tree has a dozen of those on purpose
+    (`formal/hostmods/struct.mojo`'s `unpack_from` is one, and its docstring
+    records the measurement), and refusing the return would refuse a module for a
+    use its own author measured as correct. `returns_container` is
+    `model.functions_returning_containers`' answer over THIS image; a call to
+    another image is not in it, which is why `os.listdir` — `malloc`s, and says
+    so — is untouched.
+    """
+    for line, what in M.container_escape_sites(fn, returns_container):
+        raise CodegenError(M.returned_container_refusal(fn, line, what))
 
 
 def _refuse_variadic_reads(functions: list, fn, shape) -> None:

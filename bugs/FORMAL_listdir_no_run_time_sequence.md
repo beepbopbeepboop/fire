@@ -173,10 +173,13 @@ gone.
    value a caller can use after the callee returns. With (1) and (2) the value is
    a heap address, which is. **And this one is now measurably smaller than the
    document says it is**: the returned blob already crosses a dylib boundary and
-   reads by subscript (`triple()` above), because a RETURNED CONTAINER LITERAL is
-   `malloc`'d rather than frame-resident. What is missing is the generalisation —
-   a container built by a LOOP and returned, which has no static size to
-   `malloc`.
+   reads by subscript (`triple()` above) — a blob another IMAGE `malloc`s does.
+   ~~What is missing is the generalisation — a container built by a LOOP and
+   returned, which has no static size to `malloc`.~~ **CORRECTED 2026-10-04: a
+   container returned by a function in THIS image is frame-resident too, so this
+   item was not a missing capability but a wrong answer, and it is now refused
+   at the read on both architectures — see the section above and
+   `bugs/FORMAL_a_returned_container_read_after_a_call_is_a_frame_reuse.md`.**
 4. ~~A `for` over it, and `len`.~~ **DONE**, above.
 
 That is Phase 6's tagged-value convergence arriving from the `os` side, and it
@@ -184,6 +187,58 @@ is the same work in both directions. **It is not a patch**, which is what this
 document said before, and the number in the paragraph below has not changed:
 `os.listdir` is 12 uses across the 87 files the sweep lists for `os` and
 `os.walk` another 5, and what is now reachable is all of them — as a blob.
+
+## 2026-10-04 (`work/formal21-5`): item 3 was not a missing capability, it was a WRONG ANSWER
+
+**Item 3 said "what is missing is the generalisation — a container built by a
+LOOP and returned", and the sentence above it said a returned container LITERAL
+is `malloc`'d rather than frame-resident. Both are false, and the measurement is
+the reason this document needed re-reading rather than working.**
+
+```mojo
+def lit() -> List[Int]:
+    return [11, 22, 33]
+def litter(n) -> Int:
+    var junk = []
+    junk.append(n); junk.append(n + 1); junk.append(n + 2)
+    return len(junk)
+def main(n) -> Int:
+    var p = lit()
+    printf("right after: %d %d %d\n", p[0], p[1], p[2])   # 11 22 33, both machines
+    var k = litter(7)                                   # any call at all
+    printf("after: %d %d %d\n", p[0], p[1], p[2])
+    return 0
+```
+
+CPython answers `11 22 33` twice. This backend, before this round: `11 22 33`
+and then **arm64 `7 8 9`, x86-64 `8 9 33`** — `litter`'s own scratch on one
+machine and a mix of the two frames on the other, from a program that builds,
+runs and exits 0. **A container is laid out in the frame by `_blob_est` in both
+emitters, so NOTHING a function returns of that shape is `malloc`'d**, and the
+values read correctly immediately after the call only because nothing has been
+pushed over the dead region yet.
+
+**What landed**: the escape is now REFUSED, at the read and on both
+architectures (`formal/model.py::container_escape_sites`, beside the struct-frame
+machinery this document's item 3 has always been the container twin of). The
+check is at the read rather than at the return because the immediate read is a
+shape this tree has on purpose — `formal/hostmods/struct.mojo`'s `unpack_from`
+records it in its own docstring and `formal/x86_64_decode.py` uses it — and
+refusing the return took that module out (measured: the hostmods census went
+64/64 → 62/64 rows building). After the change the census is 64/64 again and
+`test_formal_os_backing.py` is 58/58.
+
+**The capability that would make it right is unchanged in substance and better
+specified than this document had it**: a `malloc`'d blob whose length is only
+known at run time (item 2) is what a copy has to copy, and the copy is the
+struct-frame convention applied to a blob. That is one piece of work for items 2
+and 3 together, and it is written down where the three pieces of it are:
+
+`bugs/FORMAL_a_returned_container_read_after_a_call_is_a_frame_reuse.md`.
+
+**Item 1 is unaffected** — a blob another IMAGE `malloc`s (`os.listdir`,
+`os.walk`) crosses the boundary and is read by subscript today, which is the
+measured 58/58.
 
 ## The original measurements, re-verified on this tree
 

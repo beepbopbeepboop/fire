@@ -7944,6 +7944,246 @@ def list_repeat_count_refusal(spelled: str, count_spelled: str) -> str:
         f"gets its own budget")
 
 
+def assignment_target_names(node) -> list:
+    """The names one assignment or declaration binds, in source order.
+
+    `x = [1]`, `var x = [1]`, `x: List[Int] = [1]` and `x, y = [1], [2]` are four
+    spellings of the same question, and a container check that reads only one of
+    them misses the other three silently -- which is the direction this project's
+    refusals must never be wrong in. `MultiAssignStmt` is a list of targets and
+    the parser records each as a `VarDecl`-shaped node, so both go through here.
+    """
+    out = []
+    name = getattr(node, "name", None)
+    if isinstance(name, str) and name:
+        # A `VarDecl` records its target as a NAME STRING, not as a node, so the
+        # node walk below finds nothing in it. Reading only the node form is how
+        # `var xs = []` became invisible to the first version of the container
+        # check while `xs = []` was caught.
+        return [name]
+    targets = getattr(node, "targets", None)
+    if targets is None:
+        targets = [getattr(node, "target", None)]
+    for target in targets or ():
+        for sub in iter_nodes(target):
+            if isinstance(sub, F.IdentExpr):
+                out.append(sub.name)
+    return out
+
+
+def container_escape_sites(fn, returns_container=None) -> list:
+    """`[(line, what)]` — where a container handed back by a call is read too late.
+
+    **The hazard is not the return. It is the read AFTER another call.**
+
+    A container built in a function's frame does not outlive that function: the
+    blob is a block of the frame's own scratch (`_blob_est` in each emitter, and
+    the `[count][element]…` shape every container on this path has), and that
+    scratch is reclaimed the moment the function returns. Reading the value
+    BEFORE the caller makes another call is sound — nothing has been pushed over
+    the dead region yet — and reading it after is a use-after-free whose value is
+    whatever the next call left there.
+
+    Measured, both architectures, and the two machines give TWO different wrong
+    answers for the same source, which is what a use-after-free looks like from
+    here:
+
+        def appended() -> List[Int]:
+            var xs = []
+            xs.append(11); xs.append(22); xs.append(33)
+            return xs                    # a frame blob, not a heap one
+
+        def main(n) -> Int:
+            var p = appended()
+            printf("right after: %d %d %d\\n", p[0], p[1], p[2])  # 11 22 33
+            var k = litter(7)            # any call at all
+            printf("after: %d %d %d\\n", p[0], p[1], p[2])
+            # arm64:  7 8 9      <- litter's own scratch
+            # x86-64: 8 9 33     <- a MIX of the two frames
+
+    CPython answers `11 22 33` in both. **A list LITERAL at the return site is
+    the same shape and the same wrong answer** (`return [11, 22, 33]`, measured
+    identically), which corrects
+    `bugs/FORMAL_listdir_no_run_time_sequence.md` item 3: a returned container
+    literal is NOT `malloc`'d here, and "it reads correctly immediately after the
+    call" is the only reason it looked like it was.
+
+    **Why the check is HERE and not on the return**, and it is the whole design:
+    a returned container that the caller reads immediately is sound, and this
+    tree has a dozen of those on purpose. `formal/hostmods/struct.mojo`'s
+    `unpack_from` is one and its docstring says so ("a list built here is in this
+    frame, which is correct for the corpus's immediate `[0]`"), and
+    `formal/x86_64_decode.py` reads `struct.unpack_from("<i", code, at)[0]` that
+    way. **Refusing the return would refuse a module for a use its own author
+    measured as sound**, so the refusal is asked where the fact is: at the READ.
+
+    `returns_container` is `{callee name: True}` for the same-image callees this
+    build has decided return a container, and it is what makes the call side
+    decidable without a manifest. A call to ANOTHER IMAGE is not here at all:
+    `os.listdir` `malloc`s and its docstring says the caller owns it, which is
+    why `names = os.listdir(p)`, `names[i]` and `for x in names` work today
+    (`test_formal_os_backing.py::listdir_is_a_python_level_list`).
+
+    The scan is over the TOP-LEVEL statements of the body and it is conservative
+    in the direction that matters: a call inside a loop or a branch counts as
+    happening at the loop's own position, and a name read anywhere after that
+    position is refused. `struct.unpack_from(…)[0]` has no binding to be late
+    about and is never this shape.
+    """
+    body = getattr(fn, "body", None)
+    if not isinstance(body, list) or not returns_container:
+        return []
+    params = {name for name, _ann in function_param_shape(fn).fixed}
+    # Three index sets over the TOP-LEVEL statements, and the question is
+    # whether they INTERLEAVE for one name: a call between a binding and a later
+    # read of the same name. That is the whole shape — `struct.unpack_from(…)[0]`
+    # has no binding and so no interleaving, and a caller that reads the value
+    # before calling anything else has none either.
+    bound, reads, calls = {}, {}, set()
+    for i, stmt in enumerate(body):
+        if isinstance(stmt, (F.AssignStmt, F.VarDecl)) \
+                and isinstance(getattr(stmt, "value", None), F.CallExpr):
+            callee = call_callee_name(stmt.value.func)
+            if callee and returns_container.get(callee):
+                # A `VarDecl` records no line of its own, so the CALL's is what
+                # the message quotes: same statement, and the one a reader can
+                # find.
+                line = (getattr(stmt, "line", 0) or 0) \
+                    or (getattr(stmt.value, "line", 0) or 0)
+                for name in assignment_target_names(stmt):
+                    if name not in params:
+                        bound.setdefault(name, (i, line))
+        for name in _container_reads(stmt):
+            reads.setdefault(name, []).append(i)
+        # A call ANYWHERE in this statement — a loop body, an `if` arm, a
+        # comprehension — counts at the statement's own position.
+        if any(isinstance(n, F.CallExpr) for n in iter_nodes(stmt)):
+            calls.add(i)
+    out = []
+    for name, (at, line) in sorted(bound.items()):
+        late = [c for c in sorted(calls)
+                if at < c and any(r > c for r in reads.get(name, ()))]
+        if not late:
+            continue
+        # The FIRST such call is the one the reader has to look at: everything
+        # after it is downstream of the same reclamation.
+        first = late[0]
+        out.append((getattr(body[first], "line", 0) or 0,
+                    f"`{name}`, bound at line {line} to a value a function in "
+                    f"this image handed back, is read again on line "
+                    f"{getattr(body[min(r for r in reads[name] if r > first)], 'line', 0) or 0}"
+                    f", after the call on line "
+                    f"{getattr(body[first], 'line', 0) or 0} has run"))
+    return out
+
+
+def _container_reads(stmt) -> set:
+    """The names a statement READS, as distinct from the ones it binds."""
+    bound = set(assignment_target_names(stmt)) \
+        if isinstance(stmt, (F.AssignStmt, F.VarDecl)) else set()
+    return {n.name for n in iter_nodes(stmt)
+            if isinstance(n, F.IdentExpr) and n.name not in bound}
+
+
+def _stmt_line(body: list, index: int) -> int:
+    stmt = body[index] if 0 <= index < len(body) else None
+    return (getattr(stmt, "line", 0) or 0) if stmt is not None else 0
+
+
+def functions_returning_containers(functions: list) -> dict:
+    """`{callee name: True}` — this module's own functions that return a container.
+
+    A fixpoint over one question and it is monotone, so it terminates: a
+    function returns a container if it returns a list LITERAL, or a NAME it
+    binds to one, or a call to a function already known to return one. Nothing
+    can stop being a container, so the loop can only grow.
+
+    **This is what makes the escape decidable on the CALLER's side**, and it is
+    why the check lives there: the callee's own return is not where the fact is.
+    A name in the answer is a function of THIS image, which is what separates it
+    from a call to a host module — `os.listdir` `malloc`s and is not refused, and
+    the difference is not a judgement about which module is nicer.
+    """
+    out: dict = {}
+    changed = True
+    rounds = 0
+    while changed and rounds < len(functions) + 2:
+        changed = False
+        rounds += 1
+        for fn in functions:
+            name = getattr(fn, "name", None)
+            if not name or out.get(name):
+                continue
+            for node in iter_nodes(getattr(fn, "body", None) or []):
+                if not isinstance(node, F.ReturnStmt) or node.value is None:
+                    continue
+                value = node.value
+                hit = isinstance(value, F.ListExpr)
+                if isinstance(value, F.CallExpr):
+                    callee = call_callee_name(value.func)
+                    hit = bool(callee) and out.get(callee) is True
+                if not hit and isinstance(value, F.IdentExpr) \
+                        and value.name in _locally_bound_containers(fn):
+                    hit = True
+                if hit:
+                    out[name] = True
+                    changed = True
+                    break
+    return out
+
+
+def _locally_bound_containers(fn) -> set:
+    """The names this function binds to a container of its OWN construction."""
+    body = getattr(fn, "body", None)
+    if not isinstance(body, list):
+        return set()
+    params = {name for name, _ann in function_param_shape(fn).fixed}
+    out = set()
+    for node in iter_nodes(body):
+        if isinstance(node, (F.AssignStmt, F.VarDecl)):
+            if isinstance(getattr(node, "value", None), F.ListExpr):
+                out |= {n for n in assignment_target_names(node)}
+        elif isinstance(node, F.CallExpr) and isinstance(node.func,
+                                                        F.MemberExpr) \
+                and isinstance(node.func.obj, F.IdentExpr) \
+                and node.func.member == "append" \
+                and node.func.obj.name not in params:
+            out.add(node.func.obj.name)
+    return out
+
+
+def returned_container_refusal(fn, line: int, what: str) -> str:
+    """The diagnostic for reading a handed-back container after another call.
+
+    Said at the READ rather than at the return, because that is where the fact
+    is: a container this function was handed and reads before it calls anything
+    else is sound, and this tree has a dozen of those on purpose
+    (`formal/hostmods/struct.mojo`'s own docstring records the shape and the
+    measurement). The reader is being told what their program does, not that a
+    capability is missing.
+    """
+    who = f"{fn.name}: " if getattr(fn, "name", None) else ""
+    return (
+        f"{who}{what}. A container built in a function's frame does not outlive "
+        f"that function: this path has no heap for a list, so the blob is a "
+        f"block of that frame's own scratch ([count][element]… laid out per "
+        f"append SITE, `_blob_est` in each emitter), and the scratch is "
+        f"reclaimed the moment the function returns. The values read back here "
+        f"are whatever this function's NEXT call left in the same stack region "
+        f"— measured on both architectures, and the two give two DIFFERENT wrong "
+        f"answers for one source (arm64 reads the later call's scratch whole, "
+        f"x86-64 reads a mix of the two frames), which is the shape of the "
+        f"defect this backend exists to prevent rather than a value anybody can "
+        f"check. `bugs/FORMAL_listdir_no_run_time_sequence.md` item 3 records "
+        f"the capability that closes it (a container with a run-time length, "
+        f"`malloc`'d rather than frame-resident) and "
+        f"`bugs/FORMAL_a_returned_container_read_after_a_call_is_a_frame_reuse.md` "
+        f"records the measurement and the fix's shape. What lowers today: read "
+        f"the value before calling anything else, keep the container in the "
+        f"caller and pass a slot to fill, or take the elements as scalars one "
+        f"at a time")
+
+
 def list_repeat_operands_refusal(left: str, right: str) -> str:
     """Why `a * b` with a container on BOTH sides is refused.
 
