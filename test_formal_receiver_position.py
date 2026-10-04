@@ -766,37 +766,6 @@ REFUSALS = [
      "    return m.make().take[7](r)\n",
      "`m.make().take(…)` cannot be lowered"),
 
-    # …and the OTHER call-result receiver, which is a different spelling with a
-    # different reason to be refused and was reaching the LINK AUDIT instead.
-    # `Box()` is a CONSTRUCTION of a struct this module declares, so its type is
-    # not in question at all — the declaration settles it — and what the lift
-    # still cannot do is name a RECEIVER, because the call carries none.  Before
-    # this was refused at the construct, `Box().get()` built and died at the link
-    # with "the image would bind 1 symbol(s) that nothing provides: get", which
-    # is the sentence `formal/model.py`'s `subscript_receiver_method_refusal`
-    # calls worse than a wrong number because it is silent: a symbol spelled after
-    # the METHOD can collide with a real one and the image then computes a
-    # plausible wrong answer with nothing reporting a failure.
-    #
-    # `Box` is a ONE-FIELD struct here on purpose, because that is the shape the
-    # refusal's ADVICE runs into: it tells the reader to bind the receiver to a
-    # local of a declared struct type, and whether that advice answers this
-    # program is a separate question with its own answer
-    # (`bugs/FORMAL_method_call_on_a_construction_is_not_rewritten.md`). A
-    # two-field receiver builds and computes, so this row is not the only place
-    # the two shapes could have been confused.
-    ("refuse_a_method_call_on_a_construction_receiver",
-     "struct Opt:\n"
-     "    var v: Int\n"
-     "    var has: Int\n\n"
-     "struct Box:\n"
-     "    var inner: Opt\n\n"
-     "    def get(self) -> Int:\n"
-     "        return self.inner.v\n\n"
-     "def main() -> int:\n"
-     "    return Box().get()\n",
-     "`Box().get(…)` cannot be lowered"),
-
     # A ONE-FIELD holder's method reading the nested frame NOTHING built. The
     # same `Box` as the row above and the same ten lines without the
     # construction, and the difference is the whole of it: a one-word struct's
@@ -845,6 +814,150 @@ REFUSALS = [
      "    return b.get()\n",
      "reads Box's only field 'inner', a slot whose declared type is the "
      "framed struct Opt, and nothing in this function has put a frame there"),
+    # ── a CALL RESULT whose type IS established, and is still not a receiver ──
+    #
+    # The four rows above this one are about a receiver whose TYPE nothing
+    # establishes.  These are the other half, added 2026-10-04 with
+    # `formal/build.py::_call_receiver_target`, which lifts a call result whose
+    # type is written in a return annotation: `m.make().take(r)` is
+    # `Maker_take(m.make(), r)` whenever `make` says `-> Made` and `Made` is a
+    # one-field struct of this unit (`test_formal_run.py`'s
+    # `CALL_RECEIVER_CASES` is the differential half).
+    #
+    # Which leaves the cases where the type is established AND the receiver still
+    # cannot be one.  They are here for a reason that is about the SENTENCE
+    # rather than about the refusal: the message these used to get said "what is
+    # missing is the receiver's TYPE: this path has no inference that answers
+    # which struct does `m.make()` hold", which is false about every one of
+    # them — the type is right there.  A reader sent to declare a type the
+    # source already declares is the "false about the file" outcome
+    # `formal/model.py`'s own header calls worse than no message, so each of
+    # these pins the sentence that replaced it AND the refusal it replaced,
+    # because the interesting failure is a lift that happens where a refusal
+    # was expected: `Made_peek` and `Made_pick` would both compute a plausible
+    # wrong answer rather than fail.
+    #
+    # (1) The struct does not declare the method, and ANOTHER struct of the same
+    # unit does — so the name-only lift has a target and it is the wrong one.
+    # `Other_peek(m.make())` would return 5 here, and CPython raises
+    # AttributeError, so there is no number to be differential against.
+    ("refuse_a_method_the_call_results_struct_does_not_declare",
+     "struct Made:\n"
+     "    var k: Int\n\n"
+     "struct Other:\n"
+     "    var k: Int\n"
+     "    def peek(self) -> Int:\n"
+     "        return self.k\n\n"
+     "struct Maker:\n"
+     "    var s: Int\n"
+     "    def make(self) -> Made:\n"
+     "        var q = Made()\n"
+     "        q.k = self.s\n"
+     "        return q\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var m = Maker()\n"
+     "    m.s = 5\n"
+     "    return m.make().peek()\n",
+     "`m.make()` is a `Made`, and that IS established"),
+
+    # (2) The struct IS a multi-field one, so its receiver is the ADDRESS of a
+    # frame and this call site has no frame to take the address of.  A
+    # PARAMETER receiver rather than a local on purpose: `parameter_declared_
+    # structs` is what settles it, so this row measures the `frame` sentence
+    # itself rather than a gap in the binding tables.
+    ("refuse_a_multi_field_call_result_used_as_a_receiver",
+     "struct Wide:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def made(self) -> Wide:\n"
+     "        var q = Wide()\n"
+     "        q.a = self.b\n"
+     "        return q\n"
+     "    def take(self, k: Int) -> Int:\n"
+     "        return self.a + k\n\n"
+     "def go(w: Wide) -> Int:\n"
+     "    return w.made().take(1)\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    return go(Wide())\n",
+     "`w.made()` is a `Wide`, and that IS established"),
+
+    # (3) The struct declares the method TWICE, and nothing in the call says
+    # which declaration was meant.  The two bodies differ, so picking either
+    # gives a number: 3 or 30, and CPython's answer for a Mojo overload pair is
+    # not a program at all.
+    ("refuse_an_overloaded_method_on_a_call_result_receiver",
+     "struct Made:\n"
+     "    var k: Int\n"
+     "    def pick(self, a: Int) -> Int:\n"
+     "        return 3\n"
+     "    def pick(self, a: Int, b: Int) -> Int:\n"
+     "        return 30\n\n"
+     "struct Maker:\n"
+     "    var s: Int\n"
+     "    def make(self) -> Made:\n"
+     "        var q = Made()\n"
+     "        q.k = self.s\n"
+     "        return q\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var m = Maker()\n"
+     "    m.s = 5\n"
+     "    return m.make().pick(1)\n",
+     "declares that method more than once"),
+
+    # (4) The CONSTRUCTION, whose needle moved on 2026-10-04 and is now the
+    # representation sentence rather than the missing-type one.  `Box()` names
+    # `Box` exactly as `m.make()` names `Made`, so before the change this row's
+    # needle was true and the CONSTRUCTION row's was false; now each says what
+    # is actually wrong with it.  The measurable defect is unchanged and is the
+    # reason the lift still declines: lifting this reads at address 0 and
+    # answers 0, a number no source wrote (measured on both architectures before
+    # the lift existed, by the row this one used to be).
+    # (5) The last `why`, and the one `std/builtin/float_literal.mojo` gets:
+    # the annotation DOES name the receiver's type, and the struct of that name
+    # is declared in ANOTHER module — `IntLiteral` is `std/builtin/
+    # int_literal.mojo`, and `float_literal.mojo` neither imports it nor
+    # compiles it.  Before 2026-10-04 this row and the CONSTRUCTION row above
+    # got the SAME sentence, and for both of them it was false: it told the
+    # reader that the path has no inference answering "which struct does the
+    # receiver hold" about a receiver whose type is written in a `-> T`.
+    #
+    # Written as ONE file with the result type a name this unit does not
+    # declare, which is what the stdlib's pair looks like from inside the unit
+    # that makes the call: `std/builtin/float_literal.mojo` says
+    # `-> IntLiteral[…]` while `IntLiteral` is declared in
+    # `std/builtin/int_literal.mojo`, which it does not import.  `Other` is here
+    # so that `take` has an owner in `owners` — without it the name-only
+    # recogniser declines and the refusal never reaches this sentence.
+    #
+    # The needle is the middle of the new sentence, so a reversion to the
+    # missing-type wording fails the row.
+    ("refuse_a_call_result_whose_struct_lives_in_another_module",
+     "struct Local:\n"
+     "    var k: Int\n"
+     "    def make(self) -> Widget:\n"
+     "        return Widget()\n"
+     "\n"
+     "struct Other:\n"
+     "    var k: Int\n"
+     "    def take(self) -> Int:\n"
+     "        return self.k\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var l = Local()\n"
+     "    l.k = 5\n"
+     "    return l.make().take()\n",
+     "is a `Widget`, and that IS established"),
+    ("refuse_a_method_call_on_a_construction_receiver",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n\n"
+     "struct Box:\n"
+     "    var inner: Opt\n\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.v\n\n"
+     "def main() -> int:\n"
+     "    return Box().get()\n",
+     "`Box()` is a `Box`, and that IS established"),
 ]
 
 # ── the comptime ABI, now on BOTH architectures ────────────────────────────

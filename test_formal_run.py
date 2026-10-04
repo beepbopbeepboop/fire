@@ -4738,26 +4738,16 @@ WAVE5_POSITION_CASES = [
     # FRAME ARGUMENT that the old sentence was about is then fine —
     # `var b = mk(); return b.take(r)` builds on arm64 (the lift gives the
     # callee a name and its parameter list, so `r` is followed into it).
-    ("byref_refuse_an_opaque_position_as_opaque",
-     "struct R:\n"
-     "    var a: Int\n"
-     "    var b: Int\n\n"
-     "class Box:\n"
-     "    var v: Int\n"
-     "\n"
-     "    fn take(self, o: Int) -> Int:\n"
-     "        return 0\n"
-     "\n"
-     "def mk() -> Box:\n"
-     "    var bx = Box()\n"
-     "    bx.v = 1\n"
-     "    return bx\n"
-     "\n"
-     "def main(n: Int) -> Int:\n"
-     "    var r = R()\n"
-     "    r.a = 7\n"
-     "    return mk().take(r)\n",
-     "refuse:`mk().take(…)` cannot be lowered", None),
+    #
+    # …and the advice stopped being necessary on 2026-10-04, which is why this
+    # row is GONE from this table rather than moved: `mk()`'s own `-> Box` is
+    # the receiver's type, written down in the source, so
+    # `formal/build.py::_call_receiver_target` lifts the call itself
+    # (`Box_take(mk(), r)`) and there is nothing left to bind a local for. The
+    # row that replaced it is `call_result_receiver_lifted_from_a_return_type`
+    # in `CALL_RECEIVER_CASES` below, which runs the program rather than
+    # refusing it — a refusal that has become a build is worth a number here,
+    # not a deleted test.
     # …and the branch the case above used to cover is still reachable, on the
     # shape where the construct-level refusal CANNOT answer: an AMBIGUOUS method
     # name. `take` is declared by two structs here, so `owners` has no entry for
@@ -13965,6 +13955,200 @@ CTOR_RECEIVER_CASES = [
 ]
 
 
+# ── a CALL RESULT as a method receiver: the type is in a return annotation ──
+#
+# The third shape `_rewrite_method_calls` lifts, after a bare name
+# (`_method_call_target`) and a subscript whose element type the source states
+# (`_subscript_receiver_target`).  `formal/build.py::_call_receiver_target` asks
+# `model.receiver_struct` about the receiver, and the CALL row of that predicate
+# reads the callee's own `-> T` — so `mk().take(r)` dispatches on a type the
+# source STATES rather than on one a binding had to be found for.
+#
+# These are CPython-pair rows (Mojo text, CPython text, one stdout) because the
+# failure this shape can have is a wrong number rather than a refusal: the
+# receiver is passed as the call itself, `Box_take(mk(), r)`, so an emitter that
+# evaluated the receiver expression twice, or read the wrong word for the
+# receiver, produces a plausible answer with nothing reporting a failure.
+#
+# What is NOT here is the shape the lift must refuse, and that is the point of
+# the guards in `test_formal_receiver_position.py`: a CONSTRUCTION (`Box()`)
+# names its struct too, and lifting that one reads at address 0.  The row this
+# table replaces is the same table's old
+# `byref_refuse_an_opaque_position_as_opaque`, whose refusal is gone because
+# the advice it gave — bind the receiver to a local — is no longer needed when
+# the return annotation already says what the local would have said.
+CALL_RECEIVER_CASES = [
+    # (1) `mk()` is a free function whose declared return type names a one-field
+    # struct of this unit.  The answer reads BOTH the receiver the call produced
+    # and a FRAME argument, so a receiver that arrived as the wrong word would
+    # change the sum rather than crash.
+    ("call_result_receiver_lifted_from_a_return_type",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "struct Box:\n"
+     "    var v: Int\n"
+     "\n"
+     "    def take(self, o: R) -> Int:\n"
+     "        return self.v + o.a\n"
+     "\n"
+     "def mk() -> Box:\n"
+     "    var bx = Box()\n"
+     "    bx.v = 40\n"
+     "    return bx\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 2\n"
+     "    printf(\"%d\\n\", mk().take(r))\n"
+     "    return 0\n",
+     "class R:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "\n"
+     "class Box:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "\n"
+     "    def take(self, o):\n"
+     "        return self.v + o.a\n"
+     "\n"
+     "def mk():\n"
+     "    bx = Box()\n"
+     "    bx.v = 40\n"
+     "    return bx\n"
+     "\n"
+     "def main():\n"
+     "    r = R()\n"
+     "    r.a = 2\n"
+     "    print(mk().take(r))\n"),
+    # (2) The receiver is a METHOD call, which is the shape
+    # `std/builtin/float_literal.mojo` is refused on:
+    # `self.__int_literal__().__int__()`.  Two things are new here and both are
+    # needed for that file — the receiver's type comes from the METHOD's `-> T`
+    # rather than a function's, and the inner call has to be lifted too, which
+    # is why `formal/build.py`'s `visit` recurses into the receiver before the
+    # call that takes it (`model.rewrite_tree` does not descend into a
+    # construct it has consumed).
+    #
+    # `IntLike` and `Whole` are BOTH one field, and `whole()`'s body STORES
+    # through the receiver it is given, so a receiver word that was a frame
+    # address instead of the field would store somewhere else and read back a
+    # zero — which is the failure the value is chosen to make visible.
+    ("call_result_receiver_of_a_method_call",
+     "struct IntLike:\n"
+     "    var n: Int\n"
+     "\n"
+     "    def twice(self) -> Int:\n"
+     "        return self.n * 2\n"
+     "\n"
+     "struct Whole:\n"
+     "    var n: Int\n"
+     "\n"
+     "    def whole(self) -> IntLike:\n"
+     "        var q = IntLike()\n"
+     "        q.n = self.n\n"
+     "        return q\n"
+     "\n"
+     "    def report(self, k: Int) -> Int:\n"
+     "        return self.whole().twice() + k\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var w = Whole()\n"
+     "    w.n = 21\n"
+     "    printf(\"%d\\n\", w.report(1))\n"
+     "    return 0\n",
+     "class IntLike:\n"
+     "    def __init__(self):\n"
+     "        self.n = 0\n"
+     "\n"
+     "    def twice(self):\n"
+     "        return self.n * 2\n"
+     "\n"
+     "class Whole:\n"
+     "    def __init__(self):\n"
+     "        self.n = 0\n"
+     "\n"
+     "    def whole(self):\n"
+     "        q = IntLike()\n"
+     "        q.n = self.n\n"
+     "        return q\n"
+     "\n"
+     "    def report(self, k):\n"
+     "        return self.whole().twice() + k\n"
+     "\n"
+     "def main():\n"
+     "    w = Whole()\n"
+     "    w.n = 21\n"
+     "    print(w.report(1))\n"),
+    # (3) A CHAIN of two, so the recursion is pinned at depth 2 rather than at
+    # the one call `std/builtin/float_literal.mojo` happens to have.  Each hop
+    # reads a DIFFERENT struct's `-> T` (`to_a` says `A`, `to_c` says `C`), so a
+    # lift that stopped after one hop — or that carried the first hop's struct
+    # into the second — would call the wrong method rather than fail to call
+    # one.  The arithmetic is chosen so both hops and the final read are visible
+    # in one number: 5 * 3 = 15, + 4 = 19.
+    ("call_result_receiver_chain_of_two_calls",
+     "struct A:\n"
+     "    var v: Int\n"
+     "\n"
+     "    def to_c(self, k: Int) -> C:\n"
+     "        var c = C()\n"
+     "        c.v = self.v + k\n"
+     "        return c\n"
+     "\n"
+     "struct B:\n"
+     "    var v: Int\n"
+     "\n"
+     "    def to_a(self, k: Int) -> A:\n"
+     "        var a = A()\n"
+     "        a.v = self.v * k\n"
+     "        return a\n"
+     "\n"
+     "struct C:\n"
+     "    var v: Int\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.v\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var b = B()\n"
+     "    b.v = 5\n"
+     "    printf(\"%d\\n\", b.to_a(3).to_c(4).get())\n"
+     "    return 0\n",
+     "class A:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "\n"
+     "    def to_c(self, k):\n"
+     "        c = C()\n"
+     "        c.v = self.v + k\n"
+     "        return c\n"
+     "\n"
+     "class B:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "\n"
+     "    def to_a(self, k):\n"
+     "        a = A()\n"
+     "        a.v = self.v * k\n"
+     "        return a\n"
+     "\n"
+     "class C:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "\n"
+     "    def get(self):\n"
+     "        return self.v\n"
+     "\n"
+     "def main():\n"
+     "    b = B()\n"
+     "    b.v = 5\n"
+     "    print(b.to_a(3).to_c(4).get())\n"),
+]
+
+
 
 # ── REPETITION: `xs * n`, which was not a construct on this path at all ─────
 #
@@ -19734,7 +19918,8 @@ def main():
                   | {c[0] for c in CONCAT_CASES}
                   | {c[0] for c in REPEAT_CASES}
                   | {c[0] for c in SET_UNION_CASES}
-                  | {c[0] for c in CTOR_RECEIVER_CASES})
+                  | {c[0] for c in CTOR_RECEIVER_CASES}
+                  | {c[0] for c in CALL_RECEIVER_CASES})
     wanted_pairs = ([c for c in TYPE_APPLICATION_CASES
                      + COMPTIME_ALIAS_PAIR_CASES
                      + SPREAD_CONSTRUCTION_CASES
@@ -19744,7 +19929,7 @@ def main():
                      + SOLE_FIELD_CALLEE_CASES
                      + SLICE_CASES + SLICE_BOUND_CASES + CONCAT_CASES
                      + REPEAT_CASES + SET_UNION_CASES
-                     + CTOR_RECEIVER_CASES
+                     + CTOR_RECEIVER_CASES + CALL_RECEIVER_CASES
                      if not args.cases or c[0] in args.cases])
     # `BOTH_ARCH_CASES` is the four-column shape, so it rides `selected` and the
     # ordinary `run_case` dispatch; what makes it different is the RUNNER, and
