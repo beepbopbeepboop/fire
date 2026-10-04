@@ -16,6 +16,11 @@ and neither of which any existing suite could see:
   * `h.a, h.b = x, y` was refused on x86-64 while arm64 lowered it, which is the
     one thing two architectures of one language implementation are not allowed to
     do about a legitimate program.  See `TUPLE_STORE_CASES`.
+  * `a, b, c = t` bound every name to the CONTAINER's kind, so the ordinary
+    unpack was refused by `print` on both architectures — a sentence false
+    about a source that says twice what each name holds.  Found by
+    `tools/formal_fuzz.py` widening its corpus to tuple unpacking; see the five
+    `a_tuple_unpack*` cases in `CASES` and the mixed-kind refusal beside them.
 
     python3 test_formal_value_model.py [-v] [case ...]
 
@@ -319,6 +324,85 @@ CASES = [
      "    print(\"p:\", p.s, p.n)\n"
      "    return 0\n",
      "p: hi 7\n"),
+    # ── what a TUPLE UNPACK binds, which is an ELEMENT and not the container ──
+    #
+    # `a, b, c = t` binds three names and each holds one element of `t`.  The
+    # scan that decides what a name holds bound every one of them to the
+    # CONTAINER's kind instead, and `list:int` is not one of the two kinds
+    # `print` chooses between, so the ordinary unpack was refused on both
+    # architectures:
+    #
+    #     t = (1, 2, 3)
+    #     a, b, c = t
+    #     print(a)     # print() cannot tell whether IdentExpr is a string or a
+    #                  # number on the formal arm64/x86-64 path
+    #
+    # A sentence false about the source, and the whole construct unreachable
+    # from `print` while every other binding shape in this file answers.  The
+    # fix is `ValueKinds._unpacked_element_kind`, which asks the element kind
+    # the same way `_iterable_kind` asks it for a `for` over the same container.
+    #
+    # Found by `tools/formal_fuzz.py` widening its corpus to tuple unpacking
+    # (see `bugs/FORMAL_fuzz_ledger.md` §3).
+    ("a_tuple_unpack_target_holds_an_element",
+     "def main(n):\n"
+     "    var t = (3, 4, 5)\n"
+     "    var a = 0\n"
+     "    var b = 0\n"
+     "    var c = 0\n"
+     "    a, b, c = t\n"
+     "    print(\"v:\", a, b, c)\n"
+     "    return 0\n",
+     "v: 3 4 5\n"),
+    # The SWAP, which is the second shape and the one whose element kind a
+    # container literal cannot carry: `_kind_of_simple` classifies a literal
+    # and nothing else, so `e, f = f, e` — a tuple of two NAMES — has no
+    # element kind to inherit and needs the elements asked through `kind_of`.
+    ("a_tuple_swap_binds_each_elements_kind",
+     "def main(n):\n"
+     "    var e = 1\n"
+     "    var f = 2\n"
+     "    e, f = f, e\n"
+     "    print(\"v:\", e, f)\n"
+     "    return 0\n",
+     "v: 2 1\n"),
+    # A LIST on the right, so the fix is not a tuple-literal special case: the
+    # blob layout is the same `[count][e0][e1]` and the element kind is read the
+    # same way.
+    ("a_list_unpacks_into_element_kinds",
+     "def main(n):\n"
+     "    var xs = [7, 9]\n"
+     "    var a = 0\n"
+     "    var b = 0\n"
+     "    a, b = xs\n"
+     "    print(\"v:\", a, b)\n"
+     "    return 0\n",
+     "v: 7 9\n"),
+    # A NESTED group, because `_bind_target` recurses and the recursion has to
+    # carry the element kind rather than the container's — `a, (b, c) = t`
+    # binds three elements and CPython agrees they are 1, 2 and 3.
+    ("a_nested_unpack_binds_elements",
+     "def main(n):\n"
+     "    var t = (1, (2, 3))\n"
+     "    var a = 0\n"
+     "    var b = 0\n"
+     "    var c = 0\n"
+     "    a, (b, c) = t\n"
+     "    print(\"v:\", a, b, c)\n"
+     "    return 0\n",
+     "v: 1 2 3\n"),
+    # And a SUBSCRIPT on the right, whose element kind comes from the SUBSCRIPT
+    # and not from the container: `a, b = xs[0], xs[1]` is two elements of `xs`
+    # written out, which is a different node shape again.
+    ("a_tuple_unpack_of_two_subscripts",
+     "def main(n):\n"
+     "    var xs = [5, 6, 7]\n"
+     "    var a = 0\n"
+     "    var b = 0\n"
+     "    a, b = xs[0], xs[1]\n"
+     "    print(\"v:\", a, b)\n"
+     "    return 0\n",
+     "v: 5 6\n"),
 ]
 
 # ── the tuple-store target shapes ──
@@ -1383,6 +1467,24 @@ REFUSALS = [
      "    show({\"a\": 1})\n"
      "    return 0\n",
      "the INDEX is a string and nothing in the source says what `d` holds"),
+    # The CONSERVATIVE DIRECTION of the tuple-unpack fix, and the half that
+    # would be a wrong answer rather than a refusal if it were left open.  A
+    # tuple whose elements DISAGREE has no element kind, so `_kind_of_elements`
+    # claims nothing, so `a` and `b` keep whatever the container said — which is
+    # not one of the two kinds `print` chooses between, and the refusal is
+    # right.  Unanimity is the whole rule the rest of the kind table is built
+    # on (`dict_literal_key_value_kind`, `own_shape_kind`): a name two
+    # statements bind two ways is a conflict and claims nothing, and a
+    # container whose elements disagree is the same fact one level down.
+    ("a_tuple_whose_elements_disagree_stays_refused",
+     "def main(n):\n"
+     "    var t = (1, \"ab\")\n"
+     "    var a = 0\n"
+     "    var b = 0\n"
+     "    a, b = t\n"
+     "    print(\"v:\", a)\n"
+     "    return 0\n",
+     "cannot tell whether IdentExpr"),
 ]
 
 

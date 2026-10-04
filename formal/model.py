@@ -14998,6 +14998,62 @@ class ValueKinds:
             kinds.add(kind)
         return kinds.pop() if len(kinds) == 1 else None
 
+    def _unpacked_element_kind(self, value, kind, own):
+        """`(kind, own)` for ONE ELEMENT of `value`, for a tuple target.
+
+        `a, b, c = t` binds three names and each holds ONE element of `t`, not
+        `t` itself, so the kinds this returns are the ELEMENT's. Without it the
+        statement's own scan bound every name to the container's kind, and a
+        container kind is not one of the two kinds a value can print as — so
+        the ordinary shape was refused on both architectures:
+
+            t = (1, 2, 3)
+            a, b, c = t
+            print(a)   # -> print() cannot tell whether IdentExpr is a string
+                       #    or a number on the formal arm64/x86-64 path
+
+        which is a sentence false about the source: the source says `a` holds an
+        integer, and says it twice (the tuple literal's elements, and the fact
+        that an unpack binds an element at all). The refusal was the whole
+        observable effect here because a container kind is refused rather than
+        guessed — `print(a)` cannot answer "is this a `%s` or a `%lld`" from
+        `list:int`.
+
+        A container LITERAL is asked for its elements' kinds directly rather than
+        through its own `list_kind`, because `_kind_of_simple` — which
+        `kind_of`'s container arm uses — classifies a LITERAL and nothing else,
+        so `e, f = f, e` (a tuple of two NAMES, the swap) has an element kind
+        its own container kind cannot carry and narrowed to `list` with no
+        element at all. Reading the elements through `kind_of` is what makes the
+        swap work, and it is the same reader `subscript_element_kind`'s callers
+        use for `t[0]`.
+
+        Only a LIST-kind value is narrowed, and the `is_list_kind` gate is what
+        keeps the two shapes apart: `subscript_element_kind` deliberately maps
+        `str` to an integer, because `s[0]` is a BYTE on this path
+        (`subscript_element_kind`'s own docstring), and `a, b = "xy"` binds two
+        one-character STRINGS. So the string arm is not narrowed at all — it
+        keeps the container kind, which is wrong in the same way it was and no
+        more so, rather than right for a reason this file does not have.
+
+        `own` follows the element for the same reason `kind` does: the evidence
+        is the same statement, one level down, and an own-shape claim about the
+        container is not a claim about an element of it. This matters because
+        `own_shape_kind` is the answer both backends' subscript/slice/membership
+        choke points ask before treating a name as a container (`a[0]` after an
+        unpack of a list of ints must read an integer, not a blob).
+        """
+        elem = None
+        if isinstance(value, (F.TupleExpr, F.ListExpr)):
+            kinds = {self.kind_of(el) for el in (value.elements or [])}
+            kinds.discard(None)
+            elem = kinds.pop() if len(kinds) == 1 else None
+        elif is_list_kind(kind or ""):
+            elem = list_elem_kind(kind)
+        if elem is None or elem == kind:
+            return kind, own
+        return elem, elem
+
     def _scan(self, stmts) -> None:
         for s in stmts or []:
             if isinstance(s, F.AssignStmt):
@@ -15007,6 +15063,11 @@ class ValueKinds:
                 # measurement of what happens when only one of the two arms asks.
                 kind, own = self._kind_with_ann(s.value,
                                                 getattr(s, "type_ann", None))
+                if isinstance(s.target, (F.TupleExpr, F.ListExpr)):
+                    # A TUPLE TARGET binds one element per name, and that is the
+                    # same fact `_iterable_kind` states for a `for` over the
+                    # same container — so it is the same reader.
+                    kind, own = self._unpacked_element_kind(s.value, kind, own)
                 self._bind_target(s.target, kind, own=own)
                 self._note_construction(s.target, s.value)
                 self._note_dict_init(s.target, s.value)
