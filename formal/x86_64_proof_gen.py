@@ -846,7 +846,24 @@ def generate_x86_64_proof(prog, code, info) -> str:
         section = ("/- AST bridge omitted: the semantic model is a "
                    "PLACEHOLDER (see the note on it), so there is no claim "
                    "for the AST evaluation to agree with. -/\n")
+        # …and NOTHING else is attempted for the AST, which is the fix.  This
+        # used to fall through to the `else` arm below, which calls
+        # `_ast_value` to decide whether to ALSO emit `def ast`; for a shape
+        # whose AST has no form that call RAISES, and the `except` assigned
+        # over `section` — so a placeholder model's file reported the bridge as
+        # omitted because "the AST bridge cannot state this function's calls"
+        # rather than because the model is the identity.  Both omit the theorem,
+        # so nothing false was claimed; the SENTENCE was about a different
+        # premise from the one that is actually the obstacle, and a reader sent
+        # to fix their call arity would find the arity was never the problem.
+        # Measured on `formal/examples/wide_recv.mojo`, x86-64: the emitted note
+        # said `AST omitted: … \`Point\` with 0 arguments …` while the note
+        # four lines above it said the model was a placeholder.  Over the 50
+        # examples, two take this route (`subscript_var`, `wide_recv`) and 48
+        # are untouched.
+        emit_ast = False
     else:
+        emit_ast = True
         try:
             section = _eval_eq_mojo_section(func_name, fn, typed,
                                             go_lemma_names, admitted=_admitted,
@@ -854,6 +871,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
         except Exception:                           # noqa: BLE001
             section = None
     if section is None:
+        emit_ast = False
         # Either the AST value could not be built (a construct the untyped
         # model has no form for) or the shape's bridge is not closed. Both
         # mean the same thing here: omit the bridge and say which.
@@ -872,11 +890,11 @@ def generate_x86_64_proof(prog, code, info) -> str:
             reason = _first_sentence(e)
         section = (f"/- AST bridge omitted: {reason.rstrip('.')}. Correctness "
                    f"would have to come from the machine value flow alone. -/\n")
-    else:
+    if emit_ast:
         # Guarded on its own: the probe inside `_eval_eq_mojo_section` sits
-        # behind the typed-function early return, so a TYPED function whose
-        # body has no AST form reached this unguarded call and raised out of
-        # the build instead of omitting the AST.
+        # behind the typed-function early return, so a TYPED function whose body
+        # has no AST form reached this unguarded call and raised out of the build
+        # instead of omitting the AST.
         try:
             ast_value = _ast_value(fn, func_name, _admitted, _vscope)
         except Exception as e:                      # noqa: BLE001

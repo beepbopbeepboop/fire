@@ -169,6 +169,20 @@ def _generate(tmp, source, name, arch="arm64"):
         return None, f"{type(e).__name__}: {e}"
 
 
+def _compile(path, out, arch):
+    """`compile_formal(prove=True, check=False)`, so a generator EXCEPTION
+    arrives as an exception.
+
+    The module-level `_generate` above returns `(proof_path, error)` and is what
+    most of this file uses; this one returns the result dict because the rows
+    below also read `info`, and a second shape of the same call would be the
+    duplication this file's own `TestGeneratorSource` exists to catch.
+    """
+    import formal.build as fb
+    return fb.compile_formal(path, arch=arch, output=out, prove=True,
+                             check=False)
+
+
 class TestGeneratorSource(unittest.TestCase):
     """Invariants on the generator itself, which need no compilation.
 
@@ -1752,6 +1766,207 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
         text = self._text("arm64", "plain")
         self.assertNotIn("NO RUN TESTS", text)
         self.assertIn("theorem main_runs_0 :", text)
+
+
+class TestAPlaceholderModelClaimsNothing(unittest.TestCase):
+    """A model the shared generator cannot write must be CLAIMED as unwritten.
+
+    `formal/x86_64_proof_gen.py` catches the shared model generator's
+    `NotImplementedError` and does not fail the build: it emits the model's
+    function as the IDENTITY, with a NOTE, and suppresses the two sections whose
+    whole value is a comparison against that model.  For
+    `formal/examples/wide_recv.mojo` — the two-field receiver example, whose
+    `p.get_x() + p.get_y()` is a struct field read and the model's domain is
+    `UInt64 -> UInt64` — that yields `def main_go (n : UInt64) : UInt64 := n` for
+    a function whose real answer is 4 whatever `n` is.
+
+    That is a FALSE STATEMENT about the source unless nothing downstream of it is
+    claimed, so the whole of this class is that "unless".  Four sections and one
+    control, and each row is a way a later change could remove the guard and
+    leave the false statement standing with a proof attached:
+
+      1. the NOTE, naming the refusal and saying nothing downstream is claimed;
+      2. the model's own definition being the identity, so a reader who skips
+         the NOTE still sees that the model computes nothing;
+      3. the AST BRIDGE suppressed, with its reason — `eval_eq_mojo` against the
+         identity is the obligation `0 = n`, which is false rather than unproved;
+      4. the RUN TESTS suppressed, with their reason — a run test would compare
+         the MACHINE against the placeholder and fail for a reason that says
+         nothing about the machine, which is how a fabricated answer gets
+         reported as a codegen bug.
+
+    **arm64 REFUSES this program outright** and x86-64 emits a disclaimed stub,
+    which is a real divergence between the two backends on one source file.  It
+    is asserted here as a fact rather than left for a reader to find, because the
+    honest stub is the x86-64 half and the arm64 half is the stricter one — and
+    arm64's proof layer is the more complete of the two, so "make them alike"
+    would mean giving up more than it gains.  The decision and its measurement are
+    `bugs/FORMAL_wide_recv_model_has_no_domain_for_a_struct.md`'s, and what
+    belongs here is only that the stub's honesty is a property of the GENERATOR
+    and not of this one example.
+
+    Generation only, no Lean: `compile_formal(prove=True, check=False)`.
+    """
+
+    #: `wide_recv.mojo`'s shape, in the subset both backends accept: a
+    #: two-field struct whose method READS a field, so translating the body
+    #: reaches a member read the model's domain cannot hold.
+    WIDE_RECV = """struct Point:
+    var x: Int
+    var y: Int
+
+    fn get_x(self) -> Int:
+        return self.x
+
+    fn get_y(self) -> Int:
+        return self.y
+
+def main(n: Int) -> Int:
+    var p = Point()
+    return p.get_x() + p.get_y()
+"""
+
+    #: The control: a function the shared model covers, so every suppression
+    #: below must be ABSENT. Without it a generator that suppressed all four
+    #: unconditionally would satisfy rows 1-4 and prove nothing.
+    PLAIN = "def main(n: Int) -> Int:\n    return n + 1\n"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="placeholder-model-")
+        cls.built = {}
+        for name, src in (("wide_recv", cls.WIDE_RECV), ("plain", cls.PLAIN)):
+            path = os.path.join(cls.tmp, f"{name}.mojo")
+            with open(path, "w") as f:
+                f.write(src)
+            for arch in ("x86_64", "arm64"):
+                key = (arch, name)
+                try:
+                    r = _compile(path, os.path.join(
+                        cls.tmp, f"{name}-{arch}.aout"), arch)
+                except Exception as e:                # noqa: BLE001
+                    cls.built[key] = None
+                    cls.built[key + ("error",)] = f"{type(e).__name__}: {e}"
+                    continue
+                with open(r["proof_path"], encoding="utf-8") as fh:
+                    cls.built[key] = fh.read()
+                cls.built[key + ("info",)] = r["info"]
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _text(self, arch, name):
+        text = self.built.get((arch, name))
+        self.assertIsNotNone(
+            text, f"{name} on {arch} produced no proof: "
+                  f"{self.built.get((arch, name, 'error'))}")
+        return text
+
+    def test_the_uncovered_shape_reaches_the_placeholder_route(self):
+        """The premise of every other row here, measured rather than assumed.
+
+        If the shared generator learned this shape, all four suppressions would
+        disappear and rows 1-4 would fail — so this row says which tree it is
+        asserting about, and it is the row that tells a reader the other four are
+        about a real gap rather than about a generator that gave up early.
+        """
+        text = self._text("x86_64", "wide_recv")
+        self.assertIn("the shared model generator does not cover this "
+                      "function's shape", text)
+        self.assertIn("struct field read has no value in the semantic model",
+                      text,
+                      "the NOTE must name the REFUSAL, not just announce that "
+                      "there is one: a reader who cannot tell which shape is "
+                      "uncovered cannot tell whether their own program is in it")
+
+    def test_the_note_says_nothing_downstream_is_claimed(self):
+        text = self._text("x86_64", "wide_recv")
+        self.assertIn("the semantic model below is the identity and nothing "
+                      "downstream of it is claimed", text)
+
+    def test_the_model_is_the_identity_rather_than_the_program(self):
+        """A reader who skips every comment still sees that the model is empty.
+
+        `main_go n = n` for a function that returns 4 whatever `n` is. Asserted
+        as TEXT rather than by running Lean, because the point is what the
+        emitted file says and Lean's opinion of `n = n` is not in question.
+        """
+        text = self._text("x86_64", "wide_recv")
+        m = re.search(r"def main_go\s*\([^)]*\)\s*:\s*UInt64\s*:=\s*"
+                      r"\n\s*(\S+)", text)
+        self.assertIsNotNone(m, "the model's own definition is not where the "
+                                "file says it is:\n" + text[:400])
+        self.assertEqual(m.group(1), "n",
+                         "the placeholder model is no longer the identity; a "
+                         "placeholder that computes SOMETHING needs the "
+                         "suppressions below re-examined, because it is no "
+                         "longer obviously empty")
+
+    def test_the_ast_bridge_is_suppressed_with_its_reason(self):
+        text = self._text("x86_64", "wide_recv")
+        self.assertIn("AST bridge omitted", text)
+        self.assertIn("PLACEHOLDER", text)
+        self.assertNotIn("theorem eval_eq_mojo", text,
+                         "the AST bridge was emitted against a placeholder "
+                         "model: `eval_eq_mojo` here is the obligation "
+                         "`0 = n`, which is FALSE rather than unproved")
+
+    def test_the_run_tests_are_suppressed_with_their_reason(self):
+        text = self._text("x86_64", "wide_recv")
+        self.assertIn("NO RUN TESTS", text)
+        self.assertIn("PLACEHOLDER", text)
+        for n in (0, 1, 2, 5, 10):
+            self.assertNotIn(f"theorem main_runs_{n} :", text,
+                             "a run test compares the MACHINE against the "
+                             "placeholder, so it fails for a reason that says "
+                             "nothing about the machine")
+        # …and the end-to-end theorem is admitted, which is what makes the whole
+        # file honest rather than merely cautious.
+        tail = text[text.rfind("theorem main_compiles_correctly"):]
+        self.assertIn("sorry", tail,
+                      "the end-to-end theorem is not `sorry` for a file whose "
+                      "model is the identity; without that it states the image "
+                      "computes `mojo n` = `n`, and the image computes 4")
+
+    def test_the_control_claims_all_four(self):
+        """A function the model CAN cover must have none of the four.
+
+        Without this row a generator that suppressed everything unconditionally
+        would pass rows 1-4 and this file would be pinning a generator that
+        proves nothing at all.
+        """
+        for arch in ("x86_64", "arm64"):
+            text = self._text(arch, "plain")
+            with self.subTest(arch=arch):
+                self.assertNotIn("the shared model generator does not cover",
+                                 text)
+                self.assertNotIn("PLACEHOLDER", text)
+                self.assertNotIn("AST bridge omitted", text)
+                self.assertNotIn("NO RUN TESTS", text)
+                self.assertIn("theorem eval_eq_mojo", text)
+
+    def test_arm64_refuses_the_shape_and_x86_64_disclaims_it(self):
+        """The divergence, stated, because a reader meets it.
+
+        `wide_recv` is refused on arm64 at GENERATION time — the shared model's
+        `NotImplementedError` is not caught there — and emitted with a disclaimed
+        placeholder on x86-64.  Neither claims the program is proved, which is
+        the property that matters; the difference is what a caller sees, and a
+        caller reading `compile_formal`'s return value has to know which it is.
+        """
+        self.assertIsNone(self.built.get(("arm64", "wide_recv")),
+                          "arm64 now emits a proof for this shape; if it does, "
+                          "this row is stale and the divergence is gone")
+        err = self.built.get(("arm64", "wide_recv", "error"), "")
+        self.assertIn("struct field read has no value in the semantic model",
+                      err,
+                      f"arm64 refused it, but not with the shared model's own "
+                      f"reason: {err}")
+        self.assertIsNotNone(
+            self.built.get(("x86_64", "wide_recv")),
+            "x86_64 refused the shape too, so the two backends now agree and "
+            "this row is stale")
 
 
 class TestDec1PathContext(unittest.TestCase):
