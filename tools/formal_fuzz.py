@@ -695,16 +695,19 @@ def refusal_construct(diag, text=None):
     return min(hits)[1] if hits else "unnamed"
 
 
-def _tokens_in(text):
-    """Every identifier and operator spelling the program contains.
+def _identifiers_in(text):
+    """Every identifier the program contains.
 
-    Operators are spelled by the message as themselves (`'+'`, `'<<='`), so the
-    set is identifiers PLUS the punctuation runs a refusal quotes.
+    Identifiers ONLY, and not operators: an operator arrives inside a quoted
+    token that has no identifier word in it at all (`'+'`, `'<<='`), and that
+    case is decided by asking whether the quoted spelling is a SUBSTRING of the
+    program — which is the right test for punctuation, because the program
+    contains `s + "cd"` and never contains the token `+` as a word. A set of
+    punctuation runs was here first and produced `b"`, `d"` and `n(` alongside
+    the operators, which is three more things to be wrong about and no case the
+    substring test does not already cover.
     """
-    out = set(IDENT_RE.findall(text))
-    out |= set(re.findall(r"[^\sA-Za-z_0-9]+|[^\sA-Za-z_0-9][\s]|[A-Za-z_0-9][^\sA-Za-z_0-9]",
-                          text))
-    return out
+    return set(IDENT_RE.findall(text))
 
 
 def audit_refusal(text, diag, cpython=None):
@@ -728,7 +731,7 @@ def audit_refusal(text, diag, cpython=None):
     no way to demand an oracle it did not get.
     """
     # ── 1. does the message name something the program contains? ──
-    prog = _tokens_in(text)
+    prog = _identifiers_in(text)
     named = []
     for m in QUOTED_RE.finditer(diag):
         quoted = m.group(1) or m.group(2) or m.group(3) or ""
