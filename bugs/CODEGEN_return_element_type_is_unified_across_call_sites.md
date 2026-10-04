@@ -8,8 +8,64 @@ fixed shape and a second container shape at the same call site is itself this
 bug. Not mine — filed here with the measurement, because a reader of the two
 docs above will otherwise "simplify" a fixture into it.
 
-## Status: OPEN, pre-existing, NOT introduced or worsened by any of the
-## 2026-10-01 kinds work. A/B-verified on this tree.**
+## Status 2026-10-02: PARTIAL — two of the four rows below are fixed; the
+## `list()` row is not, and the measurement says exactly where it stops.
+
+**Landed.** A function whose whole body is `return <param>` is now recorded in
+`gen._passthrough_param_idx` (its parameter's position), and at the call site
+that parameter's OWN recorded element type becomes the answer — it is a fact
+about the value that came in, not an inference about the callee. The membership
+test is `_pt_av in gen._elem_types`, not `_elem_of`, because an `int64_t` entry
+is as much an answer as a `char *` and only the membership test distinguishes
+"recorded as integers" from "not recorded" (`_elem_of` answers `int64_t` for
+both). `_return_elem_types` remains the fallback for every other callee.
+
+Re-measured on this doc's own table, both pipelines, against CPython:
+
+| one function, two call sites | before | after |
+|---|---|---|
+| `list(ident([1,2,3]))` + `list(ident("abc"))` | five garbage "elements" from a 3-element list | **unchanged — see below** |
+| `list(ident([1,2,3]))` + `",".join(ident(["a","b"]))` | gcc `-Wint-conversion` error | **matches CPython** |
+| `sum(ident([1,2,3]))` + `",".join(ident(["a","b"]))` | correct | correct |
+| `",".join(ident(["a","b"]))` alone | correct | correct |
+
+One more shape found while confirming this, and fixed by the same change:
+`sorted(ident([3, 1, 2]))` beside `",".join(ident(["a", "b"]))` returned
+`[3, 1, 2]` — the string comparator saw three values below the runtime's
+pointer window, called them all equal, and left the list unsorted. It is
+`test_gimple.py::ctor_of_a_container_reaches_the_comprehension`'s third line,
+which is why that row is the guard.
+
+**Not landed, and precisely where it stops.** `list(ident([1, 2, 3]))` still
+prints `['X', '\x9e', '\ufffd', '\x02', '\x01']`. Measured with the element
+types dumped at three points:
+
+1. the call's own result now records `int64_t` — the fix above, working;
+2. the comprehension that `list()` builds appends every element with
+   `mojo_list_get_int` / `mojo_list_append_int` — the DATA is right;
+3. the comprehension's RESULT list still records `char *`, and
+   `_mojo_repr_list` then reads each slot through `mojo_list_get_str`, which
+   is the five garbage bytes.
+
+So the last hop is inside `_lower_ctor_from_iterable` /
+`_lower_comprehension`: `list()` deliberately does NOT substitute the
+already-lowered boxed value for the call (its own comment says why — that
+substitution loses the element record), so the comprehension re-lowers
+`ident([1, 2, 3])` into a fresh temp, and whatever records the comprehension's
+own result element type takes the answer from the callee again rather than from
+the re-lowered call's `_elem_types` entry. `gen._elem_types[res]` is written in
+three places for a comprehension result; the one that decides here is still
+reading `_return_elem_types`.
+
+**Exact next step:** find the comprehension-result element-type assignment that
+runs for a `list` whose iterable is a call (not `_compr_list_loop`'s
+`_mkv`/per-slot path, which is already correct), and give it the same
+"the iterable value's own `_elem_types` entry, membership-tested" answer the
+call site now uses. Then delete this doc and extend
+`test_gimple.py::ctor_of_a_container_reaches_the_comprehension` — its
+docstring already says a fixture carrying a second container shape at the same
+call site IS this bug, so the row that guards the fix is the one to extend, not
+a new one.
 
 ## What it does
 

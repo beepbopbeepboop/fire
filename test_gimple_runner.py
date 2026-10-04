@@ -2230,6 +2230,31 @@ print(sorted(names, key=lambda s: k3(s)))
 print(sorted(names, key=lambda s: s + "!"))
 """, "['a', 'bb', 'ccc']\n['a', 'bb', 'ccc']\n")
 
+    # The MODULE-LEVEL spelling of the same list, which is where
+    # `gimple_sorted_string_key_runtime_built` above was red. A module-level
+    # container is stored in the globals struct as a BOXED `int64_t`, so at
+    # the read its C type is `int64_t` and its real kind lives in
+    # `_actual_types` — and every `sorted` dispatch asked the C type, so all
+    # three forms took the generic int64-slot path. A LOCAL list of the same
+    # contents works, which is what made this read as a bug about lambdas.
+    #
+    #   sorted(names)            ordered the strings by ADDRESS (non-
+    #                            deterministic across runs; here the input
+    #                            order, because the literals descend)
+    #   sorted(names, key=k3(s)) each key was `mojo_str_from_int(<address>)
+    #                            + "!"`, so the DECIMAL of each address
+    #                            decided the order and the answer was the
+    #                            input order — the symptom the bug doc filed
+    #   sorted(words, key=len)   SEGFAULTED (exit -11): the key loop read a
+    #                            list that was never materialized
+    #
+    # See bugs/CODEGEN_sorted_key_of_runtime_built_strings_sorts_by_address.md.
+    test_gimple_stdout("gimple_sorted_module_level_string_list", """\
+words = ["pear", "fig", "apple"]
+print(sorted(words, key=len))
+print(sorted(words))
+""", "['fig', 'pear', 'apple']\n['apple', 'fig', 'pear']\n")
+
     # ── MojoSet rehash: the `tag == 2` (bytes) domain ────────────────────
     # `_set_grow`'s replay had a `tag == 0` branch and a `tag == 1` branch
     # and NO `tag == 2` branch, so every BYTES element in a set was
@@ -7292,6 +7317,57 @@ def main():
 main()
 """, "[R<a>]\n(R<a>,)\n[R<a>, R<a>]\n[[R<a>]]\n[R<a>]\n[R<a>]\n"
        "[R<a>, R<a>]\n")
+
+    # A struct-typed FIELD inside another struct's generated field dump is
+    # rendered through that struct's own repr shim (`_mojo_repr_Q`), so
+    # `Holder(p=Q(x='b'))` reads as itself. It used to be formatted as an
+    # integer — `mojo_repr_int((int64_t)obj->p)`, i.e. the struct's ADDRESS,
+    # which ASLR moves every run, so nothing could compare it and no exit code
+    # could report it. The doc's fixture as written (a field holding a `P`
+    # from one place and a `Q` from another) is a DIFFERENT limitation and
+    # still is: one C type per slot, so `struct_field_types['Holder']['p']`
+    # is int64_t for two disagreeing call sites and the dump has nothing
+    # better to say. One field type per Holder is the shape this pins, with
+    # and without a `__repr__` on the field's own class (the dunder case
+    # takes the shim, the no-dunder case the field dump — both must not be a
+    # decimal).
+    #
+    # `DunderHolder(p=R(x='c'))` and not `DunderHolder(p=R<c>)`: a field dump
+    # is this runtime's own rendering (CPython has no field dump at all — it
+    # prints `<__main__.R object at 0x...>`), so the dunder is not consulted
+    # for it, while the CONTAINER case above does consult it. The point of
+    # this row is the same in both: not a decimal address.
+    test_gimple_stdout("gimple_struct_field_dump_is_not_an_address", """\
+class Q:
+    def __init__(self, x):
+        self.x = x
+
+class R:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+
+class PlainHolder:
+    def __init__(self, p):
+        self.p = p
+
+class DunderHolder:
+    def __init__(self, p):
+        self.p = p
+
+def main():
+    var h = PlainHolder(Q("b"))
+    var g = DunderHolder(R("c"))
+    print(repr([h]))
+    print(repr([[h]]))
+    print(repr(h))
+    print(repr([g]))
+    print(repr(g))
+main()
+""", "[PlainHolder(p=Q(x='b'))]\n[[PlainHolder(p=Q(x='b'))]]\n"
+       "PlainHolder(p=Q(x='b'))\n[DunderHolder(p=R(x='c'))]\n"
+       "DunderHolder(p=R(x='c'))\n")
 
     # §4.2a: print([True, False]) printed [1, None] -- the generic list repr
     # both formats a bool slot with %d instead of True/False AND treats a

@@ -116,6 +116,25 @@ def _gmi_literal_ctype(node):
     """
     if isinstance(node, (gimple_ctypes.StringLiteral,
                         gimple_ctypes.TstringLiteral)):
+        # A BYTES literal is a `StringLiteral` too (`is_bytes` is the only
+        # difference), and answering `char *` for it types every unannotated
+        # `bytes` parameter at its call sites as a C string: `fn tail(b:
+        # bytes) -> bytes: return b` emitted
+        #
+        #     MojoBytes * tail (MojoBytes * b);      /* the definition */
+        #     MojoBytes * tail (char *);             /* the forward decl */
+        #
+        # a "conflicting types" hard error. It used to be invisible because
+        # this answer only ever fed the str-vs-container ambiguity below,
+        # which a `char *` cannot match against; the answer is now consulted
+        # for parameters the BODY says nothing about, and that is a place
+        # where a wrong ctype is a wrong compile.
+        #
+        # `is_bytes`, checked through `getattr` because the field only exists
+        # on the literal classes that carry one, and this function also sees
+        # `TstringLiteral`.
+        if getattr(node, 'is_bytes', False):
+            return 'MojoBytes *'
         return 'char *'
     # `fire_compiler` also exports `ListLiteral`/`SetLiteral`/... but those are
     # ALIASES of the `*Expr` classes, not subclasses, so naming them in an
@@ -239,6 +258,37 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
             kinds[pname] = ('list' if call_type == 'MojoList *' else
                             'set' if call_type == 'MojoSet *' else 'dict')
         if cur == call_type:
+            continue
+        # A parameter with NO use-derived evidence at all (`cur is None` —
+        # `_infer_param_types` records an entry only when the BODY says
+        # something, and this body says nothing) is not contradicted by
+        # anything, so unanimous literal call sites are all the evidence
+        # there is and this pass should believe them. That is the ordinary
+        # case for a FORWARDER: `def mid(a, b): return sink(a, b, None)`
+        # called as `mid('readme', 'b')` has no body evidence for `a`/`b`
+        # (they are only handed to another unannotated callee), and the
+        # callee `sink` therefore never saw a string at any of ITS call
+        # sites — the one call site there is `sink(a, b, None)`, whose
+        # arguments are exactly the names whose types this pass is about to
+        # resolve. Without this arm the observation was recorded as silence,
+        # `sink`'s parameters kept the `int64_t` default, and
+        # `'%s and %s' % (x, y)` formatted the boxed `char *` as a decimal
+        # address: `4301506648 and 4301506656`, exit 0, no diagnostic.
+        #
+        # Scoped to `cur is None` AND unannotated. A parameter the body DID
+        # type is decided on evidence this pass does not have — the
+        # container arm below already overrides one of those on purpose (an
+        # iterable-consuming builtin cannot tell `str` from `list`), and a
+        # parameter typed as something else entirely (`double` from a
+        # `+ 1`, a struct from a field match) must not be retyped by a
+        # literal. An ANNOTATED parameter is excluded because `_param_ctype`
+        # gives `_inferred_param_types` no say over an annotation, so an
+        # entry written here reaches the forward declaration and not the
+        # definition — see `_annotated_params`' own comment for the
+        # "conflicting types" that produces.
+        _ann_for = (getattr(gen, '_annotated_params', {}) or {}).get(fname)
+        if cur is None and not (_ann_for and _ann_for.get(pname)):
+            ipt.setdefault(fname, {})[pname] = call_type
             continue
         if not ((cur in containers and call_type == 'char *')
                 or (cur == 'char *' and call_type in containers)):
@@ -5808,6 +5858,32 @@ def gen_module_impl(self, stmts):
         for s in all_functions:
             if _is_foreign_main(s) or not isinstance(s, FunctionDef):
                 continue
+            # `def ident(x): return x` — the one shape whose result IS an
+            # argument, so a call site can answer for itself instead of
+            # inheriting the one program-wide answer `_return_elem_types`
+            # can hold. Recorded here, beside that table, because both are
+            # facts about a function's BODY read in the same pass; see
+            # `_passthrough_param_idx`'s own comment for what the answer is
+            # worth without it.
+            #
+            # The whole body must be the `return`, and the returned name must
+            # be one of the declared parameters: `return x` where `x` is a
+            # LOCAL, or a body with a second statement, is a different
+            # function and gets no entry (the conservative answer, which is
+            # what every other caller relies on).
+            if (isinstance(s.body, list) and len(s.body) == 1
+                    and type(s.body[0]).__name__ == 'ReturnStmt'):
+                _pv = getattr(s.body[0], 'value', None)
+                if isinstance(_pv, IdentExpr):
+                    # `enumerate`, not a value unpack: the POSITION is half
+                    # the answer (the call site looks its argument up by
+                    # index), and a `[a for a, b in xs]`-shaped unpack of a
+                    # `list[tuple[str, str]]` boxes both slots to int64_t on
+                    # the self-hosted compiled path.
+                    for _ppi, _ppair in enumerate(s.params or []):
+                        if _as_str(_ppair[0]) == _as_str(_pv.name):
+                            self._passthrough_param_idx[s.name] = _ppi
+                            break
             _ret_elem = self._infer_return_elem_type(
                 s.body, func_def=s, _base_var_types=_p2c_base_var_types)
             if _ret_elem is None:
@@ -6040,10 +6116,41 @@ def gen_module_impl(self, stmts):
     # "what did the callee infer for that parameter?". Looked up, never
     # computed, so there is no inference recursion.
     self._func_param_names: dict[str, list[str]] = {}
+    # Which (function, param) pairs carry an EXPLICIT annotation. Needed
+    # because "no use-derived evidence" and "annotated" look identical in
+    # `_inferred_param_types` — `_infer_param_types` records an entry only
+    # when the BODY says something — and `_param_ctype` consults that map
+    # only for an UNANNOTATED parameter. So writing an entry for an
+    # annotated one is not a no-op: it reaches the forward declaration
+    # (`_signature_ctypes`, which does not have the annotation guard) and
+    # not the definition, and the pair disagrees:
+    #
+    #     MojoList * make (MojoList *);      /* the declaration */
+    #     MojoList * make (int64_t buf)      /* the definition */
+    #
+    # "conflicting types", a hard error. Real:
+    # `fn make(buf: DynamicVector)` (test_gimple_runner.py's
+    # `gimple_struct_mixed_reads_survive_a_function_boundary`), where the
+    # annotation resolves to the generic box and the single call site
+    # passes a list literal.
+    # Nested dicts, NOT a set of `(fn, param)` tuples: a tuple key is hashed,
+    # and on the self-hosted compiled path a str slot read out of an AST field
+    # can arrive boxed, which is the whole reason `_as_str` guards every name
+    # read in this file. Two dict lookups on an `_as_str`'d name each are the
+    # pattern that does not depend on hashing (see `_inferred_param_types`).
+    self._annotated_params: dict = {}
     for s in all_functions:
         if isinstance(s, FunctionDef):
-            self._func_param_names[_as_str(s.name)] = [
+            _sfn = _as_str(s.name)
+            self._func_param_names[_sfn] = [
                 _as_str(pn) for pn, _pt in (s.params or []) if not _as_str(pn).startswith('*')]
+            _ann_for = self._annotated_params.get(_sfn)
+            for _spn, _spt in (s.params or []):
+                if _spt is not None:
+                    if _ann_for is None:
+                        _ann_for = {}
+                        self._annotated_params[_sfn] = _ann_for
+                    _ann_for[_as_str(_spn)] = True
     for s in all_functions:
         if isinstance(s, FunctionDef):
             self._inferred_param_types[s.name] = self._infer_param_types(s)

@@ -5755,6 +5755,22 @@ class Parser:
             saw_comma = True
         elif t.kind in ("NAME", "KW"):
             target = self._advance().value
+        elif t.kind == "OP" and t.value == "*":
+            # Extended unpacking in a comprehension target — `[r for first,
+            # *r in pairs]` is ordinary Python. This parser had no arm for
+            # the `*` and fell to `self._expect("NAME")`, so the whole
+            # comprehension was a SyntaxError ("Expected NAME got OP('*')")
+            # on BOTH the interpreter and the compiled path, while the
+            # statement path's own `_parse_unpack_target` has spelled it
+            # "*name" in the same target string all along.
+            #
+            # The representation is the STATEMENT path's, deliberately: one
+            # spelling for both, read by the same three consumers
+            # (`for_target_names` keeps the star, `boundnames` strips it for
+            # the bound-name set, the loop/comprehension lowerings find it by
+            # position — see `mojo/middle/loops_shared.starred_slot_index`).
+            self._advance()
+            target = "*" + self._expect("NAME").value
         else:
             target = self._expect("NAME").value
         # A TRAILING comma at this level makes the pattern a 1-tuple, which is
@@ -5801,6 +5817,12 @@ class Parser:
                 target += f", {self._rewrap_generator_group(inner, inner_comma)}"
             elif sub_t.kind in ("NAME", "KW"):
                 target += ", " + self._advance().value
+            elif sub_t.kind == "OP" and sub_t.value == "*":
+                # The same extended-unpacking slot the top-level arm above
+                # takes, in the position AFTER a comma — which is where
+                # `[r for first, *r in pairs]` puts it.
+                self._advance()
+                target += ", *" + self._expect("NAME").value
             else:
                 target += ", " + self._expect("NAME").value
         return target, saw_comma
