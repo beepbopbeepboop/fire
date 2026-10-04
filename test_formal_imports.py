@@ -1303,6 +1303,15 @@ def test_a_dotted_stdlib_import_resolves_to_the_module_it_names(tmpdir,
         # …and the other direction: a module that spells a PACKAGE and got the
         # module beside it instead.
         ("math/uutils.mojo", "std.math", "math/__init__.mojo"),
+        # A leaf that is the IMPORTER'S OWN FILE: the degenerate case of the
+        # same shape, and the one a reader finds least believable.
+        # `std/_gpu/_utils.mojo` and `std/format/_utils.mojo` are both
+        # `_utils.mojo`, so `from std.format._utils import FormatStruct` names
+        # the far module while the NEAREST search root holds a file with the
+        # very basename. Asked per root, this file was its own answer — so the
+        # self-resolution is the row worth naming of the two the ordering can
+        # get wrong, and the sibling rows above are the other one.
+        ("_gpu/_utils.mojo", "std.format._utils", "format/_utils.mojo"),
         ("memory/alloc.mojo", "std.memory", "memory/__init__.mojo"),
         ("memory/pointer.mojo", "std.memory", "memory/__init__.mojo"),
         ("benchmark/bencher.mojo", "std.benchmark", "benchmark/__init__.mojo"),
