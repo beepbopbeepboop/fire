@@ -7596,8 +7596,8 @@ def _seed_one_word_bindings(fn, structs_by_name, functions, holders, hstruct,
 
     — about a constructor the image had just compiled and can see perfectly
     well. Both architectures, identical words; measured before this arm, and
-    `bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_frame.md` has
-    the table. The one-word REWRITE was never the defect and is not what
+    commit 03e3b7b6 has the table and the correction below. The one-word
+    REWRITE was never the defect and is not what
     changed: `o.n` IS `o`, and after it the chain is `o.a`, which is `Inner`'s
     own field read — so all the walk needed was to be told that `o` names a
     frame, and every consumer downstream (the field walk's slot table, the
@@ -7610,9 +7610,21 @@ def _seed_one_word_bindings(fn, structs_by_name, functions, holders, hstruct,
     `f(o)` with `o` built by `Outer()` and a load at address 0 for one that did
     not, and this pass cannot see the call sites. The local case has no such
     gap precisely because `struct_constructor_site_bytes` guarantees the block
-    exists before the constructor returns. `bugs/FORMAL_a_parameter_of_a_one_
-    field_struct_whose_sole_field_is_a_frame_is_not_a_holder.md` records the
-    parameter half.
+    exists before the constructor returns.
+
+    Measured on both architectures, not argued: passing such an object to a
+    callee is refused anyway, by `frame_container_operand_refusal` —
+
+        struct Inner: var a, b
+        struct Outer: var n: Inner
+        def read(o: Outer) -> Int: return o.n.a
+        def main(k: Int) -> Int: var o = Outer(); o.n.a = 7; return read(o)
+
+    → "a Inner frame address is passed to read(), which is a C library entry
+    point and takes a VALUE of a type its own prototype names" — so the
+    parameter case reaches codegen through no door this path opens, and seeding
+    it would have made the callee's own `self.n.a` (a method receiver, which IS
+    seeded, three arms above) the only shape of this family that lowers.
     """
     key = _fn_key(fn)
     bound = _one_word_constructor_bindings(fn, structs_by_name,
@@ -10018,6 +10030,105 @@ def _constant_literal(struct_def, name: str, structs_by_name: dict = None):
     return None, None
 
 
+def _container_operand_slot(node, parent):
+    """`(base, op)` when `node` is a container operation over `base`, else None.
+
+    **The four shapes, and they are the four `_refuse_frame_container_operand` /
+    `_refuse_non_container_operand` are asked from** — a subscript, a slice, a
+    membership test and a for-in iteration — so the pair below and this walker
+    between them answer the same set of questions. `CompareChain` carries its
+    membership tests among its `ops`, so its operands are handed to the same
+    test as a `BinaryOp`'s; that is why the walk is over every node rather than
+    over the four types.
+
+    `base` is returned only when it is a struct FIELD reached through a plain
+    name — `s.n`, `self.d` — because that is the shape whose STRUCT this pass can
+    name. A deeper chain's owner is a frame the frame analysis has not built yet
+    at the point the class-constant rewrite runs, so those reach the emitters and
+    are caught there by the same message; `slot_container_operand_refusal`'s own
+    docstring says which recognition sees what.
+    """
+    op = base = None
+    if isinstance(node, F.SubscriptExpr) and node.attrs is None:
+        op, base = "a subscript", node.obj
+    elif isinstance(node, F.SliceExpr):
+        op, base = "a slice", node.obj
+    elif isinstance(node, F.BinaryOp) and node.op in ("in", "not in"):
+        op, base = "a membership test", node.right
+    elif isinstance(node, F.ForStmt):
+        op, base = "a for-in iteration", node.iterable
+    if op is None or not isinstance(base, F.MemberExpr) \
+            or not isinstance(base.obj, F.IdentExpr):
+        return None, None
+    return base, op
+
+
+def _refuse_container_operands_on_scalar_slots(fn, structs_by_name: dict,
+                                              owner, receiver_structs) -> None:
+    """Refuse a container operation whose base is a field declared a NUMBER.
+
+    **Asked at the HEAD of `_rewrite_class_constants`, and the position is the
+    whole of it.** That rewrite replaces `s.n` by the literal its class-level
+    default holds — which is CORRECT, a field with a default and no constructor
+    store always holds it — and in doing so it destroys the only place the
+    source's spelling exists. Measured on this tree before the fix, with the
+    substitution in place:
+
+    | | arm64 | x86-64 |
+    |---|---|---|
+    | `var n: Int = 5` ; `printf("%d", s.n[0])` | refused, naming `IntLiteral` | **SIGSEGV, exit 139** |
+    | `var d: DType = 5` ; `printf("%d", s.d[0])` | the same refusal | **SIGSEGV, exit 139** |
+
+    Both messages are about a node the source never wrote — the gate arm64
+    refused at reports the node it was HANDED, which by then is the
+    substituted literal — and one of the two architectures dereferences the
+    `5`. So the question is asked here, where `s.n` is still `s.n`, and the
+    emitters' own arm (`_refuse_slot_container_operand`, over what the
+    substitution could not match) is the second line rather than the only one.
+
+    The base's STRUCT comes from the same three recognisers
+    `_constant_read_sites` uses for the same purpose, which is what keeps the
+    two passes from disagreeing about what a name holds: the method's own
+    receiver and `Self` (`_method_class_constant_bases`), the bases this body
+    settled on (`receiver_structs`), and a local every binding of which
+    constructs one struct (`_constant_constructor_bindings`, which drops a name
+    two constructors disagree about). A base none of them names claims nothing
+    and is left to the emitter, exactly as a base with no class-level default is.
+
+    `struct_field_kind` is the gate rather than the annotation, and that is its
+    own documented gate: a kind is returned only when the slot's value is
+    something this path materializes — a literal default, a nested frame, or a
+    value a constructor puts there — and `None` otherwise. So this refuses the
+    three rows above and stays silent about every field whose kind the image
+    cannot establish, which is 2 446 of the 2 642 `X.<field>[i]` sites in the
+    610-file stdlib corpus; the census is in
+    `model.slot_container_operand_refusal`.
+    """
+    bases = _method_class_constant_bases(fn, owner)
+    for name, st in (receiver_structs or {}).items():
+        bases.setdefault(name, st)
+    for name, st in _constant_constructor_bindings(fn, structs_by_name)[0].items():
+        bases.setdefault(name, st)
+    if not bases:
+        return
+    for node, parent in M.iter_nodes_with_parent(
+            getattr(fn, "body", None) or []):
+        base, op = _container_operand_slot(node, parent)
+        if base is None:
+            continue
+        st = bases.get(base.obj.name)
+        if st is None:
+            continue
+        kind = M.struct_field_kind(st, base.member, FT.TYPE_NAMES,
+                                   FT.STRING_TYPE_NAMES, structs_by_name,
+                                   dtype_names=FT.DTYPE_TYPE_NAMES)
+        why = M.slot_container_operand_refusal(op, kind, _member_chain(base),
+                                              getattr(fn, "name", None)
+                                              or "<module>")
+        if why is not None:
+            raise CodegenError(why)
+
+
 def _rewrite_class_constants(fn, structs_by_name: dict, owner=None,
                              receiver_structs: dict = None,
                              enum_structs=None):
@@ -10057,6 +10168,8 @@ def _rewrite_class_constants(fn, structs_by_name: dict, owner=None,
     same evidence twice. See `_constant_read_sites` for what puts a base in it."""
     if not structs_by_name:
         return
+    _refuse_container_operands_on_scalar_slots(
+        fn, structs_by_name, owner, receiver_structs)
     _apply_constant_sites(
         fn.body,
         _constant_read_sites(fn, structs_by_name, owner, receiver_structs,

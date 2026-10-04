@@ -9931,7 +9931,7 @@ SOLE_FIELD_CTOR_STORE_CASES = [
     # and one that read the wrong slot both fail it.  It stayed in this group
     # because the group's question is WHICH RULE ANSWERS each of the three ctor
     # stores, and "none of them" is the answer for this one now.
-    # `bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_frame.md`.
+    # commit 03e3b7b6.
     ("sole_field_ctor_store_of_a_frame_built_here_is_another_rules",
      "struct Opt:\n"
      "    var v: Int\n"

@@ -507,7 +507,7 @@ DIFF_CASES = [
     # `Opt` holds zeros, and 5 for the store-then-read, which is the write half
     # reaching the same word.  The numbers are the assertion — a lowering that
     # left the word null, or that read the wrong slot, produces neither.
-    # `bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_frame.md`.
+    # commit 03e3b7b6.
     ("one_field_holder_reads_the_frame_its_constructor_brought_up",
      "struct Opt:\n"
      "    var v: Int\n"

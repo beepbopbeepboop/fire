@@ -847,7 +847,7 @@ CASES = [
     # the holder analysis seeded the METHOD receiver of such a struct
     # (`_frame_receivers`) and had no case for the LOCAL, so the word the
     # constructor put an address in was still classified as a plain word.
-    # `bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_frame.md`.
+    # commit 03e3b7b6.
     #
     # The `put(7)` is the METHOD-call half and the reads are the direct half,
     # so the two shapes that share the word are both here: with only the call
@@ -1580,6 +1580,69 @@ REFUSALS = [
      "    printf(\"%d\", 1)\n"
      "    return 0\n",
      "the element width is the undecided part"),
+    # A SUBSCRIPT OF A FRAME SLOT, and this group is where the disagreement
+    # lived: `s.n` on a field declared `Int` was REFUSED on arm64 and SIGSEGV'd
+    # (exit 139) on x86-64, and with the field constructor-established BOTH
+    # machines crashed.  CPython refuses all three (`TypeError: 'int' object is
+    # not subscriptable`), so the correct answer is a refusal on both and one
+    # machine was dereferencing a `5`.
+    #
+    # The needle is the BASE'S SPELLING and not the refusal's wording, because
+    # the wording was the defect in the first half: arm64 refused at an emitter
+    # gate that reports the node it was HANDED, and by then `s.n` had been
+    # rewritten to the slot's materialized class-level default, so the message
+    # said "got IntLiteral" about a source that says `s.n`.  A reader sent to
+    # look for an `IntLiteral` in a file that has none is the C5 failure this
+    # project's diagnostics exist to stop.
+    # `bugs/FORMAL_a_subscript_on_a_frame_slot_is_a_pointer_dereference_and_the_
+    # two_backends_disagree.md`.
+    ("subscript_of_a_slot_declared_an_int_refused_identically",
+     "struct S:\n"
+     "    var n: Int = 5\n"
+     "    var t: Int = 6\n"
+     "\n"
+     "def main():\n"
+     "    var s = S()\n"
+     '    printf("%d", s.n[0])\n'
+     "    return 0\n",
+     "a subscript of `s.n` asks for a container element"),
+    # The same shape with a `DType` field, which is a TYPE TAG rather than an
+    # integer and therefore a different word in the message — so the needle here
+    # is the KIND clause and it is a separate row for that reason rather than
+    # for the shape.
+    ("subscript_of_a_dtype_slot_refused_identically",
+     "struct S:\n"
+     "    var d: DType = 5\n"
+     "    var t: Int = 6\n"
+     "\n"
+     "def main():\n"
+     "    var s = S()\n"
+     '    printf("%d", s.d[0])\n'
+     "    return 0\n",
+     "is a struct field declared to hold a TYPE TAG"),
+    # …and the one that CRASHED ON BOTH, which is its own row because it is the
+    # only one of the three whose kind is not established by a DECLARATION: the
+    # slot holds a tag because the CONSTRUCTOR put one there, so
+    # `struct_field_kind`'s third door has to be open for it.
+    # `ValueKinds._constructed_field_kind` requires the constructor argument's
+    # own kind to be evidence, and `DType.int32` classified as nothing — the
+    # same "one value, two kinds, decided by where the name is written" the
+    # `DTYPE_TYPE_NAMES` row records one level out, moved one level further in.
+    # `_kind_of_simple` asks `type_value_tag` for it now.
+    ("subscript_of_a_constructor_established_dtype_slot_refused_identically",
+     "struct S:\n"
+     "    var d: DType\n"
+     "    var t: Int\n"
+     "\n"
+     "    def __init__(out self, v: DType):\n"
+     "        self.d = v\n"
+     "        self.t = 7\n"
+     "\n"
+     "def main():\n"
+     "    var s = S(DType.int32)\n"
+     '    printf("%d", s.d[0])\n'
+     "    return 0\n",
+     "is a struct field declared to hold a TYPE TAG"),
 ]
 
 # The other direction, and it is a PER-PLATFORM limit rather than a shared one,

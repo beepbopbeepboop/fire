@@ -2834,6 +2834,7 @@ dylib_exports: list = None, globals_base: int = None,
             # summing a four-field struct gave 99 on arm64 and 53 on x86-64.
             self._refuse_frame_container_operand("a for-in iteration", it)
             self._refuse_non_container_operand("a for-in iteration", it)
+            self._refuse_slot_container_operand("a for-in iteration", it)
             self._refuse_string_iteration("a for-in iteration", it)
             tnames = _lbn_target_names(stmt.target) if isinstance(
                 stmt.target, str) else []
@@ -4521,6 +4522,33 @@ ctor_field_value=self._ctor_field_value_for(name),
         raise CodegenError(M.non_container_element_refusal(
             op, M.spelled(obj), self.func_name or "<module>"))
 
+    def _refuse_slot_container_operand(self, op: str, obj) -> None:
+        """Raise if `obj` is a struct FIELD whose kind is an integer or a tag.
+
+        **The FIELD sibling of the two above, and the one they are both blind
+        to by design.** `_refuse_frame_container_operand` and
+        `_refuse_non_container_operand` are BARE-NAME-only, each saying why:
+        `h.x` is a 64-bit field and reading it as a blob is what a declared
+        `List` field is FOR. That is right about a field whose declared type
+        says nothing and it is how `s.n[0]` — `s.n` declared `Int` — reached
+        the blob walk on one architecture and a SIGSEGV on the other.
+        `model.slot_container_operand_refusal` has the measurement, the
+        three-row table and the corpus census that says the gate is the KIND
+        and that `None` stays out of it.
+
+        Asked at the same four choke points as its two siblings, so a read, a
+        store, an augmented assignment, a slice, a membership test and a for-in
+        iteration all get this answer and the two architectures cannot come to
+        disagree about which bases qualify.
+        """
+        if not isinstance(obj, F.MemberExpr):
+            return
+        why = M.slot_container_operand_refusal(
+            op, self._expr_str_kind(obj), M.spelled(obj),
+            self.func_name or "<module>")
+        if why is not None:
+            raise CodegenError(why)
+
     def _emit_subscript_addr(self, e: F.SubscriptExpr) -> None:
         """X0 = &obj[index]. Blob path bounds-checkes (exit 1 on OOB).
 
@@ -4536,6 +4564,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         address. Both now say no."""
         self._refuse_frame_container_operand("a subscript", e.obj)
         self._refuse_non_container_operand("a subscript", e.obj)
+        self._refuse_slot_container_operand("a subscript", e.obj)
         if M.is_external_call_template(e):
             # The ONE place an `external_call[...]` is a subscript that is not
             # the callee of a call, and `M.multi_index_refusal_for` above (and
@@ -6742,6 +6771,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # the measurement, which is a wrong answer rather than a crash.
         self._refuse_frame_container_operand("a membership test", right)
         self._refuse_non_container_operand("a membership test", right)
+        self._refuse_slot_container_operand("a membership test", right)
         if type(right) not in (F.IdentExpr, F.CallExpr, F.ListExpr,
                                F.TupleExpr, F.MemberExpr, F.SubscriptExpr,
                                F.SliceExpr, F.Comprehension, F.SetExpr,
@@ -8902,6 +8932,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         argument for lowering the suffix case later."""
         self._refuse_frame_container_operand("a slice", obj)
         self._refuse_non_container_operand("a slice", obj)
+        self._refuse_slot_container_operand("a slice", obj)
         sreason = M.string_slice_refusal(
             self._expr_str_kind(obj), M.spelled(obj))
         if sreason is not None:

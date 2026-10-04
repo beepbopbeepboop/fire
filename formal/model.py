@@ -5805,6 +5805,107 @@ def non_container_element_refusal(op: str, spelled: str,
     )
 
 
+#: The kinds a CONTAINER OPERATION cannot be lowered against when its base is a
+#: struct FIELD. `None` is deliberately absent, and its absence is the whole of
+#: the narrowing this family is for: an unclassified slot is a word this image
+#: cannot read, and refusing it would refuse every `h.xs[i]` on a field whose
+#: declaration is in another module.
+#:
+#: `FRAME_KIND` is absent too, and for a different reason — a field whose
+#: declared type is a framed struct of this module holds an ADDRESS, and reading
+#: that as a container is a wrong ANSWER rather than a fault, which is its own
+#: defect and not this one:
+#: `bugs/FORMAL_a_subscript_of_a_field_declared_a_framed_struct_is_a_wrong_answer.md`.
+NON_CONTAINER_SLOT_KINDS = (INT_KIND, TYPE_KIND)
+
+
+def slot_container_operand_refusal(op: str, base_kind, spelled_base: str,
+                                   function: str) -> str | None:
+    """Why {op} of a struct FIELD whose kind is a scalar is refused, or None.
+
+    **The FIELD half of `non_container_element_refusal` and
+    `frame_container_operand_refusal`, and the one both of those are
+    deliberately blind to.** Both are BARE-NAME-only, and each says why: `h.x` is
+    a 64-bit field and reading it as a blob is what a declared `List` field is
+    FOR. That reasoning is right about a field whose DECLARED type says nothing,
+    and it is how a slot that says it holds a number reached the blob walk:
+
+        struct S:
+            var n: Int = 5
+        var s = S()
+        printf("%d", s.n[0])          # a subscript of the integer 5
+
+    Measured on this tree before the fix, and the two architectures disagreed
+    about the same source file, which is the worst failure mode this backend has:
+
+    | | arm64 | x86-64 |
+    |---|---|---|
+    | `var n: Int = 5` | refused — "subscript base must be a list/tuple name or literal … (got IntLiteral)" | **SIGSEGV, exit 139** |
+    | `var d: DType = 5` | the same refusal | **SIGSEGV, exit 139** |
+    | `var d: DType` + `__init__(out self, v: DType)`, `S(DType.int32)` | **SIGSEGV, exit 139** | **SIGSEGV, exit 139** |
+
+    CPython refuses all three (`TypeError: 'int' object is not subscriptable`),
+    so every row is a program no reader would write on purpose — which is the
+    point: the answer is a refusal on both machines and one machine was
+    dereferencing a `5`.  The arm64 message is also false about the file: the
+    source says `s.n`, and `s.n` IS a field.  It names the node its gate was
+    handed, which by then is the slot's materialized default, so the literal in
+    the sentence is a residue of the rewrite rather than anything the reader
+    wrote.  `bugs/FORMAL_a_subscript_on_a_frame_slot_is_a_pointer_dereference_
+    and_the_two_backends_disagree.md`.
+
+    **Why the kind and not the base's SPELLING is the gate**, and why `None` is
+    excluded from `NON_CONTAINER_SLOT_KINDS`, is measured rather than argued.
+    Every `X.<field>[i]` in the 610-file stdlib corpus was classified by its
+    field's declared type:
+
+    | declared kind | sites |
+    |---|---|
+    | nothing reachable in the file (a module attribute, or a struct from another module) | 2 446 |
+    | a POINTER (`Pointer` / `OptionalPointer`) | 85 |
+    | a declared name this path has no kind for | 66 |
+    | a container (`List` / `Dict` / `Tuple` / `Array` / `Optional` / …) | 37 |
+    | a string | 1 |
+    | a framed struct of the module | 7 |
+    | **an integer or a type tag** | **0** |
+
+    So the refusal costs the corpus nothing, and the permissive `None` is what
+    the other 2 446 sites get — which is the right answer for them: an
+    unclassified slot is a word, a word is a container as far as this path can
+    tell, and the corpus's untyped parameter and module-attribute subscripts are
+    the bulk of the language.
+
+    `op` is the parameter `non_container_element_refusal` takes and for its
+    reason: one message, said four ways, so a read, a store, an augmented
+    assignment, a slice, a membership test and a for-in iteration all answer
+    with the same sentence and the two backends cannot part company.
+    """
+    if base_kind not in NON_CONTAINER_SLOT_KINDS:
+        return None
+    what = ("an integer" if base_kind == INT_KIND
+            else "a TYPE TAG — a hash of a type's name — which is a number")
+    return (
+        f"{op} of `{spelled_base}` asks for a container element, and "
+        f"`{spelled_base}` is a struct field declared to hold {what}. Every "
+        f"container lowering starts by reading eight bytes at offset 0 of its "
+        f"base and calling the result a COUNT — that is the blob's header word "
+        f"— and then reads or writes at `base + 8 + 8k`, so the element "
+        f"address here is the number in the slot itself plus 8. Measured on "
+        f"BOTH architectures, this builds, links, and then dies of SIGSEGV "
+        f"(exit 139) at run time with the build green, because it reads through "
+        f"a number rather than through an address into anything. A frame slot is "
+        f"ONE word: a subscript needs a pointer plus a stride and there is "
+        f"nothing in the slot to compute a stride from, which is why this is a "
+        f"refusal rather than a cheaper index. The base's declared type is what "
+        f"this refusal names, and it is a DECLARATION: `{spelled_base}` is not "
+        f"classified because the image could not read it, it is classified as "
+        f"this because the source says so. What the same source can do instead: "
+        f"index a container it holds (`xs[i]`), or take that container as a "
+        f"PARAMETER of {function}, where the caller's value decides and the "
+        f"subscript is answered for its callers too"
+    )
+
+
 def string_iteration_refusal(where: str, function: str) -> str:
     """Why ITERATING a `char *` is refused. Always a refusal.
 
@@ -14151,6 +14252,32 @@ def _kind_of_simple(e) -> str | None:
         if e.op == "not":
             return INT_KIND
         return _kind_of_simple(e.operand)
+    if isinstance(e, F.MemberExpr) and type_value_tag(e) is not None:
+        # `DType.int32` — a type named as a VALUE, which is one 63-bit TAG and
+        # so `TYPE_KIND`. Asked with `type_value_tag`, the ONE reader both
+        # backends' member arms use for exactly this expression, so a third
+        # answer cannot appear here.
+        #
+        # It was missing, and the consequence was a downstream one rather than a
+        # cosmetic one: `declared_type_kind` classifies a field DECLARED `DType`
+        # as a tag, so `struct S { var d: DType }` knows the slot holds a tag —
+        # but `S(DType.int32)` puts the tag there through `__init__`, and
+        # `ValueKinds._constructed_field_kind` requires the constructor
+        # argument's own kind to be EVIDENCE ("a bare name is asked of
+        # `own_shape_kind` and a call result is refused by `_own_shape_of`'s
+        # filter"). The argument is this expression, it classified as None, and
+        # so the slot's kind was unestablished. Measured on both backends,
+        # `struct S { var d: DType; var t: Int }` with
+        # `def __init__(out self, v: DType): self.d = v`, called as
+        # `S(DType.int32)`, and `printf("%d", s.d[0])` then built, ran and died
+        # of SIGSEGV (exit 139) — the container lowering reading a count out of
+        # the tag. Same class as the `DTYPE_TYPE_NAMES` row's own note ("one
+        # value, two kinds, decided by where the name is written"), one level
+        # further in: there the field and the local disagreed, here the field
+        # and the CONSTRUCTOR ARGUMENT do.
+        # `bugs/FORMAL_a_subscript_on_a_frame_slot_is_a_pointer_dereference_and_
+        # the_two_backends_disagree.md` row 3.
+        return TYPE_KIND
     return None
 
 
