@@ -6028,6 +6028,35 @@ def main():
 main()
 """, "add\nTrue\nmul\nsub\nneg\ninvert\nshift\nmod\nfloordiv\n3000000001\n1\n1\n")
 
+    # The same computed key through the OTHER dict entry points, because they
+    # are separate consumers and not all of them route through the one
+    # subscript-store the case above covers: `+=` (two key conversions in one
+    # statement), `.get` with and without a default, `in`, `.pop`,
+    # `.setdefault`, a dict LITERAL whose key is a computed expression, and
+    # `sorted(d.keys())` (the key is re-materialised as text there). A fix
+    # that reached the plain store and nothing else would leave most of these
+    # crashing, which is why they are enumerated rather than left implied.
+    test_gimple_stdout("gimple_dict_key_computed_reaches_every_dict_consumer", """\
+def main():
+    base = 3000000000
+    d = {}
+    d[base + 1] = 10
+    d[base + 1] += 5
+    print(d[base + 1])
+    print(d.get(base + 1))
+    print(d.get(base + 2, -1))
+    print(base + 1 in d)
+    print(d.pop(base + 1))
+    print(base + 1 in d)
+    d.setdefault(base + 3, 7)
+    print(d[base + 3])
+    e = {3000000000 + 2: "lit"}
+    print(e[3000000002])
+    for k in sorted(d.keys()):
+        print(k)
+main()
+""", "15\n15\n-1\nTrue\n15\nFalse\n7\nlit\n3000000003\n")
+
     # The CONSTRUCTOR half of the same cross-call struct contract
     # (the ctor-direction cross-call struct contract in `module_gen.py`'s
     # constructor observation pass). The receiver
