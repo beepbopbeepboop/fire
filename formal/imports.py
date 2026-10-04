@@ -302,7 +302,37 @@ HOST_MODELLED = frozenset((
     #     is written at the top of the file: `filter`/`filterfalse` are
     #     sequences, `iglob` is a generator, and `translate` emits a regex
     #     dialect `re.mojo` does not compile.
-    "glob", "secrets", "uuid",
+    #   `glob`  — LEFT on 2026-10-04 for `formal/hostmods/glob.mojo`, the
+    #     LARGEST UNCLAIMED row in the sweep's host-import ranking: 50 files
+    #     blocked and 15 of them naming it, ranked by
+    #     `tools/formal_sweep_causes.py --host bugs/sweeps/sweep-arm-9.txt`, and
+    #     the row `bugs/FORMAL_host_import_row_ranked_by_module_2026-10-03.md`
+    #     §5 item 4 had left as `formal10-3`'s. `glob`, `glob_free`,
+    #     `has_magic` and `escape`, checked answer for answer **and in order**
+    #     against CPython's own `glob` by `test_formal_glob.py` over a fixture
+    #     tree carrying a dotfile, a hidden DIRECTORY, a symbolic link to a file
+    #     and a DANGLING one, on both backends.
+    #
+    #     **The record that said this row was blocked on a CAPABILITY was half
+    #     wrong, and the half that was wrong is what made it possible.** It held
+    #     that `glob.glob` returns a run-time-length list and a list cannot be
+    #     one here (`bugs/FORMAL_listdir_no_run_time_sequence.md` items 2 and
+    #     3). True of a LIST and irrelevant: `os.listdir` already answers a
+    #     run-time-length container, because `malloc` takes a run-time size and
+    #     its memory outlives the function that asked for it. So `glob` builds
+    #     the same `[count:i64][char *]…` shape, declares `-> List[String]` —
+    #     which is what puts the CONTAINER kind in the manifest, and a container
+    #     kind is the one thing a caller cannot derive, since a list is one word
+    #     and the C signature is `int64_t` either way — and a caller writes
+    #     `len(paths)`, `paths[i]` and `for p in paths`.
+    #
+    #     What is absent is at the top of the module: `iglob` and the four
+    #     `glob*` helpers are a GENERATOR and a SEQUENCE, `root_dir`/`dir_fd`
+    #     want a directory descriptor and no file in this repository spells
+    #     either, and `**` under `recursive` recurses without bound exactly as
+    #     CPython 3.14's does — a tree carrying a link to an ancestor loops in
+    #     both, which is the agreement rather than the defect.
+    "secrets", "uuid",
     #   `ast`  — `formal/hostmods/ast.mojo`, the TOKENIZER and a lexical
     #     validator, not a tree: `parse`, `parse_reason`, `tokenize`,
     #     `tokenize_from`, `token_bound` and `token_name`, with token kinds,
@@ -2030,6 +2060,15 @@ HOST_OWNED_BLOBS = {
                         "release": "os.listdir_free"},
     "os.walk_free": {"param": 0, "count_word": 0, "entry_base": 1,
                      "release": "os.walk_free"},
+    # `glob`'s answer is the same shape for the same reason (`-> List[String]`
+    # over a `malloc`'d `[count][char *]…`), and the caller owns every path in
+    # it. It is registered here for the same reason `os.listdir` is: without
+    # the row, `paths[i] = v` is a store into memory the caller does not own and
+    # nothing says so.
+    "glob.glob": {"returns": True, "count_word": 0, "entry_base": 1,
+                  "release": "glob.glob_free"},
+    "glob.glob_free": {"param": 0, "count_word": 0, "entry_base": 1,
+                       "release": "glob.glob_free"},
 }
 
 

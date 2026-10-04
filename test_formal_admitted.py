@@ -89,6 +89,15 @@ ADMITTED_COUNTS = {
     "enum": 0,
     "fcntl": 0,                    # the real flock(2); nothing is admitted
     "fnmatch": 0,
+    # `glob` is 0 and the reason is the same one `tempfile`'s zero is: every
+    # answer this module gives is computed.  The directory entries come from
+    # `readdir(3)` through `os.listdir`, the pattern language is
+    # `formal/hostmods/fnmatch.mojo`'s `match_any`, and the only decisions are
+    # `opendir`/`lstat` questions libSystem answers -- there is no host fact
+    # left over to trust, which is what the zero measures.  All 33 corpus cases
+    # in `test_formal_glob.py` are compared with CPython's own `glob` on both
+    # backends.
+    "glob": 0,
     "hashlib": 0,
     # `escape` is five ordered substring replacements over bytes a string already
     # is, and every one of the 1132 answers `test_formal_html.py` compares with

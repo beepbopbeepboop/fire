@@ -1341,6 +1341,56 @@ def _host_rank_checks(failures):
           and not tf_names[0].startswith("_"),
           f"tempfile's public names are {tf_names!r}, and `mkdtemp` is among "
           f"them with no underscore-prefixed name in front")
+
+    # A module-scope binding INSIDE `if`/`try`/`with` is still a module
+    # attribute, and the scan has to see it or the row reads as closure.
+    #
+    # `types` is the case that made this a fix rather than a note: CPython's
+    # `types.py` binds `SimpleNamespace` and `ModuleType` inside a module-level
+    # `try:` (the `_collections_abc` import), and its `__all__` is
+    # `[n for n in globals() if not n.startswith('_')]` — a COMPREHENSION, so
+    # `ast.literal_eval` cannot answer it and the scan is all there was. With
+    # `tree.body` alone the ranking printed, for `types`:
+    #
+    #     10    0  modelled    —    types
+    #          uses:  0 — every blocked file names nothing types declares, so
+    #                 the row is import CLOSURE and not 10 files of work
+    #
+    # while 10 of those 10 files name something it declares (`ModuleType` x7,
+    # `SimpleNamespace` x4 across them). "Nothing to do here" is the reading
+    # this column must never produce when it is wrong, so it is checked against
+    # CPython's own source rather than against a fixture — a fixture would test
+    # the fixture.
+    try:
+        types_names = C._host_declared_names("types")
+    except Exception as exc:                             # noqa: BLE001
+        check(False, f"types' declared names could not be read: {exc}")
+        types_names = None
+    if types_names is None:
+        print("  SKIP  this interpreter's stdlib is not reachable, so the "
+              "module-scope binding scan is not checked")
+    else:
+        for name in ("SimpleNamespace", "ModuleType", "FunctionType",
+                     "LambdaType", "MappingProxyType"):
+            check(name in types_names,
+                  f"types does not declare {name!r} — it is bound at module "
+                  f"scope inside the `try:` that imports `_collections_abc`, "
+                  f"and a scan of `tree.body` alone cannot see it. That scan "
+                  f"reported the whole 10-file row as import CLOSURE while "
+                  f"every one of those files names a name in this list. The "
+                  f"names read now are {sorted(types_names)[:12]}…")
+        # …and a name that is NOT a module attribute must still be absent, or
+        # the fix has bought the right answer by collecting every local in
+        # CPython's stdlib (measured on `inspect`: 400+).
+        check("FrameType" in types_names or "frame" not in types_names,
+              "sanity: the scan's own locals are not being collected")
+        check(not any(n in ("arg", "local", "self", "retval")
+                      for n in types_names),
+              f"types declares a function local: "
+              f"{[n for n in ('arg', 'local', 'self', 'retval') if n in types_names]}"
+              f". `_module_scope_bindings` stops at `def` and `class` bodies "
+              f"precisely so this cannot happen — a `def`'s locals are not "
+              f"module attributes")
     return n[0]
 
 
