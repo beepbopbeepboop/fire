@@ -5,6 +5,11 @@
 `formal/arm64_proof_gen.py`'s walk, and it is **one arm away** from
 `bugs/FORMAL_wdiff_has_no_loop_contract.md`, which this branch fixed and deleted.
 
+**Status: still OPEN and still refused, and §"What the fix actually is" replaces
+the next step above with a three-part change that is bigger than it looks — the
+contract is not merely unapplied at the conditional edge, it is never BUILT for
+this shape. Measured on this tree 2026-10-04 (`work/formal19-5`).**
+
 **Not new, and the prior observation is recorded.** `bugs/FORMAL_proof_coverage_census_2026-10-03.md`
 §0.3 already measured this exact refusal against this exact tree:
 
@@ -119,6 +124,185 @@ Two measurements to take while in there, both cheap:
   `cond_flag` obligation is what fails to close, the honest outcome is a
   generated proof carrying that hole — which is what the ledger recorded — rather
   than a refusal.
+
+## What the fix actually is, measured (2026-10-04) — three parts, and part 1 is
+## the one this doc's next step missed
+
+§"The next step" above says "give the conditional back edge the treatment the
+`b` arm already has … is the taken target the loop top? `ctx["loop_contract"]
+["cbz_start"]`, the same value `:5382` matches on. If so, apply the contract there
+too." **Measured, that is necessary and not sufficient: for `sum_range` there is
+no `loop_contract` in `ctx` to apply, because no loop contract is generated at
+all.** Three things are missing, and in this order.
+
+### 1. The loop test is never FOUND (the discovery, not the application)
+
+`formal/arm64_proof_gen.py:5120` asks one question:
+
+```python
+for b in blocks:
+    if b["kind"] == "b" and start_to_bi.get(b["targets"][0]) is not None:
+        cbi = start_to_bi[b["targets"][0]]
+        if blocks[cbi]["kind"] == "cbz":
+            loop_check = (cbi, blocks[cbi]["start"])
+```
+
+— a **`b` block whose target is a `cbz` block**, i.e. an UNCONDITIONAL back
+edge. `sum_range`'s blocks, read off `_cfg_blocks` (the generator's own
+partitioner, so this is what the generator sees):
+
+```
+  4 start=0x100000300 kind=cbz  targets=['0x100000324', '0x100000328']
+  5 start=0x100000324 kind=b    targets=['0x100000374']
+  6 start=0x100000328 kind=seq
+  7 start=0x100000330 kind=cbz  targets=['0x10000036c', '0x100000330']   <- the back edge
+  8 start=0x10000036c kind=b    targets=['0x100000374']
+  9 start=0x100000374 kind=ret
+```
+
+Blocks 5 and 8 branch to the RET block, so `loop_check` stays `None` and the
+whole `if loop_check is not None` at `:7020` — every `_gen_range_loop` and
+`_gen_countdown_loop` call, and the `_init_ctx` that carries the contract to the
+walk — is skipped. `wdiff`, `countdown` and `wge` are found precisely because
+their block 5 is `b 0x1000002fc`. **So the first change is in the discovery: a
+`cbz` block whose TAKEN target is its own start is the same answer, and the scan
+has to ask for it.** That is the `formal16-2` doc's "`csel`/bit-test" territory
+only in the sense that both are about which branch is a loop's test; the change
+itself is one clause.
+
+### 2. `_gen_range_loop` reads the two targets in the wrong order for this shape
+
+`_gen_range_loop` does `cbz_fall, cbz_taken = cbz_block["targets"]` and then
+`body_pc = cbz_fall; exit_pc_val = cbz_taken`. For a loop whose test comes FIRST
+that is right. For `sum_range` the taken target is `0x100000330` — the block's
+OWN start — and the fall target is the exit path, so the two are swapped:
+
+* `body_pc` would be `0x10000036c`, which is `sub x21, x21, #1 ; b exit` — the
+  exit, not a body;
+* `exit_pc_val` would be the loop top itself.
+
+With `body_pc` pointing at the exit, the body-block walk finds no `b` block
+targeting `cbz_start` and `_gen_range_loop` returns `None` — and the caller's
+`else` then tries `_gen_countdown_loop`, which requires the same `b`-to-`cbz`
+back edge and also returns `None`, and the refusal becomes "no loop contract
+matches". **Measured, the rest of the signature DOES match this file**, which is
+the encouraging half and the reason §"The next step" above believed it:
+block 7's prefix carries step-branch indices `[10, 21, 10, 10, 22, 2, 10, 10, 10,
+21, 10, 10, 22, 6]` — STP-pre (21), LDP-post (22), CMP-register (6) — and its
+terminator is a `B.cond` (51), which is exactly the predicate
+`if not (21 in idxs and 22 in idxs and 6 in idxs and _has_cond): return None`
+tests. So the shape is recognised and the ROLE of the two targets is the only
+thing wrong.
+
+### 3. The contract for this shape is a DIFFERENT induction, and the library does
+### not have it
+
+`while_lt_exit_contract` cannot express a test at the bottom, and this is
+structural rather than a missing hypothesis. It asks for a BODY RUN that starts
+at `bodyPc` and comes back to `checkPc`:
+
+```
+(hbodyRun : ∀ st, st.pc = bodyPc → arm64_runs code mb st = some (body st))
+(hbodyPc  : ∀ st, st.pc = bodyPc → (body st).pc = checkPc)
+```
+
+For `sum_range` the loop's body IS the loop top: the run from `0x100000330`
+reaches the test at `0x100000368`, whose successor is either the loop top again
+or the exit — it never returns to `checkPc`, because `checkPc` is where it
+started and `arm64_runs` is a straight-line run. `bodyPc = checkPc` would make
+`hbodyRun` demand `arm64_runs code 0 st = some st` with `body = id` AND
+`hbodyR : arm64_reg r (body st) = arm64_reg r st + 1`, which is `r = r + 1`.
+
+**So the Lean half is a new theorem, and its statement is short.** `checkPc` is
+the loop top, `cbzPc` the test instruction INSIDE that block, the iteration is
+the block's own straight-line prefix, and the induction is on
+`(b - r).toNat` exactly as before:
+
+```lean
+theorem while_do_exit_contract
+    (code : Nat → UInt8) (exit checkPc cbzPc exitBpc : Nat)
+    (q : Arm64State → Bool) (r b : Nat) (model : Arm64State → UInt64)
+    (cond ex : Arm64State → Arm64State) (mc me : Nat)
+    (P : Arm64State → Prop)
+    (hP_pc   : ∀ (st : Arm64State) (pc : Nat), P st → P { st with pc := pc })
+    (hP_cond : ∀ st, st.pc = checkPc → P st → P (cond st))
+    (hstep   : ∀ st, st.pc = cbzPc →
+      arm64_step st code = some (if q st then
+        ({ st with pc := exitBpc } : Arm64State) else ({ st with pc := checkPc } : Arm64State)))
+    (hcondRun  : ∀ st, st.pc = checkPc → arm64_runs code mc st = some (cond st))
+    (hcondMid  : …) (hcondPc : ∀ st, st.pc = checkPc → (cond st).pc = cbzPc)
+    (hcondFlag : ∀ st, st.pc = checkPc →
+      (q (cond st) = true ↔ ¬ (arm64_reg r st < arm64_reg b st)))   -- q = LEAVE, as in while_lt
+    (hcondRB : ∀ st, st.pc = checkPc →
+      arm64_reg b (cond st) = arm64_reg b st)
+    (hcondR  : ∀ st, st.pc = checkPc →
+      (arm64_reg r (cond st)).toNat = (arm64_reg r st).toNat + 1)     -- see the wrap note
+    (hcondModel : ∀ st, st.pc = checkPc → arm64_reg r st < arm64_reg b st →
+      model (cond st) = model st)
+    (hexRun) (hexMid) (hexPc) (hexX0) (hmodelPc) (hcbzExit) (hExitBpc) (hCheckCbz) :
+    ∀ (st : Arm64State) (fuel : Nat),
+      (mc + 2) * ((arm64_reg b st).toNat - (arm64_reg r st).toNat) + (mc + me + 2) ≤ fuel →
+      st.pc = checkPc → P st →
+      ∃ s, arm64_go_exit st code exit fuel = some s ∧ s.x0 = model st
+```
+
+The proof is `while_lt_exit_contract`'s with the body group deleted: `zero` is
+that lemma's base case verbatim, and `succ k` applies `ih` to
+`{cond st with pc := checkPc}` after `rec1_glue_gen` for `mc` and one
+`go_exit_cbz_fall` — no second `rec1_glue_gen`, because there is no second run.
+
+**One design decision inside it, and it is the one to be careful about: the
+counter's advance is stated in NATS** (`(arm64_reg r (cond st)).toNat =
+(arm64_reg r st).toNat + 1`), not as `arm64_reg r (cond st) = arm64_reg r st + 1`.
+`while_lt_exit_contract` states the `UInt64` equation and derives the Nat one
+inside the induction, using `r < b` to get the no-wrap. A test at the BOTTOM
+cannot: the increment has already happened when the loop decides to exit, and the
+base case only knows `b ≤ r`. With the `UInt64` spelling the base case needs
+`¬ (r + 1 < b)` from `b ≤ r`, which is FALSE when `r = 2^64 - 1` and `b > 0` — the
+counter wraps and the machine genuinely loops again. Stating it in Nats makes the
+no-wrap an explicit OBLIGATION, which the generator discharges where it can
+(inside the body, from `i < bound`) and ADMITS where it cannot (on the exit
+path), and that admission is the honest account: it is the same unsigned
+exit-side obligation `countdown`/`wge` are already marked for
+(`bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md`), and it is what the
+census recorded as `sum_range`'s `loop_cond_flag` hole before the refusal.
+
+### 4. And the walk's conditional arm, which is where §"The next step" was right
+
+`formal/arm64_proof_gen.py:6307`:
+
+```python
+tgt_bi = start_to_bi.get(taken)
+if tgt_bi is None or tgt_bi in path:
+    raise ValueError(f"unsupported cbz taken continuation to {hex(taken)}")
+```
+
+The question to ask is the one the `b` arm asks at `:5647` — is `taken` the
+`cbz_start`? — and when it is, the ~130 lines the `b` arm emits for the contract
+have to be emitted here too, against `taken` rather than `tgt`. **They must be
+EXTRACTED, not copied**: CLAUDE.md's "no duplicated implementations" applies with
+force here, because the block encodes one fact about one example twice — the
+`h{i}x19`/`x20`/`x21` chain and the `h{i}x20 = s_{i-1}.x20 + s_{i-1}.x21`
+"the last block incremented the counter" step are numbered off the block indices
+of a two-block loop, and the doc's own history is the argument:
+`bugs/FORMAL_arm64_known_proof_gaps.md`'s comment in that arm records that a
+previous version named `hsrc_1`/`hsid_1` and `{name}_b2_qT6`, which are one
+example's numbering, and that Lean reported them as `Unknown identifier` hundreds
+of lines later. One helper, two call sites.
+
+### What this doc does NOT claim
+
+* That the four parts land, or in this order — 1 and 2 are mechanical and 3 and 4
+  are where the work is.
+* That the generated proof will be CLOSED. Per the author's own note, the
+  exit-side unsigned comparison may still be admitted; the outcome to aim for is
+  a generated proof with that hole, which is what the ledger recorded, rather than
+  a refusal.
+* `sum_range`'s **value** theorem. The `range` model (`_gen_range_loop_model`'s
+  `loop_go`) is only reached through the contract, and the walk's post-processing
+  assumes the accumulator is updated in a block AFTER the test — which in this
+  shape is the same block as the test. That is a second, separate obligation and
+  this doc does not claim it is free.
 
 ## Reproducing
 
