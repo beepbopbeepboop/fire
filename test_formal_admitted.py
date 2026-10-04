@@ -29,6 +29,11 @@ contract must be SCOPED.  `test_every_contract_only_constrains_the_answer` runs
 admission that grew a claim about the host's BEHAVIOUR -- "always", "never",
 "deterministic" -- is refused.  An admission is a claim of trust; a claim that
 reaches past the answer is an unproved assertion wearing a proof's clothes.
+`SCOPE_PROBES` is the instrument for the rule itself, in the shape
+`PRE_AUDIT_TEXT` gives the truth half: one row per rule in BOTH directions, and
+one row per explanatory connective built from `formal/admitted.py`'s table, so a
+connective nothing exercises is reported rather than read as a rule that blocks
+nothing.
 
 FOURTH, and the one the audit of 2026-10-04 added: an admission must be TRUE.
 Scoping cannot tell a true assumption from a false one -- both are sentences
@@ -227,6 +232,207 @@ def group_scope(tmpdir, cas_root, verbose):
         for c in A.all_contracts():
             print(f"    {c.qualified:34s} {c.assumes[:70]}")
     return True, f"{len(A.all_contracts())} contract(s) are scoped to the answer"
+
+
+# ── the SCOPE probes: one sentence per rule, in BOTH directions ───────────────
+#
+# `contract_text_is_scoped` is a text rule, and a text rule that has only ever
+# agreed with the tree proves nothing — which is how fifteen false admissions
+# were green in every other group of this file on 2026-10-04, and how the
+# `ctypes` sentence the audit found ("the loader handle is 0, meaning no library
+# of that name is on this target") passed a rule that no row had ever been
+# written for.  `PRE_AUDIT_TEXT` below is the truth side's answer to that; this
+# table is the scope side's, and it is the same shape for the same reason.
+#
+# Both directions, and the accept rows are the half that matters: a rule
+# implemented by refusing everything would pass every refuse row here and be
+# useless, because the live corpus it is supposed to admit is admitted by
+# `group_scope` above.  So every rule needs a sentence it must ADMIT, and two
+# of the accept rows here are the instrument's DOCUMENTED LIMITS — sentences the
+# rule does not catch, with the instrument that does named beside them.
+#
+# `(rule, refused, text, why)`.  The `why` is read by a reader who finds a row
+# firing when it should not; it is not checked, because a probe that asserts its
+# own justification is a probe with nothing left to test.
+SCOPE_PROBES = (
+    # ── `no_text`: a `sorry` with an empty statement is an absence, not a claim
+    ("no_text", True, "",
+     "an admission with no text says nothing, so there is no claim to trust"),
+    ("no_text", True, "   \n  ",
+     "whitespace is not a sentence either"),
+    ("no_text", False, "the child's process id, a positive integer",
+     "the shortest real admission in the tree, and the shape of every other"),
+
+    # ── `overclaim_phrase`: one row per phrase, so removing one fails here
+    ("overclaim_phrase", True, "the command always succeeds, so the word is 0",
+     "the `always` phrase"),
+    ("overclaim_phrase", True,
+     "the child's status word, which is never negative for a normal exit",
+     "the `never` phrase"),
+    ("overclaim_phrase", True,
+     "the number of bytes the write reports, and the write is deterministic",
+     "the `deterministic` phrase"),
+    ("overclaim_phrase", True,
+     "the child's output on stdout, an arbitrary byte string that is empty",
+     "the `empty` phrase, which is a claim about CONTENT rather than shape"),
+    ("overclaim_phrase", True,
+     "the lock is granted, and no other holder of it is running",
+     "the `no other` phrase, which is a claim about host state"),
+    ("overclaim_phrase", True,
+     "the child's status word, and none running means it has been collected",
+     "the `none running` phrase"),
+    ("overclaim_phrase", True,
+     "the pointer this returns is safe to dereference for any address",
+     "the `safe` phrase, which is a claim about a property of the host"),
+    ("overclaim_phrase", False,
+     "the child's exit status word: 0..255 for a normal exit, or -N for a "
+     "death by signal N",
+     "the shape `subprocess.run` actually declares, and no phrase in it"),
+
+    # ── `value_attached_claim`: the shape a phrase list cannot see
+    ("value_attached_claim", True,
+     # The audit's own sentence, verbatim from `PRE_AUDIT_TEXT`: a claim about
+     # the WORD, joined to a claim about the FILESYSTEM by "meaning".
+     "the loader handle is 0, meaning no library of that name is on this "
+     "target, or a non-zero word this target's dynamic loader owns",
+     "the one instance the audit found false, and the reason a phrase list "
+     "cannot be the rule"),
+    ("value_attached_claim", True,
+     "the lock this returns is free, which means no thread of this process "
+     "holds it",
+     "a `which means` clause about host state — the threading analogue of the "
+     "ctypes sentence, and the clause shape rather than the word"),
+    ("value_attached_claim", False,
+     # The live text, and the test below pins that the row IS the tree's.
+     "the loader handle is 0 when dlopen(3) failed: the file may be absent, "
+     "may not be a loadable image, or a symbol may be unresolvable, and "
+     "CPython raises OSError for all three, or else a non-zero word this "
+     "target's dynamic loader owns",
+     "the corrected `ctypes` text: a claim about the filesystem in every word, "
+     "and IN SCOPE because it constrains the answer 0.  This is the row a "
+     "phrase list cannot produce — refusing it would trade a false admission "
+     "for an unusable instrument"),
+    ("value_attached_claim", False,
+     "the loader handle is 0, meaning 0 is the word this loader answers for a "
+     "failure",
+     "an explanation clause carrying a numeral, which is a value "
+     "specification and therefore a constraint on the word"),
+    ("value_attached_claim", False,
+     "the child's status word, meaning the word this kernel reports at the "
+     "child's exit",
+     "an explanation clause that names the answer, which is what the rule asks "
+     "for"),
+    ("value_attached_claim", False,
+     "the child's output on stdout up to the first NUL byte, because a str "
+     "on this path is a NUL-terminated char *; CPython's own answer is the "
+     "whole byte string and may contain NULs",
+     "a `because` clause, which is a RATIONALE for a constraint on the word "
+     "and not an explanation of it — `because` is absent from the connective "
+     "table on this row's account, since `subprocess.check_output` declares it"),
+    # The two rows below are the rule's LIMITS, and they are here so that the
+    # boundary between the two instruments is written down rather than
+    # discovered.  `TRUTH['subprocess.popen_poll']` refuses the first (it is
+    # the `-1` sentinel that collides with a real SIGHUP answer) and
+    # `TRUTH['ctypes.cdll_open']` measures the second; a scope rule is a shape
+    # question and neither of these is one.
+    ("value_attached_claim", False,
+     "the child's exit status word, an integer in 0..255, and -1 while the "
+     "child has not been collected",
+     "LIMIT: the `-1` sentinel the audit found false.  No connective, no "
+     "banned phrase — it is the TRUTH probe for `popen_poll` that refuses it, "
+     "because `-1` is an answer CPython really gives"),
+    ("value_attached_claim", False,
+     "the loader handle is 0 because no library of that name is on this target",
+     "LIMIT: a world claim attached by a CAUSAL connective.  `because` is not "
+     "in the table (see the `because` row above), so this passes; "
+     "`TRUTH['ctypes.cdll_open']`'s measurement is what catches it"),
+) + tuple(
+    # ONE ROW PER CONNECTIVE, BUILT rather than written, and that is the whole
+    # reason this is a comprehension: eleven of the thirteen connectives in
+    # `_EXPLANATORY` had no row, so removing any of them was a no-op and the
+    # table could not tell a live connective from a dead one — which is the
+    # defect `tools/formal_sweep_causes.py` was fixed for in
+    # `bugs/FORMAL_sweep_work_map_2026-10-04_b10.md` §5.1, and the reason that
+    # map's `check_cause_table` asserts every label is reachable from a sample.
+    # Generated, a connective added to `_EXPLANATORY` brings its row with it and
+    # the row fails if the connective does not fire.
+    ("value_attached_claim", True,
+     f"the loader handle is 0, {conn} no library of that name is on this "
+     f"target",
+     f"the `{conn}` connective, which introduces a clause")
+    for conn in A._EXPLANATORY_CLAUSE) + tuple(
+    ("value_attached_claim", True,
+     f"the loader handle is 0, {conn} a claim about the filesystem of this "
+     f"target",
+     f"the `{conn}` connective, which introduces a phrase rather than a clause")
+    for conn in A._EXPLANATORY_PHRASE)
+
+
+def test_the_scope_probes_refuse_what_they_are_written_for(tmpdir=None):
+    """Every scope rule refuses the sentence written for it, and admits the
+    others — and every rule has a row in BOTH directions.
+
+    The direction that keeps `contract_text_is_scoped` honest.  It is a text
+    check, and text checks have two ways to be useless: passing everything (which
+    is how the `ctypes` sentence survived the audit) and refusing everything
+    (which would pass every refuse row here while `group_scope` went red on the
+    tree's own nineteen contracts).  So the table is keyed by rule name, a rule
+    with no refuse row is reported as a dead rule, a rule with no accept row is
+    reported as one that can only refuse, and a row naming a rule that no longer
+    exists is reported as a probe that lost its subject.
+    """
+    live_rules = set(A.SCOPE_RULES)
+    bad = []
+    # One row per rule per direction, from the table rather than from the run, so
+    # the failure names the rule whose coverage is missing.
+    seen = {}
+    for rule, refused, text, _why in SCOPE_PROBES:
+        seen.setdefault(rule, {True: 0, False: 0})[refused] += 1
+        c = A.Contract("probe", "probe", text, "<scope-probe>", 0)
+        why = A.contract_text_is_scoped(c)
+        if refused and not why:
+            bad.append(f"rule `{rule}`: the probe sentence {text!r} is ADMITTED, "
+                       f"so the rule does not catch what it was written for")
+        elif refused and f"rule `{rule}`" not in why:
+            bad.append(f"rule `{rule}`: the probe sentence {text!r} is refused, "
+                       f"but by a different rule:\n        {why}")
+        elif not refused and why:
+            bad.append(f"rule `{rule}`: the probe sentence {text!r} must be "
+                       f"admitted and was refused:\n        {why}")
+    unknown = sorted(set(seen) - live_rules)
+    check(not unknown,
+          f"these SCOPE_PROBES rows name a rule `contract_text_is_scoped` does "
+          f"not have: {unknown}. A probe that lost its subject keeps passing "
+          f"after the rule it was written for is gone.")
+    gaps = [f"rule `{rule}` has no {'refuse' if not d[True] else 'accept'} row"
+            for rule, d in sorted(seen.items())
+            for d in ([d] if (not d[True] or not d[False]) else [])]
+    missing_rules = sorted(live_rules - set(seen))
+    check(not missing_rules,
+          "these scope rules have no probe row at all, so nothing here checks "
+          f"that they fire: {missing_rules}")
+    check(not gaps, "a scope rule can only do one direction:\n    "
+                    + "\n    ".join(gaps))
+    check(not bad, "a scope probe does not behave as it was written:\n    "
+                   + "\n    ".join(bad))
+    # Anti-drift: the sentence the audit corrected has to be the ACCEPT row, so
+    # a rewrite of `ctypes.cdll_open` that reintroduces an attached claim has to
+    # update this table rather than quietly pass.
+    cdll_open = next((c for c in A.all_contracts()
+                      if c.qualified == "ctypes.cdll_open"), None)
+    check(cdll_open is not None,
+          "ctypes.cdll_open is not in the tree, so the scope rule's own reason "
+          "for existing cannot be checked")
+    accepted = {t for _r, refuted, t, _w in SCOPE_PROBES if not refuted}
+    check(cdll_open.assumes in accepted,
+          "the corrected `ctypes.cdll_open` text is not one of the accept rows "
+          "of SCOPE_PROBES:\n        " + cdll_open.assumes
+          + "\n    so the sentence the rule exists for is not pinned against "
+            "the tree, and a rewrite that reintroduced an attached claim would "
+            "pass rather than be reported.")
+    return True, (f"{len(SCOPE_PROBES)} scope probe(s) over "
+                  f"{len(live_rules)} rule(s), refuse and accept each way; the "
+                  f"corrected ctypes text is pinned as an accept row")
 
 
 # ── the TRUTH half: every contract against the real host ──────────────────────
@@ -2442,6 +2648,8 @@ PURE = [("the emitted Lean is inert where nothing is admitted",
          test_a_file_that_reaches_none_generates_no_hole),
         ("the modelled surface covers what the tree spells",
          test_the_modelled_surface_covers_what_the_tree_spells),
+        ("every scope rule refuses and admits what it was written for",
+         test_the_scope_probes_refuse_what_they_are_written_for),
         ("every admitted contract has a truth row",
          test_every_contract_has_a_truth_row),
         ("every truth probe rejects the pre-audit text",
