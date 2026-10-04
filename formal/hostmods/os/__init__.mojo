@@ -313,7 +313,7 @@ def unsetenv(name) -> int:
 #     os.environ.copy()        environ_copy(e)
 #     dict(os.environ)         environ_copy(e)
 #     os.environ.clear()       environ_clear(e)
-#     os.environ.update(o)     two calls: environ_set per pair (see below)
+#     os.environ.update(o)     e2 = environ_update(e, o)
 #     os.environ.setdefault(k, v)
 #                              environ_get_or(e, k, v) then environ_set if 0
 #     os.getenv(k[, d])        getenv(k) / getenv_or(k, d)  — the C library's
@@ -708,6 +708,67 @@ def environ_pop(e: Pointer[Int64], k, default) -> str:
     var v = str_dup(environ_value(e, i))
     environ_del(e, k)
     return v
+
+
+def environ_update(e: Pointer[Int64], other: Pointer[Int64]) -> Pointer[Int64]:
+    """`os.environ.update(other)`: every pair of `other` stored. The blob to KEEP.
+
+    **ONE CALL, and the doc's "two calls each" was wrong for exactly this
+    function.**  The limit that forces `setdefault` to be two calls is ONE WORD
+    OF ANSWER: `setdefault` has to hand back the value it kept as well as the
+    view, and this path returns one thing per call.  `update` has nothing to say
+    except the view, so the view IS the answer and the whole operation is one
+    call — the loop that grows the blob happens inside, where the intermediate
+    pointers are words in a register rather than the caller's problem:
+
+        e = os.environ_update(e, other)
+
+    which is `environ_set`'s contract exactly, and for `environ_set`'s reason:
+    storing a key that is not there makes the view one pair longer, and a longer
+    view is a bigger allocation and a `realloc` MAY MOVE IT.  So the answer is
+    `e` itself when every key of `other` was already there, a NEW blob when one
+    was appended, and 0 when the growth failed.
+
+    **CPython's `update` in full**: every pair of the other mapping is stored,
+    in the other mapping's own order, so a key that is already here has its
+    value replaced IN PLACE and a key that is not is APPENDED at the end — and
+    each store calls `putenv`, because that is what `__setitem__` does and what
+    makes `os.getenv` agree with the view afterwards.
+
+    **`update(e, e)` IS SAFE, and the reason is a property of the layout rather
+    than a promise.**  Every key of `other` is then already a key of the
+    receiver, so every store takes `environ_set`'s in-place branch: no `realloc`
+    happens, so `e` never moves, and the loop reads a stable blob.  That is not
+    enough on its own — `environ_set` frees the old value buffer before it
+    duplicates the new one, and for an aliasing `other` the buffer being freed
+    is the one being read — so the value is duplicated first on that path and
+    the duplicate released after.  One `str_dup` and one `free` per pair, and
+    only when the caller asked for `d.update(d)`, which CPython allows and which
+    leaves every pair equal.
+
+    A 0 receiver is a 0 and a 0 `other` changes nothing: `update` of an absent
+    mapping is a no-op in CPython, and the answer is then the receiver the
+    caller already had.
+    """
+    if e == 0 or other == 0:
+        return e
+    var alias = other == e
+    var n = other[0]
+    var i = 0
+    var cur = e
+    while i < n:
+        var k = other[1 + 2 * i]
+        var v = other[2 + 2 * i]
+        if alias:
+            var held = str_dup(v)
+            cur = environ_set(cur, k, held)
+            free(held)
+        else:
+            cur = environ_set(cur, k, v)
+        if cur == 0:
+            return 0
+        i = i + 1
+    return cur
 
 
 def environ_clear(e: Pointer[Int64]) -> int:
