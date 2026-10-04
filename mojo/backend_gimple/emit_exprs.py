@@ -691,7 +691,11 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     # earlier) and got the unknown-identifier `(int64_t)0`, so the compiled
     # binary's `--dump-full` of a TWO-LINE program died in
     # `mojo_iter_boxed_list` with `TypeError: object is not iterable`.
-    _imp_pending = (bool(_imp_home) and bool(_imp_field)
+    # `len(...) > 0` on both halves, NOT bare truthiness: this file's own
+    # rule (see `_this_mod` above) is that on the self-hosted compiled path a
+    # boxed `char *` is truthy even when it is the empty string, and an empty
+    # `_imp_home` reaching the route below would emit `__globals.NAME`.
+    _imp_pending = (len(_imp_home) > 0 and len(_imp_field) > 0
                     and _imp_home not in gen._module_globals
                     and _imp_fields is None
                     and gen._global_var_types.get(name) in _BOXED_CONTAINER_CTYPES)
@@ -914,8 +918,16 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         #    module's own scan has no field for) loads the owner's field —
         #    the same situation, reached through the other table.
         safe_module = gimple_ctypes._c_field_name(_read_mod)
+        # The field name is `_imp_field`, not `name`, whenever the read routed
+        # to the module this one IMPORTED the name from — `_imp_fields` for the
+        # owner that has registered, `_imp_pending` for the one still being
+        # compiled. Under `from b import K as J` the local spelling is `J` and
+        # the owner's FIELD is still `K`, so the local name is not an answer
+        # for either. `name` remains the answer for every other route, which
+        # is every route that loads THIS module's own struct.
         _field_name = gimple_ctypes._c_field_name(_imp_field) \
-            if _imp_fields is not None else gimple_ctypes._c_field_name(name)
+            if (_imp_fields is not None or _imp_pending) \
+            else gimple_ctypes._c_field_name(name)
         field_ref = f"_{safe_module}_globals.{_field_name}"
         if ctype == 'int64_t' and c_decl_type.endswith(' *'):
             # Global is declared as a pointer type at C level but we box it as int64_t.
