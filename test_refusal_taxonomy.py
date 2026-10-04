@@ -589,10 +589,18 @@ CAUSE_SAMPLES = [
     #    each one is the terminal message a planner would have to go and read
     #    by hand out of a bucket that meant "this tool has not classified
     #    this". ──
-    ("Optional unwrap: `None` and a value are one word, with no tag",
-     "self.step.or_else() is an Optional unwrap: it answers by knowing which "
-     "of two words was the empty one, and on this path there is no way to "
-     "know"),
+    # The Optional unwrap, RE-SPELLED 2026-10-04 to match the message the
+    # backend emits now. The sample is the LIVE sentence rather than the `-9`
+    # log's, because the row's old wording — "`None` and a value are one word,
+    # with no tag" — described a representation that now exists
+    # (`formal/model.py`'s `optional_none_word`), and a taxonomy sample cut
+    # from a log the code no longer emits is a sample that keeps a cause
+    # reachable after the cause has stopped being reachable. The construct is
+    # the same one: a receiver whose payload type this target cannot niche.
+    ("Optional unwrap: the payload type has no niche, or the receiver states none",
+     "self.step.or_else() is an Optional unwrap, and this target has a "
+     "representation for one — the payload word, with `None` at the word the "
+     "PAYLOAD'S TYPE cannot produce"),
     ("the slot would have to hold a frame address, and no type says so",
      "self._slice._slice._data.unsafe_offset() hands the word in the slot "
      "self._data to Pointer.unsafe_offset(), whose receiver is the ADDRESS of "

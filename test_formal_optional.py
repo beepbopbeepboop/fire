@@ -591,7 +591,25 @@ REFUSALS = [
      "    var z = None\n"
      "    printf(\"%d\\n\", z.or_else(1))\n"
      "    return 0\n",
-     "is an Optional unwrap"),
+     "PAYLOAD'S TYPE cannot produce"),
+    # The refusal's ADVICE is a promise to the reader, and a promise nobody
+    # checks is how a refusal sends readers after a non-bug: the message says
+    # "annotate the receiver `Optional[T]`", so a case that annotates it and
+    # then builds is the only thing that keeps the sentence true. It is pinned
+    # on the WORD the annotation has to be about, because that is the claim
+    # being made — `Optional[Int]` is annotated and still refused, which is a
+    # different message (`optional_no_niche_refusal`) and is the row above.
+    ("a_non_optional_receiver_is_told_to_annotate",
+     "struct S:\n"
+     "    var step: Int\n"
+     "    var pad: Int\n"
+     "\n"
+     "def main(n):\n"
+     "    var s = S()\n"
+     "    s.step = 1\n"
+     "    printf(\"%d\\n\", s.step.or_else(1))\n"
+     "    return 0\n",
+     "Annotate the receiver `Optional[T]`"),
     # A payload that is a STRUCT OF ANOTHER MODULE is the third refusal reason
     # and the only one that is not about a type\'s width: the layout that would
     # prove a niche is in a library this build does not compile. It is spelled

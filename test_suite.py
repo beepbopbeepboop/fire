@@ -3150,6 +3150,25 @@ UNREGISTERED = {
     # `test('formal-list-splat', [PY, 'test_formal_list_splat.py'], ...)` in
     # the `proofs` bucket beside `formal-x86`.
     'test_formal_list_splat.py': _FORMAL_SUITE_REASON,
+    # `test_formal_optional.py`, the `Optional[T]` representation's own suite
+    # (`formal/model.py`'s `optional_none_word`): 13 CPython-oracle cases, 3
+    # pinned because Mojo's `Optional.__bool__` deliberately disagrees with
+    # CPython's, 7 refusals where a build that SUCCEEDS is the failure, and the
+    # niche table's five properties plus a cross-read of `lib/ProofLib.lean`'s
+    # `optionalNoneWord` as failures. It is listed here rather than registered
+    # because this branch's task says not to touch the registry, and the cost
+    # says the entry is a TEMPORARY one and not the shape it should end in:
+    # measured 2026-10-04, 22 cases x 2 backends x (build + run) plus 13
+    # CPython oracle runs is **11.4-13.0 s wall and 0.1 GB peak** — cheaper than
+    # every registered formal suite in the table above (`formal-admitted` 10.5 s,
+    # `formal-monomorph` 9 s) and a third of `formal-tempfile`'s 35.8 s. Exact
+    # next step:
+    # `test('formal-optional', [PY, 'test_formal_optional.py'], memclass='tiny',
+    # ...)` in the `proofs` bucket beside `formal-monomorph`, because what it is
+    # ABOUT decides the bucket: it builds and executes a formal image per case
+    # on both architectures.
+    'test_formal_optional.py': _FORMAL_SUITE_REASON + (
+        ' Measured 2026-10-04: 11.4-13.0 s wall, 0.1 GB peak, 22 cases.'),
     # The same shape, and its own reason rather than the group's: this file runs
     # a DIFFERENTIAL FUZZER over twenty pinned seeds per architecture and checks
     # the generator's own corpus, so what it protects is the measurement rather

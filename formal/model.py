@@ -11883,36 +11883,46 @@ def read_only_text_store_refusal(dotted: str, receiver) -> str | None:
 
 
 # An OPTIONAL UNWRAP — the opposite of a dereference. The question is not what
-# is at the address but WHICH OF TWO WORDS was the empty one, and on this path
-# there is no way to tell. `self.step = None` and `self.step = 5` are both
-# stores of one 64-bit word into one frame slot; `None` is emitted as the
-# integer 0 (see the IdentExpr arm in each backend's `_emit_expr`), so the
-# unwrap would have to treat 0 as empty and would then be wrong about
-# `Some(0)` — a silent wrong answer on a program that computes a different
-# number. There is no niche, no discriminant and no tag word on this path.
+# is at the address but WHICH OF TWO WORDS was the empty one.
+#
+# **THE REPRESENTATION EXISTS, and this table used to say it did not.** That
+# sentence was false and has been false since the niche landed: an `Optional[T]`
+# is one word holding the payload, and `None` is a word `T` cannot produce
+# (`optional_none_word`, mirrored in `lib/ProofLib.lean`). What is missing here
+# is narrower and different: **this receiver's payload TYPE is not stated**, and
+# the niche is a fact about that type rather than about the word. `Some(2)` is
+# the same word whether `T` is a `Bool` (where 2 is out of domain, so 2 IS the
+# empty word) or an `Int8` (where 2 is a perfectly good payload and the empty
+# word is 256), so nothing about the value can say which comparison to emit.
+#
+# So a receiver that IS declared `Optional[T]` never reaches this table:
+# `optional_unwrap_lowering` answers it, and a payload with no niche raises
+# `optional_no_niche_refusal` — which names the payload type and the tagged
+# two-word alternative, and is a far better message than anything here because
+# it is about a DECISION rather than about a missing design. What reaches here
+# is a receiver with no usable `Optional` type at all, and the reader's next
+# action is one line of source: annotate it.
 #
 # This is the SHAPE the wave-3 by-reference work exposed, and it is worth
 # separating from the dereference above because the receiver is not a word that
 # happens to hold an address: `self.step` is a FRAME SLOT, so this is a method
 # on a value read out of another function's frame, and the frame's field list
-# is what says the slot is an Optional at all. 20 of the 76 files are this one
-# method, all of them blocked behind `std/builtin/builtin_slice.mojo`.
-#
-# The fix is a representation for Optional (a reserved sentinel word, or a
-# tag), which is a value-model change and NOT a lowering of this call.
+# is what says the slot is an Optional at all.
 UNWRAP_METHODS = {
-    "or_else": "is an Optional unwrap: it answers by knowing which of two "
-               "words was the empty one, and on this path there is no way to "
-               "know. None and a value are both one 64-bit word in one frame "
-               "slot, and None is emitted as the integer 0, so treating 0 as "
-               "empty would be wrong about Some(0) — a silent wrong answer on "
-               "a program that computes a different number. There is no niche, "
-               "no discriminant and no tag word here. Answering it needs a "
-               "representation for Optional, which is a value-model change "
-               "shared by both backends and the Lean proof",
-    "unsafe_value": "is an Optional unwrap (see or_else): the receiver here is "
-                    "an Optional, and the word it holds is the pointer, not "
-                    "the value",
+    "or_else": "is an Optional unwrap, and this target has a representation "
+               "for one — the payload word, with `None` at the word the "
+               "PAYLOAD'S TYPE cannot produce (`formal/model.py`'s "
+               "`optional_none_word`, which answers `Optional[Bool]`, "
+               "`Optional[String]`, `Optional[Int32]` and every "
+               "reference-shaped payload, and refuses `Optional[Int]` naming the "
+               "two-word representation that would cover it). This receiver is "
+               "not one of those: nothing here states what its payload's type "
+               "is, and the niche is a fact about that type rather than about "
+               "the word — `Some(2)` is the same word whether the payload is a "
+               "`Bool` (whose empty word is 2) or an `Int8` (whose is 256). "
+               "Annotate the receiver `Optional[T]`",
+    "unsafe_value": "is an Optional unwrap (see or_else), and the same "
+                    "annotation answers it",
     "value_or": "is an Optional unwrap; see or_else",
     "or": "is an Optional unwrap; see or_else",
 }
