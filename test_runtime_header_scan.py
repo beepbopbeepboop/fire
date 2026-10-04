@@ -401,7 +401,37 @@ def test_every_declaration_is_seen():
     # behaviour; a decimal address on this target). One name: the codegen half
     # is a `print` dispatch arm, which adds no runtime entry point. bugs4-8
     # counted from its own base's 543 and wrote `544`.
-    for header, want in (('fire_runtime.h', 561),
+    for header, want in (('fire_runtime.h', 565),
+    # 561 -> 565 (2026-10-02, `bugs4-9`), FOUR names on the merged header
+    # (its own ledger said five, from its base's 543 -> 548):
+    #   +1  `mojo_str_cat_free`, the left-operand-releasing cat every repr
+    #       walker is a chain of. It was a file-local `_cat_free` in
+    #       fire_runtime.c and is now PUBLIC because the repr walkers the
+    #       CODEGEN emits into every generated program are the same chain and
+    #       were leaking the same N-1 buffers per printed container; a second
+    #       copy emitted into the preamble would have been two
+    #       implementations of one rule in two languages.
+    #   +1  `mojo_dict_slot_double`, the double twin of `mojo_dict_slot_key`,
+    #       for the same caller: the emitted dict repr walks slots by INDEX and
+    #       `mojo_dict_get_double` takes a KEY, so a `kind == 1` slot had no
+    #       reader and went to the generic element repr, which dereferences a
+    #       word above 65536 — a double's IEEE-754 bits. `print({"c": 3.5})`
+    #       was a SIGSEGV.
+    #   +2  `mojo_raise_not_implemented` (the sixth typed raiser, beside the
+    #       five above) and `mojo_module_not_compiled`, the codegen's half of
+    #       it: a method call on a bare-imported module this compile never
+    #       compiled used to return the module marker (an int64_t 0) unchanged,
+    #       so `argparse.ArgumentParser(...)` "constructed" a parser that is not
+    #       one and every later method echoed it back, silently, until an
+    #       unrelated attribute read died naming an attribute of a class the
+    #       program never built. Raising at the CALL is where it becomes true,
+    #       and it is catchable.
+    # The fifth, `mojo_char_at`, is NOT in this count: it is the same helper
+    # master already had under the name `mojo_char_at_str` (5ba5a8aa, one day
+    # after bugs4-9's base), and this merge keeps ONE of the two — master's
+    # name, with bugs4-9's body, whose bounds are `mojo_cstr_slice`'s. Two
+    # names for one immortal-table character accessor would have been two
+    # implementations of one rule, which is what this file exists to catch.
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

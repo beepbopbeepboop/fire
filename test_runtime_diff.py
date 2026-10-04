@@ -1311,6 +1311,7 @@ CPYTHON_COMPARABLE = {
     "comprehension_result_elem_type_across_a_branch",
     "dict_repr_zero_value_is_not_the_none_sentinel",
     "getattr_default_on_a_miss",
+    "dict_update_preserves_insertion_order",
 }
 
 

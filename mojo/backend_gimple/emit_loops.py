@@ -47,7 +47,6 @@ from mojo.middle.loops_shared import (
     _as_str, _gfl_declare_target_name, _pair_key, _try_const_fold_int, _tuple_elem_value, _tuple_unpack_slot_elems,
     _emit_starred_slot_from_value, _emit_starred_slot_list, starred_slot_index, starred_slot_name,
 )
-from mojo.backend_gimple.emit_infra import _gmi_slot_kind_long
 
 def _gen_for_range(gen, node: gimple_ctypes.ForStmt):
     args = node.iterable.args
@@ -2189,6 +2188,28 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         gen._dict_item_pair_vars[var] = gen._dict_items_val_elems[it_val]
     if _pair_str_keyed:
         gen._elem_types[_pcv] = 'MojoList *'
+        # `_gmi_slot_kind_long` is imported HERE, at its one use site, rather
+        # than at the top of this file, and that is the layering rule rather
+        # than a style choice: a top-level `from mojo.backend_gimple.emit_infra
+        # import ...` here begins the import chain in the wrong direction.
+        # `emit_infra` imports `gimple_codegen` at its own top level (it has
+        # to — it is the module the shims hang off), and `gimple_codegen`
+        # imports THIS module, so a first-import of `emit_infra` would re-enter
+        # it half-built and die on the name:
+        #
+        #   ImportError: cannot import name '_gmi_slot_kind_long' from
+        #   partially initialized module 'mojo.backend_gimple.emit_infra'
+        #
+        # which makes `mojo.backend_gimple.emit_infra` unable to be a process's
+        # first `mojo.*` import — and that module is explicitly NOT exempt from
+        # `test_suite.py`'s load-order check, because the backend sits
+        # downstream of `gimple_codegen` so every one of them is reachable
+        # first. The re-entrancy the OTHER direction causes is already here and
+        # already works; what has to stay away is the edge that starts the
+        # chain. Same rule and same precedent as
+        # `emit_funcs._struct_method_qualifier` and the eight middle modules
+        # that exemption list names.
+        from mojo.backend_gimple.emit_infra import _gmi_slot_kind_long
         gen._struct_slot_kinds[_pcv] = ['str', _gmi_slot_kind_long(
             gen._dict_items_val_elems[it_val])]
         # The loop variable is declared `int64_t` and holds the pair's handle,

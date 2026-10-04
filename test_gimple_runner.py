@@ -4007,6 +4007,178 @@ def main():
 main()
 """, "4\n299999\n", 40)
 
+    # Printing a container is not an exotic program: it is what a compiler's
+    # `--dump` does, what a logging path does, and what this file's own leak
+    # instrumentation would do to itself. Every repr walker is a chain of
+    # `mojo_str_cat`, each of which allocates a new buffer and leaves both
+    # arguments alone, so an N-element container leaked N+1 buffers sized to
+    # the text so far (~500 B per `print` of an 8-element list, measured at
+    # 99.7 MB for 200000 of them) plus one string per element. Both halves
+    # exist in TWO places — the runtime's `mojo_repr_list_*` family and the
+    # `_mojo_repr_list`/`_pair`/`_dict`/`_set` the codegen emits into every
+    # generated program — and a fix in only one of them leaves the program
+    # growing, which is why every shape is printed here rather than just the
+    # one the report measured.
+    #
+    # Each shape is here for a different walker, and between them they cover
+    # every branch whose ownership had to be decided: `xs` is the uniform-int
+    # runtime walker, `ys` the nested-int-list one, `ps` the pair-list one
+    # (runtime-built by `zip`, so its slots go through `mojo_repr_int` /
+    # `mojo_repr_str`), `fs` the float one, `d` the emitted `_mojo_repr_dict`,
+    # `st` the emitted `_mojo_repr_set`, and `mix` the emitted `_mojo_repr_list`
+    # over a heterogeneous list. `MallocScribble` (set by the harness) is what
+    # turns a `free()` of one of the two SHARED buffers this runtime returns —
+    # `mojo_repr_obj`'s static and `mojo_repr_bool`'s literals — into a wrong
+    # answer instead of a silent heap corruption, so a wrong branch here is a
+    # red rather than a crash three allocations later.
+    #
+    # The peak, not the stdout, is the assertion. The text itself is pinned
+    # separately by `gimple_container_repr_text_is_unchanged` below, because a
+    # repr that printed the wrong thing and leaked nothing would pass this.
+    #
+    # A TUPLE list is deliberately NOT in the loop. In a full run of this file
+    # `ps = [(0, 'a'), (1, 'b')]` prints as two pointer decimals, while the same
+    # program run on its own prints `[(0, 'a'), (1, 'b')]` — the compiler's
+    # per-process reflection state is shared by every case in the file, so a
+    # tuple list's element inference is order-dependent. That is a real thing
+    # to know about this harness and the wrong foundation for a memory
+    # tripwire, so the pair walkers are covered by the TEXT case below instead
+    # (`[(5, 6), (7, 8)]`, `[(1, 'a'), (2, 'b')]`, `zip(...)`) and what is left
+    # here is one walker per remaining runtime helper plus all four of the
+    # emitted ones.
+    #
+    # `{1, 2, 3}` covers the emitted `_mojo_repr_set`, and the float in `d` is
+    # the branch that used to be a SIGSEGV (`mojo_dict_slot_double`'s own
+    # comment) — a shape that crashes cannot be in a loop at all.
+    _PRINTED = ('[1, 2, 3, 4, 5, 6, 7, 8]\n'
+                '[[1, 2], [3, 4]]\n'
+                '[1.0, 2.5]\n'
+                "{'a': 1, 'b': 'two', 'c': 3.5}\n"
+                '{1, 2, 3}\n'
+                "[1, 'two', None]\n")
+    test_gimple_bounded_memory("gimple_printed_container_does_not_grow", """\
+def main():
+    xs = [1, 2, 3, 4, 5, 6, 7, 8]
+    ys = [[1, 2], [3, 4]]
+    fs = [1.0, 2.5]
+    d = {"a": 1, "b": "two", "c": 3.5}
+    st = {1, 2, 3}
+    mix = [1, "two", None]
+    for i in range(60000):
+        print(xs)
+        print(ys)
+        print(fs)
+        print(d)
+        print(st)
+        print(mix)
+main()
+""", _PRINTED * 60000, 40)
+
+    # The text of every walker above, printed ONCE, against CPython. Separate
+    # from the memory case because the memory case would still pass if a repr
+    # printed something else and leaked nothing, and because this is the half
+    # of the fix that a `free()`-the-wrong-buffer mistake shows up in.
+    #
+    # `print([1, 'two', None, True, 2.5])` is NOT here: a `True` in a MIXED
+    # list prints `1` on this tree, which is
+    # bugs/CODEGEN_bool_annotated_struct_field_prints_as_int.md's open item,
+    # not this fix, and pinning the wrong text here would make it look settled.
+    # `[True, False]` (all-bool, so it routes to `mojo_repr_list_bools`) is
+    # here. A bool DICT value is not, for a different reason:
+    # `{"d": True}` still emits a call to the deleted
+    # `mojo_mark_dict_bool_values`, so the program does not compile at all
+    # (bugs/COMPILE_FAIL_dict_literal_with_a_bool_value_emits_a_deleted_
+    # runtime_entry_point.md) — so this case would be red for a bug that is
+    # not this one. That doc's "coverage to add with the fix" names this case
+    # as the place to put the bool dict back; the `_mojo_repr_dict` `kind == 3`
+    # branch it would exercise is already marked non-owned in the comment
+    # above that branch in `mojo/backend_gimple/module_gen.py`.
+    test_gimple_stdout("gimple_container_repr_text_is_unchanged", """\
+def main():
+    print([1, 2, 3, 4, 5, 6, 7, 8])
+    print([1.0, 2.5, 3.0])
+    print([True, False])
+    print([[1, 2], [3, 4]])
+    print([(5, 6), (7, 8)])
+    print([(1, "a"), (2, "b")])
+    print([(1.5, 2)])
+    print({"a": 1, "b": "two", "c": 3.5, "e": None})
+    print({1, 2, 3})
+    print({"x", "y"})
+    print((1, 2, 3))
+    print([(1,), (2,)])
+    print((5,))
+    print(zip([0, 1], ["a", "b"]))
+    print(b"ab".split(b"a"))
+    d = {"f": 3.5}
+    print(d["f"])
+main()
+""", "[1, 2, 3, 4, 5, 6, 7, 8]\n"
+       "[1.0, 2.5, 3.0]\n"
+       "[True, False]\n"
+       "[[1, 2], [3, 4]]\n"
+       "[(5, 6), (7, 8)]\n"
+       "[(1, 'a'), (2, 'b')]\n"
+       "[(1.5, 2)]\n"
+       "{'a': 1, 'b': 'two', 'c': 3.5, 'e': None}\n"
+       "{1, 2, 3}\n"
+       "{'x', 'y'}\n"
+       "(1, 2, 3)\n"
+       "[(1,), (2,)]\n"
+       "(5,)\n"
+       "[(0, 'a'), (1, 'b')]\n"
+       "[b'', b'b']\n"
+       "3.5\n")
+
+    # The generated STRUCT field dump (`_mojo_repr_<Struct>`), which reaches
+    # this through the element-repr shim — a struct-allocated value carries no
+    # runtime type tag, so `print(p)` alone would not get here
+    # (`mojo_repr_obj`'s `<object at 0x...>`), and the list is what supplies the
+    # answer.
+    #
+    # Its cat chain released its LEFT operand and nothing else, so every field's
+    # own string survived the print: six fields here, so six leaked buffers per
+    # line, 176.7 B/iteration measured over a 4x range of loop counts against
+    # 80.4 after. Each field shape carries its OWN ownership answer now, decided
+    # where the expression is built: `mojo_repr_int`/`_str`/`_float` strdup or
+    # malloc, `_mojo_generic_elem_repr` owns its return on every branch, a
+    # `"True"`/`"None"` literal does not, and a NON-NULLABLE container field is
+    # released only when its pointer is there (a null list renders as a literal
+    # `"[]"` in every `mojo_repr_list_*` helper, so freeing that would be a
+    # crash). The nullable spellings get their `"None"` fallback from one
+    # `_mojo_repr_none()`, which is what lets a mixed ternary have ONE answer.
+    #
+    # `ps` is hoisted out of the loop ON PURPOSE: `[p]` would allocate a fresh
+    # list per iteration and measure that instead (~310 B/iteration, and it is
+    # a different defect). The residual 80.4 B/iteration this case still shows
+    # is also not the struct dump — it is the top-level repr result `print` asks
+    # for and never frees, which a plain `print([1, 2, 3])` loop leaks too (16.4
+    # B/iteration) and which `gimple_printed_container_does_not_grow`'s 40 MB
+    # ceiling is too loose to see. Filed, not fixed here:
+    # bugs/CODEGEN_print_of_a_container_never_frees_the_repr_it_asked_for.md.
+    _P_REPR = ("[P(n=7, f=1.5, s='hi', l=[1, 2], d={'a': 1}, inner=Inner(k=3))]\n")
+    test_gimple_bounded_memory("gimple_printed_struct_repr_does_not_grow", """\
+class Inner:
+    def __init__(self):
+        self.k = 3
+
+class P:
+    def __init__(self):
+        self.n = 7
+        self.f = 1.5
+        self.s = "hi"
+        self.l = [1, 2]
+        self.d = {"a": 1}
+        self.inner = Inner()
+
+def main():
+    p = P()
+    ps = [p]
+    for i in range(100000):
+        print(ps)
+main()
+""", _P_REPR * 100000, 14)
+
     # ── `with C():` with no `as` target still runs `__exit__`
     # (bugs/CODEGEN_with_no_as_target_drops_exit.md, deleted with that fix).
     # The five index-parallel lists `_gen_stmt_WithStmt` accumulates per with
@@ -5022,6 +5194,55 @@ fn main():
     # answered True and the two families disagreed with the reference. The
     # honest answer is the raise, which is what CPython gives; a wrong-length
     # fill is the same shape of error.
+    # A call on a MODULE MARKER — a bare `import M` for a module this compile
+    # cannot resolve, so `M` is an `int64_t` global initialised to 0 — used to
+    # be answered by the generic scalar passthrough, which returns the receiver
+    # unchanged. So `argparse.ArgumentParser(...)` "constructed" a 0,
+    # `add_argument`/`parse_args` echoed the 0 back, and the program computed
+    # with a parser that is not a parser, silently, until the first attribute
+    # read off the result died naming an attribute of a class the program never
+    # built: CPython's own `Apple/__main__.py --help` printed usage and exited
+    # 0, and this printed `Unhandled exception: AttributeError:
+    # cross_build_dir` and exited 0 too
+    # (bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md).
+    #
+    # The raise happens at the CALL, which is where it becomes true, and it is
+    # catchable — which is the second half of the assertion: a program that
+    # probes for the capability can still say so, and a raise that could not be
+    # caught would be a strictly worse stub than the silent one it replaces.
+    #
+    # `argparse` is the whole of the first program because it is the case the
+    # doc measured; the second is a lowercase member of the same marker, which
+    # is the same silent-0 shape and used to print `1` (see the note on
+    # `gimple_module_marker_lowercase_member_raises` below).
+    test_gimple_runtime_error("gimple_module_marker_call_raises", """\
+import argparse
+
+def main():
+    p = argparse.ArgumentParser(description="demo")
+    p.add_argument("--x", type=int)
+    print(p.parse_args())
+""", "NotImplementedError: argparse.ArgumentParser: module 'argparse' is not "
+       "compiled into this binary")
+
+    # The SAME program must still run to completion when the program itself
+    # handles the absence — the point of raising rather than aborting. `try` /
+    # `except NotImplementedError` is the shape a real consumer would use to
+    # fall back to its own argument parsing.
+    test_gimple_stdout("gimple_module_marker_call_is_catchable", """\
+import argparse
+
+def main():
+    try:
+        p = argparse.ArgumentParser(description="demo")
+        print("constructed")
+    except NotImplementedError as e:
+        print("fell back")
+""", "fell back\n")
+
+    # `bytes` raises are the same mechanism reached a different way; keeping
+    # this one next to the module-marker case is the point — an unavailable
+    # thing should say so, whichever route it took to be unavailable.
     test_gimple_runtime_error("gimple_bytes_isprintable_raises", """\
 fn main():
     print(b'a'.isprintable())
@@ -6802,6 +7023,117 @@ def main():
     print(s["a"])
 main()
 """, "1\n2\nTrue\nFalse\n7\n7\n")
+
+    # The next two producers of the same fact, so the case above is not the
+    # only thing standing between a computed large key and a SIGSEGV.
+    # `gen._int_word_vals` records "this value holds a plain Python integer",
+    # and it was seeded only from `_lower_IntLiteral` — so `i + 1`, `-1` and
+    # `j * 1000000000` were all still asked of the runtime's range-only
+    # discriminator, which calls every positive int64 in [2^31, 2^47) a
+    # pointer. Both of these are now seeded: `-n`/`~n` in `_lower_UnaryOp` on
+    # an operand already recorded, and integer arithmetic in
+    # `_lower_binary`'s tail on two operands already recorded. Neither involves
+    # inference, which is what keeps the table monotone-safe — a miss falls
+    # back to today's behaviour and never to a crash.
+    #
+    # Every shape SIGSEGVs on the tree before this: `i + 1` computed from a
+    # large literal, `-1` (a negative word is outside the predicate's window,
+    # so it is the ASSIGNMENT that must recognise it), a literal-plus-literal,
+    # and a product of a small local by a large literal.
+    test_gimple_stdout("gimple_computed_dict_key_above_2gb_is_an_integer", """\
+def main():
+    i = 2999999999
+    d = {}
+    d[i + 1] = 7
+    print(d[i + 1])
+    e = {}
+    e[-1] = 9
+    print(e[-1])
+    f = {}
+    f[3000000000 + 1] = 3
+    print(f[3000000001])
+    g = {}
+    j = 5
+    g[j * 1000000000] = 1
+    print(g[j * 1000000000])
+    print(3000000000 in e)
+    print(-1 in e)
+main()
+""", "7\n9\n3\n1\nFalse\nTrue\n")
+
+    # The STORE side of the same fact: a large key that is ASSIGNED to a name,
+    # rather than written at the subscript. `gen._int_word_vals` was carried
+    # across a plain assignment and a tuple unpack, and NOT across the two
+    # other ways a value reaches a name — `var x = ...` and `x += ...` — or
+    # across a module-global store, so every one of these lost the record the
+    # literal had seeded and asked the runtime's range-only discriminator
+    # instead (every positive int64 in [2^31, 2^47) is a "pointer" to it).
+    # Both are now the same chokepoint the plain-assignment path already used
+    # (`_track_pointer_actual_type`), which is what keeps them sound: its
+    # `discard` branch clears the record on an RHS the codegen cannot vouch
+    # for, and the case below pins that direction too (`s` is a string by the
+    # time it is used as a key, and must stay a string key).
+    #
+    # `//` is here because it never reaches the binary tail where `%` is
+    # already covered; `**` because it is the usual way a large key is
+    # COMPUTED rather than written (`3 ** 20` is 3486784401), and its
+    # `(int)` cast makes "this is an integer" true for every input, so it
+    # needs no inference at all; and the ternary because two known-integer
+    # branches produce an integer, gated on BOTH branch types being
+    # integer-shaped so a branch that really lowers to a pointer cannot be
+    # recorded as one.
+    #
+    # SIGSEGV (exit -11) on the tree before, at the third line (`1`, `2` and
+    # `3` printed, then the ternary's `d[...]` died).
+    test_gimple_stdout("gimple_assigned_large_dict_key_survives_every_store_shape", """\
+def main():
+    k = 2999999999
+    k += 1
+    d = {}
+    d[k] = 1
+    print(d[k])
+    e = {}
+    e[3000000000 // 2] = 2
+    print(e[3000000000 // 2])
+    f = {}
+    f[3 ** 20] = 3
+    print(f[3 ** 20])
+    g = {}
+    g[3000000000 if True else 1] = 4
+    print(g[3000000000 if True else 1])
+    var h: Int = 3000000000
+    h2 = {}
+    h2[h] = 5
+    print(h2[h])
+    s = 3000000000
+    s = "sk"
+    d2 = {}
+    d2[s] = 6
+    print(d2["sk"])
+main()
+""", "1\n2\n3\n4\n5\n6\n")
+
+    # …and the MODULE-GLOBAL half, which is a separate hop rather than the
+    # same one: storing into the globals struct is its own shared helper
+    # (`_note_global_store_types`), and READING a global mints a fresh temp
+    # whose record has to be carried across as well — without that second
+    # copy the record stops at the temp and the dict site, which is keyed on
+    # the value it was handed, sees nothing. Both spellings of the
+    # declaration are here because they take different stores: a bare
+    # assignment and a `var`.
+    #
+    # SIGSEGV (exit -11) on the tree before, printing nothing at all: the
+    # very first statement's `d[K] = 1` was a `strcmp` of address 3000000000.
+    test_gimple_stdout("gimple_module_scope_large_dict_key_survives_the_global_store", """\
+K = 3000000000
+d = {}
+d[K] = 1
+print(d[K])
+var V = 3000000001
+e = {}
+e[V] = 2
+print(e[V])
+""", "1\n2\n")
 
     # The CONSTRUCTOR half of the same cross-call struct contract
     # (the ctor-direction cross-call struct contract in `module_gen.py`'s

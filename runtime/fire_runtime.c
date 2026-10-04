@@ -4044,8 +4044,19 @@ char *mojo_char_to_str(char c) {
  * is what keeps a `free()` of it from being emitted. It is never written to
  * either — the invariant `mojo_char_to_str` already carries. */
 char *mojo_char_at_str(char *s, int64_t i) {
-    if (!s || i < 0 || i >= (int64_t)strlen(s)) {
-        return mojo_char_to_str('\0');
+    if (!s) return mojo_char_to_str(0);
+    if (i < 0) {
+        i += (int64_t)strlen(s);
+        if (i < 0) return mojo_char_to_str(0);
+    } else if (memchr(s, 0, (size_t)i + 1) != NULL) {
+        /* A NUL at or BEFORE i means the string ended at or before it, so
+           `s[i]` is past the end: "", which is what the slice returned. A NUL
+           exactly AT i is that same case (`mojo_cstr_slice(s, i, i+1)` stops at
+           the first NUL within `s[0..i]`, inclusive of `i`). `memchr` for the
+           non-negative case rather than a second `strlen`, for the reason
+           `mojo_cstr_slice` uses it: a scan over a long string must not re-scan
+           the whole thing once per character. */
+        return mojo_char_to_str(0);
     }
     return mojo_char_to_str(s[i]);
 }
@@ -4074,6 +4085,7 @@ int64_t mojo_ord(char *s) {
 char *mojo_chr(int64_t code) {
     return mojo_char_to_str((char)code);
 }
+
 
 int mojo_str_startswith(char *s, char *prefix) {
     if (!s || !prefix) return 0;
@@ -4716,6 +4728,25 @@ static void _slot_free_key(_DictSlot *sl)
 char *mojo_dict_slot_key(MojoDict *d, int64_t i)
 {
     return _slot_key(&d->slots[i]);
+}
+
+/* The DOUBLE twin of `mojo_dict_slot_key`, for the same caller and the same
+ * reason: `_mojo_repr_dict` walks slots by INDEX (the order
+ * `mojo_dict_order_indices` hands back), and `mojo_dict_get_double` takes a
+ * KEY, so the emitted repr had no way to read a `kind == 1` slot back at its
+ * own width. It went to `_mojo_generic_elem_repr` instead, which treats
+ * `val > 65536` as a pointer and dereferences it through
+ * `mojo_read_type_tag_safe` — and a double's IEEE-754 bits are exactly such a
+ * word (3.5 is 0x400C000000000000), so `print({"c": 3.5})` was a SIGSEGV.
+ *
+ * `memcpy` rather than a `double *` cast: the slot is an `int64_t` in a
+ * struct, and reading it through a `double *` is a strict-aliasing violation
+ * (every other double accessor in this file copies for the same reason). */
+double mojo_dict_slot_double(MojoDict *d, int64_t i)
+{
+    double v;
+    memcpy(&v, &d->slots[i].val, sizeof(v));
+    return v;
 }
 
 /* mojo_dict_init/mojo_dict_destroy: see mojo_set_init/mojo_set_destroy's
@@ -7033,8 +7064,17 @@ char *mojo_repr_float(double v) {
    Int-key side had just been fixed for
    (bugs/CODEGEN_tuple_dict_key_hashed_by_address.md). `a` must be a buffer the
    caller owns -- every use below is one this file just built -- and `b` is
-   untouched, so passing a shared static (`mojo_repr_obj`'s buffer) is safe. */
-static char *_cat_free(char *a, char *b) {
+   untouched, so passing a shared static (`mojo_repr_obj`'s buffer) is safe.
+
+   PUBLIC, and declared in fire_runtime.h, because the repr walkers the
+   CODEGEN emits into every generated program (`_mojo_repr_list`,
+   `_mojo_repr_pair`, `_mojo_repr_dict`, `_mojo_repr_set`,
+   `mojo/backend_gimple/module_gen.py`) are the same chain and were leaking
+   the same N-1 buffers per printed container. Emitting a second copy of this
+   helper into the preamble instead would have been two implementations of one
+   rule in two languages, which is the thing the runtime's own note about
+   `mojo_repr_obj`'s shared buffer exists to make impossible. */
+char *mojo_str_cat_free(char *a, char *b) {
     char *r = mojo_str_cat(a, b);
     free(a);
     return r;
@@ -7075,11 +7115,20 @@ char *mojo_repr_list_doubles(MojoList *l) {
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
-        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
-        _buf = mojo_str_cat(_buf, mojo_repr_float(mojo_list_get_double(l, _i)));
+        if (_i > 0) _buf = mojo_str_cat_free(_buf, ", ");
+        /* One owned `_s`, released after the cat, rather than a cat per
+           expression: `mojo_repr_float` returns a fresh heap string and a
+           chain of N cats that never frees its left operands leaked N+1
+           buffers (sized to the text so far, so O(N^2) bytes) per printed
+           container -- ~500 B per `print` of an 8-element list, which is a
+           `--dump`, a logging line, or any other loop that prints. Fixed; the
+           bug doc is deleted with the fix and its reasoning is this comment. */
+        char *_s = mojo_repr_float(mojo_list_get_double(l, _i));
+        _buf = mojo_str_cat_free(_buf, _s);
+        free(_s);
     }
-    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
-    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
+    if (_is_tup && _n == 1) _buf = mojo_str_cat_free(_buf, ",");
+    return mojo_str_cat_free(_buf, _is_tup ? ")" : "]");
 }
 
 char *mojo_repr_list_ints(MojoList *l) {
@@ -7107,11 +7156,15 @@ char *mojo_repr_list_ints(MojoList *l) {
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
-        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
-        _buf = mojo_str_cat(_buf, mojo_repr_int(mojo_list_get_int(l, _i)));
+        if (_i > 0) _buf = mojo_str_cat_free(_buf, ", ");
+        /* `mojo_repr_int` owns its return -- see mojo_repr_list_doubles's
+           identical note on why the chain releases its left operands. */
+        char *_s = mojo_repr_int(mojo_list_get_int(l, _i));
+        _buf = mojo_str_cat_free(_buf, _s);
+        free(_s);
     }
-    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
-    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
+    if (_is_tup && _n == 1) _buf = mojo_str_cat_free(_buf, ",");
+    return mojo_str_cat_free(_buf, _is_tup ? ")" : "]");
 }
 
 char *mojo_repr_list_bools(MojoList *l) {
@@ -7134,11 +7187,16 @@ char *mojo_repr_list_bools(MojoList *l) {
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
-        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
-        _buf = mojo_str_cat(_buf, mojo_repr_bool((int)mojo_list_get_int(l, _i)));
+        if (_i > 0) _buf = mojo_str_cat_free(_buf, ", ");
+        /* The chain releases its left operands; the per-slot string does NOT
+           need releasing, because `mojo_repr_bool` is one of this file's two
+           repr helpers that returns SHARED storage (the other is
+           `mojo_repr_obj`, and see mojo_str_cat_free's own comment for why the
+           right operand of a cat must be left alone). */
+        _buf = mojo_str_cat_free(_buf, mojo_repr_bool((int)mojo_list_get_int(l, _i)));
     }
-    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
-    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
+    if (_is_tup && _n == 1) _buf = mojo_str_cat_free(_buf, ",");
+    return mojo_str_cat_free(_buf, _is_tup ? ")" : "]");
 }
 
 /* Pair-list reprs: a list whose ELEMENTS are 2-element lists — what
@@ -7158,29 +7216,36 @@ static char *_mojo_repr_pairlist(MojoList *l, int _kind) {
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup("[");
     for (int64_t _i = 0; _i < _n; _i++) {
-        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
+        if (_i > 0) _buf = mojo_str_cat_free(_buf, ", ");
         int64_t _p = mojo_list_get_int(l, _i);
         if (!mojo_is_registered_list(_p)) {
-            _buf = mojo_str_cat(_buf, mojo_repr_obj(_p));
+            /* NOT owned: `mojo_repr_obj` returns its shared static, which is
+               why it stays on the RIGHT of the cat (mojo_str_cat_free's own
+               comment). */
+            _buf = mojo_str_cat_free(_buf, mojo_repr_obj(_p));
             continue;
         }
         MojoList *_pair = (MojoList *)(intptr_t)_p;
-        _buf = mojo_str_cat(_buf, "(");
-        _buf = mojo_str_cat(_buf, mojo_repr_int(mojo_list_get_int(_pair, 0)));
-        _buf = mojo_str_cat(_buf, ", ");
+        _buf = mojo_str_cat_free(_buf, "(");
+        char *_s = mojo_repr_int(mojo_list_get_int(_pair, 0));
+        _buf = mojo_str_cat_free(_buf, _s);
+        free(_s);
+        _buf = mojo_str_cat_free(_buf, ", ");
         int64_t _v = mojo_list_get_int(_pair, 1);
         if (_kind == 1) {
-            _buf = mojo_str_cat(_buf, mojo_repr_str((char *)(intptr_t)_v));
+            _s = mojo_repr_str((char *)(intptr_t)_v);
         } else if (_kind == 2) {
-            _buf = mojo_str_cat(_buf, mojo_repr_float(mojo_list_get_double(_pair, 1)));
+            _s = mojo_repr_float(mojo_list_get_double(_pair, 1));
         } else if (mojo_boxed_is_str(_v)) {
-            _buf = mojo_str_cat(_buf, mojo_repr_str((char *)(intptr_t)_v));
+            _s = mojo_repr_str((char *)(intptr_t)_v);
         } else {
-            _buf = mojo_str_cat(_buf, mojo_repr_int(_v));
+            _s = mojo_repr_int(_v);
         }
-        _buf = mojo_str_cat(_buf, ")");
+        _buf = mojo_str_cat_free(_buf, _s);
+        free(_s);
+        _buf = mojo_str_cat_free(_buf, ")");
     }
-    return mojo_str_cat(_buf, "]");
+    return mojo_str_cat_free(_buf, "]");
 }
 
 /* A list whose elements are LISTS OF INTS (`[[0, 7], [1, 8]]`) — what a
@@ -7207,10 +7272,11 @@ static char *_mojo_repr_intlists(MojoList *l) {
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
-        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
+        if (_i > 0) _buf = mojo_str_cat_free(_buf, ", ");
         int64_t _p = mojo_list_get_int(l, _i);
         if (!mojo_is_registered_list(_p)) {
-            _buf = mojo_str_cat(_buf, mojo_repr_obj(_p));
+            /* NOT owned -- `mojo_repr_obj`'s shared static. */
+            _buf = mojo_str_cat_free(_buf, mojo_repr_obj(_p));
             continue;
         }
         MojoList *_in = (MojoList *)(intptr_t)_p;
@@ -7225,16 +7291,18 @@ static char *_mojo_repr_intlists(MojoList *l) {
          * list whose elements are containers, and a LIST OF TUPLES is
          * itself a list. */
         int _in_tup = mojo_is_tuple(_in);
-        _buf = mojo_str_cat(_buf, _in_tup ? "(" : "[");
+        _buf = mojo_str_cat_free(_buf, _in_tup ? "(" : "[");
         for (int64_t _j = 0; _j < _m; _j++) {
-            if (_j > 0) _buf = mojo_str_cat(_buf, ", ");
-            _buf = mojo_str_cat(_buf, mojo_repr_int(mojo_list_get_int(_in, _j)));
+            if (_j > 0) _buf = mojo_str_cat_free(_buf, ", ");
+            char *_s = mojo_repr_int(mojo_list_get_int(_in, _j));
+            _buf = mojo_str_cat_free(_buf, _s);
+            free(_s);
         }
-        if (_in_tup && _m == 1) _buf = mojo_str_cat(_buf, ",");
-        _buf = mojo_str_cat(_buf, _in_tup ? ")" : "]");
+        if (_in_tup && _m == 1) _buf = mojo_str_cat_free(_buf, ",");
+        _buf = mojo_str_cat_free(_buf, _in_tup ? ")" : "]");
     }
-    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
-    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
+    if (_is_tup && _n == 1) _buf = mojo_str_cat_free(_buf, ",");
+    return mojo_str_cat_free(_buf, _is_tup ? ")" : "]");
 }
 
 char *mojo_repr_list_intlists(MojoList *l) { return _mojo_repr_intlists(l); }
@@ -7275,17 +7343,21 @@ char *mojo_repr_list_slotkinds(MojoList *l, const char *kinds) {
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
-        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
+        if (_i > 0) _buf = mojo_str_cat_free(_buf, ", ");
         int64_t _p = mojo_list_get_int(l, _i);
         if (!mojo_is_registered_list(_p)) {
-            _buf = mojo_str_cat(_buf, mojo_repr_obj(_p));
+            /* NOT owned -- `mojo_repr_obj`'s shared static. */
+            _buf = mojo_str_cat_free(_buf, mojo_repr_obj(_p));
             continue;
         }
-        _buf = mojo_str_cat(_buf,
-            mojo_repr_list_kinds((MojoList *)(intptr_t)_p, kinds));
+        /* `mojo_repr_list_kinds` owns its return (see its own comment), so the
+           chain releases its left operand AND this one. */
+        char *_s = mojo_repr_list_kinds((MojoList *)(intptr_t)_p, kinds);
+        _buf = mojo_str_cat_free(_buf, _s);
+        free(_s);
     }
-    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
-    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
+    if (_is_tup && _n == 1) _buf = mojo_str_cat_free(_buf, ",");
+    return mojo_str_cat_free(_buf, _is_tup ? ")" : "]");
 }
 
 char *mojo_repr_list_bytes(MojoList *l) {
@@ -7301,12 +7373,15 @@ char *mojo_repr_list_bytes(MojoList *l) {
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
-        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
+        if (_i > 0) _buf = mojo_str_cat_free(_buf, ", ");
         MojoBytes *_b = (MojoBytes *)(uintptr_t)mojo_list_get_int(l, _i);
-        _buf = mojo_str_cat(_buf, mojo_bytes_repr(_b));
+        /* `mojo_bytes_repr` owns its return. */
+        char *_s = mojo_bytes_repr(_b);
+        _buf = mojo_str_cat_free(_buf, _s);
+        free(_s);
     }
-    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
-    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
+    if (_is_tup && _n == 1) _buf = mojo_str_cat_free(_buf, ",");
+    return mojo_str_cat_free(_buf, _is_tup ? ")" : "]");
 }
 
 char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
@@ -7341,7 +7416,7 @@ char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
-        if (_i > 0) _buf = _cat_free(_buf, ", ");
+        if (_i > 0) _buf = mojo_str_cat_free(_buf, ", ");
         /* A NULL kinds string is not "no kinds" but "no kinds to apply": every
            slot then falls back to the int accessor, which is the documented
            behaviour for a slot the string does not cover (see the comment
@@ -7369,7 +7444,7 @@ char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
            struct pointer is as true as 'i' for a small int and as useless). */
         char *_re = mojo_list_repr_elem(l, mojo_list_get_int(l, _i));
         if (_re) {
-            _buf = _cat_free(_buf, _re);
+            _buf = mojo_str_cat_free(_buf, _re);
             free(_re);
             continue;
         }
@@ -7387,16 +7462,16 @@ char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
             MojoList *_in = (MojoList *)(intptr_t)mojo_list_get_int(l, _i);
             _s = mojo_repr_list_kinds(_in, NULL);
         } else if (_k == 'n') {
-            _buf = _cat_free(_buf, "None");
+            _buf = mojo_str_cat_free(_buf, "None");
             continue;
         } else {
             _s = mojo_repr_int(mojo_list_get_int(l, _i));
         }
-        _buf = _cat_free(_buf, _s);
+        _buf = mojo_str_cat_free(_buf, _s);
         free(_s);
     }
-    if (_is_tup && _n == 1) _buf = _cat_free(_buf, ",");
-    return _cat_free(_buf, _is_tup ? ")" : "]");
+    if (_is_tup && _n == 1) _buf = mojo_str_cat_free(_buf, ",");
+    return mojo_str_cat_free(_buf, _is_tup ? ")" : "]");
 }
 
 char *mojo_repr_obj(int64_t addr) {
@@ -8238,6 +8313,47 @@ MojoList *mojo_iter_boxed_list(int64_t v)
         return mojo_str_chars((char *)(intptr_t)v);
     mojo_raise_type_error((char *)"object is not iterable");
     return mojo_list_new();
+}
+
+/* `NotImplementedError: <detail>` — the sixth typed raiser, same mechanism and
+ * same hardcoded-tag derivation as the five above. It exists for ONE caller and
+ * that caller is the whole reason it is a RAISER rather than a printed note:
+ * a call on a module this compile never compiled (`argparse`,
+ * CPython's `Apple/__main__.py`) used to be answered with the receiver
+ * unchanged, so `ArgumentParser(...)` "constructed" the module marker (an
+ * int64_t 0), `add_argument`/`parse_args` echoed it back, and the program
+ * computed with a parser that is not a parser until the first attribute read
+ * off the result died with an `AttributeError` naming an attribute of a class
+ * the program never built
+ * (bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md).
+ *
+ * Raising at the CALL is the point where it becomes true, and it is
+ * catchable, so a program that legitimately probes for the capability can
+ * still say so. Nothing here is a claim that argparse is unimplementable —
+ * it is a whole subsystem, the same size class as the pickle engine judged
+ * out of scope in dbpickle.md — only that a silent 0 is the wrong answer. */
+#define _MOJO_EXC_TAG_NOTIMPLEMENTEDERROR 108472663
+
+void mojo_raise_not_implemented(char *detail) {
+    char msg[256];
+    snprintf(msg, sizeof msg, "NotImplementedError: %s", detail ? detail : "?");
+    char *heap_msg = strdup(msg);
+    mojo_exc_type_set(_MOJO_EXC_TAG_NOTIMPLEMENTEDERROR);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_raise();
+}
+
+/* The codegen's half of the same decision, as ONE runtime entry point so the
+ * message cannot drift between the two spellings. `module` is the module name
+ * as the program wrote it; `member` is what it called on it. */
+void mojo_module_not_compiled(char *module, char *member) {
+    char msg[256];
+    snprintf(msg, sizeof msg,
+             "%s.%s: module '%s' is not compiled into this binary",
+             module ? module : "?", member ? member : "?",
+             module ? module : "?");
+    mojo_raise_not_implemented(msg);
 }
 
 /* The two ways a tuple refuses to be mutated, as CPython words them. Both
@@ -9887,13 +10003,13 @@ static char *_container_key_str(int64_t v) {
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
-        if (_i > 0) _buf = _cat_free(_buf, ", ");
+        if (_i > 0) _buf = mojo_str_cat_free(_buf, ", ");
         char *_s = _key_slot_str(mojo_list_get_int(l, _i));
-        _buf = _cat_free(_buf, _s);
+        _buf = mojo_str_cat_free(_buf, _s);
         free(_s);
     }
-    if (_is_tup && _n == 1) _buf = _cat_free(_buf, ",");
-    return _cat_free(_buf, _is_tup ? ")" : "]");
+    if (_is_tup && _n == 1) _buf = mojo_str_cat_free(_buf, ",");
+    return mojo_str_cat_free(_buf, _is_tup ? ")" : "]");
 }
 
 /* An int64_t being used where a C string is needed (a dict key, an f-string

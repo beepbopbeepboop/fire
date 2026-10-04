@@ -3356,19 +3356,13 @@ def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
     gen._ptr_helpers_needed.add('char')
-    # `mojo_cstr_slice` rather than a `char`-taking helper: gimple
-    # rejects a `char` argument ("invalid argument to gimple call"), since
-    # a char is promoted to int64_t non-trivially. See _gen_for_cstr.
-# `1LL`, not `(int64_t)1`: a C-style cast is not a legal gimple
-    # operand. `_t = _i + (int64_t)1` is rejected at gimplification
-    # with "expected expression before '(' token" -- a HARD error
-    # under `gcc -fgimple`, so it takes out the whole self-host
-    # closure, not just this subscript. The `LL` suffix is the
-    # tree's existing idiom for a width-correct int64_t literal
-    # (`0LL` appears throughout the generated C) and needs no cast.
-    _one_cs = gen._new_val('int64_t', "1LL")
-    _end_cs = gen._new_val('int64_t', f"{idx64} + {_one_cs}")
-    gen._emit(f"  {gen._cname(gen0.target)} = mojo_cstr_slice ({_iv}, {idx64}, {_end_cs});")
+    # `mojo_char_at`, for _gen_for_cstr's reason in full: gimple rejects a
+    # `char` argument ("invalid argument to gimple call"), so the slice stood
+    # in for `mojo_char_to_str` and allocated a two-byte buffer per character
+    # of every character comprehension. It reaches the same shared immortal table
+    # through an int64_t INDEX instead. The result is deliberately absent from
+    # the codegen's `_FRESH_STRING_RETURNS`, so no generated path frees it.
+    gen._emit(f"  {gen._cname(gen0.target)} = mojo_char_at ({_iv}, {idx64});")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)

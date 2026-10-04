@@ -1,9 +1,89 @@
 # RUNTIME: an int64 dict key in [2^31, 2^47) is dereferenced as a `char *`
 
-## Status (2026-10-01 — PARTIALLY FIXED: the codegen now supplies the answer
-## where it can; the predicate itself is unchanged and still red)
+## Status (2026-10-02, later — the STORE side too: every hop a value takes
+## toward a dict key now carries the record; the PREDICATE is still unchanged
+## and `ptrreg-boxed-str` is still red)
+
+Entry 0 below landed two producers for `gen._int_word_vals`, both of which
+make a large key out of a large key — `i + 1`, `-1`. What was missing was the
+other direction: a large key that is ASSIGNED to a name. The record died on
+three hops, and each was an existing shared helper that simply did not carry
+this one table:
+
+| hop | helper that now carries `_int_word_vals` | what died |
+|---|---|---|
+| `k += 1` | `_gen_stmt_AugAssignStmt` → `_track_pointer_actual_type` (the chokepoint plain AssignStmt and tuple-decl already used) | a SIGSEGV inside an ordinary increment loop |
+| `var k = 3000000000`, any scope | `_gen_stmt_VarDecl` → the same chokepoint | the same crash, one statement earlier |
+| store into the globals struct, and reading a global back | `_note_global_store_types` (both arms) and `_lower_IdentExpr`'s global-read arm | a module-level `K = 3000000000` then `d[K] = 1` died on line 3, printing nothing |
+
+The read arm is the one that was load-bearing and least obvious: reading a
+global mints a **fresh temp**, the dict-key decision is keyed on the value it
+was handed, and a record that stops at the temp is no record at all.
+
+And three more producers, none of which involves inference — which is the
+whole property that makes them monotone-safe:
+
+* `_lower_floordiv`'s integer arm. `//` never reaches `_lower_binary_tail`,
+  which is where `%` and the arithmetic operators are already covered, so it
+  needed its own site rather than being free.
+* `_lower_pow`'s integer arm — the strongest form of the argument available:
+  the `(int)` cast the lowering already performs makes the result an integer
+  for EVERY input, whatever the operands were. `**` is also how a large key
+  is usually COMPUTED rather than written (`3 ** 20` is 3486784401).
+* `_lower_TernaryExpr` over two known integers, gated on BOTH branch types
+  being integer-shaped and not on the joined `res_type`: `_quick_type`
+  estimates without evaluating, so a branch that really lowers to a pointer
+  can join to `int` and be truncated to an address. Measured, not assumed:
+  `d[x if flag else "s"]` still takes the runtime's own path, as it must.
+
+`k = "s"` clears the record (the chokepoint's `discard` branch), which is what
+keeps the carries sound; the new test pins that direction by putting a string
+in the same slot and requiring it to stay a string key.
+
+New: `gimple_assigned_large_dict_key_survives_every_store_shape` (`+=`, `//`,
+`**`, a ternary, a `var`, and the string direction) and
+`gimple_module_scope_large_dict_key_survives_the_global_store` (both
+declaration spellings at module scope). Both are SIGSEGV (exit -11) on the
+parent commit; the second printed NOTHING at all. `test_gimple_runner.py` is
+300 passed / 9 failed, those nine being the same nine by name on a pristine
+`git archive` of the parent commit (298/9 before).
+
+What is left is unchanged in kind and is the "needs real type inference" limit
+the entry below states: an unannotated/erased parameter, a value read out of a
+heterogeneous container, and a call result. The call-result case is closer than
+it was, and the exact shape of the remaining work is now named — see the
+"Exact next step" section, whose second bullet is the one to read.
+
+## Earlier status (2026-10-02 — the codegen supplies the answer in four
+## places; the PREDICATE is still unchanged and `ptrreg-boxed-str` is still
+## red)
 
 Landed, in this order of importance:
+
+0. **2026-10-02: two more producers for `gen._int_word_vals`**, so the
+   "monotone-safe, pure gain" argument below has two more instances of it.
+   `_lower_UnaryOp` records `-n` / `~n` on an operand already recorded, and
+   `_lower_binary`'s arithmetic tail records an integer result from two
+   operands already recorded (read BEFORE the coercion block replaces the
+   operand temps, marked at the final `t = lv op rv`, because every early
+   return in between produces something that is not an integer). Neither
+   involves inference, which is the whole reason they are safe: a miss falls
+   back to the runtime's own discriminator, never to a crash.
+   Measured: the case below SIGSEGVs on `bc17a62b` and matches CPython here.
+
+   - `test_gimple_runner.py`'s `gimple_computed_dict_key_above_2gb_is_an_
+     integer` — four shapes, one per way a large key can be *computed* rather
+     than written: `i + 1` from a large literal, `-1`, literal + literal, and
+     a small local times a large literal. `-1` is in the list because a
+     negative word is OUTSIDE the predicate's window (a huge `uint64`), so the
+     crash there is in the assignment rather than the lookup, and it is the
+     shape that would pass a test written only for the positive range.
+
+   Still not covered, and still the honest limit: an integer that arrives
+   through an unannotated/erased parameter, a value read out of a
+   heterogeneous container, or a call result. Those are not "no producer" but
+   "needs real type inference", which is `mojo/middle/`'s to own — see the
+   second bullet of the exact-next-step section below, unchanged.
 
 1. **The codegen supplies the answer wherever it PROVABLY knows it.** A new
    positive record, `gen._int_word_vals`, is the exact complement of
@@ -60,10 +140,47 @@ Two directions, and they are genuinely different jobs:
 
 * **Widen `_int_word_vals`.** Every additional producer is monotone-safe — a
   miss falls back to today's behaviour, never to a crash — so this is pure
-  gain. The obvious next ones: `_lower_UnaryOp` (`-n`, `~n`) and `_lower_binary`
-  where both operands are already in the set, which together cover `d[i + 1]`
-  and `d[-1]`. Beyond that it needs real type inference, which is
-  `mojo/middle/`'s to own and not this file's.
+  gain. DONE, in this order: `_lower_IntLiteral` (the seed), `_lower_UnaryOp`
+  (`-n`, `~n`), `_lower_binary`'s arithmetic tail (both operands recorded),
+  then the whole store side (`x += e`, `var x = e`, a module-global store and
+  a global read-back) plus `_lower_floordiv`, `_lower_pow`'s integer arm and
+  `_lower_TernaryExpr` — see the Status section at the top for each one's
+  shape and the two tests that cover them.
+
+  `_lower_percent`'s generic numeric arm needed nothing: it returns a `None`
+  sentinel and the caller falls through to `_lower_binary_tail`, which the
+  arithmetic producer already covers. (`%` was therefore never actually
+  missing — worth recording, because the doc listed it as work and the honest
+  answer is that it was covered by a different site.)
+
+  Deliberately NOT one of them, still: `_lower_CompareChain` (a comparison
+  yields a `_Bool`, not an int64 word).
+
+  **The remaining producer, and the exact shape of it:** a call whose return
+  this codegen can vouch for. `func_return_types` cannot answer that question
+  on its own, and the reason is structural rather than a missing entry — it
+  mixes DECLARED types with INFERRED ones and with the erasure default, and all
+  three are spelled `int64_t`. The table is written from
+  `module_gen.py`'s own two places:
+
+  * `func_return_types[s.name] = self._resolve_type(s.return_type)` — an
+    ANNOTATED return (`def f() -> Int:`). Real evidence, and it is the one
+    case worth doing first.
+  * `func_return_types[s.name] = inferred` where `inferred =
+    self._infer_return_type(s.body)` — an inference over the body. Evidence
+    only when the body's own literals are integers, which is a second
+    question, not this one.
+  * every `.get(mangled, 'int64_t')` at a call site — the ERASURE, which is
+    precisely the case that must NOT be evidence, and which is also what makes
+    "is it in the table" the wrong question.
+
+  So the work is a second table written only by the first of those three, and
+  a producer at the call site gated on it. Note `_resolve_type` is not enough
+  on its own even there: an annotation of `Any`/`object` also resolves to
+  `int64_t`, so the gate has to read the ANNOTATION's own name, not its
+  resolved C type. Still unhandled after that, and still `mojo/middle/`'s to
+  own: an unannotated/erased parameter, and a value read out of a
+  heterogeneous container.
 * **Make the predicate sound**, which means giving the runtime provenance
   rather than a range: a registry of every string the program can hold, fed by
   the runtime's own string constructors AND by codegen for its string-literal
@@ -174,7 +291,11 @@ Concretely:
    `_actual_types`, and the new `_int_word_vals` is the complement it lacked.
 2. NOT DONE — re-measure how many sites remain genuinely ambiguous (the
    `lambda k: d[k]` case in the predicate's own comment is the model example,
-   and it is still routed to the `_kw` twin, correctly).
+   and it is still routed to the `_kw` twin, correctly). The 2026-10-02 store-
+   side work moved a known set of shapes off it (`x += e`, `var x = e`, a
+   module-global store and a global read-back, `//`, `**`, a ternary) but did
+   not attempt a census, and a census is a `--dump-full` measurement: the
+   integrator's, not a worker's.
 3. NOT DONE, and now doubtful: narrow the range only for the residue, and only
    as a *crash* guard. Nothing landed narrows it — see the Status — and the
    predicate is still asked, so a narrowing here would trade one
@@ -202,3 +323,17 @@ Concretely:
   present and an absent large key, and the `lambda` string-key case that must
   keep going through the `_kw` twin. SIGSEGVs on the parent commit. It is the
   test that covers what landed; the `boxedstr` group covers what did not.
+- `test_gimple_runner.py`'s `gimple_computed_dict_key_above_2gb_is_an_integer`
+  (added 2026-10-02 with the two producers above): the same end-to-end shape
+  for a key that is COMPUTED, in four spellings, pinned to CPython's answers.
+  SIGSEGVs on `bc17a62b` for the whole program.
+- `test_gimple_runner.py`'s `gimple_assigned_large_dict_key_survives_every_
+  store_shape` and `gimple_module_scope_large_dict_key_survives_the_global_
+  store` (added 2026-10-02 with the store-side carries and the three new
+  producers): the ASSIGNED half of the same fact. The first is SIGSEGV on the
+  parent commit at its third line (`1`, `2`, `3` printed, then the ternary's
+  subscript); the second prints NOTHING before, because it died on line 3.
+  The first also pins the soundness direction — a string in the slot that
+  `k = 3000000000` used to hold must still be a STRING key — because a carry
+  that cannot clear itself would turn a crash into a silent wrong answer,
+  which this codebase rates as the worse of the two.

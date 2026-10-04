@@ -791,7 +791,12 @@ int         mojo_str_eq(MojoStr *a, MojoStr *b);
 char        mojo_str_char_at(MojoStr *s, int64_t i);
 void        mojo_str_print(MojoStr *s);
 char       *mojo_char_to_str(char c);
-char       *mojo_char_at_str(char *s, int64_t i);   /* s[i] as a 1-char str */
+/* `s[i]` on a plain `char *` str, answered from the shared immortal table
+ * instead of a fresh two-byte malloc, with the same bounds semantics as
+ * `mojo_cstr_slice(s, i, i + 1)` it replaced: a negative index resolves against
+ * the length, and an index at or past the end is "". NOT the caller's to free —
+ * see mojo_char_at_str's own comment in fire_runtime.c. */
+char       *mojo_char_at_str(char *s, int64_t i);
 int64_t     mojo_ord(char *s);
 char       *mojo_chr(int64_t code);
 
@@ -1364,6 +1369,18 @@ void        mojo_raise_type_error(char *detail);
  * (mojo_bytes_partition's empty separator). */
 void        mojo_raise_value_error(char *detail);
 void        mojo_raise_index_error(char *detail);
+/* Raises a real, catchable NotImplementedError for `detail` — the sixth typed
+ * raiser, same mechanism and same tag derivation as the five above. */
+void        mojo_raise_not_implemented(char *detail);
+/* The codegen's half of that decision, for the ONE case where a silent answer
+ * is the wrong one: a call on a module this compile never compiled
+ * (`import argparse` + `argparse.ArgumentParser(...)`). That used to answer
+ * with the receiver unchanged, so every method on it echoed a module marker
+ * back and the program computed with a parser that is not a parser until an
+ * unrelated attribute read died naming an attribute of a class the program
+ * never built. Raises at the CALL, which is where it becomes true and is
+ * catchable. See mojo_module_not_compiled's own comment in fire_runtime.c. */
+void        mojo_module_not_compiled(char *module, char *member);
 /* Runtime %-style string formatting with a DYNAMIC (non-literal) template:
  *
  *   char *out = mojo_str_format_dict("usage: %(prog)s v%(ver)d", d);
@@ -1427,6 +1444,11 @@ MojoDictIter  *mojo_dict_iter_new(MojoDict *d);
 int            mojo_dict_iter_next(MojoDictIter *it);     /* 1=has entry, 0=done */
 char *mojo_dict_iter_key(MojoDictIter *it);
 char *mojo_dict_slot_key(MojoDict *d, int64_t i);
+/* The double twin of that one: the emitted dict repr walks slots by index and
+ * a double slot's bits are a pointer-shaped word, so reading one back as an
+ * int64_t and handing it to the generic element reader SIGSEGV'd. See
+ * mojo_dict_slot_double's own comment in fire_runtime.c. */
+double mojo_dict_slot_double(MojoDict *d, int64_t i);
 int64_t mojo_dict_iter_key_int(MojoDictIter *it);
 int64_t        mojo_dict_iter_val_int(MojoDictIter *it);
 double         mojo_dict_iter_val_double(MojoDictIter *it);
@@ -1648,6 +1670,12 @@ int mojo_getattr(int obj, char *attr);
 void mojo_setattr(void *obj, char *attr, int64_t val);
 void mojo_delattr(void *obj, char *attr);
 char *mojo_str_cat(char *a, char *b);
+/* `mojo_str_cat` with `a` (which the caller owns) released. Declared here
+ * rather than kept file-local because the repr walkers the CODEGEN emits into
+ * every generated program are the same N-cat chain and were leaking the same
+ * N-1 buffers per printed container; see mojo_str_cat_free's own comment in
+ * fire_runtime.c. `b` is untouched, so a shared static on the right is safe. */
+char *mojo_str_cat_free(char *a, char *b);
 char *mojo_str_from_int(int64_t v);
 /* `printf` a pointer through a caller-owned format — the `<function f at
  * 0x...>` spelling `print(f)` needs, because a function value is a `void *`

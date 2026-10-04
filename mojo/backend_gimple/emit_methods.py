@@ -1142,6 +1142,59 @@ def _lower_struct_attr_call(gen, method, node):
                             f'struct.Struct.{method}() — raises at runtime')
 
 
+def _uncompiled_module_marker(gen, node) -> str:
+    """The module name behind `mod.member(...)` when `mod` is a bare-import
+    marker for a module THIS COMPILE never compiled, else `''`.
+
+    `import argparse` in a compiled program binds a module MARKER: an
+    `int64_t` global initialised to 0 (`_root_globals.argparse = 0`), because
+    `module_loader.can_resolve_module_path('argparse')` is false — there is no
+    source under this checkout's stdlib to compile. Every method on that marker
+    then used to be answered by this file's generic scalar passthrough, which
+    echoes the receiver unchanged: so `ArgumentParser(...)` "constructed" a 0,
+    `add_argument`/`parse_args` echoed the 0 back, and the program computed
+    with a parser that is not a parser, silently, until the first attribute
+    read off the result died with an `AttributeError` naming an attribute of a
+    class the program never built
+    (bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md).
+
+    Keyed on `_module_alias_names`, NOT `imported_symbols`, for the reason that
+    set's own docstring gives at length (an unresolved `from X import name`
+    binding has the identical dict shape, and taking the broader set once
+    wrongly excluded the genuine `block_idx.x` GPU-intrinsic accessor shape).
+    The `MemberExpr`/`IdentExpr` shape is required too: a marker reached by any
+    other spelling is not a call on it.
+
+    Cached per name on `gen` because the answer is a filesystem question and
+    the call site is not."""
+    fn = getattr(node, 'func', None)
+    if not isinstance(fn, gimple_ctypes.MemberExpr):
+        return ''
+    obj = fn.obj
+    if not isinstance(obj, gimple_ctypes.IdentExpr):
+        return ''
+    name = _as_str(obj.name)
+    if name not in getattr(gen, '_module_alias_names', ()):
+        return ''
+    cache = getattr(gen, '_uncompiled_marker_cache', None)
+    if cache is None:
+        cache = {}
+        gen._uncompiled_marker_cache = cache
+    if name in cache:
+        return cache[name]
+    _info = (gen.imported_symbols or {}).get(name)
+    _mod = _as_str(_info.get('module') or '') if isinstance(_info, dict) else ''
+    _resolvable = True
+    if _mod:
+        try:
+            import module_loader as _mlmod_marker
+            _resolvable = _mlmod_marker.can_resolve_module_path(_mod)
+        except Exception:
+            _resolvable = True      # cannot ask -> assume the module is fine
+    cache[name] = '' if _resolvable else (_mod or name)
+    return cache[name]
+
+
 def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
     func = node.func  # MemberExpr
@@ -3680,6 +3733,35 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             ov_local = gen._new_val(ot, f"({ot}){ov}")
         else:
             ov_local = gen._ensure_local(ot, ov)
+        # A call on a MODULE MARKER — `argparse.ArgumentParser(...)` and every
+        # `.method()` after it — is not a scalar operation at all, and the
+        # generic passthrough at the bottom of this block (which returns the
+        # receiver unchanged) is the wrong answer for every one of them: the
+        # program computes with a value that is not the object it named, and
+        # nothing says so until an unrelated attribute read dies naming an
+        # attribute of a class the program never built. Raise at the CALL
+        # instead, which is where it becomes true, and which is catchable so a
+        # program that genuinely probes for the capability can still say so.
+        #
+        # Above the comparison/arithmetic arms deliberately: none of them means
+        # anything on a marker either, and `argparse.__doc__ == x` should say
+        # the module is missing rather than answer about the integer 0.
+        _marker_mod = _uncompiled_module_marker(gen, node)
+        if _marker_mod:
+            for _ea in node.args:
+                gen.lower_expr(_ea)
+            gen._emit_call(
+                'void', '', 'mojo_module_not_compiled',
+                [('char *', gen._intern_string(_as_str(_marker_mod))),
+                 ('char *', gen._intern_string(_as_str(method)))])
+            # `mojo_module_not_compiled` longjmps and never returns, so this
+            # value is dead on every path that reaches it; it exists only so
+            # the surrounding expression still typechecks, exactly as the
+            # other never-taken raise sites in this file return a zero of the
+            # shape their caller wanted.
+            return gen._stub_result(ot, ov_local,
+                                    f'{_marker_mod}.{method}() — raises: module '
+                                    f'not compiled')
         if node.args:
             at, av = gen.lower_expr(node.args[0])
             # Coerce argument to the same type; GIMPLE requires separate cast stmt.

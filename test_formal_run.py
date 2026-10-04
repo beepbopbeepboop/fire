@@ -15721,36 +15721,37 @@ EQ_DISPATCH_CASES = [
      "    return bump()\n",
      "refuse:G is read in bump() at `G + 1`", None),
     # The sibling the filing did not mention: the same name WRITTEN through a
-    # `global` declaration.  It is the one row in this file that used to expect
-    # a refusal, and it is CPython's answer now: the module-global SLOT landed
-    # (`formal-module-globals`), so there is somewhere for a write to outlive the
-    # frame that made it.  Both emitters used to treat the declaration as a
-    # no-op, so CPython answered 6 and 6 where this path answered 10601485 and 5
-    # on arm64 and 11 and 5 on x86-64.  That sentence stopped being true, and
-    # the row was left asserting a refusal the backend no longer owed — red on
-    # `master` as well as on the branch that found it, which is what
-    # `bugs/TEST_a_mutated_module_global_is_refused_is_stale_after_the_slot_landed.md`
-    # recorded before it was deleted with the row it was about.  The decision and
-    # its measurement are in `bugs/FORMAL_module_state_no_storage.md`'s
-    # "Re-measured 2026-10-02" section, which named that doc's owner as the
-    # decider: option 1 of its two, and the one the tree's behaviour already
-    # implements — the program is RIGHT, so the row asserts the number.  (Those
-    # old numbers and the refusal message are history, kept where they are still
-    # readable, in `mutated_module_global_refusal`'s docstring.)
+    # `global` declaration, which the language allows.  It USED to be refused,
+    # because a formal value lives in a function's own stack scratch and there
+    # was nowhere for a write to a module-level name to outlive a frame in — so
+    # both emitters treated the declaration as a no-op and CPython's 6 and 6
+    # came out as 10601485 and 5 on arm64 and 11 and 5 on x86-64, with the two
+    # architectures unable to agree on the first number because it was never
+    # computed.
     #
-    # `formal/build.py`'s `_collect_shadowed_global_reads` is what makes the
-    # refusal disappear: it gates the finding on `declared_globals & assigned -
-    # set(M.module_slots() or ())`, so a name WITH a slot is not a finding.
+    # `formal-module-globals` landed the `__DATA` slot that write can be
+    # redirected into, and `formal/build.py`'s `_collect_shadowed_global_reads`
+    # gates the finding on `declared_globals & assigned - module_slots()`, so a
+    # name that HAS a slot is no longer a finding.  The gate's own comment
+    # carries the measurement (6 of `test_formal_globals.py`'s 17 cases before,
+    # 0 after, and the image answers CPython), and `test_formal_globals.py` was
+    # updated with it — this row was left behind asserting a refusal the module
+    # no longer owes, and it was red for that reason alone
+    # (bugs/TEST_a_mutated_module_global_is_refused_is_stale_after_the_slot_
+    # landed.md).
     #
-    # 12 is CPython's: `G` goes 5 -> 6 and both reads see 6.  Measured on both
-    # backends on this tree, and the same number from `python3`.  The exit
-    # status is the assertion and the empty stdout is the other half of it —
-    # `main` RETURNS the sum rather than printing it, so an image that printed
-    # something and exited 0 would not pass.  The shape is a `return` OF the
-    # global rather than the bare increment `test_formal_globals.py`'s
-    # `write_int_through_global` already pins, so the two files are the same
-    # fact on two shapes.
-    ("a_mutated_module_global_is_read_back_from_its_slot",
+    # So the row asserts the BUILT program's own answer, which is CPython's:
+    # `bump()` makes `G` 6 and returns 6, `rd()` reads back 6, and `main`
+    # returns 12 — so the exit status is 12.  Renamed from
+    # `a_mutated_module_global_is_refused`, because a row whose name says
+    # `_is_refused` and whose expectation says otherwise is a lie in the
+    # registry; three older bug docs quote the old name in transcripts of runs
+    # that happened when it was accurate.
+    #
+    # The shape `test_formal_globals.py` does not cover is the `return` of the
+    # global from inside the writing function, which is why this row is worth
+    # keeping rather than folding into that file.
+    ("a_mutated_module_global_is_computed",
      "G = 5\n"
      "def bump():\n"
      "    global G\n"

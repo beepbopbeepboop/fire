@@ -386,24 +386,32 @@ def pack(fmt: String, v0=0, v1=0, v2=0, v3=0, v4=0):
 
     FIVE value slots: the signature is six arguments wide because six is the
     smaller of the two ABIs' integer argument registers (limit 2). A format
-    naming more than five values cannot be packed here, and the three corpus
-    formats that do — `<HHHHHH` (6), `<HHIQQQI` (7), `<IIQQQQQQ` (8) — return
-    an empty list rather than a wrong answer. `pack_into` has no such limit
-    for the corpus's formats: every `pack_into` call site needs at most three
-    values, and it reads its buffer from the CALLER's frame, so the limit that
-    bites is the value count and not where the bytes come from.
+    naming more than five values cannot be packed here, and the corpus formats
+    that do — `<HHHHHH` (6), `<HHIQQQI` (7), `<IIQQQQQQ` (8), `<4sBBBBBBB5x`
+    (8) — return an empty list rather than a wrong answer WHEN SUPPLIED FIVE
+    VALUES, which is what every call site in the corpus does.
 
-    THE VALUE SLOTS ARE DEFAULTED, for the reason `pack_into` above gives and
-    for the same reason its own slots are: this ABI has no `*args`, so a
-    five-value signature is the only way to spell "up to five values", and a
-    REQUIRED slot turns the module's own common call into a refusal at the
-    CALL SITE. `struct.pack('<I', insn)` is 2 of 6 arguments and was refused
-    with "missing required argument 'v1'" — so every one-value pack in the
-    corpus (`formal/x86_64.py` alone has fifteen of them, `formal/macho.py` and
-    `formal/arm64.py` more) never reached this body at all, and `formal/` was
-    unbuildable behind one declaration. Zero is the right fill for a slot that
-    is not read: the loop below only touches `v0.._nvalues(fmt)-1`, exactly as
-    `pack_into` only touches its first three.
+    Two different refusals, and the difference is the interesting part. Handed
+    MORE values than the signature has slots — `pack("<IIQQQQQQ", 1, 2, 3, 4,
+    5, 6, 7, 8)`, nine arguments to six parameters — the CALL is refused by
+    the arity check against this signature, before the body is ever entered:
+
+        call pack(): too many positional arguments (9 for 6 parameter(s);
+        the parameters are ['fmt', 'v0', 'v1', 'v2', 'v3', 'v4']
+
+    So the ceiling is enforced twice over and at two different layers: the
+    signature stops the call, and the empty list is what this body answers when
+    the format asks for more values than the caller supplied. The earlier
+    version of this docstring listed `<IIQQQQQQ` among the formats that "return
+    an empty list" without saying that supplying all eight of its values never
+    reaches this function at all — which is true, and is the reason
+    `test_struct_formal.py`'s `test_the_eight_value_pack_is_refused_by_arity`
+    exists as its own case with its own expectation.
+
+    `pack_into` has no such limit for the corpus's formats: every `pack_into`
+    call site needs at most three values, and it reads its buffer from the
+    CALLER's frame, so the limit that bites is the value count and not where
+    the bytes come from.
     """
     total = calcsize(fmt)
     if total == 0:

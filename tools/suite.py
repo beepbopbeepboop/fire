@@ -2944,6 +2944,19 @@ BUCKETS = {
                # run, so being in `check` too costs nothing.
                'formal-dataclasses', 'formal-module-attr',
                'formal-os-backing',
+               # …and the two that arrived with the formal3 batch and were in
+               # NO bucket and NO `UNREGISTERED`, which is what the estate check
+               # in `suite-self-test` was reporting — and it is a FAIL on a test
+               # that is in `check`, so it was red in the everyday loop and not
+               # only in `make gate`. `formal-read-before-store` is a pure unit
+               # test of `model.read_before_store` against CPython (61 shapes, no
+               # builds); `formal-receiver-spelling` builds and runs three
+               # images. Both measured green one at a time before being named
+               # (10.9 s / 0.0 GB and 6.0 s / 0.1 GB), and both cost less than the
+               # four formal host-module suites already in this list. Registering
+               # rather than marking is the project's own rule; the bug doc that
+               # asked for it is deleted with this.
+              'formal-read-before-store', 'formal-receiver-spelling',
                # The ten the batch merge left unregistered, so `proofs` is
                # where the whole formal picture is and these were the ten
                # missing pieces of it. `formal-value-model` and

@@ -9870,12 +9870,17 @@ inside()
         broken.
 
         Both operand orders are in the program because the coercion is
-        applied to whichever side is unresolved. The merges are kept to
-        ONE application each: a second `|=` reorders the left operand's
-        keys, which is a separate runtime bug in `mojo_dict_update`
-        (RUNTIME_dict_update_discards_insertion_order.md, filed, verified
-        present with this change reverted) and is not what this test is
-        for."""
+        applied to whichever side is unresolved. Each field is merged
+        TWICE: `mojo_dict_update` used to walk the source's hash-slot
+        array, so the destination came out in slot order and the second
+        merge moved the pre-existing key behind the new one — every key
+        and value correct, only the order wrong. That is fixed (the walk
+        goes through `mojo_dict_order_indices`, as repr and iteration
+        already did) and the coverage is here rather than in a test of
+        its own: `test_runtime_diff.py`'s
+        `dict_update_preserves_insertion_order` is where the ordering
+        guarantee is pinned against CPython, and this shape keeps the
+        coercion honest when it is the SECOND merge that would reorder."""
         global _PASS, _FAIL
         name = "dict_union_right_operand_is_converted_at_runtime"
         src = '''\
@@ -9895,8 +9900,12 @@ class E:
 d = D()
 d.merge({'a': 1})
 print(d.data)
+d.merge({'b': 2})
+print(d.data)
 e = E()
 e.merge({'a': 1})
+print(e.data)
+e.merge({'b': 2})
 print(e.data)
 print({'p': 1} | {'q': 2})
 '''
