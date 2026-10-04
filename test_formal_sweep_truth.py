@@ -1206,6 +1206,21 @@ class TestLeanLauncher(unittest.TestCase):
         self.lean = _lean()
         if not self.lean:
             self.skipTest("lean not installed (see ./lean-toolchain)")
+        # The library has to be BUILT as well as the toolchain present.  Lean is
+        # on the machine and `lib/ProofLib.olean` is not, so every `#print
+        # axioms` this class asks comes back with an error, `theorem_axiom_census`
+        # records `answered = 0` for every module, and the first assertion below
+        # fails with "Lean answered for 0 of 7 theorems" — a red about a
+        # precondition, reported as a disagreement about the census.  Both
+        # halves are the same precondition and the other Lean class in this tree
+        # (`test_formal_call_proof_gen.py::TestLean`) already states it as one
+        # condition; this is that condition, so a worktree without the library
+        # skips loudly instead of failing.
+        if not os.path.isfile(os.path.join(HERE, "lib", "ProofLib.olean")):
+            self.skipTest("no lib/ProofLib.olean: run `make prooflib` (or "
+                          "`python3 tools/suite.py prooflib`) first -- every "
+                          "assertion in this class is about what LEAN says, and "
+                          "without the library it says nothing.")
         import tempfile
         self.dir = tempfile.mkdtemp(prefix="lean_bounds_")
         self.addCleanup(__import__("shutil").rmtree, self.dir, True)
@@ -1831,6 +1846,21 @@ class TestAxiomClosureCensus(unittest.TestCase):
         self.lean = _lean()
         if not self.lean:
             self.skipTest("lean not installed (see ./lean-toolchain)")
+        # The library has to be BUILT as well as the toolchain present.  Lean is
+        # on the machine and `lib/ProofLib.olean` is not, so every `#print
+        # axioms` this class asks comes back with an error, `theorem_axiom_census`
+        # records `answered = 0` for every module, and the first assertion below
+        # fails with "Lean answered for 0 of 7 theorems" — a red about a
+        # precondition, reported as a disagreement about the census.  Both
+        # halves are the same precondition and the other Lean class in this tree
+        # (`test_formal_call_proof_gen.py::TestLean`) already states it as one
+        # condition; this is that condition, so a worktree without the library
+        # skips loudly instead of failing.
+        if not os.path.isfile(os.path.join(HERE, "lib", "ProofLib.olean")):
+            self.skipTest("no lib/ProofLib.olean: run `make prooflib` (or "
+                          "`python3 tools/suite.py prooflib`) first -- every "
+                          "assertion in this class is about what LEAN says, and "
+                          "without the library it says nothing.")
 
     def test_the_closure_census_says_what_the_text_census_cannot(self):
         import time
