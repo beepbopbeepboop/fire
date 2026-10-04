@@ -5447,15 +5447,21 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # append each element by its OWN type. Numeric-only lists (incl. promoted
     # [1, 2.0]) keep the promoted list-wide suffix, so this never regresses
     # homogeneous lists.
-    lowered = [(el, *gen.lower_expr(el)) for el in node.elements]
+    # A `*spread` element lowers its OPERAND, not the `UnaryOp` wrapper: the
+    # wrapper is a dereference to `_lower_UnaryOp` (its pass-through whitelist
+    # covers the container types a spread usually operates on and not
+    # `char *`), so `(0, *a)` over a `str` produced the operand's FIRST
+    # CHARACTER — `*a` in C — and extended the tuple with `(MojoList *)'a'`.
+    # Inside a display a `*x` element never means a dereference, and the
+    # display is the only place that knows that.
+    lowered = [(el, *gen.lower_expr(el.operand if _is_star_spread(el) else el))
+               for el in node.elements]
 
-    def _is_spread(el, et):
-        # Only treat as spread if it's an explicit spread operator (*seq)
-        # Don't treat nested list literals [[...]] as spreads - those should append the list pointer
-        return isinstance(el, gimple_ctypes.UnaryOp) and el.op == '*'
-
+    # A `*seq` element EXTENDS rather than appends (see `_is_star_spread`), so
+    # it contributes no scalar suffix: a nested list literal [[...]] is not a
+    # spread — those should append the list pointer.
     scalar_sufs = {gimple_ctypes.TypeLattice.list_suffix(et)
-                   for el, et, _ev in lowered if not _is_spread(el, et)}
+                   for el, et, _ev in lowered if not _is_star_spread(el)}
     # A numeric mix is as much a mix as a string/non-string one. `[1, 2.5]`
     # used to append EVERY element through the list-wide 'double' suffix, so
     # the int 1 was stored as 1.0 and the literal printed `[1.0, 2.5]` and
@@ -5468,8 +5474,8 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
 
     for el, et, ev in lowered:
         # Spread element (*seq): extend the list instead of appending
-        if _is_spread(el, et):
-            gen._emit_call('void', '', 'mojo_list_extend', [('MojoList *', t), (et, ev)])
+        if _is_star_spread(el):
+            _emit_star_spread(gen, t, et, ev)
             # Track nested element type if extending with a list that has tracked elements
             # IMPORTANT: Keep _elem_types[t] as 'MojoList *' (what t contains),
             # and set _nested_elem_types[t] to what those lists contain
@@ -5529,7 +5535,7 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # which of the two it was. So a literal containing `None` records its
     # kinds however homogeneous it is; every other homogeneous kind keeps the
     # old no-side-table behaviour.
-    _kinds = ''.join(_list_literal_slot_kind(gen, el, et) for el, et, _ev in lowered)
+    _kinds = _literal_slot_kinds(gen, lowered)
     if _kinds and (len(set(_kinds)) > 1 or 'n' in _kinds):
         gen._emit_call('void', '', 'mojo_list_set_kinds',
                        [('MojoList *', t),
@@ -5575,6 +5581,86 @@ def _list_literal_slot_kind(gen, el, et) -> str:
             isinstance(el, gimple_ctypes.IdentExpr) and el.name == 'None'):
         return 'n'
     return gimple_ctypes.TypeLattice.slot_kind_byte(et)
+
+
+# `_lower_list_literal`'s spread test and `_lower_tuple_literal`'s identical
+# one, as ONE predicate, asked in the shared middle tier beside the other
+# AST-shape questions (`mojo.middle.types.is_star_spread`) — because a third
+# site needs the same answer and had been re-deriving it: `_infer_list_elem_type`
+# in `mojo/middle/resolve_shared.py`.
+
+
+def _is_star_spread(el) -> bool:
+    return gimple_ctypes.is_star_spread(el)
+
+
+def _emit_star_spread(gen, dest: str, et: str, ev: str) -> None:
+    """`dest.extend(*operand)` — the ONE emission of a `*seq` element of a list
+    or tuple display, shared by both lowerings.
+
+    Two things have to be right here and neither of them is the extend itself:
+
+    * A `char *` operand is a STRING spread, and `mojo_list_extend` is declared
+      to take a `MojoList *` — passing the string straight through read a list
+      header out of a `char *`, which is a SIGSEGV on `(0, *"ab")`.
+      `mojo_str_chars` is the runtime's own answer to "what does iterating this
+      string yield", already used by `mojo_iter_boxed_list` for `list(<a str>)`
+      and built on the same per-byte `mojo_cstr_slice` the codegen's own
+      `for c in s` loop uses, so the spread and the loop cannot disagree. No new
+      runtime entry point, and no second iterator.
+    * The operand is coerced to `MojoList *` rather than passed at its own
+      declared type: an UNANNOTATED parameter holding a list lowers to
+      `int64_t` (the box), and handing that to a `MojoList *` parameter is
+      `passing argument 2 ... makes pointer from integer without a cast` — a
+      hard build failure, measured on this compiler's own `mojo/middle/coro.py`.
+      Same argument and same helper as the `**` spread's operand in
+      `_lower_dict_literal` above.
+
+    The `mojo_str_chars` result goes through a temp rather than being nested
+    inside the `mojo_list_extend` call: a call as another call's argument is
+    not a GIMPLE operand this emitter can rely on.
+    """
+    if et == 'char *':
+        _chars = gen._new_temp('MojoList *')
+        gen._emit_call('MojoList *', _chars, 'mojo_str_chars', [('char *', ev)])
+        ev = _chars
+    else:
+        ev = gen._coerce_to_type(_as_str(et), 'MojoList *', ev)
+    gen._emit_call('void', '', 'mojo_list_extend',
+                   [('MojoList *', dest), ('MojoList *', ev)])
+
+
+def _literal_slot_kinds(gen, lowered) -> str:
+    """The per-slot kind string of a list/tuple LITERAL, in slot order.
+
+    ONE byte per slot is the runtime's invariant (`_KindRow.kinds`: "one byte
+    per slot, or NULL"), so the string may cover only slots whose RUNTIME index
+    this compile can name. A `*spread` element appends an unknown NUMBER of
+    slots (`mojo_list_extend` walks its operand), which makes every index from
+    the first spread onwards runtime-dependent — so the answer stops there and
+    the runtime's own documented fallback ("a slot the string does not cover
+    ... falls back to the int accessor") describes the rest.
+
+    Getting this wrong is a SEGFAULT rather than a wrong digit, which is the
+    whole of `bugs/CODEGEN_star_spread_in_a_list_or_tuple_display_segfaults.md`:
+    the spread contributed one byte carrying the SPREAD OPERAND's kind
+    (`MojoList *` -> `'l'`, the nested-list slot), so `[0, *a, 9]` recorded
+    `"ili"` — three bytes for a FOUR-slot list, every byte after the first
+    spread describing the wrong slot, and slot 1 (the integer 1 inside `a`)
+    rendered through `mojo_repr_list_kinds`'s `'l'` arm as `(MojoList *)1`.
+    Dropping the spread's own byte is NOT enough and would still crash: the
+    string would be `"il"` and `'l'` would have moved onto `a`'s first element
+    instead of `9`'s. Only stopping at the spread keeps every byte aligned.
+
+    Shared by the list and the tuple lowering, which are the same MojoList and
+    the same record.
+    """
+    out = []
+    for el, et, _ev in lowered:
+        if _is_star_spread(el):
+            break
+        out.append(_list_literal_slot_kind(gen, el, et))
+    return ''.join(out)
 
 
 # `gimple_exprtypes._dict_literal_spread_operand` — the discriminator lives in
@@ -5850,7 +5936,10 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # types feeding a later `for a, b in <list of these tuples>`).
     lowered = []
     for _le in node.elements:
-        _lres = gen.lower_expr(_le)
+        # The `*spread` OPERAND, not the UnaryOp wrapper — see
+        # `_lower_list_literal`'s identical line for why, and for what
+        # `(0, *a)` over a `str` used to lower to instead.
+        _lres = gen.lower_expr(_le.operand if _is_star_spread(_le) else _le)
         lowered.append((_le, _as_str(_lres[0]), _lres[1]))
     scalar_sufs = {gimple_ctypes.TypeLattice.list_suffix(et) for _el, et, _ev in lowered}
     # Any mix of suffixes (not just str-vs-other) needs per-element dispatch —
@@ -5864,8 +5953,7 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # the caller's destructuring needs to read them back as. Keyed on the
     # CTYPES, not the accessor, which is the same question asked properly.
     _slot_cts = [_as_str(_slt[1]) for _slt in lowered
-                 if not (isinstance(_slt[0], gimple_ctypes.UnaryOp)
-                         and _slt[0].op in ('*', '**'))]
+                 if not _is_star_spread(_slt[0])]
     per_element = len(scalar_sufs) > 1 or len(set(_slot_cts)) > 1
     # Record per-slot element types when elements are stored by their own
     # type — a later `for a, b in <list of these tuples>:` needs each
@@ -5874,8 +5962,7 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     if per_element:
         _slot_ts = []
         for _slt in lowered:
-            _sl_el = _slt[0]
-            if isinstance(_sl_el, gimple_ctypes.UnaryOp) and _sl_el.op == '*':
+            if _is_star_spread(_slt[0]):
                 continue
             _slot_ts.append(_as_str(_slt[1]))
         gen._tuple_slot_types[t] = _slot_ts
@@ -5890,9 +5977,9 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
         # callers unpack 3 ([el, et, ev]), reading garbage for et/ev (the
         # self-hosted compiled list-literal `[1, 2, 3]` emitted `_t3 = ;`
         # with raw-address type names). Mirrors _lower_list_literal's
-        # identical _is_spread handling.
-        if isinstance(_el, gimple_ctypes.UnaryOp) and _el.op == '*':
-            gen._emit_call('void', '', 'mojo_list_extend', [('MojoList *', t), (et, ev)])
+        # identical `_is_star_spread` handling.
+        if _is_star_spread(_el):
+            _emit_star_spread(gen, t, et, ev)
             continue
         use = gimple_ctypes.TypeLattice.list_suffix(et) if per_element else suf
         ev_cast = gen._cast_for_list(et, ev, use)
@@ -5969,8 +6056,7 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # strcmp'd them). `_lower_list_literal` has recorded this since it was
     # needed for the whole-result repr; a tuple is the same MojoList and
     # needed it for the same reasons plus these.
-    _tkinds = ''.join(_list_literal_slot_kind(gen, el, et)
-                      for el, et, _ev in lowered)
+    _tkinds = _literal_slot_kinds(gen, lowered)
     if _tkinds and len(set(_tkinds)) > 1:
         gen._emit_call('void', '', 'mojo_list_set_kinds',
                        [('MojoList *', t),

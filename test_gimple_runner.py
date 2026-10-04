@@ -1072,6 +1072,89 @@ def main():
     print(both(1, 2, z=3))
 """, "3\n201\n200\n3\n201\n")
 
+    # A `*seq` element of a list or tuple DISPLAY extends the container
+    # instead of occupying one slot, and it is the one place where a runtime
+    # slot COUNT meets a compile-time kinds string. Three separate mechanisms
+    # had to agree and none of them did, so `[0, *a, 9]` and `(0, *a)` both
+    # SIGSEGVed (exit -11, no output) on shapes ordinary Python writes:
+    #
+    #   * the per-slot KIND string counted the spread as one slot carrying the
+    #     OPERAND's kind — `'l'`, the nested-list slot — so `[0, *a, 9]`
+    #     recorded `"ili"` for a FOUR-slot list and slot 1 (the integer 1
+    #     inside `a`) was rendered through the nested-list arm as
+    #     `(MojoList *)1`, which reads a list header out of address 1;
+    #   * the element-type join did the same, so the literal looked
+    #     heterogeneous, no uniform repr reader was picked, and the generic
+    #     walker's "a zero slot is a boxed None" heuristic printed
+    #     `[None, 1, 2, 9]`;
+    #   * the operand of a `char *` spread was lowered through the
+    #     `UnaryOp` wrapper, which `_lower_UnaryOp` reads as a POINTER
+    #     DEREFERENCE (`_t2 = *a;` — the operand's first character), so
+    #     `(0, *"ab")` extended the tuple with `(MojoList *)'a'`.
+    #
+    # Asserted against CPython on BOTH pipeline modes, and the list case
+    # carries a string spread because that is the only shape whose element
+    # type is provable: iterating a `str` yields one-character strings.
+    test_gimple_matches_cpython("gimple_star_spread_in_a_list_display_extends", """\
+def mid(a: list) -> list:
+    return [0, *a, 9]
+
+def only(a: list) -> list:
+    return [*a]
+
+def literal(a: list) -> list:
+    return [0, *[1, 2], 9]
+
+def from_string(s: str) -> list:
+    return [*s]
+
+def main():
+    print(mid([1, 2]))
+    print(only(['x', 'y']))
+    print(literal([5]))
+    print(from_string('ab'))
+main()
+""")
+
+    test_gimple_matches_cpython("gimple_star_spread_in_a_tuple_display_extends", """\
+def mid(a: list) -> tuple:
+    return (0, *a)
+
+def only(a: list) -> tuple:
+    return (*a,)
+
+def main():
+    print(mid([1, 2]))
+    print(only(['x', 'y']))
+main()
+""")
+
+    # The third shape the same bug doc named: a `*args` CALL argument. There
+    # is no spread in the SOURCE here, so the loose arguments are packed once
+    # by `_emit_call`'s `'...'` sentinel arm, and the bug doc's evidence that
+    # they were "packed once as a tuple and then collected again" no longer
+    # holds on this tree — `a` really does hold `[1, 2]`. Asserted through
+    # `len(a)` and `sorted(a)` rather than through the printed tuple, because
+    # the tuple bracket itself comes from `_mojo_repr_pair`'s "any registered
+    # two-element list is a runtime-built pair" heuristic, which is a separate
+    # bug with its own cause (see bugs/CODEGEN_a_registered_two_element_list_
+    # is_not_always_a_pair.md) and must not be what pins the vararg packing.
+    # `fwd` forwards its own `*a`/`**k`, which is the other direction of the
+    # same contract, and `g()` with nothing is the empty-pack case.
+    test_gimple_matches_cpython("gimple_call_star_args_collects_loose_arguments_once", """\
+def g(*a, **k):
+    return len(a), sorted(a), len(k)
+
+def fwd(*a, **k):
+    return g(*a, **k)
+
+def main():
+    print(g(1, 2, x=3))
+    print(fwd(4, 5, y=6))
+    print(g())
+main()
+""")
+
     # 10a3. Heterogeneous stack drained with .pop(), each popped value
     # discriminated with `isinstance(top, tuple)`. `isinstance(x, tuple)`
     # had no real lowering (fell through to an always-false runtime stub),

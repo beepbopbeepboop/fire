@@ -922,14 +922,61 @@ def _infer_list_elem_type(gen, elements: list) -> str:
     """Determine element C type for a list/set/tuple literal."""
     if not elements:
         return 'int64_t'
+    # A `*spread` element is EXTENDED into the literal (`mojo_list_extend`),
+    # not stored in it, so the operand's own CONTAINER type is not evidence
+    # about the slots it contributes: iterating a `list[int]` yields ints and
+    # iterating a `list[str]` yields strings, from operands of the same
+    # `MojoList *` shape. Letting it in was measurable — `[0, *a, 9]` joined
+    # `int` with the operand's `MojoList *`, so the literal looked
+    # heterogeneous, `_list_repr_fn` refused a uniform reader, the generic
+    # walker ran, and its "a zero slot is a boxed None" heuristic printed
+    # `[None, 1, 2, 9]` where CPython prints `[0, 1, 2, 9]`.
+    #
+    # What the spread DOES contribute is the ELEMENT type of its operand, under
+    # the one rule that keeps every branch honest:
+    #
+    #   * A `char *` operand is provable: iterating a string yields
+    #     one-character STRINGS, whatever else the literal holds. So
+    #     `[*"ab"]` is a list of strings and `(0, *"ab")` is a tuple whose
+    #     first slot is an int — evidence either way.
+    #   * A container operand is only evidence when it is the literal's ONLY
+    #     evidence, because otherwise the literal is genuinely heterogeneous
+    #     (`[0, *a, 9]` over a list of strings is `[0, 'x', 9]`) and no single
+    #     container-wide type describes it. `[*a]` is that case: the literal is
+    #     nothing but the spread, so the operand's element type is the whole
+    #     answer.
+    #
+    # An unknown operand answers nothing, which leaves the `int64_t` storage
+    # default — the same answer an empty literal takes, for the same reason.
+    _spread_types = []
+    for _e in elements:
+        if not gimple_ctypes.is_star_spread(_e):
+            continue
+        _op = getattr(_e, 'operand', None)
+        if not isinstance(_op, gimple_ctypes.IdentExpr):
+            continue
+        if gen._quick_type(_op) == 'char *':
+            _spread_types.append('char *')
+            continue
+        _oe = gen._elem_types.get(_as_str(_op.name))
+        if _oe:
+            _spread_types.append(_oe)
+    stored = [e for e in elements if not gimple_ctypes.is_star_spread(e)]
+    if not stored:
+        return gimple_ctypes.TypeLattice.join_all(_spread_types) if _spread_types else 'int64_t'
     # Explicit loop (NOT a comprehension): the self-hosted compiler has no
     # lowering for `[f(x) for x in lst]` over a runtime MojoList (the
     # comprehension emits a no-op, leaving `types` NULL -> join_all(NULL)
     # segfault). List comprehension lowering only works for a small
     # hardcoded set of shapes.
     types = []
-    for _e in elements:
+    for _e in stored:
         types.append(gen._quick_type(_e))
+    if _spread_types and gimple_ctypes.TypeLattice.join_all(_spread_types) == 'char *':
+        # A string spread beside non-string slots of its own: the join is
+        # `char *`, and `_lower_list_literal` answers that by appending EACH
+        # element by its own type (`per_element`), so the ints stay ints.
+        types = types + ['char *']
     _joined = gimple_ctypes.TypeLattice.join_all(types) if types else 'int64_t'
     # A HETEROGENEOUS literal is not a string list. `TypeLattice.join`
     # short-circuits to `char *` whenever either side is `char *`, which is
@@ -968,7 +1015,7 @@ def _infer_list_elem_type(gen, elements: list) -> str:
     # answers `_Bool`: a mixed one joins exactly as before, because
     # `TypeLattice.join` widens `_Bool` to `int` and a genuine 0/1 int must
     # keep printing as one.
-    for _e in elements:
+    for _e in stored:
         if not gimple_exprtypes.is_python_bool_expr(gen, _e):
             return gimple_ctypes.TypeLattice.join_all(types) if types else 'int64_t'
     return '_Bool'
