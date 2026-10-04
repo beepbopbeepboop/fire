@@ -212,12 +212,11 @@ Two things the implementation had to answer that the doc did not ask about:
   * **A `0` receiver is a `0` and a `0` other view changes nothing**, which is
     CPython's rule for updating from an absent mapping.
 
-What is left in §3 is `environb`, `popitem`, the exported slot and the bare
-value read. `popitem` joins `setdefault` as a genuine two-word limit (it must
-hand back a key AND a value, and this path returns one thing per call), and
-`environb` is a NAME over the same blob rather than a second representation —
-`str` and `bytes` are both a `char *` here — which is why it is not simply
-added. **And the row's own verdict still does not move: 4 files off the
+What is left in §3 was `environb`, `popitem`, the exported slot and the bare
+value read. **`popitem` was here and is WRONG (2026-10-04,
+`work/formal19-4`) — see the Status at the head** — so what is left is
+`environb`, the exported slot and the bare value read. **And the row's own
+verdict still does not move: 4 files off the
 `os.environ` refusal and 0 to `pass`.**
 
 ## 5. The one thing here that is not the environment

@@ -10890,94 +10890,357 @@ def _lower_dialect_select(functions: list) -> int:
             continue
         bools = _declared_bool_locals(fn)
         count = [0]
-        _lower_dialect_select_in(body, bools, count)
+        _rewrite_dialect_in(
+            body, lambda node: _dialect_select_replacement(node, bools), count)
         done += count[0]
     return done
+
+
+def _declared_annotations(fn) -> dict:
+    """`{name: annotation or None}` for the names ONE function declares a type
+    for — its parameters and its annotated locals.
+
+    The one reader of "what does this function DECLARE", because two readers of
+    one function's declarations is two answers that can drift: `_declared_bool_
+    locals` reads them to ask which names are `Bool`, and `_lower_dialect_arith`
+    reads them to ask what a dialect operation's operand holds, and a program
+    lowered by one while the other disagreed would be a program lowered on half
+    the evidence.
+
+    A name bound TWICE with disagreeing annotations maps to None — "claims
+    nothing" rather than "the first one wins" — because a rewrite would act on
+    whichever value the register holds, and a program whose `flag` is a `Bool`
+    on one path and a `String` on another has no single lowering. The same rule
+    `model.struct_field_declared_type` applies to a field declared twice, and
+    for the same reason.
+
+    **A name already in the table keeps its FIRST answer**, including when that
+    answer is "no annotation". An unannotated parameter shadowed by
+    `var x: Bool` in the body therefore claims nothing, which is the
+    conservative reading and the one the `pop.select` lowering had before this
+    function existed. Widening it would be defensible — the only annotation says
+    `Bool` — and it is deliberately NOT done here: a reader consolidated out of
+    a working one should not move a verdict, and a widening belongs in its own
+    change with its own measurement.
+    """
+    declared: dict = {}
+    ambiguous = set()
+    shape = M.function_param_shape(fn)
+    for pname, ann in shape.fixed:
+        if pname.startswith("*") or pname.startswith("**"):
+            continue
+        declared[pname] = ann
+    for node in M.iter_nodes(getattr(fn, "body", None) or []):
+        ann = getattr(node, "type_ann", None)
+        target = getattr(node, "target", None)
+        if ann is None or not isinstance(target, F.IdentExpr):
+            continue
+        if target.name in declared:
+            if declared[target.name] != ann:
+                ambiguous.add(target.name)
+            continue
+        declared[target.name] = ann
+    for name in ambiguous:
+        declared[name] = None
+    return declared
 
 
 def _declared_bool_locals(fn) -> set:
     """The names `fn` declares as a `Bool`: parameters, annotated locals, and
     an annotated `self` field is NOT included.
 
-    Read from the AST once per function, beside the rewrite, because the rewrite
-    is the only thing that needs it and a second reader of "what does this
-    function declare" is a second answer to it. A name bound twice with
-    disagreeing annotations is left OUT rather than claimed: the rewrite would
-    test whichever value the register holds, and a program whose `flag` is a
-    `Bool` on one path and a `String` on another has no single lowering.
+    `annotation_is_bool` over `_declared_annotations`, so this asks the same
+    question of the same table every other declaration reader asks. The
+    receiver is not in the answer because a receiver parameter carries no
+    annotation — `self` is `self`, not `self: Bool` — and a `self` FIELD
+    annotated `Bool` is a different question, which `pop.select`'s guard does
+    not ask.
     """
-    declared: dict = {}
-    for p in (getattr(fn, "params", None) or []):
-        if isinstance(p, (tuple, list)) and p and isinstance(p[0], str):
-            declared[p[0]] = p[1] if len(p) > 1 else None
-    for node in M.iter_nodes(getattr(fn, "body", None) or []):
-        ann = getattr(node, "type_ann", None)
-        target = getattr(node, "target", None)
-        if ann is None or not isinstance(target, F.IdentExpr):
+    return {name for name, ann in _declared_annotations(fn).items()
+            if M.annotation_is_bool(ann, FT.BOOL_TYPE_NAMES)}
+
+
+def _unit_field_annotations(structs_by_name: dict) -> dict:
+    """`{field name: its declared annotation}` over the structs of ONE unit.
+
+    Keyed on the field alone and not on `(struct, field)`, because the reader it
+    serves — `model.mlir_operand_declared_type` reading `self._mlir_value` —
+    has no OWNER to resolve: a field name exactly ONE struct of this unit
+    declares has the same type wherever it is read, and a name two structs
+    declare differently has no single answer and is DROPPED. That is the same
+    agree-or-refuse rule `model.struct_field_declared_type` and
+    `_declared_annotations` apply one level down, and it is why the arithmetic
+    lowering needs no dispatch table and cannot pick one struct's declaration
+    over another's.
+
+    A field two structs declare with the SAME annotation is kept, because there
+    is one answer to it and dropping it would refuse a program whose two
+    structs agree.
+    """
+    out: dict = {}
+    conflicting = set()
+    for st in (structs_by_name or {}).values():
+        for field in M.struct_fields(st):
+            name = M.struct_field_name(field)
+            if not isinstance(name, str):
+                continue
+            base, ann, _why, declared = M.struct_field_declared_type(st, name)
+            if not declared or not isinstance(ann, str) or not ann.strip():
+                continue
+            if name in out and out[name] != ann:
+                conflicting.add(name)
+            out[name] = ann
+    for name in conflicting:
+        out.pop(name, None)
+    return out
+
+
+def _lower_dialect_arith(functions: list, structs_by_name: dict = None) -> int:
+    """Rewrite the dialect ARITHMETIC whose operand is declared a word.
+
+    Returns the number of sites rewritten.
+
+    A source-to-source rewrite in the SHARED pipeline, beside
+    `_lower_dialect_select` and for exactly its reasons: an `index.add` is a
+    construct both backends would otherwise have to be taught separately, and
+    the failure mode this module's design exists to prevent is the two
+    architectures answering one question differently. What it becomes is the
+    ORDINARY spelling — `+`, `-`, `//`, `&`, `>>`, `==` — which both emitters
+    already emit, through `common_type`, `cmp_signed` and
+    `model.shift_signedness`, so this pass adds no instruction selection at all
+    and cannot drift from it.
+
+    **The operand's DECLARED type is the whole of the gate**, and that is the
+    answer to the question
+    `bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md` §
+    Correction raised: the operation's name settles elementWISE-ness and never
+    settles word-or-N-lanes, so a table keyed on the name would have been RIGHT
+    for the corpus's 9 word-typed sites and WRONG for the 26 that are a
+    `!kgen.simd<…>` — a scalar add of two vector-typed words, which is a
+    plausible-looking number rather than a refusal. `model.mlir_operand_declared_
+    type` reads the type off the source's own declarations and answers None for
+    every shape nothing in the source states, so `std/simd.mojo`'s
+    `Self._mlir_type` ALIAS — which resolves to a vector and is how all 22 of
+    its sites are spelled — is refused rather than answered.
+
+    Three gates, all decidable from the call:
+
+      * the operation is in `model.MLIR_WORD_ARITH_OPS` or `model.MLIR_CMP_OPS`,
+        keyed on the WHOLE dialect name (`index.add` is not `pop.add`);
+      * a bracket names nothing this path cannot read — a comparison's bracket
+        must carry a `pred=` this path has in `model.MLIR_CMP_PRED_OPS`, and any
+        other operation carrying a bracket is left alone because the bracket is
+        naming a result type;
+      * every operand is DECLARED a word (`model.mlir_type_kind(...) ==
+        "word"`). One operand unestablished refuses the call, because an
+        elementwise operation's two operands have the same element type and a
+        table that checked only the first would answer a call whose second
+        operand is the vector.
+    """
+    fields = _unit_field_annotations(structs_by_name)
+    struct_names = set(structs_by_name or {})
+    done = 0
+    for fn in functions:
+        body = getattr(fn, "body", None)
+        if not isinstance(body, list):
             continue
-        prev = declared.get(target.name, None)
-        if prev is not None and prev != ann:
-            declared[target.name] = None      # disagreement: claim nothing
-            declared.setdefault("__ambiguous__", set()).add(target.name)
-        elif target.name not in declared:
-            declared[target.name] = ann
-    ambiguous = declared.pop("__ambiguous__", set())
-    return {name for name, ann in declared.items()
-            if name not in ambiguous
-            and M.annotation_is_bool(ann, FT.BOOL_TYPE_NAMES)}
+        ctx = _dialect_operand_types(fn, fields, struct_names)
+        count = [0]
+        _rewrite_dialect_in(body, lambda node: _dialect_arith_replacement(node,
+                                                                         ctx),
+                            count)
+        done += count[0]
+    return done
 
 
-def _lower_dialect_select_in(node, bools: set, count: list):
-    """The walk, in place. Returns a replacement node for `node`, or None.
+def _dialect_operand_types(fn, fields: dict, struct_names=()) -> dict:
+    """`{name: annotation or None}` — what a dialect OPERAND can be read from.
 
-    The same two-shaped replacement problem `_fold_target_queries_in` documents:
-    a list element has to be replaced through its parent and a single-attribute
-    child through `setattr`, so one walk serves both and the count comes back
-    through a box.
+    `_declared_annotations` plus the receiver spellings, which carry no
+    annotation of their own (`self` is `self`) but are the base of the
+    `self.<field>` operand six of the corpus's nine word-typed sites are written
+    in. Present-with-None rather than absent, because
+    `model.mlir_operand_declared_type` asks "does this function bind this name"
+    and "what is it declared as" as two different questions about the same
+    table.
+
+    `struct_names` and `fields` travel in the same dict under their own keys
+    because `model.mlir_operand_declared_type` needs all three and threading a
+    fourth argument through both of its call sites would be the only place in
+    this file where a reader of a declaration takes four parameters.
     """
-    if isinstance(node, (list, tuple)):
-        out = []
-        changed = isinstance(node, tuple)
-        for i, child in enumerate(node):
-            repl = _lower_dialect_select_in(child, bools, count)
+    ctx = _declared_annotations(fn)
+    receiver = M.method_receiver_name(fn)
+    for spelling in M.MLIR_SELF_TYPE_NAMES:
+        ctx.setdefault(spelling, None)
+    if receiver:
+        ctx.setdefault(receiver, None)
+    ctx["__fields__"] = fields
+    ctx["__structs__"] = set(struct_names or ())
+    return ctx
+
+
+# The child-rewriting walk the two dialect passes share, and the answer that
+# means "leave this node whole AND do not descend into it". A private sentinel
+# rather than None, because None already means "leave it and descend" and a
+# walk that conflated the two would rewrite the inside of a construct whose
+# shape it has just decided it cannot answer.
+_KEEP_WHOLE = object()
+
+
+def _rewrite_dialect_in(node, rewrite, count):
+    """The child-rewriting walk, in place. Returns a replacement, or None.
+
+    `rewrite(child)` answers with the node `child` becomes, `None` to leave it
+    and descend into it, or `_KEEP_WHOLE` to leave it AND not descend — the
+    third is what `_fold_target_queries` needs for a dialect template this
+    build cannot answer, and this walk carries it so the two dialect passes do
+    not each grow their own.
+
+    **The rule that is the whole of why this is one function: a LIST is mutated
+    in place and NEVER returned.** A list's elements are assignable, so the
+    caller has nothing to do; a tuple's are not, so a tuple with a replaced
+    element comes back as a list and the slot it was read from takes it. Both
+    of the dialect walks this replaced had `changed = isinstance(node, tuple)`
+    and then set `changed = True` inside the loop, so a LIST with a replaced
+    element returned the EMPTY `out` — and a list that is itself an ELEMENT of
+    another list has its parent's `node[i] = repl` fire on that empty list.
+    Measured, on this tree, on `Idx(tag=0, v=__mlir_op.`index.add`(self.v,
+    rhs.v))`: the call's `kwargs` became `[['tag', IntLiteral], []]` and the
+    build died in `model.struct_construction_plan` with `not enough values to
+    unpack (expected 2, got 0)` — a crash, out of a rewrite whose whole subject
+    is an arithmetic operation.
+
+    It was latent in the select pass it replaced (`_lower_dialect_select_in`)
+    and unreachable there, because the only construct that pass replaces is a
+    `CallExpr` and a `CallExpr` in argument position is reached through its
+    callee's `args` — a dataclass field, whose result the caller discards. It
+    becomes reachable the moment a second pass exists whose replacement can sit
+    in a nested list.
+
+    `_fold_target_queries_in` is a THIRD copy of this shape and is deliberately
+    left as it is: it already had the correct list rule, and its per-shape
+    template handling (`M.is_mlir_template` keeps an unanswerable one WHOLE in
+    list position but descends into it in field position) is a decision about
+    the dialect templates rather than about the walk. The shared rule lives
+    here so the next pass does not write a fourth copy of the bug.
+    """
+    if isinstance(node, dict):
+        for key, child in list(node.items()):
+            repl = rewrite(child)
+            if repl is _KEEP_WHOLE:
+                continue
             if repl is not None:
-                changed = True
-            if isinstance(node, list):
-                if repl is not None:
-                    node[i] = repl
+                node[key] = repl
             else:
-                out.append(child if repl is None else repl)
+                _rewrite_dialect_in(child, rewrite, count)
+        return None
+    if isinstance(node, list):
+        for i, child in enumerate(node):
+            repl = _rewrite_dialect_in(child, rewrite, count)
+            if repl is not None and repl is not _KEEP_WHOLE:
+                node[i] = repl
+        return None
+    if isinstance(node, tuple):
+        out = []
+        changed = False
+        for child in node:
+            repl = _rewrite_dialect_in(child, rewrite, count)
+            if repl is None or repl is _KEEP_WHOLE:
+                out.append(child)
+            else:
+                changed = True
+                out.append(repl)
         return out if changed else None
     if node is None or isinstance(node, (str, int, float, bool)):
         return None
-    repl = _dialect_select_replacement(node, bools)
+    repl = rewrite(node)
+    if repl is _KEEP_WHOLE:
+        return None
     if repl is not None:
         count[0] += 1
         # Keep descending into what this node BECAME. The walk is pre-order, so
-        # the select is reached before the `__mlir_bool__()` inside its own
+        # a `pop.select` is reached before the `__mlir_bool__()` inside its own
         # condition — and returning the replacement without walking it left that
         # call in the tree, which the emitter then refused with the very message
-        # this pass exists to make unnecessary. One line, and the shape is the
-        # same one `_fold_target_queries_in` handles by not descending into a
-        # query it FOLDED (there the subtree is gone; here it is the program).
+        # the select pass exists to make unnecessary. The shape
+        # `_fold_target_queries_in` handles by not descending into a query it
+        # FOLDED is not available here: there the subtree is gone, here it is
+        # the program.
         for name in getattr(repl, "__dataclass_fields__", {}):
             child = getattr(repl, name)
             if child is None or isinstance(child, (str, int, float, bool)):
                 continue
-            got = _lower_dialect_select_in(child, bools, count)
+            got = _rewrite_dialect_in(child, rewrite, count)
             if got is not None:
                 setattr(repl, name, got)
         return repl
     for name in getattr(node, "__dataclass_fields__", {}):
         child = getattr(node, name)
-        if isinstance(child, (list, tuple)):
-            _lower_dialect_select_in(child, bools, count)
-        elif child is not None and not isinstance(child, (str, int, float,
-                                                          bool)):
-            got = _lower_dialect_select_in(child, bools, count)
-            if got is not None:
-                setattr(node, name, got)
+        if child is None or isinstance(child, (str, int, float, bool)):
+            continue
+        got = _rewrite_dialect_in(child, rewrite, count)
+        if got is not None:
+            setattr(node, name, got)
     return None
+
+
+def _dialect_arith_replacement(node, ctx: dict):
+    """The node `node` becomes, or None when this pass does not answer it.
+
+    TWO shapes and a set of operations that are deliberately not answered:
+
+      * `__mlir_op.`index.add`(a, b)` — `a + b`, from
+        `model.MLIR_WORD_ARITH_OPS`, over two positional arguments with no
+        keyword arguments and NO bracket;
+      * `__mlir_op.`index.cmp`[pred=…](a, b)` — `a == b`, over the same two
+        arguments with a bracket whose `pred=` this path has in
+        `model.MLIR_CMP_PRED_OPS`;
+      * `pop.neg` — `-a`, the one unary the table carries.
+      * `pop.floor`, `pop.max`, `pop.floordiv`, `pop.div` — NOT answered even
+        with a word operand, each for the reason `model.MLIR_WORD_ARITH_OPS`'s
+        own comment states: floor division is the other semantics from this
+        path's `//` (measured), a saturating or NaN-aware `pop.max` is not
+        `a if a > b else b`, and `pop.div` does not say which division it is.
+        `model.mlir_operand_clause` is what tells the reader so at the site.
+
+    The BRACKET gate is the safety argument for the comparison half and the
+    reason the arithmetic half refuses a bracketed call outright: a bracket on
+    an operation this table does not know is naming a result TYPE, which is a
+    dialect object, and answering the operation while ignoring that would be
+    the name-keyed table § Correction is about.
+    """
+    if not isinstance(node, F.CallExpr):
+        return None
+    op = M.mlir_dialect_op_name(node.func)
+    if op is None or node.kwargs:
+        return None
+    bracket = node.func if isinstance(node.func, F.SubscriptExpr) else None
+    args = node.args
+    unary = False
+    if op in M.MLIR_CMP_OPS:
+        symbol = M.mlir_cmp_predicate_op(bracket)
+        if symbol is None or len(args) != 2:
+            return None
+    else:
+        shape = M.MLIR_WORD_ARITH_OPS.get(op)
+        if shape is None or bracket is not None:
+            return None
+        arity, symbol = shape
+        unary = arity == "unary"
+        if len(args) != (1 if unary else 2):
+            return None
+    fields = ctx.get("__fields__", {})
+    structs = ctx.get("__structs__", ())
+    spelled = [M.mlir_operand_declared_type(a, ctx, fields, structs)
+               for a in args]
+    if not spelled or any(M.mlir_type_kind(s) != "word" for s in spelled):
+        return None
+    line, col = getattr(node, "line", 0), getattr(node, "col", 0)
+    if unary:
+        return F.UnaryOp(op=symbol, operand=args[0], line=line, col=col)
+    return F.BinaryOp(op=symbol, left=args[0], right=args[1],
+                      line=line, col=col)
 
 
 def _dialect_select_replacement(node, bools: set):
@@ -11655,9 +11918,17 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
     # would build the same three dicts a hundred times (measured as a kill at
     # the memory ceiling on `test_formal_os.py`'s `dirs` group).
     _by_name, by_module, forwarded = M.dylib_export_tables(link_line)
+    # The unit's field annotations, ONCE, for the same reason as the three
+    # tables above: `model.mlir_operand_declared_type` reads `self.<field>`
+    # through it and a file with a hundred functions would build the same table
+    # a hundred times. Shared with `_lower_dialect_arith` through
+    # `_unit_field_annotations` rather than read twice, so a field name two
+    # structs declare differently is dropped by ONE rule and not by two.
+    unit_fields = _unit_field_annotations(structs_by_name)
     unstored: list = []
     for fn in functions:
         shape = M.function_param_shape(fn)
+        dialect_ctx = _dialect_operand_types(fn, unit_fields, struct_names)
         placed = {n for n, _t in shape.fixed}
         placed |= {shape.vararg, shape.kwarg}
         placed.discard(None)
@@ -12006,6 +12277,33 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # operations that denote three different things — see
         # `model.mlir_dialect_op_refusal`.
         dialect_ops = {}
+        # The DECLARED TYPE of each dialect operation's first operand, keyed on
+        # the same root identity and for the same reason — and gathered in a
+        # SEPARATE pre-pass because `iter_nodes` has no parent: the callee and
+        # the call that carries its arguments are two nodes, so the arguments
+        # have to be collected before the loop that keys them.
+        #
+        # It changes no verdict and no class. It exists so the message can
+        # report a type this build ESTABLISHED rather than claim it has no way
+        # to establish one, which is the false-diagnostic disease
+        # `model.mlir_dialect_op_refusal` is arranged around — at a site whose
+        # operand is declared `!kgen.simd<4, ui32>` the sentence "this path has
+        # no lowering table that establishes the operand type" is untrue, and
+        # so is its opposite at a site whose operand is a word the arithmetic
+        # table simply does not carry.
+        dialect_operands = {}
+        for call in M.iter_nodes(fn.body):
+            if not isinstance(call, F.CallExpr) or not call.args:
+                continue
+            if M.mlir_dialect_op_name(call.func) is None:
+                continue
+            root = call.func
+            while isinstance(root, (F.MemberExpr, F.SubscriptExpr)):
+                root = root.obj
+            if not isinstance(root, F.IdentExpr):
+                continue
+            dialect_operands.setdefault(id(root), M.mlir_operand_declared_type(
+                call.args[0], dialect_ctx, unit_fields, struct_names))
         for sub in M.iter_nodes(fn.body):
             if isinstance(sub, F.IdentExpr):
                 # `exempt_roots` is the OTHER half of the rule the arm below
@@ -12022,8 +12320,9 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         and not effects_lowered \
                         and sub.name.startswith(M.MLIR_DIALECT_PREFIX):
                     first_mlir = bracketed.get(id(sub)) \
-                        or M.mlir_dialect_refusal(sub.name,
-                                                  dialect_ops.get(id(sub)))
+                        or M.mlir_dialect_refusal(
+                            sub.name, dialect_ops.get(id(sub)),
+                            dialect_operands.get(id(sub)))
 
                 continue
             if not isinstance(sub, (F.SubscriptExpr, F.MemberExpr)):
@@ -12639,7 +12938,9 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # which is what the comment at `first_mlir` says about asking
                 # the same question twice and is the reason this arm exists at
                 # all rather than being the only one.
-                why = M.mlir_dialect_refusal(name, dialect_ops.get(id(node)))
+                why = M.mlir_dialect_refusal(name,
+                                             dialect_ops.get(id(node)),
+                                             dialect_operands.get(id(node)))
                 raise CodegenError(f"{fn.name}: {why}" if fn.name else why)
             gslot = M.module_slot(name)
             if gslot is not None:
@@ -12652,7 +12953,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 why = M.static_initializer_refusal_reason(gslot)
                 if why is not None:
                     raise CodegenError(
-                        M.global_value_refusal(name, fn.name, why))
+                        M.global_value_refusal(name, fn.name, why, gslot))
                 # The other half of the same discipline, and it is a different
                 # question: a slot the MODULE BODY fills has an initializer that
                 # RUNS rather than one the linker lays out, so "has an
@@ -14141,6 +14442,17 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # would otherwise refuse `pop.select` by name — and that pre-pass runs in
     # `_run_late_checks`, below.
     _lower_dialect_select(functions)
+    # …and a dialect ARITHMETIC whose operand is DECLARED a word, which is the
+    # same kind of rewrite for the same reason and sits beside the select
+    # because the two are INDEPENDENT: this one reads each operand's declared
+    # type and replaces the operation with the ordinary spelling, that one
+    # reads a `Bool`-declared condition and replaces the operation with a
+    # `TernaryExpr`. Neither walks into the other's output. It must also run
+    # before `check_module_symbols`, whose MLIR pre-pass would refuse the
+    # operation by name — and that pre-pass reads the same declared type, so
+    # the message it prints for the sites this one declined is the operand's own
+    # spelling rather than a claim that it has no way to establish one.
+    _lower_dialect_arith(functions, structs_by_name)
     # LAST, on the FINAL function list: which local names hold a frame
     # address is a property of the code that survives every rewrite above, and
     # a lifted lambda or a flattened closure is a function with its own locals

@@ -843,6 +843,7 @@ from os import environ, environ_count, environ_key, environ_value
 from os import environ_find, environ_get, environ_get_or, environ_has
 from os import environ_set, environ_del, environ_items, environ_keys
 from os import environ_copy, environ_pop, environ_clear, environ_update
+from os import environ_popitem, environ_pair_free
 from os import environ_free, getenv, putenv
 from os._syscalls import str_replace_all
 
@@ -929,6 +930,55 @@ def main(n):
     printf("pop-absent [%s]@@", show(environ_pop(e3, "FORMAL_ENV_VIEW_PROBE",
                                                 "dflt")))
     printf("pop-absent-count %d@@", environ_count(e3))
+    # ── popitem(): an ARBITRARY pair, as ONE blob ──
+    # On a view the program BUILDS ITSELF from three known pairs, and that is the
+    # whole reason: "which pair" is only decidable if the view's ORDER is known,
+    # and a fresh `environ()` is a snapshot of a process environment the test
+    # harness composed (`ENV_VIEW_ENV` plus whatever `putenv` added, and the
+    # `…_LATE` above is one such) while `e3`'s order has been edited twice by the
+    # removals above — `environ_del` shifts the LAST pair into the hole, which
+    # `environ_pop`'s own docstring calls a recorded divergence rather than an
+    # omission. A cleared view with three `environ_set` calls in it has neither
+    # problem: the order is the three stores in that order, on both
+    # architectures.
+    #
+    # Four things are being said at once, and the first is the point of the
+    # function existing: the answer is ONE word — a blob's address — carrying
+    # BOTH halves of the pair, which is what
+    # `bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md` §4 called
+    # "a genuine two-word limit" and is not. The second is that the count word
+    # says how many elements the blob has, so a caller reads it by subscript
+    # rather than trusting a convention. The third is that the removal happened:
+    # the view is one pair shorter and `getenv` no longer sees the variable,
+    # because CPython's `popitem` unsets it. The fourth is that the pair
+    # OUTLIVES the view entry it came from — a copy, not the alias `environ_pop`
+    # shows it must not be — and that it is released by its own release function.
+    # `pair` is ANNOTATED, and that is not incidental: a subscript through an
+    # unannotated word cannot read a buffer, which is the refusal this block
+    # first hit and which `re.escape`'s own docstring records being measured
+    # three ways.
+    var ep = environ_copy(e3)
+    environ_clear(ep)
+    ep = environ_set(ep, "FORMAL_ENV_VIEW_TAIL", "last")
+    ep = environ_set(ep, "FORMAL_ENV_VIEW_SPACE", "two words")
+    ep = environ_set(ep, "FORMAL_ENV_VIEW_EQUALS", "a=b=c")
+    var epn = environ_count(ep)
+    var pair: Pointer[Int64] = environ_popitem(ep)
+    printf("popitem-before %d@@", epn)
+    printf("popitem-n %d@@", pair[0])
+    printf("popitem-key [%s]@@", show(pair[1]))
+    printf("popitem-value [%s]@@", show(pair[2]))
+    printf("popitem-after %d@@", environ_count(ep))
+    printf("popitem-getenv [%s]@@", show(getenv(pair[1])))
+    printf("popitem-free %d@@", environ_pair_free(pair))
+    printf("popitem-free-null %d@@", environ_pair_free(0))
+    # An EMPTY view has no pair, and CPython raises KeyError for it: 0 is the
+    # answer and a blob is never 0 on success, so `pair != 0` is the test.
+    var eq = environ_copy(e3)
+    environ_clear(eq)
+    printf("popitem-empty %d@@", environ_popitem(eq))
+    printf("popitem-null %d@@", environ_popitem(0))
+    printf("popitem-empty-free %d@@", environ_free(eq))
     # ── update(other): every pair of the other view, in ONE call ──
     # Two views, both copies, so the rest of this program still has `e3`: the
     # receiver carries what `e3` carries and the other view changes ONE value
@@ -1055,6 +1105,62 @@ def _update_oracle():
     }
 
 
+def _popitem_oracle(items):
+    """CPython's answers for the `popitem` block of `ENV_VIEW_PROGRAM`.
+
+    **The one row that cannot be derived from `items` alone is the KEY**, and
+    that is the honest answer rather than a missing one: CPython's `popitem` is
+    documented as "remove and return an arbitrary (key, value) pair" and is LIFO
+    since 3.7, so an oracle can only be written by RUNNING CPython's own
+    `popitem` on the same mapping.  A table written out here would be a second
+    place for the two answers to disagree, which is what every other oracle in
+    this file is for.
+
+    The mapping is the three-pair view the PROGRAM builds — a cleared view with
+    three `environ_set` calls in it — and NOT `e3` and NOT the process
+    environment, for the reason the block's own comment gives: `environ_del`
+    reorders a view in place, so `e3`'s order is no longer `ENV_VIEW_ENV`'s, and
+    the harness's environment is not the image's. A view whose order the program
+    wrote down is the only one whose "which pair" is decidable.
+
+    So the dict is asked, and every other row is read off what it answered:
+
+      * `popitem-before` / `popitem-after` are the count either side of the call,
+        so the row says the removal happened rather than the pair being copied
+        out and nothing removed;
+      * `popitem-n` is 2 because a container on this path keeps its count at word
+        0 and this is a two-element blob — the same convention `environ_count`
+        reads;
+      * `popitem-getenv` is `[]`, not the value: `__delitem__` calls `unsetenv`,
+        so the C library stops seeing the variable, which is the same fact
+        `del-getenv` and `clear-getenv` are.
+    """
+    # The view the PROGRAM built: a cleared view with three `environ_set` calls
+    # in it, in that order, so the order is the three stores in that order and
+    # CPython is asked about exactly that mapping. Nothing here is derived from
+    # the process environment the harness composed, which is the whole point —
+    # see the block's own comment.
+    env = {"FORMAL_ENV_VIEW_TAIL": "last",
+           "FORMAL_ENV_VIEW_SPACE": "two words",
+           "FORMAL_ENV_VIEW_EQUALS": "a=b=c"}
+    before = len(env)
+    d = dict(env)
+    key, value = d.popitem()                      # CPython's own operation
+    return {
+        "popitem-before": str(before),
+        "popitem-n": "2",
+        "popitem-key": f"[{key}]",
+        "popitem-value": f"[{value}]",
+        "popitem-after": str(len(d)),
+        "popitem-getenv": "[]",
+        "popitem-free": "0",
+        "popitem-free-null": "0",
+        "popitem-empty": "0",
+        "popitem-null": "0",
+        "popitem-empty-free": "0",
+    }
+
+
 def _env_view_oracle():
     """CPython's answers for `ENV_VIEW_PROGRAM` over `ENV_VIEW_ENV`.
 
@@ -1134,6 +1240,9 @@ def _env_view_oracle():
         # `pop` above removed) and `other` is `recv` with one value replaced and
         # one key added — the in-place branch and the appending one.
         **_update_oracle(),
+        # `popitem()`: CPython's own `dict.popitem` on the mapping the program
+        # has at this point, for the reason `_popitem_oracle` gives.
+        **_popitem_oracle(items),
         # `clear()`: the mapping is empty and every variable is unset, so
         # `os.getenv` — the C library's answer — is empty too.
         "clear": "0",

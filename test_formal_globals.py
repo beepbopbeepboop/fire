@@ -434,6 +434,62 @@ CASES = [
     # row here that needs `global_slot_is_dict` — without it a dict global's
     # `D["a"]` is emitted as a SEQUENCE subscript and the key's address becomes
     # an element offset, which is a load from a nonsense address.
+    # `None` as a container ELEMENT, and the row that was refused before
+    # 2026-10-04 with **"one of its elements is computed by a call"** — about a
+    # literal, with no call in it. `_static_word` had no arm for a `None`, in
+    # either spelling (it arrives as `IdentExpr("None")`, not `NoneLiteral`),
+    # even though both emitters lower a `None` to the word 0 and every other
+    # reader of the same value accepts the two spellings as one.
+    #
+    # The nested shape is `formal/arm64_proof_gen.py`'s `_STEP_CONDS`, whose
+    # first entry is `(None, 0xd65f03c0)` and which
+    # `tools/formal_proof_breadth.py`'s census records under exactly that
+    # misdiagnosis. `mask is None` reading a blob element is the other half: it
+    # is the test that says the word is 0 rather than a marker nothing wrote,
+    # and a layout that stored a sentinel other than 0 would answer every row
+    # "not None".
+    ("read_nested_container_with_none_elements",
+     "TBL = [(None, 7), (3, 1), (None, 11), (6, 2)]\n"
+     "\n"
+     "def pick(w: Int) -> Int:\n"
+     "    var i = 0\n"
+     "    while i < len(TBL):\n"
+     "        var pair = TBL[i]\n"
+     "        var mask = pair[0]\n"
+     "        var base = pair[1]\n"
+     "        if mask is None:\n"
+     "            if w == base:\n"
+     "                return i\n"
+     "        else:\n"
+     "            if (w & mask) == base:\n"
+     "                return i\n"
+     "        i = i + 1\n"
+     "    return -1\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"%d %d %d %d\", pick(7), pick(5), pick(11), pick(4))\n"
+     "    return 0\n",
+     "0 1 2 -1"),
+
+    # The same word in the two simpler shapes: a list element and a dict VALUE,
+    # so the fix is not only about a nested container laying out.
+    ("read_none_in_a_list_and_a_dict",
+     "ITEMS = [1, None, 3]\n"
+     "MAP = {\"a\": None, \"b\": 2}\n"
+     "\n"
+     "def first_none() -> Int:\n"
+     "    var i = 0\n"
+     "    while i < len(ITEMS):\n"
+     "        if ITEMS[i] is None:\n"
+     "            return i\n"
+     "        i = i + 1\n"
+     "    return -1\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"%d %d\", first_none(), 1 if MAP[\"a\"] is None else 0)\n"
+     "    return 0\n",
+     "1 1"),
+
     ("read_dict_of_strings_by_key",
      "D = {\"a\": 1, \"b\": 2}\n"
      "\n"
@@ -1052,6 +1108,25 @@ REFUSALS = [
      "    print(v)\n"
      "    return 0\n",
      "no initializer"),
+    # …and WHY the name has a slot, which is the second half of that row's
+    # sentence and was false of every container global. `GlobalSlot.mutable`'s
+    # own comment records this sentence being fixed once already — in the
+    # MANIFEST, where `write_dylib_manifest` split `variables` from `containers`
+    # for exactly this reason — while the refusal kept it, so a name nothing
+    # writes was reported as one a function writes through `global`. The `absent`
+    # is the false clause and this row is what keeps it out: `L` above is a
+    # CONSTANT with a home, and a reader sent looking for the writer that does
+    # not exist stops reading the sentence that names the real problem, which is
+    # the element of the literal that is not a word.
+    ("a_container_global_says_it_is_a_constant_not_a_variable",
+     "L = [len(\"ab\"), 3]\n"
+     "\n"
+     "def main(n):\n"
+     "    v: Int = L[0]\n"
+     "    print(v)\n"
+     "    return 0\n",
+     "is a CONSTANT with a home and not a variable",
+     "a function writes it through `global L`"),
 
     # A local that SHADOWS a module global, read before the local is stored. The
     # refusal is the point of the row, and the reason is a fact about CPython
@@ -1705,7 +1780,16 @@ def run_case(name, files, want_stdout, tmpdir, verbose):
     return True, ""
 
 
-def run_refusal(name, source, needle, tmpdir, verbose):
+def run_refusal(name, source, needle, absent, tmpdir, verbose):
+    """Both backends must refuse, naming `needle` and NOT naming `absent`.
+
+    `absent` is the sentence the refusal must not contain, and it exists
+    because a diagnostic that names the wrong thing about the name it names is
+    this file's subject: one row asserts the reason a name HAS a `__DATA` slot,
+    and that reason is not the same for every slot (`a_container_global_says_it_
+    is_a_constant_not_a_variable`). It is optional so the rows that only care
+    about the missing initializer stay one tuple long.
+    """
     src = os.path.join(tmpdir, name + ".mojo")
     with open(src, "w") as f:
         f.write(source)
@@ -1722,6 +1806,10 @@ def run_refusal(name, source, needle, tmpdir, verbose):
         if needle not in text:
             return False, (f"--backend={backend} refused, but not naming the "
                            f"missing initializer ({needle!r}): "
+                           f"{text.strip()[-300:]}")
+        if absent is not None and absent in text:
+            return False, (f"--backend={backend} refused with {absent!r}, which "
+                           f"is the sentence this row says must not appear here: "
                            f"{text.strip()[-300:]}")
     if verbose:
         print(f"      refused identically on both backends: {needle!r}")
@@ -1866,11 +1954,16 @@ def main():
         print(f"SKIP: the images are arm64, host is {platform.machine()}")
         return 0
 
-    everything = ([(c[0], c[1], c[2]) for c in CASES]
-                  + [(c[0], c[1], c[2]) for c in FRAME_CASES]
-                  + [(c[0], c[1], c[2]) for c in REFUSALS]
-                  + [(c[0], c[1], c[2]) for c in FRAME_REFUSALS]
-                  + [(c[0], None, c[1]) for c in LAYOUT_CASES])
+    # The refusal tables may carry a FOURTH element — a sentence the message
+    # must NOT contain — so they are widened to four here rather than indexed,
+    # and every other table stays three.
+    everything = ([(c[0], c[1], c[2], None) for c in CASES]
+                  + [(c[0], c[1], c[2], None) for c in FRAME_CASES]
+                  + [(c[0], c[1], c[2], c[3] if len(c) > 3 else None)
+                     for c in REFUSALS]
+                  + [(c[0], c[1], c[2], c[3] if len(c) > 3 else None)
+                     for c in FRAME_REFUSALS]
+                  + [(c[0], None, c[1], None) for c in LAYOUT_CASES])
     selected = [c for c in everything if not args.cases or c[0] in args.cases]
     known = {c[0] for c in everything}
     if args.cases and len(selected) != len(args.cases):
@@ -1882,10 +1975,10 @@ def main():
 
     passed = failed = 0
     with tempfile.TemporaryDirectory() as tmpdir:
-        for name, files, want in selected:
+        for name, files, want, absent in selected:
             try:
                 if name in refusal_names:
-                    ok, detail = run_refusal(name, files, want, tmpdir,
+                    ok, detail = run_refusal(name, files, want, absent, tmpdir,
                                              args.verbose)
                 elif name in layout_names:
                     ok, detail = want(tmpdir, name, args.verbose)

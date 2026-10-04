@@ -1,5 +1,110 @@
 # `__mlir_op`: 259 sites over 104 dialect operations were refused as "there is no MLIR on this path", and for a quarter of the arithmetic ones that is false
 
+**Status (2026-10-04, `work/formal19-4`): items 1 and 3 of "The next step" are
+DONE — the operand's DECLARED type is read, and the arithmetic operations whose
+operand is a word lower to the ordinary spelling on both architectures. What is
+left is items 4 and 5, both of them now named per operation rather than as one
+class.** Read this before "The next step", because it corrects what that section
+says the arithmetic table may contain.
+
+**What landed, and it is a source-to-source rewrite in the shared pipeline rather
+than an emitter arm per architecture** — the shape `pop.select` already uses
+(`formal/build.py::_lower_dialect_select`), so "both architectures" is a
+statement about ONE code path and not about two implementations agreeing:
+
+  * `formal/model.py::mlir_operand_declared_type` reads a dialect operation's
+    operand's type off a DECLARATION: a parameter annotation, a local
+    annotation, or `<receiver>.<field>` / `<x: Struct>.<field>` against the
+    unit's field table. It answers None for every shape nothing in the source
+    states — a call result, a subscript, a comparison, an arithmetic expression,
+    and a `comptime` ALIAS, which is how all 22 of `std/simd.mojo`'s sites are
+    spelled and which resolves to a vector.
+  * `formal/model.py::mlir_type_kind` classifies a declared dialect type as a
+    `word` or a `vector`. **One word type — `__mlir_type.index`** — and that is
+    a correction of this document's own count, which calls
+    `!kgen.scalar<ui8>` word-typed: an N-bit unsigned integer held in a word
+    WRAPS at 2^N, so `a + b` over two `ui8` is not the 64-bit add this path
+    emits. `MLIR_WORD_TYPE_NAMES` is one name and the comment says why.
+  * `formal/model.py::MLIR_WORD_ARITH_OPS` — eleven operations, each with the
+    ordinary operator it denotes — and `MLIR_CMP_OPS` + `MLIR_CMP_PRED_OPS`, a
+    CLOSED set of ten bracketed predicates.
+  * `formal/build.py::_lower_dialect_arith` rewrites them, gated on the operand
+    type alone. `index.divs` → `//`, `index.shrs` → `>>`, `index.cmp[pred=eq]`
+    → `==`.
+
+**The two rows that were MEASURED rather than read**, because this path's `//`
+and `%` are not Python's and the table would otherwise be a guess:
+
+```
+f(-7, 2) on `__mlir_type.index` parameters     this path    CPython
+  a // b        -3   truncating                   -4   floor
+  a %  b        -1   rem, dividend's sign          1   Python's mod
+  a >> b        -2   arithmetic                    -2
+```
+
+so `index.divs` → `//` is right and **`pop.floordiv` is NOT in the table**,
+which is the clearest entry that is missing on purpose: floor division is the
+other semantics and rewriting it to this path's `//` would be wrong for every
+negative operand. `pop.div` is absent for the other half of the same question —
+the name does not say which division it is, and a table that picked one is the
+name-keyed table § Correction is about.
+
+**What it is worth, in this document's units — and it is NOT a coverage
+number.** The 12 sites in `std/builtin/simd_length.mojo` (`index.{add, sub,
+mul, divs, and, shrs}` and six `index.cmp`) now lower, and **0 files reach
+`pass`**: the file's own terminal is `pop.cast_to_builtin[_type=__mlir_type.
+index](value._mlir_value)` in `__init__`, re-measured on this tree after the
+change and unchanged. What the change bought is the MISSING FACT the document
+says every arithmetic arm needs, and a refusal that is no longer false at the
+sites where the fact is established (below).
+
+**The refusal changed with it, and that was not optional.** Once the operand
+type is readable, "this path has no lowering table that establishes the operand
+type" is untrue at every site where it IS established, in two different
+directions. `formal/model.py::mlir_operand_clause` now reports what the
+declaration says, and the elementwise branch says which of THREE things is
+missing: a VECTOR (the lane count and element width), an OPERATION whose
+ordinary spelling computes something else, or a declaration that states nothing.
+The clause says nothing about the OPERATION outside the elementwise branch,
+because `pop.cmp` over a word is missing its PREDICATE and a sentence claiming
+the operation was at fault would be false of it — a false diagnostic in the same
+file whose subject is false diagnostics.
+
+**One false claim this change FOUND and removed**, which is recorded here
+because it is the same disease one step further in: with a field table keyed on
+the field NAME alone, `SIMDLength___init__(out self, value: Int)` writing
+`__mlir_op.`pop.cast_to_builtin`[…](value._mlir_value)` had its operand reported
+as the `__mlir_type.index` field `SIMDLength` declares — a fact about the name
+rather than about the field the source wrote. The reader now requires the base
+to be a receiver spelling or a name the function declares as a struct of THIS
+UNIT.
+
+**Tests: `test_formal_mlir_precedence.py` is 28/28** (was 21), of which four are
+new `CLASSIFIED` rows that pin each of the three refusal shapes above plus the
+untyped-base case, and two are new `GUARDED` rows that BUILD AND RUN the
+arithmetic on both architectures — the second of which is the regression pin for
+the walk bug below.
+
+**The census is unchanged and that is the point**: still 259 sites over 104
+operations, still `typed-result 113 / effect 75 / unguarded 34 / elementwise 24
+/ vector 13`. `mlir_dialect_op_refusal`'s CLASSES are unchanged; only what the
+message says about an operand moved.
+
+**A crash this change found in a shared walk, which is a bug in its own right
+and is filed separately** (`bugs/FORMAL_a_child_rewriting_walk_empties_a_list_it
+_mutated.md`): the walk each dialect rewrite used had `changed =
+isinstance(node, tuple)` and then set `changed = True` inside the loop, so a
+LIST with a replaced element returned its EMPTY accumulator — and a list nested
+inside a list has its parent's `node[i] = repl` fire on it. Measured on
+`Idx(tag=0, v=__mlir_op.`index.add`(self.v, rhs.v))`: the call's `kwargs` became
+`[['tag', IntLiteral], []]` and the build died in
+`model.struct_construction_plan` with `not enough values to unpack (expected 2,
+got 0)`. It was latent in the select pass because the only construct that pass
+replaces is a `CallExpr` and a `CallExpr` in argument position is reached
+through its callee's `args`, a dataclass field whose result the caller
+discards. `formal/build.py::_rewrite_dialect_in` is now the ONE walk for both
+dialect passes.
+
 **Area:** FORMAL (MLIR dialect constructs). Found 2026-10-02 on
 `work/formal5-mlir-constructs` (claim `sweep5:mlir-constructs`), working the
 sweep5 cause row **"MLIR dialect construct (`__mlir_attr` / `__mlir_type` /
@@ -79,12 +184,10 @@ argument the document made in §Correction for why a NAME-keyed table is the
 wrong shape — a select's arms would have had to be re-decided per architecture
 for no gain.
 
-**Items 1 and 3 remain, unchanged and in that order.** The operand's DECLARED
-type is what every arithmetic arm needs and what the operation name cannot
-supply; `simd_length.mojo` is still the right first target for it (6 of the 9
-word-typed sites, reachable, its own terminal being a `_type=` rather than the
-vector-width question), and it is still not reached by this change —
-`bugs/FORMAL_known_limits.md` §2.2's correction now records that too.
+**SUPERSEDED by the Status at the head of this file (2026-10-04,
+`work/formal19-4`): items 1 and 3 are DONE.** The paragraph below is kept as the
+statement of what was believed when the effect lowering landed, and the two
+clauses in it that the tree has since answered are both marked above.
 
 **Status (2026-10-03, `work/formal14-std-os-io`): one EFFECT now lowers, and the
 "effects stay refused" in item 3 below is narrower than it reads.** The sweep
@@ -528,36 +631,58 @@ a caller with no operation in hand); `tools/formal_sweep.py`'s `_REFUSAL_FAMILIE
 gained `dialect OPERATION` and kept `MLIR dialect construct` for the same reason;
 `test_refusal_taxonomy.py` has a sample per wording, which is the only thing that
 proves a marker is not dead. Tests: 8 new `CLASSIFIED` rows in
-`test_formal_mlir_precedence.py` (15/15 in that file), `test_refusal_taxonomy.py`
-163/163.
+`test_formal_mlir_precedence.py`, `test_refusal_taxonomy.py` (216/216 on the
+tree items 1 and 3 landed on).
 
-**Not done: the lowering table**, and the §Correction above is why it is not the
-next mechanical step it was going to be. The remaining work, in order:
+**The lowering table, item by item, with what is DONE and what is not.** The
+§Correction above is why this was not the next mechanical step it was going to
+be, and the reasoning behind each item is not repeated — the Status at the head
+of this file is the current reading and this is the plan it was planned against.
 
-  1. **Establish the operand's declared type at a dialect operation.** This is
-     what every arithmetic arm needs and what the name cannot supply: 26 of the
-     38 arithmetic sites are over `!kgen.simd<LENGTH, DTYPE>`, whose answer needs
-     `Self.length` (the element count), not just `ValueKinds.kind_of`. Until this
-     exists, an arm keyed on the operation name is right for 9 sites and wrong
-     for 26, and a wrong answer is worse than the refusal this branch keeps.
+  1. **Establish the operand's declared type at a dialect operation.** **DONE
+     (2026-10-04, `work/formal19-4`): `model.mlir_operand_declared_type` reads it
+     off a parameter annotation, a local annotation or a field declaration, and
+     a `comptime` alias — which is how all 22 of `std/simd.mojo`'s sites are
+     spelled — claims nothing.** What it reads is narrower than the item wanted
+     and the narrowing is the safe direction: it does NOT resolve
+     `Self.length`, so a vector operand stays refused, which is what the item's
+     own "a wrong answer is worse than the refusal" requires.
   2. **The BOOL kind**, which unblocks `pop.select` and therefore
-     `_select.mojo` — **one** file of the sweep's cause row, not two:
-     `simd_length.mojo` has its own terminal (`pop.cast_to_builtin`, a `_type=`
-     that is a dialect type) and stays on this list's item 3 regardless.
-     Diagnosed already (`MLIR_BOOL_METHODS`); a fifth kind constant through
-     `ValueKinds` and both backends' kind oracles.
-  3. **Then** the arms themselves, keyed on name *and* established operand type,
-     sharing `common_type`/`cmp_signed`/`shift_signedness`, with `pop.cmp`'s
-     bracketed predicate answered from a small closed set or refused. Start with
-     `std/builtin/simd_length.mojo`: it holds 6 of the 9 word-typed sites, it is
-     reachable, and its own terminal (`pop.cast_to_builtin`) is a result-type
-     question rather than the vector-width one. Memory, variants, coroutines and
-     the `lit.*`/ownership effects stay refused, and `MLIR_EFFECT_OPS` says so in
-     the message rather than leaving them to look like a missing lowering.
-     **(2026-10-03: the two TRAPS are the one exception, and only as a statement
-     whose value is discarded — see the Status at the top. `llvm.intr.trap` and
-     `llvm.intr.debugtrap` lower to this path's divergence, and nothing else in
-     `MLIR_EFFECT_OPS` does.)**
+     `_select.mojo`. **DONE, and it needed the DECLARATION rather than a fifth
+     kind constant: `formal/types.py::BOOL_TYPE_NAMES` + `model.annotation_is_
+     bool` are the whole of it (2026-10-03, `work/formal8-7-r2`), and
+     `_select.mojo` builds.** `simd_length.mojo` keeps its own terminal
+     (`pop.cast_to_builtin`, a `_type=` that is a dialect type).
+  3. **The arms themselves, keyed on name *and* established operand type, sharing
+     `common_type`/`cmp_signed`/`shift_signedness`, with `pop.cmp`'s bracketed
+     predicate answered from a small closed set or refused. DONE for the eleven
+     operations whose operand is declared a word and for the ten bracketed
+     predicates** (`MLIR_WORD_ARITH_OPS`, `MLIR_CMP_OPS`, `MLIR_CMP_PRED_OPS`),
+     by rewriting to the ordinary spelling so both emitters' existing decisions
+     apply rather than being re-decided. **Measured, and the measurement changed
+     the table**: this path's `//` TRUNCATES and its `%` takes the dividend's
+     sign, so `index.divs` → `//` and `pop.rem` → `%` are right and
+     `pop.floordiv` is not in it. Not done and deliberately not planned:
+     `pop.floordiv`, `pop.div` (the name does not say which division it is),
+     `pop.abs`/`max`/`min`/`floor`/`ceil`/`trunc`/`round`/`fma`, every
+     `pop.simd.*`, every UNSIGNED predicate (this path's `<` is signed and there
+     is no unsigned spelling to rewrite to), and every operation over a
+     `!kgen.scalar<uiN>` — an N-bit unsigned integer in a word WRAPS at 2^N, so
+     the 64-bit add is not the ui8 add. Each of those sites now says which of
+     the three things is missing rather than repeating the class's sentence.
+     Memory, variants, coroutines and the `lit.*`/ownership effects stay
+     refused, and `MLIR_EFFECT_OPS` says so in the message rather than leaving
+     them to look like a missing lowering. **(2026-10-03: the two TRAPS are the
+     one exception, and only as a statement whose value is discarded — see the
+     Status at the top. `llvm.intr.trap` and `llvm.intr.debugtrap` lower to this
+     path's divergence, and nothing else in `MLIR_EFFECT_OPS` does.)**
+
+**What is left of this document, as of 2026-10-04, is one file's own terminal**
+— `pop.cast_to_builtin[_type=__mlir_type.index](value._mlir_value)` in
+`std/builtin/simd_length.mojo`'s `__init__`, re-measured unchanged after items 1
+and 3 landed. It is a `_type=` over an `Int`'s dialect value, which is a value-
+model question about `Int` rather than about the arithmetic, and it is
+`bugs/FORMAL_known_limits.md` §2.2's territory rather than this document's.
 
 `test_formal_mlir_precedence.py` is the suite that goes red if any of this moves:
 its `CLASSIFIED` rows assert each class's own words AND the absence of another

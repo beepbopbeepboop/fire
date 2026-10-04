@@ -312,6 +312,8 @@ def unsetenv(name) -> int:
 #     os.environ.pop(k, d)     environ_pop(e, k, d)
 #     os.environ.copy()        environ_copy(e)
 #     dict(os.environ)         environ_copy(e)
+#     os.environ.popitem()     pair = environ_popitem(e)   -> [2][key][value]
+#                              environ_pair_free(pair)  — NOT environ_free
 #     os.environ.clear()       environ_clear(e)
 #     os.environ.update(o)     e2 = environ_update(e, o)
 #     os.environ.setdefault(k, v)
@@ -797,6 +799,111 @@ def environ_clear(e: Pointer[Int64]) -> int:
         free(e[2 + 2 * i])
         i = i + 1
     e[0] = 0
+    return 0
+
+
+def environ_popitem(e: Pointer[Int64]) -> Pointer[Int64]:
+    """`os.environ.popitem()`: remove and return an arbitrary pair as a BLOB.
+
+    **THE ANSWER IS A `[count=2][key][value]` BLOB, and that is one word — which
+    is the whole of why this is ONE call.**  The doc's "a genuine two-word limit
+    (it must hand back a key AND a value, and this path returns one thing per
+    call)" is TRUE of a RETURN VALUE and false of a return BLOB: a blob is a
+    `malloc`'d block whose address is one word, it crosses a dylib boundary and
+    reads by subscript on both architectures (`formal/model.py`'s container
+    return kind is what says so, and `bugs/FORMAL_module_state_no_storage.md`
+    §(3) records the measurement), and `environ_update`'s own docstring states
+    the rule it was written under: **the limit is ONE WORD OF ANSWER, not one
+    field of it**.  `setdefault` is genuinely two calls because its answer is the
+    view PLUS the value it kept, and only the view can move; `popitem`'s view
+    never moves (see below), so its whole answer fits in one block.
+
+    So the caller does what it does for every other blob this module hands out:
+
+        pair = os.environ_popitem(e)
+        if pair != 0:
+            key = pair[1]
+            val = pair[2]
+            os.environ_pair_free(pair)   # NOT environ_free; see its note
+
+    and the pair comes back as a COPY, for the reason `environ_pop` gives: the
+    view's buffers are released by the removal, so an alias would be freed memory
+    by the time the caller printed it.  **A caller MUST release the pair with
+    `environ_pair_free` and must NOT pass it to `environ_free`**, which is the
+    view's own release function and would read word 1 as the key of a view with 2
+    pairs and free the wrong buffers — the shape `environ_keys`' docstring records
+    being measured as a double free.  Two shapes need two release functions, and
+    the reason there is one per shape rather than one clever one is `environ_keys`
+    again: a caller holding a blob and not knowing which shape it is holding is
+    exactly the knowledge a shape is supposed to remove.
+
+    **WHICH PAIR, and the answer is the same one CPython gives.**  CPython's
+    `popitem` is "remove and return an arbitrary (key, value) pair", LIFO since
+    3.7, and this path removes the LAST pair, which is the same answer for every
+    program that does not rely on which one it was.  The word is "arbitrary" in
+    both, and a caller that needs a specific key uses `environ_pop`.
+
+    **THE VIEW DOES NOT MOVE, which is why the answer is a pair and not the view
+    too.**  `environ_del` releases the pair's buffers and shifts the last pair
+    into the hole, in place, and never reallocs — `environ_clear`'s docstring
+    says the same about the other direction.  So unlike `environ_set` and
+    `environ_update`, there is nothing for the caller to keep: `e` is still the
+    view after the call, and the answer is only the pair.
+
+    0 for a 0 view and for an EMPTY one, which is what CPython raises
+    `KeyError` for and there is no unwinder to raise into — so 0 is the answer
+    and it is distinguishable from a pair blob because a blob is never 0 on
+    success.  `environ_count(e) == 0` is the test a caller can ask first, and
+    both are the same fact asked twice.
+    """
+    if e == 0:
+        return 0
+    n = e[0]
+    if n == 0:
+        return 0
+    var i = n - 1
+    var pair: Pointer[Int64] = malloc(24)
+    if pair == 0:
+        return 0
+    memset(pair, 0, 24)
+    pair[1] = str_dup(e[1 + 2 * i])
+    pair[2] = str_dup(e[2 + 2 * i])
+    pair[0] = 2
+    free(e[1 + 2 * i])
+    free(e[2 + 2 * i])
+    e[0] = n - 1
+    fs_unsetenv(pair[1])
+    return pair
+
+
+def environ_pair_free(pair: Pointer[Int64]) -> int:
+    """Release a `environ_popitem` answer and its two buffers. 0.
+
+    **THE SECOND RELEASE FUNCTION IN THIS SECTION, and the shape is why.**
+    `environ_free` is a VIEW's release: it frees the first `e[0]` pairs' key and
+    value buffers at words `1 + 2i` and `2 + 2i` and then the blob.  A
+    `popitem` answer is `[count=2][key][value]` — one key at word 1 and one value
+    at word 2 — so handed to `environ_free` it is read as a view of 2 pairs,
+    whose words 3 and 4 are past the end of a 3-word block: it frees the two
+    buffers it was given and then the allocator is asked to free memory that is
+    not ours.  That is the double free `environ_keys`' docstring records being
+    measured (SIGABRT, after a whole correct run of everything else in the
+    program), so the release is a function of the SHAPE rather than a caller
+    knowing which shape it holds.
+
+    The count is read rather than assumed, so a blob this module did not hand out
+    is refused rather than trusted: a count that is not 2 releases nothing and
+    answers -1.
+
+    0 for a 0, like every release in this module.
+    """
+    if pair == 0:
+        return 0
+    if pair[0] != 2:
+        return 0 - 1
+    free(pair[1])
+    free(pair[2])
+    free(pair)
     return 0
 
 
