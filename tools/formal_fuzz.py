@@ -4511,7 +4511,20 @@ def _still_fails(text, args, want=None):
                                     or len(want_refusals) == len(verdicts))
         if "refusal" in verdicts.values() and (
                 len(verdicts) == 1 or "ok" in verdicts.values()):
-            return True
+            # …and only when the program being minimised disagreed by
+            # ANSWERING. A reduction that turns "the image printed the wrong
+            # number" into "the image refused it" demonstrates neither, and on a
+            # single-backend run this predicate is the ONLY way to be satisfied
+            # without an oracle — so it used to accept exactly that, and the
+            # reproducer that came back was a program CPython itself rejects.
+            # Measured 2026-10-04, `strings` seeds sweepD 4000-4001: the two
+            # findings shrank 619 -> 125 and 1117 -> 563 bytes and the
+            # reduction was a `generator-error` here, so the file on disk was
+            # not a differential program at all. The branch above is
+            # unaffected: it is reached only when the ORIGINAL refused
+            # somewhere, which is what `want_refusals` is.
+            if not _answers_only(want):
+                return True
     # No oracle at all — a program CPython itself refuses to run, which is what
     # a recursion past ITS limit looks like. There is then nothing to compare
     # against, so a mismatch cannot be the predicate; but `--min-kind any` still
@@ -4520,6 +4533,20 @@ def _still_fails(text, args, want=None):
     # here (a recursion that deep is refused before it is built); this is the
     # path a hand-written reproducer takes.
     return kind == "any" and bool(standalone)
+
+
+def _answers_only(want):
+    """Whether every backend ANSWERED the program being minimised.
+
+    The shrinker's predicate preserves the KIND of disagreement it was given: a
+    refusal divergence has to survive as a refusal divergence, and an ANSWER
+    disagreement has to survive as one. Without this the refusal arm above
+    accepts a candidate that merely refuses, which on a single-backend run is
+    the only exit from a candidate that no longer answers — and the reduction
+    it produces is a program whose wrongness is a refusal rather than the
+    number the finding is about.
+    """
+    return bool(want) and all(v == "ok" for v, _d in want.values())
 
 
 def _statement_spans(text):

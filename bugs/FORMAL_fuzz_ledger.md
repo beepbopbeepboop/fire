@@ -39,10 +39,12 @@ magnitude of the 3-4 GB line.
 **5212 programs over 25 sweeps** — §2's thirteen rows and §2.2's twelve. Three
 bugs fixed, five limits filed, and eight defects in the tool itself. §2.1 adds
 **5100 programs over 41 more sweeps**, THREE more fixes and three more tool
-defects, and §2.1a one more sweep of 100 programs and one more fix, so the whole
-file is **10412 programs over 67 sweeps** and **twelve** tool defects — and the
-last eleven rows of §2.1 are the OLD mixes on fresh seed ranges, which is what
-says the fixes did not cost the corpus anything it already had.
+defects, and §2.1a one more sweep of 100 programs and one more fix, and §4.12's
+fix adds one more tool defect found by its own first run (the thirteen is that
+one), so the whole file is **10412 programs over 67 sweeps** and **thirteen** tool
+defects — and the last eleven rows of §2.1 are the OLD mixes on fresh seed
+ranges, which is what says the fixes did not cost the corpus anything it already
+had.
 
 | date | mix | seed | indexes | programs | tally | what came of it |
 |---|---|---|---|---|---|---|
@@ -824,7 +826,12 @@ measures, so it belongs in a session whose claim is the corpus rather than one
 commit at the end of another.
 
 
-### 4.12 The reproducer on disk is the SHRUNK program and the recorded answers are the ORIGINAL's
+### 4.12 The reproducer on disk is the SHRUNK program and the recorded answers are the ORIGINAL's — FIXED 2026-10-04 (`formal25-3`), and fixing it found a second defect underneath
+
+**Status: FIXED, both of the three options below rather than one**, plus a defect
+in the shrinker's predicate that the first option made visible within one run.
+The section keeps its original text because the measurement is what made both
+changes necessary.
 
 **Found 2026-10-04** by trying to rebuild one of §2.1a's 34 findings. The
 finding says
@@ -860,6 +867,92 @@ Three things would fix it and the cheapest is first:
    which makes the comment above true by weakening it.
 3. Or keep both programs (`p9011.mojo` and `p9011.reduced.mojo`), which costs one
    more file per finding and nothing else.
+
+#### 4.12a What landed
+
+**Options 1 and 3**, because 3 is what makes 1 usable: a record that carries the
+original program as a field is re-derivable, but a record that carries it only
+as a field is still a record whose *file* is not the program it is about.
+
+`tools/formal_fuzz.py::record_reduction` (new, called from `check_one`) puts
+four things on the record and writes a second file:
+
+| key / file | what it is |
+|---|---|
+| `original_text` | the program `want`/`results` are about |
+| `reduced_want`, `reduced_results` | CPython's and each backend's answers about the REDUCTION, measured |
+| `reduced_verdict` | the reduction through the same `classify` |
+| `programs/pN.original.mojo` | the original, beside `programs/pN.mojo` |
+
+`reduced_verdict` is the part that answers the reader's question rather than
+adding to the record: a reduction that **stopped** disagreeing is now visible in
+`findings.json` and in `report`, instead of in the next reader's afternoon. It is
+a report and never changes `verdict` — the finding is about the program that
+produced it, and a shrinker that loses a disagreement is a fact about the
+shrinker, not a retraction. A reduction CPython cannot run is recorded as
+`reduced_verdict: generator-error` (or `CPYTHON-TIMEOUT`) with
+`reduced_want: None` rather than as an empty answer.
+
+**`test_formal_fuzz.py`'s new `record` half** reaches `check_one` with
+`make_program`/`shrink`/`blame`/`cpython_answer`/`run_on` replaced — the only way
+to reach a FINDING without a miscompile to find, and no compiler at all — and
+pins four shapes: the reduction still reproduces, it stopped, the shrinker
+removed nothing (so no second file is written), and the reduction is a program
+CPython rejects. It checks the two files on disk against the two texts, because
+"the record carries it" and "the reader can find it" are different properties and
+only the second one is worth having.
+
+#### 4.12b The defect underneath, which only the record could show
+
+Landed the same day, same area, and it is the reason this section is worth more
+than the option list above: **with the reduction's own answers on the record, one
+run showed the reduction was not a differential program at all.** `strings`,
+seeds `sweepD` 4000-4001, one backend:
+
+```
+  MISMATCH-X86  #4000
+      want  exit=0 'pqrs d 41 24 0 29 -14 12 -24 17'
+      reduced 619 -> 125 bytes: CPython generator-error, so the reduction has no answers to compare
+```
+
+`reduced_verdict: generator-error` means CPython itself REJECTS the reproducer,
+and `_still_fails` accepts that candidate on the single-backend refusal arm: "a
+refusal in the candidate is the whole predicate when there is nothing to diverge
+from". On a one-backend run of an ANSWER disagreement that arm is the only exit
+from a candidate which no longer answers — so the shrinker satisfied it by
+turning "the image printed the wrong number" into "the image refused", and the
+file on disk demonstrated neither.
+
+`tools/formal_fuzz.py::_still_fails` now asks `_answers_only(want)` — did every
+backend ANSWER the program being minimised — and refuses the refusal arm when
+they did. The refusal arm above it is untouched: it is reached only when the
+ORIGINAL refused somewhere, which is what `want_refusals` is, so a genuine
+refusal divergence still minimises to a refusal divergence. The same two
+programs after the fix, same command:
+
+```
+  KNOWN:str_subscript  #4000
+      want      exit=0 'pqrs d 41 24 0 29 -14 12 -24 17'
+      x86_64   exit=0 'pqrs 100 41 24 0 29 -14 12 -24 17'
+      reduced 619 -> 371 bytes; the reduction itself is MISMATCH-X86
+      reduced  want  exit=0 'pqrs d 41'
+      reduced  x86_64   exit=0 'pqrs 100 41'
+```
+
+The reduction is **larger** (371 against 125) and that is the fix working: it is
+a program that still prints the wrong number, which is what a reproducer is for.
+Pinned by `test_formal_fuzz.py`'s new `shrink` half — four rows, the two kinds of
+finding against the two kinds of candidate, no compiler — and non-vacuous:
+`_answers_only = lambda want: False` puts the `drops_a_refusal` row red with one
+build and nothing else.
+
+**Not fixed, and it is a campaign, not a patch:** the two programs above are the
+only findings the `strings` corpus still produces on one backend, and
+`reduced_verdict` for a reduction that stopped disagreeing is a REPORT with no
+owner — nothing acts on it. The honest next step is a tally line for it, the way
+`REFUSAL-FALSE` is a tally line for a message that is false of the program, so a
+campaign can report "N reductions stopped reproducing" instead of leaving it in a
+field.
 
 ## 5. What the corpus still cannot say, and what it costs to run
 

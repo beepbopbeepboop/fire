@@ -782,6 +782,74 @@ def check_record(verbose=False):
     return failures
 
 
+def check_shrink_predicate(verbose=False):
+    """`_still_fails` preserves the KIND of disagreement it was given.
+
+    No compiler: the predicate is reached through `cpython_answer` and `run_on`,
+    both replaced here, which is also how the defect it guards against was
+    measured. A candidate that REFUSES satisfies the single-backend refusal arm
+    whether or not the finding was about an answer — so `strings` seeds
+    sweepD 4000-4001 shrank two wrong-number findings into programs CPython
+    itself rejects, and the record's new `reduced_verdict` was the only place
+    that said so. Four rows: the two kinds of finding against the two kinds of
+    candidate.
+    """
+    import tempfile
+
+    failures = 0
+    real = {name: getattr(F, name) for name in ("cpython_answer", "run_on")}
+    candidate = "def main():\n    print(1)\n    return 0\n"
+
+    def cpython_answer(text, tmpdir, name, argv=""):
+        return (0, "1\n"), ""
+
+    def run_on(backend, text, tmpdir, name):
+        state = run_on.next
+        run_on.calls += 1
+        return {"x86_64": state[0], "arm64": state[1]}[backend]
+
+    run_on.calls = 0
+
+    def check(name, want, ok_state, refusal_diag, expect):
+        nonlocal failures
+        run_on.next = ok_state
+        run_on.calls = 0
+        F.cpython_answer, F.run_on = cpython_answer, run_on
+        args = argparse.Namespace(backends=["x86_64"], min_kind="x86",
+                                  work=os.path.join(ROOT, ".tmp"))
+        with tempfile.TemporaryDirectory(dir=args.work) as work:
+            args.work = work
+            got = F._still_fails(candidate, args, want)
+        if got != expect:
+            failures += _fail(f"shrink_{name}",
+                              f"said {got}, expected {expect} "
+                              f"({run_on.calls} build(s))", verbose)
+
+    ok_wrong = ({"verdict": "ok", "rc": 0, "stdout": "9\n", "diag": ""},
+                {"verdict": "ok", "rc": 0, "stdout": "9\n", "diag": ""})
+    ok_right = ({"verdict": "ok", "rc": 0, "stdout": "1\n", "diag": ""},
+                {"verdict": "ok", "rc": 0, "stdout": "1\n", "diag": ""})
+    refused = ({"verdict": "refusal", "rc": 1, "stdout": "",
+                "diag": "build: 's' is a String receiver ..."},
+               {"verdict": "refusal", "rc": 1, "stdout": "",
+                "diag": "build: 's' is a String receiver ..."})
+
+    check("an_answer_finding_keeps_a_wrong_answer", {"x86_64": ("ok", "")},
+          ok_wrong, "", True)
+    check("an_answer_finding_drops_an_agreeing_answer", {"x86_64": ("ok", "")},
+          ok_right, "", False)
+    check("an_answer_finding_drops_a_refusal", {"x86_64": ("ok", "")},
+          refused, "", False)
+    check("a_refusal_finding_keeps_a_refusal",
+          {"x86_64": ("refusal", "build: 's' is a String receiver ...")},
+          refused, "", True)
+    for name, fn in real.items():
+        setattr(F, name, fn)
+    print(f"formal fuzz: shrink    {'PASS' if not failures else 'FAIL'} "
+          f"4 predicate rows (no compiler)")
+    return failures
+
+
 def check_run(arch, count, jobs, verbose):
     """`count` pinned indexes, end to end, and every verdict accounted for."""
     argv = [sys.executable, os.path.join(ROOT, "tools", "formal_fuzz.py"),
@@ -1045,6 +1113,7 @@ def main():
     failures = check_classifier(args.verbose)
     failures += check_audit(args.verbose)
     failures += check_record(args.verbose)
+    failures += check_shrink_predicate(args.verbose)
     failures += check_frame_budget(args.verbose)
     for mix in mixes:
         failures += check_generator(mix, args.gen_indexes, args.verbose)
