@@ -6324,12 +6324,120 @@ def non_container_element_refusal(op: str, spelled: str, function: str,
 #: cannot read, and refusing it would refuse every `h.xs[i]` on a field whose
 #: declaration is in another module.
 #:
-#: `FRAME_KIND` is absent too, and for a different reason — a field whose
+#: `FRAME_KIND` is absent here too, and for a different reason — a field whose
 #: declared type is a framed struct of this module holds an ADDRESS, and reading
-#: that as a container is a wrong ANSWER rather than a fault, which is its own
-#: defect and not this one:
-#: `bugs/FORMAL_a_subscript_of_a_field_declared_a_framed_struct_is_a_wrong_answer.md`.
+#: that as a container is a wrong ANSWER rather than a fault.  It is refused, but
+#: by `frame_slot_element_refusal` and NOT from this set, because this set is
+#: asked BEFORE the string and dict readings are dispatched and a frame-typed
+#: field is exactly what those two need to keep answering: `self._dict[k]` in
+#: `std/collections/dict.mojo` reads a dict because its DECLARATION says
+#: `Dict[...]`, and `declared_type_kind` resolves that annotation against the
+#: module's own `struct Dict`, so the emitter's kind for the base is a frame.
+#: Putting the kind here would refuse a dict lookup that works, which is the
+#: failure mode every other fix in this family is arranged to avoid.
 NON_CONTAINER_SLOT_KINDS = (INT_KIND, TYPE_KIND)
+
+#: The kinds the BLOB fallback may not read an element out of, asked AFTER the
+#: string and dict readings have been dispatched.  `FRAME_KIND` is the whole of
+#: it, and the measurement behind it is `frame_slot_element_refusal`'s.
+FRAME_SLOT_ELEMENT_KINDS = (FRAME_KIND,)
+
+
+def frame_slot_element_refusal(op: str, base_kind, spelled_base: str) -> str | None:
+    """Why a container operation on a FRAME-valued struct FIELD is refused, or None.
+
+    **The THIRD member of the container-operand family, and the one the other
+    two are blind to by construction.**  `_refuse_frame_container_operand`
+    (`frame_container_operand_refusal`) is BARE-NAME only and
+    `_refuse_slot_container_operand` (`slot_container_operand_refusal`) covers
+    the scalar field kinds; each says why.  A field whose DECLARED type is a
+    framed struct of this module holds that struct's ADDRESS, so both of them
+    decline it and the container walk reads it:
+
+        struct Deep:
+            var x: Int
+            var y: Int
+        struct Wrap:
+            var d: Deep
+            var t: Int
+        var w = Wrap()
+        w.d.x = 3
+        w.d.y = 4
+        printf("%d", w.d[0])
+
+    which is this arithmetic, and the second line of it is the whole defect:
+
+        count = mem_read_u64(w + 0)        # Deep's slot 0 == x == 3
+        addr  = w + 8 + 8*count            # w + 32
+        value = mem_read_u64(addr)
+
+    `w + 32` is PAST `Deep`'s two slots, so the answer is whatever the frame's
+    scratch region holds next to it.  Measured on both architectures: **4**, on
+    both, and 3 is what a reader means by `w.d[0]` — `w.d` is `Deep`'s frame base
+    and slot 0 of that frame is `x`.  CPython refuses the shape outright
+    (`TypeError: 'Deep' object is not subscriptable`), so there is no oracle and
+    the program is one no reader writes on purpose; that is exactly why it must
+    not be answered with a number out of the frame's scratch region.
+
+    **A REFUSAL and not a lowering, decided, with the alternatives named.**  A
+    load at `base + 8i` is what `w.d.x` already is one level up, so it is
+    available; it is declined for two reasons.  First, the index is not a field
+    NAME: slot `i` of the frame is the struct's `i`-th declared field for
+    `i < len(fields)`, and past that it is a spill slot or scratch — a value with
+    no field behind it, so a lowering would have to invent the bound that makes
+    it an answer, and `w.d[i]` is not a program whose meaning is worth inventing
+    one for.  Second, the two sibling rules already refuse a non-container base
+    (a bare name holding a frame, and a field declared an integer or a type tag),
+    and a third answer for the same mistake is a decision this path would then
+    have to keep consistent.  Refusing also keeps the emitter side free of a new
+    arm on BOTH architectures, which is why the two cannot come to answer this
+    differently.
+
+    **Asked AFTER the string and dict readings, and that placement is the
+    corpus.**  `FRAME_KIND` is `frame_slot_element_refusal`'s only kind, and the
+    emitters call it where the BLOB fallback begins — after
+    `_is_dict_key_subscript` and after the string path.  It is not in
+    `NON_CONTAINER_SLOT_KINDS`, which is asked before both: a frame-typed field
+    is what a DICT lookup's base looks like.  Measured with
+    `tools/formal_frame_slot_subscript_census.py` over this repository and the
+    stdlib, every `X.<field>[i]` site classified by its field's declared type:
+
+    | declared kind | sites |
+    |---|---|
+    | the receiver this file cannot type (the emitter answers `None` too) | 803 |
+    | a chain — `a.b.c[i]`, whose outer field's type is the type of the WORD | 470 |
+    | `self.<field>`, with no declared type to read | 143 |
+    | a container (`List` / `Dict` / `Tuple` / …) | 26 |
+    | an unclassified slot | 1 |
+    | **a framed struct of the module** | **2** |
+
+    and **both of the two are the dict case**: `self._dict` in
+    `std/collections/dict.mojo`'s `__getitem__` and `__setitem__`, annotated
+    `Dict[...]`, which `declared_type_kind` resolves against that module's own
+    `struct Dict` — a NAME collision, and the only two sites in the corpus where
+    a frame kind is reached at all.  Which is why the set above is one kind and
+    not two, and why the placement after the dict dispatch is load-bearing
+    rather than tidier: the census says the corpus has nothing to lose, and the
+    placement is what makes that true rather than a claim about it.
+    """
+    if base_kind not in FRAME_SLOT_ELEMENT_KINDS:
+        return None
+    return (
+        f"{op} of `{spelled_base}` asks for a container element, and "
+        f"`{spelled_base}` is a struct field declared to hold a FRAME — the "
+        f"address of another struct's block of slots, not a container. Every "
+        f"container lowering starts by reading eight bytes at offset 0 of its "
+        f"base and calling the result a COUNT, and offset 0 of a frame is that "
+        f"struct's FIRST FIELD: `count` is the first element's own value, and "
+        f"the element address computed from it lands past the frame's fields, "
+        f"in whatever its scratch region holds next to it. Measured on BOTH "
+        f"architectures, `{spelled_base}[0]` printed 4 where the frame's first "
+        f"field was 3 — a wrong answer on both machines, which is what makes it "
+        f"worse than a fault. Refused here rather than emitted. What the same "
+        f"source can do instead: read the field by name, which is a load at the "
+        f"frame's own offset and is answered for the frame's type — "
+        f"`{spelled_base}`'s FIRST FIELD for `[0]`, its second for `[1]`"
+    )
 
 
 def slot_container_operand_refusal(op: str, base_kind, spelled_base: str,
