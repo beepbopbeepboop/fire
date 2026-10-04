@@ -799,6 +799,18 @@ _REFUSAL_FAMILIES = (
     ("is a method on a string", "method call on a string"),
     ("is a real method of String", "string method needing a length"),
     ("multi-index subscript", "multi-index subscript"),
+    # A call through a VALUE, in three shapes with three fixes: the callee's
+    # declared type, the bracket, the keyword. Ahead of everything below
+    # because each message contains "a call through a VALUE" and the generic
+    # markers further down would otherwise claim them without distinguishing
+    # the three.
+    ("a word that is not a code address is nothing to branch through",
+     "value call: declared type cannot hold a function"),
+    ("read as a value", "function value into a declared non-function"),
+    ("is a bracketed call through a VALUE",
+     "value call: bracket unreadable"),
+    ("no declaration to bind it by NAME",
+     "value call: keyword unreadable"),
     ("has no representation on this path", "value with no representation"),
     ("has no public functions", "module exports nothing"),
     ("would bind", "dependency binds what nothing provides"),

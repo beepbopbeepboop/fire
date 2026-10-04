@@ -224,6 +224,68 @@ annotations is what unblocks it; `specialization_call_refusal`'s text already
 describes the right lowering and has nothing to read it from. 22 aliases in 11
 files depend on it, not 10 — see the census table below.
 
+### Part 3, measured again 2026-10-03 (`work/formal18-tile-specialization`): the ERASURE is what the INTERPRETER trips over too, and it is a diagnostic with no position
+
+Re-measured while landing the specialization-through-a-function-value lowering
+(`FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md`
+§"What landed"), because the differential test for that construct wanted the
+stdlib's own spelling and could not have it.
+
+`fire.py run` on the smallest possible file that uses it:
+
+```sh
+cat > .tmp/alias.mojo <<'EOF'
+comptime Sig = def[width: Int](Int) -> None
+
+def use_it(x: Some[Sig]):
+    return 1
+
+def main():
+    return use_it(0)
+EOF
+python3 fire.py run .tmp/alias.mojo
+```
+
+```
+  File ".../myinterpreter.py", line 4859, in eval_IdentExpr
+    return self.scope.get(expr.name)
+NameError: name '_comptime_expr' is not defined
+During handling of the above exception, another exception occurred:
+  ...
+  File ".../myinterpreter.py", line 4286, in execute_ComptimeVarStmt
+    value = self.eval_expr(node.value)
+NameError: .tmp/alias.mojo:0:0: name '_comptime_expr' is not defined
+```
+
+Three things in that, and they are all this file's subject rather than a new
+one:
+
+* the interpreter's answer is the PLACEHOLDER's own name — `_comptime_expr` is
+  the sentinel `fire_compiler.py` emits for a function type it does not model,
+  so the interpreter is reporting the erasure rather than the file's line. The
+  position is `0:0`, which is what makes it useless: a reader is sent to the top
+  of the file for an error on line 1;
+* `comptime Two = 2` in the same position runs fine, so it is the function-type
+  literal and not `comptime`;
+* the compiled path BUILDS the same file (measured: `fire.py build` exit 0), so
+  the three consumers of a `comptime` alias disagree about what one is.
+
+**The census is unchanged and is worth repeating because it is what sizes the
+row:** 11 files, 34 alias lines —
+`grep -rln 'comptime [A-Za-z_][A-Za-z_0-9]* = def' ../new-modular/Mojo/stdlib/std | wc -l`
+→ 11, and the `grep -rn` of the same pattern → 34 (the difference is aliases
+written across several lines, `std/python/bindings.mojo:244` among them). The
+largest single user is `std/python/_cpython.mojo` (`PyCFunction`,
+`PyCFunctionWithKeywords`, `PyCFunctionFast`).
+
+**So the interpreter cannot be the oracle for any of the 11**, which is what
+forced the differential test for the value-call lowering to write its function
+type inline (`workgroup_function: Some[def[width: Int](Int) -> Int]`) instead of
+behind an alias. Both spellings say the same thing to the formal readers — the
+`Some[…]` base is what settles the bracket — and the inline one the interpreter
+can execute; the test's docstring records the substitution rather than leaving it
+as a mystery.
+
 ### NEW, found while fixing the above, and NOT fixed
 
 `myinterpreter.py` has **no evaluation for a keyword-bracket call at all** —

@@ -40,6 +40,7 @@ from formal.x86_64 import *  # noqa: F401,F403 — encoders, Reg, Assembler
 import fire_compiler as F
 import mojo.middle.comptime as comptime_eval
 from formal import model as M
+from formal import monomorph
 from formal.model import CodegenError, IDENTITY_TYPE_CTORS
 from mojo.middle.boundnames import bound_names_in_order
 
@@ -1520,6 +1521,24 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if tag is not None:
             self._emit_mov_imm(dst, tag)
             return
+        # A FUNCTION of THIS image, read as a value, is its CODE ADDRESS.  Last
+        # of the homes and not the first, because that is what makes shadowing
+        # free: a local or a parameter spelled like a function is found by one
+        # of the arms above and never reaches here, which is the case
+        # `test_formal_specialization.py`'s shadowing guard pins.
+        #
+        # It is `LEA r, [rip + d]` and nothing else, and it is the addressing a
+        # STRING LITERAL's address already uses two lines of `_emit_comptime_val`
+        # away — so the one thing being invented here is that the label is code
+        # rather than data.  The `rip` relocation is back-patched by `resolve()`
+        # from the label table, and `compile()` binds a function NAME to its
+        # entry label after every body is out, so a function read as a value
+        # before its own definition is emitted is the same address a direct call
+        # to it reaches.
+        if name in self._functions:
+            self.asm.emit(encode_lea_r64_rip(dst, 0))
+            self.asm.emit_label_rip(name, here_offset=-4)
+            return
         raise CodegenError(self._no_home(name))
 
     def _no_home(self, name: str) -> str:
@@ -1532,13 +1551,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if "." in name:
             return M.field_access_refusal(name, self.func_name or "<module>",
                                           name.split(".", 1)[0], holder)
-        # A FUNCTION NAME read as a value is not an unplaceable name: both this
-        # emitter and the allocation walk know it is not a local, which is why
-        # neither gave it one, and the allocator sentence below is false in
-        # every clause. Named here for the reason `model.function_value_refusal`
-        # gives — a first-class function has no representation on this path at
-        # all, so the message says that instead of blaming the allocator.
-        if name in self._functions:
+        # A FUNCTION of ANOTHER image, read as a value, has no address here.
+        # This unit has the DECLARATION (it is how the callee's parameters are
+        # bound for an ordinary call into a linked library) and no CODE — the
+        # body is in the library, and materializing an address for it needs a
+        # GOT slot this assembler does not fill for anything but a C symbol.
+        # It used to be asked about `name in self._functions`, which `_load_var`
+        # now answers before it comes here: a function of THIS image is a `LEA`
+        # away and is lowered, so the arm is the cross-image case and
+        # `model.function_value_refusal` is still the sentence for it.
+        if name in self._extern_decls:
             return M.function_value_refusal(name,
                                             self.func_name or "<module>")
         return M.unresolved_name_refusal(
@@ -7931,6 +7953,49 @@ ctor_field_value=self._ctor_field_value_for(name),
             raise CodegenError(
                 "unsupported call target on the formal x86-64 path "
                 f"(got {type(e.func).__name__})")
+        # A CALLEE THIS FUNCTION BINDS — arm64's rule, its reason and its
+        # message, from the one shared pair (`model.callee_is_a_bound_value` /
+        # `model.callee_value_refusal`).  `func(i)` where `func` arrived as a
+        # parameter is a call through a VALUE, and "a name this unit does not
+        # compile" cannot tell it from a C symbol, so the extern path emitted a
+        # call against a symbol spelled `func` and the bind audit reported a
+        # missing symbol instead of the construct that is missing.
+        #
+        # IT LOWERS NOW, on arm64's terms and beside the BUILTIN intercepts on
+        # purpose: a parameter or local spelled `len` or `print` is the
+        # function the source wrote, and `M.emitter_lowers` asks about the NAME
+        # alone, so deciding this after those arms would compile somebody
+        # else's function.  `is_extern` is FALSE for a call through a word,
+        # which is what keeps every arm below — all of them about calling a C
+        # symbol — out of it; the argument loop, the SysV split and the call
+        # itself are the same code either way, and the call is `CALL r64`
+        # through R11 instead of `CALL rel32` through a label.
+        through_value = (not is_extern_call and name not in self._functions
+                         and M.callee_is_a_bound_value(self._cur_fn, name))
+        # …and the name has to be a BARE one. `_callee_symbol` flattens a
+        # subscript callee to its base, so `a.b[3](x)` arrives here as `a.b`
+        # and `a[i](x)` as `a`; only the first of those is a name the function
+        # binds as a callable, and `comptime.specialization_name` is the one
+        # recogniser of the bare spelling.
+        through_value = through_value and (
+            e.func.name == name if isinstance(e.func, F.IdentExpr)
+            else comptime_eval.specialization_name(e.func) == name)
+        if through_value:
+            ann = M.param_annotation(self._cur_fn, name)
+            if e.kwargs:
+                raise CodegenError(M.value_call_keyword_refusal(
+                    M.member_chain_text(e.func), "a keyword argument in"))
+            if not M.value_callee_can_hold_a_function(ann):
+                raise CodegenError(M.callee_value_refusal(
+                    name, self._cur_fn, M.member_chain_text(e.func), ann))
+            if isinstance(e.func, F.SubscriptExpr):
+                # A bracketed callee through a value: a specialization, or an
+                # index into a container. Only the parameter's declared type
+                # can say — see `model.value_call_bracket_reading`.
+                if M.value_call_bracket_reading(self._cur_fn, name, ann) \
+                        != "specialization":
+                    raise CodegenError(M.value_bracket_reading_refusal(
+                        name, self._cur_fn, ann))
         # `external_call["sym", T]` names a C SYMBOL, and `std/os/env.mojo`
         # defines Mojo functions called `getenv`/`setenv`/`unsetenv` over the
         # same three C symbols — so a bare name would branch to the module's OWN
@@ -8039,21 +8104,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         if not is_extern_call and name in self._structs:
             self._emit_struct_constructor(e, name, self._structs[name])
             return
-        # A CALLEE THIS FUNCTION BINDS — arm64's rule, its reason and its
-        # message, from the one shared pair (`model.callee_is_a_bound_value` /
-        # `model.callee_value_refusal`).  `func(i)` where `func` arrived as a
-        # parameter is a call through a VALUE, and "a name this unit does not
-        # compile" cannot tell it from a C symbol, so the extern path emitted a
-        # call against a symbol spelled `func` and the bind audit reported a
-        # missing symbol instead of the construct that is missing.
-        if not is_extern_call and name not in self._functions \
-                and M.callee_is_a_bound_value(self._cur_fn, name):
-            # The SOURCE's spelling, not the flattened base name: `c.f(…)`
-            # flattens to `c`, and a refusal that names `c` sends the reader
-            # to the wrong line. `member_chain_text` prints both spellings.
-            raise CodegenError(M.callee_value_refusal(
-                name, self._cur_fn, M.member_chain_text(e.func)))
-        is_extern = is_extern_call or name not in self._functions
+        is_extern = is_extern_call or (name not in self._functions
+                                       and not through_value)
         # The gimple backend's C runtime is a library of a DIFFERENT target, not
         # an external dependency of this one, and the source spells its ABI as
         # bare `mojo_*` names. Everything a call to one of those could bind to
@@ -8085,9 +8137,21 @@ ctor_field_value=self._ctor_field_value_for(name),
         # binder as a local one — that is the whole fix for a default argument
         # that arrives as a stack address — and one whose declaration is not
         # known keeps the old positional-only behaviour.
-        args = (list(e.args)
-                if is_extern and self._callee_decl(name) is None
-                else self._bind_call_args(name, e))
+        # A callee reached through a word has NO declaration in this image, so
+        # the binder has nothing to bind against and every argument is passed
+        # exactly as the call site wrote it — in position, with the
+        # specialization's brackets AHEAD of them. That is the same rule the
+        # direct path applies to a generic's comptime parameters
+        # (`comptime.param_names`: they are ordinary leading arguments), read
+        # through the one bracket reader
+        # `formal/monomorph.py::supplied_bracket_args`, so there is one answer
+        # to "what does `f[a, b](x)` pass" rather than one per backend and one
+        # per callee kind.
+        args = (monomorph.supplied_bracket_args(e) + list(e.args)
+                if through_value
+                else (list(e.args)
+                      if is_extern and self._callee_decl(name) is None
+                      else self._bind_call_args(name, e)))
         if is_extern and self._callee_decl(name) is None:
             # …and the count is checked against what the MANIFEST publishes,
             # because "no declaration to read" must not mean "no contract to
@@ -8173,7 +8237,12 @@ ctor_field_value=self._ctor_field_value_for(name),
         # see `_vararg_placement`, and the reason it is asked here rather than
         # in the argument loop below is that the stack half and the register
         # half both need the same answer.
-        placement = self._vararg_placement(name, args)
+        # …and the callee NAME is a formality here: a call through a word is not
+        # a call to a C entry point, so the printf argument-classification arm
+        # of `_vararg_placement` must not fire on a parameter that happens to be
+        # spelled like one. The empty name is what says "no callee name", and
+        # that table keys on names only, so it answers the identity placement.
+        placement = self._vararg_placement("" if through_value else name, args)
         n_stack = sum(1 for _c, _slot in placement if _c == "stack")
         if len(args) > _MAX_INCOMING_ARGS:
             raise CodegenError(
@@ -8252,6 +8321,24 @@ ctor_field_value=self._ctor_field_value_for(name),
         # it, so it is the ADDRESS of the caller's own storage rather than the
         # value in it.
         recv_arg = self._receiver_argument(e, name)
+        # A CALLEE REACHED THROUGH A WORD is evaluated and pushed FIRST, below
+        # every argument, and popped back after them. Both halves are forced:
+        # the source writes the callee before the arguments and an argument
+        # expression here can be an arbitrary call that clobbers every
+        # caller-saved register, so evaluating the callee after the arguments
+        # would read whatever the last one left; and it is pushed LOWEST because
+        # the pops below are a fixed count, so a slot under them is the one
+        # still there when the count is spent. R11 is the destination
+        # (`SCRATCH_REGS`: caller-saved, holds no local), and at this point
+        # nothing transient is live — the last argument was popped.
+        if through_value:
+            self._emit_expr(e.func.obj if isinstance(e.func, F.SubscriptExpr)
+                            else e.func)
+            # RAX, not R11: `_emit_expr` leaves its value in RAX on this
+            # backend exactly as it leaves one in X0 on arm64, and R11 is where
+            # it comes BACK out (below). Pushing R11 would push whatever the
+            # callee's own name evaluation happened to leave there.
+            self._push_slot(Reg.RAX)
         for j, _c, _slot in reg_plan:
             if j == recv_arg:
                 self._emit_receiver_argument(args[j], name)
@@ -8308,6 +8395,9 @@ ctor_field_value=self._ctor_field_value_for(name),
             else:
                 self.asm.emit(encode_mov_r64_r64(ARG_REGS[slot], Reg.RAX))
 
+        if through_value:
+            # The callee's own slot, last off the stack and into R11.
+            self._pop_slot(Reg.R11)
         if is_extern:
             # AL = how many vector registers the caller used, which the ABI
             # requires a variadic callee to be told: `va_start` builds the
@@ -8321,6 +8411,13 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_mov_imm(Reg.RAX, nxmm)
             self._emit_extern_call(symbol)
 
+        elif through_value:
+            # `CALL R11` — the branch through the word, the register form of
+            # `FF /2` and the twin of arm64's `BLR`. RSP is 16-byte aligned at
+            # this point (the outgoing area above is a whole number of 16-byte
+            # slots), which is what SysV requires at a call and is the same
+            # alignment the `call rel32` below is emitted with.
+            self.asm.emit(encode_call_r64(Reg.R11))
         else:
             self.asm.emit(encode_call_rel32(0))
             # The NAME a call reaches, not the label this image happens to

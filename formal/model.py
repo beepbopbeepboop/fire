@@ -4975,62 +4975,6 @@ def callee_is_a_bound_value(fn, name: str) -> bool:
     return name in bound
 
 
-def callee_value_refusal(name: str, fn, spelling: str = None) -> str:
-    """The refusal for calling a name the calling function binds.
-
-    ARCH-FREE, asked by BOTH backends from `_emit_call` beside
-    `specialization_call_refusal` and for the same reason: one construct, one
-    language implementation, one answer.
-
-    `name` is a parameter or a local of `fn` (`callee_is_a_bound_value` is the
-    reader that decides it), so the call is a call THROUGH A VALUE. This path
-    has no function values at all, and it has none for the same reason it has
-    no heap: a formal value is one 64-bit word with a home in a register, a
-    spill slot, a receiver's frame or a folded module constant, and the word a
-    function value would need is a code ADDRESS whose target this build cannot
-    establish — a closure would need an environment, and an environment is a
-    box. Passing a function in is refused too, and by a different check
-    (`check_module_symbols`: "'target' has no home"), which is the other half of
-    the same fact and worth pointing at: there is no spelling of this construct
-    that works, so the reader is not being sent from one refusal to another.
-
-    `spelling` is what the SOURCE wrote and `name` is what `_callee_symbol`
-    flattened it to, and they are two names in the message when they differ
-    because a refusal that names the base of `c.f` while the reader is looking
-    at `c.f` sends them to the wrong line for the same reason the `no home`
-    message does. `member_chain_text` is the reader for it, for the reason its
-    own docstring gives.
-
-    **The measured alternative is an image that cannot be loaded.** With the
-    extern path taking the call, `map(size, func)` emitted a branch against a
-    symbol spelled `func`, and the file built before the bind audit caught it —
-    which is one verdict (`not-answerable/unresolved-extern`, a fact about the
-    target) standing where another belongs (a codegen gap in this file, in the
-    coverage denominator). The advice is the same program with a
-    representation: take what the operation DOES rather than the operation, so
-    `apply(size, kind: Int)` with one arm per operation, or `apply(n, f)` where
-    `f` is a function of THIS unit and the call is named."""
-    where = getattr(fn, "name", None) or "this function"
-    subject = (f"`{name}`" if not spelling or spelling == name
-               else f"`{spelling}`, which flattens to the base name `{name}`,")
-    return (
-        f"{subject} is a call through a VALUE rather than through a function "
-        f"of this unit — `{name}` is a name {where} binds, a parameter or a "
-        f"local of it, and this path has no representation for a function "
-        f"value. A formal value is one 64-bit word with a home in a register, "
-        f"a spill slot, a receiver's frame or a folded module constant; the "
-        f"word a function value needs is a code address, and a closure needs "
-        f"an environment, which is a box this target has no allocator for. "
-        f"Passing one in is refused for the same reason (a function name read "
-        f"as a value has no home). Refused rather than emitted as a branch "
-        f"against a symbol named `{name}`, which is what this used to do: the "
-        f"image was written, and then the loader refused it. Take what the "
-        f"operation DOES rather than the operation — `apply(size, kind: Int)` "
-        f"with one arm per operation is the same program with a "
-        f"representation — or call a function of this unit by name"
-    )
-
-
 def sole_field_call_refusal(spelling: str, struct: str, chain: str, root: str,
                             fn_name: str = None) -> str:
     """Why `c.f(5)` is a call of a VALUE: the callee is the struct's own field.
@@ -21241,6 +21185,368 @@ def parameter_declared_structs(fn, decls: dict, owner=None) -> dict:
 
 CONTAINER_TYPE_NAMES = ("List", "list", "StaticList", "Tuple", "tuple",
                         "Set", "set", "InlineStaticList", "Array", "array")
+
+
+# ── calling through a VALUE: a function value is a code address ────────────
+#
+# The construct `std/algorithm/backend/tile.mojo` is refused for, and the four
+# shapes it takes on this path.  One value is one 64-bit word with a home in a
+# register, a spill slot, a receiver's frame or a folded module constant
+# (`pointer_value_model`), and the word a FUNCTION value holds is a CODE ADDRESS
+# — which is a perfectly good word, and the only thing it needs is something to
+# materialize it and something to branch through it.  `encode_blr_xn` has been in
+# `formal/arm64.py` since the beginning with no caller, and `encode_lea_r64_rip`
+# is how a string literal's address reaches a register, so neither backend is
+# missing a piece of machinery; what was missing was the DECISION, and it is
+# here so the two machines cannot answer one construct differently:
+#
+#   `param_annotation`             — what the caller DECLARED about that word;
+#   `value_callee_can_hold_a_function` / `value_call_bracket_reading` — the two
+#                                     decisions the declaration settles;
+#   `callee_value_refusal`, `value_bracket_reading_refusal`,
+#   `value_call_keyword_refusal`, `function_value_argument_refusal` — the four
+#                                     sentences for the shapes with no answer;
+#   `function_value_refusal`       — a function with no code in this image.
+#
+# All eight live in THIS section rather than beside the caller that happens to
+# reach them first, which is the only property here a 30,000-line file can lose:
+# a construct whose readers are scattered is a construct whose readers disagree,
+# and the two tables in `test_refusal_taxonomy.py` exist because that has
+# happened.
+#
+# **What is still refused, and it is a real boundary rather than a remainder.**
+# The word is an address, and this build does not prove the word IS an address:
+# a program that calls a value holding a non-address traps at run time where it
+# used to be refused at build time.  What this path cannot do is decide that
+# soundly without a whole-module dataflow over every value the callee might
+# have been handed — the callee cannot see its call sites, and the call sites
+# cannot see the callee's body across a dylib boundary — so the check that is
+# cheap and local is done and the rest is named rather than implied:
+# `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`.
+
+# Types this path SUBSCRIPTS.  A value of one of these answers `x[i]` with an
+# element, which is the reading a bracketed callee has to be told apart from;
+# everything else that is a type at all cannot be indexed, so a bracket on it
+# says specialization and says it by deduction rather than by guess.
+SUBSCRIPTABLE_TYPE_NAMES = tuple(
+    dict.fromkeys(CONTAINER_TYPE_NAMES
+                  + ("String", "StringRef", "StringLiteral", "SIMD",
+                     "SIMDVector", "StaticTuple")))
+
+
+def param_annotation(fn, name: str) -> str | None:
+    """The declared type of `fn`'s parameter `name`, or None.
+
+    None is not "untyped" alone — it is every case the reader cannot reduce,
+    including a parameter this function does not have, so a caller asking this
+    about a local always gets None and must not read that as a fact about the
+    local's type.  `annotation_base_name` is the reducer, so the decorations
+    (`inout`, `out`, `borrowed`, a trailing `?`) and `Self` are its problem and
+    not this one's; a FUNCTION-typed declaration reduces to None, which is why
+    `value_call_bracket_reading` looks at the raw text for it.
+    """
+    for p in (getattr(fn, "params", None) or []):
+        pname = p[0] if isinstance(p, (list, tuple)) else getattr(p, "name", None)
+        if pname != name:
+            continue
+        ann = p[1] if isinstance(p, (list, tuple)) and len(p) > 1 \
+            else getattr(p, "annotation", None)
+        return ann if isinstance(ann, str) and ann.strip() else None
+    return None
+
+
+def _outer_annotation_base(ann) -> str | None:
+    """The bare name an annotation's OUTERMOST type names, or None.
+
+    `annotation_base_name` cannot be this reader, and the reason is one line of
+    that function: it answers None for any annotation containing a `(`, because
+    a function-typed declaration names no struct — which is the right answer for
+    ITS question and the wrong one here, because the question is what the
+    annotation is made OF rather than what struct it is.  `Some[def[width:
+    Int](Int) -> Int]` — the same construct spelled with the function type
+    inline instead of through an alias — is an `Optional` of a function, and
+    `annotation_base_name` says None about it.
+
+    So this reads the outermost application directly, and it does NOT reuse
+    `_strip_type_decorations` for the same reason it does not reuse
+    `annotation_base_name`: that function returns None for any annotation
+    holding a `(`, which is exactly the spelling this has to answer. The
+    decorations are the same TABLE — one list, read here in the one place that
+    needs it — and a `Self` with no `self_type` is left as the name `Self`,
+    which no caller below claims anything from.
+    """
+    if not isinstance(ann, str) or not ann.strip():
+        return None
+    text = ann.strip()
+    changed = True
+    while changed:
+        changed = False
+        for deco in _TYPE_DECORATIONS:
+            if text.startswith(deco) and text[len(deco):len(deco) + 1] in (" ", "["):
+                text = text[len(deco):].strip()
+                changed = True
+    if not text:
+        return None
+    if text.startswith("def") or text.startswith("fn"):
+        return "def"
+    m = re.match(r"([A-Za-z_][A-Za-z_0-9]*(?:\.[A-Za-z_][A-Za-z_0-9]*)*)", text)
+    if not m:
+        return None
+    rest = text[m.end():].lstrip()
+    if rest and not rest.startswith("["):
+        return None
+    return m.group(1).split(".")[0]
+
+
+def callee_value_refusal(name: str, fn, spelling: str = None,
+                         ann=None) -> str:
+    """The refusal for calling a name the calling function binds, when the
+    build can see the word is not a function.
+
+    ARCH-FREE, asked by BOTH backends from `_emit_call` beside
+    `specialization_call_refusal` and for the same reason: one construct, one
+    language implementation, one answer.
+
+    `name` is a parameter or a local of `fn` (`callee_is_a_bound_value` is the
+    reader that decides it), so the call goes THROUGH A VALUE — and a function
+    value IS a word on this path now, its code address, so the question this
+    function answers is not whether a value can be called but whether **this**
+    value can be. `ann` is the parameter's declared type
+    (`param_annotation`), and `value_callee_can_hold_a_function` is what
+    decides: a container this path subscripts and a scalar cannot hold a code
+    address, so `drain(f: List[Int])` calling `f(0)` is a program whose own
+    declaration refutes it, and it is refused HERE rather than turned into a
+    branch through whatever word the container held.
+
+    **What this is not, and the sentence it replaced said the opposite.** It
+    used to read "this path has no representation for a function value", and
+    that was true when a function name had nowhere to live and `func(i)` had
+    nowhere to branch. Both are answered now — a function name is an
+    `ADRP`+`ADD` from its entry label (each backend's `_load_var`), and a call
+    through a word is one `BLR` (arm64) or `CALL r64` (x86-64), each backend's
+    `_emit_call` — so keeping the old words would have been a refusal that says
+    a thing which is no longer true, on the construct it was written for.
+
+    `spelling` is what the SOURCE wrote and `name` is what `_callee_symbol`
+    flattened it to, and they are two names in the message when they differ
+    because a refusal that names the base of `c.f` while the reader is looking
+    at `c.f` sends them to the wrong line for the same reason the `no home`
+    message does. `member_chain_text` is the reader for it, for the reason its
+    own docstring gives.
+
+    **The measured alternative is an image that cannot be loaded.** With the
+    extern path taking the call, `map(size, func)` emitted a branch against a
+    symbol spelled `func`, and the file built before the bind audit caught it —
+    which is one verdict (`not-answerable/unresolved-extern`, a fact about the
+    target) standing where another belongs (a codegen gap in this file, in the
+    coverage denominator)."""
+    where = ((getattr(fn, "name", None) or "this function")
+             if fn is not None else "this function")
+    subject = (f"`{name}`" if not spelling or spelling == name
+               else f"`{spelling}`, which flattens to the base name `{name}`,")
+    declared = (f" and it is declared `{ann.strip()}`" if isinstance(ann, str)
+                and ann.strip() else "")
+    return (
+        f"{subject} is a call through a VALUE rather than through a function "
+        f"of this unit \u2014 `{name}` is a name {where} binds, a parameter or "
+        f"a local of it{declared}, and a word that is not a code address is "
+        f"nothing to branch through. A formal value is one 64-bit word with a "
+        f"home in a register, a spill slot, a receiver's frame or a folded "
+        f"module constant; calling one is a branch to whatever that word is, so "
+        f"a callee this build can see cannot hold a function is refused here "
+        f"instead of at run time. Take what the operation DOES rather than the "
+        f"operation \u2014 `apply(size, kind: Int)` with one arm per operation "
+        f"is the same program with a representation \u2014 or declare the "
+        f"parameter as the function type and pass the function of this unit "
+        f"whose address it will hold"
+    )
+
+
+def function_value_argument_refusal(name: str, callee: str, param: str,
+                                    ann, reader: str = None) -> str:
+    """Why a function name cannot be passed where the callee declares something
+    that cannot hold one.
+
+    Arch-free, and asked from `formal/build.py`'s name-placement walk — the one
+    pass that has both ends of the call in hand at once, which is the only place
+    this question CAN be asked: the callee cannot see its call sites and a call
+    site without a declaration cannot know the parameter.
+
+    `call2(dbl, 5)` with `def call2(f: Int, a: Int): return f + a` is the
+    program, and it is a build error in Mojo and CPython. Emitted here it would
+    be `address_of_dbl + 5` — a number nobody wrote, with exit 0, and nothing on
+    the link line to catch it, which is the failure
+    `no_public_api_reason`'s own docstring calls trading a build error for a
+    run-time wrong answer.
+
+    Only the bare `dbl(x)` spelling reaches this, because that is the only one
+    where the argument is DEFINITIONALLY a code address; a computed argument is
+    a word of unknown provenance and is named in
+    `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md` rather than
+    refused here, where the answer would be a sentence about a program this
+    check cannot see.
+    """
+    who = f" in {reader}" if reader else ""
+    declared = (f"declared `{ann.strip()}`" if isinstance(ann, str)
+                and ann.strip() else "not a type a function can go into")
+    return (
+        f"{name!r} is a FUNCTION of this image read as a value, and it is "
+        f"passed to `{callee}()`{who} as parameter `{param}`, which is "
+        f"{declared}. A function value is a code ADDRESS — one 64-bit word, "
+        f"the entry point of `{name}` — and a word of that kind is not an "
+        f"arithmetic operand, a container or a number, so the callee would "
+        f"compute with an address and answer a number the source never wrote. "
+        f"Declare `{param}` as the function type and CALL it, or pass the "
+        f"function's RESULT instead of the function"
+    )
+
+
+def value_bracket_reading_refusal(name: str, fn, ann=None) -> str:
+    """Why a bracketed callee through a value cannot be read either way.
+
+    Arch-free, and asked by both backends from `_emit_call` beside
+    `value_call_keyword_refusal`. The bracket on a value is genuinely two
+    constructs — a specialization's comptime parameters, or an index — and only
+    the parameter's declared type separates them
+    (`value_call_bracket_reading`). This is the refusal for the shapes that
+    type does not separate, and it is a refusal rather than a guess in both
+    directions: reading an index as a specialization passes an element as a
+    leading argument to the wrong word, and reading a specialization as an index
+    would subscript a value that cannot be subscripted.
+
+    The advice is the annotation, because that is what the stdlib already
+    writes for this construct — `workgroup_function: Some[Static1DTileUnitFunc]`
+    in `std/algorithm/backend/tile.mojo` is what makes its own brackets a
+    specialization — and a BARE `func(i)` needs no annotation at all, which is
+    why this refusal is about the bracketed spelling alone.
+    """
+    where = getattr(fn, "name", None) if fn is not None else None
+    where = where or "this function"
+    declared = (f" It is declared `{ann.strip()}`" if isinstance(ann, str)
+                and ann.strip() else " It is not declared at all.")
+    return (
+        f"`{name}[…](…)` is a bracketed call through a VALUE, and a "
+        f"bracket on a value is two constructs: the comptime parameters of a "
+        f"specialization, or an index into a container. This build separates "
+        f"them from the callee's DECLARED type, because that is the only thing "
+        f"that can, and `{name}` does not declare one this path can read."
+        f"{declared} A parameter declared `Some[…]` or as a `def[…](…) "
+        f"-> …` function type cannot be indexed, so a bracket on one is a "
+        f"specialization and is passed as leading arguments; a `List`/a "
+        f"`String` can only be indexed, so its brackets are an index and an "
+        f"element is not callable here. Annotate the parameter, or write the "
+        f"call without brackets (`{name}(…)`), which is the same program "
+        f"on this path: a comptime parameter is an ordinary leading argument"
+    )
+
+
+def value_callee_can_hold_a_function(ann) -> bool:
+    """True unless `ann` says the parameter CANNOT be holding a function.
+
+    The one soundness check this construct can afford, and it is deliberately
+    small: it reads the caller's own DECLARATION and refuses the two declared
+    types that cannot hold a code address — a container this path subscripts
+    and a scalar.  `workgroup_function: Some[Static1DTileUnitFunc]` passes
+    (an `Optional` of a function), an UNANNOTATED `func` passes (a function
+    value is the most likely thing an untyped parameter holds, and
+    `stdlib/std/algorithm/backend/cpu/map.mojo`'s is one), and `f: List[Int]`
+    does not.
+
+    What it cannot do is the other direction — proving the value IS an address,
+    which needs a whole-module dataflow and is named in
+    `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md` rather
+    than implied here.
+    """
+    base = _outer_annotation_base(ann)
+    if base is None:
+        return True
+    if base in SUBSCRIPTABLE_TYPE_NAMES:
+        return False
+    return not (base in POINTEE_WIDTHS
+                or type_constructor_kind(base) is not None)
+
+
+def value_call_bracket_reading(fn, name: str, ann) -> str:
+    """`"specialization"` or `""` (refuse) for `name[a, b](…)` through a value.
+    A bracket on a VALUE is genuinely ambiguous and the ambiguity is the whole
+    difficulty of this construct, so the answer is read off the one fact the
+    caller stated: the parameter's declared type.
+
+      * a type this path SUBSCRIPTS (`List[Int]`, `String`, …) — the bracket is
+        an INDEX.  `f[0](x)` with `f` a list of functions is a call of the
+        element, and reading the bracket as a specialization would pass `0` as a
+        leading argument to the wrong word;
+      * a SCALAR (`Int`, `bool`, `DType`) — neither.  A specialization of an
+        `Int` is not a program, so the bracket cannot be the index and the
+        program is wrong; refused rather than turned into a branch through a
+        number;
+      * `Some[F]` / `Optional[F]`, or the function type itself — an OPTIONAL of
+        a function, or the function.  **Neither can be subscripted on this
+        path**, so the bracket cannot be an index and the only reading left is
+        the specialization.  That is
+        `std/algorithm/backend/tile.mojo`'s `workgroup_function:
+        Some[Static1DTileUnitFunc]`, and it is a DEDUCTION from the annotation
+        rather than a pattern match on the file;
+
+        the bare function type arrives here as the spelling `def ... -> R`,
+        because the parser does not keep a function-typed parameter's own
+        parameter list (`('f', 'def ... -> Int')` is what it hands this
+        reader).  **So the annotation cannot say how MANY brackets the
+        specialization has**, and nothing here checks: `f[2, 5](x)` and
+        `f[2](x)` are both "a specialization" as far as this decision goes, and
+        both pass what they were given as leading arguments.  That is the same
+        unagreed direction as everything else here, and it is the callee's own
+        parameter list that would have to disagree for it to be wrong — which is
+        a program whose two ends disagree, answered by passing what the call
+        site wrote;
+      * anything else — an alias this build cannot resolve, a struct, an
+        UNANNOTATED parameter — `""`, and the caller refuses.
+
+    The unannotated case is the one a reader will hit, because this corpus is
+    full of `def apply(size, func)` (`stdlib/std/algorithm/backend/cpu/map.mojo`
+    is exactly that) and the honest answer for a BARE `func(i)` is still yes:
+    there is no bracket to read.  Only the bracketed spelling needs the
+    annotation, and the refusal says so.
+    """
+    base = _outer_annotation_base(ann)
+    if base is None:
+        return ""
+    if base in SUBSCRIPTABLE_TYPE_NAMES:
+        return ""
+    if base in POINTEE_WIDTHS or type_constructor_kind(base) is not None:
+        return ""
+    if base in ("Some", "Optional", "def"):
+        return "specialization"
+    # A struct of this module is not subscriptable either, but the emitter is
+    # handed `structs` by each backend and this reader is not — so a struct
+    # falls to the ambiguous answer rather than being answered by a table that
+    # would have to be handed the whole unit to be right.
+    return ""
+
+
+def value_call_keyword_refusal(spelling: str, what: str) -> str:
+    """Why a KEYWORD (or a keyword bracket) cannot be bound through a value.
+
+    Arch-free and asked by both backends, because the construct is one and the
+    two must not invent different defaults for it.  A keyword names a PARAMETER,
+    and a callee reached through a value has no declaration here, so there is no
+    parameter to name: `f(width=3)` and `f[width=3](x)` would have to be bound
+    positionally against a list nobody has, which is how a defaulted parameter
+    silently receives the wrong word.  Passed positionally, both are one program
+    with a representation.
+    """
+    return (
+        f"`{spelling}` is {what} a call through a VALUE, and this path has no "
+        f"declaration to bind it by NAME: a callee reached through a word is "
+        f"read as taking the arguments the call site writes, in order, and a "
+        f"keyword — or a keyword item in the specialization bracket — names a "
+        f"parameter this build cannot enumerate, so binding it would mean "
+        f"inventing one. Write the argument positionally (`{spelling}` with the "
+        f"words in bracket order), which is the same program on this path: a "
+        f"comptime parameter is an ordinary leading argument and a default "
+        f"parameter is filled by its declaration, and neither has a declaration "
+        f"here"
+    )
 
 
 def list_element_structs(fn, structs_by_name: dict, decls: dict,

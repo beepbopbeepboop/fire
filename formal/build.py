@@ -11611,6 +11611,54 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # this function binds it, which is exactly what lets a callee through.
         func_names = set(_callee_defs(functions))
         placed |= func_names
+        # A FUNCTION read as a value in ARGUMENT position, where the callee's
+        # DECLARATION is in hand and says the word cannot be a function.
+        #
+        # The value itself is a code address and always was (each backend's
+        # `_load_var`), so a read is not a refusal — but the RECEIVING end is
+        # declared, and a declaration that says `Int` refutes the program:
+        # `call2(dbl, 5)` with `def call2(f: Int, a: Int): return f + a` would
+        # otherwise build, run and answer `address_of_dbl + 5`, which is a
+        # number nobody wrote with exit 0. That is the exact failure
+        # `no_public_api_reason`'s docstring calls a "build-error traded for a
+        # run-time wrong answer", so it is refused here.
+        #
+        # Only the bare `dbl(x)` spelling is checked, and that is the only one
+        # that can be: the value is definitionally an address when the
+        # argument IS a function name, and a computed argument (`call2(g, 5)`
+        # with `g` a local) is a word of unknown provenance that this check has
+        # no more to say about than the emitters do
+        # (`bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`).
+        #
+        # The reader is `model.value_callee_can_hold_a_function`, the SAME one
+        # the emitters ask about a callee reached through a value, so the two
+        # ends of one call cannot disagree about whether a declared `List[Int]`
+        # can hold a function.
+        callee_defs = _callee_defs(functions)
+        for call in M.iter_nodes(fn.body):
+            if not isinstance(call, F.CallExpr):
+                continue
+            # The callee's own name, from the two shapes a local callee is
+            # written in (`add(x)` and `add[2, 5](x)`) and one reader of each,
+            # so this cannot disagree with either backend's flattening.
+            cname = (M.subscript_callee_name(call)
+                     or (call.func.name
+                         if isinstance(call.func, F.IdentExpr) else None))
+            fdef = callee_defs.get(cname)
+            if fdef is None:
+                continue
+            shape = M.function_param_shape(fdef)
+            for i, arg in enumerate(call.args or []):
+                if not isinstance(arg, F.IdentExpr) \
+                        or arg.name not in func_names \
+                        or i >= len(shape.positional):
+                    continue
+                if not M.value_callee_can_hold_a_function(
+                        M.param_annotation(fdef, shape.positional[i])):
+                    raise CodegenError(M.function_value_argument_refusal(
+                        arg.name, fdef.name, shape.positional[i],
+                        M.param_annotation(fdef, shape.positional[i]),
+                        fn.name))
         frame_slots = dict(getattr(fn, "_frame_slots", None) or {})
         holders = set(getattr(fn, "_frame_holders", None) or ())
         # A call's CALLEE is not a read of a value: it names a symbol, and a
@@ -11944,9 +11992,28 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             type_application = (isinstance(sub, F.SubscriptExpr)
                                 and id(root_ident) in bracket_callee_roots
                                 and M.empty_blob_constructor(root_ident.name))
+            # …and the FOURTH class, beside `type_application` and for the same
+            # reason: a bracket list that is a CALL's bracketed callee whose
+            # base is a name this function binds. `f[a, b](x)` through a
+            # function VALUE is a specialization with two comptime parameters,
+            # so its comma list is a parameter list and not a two-dimensional
+            # index — `std/algorithm/backend/tile.mojo`'s
+            # `workgroup_function[tile_size_x, tile_size_y](x, y)` is that call,
+            # and it was refused here with "a subscript whose index is a tuple"
+            # about a bracket this unit had already decided was a
+            # specialization's. `multi_index_refusal_for` cannot see the parent
+            # (it is handed the subscript), so the class is established here
+            # from the same `bracket_callee_roots` membership that establishes
+            # it is a CALLEE at all, and the shape it exempts is exactly the
+            # one the emitter lowers.
+            value_callee = (isinstance(sub, F.SubscriptExpr)
+                            and id(root_ident) in bracket_callee_roots
+                            and sub.obj is root_ident
+                            and M.callee_is_a_bound_value(fn, root_ident.name))
             why = M.mlir_template_refusal(sub)
             if why is None and isinstance(sub, F.SubscriptExpr) \
-                    and not type_application and id(sub) not in type_positions:
+                    and not type_application and not value_callee \
+                    and id(sub) not in type_positions:
                 why = M.multi_index_refusal_for(sub, False,
                                                 _callee_defs(functions),
                                                 structs_by_name)
@@ -12019,6 +12086,37 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # `external_call`. A construct refusal asked here has to be the
                 # LAST one, not the first.
                 #
+                # `callee_is_a_bound_value` is the FIFTH exclusion and the only
+                # one that is not about a better message: a base name the
+                # enclosing function binds is a WORD, not a symbol, so
+                # "calls a name this unit does not compile" is not true of it
+                # in the first place — there is no declaration to be missing,
+                # because a callee reached through a value has none on either
+                # architecture and gets none. What it does have is a lowering
+                # (the bracket items are leading arguments, read by
+                # `monomorph.supplied_bracket_args`), and a scan that refused
+                # it here would have made this check the wall the emitters'
+                # lowering sat behind:
+                # `std/algorithm/backend/tile.mojo`'s
+                # `workgroup_function[tile_size](offset)` is exactly that call,
+                # and it was THIS refusal a reader of that file met first. The
+                # emitter still refuses the shapes it cannot read — a bracket
+                # this build cannot tell from an index, a keyword, a parameter
+                # whose declared type cannot hold a function — so nothing that
+                # used to be refused here is silently dropped; it is asked
+                # where the declaration would have been read.
+                #
+                # `sub.obj is root_ident`, and it is load-bearing: `root_ident`
+                # is the BARE NAME at the root of a dotted chain, so without it
+                # this exemption also covers `p.unsafe_load[width=4]()`, whose
+                # base is the MEMBER `p.unsafe_load` and whose root is the
+                # parameter `p` — a bracketed callee this path cannot name at
+                # all, and which
+                # `test_formal_run.py::deref_refuse_unsafe_load_bracketed_width`
+                # pins a refusal for. The emitters ask the same question with
+                # `comptime.specialization_name` and refuse anything that is not
+                # a bare name, and this is that question asked at the scan.
+                #
                 # `root_ident.name` and not `model.subscript_callee_name`:
                 # that one takes the CALL, and `iter_nodes` hands this loop the
                 # subscript with no parent to find the call through. Membership
@@ -12030,7 +12128,9 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         and not M.empty_blob_constructor(base_name)
                         and not base_name.startswith(M.MLIR_DIALECT_PREFIX)
                         and not M.is_external_call_template(sub)
-                        and not M.debug_assert_callee(sub)):
+                        and not M.debug_assert_callee(sub)
+                        and not (sub.obj is root_ident
+                                 and M.callee_is_a_bound_value(fn, base_name))):
                     why = (M.ambiguous_method_specialization_refusal(
                         M.member_chain_text(sub.obj), sub.obj.member,
                         _ambiguous_method_owners(sub.obj, structs_by_name))
@@ -12268,46 +12368,28 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         for sub in M.iter_nodes(fn.body):
             if isinstance(sub, F.SubscriptExpr) and isinstance(sub.obj, F.IdentExpr):
                 subscript_bases.add(id(sub.obj))
-        # A FUNCTION of this image read as a VALUE, and it has to be a PRE-PASS
-        # for the same reason `first_mlir` is: the walk below cannot answer it,
-        # because `placed` above deliberately contains every function name of the
-        # image (`placed |= set(_callee_defs(functions))`, which is what lets a
-        # specialization's root through as a callee). So this question is asked
-        # here, of the walk's own sets, and raised in the walk's order.
+        # A FUNCTION of this image read as a VALUE IS NOT A REFUSAL HERE, and
+        # that used to need a pre-pass of its own to say so.
         #
-        # What it replaces, measured on both architectures for
-        # `def call_it(f, x): return f(x)` called `call_it(plain, 5)`:
+        # The pre-pass existed because `placed` deliberately contains every
+        # function name of the image (`placed |= set(_callee_defs(functions))`,
+        # which is what lets a specialization's root through as a callee), so
+        # the walk below cannot tell a function read as a value from a callee.
+        # It answered "a function of this image, read as a value", which for
+        # `call_it(plain, 5)` was refused by `model.function_value_refusal` —
+        # after an earlier wording of the same refusal had been reported as the
+        # allocator's symptom ('plain' has no home: the register allocator
+        # collected no home for it …), which is a TRUE statement about this
+        # pass and a useless one: it sends the reader looking for a
+        # register-allocation bug in a program whose problem was a construct.
         #
-        #     'plain' has no home: the register allocator collected no home for
-        #     it, so the emitter and the allocation walk disagree about this
-        #     function's locals …
-        #
-        # which is a TRUE statement about this pass and a useless one. It names
-        # an internal table, so the reader goes looking for a register-allocation
-        # bug in a program whose real problem is that it asked for a construct
-        # this path does not have — `model.function_value_refusal` says which.
-        #
-        # The exclusions are the walk's own answers rather than a new judgement
-        # about each: a name the function BINDS reads its own (`bound_here` is
-        # `placed` minus the function names, which is what makes a shadowing
-        # local win), a callee is a symbol rather than a read (`callees`), a
-        # SUBSCRIPT base is a type application or a specialization root
-        # (`subscript_bases`), a TYPE position is a type argument
-        # (`type_positions`), a frame slot and a folded module constant are the
-        # two other values a bare name can have here, and
-        # `name_resolves_without_a_local` is the closed list of names that are
-        # values without a home by design.
-        first_function_value = None
-        for sub in M.iter_nodes(fn.body):
-            if not isinstance(sub, F.IdentExpr) or first_function_value:
-                continue
-            if sub.name not in func_names or sub.name in bound_here \
-                    or sub.name in frame_slots or id(sub) in callees \
-                    or id(sub) in subscript_bases or id(sub) in type_positions \
-                    or M.module_constant_literal(sub.name) is not None \
-                    or M.name_resolves_without_a_local(sub.name):
-                continue
-            first_function_value = M.function_value_refusal(sub.name, fn.name)
+        # A function value is a CODE ADDRESS on this path now, materialized by
+        # each backend's `_load_var` and branched through by its `_emit_call`,
+        # so the name HAS a home and the pre-pass has no question left to ask.
+        # It is not deleted for tidiness and not relocated: the walk below is
+        # still the right place for a name it cannot place, and a function name
+        # is placed (as an address) rather than unplaced, which is the whole
+        # difference between the two.
         # The MLIR refusal is raised BEFORE the name-placement walk below, not
         # inside it, and the order is the point: the walk answers "this name has
         # no home", which is TRUE of a dialect root and useless to a reader
@@ -12321,13 +12403,9 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         if first_mlir is not None:
             raise CodegenError(
                 f"{fn.name}: {first_mlir}" if fn.name else first_mlir)
-        # AFTER the dialect refusal and for the same reason: both name a
-        # CONSTRUCT where the walk would name a symptom, and a dialect root and
-        # a function name are different constructs that cannot collide (one
-        # spells `__mlir_*`), so the order between them is a fixed choice rather
-        # than a precedence that has to be earned.
-        if first_function_value is not None:
-            raise CodegenError(first_function_value)
+        # (A function name read as a value used to be raised HERE, between the
+        # dialect refusal and this walk.  It is answered in the emitters now —
+        # an address is a home — so there is nothing to raise.)
         for node in M.iter_nodes(fn.body):
             if not isinstance(node, F.IdentExpr):
                 continue

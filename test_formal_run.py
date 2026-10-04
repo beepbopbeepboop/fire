@@ -5780,6 +5780,28 @@ BOTH_ARCH_CASES = [
      "def main(n: Int) -> Int:\n"
      "    printf(\"eq=%d\", 1 if mk(1) == mk(2) else 0)\n"
      "    return 0\n", 0, "eq=1"),
+    # …and the case that used to REFUSE a function read as a value, in the
+    # group whose docstring says a construct the two backends once disagreed
+    # about belongs here.  A function value is its entry ADDRESS
+    # (`formal/model.py`'s `function_value_address_note` neighbourhood: each
+    # backend's `_load_var`), so storing one in a local and calling it is one
+    # `BLR` / `CALL r64` and answers the source's arithmetic.  It was
+    # `a_function_name_read_as_a_value_is_named_as_one` in `REFUSAL_CASES`
+    # until the lowering landed; the half that is still refused — the same name
+    # passed where the callee DECLARES an `Int` — stayed in that table beside
+    # it, and the pair is the reason: a word that is an address is not an
+    # arithmetic operand, and the build says so where it can see the
+    # declaration.
+    #
+    # `test_formal_specialization.py` carries the same construct WITH the
+    # CPython comparison this table cannot make, plus the specialization through
+    # a value that `std/algorithm/backend/tile.mojo` is written with.
+    ("both_arch_a_function_value_in_a_local_is_called",
+     "def dbl(x: Int) -> Int:\n"
+     "    return x * 2\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var g = dbl\n"
+     "    return g(5)\n", 10, ""),
     # A positive case whose expected answer is under 256, because the formal
     # entry point's return value becomes the process exit status and a status is
     # eight bits wide: 347 & 255 == 91, and a constant written as 347 would be a
@@ -16903,16 +16925,17 @@ REFUSAL_CASES = [
     # here is one 64-bit word. The needle is the clause that names the
     # CONSTRUCT, so a change that went back to blaming the allocator fails.
     #
-    # Two spellings, because they reach it differently and the second is the one
-    # a `functools.reduce(add2, [1,2,3], 0)` would be: the first stores the name
-    # in a local, the second hands it straight to a callee's parameter.
-    ("a_function_name_read_as_a_value_is_named_as_one",
-     "def dbl(x: Int) -> Int:\n"
-     "    return x * 2\n\n"
-     "def main(n: Int) -> Int:\n"
-     "    var g = dbl\n"
-     "    return g(5)\n",
-     "refuse:is a FUNCTION, and a function is not a value on this path", None),
+    # Two spellings, because they now reach two DIFFERENT answers and the
+    # difference is the point of the pair.
+    #
+    # The first STORES the name in a local and calls it, and it is a working
+    # program: a function value is its entry ADDRESS (each backend's
+    # `_load_var`), so `g` holds one word and `g(5)` is one `BLR` / `CALL r64`.
+    # It moved from this table to `BOTH_ARCH_CASES` when the lowering landed
+    # (`bugs/FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_
+    # value.md` §"What landed"); `test_formal_specialization.py` carries the
+    # same construct with the CPython comparison this table's `refuse:` rows
+    # could not make.
     ("a_function_name_passed_as_an_argument_is_named_as_one",
      "def dbl(x: Int) -> Int:\n"
      "    return x * 2\n\n"
@@ -16920,7 +16943,7 @@ REFUSAL_CASES = [
      "    return f + a\n\n"
      "def main(n: Int) -> Int:\n"
      "    return call2(dbl, 5)\n",
-     "refuse:is a FUNCTION, and a function is not a value on this path", None),
+     "refuse:read as a value, and it is passed to `call2()`", None),
 
     # The ARITY LADDER rows below were REFUSALS here and are ANSWERED ones in
     # `BOTH_ARCH_CASES` now, so they no longer say what the paragraph this group

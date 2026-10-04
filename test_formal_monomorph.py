@@ -566,13 +566,28 @@ def test_an_instantiation_substitutes_the_parameter_and_keeps_the_self_spelling(
            "    def fill(self):\n"
            "        self.items = List[Self.T]()\n")
     mangled, concrete = MM.instantiate(src, "Bag", ("Int",))
-    check(mangled == "Bag_Int", f"the mangled name is {mangled!r}")
+    # The mangled spelling comes from the ONE mangler rather than from a
+    # literal, and that is the whole point of this assertion: `monomorphize.
+    # mangle` deliberately encodes each field with its index, its name and a
+    # digest (`Box[T]` → `Box_1_T_5_Int64`) because the old spelling was not
+    # INJECTIVE — two instantiations could share a symbol — and a literal here
+    # went stale the moment that landed, turning this case red on a mangling
+    # scheme nobody had broken. Deriving it makes the case say what it is
+    # about: that `instantiate` uses the shared mangler, not that a particular
+    # string came out of it.
+    import monomorphize
+    check(mangled == monomorphize.mangle("Bag", {"T": "Int"}),
+          f"the mangled name is {mangled!r}, which is not what the shared "
+          f"mangler produces")
     check("Self." not in concrete,
           f"`Self.T` survived into the instantiation, which binds nothing: "
           f"{concrete!r}")
     check("List[Int]" in concrete,
           f"the field's type argument was not substituted: {concrete!r}")
-    check("struct Bag_Int" in concrete and "struct Bag[" not in concrete,
+    # …and the SAME derivation for the declaration's own name, which is the
+    # other half of what this case is about (the substitution is only useful if
+    # the declaration is renamed to the symbol the library will publish).
+    check(f"struct {mangled}" in concrete and "struct Bag[" not in concrete,
           f"the declaration was not renamed and de-parameterised: "
           f"{concrete!r}")
 
@@ -725,8 +740,18 @@ def test_two_demand_sets_are_two_libraries(tmpdir):
               f"two demand sets produced one path ({want_int!r}); a program "
               f"that binds `Pair_Bool_get_first` would be handed a library that "
               f"exports `Pair_Int_get_first` instead")
-        for path_built, want, other in ((want_int, "Pair_Int", "Pair_Bool"),
-                                        (want_bool, "Pair_Bool", "Pair_Int")):
+        # …and the expected symbol is spelled by the ONE mangler for the same
+        # reason as the case above: `Pair_Int` was the pre-injective spelling and
+        # went stale with it. The NEGATIVE half still keys on the plain base
+        # names, because what it is testing is that the demand set decided the
+        # artifact — and `Pair_Bool` is a substring of nothing an `Int` library
+        # publishes, whether or not the mangler lengthens it.
+        import monomorphize
+        for path_built, want, other in (
+                (want_int, monomorphize.mangle("Pair", {"T": "Int"}),
+                 monomorphize.mangle("Pair", {"T": "Bool"})),
+                (want_bool, monomorphize.mangle("Pair", {"T": "Bool"}),
+                 monomorphize.mangle("Pair", {"T": "Int"}))):
             with open(I._manifest_path(path_built)) as f:
                 exports = {e.get("symbol") for e in
                            (json.load(f).get("exports") or [])}

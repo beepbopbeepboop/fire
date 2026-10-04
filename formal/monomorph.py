@@ -562,12 +562,70 @@ def _bracket_type_args(sub, values=()) -> list:
     documents it), and a keyword bracket is not read here: binding it positionally
     against a declaration that is a lossy record is what that function's own
     docstring warns against, and an unrecognised item here would be mangled into
-    a name no importer computed.
+    a name no importer computed.  `bracket_items` is that decision, in one place
+    both readers of this bracket now share.
     """
-    if getattr(sub, "attrs", None):
+    spelled = [type_arg_text(i, values) for i in bracket_items(sub)]
+    return spelled if spelled and all(spelled) else []
+
+
+def bracket_items(sub) -> list:
+    """The bracket's ITEMS, a comma list expanded, or [] when there is none.
+
+    The ONE reader of a specialization's bracket, and both of its consumers are
+    here rather than beside the emitter that needs them: `demands` below, which
+    asks whether the items spell concrete TYPE arguments, and
+    `supplied_bracket_args`, which asks what a call site SUPPLIED for a callee
+    with no declaration to bind them against.  Two readings of one bracket is
+    how the two answers come to disagree about `f[a, b](x)` — and the second
+    one is the arm whose disagreement is a wrong value rather than a missing
+    demand, because it becomes leading ARGUMENTS.
+
+    `[]` for a callee that is not a subscript at all (`f(x)`), and for a
+    KEYWORD bracket (`f[a = 1](x)`), which the parser keeps in `attrs` and not
+    in `index`.  The keyword half is not answered here for the reason
+    `_bracket_type_args` gives: binding it needs the callee's declared
+    comptime-parameter names, and a value callee has no declaration — so
+    `model.value_call_keyword_refusal` is what a keyword bracket on one of
+    those is, rather than a positional guess here.
+    """
+    if sub is None or getattr(sub, "attrs", None):
+        return []
+    if not isinstance(sub, F.SubscriptExpr):
         return []
     index = sub.index
-    items = list(index.elements) if isinstance(
+    return list(index.elements) if isinstance(
         index, (F.TupleExpr, F.ListExpr)) else [index]
-    spelled = [type_arg_text(i, values) for i in items]
-    return spelled if spelled and all(spelled) else []
+
+
+def supplied_bracket_args(call) -> list:
+    """`f[a, b](x)` → `[a, b]`; `f(x)` → `[]`.  What the brackets SUPPLIED.
+
+    The bracket-to-arguments half of a specialization, for the callee whose
+    declaration this build does not have: a call through a FUNCTION VALUE, where
+    the word being called is the only callee there is and nothing declares its
+    comptime parameters.  On both architectures a comptime parameter is an
+    ordinary LEADING argument (`comptime.param_names` says so), so the items
+    the source wrote in brackets are the arguments it expects first, in bracket
+    order, evaluated in the CALLER's scope — which is what makes
+    `workgroup_function[tile_size](offset)` and `workgroup_function(tile_size,
+    offset)` one lowering rather than two.
+
+    **Why it is not `comptime.specialization_args`, which is the reader for
+    every other specialization on this path.**  That one binds the items to a
+    DECLARED list: it pads a short bracket with 0 and truncates a long one to
+    the declaration's length, because a named generic's parameter list is a
+    fact both ends hold.  Here there is no list, so there is nothing to pad
+    against and nothing may be truncated — the source wrote some arguments, and
+    they are passed, because the alternative is inventing an arity for a
+    function this build cannot read.  `f[3](x)` therefore reaches the callee as
+    `f(3, x)` and `f(x)` as `f(x)`; a callee that wanted a comptime parameter
+    the bracket did not supply is a program whose two ends disagree, and it
+    reads whatever the register held, exactly as a direct call to a generic
+    with too few arguments does.
+
+    Also why it is not the parser's own `index`: a comma list is several
+    arguments, and this is the place the bracket's meaning is known, so the
+    expansion happens here (`bracket_items`) rather than in each reader.
+    """
+    return bracket_items(getattr(call, "func", None))
