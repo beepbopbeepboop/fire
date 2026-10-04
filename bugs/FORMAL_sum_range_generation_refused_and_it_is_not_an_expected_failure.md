@@ -1,5 +1,12 @@
 # `formal/examples/sum_range.mojo` has no loop contract because its back edge is a CONDITIONAL branch — and no `EXPECTED_FAILURES` entry says so
 
+**Status (2026-10-04, `work/formal21-6`): the GENERATION refusal is FIXED at the
+root cause — the back edge is discharged by a bottom-tested loop contract, and
+the doc's "next step" was right about what to ask and wrong about how many
+things had to be asked. The proof now generates on arm64. It still does not
+TYPECHECK, for a reason in the walk's SHARED conditional-branch machinery that
+this branch did not take: see §0 and the second doc.**
+
 **Area:** FORMAL (the arm64 proof generator's CFG walk). Found 2026-10-03 on
 `work/formal18-6`; measured, not fixed. It belongs to whoever holds
 `formal/arm64_proof_gen.py`'s walk, and it is **one arm away** from
@@ -9,6 +16,68 @@
 the next step above with a three-part change that is bigger than it looks — the
 contract is not merely unapplied at the conditional edge, it is never BUILT for
 this shape. Measured on this tree 2026-10-04 (`work/formal19-5`).**
+
+## 0. What landed, and what is still open
+
+**Fixed: `ValueError: unsupported cbz taken continuation to 0x100000330` is
+gone, and it is gone at the cause.** The doc's §"The root cause" is confirmed
+exactly — a `for`-range loop's back edge is a conditional branch, and the walk
+asked "is this the loop top?" only in its `b` arm — and the discovery was the
+half this doc did not name:
+
+> `_gen_range_loop` was written for a shape the emitter **has not produced
+> since the preheader landed**.
+
+`arm64_codegen`'s `_emit_while` puts a `for`-range loop's emptiness test in a
+PREHEADER, so the body, the counter increment, the comparison and the back edge
+are ONE `cbz`-kinded block whose taken edge targets its OWN start, and the
+generator's loop discovery — "a `b` block whose target is a `cbz` block" — has
+no answer for it. Measured over every `.mojo` in `formal/examples/` and
+`formal/hostmods/`: one self-looping `cbz` block for `sum_range`, and **no
+top-tested range loop anywhere**, which is why the contract generator matched
+nothing and the walk had nothing to apply. That is the whole of "the loop
+contract is on ONE arm": the arm was right about the question and the loop was
+not in the shape it was asking about.
+
+The commit adds `while_lt_exit_contract_bottom` to `lib/ProofLib.lean`
+(`while_lt_exit_contract` for a loop whose test is at the bottom: no condition
+prefix, the branch's TAKEN edge is the loop again, and an entry obligation
+that the counter is still below the bound), rewrites `_gen_range_loop` for the
+shape the emitter produces — including composing the TWO-block exit path out of
+each block's own certificate — and makes the `cbz` arm ask the question the
+`b` arm already asks. The back edge's register chain and terminal value flow
+moved out of the `b` arm into `_emit_range_back_edge_tail`, shared by both.
+
+**Still open, and it is a different bug: the generated proof does not
+typecheck.** One Lean error, in the walk's `hcond` obligation for the loop's
+PREHEADER — the comparison's operand is read through a spill slot stored two
+blocks earlier, the chain emits no flag lemma for a `B.cond`, and `bv_decide`
+returns a "potentially spurious counterexample" over its own abstraction.
+Filed, with the reproduction and the next step, as
+`bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`. It
+is not in the loop contract and it is not this branch's to take: `hcond` is
+emitted for every conditional branch, so appending a `sorry` to that chain
+would convert other programs' build failures into admitted obligations.
+
+The generated proof also carries **four admitted `sorry`s** — the frame
+obligations the loop's body run and exit path owe, stated where they are used
+rather than discharged. That is this emitter's established shape
+(`_COND_ARITH_DEFAULT`, the `-- TODO(range)` leaves) and the honest outcome
+this doc's §"The next step" predicted: "a generated proof carrying that hole …
+rather than a refusal". `test_formal.py`'s hole census reports all four, so
+they are counted rather than hidden.
+
+**Verified:** `python3 test_formal_call_proof_gen.py` — 61 passed, 0 failed,
+including three new rows that pin that `sum_range` generates, that its proof
+carries `while_lt_exit_contract_bottom`, and that the loop top on the IMAGE is
+the self-looping block the contract is generated from. `python3 -c` over every
+`formal/examples/*.mojo` with `prove=True, check=False`: **48 of 50 generate**,
+and the two that do not are `subscript_var` (in `EXPECTED_FAILURES`) and
+`wide_recv` (a semantic-model refusal in code-generation territory), both
+unmoved by this change — it was 47 of 50 before it.
+
+**`test_formal.py`'s `sum_range` row is still red**, for the `hcond` reason
+above. So this document stays: the job it names is still not green.
 
 **Not new, and the prior observation is recorded.** `bugs/FORMAL_proof_coverage_census_2026-10-03.md`
 §0.3 already measured this exact refusal against this exact tree:

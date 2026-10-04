@@ -1219,6 +1219,35 @@ def _terminal_reason(term: str) -> str:
     return _FILE_PREFIX_RE.sub("", term, count=1)
 
 
+_EXPORT_GATE_MODULE_RE = re.compile(r"is imported from `([^`]+)`")
+"""The module a call's DEFINING module is named by, in prose.
+
+`formal/model.py::imported_callee_refusal` says it in a sentence rather than
+in a `<file>: ` prefix, so `_refuser` answers "" for the largest refusal row in
+the corpus — 170 of the 710 files on the 2026-10-04 b10 sweep, all of them
+carrying this one sentence. The backtick span is the module name as the build's
+own resolver spells it: `std.format._utils`, `std.math`, `..fstat`, `.path`.
+
+ONE reader, because two tools now want it and a second spelling rule would be a
+second thing to keep right: `tools/formal_sweep_causes.py` (whose `uses:`
+column could not be measured for that row until it existed — see
+`bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` §6.1) and
+`tools/formal_chain_probe.py`, whose `_EXPORT_GATE_RE` is this same pattern.
+"""
+
+
+def refusing_module(msg: str) -> str:
+    """The dotted module name a message says a call is imported from, or "".
+
+    A NAME, not a path: answering "which module do I stub to break this link"
+    and answering "which module declares these names" are two questions, and
+    only the second needs a file. `formal.imports.resolve_module_path` is the
+    resolver for both, and a caller that wants the file says so.
+    """
+    m = _EXPORT_GATE_MODULE_RE.search(msg or "")
+    return m.group(1) if m else ""
+
+
 def _refuser(term: str) -> str:
     """The file the innermost message came from, or "" if it names none.
 

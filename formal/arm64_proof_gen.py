@@ -111,11 +111,20 @@ CFG_LEAF_SITES = {
     # signedness reasoning the documentation talks about.
     "runs-bl-step",
     "runs-cbz-condition",
-    # The `for i in range(...)` loop contract's four obligations.
+    # The `for i in range(...)` loop contract's obligations.  Five, where the
+    # pre-rewrite generator had five too but not the same five: the contract is
+    # now decomposed per SEGMENT (`_loop_exit_run` / `_loop_exit_mid`), so what
+    # used to be one "model invariance under the condition prefix" leaf and one
+    # "back-edge B target" leaf are carried by the `_loop_body_flag` /
+    # `_loop_go_one_step` chain and no longer admit here, and two leaves that
+    # name the back edge and the exit path's frame took their place.  A
+    # registry entry nothing can emit is rot in the direction the census reads:
+    # `cfg_leaf_census` would never report it, which is the same silent gap the
+    # registry was written to close.
     "range-loop-frame-preservation",
+    "range-loop-exit-frame-preservation",
     "range-loop-exit-x30",
-    "range-loop-model-invariance",
-    "range-loop-back-edge-target",
+    "range-loop-back-edge-frame",
     "range-loop-terminal-invariant",
     # The two closers both loop contracts share: the branch's flag predicate
     # against the loop's exit condition, and the branch's own step.
@@ -4407,6 +4416,169 @@ def _block_defs(flow_defs) -> dict:
     return out
 
 
+def _emit_range_back_edge_contract(A, ind: str, bi: int, ctx: dict, s_cur: str,
+                                   tgt: int, lc: dict, fuel_1: str,
+                                   name: str) -> None:
+    """Discharge a bottom-tested range loop's back edge with its contract.
+
+    The `cbz` arm of the walk calls this when a conditional branch's TAKEN edge
+    lands on the loop's own top, which is what a `for`-range loop's last
+    instruction is: the body, the counter increment and the comparison share one
+    block, and the branch that ends it branches back to its own start.  The
+    three obligations are the ones the top-tested shape (`while_lt_exit_contract`,
+    applied from the `b` arm) also owes, in the same order and for the same
+    reasons:
+
+    1. **the frame slot still holds the return address** — written once in the
+       prologue, so it is a fact about the executed PATH, discharged by
+       unfolding every state on that path down to the initial one;
+    2. **the counter is still below the bound** — this is the entry condition
+       `while_lt_exit_contract_bottom` carries and the one obligation with no
+       counterpart in the top-tested shape.  The taken edge IS the loop's own
+       test holding, and the loop's flag lemma relates that test to the counter
+       order at the state the branch reads; the loop's increment and
+       bound-preservation lemmas turn it into the order at the loop TOP.  It is
+       emitted as an obligation with an admitted fallback rather than as a fact,
+       because the last step of that chain (the increment's own no-wrap case)
+       is a value-flow obligation this walk does not discharge for registers it
+       only follows — stated where it is used rather than assumed;
+    3. **the contract itself**, whose fuel obligation is discharged the same way.
+    """
+    _slot = lc["slot"]
+    _exit = lc["exit_pc"]
+    _rr = lc["rr"]
+    _rb = lc["rb"]
+    _state = f"({{ {s_cur} with pc := {tgt} }})"
+    # Subst chain: unfold every state on the executed path down to the concrete
+    # initial state, so a value-flow fact about the path is a fact about the
+    # concrete state the loop contract is stated at.
+    _path_bis = [int(h[len('hsid_'):]) for h in reversed(ctx['flow_hsid'])]
+    A(f"{ind}have hframe_{bi} : mem_read_u64 {_state}.mem "
+      f"({_state}.sp + UInt64.ofNat {_slot}).toNat = "
+      f"UInt64.ofNat {_exit} := by")
+    for _k in _path_bis:
+        A(f"{ind}  subst s_{_k}")
+    A(f"{ind}  simp only [{', '.join(ctx['flow_defs'])}, "
+      f"arm64_reg, arm64_set_reg, Arm64State.init]")
+    A(f"{ind}  all_goals try simp [mem_read_after_write_u64, "
+      f"mem_read_after_write_u64_ne, mem_read_two_writes_same]")
+    A(f"{ind}  all_goals try simp [u64_add_zero_r, UInt64.toNat_ofNat]")
+    A(f"{ind}  all_goals try grind")
+    A(_tag_leaf(f"all_goals {_HOLE}", "range-loop-back-edge-frame",
+                note="frame preservation at the back edge"))
+    A(f"{ind}have hlt_{bi} : arm64_reg {_rr} {_state} < "
+      f"arm64_reg {_rb} {_state} := by")
+    A(f"{ind}  -- the taken edge is the loop's own test holding, and the flag "
+      f"lemma")
+    A(f"{ind}  -- relates that test to the counter order")
+    A(f"{ind}  have hgo : {name}_loop_q {_state} = true := by")
+    A(f"{ind}    simp only [{', '.join(ctx['flow_defs'])}]")
+    A(f"{ind}    all_goals first | exact hc_{bi} | simp [{name}_loop_q] | "
+      f"omega | grind")
+    A(f"{ind}  rw [{name}_loop_body_flag {_state} (by rfl)] at hgo")
+    A(f"{ind}  all_goals first | omega | grind | simp | decide | "
+      f"{_HOLE}")
+    A(f"{ind}have hlc_{bi} := {name}_ltb_loop {_state}")
+    A(f"{ind}  (by rfl) hlt_{bi} hframe_{bi} ({fuel_1})")
+    A(f"{ind}  (by first | omega | grind | {_HOLE})")
+    A(f"{ind}rcases hlc_{bi} with ⟨sf_{bi}, heqf_{bi}, hx0f_{bi}⟩")
+    A(f"{ind}rw [heqf_{bi}]")
+    _emit_range_back_edge_tail(A, ind, bi, ctx, name)
+
+
+def _emit_range_back_edge_tail(A, ind: str, bi: int, ctx: dict, name: str) -> None:
+    """The register chain and terminal value flow a RANGE loop's back edge owes.
+
+    One definition of "what the back edge closes with", shared by the two arm
+    shapes a `for`-range loop can be emitted in: the top-tested one, whose back
+    edge is an unconditional `b` (the `b` arm of the walk), and the fused one,
+    whose back edge is the block's own conditional branch (the `cbz` arm).  The
+    facts are the same in both — the bound register is set to `n` by the
+    prologue and preserved by every block, the counter starts at 0, is
+    preserved by the prefix and incremented by the body, and the accumulator
+    starts at 0 and gains the counter — so emitting them twice would be two
+    copies of one argument free to disagree about which block increments what.
+
+    `ctx` is the walk's own flow context: the per-block state definitions the
+    `simp only` sets are built from, and `hsid_{i}` the facts each block's
+    state definition was introduced by.
+    """
+    _bdd = _block_defs(ctx["flow_defs"])
+    # A block with no state definitions of its own (a `seq` the walk reached
+    # through, whose certificate is empty) must not spell an EMPTY `simp only`
+    # list: `simp only [, arm64_reg]` is a parse error, and this tail is the
+    # first thing that ever reaches such a block.
+    def _bdefs(_i, _with=("arm64_reg", "arm64_set_reg")):
+        _own = _bdd.get(_i, [])
+        return ', '.join(list(_own) + list(_with))
+    A(f"{ind}-- s.x0 = loop model at the back edge = mojo n.")
+    A(f"{ind}-- The back-edge register facts are established as a")
+    A(f"{ind}-- CHAIN of shallow per-block facts (one block each),")
+    A(f"{ind}-- so the kernel never unfolds the deep chain.")
+    # bound (x19): preserved by every block, set to n by the prologue
+    for _i in range(1, bi + 1):
+        A(f"{ind}have h{_i}x19 : s_{_i}.x19 = s_{_i - 1}.x19 "
+          f":= by rw [hsid_{_i}]; "
+          f"simp only [{_bdefs(_i)}]; "
+          f"try grind")
+    A(f"{ind}have h0x19 : s_0.x19 = n "
+      f":= by rw [hsid_0]; "
+      f"simp only [{_bdefs(0, ('arm64_reg', 'arm64_set_reg', 'Arm64State.init'))}]; "
+      f"try grind")
+    A(f"{ind}have hx19 : s_{bi}.x19 = n "
+      f":= by rw [{', '.join(f'h{_i}x19' for _i in range(bi, 0, -1))}, "
+      f"h0x19]")
+    # counter (x21): 0 at the prologue, preserved by the prefix,
+    # incremented by the body (the last block)
+    A(f"{ind}have h0x21 : s_0.x21 = 0 "
+      f":= by rw [hsid_0]; "
+      f"simp only [{_bdefs(0, ('arm64_reg', 'arm64_set_reg', 'Arm64State.init'))}]; "
+      f"try grind")
+    for _i in range(1, bi):
+        A(f"{ind}have h{_i}x21 : s_{_i}.x21 = s_{_i - 1}.x21 "
+          f":= by rw [hsid_{_i}]; "
+          f"simp only [{_bdefs(_i)}]; "
+          f"try grind")
+    A(f"{ind}have h{bi}x21 : s_{bi}.x21 = s_{bi - 1}.x21 + "
+      f"UInt64.ofNat 1 := by rw [hsid_{bi}]; "
+      f"simp only [{_bdefs(bi)}]; "
+      f"try rw [mem_read_push_low s_{bi - 1}.mem s_{bi - 1}.sp]; "
+      f"try grind")
+    A(f"{ind}have hx21 : s_{bi}.x21 = 1 "
+      f":= by rw [{', '.join(f'h{_i}x21' for _i in range(bi, 0, -1))}, "
+      f"h0x21]; try grind")
+    # accumulator (x20): 0 at the prologue, preserved by the prefix,
+    # updated by the body; after one iteration (i = 0) it is still 0
+    A(f"{ind}have h0x20 : s_0.x20 = 0 "
+      f":= by rw [hsid_0]; "
+      f"simp only [{_bdefs(0, ('arm64_reg', 'arm64_set_reg', 'Arm64State.init'))}]; "
+      f"try grind")
+    for _i in range(1, bi):
+        A(f"{ind}have h{_i}x20 : s_{_i}.x20 = s_{_i - 1}.x20 "
+          f":= by rw [hsid_{_i}]; "
+          f"simp only [{_bdefs(_i)}]; "
+          f"try grind")
+    A(f"{ind}have h{bi}x20 : s_{bi}.x20 = s_{bi - 1}.x20 + "
+      f"s_{bi - 1}.x21 := by rw [hsid_{bi}]; "
+      f"simp only [{_bdefs(bi)}]; "
+      f"try rw [mem_read_push_low s_{bi - 1}.mem s_{bi - 1}.sp]; "
+      f"try grind")
+    _acc_rw = ([f'h{bi}x20']
+               + [f'h{_i}x20' for _i in range(bi - 1, 0, -1)]
+               + ['h0x20']
+               + [f'h{_i}x21' for _i in range(bi - 1, 0, -1)]
+               + ['h0x21'])
+    A(f"{ind}have hx20 : s_{bi}.x20 = 0 "
+      f":= by rw [{', '.join(_acc_rw)}]; try grind")
+    A(f"{ind}simp [hx0f_{bi}, mojo, {name}_loop_model, "
+      f"{name}_loop_go, {name}_go, arm64_reg, arm64_set_reg]")
+    A(f"{ind}all_goals try rw [hx19, hx21, hx20]")
+    A(f"{ind}all_goals try simp [UInt64.toNat_ofNat]")
+    A(f"{ind}all_goals try exact ({name}_loop_go_one_step n)")
+    A(_tag_leaf(f"all_goals {_HOLE}", "range-loop-terminal-invariant",
+                note="terminal loop invariant"))
+
+
 def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
                         exit_pc: int, blocks: list, fn, cbz_bi: int):
     """Generate state definitions and a loop contract for countdown-style while loops.
@@ -4761,20 +4933,42 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
 
 def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
                     exit_pc: int, blocks: list, fn, vregs: dict,
-                    cbz_bi: int) -> str:
+                    cbz_bi: int):
     """Generate state definitions and a loop contract for
-    `for i in range(n)` accumulator loops.
+    `for i in range(n)` accumulator loops, in the shape the emitter produces.
+
+    **The shape is one block, and that is the whole of what is new here.**
+    `arm64_codegen`'s `_emit_while` puts the loop's emptiness test in a
+    PREHEADER — `start: <test> B false / init: i = start_val / body: … / step:
+    i += step; <test> B body` — because a `for` binds its target only when the
+    iteration produces a value, so the counter must not be stored before the
+    test (see that method's docstring, and `bugs/FORMAL_stdlib_module_names…`
+    for the CPython measurement behind it).  The block partitioner splits at
+    branch targets, and `step:` is not one: so the body, the increment, the
+    comparison and the back edge are all ONE `cbz`-kinded block whose TAKEN
+    edge targets its own start.  An earlier version of this function looked for
+    the pre-preheader shape — a test block with an `STP`/`LDP`/`CMP` prefix and
+    an unconditional `b` back to it — which this emitter has not produced since
+    that preheader landed, so it matched nothing and every such loop raised
+    `unsupported cbz taken continuation`.  The shape it is written for now is
+    measured, not assumed: `tools/formal_call_depth_census.py`-style probing of
+    `formal/examples/*.mojo` and `formal/hostmods/*.mojo` finds one
+    self-looping `cbz` block for `sum_range` and no top-tested one anywhere.
 
     Emits:
-    - Straight-line state chains for the condition prefix (ck), the body
-      (cb, excluding the back-edge B) and the exit (ce, including RET)
-    - Helper theorems for the `while_lt_exit_contract` obligations whose
-      value flow is not yet automated (structured leaves)
-    - The contract itself: a thin wrapper over `while_lt_exit_contract`
+    - the contract `{name}_ltb_loop`, a wrapper over
+      `while_lt_exit_contract_bottom` (lib/ProofLib.lean), which is
+      `while_lt_exit_contract` for a loop whose test is at the BOTTOM of the
+      body: no condition prefix, the branch's taken edge is the loop again, and
+      the entry obligation is that the counter is still below the bound;
+    - helper theorems for the obligations whose value flow is not automated
+      (the frame slot through the body run, the counter's increment, the bound
+      through the body, the model's invariance under one iteration, the branch
+      flag against the counter order, and the exit run's three facts).
 
     Returns None when the blocks are not a 1-arg range loop (the caller then
     falls back to the countdown detection).  `cbz_bi` is the caller's loop-top
-    block -- see `_gen_countdown_loop` for why it is passed in rather than
+    block — see `_gen_countdown_loop` for why it is passed in rather than
     found again here.
     """
     pat = _range_loop_pattern(fn)
@@ -4786,67 +4980,47 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     L = []
     A = L.append
 
-    # The loop-top cbz block is the caller's `cbz_bi`.
+    # The loop-top block is the caller's `cbz_bi`, and it must be the FUSED
+    # shape: a conditional branch whose taken edge is its own start.
     if cbz_bi is None or blocks[cbz_bi]["kind"] != "cbz":
         return None
     cbz_block = blocks[cbz_bi]
     cbz_start = cbz_block["start"]
     cbz_pc = cbz_block["instrs"][-1]
-    prefix = cbz_block["instrs"][:-1]
-    idxs = [_step_branch_index(words[pc]) for pc in prefix]
-    # Range prefix signature: STP-pre + LDP-post + CMP-register, plus the
-    # condition test. The condition used to be a CSET in the prefix; the
-    # codegen now branches on the CMP's flags directly, so the test is the
-    # block's B.cond TERMINATOR instead. Requiring the CSET here is what made
-    # every `for i in range(...)` fail with "no loop contract matches" once
-    # B.cond was wired in -- the loop stopped looking like a range loop.
-    # (The countdown shape has only CMP-imm + CSET, no spill pair.)
-    _term_idx = _step_branch_index(words[cbz_block["instrs"][-1]])
-    _has_cond = (30 in idxs) or (_term_idx == 51)
-    if not (21 in idxs and 22 in idxs and 6 in idxs and _has_cond):
+    if cbz_block["targets"][1] != cbz_start:
         return None
-    cbz_fall, cbz_taken = cbz_block["targets"]
-    body_pc = cbz_fall
-    exit_pc_val = cbz_taken
+    body_only_pcs = list(cbz_block["instrs"][:-1])
+    _term_idx = _step_branch_index(words[cbz_pc])
+    if _term_idx not in (51, 16, 17):
+        # The loop's own test has to be a branch this generator can read a
+        # predicate out of (`loop_test`), and the comparison it tests has to be
+        # in the run: a CBZ/CBNZ on a CSET the run does not contain is the
+        # countdown shape, not this one.
+        return None
+    idxs = [_step_branch_index(words[pc]) for pc in body_only_pcs]
+    if 6 not in idxs:
+        return None
+    mc = len(body_only_pcs)
+    if mc == 0:
+        return None
+    # The FALL edge leaves the loop (the test failed); the taken edge is the
+    # loop again.  That is the opposite polarity from the top-tested shape,
+    # which is why the contract is a different theorem and not a re-argument.
+    exit_pc_val = cbz_block["targets"][0]
 
-    # --- body blocks: from body_pc to the `b` targeting cbz_start ---
-    body_blocks = []
-    visited = set()
-    queue = [body_pc]
-    while queue:
-        pc = queue.pop(0)
-        if pc in visited:
-            continue
-        visited.add(pc)
-        bi = next((i for i, b in enumerate(blocks) if b["start"] == pc), None)
-        if bi is None:
-            continue
-        body_blocks.append(bi)
-        b = blocks[bi]
-        if b["kind"] == "b" and b["targets"][0] == cbz_start:
-            break
-        for t in b["targets"]:
-            queue.append(t)
-    b_bi = next((bi for bi in body_blocks
-                 if blocks[bi]["kind"] == "b"
-                 and blocks[bi]["targets"][0] == cbz_start), None)
-    if b_bi is None:
-        return None
-    # The body is the straight-line code from body_pc up to (excluding) the
-    # back-edge B.  The block partitioner places it in seq block(s) and/or in
-    # the trailing `b` block itself (which holds the B as its last word).
-    body_seqs = [bi for bi in body_blocks if bi != b_bi]
-    body_only_pcs = []
-    for bi in body_seqs:
-        body_only_pcs.extend(blocks[bi]["instrs"])
-    _b_instrs = blocks[b_bi]["instrs"]
-    if len(_b_instrs) > 1:  # body code inside the b block (before the B)
-        body_only_pcs.extend(_b_instrs[:-1])
-    if not body_only_pcs or body_only_pcs[0] != body_pc:
-        # v1: straight-line body starting exactly at the cbz fall target
-        return None
-
-    # --- exit blocks: from cbz_taken to the ret block ---
+    # --- the exit path, as SEGMENTS ---
+    #
+    # It is not one block.  `_emit_while` puts the counter restore
+    # (`i -= step`, which is what makes the loop variable hold its LAST bound
+    # value afterwards) between the test and the loop's false label, so the
+    # path out of a `for`-range loop is `[restore; B epilogue]` then the
+    # epilogue's own `ret` block — two blocks, and the per-block certificates
+    # the walk already emitted cover each of them separately.  So the exit
+    # obligation is a COMPOSITION, and this list is what it composes: one
+    # segment per block, each a straight-line run of the instructions before
+    # that block's terminator plus, for every block but the last, the one step
+    # that leaves it.  `me` is the total, and it is the `hexRun`/`hexMid`
+    # lengths.
     exit_blocks = []
     visited = set()
     queue = [exit_pc_val]
@@ -4857,29 +5031,34 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
         visited.add(pc)
         bi = next((i for i, b in enumerate(blocks) if b["start"] == pc), None)
         if bi is None:
-            continue
+            return None
         exit_blocks.append(bi)
         if blocks[bi]["kind"] == "ret":
             break
         for t in blocks[bi]["targets"]:
             queue.append(t)
-    exit_bi = next((bi for bi in exit_blocks if blocks[bi]["kind"] == "ret"),
-                   None)
-    if exit_bi is None:
+    if not exit_blocks or blocks[exit_blocks[-1]]["kind"] != "ret":
         return None
-
-    # --- run lengths (the state chains come from the per-block certificates
-    #     emitted earlier by the universal walk, as in the countdown loop) ---
-    mc = len(prefix)
-    mb0 = len(body_only_pcs)
-    exit_only_pcs = []
+    segs = []
     for bi in exit_blocks:
-        exit_only_pcs.extend(blocks[bi]["instrs"])
-    me = len(exit_only_pcs)
-    mb = mb0 + 1  # +1 for the back-edge B (composed via work_body_run)
-    if mc == 0 or mb0 == 0 or me == 0:
+        blk = blocks[bi]
+        if blk["kind"] in ("seq", "ret"):
+            segs.append({"bi": bi, "run": list(blk["instrs"]), "br": None})
+        else:
+            segs.append({"bi": bi, "run": list(blk["instrs"][:-1]),
+                         "br": blk["instrs"][-1]})
+    # Every intermediate segment must leave by an unconditional branch: a
+    # conditional one is a second test, which is a different contract.
+    for seg in segs[:-1]:
+        if seg["br"] is None or _step_branch_index(words[seg["br"]]) != 14:
+            return None
+    if not segs[-1]["run"] or _step_branch_index(words[segs[-1]["run"][-1]]) != 0:
         return None
-    for pc in list(prefix) + list(body_only_pcs) + list(exit_only_pcs):
+    me = sum(len(sg["run"]) + (1 if sg["br"] is not None else 0) for sg in segs)
+    exit_only_pcs = [pc for sg in segs for pc in sg["run"]]
+    if me == 0 or not exit_only_pcs:
+        return None
+    for pc in list(body_only_pcs) + list(exit_only_pcs):
         idx = _step_branch_index(words[pc])
         rhs = _step_rhs(words[pc], idx)
         if rhs is None or not rhs.startswith("some "):
@@ -4895,26 +5074,39 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     # prologue's first STP pair, which the epilogue's LDP-post reloads.  Its
     # offset above the post-prologue `sp` is the exit run's own `sp` reduction
     # (see `_reduced_sp_num`) plus the 8 bytes into the pair.  Deriving it from
-    # the emitted code rather than from `4032 + 16*npairs + 8` keeps it correct
-    # when the frame layout changes; the old literal silently went stale and
-    # left the `hslot` obligation false.
+    # the emitted code rather than from a literal keeps it correct when the
+    # frame layout changes.
     _slot_off = _reduced_sp_num(exit_only_pcs[:me - 2], words)
     if _slot_off is None:
         return None
     _slot = _slot_off + 8
 
+    # The exit path's state at the LAST segment, as one expression: each
+    # earlier segment contributes its certificate's exit state with the pc
+    # rewritten to the next segment's start (the one step that leaves it), and
+    # the last segment's own certificate is applied to that.
+    _states = ["s"]
+    for _k, _sg in enumerate(segs[:-1]):
+        _tag = f"{name}_b{_sg['bi']}"
+        _m = len(_sg["run"])
+        _run_exit = f"({{ {_tag}_qT{_m - 1} {_states[-1]} with pc := {_sg['run'][-1] + 4} }})"
+        _states.append(f"({{ {_run_exit} with pc := {blocks[segs[_k + 1]['bi']]['start']} }})")
+    mid_last = _states[-1]
+    last_seg = segs[-1]
+    exit_bi = last_seg["bi"]
+    mk = len(last_seg["run"])
     cc = f"{name}_b{cbz_bi}"
-    qb = f"{name}_b{b_bi}"
     qe = f"{name}_b{exit_bi}"
-    cqt = f"{cc}_qT{mc - 1}"
-    bqt = f"{qb}_qT{mb0 - 1}"
-    eqt = f"{qe}_qT{me - 1}"
-    eqs = f"{qe}_qS{me - 1}"
-    bmid_pc = _b_instrs[-1]
+    bqt = f"{cc}_qT{mc - 1}"
+    eqt = f"{qe}_qT{mk - 1}"
+    eqs = f"{qe}_qS{mk - 1}"
+    ex_expr = f"({eqt} {mid_last})"
     cbz_idx = (cbz_pc - base) // 4
-    ccond = f"({{ {cqt} s with pc := {cbz_pc} }})"
-    bmid = f"({{ {bqt} s with pc := {bmid_pc} }})"
-    bbody = f"({{ {bmid} with pc := {cbz_start} }})"
+    # The state the branch is TAKEN FROM: the run's exit state, whose pc is the
+    # branch itself.  `bbody` is the same state with the pc rewritten to the
+    # loop top, which is where the contract is stated.
+    bmid = f"({{ {bqt} s with pc := {cbz_pc} }})"
+    bbody = f"({{ {bqt} s with pc := {cbz_start} }})"
     Pf = f"(fun s => mem_read_u64 s.mem (s.sp + UInt64.ofNat {_slot}).toNat = UInt64.ofNat {exit_pc})"
 
     _qdefs, _qsym = loop_test_def(name, words, cbz_pc)
@@ -4922,93 +5114,98 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     for _l in _qdefs:
         A(_l)
     A("")
-    A(f"/- Loop contract for {name}: thin wrapper over `while_lt_exit_contract`.")
-    A(f"    The value-flow obligations are named helper theorems; the ones not")
-    A(f"    yet automated are structured placeholder leaves. -/")
+    A(f"/- Loop contract for {name}: a thin wrapper over")
+    A(f"    `while_lt_exit_contract_bottom`, the BOTTOM-tested loop contract, for a loop")
+    A(f"    whose body, counter increment and comparison share one block.  The")
+    A(f"    value-flow obligations are named helper theorems; the ones not yet")
+    A(f"    automated are structured placeholder leaves. -/")
+    _bdefs_list = ([f"{cc}_qS{k}" for k in range(mc)]
+                   + [f"{cc}_qT{k}" for k in range(mc)])
+    # The exit path's value flow is proved against EVERY segment's state
+    # definitions, not only the last one's: the state the epilogue reads is
+    # reached through them.
+    _edefs = ", ".join(
+        [f"{name}_b{sg['bi']}_qS{k}" for sg in segs for k in range(len(sg["run"]))]
+        + [f"{name}_b{sg['bi']}_qT{k}" for sg in segs for k in range(len(sg["run"]))])
+    _bdefs = ", ".join(_bdefs_list)
     for hname, hsig, hbody in [
-        (f"{name}_loop_frame_cond",
-         f"(s : Arm64State) (hpc : s.pc = {cbz_start})\n"
-         f"    (h : mem_read_u64 s.mem (s.sp + UInt64.ofNat {_slot}).toNat = UInt64.ofNat {exit_pc}) :\n"
-         f"    mem_read_u64 ({cqt} s).mem (({cqt} s).sp + UInt64.ofNat {_slot}).toNat = UInt64.ofNat {exit_pc}",
-         None),
         (f"{name}_loop_frame_body",
-         f"(s : Arm64State) (hpc : s.pc = {body_pc})\n"
+         f"(s : Arm64State) (hpc : s.pc = {cbz_start})\n"
          f"    (h : mem_read_u64 s.mem (s.sp + UInt64.ofNat {_slot}).toNat = UInt64.ofNat {exit_pc}) :\n"
          f"    mem_read_u64 {bbody}.mem ({bbody}.sp + UInt64.ofNat {_slot}).toNat = UInt64.ofNat {exit_pc}",
          None),
-        (f"{name}_loop_cond_flag",
+        # The branch's own predicate IS the loop's test, so this is the
+        # obligation that makes the contract's counter-order hypothesis
+        # available at the back edge: the taken edge is exactly
+        # `q = true`, which is exactly "the counter has not reached the
+        # bound".
+        (f"{name}_loop_body_flag",
          f"(s : Arm64State) (hpc : s.pc = {cbz_start}) :\n"
-         f"    {_qsym} ({cqt} s) = true ↔ ¬ (arm64_reg {rr} s < arm64_reg {rb} s)",
-         None),
-        (f"{name}_loop_cond_rb",
-         f"(s : Arm64State) (hpc : s.pc = {cbz_start}) :\n"
-         f"    arm64_reg {rr} ({cqt} s) = arm64_reg {rr} s ∧ "
-         f"arm64_reg {rb} ({cqt} s) = arm64_reg {rb} s",
-         None),
-        (f"{name}_loop_cond_model",
-         f"(s : Arm64State) (hpc : s.pc = {cbz_start}) :\n"
-         f"    {name}_loop_model ({cqt} s) = {name}_loop_model s",
-         None),
-        (f"{name}_loop_body_step",
-         f"(s : Arm64State) (hpc : s.pc = {bmid_pc}) :\n"
-         f"    arm64_step s {C} = some {{ s with pc := {cbz_start} }}",
+         f"    {(_qsym)} {bmid} = true ↔ "
+         f"(arm64_reg {rr} {bmid} < arm64_reg {rb} {bmid})",
          None),
         (f"{name}_loop_body_inc",
-         f"(s : Arm64State) (hpc : s.pc = {body_pc}) :\n"
+         f"(s : Arm64State) (hpc : s.pc = {cbz_start}) :\n"
          f"    arm64_reg {rr} {bbody} = arm64_reg {rr} s + UInt64.ofNat 1",
          None),
         (f"{name}_loop_body_bound",
-         f"(s : Arm64State) (hpc : s.pc = {body_pc}) :\n"
+         f"(s : Arm64State) (hpc : s.pc = {cbz_start}) :\n"
          f"    arm64_reg {rb} {bbody} = arm64_reg {rb} s",
          None),
         (f"{name}_loop_body_model",
-         f"(s : Arm64State) (hpc : s.pc = {body_pc})\n"
+         f"(s : Arm64State) (hpc : s.pc = {cbz_start})\n"
          f"    (hlt : arm64_reg {rr} s < arm64_reg {rb} s) :\n"
          f"    {name}_loop_model {bbody} = {name}_loop_model s",
+         None),
+        # The exit path is more than one block, so the frame fact the epilogue
+        # needs is a fact about the state REACHED by the earlier segments.
+        # That is what this helper is for, and it is stated at the loop's exit
+        # entry because that is where the contract asks for it.
+        (f"{name}_loop_frame_exit",
+         f"(s : Arm64State) (hpc : s.pc = {exit_pc_val})\n"
+         f"    (h : mem_read_u64 s.mem (s.sp + UInt64.ofNat {_slot}).toNat = UInt64.ofNat {exit_pc}) :\n"
+         f"    mem_read_u64 {mid_last}.mem ({mid_last}.sp + UInt64.ofNat {_slot}).toNat = UInt64.ofNat {exit_pc}",
          None),
         (f"{name}_loop_exit_x30",
          f"(s : Arm64State) (hpc : s.pc = {exit_pc_val})\n"
          f"    (h : mem_read_u64 s.mem (s.sp + UInt64.ofNat {_slot}).toNat = UInt64.ofNat {exit_pc}) :\n"
-         f"    ({eqs} s).x30.toNat ≠ {exit_only_pcs[-1]}",
+         f"    ({eqs} {mid_last}).x30.toNat ≠ {exit_only_pcs[-1]}",
          None),
         (f"{name}_loop_exit_pc",
          f"(s : Arm64State) (hpc : s.pc = {exit_pc_val})\n"
          f"    (h : mem_read_u64 s.mem (s.sp + UInt64.ofNat {_slot}).toNat = UInt64.ofNat {exit_pc}) :\n"
-         f"    ({eqt} s).pc = {exit_pc}",
+         f"    {ex_expr}.pc = {exit_pc}",
          None),
         (f"{name}_loop_exit_x0",
          f"(s : Arm64State) (hpc : s.pc = {exit_pc_val})\n"
          f"    (hlt : ¬ (arm64_reg {rr} s < arm64_reg {rb} s)) :\n"
-         f"    ({eqt} s).x0 = {name}_loop_model s",
+         f"    {ex_expr}.x0 = {name}_loop_model s",
+         None),
+        # The composed exit run, and its avoidance.  One helper for each
+        # because `while_lt_exit_contract_bottom` asks for both as separate
+        # hypotheses and neither is a single block's certificate.
+        (f"{name}_loop_exit_run",
+         f"(s : Arm64State) (hpc : s.pc = {exit_pc_val})\n"
+         f"    (hjump : ({eqs} {mid_last}).x30.toNat ≠ {exit_only_pcs[-1]}) :\n"
+         f"    arm64_runs {C} {me} s = some {ex_expr}",
+         None),
+        # No `hjump` here, unlike `loop_exit_run`: the avoidance of the LAST
+        # segment is the block's own `_mid`, which needs no RET side condition,
+        # and it is what closes the composition.  The run certificate is only
+        # needed by `loop_exit_run`.
+        (f"{name}_loop_exit_mid",
+         f"(s : Arm64State) (hpc : s.pc = {exit_pc_val}) :\n"
+         f"    ∀ u < {me}, ∀ su, arm64_runs {C} u s = some su → "
+         f"su.pc ≠ {exit_pc}",
          None),
     ]:
         A(f"theorem {hname} {hsig} := by")
-        _defs = ", ".join([f"{cc}_qS{k}" for k in range(mc)]
-                          + [f"{cc}_qT{k}" for k in range(mc)])
-        _bdefs = ", ".join([f"{qb}_qS{k}" for k in range(mb0)]
-                           + [f"{qb}_qT{k}" for k in range(mb0)])
-        _edefs = ", ".join([f"{qe}_qS{k}" for k in range(me)]
-                           + [f"{qe}_qT{k}" for k in range(me)])
-        if hname == f"{name}_loop_cond_flag":
-            # The exit test is the loop's own `B.cond`/`CBZ`, so the obligation
-            # is the flag predicate that instruction actually branches on --
-            # `loop_q` -- related to "counter has not reached the bound".  The
-            # prefix's spill pair is folded back with mem_read_push_low first:
-            # the STP and the matching LDP have to be resolved before the CMP
-            # operands are in the shape `arm64_flag_*` expects.
-            for _l in _cond_flag_lines(_defs, words, cbz_pc, cc, mc,
-                                       qsym=_qsym, qstate=cqt,
-                                       rhs=f"¬ (arm64_reg {rr} s < arm64_reg {rb} s)"):
-                A(f"  {_l}")
-        elif hname in (f"{name}_loop_frame_cond", f"{name}_loop_frame_body"):
+        if hname == f"{name}_loop_frame_body":
             # The saved frame address is preserved by the straight-line run:
             # fold the run's sp changes (shared _reduced_sp), show they net to
             # the entry sp, and fold the frame slot through mem_read_push_frame.
-            _is_cond = hname == f"{name}_loop_frame_cond"
-            _d = _defs if _is_cond else _bdefs
-            _pcs = prefix if _is_cond else body_only_pcs
-            _red = _reduced_sp(_pcs, words)
-            A(f"  simp only [{_d}, arm64_set_reg]")
+            _red = _reduced_sp(body_only_pcs, words)
+            A(f"  simp only [{_bdefs}, arm64_set_reg]")
             A(f"  have hslot : ({_red} + UInt64.ofNat {_slot}) = "
               f"(s.sp + UInt64.ofNat {_slot}) := by grind")
             A(f"  all_goals try rw [hslot]")
@@ -5018,6 +5215,208 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
             A(f"  all_goals try grind")
             A(_tag_leaf(f"all_goals {_HOLE}", "range-loop-frame-preservation",
                       note="frame preservation value flow"))
+        elif hname == f"{name}_loop_frame_exit":
+            # The frame slot is above `sp` and the restore segment only pushes
+            # below it, so the same recipe as the body's frame preservation
+            # applies over the exit path's earlier runs.
+            _redx = _reduced_sp([pc for sg in segs[:-1] for pc in sg["run"]],
+                                words)
+            A(f"  simp only [{_edefs}, arm64_set_reg]")
+            A(f"  have hslot : ({_redx} + UInt64.ofNat {_slot}) = "
+              f"(s.sp + UInt64.ofNat {_slot}) := by grind")
+            A(f"  all_goals try rw [hslot]")
+            A(f"  all_goals try rw [mem_read_push_frame s.mem s.sp (by decide : "
+              f"{_slot} < 2^63)]")
+            A(f"  all_goals try rw [h]")
+            A(f"  all_goals try grind")
+            A(_tag_leaf(f"all_goals {_HOLE}",
+                      "range-loop-exit-frame-preservation",
+                      note="exit frame preservation"))
+        elif hname in (f"{name}_loop_exit_run", f"{name}_loop_exit_mid"):
+            # Per segment: the block's own certificate for the straight-line
+            # prefix, then — for every block but the last — ONE step for the
+            # branch that leaves it.  `work_body_run` / `work_body_mid` compose
+            # each of those two into a single hypothesis, and
+            # `runs_append_some` / `runs_avoid_append` compose the segments
+            # into the one run the contract asks about.  So the composition is
+            # peeled off the front, one segment at a time, in both halves.
+            #
+            # Every intermediate state is bound by a `let` FIRST.  Spelled out,
+            # a state two blocks deep is a record update over a record update
+            # over a state chain, and Lean reaches its recursion limit
+            # elaborating an application whose argument is one of those
+            # (measured: `maximum recursion depth has been reached` at the
+            # last block's `runs` application, with `maxRecDepth` already at
+            # 100000).  A `let` is defeq to the term it binds, so nothing about
+            # what is being said changes.
+            _chain = []
+            for _k, _sg in enumerate(segs):
+                _tag = f"{name}_b{_sg['bi']}"
+                _m = len(_sg["run"])
+                _pre = "s" if _k == 0 else f"st{_k - 1}"
+                if _sg["br"] is None and _k == len(segs) - 1:
+                    # A RET-ending run's certificate ENDS at the last
+                    # instruction, so there is no run-exit state to bind: the
+                    # exit is the certificate's own conclusion.
+                    _chain.append({"tag": _tag, "m": _m, "pre": _pre,
+                                   "run": None, "nxt": None, "hyp": None,
+                                   "hm": None, "steps": _m})
+                    continue
+                A(f"  let rex{_k} : Arm64State := ({{ {_tag}_qT{_m - 1} {_pre} "
+                  f"with pc := {_sg['run'][-1] + 4} }} : Arm64State)")
+                _c = {"tag": _tag, "m": _m, "pre": _pre, "run": f"rex{_k}",
+                      "nxt": None, "hyp": None, "hm": None, "steps": _m}
+                if _sg["br"] is not None:
+                    _tgt = blocks[segs[_k + 1]["bi"]]["start"]
+                    A(f"  let st{_k} : Arm64State := ({{ rex{_k} with pc := "
+                      f"{_tgt} }} : Arm64State)")
+                    _c.update({"nxt": f"st{_k}", "steps": _m + 1, "tgt": _tgt})
+                _chain.append(_c)
+            for _k, _c in enumerate(_chain):
+                _c["hyp"] = f"hr{_k}"
+                if _c["nxt"] is None:
+                    if hname == f"{name}_loop_exit_run":
+                        # The last segment ends at the RET, so its certificate
+                        # is the one that takes the `hjump` side condition —
+                        # which is this helper's own third hypothesis, the
+                        # same fact the contract asks for again as
+                        # `loop_exit_x30`.
+                        A(f"  have hr{_k} : arm64_runs {C} {_c['m']} "
+                          f"{_c['pre']} = some "
+                          f"{ex_expr if _k == len(segs) - 1 else _c['run']} := "
+                          f"{_c['tag']}_runs {_c['pre']} "
+                          f"({'hpc' if _k == 0 else 'by first | rfl | simp | native_decide'}) "
+                          f"hjump")
+                    else:
+                        _c["hm"] = f"hm{_k}"
+                        A(f"  have hm{_k} : ∀ v < {_c['m']}, ∀ sv, arm64_runs "
+                          f"{C} v {_c['pre']} = some sv → sv.pc ≠ {exit_pc} := "
+                          f"{_c['tag']}_mid {exit_pc} {_c['pre']} "
+                          f"({'hpc' if _k == 0 else 'by first | rfl | simp | native_decide'}) (by simp)")
+                    continue
+                _sg = segs[_k]
+                _bi = (_sg["br"] - base) // 4
+                A(f"  have hr{_k} : arm64_runs {C} {_c['m']} {_c['pre']} = some "
+                  f"{_c['run']} := {_c['tag']}_runs {_c['pre']} "
+                  f"({'hpc' if _k == 0 else 'by first | rfl | simp | native_decide'})")
+                # The segment's own pc fact, at the top level rather than
+                # inside `hb{_k}`: `work_body_mid`'s last obligation is
+                # `mid.pc ≠ exit`, which `decide` cannot reach through the
+                # `let` and `omega` can only close with this fact in scope.
+                A(f"  have hpcx{_k} : ({_c['run']} : Arm64State).pc = "
+                  f"{_sg['br']} := by rfl")
+                A(f"  have hb{_k} : arm64_step {_c['run']} {C} = some "
+                  f"{_c['nxt']} := by")
+                A(f"    rw [{name}_sr_{_bi} {_c['run']} hpcx{_k}]")
+                A(f"    simp only [hpcx{_k}]")
+                A(f"    all_goals first | rfl | decide | grind | {_HOLE}")
+                A(f"  have hc{_k} : arm64_runs {C} {_c['m'] + 1} {_c['pre']} = "
+                  f"some {_c['nxt']} := work_body_run {C} {_c['m']} {_c['pre']} "
+                  f"{_c['run']} {_c['tgt']} hr{_k} hb{_k} (by decide : "
+                  f"{_c['tgt']} ≠ {_sg['run'][-1] + 4})")
+                _c["hyp"] = f"hc{_k}"
+                if hname == f"{name}_loop_exit_mid":
+                    _c["hm"] = f"hm{_k}"
+                    A(f"  have hm{_k} : ∀ v, v < {_c['m'] + 1} → ∀ sv, "
+                      f"arm64_runs {C} v {_c['pre']} = some sv → sv.pc ≠ {exit_pc} := "
+                      f"by")
+                    # `refine` with one bullet per obligation, not a single
+                    # application with five arguments: each obligation then
+                    # gets its own goal and its own context, which is what
+                    # makes the two `decide`s below decidable (both compare
+                    # two literals).
+                    A(f"    refine work_body_mid {C} {_c['m']} {_c['pre']} "
+                      f"{_c['run']} {_c['tgt']} {exit_pc} hr{_k} hb{_k} ?_ ?_ ?_")
+                    A(f"    · intro v hv sv hsv")
+                    A(f"      exact {_c['tag']}_mid {exit_pc} {_c['pre']} "
+                      f"({'hpc' if _k == 0 else 'by first | rfl | simp | native_decide'}) "
+                      f"(by simp) v hv sv hsv")
+                    A(f"    · decide")
+                    A(f"    · omega")
+            if (hname == f"{name}_loop_exit_mid" and len(_chain) == 1):
+                # One segment, so there is nothing to compose: its own
+                # avoidance IS the statement.
+                A(f"  exact {_chain[0]['hm']}")
+            _rest = me
+            for _k, _c in enumerate(_chain):
+                _last = _k == len(_chain) - 1
+                if hname == f"{name}_loop_exit_run":
+                    if _last:
+                        A(f"  exact {_c['hyp']}")
+                        break
+                    A(f"  rw [show {_rest} = {_c['steps']} + "
+                      f"{_rest - _c['steps']} from by omega, "
+                      f"runs_append_some {C} {_c['steps']} "
+                      f"{_rest - _c['steps']} {_c['pre']} {_c['nxt']} "
+                      f"{_c['hyp']}]")
+                elif _last:
+                    # The last segment is never composed on its own: every
+                    # earlier `runs_avoid_append` names its avoidance as the
+                    # `h2` of a composition whose `u` already covers it, so its
+                    # conclusion is the goal.
+                    break
+                else:
+                    # One `runs_avoid_append` per segment but the last, each
+                    # with the WHOLE remaining length as its `u`, so the last
+                    # one closes the goal.  Stated with its expected type
+                    # rather than used as a rewrite rule: `rw [runs_avoid_append
+                    # …]` asks for the same unification with the goal already
+                    # elaborated, and leaves the last segment's hypotheses as
+                    # metavariables when it cannot (measured: "Invalid rewrite
+                    # argument … is a proof of False").
+                    A(f"  rw [show {_rest} = {_c['steps']} + "
+                      f"{_rest - _c['steps']} from by omega]")
+                    A(f"  exact runs_avoid_append {C} {_c['steps']} "
+                      f"{_rest - _c['steps']} {exit_pc} {_c['pre']} "
+                      f"{_c['nxt']} {_c['hyp']} {_c['hm']} "
+                      f"{_chain[_k + 1]['hm']}")
+                _rest = _rest - _c["steps"]
+        elif hname == f"{name}_loop_body_flag":
+            for _l in _cond_flag_lines(_bdefs, words, cbz_pc, cc, mc,
+                                       qsym=_qsym, qstate=bmid,
+                                       rhs=f"(arm64_reg {rr} {bmid} < "
+                                           f"arm64_reg {rb} {bmid})"):
+                A(f"  {_l}")
+        elif hname == f"{name}_loop_body_inc":
+            # The counter is incremented by one across the body run.  The
+            # back-edge state is bqt with only its pc rewritten, so prove the
+            # bqt fact and then fold the pc out.
+            A(f"  have hinc : arm64_reg {rr} ({bqt} s) = "
+              f"arm64_reg {rr} s + UInt64.ofNat 1 := by")
+            A(f"    simp only [{_bdefs}, arm64_reg, arm64_set_reg]")
+            A(f"    try rw [mem_read_push_low s.mem s.sp]")
+            A(f"    try grind")
+            A(f"  simp only [arm64_reg_pc]")
+            A(f"  exact hinc")
+        elif hname == f"{name}_loop_body_bound":
+            # The bound is preserved across the body run; reuse the
+            # register-chain generator (as countdown's cond_x19 does).
+            _chb, _ = _emit_reg_chain(name, words, f"b{cbz_bi}", body_only_pcs,
+                                      rb, st="s", hname="hboundb")
+            for _l in _chb:
+                A(f"  {_l}")
+            A(f"  simp only [arm64_reg_pc]")
+            A(f"  exact hboundb")
+        elif hname == f"{name}_loop_body_model":
+            # One loop iteration shifts (rem, acc, i) -> (rem-1, acc+i, i+1);
+            # the model is invariant under that shift (loop_go_unfold).  After
+            # the spill is folded back and the +0 terms are dropped, the goal is
+            # exactly (loop_go_unfold A acc i).symm once two Nat facts hold
+            # from i < bound.
+            A(f"  simp only [{_bdefs}, arm64_reg, arm64_set_reg, {name}_loop_model]")
+            A(f"  rw [mem_read_push_low s.mem s.sp]")
+            A(f"  simp [u64_add_zero_r]")
+            A(f"  have h19 : s.x{rr}.toNat < s.x{rb}.toNat := "
+              f"(UInt64.lt_iff_toNat_lt).mp hlt")
+            A(f"  have hge : s.x{rr}.toNat + 1 ≤ s.x{rb}.toNat := Nat.succ_le_of_lt h19")
+            A(f"  have hmod : (s.x{rr}.toNat + 1) % 18446744073709551616 = "
+              f"s.x{rr}.toNat + 1 :=")
+            A(f"    Nat.mod_eq_of_lt (Nat.lt_of_le_of_lt hge (UInt64.toNat_lt s.x{rb}))")
+            A(f"  have hsub : s.x{rb}.toNat - s.x{rr}.toNat = "
+              f"(s.x{rb}.toNat - (s.x{rr}.toNat + 1)) + 1 := by omega")
+            A(f"  rw [hmod, hsub]")
+            A(f"  exact ({name}_loop_go_unfold "
+              f"(s.x{rb}.toNat - (s.x{rr}.toNat + 1)) s.x{ra} s.x{rr}).symm")
         elif hname in (f"{name}_loop_exit_x30", f"{name}_loop_exit_pc"):
             # The RET return address is the x30 loaded from the frame slot; the
             # epilogue restores sp so x30 sits 8 bytes into the saved pair.
@@ -5033,69 +5432,6 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
             A(f"  all_goals try rfl")
             A(_tag_leaf(f"all_goals {_HOLE}", "range-loop-exit-x30",
                       note="exit x30 value flow"))
-        elif hname == f"{name}_loop_cond_rb":
-            # Counter and bound are both preserved by the condition prefix.
-            # Reuse the per-instruction register-chain generator (as countdown
-            # does for its cond_x19) instead of re-deriving the simp script.
-            _ch1, _ = _emit_reg_chain(name, words, f"b{cbz_bi}", prefix, rr,
-                                      st="s", hname="hctr")
-            for _l in _ch1:
-                A(f"  {_l}")
-            _ch2, _ = _emit_reg_chain(name, words, f"b{cbz_bi}", prefix, rb,
-                                      st="s", hname="hbound")
-            for _l in _ch2:
-                A(f"  {_l}")
-            A(f"  exact ⟨hctr, hbound⟩")
-        elif hname == f"{name}_loop_cond_model":
-            # The model reads only the counter / bound / accumulator
-            # registers; the condition prefix leaves them all untouched.
-            A(f"  simp only [{_defs}, arm64_reg, arm64_set_reg, {name}_loop_model]")
-            A(f"  all_goals try rw [mem_read_push_low s.mem s.sp]")
-            A(f"  all_goals try grind")
-            A(f"  all_goals try omega")
-            A(_tag_leaf(f"all_goals {_HOLE}", "range-loop-model-invariance",
-                      note="model invariance under the condition prefix"))
-        elif hname == f"{name}_loop_body_inc":
-            # Counter is incremented by one across the body.  The back-edge
-            # state bbody is bqt with only its pc rewritten, so prove the bqt
-            # fact (via grind, as countdown's body_dec) then fold the pc out.
-            A(f"  have hinc : arm64_reg {rr} ({bqt} s) = "
-              f"arm64_reg {rr} s + UInt64.ofNat 1 := by")
-            A(f"    simp only [{_bdefs}, arm64_reg, arm64_set_reg]")
-            A(f"    try rw [mem_read_push_low s.mem s.sp]")
-            A(f"    try grind")
-            A(f"  simp only [arm64_reg_pc]")
-            A(f"  exact hinc")
-        elif hname == f"{name}_loop_body_bound":
-            # Bound is preserved across the body (bbody = bqt with a pc
-            # rewrite); reuse the register-chain generator for the bqt fact.
-            _chb, _ = _emit_reg_chain(name, words, f"b{b_bi}", body_only_pcs, rb,
-                                      st="s", hname="hboundb")
-            for _l in _chb:
-                A(f"  {_l}")
-            A(f"  simp only [arm64_reg_pc]")
-            A(f"  exact hboundb")
-        elif hname == f"{name}_loop_body_model":
-            # One loop iteration shifts (rem, acc, i) -> (rem-1, acc+i, i+1);
-            # the model is invariant under that shift (loop_go_unfold).  After
-            # the prefix spill is folded back and the +0 terms are dropped, the
-            # goal is exactly (loop_go_unfold A acc i).symm once two Nat facts
-            # hold from i < bound: the counter's toNat no-wrap
-            # (i+1).toNat = i.toNat+1 and the subtraction rem = (rem-1)+1.
-            A(f"  simp only [{_bdefs}, arm64_reg, arm64_set_reg, {name}_loop_model]")
-            A(f"  rw [mem_read_push_low s.mem s.sp]")
-            A(f"  simp [u64_add_zero_r]")
-            A(f"  have h19 : s.x{rr}.toNat < s.x{rb}.toNat := "
-              f"(UInt64.lt_iff_toNat_lt).mp hlt")
-            A(f"  have hge : s.x{rr}.toNat + 1 ≤ s.x{rb}.toNat := Nat.succ_le_of_lt h19")
-            A(f"  have hmod : (s.x{rr}.toNat + 1) % 18446744073709551616 = "
-              f"s.x{rr}.toNat + 1 :=")
-            A(f"    Nat.mod_eq_of_lt (Nat.lt_of_le_of_lt hge (UInt64.toNat_lt s.x{rb}))")
-            A(f"  have hsub : s.x{rb}.toNat - s.x{rr}.toNat = "
-              f"(s.x{rb}.toNat - (s.x{rr}.toNat + 1)) + 1 := by omega")
-            A(f"  rw [hmod, hsub]")
-            A(f"  exact ({name}_loop_go_unfold "
-              f"(s.x{rb}.toNat - (s.x{rr}.toNat + 1)) s.x{ra} s.x{rr}).symm")
         elif hname == f"{name}_loop_exit_x0":
             # At the exit the counter is not below the bound, so the model's
             # remaining-iteration count rem = n-i is 0 and the model collapses
@@ -5107,74 +5443,47 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
             A(f"  have hsub : s.x{rb}.toNat - s.x{rr}.toNat = 0 := by omega")
             A(f"  rw [hsub, {name}_loop_go_zero]")
             A(f"  try rfl")
-        elif hname == f"{name}_loop_body_step":
-            _w = words[bmid_pc]
-            _imm26 = _w & 0x03ffffff
-            A(f"  have h := {name}_sr_{(bmid_pc - base) // 4} s hpc")
-            A(f"  rw [h]")
-            A(f"  simp only [hpc]")
-            A(f"  have hpceq : (UInt64.ofNat {bmid_pc} + (if "
-              f"((({_imm26} : UInt32) &&& 0x02000000) : UInt32) ≠ 0 then "
-              f"(UInt64.ofNat ({_imm26} : UInt32).toNat) - (UInt64.ofNat (2 ^ 26)) "
-              f"else UInt64.ofNat ({_imm26} : UInt32).toNat) * 4).toNat "
-              f"= {cbz_start} := by native_decide")
-            A(f"  rw [hpceq]")
-            A(f"  all_goals try rfl")
-            A(f"  all_goals try grind")
-            A(_tag_leaf(f"all_goals {_HOLE}", "range-loop-back-edge-target",
-                      note="back-edge B target"))
         else:
             raise ValueError(f"unsupported range helper theorem: {hname}")
         A("")
 
-    A(f"theorem {name}_lt_loop (st : Arm64State)")
+    C3 = mc + me + 3
+    A(f"theorem {name}_ltb_loop (st : Arm64State)")
+    A(f"    (hpc : st.pc = {cbz_start})")
+    A(f"    (hlt : arm64_reg {rr} st < arm64_reg {rb} st)")
     A(f"    (hframe : mem_read_u64 st.mem (st.sp + UInt64.ofNat {_slot}).toNat = "
       f"UInt64.ofNat {exit_pc}) :")
     A(f"    ∀ (fuel : Nat),")
-    A(f"      (({mc} + {mb} + 2) *")
-    A(f"        ((arm64_reg {rb} st).toNat - (arm64_reg {rr} st).toNat)) + "
-      f"({mc} + {me} + 2) ≤ fuel →")
-    A(f"      st.pc = {cbz_start} →")
+    A(f"      {C3} * ((arm64_reg {rb} st).toNat - (arm64_reg {rr} st).toNat) + "
+      f"{C3} ≤ fuel →")
     A(f"      ∃ s, arm64_go_exit st {C} {exit_pc} fuel = some s ∧ "
       f"s.x0 = {name}_loop_model st := by")
-    A(f"  intro fuel hfuel hpc")
-    A(f"  refine while_lt_exit_contract {C} {exit_pc} {cbz_start} {cbz_pc} "
-      f"{body_pc} {exit_pc_val} {_qsym} {rr} {rb}")
+    A(f"  intro fuel hfuel")
+    A(f"  refine while_lt_exit_contract_bottom {C} {exit_pc} {cbz_start} "
+      f"{cbz_pc} {exit_pc_val} {_qsym} {rr} {rb}")
     A(f"    {name}_loop_model")
-    A(f"    (fun s => {{ {cqt} s with pc := {cbz_pc} }})")
-    A(f"    (fun s => {bbody})")
-    A(f"    (fun s => {eqt} s)")
-    A(f"    {mc} {mb} {me}")
+    A(f"    (fun s => {bmid})")
+    A(f"    (fun s => {ex_expr})")
+    A(f"    {mc} {me}")
     A(f"    {Pf}")
     A(f"    (by intro s pc h; simpa using h)")
-    A(f"    (by intro s hs h; exact {name}_loop_frame_cond s hs h)")
     A(f"    (by intro s hs h; exact {name}_loop_frame_body s hs h)")
     for _l in _cond_step_arg(name, cbz_idx, _qsym):
         A(f"    {_l}")
-    A(f"    {cc}_runs")
-    A(f"    (fun st hs => {cc}_mid {exit_pc} st hs (by simp))")
-    A(f"    (by intro s hs; rfl)")
-    A(f"    {name}_loop_cond_flag")
-    A(f"    {name}_loop_cond_rb")
-    A(f"    {name}_loop_cond_model")
-    A(f"    (by intro s hs; exact work_body_run {C} {mb0} s {bmid} {cbz_start} "
-      f"({qb}_runs s hs) ({name}_loop_body_step {bmid} (by rfl)) "
-      f"(by decide : {cbz_start} ≠ {bmid_pc}))")
-    A(f"    (by intro s hs; exact work_body_mid {C} {mb0} s {bmid} {cbz_start} "
-      f"{exit_pc} ({qb}_runs s hs) ({name}_loop_body_step {bmid} (by rfl)) "
-      f"({qb}_mid {exit_pc} s hs (by simp)) (by decide) "
-      f"(by decide : {bmid_pc} ≠ {exit_pc}))")
+    A(f"    (by intro s hs; exact {cc}_runs s hs)")
+    A(f"    (by intro s hs; exact {cc}_mid {exit_pc} s hs (by simp))")
     A(f"    (by intro s hs; rfl)")
     A(f"    {name}_loop_body_inc")
     A(f"    {name}_loop_body_bound")
+    A(f"    {name}_loop_body_flag")
     A(f"    {name}_loop_body_model")
-    A(f"    (by intro s hs h; exact {qe}_runs s hs ({name}_loop_exit_x30 s hs h))")
-    A(f"    (fun st hs => {qe}_mid {exit_pc} st hs (by simp))")
+    A(f"    (by intro s hs h; exact {name}_loop_exit_run s hs ({name}_loop_exit_x30 s hs h))")
+    A(f"    (by intro s hs; exact {name}_loop_exit_mid s hs)")
     A(f"    (by intro s hs h; exact {name}_loop_exit_pc s hs h)")
     A(f"    (by intro s hs h; exact {name}_loop_exit_x0 s hs h)")
     A(f"    (by intro s pc; simp [{name}_loop_model, arm64_reg])")
     A(f"    (by decide) (by decide) (by decide)")
-    A(f"    st fuel hfuel hpc hframe")
+    A(f"    st fuel hfuel hpc hlt hframe")
     A("")
     return "\n".join(L), _slot
 
@@ -5606,6 +5915,21 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             cbi = start_to_bi[b["targets"][0]]
             if blocks[cbi]["kind"] == "cbz":
                 loop_check = (cbi, blocks[cbi]["start"])
+                break
+    # The OTHER loop shape, and the only one a `for … in range(…)` is emitted
+    # in: the body, the counter increment and the comparison in one block,
+    # whose conditional back edge targets its OWN start.  Asked as its own
+    # question because the question above cannot see it — a conditional branch
+    # is not a `b` — and its answer was the reason every such loop raised
+    # "unsupported cbz taken continuation" (the walk's `cbz` arm reads a loop
+    # contract off `ctx`, and `ctx` had none for this shape).  Only asked when
+    # the shape above found nothing, so a countdown loop is unaffected.
+    loop_check_bottom = None
+    if loop_check is None:
+        for bi, b in enumerate(blocks):
+            if (b["kind"] == "cbz" and len(b["instrs"]) > 1
+                    and b["targets"][1] == b["start"]):
+                loop_check_bottom = (bi, b["start"])
                 break
 
     # --- entry-branch condition lemma for single-recursion (dec1) functions
@@ -6178,75 +6502,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}  ) (by rfl)")
                         A(f"{IND}rcases hlc_{bi} with ⟨sf_{bi}, heqf_{bi}, hx0f_{bi}⟩")
                         A(f"{IND}rw [heqf_{bi}]")
-                        A(f"{IND}-- s.x0 = loop model at the back edge = mojo n.")
-                        A(f"{IND}-- The back-edge register facts are established as a")
-                        A(f"{IND}-- CHAIN of shallow per-block facts (one block each),")
-                        A(f"{IND}-- so the kernel never unfolds the deep chain.")
-                        _bdd = _block_defs(ctx["flow_defs"])
-                        _bdefs = lambda _i: ', '.join(_bdd.get(_i, []))
-                        # bound (x19): preserved by every block, set to n by the prologue
-                        for _i in range(1, bi + 1):
-                            A(f"{IND}have h{_i}x19 : s_{_i}.x19 = s_{_i - 1}.x19 "
-                              f":= by rw [hsid_{_i}]; "
-                              f"simp only [{_bdefs(_i)}, arm64_reg, arm64_set_reg]; "
-                              f"try grind")
-                        A(f"{IND}have h0x19 : s_0.x19 = n "
-                          f":= by rw [hsid_0]; "
-                          f"simp only [{_bdefs(0)}, arm64_reg, arm64_set_reg, "
-                          f"Arm64State.init]; try grind")
-                        A(f"{IND}have hx19 : s_{bi}.x19 = n "
-                          f":= by rw [{', '.join(f'h{_i}x19' for _i in range(bi, 0, -1))}, "
-                          f"h0x19]")
-                        # counter (x21): 0 at the prologue, preserved by the prefix,
-                        # incremented by the body (the last block)
-                        A(f"{IND}have h0x21 : s_0.x21 = 0 "
-                          f":= by rw [hsid_0]; "
-                          f"simp only [{_bdefs(0)}, arm64_reg, arm64_set_reg, "
-                          f"Arm64State.init]; try grind")
-                        for _i in range(1, bi):
-                            A(f"{IND}have h{_i}x21 : s_{_i}.x21 = s_{_i - 1}.x21 "
-                              f":= by rw [hsid_{_i}]; "
-                              f"simp only [{_bdefs(_i)}, arm64_reg, arm64_set_reg]; "
-                              f"try grind")
-                        A(f"{IND}have h{bi}x21 : s_{bi}.x21 = s_{bi - 1}.x21 + "
-                          f"UInt64.ofNat 1 := by rw [hsid_{bi}]; "
-                          f"simp only [{_bdefs(bi)}, arm64_reg, arm64_set_reg]; "
-                          f"try rw [mem_read_push_low s_{bi - 1}.mem s_{bi - 1}.sp]; "
-                          f"try grind")
-                        A(f"{IND}have hx21 : s_{bi}.x21 = 1 "
-                          f":= by rw [{', '.join(f'h{_i}x21' for _i in range(bi, 0, -1))}, "
-                          f"h0x21]; try grind")
-                        # accumulator (x20): 0 at the prologue, preserved by the prefix,
-                        # updated by the body; after one iteration (i = 0) it is still 0
-                        A(f"{IND}have h0x20 : s_0.x20 = 0 "
-                          f":= by rw [hsid_0]; "
-                          f"simp only [{_bdefs(0)}, arm64_reg, arm64_set_reg, "
-                          f"Arm64State.init]; try grind")
-                        for _i in range(1, bi):
-                            A(f"{IND}have h{_i}x20 : s_{_i}.x20 = s_{_i - 1}.x20 "
-                              f":= by rw [hsid_{_i}]; "
-                              f"simp only [{_bdefs(_i)}, arm64_reg, arm64_set_reg]; "
-                              f"try grind")
-                        A(f"{IND}have h{bi}x20 : s_{bi}.x20 = s_{bi - 1}.x20 + "
-                          f"s_{bi - 1}.x21 := by rw [hsid_{bi}]; "
-                          f"simp only [{_bdefs(bi)}, arm64_reg, arm64_set_reg]; "
-                          f"try rw [mem_read_push_low s_{bi - 1}.mem s_{bi - 1}.sp]; "
-                          f"try grind")
-                        _acc_rw = ([f'h{bi}x20']
-                                   + [f'h{_i}x20' for _i in range(bi - 1, 0, -1)]
-                                   + ['h0x20']
-                                   + [f'h{_i}x21' for _i in range(bi - 1, 0, -1)]
-                                   + ['h0x21'])
-                        A(f"{IND}have hx20 : s_{bi}.x20 = 0 "
-                          f":= by rw [{', '.join(_acc_rw)}]; try grind")
-                        A(f"{IND}simp [hx0f_{bi}, mojo, {_lc_name}_loop_model, "
-                          f"{_lc_name}_loop_go, {_lc_name}_go, arm64_reg, arm64_set_reg]")
-                        A(f"{IND}all_goals try rw [hx19, hx21, hx20]")
-                        A(f"{IND}all_goals try simp [UInt64.toNat_ofNat]")
-                        A(f"{IND}all_goals try exact ({_lc_name}_loop_go_one_step n)")
-                        _cfg_leaf(A, IND, "range-loop-terminal-invariant",
-                                  f"all_goals {_HOLE}",
-                                  note="terminal loop invariant")
+                        _emit_range_back_edge_tail(A, IND, bi, ctx, name)
                     else:
                         # The countdown contract, applied at the back edge.
                         #
@@ -6802,8 +7058,24 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{BIND}rw [hg_{bi}]")
                 tgt_bi = start_to_bi.get(taken)
                 if tgt_bi is None or tgt_bi in path:
+                    # A taken edge onto the path is a LOOP when the taken
+                    # target is the loop's own top, and the loop contract
+                    # discharges it; it is an impossible continuation
+                    # otherwise, and the refusal below is right.  Which loop
+                    # contract is the question the `b` arm already asks
+                    # (`loop_contract["cbz_start"] == target`), asked here for
+                    # the same reason: a `for`-range loop's back edge is a
+                    # conditional branch, and before this arm existed there was
+                    # no case for it at all.
+                    _lc = ctx.get("loop_contract") if ctx else None
+                    if (_lc and _lc.get("kind") == "range_bottom"
+                            and _lc.get("cbz_start") == taken):
+                        _emit_range_back_edge_contract(
+                            A, IND, bi, ctx, s_cur, taken, _lc, fuel_1, name)
+                        tgt_bi = None
+                if tgt_bi is not None and (tgt_bi is None or tgt_bi in path):
                     raise ValueError(f"unsupported cbz taken continuation to {hex(taken)}")
-                else:
+                elif tgt_bi is not None:
                     if is_contract:
                         emit_block(tgt_bi, "s_t", fuel_1, depth, path, ctx)
                     else:
@@ -7560,6 +7832,26 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         # caller's branch matched `cbz_start` against it.
                         "check_bi": cbz_bi,
                     }
+    elif loop_check_bottom is not None and not recursive:
+        # A bottom-tested loop: ONE block holding the body, the increment and
+        # the comparison, whose taken edge is its own start.  `_gen_range_loop`
+        # returns None for anything that is not a 1-arg range accumulator, so
+        # a self-loop that is some other loop simply gets no contract and the
+        # walk refuses its re-entry by name, as before.
+        _bt = loop_check_bottom[0]
+        rl = _gen_range_loop(name, code, base, func_entry, exit_pc,
+                             blocks, fn, _var_regs, _bt)
+        if rl is not None:
+            A(rl[0])
+            _loop_contract = {
+                "name": name,
+                "kind": "range_bottom",
+                "cbz_start": loop_check_bottom[1],
+                "exit_pc": exit_pc,
+                "slot": rl[1],
+                "rr": _var_regs[_range_loop_pattern(fn)["target"]],
+                "rb": _var_regs[_range_loop_pattern(fn)["param"]],
+            }
 
     # --- universal theorem: walk the CFG path ---
     # The top-level entry state, shared by the walk closure (which needs it to
