@@ -4,9 +4,12 @@
 **Area:** `formal/monomorph.py` (`demands`) / `formal/model.py` (the callee
 refusal) · **Status: PARTIAL — §2's half is FIXED (2026-10-04): the refusal no
 longer tells a correct caller to add brackets, and says which side the fault is
-on. The inference itself is NOT done, and §3 is why it is a project rather than
-a reader.** Measured 2026-10-04 by `project18:export-gate` · **Layer:** 1/5 of
-the formal work
+on. The inference is NOT done, and §5 is the measurement of what it would take:
+of 115 measured call sites, 32 are a matcher over annotation strings and 83 need
+a type inferrer or a trait-bound resolver, so §3's single feature is three of
+different sizes and §5 reorders them.** Measured 2026-10-04 by
+`project18:export-gate`, and §5 by `formal21-1` · **Layer:** 1/5 of the formal
+work
 
 Found while implementing the per-edge export-gate rule
 (`formal/imports.py::library_free_edges`, `work/formal18-export-gate`), which
@@ -135,6 +138,10 @@ python3 tools/memslot.py --gb 8 --label fmt -- python3 fire.py build --formal \
 sed -n '287p' $S/std/format/_utils.mojo     # struct FormatStruct[T: Writer, o: MutOrigin]
 sed -n '450p' $S/std/memory/alloc.mojo       #   FormatStruct(writer, "Allocation").params(
 sed -n '904p' $S/std/memory/alloc.mojo       # def dealloc[T: AnyType, /](var allocation: Allocation[T, …])
+
+# §5's measurement, over the repository, formal/hostmods and the stdlib
+python3 tools/memslot.py --gb 8 --label tlc -- \
+  python3 tools/formal_template_call_census.py
 ```
 
 The 163-file classification this table comes from is one `fire.py build
@@ -143,3 +150,114 @@ The 163-file classification this table comes from is one `fire.py build
 the lines that mention `binary_heap`. No lean runs; both architectures produce
 the same refusal, which is `bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §2.2's
 standing measurement.
+## 5. §3's one feature is three, and the biggest of the three is not the one §1's table leads with
+
+**What was run.** `python3 tools/memslot.py --gb 8 --label tlc -- python3
+tools/formal_template_call_census.py`, over this repository, `formal/hostmods/`
+and all 252 stdlib files — a parse and a walk, no build, no link, no Lean, and
+architecture-blind because the question is about source. 391 files, **115 call
+sites** of a bare call to a name the defining module declares a **template**
+(`formal/monomorph.py::template_names`, which is `reflect.export_exclusions`'s
+generic set, so "is a template" is the export rule's own answer).
+
+**§2's claim, measured.** It says "**every one of those type arguments is
+INFERABLE from the call's own arguments**", and that is TRUE of Mojo's semantics
+and FALSE of what this path can read at a call site:
+
+| what it would take | sites | the callee that carries the row |
+|---|---:|---|
+| **solvable from the annotations at the call site** — every type parameter is decided by a parameter of the declaration (or by a default), and every matched argument has an annotation to unify with | **32** | `ThinAllocation` 17, `is_32bit` 5, `is_negative` 2, `fcntl` 2 … |
+| **the argument's type is written but does not unify** — the parameter is **trait-bounded** and the annotation is spelled independently, so the answer needs bound resolution | **28** | `FormatStruct` 19, `isnan` 2, `_isnan` 2 … |
+| **the argument's type is not written down** — the argument is a call, an operator, a subscript or a literal, so the type has to come from a RETURN type | **52** | **`dealloc` 26**, `Named` 14, `umod` 2, `Repr` 2 … |
+| **a type argument is not in the arguments at all** — a phantom with no default | **3** | `Pointer` 3 |
+| the declaration could not be read | 0 | — |
+| of which some parameter is trait-bounded | 66 | |
+| of which the declaration writes it as `Self.T` / `Self.o` | 60 | |
+
+**Three findings, and each one reorders §3.**
+
+1. **The `dealloc` row is not a unification at all.** §1 counts it 29 files and
+   §2 says "`allocation` is an `Allocation[T, …]`, so the argument's type IS
+   `T`". At the call site the argument is `allocation^` — a `UnaryOp` — and its
+   type comes from the *enclosing* declaration, which for a
+   `var allocation = alloc(Layout[Int].single())` spells nothing at all. So the
+   second-largest row in §1 needs **return-type inference through `alloc`**,
+   which this path does not have anywhere: nothing in `formal/` computes a
+   function's result type from its body. That is the single biggest piece of the
+   three and §3 does not mention it.
+2. **The `FormatStruct` row is a trait-bound resolution, not a match.** Its
+   parameter is `ref[Self.o] writer: Self.T` bounded `T: Writer`, and the
+   argument is `writer: Some[Writer]` — an EXISTENTIAL. Unifying the two
+   annotation strings does not produce a type argument; something has to choose a
+   concrete writer type for it. That is why the doc's §2 says "with the trait
+   bounds to choose between candidates" and why §3, which says "match each of
+   the template's declared parameters against the parameter it appears in", reads
+   as if the bounds did not matter: **they are the whole difficulty of the
+   largest row in the corpus** (111 of the 170 files, per
+   `bugs/FORMAL_sweep_work_map_2026-10-04_b10.md` §3.1).
+3. **A quarter of the corpus's largest row IS a matcher**, so the feature has a
+   cheap half and it is worth landing first: 32 sites need nothing but a
+   structural comparison of two annotation strings (`SIMD[dtype, _]` against
+   `SIMD[dtype, _]`), which is arithmetic and not inference.
+
+**Two places the census itself had to be corrected, recorded because both
+produced a wrong number first and both are the kind a reader will hit.**
+
+* **`Self.o` is not in the AST.** `fire_compiler` normalises
+  `ref[Self.o] writer: Self.T` to the annotation `Self.T` and the conv `ref`, so
+  a census reading the AST finds `o` mentioned by nothing and files the whole
+  `FormatStruct` row as a phantom — 111 files in the wrong bucket, from a field
+  the parser drops. The mention text has to be read off the declaration SOURCE.
+* **A multi-line signature is a signature.** Reading parameters a line at a time
+  sees `struct Pointer[` and `def __init__(` as unclosed brackets, reports a
+  declaration with no parameters at all, and files `ThinAllocation` and both
+  measured intrinsics as phantoms — the stdlib's line length, as a bucket.
+
+**What this does NOT do.** It does not infer anything, and a row is a claim about
+the SOURCE, not about the emitted code: even the 32 solvable sites need the call
+site REWRITTEN to the instantiation the answer names, and `monomorph.demands` is
+only half of that (§3 step 2 is the other half, and it is the half the demand
+pipeline already does for a bracket). Landing the matcher bucket without the
+rewrite would produce a demand the emitter cannot bind — a worse answer than the
+refusal, which is why neither half is landed here.
+
+**The tests**, both in `test_formal_monomorph.py`, because that is where the
+refusal this measurement sizes is pinned:
+`test_the_census_answers_each_of_the_five_questions` asks the classifier each of
+the five buckets on sources small enough to read — one per bucket, including the
+`Self.o` mention and a defaulted parameter — and
+`test_the_census_reads_the_measured_shapes_out_of_the_corpus` asks it the three
+shapes §1 measured (`FormatStruct` → no-unify and bounded, `dealloc` →
+not-written-down, `is_negative` → solvable), so a stdlib that moves these
+declarations says so here rather than in the next sweep. The second skips
+loudly, and counts the skip, when there is no stdlib checkout beside the tree.
+
+```console
+$ python3 tools/formal_template_call_census.py --rows 6
+files scanned: 391   bare calls to an imported name that is a declared template: 115   call sites classified: 115
+       32  solvable from the annotations at the call site
+       28  the argument's type is written but does not unify
+       52  the argument's type is not written down
+        3  a type argument is not in the arguments at all
+        0  the declaration could not be read
+   of which some parameter is trait-bounded (`B`): 66
+   of which the declaration writes it as `Self.T` (`S`): 60
+
+   callee                                defining module        bucket                                                   sites
+   dealloc                              std.memory.alloc      the argument's type is not written down         26
+   FormatStruct                         std.format._utils     the argument's type is written but does not unif  19
+   ThinAllocation                       std.memory.alloc      solvable from the annotations at the call site    17
+   Named                                std.format._utils     the argument's type is not written down         14
+```
+
+**The next step, in the order this measurement gives.** (a) The matcher bucket —
+32 sites, `formal/monomorph.py::all_instantiation_calls` unifying two annotation
+strings, plus the call-site rewrite that makes the demand bindable; it is the
+only piece of the three that is a patch. (b) Return-type inference, 52 sites and
+the `dealloc` row; nothing in `formal/` has it, and §3's step 1 does not name it
+because §2 believed the argument's type was written down. (c) Bound resolution
+against an existential, 28 sites and the `FormatStruct` row — the biggest number
+of files and the one that needs the most machinery. **And one thing §3 step 3
+still owes whoever takes this:** the three build-and-RUN comparisons against
+CPython are only meaningful for a bucket this census calls solvable, so they
+belong with (a) and not before it.

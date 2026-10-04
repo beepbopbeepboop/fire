@@ -1202,6 +1202,195 @@ def test_a_stated_mangled_spelling_is_the_one_the_mangler_produces(tmpdir):
           + "\n  ".join(problems))
 
 
+# ── what the INFERENCE would have to do, measured ──────────────────────────
+#
+# The case above is the control: `widen(5)` is refused, and the refusal says the
+# source is right and this path does not infer the type arguments. That is the
+# honest half. The other half is the SIZE of the work, and
+# `bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
+# §3 step 1 asks for it without having it: "derive its type arguments from the
+# call's argument types instead of from a bracket" — where the type argument "is
+# not IN the call, it is a property of the argument's DECLARED TYPE".
+#
+# `tools/formal_template_call_census.py` is that measurement, and these two cases
+# are what keeps it honest: the first asks the classifier each of the five
+# questions on sources small enough to read, the second asks it the three shapes
+# the doc MEASURED on the real stdlib, so a census whose numbers have drifted
+# from the corpus says so here rather than in the next sweep.
+
+def _census_rows(root):
+    """The census over one directory, as `{callee: [(bucket, bounded, selfq)]}`."""
+    sys.path.insert(0, os.path.join(HERE, "tools"))
+    import formal_template_call_census as T
+    rows, _n_files, _n_calls, unresolved = T.collect([root])
+    out = {}
+    for _path, _line, name, _module, bucket, bounded, selfq, _params in rows:
+        out.setdefault(name, []).append((bucket, bounded, selfq))
+    return out, unresolved
+
+
+def test_the_census_answers_each_of_the_five_questions(tmpdir):
+    """One small source per bucket, because the classifier IS the measurement.
+
+    Each pair below is a library and a caller, and each caller is written so that
+    exactly one thing decides its bucket. The five are the five answers an
+    implementation of `monomorph.all_instantiation_calls` has to be able to give,
+    and a classifier that cannot tell them apart cannot be used to size the work
+    either — it would report one number for a feature whose cost is the
+    difference between a matcher and a type inferrer.
+    """
+    root = os.path.join(tmpdir, "census")
+    write_tree(root, {
+        # 1. The argument's type is written down and names the parameter:
+        #    unification over two annotation strings.
+        "easy.mojo": "def widen[T: AnyType](v: T) -> T:\n    return v\n",
+        "use_easy.mojo": ("from easy import widen\n"
+                          "\n"
+                          "def main(n: Int):\n"
+                          "    print(widen(n))\n"),
+        # 2. Written, but the annotation does not name the parameter: `T: Writer`
+        #    against `Some[Writer]` is a bound-resolution question.
+        "bound.mojo": ("struct Box[T: Writer]:\n"
+                       "    var w: T\n"
+                       "\n"
+                       "    def __init__(out self, w: T):\n"
+                       "        self.w = w\n"),
+        "use_bound.mojo": ("from bound import Box\n"
+                           "\n"
+                           "def show(mut w: Some[Writer]):\n"
+                           "    var b = Box(w)\n"
+                           "    print(b)\n"),
+        # 3. The declaration names the parameter; the argument is a CALL, so its
+        #    type needs a return type this path does not compute.
+        "made.mojo": "def make_it[T: AnyType](n: T) -> T:\n    return n\n",
+        "use_made.mojo": ("from made import make_it\n"
+                          "\n"
+                          "def main():\n"
+                          "    print(make_it(other()))\n"),
+        # 4. A phantom: nothing in any parameter mentions `U`, and it has no
+        #    default, so no argument can supply it.
+        "phantom.mojo": "def pair_up[T: AnyType, U](a: T) -> T:\n    return a\n",
+        "use_phantom.mojo": ("from phantom import pair_up\n"
+                              "\n"
+                              "def main(n: Int):\n"
+                              "    print(pair_up(n))\n"),
+        # 5. `Self.T` and `ref[Self.o]`: the origin is carried by the CONVENTION,
+        #    which `fire_compiler` normalises away, so a matcher that reads only
+        #    the annotation files this as a phantom. It is not: both parameters
+        #    are decided, and the answer is `NO_UNIFY` because the argument's
+        #    `Some[Writer]` does not unify with `T`.
+        "fmt.mojo": ("struct FormatStruct[T: Writer, o: MutOrigin]:\n"
+                     "    var w: T\n"
+                     "\n"
+                     "    def __init__(\n"
+                     "        out self,\n"
+                     "        *,\n"
+                     "        ref[Self.o] writer: Self.T,\n"
+                     "    ):\n"
+                     "        self.w = writer\n"),
+        "use_fmt.mojo": ("from fmt import FormatStruct\n"
+                         "\n"
+                         "def show(mut writer: Some[Writer]):\n"
+                         "    var f = FormatStruct(writer)\n"
+                         "    print(f)\n"),
+        # 6. A DEFAULT settles a parameter no argument mentions, so this is not a
+        #    phantom: `invariant` is filled in by Mojo, not by the arguments.
+        "masked.mojo": ("def masked[T: AnyType, invariant: Bool = False]"
+                        "(v: SIMD[T, _]) -> T:\n    return v\n"),
+        "use_masked.mojo": ("from masked import masked\n"
+                            "\n"
+                            "def main(n: SIMD[DType.float32, 4]):\n"
+                            "    print(masked(n))\n"),
+    })
+    sys.path.insert(0, os.path.join(HERE, "tools"))
+    import formal_template_call_census as T
+    got, unresolved = _census_rows(root)
+    check(not unresolved,
+          f"the census could not resolve a defining module in its own fixture: "
+          f"{unresolved}")
+    want = {
+        "widen": T.BUCKET_SOLVABLE,
+        "Box": T.BUCKET_NO_UNIFY,
+        "make_it": T.BUCKET_UNDECLARED,
+        "pair_up": T.BUCKET_PHANTOM,
+        "FormatStruct": T.BUCKET_NO_UNIFY,
+        "masked": T.BUCKET_SOLVABLE,
+    }
+    for name, bucket in want.items():
+        rows = got.get(name) or []
+        check(rows, f"{name}(…) was not classified at all; the census saw "
+                    f"{sorted(got)}")
+        check(all(r[0] == bucket for r in rows),
+              f"{name}(…) classified {[r[0] for r in rows]}, expected "
+              f"{bucket!r} for every site")
+    # The two flags, because they are what turns bucket 2 from "unify two
+    # strings" into "resolve a trait bound": `Box` is bounded and `FormatStruct`
+    # is written `Self.T`/`Self.o`.
+    check(all(r[1] for r in got["Box"]),
+          f"Box[T: Writer] classified with no trait-bound flag: {got['Box']}")
+    check(all(r[2] for r in got["FormatStruct"]),
+          f"FormatStruct's `ref[Self.o] writer: Self.T` did not set the "
+          f"`Self.T` flag: {got['FormatStruct']}")
+
+
+def test_the_census_reads_the_measured_shapes_out_of_the_corpus():
+    """The three symbols the doc measured, asked of the real stdlib.
+
+    `bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
+    §1 measures the row by the callee the refusal names — `FormatStruct` 68
+    files, `dealloc` 29, `is_negative` 13 — and §2 says every one of those type
+    arguments is inferable from the argument's declared type. Asking this census
+    about the three is the check that the measurement and the instrument agree,
+    and it is where a census that has drifted says so: a stdlib that moved these
+    declarations changes the answer here.
+
+    Skipped, with the reason printed and counted, when there is no stdlib
+    checkout beside this tree — see `_Skip` and `_stdlib_dir`.
+    """
+    stdlib = FI._stdlib_dir()
+    if stdlib is None:
+        raise _Skip("no stdlib checkout beside this tree, so there are no "
+                    "measured call sites to classify")
+    sys.path.insert(0, os.path.join(HERE, "tools"))
+    import formal_template_call_census as T
+    rows, _n_files, _n_calls, unresolved = T.collect([stdlib])
+    check(not unresolved,
+          f"{len(unresolved)} (file, name) pair(s) named a module that did not "
+          f"resolve, so the census is not reporting the whole scope it claims: "
+          f"{unresolved[:4]}")
+    per = {}
+    for _path, _line, name, _module, bucket, bounded, selfq, _params in rows:
+        per.setdefault(name, []).append((bucket, bounded, selfq))
+    want = {
+        "FormatStruct": T.BUCKET_NO_UNIFY,     # `Some[Writer]` against `T: Writer`
+        "dealloc": T.BUCKET_UNDECLARED,        # the argument is `x^`
+        "is_negative": T.BUCKET_SOLVABLE,      # `SIMD[dtype, _]` against `SIMD[dtype, _]`
+    }
+    for name, bucket in want.items():
+        sites = per.get(name) or []
+        check(sites, f"{name}(…) has no site in the census over {stdlib}, so "
+                     f"the measurement the doc quotes is not being reproduced")
+        wrong = sorted({b for b, _bd, _s in sites} - {bucket})
+        check(not wrong,
+              f"{name}(…) classified {wrong} where the doc's §2 says the "
+              f"argument's type decides it ({bucket!r}); the census and the "
+              f"measurement disagree")
+    check(any(bounded for _b, bounded, _s in per.get("FormatStruct", [])),
+          "FormatStruct[T: Writer] classified with no trait-bound row, so the "
+          "bound that makes its unification a bound-resolution question is "
+          "not being read")
+    # The arithmetic, asserted here because the tool's own docstring says its
+    # totals are only comparable if they add up.
+    kinds = {}
+    for _p, _l, _n, _m, bucket, _b, _s, _params in rows:
+        kinds[bucket] = kinds.get(bucket, 0) + 1
+    check(sum(kinds.values()) == len(rows),
+          f"the buckets sum to {sum(kinds.values())} over {len(rows)} rows")
+    check(set(kinds) <= set(T.BUCKETS),
+          f"a row carries a bucket the tool does not declare: "
+          f"{sorted(set(kinds) - set(T.BUCKETS))}")
+
+
 TESTS = [
     ("a generic struct template is instantiated at the importer's type",
      test_a_generic_struct_template_is_instantiated_at_the_importers_type),
@@ -1233,6 +1422,10 @@ TESTS = [
      test_a_bracketed_parameter_annotation_instantiates),
     ("a stated mangled spelling is the one the mangler produces",
      test_a_stated_mangled_spelling_is_the_one_the_mangler_produces),
+    ("the census answers each of the five questions",
+     test_the_census_answers_each_of_the_five_questions),
+    ("the census reads the measured shapes out of the corpus",
+     test_the_census_reads_the_measured_shapes_out_of_the_corpus),
 ]
 
 EXPECTED_FAILURES: dict = {}
