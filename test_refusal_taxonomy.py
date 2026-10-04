@@ -1108,6 +1108,85 @@ def _uses_column_checks(failures):
           f"an unambiguous basename resolved to {solo!r}, so the ambiguity "
           f"guard would pass for the wrong reason")
 
+    # ── a chain that names its module in PROSE, which is the largest row in
+    # the corpus (170 of the 710 files on the 2026-10-04 b10 sweep) ──
+    #
+    # `formal/model.py::imported_callee_refusal` states the DEFINING module in a
+    # sentence, so the chain carries no `<file>: ` prefix for it and the two
+    # questions above — "which module refused" and "which file is it" — have no
+    # answer from the prefix. Before this, that row grouped under its IMPORTER
+    # and every one of its `uses:` cells read NOT MEASURED (21 of 22 groups on
+    # the std/{os,io,…} scope), which is a number a reader cannot act on for the
+    # corpus's biggest finding. The sample is cut from `formal/model.py`'s own
+    # f-string, for the reason `…_b9.md` §5.1 gives: a log line drifts, a
+    # sentence that is GENERATED does not.
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    import formal.model as M
+
+    class _Sym:
+        module = "std.format._utils"
+    gate = M.imported_callee_refusal("FormatStruct", _Sym(), "")
+    named = S.refusing_module(gate)
+    check(named == "std.format._utils",
+          f"`refusing_module` read {named!r} out of the real message "
+          f"{gate[:90]!r}; the corpus's largest row is grouped by this answer, "
+          f"and a wrong one is a wrong queue")
+    check(S.refusing_module("nothing here names a module") == "",
+          "`refusing_module` found a module in a message that names none")
+
+    # The dotted name resolves to the DEFINING module's file, and the row is
+    # keyed on it — not on the file that imported it.
+    user = write("pkg/uses_it.mojo",
+                 "from pkg.inner import FormatStruct\n"
+                 "var x = FormatStruct(w, \"Allocation\")\n")
+    closure = write("pkg/other.mojo",
+                    "from pkg.something import Widget\nvar w = Widget()\n")
+
+    def prose_line(blocked):
+        return (f"CODEGEN/DEPENDENCY: {blocked}  (build: inner.mojo imports "
+                f"'pkg.something', which cannot be built either: {gate})")
+
+    table = rank(prose_line(user) + "\n" + prose_line(closure) + "\n", {})
+    row = row_of(table, "a call to a name the defining module does not export")
+    check(row is not None,
+          "the export-gate refusal was not classified as the unexported-callee "
+          f"row any more. Labels seen: {[r['cause'] for r in table]}")
+    if row is not None and row["uses"]:
+        refuser_name, src, blocks, uses, declared = row["uses"][0]
+        check(refuser_name == "std.format._utils",
+              f"the refusing module is {refuser_name!r}; it is named in the "
+              f"message and nowhere else, so this is the IMPORTER again and "
+              f"the row is one refusal layer out from where it is")
+        check(blocks == 2,
+              f"the row counts {blocks} blocked files, expected 2")
+        check(src is not None,
+              "the dotted name did not resolve, so `uses:` reads NOT MEASURED "
+              "for the corpus's largest row — which is the defect this "
+              "section is about, unchanged")
+        if src is not None:
+            # The answer is the REAL `std/format/_utils.mojo` — this tree has a
+            # stdlib beside it, and a resolution that pretended otherwise would
+            # be a number nobody could check. The fixture cannot be what a
+            # dotted stdlib name resolves to; what is pinned is that it resolves
+            # to a file AT ALL, which is what `uses:` needs and what the old
+            # basename lookup could not do for a dotted name.
+            check(os.path.basename(src) == "_utils.mojo",
+                  f"the dotted name `std.format._utils` resolved to {src!r}, "
+                  f"whose basename is not the module's — a resolution the "
+                  f"reader cannot check is worse than an honest "
+                  f"NOT MEASURED")
+            check(uses == 1,
+                  f"`uses` counted {uses} of 2; it must count the file that "
+                  f"names `FormatStruct` alone, or the row reads as closure")
+    # A name the resolver cannot answer stays unmeasured rather than guessed:
+    # the column's discipline is that an unmeasured number says so.
+    check(rank(prose_line(user).replace("std.format._utils", "..nowhere")
+               + "\n", {})[0]["uses"][0][1] is None,
+          "a relative spelling of a module resolved to a file; it is relative "
+          "to the IMPORTER inside the chain, not to the file the sweep swept, "
+          "so answering it is a guess")
+
     # The audit the whole 38-file row rests on, which nothing pinned before.
     heap = None
     try:

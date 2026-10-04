@@ -837,12 +837,70 @@ def _source_index():
 
 
 def _resolve_refuser(refuser: str, blocked_file: str):
-    """The source path of a refusing module named by BASENAME in the chain, or
-    None when it is absent or ambiguous. See `_source_index`."""
+    """The source path of a refusing module, or None when absent or ambiguous.
+
+    **Two questions, asked in that order, because they have different
+    answers.** A chain that carries a `<file>: ` prefix names a FILE, and the
+    basename index is exact for it. A chain that names its module in prose —
+    `formal/model.py::imported_callee_refusal`, and that is the largest row in
+    the corpus — names a DOTTED PATH (`std.format._utils`, `std.math`), and the
+    build's own resolver answers it: `formal.imports.resolve_module_path`, the
+    same call `tools/formal_chain_probe.py` makes, so there is one resolver and
+    not two spelling rules.
+
+    **A RELATIVE spelling is left unresolved on purpose.** `..fstat` and
+    `.path` are relative to the file that did the importing, which is inside
+    the chain and not the file the sweep swept, so answering it from
+    `blocked_file` would be a guess — and this column's whole discipline is that
+    an unmeasured number says so. `_refusal_module_of` therefore keeps the
+    name and the path apart, and a name that cannot be resolved leaves `uses:`
+    reading NOT MEASURED.
+
+    A basename with more than one match resolves to NOTHING rather than to the
+    first one (see `_source_index`): several stdlib packages have an
+    `__init__.mojo`, and a count computed from the wrong one is a number nobody
+    can check.
+    """
+    if _looks_like_a_module_name(refuser):
+        found = _resolve_dotted(refuser, blocked_file)
+        if found:
+            return found
     hits = _source_index().get(os.path.basename(refuser))
     if hits and len(hits) == 1:
         return hits[0]
     return None
+
+
+def _looks_like_a_module_name(name: str) -> bool:
+    """A dotted MODULE name (`std.format._utils`, `..fstat`, `.philox`) rather
+    than a file the chain already named (`binary_heap.mojo`).
+
+    The discriminator is the extension and the separator, not the dots: half the
+    basenames this tool is handed end in `.mojo`, and handing one to
+    `resolve_module_path` answers with the repository root joined to its stem —
+    a real path, to a file that is not the module, which is the one answer worse
+    than no answer.
+    """
+    if not name or name.endswith((".mojo", ".py")) or os.sep in name:
+        return False
+    return "." in name
+
+
+def _resolve_dotted(name: str, blocked_file: str):
+    """`formal.imports.resolve_module_path(name, relative_to=blocked_file)`, or
+    None — including when the import machinery is not importable, which is what
+    a checkout without `formal/` on the path looks like from here."""
+    if os.environ.get("MOJO_STDLIB"):
+        return None                      # this tool never builds, never reads
+    try:
+        from formal.imports import resolve_module_path
+    except Exception:                                   # noqa: BLE001
+        return None
+    try:
+        return resolve_module_path(name, relative_to=blocked_file,
+                                   project_root=blocked_file)
+    except Exception:                                   # noqa: BLE001
+        return None
 
 
 def _uses_table(rows_for_label):
@@ -893,8 +951,14 @@ def rank(log_path):
     per_cause = collections.defaultdict(list)
     for cls, path, detail in rows:
         hops, term = FS._split_chain(detail)
-        refuser = FS._refuser(term)
         msg = FS._terminal_reason(term).strip()
+        # The refusing module, from the chain's `<file>: ` prefix when it has
+        # one and from the message's own sentence when it does not. Without the
+        # second half the corpus's largest row groups under its IMPORTER (21 of
+        # 22 groups on the std/{os,io,…} scope, `uses:` NOT MEASURED on every
+        # one of them), which is a different module from the one the reader has
+        # to open.
+        refuser = FS._refuser(term) or FS.refusing_module(msg)
         label = classify_message(msg)
         blocked[label] += 1
         if cls == "CODEGEN":
