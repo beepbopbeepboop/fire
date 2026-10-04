@@ -81,13 +81,15 @@ This worktree's own **458** `*.py`/`*.mojo` plus the **252** under
 `../new-modular/Mojo/stdlib/std`. The repository has grown from 445 to 458 since `-9`, and
 that is the whole of the scope delta: **13 files added between `55951ba3` (the `-9` tree) and
 `3c3516db`, of which 12 are non-pass and exactly one passes on arrival** —
-`formal/examples/bittest.mojo`. **Nine of the twelve are new census tools**
-(`tools/{formal_proof_fuzz,formal_unstated_base_subscript_census,elab_fail_census,undef_import_census,repro_indexlist,dumpc,linkcheck}.py`,
-`test_formal_{proof_fuzz,frame_field_census,x86_64_call_tree}.py`), and **eleven of the twelve
-land in `not-answerable`** on arrival — a tool that imports `ast`, `re`, `pathlib` or `pytest`
-is a fact about the target, not a gap in the backend, so the scope growing by 13 files moved
-the denominator's host-import class by 10 and the rate not at all. A reader comparing this
-scope with `-9`'s should read that sentence before reading the rate.
+`formal/examples/bittest.mojo`. **Ten of the twelve are new census and audit tools**
+(`tools/{formal_proof_fuzz,formal_unstated_base_subscript_census,elab_fail_census,undef_import_census,repro_indexlist,dumpc,linkcheck}.py`
+and `test_formal_{proof_fuzz,frame_field_census,x86_64_call_tree}.py`) and the other two are
+backend modules (`mojo/backend_gimple/elab_intu.py`, `mojo/middle/itcursor.py`); and
+**eleven of the twelve land in `not-answerable`** on arrival, the other two in
+`codegen/dependency`. A census tool imports `ast`, `re`, `pathlib` or `pytest`, which is a fact
+about the target and not a gap in the backend, so the scope growing by 13 files moved the
+denominator's host-import class by 10 and the rate not at all. A reader comparing this scope
+with `-9`'s should read that sentence before reading the rate.
 
 ### 1.3 No `tool` row at all, for the first time in this series
 
@@ -429,8 +431,9 @@ value-model question with a doc (§3.2 lists all of them). **None is a shared-ba
 
 ## 5. What this branch changed, measured
 
-One commit on top of `master` at `3c3516db`, and it is **in the ranking instrument, not in the
-backend**: the corpus's largest cause had no row, so the queue could not prioritise it.
+Three commits on top of `master` at `3c3516db` — the two logs and this map, the row below, and
+the one bug doc §4.4 points at. **The change is in the ranking instrument, not in the backend**:
+the corpus's largest cause had no row, so the queue could not prioritise it.
 
 ### 5.1 The fix: `tools/formal_sweep_causes.py` gets a row for the corpus's largest construct
 
