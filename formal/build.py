@@ -8038,7 +8038,22 @@ def _seed_one_word_bindings(fn, structs_by_name, functions, holders, hstruct,
             fn, structs_by_name, None).items():
         if pname in holders[key] or pname in one_word[key]:
             continue
-        if M.struct_is_framed(pst) or not M.one_field_answer(pst, one_field):
+        # `not M.one_field_answer(pst, one_field)` ALONE, and the
+        # `struct_is_framed` operand this line used to read first is DEAD:
+        # `one_field_answer` is `struct_is_one_field`, which is
+        # `struct_fits_one_word and struct_field_count == 1`, and
+        # `struct_is_framed` is `struct_field_count > 1 and
+        # wide_receiver_by_reference()` — so a struct the first claims is one the
+        # second cannot, whatever `WIDE_RECEIVER_BY_REFERENCE` says, and
+        # `framed or not one_field` says exactly what `not one_field` says.
+        # Reading it first was not a safety net, it was a whole-struct walk per
+        # DECLARED PARAMETER per function (`M.struct_is_framed` derives the field
+        # count by walking every method body of the struct, twice): 21 of them on
+        # a 20-function module, and the shape
+        # `bugs/PERF_formal_build_recomputes_a_per_struct_census_on_every_ask.md`
+        # measured. The `one_field` operand is asked either way — it was the
+        # second one — so the table still answers without a walk.
+        if not M.one_field_answer(pst, one_field):
             continue
         if M.type_constructor_kind(getattr(pst, "name", "")) is not None:
             continue
@@ -9358,7 +9373,8 @@ def _is_sole_field_prefix(path: str, sole: tuple) -> bool:
     return bool(fields) and fields == list(sole[:len(fields)])
 
 
-def _bound_receiver_structs(fn, framed, functions=(), owner=None) -> dict:
+def _bound_receiver_structs(fn, framed, functions=(), owner=None,
+                           one_field=None) -> dict:
     """`{name: struct}` for a local whose construction bindings all AGREE.
 
     **The same evidence `_one_word_field_map` reads, without the one-word
@@ -9424,10 +9440,25 @@ def _bound_receiver_structs(fn, framed, functions=(), owner=None) -> dict:
     # function here whose stated reason for existing is that it no longer
     # derives a module-level table. A table that does not cover this owner falls
     # back to the predicate, because this function cannot know what a partial
-    # table was meant to say.
+    # table was meant to say — EXCEPT for an owner `one_field` already covers,
+    # which is the common case and was a whole-struct walk per METHOD.
+    # `struct_is_one_field` is `struct_fits_one_word and struct_field_count == 1`,
+    # so a struct it claims has ONE field, and `struct_is_framed` is
+    # `struct_field_count > 1 and wide_receiver_by_reference()` — False whatever
+    # `WIDE_RECEIVER_BY_REFERENCE` says. The answer is the same one the walk gave,
+    # and it is the answer by ABSENCE from `framed` that the walk was
+    # re-deriving: a one-field owner is missing from that table for the same
+    # reason it is not framed. Measured on a 20-function module with one
+    # one-field struct: 22 whole-struct walks became 0. `one_field_answer` with no
+    # table still asks the predicate, so a caller without module context is
+    # unaffected, and the shape is the one
+    # `bugs/PERF_formal_build_recomputes_a_per_struct_census_on_every_ask.md`
+    # measured — one level below the one-field table that doc's fix installed.
     covered = framed.get(owner.name) if owner is not None else None
     owner_framed = (covered is owner if covered is not None
-                    else owner is not None and M.struct_is_framed(owner))
+                    else owner is not None
+                    and not M.one_field_answer(owner, one_field)
+                    and M.struct_is_framed(owner))
     if owner_framed:
         for recv in M.struct_receivers(owner):
             out.setdefault(recv, owner)
@@ -15287,7 +15318,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # the owner of `o.get()` as plainly as the source spells it.
         _rewrite_one_word_field_method_calls(
             fn.body, one_word, structs_by_name, receiverless,
-            _bound_receiver_structs(fn, framed, _image_function_names, st),
+            _bound_receiver_structs(fn, framed, _image_function_names, st,
+                                    one_field),
             one_field)
         # `mapping` is derived inside `_rewrite_self_fields` now, because the
         # rewrite is handed the table it derives the chain from — it needs the
