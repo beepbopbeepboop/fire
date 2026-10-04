@@ -2587,7 +2587,21 @@ def _still_fails(text, args, want=None):
             if (have_oracle and r["verdict"] == "ok"
                     and (r["rc"] != want_exit or r["stdout"] != want_out)):
                 return True
-            if r["verdict"] in ("crash", "trapped"):
+            # A CRASH is a finding in its own right, so it is preserved even
+            # where the oracle comparison cannot see it (the image died, so it
+            # produced no answer).  A TRAP is not: exit 2 is the stack-floor
+            # guard's verdict about the PROGRAM — a runaway recursion — which
+            # the module docstring calls a documented limit rather than a
+            # silent wrong answer, and which is a SMALLER program than any real
+            # disagreement. Preserving it let the shrink walk out of a
+            # `s[i]`-is-a-byte disagreement and into `def f(): print(f())`,
+            # which is 26 bytes, traps on both images and raises
+            # `RecursionError` on CPython — and then reported the byte
+            # divergence as unexplained, because the reproducer no longer
+            # contained it. Measured on the `strings` mix, seeds 4000-4011:
+            # 7 of 9 KNOWN-attributed programs were right and 2 came back
+            # `MISMATCH-X86` with a recursion for a reproducer.
+            if r["verdict"] == "crash":
                 standalone.append(r["verdict"])
         # A REFUSAL DIVERGENCE has to survive the shrink as itself: one engine
         # refused while another answered.  Preserved here rather than in
@@ -2625,10 +2639,10 @@ def _still_fails(text, args, want=None):
     # No oracle at all — a program CPython itself refuses to run, which is what
     # a recursion past ITS limit looks like. There is then nothing to compare
     # against, so a mismatch cannot be the predicate; but `--min-kind any` still
-    # preserves a CRASH and a stack-floor TRAP, because those two verdicts are
-    # about the IMAGE rather than about a difference between two of them. A
-    # generated corpus never reaches here (a recursion that deep is refused
-    # before it is built); this is the path a hand-written reproducer takes.
+    # preserves a CRASH, because that verdict is about the IMAGE rather than
+    # about a difference between two of them. A generated corpus never reaches
+    # here (a recursion that deep is refused before it is built); this is the
+    # path a hand-written reproducer takes.
     return kind == "any" and bool(standalone)
 
 
