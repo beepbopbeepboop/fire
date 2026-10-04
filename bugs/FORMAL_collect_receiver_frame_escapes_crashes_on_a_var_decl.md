@@ -3,9 +3,12 @@
 **Area:** FORMAL, `formal/build.py`'s late checks. Found 2026-10-04 on
 `work/formal23-2` while verifying an unrelated change; **PRE-EXISTING on this
 tree's tip** (measured both with and without that change, see below). **Not
-fixed here**: the receiver-frame-escape area belongs to
-`bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_frame.md`
-(claimed `formal21-2`), and a worker editing it should do this with the rest.
+**fixed here**: the receiver-frame-escape area is a
+one-word-struct-holding-a-nested-frame question, and
+`bugs/FORMAL_one_word_ctor_of_a_nested_frame_is_unexportable.md` is the live doc
+for it (`formal21-2` holds a claim under an older name for the same subject,
+which no longer resolves to a file), so a worker already in that area should do
+this with the rest rather than a second worker arriving cold.
 
 ## What I ran, and what I saw
 
