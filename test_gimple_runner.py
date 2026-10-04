@@ -4615,6 +4615,28 @@ print({"a": 1}.items())
     # the emitted `_mojo_repr_dict` render through. The MIXED dict is in the same
     # program on purpose: the thunk is chosen per pair, so one repr function for
     # the whole dict would get only half of these right.
+    # A closure value stored in a MODULE-SCOPE name, and then both printed and
+    # called. Two build failures used to meet here and neither was an answer,
+    # which is why it was survivable: `_root_globals` minted no field for `f`
+    # (the global's inferred type is `MojoBoundMethod *`, and the pre-scan that
+    # declares the struct's fields had no row for it), and the CALL read the
+    # bare `f` while every other read in the same block went through
+    # `_root_globals.f` — so even with the field declared it would have read an
+    # undeclared local. `print(f)` is a pointer decimal rather than CPython's
+    # `<function outer.<locals>.inner at 0x...>`; that is a FUNCTION-VALUE
+    # repr gap with no doc of its own, and the two lines below are here for the
+    # field and the call, not for it.
+    test_gimple_stdout("gimple_module_scope_closure_value_is_declared_and_callable", """\
+def outer(a):
+    def inner(x):
+        return x + a
+    return inner
+
+f = outer(3)
+print(f(10))
+print(f(4))
+""", "13\n7\n")
+
     test_gimple_stdout("gimple_dict_items_value_kinds_survive", """\
 def c() -> dict:
     return {"mid": 0}
