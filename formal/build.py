@@ -1594,6 +1594,19 @@ def compile_formal(source_path: str, output: str = None,
     # the two front ends cannot describe one target two ways.
     M.publish_target(M.target_for(arch, fmt))
 
+    # …and the IMAGE's string-encoding facts start EMPTY here, for the same
+    # reason the target is republished below: this is one image, and the units
+    # compiled into it accumulate their non-ASCII literals as they go (see
+    # `model.publish_non_ascii_strings` — accumulating is the sound direction
+    # here, where `publish_module_symbols` replaces). Resetting at the START of
+    # the image is what makes that accumulation per-image rather than
+    # per-process: `fire.py` builds one image per invocation, so this line is
+    # belt-and-braces for a harness that builds several in one process — and it
+    # is exactly what a test needs, since without it the second program a test
+    # builds inherits the first program's accented literals and refuses
+    # `len()` over text that never had any.
+    M.clear_non_ascii_strings()
+
     # Structural acceptance: only FunctionDefs matter for codegen; imports /
     # module-level statements are fine (filtered here + in the codegen).
     # The modules this file imports contribute their struct declarations

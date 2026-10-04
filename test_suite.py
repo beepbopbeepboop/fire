@@ -3427,9 +3427,10 @@ UNREGISTERED = {
     #
     # NOT the reason above, and it is cheap: measured 2026-10-04 on
     # `work/formal26-unicode`, `python3 test_formal_unicode.py` —
-    # **47.3 s wall, 53.8 MB peak** (`/usr/bin/time -l`, 80 cases: 35 answered
-    # against CPython, 10 refusals whose words both machines must share, and 36
-    # in-process rows over `formal/model.py`'s TEXT ENCODING block).  That is
+    # **97.0 s wall, 59.4 MB peak** (`/usr/bin/time -l`, 96 cases: 43 answered
+    # against CPython, 15 refusals whose words both machines must share, 3
+    # CROSS-MODULE rows over an image of several files, and 38 in-process rows
+    # over `formal/model.py`'s TEXT ENCODING block).  That is
     # the same cost class as `formal-globals` and `formal-hostmods-census`, so
     # by the cost rule in CLAUDE.md it WANTS a registration; it is listed rather
     # than registered because this branch's task says not to register anything,

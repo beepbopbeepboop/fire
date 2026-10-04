@@ -713,6 +713,168 @@ def build_formal(src, out, backend):
                           timeout=BUILD_TIMEOUT, cwd=HERE)
 
 
+# ── the CROSS-MODULE rows: an IMAGE's literals, not a MODULE's ──────────────
+#
+# (name, {filename: source}, needles)
+#
+# A string is a `char *` into the IMAGE, and an image is every module compiled
+# into it — so the encoding block's condition is a fact about the image and not
+# about the module being prepared. These three rows are the whole reason
+# `publish_non_ascii_strings` ACCUMULATES where `publish_module_symbols`
+# replaces, and the first of them is a measured wrong answer rather than a
+# theoretical one.
+#
+# The shape needs three files because the bug needs an ORDER: with two imported
+# modules where only the first carries the accented literal, `_prepare_functions`
+# runs for the ENTRY first and for each imported module after it, so a REPLACE
+# left the table holding whichever unit was compiled LAST. `h3.mojo` exists to
+# be that last unit and it has no non-ASCII literal in it.
+CROSS_MODULE_CASES = [
+    ("refuse_len_of_a_string_from_a_module_this_one_cannot_see",
+     {"h2.mojo": 'def tag() -> String:\n'
+                 '    return "héllo"\n',
+      "h3.mojo": 'def plain() -> Int:\n'
+                 '    return 3\n',
+      "main.mojo": 'from h2 import tag\n'
+                   'from h3 import plain\n'
+                   '\n'
+                   'def main(n):\n'
+                   # `var` is dropped here so that the SAME text runs under
+                   # CPython for an answered row; `var` is Mojo's optional
+                   # local declaration and a plain assignment binds the same
+                   # name on this path.
+                   '    s = tag()\n'
+                   '    printf("len=%d n=%d\\n", len(s), plain())\n'
+                   '    return 0\n'},
+     ["is refused", "BYTES where CPython answers in CHARACTERS",
+      "'héllo'", "len(s)"]),
+
+    # The FOLD crosses the boundary too: a module's own literal is its own text,
+    # and `len("héllo")` written in `h2.mojo` is 2 characters' worth of answer
+    # whichever module asks.  The row is here because a "refuse anything non-ASCII
+    # in the closure" fix would take this with it.
+    ("fold_len_of_a_literal_in_an_imported_module",
+     {"h2.mojo": 'def width() -> Int:\n'
+                 '    return len("日本")\n',
+      "main.mojo": 'from h2 import width\n'
+                   '\n'
+                   'def main(n):\n'
+                   '    printf("w=%d\\n", width())\n'
+                   '    return 0\n'},
+     None),
+
+    # And an all-ASCII image must not see any of it: the refusal above is
+    # conditional on a non-ASCII literal existing SOMEWHERE in the image, and
+    # this is the row that says the condition is not simply "there are imports".
+    ("an_all_ascii_image_is_unaffected_by_the_rule",
+     {"h2.mojo": 'def plain() -> Int:\n'
+                 '    return 3\n',
+      "main.mojo": 'from h2 import plain\n'
+                   '\n'
+                   'def main(n):\n'
+                   '    s = "hello"\n'
+                   '    printf("len=%d n=%d\\n", len(s), plain())\n'
+                   '    return 0\n'},
+     None),
+]
+
+
+def run_cross_module_case(name, files, needles, tmpdir, verbose):
+    """Both backends, over an image of SEVERAL modules.
+
+    The needles are None for an answered row, which then has to match CPython —
+    and the CPython side is the same three files run as one Python module set,
+    because a two-file expectation here would be a constant this file's author
+    wrote about the row the author also wrote.
+    """
+    for filename, text in files.items():
+        with open(os.path.join(tmpdir, filename), "w", encoding="utf-8") as f:
+            f.write(text)
+    src = os.path.join(tmpdir, "main.mojo")
+    want = None
+    if needles is None:
+        want = _cpython_cross_module_answer(name, files, tmpdir)
+        if want is None:
+            return False, "the CPython reference itself failed"
+    for backend in ("arm64", "x86_64"):
+        out = os.path.join(tmpdir, f"{name}.{backend}")
+        p = build_formal(src, out, backend)
+        text = (p.stderr or p.stdout)
+        if needles is not None:
+            if p.returncode == 0:
+                return False, (f"--backend={backend} BUILT a case that must be "
+                               f"refused — silently is the whole failure")
+            missing = [n for n in needles if n not in text]
+            if missing:
+                return False, (f"--backend={backend} refused without "
+                               f"{missing!r}: {text.strip()[-300:]}")
+            continue
+        if p.returncode != 0:
+            return False, f"--backend={backend} did not build: {text.strip()[-300:]}"
+        run = subprocess.run([out], capture_output=True, timeout=RUN_TIMEOUT)
+        if run.stdout != want:
+            return False, (f"--backend={backend} printed {run.stdout!r}, CPython "
+                           f"printed {want!r}")
+    if verbose:
+        print("      both agreed with CPython" if needles is None
+              else "      both refused")
+    return True, ""
+
+
+def _cpython_cross_module_answer(name, files, tmpdir):
+    """What CPython prints for the same modules, assembled and run here.
+
+    The translation from the Mojo source is two lines and both are exact: a
+    module's text is the same text, and `printf("...", x)` becomes
+    `printf("...", x)` with a `printf` bound to `print(..., end="")` — the
+    format string carries its own `\\n`, so the output is byte-for-byte the same
+    and the comparison needs no normalisation.
+    """
+    import importlib.util
+    sys.path.insert(0, tmpdir)
+    loaded = {}
+    try:
+        for filename, text in files.items():
+            short = filename.replace(".mojo", "")
+            path = os.path.join(tmpdir, short + ".py")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            spec = importlib.util.spec_from_file_location(short, path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[short] = module
+            spec.loader.exec_module(module)
+            loaded[short] = module
+        # Injected into every module, because a helper may be the one that
+        # prints: `h2.width()` folds to a constant but `h2.tag()` is what a
+        # cross-module case hands back, and a row that only worked when the
+        # ENTRY printed would not be testing the boundary.
+        for module in loaded.values():
+            module.printf = lambda fmt, *a: print(fmt % a, end="")
+        buf = []
+
+        class _Out:
+            def write(self, text):
+                buf.append(text)
+
+            def flush(self):
+                pass
+
+        real, sys.stdout = sys.stdout, _Out()
+        try:
+            loaded["main"].main(0)
+        finally:
+            sys.stdout = real
+        return "".join(buf).encode()
+    except Exception as exc:                      # noqa: BLE001
+        print(f"        (the CPython reference raised {exc!r})", file=sys.stderr)
+        return None
+    finally:
+        try:
+            sys.path.remove(tmpdir)
+        except ValueError:
+            pass
+
+
 def run_oracle_case(name, msrc, psrc, tmpdir, verbose):
     """Build on BOTH backends and require CPython's own output, byte for byte.
 
@@ -880,9 +1042,13 @@ def model_checks():
            'def main(n):\n    printf("%s", "\\u00e9")\n')), [])
 
     # ── the three answers of `string_codepoint_verdict` ──
+    # Save/restore through `clear_*` + `publish_*` rather than by assigning:
+    # `publish_non_ascii_strings` ACCUMULATES (it must — see its docstring for
+    # the two-module measurement), so a restore that published the saved list
+    # would leave the union of before and after behind it.
     saved = M.non_ascii_strings()
     try:
-        M.publish_non_ascii_strings([])
+        M.clear_non_ascii_strings()
         # `args[1]`, not `args[0]`: `printf("%d", …)` puts the FORMAT first,
         # and indexing 0 would test the format string — which is ASCII, and so
         # would pass every row below for the wrong reason.
@@ -913,6 +1079,7 @@ def model_checks():
            M.LEN_FROM_CODPOINT_FOLD)
         ok("verdict: the fold is the CHARACTER count", folded, "5")
     finally:
+        M.clear_non_ascii_strings()
         M.publish_non_ascii_strings(saved)
 
     # ── `string_position_verdict`, which has two operands ────────────────
@@ -957,6 +1124,7 @@ def model_checks():
         ok("position: a non-ASCII haystack with an unknown needle is refused",
            M.string_position_verdict('s.find(llo)', hay_arg, None)[0], None)
     finally:
+        M.clear_non_ascii_strings()
         M.publish_non_ascii_strings(saved)
 
     # ── the width scanner, which is the one piece of new parsing ──────────
@@ -989,9 +1157,13 @@ def model_checks():
     # image's literals; a string ELEMENT of non-ASCII text is refused by
     # `string_element_refusal` on the image.  Merging them would make one
     # architecture's answer depend on whether the other had asked yet.
+    # Save/restore through `clear_*` + `publish_*` rather than by assigning:
+    # `publish_non_ascii_strings` ACCUMULATES (it must — see its docstring for
+    # the two-module measurement), so a restore that published the saved list
+    # would leave the union of before and after behind it.
     saved = M.non_ascii_strings()
     try:
-        M.publish_non_ascii_strings([])
+        M.clear_non_ascii_strings()
         ok("element: an ASCII image does not refuse a string element",
            M.string_element_refusal(None, None), None)
         M.publish_non_ascii_strings(["日本"])
@@ -1003,6 +1175,7 @@ def model_checks():
         ok("index: an integer index is not that refusal",
            M.string_index_refusal(M.STR_KIND, M.INT_KIND, "0"), None)
     finally:
+        M.clear_non_ascii_strings()
         M.publish_non_ascii_strings(saved)
 
     return passed, failures
@@ -1021,7 +1194,8 @@ def main():
     def selected(table):
         return [c for c in table if not args.cases or c[0] in args.cases]
 
-    known = {c[0] for c in ORACLE_CASES} | {c[0] for c in REFUSAL_CASES}
+    known = ({c[0] for c in ORACLE_CASES} | {c[0] for c in REFUSAL_CASES}
+             | {c[0] for c in CROSS_MODULE_CASES})
     if args.cases:
         missing = set(args.cases) - known
         if missing:
@@ -1039,6 +1213,13 @@ def main():
         for name, msrc, needles in selected(REFUSAL_CASES):
             good, why = run_refusal_case(name, msrc, needles, tmpdir,
                                          args.verbose)
+            print(f"  {'PASS' if good else 'FAIL'}  {name}"
+                  + ("" if good else f"\n        {why}"))
+            passed += good
+            failed += not good
+        for name, files, needles in selected(CROSS_MODULE_CASES):
+            good, why = run_cross_module_case(name, files, needles, tmpdir,
+                                              args.verbose)
             print(f"  {'PASS' if good else 'FAIL'}  {name}"
                   + ("" if good else f"\n        {why}"))
             passed += good

@@ -6459,21 +6459,72 @@ def string_literal_text(node) -> str | None:
 # The IMAGE's text fact, published rather than threaded: the consumers are a
 # per-function walk inside a backend and a refusal asked from `build.py` before
 # any emitter runs, and neither has the module's statements in hand. Same shape
-# and same reason as `_MODULE_SYMBOLS`, and the same discipline about it:
-# REPLACED per unit, never merged, because two units compiled in one process (a
-# dylib and its dependent) must not accumulate each other's strings.
+# as `_MODULE_SYMBOLS` and NOT its rule — see `publish_non_ascii_strings`.
 _NON_ASCII_STRINGS: list = []
 
 
 def publish_non_ascii_strings(texts: list) -> None:
-    """Install `texts` as the current unit's non-ASCII string literals."""
+    """ADD `texts` to the current unit's non-ASCII string literals.
+
+    **ACCUMULATES, where `publish_module_symbols` REPLACES, and the difference is
+    the direction each mistake goes.** A module-global table must not accumulate,
+    because a name one unit declares and another does not is a real conflict and
+    a union would invent a binding — and two units compiled in one process must
+    not see each other's globals at all. A non-ASCII string list must
+    accumulate, because the question it answers is "can a string value in this
+    IMAGE be non-ASCII", and the honest answer for a multi-module image is the
+    union over every module in it: a string one module interns is a value another
+    module can hold, through a return value or a parameter, however many of that
+    other module's own literals are ASCII.
+
+    Measured on both architectures, before this accumulated, with two imported
+    modules where only the FIRST carries the accented literal:
+
+        h2.mojo   def tag() -> String: return "héllo"
+        h3.mojo   def plain() -> Int: return 3
+        e2.mojo   from h2 import tag
+                  from h3 import plain
+                  def main(n): printf("len=%d n=%d", len(tag()), plain())
+
+    `len(tag())` printed **6** where CPython prints 5, exit 0, on arm64 and on
+    x86-64 — because `_prepare_functions` runs for the ENTRY first and for each
+    imported module after it, so a REPLACE left the table holding whichever unit
+    was compiled LAST, and `h3` has no non-ASCII literal. A replace is a correct
+    answer to "what does THIS module hold" and a wrong one to "what can a string
+    in this IMAGE be".
+
+    The cost of accumulating is over-conservatism across two top-level builds in
+    one process, which is to say none in practice: `fire.py` builds one image
+    per invocation, and the entries are a refusal that a later build would have
+    to earn back by being an all-ASCII image, which it can only be if no earlier
+    one was not.
+    """
     global _NON_ASCII_STRINGS
-    _NON_ASCII_STRINGS = list(texts or [])
+    have = set(_NON_ASCII_STRINGS)
+    for text in texts or []:
+        if text not in have:
+            have.add(text)
+            _NON_ASCII_STRINGS.append(text)
 
 
 def non_ascii_strings() -> list:
-    """The published non-ASCII literals. Empty before a publish."""
+    """The published non-ASCII literals, in the order they were first seen."""
     return list(_NON_ASCII_STRINGS)
+
+
+def clear_non_ascii_strings() -> None:
+    """Start a NEW IMAGE's accumulation over.
+
+    The one caller that is not a test is `formal/build.py`'s `compile_formal`,
+    at the top of the image: `publish_non_ascii_strings` accumulates because a
+    union is the sound direction WITHIN an image, and this is what keeps that
+    union from being per-PROCESS instead. Two images built by one harness must
+    not see each other's literals, or the second refuses `len()` over text that
+    never had any — a false refusal, which is the expensive direction here
+    rather than the cheap one.
+    """
+    global _NON_ASCII_STRINGS
+    _NON_ASCII_STRINGS = []
 
 
 # How many examples a refusal quotes. A message that listed every one would be

@@ -1103,3 +1103,49 @@ four answered (`ord` over ASCII, Latin-1, CJK and an astral character; the fold
 in arithmetic; the `\xHH` spelling; the `0x7F` boundary) and eight refused, the
 three refusals' reasons being unrelated enough that one message would have made
 at least two of them false.
+
+## The encoding condition is a fact about the IMAGE, not about the MODULE
+
+Wave 9's condition is "this unit holds no non-ASCII string literal", and a unit
+turned out to be the wrong unit. `_prepare_functions` runs for the ENTRY first
+and for each imported module after it, so a per-module REPLACE leaves the table
+holding whichever module was compiled LAST — and a string one module interns is a
+value another module can hold, through a return value or a parameter, however
+many of that other module's own literals are ASCII.
+
+Measured on both architectures with three files, where only the FIRST of the two
+imported modules carries the accented literal and `h3.mojo` exists only to be
+compiled last:
+
+```
+h2.mojo   def tag() -> String: return "héllo"
+h3.mojo   def plain() -> Int: return 3
+e2.mojo   from h2 import tag
+          from h3 import plain
+          def main(n): printf("len=%d n=%d", len(tag()), plain())
+
+arm64   len=6 n=3      CPython  len=5 n=3
+x86-64  len=6 n=3      CPython  len=5 n=3
+```
+
+Six bytes, exit 0, both machines, on the wave-9 code — a byte answer presented
+where a character count belongs, which is the exact failure the whole block
+exists to prevent, introduced by the block's own bookkeeping.
+
+**So `publish_non_ascii_strings` ACCUMULATES where `publish_module_symbols`
+REPLACES, and the difference is the direction each mistake goes.** A globals
+table must not accumulate: a name one unit declares and another does not is a
+real conflict, and a union would invent a binding. A non-ASCII string list must,
+because the question is about the IMAGE and the honest answer for a multi-module
+image is the union. And `compile_formal` clears it at the top of each image,
+which is what keeps "accumulate" from meaning "accumulate for the whole
+process" — a harness that builds several programs in one invocation would
+otherwise have the second refuse `len()` over text that never had any, and a
+false refusal is the expensive direction here rather than the cheap one.
+
+Three rows in `test_formal_unicode.py`, and the first is the measured one: the
+cross-module refusal, a FOLD that crosses the boundary (a module's own literal
+is its own text, so `len("日本")` written in the imported module is 2 — the row
+that stops a "refuse anything non-ASCII in the closure" fix from taking it), and
+an all-ASCII image that must not see any of it (the condition is "a non-ASCII
+literal exists somewhere", not "there are imports").
