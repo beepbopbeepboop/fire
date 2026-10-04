@@ -1,5 +1,10 @@
 # FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell: what is left, which of it is reachable, and why four of the next six are not this wave's
 
+**Status 2026-10-04 (a second pass): §5 item 1, `shlex`, is DONE** —
+`formal/hostmods/shlex.mojo` and `test_formal_shlex.py`, 1 file moved, 0 passes,
+which is the number every host-import row in this project predicts. §5 items 2-5
+remain and each is named below with why it is not this wave's.
+
 **Claim** `sweep20:hostmods-wave3` on `work/formal20-hostmods-wave3`. Written
 2026-10-04 after `formal/hostmods/glob.mojo` landed (commit `d2edb1aa`). The
 ranking is `tools/formal_sweep_causes.py --host bugs/sweeps/sweep-arm-9.txt`,
@@ -205,8 +210,22 @@ no lean invocation, no gate.
 
 ## 5. The next step, per row, in the order the ranking gives
 
-1. **`shlex`, 1 file.** The cheapest row in the census and the same shape as
-   `html`/`textwrap`. §2.1 says what it is and what it costs.
+0. **`shlex`, 1 file — DONE 2026-10-04** (`formal/hostmods/shlex.mojo`,
+   `test_formal_shlex.py`). `quote` only, and what is absent is named at the top
+   of the module: `split` and `join` answer a LIST or a generator
+   (`bugs/FORMAL_listdir_no_run_time_sequence.md`), the `shlex.shlex` reader is a
+   generator over `readline`. Checked against **CPython's own `shlex.quote`** over
+   61 corpus cases and every byte 1..255 alone AND after a safe byte — 1020
+   answers on each of two backends — and every answer re-split by **CPython's own
+   `shlex.split`** to say the quoting is one shell word, which is the only
+   property `tools/suite.py`'s three call sites need of it since they build a
+   command line out of the answer. `shlex` has left `HOST_MODELLED` by being
+   written, which is the rule that set states for itself, and two other suites
+   carried rows about it (`test_formal_imports.py`'s
+   `test_a_stdlib_module_in_no_tier_is_not_reported_as_a_typo` used `shlex` as its
+   example of a module in NO tier; `test_formal_link_accounting.py` accounts for
+   it beside `html`, `posixpath` and `glob`).
+1. ~~**`shlex`, 1 file.**~~ Done, above.
 2. **`random`, 2 of 4 files.** `arc4random_buf` is in libSystem and a Mersenne
    Twister is integer arithmetic; the two module-level callers
    (`test_formal_hashlib.py`, `test_formal_time.py`) already compare against
