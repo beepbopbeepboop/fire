@@ -28,6 +28,7 @@ import dataclasses
 from dataclasses import field
 import os
 import re
+from typing import NamedTuple
 
 import fire_compiler as F
 
@@ -64,11 +65,41 @@ CANONICAL_ELEM_TYPES = (F.IntLiteral, F.BoolLiteral, F.StringLiteral)
 
 BLOB_HEADER_BYTES = 8      # the i64 count
 ELEM_STRIDE = 8            # list element / pair slot stride
+BYTE_ELEM_STRIDE = 1       # a BYTE blob's element stride (see `blob_elem_stride`)
 PAIR_STRIDE = 16           # key+value pair stride (also the key-address step)
 VALUE_OFFSET = 8           # key -> value within a pair
 
 
-def walk_stride(is_dict: bool) -> int:
+def blob_elem_stride(kind) -> int:
+    """Byte step between a blob's own elements, for a blob of value `kind`.
+
+    **The element-width axis, and the reason a byte blob has one.** Every blob
+    on this path is `[count:i64][element 0]…` in EIGHT-BYTE slots, which is a
+    fact about a formal value (one 64-bit word) rather than about the container:
+    a list of words stores a word per slot, and the slot is what makes the
+    address arithmetic one shift. A byte blob is the one container whose element
+    is narrower than a word, so `bytearray` needs the stride to come from the
+    blob's KIND instead of being the constant it has always been.
+
+    `BYTE_BLOB_ELEM_KIND` is the element kind that says "one byte", and this
+    function is the only place that maps it to a stride — the two other readers
+    of the same kind are `subscript_element_kind` (what `b[i]` YIELDS, which is
+    an integer) and `blob_ctor_elem_stride` (how wide a slot a constructor
+    reserves). Three questions, one name, because a byte blob whose `len` reads
+    one stride while its subscript reads another is a wrong answer with a right
+    count in it.
+
+    `BYTE_ELEM_STRIDE` is a power of two precisely so `walk_shift` stays exact
+    below; the shift it yields is **0**, and an emitter that scales an index by
+    a shift has to notice that `<< 0` is "add", not "emit the same shift you
+    always emit".
+    """
+    if is_byte_blob_kind(kind):
+        return BYTE_ELEM_STRIDE
+    return ELEM_STRIDE
+
+
+def walk_stride(is_dict: bool, elem_stride: int = ELEM_STRIDE) -> int:
     """Byte step between the things a walk over a blob YIELDS.
 
     One word per COUNT for a list, one KEY per COUNT for a dict — so a dict is
@@ -79,11 +110,17 @@ def walk_stride(is_dict: bool) -> int:
     is a `for x in …` target and a `x in …` membership needle and nothing else;
     the emitters that also want the address of pair `i`'s VALUE want
     `pair_value_offset` and are not asking this question.
+
+    `elem_stride` is the blob's OWN element stride (`blob_elem_stride`), which
+    is `ELEM_STRIDE` for every blob but a byte one. A dict is a pair blob in
+    both cases and its stride ignores the argument, which is why the default
+    keeps every existing caller correct: a caller with no kind in hand reads a
+    word per element, which is what every blob but a byte one holds.
     """
-    return PAIR_STRIDE if is_dict else ELEM_STRIDE
+    return PAIR_STRIDE if is_dict else elem_stride
 
 
-def walk_shift(is_dict: bool) -> int:
+def walk_shift(is_dict: bool, elem_stride: int = ELEM_STRIDE) -> int:
     """`walk_stride` as the SHIFT an emitter that scales an index uses.
 
     `index << walk_shift(is_dict)` is the byte offset the walk advances per
@@ -91,8 +128,15 @@ def walk_shift(is_dict: bool) -> int:
     than rounded.  This is the same rule in the unit an instruction encodes it
     (`LSL #3` / `LSL #4`, `SHL $3` / `SHL $4`) and it lives beside the strides
     so the two cannot drift.
+
+    **0 is a real answer here** — `BYTE_ELEM_STRIDE` is 1 — and an emitter
+    that hands the shift to a shift instruction emits a no-op that costs an
+    instruction; one that selects an encoder by the shift must select the
+    ADD. Neither is a detail: `x86_64_codegen`'s `_emit_elem_addr` takes a
+    `scale` and shifts by it unconditionally, which is correct at 0, while
+    arm64's walks select `LSL #3` by comparison and have to learn 0.
     """
-    return walk_stride(is_dict).bit_length() - 1
+    return walk_stride(is_dict, elem_stride).bit_length() - 1
 
 
 def element_offset(index: int) -> int:
@@ -8317,18 +8361,41 @@ def _literals_bound_to(fn, name: str) -> list:
     """Every container literal `fn` binds `name` to, whatever its kind."""
     out = []
     for node in iter_nodes(getattr(fn, "body", None) or []):
-        value = None
-        if isinstance(node, F.AssignStmt):
-            if _target_binds_name(node.target, name):
-                value = node.value
-        elif isinstance(node, F.VarDecl) and node.name == name:
-            value = node.value
+        value = _binding_value(node, name)
         if isinstance(value, (F.ListExpr, F.DictExpr, F.SetExpr, F.TupleExpr)):
             out.append(value)
     return out
 
 
+def _binding_value(node, name: str):
+    """The value a binding statement gives `name`, or None if it binds another.
+
+    The two shapes a binding comes in, and they are two shapes because the
+    PARSER made them two: `b = bytearray()` is an `AssignStmt` with an
+    `IdentExpr` target, and `var b = bytearray()` is a `VarDecl` with a plain
+    `name`. Two readers of that used to exist — `_literals_bound_to` here and
+    each backend's `_list_literals_bound_to` — and they agreed only because
+    both spelled both arms out. One helper, both callers, and the append-capacity
+    scan and the literal census cannot drift about which statements bind a name.
+    """
+    if isinstance(node, F.AssignStmt):
+        return node.value if _target_binds_name(node.target, name) else None
+    if isinstance(node, F.VarDecl) and node.name == name:
+        return node.value
+    return None
+
+
 def _target_binds_name(target, name: str) -> bool:
+    """Whether an assignment target introduces the local `name`.
+
+    Direct, or one level of tuple/destructuring. An assignment target is always
+    a NODE (`fire_compiler` gives a `ForStmt` a bare STRING target instead, and
+    neither caller here has a for-target to read), so there is no string
+    spelling to handle — which is also why this is not the emitters'
+    `_binds_name` moved wholesale: that one answers the string case for a
+    for-target walk, and splitting a target STRING by hand here would be a
+    second implementation of `mojo.middle/boundnames`'s own reader.
+    """
     if isinstance(target, F.IdentExpr):
         return target.name == name
     if isinstance(target, (F.TupleExpr, F.ListExpr)):
@@ -8459,6 +8526,70 @@ def list_literal_reserved_slots(literal) -> int:
         return dynamic_splat_capacity(literal.elements,
                                       literal_splat_operand_is_static)
     return len(literal.elements or [])
+
+
+def blob_reserved_slots(node) -> int:
+    """How many element slots a blob-constructing NODE's own construction takes.
+
+    Two shapes, one question, because `xs = []; xs.append(3)` and
+    `xs = bytearray(); xs.append(3)` are the same program and the append bound
+    is made of the number this returns:
+
+      * a container LITERAL — `list_literal_reserved_slots`, which is
+        `len(elements)` or the splat capacity;
+      * a blob CONSTRUCTOR call — `blob_constructor_lowering`'s `elem_count`,
+        which is 0 for `bytearray()` and `List()` and `bytearray(3)`'s 3 for
+        `bytearray(3)`.
+
+    A node that is neither has no answer here, and `blob_nodes_bound_to` is
+    what guarantees a caller never hands one over: it returns only nodes that
+    construct a blob. That is why the dispatch is here and not at the two call
+    sites — a caller reaching for `node.elements` on a `bytearray()` would get
+    an `AttributeError` on a program the backend can lower.
+    """
+    if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        return list_literal_reserved_slots(node)
+    if isinstance(node, F.CallExpr):
+        ctor = subscript_callee_name(node) or _flat_callee(node)
+        if ctor is not None:
+            lowering = blob_constructor_lowering(ctor, node.args, node.kwargs)
+            if lowering is not None:
+                return lowering.elem_count
+    return 0
+
+
+def blob_nodes_bound_to(fn, name: str) -> list:
+    """Every blob-constructing node in `fn` that binds `name`.
+
+    The append-capacity scan's first half (`_scan_list_caps` in each backend):
+    `xs.append(v)` needs room the construction does not promise, so the scan
+    needs to know what `xs` was built from and how many slots that occupies.
+
+    **It counts a blob CONSTRUCTOR as well as a literal, which is the change
+    that makes `bytearray()` growable.** Before this, only a `ListExpr` bound
+    the name, so `var b = bytearray()` had no node, `want` was never computed
+    for it, and `append` refused with "the receiver is not a list literal this
+    function appends to" — a sentence about a LITERAL that was true and
+    irrelevant, because the capacity question is about the BLOB and a
+    constructor's blob is in the frame on exactly the terms a literal's is.
+
+    One function in the model rather than one per backend: the two copies were
+    byte-identical apart from their docstrings, and a shared reader means a
+    name both backends agree is bound to a blob is a name both backends reserve
+    room for.
+    """
+    out = []
+    body = getattr(fn, "body", None) or []
+    for node in iter_nodes(body):
+        value = _binding_value(node, name)
+        if isinstance(value, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+            out.append(value)
+        elif isinstance(value, F.CallExpr):
+            ctor = subscript_callee_name(value) or _flat_callee(value)
+            if ctor is not None and blob_constructor_lowering(
+                    ctor, value.args, value.kwargs) is not None:
+                out.append(value)
+    return out
 
 
 def set_union_refusal(left: str, right: str) -> str:
@@ -9151,14 +9282,40 @@ def truthy_lowering(kind, expr=None) -> str:
 # rather than in what it holds.
 #
 # IT IS NOT REACHABLE FROM A FIELD, and `struct_field_kind` is where that is
+# The CONSTRUCTOR names whose value is a blob whose elements are one BYTE each
+# (`BYTE_BLOB_ELEM_KIND`), and the only mutable byte sequence in the language.
+# `bytes` is deliberately NOT here, and the reason is the REPRESENTATION and
+# not the mutability of the spelling: on this path a `bytes` value IS the
+# interned `char *` a bytes LITERAL is — measured on both architectures,
+# `len(b"abc")` is 3 off `strlen` and `b"abc"[i]` is a one-byte load at offset
+# `i` — while `bytes(n)` needs a blob whose SIZE is a runtime value, which is
+# the same reservation every other runtime-sized container is refused for.
+# `bytearray()` needs no size, and a `bytearray(n)` over a compile-time
+# constant `n` needs only what a list literal of `n` words needs, so it is
+# admitted and `bytes` is not.
+#
+# Read by `blob_ctor_elem_stride` (how wide a slot the constructor reserves),
+# by `kind_of`'s constructor arm (the KIND the name binds, which is what makes
+# `len` read the count and a subscript read one byte), and by both emitters.
+# One set for all three, because a constructor that reserved word slots while
+# the kind said `byte` would build a blob whose COUNT and whose ELEMENTS
+# disagree — the exact defect `bugs/FORMAL_bytearray_and_bytes_have_no_
+# representation.md` was filed for.
+BYTE_BLOB_CTORS = frozenset({"bytearray"})
+
 # enforced: a container default is refused by `struct_frame_representable`
 # ("the default is not a literal"), so a field's slot never holds one of these
 # on this path.  The name is kept because it is the vocabulary the same
 # question asks elsewhere — a `var xs: List[Int]` ANNOTATION is a real
 # declaration of what the slot is FOR, and the refusal below quotes it.
+#
+# `BYTE_BLOB_CTORS` is UNIONED rather than written in, so the set of names that
+# build a counted region and the set of names that build a counted region OF
+# BYTES cannot drift: the first is the annotation question and the second is
+# the element width of what the first builds.
 BLOB_TYPE_CTORS = frozenset({
     "List", "list", "Tuple", "tuple", "Set", "set", "Dict", "dict",
-})
+}) | BYTE_BLOB_CTORS
 
 
 def frame_slot_value_refusal(spelled: str, ann, slot_kind) -> str | None:
@@ -9395,6 +9552,13 @@ def declared_type_kind(ann, int_names=(), string_names=(), decls=None,
         inner = structs_declared(base, decls)
         if inner is not None and struct_is_framed(inner):
             return FRAME_KIND
+    if base in BYTE_BLOB_CTORS:
+        # A DECLARED `bytearray` says the slot holds a byte blob, so it says
+        # the element width as well — and it is the same answer the
+        # CONSTRUCTOR gives (`kind_of`'s constructor arm), which is the point:
+        # `var b = bytearray(3)` and `var b: bytearray = bytearray(3)` have to
+        # be one kind or the emitter reads one layout and `len` another.
+        return byte_blob_kind()
     if base in BLOB_TYPE_CTORS:
         return list_kind(None)
     return None
@@ -15866,6 +16030,53 @@ def list_elem_kind(kind):
     return kind.split(":", 1)[1] if ":" in kind else None
 
 
+# The element kind that says "this blob's elements are one BYTE each". A name
+# rather than a boolean because a blob's element kind is where every other
+# element fact already lives (`list_kind`/`list_elem_kind` carry it, and
+# `subscript_element_kind` reads it), and a second axis spelled as a flag is a
+# second thing to keep in step with the first.
+#
+# It is a LIST kind on purpose: a byte blob is `[count][byte 0]…` and every
+# operation that reads a blob reads the same header, so it goes down every blob
+# path on this path (`len` off the count field, the bounds check against the
+# count, a walk bounded by the count) rather than a parallel set of them. What
+# makes it a byte blob is the STRIDE (`blob_elem_stride`) and the fact that its
+# elements are numbers, which is all `subscript_element_kind` has to say.
+BYTE_BLOB_ELEM_KIND = "byte"
+
+
+def byte_blob_kind():
+    """The kind of a `bytearray` value: a counted blob of one-byte elements."""
+    return list_kind(BYTE_BLOB_ELEM_KIND)
+
+
+def is_byte_blob_kind(kind) -> bool:
+    """True when `kind` names a blob whose elements are bytes.
+
+    One predicate for both backends and for the value model, and it reads the
+    ELEMENT kind rather than a type name: the question "is this blob a byte
+    blob" is a property of the slot's contents, and a `var b: bytearray`
+    annotation, a `bytearray()` construction and a `List[UInt8]`-looking
+    subscript all have to agree about it without three spellings.
+    """
+    return list_elem_kind(kind) == BYTE_BLOB_ELEM_KIND
+
+
+def blob_ctor_elem_stride(ctor_name: str) -> int:
+    """The element stride a blob CONSTRUCTOR reserves slots at.
+
+    The constructor's own question, and it is not the same one as
+    `blob_elem_stride`: a constructor knows the TYPE it is building, not the
+    kind of a value that does not exist yet. So it is asked of the name, and it
+    answers the same number `blob_elem_stride` would for the kind that name
+    produces — which is why the two read `BYTE_BLOB_ELEM_KIND` rather than
+    each keeping a list.
+    """
+    if ctor_name in BYTE_BLOB_CTORS:
+        return BYTE_ELEM_STRIDE
+    return ELEM_STRIDE
+
+
 def subscript_element_kind(base_kind):
     """What `base[i]` yields, given what `base` is: a blob's element, or a BYTE.
 
@@ -15888,8 +16099,20 @@ def subscript_element_kind(base_kind):
 
     NOT the SLICE: `s[1:3]` is a new string, not a byte, and the slice arm of
     `kind_of` answers it separately (`FORMAL_string_value_model.md`).
+
+    **A BYTE BLOB yields an integer for the same reason a `char *` does**, and
+    it is the other half of the decision the width axis rests on: `b[i]` off a
+    `bytearray` loads one byte (`LDRB`, `MOVZX`) and a byte IS the integer
+    `0..255`, so claiming the element kind `byte` verbatim would leave every
+    `%s`/`%d` and every arithmetic reader of the answer holding a kind nothing
+    in this file has heard of. The element kind stays `byte` — it is what makes
+    the blob a byte blob and what `blob_elem_stride` reads — and the VALUE kind
+    is the integer. Measured on both architectures: `printf("%d %d", b[0],
+    b[1])` over `bytearray(2)` with `b[0] = 65` prints `65 0`.
     """
     if base_kind == STR_KIND:
+        return INT_KIND
+    if is_byte_blob_kind(base_kind):
         return INT_KIND
     return list_elem_kind(base_kind)
 
@@ -17384,8 +17607,18 @@ class ValueKinds:
             # emitted a blob for it — so `len(d)` was refused with "an integer
             # has no length" about a container the same line had just built.
             ctor = subscript_callee_name(e) or callee
-            if ctor is not None and blob_constructor_lowering(
-                    ctor, e.args, e.kwargs) is not None:
+            lowering = (blob_constructor_lowering(ctor, e.args, e.kwargs)
+                        if ctor is not None else None)
+            if lowering is not None:
+                # The BYTE kind when the constructor builds a byte blob, and
+                # this is the one place that decision is made for a value:
+                # everything downstream — `len` off the count field, the
+                # one-byte subscript, the stride a walk takes — reads the KIND
+                # and not the callee's name. A `List()` and a `bytearray()`
+                # are both `[count][element 0]…` and both answerable here, and
+                # they are told apart here and nowhere else.
+                if ctor in BYTE_BLOB_CTORS:
+                    return byte_blob_kind()
                 return LIST_PREFIX
             if callee is None:
                 return None
@@ -18926,20 +19159,31 @@ STRING_TYPE_CTORS = ("String", "str", "StringLiteral", "StringSlice")
 # struct (`Error`) or a vector (`SIMD`) cannot be conjured out of one word, and
 # saying so beats emitting a call that cannot be linked.
 #
-# `bytearray` and `bytes` are here for the OTHER half of the same rule — they
-# used to be absent, which did not refuse them, it made them look like ordinary
-# function calls, and `type_constructor_kind`'s documented `None` means exactly
-# that. So `bytearray()` reached the bind audit as a dangling extern named
-# `bytearray` and the build failed with a message about a SYMBOL ("this image
-# would bind 1 symbol(s) that nothing provides") about a fact that is a TYPE's.
-# They are NOT in `BLOB_TYPE_CTORS`, and that is deliberate rather than an
-# oversight: every count and every index on this path is an EIGHT-BYTE slot
-# (`[count:i64][element 0]…`), a byte blob's element is a byte, and admitting
-# them there would make `len(b)` right and `b[i]` wrong by a factor of eight.
-# Which of the two layouts a byte blob gets is a design decision with a
-# measurement attached (`bugs/FORMAL_bytearray_and_bytes_have_no_representation.md`
-# §"The next step"), so until it is made the honest answer is a refusal that
-# says which of the two is undecided.
+# `bytearray` and `bytes` are both here for the OTHER half of the same rule —
+# they used to be absent, which did not refuse them, it made them look like
+# ordinary function calls, and `type_constructor_kind`'s documented `None`
+# means exactly that. So `bytearray()` reached the bind audit as a dangling
+# extern named `bytearray` and the build failed with a message about a SYMBOL
+# ("this image would bind 1 symbol(s) that nothing provides") about a fact that
+# is a TYPE's.
+#
+# Being in this set is ROUTING, not a verdict — `("unsupported", None)` is what
+# sends a bare name to `_emit_type_constructor`, and `List`, `Dict`, `Set` and
+# `Tuple` are here for the same reason while building blobs every day. What
+# tells the two apart is `empty_blob_constructor`, asked first inside that
+# arm: `bytearray` is a `BYTE_BLOB_CTOR`, so it builds a blob of one-byte
+# elements (`bytearray()` and a constant-size `bytearray(n)` both lower, on
+# both backends), and `bytes` is not, so it gets the refusal below. The element
+# width is therefore NOT the undecided thing this comment used to say it was:
+# `bytes` on this path is the interned `char *` a bytes LITERAL is — measured on
+# both architectures, `len(b"abc")` is 3 off `strlen` and `b"abc"[i]` is one byte
+# at offset `i` — so a `bytes(n)` needs a blob whose SIZE is a runtime value,
+# which is the reservation every runtime-sized container is refused for.
+# So the pair is decided by MEASUREMENT rather than by preference, and the
+# measurements are the two sentences above: the literal's `strlen`/byte-load
+# pair, and a constructor's having to build a counted region. Every consumer
+# reads the decision from `BYTE_BLOB_CTORS` (the widths) or from
+# `empty_blob_constructor` (the routing), never from this tuple.
 BYTE_BLOB_TYPE_CTORS = ("bytearray", "bytes")
 
 UNREPRESENTABLE_TYPE_CTORS = (
@@ -18958,37 +19202,39 @@ def unrepresentable_type_ctor_refusal(callee_name: str) -> str:
     that has to be one thing.
 
     Two texts, and the split is a fact about the name rather than a preference.
-    The generic one is about a type that cannot be conjured out of one word; a
-    BYTE BLOB is a different problem, because the blob itself is already a
-    layout this path lays out (`[count:i64][element 0]…`, the eight bytes
-    `_emit_list` reserves for `[]`, the one `LEN_FROM_BLOB_FIELD` reads) and the
-    bytes LITERAL already builds one — `len(b"abc")` answers 3 today. What is
-    undecided is the ELEMENT WIDTH: a byte is one byte and every slot on this
-    path is eight, so the count word and the index arithmetic cannot both be
-    right until someone decides whether a byte blob is a blob of words or has a
-    layout of its own. Saying THAT is what a reader can act on, and it names the
-    two answers rather than picking one silently.
+    The generic one is about a type that cannot be conjured out of one word.
+    `bytes` is a different problem, and it is the one this text is about: a
+    `bytes` value on this path is the interned `char *` a bytes LITERAL is —
+    measured on both architectures, `len(b"abc")` is 3 off `strlen` and
+    `b"abc"[i]` is one byte at offset `i` — so the layout a `bytes(n)` has to
+    build is a blob whose SIZE is a runtime value, which is the reservation
+    every runtime-sized container on this path is refused for. It is NOT the
+    undecided element width any more: `bytearray` is a blob with a one-byte
+    element stride (`BYTE_BLOB_CTORS`), so the width question is answered and
+    `bytes` is refused for what it actually needs. Saying THAT is what a reader
+    can act on, and it names the answer that exists rather than the two that
+    were open when this text was written.
     """
     if callee_name in BYTE_BLOB_TYPE_CTORS:
         return (
             f"constructing {callee_name} is refused on this path, and the "
             f"reason is a fact about the TYPE rather than about a symbol: a "
-            f"{callee_name} is a counted region, and every counted region here "
-            f"is laid out as `[count:i64][element 0]…` in EIGHT-BYTE slots — "
-            f"the same blob `[]` is, and the one `len` reads its answer from. A "
-            f"byte is one byte, so the element width is the undecided part: "
-            f"admit the name as a blob of words and `len(b)` is right while "
-            f"`b[i]` is wrong by a factor of eight, and give it a layout of its "
-            f"own and `b + b` and `struct.pack_into` become reachable. Nothing "
-            f"here guesses between those. What this path CAN already do is the "
-            f"part that needs no width: a bytes LITERAL is a blob of this "
-            f"layout and `len` of it answers 3, so `b\"abc\"` is not what is "
-            f"missing — the CONSTRUCTOR is. (The measurement and the two "
-            f"candidate layouts are in "
-            f"bugs/FORMAL_bytearray_and_bytes_have_no_representation.md; "
-            f"emitting a call to a symbol named {callee_name!r} that nothing "
-            f"defines is not the alternative — that reached the bind audit as "
-            f"a dangling extern and failed with a message about a symbol.)")
+            f"{callee_name} here is the interned `char *` a bytes LITERAL is "
+            f"— `len(b\"abc\")` answers 3 off `strlen` and `b\"abc\"[i]` is one "
+            f"byte at offset `i`, both architectures — while a CONSTRUCTOR has "
+            f"to build a counted region, and a counted region here is a blob "
+            f"laid out `[count:i64][element 0]…`. The element width is "
+            f"decided and it is not the obstacle: `bytearray` is that blob "
+            f"with a one-byte element, and `bytearray()` and a constant-size "
+            f"`bytearray(n)` both lower. What `bytes(n)` needs is a "
+            f"reservation sized by a value this compiler does not have at "
+            f"layout time, which is the same limit `List[Int](3)` has and the "
+            f"same bargain every container here makes. The MUTABLE byte blob "
+            f"is `bytearray`, and it is the spelling to reach for. (Emitting a "
+            f"call to a symbol named {callee_name!r} that nothing defines is "
+            f"not the alternative — that reached the bind audit as a dangling "
+            f"extern and failed with a message about a SYMBOL rather than "
+            f"about the type.)")
     return (
         f"constructing {callee_name} has no representation on this path: this "
         f"image has no declaration of {callee_name} to construct — it is not a "
@@ -19104,14 +19350,34 @@ def blob_constructor_with_operands_refusal(callee_name: str, nargs: int) -> str:
 # compiler has never seen.
 BLOB_CAPACITY_KEYWORD = "capacity"
 
-# The two answers, named rather than spelled at the two emitters separately.
+# The answers, named rather than spelled at the two emitters separately.
 BLOB_LOWER_EMPTY = "empty"
 BLOB_LOWER_RESERVED = "reserved"
+BLOB_LOWER_SIZED = "sized"
+
+
+class BlobCtorLowering(NamedTuple):
+    """What a lowered blob constructor builds, for the emitters that build it.
+
+    A record rather than a bare string because the SIZED form carries a number
+    the emitter cannot re-derive: `bytearray(3)` has to RESERVE three bytes and
+    write a count of 3 into the header, and the only place that knows the 3 is
+    the argument the source wrote. Returning the string and leaving the emitter
+    to read `e.args[0]` would put the decision (this argument is a compile-time
+    count) in two files, and the one that is wrong is the one that reserves the
+    wrong number of bytes.
+
+    Every reader that only wants "does this lower" asks `is None`, which is why
+    a record is safe here: six call sites test exactly that and none compared
+    against the string constants.
+    """
+    form: str
+    elem_count: int = 0     # BLOB_LOWER_SIZED only; 0 means "no count is known"
 
 
 def blob_constructor_lowering(callee_name: str, positional=(),
-                              keywords=()) -> str | None:
-    """How to lower `List[…](…)`, or None when it cannot be lowered.
+                              keywords=()):
+    """How to lower `List[…](…)` / `bytearray(…)`, or None when it cannot.
 
     ONE decision for both architectures and for every caller that needs to know
     whether a container construction produces a blob — the emitters, and
@@ -19127,6 +19393,14 @@ def blob_constructor_lowering(callee_name: str, positional=(),
         that has to HOLD n ELEMENTS, and a capacity is not that: it says how much
         room to set aside, and the container it builds is EMPTY either way. So
         the value is the empty container and the reservation is not modelled.
+      * `BLOB_LOWER_SIZED` — ONE positional operand that is a compile-time
+        integer, and the element count it states. `bytearray(3)` is three zero
+        bytes in CPython, so a blob with a count of 3 and three zero elements is
+        that value exactly, and reserving it is what a list literal of three
+        words reserves. **Only for a byte blob**, because `List[Int](3)` is not a
+        thing the language has: a list literal says its elements, and a list
+        constructor that had to HOLD three of them would be three values this
+        compiler has no expression for.
       * None — anything else, refused by name.
 
     **The limits of `BLOB_LOWER_RESERVED`, because an answer with unstated limits
@@ -19155,12 +19429,48 @@ def blob_constructor_lowering(callee_name: str, positional=(),
     positional = list(positional or ())
     keywords = list(keywords or ())
     if not positional and not keywords:
-        return BLOB_LOWER_EMPTY
+        return BlobCtorLowering(BLOB_LOWER_EMPTY)
     if positional:
-        return None
+        n = _static_byte_blob_count(callee_name, positional, keywords)
+        if n is None:
+            return None
+        return BlobCtorLowering(BLOB_LOWER_SIZED, n)
     if all(name == BLOB_CAPACITY_KEYWORD for name, _v in keywords):
-        return BLOB_LOWER_RESERVED
+        return BlobCtorLowering(BLOB_LOWER_RESERVED)
     return None
+
+
+def _static_byte_blob_count(callee_name: str, positional, keywords):
+    """The element count `positional` states for a byte blob, or None.
+
+    A byte blob is the ONE container whose size an argument can state: a byte
+    blob's element is one byte, so `bytearray(3)` is a request for three of them
+    and the count word is the 3 itself. Everything else stays refused, and each
+    refusal here is a different question rather than a shorter list:
+
+      * not a byte blob (`List[Int](3)`) — a word blob's constructor has no
+        spelling for "three of them", because three values is not an expression
+        this IR has;
+      * a computed argument (`bytearray(n)`) — the reservation is sized when the
+        function is laid out and `n` is not known then. This is
+        `blob_constructor_with_operands_refusal`'s own paragraph;
+      * a keyword operand (`bytearray(length=3)`) — refused rather than guessed
+        at, and `BLOB_CAPACITY_KEYWORD` is the one keyword this path knows;
+      * a negative literal (`bytearray(-1)`) — CPython raises `ValueError` here,
+        and a blob with a negative count is a blob whose bounds check every
+        index fails.
+    """
+    if callee_name not in BYTE_BLOB_CTORS or keywords:
+        return None
+    if len(positional) != 1:
+        return None
+    arg = positional[0]
+    if not isinstance(arg, F.IntLiteral):
+        return None
+    value = _int_literal_value(arg)
+    if value is None or value < 0:
+        return None
+    return value
 
 
 def subscript_callee_names(call) -> list:
@@ -27625,7 +27935,7 @@ def _callee_container_evidence(arg, rets=None, struct_def=None):
 BLOB_TYPE_NAMES = frozenset({
     "List", "Dict", "Set", "Tuple", "Optional", "InlineArray", "StaticTuple",
     "Array", "StringRef",
-})
+}) | BYTE_BLOB_CTORS
 
 
 def return_type_is_blob(annotation) -> bool:

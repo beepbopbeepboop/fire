@@ -556,19 +556,6 @@ def _walk_value_methods(fn):
             yield (node, node.func.obj, node.func.member, list(node.args))
 
 
-def _list_literals_bound_to(fn, name: str) -> list:
-    """Every ListExpr in `fn` that assigns to `name` (directly or by tuple)."""
-    out = []
-    for node in _walk_ast(getattr(fn, "body", None) or []):
-        if isinstance(node, F.AssignStmt) and _binds_name(node.target, name) \
-                and isinstance(node.value, F.ListExpr):
-            out.append(node.value)
-        elif isinstance(node, F.VarDecl) and node.name == name \
-                and isinstance(node.value, F.ListExpr):
-            out.append(node.value)
-    return out
-
-
 def _binds_name(target, name: str) -> bool:
     """Whether an assignment target introduces the local `name`."""
     if isinstance(target, F.IdentExpr):
@@ -2969,25 +2956,42 @@ dylib_exports: list = None, globals_base: int = None,
                 self.asm.emit(encode_cbz_xn(0, 0))
                 self.asm.emit_label_rel(false_label, here_offset=-4)
 
-                self.asm.emit(encode_add_xd_xn_imm(2, 9, 8))
-                # `LSL #4` on a dict pair blob, `LSL #3` on a list blob: the
-                # x86-64 `_emit_for_list` comment is the measurement, and this
-                # is the same question on the same terms.  A dict is
-                # `[npairs][k0][v0][k1][v1]…`, so one COUNT is one PAIR and the
-                # `#3` walk reads `k0, v0, k1` — `for k in d` binding half the
-                # values.  The decision is `M.walk_stride`'s (the same rule a
-                # membership test asks); `lsl3`/`lsl4` are two hand-encoded
-                # instructions, so the stride is compared rather than shifted.
-                lsl = (encode_add_xd_xn_xm_lsl4
-                       if M.walk_stride(self._is_dict_subscript(it))
-                       == M.PAIR_STRIDE
-                       else encode_add_xd_xn_xm_lsl3)
+                self.asm.emit(encode_add_xd_xn_imm(
+                    2, 9, M.BLOB_HEADER_BYTES))
+                # `LSL #4` on a dict pair blob, `LSL #3` on a list blob, and
+                # NEITHER on a byte blob (whose elements are one byte apart, so
+                # the index is the offset): the x86-64 `_emit_for_list` comment is
+                # the measurement, and this is the same question on the same
+                # terms.  A dict is `[npairs][k0][v0][k1][v1]…`, so one COUNT is
+                # one PAIR and the `#3` walk reads `k0, v0, k1` — `for k in d`
+                # binding half the values.  The decision is `M.walk_stride`'s (the
+                # same rule a membership test asks) over the iterable's OWN
+                # element stride; `lsl3`/`lsl4` are two hand-encoded
+                # instructions, so the stride is compared rather than shifted,
+                # and a stride of 1 is the third answer and it is an ADD.
+                stride = M.walk_stride(
+                    self._is_dict_subscript(it),
+                    M.blob_elem_stride(self._expr_str_kind(it)))
+                if stride == M.PAIR_STRIDE:
+                    step = encode_add_xd_xn_xm_lsl4
+                elif stride == M.ELEM_STRIDE:
+                    step = encode_add_xd_xn_xm_lsl3
+                else:
+                    step = encode_add_xd_xn_xm
                 if fi_reg is not None:
-                    self.asm.emit(lsl(2, 2, fi_reg))
+                    self.asm.emit(step(2, 2, fi_reg))
                 else:
                     self._load_var(fi_name, 0)
-                    self.asm.emit(lsl(2, 2, 0))
-                self.asm.emit(encode_ldr_xt_xn_imm(0, 2, 0))
+                    self.asm.emit(step(2, 2, 0))
+                if stride == M.BYTE_ELEM_STRIDE:
+                    # A byte blob yields BYTES, and a byte is the integer
+                    # `0..255`, so this is `LDRB` — the same load
+                    # `_emit_subscript_load` picks for a byte element and the
+                    # same one a `char *` subscript uses. A word load here
+                    # would bind `c` to seven bytes of whatever follows.
+                    self.asm.emit(encode_ldrb_wd_wn(0, 2, 0))
+                else:
+                    self.asm.emit(encode_ldr_xt_xn_imm(0, 2, 0))
 
                 if is_tuple_target:
                     # X0 = element (pointer to [count][e0…] blob).
@@ -4163,15 +4167,18 @@ ctor_field_value=self._ctor_field_value_for(name),
             # append site refuses instead.
             if not M.is_list_kind(vkinds.name_kind(name)):
                 continue
-            literals = _list_literals_bound_to(fn, name)
+            literals = M.blob_nodes_bound_to(fn, name)
             if not literals:
                 continue
-            # `list_literal_reserved_slots`, not `len(lit.elements)`: a
-            # literal with a `*` operand builds its blob by appending and
-            # occupies the cap it reserved, so counting the `*` as ONE
-            # element made `xs = [*a]; xs.append(3)` overflow the guard
-            # with `a` of length 2. One rule, read by both backends.
-            want = min(M.list_literal_reserved_slots(lit)
+            # `blob_reserved_slots`, not `len(lit.elements)`: a literal with a
+            # `*` operand builds its blob by appending and occupies the cap it
+            # reserved, so counting the `*` as ONE element made
+            # `xs = [*a]; xs.append(3)` overflow the guard with `a` of length 2.
+            # It is also the reader that answers for a CONSTRUCTOR node
+            # (`bytearray()` occupies 0 slots and `bytearray(3)` occupies 3),
+            # which is what makes a constructor-built blob appendable. One
+            # rule, in the model, read by both backends.
+            want = min(M.blob_reserved_slots(lit)
                        for lit in literals) + count
             for literal in literals:
                 prev = by_node.get(id(literal))
@@ -5040,9 +5047,21 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_cset_xd_cond(3, "hi"))
         self.asm.emit(encode_cbz_xn(0, 3))
         self.asm.emit_label_rel(oob_label, here_offset=-4)
-        # addr = base + 8 + index*8
-        self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(4, 4, 1))
+        # addr = base + header + index * stride.  The stride is the BLOB's own
+        # (`model.blob_elem_stride` off the base's kind), so a byte blob steps
+        # one byte per element and every other blob steps a word — and
+        # `_sub_width` is set from the same number, so the ADDRESS and the LOAD
+        # out of it cannot disagree about how wide an element is.  That pairing
+        # is the whole of the byte blob: a right address with a word load would
+        # read seven bytes of whatever follows, which is the wrong answer rather
+        # than a crash.
+        stride = M.blob_elem_stride(self._expr_str_kind(e.obj))
+        self._sub_width = stride
+        self.asm.emit(encode_add_xd_xn_imm(4, 9, M.BLOB_HEADER_BYTES))
+        if stride == 1:
+            self.asm.emit(encode_add_xd_xn_xm(4, 4, 1))
+        else:
+            self.asm.emit(encode_add_xd_xn_xm_lsl3(4, 4, 1))
         self.asm.emit(encode_mov_zr_xn(0, 4))
         self.asm.emit(encode_ldp_sp_post(0, 31))  # restore SP (clobbers X0)
         self.asm.emit(encode_mov_zr_xn(0, 4))
@@ -6098,10 +6117,22 @@ ctor_field_value=self._ctor_field_value_for(name),
         ok = f"{self.func_name}_appok{self._while_counter}"
         self.asm.emit(encode_cbnz_xn(0, 3))
         self.asm.emit_label_rel(oob, here_offset=-4)
-        # value slot = base + 8 + 8*count
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(5, 4, 1))
-        self.asm.emit(encode_add_xd_xn_imm(5, 5, 8))
-        self.asm.emit(encode_str_xt_xn_imm(0, 5, 0))
+        # value slot = base + header + count * stride, at the RECEIVER's own
+        # element stride, and the store is the width that stride implies: a byte
+        # blob appends a BYTE, so the value is narrowed by the store itself —
+        # the same pairing the subscript store makes, and the same reason a
+        # `UInt8` pointee store truncates rather than widening into the next
+        # element.
+        stride = M.blob_elem_stride(self._expr_str_kind(recv))
+        if stride == M.BYTE_ELEM_STRIDE:
+            self.asm.emit(encode_add_xd_xn_xm(5, 4, 1))
+        else:
+            self.asm.emit(encode_add_xd_xn_xm_lsl3(5, 4, 1))
+        self.asm.emit(encode_add_xd_xn_imm(5, 5, M.BLOB_HEADER_BYTES))
+        if stride == M.BYTE_ELEM_STRIDE:
+            self.asm.emit(encode_strb_wd_wn(0, 5, 0))
+        else:
+            self.asm.emit(encode_str_xt_xn_imm(0, 5, 0))
         self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
         self.asm.emit(encode_str_xt_xn_imm(1, 4, 0))       # count = n + 1
         self.asm.emit(encode_ldp_sp_post(0, 31))
@@ -6444,38 +6475,72 @@ ctor_field_value=self._ctor_field_value_for(name),
         total = _SCRATCH + 16 * self._npairs - offset
         _emit_sub_imm(self.asm, 9, 29, total)
 
-    def _emit_empty_blob(self) -> None:
-        """The empty container: eight bytes with a zero count, base in X0.
+    def _emit_empty_blob(self, count: int = 0, stride: int = M.ELEM_STRIDE,
+                         what: str = "empty containers", extra_slots: int = 0,
+                         node=None) -> None:
+        """A blob of `count` zeroed elements, base in X0.
 
-        `List()`, `List[Int]()`, `Dict()` and the rest of
-        `model.EMPTY_BLOB_CTORS`, and it is `_emit_list` with `n == 0` — the
-        same eight bytes, the same `[count][elements]` layout and the same
-        reservation, because an empty container IS the zero-element literal, and
-        the instruction sequence below is `_emit_list`'s with its loop deleted.
+        `List()`, `List[Int]()`, `bytearray(3)` and the rest of
+        `model.EMPTY_BLOB_CTORS`, and it is `_emit_list` with its elements
+        deleted — the same layout and the same reservation arithmetic, because
+        a container built by a CONSTRUCTOR has exactly the shape a literal with
+        `count` zeros has.
 
         Its own method rather than a call into `_emit_list` with a synthesised
-        `ListExpr`, and the reason is that the two are NOT the same code with a
-        different argument: `_emit_list` also handles a star-unpack, reserves
+        `ListExpr`, and the reason is that the two are NOT the same code with
+        a different argument: `_emit_list` also handles a star-unpack, reserves
         CAPACITY slots when the function appends to the literal, and says
         "list literals exceed the formal frame" when the reservation does not
         fit. None of those applies here — there is nothing to unpack, and
         appending to an empty container built by a CONSTRUCTOR is a different
         question that `_scan_list_caps` does not answer — and a reader who had
         to work out which of `_emit_list`'s four behaviours a constructor
-        inherits would be reasoning about the wrong thing. So the eight bytes
-        are written out, the shared parts (`_emit_list_base`,
-        `_emit_mov_imm`, the store) being the same calls in the same order as
-        `_emit_list` uses, so the two layouts cannot drift.
+        inherits would be reasoning about the wrong thing. So the shared parts
+        (`_emit_list_base`, `_emit_mov_imm`, the store) are the same calls in
+        the same order `_emit_list` uses, so the two layouts cannot drift.
+
+        **`count` and `stride` are what make a BYTE blob.** `bytearray(3)` is
+        three bytes in CPython, so its blob is `[3][0][0][0]` — one header word
+        and three one-byte elements — and `stride` is what makes the difference
+        between that and `[3][w0][w1][w2]` visible in the address arithmetic.
+        Both come from `model.blob_constructor_lowering` and
+        `model.blob_ctor_elem_stride`, so the reservation here cannot disagree
+        with the kind the value model gave the name; a blob reserved at the
+        word stride whose kind says `byte` is the defect a byte blob exists to
+        prevent — `len(b)` right, `b[i]` wrong. The elements are explicitly
+        zeroed rather than assumed: the frame
+        scratch is not zeroed on entry, and an unwritten byte would be whatever
+        the previous blob left there — a right count over arbitrary bytes.
         """
-        if self._list_cursor + 8 > self._blob_cap:
-            raise CodegenError(
-                f"an empty container exceeds the formal frame "
-                f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
+        # `extra_slots` is the APPEND capacity the scan found for this node
+        # (`_scan_list_caps`), and it is why a constructor-built blob can grow:
+        # `var b = bytearray(); b.append(1)` is the same shape as `xs = [];
+        # xs.append(1)`, and the reservation has to cover the appends whichever
+        # spelling built the blob. It is asked for by NODE ID, the same key
+        # `_emit_list` uses for a literal, so the two paths cannot reserve
+        # different numbers for one blob.
+        if node is not None:
+            extra_slots = max(extra_slots,
+                              self._list_caps.get(id(node), 0))
+        size = M.BLOB_HEADER_BYTES + (count + extra_slots) * stride
+        if self._list_cursor + size > self._blob_cap:
+            raise CodegenError(M.frame_blob_refusal(
+                what, self._list_cursor + size, self._blob_cap))
         offset = self._list_cursor
-        self._list_cursor += 8
+        self._list_cursor += size
         self._emit_list_base(offset)
-        self._emit_mov_imm("X10", 0)
+        self._emit_mov_imm("X10", count)
         self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))
+        for i in range(count):
+            self._emit_list_base(offset)
+            if stride == 1:
+                self.asm.emit(encode_movz_xd_imm(10, 0))
+                self.asm.emit(encode_strb_wd_wn(10, 9, M.BLOB_HEADER_BYTES + i))
+            else:
+                self._emit_mov_imm("X10", 0)
+                self.asm.emit(encode_str_xt_xn_imm(
+                    10, 9, M.BLOB_HEADER_BYTES + stride * i))
+        self._emit_list_base(offset)
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
     # ── Reading and writing one element of a blob, at any distance ──
@@ -7248,11 +7313,22 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_add_xd_xn_imm(5, 9, M.BLOB_HEADER_BYTES))
         # A dict is a pair blob, so membership walks KEYS at the pair stride
         # (formal/model.walk_stride) — at the element stride it would
-        # walk keys and values alternately and stop at the pair count.
-        self.asm.emit(encode_add_xd_xn_xm_lsl4(5, 5, 3)
-                      if M.walk_stride(is_dict) == M.PAIR_STRIDE
-                      else encode_add_xd_xn_xm_lsl3(5, 5, 3))
-        self.asm.emit(encode_ldr_xt_xn_imm(5, 5, 0))  # elem / key
+        # walk keys and values alternately and stop at the pair count.  A BYTE
+        # blob walks at ITS stride, for the same reason the `for` walk above
+        # does: `65 in b` asks whether a BYTE equals the needle, and reading a
+        # word at a byte offset would compare seven bytes of the next element.
+        stride = M.walk_stride(is_dict,
+                               M.blob_elem_stride(self._expr_str_kind(right)))
+        if stride == M.PAIR_STRIDE:
+            self.asm.emit(encode_add_xd_xn_xm_lsl4(5, 5, 3))
+        elif stride == M.ELEM_STRIDE:
+            self.asm.emit(encode_add_xd_xn_xm_lsl3(5, 5, 3))
+        else:
+            self.asm.emit(encode_add_xd_xn_xm(5, 5, 3))
+        if stride == M.BYTE_ELEM_STRIDE:
+            self.asm.emit(encode_ldrb_wd_wn(5, 5, 0))   # the byte
+        else:
+            self.asm.emit(encode_ldr_xt_xn_imm(5, 5, 0))  # elem / key
         if key_pushed:
             self.asm.emit(encode_ldr_xt_xn_imm(6, 31, 0))  # needle from [SP]
             self.asm.emit(encode_cmp_xn_xm(5, 6))
@@ -7402,13 +7478,19 @@ ctor_field_value=self._ctor_field_value_for(name),
                 # a value this compiler does not have, so it keeps its own
                 # diagnostic; a `capacity=` operand is a reservation rather than
                 # content and lowers as the empty container, with its limits in
-                # that function's docstring.
-                if M.blob_constructor_lowering(name, e.args,
-                                               e.kwargs) is None:
+                # that function's docstring; and a `bytearray(n)` over a
+                # COMPILE-TIME `n` lowers as a sized blob, because a byte blob's
+                # element is one byte and the count word is the `n` itself.
+                lowering = M.blob_constructor_lowering(name, e.args, e.kwargs)
+                if lowering is None:
                     raise CodegenError(
                         M.blob_constructor_with_operands_refusal(
                             name, len(operands)))
-                self._emit_empty_blob()
+                self._emit_empty_blob(
+                    count=lowering.elem_count,
+                    stride=M.blob_ctor_elem_stride(name),
+                    what=f"a {name} of {lowering.elem_count} element(s)",
+                    node=e)
                 return
             raise CodegenError(
                 M.unrepresentable_type_ctor_refusal(name))

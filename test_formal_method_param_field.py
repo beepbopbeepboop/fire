@@ -1078,6 +1078,103 @@ CASES = [
      "q.b = 4\n"
      'sys.stdout.write("v=%d" % (get(5) + q.get()))\n',
      0, "v=42", None),
+    # ── THE `_REASSIGNED` ADVICE, and why it is a case rather than a comment ──
+    #
+    # A frame-typed field a NON-CONSTRUCTOR method assigns is refused
+    # (`_typed_nested_frame`'s `_REASSIGNED`), and the refusal used to end by
+    # naming a spelling: "Assign the field to a name and read through the name"
+    # at the nested-read site and "…and call the method on the name" at the
+    # constructor site. BOTH were measured false on both architectures, each in
+    # its own way — `var t = self.inner; t.v` is refused for want of a shape for
+    # `t`, and `var t = self.inner; t.get()` is refused as a method call on a
+    # value whose method is not one this path lowers. A refusal that names a
+    # spelling it also refuses is a promise nobody checked, which is how a
+    # diagnostic sends a reader after a non-bug, so the advice is now the form
+    # that is MEASURED to build: a DELEGATING field, assigned in `__init__` from
+    # a parameter of `__init__`.
+    #
+    # The needle is the clause that says what makes the delegating form sound —
+    # "a constructor's argument is the frame the CALLER reached" — because the
+    # NAME of the advice is not what a reader has to trust; the reason is.
+    ("a_frame_field_assigned_by_a_method_advises_the_delegating_constructor",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var pad: Int\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def set(out self, o: Opt):\n"
+     "        self.inner = o\n"
+     "\n"
+     "    def get(out self) -> Int:\n"
+     "        return self.inner.v * 10 + self.inner.has\n"
+     "\n"
+     "def mk(n: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    b.set(mk(4))\n"
+     "    printf(\"g=%d\", b.get())\n"
+     "    return 0\n",
+     None, None, None,
+     "a constructor's argument is the frame the CALLER reached"),
+    # And the advice's own PROMISE, executed on both architectures against
+    # CPython: the same program with the field assigned in `__init__` from
+    # `__init__`'s own parameter. This is the half that is easy to leave out —
+    # a reworded advice nobody runs is an advice nobody knows is true — and it
+    # is the case that keeps `bugs/FORMAL_builtin_slice_optional_field_is_a_
+    # frame_holder.md`'s remaining item (the `_REASSIGNED` question) described
+    # accurately: the refusal is a LIFETIME question about which function
+    # assigns, not a gap in what a frame-typed field can be.
+    ("the_delegating_constructor_form_the_advice_names_builds_and_answers",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var pad: Int\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def __init__(out self, o: Opt):\n"
+     "        self.inner = o\n"
+     "\n"
+     "    def get(out self) -> Int:\n"
+     "        return self.inner.v * 10 + self.inner.has\n"
+     "\n"
+     "def mk(n: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box(mk(4))\n"
+     "    printf(\"g=%d\", b.get())\n"
+     "    return 0\n",
+     "class Opt:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.has = 0\n"
+     "class Box:\n"
+     "    def __init__(self, o):\n"
+     "        self.pad = 0\n"
+     "        self.inner = o\n"
+     "    def get(self):\n"
+     "        return self.inner.v * 10 + self.inner.has\n"
+     "def mk(n):\n"
+     "    o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "import sys\n"
+     "sys.stdout.write(\"g=%d\" % Box(mk(4)).get())\n",
+     0, "g=41", None),
 ]
 
 
