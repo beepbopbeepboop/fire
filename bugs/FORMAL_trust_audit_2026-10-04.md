@@ -3,10 +3,13 @@
 **Status: the audit is DONE and its findings are FIXED. The axiom census is DONE
 too, and it corrected this file's own §3 (the axiom is not `Lean.ofReduceBool`,
 the 749 sites were an undercount, and 53 of 375 theorems is the number the sites
-were standing in for). What is left is ONE limit of the scope rule**, written
-down at the end. This file is the table; it is kept because the audit is a
-reading of the tree that nobody can re-derive for free, and because a reading
-with a measurement beside it is what made the fifteen corrections possible.
+were standing in for). Of the two things "not fixed" below, one is now closed and
+the other is NOT this file's to close**: it is
+`bugs/FORMAL_contract_scope_rule_is_a_phrase_list.md`, claimed by another worker,
+and `formal/admitted.py::contract_text_is_scoped` is its write set. This file is
+the table; it is kept because the audit is a reading of the tree that nobody can
+re-derive for free, and because a reading with a measurement beside it is what
+made the fifteen corrections possible.
 
 Claim: `sweep20:admitted-audit`. Not one of the eight `formal19` FORMAL docs.
 
@@ -254,6 +257,10 @@ false. They are now true, and each is re-measured.
   structural notion of "the claim is about the answer" rather than a longer word
   list, and guessing at it would reject sentences that are fine. Filed as
   `bugs/FORMAL_contract_scope_rule_is_a_phrase_list.md`.
+  **NOT THIS FILE'S, and not closed here:** that doc is another worker's claim and
+  `contract_text_is_scoped` is its write set, so the only honest thing this audit
+  can say about it is where it stands — one known hole in one of its four
+  instruments, with the doc named. This audit is otherwise complete.
 - **The axiom census that needs Lean.** `library_trust` counts SITES in the
   source; `#print axioms` measures which theorems actually reach
   `Lean.ofReduceBool`, and that is transitivity no text scan can do.
