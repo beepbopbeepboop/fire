@@ -251,6 +251,20 @@ the write-back.
   new case in `test_formal_dylib.py` (`a receiver write-back is not a returned
   frame`), which asserts both directions: that the write-through library is
   written and that the assigning one is still refused with its own sentence.
+  **Re-measured 2026-10-04: that case is RED on `master` (`86d60026`), and only
+  its second assertion.** `python3 test_formal_dylib.py` → `PASS=22 FAIL=1`, and
+  the failure is verbatim "a constructor that ASSIGNS a frame to its own one word
+  was built as a dylib: the frame it hands back is one the CALLEE built, and an
+  importer has no way to learn the width of the block it must reserve". So the
+  first assertion (the write-through library IS written, and exports `mk`) holds
+  and the refusal the paragraph above says is right does not fire — which is the
+  remaining half of this doc's subject and nothing to do with the export-gate
+  work in `formal/imports.py` measured on the same day. The classification to
+  look at is `_frame_return_status` / `returns_frame` in `formal/build.py`
+  (`_return_the_receiver` is gone, so the one-word receiver now travels BY
+  REFERENCE and the rebind has to be recognised from the constructor's own body
+  rather than from an appended `return self`). Not measured on x86-64: this test
+  file skips off arm64.
 * This session's own chain: `variant.mojo` and `builtin_slice.mojo` both stop
   here on arm64 AND x86-64, which is worth stating because the refusal is raised
   by the BUILD PASS (arch-free classification) even though `fire.py dylib
