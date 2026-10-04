@@ -281,5 +281,62 @@ class TestClassifier(unittest.TestCase):
         self.assertEqual(self._class_of(src), "codegen-refused")
 
 
+class TestAReplayedVerdictSaysSo(unittest.TestCase):
+    """A verdict the cache answered is a fact about the measurement, and the
+    ledger has to carry it.
+
+    `formal/lean.py::check_proof_cached` answers `True` for "these exact proof
+    bytes have been checked before" in about a tenth of a second. The census
+    used to discard that flag, so a replayed row read exactly like a fresh one —
+    `bugs/sweeps/proof_breadth_2026-10-03.jsonl` records
+    `formal/examples/either.mojo` as `{"cls": "pass", "wall_s": 0.1}` on a date
+    it was never checked, and a proof regression the size of
+    `bugs/FORMAL_a_generated_proof_over_leans_memory_ceiling_is_rejected.md`'s
+    was recorded as coverage. "The corpus still measures this construct" is the
+    claim every `KNOWN_DIVERGENCES` discipline here rests on, and a replayed
+    verdict does not support it.
+
+    The check is on the plumbing, with the cache stubbed: what matters is that
+    the flag reaches the `Verdict` and the summary, and that is a property of
+    this file's code rather than of what the cache happens to hold on the day.
+    """
+
+    SOURCE = "def main(n):\n    return n + 1\n"
+
+    def _verdict_with_cache(self, cached):
+        import shutil
+        import formal.lean
+        real = formal.lean.check_proof_cached
+        formal.lean.check_proof_cached = lambda *a, **k: (True, "", cached, 0)
+        tmp = tempfile.mkdtemp(prefix="pb-cached-")
+        try:
+            item = B.Workload(ident="t", origin="repo", source=self.SOURCE,
+                              detail="", weight=0)
+            return B.run_item(item, "arm64", timeout=60, workdir=tmp)
+        finally:
+            formal.lean.check_proof_cached = real
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_a_replayed_verdict_is_flagged_and_a_fresh_one_is_not(self):
+        fresh = self._verdict_with_cache(False)
+        replayed = self._verdict_with_cache(True)
+        self.assertEqual(fresh.cls, replayed.cls,
+                         "the stub changed the class, so this test is not "
+                         "measuring the flag")
+        self.assertFalse(fresh.cached,
+                         "a fresh check is reported as a replay")
+        self.assertTrue(replayed.cached,
+                        "a replayed check is reported as fresh — this is the "
+                        "defect: the row reads as a measurement it was not")
+
+    def test_the_report_counts_the_replayed_rows(self):
+        fresh = self._verdict_with_cache(False)
+        replayed = self._verdict_with_cache(True)
+        text = B.report([fresh, replayed], ["arm64"])
+        self.assertIn("of which replayed", text,
+                      f"the summary cannot be read as a measurement without "
+                      f"the ledger:\n{text}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

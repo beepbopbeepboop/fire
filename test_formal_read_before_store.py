@@ -224,6 +224,80 @@ CASES = [
      "CPython leaves the target unbound when a runtime-empty range is read"),
     ("nonempty_literal_range_target_is_still_a_definition",
      "    for i in range(3):\n        pass\n    return i\n", "ok"),
+    # ── the emptiness as a PREDICATE: `consts` decides a range the call does
+    # not write out ──
+    #
+    # `_preheader_literals` already carries a "definitely this integer" table
+    # along every edge that reaches a loop header, and `while i < 3:` after
+    # `i = 0` is the row that pinned it. A `range` bound is the same question
+    # with the same evidence, so `range(0, k)` after `k = 0` is an emptiness
+    # this build can decide — and an emptiness that is decided EMPTY binds
+    # nothing, which is the refusal this row pins. Before, the header's
+    # definition survived because `_for_target_never_binds` only read the
+    # literals written in the call, so the program built and printed whatever
+    # the caller left in the register (CPython raises `UnboundLocalError` here
+    # for every probe value).
+    ("preheader_zero_range_target_is_not_a_definition",
+     "    k = 0\n    for i in range(0, k):\n        pass\n    return i\n",
+     "refuse"),
+    # …and the same table says a range it decides NON-EMPTY always yields, so
+    # the target is bound — the other direction of the same predicate, and the
+    # row that fails if the rule is written as "refuse unless the call writes
+    # its bounds out".
+    ("preheader_nonzero_range_target_is_still_a_definition",
+     "    k = 3\n    for i in range(0, k):\n        pass\n    return i\n", "ok"),
+    # The BODY's store, which is the precision `_loop_body_always_runs` gains
+    # from the same table: the header's exit edge is gone when the body
+    # provably ran, so `t` dominates the read after the loop.
+    ("preheader_nonzero_range_body_store_ok",
+     "    k = 3\n    for i in range(0, k):\n        t = i\n    return t\n", "ok"),
+    # …and the empty one keeps its refusal: the body does not run, so a store
+    # in it dominates nothing. This row is unchanged by the predicate and is
+    # here because it is the pair that shows the table decides BOTH ways
+    # rather than merely adding definitions.
+    ("preheader_zero_range_body_store_refused",
+     "    k = 0\n    for i in range(0, k):\n        t = i\n    return t\n",
+     "refuse"),
+    # A name that already held a value dominates the read whatever the loop
+    # does — the `preassigned_target_survives_an_empty_range` row above, in the
+    # position this fix reaches.
+    ("preassigned_target_survives_a_preheader_zero_range",
+     "    i = 7\n    k = 0\n    for i in range(0, k):\n        pass\n"
+     "    return i\n", "ok"),
+    # THE BODY READS ITS OWN TARGET, and the body is entered only through the
+    # header's head test, so reaching it means the loop bound the name — a fact
+    # about the body's entry rather than about the header's definitions, which
+    # is why `_build_cfg` seeds the body's first block instead of leaving the
+    # header to carry it. Without the seed a `for` over a range decided empty
+    # refused this too, which is a refusal of a program CPython runs (the body
+    # never executes, so nothing raises).
+    ("empty_literal_range_body_reads_its_target_ok",
+     "    for i in range(0, 0):\n        sink(i)\n    return 0\n", "ok"),
+    # The same read in the position the rule is about, where the body DOES run
+    # for a non-empty range: legal, and it is what would break first if the
+    # seed were moved to the header.
+    ("nonempty_range_body_reads_its_target_ok",
+     "    for i in range(2):\n        sink(i)\n    return 0\n", "ok"),
+    # A literal SEQUENCE's emptiness is decided by the same reader as a range's
+    # (`_for_emptiness`), and it is decided in both directions: an empty
+    # sequence binds no target, so a read after it is the refusal CPython's
+    # `UnboundLocalError` already is.
+    ("empty_literal_list_target_is_not_a_definition",
+     "    for i in []:\n        pass\n    return i\n", "refuse"),
+    ("empty_string_target_is_not_a_definition",
+     "    for c in \"\":\n        pass\n    return c\n", "refuse"),
+    ("nonempty_literal_list_target_is_still_a_definition",
+     "    for i in [4, 5]:\n        pass\n    return i\n", "ok"),
+    # THE RESIDUAL, pinned as a case so it cannot rot: the preheader has to
+    # STATE the value, and a parameter is not a literal it can state — which is
+    # the same limit `while_body_store_from_a_parameter_refused` records for the
+    # `while` half, reached here through a range bound. CPython raises at
+    # `probe(0)` and this path keeps the target defined, so it stays a
+    # recorded divergence rather than a refusal; see
+    # `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
+    ("preheader_range_bound_from_a_parameter_keeps_the_target",
+     "    k = n\n    for i in range(0, k):\n        pass\n    return i\n", "ok",
+     "CPython leaves the target unbound when a runtime-empty range is read"),
     # The shape the old walk could not see at all: a store in a loop body,
     # read after the loop. `range(n)` may be empty, so the store does not
     # dominate — and CPython raises at n == 0, so this one is not a

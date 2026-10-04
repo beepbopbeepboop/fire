@@ -2,8 +2,11 @@
 # the per-edge export gate hands 98 of the 163 files to
 
 **Area:** `formal/monomorph.py` (`demands`) / `formal/model.py` (the callee
-refusal) · **Status:** OPEN, measured 2026-10-04 by `project18:export-gate` ·
-**Layer:** 1/5 of the formal work
+refusal) · **Status: PARTIAL — §2's half is FIXED (2026-10-04): the refusal no
+longer tells a correct caller to add brackets, and says which side the fault is
+on. The inference itself is NOT done, and §3 is why it is a project rather than
+a reader.** Measured 2026-10-04 by `project18:export-gate` · **Layer:** 1/5 of
+the formal work
 
 Found while implementing the per-edge export-gate rule
 (`formal/imports.py::library_free_edges`, `work/formal18-export-gate`), which
@@ -65,12 +68,36 @@ without one is invisible to it. That doc's §"what is not covered" list is where
 this belongs; it is filed separately because it is worth 123 measured files here
 rather than a class.
 
-The refusal itself is already the right sentence
-(`formal/model.py::imported_callee_refusal`: "spell it as `widen[<a type>](…)`
-and the library will carry the instantiation") — **and for these 123 that advice
-is WRONG**, because the source is correct Mojo and the brackets are optional.
-That is the part of this doc worth having: a refusal whose next step is wrong
+The refusal itself was already the right sentence
+(`formal/model.py::imported_callee_refusal`) — **and for these 123 that advice
+was WRONG**, because the source is correct Mojo and the brackets are optional.
+That was the part of this doc worth having: a refusal whose next step is wrong
 about correct code sends the reader to edit working stdlib.
+
+**FIXED 2026-10-04.** The sentence now says, for the bare case, that the SOURCE
+is right and this path is short — Mojo infers a template call's type arguments,
+so `FormatStruct(writer, "Allocation")` is correct code and this path does not
+infer them yet — names the demand pipeline that reads them off a bracket, points
+at this doc for the inference and its 123 measured files, and offers
+`name[<a type>](…)` explicitly as a **workaround for this gap rather than a
+correction to your code**. The refusal is still a refusal and still names the
+export rule; only the next step changed. `test_formal_monomorph.py`'s `a bare
+call to an imported generic is still refused` pins all four properties (says the
+source is right, names the inference, calls the bracket a workaround, and does
+NOT contain the old imperative) on both architectures, because a property of the
+message a program gets belongs on the case that produces it.
+
+**What is still not fixed is the inference itself, and §3 says what it is.** The
+short version: the type argument is not IN the call, it is a property of the
+argument's DECLARED TYPE (`writer: Some[Writer]` gives `T`; `value: SIMD[dtype,
+_]` gives `dtype`), so the monomorphizer needs enough type structure to read a
+template parameter out of an annotation, with the trait bounds to choose between
+candidates — and for two of the three measured shapes (`dealloc`, whose argument
+is `Allocation[T, …]` in the DEFINING module itself, and `is_negative`, whose
+bound is a `DType`) what falls out is the CALLER's own parameter, which is a
+specialization of the same template rather than a new instantiation. Those are
+not the same feature as `FormatStruct` and the doc should not claim 123 files for
+one of them.
 
 ## 3. The exact next step
 

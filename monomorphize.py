@@ -29,9 +29,101 @@ RUNTIME = os.path.join(HERE, 'runtime')
 _OBJ_FLAGS = ('-fgimple', '-fPIC', f'-I{RUNTIME}')
 _CPP_FLAGS = ('-std=c++20', '-fPIC', f'-I{RUNTIME}')
 
-_FN_HEAD = re.compile(r'\b(?:fn|def)\s+(\w+)\s*\[([^\]]*)\]')
-# Generalized head: a `fn` or `struct` template with `[type params]`.
-_HEAD = re.compile(r'\b(fn|def|struct)\s+(\w+)\s*\[([^\]]*)\]')
+# The head of a generic definition, up to and INCLUDING its opening bracket.
+# The parameter list itself is found by COUNTING brackets (`head_match`), not by
+# a `[^\]]*` character class: a parameter whose declared type is itself a type
+# application — `keys: List[T]`, `width: SIMD[dtype, width]`, `*values: Trait`
+# beside a `List[T]` — puts a `]` inside the parameter list, and a class that
+# stops at the first `]` ends the match there. That is not a rare shape, it is
+# `std/collections/type_dict.mojo` (the whole API is compile-time and every
+# parameter is a value) and every numeric template the compiled path
+# instantiates, and the failure it produced was an EMITTED FILE THAT DOES NOT
+# PARSE: `monomorphize_source` cut the head at `m.end()` and left `]:` behind,
+# so `struct Box[T, keys: List[T]]:` became
+# `struct Box_1_T_3_Int_4_keys_39__x005B1_x002C_…_x005D]:` and the build died
+# at `Unexpected RBRACKET(']')` on both backends. See
+# `bugs/FORMAL_a_generic_structs_parameters_are_never_bound.md` §0a, where
+# the before/after table and the stdlib file that reaches it are.
+_HEAD = re.compile(r'\b(fn|def|struct)\s+(\w+)\s*\[')
+
+
+class _HeadMatch:
+    """The `(kind, name, params)` head of a generic definition.
+
+    Quacks like the `re.Match` the five call sites were written against —
+    `group(1)`/`group(2)`, `start()`, `end()` — so `monomorphize_source` and
+    `elaborate.py`'s readers are unchanged, and `params` carries the text
+    INSIDE the brackets, which is what they actually all wanted from `group(2)`.
+
+    `end()` is one past the MATCHING `]`, which is the offset
+    `monomorphize_source` cuts the source at and `_code_only` blanks out.
+    """
+
+    __slots__ = ("kind", "name", "params", "_start", "_end")
+
+    def __init__(self, kind, name, params, start, end):
+        self.kind = kind
+        self.name = name
+        self.params = params
+        self._start = start
+        self._end = end
+
+    def group(self, n):
+        return {1: self.kind, 2: self.name, 3: self.params}[n]
+
+    def start(self):
+        return self._start
+
+    def end(self):
+        return self._end
+
+    def __repr__(self):
+        return (f"<head {self.kind} {self.name}[{self.params}] "
+                f"{self._start}..{self._end}>")
+
+
+def head_match(src: str, kinds: str = r'(?:fn|def|struct)'):
+    """The first generic definition head in `src`, brackets balanced, or None.
+
+    **Balanced, and that is the whole point.** `fn Box[T: AnyType, keys:
+    List[T]]` has a `]` at `List[T]`'s, and a pattern that stops at the first
+    `]` reports the parameter list as `T: AnyType, keys: List[T` — which is
+    wrong in the two ways that matter at once: `monomorphize_source` cuts the
+    head there and emits a definition with a stray `]` (a file that does not
+    parse), and every reader of the parameter list downstream reads a
+    truncated one (`keys: List[T` with no closing bracket).
+
+    `kinds` narrows to `(?:fn|def)` for a function template; the compiled
+    path's struct-only readers pass `(?:struct)`. A regex that finds the head
+    and a scan that finds its END are two steps because the end is not a
+    regular-language property of the text — it is a nesting depth — and the
+    scan is four lines.
+
+    **An unbalanced head keeps the OLD answer** rather than raising: a `fn`
+    whose brackets never close is malformed source, and the previous behaviour
+    for it was a truncated match whose consequence was a parse error downstream.
+    Inventing a refusal here would change which layer reports the malformation,
+    and this function's job is to find the head, not to judge the source.
+    """
+    m = re.compile(r'\b(' + kinds + r')\s+(\w+)\s*\[').search(src)
+    if not m:
+        return None
+    depth = 0
+    for i in range(m.end() - 1, len(src)):
+        c = src[i]
+        if c == '[':
+            depth += 1
+        elif c == ']':
+            depth -= 1
+            if depth == 0:
+                return _HeadMatch(m.group(1), m.group(2), src[m.end():i],
+                                  m.start(), i + 1)
+    close = src.find(']', m.end() - 1)
+    if close < 0:                       # no `]` at all: nothing to cut to
+        return _HeadMatch(m.group(1), m.group(2), src[m.end():], m.start(),
+                          m.end())
+    return _HeadMatch(m.group(1), m.group(2), src[m.end():close], m.start(),
+                      close + 1)
 
 
 _ALNUM = re.compile(r'[A-Za-z0-9]')
@@ -254,7 +346,7 @@ def monomorphize_source(template_src: str, type_args: dict) -> tuple:
     (see bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md).
     Substituting the qualified form first also keeps the bare pass from
     double-substituting it — by then no `Self.<param>` text survives."""
-    m = _HEAD.search(template_src)
+    m = head_match(template_src)
     if not m:
         raise ValueError("monomorphize: no generic `fn`/`struct name[...]` found")
     kind, name = m.group(1), m.group(2)

@@ -434,6 +434,33 @@ def test_a_bare_call_to_an_imported_generic_is_still_refused(tmpdir):
         check("does not export it" in bare,
               f"[{arch}] a bare call to an imported generic must be refused as "
               f"an export gap: {bare.strip()[-400:]}")
+        # …and the refusal must not tell this file its SOURCE is wrong. It used
+        # to end "spell it as `widen[<a type>](…)` and the library will carry
+        # the instantiation", which is a repair for correct code: in Mojo a
+        # template call's type arguments are INFERRED, `widen(5)` is the spelling
+        # the stdlib uses (`FormatStruct(writer, "Allocation")` is 68 files of
+        # it), and the gap is in this path's demand pipeline. That is the
+        # `refuse_without:` defect — a next step that is wrong about the code
+        # being compiled — so the sentence now says which side the fault is on,
+        # names the inference and its measurement, and calls the bracket a
+        # WORKAROUND. The property is pinned here rather than in the message's
+        # own test because it is a property of the REFUSAL a program gets.
+        check("the SOURCE is right" in bare
+              and "does not infer them yet" in bare,
+              f"[{arch}] the refusal does not say the bare spelling is correct "
+              f"source and that the inference is what is missing: "
+              f"{bare.strip()[-600:]}")
+        check("workaround" in bare,
+              f"[{arch}] the bracket is offered without saying it is a "
+              f"workaround for this path rather than a correction: "
+              f"{bare.strip()[-400:]}")
+        check("FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_"
+              "inferrable.md" in bare,
+              f"[{arch}] the refusal does not point at the measurement of the "
+              f"inference it is short of")
+        check("spell it as `widen[" not in bare,
+              f"[{arch}] the old imperative is back: a reader sent to edit "
+              f"correct stdlib")
         bracketed = run_pair_case(
             tmpdir, arch, "mm_brack", lib,
             ("from pairlib import widen\n"
@@ -764,6 +791,215 @@ def test_two_demand_sets_are_two_libraries(tmpdir):
                   f"{sorted(exports)}")
 
 
+def test_a_bracketed_parameter_annotation_instantiates(tmpdir):
+    """`keys: List[T]` is a parameter, and every instantiation of it used to be
+    a file that does not parse.
+
+    The head matcher's character class was "not a bracket", so it stopped at
+    `List[T]`'s `]`, `monomorphize_source` cut the head there and left `]:`
+    behind:
+
+        struct Box[T: AnyType, keys: List[T]]:      ->  struct Box_1_…_x005D]:
+        parse error: Unexpected RBRACKET(']')
+
+    which is the worst of the three failure directions — the instantiation is
+    produced, substituted correctly, and cannot be compiled. It is not an exotic
+    shape either: it is `std/collections/type_dict.mojo` (every one of whose
+    parameters is a value) and `SIMD[…]` in any numeric template.
+
+    **The assertion that was missing everywhere is that the emitted source
+    PARSES** — the mangled name was already right, so a test that checked only
+    the name passed against a definition no compiler would accept. Hence
+    `Parser(py_tokenize(out)).parse_module()` here, and the substitution is
+    checked as well because a head that ends in the right place still has to
+    substitute INSIDE the annotation.
+    """
+    from formal import monomorph as MM
+    import fire_compiler as F
+    src = ("struct Box[T: AnyType, keys: List[T]]:\n"
+           "    var items: List[T]\n"
+           "\n"
+           "    def size(self) -> Int:\n"
+           "        return len(self.items)\n")
+    mangled, concrete = MM.instantiate(src, "Box", ("Int", "[1, 2, 3]"))
+    check(concrete.startswith(f"struct {mangled}:"),
+          f"the definition was not renamed and its parameter list not dropped: "
+          f"{concrete!r}")
+    check(concrete.rstrip().endswith("return len(self.items)"),
+          f"the body was cut with the head: {concrete!r}")
+    check("List[Int]" in concrete,
+          f"a type parameter inside another parameter's ANNOTATION was not "
+          f"substituted: {concrete!r}")
+    try:
+        mod = F.Parser(F.py_tokenize(concrete)).parse_module()
+    except Exception as exc:                        # noqa: BLE001
+        raise TestFailure(
+            f"the instantiation does not parse, which is the whole defect: "
+            f"{exc!r}\n{concrete!r}") from None
+    check(any(getattr(s, "name", None) == mangled for s in mod),
+          f"the parser did not read the instantiated name back: "
+          f"{[getattr(s, 'name', None) for s in mod]}")
+
+    # THE CONTROL, so the fix cannot be "the parameter list ends at the first
+    # `]`" all over again, and the NESTED case, because a matcher that counts
+    # one level is a matcher with the same bug one level down.
+    import elaborate as E
+    check(E.type_param_names("struct Box[T: AnyType, keys: List[T]]:\n"
+                             "    pass\n") == ["T", "keys"],
+          "the parameter reader stops at the `]` inside `List[T]`")
+    check(E.type_param_names(
+        "struct Box[T, keys: SIMD[Tuple[Int, Int], 4]]:\n    pass\n")
+        == ["T", "keys"],
+        "a bracketed type argument carrying its own comma splits the parameter "
+        "in half (`split(',')` rather than a top-level split)")
+    check(E.parse_bounds("struct Box[T: AnyType, keys: List[T]]:\n    pass\n")
+          == {"T": "AnyType", "keys": "List[T]"},
+          "the trait bound of a parameter whose type is a type application is "
+          "read from a truncated list")
+
+    # …and the multi-line form `type_dict.mojo` writes, whose parameters carry
+    # a trailing comma, a `//` separator and a `*values` marker. This is the
+    # real declaration, transcribed: every parameter of that struct is a VALUE,
+    # so the `keys: List[T]` line is not an edge case there but the middle of
+    # the parameter list, and before the fix `type_param_names` returned
+    # `['T', 'Trait', 'keys']` — it stopped at that `]` and lost `*values`.
+    typed_dict = ("struct TypeDict[\n"
+                 "    T: Equatable & Movable,\n"
+                 "    Trait: type_of(AnyType),\n"
+                 "    //,\n"
+                 "    keys: List[T],\n"
+                 "    *values: Trait,\n"
+                 "](TrivialRegisterPassable):\n"
+                 "    var items: List[T]\n"
+                 "\n"
+                 "    def get(self) -> Int:\n"
+                 "        return len(Self.keys) + len(self.items)\n")
+    check(E.type_param_names(typed_dict) == ["T", "Trait", "keys", "*values"],
+          f"std/collections/type_dict.mojo's parameter list is not read whole: "
+          f"{E.type_param_names(typed_dict)}")
+    mangled_td, concrete_td = MM.instantiate(
+        typed_dict, "TypeDict", ("Int", "AnyType", "[1,2,3]", "String"))
+    check("len([1,2,3])" in concrete_td,
+          f"`len(Self.keys)` was not folded with the argument the "
+          f"instantiation supplied: {concrete_td!r}")
+    try:
+        F.Parser(F.py_tokenize(concrete_td)).parse_module()
+    except Exception as exc:                        # noqa: BLE001
+        raise TestFailure(f"the TypeDict instantiation does not parse: "
+                          f"{exc!r}\n{concrete_td!r}") from None
+    check(concrete_td.startswith(f"struct {mangled_td}("),
+          f"the declaration's base class and parameter list were lost: "
+          f"{concrete_td!r}")
+
+
+def test_a_stated_mangled_spelling_is_the_one_the_mangler_produces(tmpdir):
+    """No `doc/` or `bugs/` file may state a mangled spelling the mangler does
+    not produce.
+
+    The two cases above used to write `Pair_Int` out by hand, and both went
+    stale the moment `monomorphize.mangle` became injective — leaving
+    `doc/ABI.md` §Generics stating, in the one document a consumer reads to
+    learn what the boundary symbol is, a symbol no code produces. Deriving the
+    expected name in a TEST is not enough: a test stops at its own file, and
+    the sentence a reader reads was in a contract. So the invariant is checked
+    where the prose is.
+
+    `Pair[Int]` is the witness because it is the example every one of these
+    documents uses. The rule is deliberately narrow: it looks for a token that
+    LOOKS like this mangling (`Pair_` plus an alnum continuation) and requires
+    it to be a well-formed `_fields` encoding — `Pair` followed by one or more
+    `_{len}_{name}_{len}_{value}` fields, each declared length checked against
+    the segment it introduces. That is what `monomorphize._fields` emits and
+    what its docstring says is uniquely decodable ("the maximal digit run is a
+    count, the next `_` separates, and each count is followed by exactly that
+    many characters"), so the check is the mangler's own format read back rather
+    than a copy of it: `Pair_1_T_6_Colour` is a different instantiation and
+    passes, `Pair_Int` and `Pair_Colour` are the pre-injective shape and do not.
+    Asking "is this string a mangling of SOME instantiation" rather than "is it
+    the one for `Int`" is what lets a document use the mangler on any example.
+
+    **A paragraph that discusses the ENCODING may name the spelling the
+    encoding replaced**, because "it used to be `Pair_Int`" is the sentence that
+    tells a reader holding the old name what to look for. That exemption is
+    keyed on the word `injective` in the paragraph rather than on any list of
+    known-old spellings, so it cannot rot into "any stale spelling is fine" —
+    an example line does not say the encoding is injective, and the two
+    paragraphs that do are the ones about the change. The scan is per paragraph
+    rather than per line because prose wraps: the word and the spelling it
+    qualifies are routinely 80 columns apart.
+    """
+    import monomorphize
+    import re
+    problems: list = []
+
+    def decodes(token: str) -> bool:
+        """Whether `token` is `<name>` followed by `_fields`-shaped fields.
+
+        The decoder is `monomorphize._fields`' own description read back: at
+        each position a digit run is a length, an `_` separates, and exactly
+        that many characters must follow. Written out rather than imported
+        because there is nothing to import — `_fields` produces, it does not
+        parse — and because a test that re-implements the producer's format is
+        what makes the format a CONTRACT rather than an accident.
+        """
+        pos = token.find("_")
+        if pos < 0:
+            return False                      # no fields: `Pair` is its own name
+        i = pos + 1
+        fields = 0
+        while i < len(token):
+            start = i
+            while i < len(token) and token[i].isdigit():
+                i += 1
+            if i == start or i >= len(token) or token[i] != "_":
+                return False
+            count = int(token[start:i])
+            i += 1
+            if i + count > len(token) or token[i + count] != "_":
+                return False
+            i += 1 + count                    # the field's name
+            start = i
+            while i < len(token) and token[i].isdigit():
+                i += 1
+            if i == start or i >= len(token) or token[i] != "_":
+                return False
+            count = int(token[start:i])
+            i += 1
+            if i + count > len(token):
+                return False
+            i += count                        # the field's value
+            fields += 1
+        return fields > 0
+
+    pattern = re.compile(r"\bPair_[A-Za-z0-9_]*")
+    for root in ("doc", "bugs"):
+        base = os.path.join(HERE, root)
+        for dirpath, _dirs, files in os.walk(base):
+            for name in sorted(files):
+                if not name.endswith(".md"):
+                    continue
+                path = os.path.join(dirpath, name)
+                rel = os.path.relpath(path, HERE)
+                text = open(path, encoding="utf-8").read()
+                for para in re.split(r"\n\s*\n", text):
+                    if "injective" in para.lower():
+                        continue
+                    for token in pattern.findall(para):
+                        token = token.rstrip("_")
+                        if not decodes(token):
+                            line = text[:text.index(para)].count("\n") + 1
+                            problems.append(
+                                f"{rel}:{line} states {token!r}, which is not a "
+                                f"spelling monomorphize.mangle can produce — it "
+                                f"emits length-prefixed fields "
+                                f"(`Pair[Int]` is "
+                                f"{monomorphize.mangle('Pair', {'T': 'Int'})!r}"
+                                f"), and this one carries no lengths")
+    check(not problems,
+          "a document states a mangled spelling no code produces:\n  "
+          + "\n  ".join(problems))
+
+
 TESTS = [
     ("a generic struct template is instantiated at the importer's type",
      test_a_generic_struct_template_is_instantiated_at_the_importers_type),
@@ -787,6 +1023,10 @@ TESTS = [
      test_a_value_typed_bracket_is_not_read_as_a_type),
     ("two demand sets are two libraries",
      test_two_demand_sets_are_two_libraries),
+    ("a bracketed parameter annotation instantiates",
+     test_a_bracketed_parameter_annotation_instantiates),
+    ("a stated mangled spelling is the one the mangler produces",
+     test_a_stated_mangled_spelling_is_the_one_the_mangler_produces),
 ]
 
 EXPECTED_FAILURES: dict = {}
