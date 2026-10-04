@@ -17512,11 +17512,25 @@ SOLE_FIELD_CALLEE_REFUSALS = [
     # `bugs/FORMAL_binary_heap_mojo_after_the_len_value.md` §3 row 0a names, and
     # it is the file's reported verdict.
     #
-    # The expectation is the METHOD-TABLE refusal, not a build: with `_data`
-    # collapsed into `self`, the emitter is asked for `clear` on a receiver it
-    # cannot type, and `List.clear` is not in its table (row 1 of the same
-    # table).  So this row pins that the diagnosis names the REAL remaining gap
-    # -- and `refuse:` is a substring match, so the old message would fail it.
+    # The expectation WAS the METHOD-TABLE refusal and is now a BUILD, because
+    # `List.clear` landed (row 1 of `bugs/FORMAL_binary_heap_mojo_after_the_len_
+    # value.md`'s table).  Two things in the note above were corrected by that
+    # landing, and both are worth the row staying here as a build rather than
+    # moving out of the group: the collapsed receiver is NOT one "the emitter
+    # cannot type" — `_method_recv_kind(self)` answers `list`, from the field's
+    # declared type through `one_word_receiver_kind`, which is what made the
+    # one-store lowering possible at all; and `clear` is not "not in its table"
+    # any more.
+    #
+    # `size=%d`/`after=%d` are here so the row is not a bare exit status: they
+    # are only reachable if BOTH `len(self._data)` and `self.clear()` lower,
+    # and the numbers are 0 and 0 for the reason the constructor is
+    # `List[Int]()` — an EMPTY list.  The row that shows the store landing is
+    # `test_formal_x86_64_parity.py`'s
+    # `list_clear_through_a_one_word_structs_sole_field`, whose constructor puts
+    # three elements in and prints the length before and after; this one keeps
+    # the zero-operand construction, which is the OTHER of
+    # `ctor_establishes_slot`'s two doors.
     ("a_method_callee_through_a_collapsed_field_is_not_a_field_read",
      "struct Wrap:\n"
      "    var _data: List[Int]\n"
@@ -17527,11 +17541,16 @@ SOLE_FIELD_CALLEE_REFUSALS = [
      "    def clear(mut self):\n"
      "        self._data.clear()\n"
      "\n"
+     "    def size(self) -> Int:\n"
+     "        return len(self._data)\n"
+     "\n"
      "def main(n: Int) -> Int:\n"
      "    var w = Wrap()\n"
+     '    printf("size=%d", w.size())\n'
      "    w.clear()\n"
+     '    printf(" after=%d", w.size())\n'
      "    return 0\n",
-     "refuse:'clear' is not one of those methods of those receivers", None),
+     0, "size=0 after=0"),
 ]
 
 # The two spellings that must keep BUILDING, as the CPython-pair shape, because

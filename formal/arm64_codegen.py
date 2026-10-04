@@ -5239,6 +5239,8 @@ ctor_field_value=self._ctor_field_value_for(name),
                or M.string_identity_method(method))
         if how == "list_append":
             self._emit_list_append(e)
+        elif how == "list_clear":
+            self._emit_list_clear(e)
         elif how == "file_write":
             self._emit_file_write(e)
         elif how == "file_close":
@@ -5669,6 +5671,41 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.label(done)
         self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 32))
         _emit_add_imm(self.asm, 31, 31, 48)
+
+    def _emit_list_clear(self, e: F.CallExpr) -> None:
+        """`xs.clear()` — one store of zero at offset 0 of the blob.
+
+        The blob is `[count:i64][elem0]…`, so its COUNT is offset 0 and
+        emptying it is exactly that one store; the elements past the count are
+        already unreachable and nothing walks them. It is `List.clear` in
+        `std/collections/binary_heap.mojo` and nothing else, and it is here
+        rather than as a rewrite because the store is the whole method — there
+        is no loop and no capacity to compute.
+
+        **No capacity check, and that is the difference from `append`.** An
+        append needs room the compile-time scan cannot find for a blob it did
+        not see built, which is why `_emit_list_append` refuses rather than
+        growing one; a clear needs no room at all, so the receiver may be any
+        word this image has established to be a list — which is what
+        `model.BUILTIN_VALUE_METHOD_LIST_KINDS` gates, and the guard is a KIND
+        precisely because a zero written at offset 0 of an arbitrary word is a
+        store into whatever address that word holds.
+
+        The receiver is emitted first and the base recomputed into X9, the
+        register discipline `_emit_list_append` and `_emit_block_store` both
+        use: evaluating a receiver can be anything, and both clobber X9.
+
+        Returns 0, for `non_container_element_refusal`'s reason and
+        `_emit_list_append`'s: `list.clear` returns None, and nothing in the
+        language can tell that from a zero."""
+        if e.args or e.kwargs:
+            raise CodegenError(
+                f"list.clear() takes no arguments on this path "
+                f"(got {len(e.args or []) + len(e.kwargs or [])})")
+        self._emit_expr(e.func.obj)                     # X0 = the blob base
+        self.asm.emit(encode_mov_zr_xn(9, 0))
+        self.asm.emit(encode_movz_xd_imm(0, 0))         # count = 0
+        self.asm.emit(encode_str_xt_xn_imm(0, 9, 0))
 
     def _emit_list_append(self, e: F.CallExpr) -> None:
         """`xs.append(v)` — store v at the blob's count and bump the count.

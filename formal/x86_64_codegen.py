@@ -3451,6 +3451,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                or M.string_identity_method(method))
         if how == "list_append":
             self._emit_list_append(e)
+        elif how == "list_clear":
+            self._emit_list_clear(e)
         elif how == "file_write":
             self._emit_file_write(e)
         elif how == "file_close":
@@ -4017,6 +4019,35 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # inversions is three chances for one of them to be the missing one.
             self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
             self._emit_setcc_bool(Reg.RAX, "sete")
+
+    def _emit_list_clear(self, e) -> None:
+        """`xs.clear()` — one store of zero at offset 0 of the blob.
+
+        The x86-64 twin of arm64's, over the same shared node
+        (`model.BUILTIN_VALUE_METHODS["clear"]`, whose KIND guard is asked by
+        `model.value_method_refusal` before this runs) and the same blob layout:
+        `[count][elem0]…`, so the COUNT is offset 0 and emptying the list is
+        that one store. It is `List.clear` in
+        `std/collections/binary_heap.mojo` and nothing else.
+
+        **No capacity check, and that is the difference from `append`** — an
+        append needs room the compile-time scan cannot find for a blob it did
+        not see built, so `_emit_list_append` refuses rather than growing one; a
+        clear needs no room at all.
+
+        The base is recomputed into R11 after the receiver is emitted, the
+        register discipline `_emit_block_store` and `_emit_file_write` both use:
+        evaluating a receiver can be anything, and both clobber R11.
+
+        Returns 0, this model's `None`, for `_emit_list_append`'s reason."""
+        if e.args or e.kwargs:
+            raise CodegenError(
+                f"list.clear() takes no arguments on this path "
+                f"(got {len(e.args or []) + len(e.kwargs or [])})")
+        self._emit_expr(e.func.obj)                     # RAX = the blob base
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
+        self.asm.emit(encode_mov_r64_imm64(Reg.RAX, 0))       # count = 0
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.RAX))
 
     def _emit_list_append(self, e) -> None:
         """`xs.append(v)` — store v at the blob's count and bump the count.

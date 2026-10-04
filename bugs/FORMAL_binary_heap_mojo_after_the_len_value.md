@@ -1,22 +1,18 @@
 # `std/collections/binary_heap.mojo` builds nothing yet, and the 165 files behind it have TWO walls
 
-**Status: §3 row 0 is FIXED (the ABI decision and its implementation, on
-`work/formal15-mutator-return-abi`, commit `11558f0d`). The row it blocks is
-NOT, and the reason is unchanged: the codegen half was never the whole of wall
-one, and wall two — the export gate — still has nothing to do with how well
-`binary_heap.mojo` lowers.** Re-measured on both architectures after that commit:
+**Status: §3 row 1 is FIXED (`List.clear`, both backends), and §3a row 0a's
+CAUSE was already fixed — so the file's own verdict has moved two rows down the
+table and the two corrections below are what a reader planning §3 needs. §2's
+conclusion is UNCHANGED and re-measured: the row does not move, because wall
+two is the export gate and it is untouched by any of this.** Re-measured on both
+architectures:
 
 ```
-build: BinaryHeap_clear: self.clear is not a field of BinaryHeap — clear is one
-of its METHODS, and nothing in BinaryHeap stores into an attribute of that name
-… Call it (`self.clear(...)`), which is a receiver and a call and lowers
+build: self.clear() is a method call on a value, and this backend lowers only
+append, close, write (on a file descriptor) and the string methods count,
+endswith, find, lstrip, startswith — …            <- BEFORE row 1
+build: …                                           <- now the NEXT row
 ```
-
-which is §3's row **#0a**, the construct the table below already predicted would
-be reached next. So the file's reported verdict moved one row down and the 165
-files behind it moved with it: `mutating_receiver_return_refusal` no longer
-fires anywhere in the file, and the refusal that fires instead belongs to the
-one-word rewrite, which another worker holds.
 
 Written on `work/formal12-binary-heap`, claim `sweep12:binary-heap`.
 
@@ -241,8 +237,8 @@ PREP-time refusal, so it preempts every emitter refusal below it.)
 | # | construct | refusal | why it is a project, not a patch |
 |---|---|---|---|
 | 0 | `def pop(mut self) -> Self.T` | ~~`BinaryHeap.pop() both changes its receiver and returns a value`~~ | **FIXED 2026-10-03**, §0. The receiver is handed over by reference, so the return register carries the popped element and `pop` lowers. This was a PREP-time refusal, so while it stood it preempted every emitter refusal below it — which is why removing it changed this file's reported verdict rather than adding a row |
-| 0a | `def clear(mut self)` → `self._data.clear()`, once `self._data` is rewritten to `self` | `BinaryHeap_clear: self.clear is not a field of BinaryHeap` (`check_value_position_method_reads`) | **The file's reported verdict as of 2026-10-03**, measured on both architectures with row 0 gone. The one-word rewrite turns `self._data.clear()` into `self.clear()`, and the value-position check cannot tell a call's callee from a value read — its own docstring calls that "a limitation, not a choice". Either give the walk a parent (a second traversal of its own) or do not rewrite a field whose own struct has a method of that name. **Touches the one-word rewrite, which `formal12-singles-a`/`formal12-singles-b` hold — not claimed here** |
-| 1 | `self._data.clear()` | `is a method call on a value, and this backend lowers only append, close, write … and the string methods count, endswith, find, lstrip, startswith` | `List.clear` is `count = 0` — one store. Trivial to lower and honest; it is here because the emitter's method table has no entry for it |
+| 0a | `def clear(mut self)` → `self._data.clear()`, once `self._data` is rewritten to `self` | ~~`BinaryHeap_clear: self.clear is not a field of BinaryHeap`~~ | **The file's reported verdict as of 2026-10-03; its CAUSE fixed in §3a (`model.iter_nodes_with_parent` + `check_value_position_method_reads` skipping a callee), and with row 1 now closed the file's verdict has moved past this row entirely** |
+| 1 | `self._data.clear()` | ~~`is a method call on a value, and this backend lowers only append, close, write … and the string methods count, endswith, find, lstrip, startswith`~~ | **FIXED 2026-10-03, §3b.** `List.clear` is `count = 0` — one store at offset 0 of the blob — and it is now in `model.BUILTIN_VALUE_METHODS` with a LIST-only kind guard. §3b corrects this row's own analysis: the receiver is typed after the collapse, and the collapse is correct |
 | 2 | `self._data.unsafe_ptr()` (in `_heapify_up` and `_heapify_down`) | same method-call refusal | `unsafe_ptr` hands out the blob's base; with it come `unsafe_offset`, `unsafe_take_pointee` and `unsafe_write` (`(data_ptr.unsafe_offset(pos)).unsafe_write(...)`). That is a POINTER model — ownership, `^`, and what a borrow means — not four method entries |
 | 3 | `self._data.append(val^)` (in `push`) | `list.append() is not lowered on the formal arm64 path: a list blob lives in the frame, so the room an append needs has to be known when the list is built. This one is not (the receiver is not a list literal)` | True and structural: the blob is carved out of the building function's frame, and the zero-operand `List[Self.T]()` reserves no room. **This is the one that interacts with §1's `capacity=` answer** — the reservation is dropped there, so appending into a reserved container is refused here rather than silently overrunning. Do not "fix" this by honouring `capacity` without a representation for it |
 | 4 | `self._data.pop()` (in `pop`) | method-call refusal again | `List.pop` needs the count decremented and the element read out of the blob |
@@ -332,6 +328,95 @@ Test: `test_formal_run.py`'s
 that already pins the three `sole_field_call_refusal` spellings — and it is a
 `refuse:` expectation whose words are the METHOD TABLE's, so the old message
 fails it, which is the point.
+
+## 3b. Row 1 is CLOSED, and BOTH of this section's reasons for it were wrong
+(2026-10-03)
+
+**`List.clear` lowers, on both backends, and the row's analysis above was wrong
+twice — both times in the direction of "this needs a rewrite".** Recorded
+because the next reader of §3a would otherwise act on it.
+
+    struct Wrap:
+        var _data: List[Int]
+        def __init__(out self):
+            self._data = [5, 6, 7]
+        def clear(mut self):
+            self._data.clear()
+        def size(self) -> Int:
+            return len(self._data)
+    def main(k: Int) -> Int:
+        var w = Wrap()
+        printf("before %d", w.size())
+        w.clear()
+        printf(" after %d", w.size())
+        return 0
+
+    arm64    before 3 after 0, exit 0
+    x86-64   before 3 after 0, exit 0
+    CPython  before 3 after 0
+
+1. **The receiver IS typed after the collapse, so the "lift it to a call on
+   `_data`" repair is not needed.** Measured, not read: at the point
+   `model.value_method_refusal` is asked, `_method_recv_kind(self)` answers
+   **`list`**. The identity took the field away and
+   `ValueKinds._declared_kind_for`'s one-word-receiver row hands the question to
+   `model.one_word_receiver_kind`, which reads the field's DECLARED type, and
+   `struct_field_kind` opens its constructor door because `__init__` stores a
+   container display. So §3a's "`_data` is a NAME whose type this path does not
+   infer" is false on this tree, and the refusal's own text agrees — it says
+   "the receiver is a name **on this path**", not "a name this path cannot
+   type": the receiver being a NAME was the complaint, and a name is what a list
+   blob lives in.
+2. **The collapse is CORRECT, so the "decline to collapse a field whose struct
+   declares a method of the chain's name" repair would have been a regression.**
+   `self._data` IS `self` — that is the identity this path is built on — and
+   `Wrap` declares no FIELD named `clear`, so the rule as §3a states it would
+   fire on every method call through a one-word struct's sole field. Measured
+   while checking this: making the rewrite skip a chain interior of a callee (so
+   `self._data.clear()` survives intact) does NOT reach the value-method table
+   at all; it reaches `_callee_symbol`, which emits `BL self._data.clear` and
+   the build fails on an unbound symbol. The spelling is nicer and the answer is
+   worse, which is the trade this path keeps making.
+
+**So the whole of row 1 is one store.** `model.BUILTIN_VALUE_METHODS` gains
+`"clear": "list_clear"` — the blob's COUNT is its first word, so emptying a list
+is `count = 0` — and each backend's `_emit_list_clear` emits the receiver, parks
+the base, and stores zero at offset 0. No capacity check, which is the whole
+difference from `append`: an append needs room a compile-time scan cannot find
+for a blob it did not see built, and a clear needs no room.
+
+**The guard is a KIND and it fires.** `model.BUILTIN_VALUE_METHOD_LIST_KINDS` is
+the one that needs a kind rather than a fact an emitter has, and
+`_shape_guarded_refusal` asks it: the same `clear()` on a field whose value the
+constructor takes from a PARAMETER is refused, because the receiver's kind is
+then the model's default for an unannotated word (`int`) and a zero written at
+offset 0 of an arbitrary word is a store into whatever address that word holds.
+Measured on both architectures, identical words:
+
+    build: self.clear() lowers to one store of zero at offset 0 of its receiver,
+    and that offset is a container's COUNT — so the store empties a list and
+    writes into whatever address anything else holds. self.clear's receiver is
+    'int', and this path will not read an arbitrary word as a blob's header.
+
+Tests: `test_formal_x86_64_parity.py`'s
+`list_clear_through_a_one_word_structs_sole_field` (both backends against the
+CPython oracle, with the numbers) and its
+`clear_of_a_receiver_this_image_cannot_call_a_list_refused_identically` (both
+backends, the guard); plus `test_formal_run.py`'s
+`a_method_callee_through_a_collapsed_field_is_not_a_field_read`, whose
+`refuse:` expectation named the METHOD TABLE's words and is now a build with
+`size=0 after=0` — it keeps the zero-operand `List[Int]()` constructor, which is
+the OTHER of `ctor_establishes_slot`'s two doors.
+
+**What is left in this file, in order: rows 2–6 of the table below**, and row 2
+(`self._data.unsafe_ptr()`) is still the one that needs a POINTER model rather
+than four method entries — `unsafe_ptr`, `unsafe_offset`, `unsafe_take_pointee`
+and `unsafe_write` together. Rows 3 and 4 (`append` / `pop` on a field whose
+blob the constructor did not build from a literal) are the capacity and count
+questions §3a already answers "do not fix by honouring `capacity=`", and row 5
+is downstream of row 2. **None of them is in this claim's reach and none of them
+moves the row** — §2's wall two is the export gate, measured again on this tree
+and unchanged.
 
 ## 4. Reproducing
 

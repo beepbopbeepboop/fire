@@ -5085,6 +5085,19 @@ BUILTIN_VALUE_METHODS = {
     # on this path, so the blob's capacity is a compile-time bound — the count
     # of append sites in the function — and the store is checked against it.
     "append": "list_append",
+    # `list.clear()`: the count word is the blob's header, so emptying a list is
+    # ONE store of zero at offset 0 of it. `std/collections/binary_heap.mojo`'s
+    # `clear`, and it is the whole of that method:
+    #
+    #     def clear(mut self):
+    #         self._data.clear()
+    #
+    # It is in this table and not in a backend's own because the two
+    # architectures would otherwise have two `clear` lowerings that can agree
+    # today and drift, and because the KIND GUARD below is a model decision —
+    # `append`'s guard is capacity and lives in the emitter, which is the
+    # reason that arm says why its own does not.
+    "clear": "list_clear",
     # `f.write(s)`: a text-mode write of a C string to a file descriptor.
     # `open(...)` already lowers to the C library's `open`, so the receiver
     # IS a descriptor and this is `write(fd, s, strlen(s))`.
@@ -5092,6 +5105,17 @@ BUILTIN_VALUE_METHODS = {
     # `f.close()`: the C library's `close` on the same descriptor.
     "close": "file_close",
 }
+
+#: The receiver kind a `BUILTIN_VALUE_METHODS` entry REQUIRES, for the ones
+#: whose guard is a kind rather than a fact an emitter has. One table and one
+#: reader (`_shape_guarded_refusal`) rather than a branch per method, and it is
+#: empty for `append`/`write`/`close` because their guards are CAPACITY and
+#: FILE-DESCRIPTOR-ness respectively — `append`'s emitter guard and
+#: `VALUE_METHOD_RECEIVERS`'s. `clear` is the case that needs one: storing zero
+#: at offset 0 of a word that is not a blob's header writes zero into whatever
+#: address that word holds, so it is honest only on a receiver established to be
+#: a list.
+BUILTIN_VALUE_METHOD_LIST_KINDS = frozenset({"clear"})
 
 # ── Methods on a string ───────────────────────────────────────────────────
 #
@@ -11194,10 +11218,30 @@ def _shape_guarded_refusal(method, receiver_kind, dotted, receiver_is_fd,
         return (f"{dotted}() {MLIR_BOOL_METHODS[method]}")
     if method in BUILTIN_VALUE_METHODS:
         # `append`, whose guard is in the backend: `_scan_list_caps` has the
-        # function in hand and can compute the blob's capacity, and a name the
-        # scan drops refuses there with a message about CAPACITY — which is the
+        # function in hand and can compute the capacity, and a name the scan
+        # drops refuses there with a message about CAPACITY — which is the
         # thing a reader has to fix. Refusing here would be both less accurate
         # and one more thing to keep in step between two architectures.
+        #
+        # `clear` is the other half and its guard IS a kind, so it is asked
+        # here: storing zero at offset 0 of a word that is not a blob's header
+        # writes zero into whatever address that word holds. A receiver this
+        # image cannot establish to be a list therefore refuses, which is the
+        # same default the whole kind model runs on and the reason the arm is a
+        # table and not a flag.
+        if method in BUILTIN_VALUE_METHOD_LIST_KINDS:
+            if is_list_kind(receiver_kind):
+                return None
+            holds = (repr(receiver_kind) if receiver_kind
+                     else "a word of unknown contents")
+            return (f"{dotted}() lowers to one store of zero at offset 0 of "
+                    f"its receiver, and that offset is a container's COUNT — so "
+                    f"the store empties a list and writes into whatever address "
+                    f"anything else holds. {dotted}'s receiver is {holds}, and "
+                    f"this path will not read an arbitrary word as a blob's "
+                    f"header. Bind a list to a name and call the method on the "
+                    f"name, or give the field a `List[…]` declaration so the "
+                    f"receiver's kind is stated")
         return None
     holds = repr(receiver_kind) if receiver_kind else "a word of unknown contents"
     return (f"{dotted}() is a method call on a value, and this backend "

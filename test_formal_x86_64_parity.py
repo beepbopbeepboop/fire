@@ -1439,6 +1439,56 @@ CASES = [
      "        1 if -4 < 17 else 0,\n"
      "        1 if (a - b) < a else 0))\n"
      "    return 0\n"),
+    # `List.clear()` reached through a ONE-FIELD struct's sole field, which is
+    # `std/collections/binary_heap.mojo`'s `clear` and the row that file's build
+    # reaches next.  The identity is correct (`self._data` IS `self`), so what
+    # the emitter sees is `self.clear()` with the receiver's KIND established
+    # from the field's declared type — which is why this is a one-store lowering
+    # and not a rewrite: the blob's COUNT is its first word, and emptying a list
+    # is a store of zero there.
+    #
+    # The numbers are the assertion and they are not weak: `after 0` is only
+    # reachable if the store landed in the blob the caller's local points at, and
+    # `before 3` is only reachable if it did not already.
+    #
+    # `bugs/FORMAL_binary_heap_mojo_after_the_len_value.md` §3a row 1.
+    ("list_clear_through_a_one_word_structs_sole_field",
+     "struct Wrap:\n"
+     "    var _data: List[Int]\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self._data = [5, 6, 7]\n"
+     "\n"
+     "    def clear(mut self):\n"
+     "        self._data.clear()\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return len(self._data)\n"
+     "\n"
+     "def main(k):\n"
+     "    var w = Wrap()\n"
+     '    printf("before %d", w.size())\n'
+     "    w.clear()\n"
+     '    printf(" after %d", w.size())\n'
+     "    return 0\n",
+     "class Wrap:\n"
+     "    def __init__(self):\n"
+     "        self._data = [5, 6, 7]\n"
+     "\n"
+     "    def clear(self):\n"
+     "        self._data.clear()\n"
+     "\n"
+     "    def size(self):\n"
+     "        return len(self._data)\n"
+     "\n"
+     "import sys\n"
+     "\n"
+     "def main():\n"
+     "    w = Wrap()\n"
+     '    sys.stdout.write("before %d" % w.size())\n'
+     "    w.clear()\n"
+     '    sys.stdout.write(" after %d" % w.size())\n'
+     "    return 0\n"),
 ]
 
 
@@ -1643,6 +1693,34 @@ REFUSALS = [
      '    printf("%d", s.d[0])\n'
      "    return 0\n",
      "is a struct field declared to hold a TYPE TAG"),
+    # The other direction of the `clear` row above, and the one that says the
+    # KIND guard is load-bearing rather than decorative: the same `clear()` on a
+    # field whose value the constructor takes from a PARAMETER.  The store is
+    # one word at offset 0 of the receiver, so on a word this image cannot
+    # establish to be a list's header it writes zero into whatever address that
+    # word holds — which is a silent wrong answer in a program that runs.
+    #
+    # The receiver's kind is `'int'` and not `None` because
+    # `ValueKinds`'s default for an unannotated word is an integer, and the
+    # message names that rather than shrugging: the reader is looking at a
+    # `List[Int]` declaration two lines above and the sentence has to explain why
+    # it is not being used.
+    ("clear_of_a_receiver_this_image_cannot_call_a_list_refused_identically",
+     "struct Wrap:\n"
+     "    var _data: List[Int]\n"
+     "\n"
+     "    def __init__(out self, xs: List[Int]):\n"
+     "        self._data = xs\n"
+     "\n"
+     "    def clear(mut self):\n"
+     "        self._data.clear()\n"
+     "\n"
+     "def main(k):\n"
+     "    var xs = [5, 6, 7]\n"
+     "    var w = Wrap(xs)\n"
+     "    w.clear()\n"
+     "    return 0\n",
+     "lowers to one store of zero at offset 0 of its receiver"),
 ]
 
 # The other direction, and it is a PER-PLATFORM limit rather than a shared one,
