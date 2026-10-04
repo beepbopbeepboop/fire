@@ -1580,6 +1580,29 @@ CASES = [
      "    w.clear()\n"
      '    sys.stdout.write(" after %d" % w.size())\n'
      "    return 0\n"),
+    # A BYTE BLOB is `[count][byte 0][byte 1]…` — one header word and ONE-BYTE
+    # elements — and this case is the whole of that claim, on both machines.
+    # Read `b[1]` and a word-stride blob answers 0 where CPython says 98, so
+    # the expected output is a number only a one-byte-element lowering can
+    # produce; and it is read off CPython by this file rather than written down,
+    # which is what makes it an assertion about the layout rather than a
+    # constant agreed with by hand. `test_formal_run.py`'s `constr_bytearray_*`
+    # group is the rest of it (iteration, membership, append, and the `bytes`
+    # refusal), and this row is what says the two machines build the SAME blob
+    # from the same constructor — the property a one-sided assertion cannot see.
+    ("bytearray_both_backends_build_it_identically",
+     "def main():\n"
+     "    var b = bytearray(4)\n"
+     "    b[0] = 65\n"
+     "    b[1] = 66\n"
+     "    printf(\"%d %d %d %d %d\\n\", len(b), b[0], b[1], b[2], b[3])\n"
+     "    return 0\n",
+     "def main():\n"
+     "    b = bytearray(4)\n"
+     "    b[0] = 65\n"
+     "    b[1] = 66\n"
+     "    print(len(b), b[0], b[1], b[2], b[3])\n"
+     "    return 0\n"),
 ]
 
 
@@ -1704,23 +1727,26 @@ REFUSALS = [
      "    printf(\"%d\", o.x)\n"
      "    return 0\n",
      "past the 4 levels this path lays out"),
-    # `bytearray()` and `bytes()` are the one refusal here that is a fact about
-    # a TYPE, and it used to reach the bind audit as a dangling extern named
-    # `bytearray` — so both machines "built" it and the build failed about a
-    # SYMBOL. The needle is the clause that says what is actually undecided
-    # (the ELEMENT WIDTH) rather than the name, because the name is what both
-    # messages would say whatever they meant, and a byte blob's layout is not a
-    # fact about one architecture.
+    # `bytes()` is the one byte-sequence constructor still refused, and the
+    # refusal is the x86-64 half of a message arm64 prints too. The needle is
+    # the clause naming what to write instead — `bytearray` IS the blob on this
+    # path, and the two byte sequences being told apart by which blob they are
+    # is the decision `bytearray_both_backends_build_it_identically` below
+    # exercises.
     #
-    # `test_formal_run.py`'s `constr_refuse_bytearray_by_name` pins the same
-    # refusal's WORDS on the host backend; this row is what says the two
-    # backends say them, which is the property a one-sided assertion cannot see.
-    ("bytearray_constructor_refused_identically",
+    # Before the element width was decided, all four spellings reached the bind
+    # audit as a dangling extern named `bytearray`/`bytes`, so both machines
+    # "built" them and the build failed about a SYMBOL — a fact about the link
+    # line rather than about the type the reader wrote.
+    ("bytes_constructor_refused_identically",
      "def main():\n"
-     "    var b = bytearray()\n"
+     "    var b = bytes()\n"
      "    printf(\"%d\", 1)\n"
      "    return 0\n",
-     "the element width is the undecided part"),
+     "The MUTABLE byte blob is `bytearray`"),
+    # `bytes_constructor_refused_identically` below is the refusal direction:
+    # the two byte-sequence names are told apart by WHICH blob each builds, and
+    # the row above is the construction that has to agree on both machines.
     # A SUBSCRIPT OF A FRAME SLOT, and this group is where the disagreement
     # lived: `s.n` on a field declared `Int` was REFUSED on arm64 and SIGSEGV'd
     # (exit 139) on x86-64, and with the field constructor-established BOTH

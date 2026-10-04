@@ -11241,28 +11241,114 @@ CONSTRUCTION_REFUSALS = [
      "    var e = DType(1, 2)\n"
      "    return 0\n",
      "refuse:constructing DType has no representation on this path", None),
-    # `bytearray`/`bytes` are the one pair in that list whose refusal is NOT
-    # "cannot be conjured out of one word", and the generic sentence is false
-    # about them: the blob layout is one this path already lays out (`[]` is it),
-    # a bytes LITERAL already builds one, and `len(b"abc")` answers 3. What is
-    # undecided is the ELEMENT WIDTH, so the message has to say that — and
-    # `bytes(3)` with an argument has to keep saying it too, because an
-    # argument does not make the width any more decided.
+    # `bytes` is the one byte-sequence name still refused, and the refusal says
+    # WHY in terms of what this path can build: a `bytes` value here is the
+    # interned `char *` a bytes LITERAL is (`len(b"abc")` answers 3 off
+    # `strlen`, `b"abc"[i]` is one byte at offset `i`), while a constructor has
+    # to build a counted region — a blob — and `bytes(n)` needs one whose SIZE
+    # is a runtime value. The element width is no longer the undecided part:
+    # `bytearray` is that blob with a one-byte element, and the four cases
+    # below build and run on both backends. `bytes` with an argument keeps its
+    # own refusal, and the needle is the clause about the MUTABLE blob, because
+    # that is the sentence that tells the reader what to write instead.
     #
-    # Before this, all four spellings reached the bind audit as a dangling
-    # extern named `bytearray`/`bytes` and the build failed with a message about
-    # a SYMBOL, which is a fact about the link line and not about the type the
-    # reader wrote. `bugs/FORMAL_bytearray_and_bytes_have_no_representation.md`.
-    ("constr_refuse_bytearray_by_name",
+    # Before the width decision, all four spellings reached the bind audit as a
+    # dangling extern named `bytearray`/`bytes` and the build failed with a
+    # message about a SYMBOL, which is a fact about the link line and not about
+    # the type the reader wrote.
+    # `bugs/FORMAL_bytearray_and_bytes_have_no_representation.md`.
+    ("constr_refuse_bytes_by_name",
      "def main(n: Int) -> Int:\n"
-     "    var b = bytearray()\n"
+     "    var b = bytes()\n"
      "    return 0\n",
-     "refuse:the element width is the undecided part", None),
+     "refuse:constructing bytes is refused on this path", None),
     ("constr_refuse_bytes_with_an_argument_by_name",
      "def main(n: Int) -> Int:\n"
      "    var b = bytes(3)\n"
      "    return 0\n",
-     "refuse:constructing bytes is refused on this path", None),
+     "refuse:The MUTABLE byte blob is `bytearray`", None),
+    # ── `bytearray`: a BLOB with a one-byte element, on both backends ──────
+    #
+    # Every answer below is CPython's, read off this process:
+    #   bytearray(4) → len 4;  b[0]=65, b[1]=66 → 65 66 0 0
+    #   bytearray()  → len 0
+    #   for c over [97,98,99] → 97+98+99 = 294;  98 in b True, 100 in b False
+    #   b[-1] = 122 → b[2] == 122
+    #   bytearray() + two appends → len 2, b[0]=65, b[1]=66
+    #
+    # The load-bearing halves are the ones a WORD-slot blob would get wrong.
+    # With eight-byte elements and a byte-count header, `b[1]` reads the low
+    # byte of element 1 and answers 0 where CPython says 98 — which is the
+    # "option 1" the bug doc measured and rejected, and the reason the stride
+    # comes from the value's KIND (`model.blob_elem_stride`) and not from the
+    # constant it used to be.
+    ("constr_bytearray_of_a_constant_size_is_a_counted_blob",
+     "def main() -> int:\n"
+     "    var b = bytearray(4)\n"
+     "    printf(\"len=%d\", len(b))\n"
+     "    return 0\n",
+     0, "len=4"),
+    ("constr_bytearray_sized_elements_read_and_write_one_byte_each",
+     "def main() -> int:\n"
+     "    var b = bytearray(4)\n"
+     "    b[0] = 65\n"
+     "    b[1] = 66\n"
+     "    printf(\"b=%d %d %d %d\", b[0], b[1], b[2], b[3])\n"
+     "    return 0\n",
+     0, "b=65 66 0 0"),
+    ("constr_empty_bytearray_has_length_zero",
+     "def main() -> int:\n"
+     "    var b = bytearray()\n"
+     "    printf(\"len=%d\", len(b))\n"
+     "    return 0\n",
+     0, "len=0"),
+    ("constr_bytearray_a_negative_index_counts_from_the_end",
+     "def main() -> int:\n"
+     "    var b = bytearray(3)\n"
+     "    b[-1] = 122\n"
+     "    printf(\"b=%d %d %d\", b[0], b[1], b[2])\n"
+     "    return 0\n",
+     0, "b=0 0 122"),
+    ("constr_bytearray_iterates_yielding_bytes_not_words",
+     "def main() -> int:\n"
+     "    var b = bytearray(3)\n"
+     "    b[0] = 97\n"
+     "    b[1] = 98\n"
+     "    b[2] = 99\n"
+     "    var total = 0\n"
+     "    for c in b:\n"
+     "        total += c\n"
+     "    printf(\"sum=%d\", total)\n"
+     "    return 0\n",
+     0, "sum=294"),
+    ("constr_bytearray_membership_reads_bytes",
+     "def main() -> int:\n"
+     "    var b = bytearray(3)\n"
+     "    b[0] = 97\n"
+     "    b[1] = 98\n"
+     "    printf(\"a=%d b=%d\", 98 in b, 100 in b)\n"
+     "    return 0\n",
+     0, "a=1 b=0"),
+    ("constr_bytearray_appends_grow_the_constructor_built_blob",
+     "def main() -> int:\n"
+     "    var b = bytearray()\n"
+     "    b.append(65)\n"
+     "    b.append(66)\n"
+     "    printf(\"len=%d %d %d\", len(b), b[0], b[1])\n"
+     "    return 0\n",
+     0, "len=2 65 66"),
+    # The refusal a constructor-built blob cannot answer, and it is the same
+    # one `List()` has always had: the room an append needs has to be known when
+    # the blob is BUILT, and a `n` this compiler cannot read is not known then.
+    # The needle is the constructor's name because that is what makes the two
+    # byte-sequence spellings disagree on purpose.
+    ("constr_bytearray_of_a_computed_size_is_refused_by_name",
+     "def main(n: Int) -> int:\n"
+     "    var b = bytearray(n)\n"
+     "    printf(\"%d\", len(b))\n"
+     "    return 0\n",
+     "refuse:a blob that has to HOLD 1 element(s) needs a frame reservation",
+     None),
     # ── INHERITANCE: the fields a class has because a BASE declares them ────
     #
     # `formal/model.py`'s `attach_inherited_fields` merges a declared base's
