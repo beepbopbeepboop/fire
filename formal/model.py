@@ -11118,6 +11118,60 @@ BUILTIN_FUNCTIONS = {
     "debug_assert": "debug_assert",
 }
 
+# ── a `with` over a RESOURCE value ────────────────────────────────────────
+#
+# `with open(path, "w") as f:` is CPython's context-manager protocol, and the
+# protocol is two calls on the object: `__enter__` binds the name and
+# `__exit__` runs on the way out.  `formal/build.py::_one_with_item` lowers
+# exactly those two calls, and it can only do it for a struct this image
+# compiles — so the single most common `with` in the corpus was REFUSED, by name
+# and with a correct explanation ("this build cannot answer what type it is,
+# because it is not a construction of a struct this image compiles").
+#
+# The type IS answerable, and it is answerable from the same place every other
+# fact about `open` comes from: `BUILTIN_FUNCTIONS` above says `open` lowers to
+# the C library's `open(2)`, so its value on this path is a FILE DESCRIPTOR —
+# one word, already the receiver `f.write(…)` and `f.close()` lower on
+# (`BUILTIN_VALUE_METHODS`, guarded by `VALUE_METHOD_RECEIVERS`).  A descriptor's
+# `__enter__` returns the descriptor and its `__exit__` closes it, which is
+# `close(2)` on the same word.  So this table is the protocol for a value whose
+# representation is already decided, and it says so with two names rather than
+# with a rule per builtin.
+#
+# It is deliberately keyed by the BUILTIN NAME and not by the call's shape, so
+# `mod.open(...)` — a dotted spelling of a name this module may or may not
+# declare — is NOT here.  `with_expr_struct` resolves the dotted spelling for a
+# struct because `mod.S(...)` constructs a type the image compiles and the
+# image has a table of those; a dotted `open` names a function in another
+# module, and `formal/model.py::dotted_struct_construction`'s argument is the
+# same one: a callee this path cannot resolve must not be guessed at.
+#
+# What is NOT here is a resource this path has no value for.  A name absent from
+# this table keeps `refuse_unlowerable_with`'s sentence, which is the honest
+# answer for it rather than a gap this table left.
+RESOURCE_CONTEXT_MANAGERS = {
+    "open": "close",
+}
+
+
+def resource_context_manager_exit(expr) -> str | None:
+    """The `__exit__` builtin for a `with` over a RESOURCE, or None.
+
+    The one entry point for the question, and it asks about the CALL rather than
+    about a callee name: `len(open)` is not a `with` over a descriptor, and a
+    name-based test would say it was.  `with_expr_struct` is the sibling reader
+    for the struct case and takes the same view of what an expression is.
+    """
+    if isinstance(expr, tuple):        # a parenthesised expression
+        expr = expr[0] if expr else None
+    callee = getattr(expr, "func", None)
+    if callee is None:
+        return None
+    name = getattr(callee, "name", None)
+    if not isinstance(name, str):
+        return None
+    return RESOURCE_CONTEXT_MANAGERS.get(name)
+
 # The builtins each backend's CALL EMITTER intercepts by bare name and lowers
 # itself, rather than leaving to a module symbol. This is the table
 # `bugs/FORMAL_callee_no_def_ceiling_zero.md` §5 says would "retire" the
@@ -31431,7 +31485,12 @@ def refuse_unlowerable_with(fn, where, expr, struct, structs_by_name) -> str:
         an arm that is never reached is a sentence a future reader has to check.
       * the expression is not a construction at all, so nothing says what type it
         is.  The fix is in the spelling: bind the context manager in a `var`
-        this build can see the type of, or construct it here.
+        this build can see the type of, or construct it here.  A call to a
+        RESOURCE builtin (`RESOURCE_CONTEXT_MANAGERS`, i.e. `open`) is the one
+        non-construction that IS answerable, and `resource_context_manager_exit`
+        answers it before this function is asked — so a reader who lands here
+        for `with open(…)` is reading a message from a build that predates that
+        table.
 
     The sentence that matters most is the last one: what this path used to do
     instead.  A `with` lowered as "evaluate, bind, run the body" is a program
@@ -31475,6 +31534,47 @@ def refuse_unlowerable_with(fn, where, expr, struct, structs_by_name) -> str:
         f"`{CONTEXT_ENTER}` and `{CONTEXT_EXIT}`, or construct it in the `with` "
         f"itself; a `with` whose context is a plain value cannot be made "
         f"faithful here."
+    )
+
+
+def refuse_unlowerable_with_alias(fn, where) -> str:
+    """Why this `with` item's ALIAS cannot be bound, in reader's terms.
+
+    Its own message, and the reason is that the one above became false for the
+    cases that reach this.  It describes the CONTEXT EXPRESSION — a struct that
+    is not framed, a struct with no `__enter__`, an expression this build
+    cannot type — and `with EXPR as (a, b)` has none of those problems: the
+    context is fine and the TARGET is the shape.  Reusing the expression's
+    message for it sent the reader to the wrong half of their own line, and
+    saying "this build cannot answer what type it is" about an `open(…)` whose
+    type this module now knows is the same defect one level along.
+
+    It opens with the protocol sentence `refuse_unlowerable_with` opens with,
+    and that is deliberate rather than decorative: `tools/formal_sweep_causes.py`
+    keys its `with` row on that clause, so a file refused for the alias shape is
+    counted in the same row as one refused for the context — which is what a
+    reader deciding where to start needs — while the sentence that says WHY
+    differs.
+
+    ONE sentence for both spellings (`as (a, b)` and `as obj.attr`), because
+    there is a sentence that is true of both: neither names somewhere this path
+    can put a word.  Saying which is which would need a discriminator between a
+    tuple node and a member node on a front end where the alias is a bare STRING
+    (`fire_compiler` parses all three spellings to a string, so the shape is not
+    in the AST this function is handed), and a message that guesses between two
+    shapes it cannot see is the failure this repository keeps deleting.
+    """
+    line = getattr(where, "line", 0) or 0
+    head = f"line {line}: " if line else ""
+    return (
+        f"{head}{fn.name}: `with … as …` is CPython's CONTEXT-MANAGER "
+        f"PROTOCOL — `type(mgr).__enter__` binds the name — and this `as` "
+        f"clause names somewhere this path cannot put the word `__enter__` "
+        f"returns: a formal value is one 64-bit word, and a destructuring "
+        f"target or a store into `obj.attr` is not a place one word goes. "
+        f"Refused rather than bound to the whole value: the `as` clause is the "
+        f"reader's own source, and dropping it leaves a program that runs the "
+        f"body with the name unset."
     )
 
 

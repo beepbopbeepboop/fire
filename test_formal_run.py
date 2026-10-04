@@ -8322,6 +8322,85 @@ INIT_FIELD_TYPE_REFUSALS = [
      "    return 0\n",
      "refuse:is a METHOD of the nested Inner frame rather than one of its "
      "fields", None),
+    # ── a `with` over a RESOURCE (`with open(…) as f:`) ───────────────────
+    #
+    # The three cases below are the ones `model.resource_context_manager_exit`
+    # made buildable, and they are here rather than in the `with_*` group above
+    # because that group's subject is the PROTOCOL — `__enter__` binds the alias
+    # and `__exit__` runs on the way out, proved with a struct whose two dunders
+    # print. A resource has no methods to print from: `__enter__` IS the
+    # descriptor and `__exit__` is `close(2)`, so the same three properties have
+    # to be observed through the DESCRIPTOR, and that is a different assertion
+    # rather than a fourth spelling of the first one.
+    #
+    # `BOTH_ARCH_CASES` rather than `CASES` because the lowering is shared
+    # (`formal/build.py::_one_with_item`) but the two `close(2)` and `write(2)`
+    # calls are each emitted by their own backend, and "it worked on the host's
+    # architecture" would leave the other one unmeasured.
+    #
+    # 1. The ALIAS is a live descriptor. `f.write(s)` lowers to
+    #    `write(fd, s, strlen(s))` and its VALUE is what the C library returned,
+    #    so `5` is the kernel's answer for five bytes and not a constant this
+    #    file wrote. A lowering that bound the alias to anything else would
+    #    refuse here rather than print a wrong number (`VALUE_METHOD_RECEIVERS`
+    #    is a guard on where the word was bound), which is the honest failure:
+    #    the case cannot pass by accident.
+    ("with_open_alias_is_a_live_descriptor",
+     "def main():\n"
+     "    with open(\"/tmp/with_open_alias_is_a_live_descriptor.txt\", \"w\") "
+     "as f:\n"
+     "        k = f.write(\"hello\")\n"
+     "        printf(\"wrote=%d@@\", k)\n"
+     "    return 0\n",
+     0, "wrote=5@@"),
+    # 2. `__exit__` RAN, on the fall-through. The observation is the descriptor
+    #    NUMBER rather than a flag: `open(2)` returns the lowest free
+    #    descriptor, so if the `with` closed it the next `open` gets the same
+    #    one and `g - f` is 0. That is number-independent — the case does not
+    #    hard-code 3 — and it cannot be satisfied by a lowering that only
+    #    dropped the call, because then `g` would be the next number up and the
+    #    delta would be 1.
+    #
+    #    `delta=1` is what a `with` lowered as "evaluate, bind, run the body"
+    #    prints, and that is the whole failure this protocol exists to remove:
+    #    the program would exit 0 having leaked every descriptor it opened.
+    ("with_open_closes_the_descriptor_on_the_fall_through",
+     "def main():\n"
+     "    with open(\"/tmp/with_open_fall_through_a.txt\", \"w\") as f:\n"
+     "        printf(\"in=%d@@\", f)\n"
+     "        f.write(\"hello\")\n"
+     "    g = open(\"/tmp/with_open_fall_through_b.txt\", \"w\")\n"
+     "    printf(\"delta=%d@@\", g - f)\n"
+     "    g.close()\n"
+     "    return 0\n",
+     0, "delta=0@@"),
+        # 3. …and on an EARLY `return` out of the body, which is the edge a cleanup
+    #    written after the body gets wrong and the reason the whole rewrite is a
+    #    `try`/`finally`. Same observation, one edge deeper, and the RETURN
+    #    VALUE is the descriptor: `return fd` from inside the block has to both
+    #    come back to the caller and leave the descriptor free, so the pending
+    #    return cannot be flushed at the cost of the `finally` or the other way
+    #    round. `fell=0` is the fall-through arm of the same function, and it is
+    #    in the expected output because 0 is not a descriptor number: a `with`
+    #    whose exit edge returned early would print it here instead.
+    ("with_open_closes_the_descriptor_on_an_early_return",
+     "def early_fd(n):\n"
+     "    var fd = 0\n"
+     "    with open(\"/tmp/with_open_early_return.txt\", \"w\") as f:\n"
+     "        fd = f\n"
+     "        f.write(\"hello\")\n"
+     "        if n > 0:\n"
+     "            return fd\n"
+     "    return 0\n"
+     "\n"
+     "def main():\n"
+     "    a = early_fd(1)\n"
+     "    g = open(\"/tmp/with_open_after_early.txt\", \"w\")\n"
+     "    printf(\"delta=%d@@\", g - a)\n"
+     "    printf(\"fell=%d@@\", early_fd(0))\n"
+     "    g.close()\n"
+     "    return 0\n",
+     0, "delta=0@@fell=0@@"),
 ]
 # ── a ONE-WORD struct held in a HOLDER'S FIELD ──────────────────────────────
 #

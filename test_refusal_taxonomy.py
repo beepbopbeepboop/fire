@@ -431,6 +431,34 @@ CAUSE_SAMPLES = [
     ("len() of a value that has no length",
      "len(s) is len() of a value classified as 'int', and an integer has no "
      "length"),
+    # A `with` whose context this build cannot type, cut from
+    # `formal/model.py::refuse_unlowerable_with` (the "not a construction of a
+    # struct this image compiles" arm) rather than from a sweep log, because the
+    # construct is the most common statement in this repository's own files
+    # (`with open(` is in 192 of them) and the message names the protocol it
+    # cannot honour rather than the value it cannot type. The sample is the
+    # `open` spelling on purpose: it is the one a reader meets first, and it is
+    # the one the resource table now answers.
+    ("a `with` over a value this build cannot type",
+     "ModuleLoader_load_module_from_path: `with open(path, 'r') as …` is "
+     "CPython's CONTEXT-MANAGER PROTOCOL — `type(mgr).__enter__` binds the "
+     "name, and `type(mgr).__exit__` runs on the way out — and this path "
+     "cannot honour it here: this build cannot answer what type it is, "
+     "because it is not a construction of a struct this image compiles"),
+    # …and the ALIAS half, which is the same construct and used to be reported
+    # with the message above — a message that describes the context expression,
+    # which is FINE in this case, so the reader was sent to the wrong half of
+    # their own line.  Its own sample because
+    # `formal/model.py::refuse_unlowerable_with_alias` opens with the protocol
+    # sentence on purpose: one row, so a file refused for the alias shape is
+    # counted beside one refused for the context, and the sentence that says why
+    # is the part that differs.
+    ("a `with` over a value this build cannot type",
+     "load_pair: `with … as …` is CPython's CONTEXT-MANAGER PROTOCOL — "
+     "`type(mgr).__enter__` binds the name — and this `as` clause names "
+     "somewhere this path cannot put the word `__enter__` returns: a formal "
+     "value is one 64-bit word, and a destructuring target or a store into "
+     "`obj.attr` is not a place one word goes"),
     ("a method on a multi-field struct where a descriptor is meant",
      "writer.write_string() is a method on a Writer — a multi-field struct, so "
      "on this path the receiver is the ADDRESS of a frame"),
