@@ -672,6 +672,80 @@ def test_a_source_derived_answer_is_made_once_per_source_and_never_shared(tmpdir
           f"{MM.template_names(both)}")
 
 
+def test_a_template_is_located_once_per_source_and_name(tmpdir):
+    """`template_kind`/`_template_source` are whole-module SCANS, so they are
+    asked once per `(source, name)` and not once per instantiation.
+
+    `elaborate.extract_struct_source` and `extract_fn_source` each split the
+    module into lines and run `elaborate._bracket_depth_by_line` over it, and
+    `instantiate` asks both of this module's questions once per (template,
+    argument-list) pair: 300 asks over FOUR distinct pairs on `std/simd.mojo`,
+    which is 600 bracket-depth scans of whole modules and 39% of what was left
+    of that build.
+
+    Counted rather than timed, and the count is the point: a caller that
+    reintroduces a per-instantiation ask fails here, and one that made the
+    lookup answer a different question would still be caught by the equality
+    assertions rather than by a clock.
+    """
+    from formal import monomorph as MM
+    import elaborate
+
+    lib = ("struct Pair[T]:\n"
+           "    var first: T\n"
+           "    var second: T\n"
+           "\n"
+           "    def scaled(self) -> T:\n"
+           "        return self.first + self.second\n"
+           "\n"
+           "def widen[T](v: T) -> T:\n"
+           "    return v\n")
+    scans = {"n": 0}
+    real_depth = elaborate._bracket_depth_by_line
+
+    def counted(src):
+        scans["n"] += 1
+        return real_depth(src)
+
+    elaborate._bracket_depth_by_line = counted
+    try:
+        kinds = [(MM.template_kind(lib, "Pair"), MM.template_kind(lib, "widen"))
+                 for _ in range(6)]
+        sources = [MM._template_source(lib, "Pair", MM.KIND_STRUCT)
+                   for _ in range(6)]
+        made = [MM.instantiate(lib, "Pair", (a,))[0]
+                for a in ("Int", "Float64", "Bool")]
+        again = MM.template_kind(lib, "Pair")
+        miss = 0
+        for _ in range(3):
+            try:
+                MM.template_kind(lib, "NoSuchTemplate")
+            except MM.MonomorphError:
+                miss += 1
+    finally:
+        elaborate._bracket_depth_by_line = real_depth
+    check(all(k == (MM.KIND_STRUCT, MM.KIND_FN) for k in kinds),
+          f"a struct template and a function template were not told apart: "
+          f"{kinds}")
+    check(again == MM.KIND_STRUCT,
+          f"the same (source, name) gave a different kind across calls: "
+          f"{again}")
+    check(all(s == sources[0] and "scaled" in s for s in sources),
+          f"the template's own text is not the extractor's: {sources[0]!r}")
+    check([m.split("_")[-1] for m in made] == ["Int", "Float64", "Bool"] and
+          all(m.startswith("Pair_") for m in made),
+          f"three instantiations of one template did not mangle as the ABI "
+          f"says: {made}")
+    check(scans["n"] <= 16,
+          f"{scans['n']} whole-module bracket-depth scans for 6 + 6 + 3 + 3 "
+          f"asks over two templates in one source; each is a scan of the "
+          f"whole module and there are two `(source, name)` pairs here")
+    check(miss == 3,
+          f"a name this module does not declare was refused {miss} times "
+          f"rather than 3; a refusal answered from a cache would go stale "
+          f"against a source that later declares the name")
+
+
 def test_an_instantiation_substitutes_the_parameter_and_keeps_the_self_spelling(tmpdir):
     """`Self.T` is `T`, and the shared substitution would otherwise break it.
 
@@ -909,6 +983,8 @@ TESTS = [
      test_only_the_export_rule_says_what_is_a_template),
     ("a source-derived answer is made once per source and never shared",
      test_a_source_derived_answer_is_made_once_per_source_and_never_shared),
+    ("a template is located once per source and name",
+     test_a_template_is_located_once_per_source_and_name),
     ("an instantiation substitutes the parameter and keeps the Self spelling",
      test_an_instantiation_substitutes_the_parameter_and_keeps_the_self_spelling),
     ("a type argument that is computed is not a demand",

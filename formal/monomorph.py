@@ -209,6 +209,29 @@ def template_kind(src: str, name: str) -> str:
     the export rule filed as a template that neither extractor can pull out is
     the nested-`def` imprecision above rather than a template — which is a fact
     the caller needs told rather than an instantiation it needs built.
+
+    **Once per `(source, name)`, because the extractors are whole-module
+    scans.**  `elaborate.extract_struct_source` and `extract_fn_source` each
+    `splitlines()` the module and run `elaborate._bracket_depth_by_line` over
+    it, and `instantiate` asks this question once per (template, argument-list)
+    pair — 300 times on `std/simd.mojo`, over FOUR distinct `(source, name)`
+    pairs, for 600 bracket-depth scans of whole modules and 8.4 s of a 21.6 s
+    instrumented build.  So the answer goes through `_derived_from_source` with
+    the name as its subkey, and a refusal is NOT stored: `_derived_from_source`
+    only caches a value that is not None, so a name no extractor finds is
+    re-derived (and re-refused) every time, which is what happened before.
+    """
+    import elaborate                                # lazy — see the module docstring
+    return _derived_from_source("template_kind", src,
+                                lambda: _kind_of(src, name), subkey=name)
+
+
+def _kind_of(src: str, name: str) -> str:
+    """The `KIND_*` for `name` in `src`, or raise. The body of `template_kind`.
+
+    Split out so the memo in `template_kind` wraps ONE call and the refusal
+    stays a `raise` in the ordinary place rather than a sentinel a caller has
+    to know about.
     """
     import elaborate                                # lazy — see the module docstring
     if elaborate.extract_struct_source(src, name) is not None:
@@ -224,9 +247,22 @@ def template_kind(src: str, name: str) -> str:
 
 
 def _template_source(src: str, name: str, kind: str) -> str:
+    """`name`'s own declaration text, read out of `src`.
+
+    The SECOND reader of the extractors `template_kind` above just used, for
+    the same source and the same name, so it is memoized the same way and on
+    the same key's subkey: `instantiate` asks both questions in a row and each
+    ask was a pair of whole-module bracket-depth scans.  A template that is
+    not in the source is not stored either — see `template_kind`'s note — so
+    the refusal below still fires rather than being served from the cache.
+    """
     import elaborate
-    got = (elaborate.extract_struct_source(src, name) if kind == KIND_STRUCT
-           else elaborate.extract_fn_source(src, name))
+    got = _derived_from_source(
+        "_template_source", src,
+        lambda: (elaborate.extract_struct_source(src, name)
+                 if kind == KIND_STRUCT
+                 else elaborate.extract_fn_source(src, name)),
+        subkey=(name, kind))
     if got is None:
         raise MonomorphError(f"no {kind} template {name!r} in this module")
     return got
