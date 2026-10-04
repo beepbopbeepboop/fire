@@ -14120,6 +14120,19 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # and never sees the module statements, and here rather than at either
     # front end because this is the one pipeline both of them go through.
     M.refuse_module_level_mlir_templates(stmts)
+    # An f-string/t-string LITERAL, asked HERE for the same reason and in the
+    # same place as the line above: the parser keeps an interpolated literal's
+    # whole SOURCE TOKEN as its value, one consumer reads that (`myinterpreter`
+    # evaluates the `{...}` fields), and both backends' expression walks decoded
+    # it as text instead — so the program ran with the spelling as its value.
+    # `print(f"n={n}")` printed `f"n={n}"`, `len(f"n={n}")` was 8 where CPython
+    # says 3, and `f"n={n}" == "n=7"` was false where CPython says true, all of
+    # it on both architectures with exit status 0. Composition is what is
+    # missing and there is no buffer to do it in (`model.py`'s
+    # `interpolated_literal_refusal`), so it is a refusal, and a refusal asked
+    # from either backend would be a second copy of one decision — which is how
+    # the executable and dylib paths come to answer differently about one file.
+    M.refuse_interpolated_literals(stmts)
     # The module's own statement list is the ONE place a module-level name's
     # home is stated, so it is read here and PUBLISHED, for the same reason
     # `attach_field_evidence` and `attach_placed_frame_callees` carry what

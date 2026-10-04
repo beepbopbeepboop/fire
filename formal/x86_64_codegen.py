@@ -5456,7 +5456,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_call_exit(1)
         self.asm.label(end_label)
 
-    def _emit_for_unpack(self, targets: list, blob_reg: Reg, tag: str) -> None:
+    def _emit_for_unpack(self, targets: list, blob_reg: Reg, tag: str,
+                         stride: int = 0) -> None:
         """Bind a tuple target's elements from the blob pointer in `blob_reg`.
 
         Each element of the outer blob `[count][e0…]` must itself be a
@@ -5510,7 +5511,17 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._emit_call_exit(1)
         self.asm.label(ok_label)
         for i, target in enumerate(targets):
-            self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.R10, 8 * (i + 1)))
+            # `stride` is 0 for a `[count][e0...]` blob and `M.PAIR_STRIDE` for
+            # a dict's `[npairs][k0][v0]...`: a tuple unpack over a dict binds
+            # the KEYS, and an element-stride read binds the key and the value.
+            # The `0` default is the element stride spelled as "offset 8, then
+            # 8 per element" — which is what the dict case is the SAME LINE with
+            # a different stride, and both architectures now ask
+            # `M.walk_stride` at the one call site that has a container on the
+            # right (a `for` over a dict walks at its own stride and hands this
+            # function a single already-stepped element, so it does not).
+            self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.R10,
+                                               8 + (stride or M.ELEM_STRIDE) * i))
             if isinstance(target, list):
                 self._push_slot(Reg.R10)
                 self._emit_for_unpack(target, Reg.RAX, f"{tag}_n{i}")
@@ -7000,8 +7011,14 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if not keys:
             raise CodegenError("tuple assignment needs at least one target")
         self._emit_expr(stmt.value)
+        # The stride is the DICT question, asked at the one call site with a
+        # container on the right. arm64's `_emit_tuple_assign` reads the same
+        # `M.walk_stride` for the same statement, so the two architectures
+        # cannot answer differently about what `k, v = d` binds.
         self._emit_for_unpack(keys, Reg.RAX,
-                              f"{self.func_name}_ta{self._while_counter}")
+                              f"{self.func_name}_ta{self._while_counter}",
+                              stride=M.walk_stride(
+                                  self._is_dict_subscript(stmt.value)))
 
     def _emit_slice_parts(self, obj, start, stop, step) -> None:
         """`obj[start:stop:step]` → a NEW blob holding the selected elements.

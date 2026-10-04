@@ -25,7 +25,9 @@ The anti-rot is `KNOWN_DIVERGENCES`': **a construct that stopped being generated
 is invisible here**, so a mix deleted from the corpus must be deleted with its
 reason in the tool's own docstring, and a construct added must show up in a
 sweep. The five mixes in §2's "new" block were each added because the backend had
-newly learned the construct and nothing could see it.
+newly learned the construct and nothing could see it; the nine in §2.1 were each
+added because the CORPUS could not produce a construct at all, and three of them
+found a defect the day they were written (§3.7, §3.8, §3.9).
 
 ## 2. Sweeps
 
@@ -34,8 +36,12 @@ backends (`--backends x86_64,arm64`). Peak memory across every sweep in this
 file: **0.1 GB** (`tools/memslot.py --gb 4`), so none of it is within an order of
 magnitude of the 3-4 GB line.
 
-**5212 programs over 25 sweeps.** Three bugs fixed, five limits filed, and eight
-defects in the tool itself.
+**5212 programs over 25 sweeps** — §2's thirteen rows and §2.2's twelve. Three
+bugs fixed, five limits filed, and eight defects in the tool itself. §2.1 adds
+**5100 programs over 41 more sweeps**, THREE more fixes and two more tool
+defects, so the whole file is **10312 programs over 66 sweeps** — and the last
+eleven rows of §2.1 are the OLD mixes on fresh seed ranges, which is what says
+the fixes did not cost the corpus anything it already had.
 
 | date | mix | seed | indexes | programs | tally | what came of it |
 |---|---|---|---|---|---|---|
@@ -62,7 +68,106 @@ programs that could not be generated at all.
 reason §5 gives: a program whose disagreement is a KNOWN construct pays for a
 reduction that attribution then neutralises anyway.
 
-### 2.1 The arch-parity sweep (`sweepG`, 2026-10-03) — 1180 programs, twelve mixes
+### 2.1 The fuzz-3 sweep (2026-10-03, seed `sweep19c`)
+
+**5100 programs over 41 sweeps.** The first eleven rows are the nine mixes this
+session ADDED — the corpus could not produce a loop's `else` arm, a closure, a
+default or keyword argument, a list slice, a tuple unpack, a word-boundary
+integer, a comparison chain as a value, a `try`/`finally`, or an interpolated
+string literal — and each was PROBED ON BOTH ARCHITECTURES before it was written
+down, because a mix that measures a refusal is a mix that spends its budget
+re-deriving `FORMAL_known_limits.md`. The last eleven rows are the SEVEN
+PRE-EXISTING mixes on fresh seed ranges, which is the other half of the result:
+three fixes did not cost the corpus anything it already had.
+
+`-j 4` (the earlier rows used `-j 2`), both backends, `tools/memslot.py --gb 8`.
+Peak memory: **0.2 GB**. Cost: **0.7–2.8 programs/second** except `fstrings`,
+which is 17/s because every program is a refusal that never reaches the image.
+A sweep row is one `(mix, range, options)` triple, so the 41 rows below are 41
+runs and the "sweeps" this file counts are rows — the earlier table's 13 are the
+same thing.
+
+The cost is not flat, and the shape of the cost is worth reading: `--stmts 30 50`
+is **3–7x slower per program** than the default body, because a wide body is a
+longer function to lower and two images to emit (`chains` went from 2.1/s to
+0.2/s, `bignum` from 2.0/s to 0.4/s). A family that looked cheap at the default
+body is not necessarily cheap at the width where the SPILL paths are.
+
+**Ranges are recorded here so no row ever re-runs another's programs**, and
+`make_program(seed, index, mix)` is a pure function of its arguments. Two ranges
+are used per mix where the corpus changed between them, and both are listed —
+the first `bignum` row is a different CORPUS from the second, which is why the
+same indexes give different programs.
+
+| date | mix | seed | indexes | programs | tally | what came of it |
+|---|---|---|---|---|---|---|
+| 2026-10-03 | `loopelse` | `sweep19c` | 7000-7099 | 100 | 100 match | nothing |
+| 2026-10-03 | `closures` | `sweep19c` | 7000-7099 | 100 | 100 match | nothing |
+| 2026-10-03 | `argshape` | `sweep19c` | 7000-7099 | 100 | 100 match | nothing |
+| 2026-10-03 | `slicing` | `sweep19c` | 7000-7099 | 100 | 100 match | nothing (after §4.9: the first version of this family was 2 of 2 REFUSED) |
+| 2026-10-03 | `unpack` | `sweep19c` | 7000-7099 | 100 | 100 match | nothing — and 100 more after the fix it prompted |
+| 2026-10-03 | `bignum` | `sweep19c` | 7000-7099 | 100 | 99 match, 1 `MISMATCH-X86` | **the corpus's own value discipline**, §4.9— not a backend bug |
+| 2026-10-03 | `bignum` | `sweep19c` | 7000-7099 (re-run, corpus fixed) | 100 | 100 match | nothing |
+| 2026-10-03 | `bignum` | `sweep19c` | 7100-7199 | 100 | 100 match | nothing |
+| 2026-10-03 | `chains` | `sweep19c` | 7100-7199 | 100 | 100 match | nothing |
+| 2026-10-03 | `strfmt` | `sweep19c` | 7100-7199 | 100 | 100 match | nothing |
+| 2026-10-03 | `fstrings` | `sweep19c` | 7100-7199 | 100 | 100 refusal | nothing — 100 refusals is what the mix is (§3.7) |
+| 2026-10-03 | `tryfinally` | `sweep19c` | 7200-7399 | 200 | 200 match | nothing |
+| 2026-10-03 | `loopelse` | `sweep19c` | 7200-7399 | 200 | 200 match | nothing |
+| 2026-10-03 | `closures` | `sweep19c` | 7200-7399 | 200 | 200 match | nothing |
+| 2026-10-03 | `argshape` | `sweep19c` | 7200-7399 | 200 | 200 match | nothing |
+| 2026-10-03 | `slicing` | `sweep19c` | 7200-7399 | 200 | 200 match | nothing |
+| 2026-10-03 | `unpack` | `sweep19c` | 7200-7399 | 200 | 200 match | nothing |
+| 2026-10-03 | `bignum` | `sweep19c` | 7200-7399 | 200 | 200 match | nothing |
+| 2026-10-03 | `chains` | `sweep19c` | 7200-7399 | 200 | 200 match | nothing |
+| 2026-10-03 | `strfmt` | `sweep19c` | 7200-7399 | 200 | 200 match | nothing |
+| 2026-10-03 | `fstrings` | `sweep19c` | 7200-7399 | 200 | 200 refusal | nothing |
+| 2026-10-03 | `closures` | `sweep19c` | 7400-7499, `--stmts 30 50` | 100 | 100 match | nothing — the SPILL paths (a wide body is what reaches them) |
+| 2026-10-03 | `unpack` | `sweep19c` | 7400-7499, `--stmts 30 50` | 100 | 100 match | nothing |
+| 2026-10-03 | `argshape` | `sweep19c` | 7400-7499, `--stmts 30 50` | 100 | 100 match | nothing |
+| 2026-10-03 | `loopelse` | `sweep19c` | 7400-7499, `--stmts 30 50` | 100 | 100 match | nothing |
+| 2026-10-03 | `tryfinally` | `sweep19c` | 7400-7499, `--stmts 30 50` | 100 | 100 match | nothing |
+| 2026-10-03 | `bignum` | `sweep19c` | 7400-7499, `--stmts 30 50` | 100 | 100 match | nothing — and the SLOWEST mix per program (0.4/s) |
+| 2026-10-03 | `chains` | `sweep19c` | 7400-7499, `--stmts 30 50` | 100 | 100 match | nothing — 400 s for 100 programs, the widest body in this table |
+| 2026-10-03 | `strfmt` | `sweep19c` | 7400-7499, `--stmts 30 50` | 100 | 95 match, **5 `TIMEOUT`** | the machine, not the programs — §4.10|
+| 2026-10-03 | `strfmt` | `sweep19c` | 7400-7499, `--stmts 30 50` (re-run after §4.10) | 100 | 100 match | nothing |
+| 2026-10-03 | `closures` | `sweep19c` | 7500-7599 (captured-container corpus) | 100 | 100 match | nothing |
+| 2026-10-03 | `slicing` | `sweep19c` | 7500-7599 (negative-bound corpus) | 100 | 100 match | nothing |
+| 2026-10-03 | `unpack` | `sweep19c` | 7600-7699 | 100 | 100 match | nothing — after §3.9's fix |
+| 2026-10-03 | `unpack` | `sweep19c` | 7700-7799 (dict-unpack corpus, first version) | 100 | 79 match, 21 `generator-error` | the corpus drew the SAME dict key twice — §4.9's last paragraph |
+| 2026-10-03 | `unpack` | `sweep19c` | 7700-7799 (re-run, corpus fixed) | 100 | 100 match | nothing |
+| 2026-10-03 | `containers` | `sweep19c` | 7800-7899 | 100 | 100 match | nothing |
+| 2026-10-03 | `lists` | `sweep19c` | 7800-7899 | 100 | 100 match | nothing |
+| 2026-10-03 | `strings` | `sweep19c` | 7800-7899, `--max-min-steps 30` | 100 | 21 match, 52 `KNOWN:str_subscript`, 27 `MISMATCH-X86` | **all 27 are classes §3.3 and §4.4 already name** — §4.11|
+| 2026-10-03 | `strmeth` | `sweep19c` | 7800-7899 | 100 | 100 match | nothing |
+| 2026-10-03 | `generics` | `sweep19c` | 7800-7899 | 100 | 100 match | nothing |
+| 2026-10-03 | `globals` | `sweep19c` | 7800-7899 | 100 | 100 match | nothing |
+
+The three `--stmts 30 50` rows are a different AXIS rather than more of the same:
+x86-64 has fifteen usable general registers, so a function with twenty live
+locals has to put some of them in its frame, and a lowering that reads a spilled
+slot at the wrong offset is silent. A twelve-statement body never has enough
+live values to spill one.
+
+Five hand-written INTERACTION probes were also run against both architectures,
+because the mixes generate the constructs but not every pairing of them: a
+closure called from inside a loop after the captured local has changed twice; a
+tuple SLICE and a keyword-argument call with a default in one function; a
+`for`/`else` inside a `try`/`finally` whose `break` must reach both arms; a
+closure whose own body does a two-element unpack of its parameters; and a slice
+of a list beside a four-link comparison chain. **Five of five agree on both
+architectures.**
+
+The first two rows are a BASELINE rather than a result: they ran on master's
+corpus with the five new mixes absent, which is what "the corpus covered
+arithmetic, control flow, calls, one-word containers and a `class`" costs in
+programs that could not be generated at all.
+
+`signed` was run with `--max-min-steps 30` rather than the default 400, for the
+reason §5 gives: a program whose disagreement is a KNOWN construct pays for a
+reduction that attribution then neutralises anyway.
+
+### 2.2 The arch-parity sweep (`sweepG`, 2026-10-03) — 1180 programs, twelve mixes
 
 Seed name `sweepG` and index ranges from 7000, disjoint from every row above, so
 no row double-counts another's programs. The subject of this block is the
@@ -93,9 +198,13 @@ cannot reduce a construct that is not in the program.
 
 ## 3. Findings
 
-Three, in the order they were found. Each is a SILENT wrong answer or a
+Nine, in the order they were found. Each is a SILENT wrong answer or a
 one-sided refusal — not a crash, not a diagnostic — because that is the class
-this tool exists for and the class every other suite here misses.
+this tool exists for and the class every other suite here misses. §3.7, §3.8 and
+§3.9 are the fuzz-3 sweep's three, and each was found by a construct the corpus
+could not produce at all: two of them by probing it before a family was written
+around it, one by probing a shape that family did not reach. §3.5 is about the
+MESSAGES rather than about a lowering, and §3.6 is not a backend bug at all.
 
 ### 3.1 A walk over a dict read `k0, v0, k1`, and a membership test's bound was its own needle
 
@@ -278,12 +387,141 @@ attributed. §4.4 is the earlier measurement of the same failure; this is its
 second instance and it is the argument for shrinking with `want` fixed per
 verdict rather than at all.
 
-## 4. EIGHT defects in the TOOL, all found by using it
+### 3.7 A tuple unpack bound the CONTAINER's kind to every target, so `print(a)` was refused on both architectures
+
+**Found:** by probing the construct before writing the family around it, which is
+the order this ledger's §2.1 describes — and it is why the probe is a probe and
+not a sweep row: the sweep could not have found it, because the corpus could not
+produce an unpack.
+**Fixed:** `6b8a1de2` (`formal: a tuple unpack binds an ELEMENT, not the
+container`).
+**Pinned:** `test_formal_value_model.py` — five `a_tuple_unpack*` cases and one
+REFUSAL, both backends, against CPython.
+
+```mojo
+t = (1, 2, 3)
+a, b, c = t
+print(a)     # CPython 1; both images REFUSE
+```
+
+| | CPython | arm64 | x86-64 (before) |
+|---|---|---|---|
+| `a, b, c = t` ; `print(a, b, c)` | `1 2 3` | *refused* | *refused* |
+| `e = 1` ; `f = 2` ; `e, f = f, e` ; `print(e, f)` | `2 1` | *refused* | *refused* |
+| `a, b = [7, 9]` ; `print(a, b)` | `7 9` | *refused* | *refused* |
+| `a, (b, c) = (1, (2, 3))` ; `print(a, b, c)` | `1 2 3` | *refused* | *refused* |
+
+One cause: `ValueKinds._scan`'s `AssignStmt` arm bound every name in a tuple
+TARGET the kind of the whole VALUE, and a container kind (`list:int`) is not one
+of the two kinds `print` chooses between, so the refusal was "print() cannot
+tell whether IdentExpr is a string or a number on the formal arm64 path" — a
+sentence false about a source that says twice what each name holds.
+`_unpacked_element_kind` asks the ELEMENT kind, the same way `_iterable_kind`
+already did for a `for` over the same container.
+
+The second row is the part that was not a special case: `e, f = f, e` is a tuple
+of two NAMES, and `_kind_of_simple` (which is what classifies a container
+literal) classifies literals and nothing else, so the swap had no element kind
+to inherit. It needs the elements asked through `kind_of`. A fix that handled
+only `(1, 2, 3)` would have left the swap refusing.
+
+### 3.8 An f-string printed ITS OWN SOURCE SPELLING, on both architectures, exit 0
+
+**Found:** the same probe-first order as §3.7, and it is the worse of the two:
+there was no refusal to notice, only an answer.
+**Fixed:** `9b40c019` (`formal: an f-string literal is REFUSED, not printed as
+its own spelling`).
+**Pinned:** `test_formal_run.py` — `fstring_literal_refused`,
+`tstring_literal_refused`, and `braces_in_an_ordinary_string_are_not_a_fstring`
+(a guard against matching the TEXT instead of the prefix), both architectures.
+
+```mojo
+n = 7
+print(f"n={n}")        # CPython n=7;  both images  f"n={n}"
+print(len(f"n={n}"))   # CPython 3;    both images  8
+if f"n={n}" == "n=7":  # CPython True; both images  false
+print(f"{{lit}}")      # CPython {lit}; both images f"{{lit}}"
+```
+
+`fire_compiler.replace_tstrings_with_placeholders` puts an interpolated
+literal's whole SOURCE TOKEN into the string cache, `eval_StringLiteral`
+evaluates the `{...}` fields from it (which is why `fire.py run` and the
+COMPILED path both print `n=7` — measured, and the compiled path's answer is the
+one that makes this a defect rather than a design), and `decoded_literal` — the
+reader every engine shares — handed the same text to both formal emitters.
+
+**The fix is a REFUSAL and not a lowering**, and the reason is the same missing
+buffer `string_concat_refusal` names: a string here is a bare `char *` interned
+into read+execute `__TEXT`, so `"n=" + decimal(n)` has nowhere to be laid down
+at compile time (the field may be a runtime value) or at run time (there is no
+heap). Asked once from `formal/build.py`'s shared pipeline, over
+`model.iter_nodes`, so a literal nested under a call is reached by the same walk
+the frame layout uses and the two front ends cannot answer differently.
+
+**What the fix does not cover**, filed as
+`bugs/PARSE_FAIL_an_ordinary_string_whose_text_starts_with_an_f_prefix.md`: the
+test is the value's PREFIX, and an ordinary string whose TEXT starts with `f"` or
+`t'` is indistinguishable from an interpolated one in this AST. Measured on
+` s = 'f"n"' `: the interpreter and the compiled path both print `n` where CPython
+prints `f"n"`, and the formal path now refuses. The fix belongs in the parser —
+a flag beside `is_raw`, set where the placeholder is built from the RAW token.
+
+### 3.9 `k, v = d` bound a key and then a VALUE, and printed an address for the first
+
+**Found:** by hand, while probing the shapes a tuple unpack's right-hand side can
+be once the basic one was fixed. **Not** by a sweep, and this is the part worth
+recording: the corpus cannot produce it either, because `unpack`'s right-hand side
+is a tuple LITERAL — so the sequence was probe, fix, add the family, sweep.
+**Fixed:** `bf554772`.
+**Pinned:** `test_formal_value_model.py`'s `tuple_store_from_a_dict_binds_keys`,
+which needs BOTH halves to pass.
+
+```mojo
+d = {"a": 1, "b": 2}
+k, v = d
+print(k)     # CPython: a
+print(v)     # CPython: b
+```
+
+| | CPython | arm64 (before) | x86-64 (before) |
+|---|---|---|---|
+| `print(k)` | `a` | `4373316948` | `4309468543` |
+| `print(v)` | `b` | `1` | `1` |
+
+Two architectures, two DIFFERENT addresses for the same key, and `v` holding the
+first value — so this was a wrong answer on both machines *and* a divergence
+between them, all at exit 0. Three parts, and any one alone still leaves a wrong
+answer:
+
+1. **the stride.** Both emitters' blob unpack read element `i` at
+   `8 + 8*i`. A dict is `[npairs][k0][v0][k1][v1]…`, so it must be
+   `8 + 16*i` — `M.walk_stride`'s question, the one `for k in d` already asked and
+   the one `walk_stride` was written for (§3.1). The count check was already
+   right, because a dict's count field holds its pair count, which is why only the
+   loads moved.
+2. **the kind.** `ValueKinds._unpacked_element_kind` reads
+   `_iterable_dict_key_kind` — the same reader a dict walk's target uses — so the
+   targets classify as the strings they are and `print` has a conversion to
+   choose. Gating that on `is_dict_value` does **not** work, and the measurement
+   is the interesting part: that reader works from `_dict_names`, which a plain
+   `d = {…}` assignment never reaches, so the arm never ran and `len(k)` still
+   said "classified as 'int'". A gate that cannot be true is worse than none.
+3. **the conservative direction.** A name pre-bound to an integer (`k = 0`) and
+   then bound to a dict key is a flow-insensitive CONFLICT, and it now says so —
+   `print() cannot tell whether IdentExpr is a string or a number`, where it used
+   to print an address. A refusal, and the right one: the corpus's own preamble
+   discipline (every local declared with the value CPython would not have) puts
+   exactly that shape on the path, which is why the generator declares a dict
+   unpack's targets as STRINGS.
+
+## 4. ELEVEN defects in the TOOL, all found by using it
 
 None is a backend bug. Between them they cost more time than the backend bugs
 did, and each one made the tool report LESS than it should. §4.5-§4.8 are the
 four the `sweepG` arch-parity sweep added, and they share a shape: each one
-classified something as a correctly-refused construct that was not one.
+classified something as a correctly-refused construct that was not one. §4.9-§4.11
+are the fuzz-3 sweep's three, and the first of those is the CORPUS's own
+invariants being wrong rather than the runner's.
 
 ### 4.1 A one-sided refusal was not a finding
 
@@ -406,6 +644,129 @@ Two of its seven families are in the mix although they are known to produce
 findings (§3.5.1 and §3.5.3). A family that produces a finding is a family that
 measures, and a corpus tuned to be green is a corpus that has stopped.
 
+### 4.9 A new family's own invariants, and the two of them that were wrong
+
+The ninth of the eleven, and the same SHAPE as §4.1 through §4.4: it is the one a
+sweep finds fastest, because a new family is written once and runs immediately:
+**two thirds of the programs can be measuring the corpus rather than the
+backend.** Both of this session's were found by the checks that are already in
+`test_formal_fuzz.py`, which is the argument for having them.
+
+**A preamble copy of the wrong SHAPE turns the family's first statement into a
+refusal.** `slice_stmt` declared `S = []` for a name the body assigns
+`S = L5[0:2]`. `[]` classifies as the BARE list prefix (`_kind_of_elements` of
+nothing is nothing), so the body's binding disagrees with the preamble's and the
+value scan calls that a conflict and withdraws the answer — and the first thing a
+conflict costs is `len(S)`, the statement the family exists to run. **2 of 2
+programs of `--mix slicing` were refused for this**, and `check_mix_builds` is
+what said so ("a family that is always refused measures nothing and reports
+numbers anyway"). The preamble copy now has the slice's own LENGTH, for the
+reason `list_build` already gave.
+
+**A literal outside the word reports the word-size MODEL.** `bignum` masked its
+operands with `& 0xFFFFFFFFFFFFFFFF` and included 2\*\*64-1, and one program in a
+hundred disagreed:
+
+```python
+B = (((18446744073709551615 & 0xFFFFFFFFFFFFFFFF) >> 63) & 0xFFFF)
+print(B)     # CPython 1;  both images 65535
+```
+
+Three facts, none of them a lowering:
+
+1. a literal that does not fit a signed word is WRAPPED, not refused — measured
+   directly, `print(18446744073709551615)` prints `-1` and
+   `print(2147483647 << 33)` prints `-8589934592` on BOTH architectures;
+2. `-1 >> 63` is an ARITHMETIC shift, while CPython's shift of the unbounded
+   2\*\*64-1 is logical and answers 1. The `& 0xFFFF` was masking that
+   difference into `65535`;
+3. `& 0xFFFFFFFFFFFFFFFF` is the IDENTITY on a non-negative value in CPython and
+   is ALREADY WRAPPED to -1 on this path, so the mask moved a negative operand
+   positive on one side only — it caused the divergence rather than preventing
+   it.
+
+So the fix is the corpus's, and it is the third time in this file that the answer
+is "keep the generator inside the modelled subset": the literals are now inside
+the word and unmasked, with the fold-back mask only at the end, and the family
+still measures the boundary it was written for (2\*\*31, 2\*\*32, 2\*\*63-1, the
+negatives, and shift counts up to 63).
+
+**Two more corpus invariants the same hour, recorded because they cost programs
+rather than sweeps.** An `else` after a plain statement is a syntax error in
+CPython, so `loop_nested`'s inner arm had to belong to an inner LOOP (48 of the
+first 80 `loopelse` programs failed to compile); and a `return` inside `main`'s
+body truncates the program there, so the `try_finally_return` arm moved into a
+helper — dead code on both engines measures nothing.
+
+**And a third, from the dict-unpack family (§3.9): a dict literal with a
+DUPLICATE key.** `rng.choice` drew `""` twice for the two keys in 21 of 100
+programs; a dict with one pair then fails a 2-element unpack in the ORACLE
+("not enough values to unpack"), so 21 of the sweep's programs were
+`generator-error` — the corpus measuring itself. `rng.sample` over the non-empty
+words cannot collide with itself, and the preamble copy carries the same two
+keys for the reason every other preamble copy does: a walk that reaches the blob
+before the statement that fills it reads the pair COUNT first, and a count that
+differs between the two copies is a different program.
+
+### 4.10 A `TIMEOUT` was reported about the SCHEDULER
+
+The tenth defect, and the only one in this file that is about the harness rather
+than about the corpus or the backend: **the tool believed a timeout on the first
+observation.** Measured on the `strfmt` row of §2.1 — 5 `TIMEOUT` verdicts out of
+100 programs at `--stmts 30 50`, all five of which:
+
+* run in **0.58 s or less** (four of them in 0.01 s), on both architectures,
+  repeatedly, timed directly;
+* re-ran as `match` the moment the sweep was asked for those five indexes
+  alone (`--seeds 7480-7484`, `-j 2`: 5 match), with CPython's own output as the
+  oracle and both images agreeing with it.
+
+A 0.01 s program does not become a 30 s one, so what the tally said was about
+the machine — this sweep ran `-j 4` alongside other work on a shared box, and
+`RUN_TIMEOUT` is a wall-clock limit measured against a scheduler the tool does
+not own. It was NOT a finding (`classify` counts `TIMEOUT` apart from
+`MISMATCH-*`), so the run still exited 0 and nothing was claimed as a defect; but
+it was in the table as a fact, and a fact that is a measurement of the weather is
+worse than no fact.
+
+`run_on` now re-runs a timeout once and believes the verdict only if the second
+run agrees. A program that times out twice is still a `TIMEOUT` and is still not
+a finding — it is now a statement about the program. The same re-run argument
+would apply to a BUILD timeout, and does not yet: a build that exceeds 120 s is
+expensive enough to be worth believing, which is the only reason it is spelled
+one way and not the other.
+
+### 4.11 The `strings` mix at scale: 27 `MISMATCH` out of 100, and every one is a class this file already names
+
+The first sweep here at the `strings` mix's own scale (100 programs, seed
+`sweep19c` 7800-7899, `--max-min-steps 30`): **52 `KNOWN:str_subscript`, 27
+`MISMATCH-X86`, 21 `match`.** Characterised by reading all 27 reproducers:
+
+| how many | what the reproducer is | which section |
+|---|---|---|
+| 21 | a `def` whose body the MINIMISER stripped of its `return`, so `print(helper(...))` is the no-`return` bug | §3.3 — filed, deliberately not in `KNOWN_DIVERGENCES` |
+| 6 | the `str_subscript` divergence itself, in a spelling the neutraliser cannot take apart | §3.1's row, and §4.4's attribution limit |
+
+**No new backend bug is in there, and the fact that 27 rows had to be read by
+hand to establish that is the finding.** Both classes are known and both are
+properties of the ATTRIBUTION, not of the backends:
+
+* the no-`return` class is reachable only through the minimiser (§3.3 says so
+  and measured it), which is also why it has no `KNOWN_DIVERGENCES` row — a row
+  the corpus cannot trigger is a row that has stopped measuring, and this is the
+  proof: the minimiser triggers it constantly and `blame` has no way to name it;
+* the six are the known byte-vs-character divergence in a reduced program where
+  the neutraliser's precondition (the `print(<name>[<literal>])` spelling with the
+  name bound by its own literal statement) no longer holds, so a REAL known bug
+  is reported as unexplained. One extra report rather than one hidden bug is the
+  documented direction to err in (§"What the blame cannot do").
+
+The cheap improvement is a second marker on the no-`return` shape — the corpus
+can produce it by emitting a helper whose body ends without a `return`, which is
+exactly what the minimiser discovered — but that is a change to what the corpus
+measures, so it belongs in a session whose claim is the corpus rather than one
+commit at the end of another.
+
 ## 5. What the corpus still cannot say, and what it costs to run
 
 **`strings` costs 45 s to 3 min per program**, and the cost moved when §4.4 was
@@ -448,8 +809,21 @@ does, deliberately (§4.8). They are refusals rather than lowerings, so what the
 buy is the MESSAGE and not an answer — which is the trade §4.8 makes and the
 reason the mix is declared not to lower.
 
-**What would be the next thing to generate**, in this ledger's order: `while`/`else`
-and `for`/`else` (the corpus emits neither), a `with` statement (measured: it is
+The two that have an ANSWER as well as a refusal are now generated both ways,
+which is the distinction worth keeping: `strmeth`/`strfmt` and `slicing` measure
+the five lowered string methods and a list slice as lowerings, while `limits`'s
+`slice_print` measures the same slice as the refusal it is when the slice
+EXPRESSION is what `print` is handed. One construct, two questions, two mix
+names, one generator each (`slice_stmt` against `limits_stmt`) — the two were
+the same name on two branches, and a name two generators answer to is a name
+whose arm depends on which `elif` reached it first. `limits`' recorded row
+(`sweepG` 8000-8099) is therefore reproducible up to that rename, because a mix
+name is part of the program's seed (`make_program` seeds on
+`f"{seed}:{index}:{mix}"`) and the weights it draws from changed with it.
+
+**What would be the next thing to generate**, in this ledger's order — `while`/`else`
+and `for`/`else` are no longer on it (§5.1: `loopelse`, 600 programs clean) — a
+`with` statement (measured: it is
 REFUSED with a message that names the protocol and the remedy, and it needs a
 context manager CPython can also run, which is why `limits` leaves it out — a
 `with 1 as w` is a `TypeError` in CPython and would take the program's verdict
@@ -459,6 +833,32 @@ next thing to vary there is the arm body), a comprehension whose generator has a
 CONDITION over a dict walk, and a `global` container mutated through two
 different helpers. Each is a family whose absence from this table is a coverage
 hole rather than a decision.
+
+### 5.1 What the fuzz-3 sweep closed in this list, and what is still open
+
+**Closed by the nine new mixes** (§2.1): `while`/`else` and `for`/`else`
+(`loopelse`, 400 programs clean), `try`/`finally` (`tryfinally`, 200 clean — the
+`try`/`except` half stays refused, which is the decision above and not a gap),
+and string formatting (`strfmt`, 300 clean; `fstrings`, 300 refusals by design).
+
+**Still open, each with the measurement that says why it is a LIMIT rather than a
+gap.** All three were probed on both architectures before this list was written,
+which is what makes them entries rather than guesses:
+
+| construct | what the backends do | why it is not a family |
+|---|---|---|
+| `nonlocal` | REFUSED on both: "unsupported statement NonlocalStmt" | no lowering exists, so a mix would measure one refusal per program |
+| a `try` whose HANDLER would run | the operation TRAPS (exit 1, nothing printed) where CPython takes the handler and prints `0` | this path has no exception VALUES, so the only way to reach a handler is a trap — and a program whose answer depends on a trap is not a differential test |
+| float formatting | a `double` is a word here: `print(1.5)` truncates | the tool's docstring's reason, and it stands — a fuzz oracle built on a truncated float measures the model |
+| an integer that does not fit the word | WRAPPED, silently (`print(18446744073303095535)` prints `-1`) | `formal/model.py`'s deliberate word model; §4.9|
+
+The `nonlocal` row is a one-line refusal message away from a family, and it is
+the cheapest of these to close: `NonlocalStmt` is refused by name in both
+emitters' statement dispatch, so the decision is one function in
+`formal/model.py` and a `formal/model.py`-level lowering of a captured cell
+(which the closure flattening already builds for a closure — §3.7's fix is in the
+same table). Filed as the next thing to generate rather than fixed here, because
+it is a FEATURE and this sweep's claim is the corpus.
 
 ## 6. Reproducing a row
 

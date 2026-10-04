@@ -7350,6 +7350,134 @@ def string_concat_refusal(op: str, left_kind, right_kind) -> str | None:
 STRING_TWO_STRING_ARITHMETIC_OPS = ("+", "+=", "-", "-=")
 
 
+# ── f-strings and t-strings: a LITERAL whose text is not its value ─────────
+#
+# `fire_compiler.py`'s placeholder scan (`replace_tstrings_with_placeholders`)
+# puts the WHOLE SOURCE TOKEN of an f-string or t-string into the string cache
+# under a `__MOJO_STR_n__` name, so the `StringLiteral` the parser hands on
+# carries `f"n={n}"` — prefix, quotes, braces and all — as its `value`. That is
+# a deliberate shape, and one consumer reads it: `myinterpreter.eval_StringLiteral`
+# sees the `f"` prefix, strips it and evaluates the `{...}` fields through the
+# interpreter's own expression machinery, which is why `fire.py run` answers
+# `n=7` where CPython answers `n=7`.
+#
+# The formal path decoded that value as TEXT, because `decoded_literal` is the
+# reader every engine uses and an f-string is a `StringLiteral` like any other.
+# So the interpolation was never evaluated and the program ran with the SOURCE
+# SPELLING as its value. Measured on both architectures, exit 0 in every case,
+# which is what makes this the class the whole backend's refusals exist for:
+#
+#     n = 7
+#     print(f"n={n}")       ->  f"n={n}"   (CPython: n=7)
+#     print(len(f"n={n}"))  ->  8           (CPython: 3)
+#     if f"n={n}" == "n=7"  ->  false       (CPython: true)
+#     print(f"{{lit}}")     ->  f"{{lit}}"  (CPython: {lit})
+#
+# The last one is the `{{` escape, so the wrong value is not even the same text
+# twice. Composition is what is missing, and it is the same missing BUFFER
+# `string_concat_refusal` above names: a string on this path is a bare
+# `char *` interned into read+execute `__TEXT`, so there is nowhere to lay down
+# `"n=" + decimal(n)` — not at compile time, because the field may be a runtime
+# value, and not at run time, because there is no heap. So this is a REFUSAL,
+# and it is asked over the whole module rather than at each use site, because
+# every use site is a different one (a `print` fragment, a comparison, a
+# subscript, a `len`, an intern) and a construct this path cannot represent
+# should be declined by name rather than answered by whichever reader happened
+# to see it first.
+#
+# Spelled as a SET of prefixes rather than as "starts with f" so a `t`-string,
+# an uppercase spelling and a triple-quoted body are all covered by the same
+# test and adding a spelling is one tuple entry.
+INTERPOLATED_LITERAL_PREFIXES = ('f"', "f'", 'F"', "F'", 't"', "t'", 'T"', "T'")
+
+
+def is_interpolated_literal(node) -> bool:
+    """Whether `node` is a `StringLiteral` whose text is an f-string/t-string.
+
+    False for anything that is not a literal, and false for an ordinary string
+    however it is spelled — the test is the PREFIX, because that is the whole of
+    what the parser preserved: an ordinary literal's `value` is its body and an
+    interpolated one's is its source token, and nothing else in the node
+    distinguishes them.
+
+    **And the prefix test cannot see an ordinary string whose TEXT begins with
+    one**, which is a property of the AST rather than of this function. It
+    takes exactly one spelling — the inner quote DIFFERENT from the outer one,
+    so nothing is escaped:
+
+        s = 'f"n"'      # value is f"n"  — read as an f-string
+        s = "f\\"n\\""  # value is f\"n\" — read as an ordinary string
+
+    and on that one spelling every engine in this tree is wrong or refuses:
+    `myinterpreter.eval_StringLiteral` and `gimple_codegen` print `n`, CPython
+    prints `f"n"`, and this predicate refuses. Filed with the three-way
+    measurement and the exact next step:
+    `bugs/PARSE_FAIL_an_ordinary_string_whose_text_starts_with_an_f_prefix.md`.
+    The fix belongs in the parser (a flag beside `is_raw`, set where the
+    t/f-string placeholder is built from the RAW token) and not in a reader of
+    the value.
+    """
+    return (isinstance(node, F.StringLiteral)
+            and isinstance(node.value, str)
+            and node.value.startswith(INTERPOLATED_LITERAL_PREFIXES))
+
+
+def interpolated_literal_refusal(node, where: str = "") -> str:
+    """Why an f-string/t-string literal is refused on this path.
+
+    `where` is the line the literal is on when the caller has it, so the
+    message can point at the source rather than at the construct: two f-strings
+    in one program are two refusals a reader has to tell apart.
+    """
+    spelled = node.value if isinstance(node, str) else getattr(node, "value", "")
+    # The article is spelled out rather than derived from the first letter:
+    # "f-string" is pronounced "eff-string" and so takes "an", while the rule a
+    # `kind[0] in "aeiou"` test would apply gives it "a" — and a message whose
+    # first three words are wrong is a message a reader stops reading.
+    kind = "an f-string" if spelled[:1] in ("f", "F") else "a t-string"
+    at = f" on line {where}" if where else ""
+    return (
+        f"{kind} literal{at} is refused on this path: its value is "
+        f"its INTERPOLATED text, and this path has no buffer to compose one "
+        f"in. The parser keeps the whole source token (`{spelled}`) as the "
+        f"literal's value, so what this build would have printed is the "
+        f"spelling: with `n = 7`, `print(f\"n={{n}}\")` printed "
+        f"`f\"n={{n}}\"` and exited 0 where CPython prints `n=7`. A string "
+        f"here is a bare `char *` interned into read+execute __TEXT, so "
+        f"`\"n=\" + decimal(n)` has nowhere to be laid down at compile time "
+        f"(the field may be a runtime value) or at run time (there is no "
+        f"heap); this is the same missing buffer that keeps string "
+        f"concatenation and the length-dependent methods refused (see "
+        f"`string_concat_refusal` and LENGTH_DEPENDENT_METHODS). Print the "
+        f"parts as separate operands, or build the text with `+` once that is "
+        f"lowered.")
+
+
+def refuse_interpolated_literals(stmts) -> None:
+    """Raise `CodegenError` on the first f-string/t-string literal in `stmts`.
+
+    Asked over the MODULE's statement list, once, by the one pipeline both
+    front ends go through (`formal/build.py:_prepare_functions`) — the same
+    place and for the same reason as `refuse_module_level_mlir_templates`: a
+    refusal asked from either backend's expression walk would be two copies of
+    one decision, and the executable and dylib paths would then be able to
+    answer differently about one source file.
+
+    `iter_nodes` is the shared walker, so a literal nested two levels down —
+    `print("x", f"v={v}")`, a `f` field inside a format spec, a comprehension's
+    element — is reached by the same walk the frame layout uses, and a node one
+    of them would miss is not missed here.
+
+    A module-level statement the walker does not descend into is not a hole:
+    `iter_nodes` recurses through dataclass fields, and a `FunctionDef`'s body
+    is one of them.
+    """
+    for node in iter_nodes(stmts):
+        if is_interpolated_literal(node):
+            raise CodegenError(interpolated_literal_refusal(
+                node, getattr(node, "line", "")))
+
+
 # ── Everything else that reaches an INTEGER path holding a `char *` ───────
 #
 # `string_concat_refusal` above is one operator out of a table, and the reason
@@ -15901,6 +16029,75 @@ class ValueKinds:
             kinds.add(kind)
         return kinds.pop() if len(kinds) == 1 else None
 
+    def _unpacked_element_kind(self, value, kind, own):
+        """`(kind, own)` for ONE ELEMENT of `value`, for a tuple target.
+
+        `a, b, c = t` binds three names and each holds ONE element of `t`, not
+        `t` itself, so the kinds this returns are the ELEMENT's. Without it the
+        statement's own scan bound every name to the container's kind, and a
+        container kind is not one of the two kinds a value can print as — so
+        the ordinary shape was refused on both architectures:
+
+            t = (1, 2, 3)
+            a, b, c = t
+            print(a)   # -> print() cannot tell whether IdentExpr is a string
+                       #    or a number on the formal arm64/x86-64 path
+
+        which is a sentence false about the source: the source says `a` holds an
+        integer, and says it twice (the tuple literal's elements, and the fact
+        that an unpack binds an element at all). The refusal was the whole
+        observable effect here because a container kind is refused rather than
+        guessed — `print(a)` cannot answer "is this a `%s` or a `%lld`" from
+        `list:int`.
+
+        A container LITERAL is asked for its elements' kinds directly rather than
+        through its own `list_kind`, because `_kind_of_simple` — which
+        `kind_of`'s container arm uses — classifies a LITERAL and nothing else,
+        so `e, f = f, e` (a tuple of two NAMES, the swap) has an element kind
+        its own container kind cannot carry and narrowed to `list` with no
+        element at all. Reading the elements through `kind_of` is what makes the
+        swap work, and it is the same reader `subscript_element_kind`'s callers
+        use for `t[0]`.
+
+        Only a LIST-kind value is narrowed, and the `is_list_kind` gate is what
+        keeps the two shapes apart: `subscript_element_kind` deliberately maps
+        `str` to an integer, because `s[0]` is a BYTE on this path
+        (`subscript_element_kind`'s own docstring), and `a, b = "xy"` binds two
+        one-character STRINGS. So the string arm is not narrowed at all — it
+        keeps the container kind, which is wrong in the same way it was and no
+        more so, rather than right for a reason this file does not have.
+
+        `own` follows the element for the same reason `kind` does: the evidence
+        is the same statement, one level down, and an own-shape claim about the
+        container is not a claim about an element of it. This matters because
+        `own_shape_kind` is the answer both backends' subscript/slice/membership
+        choke points ask before treating a name as a container (`a[0]` after an
+        unpack of a list of ints must read an integer, not a blob).
+        """
+        elem = None
+        if isinstance(value, (F.TupleExpr, F.ListExpr)):
+            kinds = {self.kind_of(el) for el in (value.elements or [])}
+            kinds.discard(None)
+            elem = kinds.pop() if len(kinds) == 1 else None
+        else:
+            # `k, v = d` binds two KEYS — CPython unpacks a mapping's keys and
+            # nothing else — so the element kind here is the dict's KEY kind,
+            # read by the same reader a `for k in d` uses
+            # (`_iterable_dict_key_kind`, whose own docstring carries the
+            # measurement: before it existed a dict walk's target classified as
+            # an integer and `print(k)` printed an ADDRESS). It answers None for
+            # anything that is not a dict with a stated initializer, which is
+            # what makes it its own gate — asking `is_dict_value` first is
+            # wrong, and measurably so: that reader works from `_dict_names`,
+            # which a plain `d = {…}` ASSIGNMENT never reaches, so the arm
+            # below it never ran and `len(k)` still said "classified as 'int'".
+            elem = self._iterable_dict_key_kind(value)
+            if elem is None and is_list_kind(kind or ""):
+                elem = list_elem_kind(kind)
+        if elem is None or elem == kind:
+            return kind, own
+        return elem, elem
+
     def _scan(self, stmts) -> None:
         for s in stmts or []:
             if isinstance(s, F.AssignStmt):
@@ -15910,6 +16107,11 @@ class ValueKinds:
                 # measurement of what happens when only one of the two arms asks.
                 kind, own = self._kind_with_ann(s.value,
                                                 getattr(s, "type_ann", None))
+                if isinstance(s.target, (F.TupleExpr, F.ListExpr)):
+                    # A TUPLE TARGET binds one element per name, and that is the
+                    # same fact `_iterable_kind` states for a `for` over the
+                    # same container — so it is the same reader.
+                    kind, own = self._unpacked_element_kind(s.value, kind, own)
                 self._bind_target(s.target, kind, own=own)
                 self._note_construction(s.target, s.value)
                 self._note_dict_init(s.target, s.value)

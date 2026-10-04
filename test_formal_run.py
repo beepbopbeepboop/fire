@@ -2543,6 +2543,52 @@ CASES = [
      "    k += 4\n"
      "    printf(\"%d\\n\", k)\n"
      "    return 0\n", 0, "7"),
+    # ── an f-string is a LITERAL WHOSE TEXT IS NOT ITS VALUE ──
+    #
+    # Found by `tools/formal_fuzz.py` widening its corpus to string
+    # formatting; before this case the same source printed the literal's own
+    # SPELLING on both architectures, with exit status 0:
+    #
+    #     n = 7
+    #     printf("[%s]\n", f"n={n}")     ->  [f"n={n}"]   CPython: [n=7]
+    #
+    # The parser keeps an f-string's whole source token as the literal's value
+    # (`fire_compiler.py`'s t/f-string placeholder, which `myinterpreter` and
+    # `gimple_codegen` both read) and `decoded_literal` — the reader every
+    # engine shares — handed that text to the emitters, so the interpolation was
+    # never evaluated. Refused rather than lowered: composition needs a buffer,
+    # and a string on this path is a bare `char *` interned into read+execute
+    # `__TEXT` (the same missing buffer as `str_concat_refused` above).
+    ("fstring_literal_refused",
+     "def main(n):\n"
+     "    k = 7\n"
+     "    printf(\"[%s]\\n\", f\"n={k}\")\n"
+     "    return 0\n",
+     "refuse:an f-string literal", None),
+    # The t-string, which is the OTHER prefix that keeps its token and the same
+    # reader: one case each, because the two are different literals with
+    # different messages and a rule that caught only `f` would leave `t` printing
+    # `t"n={n}"`.
+    ("tstring_literal_refused",
+     "def main(n):\n"
+     "    k = 7\n"
+     "    printf(\"[%s]\\n\", t\"n={k}\")\n"
+     "    return 0\n",
+     "refuse:a t-string literal", None),
+    # The GUARD, and it is the half that could have gone the other way: an
+    # ordinary string that happens to CONTAIN braces and a quote is still an
+    # ordinary string, and a rule that matched on text instead of on the prefix
+    # would refuse every program that prints a template. Three spellings — no
+    # braces at all, braces with no quotes, and a brace-ful string after a
+    # percent — in one program, so the first refusal is the one that fires and
+    # the case is one assertion about the family.
+    ("braces_in_an_ordinary_string_are_not_a_fstring",
+     "def main(n):\n"
+     "    a = \"{}\"\n"
+     "    b = \"{not a field}\"\n"
+     "    c = \"%d%s\"\n"
+     "    printf(\"[%s][%s][%s]\\n\", a, b, c)\n"
+     "    return 0\n", 0, "[{}][{not a field}][%d%s]"),
 
     # ── the class: every operator that reached the integer path ────────────
     #

@@ -221,6 +221,23 @@ subscript), `strmeth` (the five methods this path lowers — `count`, `find`,
 `startswith`, `endswith`, `lstrip`), `lists`, `containers` (dict pair blobs,
 tuples, and `append`).
 
+The nine the fuzz-3 sweep added, one per construct the corpus could not produce
+at all, each PROBED ON BOTH ARCHITECTURES before it was written down (so a mix
+measures a lowering and not a refusal it would spend its budget re-deriving):
+`loopelse` (`while`/`for` with an `else` arm, which is the shape where the arm
+depends on whether a `break` did), `closures` (a `def` inside `main`, called
+again after the captured local is REASSIGNED, which is what separates a cell
+from a copy), `argshape` (default parameters and keyword arguments at the call
+site), `slicing` (`xs[a:b]`, `xs[a:b:c]`), `unpack` (`a, b, c = t`, whose
+targets hold ELEMENTS — the one family that found a backend defect rather than
+confirming one), `bignum` (word-boundary literals under `& | ^ >> <<`, every
+result masked back into 16 bits so the word-size MODEL is not what is being
+measured), `chains` (`a < b < c` as a condition and as a value), `strfmt` (the
+five lowered string methods as a formatting surface) and `fstrings` (an
+interpolated literal alone in its mix, because it is a documented REFUSAL and a
+mix that expected answers could only report refusals — see
+`test_formal_fuzz.py`'s `MIXES_NOT_LOWERED`).
+
 Every one of the last five was added because a DIFFERENTIAL SWEEP found
 something in it, and the ledger is `bugs/FORMAL_fuzz_ledger.md`: `containers`
 because `for k in d` read `k0, v0, k1` on BOTH architectures (exit 0) and
@@ -228,6 +245,14 @@ because a membership test's bound was its own needle on x86-64;
 `generics`/`globals`/`strmeth`/`environ` because they were newly lowered and
 had no coverage at all, which is the state in which a bug is cheapest to
 introduce and most expensive to find.
+
+The same rule produced the nine above, and two of them paid for themselves the
+way `containers` did: `unpack` found a construct the corpus could not produce
+that was REFUSED on both architectures (`a, b, c = t` bound every target to the
+CONTAINER's kind, so `print(a)` said the source did not say what the operand
+holds), and `fstrings` found one that BUILDS and LIES (an interpolated literal
+printed its own source spelling, exit 0, on both). The other six are coverage
+with nothing found yet, which is the state a row is worth having in.
 
 Deliberately absent, each for a stated reason:
 
@@ -879,6 +904,22 @@ def run_on(backend, text, tmpdir, name):
                 "diag": "reported success and wrote no binary"}
     got, err = run(out, backend)
     if got is None:
+        # A TIMEOUT is a claim about the MACHINE as much as about the program,
+        # and this measurement is what made that cost a row: `--mix strfmt`,
+        # seed `sweep19c`, indexes 7400-7499, `--stmts 30 50` reported five
+        # `TIMEOUT` verdicts out of a hundred, and all five run in 0.58 s or less
+        # — every one of them re-ran as a `match` the moment the sweep was asked
+        # for those five indexes alone, on both architectures, repeatedly. The
+        # five were concurrent with other work on a shared box, and a 0.01 s
+        # program does not become a 30 s one.
+        #
+        # So a timeout is believed only after a SECOND run disagrees with the
+        # first, which costs one extra run per timeout and turns the verdict
+        # into a statement about the program rather than about the scheduler. A
+        # program that times out twice is still a timeout and is still not a
+        # finding (`classify` counts it apart), but it is now one.
+        got, err = run(out, backend)
+    if got is None:
         return {"verdict": "timeout", "rc": rc, "diag": err}
     exit_code, stdout = got
     if exit_code is not None and exit_code < 0:
@@ -1029,10 +1070,10 @@ MIXES = {
     # The process environment, against a FIXED one (`FIXED_ENV`).
     "environ": (("environ_get", 4), ("environ_len", 3), ("environ_cmp", 3),
                 ("if", 2), ("assign", 2), ("augassign", 2)),
-    # The REFUSAL half of the corpus: constructs OUTSIDE the modelled subset,
+# The REFUSAL half of the corpus: constructs OUTSIDE the modelled subset,
     # emitted on purpose, because nothing else here can reach a refusal. Every
-    # one of the eleven mixes above emits something the path is supposed to
-    # LOWER, which is the right discipline for finding miscompiles and the wrong
+    # one of the mixes above emits something the path is supposed to LOWER,
+    # which is the right discipline for finding miscompiles and the wrong
     # one for measuring limits — measured: 4032 programs over the thirteen sweeps
     # `bugs/FORMAL_fuzz_ledger.md` records produced 13 refusals and all 13 were
     # one bug (`_cb0` has no home), so the refusal surface had no coverage at all
@@ -1045,9 +1086,107 @@ MIXES = {
     # and `big_blob` are IN it although they are known to produce findings: a
     # family that produces a finding is a family that measures, and a corpus
     # tuned to be green is a corpus that has stopped.
-    "limits": (("str_concat", 4), ("str_new_method", 6), ("slice_read", 4),
+    #
+    # Its slice member is `slice_print` and NOT `slice_read`, which is the
+    # `slicing` mix's name for the other half of the same construct: this one
+    # prints the slice EXPRESSION (`print(L[1:3])`), which both backends refuse
+    # because `print` cannot tell a string slice from a number, and that refusal
+    # is what this mix is here to census. `slice_read` binds the slice to a local
+    # first and then measures the LOWERING (`slice_stmt`), which is a family that
+    # answers. Two programs, two names, one dispatch arm each — they were the
+    # same name on two branches, and a name that two generators answer to is a
+    # name whose arm depends on which one the `elif` chain reached first.
+    "limits": (("str_concat", 4), ("str_new_method", 6), ("slice_print", 4),
                ("dict_method", 3), ("try_handler", 3), ("unknown_callee", 3),
                ("big_blob", 2), ("assign", 2), ("if", 2), ("print", 2)),
+    # ── the nine families the fuzz-3 sweep added ──
+    #
+    # Every one of them is a construct the corpus could not produce at all, and
+    # each was probed on both architectures BEFORE it was written down here, so
+    # that a mix measures a lowering rather than a refusal it would have spent
+    # its budget re-deriving (`bugs/FORMAL_fuzz_ledger.md` §2 and §5). What each
+    # one is here to reach:
+    #
+    #   loopelse  `while`/`for` with an `else` arm, which is the shape where the
+    #             arm runs only when NO `break` did — so `break` and `continue`
+    #             stop being interchangeable. Both lower on both architectures
+    #             (probed), and CPython's rule is the oracle's own.
+    #   closures  a `def` inside `main` reading an enclosing local, and a call
+    #             to it AFTER that local has been reassigned: a closure that
+    #             captures the CELL answers the new value, one that copied it at
+    #             definition time answers the old one, and both build and exit 0.
+    #   argshape  default parameters and KEYWORD arguments at the call site —
+    #             the two halves of a call signature, and the only place a
+    #             missing argument's default is filled in.
+    #   slicing   `xs[a:b]`, `xs[a:]`, `xs[a:b:c]` on a list, which is a NEW blob
+    #             with the same element kind (a string slice is refused; the
+    #             corpus spends its budget where answers exist).
+    #   unpack    `a, b, c = t` — the element-kind family, found by this mix:
+    #             it was refused outright by `print` on both architectures
+    #             (fixed in `formal/model.py`'s `_unpacked_element_kind`).
+    #   bignum    word-boundary integers under the operations that agree on them
+    #             — and the discipline that IS the family, because getting it
+    #             wrong produces a `MISMATCH` that is about the CORPUS rather
+    #             than about a backend: CPython's integers are unbounded and a
+    #             formal value is ONE 64-bit word, so a literal that does not fit
+    #             is WRAPPED rather than refused (measured on both
+    #             architectures: `print(18446744073709551615)` prints `-1`,
+    #             `print(2147483647 << 33)` prints `-8589934592`) and a family
+    #             that generated one would report that deliberate wrapping
+    #             hundreds of times. `big_expr` carries the measurement.
+    #   chains    `a < b < c` as a CONDITION and as a VALUE, which is a
+    #             different lowering from `a < b`: CPython evaluates the middle
+    #             operand ONCE, so a lowering that re-reads it answers a
+    #             different question about the same source.
+    #   strfmt    string formatting that this path LOWERS: the five methods
+    #             (`count`, `find`, `startswith`, `endswith`, `lstrip`) plus
+    #             `len`, which is the whole of what a string can do here.
+    #   fstrings  an f-string / t-string literal, ALONE in its mix and for the
+    #             reason `MIXES_NOT_LOWERED` names: it is a REFUSAL now
+    #             (`model.interpolated_literal_refusal`) because composition has
+    #             no buffer here, so a mix that also expected answers could only
+    #             report refusals for the family it exists to measure. It was a
+    #             silent wrong answer before that refusal — the literal's own
+    #             source spelling, printed, exit 0, on both architectures — and
+    #             the fuzz-3 sweep found it by generating it.
+    "loopelse": (("loop_else", 6), ("loop_nested", 3), ("assign", 3),
+                 ("if", 3), ("print", 2), ("augassign", 2), ("chain_cmp", 2)),
+    "closures": (("closure_def", 5), ("closure_call", 6), ("assign", 2),
+                 ("if", 3), ("print", 3), ("augassign", 2), ("list_build", 2)),
+    "argshape": (("arg_define", 4), ("arg_call", 7), ("assign", 2),
+                 ("if", 3), ("print", 3), ("augassign", 2)),
+    "slicing": (("slice_read", 7), ("slice_step", 3), ("list_build", 3),
+                ("list_len", 2), ("assign", 2), ("if", 3), ("print", 2)),
+    "unpack": (("unpack_bind", 6), ("unpack_dict", 4), ("tuple_build", 3),
+               ("list_build", 2), ("tuple_read", 2), ("assign", 2), ("if", 3),
+               ("print", 3)),
+    "bignum": (("big_int", 7), ("big_shift", 3), ("assign", 2), ("cmp", 3),
+               ("if", 3), ("print", 3), ("augassign", 2)),
+    "chains": (("chain_cmp", 7), ("assign", 2), ("cmp", 3), ("if", 3),
+               ("print", 3)),
+    #   tryfinally  a `try`'s `finally` arm, which is the half of `try` this
+    #             path lowers — a handler with a body is REFUSED
+    #             (`unemitted_handler_arm`), so a corpus that generated one would
+    #             measure a refusal and not a lowering. The arm has three exits
+    #             to run on (fall through, `break` out of an enclosing loop,
+    #             `return` out of the function) and the emitters run the pending
+    #             arms from three places, so each is its own family.
+    "tryfinally": (("try_finally", 5), ("try_finally_loop", 4),
+                   ("try_finally_return", 4), ("assign", 2), ("if", 3),
+                   ("print", 2)),
+    #   strfmt  the SAME five lowered string methods `strmeth` above draws,
+    #             under the fuzz-3 session's own name and weights.  Both mixes
+    #             stay because a mix name is part of the program's SEED
+    #             (`make_program` seeds on `f"{seed}:{index}:{mix}"`), so
+    #             collapsing them would make every row
+    #             `bugs/FORMAL_fuzz_ledger.md` records under one of the two
+    #             names a row about programs this tool can no longer generate.
+    #             Two SELECTIONS of one generator is what the table is for —
+    #             `core` and `signed` share half their kinds too.
+    "strfmt": (("str_bind", 3), ("str_count", 3), ("str_find", 3),
+               ("str_startswith", 3), ("str_endswith", 2), ("str_lstrip", 2),
+               ("str_meth_len", 2), ("if", 3), ("print", 2)),
+    "fstrings": (("str_interp", 5), ("assign", 2), ("print", 2)),
 }
 
 # The growing augmented operators, and the bound each one's RIGHT-HAND side is
@@ -1061,6 +1200,18 @@ GROWTH_MASK = {"+=": "0xF", "-=": "0xF", "*=": "0xF", "<<=": "3"}
 #: helpers define (see `define_function`), and how many classes it may define.
 MAX_FUNCS = 5
 MAX_CLASSES = 2
+#: The same bound for the two families that define a function from INSIDE a body
+#: (`closure_def`) or with a signature of its own (`arg_define`), kept apart
+#: rather than folded into `MAX_FUNCS` because the bound that matters is
+#: different: a closure nests, so two of them can put four `def` lines on the
+#: stack, and a signature with defaults is a longer definition per function.
+MAX_CLOSURES = 2
+MAX_ARGFUNCS = 3
+#: The same bound for the `try_finally_return` helper: it is a module-level
+#: definition like `define_function`'s, and it exists to carry a `return` that
+#: must not end `main` (a `return` in `main` truncates the program there and
+#: every statement after it is dead code on both engines).
+MAX_TRYFUNCS = 2
 
 
 class Gen:
@@ -1095,6 +1246,11 @@ class Gen:
         self.globals = []     # (name, initial value) module-level INT names
         self.global_containers = []   # (name, length) module-level list names
         self.generics = []    # (name, arity, returns a String) generic defs
+        self.closures = []    # (name, params, captured, outer, is_nested)
+        self.closure_defs = []   # the `def` lines, spliced into main's body
+        self.argfuncs = []    # (name, params, required count, defaults)
+        self.tryfuncs = []    # (name, param) helpers with a return in a try
+        self.closure_blobs = {}   # captured list name -> the index its body reads
         self.classes = []     # (name, fields, methods) definitions
         self.objs = []        # (var, class name, fields, methods) instances
         self.fields = []      # field names, inside a method body
@@ -1321,13 +1477,20 @@ class Gen:
             "str_endswith", "str_lstrip", "str_meth_len",
             "global_build", "global_read", "global_write", "global_bump",
             "global_container", "generic_define", "generic_call",
-            "environ_get", "environ_len", "environ_cmp",
-            "str_concat", "str_new_method", "slice_read", "dict_method",
-            "try_handler", "unknown_callee", "big_blob")
+"environ_get", "environ_len", "environ_cmp",
+            "str_concat", "str_new_method", "slice_print", "dict_method",
+            "try_handler", "unknown_callee", "big_blob",
+            "loop_else", "loop_nested", "closure_def", "closure_call",
+            "try_finally", "try_finally_loop", "try_finally_return",
+            "arg_define", "arg_call", "slice_read", "slice_step",
+            "unpack_bind", "unpack_dict", "big_int", "big_shift", "chain_cmp",
+            "str_interp")
         if budget <= 0 and kind in ("if", "while", "for", "call",
                                     "nested_call", "recursion",
                                     "list_in_loop", "dict_iter",
-                                    "tuple_iter"):
+                                    "tuple_iter", "loop_nested",
+                                    "loop_else", "closure_def",
+                                    "try_finally", "try_finally_loop"):
             # A walk is a LOOP: it is what `budget` exists to bound, since a
             # nest of them is a nest of stack frames rather than a nest of
             # branches. Folding one into an assignment keeps the depth of the
@@ -1412,13 +1575,33 @@ class Gen:
             self.generic_stmt(indent, kind)
         elif kind in ("environ_get", "environ_len", "environ_cmp"):
             self.environ_stmt(indent, kind)
-        elif kind in ("str_concat", "str_new_method", "slice_read",
+        elif kind in ("str_concat", "str_new_method", "slice_print",
                       "dict_method", "try_handler", "unknown_callee",
                       "big_blob"):
             self.limits_stmt(indent, kind)
         elif kind in ("obj_new", "field_read", "field_cmp", "field_write",
                       "method_call", "method_call_in_arg"):
             self.object_stmt(indent, kind)
+        elif kind in ("loop_else", "loop_nested"):
+            self.loop_else_stmt(indent, kind)
+        elif kind in ("try_finally", "try_finally_loop", "try_finally_return"):
+            self.try_stmt(indent, kind)
+        elif kind in ("closure_def", "closure_call"):
+            self.closure_stmt(indent, kind)
+        elif kind in ("arg_define", "arg_call"):
+            self.argshape_stmt(indent, kind)
+        elif kind in ("slice_read", "slice_step"):
+            self.slice_stmt(indent, kind)
+        elif kind == "unpack_bind":
+            self.unpack_stmt(indent)
+        elif kind == "unpack_dict":
+            self.unpack_dict_stmt(indent)
+        elif kind in ("big_int", "big_shift"):
+            self.bignum_stmt(indent, kind)
+        elif kind == "chain_cmp":
+            self.chain_stmt(indent)
+        elif kind == "str_interp":
+            self.str_interp_stmt(indent)
         else:
             self.list_stmt(indent, kind)
 
@@ -2319,7 +2502,7 @@ class Gen:
                                     "swapcase", "split", "rsplit"])
             self.emit(indent, f"print({recv}.{meth}())")
             return
-        if kind == "slice_read":
+        if kind == "slice_print":
             if not self.lists:
                 self.limit_bind_list(indent)
             # `self.lists` holds (name, length) TUPLES, so the name is the
@@ -2472,6 +2655,610 @@ class Gen:
             self.emit(indent + 1, f"{name}[{i}] = {name}[{i}] + 1")
             self.emit(indent + 1, f"print({name}[{i}])")
             self.loop_depth -= 1
+
+    # ── a `try`'s `finally` arm ──
+    #
+    # The one half of `try` this path lowers. A handler arm with a BODY is
+    # REFUSED (`formal/model.py`'s `unemitted_handler_arm`, measured on both
+    # architectures: a `try` whose handler printed built, ran, printed nothing
+    # and exited 0), so a corpus that generated one would measure a refusal; an
+    # arm whose body is `pass` BUILDS and does nothing, which is also not
+    # generatable here — this path has no exception VALUES, so the only way to
+    # reach a handler is an operation that TRAPS (a division by zero exits 1 on
+    # both architectures where CPython would have taken the handler and printed
+    # `0`), and a program whose answer depends on a trap is not a differential
+    # test.
+    #
+    # `finally` is the opposite: it is unconditional, it is lowered, and it has
+    # three exits it has to run on — falling out of the `try`, a `break` out of
+    # an enclosing loop, and a `return` out of the function. The emitters keep
+    # the pending arms in a list and run them from three places
+    # (`arm64_codegen._flush_pending_finally`: depth 0 for a return, the loop's
+    # entry depth for `break`/`continue`), so all three are the same bug class
+    # and all three build and exit 0 when they are wrong. Every family below is
+    # one of those three exits, and the observable is always the ORDER of the
+    # prints: a `finally` that runs late or not at all reorders the output.
+    def try_stmt(self, indent, kind):
+        acc = self.declare(self.fresh("w"), "0")
+        self.words.append(acc)
+        marker = self.rng.randint(1, 99)
+        if kind == "try_finally_return":
+            # A `return` INSIDE the `try`, with the marker printed by the
+            # `finally` after it — in a HELPER, because a `return` in `main`
+            # ends the program there and every statement after it is dead code
+            # (which both engines agree about, so it measures nothing). The
+            # only observable is whether the arm ran BEFORE the return, which is
+            # why the marker is a `print` and not a store: a store into a local
+            # the function has already left is invisible on both engines.
+            if len(self.tryfuncs) >= MAX_TRYFUNCS:
+                self.emit(indent, "try:")
+                self.loop_depth += 1
+                self.emit(indent + 1,
+                          f"{acc} = ({acc} + 3) & 0xFFFF")
+                self.loop_depth -= 1
+                self.emit(indent, "finally:")
+                self.emit(indent + 1, f"{acc} = ({acc} + 100) & 0xFFFF")
+                self.emit(indent + 1, f"print({marker}, {acc} & 0xFF)")
+                return
+            name = self.fresh("tf")
+            param = self.fresh("q")
+            self.defs.append(f"def {name}({param}):")
+            self.defs.append(f"    acc = 0")
+            self.defs.append(f"    try:")
+            self.defs.append(f"        acc = ({param} + 7) & 0xFFFF")
+            self.defs.append(f"        return acc & 0xFF")
+            self.defs.append(f"    finally:")
+            self.defs.append(f"        print({marker})")
+            self.tryfuncs.append((name, param))
+            self.emit(indent, f"print({name}({self.rng.randint(0, 200)}))")
+            return
+        self.emit(indent, "try:")
+        self.loop_depth += 1
+        self.emit(indent + 1, f"{acc} = ({acc} + {self.rng.randint(1, 9)})"
+                              f" & 0xFFFF")
+        if kind == "try_finally_loop":
+            counter = self.fresh("i")
+            self.emit(indent + 1, f"for {counter} in range(2):")
+            self.emit(indent + 2, f"{acc} = ({acc} + {counter}) & 0xFFFF")
+            self.emit(indent + 2, "try:")
+            self.emit(indent + 3, f"print({acc} & 0xFF)")
+            if self.rng.random() < 0.5:
+                self.emit(indent + 3, "break")
+            self.emit(indent + 2, "finally:")
+            self.emit(indent + 3, f"print({marker})")
+            self.loop_depth -= 1
+            self.emit(indent, "finally:")
+            self.emit(indent + 1, f"print({marker})")
+            return
+        self.emit(indent, "finally:")
+        self.emit(indent + 1, f"{acc} = ({acc} + 100) & 0xFFFF")
+        self.emit(indent + 1, f"print({marker}, {acc} & 0xFF)")
+
+    # ── a loop's `else` arm, and the loop that decides it ──
+    #
+    # `while c: … else: …` runs the `else` when the loop finished WITHOUT a
+    # `break`, which makes the arm the one construct in control flow whose
+    # reaching depends on something that happened earlier in the body rather
+    # than on a condition. A lowering that treats `break` and `continue` alike,
+    # or that emits the arm unconditionally, computes something else and exits
+    # 0 — and `continue` is the shape that tells them apart, because CPython
+    # runs the `else` after a `continue` too.
+    #
+    # Every trip count is bounded BY CONSTRUCTION (`while_loop`'s counter, or
+    # `range(lo, hi)`) for the reason that docstring gives, and the `else` body
+    # is never empty: an empty block is an `IndentationError` in CPython and a
+    # syntax error in the parser, so it goes through `block` like every other.
+
+    def loop_else_stmt(self, indent, kind):
+        if kind == "loop_nested":
+            inner = self.fresh("j")
+            outer = self.fresh("i")
+            acc = self.declare(self.fresh("w"), "0")
+            self.words.append(acc)
+            lo = self.rng.randint(0, 2)
+            self.emit(indent, f"for {outer} in range({lo}, {lo + 2}):")
+            self.loop_depth += 1
+            # The inner loop carries its OWN arm, and it is a loop rather than
+            # an `if` because the arm has to belong to a construct that CAN
+            # break: an `else` after a plain statement is a syntax error in
+            # CPython (measured — 48 of the first 80 `loopelse` programs), and
+            # the family that exists to measure an arm is not the family that
+            # measures a syntax error.
+            self.emit(indent + 1,
+                      f"for {inner} in range({self.rng.randint(1, 3)}):")
+            self.loop_depth += 1
+            self.emit(indent + 2, f"{acc} = ({acc} + {inner}) & 0xFFFF")
+            if self.rng.random() < 0.6:
+                # A `break` in the INNER loop decides the INNER arm only, which
+                # is the whole of what nesting two of them measures: the outer
+                # arm must still run.
+                self.emit(indent + 2, "break")
+            self.loop_depth -= 1
+            self.emit(indent + 1, "else:")
+            self.emit(indent + 2, f"{acc} = ({acc} + 10) & 0xFFFF")
+            self.emit(indent, "else:")
+            self.emit(indent + 1, f"{acc} = ({acc} + 100) & 0xFFFF")
+            self.emit(indent + 1, f"print({acc})")
+            self.loop_depth -= 1
+            return
+        # The `while` half and the `for` half are both generated: their `else`
+        # arms are reached by different code (a counter test against a bound,
+        # and a walk's completion), and a lowering that emits one of them is not
+        # evidence about the other.
+        if self.rng.random() < 0.5:
+            guard = self.declare(self.fresh("g"), "0")
+            limit = self.rng.randint(1, 4)
+            self.emit(indent, f"{guard} = 0")
+            self.emit(indent, f"while {guard} < {limit}:")
+            step = f"{guard} = {guard} + 1"
+            witness = guard
+        else:
+            lo = self.rng.randint(0, 2)
+            hi = lo + self.rng.randint(1, 3)
+            counter = self.fresh("i")
+            self.emit(indent, f"for {counter} in range({lo}, {hi}):")
+            step = f"print({counter})"
+            witness = counter
+        self.loop_depth += 1
+        self.emit(indent + 1, step)
+        if self.rng.random() < 0.5:
+            # A `break` half the time and a `continue` the other half, and BOTH
+            # are followed by the arm: the pair is what says which one the
+            # backend understood, because they differ only in whether the arm
+            # runs. CPython runs the `else` after a `continue`.
+            self.emit(indent + 1, self.rng.choice(["break", "continue"]))
+        else:
+            self.block(indent + 1, 0)
+        self.loop_depth -= 1
+        self.emit(indent, "else:")
+        acc = self.declare(self.fresh("w"), "0")
+        self.words.append(acc)
+        self.emit(indent + 1,
+                  f"{acc} = ({self.int_expr(1)} + {witness}) & 0xFFFF")
+        self.emit(indent + 1, f"print({acc})")
+
+    # ── a closure: a `def` that reads an enclosing local ──
+    #
+    # Module level is where `define_function` puts its helpers, deliberately:
+    # a `def` inside `main` is a CLOSURE, and a closure's environment is a
+    # different subject — the flattened cell (`formal/build.py`'s
+    # `_rewrite_closures_in_body`) either shares the enclosing slot or copies
+    # it, and only a program that REASSIGNS the captured name after the `def`
+    # can tell. CPython reads the cell at call time, so a copy answers the
+    # value from before the reassignment, and both engines exit 0 either way.
+    #
+    # The definition goes into `closure_defs` and `program()` splices it into
+    # `main`'s body BETWEEN the preamble and the body, for two reasons that are
+    # both CPython's rules rather than taste: a `def` inside `main` at module
+    # level is a syntax error, and a call emitted BEFORE the `def` reached is a
+    # `NameError` in the oracle. Splicing after the preamble is what lets the
+    # closure read a name the preamble declares, which is the only reason the
+    # capture is guaranteed to be bound on every path.
+    def closure_stmt(self, indent, kind):
+        if kind == "closure_def" or not self.closures:
+            if len(self.closures) >= MAX_CLOSURES:
+                self.new_word(indent)
+                return
+            if not (self.words or self.smalls):
+                self.new_small(indent)
+            capture = self.rng.random() < 0.3
+            if capture and not self.lists:
+                # The captured container is built HERE rather than left to the
+                # mix's weights to have happened by now: a list that exists only
+                # when some other statement made it first would make the
+                # captured-container shape a function of statement order rather
+                # than of the draw, and the whole point of the shape is that it
+                # is always available to be measured.
+                self.new_list_of_two(indent)
+            cap = (self.rng.choice(self.lists)[0] if capture
+                   else self.rng.choice(self.words + self.smalls))
+            name = self.fresh("cf")
+            param = self.fresh("k")
+            if capture:
+                # The captured CONTAINER, and the body reads an ELEMENT of it —
+                # the closure half of the same question a tuple unpack asks
+                # (`_unpacked_element_kind`), at two levels of indirection: a
+                # rewrite that lifted the closure into a function of its own
+                # would have to carry the blob across, and a copy of the blob
+                # would answer the element from before the store.
+                idx = self.rng.randrange(dict(self.lists)[cap])
+                self.closure_blobs[cap] = idx
+                self.closures.append((name, [param], cap, None, False))
+                self.closure_defs.append(f"    def {name}({param}):")
+                self.closure_defs.append(
+                    f"        return {cap}[{idx}] + {param}")
+                self.new_word(indent)
+                return
+            if self.rng.random() < 0.35:
+                # TWO levels, because the flattening is recursive and one level
+                # does not reach it: the inner `def` reads a name the middle
+                # one captured, and a rewrite that lifts only the outermost
+                # closure leaves the inner one reading a slot that does not
+                # exist.
+                inner = self.fresh("df")
+                self.closures.append((inner, [param], cap, name, True))
+                self.closure_defs.append(f"    def {name}({param}):")
+                self.closure_defs.append(f"        def {inner}({param}):")
+                self.closure_defs.append(
+                    f"            return ({cap} + {param}) & 0xFFFF")
+                self.closure_defs.append(
+                    f"        return {inner}(({param} + 1) & 0xF)")
+            else:
+                self.closures.append((name, [param], cap, None, False))
+                self.closure_defs.append(f"    def {name}({param}):")
+                self.closure_defs.append(
+                    f"        return ({cap} + {param}) & 0xFFFF")
+            self.new_word(indent)
+            return
+        name, params, cap, outer, deep = self.rng.choice(self.closures)
+        if outer is not None:
+            # A nested closure is called through the OUTER one, which is the
+            # only way its own body runs.
+            self.emit(indent, f"print({outer}({self.rng.randint(0, 9)}))")
+            return
+        if cap in self.closure_blobs:
+            # A captured CONTAINER, which is the shape where "shares the slot"
+            # and "copied the value" cannot be told apart from an integer: the
+            # closure reads an ELEMENT, so a copy taken at definition time
+            # answers the old element while CPython — and this path, measured —
+            # answers the new one. The store goes through an index that is
+            # inside the list's length, so the two engines are comparing the
+            # same program and not one of them is faulting.
+            idx = self.closure_blobs[cap]
+            # The closure's own PARAMETER is not in scope here — it belongs to
+            # the `def`, and spelling it in `main`'s body is a NameError in the
+            # oracle. What the caller has is an integer literal, which is what
+            # makes the two answers differ at all: the second print sees the
+            # store only if the closure and the caller share the blob.
+            k = self.rng.randint(0, 9)
+            self.emit(indent, f"print({cap}[{idx}] + {k})")
+            self.emit(indent, f"{cap}[{idx}] = ({cap}[{idx}] + 9) & 0xFFFF")
+            self.emit(indent, f"print({cap}[{idx}] + {k})")
+            return
+        self.emit(indent, f"print({name}({self.rng.randint(0, 9)}))")
+        if self.rng.random() < 0.6:
+            # The reassignment AFTER the `def`: the statement that separates a
+            # cell from a copy. Emitted by the family itself, so no mix has to
+            # remember to do it and a closure the corpus generates is always one
+            # a copy would get wrong.
+            self.emit(indent, f"{cap} = ({self.rng.randint(0, 200)}) & 0xFFFF")
+            self.emit(indent, f"print({name}({self.rng.randint(0, 9)}))")
+
+    # ── a call signature: default parameters and keyword arguments ──
+    #
+    # Two halves of one contract, and the halves are lowered in different
+    # places: the default is a value the DEFINITION carries and the callee reads
+    # when no argument arrived, and a keyword argument is a NAME the call site
+    # spells which the emitter has to bind to a POSITION. A lowering that
+    # filled a missing argument from the wrong slot, or that took keyword
+    # arguments positionally, computes a different program and exits 0.
+    #
+    # Parameters with defaults come after the ones without — CPython's own rule,
+    # and it is a SyntaxError rather than a wrong answer to test, so a family
+    # that could produce it would be measuring the oracle's traceback. The body
+    # returns, for the same reason: a helper with no `return` yields a word on
+    # this path where CPython yields `None`
+    # (`bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`),
+    # and a family that printed such a call would spend its budget on a bug this
+    # corpus cannot fix.
+    def argshape_stmt(self, indent, kind):
+        if kind == "arg_define" or not self.argfuncs:
+            if len(self.argfuncs) >= MAX_ARGFUNCS:
+                self.new_word(indent)
+                return
+            name = self.fresh("af")
+            required = self.rng.randint(1, 2)
+            optional = self.rng.randint(1, 2)
+            params = [self.fresh("q") for _ in range(required + optional)]
+            defaults = [self.rng.randint(0, 40) for _ in range(optional)]
+            sig = ", ".join(params[:required]
+                             + [f"{p}={d}" for p, d
+                                in zip(params[required:], defaults)])
+            self.defs.append(f"def {name}({sig}):")
+            self.defs.append(f"    return ({' + '.join(params)} + "
+                             f"{self.rng.randint(0, 30)}) & 0xFFFF")
+            self.argfuncs.append((name, params, required, defaults))
+            return
+        name, params, required, defaults = self.rng.choice(self.argfuncs)
+        optional = list(params[required:])
+        how = self.rng.choice(["all", "some", "kw", "mixed", "none"])
+        if how == "none":
+            args = [self.int_expr(0) for _ in params[:required]]
+            self.emit(indent, f"print({name}({', '.join(args)}))")
+            return
+        if how == "all":
+            args = [self.int_expr(0) for _ in params]
+            self.emit(indent, f"print({name}({', '.join(args)}))")
+            return
+        if how == "some":
+            take = self.rng.randint(0, len(optional))
+            args = [self.int_expr(0) for _ in params[:required + take]]
+            self.emit(indent, f"print({name}({', '.join(args)}))")
+            return
+        # The keyword half. A keyword argument may name a parameter the call has
+        # not filled, and CPython binds it by NAME — so the argument list is
+        # built as "the required ones, positionally, then the named ones", and a
+        # call that names a parameter twice is a TypeError in the oracle.
+        if how == "kw":
+            names = [p for p in params if self.rng.random() < 0.7]
+            for req in params[:required]:
+                if req not in names:
+                    names.insert(0, req)
+            args = [f"{p}={self.int_expr(0)}" for p in names]
+            self.emit(indent, f"print({name}({', '.join(args)}))")
+            return
+        args = [self.int_expr(0) for _ in params[:required]]
+        pick = optional or params
+        args.append(f"{self.rng.choice(pick)}={self.int_expr(0)}")
+        self.emit(indent, f"print({name}({', '.join(args)}))")
+
+    # ── a list slice: a NEW blob with the source's element kind ──
+    #
+    # `xs[1:3]` is not an index and not a name: it builds a blob whose count is
+    # the number of elements selected, so the walk, the stride and the element
+    # kind all have to be re-derived from the BOUNDS rather than read off the
+    # base. The corpus could produce a subscript and a container and nothing in
+    # between.
+    #
+    # Bounds are inside the list's length and `lo <= hi` (a reversed pair is an
+    # empty slice in CPython and a count this path has no reason to get wrong,
+    # but an out-of-range bound is an IndexError in the oracle and a generator
+    # error rather than a finding), and the slice is bound to a local whose
+    # length the preamble already states so a later statement cannot read it
+    # before the assignment runs.
+    def slice_stmt(self, indent, kind):
+        sources = [pair for pair in self.lists if pair[1] >= 2]
+        if not sources:
+            self.new_list_of_two(indent)
+            sources = [pair for pair in self.lists if pair[1] >= 2]
+        src, n = self.rng.choice(sources)
+        step = self.rng.choice([None, None, 2, 3]) if kind == "slice_step" else None
+        # Bounds are SPELLED three ways, and the third is the one that is its
+        # own lowering: `xs[a:b]` names two offsets, `xs[a:]` runs to the end
+        # (which is a new blob whose count is `n - a`) and `xs[a:b:c]` walks.
+        # A NEGATIVE bound is generated too — CPython counts from the end, so
+        # `xs[-2:]` is the last two elements and an emitter that reads `-2` as
+        # an offset reads two words before the blob's header.
+        shape = self.rng.choice(["pair", "open", "negative"])
+        if shape == "negative" and n >= 3:
+            hi = self.rng.randint(1, n - 1)
+            bound = f"-{n - hi}:"
+            count = hi
+        elif shape == "open" and n >= 3:
+            lo = self.rng.randint(1, n - 2)
+            bound = f"{lo}:"
+            count = n - lo
+        else:
+            lo = self.rng.randint(0, n - 2)
+            # `hi` is at least `lo + 1`, so the slice is never EMPTY: an empty
+            # slice has no element to read and its length is the one number a
+            # lowering could get right by accident, so a corpus that generated
+            # it would be measuring the degenerate case.
+            hi = self.rng.randint(lo + 1, n)
+            if step:
+                bound = f"{lo}:{hi}:{step}"
+                count = len(range(lo, hi, step))
+            else:
+                bound = f"{lo}:{hi}"
+                count = hi - lo
+        # The PREAMBLE copy has the slice's own LENGTH, for the reason
+        # `list_build` gives and because it is measurable: `S = []` classifies as
+        # the BARE list prefix (`_kind_of_elements` of nothing is nothing), so the
+        # body's `S = L5[0:2]` binds it a second time with a different kind, the
+        # scan calls that a conflict and withdraws the answer — and the first
+        # thing a conflict costs is `len(S)`, which is the statement this family
+        # exists to run. Measured: 2 of 2 programs of `--mix slicing` were refused
+        # for exactly this.
+        name = self.declare(self.fresh("S"), "[" + ", ".join(["0"] * count) + "]")
+        self.emit(indent, f"{name} = {src}[{bound}]")
+        self.emit(indent, f"print(len({name}))")
+        # The ELEMENT, read through a local: `print(S[0])` is refused on both
+        # backends ("print() cannot tell whether SubscriptExpr is a string or a
+        # number") — the same discipline `dict_stmt` states, and for the same
+        # reason: a family that is 95% refused measures nothing.
+        elem = self.declare(self.fresh("w"), "0")
+        self.words.append(elem)
+        self.emit(indent, f"{elem} = {name}[0]")
+        self.emit(indent, f"print({elem})")
+
+    def new_list_of_two(self, indent):
+        name = self.fresh("L")
+        self.declare(name, "[0, 0]")
+        self.emit(indent, f"{name} = [{self.rng.randint(0, 40)}, "
+                          f"{self.rng.randint(0, 40)}]")
+        self.lists.append((name, 2))
+
+    # ── tuple unpacking: what each TARGET holds is an ELEMENT ──
+    #
+    # The one family whose first version found a backend defect rather than
+    # confirming one: `a, b, c = t` bound every name to the CONTAINER's kind,
+    # so `print(a)` was refused on both architectures with a sentence false
+    # about the source (fixed in `formal/model.py`'s `_unpacked_element_kind`,
+    # pinned by `test_formal_value_model.py`). It stays in the corpus because a
+    # corpus that drops a construct the day it is fixed cannot notice the day
+    # something else breaks it.
+    #
+    # The right-hand side is always a LITERAL of integers, for the reason the
+    # value discipline gives in general: a tuple whose elements disagree has no
+    # element kind to bind, so half the corpus would be refused for a reason
+    # that is about the corpus rather than the lowering, and CPython's answer
+    # (a `str` element printed with `%d`) is a different program.
+    def unpack_stmt(self, indent):
+        n = self.rng.randint(2, 3)
+        items = ", ".join(str(self.rng.randint(0, 60)) for _ in range(n))
+        tname = self.fresh("U")
+        self.declare(tname, "(" + ", ".join(["0"] * n) + ")")
+        self.emit(indent, f"{tname} = ({items})")
+        names = [self.declare(self.fresh("u"), "0") for _ in range(n)]
+        for nm in names:
+            self.words.append(nm)
+        self.emit(indent, f"{', '.join(names)} = {tname}")
+        # Observed through an ARITHMETIC expression rather than through a bare
+        # `print(name)`, so what the comparison reads is the sum the unpack fed
+        # and not one element — a lowering that paired the wrong element with
+        # the wrong name still changes the sum.
+        self.emit(indent, "print(" + " + ".join(
+            f"({nm} * {i + 1})" for i, nm in enumerate(names)) + ")")
+
+    def unpack_dict_stmt(self, indent):
+        """`k, v = d` — a DICT on the right, which binds its KEYS.
+
+        The half of the element-kind family that is a different lowering rather
+        than a different value: a dict is a PAIR blob, so the unpack steps by
+        the pair where every other container steps by the element
+        (`model.walk_stride`), and the targets hold the KEYS rather than one
+        element each. It was found by hand and fixed — `formal/model.py`'s
+        `_unpacked_element_kind` and both emitters' blob unpack — and it is here
+        so a regression is a `MISMATCH` instead of a silent answer again.
+
+        **The two targets are declared as STRINGS in the preamble**, which is not
+        tidiness: the value scan is flow-INsensitive and a name two statements
+        bind two ways is a conflict that claims nothing, so `k = 0` followed by
+        `k, v = d` (where `k` is a key) is refused by `print` — correctly, and
+        for a program the model genuinely cannot classify. Declaring them as the
+        kind they will hold is what makes this family a DIFFERENTIAL TEST rather
+        than a refusal census, and it is why the keys are string literals: an
+        integer-keyed dict makes the same two names integers and needs the same
+        declaration.
+        """
+        # Two DISTINCT non-empty keys, and the distinctness is measured rather
+        # than assumed: `rng.choice` drew `""` twice in 21 of the first 100
+        # programs, a dict literal with a duplicate key has ONE pair, and the
+        # 2-element unpack then fails in the ORACLE with "not enough values to
+        # unpack" — 21 `generator-error`s in a sweep, which is a corpus bug and
+        # not a finding about anything. `sample` from the non-empty words cannot
+        # collide with itself, and `""` is out because it is a key no reader
+        # distinguishes.
+        keys = self.rng.sample([w for w in STRINGS if w] or ["ab"], 2)
+        items = ", ".join(f'"{w}": {self.rng.randint(0, 40)}' for w in keys)
+        dname = self.fresh("D")
+        # The preamble copy carries the SAME two keys, for the reason every other
+        # preamble copy in this generator does: the corpus reads a blob before
+        # the statement that fills it on some paths, and a dict's pair count is
+        # what a walk and an unpack both read first.
+        self.declare(dname, '{"%s": 0, "%s": 0}' % (keys[0], keys[1]))
+        self.emit(indent, f"{dname} = {{{items}}}")
+        targets = [self.declare(self.fresh("k"), '""') for _ in range(2)]
+        self.strings.extend(targets)
+        self.emit(indent, f"{', '.join(targets)} = {dname}")
+        self.emit(indent, f"print({targets[0]}, len({targets[1]}))")
+
+    # ── word-boundary integers, under the operations that agree on them ──
+    #
+    # CPython's integers are unbounded and a formal value is ONE 64-bit word,
+    # so a program that lets a big number grow reports the word-size MODEL as a
+    # miscompile — hundreds of times, and the signal is worthless. What IS
+    # answerable is the boundary arithmetic itself: `&`, `|`, `^` and `<<`/`>>`
+    # are bit-for-bit the same on both sides for any pattern that FITS the word,
+    # and a `>>` of a negative is an arithmetic shift in both.
+    #
+    # **Every literal here is inside the word, and that is the measured part
+    # rather than the obvious one.** The first version of this family masked its
+    # operands with `& 0xFFFFFFFFFFFFFFFF` and included 2**64-1, and the sweep
+    # (`--mix bignum`, seed `sweep19c`, index 7000) found it in one program of
+    # a hundred:
+    #
+    #     B = (((18446744073709551615 & 0xFFFFFFFFFFFFFFFF) >> 63) & 0xFFFF)
+    #     print(B)        CPython 1     both images 65535
+    #
+    # Both halves of that are the corpus's invariant, not a lowering: the literal
+    # does not fit a signed word, so it is WRAPPED to -1 (measured directly:
+    # `print(18446744073709551615)` prints `-1` on both architectures), and
+    # `-1 >> 63` is an arithmetic shift — while CPython's shift of the
+    # UNBOUNDED 2**64-1 is logical and answers 1. `& 0xFFFFFFFFFFFFFFFF` made it
+    # worse rather than better: in CPython that mask is the IDENTITY on a
+    # non-negative value and in this path the mask itself is already wrapped to
+    # -1, so it moved a negative operand to a positive one on one side only.
+    # The mask that belongs here is the one at the END, which folds the answer
+    # back inside 16 bits where the two representations agree again.
+    #
+    # The literals that survive are the ones with a real boundary to find:
+    # 2**31-1, 2**31, 2**32-1, 2**32, 2**63-1, -2**31, -2**63+1, and two
+    # arbitrary patterns. A shift count is at most 63 because CPython answers a
+    # larger one and this path has to answer the same way — a count of 64 is a
+    # different question, not a boundary of this one.
+    BIG_WORDS = (0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0x100000000,
+                 0x7FFFFFFFFFFFFFFF, -0x80000000, -0x7FFFFFFFFFFFFFFF,
+                 0xDEADBEEF, 0x123456789ABC)
+
+    def big_expr(self):
+        a = self.rng.choice(self.BIG_WORDS)
+        b = self.rng.choice(self.BIG_WORDS)
+        op = self.rng.choice(["&", "|", "^"])
+        return f"(({a} {op} {b}) & 0xFFFF)"
+
+    def bignum_stmt(self, indent, kind):
+        name = self.declare(self.fresh("B"), "0")
+        self.words.append(name)
+        if kind == "big_shift":
+            # A shift count near the word width is the boundary that matters: a
+            # count of 63 on a one-bit value is 2**63 in CPython and the sign
+            # bit here, and both wrap the same way once the low 16 bits are read
+            # back out.
+            src = self.rng.choice(self.BIG_WORDS)
+            count = self.rng.choice([1, 7, 31, 32, 63])
+            op = self.rng.choice(["<<", ">>"])
+            self.emit(indent, f"{name} = (({src} {op} {count}) & 0xFFFF)")
+            return
+        self.emit(indent, f"{name} = {self.big_expr()}")
+
+    # ── a comparison CHAIN ──
+    #
+    # `a < b < c` is a different lowering from `a < b`: CPython evaluates the
+    # middle operand ONCE, `b`, and compares `a < b` then `b < c`, so a lowering
+    # that re-evaluates the middle — or that reads it after a store — answers a
+    # different question about the same source. `cond` has emitted a chain for a
+    # long time as one of seven condition shapes; what this family adds is the
+    # chain as a VALUE and the chain whose operands are a function CALL, which
+    # is the shape where re-evaluating the middle operand is observable rather
+    # than invisible.
+    def chain_stmt(self, indent):
+        pool = self.words + self.smalls
+        if len(pool) < 3:
+            self.new_small(indent)
+            self.new_word(indent)
+            return
+        a, b, c = (self.rng.choice(pool) for _ in range(3))
+        op = self.rng.choice(["<", "<=", ">", ">=", "==", "!="])
+        op2 = self.rng.choice(["<", "<=", ">", ">=", "==", "!="])
+        chain = f"{a} {op} {b} {op2} {c}"
+        if self.rng.random() < 0.5:
+            self.emit(indent, f"if {chain}:")
+            self.emit(indent + 1,
+                      f"print({self.rng.randint(0, 99)})")
+            if self.rng.random() < 0.5:
+                self.emit(indent, "else:")
+                self.emit(indent + 1, f"print({self.rng.randint(0, 99)})")
+            return
+        # As a value, routed through `1 if … else 0` for the reason
+        # `strmeth_stmt` gives: a bool is a WORD here, so a bare `print(chain)`
+        # answers `1` where CPython answers `True` and the disagreement would be
+        # the model rather than the lowering.
+        self.emit(indent, f"print(1 if {chain} else 0)")
+
+    # ── an f-string / t-string literal ──
+    #
+    # Generated ON PURPOSE, for the reason `--mix signed` is: it used to be a
+    # SILENT wrong answer on both architectures — the literal's own source
+    # spelling, printed, exit 0 — and it is a refusal now
+    # (`model.interpolated_literal_refusal`). A corpus that dropped it with the
+    # fix could not notice the day interpolation is implemented, which is the
+    # only moment the row is for; and a corpus that never had it would have
+    # called the fix unnecessary.
+    #
+    # The field is an INTEGER EXPRESSION, never a string, because this path has
+    # no `%` conversion for a string operand and an f-string of a string would
+    # be refused for a second reason (the oracle's own `TypeError`).
+    def str_interp_stmt(self, indent):
+        if not (self.words or self.smalls):
+            self.new_small(indent)
+            return
+        pool = self.words + self.smalls
+        literal = self.rng.choice(pool)
+        prefix = self.rng.choice(["f", "F", "t", "T"])
+        quote = self.rng.choice(['"', "'"])
+        self.emit(indent, f'print({prefix}{quote}v={{{literal}}} '
+                          f'{quote})')
 
     # ── a class, and the frame receiver it makes ──
     #
@@ -2668,6 +3455,13 @@ class Gen:
             lines.append(f"    global {gname}")
         for dname, dval in self.decls:
             lines.append(f"    {dname} = {dval}")
+        # The CLOSURE definitions, between the preamble and the body: a nested
+        # `def` at module level is a syntax error, and a call emitted before the
+        # `def` is a `NameError` in the oracle, so this is the one order every
+        # generated call site is legal in — and it is also the order that lets a
+        # closure read a name the preamble has already bound, which is what makes
+        # the capture total rather than path-dependent.
+        lines.extend(self.closure_defs)
         lines.extend(body)
         lines.append("    return 0")
         return "\n".join(lines) + "\n"
