@@ -33,7 +33,10 @@ class ConformanceError(Exception):
 # a type application (`keys: List[T]`, `width: SIMD[dtype, width]`) puts a `]`
 # inside the parameter list, and every reader below wants the whole list. This
 # file used to carry its own two copies of that regex; one reader of one rule is
-# the point (`bugs/MONOMORPH_a_bracket_in_a_template_parameter_annotation_is_not_matched.md`).
+# the point: `head_match` counts brackets to its match, so a parameter whose
+# type is a type application is one parameter and not two
+# (`bugs/FORMAL_a_generic_structs_parameters_are_never_bound.md` §0a carries
+# the before/after and `std/collections/type_dict.mojo` as the case).
 
 
 def _bracket_depth_by_line(module_src: str) -> list[int]:

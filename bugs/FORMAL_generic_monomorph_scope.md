@@ -152,8 +152,7 @@ test rather than a program.
 
 ## 6. The mangling spelling, and `doc/ABI.md`'s example
 
-**Corrected 2026-10-04** (`bugs/FORMAL_a_mangled_spelling_is_still_stated_as_Pair_Int_in_the_ABI_doc_and_the_scope_doc.md`,
-deleted with its fix). This section used to assert that `monomorphize.mangle`
+**Corrected 2026-10-04.** This section used to assert that `monomorphize.mangle`
 emits `Pair_Int`; it emits `Pair_1_T_3_Int`, and it has emitted that since the
 encoding was made injective — 1512 collisions over 1752 generated
 `(name, type_args)` pairs under the flat scheme, measured in

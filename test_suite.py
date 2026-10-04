@@ -3305,6 +3305,19 @@ UNREGISTERED = {
         '`other` row, both read off the real tree rather than written for the '
         'test.',
 
+    'test_formal_returnless_census.py': 'The return-less census TOOL, and the '
+        'third census tool in this shape: a parse and a walk over `.mojo` files, '
+        'no build and no Lean (11 cases, 0.01 s — the instrument is cheap, not '
+        "the corpus it walks). Not registered because this session's task says "
+        'not to register anything; listed here for the reason the estate check '
+        "below exists. It covers `tools/formal_returnless_census.py`'s rules "
+        'that DECIDE a row, including the two that remove one (a discarded '
+        'call, a struct construction) and the three that would otherwise '
+        "invent 456 — generators, coroutines, and a name whose definitions "
+        'disagree about whether it returns, which is the defect the census it '
+        'replaces had (`bugs/FORMAL_a_function_with_no_return_yields_a_word_'
+        'where_cpython_yields_None.md` §0), as a case.',
+
     # `test_formal_proof_breadth.py` was listed here when it landed on
     # 2026-10-03 with the note that the registering commit deletes the excuse,
     # and is REGISTERED now (`formal-proof-breadth-tool` in the `proofs`

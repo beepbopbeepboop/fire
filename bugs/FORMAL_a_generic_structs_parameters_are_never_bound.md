@@ -17,8 +17,8 @@ Found by sweeping `std/collections` for `sweep14:std-collections`; see
 ## 0a. The bracket fix, 2026-10-04: `keys: List[T]` instantiates, and the
 ## emitted file parses
 
-`bugs/MONOMORPH_a_bracket_in_a_template_parameter_annotation_is_not_matched.md`
-is fixed, and its fix is in the place all five copies of the rule could read —
+A separate doc filed for this limit was fixed with it, and the fix is in the
+place all five copies of the rule could read —
 `monomorphize.head_match`, which finds a generic head with its brackets
 **balanced** instead of stopping at the first `]` (`elaborate.py`'s two private
 copies of that regex are gone, and its three parameter-list readers now split on
@@ -100,12 +100,14 @@ measured here, and the first is a bug rather than a project.**
   ```
 
   with a stray `]`, which is a **parse error** (`either_proof`-class: the
-  instantiation is produced and then cannot be compiled). Filed as
-  `bugs/MONOMORPH_a_bracket_in_a_template_parameter_annotation_is_not_matched.md`,
-  which also carries the three other `[^\]]*` copies of the same rule in
-  `elaborate.py`. It is not fixed here because `_HEAD` is the COMPILED path's
-  monomorphizer too and its regression surface is a full `make gate`, which is
-  the integrator's.
+  instantiation is produced and then cannot be compiled). Filed separately then,
+  and **FIXED with §0a** — the head is now found with its brackets balanced
+  (`monomorphize.head_match`), and `elaborate.py`'s three parameter-list
+  readers split on top-level commas rather than `,`, which is what a parameter
+  whose type is a type application needs. It was not fixed on the branch that
+  first measured it because the matcher is the COMPILED path's monomorphizer too
+  and its regression surface is a full `make gate`, which is the integrator's —
+  §0a is what was verified in its place.
 * **A VARIADIC value parameter is refused by the arity check.** `*values` is a
   parameter `type_param_names` reports and `instantiate` will not accept an
   argument for:
