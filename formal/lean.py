@@ -1127,6 +1127,117 @@ def library_census(lean: str, lib_dir: str, timeout: int | None = None,
     return out
 
 
+# ── `#print axioms`: what a declaration's TRANSITIVE closure rests on ────────
+#
+# `_census_from_output` above reads Lean's hole report.  This reads the other
+# one, and it is here because there is no text scan for what it measures:
+# `formal/admitted.py::library_trust` counts the `native_decide`/`bv_decide`
+# SITES in a module, which is what the source says, and `#print axioms` measures
+# what the PROOF TERM actually closes over.  The two differ in three ways that
+# matter, and all three have bitten somebody:
+#
+#   * it is transitive, so a theorem with no tactic site of its own still reports
+#     every axiom its callees' proofs used;
+#   * a tactic site that never ran — a losing branch of `first | … | …` — leaves
+#     no axiom, so the site count can be an over-count;
+#   * and the axiom is NOT named `Lean.ofReduceBool` on the pinned 4.32.2.
+#     `ofReduceBool` is deprecated there ("in-kernel native reduction is
+#     deprecated; assert native evaluations with axioms instead"), and the
+#     `native_decide` TACTIC elaborates to a FRESH AXIOM PER USE, named after
+#     the declaration that used it:
+#     `work_step_mov._native.native_decide.ax_1_1`.  A census that greps for
+#     `ofReduceBool` therefore reports CLEAN over a library that is not.
+#
+# `AXIOM_FOUNDATION` is the part of the answer that is Lean's own and not this
+# tree's: `propext`, `Quot.sound` and `Classical.choice` are what every
+# `simp`/`decide` proof in Lean rests on, so they are named rather than
+# tolerated — a caller comparing against them is comparing against a list, and
+# a list can be wrong.
+_AXIOM_DEPENDS_RE = re.compile(
+    r"^'(?P<name>[^'\n]+)' depends on axioms:\s*\[(?P<body>[^\]]*)\]", re.M)
+_AXIOM_NONE_RE = re.compile(
+    r"^'(?P<name>[^'\n]+)' does not depend on any axioms", re.M)
+AXIOM_FOUNDATION = frozenset({"propext", "Quot.sound", "Classical.choice"})
+# A per-use axiom the reflection tactics create, whatever the toolchain calls
+# it: `<declaration>._native.<tactic>.ax_<n>_<m>`.  Matched structurally
+# because the index after `ax` is the toolchain's business and changed once
+# already in the direction that matters (ONE counter for the whole module, so
+# deleting one site's axiom renumbers every later one in the file — which is why
+# no test may pin an index).  The declaration group is GREEDY: a namespaced
+# declaration's axiom is `DylibExport.backward_branch_run_none._native.…` and a
+# lazy `.+` would hand `DylibExport` to `decl` and fail to match at all.
+GENERATED_AXIOM_RE = re.compile(
+    r"^(?P<decl>.+)\._native\.(?P<tactic>[A-Za-z_]\w*)\.ax_\d+_\d+$")
+
+
+def parse_axioms(output: str) -> dict:
+    """`{declaration: (axioms…)}` out of one `lean` run's `#print axioms` output.
+
+    A declaration that reported nothing is ABSENT from the result rather than
+    mapped to an empty tuple, and the difference is the whole reason a caller
+    has to check: an absent name is one Lean could not find (an `Unknown
+    constant` error, which is a disagreement between the census and the
+    library) and an empty tuple is a declaration that genuinely rests on
+    nothing.  Reporting both as `()` would make a renamed declaration look like
+    a clean one.
+    """
+    out = {}
+    for m in _AXIOM_NONE_RE.finditer(output or ""):
+        out[m.group("name")] = ()
+    for m in _AXIOM_DEPENDS_RE.finditer(output or ""):
+        out[m.group("name")] = tuple(
+            a.strip() for a in m.group("body").split(",") if a.strip())
+    return out
+
+
+def print_axioms(lean: str, lib_dir: str, imports, names,
+                 wall_s: float | None = None, cpu_s: float | None = None,
+                 mem_mb: int | None = None) -> tuple:
+    """`(LeanRun, {declaration: (axioms…)})` for `names`, through `run_lean`.
+
+    `imports` is a module name or a list of them; `names` are the declarations
+    to ask about, spelled the way a `#print axioms` line spells them — which is
+    QUALIFIED, so `DylibExport.backward_branch_run_none` and not the bare name
+    `formal/admitted.py::_declarations` returns for the unqualified spelling.
+
+    One run for all of them, because each is a separate `lean` process paying
+    the whole 30 MB `ProofLib.olean` load and the answer is microseconds of
+    work: asking 513 declarations costs one process instead of 513.
+
+    The generated file goes to `scratch_dir` and is handed to `lean` as an
+    ABSOLUTE path, for the reason that function's docstring gives — a shared
+    fixed name is a hazard `tools/suite.py -j 18` turns into someone else's
+    failure.
+    """
+    if isinstance(imports, str):
+        imports = [imports]
+    names = list(names)
+    if not lean:
+        return (LeanRun(None, "", "", "lean not found (see ./lean-toolchain)",
+                        0.0, 0.0, 0, 0), {})
+    env = os.environ.copy()
+    env["LEAN_PATH"] = os.pathsep.join((os.path.abspath(lib_dir),
+                                        env.get("LEAN_PATH", "")))
+    with scratch_dir("print-axioms") as td:
+        source = os.path.join(td, "axioms.lean")
+        with open(source, "w", encoding="utf-8") as f:
+            # ONE `import` per module: `import A B C` is not Lean.  It reads as if
+            # it were and it is not — the pinned parser reads the module name and
+            # then finds `Refine` where a command was expected — so a multi-module
+            # `import` line leaves every module after the FIRST one unimported and
+            # every declaration in it an `Unknown constant`.  Measured here: 230 of
+            # 513 declarations "missing" for exactly that reason, which is the
+            # shape of a wholesale failure that a check keyed on "did anything
+            # come back" would have passed.
+            for m in imports:
+                f.write(f"import {m}\n")
+            for n in names:
+                f.write(f"#print axioms {n}\n")
+        run = run_lean(lean, [source], env=env, wall_s=wall_s, cpu_s=cpu_s,
+                       mem_mb=mem_mb)
+        return run, parse_axioms(run.stdout)
+
+
 def _measure_one(lean: str, source: str, workdir: str, env: dict,
                  timeout: int, source_lines=None, cpu_s: float | None = None):
     """The hole census of one module, or None if it could not be measured.

@@ -546,15 +546,20 @@ def contract_texts_are_unique(contracts: list) -> str:
 # 2026-10-04 (`bugs/FORMAL_trust_audit_2026-10-04.md`): the first half of that
 # sentence is true of the SOURCE TEXT and false of a theorem's transitive
 # closure.  There is no `axiom` declaration and no `sorry` in any of the five
-# modules — and 749 proof sites are closed by `native_decide` or `bv_decide`,
+# modules — and 751 proof sites are closed by `native_decide` or `bv_decide`,
 # which do not go through the kernel: they compile a decision procedure and run
-# it, and close the goal through Lean's `Lean.ofReduceBool` axiom.
-# `#print axioms` on such a theorem reports `Lean.ofReduceBool`, and `OPUS.md` §1
-# already says so about a generated theorem ("plus the project's usual
+# it, and close the goal through a generated axiom.  What that axiom is CALLED
+# is not what the first version of this paragraph said; see `AXIOM_TACTICS` and
+# `formal/lean.py::GENERATED_AXIOM_RE`.  `#print axioms` on such a theorem
+# reports an axiom named after the theorem, and `OPUS.md` §1 already says as
+# much about a generated theorem ("plus the project's usual
 # `native_decide`/`bv_decide` step-lemma axioms") without FORMAL.md's inventory
-# having a row for it.  That 749 is a CEILING rather than an equality, because it
+# having a row for it.  That 751 is a CEILING rather than an equality, because it
 # is a debt being paid down and `lib/ProofLib.lean` is edited by many hands at
 # once; `test_formal_admitted.py` pins it, reports it, and fails when it rises.
+# It was **749 until 2026-10-04 and 749 was wrong**: the scanner's own apostrophe
+# rule (`lean_code_regions`) hid two sites, so this figure is a measurement of a
+# fixed instrument and not of the file it started out measuring.
 #
 # WHY THIS IS NOT A BUG AND WHY IT IS STILL COUNTED
 # -------------------------------------------------
@@ -587,7 +592,24 @@ def contract_texts_are_unique(contracts: list) -> str:
 # kernel checks.  `exact_decide` is not a Lean 4 tactic and `implemented_by` is
 # not used in `lib/`; both are checked by the test that pins this list, so a
 # library that starts using one cannot be counted correctly.
+#
+# The axiom is NOT `Lean.ofReduceBool`, and that name must not be written here:
+# `ofReduceBool` is DEPRECATED on the pinned 4.32.2, and each use of either
+# tactic elaborates to a fresh axiom named after the DECLARATION that used it
+# (`work_step_mov._native.native_decide.ax_1_1`).  Measured; see
+# `formal/lean.py::GENERATED_AXIOM_RE`.  A census that matched the source
+# against `ofReduceBool` would be green over a library that reaches an axiom at
+# every one of these sites.
 AXIOM_TACTICS = ("native_decide", "bv_decide")
+
+# What a tactic site costs depends on WHICH one, and the difference is not a
+# matter of degree: `bv_decide`'s subject is a `∀ w, …` over a 32-bit word, where
+# no kernel decision procedure is going to enumerate 2^32 cases, and
+# `native_decide`'s subject in `lib/` was a CLOSED proposition over literals —
+# which `decide` discharges in microseconds and the kernel checks.  So the two
+# are named apart here and the test can require the expensive one only where it
+# is the only tool.
+CHEAP_AXIOM_TACTICS = ("decide", "rfl", "simp", "omega", "norm_num")
 
 
 def lean_code_regions(text: str) -> str:
@@ -605,6 +627,24 @@ def lean_code_regions(text: str) -> str:
         ordinary string mis-lexes every `r"` in the file);
       * `'…'` character literals, because a `'/'` or `'-'` inside one would
         otherwise open a comment that swallows the rest of the file.
+
+    **A `'` after an identifier character is an identifier's PRIME, not the
+    opening of a character literal**, and getting that wrong cost this census two
+    sites out of 751 — the reason is worth keeping because the failure is silent
+    and large.  Lean 4 identifiers may contain `'`, and `lib/ProofLib.lean` has
+    `fieldTag_inj'`, `fieldTag_inj''` and about forty more.  Treating the first
+    of those as a literal opener blanks everything to the next apostrophe in the
+    file, which lands in the middle of an unrelated docstring; from there the
+    scanner is inside a string it invented, so it blanks REAL CODE — measured on
+    `lib/` before the fix: **74 declaration headers that start at the beginning
+    of a line were blanked as if they were prose** (62 in `ProofLib`, 11 in
+    `Refine`, 1 in `Contracts`), among them `private def stmtsSize` and the `end`
+    that closes a `mutual`, and two `bv_decide` sites at `lib/ProofLib.lean:1579`
+    and `:1582` were not counted at all.  So the published figure was 749 where
+    the truth is 751.  `test_formal_admitted.py::check_the_stripper_sees_every_
+    declaration` is the assertion that would have caught it.  The rule is
+    local and total: the `'` is a prime iff the character before it is
+    alphanumeric, `_` or `'`.
 
     Lean's multi-line string delimiter (three double quotes) is deliberately
     absent from the list above: `lib/` contains none, and a scanner that guessed
@@ -640,6 +680,11 @@ def lean_code_regions(text: str) -> str:
             depth = 1
             out.append("  ")
             i += 2
+            continue
+        if ch == "'" and i > 0 and (text[i - 1].isalnum()
+                                    or text[i - 1] in "_'"):
+            out.append(ch)          # an identifier's prime, not a literal
+            i += 1
             continue
         if ch in "\"'":
             raw = (ch == '"' and i > 0 and text[i - 1] == "r"
@@ -684,10 +729,18 @@ def library_trust(lean_dir: str) -> dict:
       `axiom`   an `axiom`/`opaque` declaration — none is wanted, ever (§7);
       `sorry`   a hole — countable here and, more precisely, by Lean itself;
       `axiom_tactic`  a `native_decide`/`bv_decide` site, whose proof term
-                 reaches `Lean.ofReduceBool` rather than the kernel.
+                 reaches a generated axiom rather than the kernel (see
+                 `AXIOM_TACTICS` for the name it has and is not).
 
     Both the count and the LINES come back, because a count with no location is
     a number nobody can act on and a location with no count is a note.
+
+    This is a count of SITES, which is what the source text can decide and
+    therefore what can sit in a test that runs every time.
+    `library_trust_by_declaration` below is the same census attributed to the
+    declaration each site is in, and `formal/lean.py::print_axioms` is the
+    measurement no text scan can do: which axioms a theorem's TRANSITIVE closure
+    reaches.
     """
     out = {}
     for name in sorted(os.listdir(lean_dir)):
@@ -724,6 +777,185 @@ def library_trust_lines(lean_dir: str) -> list:
                 shown = ",".join(str(x) for x in lines[:6])
                 more = "" if len(lines) <= 6 else f",+{len(lines) - 6}"
                 out.append(f"{mod}: {kind}={count} at {shown}{more}")
+    return out
+
+
+# A top-level DECLARATION and the NAME LEAN GAVE IT, which is not the same
+# string: `lib/ProofLib.lean` declares `backward_branch_run_none` inside
+# `namespace DylibExport`, so a `#print axioms` line has to spell
+# `DylibExport.backward_branch_run_none` and a census that reported the bare
+# name would produce a file full of `Unknown constant` errors and look like a
+# disagreement rather than a namespace.  `def`/`abbrev`/`instance`/`example` are
+# in the shape because a tactic can sit in any of them's bodies.
+_DECL_RE = re.compile(r"(?m)^[ \t]*(?:@\[[^\]\n]*\][ \t\n]*)*"
+                      r"(?P<mods>(?:private\s+|protected\s+|noncomputable\s+)*)"
+                      r"(?:theorem|lemma|def|abbrev|instance|example)\s+"
+                      r"(?P<name>[A-Za-z_][\w'.]*)")
+# Every construct that opens a LeAN SCOPE, in one regex, because a scope this
+# scanner does not know about is a scope it will attribute wrongly.
+#
+# `[ \t]+` after the keyword, never `\s+`: `\s` spans newlines, so `^end\s+(n)`
+# matched the BARE `end` at `lib/ProofLib.lean:6462` followed by the blanked-out
+# body of the next declaration's docstring and took `def` for a namespace name.
+# Measured — the symptom was a scanner reporting a perfectly balanced file as
+# mis-nested, which is what sent this to raising in the first place.
+#
+# `section` and `mutual` are here for a measured reason rather than a
+# general one: `lib/ProofLib.lean:6445` opens a `mutual` and closes it with a
+# BARE `end` at `:6462`, and `:6708`/`:6724` is a second pair. A scanner that
+# knew only `namespace` put the second `end` where a namespace should have been,
+# and every declaration after `:6462` got a name one level too shallow.
+_SCOPE_OPEN_RE = re.compile(r"(?m)^(namespace|section|mutual)(?:[ \t]+"
+                            r"([A-Za-z_][\w'.]*))?[ \t]*$")
+# `_kind` 0 opens a scope, 1 closes one; `_name` is the namespace or None.
+_SCOPE_RE = re.compile(r"(?m)^(end)(?:[ \t]+([A-Za-z_][\w'.]*))?[ \t]*$")
+
+#: The key a site lands under when no declaration starts above it.  A named
+#: sentinel rather than a silently dropped site: the alternative loses a count,
+#: and a count that is short because a site found no owner is indistinguishable
+#: in the output from a count that is right.
+UNATTRIBUTED = "<no declaration above the site>"
+
+
+def _declarations(code: str) -> list:
+    """`(line, qualified_name, is_public)` for every declaration in `code`.
+
+    `code` is the comment-stripped text, so a `theorem` inside a docstring is
+    not a declaration.  `is_public` is False for `private`, and it is reported
+    rather than filtered because the two consumers need opposite things:
+    `library_trust_by_declaration` counts a `private` declaration's sites (they
+    are sites), and `#print axioms` cannot NAME one — Lean mangles it, so
+    `test_formal_axioms.py` can only ask about the public ones and has to
+    assert that no `private` declaration carries a tactic site.
+
+    The scope stack holds one entry per open scope: a NAMESPACE by its name, and
+    a `section`/`mutual` as `(None, keyword)`. Only namespaces contribute a name
+    to the declarations inside them, but both have to be on the stack, because a
+    BARE `end` closes the innermost scope whatever it is: `lib/ProofLib.lean:6445`
+    opens a `mutual` and `:6462` closes it with a bare `end`, and a stack that
+    did not hold the `mutual` would pop `namespace MF` instead and name every
+    declaration in the next 160 lines one level too shallow. `:6708`/`:6724` is
+    a second pair of the same shape.
+
+    An `end NAME` that does not match, or an `end` with nothing open, raises
+    rather than guessing: a mis-nested name attributes every site after it to
+    the wrong theorem, and a wrong attribution is worse than no census because
+    it is still a census.
+    """
+    events = []
+    for m in _SCOPE_OPEN_RE.finditer(code):
+        events.append((m.start(), 0, m.group(1), m.group(2)))
+    for m in _SCOPE_RE.finditer(code):
+        events.append((m.start(), 1, m.group(1), m.group(2)))
+    events.sort()
+    out, stack, pos = [], [], 0
+
+    def emit(upto):
+        for m in _DECL_RE.finditer(code, pos, upto):
+            out.append((code.count("\n", 0, m.start()) + 1,
+                        ".".join([s[0] for s in stack if s[0]]
+                                 + [m.group("name")]),
+                        "private" not in m.group("mods")))
+
+    for off, kind, kw, name in events:
+        # Every declaration that STARTED before this event is emitted here and
+        # named by the stack as it stood WHERE IT STARTED, which is why the pop
+        # happens after the emit rather than before it.
+        emit(off)
+        pos = off
+        line = code.count("\n", 0, off) + 1
+        if kind == 0:
+            if name is None and kw == "namespace":
+                raise ValueError(
+                    f"lib/{line}: a bare `namespace`, which this scanner will "
+                    f"not guess the name of. Name it.")
+            stack.append((name, kw))
+            continue
+        if not stack:
+            raise ValueError(
+                f"lib/{line}: `end {name or ''}` closes nothing, so this "
+                f"scanner and the file disagree about the scopes.")
+        if name is not None and stack[-1][0] != name:
+            raise ValueError(
+                f"lib/{line}: `end {name}` closes the {stack[-1][1]} "
+                f"{stack[-1][0] or '(unnamed)'!r}, so this scanner and the "
+                f"file disagree about the scopes. Fix the nesting rather than "
+                f"the scanner: a mis-nested name attributes every site after it "
+                f"to the wrong theorem.")
+        stack.pop()
+    emit(len(code))
+    left = [s for s in stack if s[0]]
+    if left:
+        raise ValueError(f"lib/: namespace {left[-1][0]!r} is never closed")
+    out.sort()
+    return out
+
+
+def library_trust_by_declaration(lean_dir: str) -> dict:
+    """`library_trust`'s `axiom_tactic` sites, attributed to a DECLARATION.
+
+    `{module: {qualified_name: (count, (lines…))}}`.  This is the direction the
+    module-level census cannot give: `library_trust` says how many sites a
+    FILE has, and a file is not something a reader can fix — a theorem is.  The
+    ceiling the library-trust test pins is per module because that is the number
+    a merge moves; this is the number a replacement moves, and it is what makes
+    "these four theorems are now kernel-checked" a checkable claim rather than
+    a sentence in a commit message.
+
+    Names are QUALIFIED (`DylibExport.backward_branch_run_none`), because the
+    consumer of this is a `#print axioms` line and Lean's spelling is the
+    qualified one.
+
+    Raises rather than guessing if the namespace nesting does not balance: a
+    scanner that mis-nested would attribute sites to the wrong theorems, and a
+    wrong attribution is worse than no census because it is a census.
+    """
+    census = library_trust(lean_dir)
+    out = {}
+    for mod, kinds in census.items():
+        path = os.path.join(lean_dir, mod + ".lean")
+        try:
+            with open(path, encoding="utf-8") as f:
+                code = lean_code_regions(f.read())
+        except OSError:
+            continue
+        decls = _declarations(code)
+        per = {}
+        for site in kinds["axiom_tactic"][1]:
+            owner = UNATTRIBUTED
+            for line, name, _public in decls:
+                if line <= site:
+                    owner = name
+                else:
+                    break
+            per.setdefault(owner, []).append(site)
+        out[mod] = {name: (len(lines), tuple(lines))
+                    for name, lines in sorted(per.items())}
+    return out
+
+
+def native_decide_declarations(lean_dir: str) -> dict:
+    """`{module: {qualified_name: lines…}}` for `native_decide` sites only.
+
+    Split out from `bv_decide` because the two are not interchangeable and the
+    difference is worth a name.  Every `bv_decide` in `lib/` closes a `∀ w, …`
+    over a 32-bit word, where bit-blasting is the only tool; a `native_decide`
+    in this tree has been a CLOSED proposition over literals, which `decide`
+    discharges and the KERNEL checks.  So this is the census a reader can act on
+    where `library_trust_by_declaration` is the census a reader can only count.
+    """
+    out = {}
+    for mod, per in library_trust_by_declaration(lean_dir).items():
+        raw = os.path.join(lean_dir, mod + ".lean")
+        with open(raw, encoding="utf-8") as f:
+            code = lean_code_regions(f.read()).split("\n")
+        hits = {}
+        for name, (_n, lines) in per.items():
+            at = [ln for ln in lines if "native_decide" in code[ln - 1]]
+            if at:
+                hits[name] = tuple(at)
+        if hits:
+            out[mod] = hits
     return out
 
 

@@ -2430,7 +2430,7 @@ def lowMask : Nat → UInt64
   | 0 => 0
   | k + 1 => (0xFF : UInt64) ||| (lowMask k <<< 8)
 
-@[simp] theorem lowMask_eight : lowMask 8 = 0xFFFFFFFFFFFFFFFF := by native_decide
+@[simp] theorem lowMask_eight : lowMask 8 = 0xFFFFFFFFFFFFFFFF := by decide
 
 /-- **Writing the low byte at `a` disturbs no other address.**  A `k + 1`-byte
     write at `a` is a one-byte write at `a` followed by a `k`-byte write of the
