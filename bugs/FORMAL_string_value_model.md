@@ -1069,3 +1069,37 @@ four-row measurement and the reason "an unknown escape keeps its backslash" and
 in CPython. It is worth knowing that the encoding block above makes the formal
 half of that fix free: `len("\u00e9")` is 1 on both backends the moment the
 decoder knows the escape, because the fold reads the decoded text.
+
+## `ord`, `chr` and `hash` were not an encoding question at all
+
+Worth its own note because it was found *while* measuring the encoding and is
+**not fixed by anything in wave 9**: all three names reached the LINKER as a
+dangling symbol, because none of them was in `EMITTER_BUILTINS` and the extern
+path turns an unlowered call into a `BL` to a symbol no library defines.
+
+```
+build: the image would bind 1 symbol(s) that nothing provides, so it could not
+be loaded: ord. `ord` is a call this build emitted and nothing provides it …
+(Provider check: asked the C library (dlsym).)
+```
+
+**For `ord("A")` — an ASCII case**, which is the point. This is a question the
+path never answered, so the encoding block had nothing to add to it and the
+honest thing was to measure it rather than to fold it into the encoding story.
+
+One of the three has an answer and two do not, and the reason is the direction
+the value has to travel:
+
+| | direction | answer | why |
+|---|---|---|---|
+| `ord` | character → NUMBER | **folded** | a number is one word, which is what a formal value already is, and a literal's one character is known at compile time. `ord("é")` is 233 and `ord("😀")` is 128512 — neither is reachable by reading a byte, which is what makes this the unicode-relevant half |
+| `chr` | NUMBER → character | refused | the answer is a NEW one-character object, and a string value here is a `char *` into text the image maps read+execute and interns by content. `LENGTH_DEPENDENT_METHODS`'s missing buffer, from the other direction — and the reason `ord` folds where `chr` cannot is where each answer would LIVE, not how much work it is |
+| `hash` | text → NUMBER | refused | CPython randomises a `str` hash per process unless `PYTHONHASHSEED` is fixed, so two runs of one program disagree by design and **there is no value of the text for this to be right about**. That is not a gap and must not become one |
+
+`FRAME_VALUE_ONLY_CALLS` already carried all three, so a frame address handed to
+any of them was a category error before this — which is why intercepting them
+needed no argument-side change. Pinned by 12 rows in `test_formal_unicode.py`:
+four answered (`ord` over ASCII, Latin-1, CJK and an astral character; the fold
+in arithmetic; the `\xHH` spelling; the `0x7F` boundary) and eight refused, the
+three refusals' reasons being unrelated enough that one message would have made
+at least two of them false.

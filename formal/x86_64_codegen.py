@@ -3347,6 +3347,33 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # RAX holds the blob address; the count is its first 8 bytes.
         self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX, 0))
 
+    def _emit_text_builtin(self, e: F.CallExpr, name: str) -> None:
+        """`ord(x)` / `chr(n)` / `hash(s)` — one folds, two are refused by name.
+
+        Delegation and nothing else: `model.ord_fold` decides the one answer
+        that exists and `model.text_builtin_refusal` words the other three, so
+        x86-64's copy of this cannot come to disagree with arm64's about any of
+        them.  A second copy of the refusal text would be a second thing to fall
+        out of step, and the whole point of intercepting these at all is that
+        the refusal replaces a LINK-TIME message four stages late.
+
+        The three reasons are unrelated and that is why there are three: `ord`'s
+        is what the build can SEE (a literal's one character is known, so it is
+        folded; a name's is not), `chr`'s is where the answer would LIVE (a new
+        one-character object, and a string value is a `char *` into read+execute
+        text), and `hash`'s is that CPython randomises a `str` hash per process,
+        so there is no value of the text to be right about.
+        """
+        args = list(e.args or [])
+        if getattr(e, "kwargs", None):
+            raise CodegenError(M.text_builtin_refusal(
+                name, list(e.args or [])))
+        fold = M.ord_fold(args) if name == "ord" else None
+        if fold is not None:
+            self._emit_mov_imm(Reg.RAX, fold)
+            return
+        raise CodegenError(M.text_builtin_refusal(name, args))
+
     # ── print ────────────────────────────────────────────────────────────
 
     # ── what a value is, for the paths that must decide before emitting ──
@@ -8570,6 +8597,9 @@ ctor_field_value=self._ctor_field_value_for(name),
                 return
             if name == "print":
                 self._emit_print(e)
+                return
+            if name in ("ord", "chr", "hash"):
+                self._emit_text_builtin(e, name)
                 return
         if not is_extern_call and M.builtin_function(name) == "file_open":
             self._emit_open(e)

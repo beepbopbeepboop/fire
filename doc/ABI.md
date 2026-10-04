@@ -154,6 +154,19 @@ missing-capability list is `formal/model.py::LENGTH_DEPENDENT_METHODS` and
 `bugs/FORMAL_string_composition_has_no_buffer.md`; the encoding question is
 downstream of both and is the easier half.
 
+**Three text builtins, one of which has an answer here.** `ord` folds for a
+one-character string LITERAL — the character is known at compile time and a code
+point is one word, so `ord("é")` is 233 and `ord("\U0001F600")` is 128512 with no
+machine instruction at all. That is the only direction with an answer: `chr`'s
+is a NEW one-character object, which is rule 3's missing buffer reached from the
+other side, and `hash`'s is not an answer at all because CPython randomises a
+`str` hash per process unless `PYTHONHASHSEED` is fixed. Before this row, all
+three reached the LINKER as "the image would bind 1 symbol(s) that nothing
+provides: ord" — including the ASCII `ord("A")` — which is a statement about the
+link line produced four stages after the one that could have named the construct.
+The three refusals are `formal/model.py::text_builtin_refusal`, and they are
+three messages because the three reasons have nothing in common.
+
 **And the escape spellings are a front-end gap, not an ABI one.** `\uXXXX`,
 `\UXXXXXXXX`, `\N{…}` and multi-digit octal escapes are not decoded by any engine
 in this repository, so a Mojo literal `"\u00e9"` is a six-character string where

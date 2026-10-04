@@ -60,20 +60,32 @@ CPython. Without the guard a fix that refused everything would pass this file.
 
   * `\\uXXXX`, `\\UXXXXXXXX` and `\\N{…}` ESCAPES are not decoded by
     `fire_compiler.decode_c_escapes`, so all three engines make a six-character
-    string out of `"\\u00e9"` where CPython makes one character. That is a
-    FRONT-END question shared by the interpreter, the compiled path and both
-    formal backends, not a formal-backend divergence, so it is filed rather
-    than fixed here: `bugs/LEXER_unicode_escapes_are_not_decoded.md`.
-  * `ord`, `chr`, `hash`, `encode`, `decode` and iteration over a string are
-    refused or dangling before this file reaches them, for reasons that have
-    nothing to do with encoding (`ord`/`chr` are not lowered at all;
-    `encode`/`decode` are refused as value methods; iteration over a string is
-    `string_iteration_refusal`). They are recorded in that doc and in the two
-    bug docs above; this file pins what the encoding block decides.
+    string out of `"\\u00e9"` where CPython makes one character (and a
+    thirty-five-character one out of `"\\N{…}"`). That is a FRONT-END question
+    shared by the interpreter, the compiled path and both formal backends, not a
+    formal-backend divergence, so it is filed rather than fixed here:
+    `bugs/LEXER_unicode_escapes_are_not_decoded.md`. The rows here that want a
+    character outside ASCII therefore SPELL IT rather than escape it, and say so.
+  * `encode` and `decode` are refused as VALUE METHODS before any question
+    about encoding arises — `formal/model.py`'s `BUILTIN_VALUE_METHODS` has
+    neither name. Both are string→bytes and bytes→string, so on this path they
+    would be a blob's element width (the undecided half of
+    `bugs/FORMAL_bytearray_and_bytes_have_no_representation.md`) and a
+    one-object buffer respectively; neither is modelled and neither is
+    approximated. Not pinned here because the refusal is about the METHOD TABLE
+    and not about text.
+  * ITERATION over a string is `string_iteration_refusal`, which fires on the
+    container protocol rather than on the encoding: a blob walk reads eight bytes
+    at offset 0 and calls the result a count, and a string's first eight bytes
+    are text. Refusing it is right on this path; how many characters it *would*
+    yield is the question this file's `len` rows answer, and it is answered.
   * `upper`/`lower`/`strip`/`title`/`join`/`split`/`replace`/`reverse` are
     refused by `LENGTH_DEPENDENT_METHODS` for the missing BUFFER, before any
-    question about ASCII or UTF-8 arises. That is the right refusal and it is
-    not this file's to change.
+    question about ASCII or UTF-8 arises. That is the right refusal, it is not
+    this file's to change, and `refuse_chr_names_the_missing_buffer` is in the
+    REFUSAL table precisely because it is the SAME buffer reached from the other
+    direction — which is what makes `ord`'s fold and `chr`'s refusal one
+    asymmetry with one cause rather than two decisions.
 """
 import argparse
 import os
@@ -409,6 +421,50 @@ ORACLE_CASES = [
      '    d = {"hé": 1, "日": 2}\n'
      '    print("%d %d %d" % (d["hé"], d["日"], len(d)), end="\\n")\n'),
 
+    # ── `ord`: character -> NUMBER, the direction that has an answer ──────
+    #
+    # A code point is not a byte, which is the whole reason this is in the
+    # file: `ord("é")` is 233 where the lead byte is 195, and `ord("😀")` is
+    # 128512 where the bytes are four.  So `ord` is a construct an encoding-blind
+    # lowering gets wrong, and it reached the LINKER as a dangling symbol before
+    # (for `ord("A")` too — this is not an encoding question, it is a question
+    # the path never answered).
+    ("ord_folds_to_the_code_point",
+     'def main(n):\n'
+     '    printf("%d %d %d %d\\n", ord("A"), ord("é"), ord("日"), ord("\U0001F600"))\n'
+     '    return 0\n',
+     'def main():\n'
+     '    print("%d %d %d %d" % (ord("A"), ord("é"), ord("日"), ord("\U0001F600")), '
+     'end="\\n")\n'),
+
+    # The fold has to be a VALUE and not a constant in a special register: it is
+    # used in arithmetic here, so a build that materialised it in the wrong place
+    # would answer 0 or the string's own address.
+    ("ord_fold_is_an_ordinary_value",
+     'def main(n):\n'
+     '    var i = ord("é") + 1\n'
+     '    printf("i=%d\\n", i)\n'
+     '    return 0\n',
+     'def main():\n'
+     '    i = ord("é") + 1\n'
+     '    print("i=%d" % i, end="\\n")\n'),
+
+    # A `\\xHH`-escaped byte, which is the row that says the fold reads the
+    # DECODED text: `ord("\\xe9")` is 233 and not 0xe9 or a two-byte something.
+    ("ord_of_a_hex_escaped_byte_is_the_code_point",
+     'def main(n):\n'
+     '    printf("%d\\n", ord("\\xe9"))\n'
+     '    return 0\n',
+     'def main():\n'
+     '    print("%d" % ord("\\xe9"), end="\\n")\n'),
+
+    ("ord_of_an_ascii_del_is_its_code_point",
+     'def main(n):\n'
+     '    printf("%d\\n", ord("\\x7f"))\n'
+     '    return 0\n',
+     'def main():\n'
+     '    print("%d" % ord("\\x7f"), end="\\n")\n'),
+
     # ── GUARDS: the ASCII rows beside every refusal ──────────────────────
     #
     # `printf_width_on_ascii_text_is_a_byte_width_and_agrees`,
@@ -576,6 +632,77 @@ REFUSAL_CASES = [
      '    printf("[%6s]\\n", s)\n'
      '    return 0\n',
      ["`%6s`", "is refused", "'héllo'"]),
+
+    # ── the three TEXT BUILTINS with no lowering ──
+    #
+    # None of these is an encoding question and that is the point of the group:
+    # `ord("A")`, `chr(65)` and `hash("abc")` all reached the LINKER as
+    # "the image would bind 1 symbol(s) that nothing provides: ord/chr/hash",
+    # which is a statement about the link line produced four stages after the one
+    # that could have named the construct. The needles are the three REASONS,
+    # and they are unrelated to each other, which is why there are three messages
+    # rather than one.
+    ("refuse_chr_names_the_missing_buffer",
+     'def main(n):\n'
+     '    var s = chr(233)\n'
+     '    printf("[%s]\\n", s)\n'
+     '    return 0\n',
+     ["chr(233) is refused", "NEW one-character",
+      "nowhere to put one", "LENGTH_DEPENDENT_METHODS"]),
+
+    ("refuse_chr_of_an_ascii_code_point_is_still_refused",
+     'def main(n):\n'
+     '    var s = chr(65)\n'
+     '    printf("[%s]\\n", s)\n'
+     '    return 0\n',
+     ["chr(65) is refused", "NEW one-character"]),
+
+    ("refuse_hash_says_the_answer_is_not_a_function_of_the_text",
+     'def main(n):\n'
+     '    var h = hash("héllo")\n'
+     '    printf("h=%d\\n", h)\n'
+     '    return 0\n',
+     ["hash('héllo') is refused", "RANDOMISES", "PYTHONHASHSEED",
+      "no value of the text"]),
+
+    ("refuse_hash_of_an_ascii_string_is_the_same_refusal",
+     'def main(n):\n'
+     '    var h = hash("abc")\n'
+     '    printf("h=%d\\n", h)\n'
+     '    return 0\n',
+     ["RANDOMISES"]),
+
+    # `ord` of a NAME, which is the one half of `ord` that has no answer: the
+    # code point of a character this build cannot see. The needle is the
+    # sentence that says WHY a byte is not it, because that is the sentence a
+    # reader who is about to write `s[0]` needs.
+    ("refuse_ord_of_a_name_the_build_cannot_see",
+     'def main(n):\n'
+     '    var s = "héllo"\n'
+     '    var c = ord(s[0])\n'
+     '    printf("c=%d\\n", c)\n'
+     '    return 0\n',
+     ["ord(", "is refused", "cannot see what character",
+      "`ord(\"é\")` is 233", "the byte is 195"]),
+
+    # `ord` of a literal that is not ONE character — a `TypeError` in CPython,
+    # so the refusal has to say that rather than invent a number. The needle
+    # names the count, which is the part that tells a reader which of the two
+    # reasons they hit.
+    ("refuse_ord_of_a_multi_character_literal",
+     'def main(n):\n'
+     '    var c = ord("日本")\n'
+     '    printf("c=%d\\n", c)\n'
+     '    return 0\n',
+     ["ord(", "is refused", "exactly ONE character", "this literal has 2",
+      "TypeError"]),
+
+    ("refuse_ord_of_an_empty_literal",
+     'def main(n):\n'
+     '    var c = ord("")\n'
+     '    printf("c=%d\\n", c)\n'
+     '    return 0\n',
+     ["exactly ONE character", "this literal has 0"]),
 ]
 
 

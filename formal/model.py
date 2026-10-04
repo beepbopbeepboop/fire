@@ -6623,6 +6623,144 @@ def codepoint_refusal(construct: str, spelled: str) -> str:
         f"`strstr` offset and a `%s` width mean what Python means by them")
 
 
+# ── `ord` / `chr` / `hash`: a character as a NUMBER, and back ───────────────
+#
+# All three are in `FRAME_VALUE_ONLY_CALLS` already — a frame address handed to
+# any of them is a category error — and all three reached the LINKER as a
+# dangling symbol instead, because none of them is in `EMITTER_BUILTINS`.  That
+# is the wrong message four stages late, and it is the same shape as
+# `bugs/FORMAL_bytearray_and_bytes_have_no_representation.md`'s §"why the
+# message is the wrong one to stop at":
+#
+#   build: the image would bind 1 symbol(s) that nothing provides, so it could
+#   not be loaded: ord. … (Provider check: asked the C library (dlsym).)
+#
+# for `ord("A")` — an ASCII case, which is the point: this is not an encoding
+# question, it is a question this path never answered, and the encoding work in
+# the block above had nothing to add to it.  Measured on both architectures, all
+# three the same way, ASCII operands included.
+#
+# ONE of the three has an answer here and two do not, and the reason is the
+# direction the value has to travel:
+#
+#   ord  character -> NUMBER.  A number is one word, which is what a formal
+#        value already is, and for a LITERAL the character is known at compile
+#        time — so the fold is `ord()` of the decoded text, with no machine
+#        instruction and no libc call.  This is a new capability and it is the
+#        unicode-relevant one: `ord("é")` is 233 and `ord("\U0001F600")` is
+#        128512, neither of which is reachable by reading a byte.
+#
+#   chr  NUMBER -> character.  The answer is a NEW one-character object, and a
+#        string value on this path is a `char *` into an image section mapped
+#        read+execute and interned by content, so there is nowhere to put one.
+#        That is `LENGTH_DEPENDENT_METHODS`'s missing buffer reached from the
+#        other direction — and it is why `ord` folds where `chr` cannot, which
+#        looks asymmetric until you ask where each answer would live.
+#
+#   hash  text -> NUMBER, and the number is NOT A FUNCTION OF THE TEXT.  CPython
+#        randomises `str` hashing per process unless `PYTHONHASHSEED` is fixed,
+#        so there is no answer to be right about: two runs of the same program
+#        disagree by design.  Refusing is not a gap here; it is the only honest
+#        option, and it is why `hash` belongs in this block rather than in a
+#        list of constructs nobody has reached yet.
+
+# The two with no lowering, named so the emitters' dispatch and this comment
+# cannot come apart.  `ord` is deliberately NOT here: it has an arm.
+TEXT_BUILTINS_WITHOUT_A_LOWERING = ("chr", "hash")
+
+
+def ord_fold(args: list):
+    """The code point of `args[0]` when the build knows it, else None.
+
+    `ord()` of one character, which is CPython's whole rule — `ord("")` and
+    `ord("ab")` are both a `TypeError`, so a literal of any other length is not
+    folded and `text_builtin_refusal` says which of the two reasons it is.
+
+    The DECODED text, through `string_literal_text`, so `ord("\xe9")` is 233 and
+    not the two bytes' worth of something else.  That is the whole interaction
+    with the TEXT ENCODING block above and it is worth stating: a code point is
+    not a byte, so this is one of the two places (the other being `chr`) where
+    the encoding question is a question at all.
+    """
+    if len(args) != 1:
+        return None
+    text = string_literal_text(args[0])
+    if text is None or codepoint_count(text) != 1:
+        return None
+    return ord(text)
+
+
+def text_builtin_refusal(name: str, args: list) -> str:
+    """Why `name(...)` is refused here, with the reason that is specific to it.
+
+    One function for the three so the two machines cannot word one construct
+    differently, and one message per name because the three reasons have nothing
+    in common: `ord`'s is about what the build can SEE, `chr`'s is about where
+    the answer would LIVE, and `hash`'s is that CPython does not define one.
+    Spelling them as one sentence would make at least two of them false.
+    """
+    # NOT named `spelled`: that is this module's function for spelling an
+    # expression, and a local of the same name shadows it inside the
+    # comprehension below — which is a NameError at build time rather than a
+    # wrong answer, and one that only fires on the REFUSAL path, so the six
+    # `ord` rows that answer would have stayed green.
+    shown = ", ".join(spelled(a) for a in args) if args else ""
+    if name == "ord":
+        text = string_literal_text(args[0]) if len(args) == 1 else None
+        if text is not None:
+            return (
+                f"ord({shown}) is refused: CPython's `ord` takes exactly ONE "
+                f"character and this literal has "
+                f"{codepoint_count(text)}, which is a TypeError there rather "
+                f"than a number. Nothing to lower, and lowering it anyway — to "
+                f"the first byte, or to the last — would be a wrong answer in "
+                f"the shape of a right one")
+        return (
+            f"ord({shown}) is refused: `ord` is the code point of ONE "
+            f"character, and this build cannot see what character "
+            f"{shown or 'the operand'} holds — it is a name, a parameter or "
+            f"a call, and its bytes are behind a `char *` only at run time. "
+            f"The answer would be a NUMBER, which is the easy direction (a "
+            f"formal value is one 64-bit word), but the code point of a "
+            f"multi-byte character is not any of its bytes: `ord(\"é\")` is 233 "
+            f"where the byte is 195, and `ord(\"\\U0001F600\")` is 128512 where "
+            f"the bytes are four. Reading the byte would be right for ASCII "
+            f"and wrong everywhere else, which is the byte-versus-character "
+            f"answer this path does not give. What it CAN do: `ord` a string "
+            f"LITERAL, whose one character is known at compile time and is "
+            f"folded — or keep the text ASCII, where the byte is the character "
+            f"and the arithmetic is written out")
+    if name == "chr":
+        return (
+            f"chr({shown}) is refused: its answer is a NEW one-character "
+            f"`String`, and a string on this path is a bare `char *` to bytes "
+            f"in the image's own text section — which is mapped read+execute "
+            f"and interned BY CONTENT, so there is nowhere to put one and "
+            f"nothing to intern it into. `ord`, the other direction, is folded, "
+            f"and the asymmetry is the representation rather than the effort: a "
+            f"number is one word and a character is an object. This is the same "
+            f"missing buffer `upper()`/`join()`/`replace()` are refused for "
+            f"(`LENGTH_DEPENDENT_METHODS`), reached from the other side. What "
+            f"this path CAN do: build the character from its code point as "
+            f"bytes the program already has — `String([n as UInt8])` over a "
+            f"list you built — for a character below 128, where one byte is "
+            f"the whole of it")
+    if name == "hash":
+        return (
+            f"hash({shown}) is refused, and the reason is not a gap: "
+            f"CPython RANDOMISES the hash of a `str` per process unless "
+            f"`PYTHONHASHSEED` is fixed, so two runs of one program disagree "
+            f"by design and there is no value of the text for this to be right "
+            f"about. A build that folded one would answer with a number CPython "
+            f"disagrees with, and a build that called libc would be right about "
+            f"neither. If what the program wants is a DICTIONARY KEY, use the "
+            f"string as one — `d[{shown or 'k'}]` — where the comparison is "
+            f"the content compare and the hash never appears")
+    return (f"{name}({shown}) is a text builtin this path does not lower, "
+            f"and no reason is recorded for it, which is a table entry with no "
+            f"arm rather than a construct")
+
+
 def frame_container_operand_refusal(op: str, spelled: str, struct_names):
     """Why a CONTAINER operation on a FRAME ADDRESS is wrong. Always a refusal.
 
@@ -13579,6 +13717,17 @@ EMITTER_BUILTINS = {
     "range": "range_list",
     "len": "len",
     "print": "print",
+    # `ord`, `chr` and `hash` are here for a reason that is not "the backend can
+    # do them": ONE of them can and two cannot, and all three reached the LINKER
+    # as dangling symbols before, because a name absent from this table is a
+    # call the backend does not compile and the extern path turns into a `BL` to
+    # a symbol no library defines.  Intercepting them here is what lets the two
+    # refusals be refusals — with the reason that is specific to each — instead
+    # of a link-time message about a symbol, produced four stages after the one
+    # that could have named the construct.  See the `ord`/`chr`/`hash` block.
+    "ord": "text_builtin",
+    "chr": "text_builtin",
+    "hash": "text_builtin",
 }
 
 
