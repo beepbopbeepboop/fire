@@ -5963,11 +5963,47 @@ class Interpreter:
         A 'generator' expression is a REAL lazy generator object (see
         `_generator_expression`), not a materialized list.
 
-        Real Python list/set/dict comprehensions get their own scope; this
-        interpreter evaluates those in the *current* scope instead (same
-        simplification execute_ForStmt already makes for a plain `for`
-        loop) — their loop variables leak into the enclosing scope, a known
-        minor fidelity gap.
+        A list/set/dict comprehension gets its OWN SCOPE, as CPython's does,
+        and it used to be evaluated in the current scope instead (the same
+        simplification `execute_ForStmt` still makes for a plain `for` loop) —
+        so its loop variables LEAKED into the enclosing function. The
+        measurement that made it a bug rather than a note: `G = 5` /
+        `[G for G in rows]` / `return G + out[0]` printed 3 where CPython
+        prints 6, and both formal images printed 6, so the interpreter — the
+        engine every other parity test uses as the reference — disagreed with
+        the compiled path on a program that is otherwise correct, with no
+        diagnostic. `test_interp_oracle.py`'s
+        `a_comprehension_does_not_shadow_a_module_constant` (interpreter vs
+        CPython) and `test_formal_globals.py`'s case of the same name (arm64,
+        x86_64 and the interpreter) pin it.
+
+        **The compiled path still has this defect, by a different mechanism** —
+        it allocates the comprehension's target as a plain local of the
+        enclosing function, under the target's own source name, so that local
+        shadows the module global for the rest of the body and `fire.py --jit`
+        prints 3 where this now prints 6:
+        `bugs/CODEGEN_a_comprehension_target_is_a_local_of_the_enclosing_function.md`
+        quotes the generated C. Two engines agreeing on a wrong answer is why
+        the case above lives in the oracle rather than in the engine-vs-engine
+        suite.
+
+        `_generator_expression` twenty lines below already did this, and the
+        shape is the same one it uses: a child scope for the whole walk, with
+        names the comprehension READS still live through the parent chain.
+        That is a real closure rather than a copy, so the enclosing function's
+        locals and the module's globals both resolve normally from inside —
+        which is why the common case is unchanged and only the BINDING of the
+        loop variable moves.
+
+        The outermost iterable is evaluated inside the child scope too, and
+        that is Python's rule rather than an accident of the placement: in
+        `[... for x in y for y in x]`, `y` is read before `y` is bound, and
+        with the child scope in place that is structural — the first `y` can
+        only resolve to the enclosing one — instead of depending on the order
+        two nested `run` calls happen to bind in.
+
+        Save/push/restore rather than a new `return`, because of the one-return
+        discipline the docstring below explains.
 
         For a dict comprehension, fire_compiler.py's parser stores the KEY
         expression in `.element` and the VALUE expression in `.key` (yes,
@@ -6003,7 +6039,12 @@ class Interpreter:
                     if all(self.eval_expr(cond) for cond in gen.conditions):
                         run(rest)
 
-            run(expr.generators)
+            saved = self.scope
+            self.scope = Scope(parent=saved)
+            try:
+                run(expr.generators)
+            finally:
+                self.scope = saved
             if expr.kind == 'set':
                 result = set(results)
             elif expr.kind == 'dict':

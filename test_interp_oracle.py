@@ -231,6 +231,63 @@ def main():
     print(kw(a=1, b=2))
     print(sorted([1, 2, 3], key=Callable(10)))
 ''',
+    # A list/set/dict comprehension is its OWN SCOPE in Python 3: its `for`
+    # target binds nothing in the enclosing body, so the trailing `G` in
+    # `shadowed` is still the module's 5 and the answer is 6.
+    # `eval_Comprehension` evaluated those in the CURRENT scope — its own
+    # docstring called it a "known minor fidelity gap" — so this printed 3,
+    # and it was the only engine that did: both formal images print 6
+    # (`test_formal_globals.py`), which is the direction that matters, because
+    # the interpreter is the engine every other parity test treats as the
+    # reference.
+    #
+    # This is in the ORACLE and not in `test_runtime_diff.py` on purpose. The
+    # compiled path has the same defect by a different mechanism — it allocates
+    # the comprehension's target as a plain local of the enclosing function, so
+    # that local shadows the module global for the rest of the body — and it
+    # prints 3 there too, so an engine-vs-engine case would sit red until that
+    # half is fixed. Filed as
+    # `bugs/CODEGEN_a_comprehension_target_is_a_local_of_the_enclosing_function.md`,
+    # which quotes the generated C.
+    #
+    # The last arm is the control in the direction that matters: a plain `for`
+    # loop's target DOES bind in the enclosing scope (Python has no loop
+    # scope), so `execute_ForStmt`'s simplification is correct and must not be
+    # "fixed" along with the comprehension.
+    "a_comprehension_does_not_shadow_a_module_constant": '''\
+G = 5
+
+def shadowed(rows):
+    out = [G for G in rows]
+    return G + out[0]
+
+def shadowed_set(rows):
+    out = {k for k in rows}
+    return len(out)
+
+def shadowed_dict(rows):
+    out = {k: k for k in rows}
+    return len(out)
+
+def shadowed_local():
+    t = "outer"
+    lst = [t for t in ["c", "d"]]
+    return t + str(lst)
+
+def loop_target_still_binds():
+    m = 3
+    acc = []
+    for m in [1, 2]:
+        acc = acc + [m]
+    return acc + [m]
+
+def main():
+    print(shadowed([1, 2]))
+    print(shadowed_set([1, 2, 2]))
+    print(shadowed_dict(["a"]))
+    print(shadowed_local())
+    print(loop_target_still_binds())
+''',
 }
 
 # Shapes CPython CANNOT EXPRESS, so the corpus above cannot hold them: a
