@@ -975,12 +975,71 @@ def _host_source_path(name: str):
     return None
 
 
+def _module_scope_bindings(nodes, names):
+    """Every name bound at MODULE scope in `nodes`, and recursively in the bodies
+    of the statements that run at import.
+
+    A module attribute is a binding in the module's own namespace, and CPython's
+    stdlib puts a real share of them inside `if`/`try`/`with` at module level:
+    `types.py` binds `SimpleNamespace = type(sys.implementation)` inside a
+    module-level `try:` that imports `_collections_abc`, and `types.__all__` is
+    `[n for n in globals() if not n.startswith('_')]` — a COMPREHENSION, which
+    `ast.literal_eval` cannot answer, so the `__all__` path does not fire for
+    that module and the top-level scan is all there was.
+
+    Scanning `tree.body` alone therefore reported `types` as declaring six names
+    and the ranking printed `uses: 0 — every blocked file names nothing types
+    declares, so the row is import CLOSURE` while **22 blocked files spell
+    `types.SimpleNamespace` and 9 spell `types.ModuleType`** (`myinterpreter.py`
+    alone has 22 of the former). That is the direction this tool must never be
+    wrong in: it reads as "nothing to do here" and it is the largest false
+    negative the `--host` table has had.
+
+    The recursion stops at function and class bodies, and that boundary is the
+    whole discipline: a `def`'s locals are not module attributes, so descending
+    into one would add every local in CPython's stdlib (measured on `inspect`:
+    400+ names, none of them an attribute) and a `class`'s body is a namespace
+    of its own. What runs at import — `if`, `try`, `with`, `for`, `while` — is
+    descended, because a name bound there IS in the module's namespace.
+    """
+    import ast
+    for node in nodes:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef, ast.Lambda)):
+            names.add(node.name if hasattr(node, "name") else "")
+            continue
+        if isinstance(node, ast.Assign):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    names.add(tgt.id)
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name):
+                names.add(node.target.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, (ast.If, ast.Try, ast.With, ast.AsyncWith,
+                               ast.For, ast.AsyncFor, ast.While)):
+            _module_scope_bindings(node.body, names)
+            # `except` handlers and `else`/`finally` are module scope too, and
+            # `TryStar` (3.11+) is spelled separately from `Try` in the AST.
+            _module_scope_bindings(getattr(node, "orelse", []), names)
+            _module_scope_bindings(getattr(node, "finalbody", []), names)
+            for h in getattr(node, "handlers", []) or ():
+                _module_scope_bindings(h.body, names)
+
+
 def _host_declared_names(name: str):
     """The names a caller can bind from the host module `name`, or None.
 
-    `__all__` where CPython defines it as a literal list, else every top-level
+    `__all__` where CPython defines it as a literal list, else every module-scope
     binding the source makes that does not begin with an underscore. None means
     the names could not be read, which the printed row says is not a count of 0.
+
+    **A `__all__` that is not a literal list falls through to the scan, and that
+    fallback has to see module-scope bindings inside `if`/`try`/`with`** — see
+    `_module_scope_bindings`, and `types.py` for the case that made it a
+    function rather than a loop.
     """
     if name in _host_decl_cache:
         return _host_decl_cache[name]
@@ -992,22 +1051,17 @@ def _host_declared_names(name: str):
             with open(path, encoding="utf-8", errors="replace") as f:
                 tree = ast.parse(f.read(), filename=path)
             names = set()
-            for node in tree.body:
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                     ast.ClassDef)):
-                    names.add(node.name)
-                elif isinstance(node, ast.Assign):
-                    for tgt in node.targets:
-                        if isinstance(tgt, ast.Name):
-                            names.add(tgt.id)
-                elif isinstance(node, ast.AnnAssign):
-                    if isinstance(node.target, ast.Name):
-                        names.add(node.target.id)
-                elif isinstance(node, (ast.Import, ast.ImportFrom)):
-                    for alias in node.names:
-                        names.add(alias.asname or alias.name.split(".")[0])
+            _module_scope_bindings(tree.body, names)
             if "__all__" in names:
                 exported = None
+                for node in tree.body:
+                    if isinstance(node, ast.Assign) and any(
+                            isinstance(t, ast.Name) and t.id == "__all__"
+                            for t in node.targets):
+                        try:
+                            exported = list(ast.literal_eval(node.value))
+                        except Exception:               # noqa: BLE001
+                            exported = None
                 for node in tree.body:
                     if isinstance(node, ast.Assign) and any(
                             isinstance(t, ast.Name) and t.id == "__all__"
