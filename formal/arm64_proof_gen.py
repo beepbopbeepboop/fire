@@ -2848,14 +2848,19 @@ def _step_rhs(w: int, idx: int):
         return f"some (arm64_set_reg {rd} s (arm64_reg {rn} s ^^^ arm64_reg {rm} s))"
     if idx == 25:  # ORR register
         return f"some (arm64_set_reg {rd} s (arm64_reg {rn} s ||| arm64_reg {rm} s))"
-    if idx in (26, 27):  # MOVK 32/64: insert imm16 at LSL #(hw*16), keep rest
+    if idx in (26, 27):  # MOVK 32/64: INSERT imm16 at LSL #(hw*16)
+        # MOVK replaces the halfword; an OR only agrees with that when the
+        # halfword was zero, which is why the model got away with it and why
+        # this row and `arm64_step` now both clear the field first.
         hw = (w >> 21) & 0x3
         imm16 = (w >> 5) & 0xffff
-        return (f"some (arm64_set_reg {rd} s "
-                f"(arm64_reg {rd} s ||| (UInt64.ofNat {imm16} <<< UInt64.ofNat {hw * 16})))")
-    if idx == 6:  # CMP register: flags from wrapped difference (N, Z, C)
-        return (f"some {{ s with nzcv := arm64_subs_flags "
-                f"(arm64_reg {rn} s) (arm64_reg {rm} s) }}")
+        return (f"some (arm64_set_reg {rd} s (movk_insert (arm64_reg {rd} s) "
+                f"(UInt64.ofNat {imm16}) (UInt64.ofNat {hw * 16})))")
+    if idx == 6:  # CMP / SUBS (shifted register): write Rd, and the flags
+        # `arm64_set_reg 31 s v = s`, so this is the CMP spelling exactly and
+        # `subs xd, xn, xm` (which `encode_subs_xd_xn_xm` emits) with it.
+        return (f"some {{ (arm64_set_reg {rd} s (arm64_reg {rn} s - arm64_reg {rm} s)) with "
+                f"nzcv := arm64_subs_flags (arm64_reg {rn} s) (arm64_reg {rm} s) }}")
     if idx == 13:  # CMP immediate
         imm12 = (w >> 10) & 0xfff
         return (f"some {{ s with nzcv := arm64_subs_flags "
@@ -2967,6 +2972,12 @@ def _step_rhs(w: int, idx: int):
         # of `work_step_ldr_uoff`'s statement, because that is what `exact`
         # unifies against, and a hand-simplified base is a different term even
         # where it is equal.
+        #
+        # BUG, measured and not yet fixed: this form HAS an SP encoding, so
+        # `Rn = 31` is the stack pointer and both this row and
+        # `work_step_ldr_uoff` model `encode_ldr_xt_xn_imm(_, 31, off)` — ten
+        # sites in `formal/arm64_codegen.py` — as a load from address `off`.
+        # `bugs/FORMAL_arm64_ldr_str_unsigned_offset_reads_register_31_as_zero.md`.
         return (f"some (arm64_set_reg {rt} s (mem_read_u64 s.mem "
                 f"(arm64_reg {rn} s + UInt64.ofNat {imm12 * 8}).toNat))")
     if idx == 19:  # STR Wt, [Xn, #imm] (unsigned-offset 32-bit STORE)
@@ -2993,6 +3004,8 @@ def _step_rhs(w: int, idx: int):
         rt = w & 0x1f
         rn = (w >> 5) & 0x1f
         imm12 = (w >> 10) & 0xfff
+        # BUG, measured and not yet fixed: as for the LDR row above, `Rn = 31`
+        # is the stack pointer here too and this spells it as the zero register.
         return (f"some {{ s with mem := mem_write_u64 s.mem "
                 f"(arm64_reg {rn} s + UInt64.ofNat {imm12 * 8}).toNat "
                 f"(arm64_reg {rt} s) }}")
@@ -3024,8 +3037,12 @@ def _step_rhs(w: int, idx: int):
         # The arm64_step result is definitionally the t-w sign-extension helper
         # (same let/if body); emitting the helper keeps the value flow clean and
         # matches the typed model.  The helper is emitted by lean_trunc_defs.
-        tname = {36: "t8s", 37: "t16s", 38: "t32s"}[idx]
-        return f"some (arm64_set_reg {rd} s ({tname} (arm64_reg {rn} s)))"
+        # A W DESTINATION writes bits 31:0 and zeroes 63:32, so SXTB/SXTH are
+        # `t32u ∘ t8s/t16s`; only SXTW (`sxtw x0, w1`) writes all 64 bits and so
+        # is `t32s` on its own.
+        tname = {36: "t32u (t8s", 37: "t32u (t16s", 38: "t32s"}[idx]
+        close = "))" if idx != 38 else ")"
+        return f"some (arm64_set_reg {rd} s ({tname} (arm64_reg {rn} s){close})"
     if idx in (39, 40, 41):  # AND Xd, Xn, #imm (zero-truncate)
         tname = {39: "t8u", 40: "t16u", 41: "t32u"}[idx]
         return f"some (arm64_set_reg {rd} s ({tname} (arm64_reg {rn} s)))"
@@ -3103,8 +3120,8 @@ def _step_rhs_generic(idx: int):
     if idx == 5:
         return f"some (arm64_set_reg {_RD} s (-(arm64_reg {_RM} s)))"
     if idx == 6:
-        return (f"some {{ s with nzcv := arm64_subs_flags (arm64_reg {_RN} s) "
-                f"(arm64_reg {_RM} s) }}")
+        return (f"some {{ (arm64_set_reg {_RD} s (arm64_reg {_RN} s - arm64_reg {_RM} s)) with "
+                f"nzcv := arm64_subs_flags (arm64_reg {_RN} s) (arm64_reg {_RM} s) }}")
     if idx == 7:
         return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s &&& arm64_reg {_RM} s))"
     if idx == 8:
@@ -3170,8 +3187,8 @@ def _step_rhs_generic(idx: int):
     if idx == 25:
         return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s ||| arm64_reg {_RM} s))"
     if idx in (26, 27):
-        return (f"some (arm64_set_reg {_RD} s (arm64_reg {_RD} s ||| "
-                f"(UInt64.ofNat {_I16} <<< UInt64.ofNat ({_HW} * 16))))")
+        return (f"some (arm64_set_reg {_RD} s (movk_insert (arm64_reg {_RD} s) "
+                f"(UInt64.ofNat {_I16}) (UInt64.ofNat ({_HW} * 16))))")
     if idx == 28:
         return f"some (arm64_set_reg {_RD} s (UInt64.ofNat (0xffff_ffff - {_I16})))"
     if idx == 29:
@@ -5773,7 +5790,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # in the branch-condition proofs, so the sign-extension of the free param is
     # concrete rather than opaque (otherwise bv_decide reports spurious
     # counterexamples).
-    _tw_defs = ("t8u, t8s, t16u, t16s, t32u, t32s"
+    _tw_defs = ("t8u, t8s, t16u, t16s, t32u, t32s, movk_insert"
                 if (tc and tc.get("typed")) else "")
 
     # The halt address.  Normally the appended RET sentinel at the end of the
@@ -8230,7 +8247,7 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
                 tail += ", hb" if idx != 30 else ", hc"
             # t-w truncator helpers (typed instructions) delta-reduce to the
             # inline sign/zero-extension if-term, matching arm64_step.
-            _tw = {36: "t8s", 37: "t16s", 38: "t32s",
+            _tw = {36: "t32u, t8s", 37: "t32u, t16s", 38: "t32s",
                    39: "t8u", 40: "t16u", 41: "t32u"}.get(idx)
             if _tw:
                 tail += f", {_tw}"
@@ -9184,7 +9201,7 @@ def generate_arm64_proof(prog, code, info) -> str:
     # generator is thin: it only *references* them, adding them to the
     # value-flow simp set for typed proofs.
     trunc_defs = ""
-    tw_extra = ("t8u, t8s, t16u, t16s, t32u, t32s, t32s_t8s, t32s_t16s"
+    tw_extra = ("t8u, t8s, t16u, t16s, t32u, t32s, t32s_t8s, t32s_t16s, movk_insert"
                 if is_typed else "")
 
     go_defs = "\n\n".join(_go_defs_for(prog, fn, tc))

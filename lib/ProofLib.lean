@@ -1728,6 +1728,19 @@ def arm64_subs_flags (a b : UInt64) : UInt8 :=
 def t8u (x : UInt64) : UInt64 := x &&& 0xff
 def t16u (x : UInt64) : UInt64 := x &&& 0xffff
 def t32u (x : UInt64) : UInt64 := x &&& 0xffffffff
+
+/-- `MOVK Xd, #imm16, LSL #sh`'s effect: REPLACE the 16-bit field that starts at
+bit `sh` and leave every other bit alone.
+
+The field has to be CLEARED first, not OR-ed into: an OR computes the right
+answer only when the field was zero, which is why an `MOVK` after a `MOVZ` of
+the same halfword — or a second `MOVK` of it — modelled as a no-op. It is a
+named function rather than an inline expression because it now appears in three
+places that have to agree (`arm64_step`, `work_step_movk`, and the generator's
+`_step_rhs`), and an expression written out three times is an expression that
+will be written wrong once. -/
+def movk_insert (x imm16 sh : UInt64) : UInt64 :=
+  (x &&& ((0xffff : UInt64) <<< sh ^^^ 0xffffffffffffffff)) ||| (imm16 <<< sh)
 /-- Sign-extend the low 8/16/32 bits of a 64-bit value to 64 bits.  These are
     the single source of truth shared by the ARM64 step function (SXTB/SXTH/
     SXTW) and the typed semantic model. -/
@@ -1777,7 +1790,19 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let xm := ((insn >>> 16) &&& 0x1f).toNat
-    let result := (arm64_reg_or_sp rn s - arm64_reg xm s)
+    -- `arm64_reg`, NOT `arm64_reg_or_sp`, and the reason is the alias: A64's
+    -- SUB (shifted register) has NO SP encoding, so `Rn == 31` is the ZERO
+    -- register — which is exactly how `neg` is encoded. `formal/arm64.py`'s
+    -- `encode_neg_xd_xn` emits this very word (`0xcb0003e0`, `Rn = 31`), so
+    -- reading `sp` here computed `sp - Xm` for every `neg` in an image.
+    -- Measured against the CPU (`tools/formal_model_fuzz.py`, reduced to one
+    -- instruction): `neg x13, x1` with x1 = 0x25 gives the model 0x0000000000
+    -- 0000db and the hardware 0xffffffffffffffdb.
+    --
+    -- ADD (shifted register), two arms above, is the OPPOSITE: its `Rn == 31`
+    -- is `SP` (`add x4, sp, x5` assembles and reads the stack pointer), which
+    -- is why that one keeps `arm64_reg_or_sp` and this one must not.
+    let result := (arm64_reg rn s - arm64_reg xm s)
     some (arm64_set_reg rd s result)
   -- MUL Xd, Xn, Xm: 0x9b007c00
   else if (insn &&& 0xffe07c00) = 0x9b007c00 then
@@ -1794,14 +1819,34 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let result := -val
     some (arm64_set_reg rd s result)
   -- CMP Xn, Xm (register): 0xeb000000 -- SUBS XZR, Rn, Xm
-  -- The form a stack-floor guard is built from: `cmp sp, floor` is
-  -- `SUBS XZR, X31, X16`, so `Rn` here has to read SP.  With `arm64_reg` the
-  -- model computed `arm64_subs_flags 0 X16` — a comparison against zero that
-  -- typechecks and is about a different instruction than the one emitted.
+  --
+  -- Two things about this arm, and both were wrong before.
+  --
+  -- `Rn` is `arm64_reg` (the ZERO register for `Rn == 31`), NOT
+  -- `arm64_reg_or_sp`. This comment used to say the opposite — "`cmp sp,
+  -- floor` is `SUBS XZR, X31, X16`, so `Rn` here has to read SP" — and the
+  -- measurement in it was real (`cmp sp, x16` DOES assemble) but the inference
+  -- was not: `as` accepts the text and encodes `Rn = 31`, which SUBS (shifted
+  -- register) reads as XZR. So `cmp sp, x16` is a comparison against ZERO with
+  -- the SP spelling ignored, and the model was computing a comparison against
+  -- the stack pointer. Measured against the CPU
+  -- (`tools/formal_model_fuzz.py`): `cmp sp, x16` with sp = 0 and x16 = 0 sets
+  -- Z=1 on the hardware and N=1 on the model.
+  --
+  -- `Rd` is WRITTEN, because SUBS with `Rd != 31` is not a CMP: it is
+  -- `formal/arm64.py`'s `encode_subs_xd_xn_xm`, which a lowering calls, and it
+  -- leaves the difference in a register. This arm only set the flags, so every
+  -- `subs xd, xn, xm` in an image modelled as "set the flags, change no
+  -- register" — and a proof about that is a proof about a different program.
+  -- `arm64_set_reg 31 s v = s`, so writing `Rd` unconditionally is exactly
+  -- right for the CMP spelling and for `subs` alike.
   else if (insn &&& 0xffe00000) = 0xeb000000 then
+    let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let xm := ((insn >>> 16) &&& 0x1f).toNat
-    some { s with nzcv := arm64_subs_flags (arm64_reg_or_sp rn s) (arm64_reg xm s) }
+    let diff := arm64_reg rn s - arm64_reg xm s
+    some { (arm64_set_reg rd s diff) with
+           nzcv := arm64_subs_flags (arm64_reg rn s) (arm64_reg xm s) }
   -- AND Xd, Xn, Xm: 0x8a000000
   else if (insn &&& 0xffe00000) = 0x8a000000 then
     let rd := (insn &&& 0x1f).toNat
@@ -1965,6 +2010,17 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rt := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let imm12 := ((insn >>> 10) &&& 0xfff).toNat
+    -- BUG, measured and NOT yet fixed, and this arm is reachable:
+    -- `formal/arm64_codegen.py` emits `encode_ldr_xt_xn_imm(_, 31, off)` at ten
+    -- sites, and this base reads register 31 as the ZERO register, so every one
+    -- of them is modelled as a load from address `off` rather than `sp + off`.
+    -- `tools/formal_model_fuzz.py` measures it — `ldr x0, [sp, #32]` with those
+    -- bytes non-zero gives the model 0 and the hardware the word — and the fix
+    -- is `arm64_reg_or_sp` here, in `work_step_ldr_uoff`'s statement and in the
+    -- generator's `idx == 18` row. The last two need the `Rn == 31` / `Rn < 31`
+    -- case split that `simp` cannot do from `(w >>> 5) &&& 0x1f` alone, which is
+    -- why it is written down rather than landed:
+    -- `bugs/FORMAL_arm64_ldr_str_unsigned_offset_reads_register_31_as_zero.md`.
     let addr := arm64_reg rn s + UInt64.ofNat (imm12 * 8)
     some (arm64_set_reg rt s (mem_read_u64 s.mem addr.toNat))
   -- STR Wt, [Xn, #imm]: 0xB9000000 (unsigned-offset 32-bit STORE, no writeback)
@@ -2037,16 +2093,30 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rm := ((insn >>> 16) &&& 0x1f).toNat
     some (arm64_set_reg rd s (arm64_reg rn s ||| arm64_reg rm s))
   -- MOVK Xd, #imm16, LSL #(hw*16): 0x72800000 (32-bit) / 0xf2800000 (64-bit)
+  --
+  -- MOVK INSERTS: it replaces the 16-bit field at `hw` and leaves every other
+  -- bit alone. The body below ORed the new field in instead, which computes the
+  -- right answer only for a field that was previously zero — and a MOVK whose
+  -- field is already set is not an exotic input: the backend emits
+  -- `encode_movk_xd_imm(1, …)` and `…(16, …)` at 21 sites, and a sequence that
+  -- sets the same halfword twice (a loop, a re-entered block, a value patched
+  -- after a `movz`) is ordinary code. Measured against the CPU by
+  -- `tools/formal_model_fuzz.py`, which reduces it to one instruction:
+  --   `movk x23, #54219, lsl #0` with x23 = 0xffffffffffffffff
+  --     model 0xffffffffffffffff     hardware 0xffffffffffffd3cb
+  -- The clear-then-set form is the one the architecture defines.
   else if (insn &&& 0xff800000) = 0xf2800000 then
     let rd := (insn &&& 0x1f).toNat
     let imm16 := ((insn >>> 5) &&& 0xffff).toNat
     let hw := ((insn >>> 21) &&& 0x3).toNat
-    some (arm64_set_reg rd s (arm64_reg rd s ||| (UInt64.ofNat imm16 <<< UInt64.ofNat (hw * 16))))
+    some (arm64_set_reg rd s
+            (movk_insert (arm64_reg rd s) (UInt64.ofNat imm16) (UInt64.ofNat (hw * 16))))
   else if (insn &&& 0xff800000) = 0x72800000 then
     let rd := (insn &&& 0x1f).toNat
     let imm16 := ((insn >>> 5) &&& 0xffff).toNat
     let hw := ((insn >>> 21) &&& 0x3).toNat
-    some (arm64_set_reg rd s (arm64_reg rd s ||| (UInt64.ofNat imm16 <<< UInt64.ofNat (hw * 16))))
+    some (arm64_set_reg rd s
+            (movk_insert (arm64_reg rd s) (UInt64.ofNat imm16) (UInt64.ofNat (hw * 16))))
   -- MOVN Xd, #imm16: 0x12800000 (32-bit) / 0x92800000 (64-bit)
   else if (insn &&& 0xffe00000) = 0x12800000 then
     let rd := (insn &&& 0x1f).toNat
@@ -2080,6 +2150,9 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rt := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let imm12 := ((insn >>> 10) &&& 0xfff).toNat
+    -- BUG, measured and NOT yet fixed: same defect as the LDR arm above, and
+    -- `encode_str_xt_xn_imm(_, 31, off)` is reachable in the same way. See
+    -- `bugs/FORMAL_arm64_ldr_str_unsigned_offset_reads_register_31_as_zero.md`.
     let addr := arm64_reg rn s + UInt64.ofNat (imm12 * 8)
     some { s with mem := mem_write_u64 s.mem addr.toNat (arm64_reg rt s) }
   -- LDP Xt, Xn, [SP, #imm]: 0xA9400000 (offset load pair, no writeback)
@@ -2127,15 +2200,27 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
   else if (insn &&& 0xffe0001f) = 0xD4000001 then
     some s
   -- SXTB Wd, Wn: 0x13001c00 (sign-extend byte 0 to 32 bits, zero-extended to 64)
+  --
+  -- The `t32u` is not decoration. A W DESTINATION means the instruction writes
+  -- bits 31:0 and ZEROES bits 63:32, so the result is the 32-bit
+  -- sign-extension, not the 64-bit one: the body below returned `t8s`, which is
+  -- the sign extension to 64 bits, and the two differ on every input whose bit 7
+  -- is set. Measured against the CPU (`tools/formal_model_fuzz.py`, reduced to
+  -- one instruction): `sxtb w0, w3` with w3 = 0xa5 gives model
+  -- 0xffffffffffffffa5 and hardware 0x00000000ffffffa5.
+  --
+  -- `arm64_step_sxtw` below is where the 64-bit form lives (`sxtw x0, w1`
+  -- really does write all 64 bits), so the two helpers are both still needed and
+  -- the difference between them is the W destination.
   else if (insn &&& 0xffe0fc00) = 0x13001c00 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
-    some (arm64_set_reg rd s (t8s (arm64_reg rn s)))
+    some (arm64_set_reg rd s (t32u (t8s (arm64_reg rn s))))
   -- SXTH Wd, Wn: 0x13003c00 (sign-extend halfword 0 to 32 bits, zero-extended to 64)
   else if (insn &&& 0xffe0fc00) = 0x13003c00 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
-    some (arm64_set_reg rd s (t16s (arm64_reg rn s)))
+    some (arm64_set_reg rd s (t32u (t16s (arm64_reg rn s))))
   -- SXTW Xd, Wn: 0x93407c00 (sign-extend 32 bits to 64 bits)
   else if (insn &&& 0xffe0fc00) = 0x93407c00 then
     let rd := (insn &&& 0x1f).toNat
@@ -2631,13 +2716,20 @@ theorem arm64_step_add_reg (s : Arm64State) (code : Nat → UInt8) (rd rn xm : N
   unfold arm64_step
   rw [if_neg hne_ret, if_neg hne_mov, if_pos h_opc, h_rd, h_rn, h_xm]
 
-/-- Library step lemma: SUB Xd, Xn, Xm. -/
+/-- Library step lemma: SUB Xd, Xn, Xm.
+
+`Rn` is `arm64_reg` and not `arm64_reg_or_sp`, because SUB (shifted register)
+has no SP encoding and `Rn == 31` is the ZERO register — which is the `neg`
+alias. `formal/arm64_proof_gen.py`'s `_step_rhs` already rendered the `idx == 3`
+row that way, so until this fix the GENERATOR and the MODEL disagreed about
+exactly the register they disagree about; see
+`bugs/FORMAL_arm64_sub_and_subs_read_register_31_as_sp.md`. -/
 theorem arm64_step_sub_reg (s : Arm64State) (code : Nat → UInt8) (rd rn xm : Nat)
     (h_opc : arm64_read_insn code s.pc &&& 0xffe00000 = 0xcb000000)
     (h_rd : (arm64_read_insn code s.pc &&& 0x1f).toNat = rd)
     (h_rn : ((arm64_read_insn code s.pc >>> 5) &&& 0x1f).toNat = rn)
     (h_xm : ((arm64_read_insn code s.pc >>> 16) &&& 0x1f).toNat = xm) :
-    arm64_step s code = some (arm64_set_reg rd s (arm64_reg_or_sp rn s - arm64_reg xm s)) := by
+    arm64_step s code = some (arm64_set_reg rd s (arm64_reg rn s - arm64_reg xm s)) := by
   have hne_ret : arm64_read_insn code s.pc ≠ 0xd65f03c0 := by
     intro he; rw [he] at h_opc
     exact absurd h_opc (by decide)
@@ -2689,13 +2781,21 @@ single "31 means SP everywhere" rule would leave the first passing and this one
 FAILING, which is the direction that matters, since `and x0, xzr, x1` is an
 instruction the tree emits.
 
-`cmp sp, x16` — the stack-floor guard's own comparison, `SUBS XZR, X31, X16`.
-With `arm64_reg 31` this theorem was false and the model computed
-`arm64_subs_flags 0 X16`. -/
-theorem arm64_step_cmp_sp_reads_sp (s : Arm64State) (code : Nat → UInt8) (pc : Nat)
+`cmp sp, x16` — the stack-floor guard's own comparison, `SUBS XZR, X31, X16` —
+is the half of this table that was wrong in the direction that mattered. Its
+`Rn` is the ZERO register and not SP: `as` accepts the `sp` spelling and encodes
+`Rn = 31`, which SUBS (shifted register) reads as XZR. Measured against the CPU
+(`tools/formal_model_fuzz.py`, one instruction): with `sp = 0` and `x16 = 0`,
+`cmp sp, x16` sets Z=1 on the hardware and N=1 on the model that read SP. So
+this theorem is about ZERO now, and its NAME says so — a name saying "reads SP"
+over a statement about zero is how the wrong reading survived every typecheck in
+the tree, and `test_formal_axioms.py`'s headline row pointed at it as an example
+of a decidable statement. -/
+theorem arm64_step_cmp_sp_reads_zero (s : Arm64State) (code : Nat → UInt8) (pc : Nat)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = 0xeb1003ff) :
     arm64_step s code
-      = some { s with nzcv := arm64_subs_flags s.sp (arm64_reg 16 s) } := by
+      = some { (arm64_set_reg 31 s (arm64_reg 31 s - arm64_reg 16 s)) with
+                nzcv := arm64_subs_flags (arm64_reg 31 s) (arm64_reg 16 s) } := by
   have hne_ret : (0xeb1003ff : UInt32) ≠ 0xd65f03c0 := by decide
   have hne_mov : ¬ ((0xeb1003ff : UInt32) &&& 0xffe00000 = 0x2a00fa00) := by
     intro t; exact absurd t (by decide)
@@ -2711,7 +2811,7 @@ theorem arm64_step_cmp_sp_reads_sp (s : Arm64State) (code : Nat → UInt8) (pc :
   unfold arm64_step
   rw [hpc, hread, if_neg hne_ret, if_neg hne_mov, if_neg hne_add, if_neg hne_sub,
       if_neg hne_mul, if_neg hne_neg, if_pos hcmp]
-  simp
+  rfl
 
 /-- …and `and x0, xzr, x1`, whose `Rn` is the ZERO register and not SP: the
 logical shifted-register forms have no SP encoding at all (measured — clang's
@@ -4416,7 +4516,7 @@ theorem work_step_add_reg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w 
 theorem work_step_sub_reg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xcb000000) :
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s - arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s - arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -4458,7 +4558,8 @@ theorem work_step_neg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
 theorem work_step_cmp_reg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xeb000000) :
-    arm64_step s code = some { s with nzcv := arm64_subs_flags (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) (arm64_reg (((w >>> 16) &&& 0x1f).toNat) s) } := by
+    arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s - arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) with
+      nzcv := arm64_subs_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (arm64_reg (((w >>> 16) &&& 0x1f).toNat) s) } := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -4940,7 +5041,10 @@ theorem work_step_orr (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
 theorem work_step_movk (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xff800000) = 0xf2800000 ∨ (w &&& 0xff800000) = 0x72800000) :
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg ((w &&& 0x1f).toNat) s ||| (UInt64.ofNat (((w >>> 5) &&& 0xffff).toNat) <<< UInt64.ofNat ((((w >>> 21) &&& 0x3).toNat) * 16)))) := by
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s
+      (movk_insert (arm64_reg ((w &&& 0x1f).toNat) s)
+        (UInt64.ofNat (((w >>> 5) &&& 0xffff).toNat))
+        (UInt64.ofNat ((((w >>> 21) &&& 0x3).toNat) * 16)))) := by
   rcases h with h | h
   ·
     unfold arm64_step
