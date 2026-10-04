@@ -19,8 +19,8 @@ the tree with the per-edge rule (`python3 fire.py build --formal --no-prove`,
 | verdict | files | terminal cause |
 |---|---|---|
 | **BUILT** | **3** | — (`std/_gpu/host/__init__.mojo`, `std/compile/__init__.mojo`, `std/os/path/__init__.mojo`) |
-| moved off the gate, still refused | 128 | **121 of them a bare call to a name the defining module cannot export**; 7 something else |
-| still at the gate | 32 | `std/sys/_io.mojo` (17) and a `constants.mojo` (13) — both "declares no function and no type at all — only module-level constants" — plus 2 my probe's regex misfiled, which are bare calls too |
+| moved off the gate, still refused | 130 | **123 of them a bare call to a name the defining module cannot export**; 7 something else (MLIR, `inlined_assembly`, a comptime explicit-parameter list, `CompilationTarget`) |
+| still at the gate | 30 | `std/sys/_io.mojo` (17) and a `constants.mojo` (13) — both, all 30, "declares no function and no type at all — only module-level constants" |
 
 So the row moves **3 files to a pass** and hands the rest to the shape below.
 `bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §4.1 predicted "8-in-10 land on
@@ -29,16 +29,16 @@ every module the gate refused. **That probe also removed the refusal a bare call
 gets**, so it read one layer further out than the tree does: with the gate fixed
 and the bare call still refused, the first thing a build meets is this row.
 
-The 121, by the callee named in the refusal:
+The 123, by the callee named in the refusal:
 
 | files | the call | the declaration |
 |---|---|---|
 | **68** | `FormatStruct(writer, "Allocation")` | `std/memory/alloc.mojo:450` calling `std/format/_utils.mojo:287`'s `struct FormatStruct[T: Writer, o: MutOrigin]` |
 | **29** | `dealloc(allocation^)` | `std/memory/alloc.mojo:99` (and 110, 111, 123, 231, …) calling its own module's `std/memory/alloc.mojo:904` — `def dealloc[T: AnyType, /](var allocation: Allocation[T, alignment=_], /)` |
-| 12 | `is_negative(value)` | `std/bit/mask.mojo:26` — `def is_negative[dtype: DType, //](value: SIMD[dtype, _]) -> type_of(value)` |
+| 13 | `is_negative(value)` | `std/bit/mask.mojo:26` — `def is_negative[dtype: DType, //](value: SIMD[dtype, _]) -> type_of(value)` |
 | 6 | `PhiloxRandom(seed)` | `std/random/philox.mojo` — a generic struct constructor |
 | 3 | `align_up(x)` | `std/math/math.mojo` |
-| 3 | one each: `keep`, `isnan`, `stat` | `.compiler`, `std.utils.numerics`, `..fstat` |
+| 4 | one each: `keep`, `isnan`, `strided_load`, `stat` | `.compiler`, `std.utils.numerics`, `std.sys.intrinsics`, `..fstat` |
 
 **`std/memory/alloc.mojo` carries the first two**, and it is in the import
 closure of nearly every stdlib file, which is why these two rows are large and
@@ -62,12 +62,12 @@ instead of the brackets**, and
 `bugs/FORMAL_generic_monomorph_scope.md` §1 already records the shape from the
 other side — a demand is read from *call sites with brackets*, and everything
 without one is invisible to it. That doc's §"what is not covered" list is where
-this belongs; it is filed separately because it is worth 98 measured files here
+this belongs; it is filed separately because it is worth 123 measured files here
 rather than a class.
 
 The refusal itself is already the right sentence
 (`formal/model.py::imported_callee_refusal`: "spell it as `widen[<a type>](…)`
-and the library will carry the instantiation") — **and for these 113 that advice
+and the library will carry the instantiation") — **and for these 123 that advice
 is WRONG**, because the source is correct Mojo and the brackets are optional.
 That is the part of this doc worth having: a refusal whose next step is wrong
 about correct code sends the reader to edit working stdlib.

@@ -504,7 +504,7 @@ the same commit in **`bugs/FORMAL_generic_monomorph_scope.md`**, which is the
 single home for them from here.
 
 ### §1.2, RE-MEASURED 2026-10-04: the gate is a PER-EDGE question, so this family
-### is 3 files instead of 163 — and what is behind it is 121 BARE CALLS
+### is 3 files instead of 163 — and what is behind it is 123 BARE CALLS
 
 `work/formal18-export-gate` made the export gate per EDGE
 (`formal/imports.py::library_free_edges`, `doc/ABI.md` §Generics "When a module
@@ -515,21 +515,21 @@ instantiation**. Four facts about this family change, and none of them is that
 the limits above were wrong:
 
 * **The family is 3 files, not 163.** All 163 re-measured (one
-  `fire.py build --formal --no-prove` per file, no lean): **3 BUILD**, 128 move
-  off `binary_heap.mojo`'s gate and are still refused, 32 stay at the gate
+  `fire.py build --formal --no-prove` per file, no lean): **3 BUILD**, 130 move
+  off `binary_heap.mojo`'s gate and are still refused, 30 stay at the gate
   against `std/sys/_io.mojo` (17) and a `constants.mojo` (13) — the
   constants-only rows this section already calls **permanent and not work**.
-* **The 128 are 121 bare calls to a template whose type arguments are INFERABLE
+* **The 130 are 123 bare calls to a template whose type arguments are INFERABLE
   from the call's arguments** — `FormatStruct(writer, "Allocation")` (68,
   `std/memory/alloc.mojo:450`), `dealloc(allocation^)` (29, `:99`),
-  `is_negative(value)` (12), `PhiloxRandom(seed)` (6), `align_up(x)` (3). One
+  `is_negative(value)` (13), `PhiloxRandom(seed)` (6), `align_up(x)` (3). One
   feature, and it is not this section's: the doc is
   **`FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`**.
   `std/memory/alloc.mojo` carries the first two and is in nearly every stdlib
   file's closure, which is why those two are large.
 * **The "a bare call still names no instantiation, so no trie entry can mean it"
   clause above is now the load-bearing limit rather than a footnote**, and its
-  next step is wrong about correct Mojo for all 121: Mojo lets an inferrable
+  next step is wrong about correct Mojo for all 123: Mojo lets an inferrable
   type argument be omitted, the stdlib omits it in these places, and
   `imported_callee_refusal`'s "spell it as `Name[<a type>](…)`" would send a
   reader to edit working stdlib. That is why the bare call is still refused and

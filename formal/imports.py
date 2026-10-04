@@ -2589,8 +2589,22 @@ def library_free_edges(importer_path: str, stmts: list,
                     f"a name in that scope, which this edge does not track")
             else:
                 for bound, original, spelled in _from_import_bindings([st]):
-                    if bound and bound not in defined:
-                        edge[0].append((bound, original or bound, spelled))
+                    # The DEFINING name decides the shadowing question, not the
+                    # local one, and it is `reexported_names`' own filter
+                    # (`if name in defined: continue`) for the reason that
+                    # function gives: `from x import f as g` beside a local
+                    # `def g` publishes NOTHING under `g` — the local
+                    # definition wins the bare call — but it still publishes
+                    # `f`, because `f` is a name no local declaration shadows.
+                    # Judging the edge by `bound` instead would read that module
+                    # as binding nothing at all and drop a library the
+                    # manifest's own re-export table still points into:
+                    # measured, `test_formal_imports.py`'s "a name the module
+                    # defines wins over its own import" builds a package that
+                    # re-exports `base as g` beside its own `def g`, and the
+                    # program calls `base` as well as `g`.
+                    if original and original not in defined:
+                        edge[0].append((bound or original, original, spelled))
     out: dict = {}
     for key, (bound, keep) in edges.items():
         if keep or (demands or {}).get(key):

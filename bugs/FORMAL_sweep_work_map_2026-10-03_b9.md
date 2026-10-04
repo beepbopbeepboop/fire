@@ -370,26 +370,26 @@ lean runs; the two architectures produce the same refusal, §2.2's standing meas
 | verdict | files | terminal cause |
 |---|---|---|
 | **BUILT** | **3** | `std/_gpu/host/__init__.mojo`, `std/compile/__init__.mojo`, `std/os/path/__init__.mojo` |
-| moved off the gate, still refused | 128 | **121 a bare call to a name the defining module cannot export**; 7 something else |
-| still at the gate | 32 | `std/sys/_io.mojo` (17) and a `constants.mojo` (13) — "declares no function and no type at all, only module-level constants" — plus 2 misfiled by the probe's own regex, which are bare calls too |
+| moved off the gate, still refused | 130 | **123 a bare call to a name the defining module cannot export**; 7 something else (MLIR, `inlined_assembly`, a comptime explicit-parameter list, `CompilationTarget`) |
+| still at the gate | 30 | `std/sys/_io.mojo` (17) and a `constants.mojo` (13) — all 30 the same shape: "declares no function and no type at all — only module-level constants" |
 
 **So the map's prediction holds and its destination row was one layer too far out.** The probe
 above lifted the refusal for *every* module the gate refused and so also removed the refusal a
 bare call gets; with the gate fixed and the bare call still refused, the first thing a build
-meets is the bare call. It is 121 of the 128, and it is **one feature**: a call whose type
+meets is the bare call. It is 123 of the 130, and it is **one feature**: a call whose type
 arguments are INFERABLE from its arguments, spelled `FormatStruct(writer, "Allocation")`
 (68 files, `std/memory/alloc.mojo:450` against `std/format/_utils.mojo:287`'s
 `struct FormatStruct[T: Writer, o: MutOrigin]`), `dealloc(allocation^)` (29, `alloc.mojo:99`
-against its own `:904`), `is_negative(value)` (12), `PhiloxRandom(seed)` (6), `align_up(x)` (3),
-three singles. `std/memory/alloc.mojo` carries the first two and is in nearly every stdlib
+against its own `:904`), `is_negative(value)` (13), `PhiloxRandom(seed)` (6), `align_up(x)` (3),
+four singles. `std/memory/alloc.mojo` carries the first two and is in nearly every stdlib
 file's closure, which is why those two rows are large and why they do not overlap in the FILE
 list — the walk stops at the first refusal.
 
 The doc is **`FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`**, and
 the part of it that matters beyond the count is that `imported_callee_refusal`'s next step —
-"spell it as `widen[<a type>](…)`" — is **wrong about correct Mojo** for all 121.
+"spell it as `widen[<a type>](…)`" — is **wrong about correct Mojo** for all 123.
 
-The 32 that stay at the gate are the **constants-only** family this map's §4.1 called
+The 30 that stay at the gate are the **constants-only** family this map's §4.1 called
 permanent, and they are still permanent: `_io.mojo` and `constants.mojo` declare no function
 and no type, so there is no boundary symbol for any edge, and the importer needs their VALUES
 out of a `__DATA` a dylib would have had to publish
