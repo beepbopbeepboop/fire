@@ -4,8 +4,12 @@
 times on this tree — once for the method, once for the two largest gaps, and
 once more the same day after the `CSEL` neighbourhood and `STRH` gained
 lowerings. `TBZ` and `TBNZ` are WIRED (encoder, machine model, proof tables, and
-a lowering that emits them). The file stays a survey, for the reason below; the
-latest numbers are in §"Re-measured again, 2026-10-03 (later)".**
+a lowering that emits them). `CMN` remains the next unit of work by the survey's
+own ranking (§"the two largest gaps" below). The file stays a survey, for the
+reason below; the latest numbers are in §"Re-measured again, 2026-10-03
+(later)".** One ENCODING CLASS was added to the model's vocabulary on
+2026-10-04, and §"The one class the census cannot see" says which and why it is
+not a mnemonic row.
 
 Preserved from the root `BUG.md` (deleted 2026-09-26) so the survey and its
 measurements are not lost. Not a bug report: a **survey**, kept because the
@@ -213,6 +217,62 @@ this backend has a use for on a target that is int-only (`formal/types.py` is th
 authority on that). **Not a bug and no bug doc: this file is the survey, and it
 stays because the answer is not guessable** — more so now, since the answer has
 moved twice already (the 2026-10-03 method change, and the TBZ/TBNZ wiring).
+
+## The one class the census cannot see: the EXTENDED-register `ADD`/`SUB`
+
+**Added 2026-10-04, by the `NEG` fix's own measurement, and it is a coverage
+gap rather than a mnemonic row — which is why it belongs here and not in the
+table.**  `tools/arm64_insn_audit.py` ranks MNEMONICS by how often a real
+compiler emits them, and it reads the emitter's encoder table; a class that has
+no row in either cannot appear in its output at all.
+
+A64's SP encoding for `Rn` is in the **extended-register** class — bits 28..24 =
+`01011` with **bit 21 set** — and not in the shifted-register class
+(`0x8b000000` / `0xcb000000`), which is where every register-form `ADD`/`SUB`
+row of the step table sits.  Measured by assembling each spelling, reading the
+word and RUNNING it:
+
+| spelling | word | class | `Rn = 31` reads | a branch decodes it? |
+|---|---|---|---|---|
+| `add x0, sp, x1` | `0x8b2163e0` | extended (bit 21) | **SP** — computes `sp + 1` | **no** |
+| `sub x0, sp, x1` | `0xcb2763e0` | extended | **SP** — computes `sp - 1` | **no** |
+| `subs x0, sp, x1` | `0xeb2763e0` | extended | **SP** | **no** |
+| `cmp sp, x16` | `0xeb3063ff` | extended | **SP** | **no** |
+| `add x0, xzr, x1` | `0x8b0103e0` | shifted | XZR — computes `0 + 1` | yes (branch 2) |
+| `sub x0, xzr, x1` | `0xcb0103e0` | shifted | XZR — computes `0 - 1` | yes (branch 3), and this is a `NEG` |
+| `cmp xzr, x1` | `0xeb0103ff` | shifted | XZR — compares `0` | yes (branch 6) |
+
+**Nothing this backend emits is in the extended class**, and that is why no
+image and no proof has ever hit it: every `ADD Xd, SP, Xm` the emitter wants is
+spelled as the **immediate** form (`_emit_stack_floor_guard`'s
+`encode_add_xd_xn_imm(16, 31, 0)`, which is branch 10 and does read SP), and
+every register-form `ADD`/`SUB`/`CMP` it emits names an ordinary register in `Rn`
+— measured, all 60-odd call sites.  So this is the shape the tree already calls
+"a coverage gap rather than a wrong answer": the generator REFUSES such a word
+rather than mis-reading it.
+
+**What landed for it is the NAME.**  `formal/arm64_proof_gen.py`'s
+`_unmodelled_instruction` names a word from its encoding so a proof failure can
+say which instruction it is; it knew `CSEL`, `STUR` and `LDUR`, and it reported
+this class as "an instruction (0x8b2163e0)" — which sends the reader to a
+disassembler for a word the answer is about.  It now names the class
+(`ADD extended` / `SUB extended` / `SUBS/CMP extended`) and says in the reason
+that this is where the SP encoding lives and that the shifted-register rows are a
+different class, with the measurement inline.  Pinned by
+`test_formal_call_proof_gen.py::TestRegister31.test_the_sp_encodings_are_named_rather_than_left_unnamed`,
+which assembles the four SP spellings, requires each to decode to no branch, and
+requires each to be named.
+
+**What closing it would cost, and why it is not the next row of this survey.**
+A model branch for the class is a mask/value pair plus a `work_step_*` theorem
+plus an `hne_` fact in every earlier `work_step_*` theorem — the same four things
+the `TBZ`/`TBNZ` wiring cost, and the reason that section says "the MODEL was
+not [cheap]".  It is not worth landing for an image no emitter produces, and
+`cmn` (10,603 occurrences, an encoder with no lowering) still outranks it as
+work.  It is here because a reader who finds one of these words in a
+disassembler deserves to be told what it is, and because the NEXT survey that
+re-measures coverage should not have to rediscover that a whole encoding class
+can be missing while every mnemonic it appears in is "covered".
 
 ## What was added, in the order the audit said it mattered
 

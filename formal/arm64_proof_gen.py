@@ -5606,6 +5606,15 @@ def _unmodelled_instruction(word: int):
         `bugs/FORMAL_arm64_instruction_coverage.md` lists this pair as the one
         instruction whose emission carried a real bug, and the step table still
         has no arm for it.
+      * **the EXTENDED-register `ADD`/`SUB`** — bits 28..23 = `010111`, bit 21
+        set, which is a different CLASS from the shifted-register rows the step
+        table has (`0x8b000000`, `0xcb000000`) and not a spelling of them: it is
+        where A64 keeps the SP encoding for `Rn`.  Measured by assembling the
+        spelling and reading the word — `add x0, sp, x1` is `0x8b2163e0` and
+        `sub x0, sp, x1` is `0xcb2763e0`, both RUN as `sp + 1`, while the
+        shifted-register words for the zero register (`add x0, xzr, x1` =
+        `0x8b0103e0`, `sub x0, xzr, x1` = `0xcb0103e0`) run as `0 + 1` and
+        `0 - 1`.
       * anything else: `None`, and the caller says so rather than guessing.
     """
     if ((word >> 21) & 0x7ff) == 0x4d4:
@@ -5616,6 +5625,24 @@ def _unmodelled_instruction(word: int):
                 "missing here is the machine half, and the measurement is "
                 "`bugs/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_"
                 "cannot_claim_it.md`.")
+    if (((word >> 21) & 0x7) == 0x1 and ((word >> 24) & 0x1f) == 0x0b):
+        which = ("SUBS/CMP extended" if (word >> 29) & 1 else
+                 "SUB extended" if (word >> 30) & 1 else "ADD extended")
+        return (which,
+                "A64's EXTENDED-register `ADD`/`SUB` — bits 28..24 = 01011 with "
+                "bit 21 set — which is where the architecture keeps the SP "
+                "encoding for `Rn`. The shifted-register row the step table has "
+                "(`0x8b000000` / `0xcb000000`) is a DIFFERENT class and reads "
+                "`Rn = 31` as the zero register, which is what a `NEG` is; this "
+                "one reads it as `sp`. Measured by assembling the spelling and "
+                "running it: `add x0, sp, x1` is 0x8b2163e0 and computes "
+                "`sp + 1`, while `add x0, xzr, x1` (0x8b0103e0) computes `0 + 1`, "
+                "and `sub x0, sp, x1` is 0xcb2763e0 and computes `sp - 1` while "
+                "`sub x0, xzr, x1` (0xcb0103e0) computes `0 - 1`. Nothing this "
+                "backend emits is in this class today (every SP add or subtract "
+                "it wants is spelled as the immediate form), so this is a "
+                "coverage gap rather than a mis-read — the census that would "
+                "close it is `bugs/FORMAL_arm64_instruction_coverage.md`.")
     top = word & 0xffc00000
     if top in (0xf8000000, 0xf8400000):
         which = "STUR" if top == 0xf8000000 else "LDUR"

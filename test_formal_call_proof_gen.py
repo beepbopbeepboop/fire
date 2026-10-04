@@ -850,6 +850,47 @@ the text; it does not find out whether any word can arrive there.  So:
         self.assertIn("arm64_reg 31 s", G._step_rhs(0x8b1003e0, 2),
                       "`_step_rhs`'s ADD-register arm changed shape")
 
+    def test_the_sp_encodings_are_named_rather_than_left_unnamed(self):
+        """The words clang emits for `sp` in `Rn` are NAMED, not "an instruction".
+
+        A64's SP encoding for `Rn` is in the EXTENDED-register class, and
+        nothing this backend emits is in it — every `ADD Xd, SP, Xm` it wants is
+        spelled as the immediate form, and every register-form add/sub/cmp it
+        emits names an ordinary register.  So this is a COVERAGE gap, and the
+        only thing the generator owes a reader who hits one is its NAME: the
+        shifted-register rows are a different class, and the reason the class
+        exists is the same fact the NEG fix turned on (an `Rn` of 31 is the zero
+        register there and `sp` here).
+
+        The words are the ones clang assembles for the SP spellings, measured by
+        assembling them, and each is required to decode to no branch AND to be
+        named — a word that decodes to nothing and has no name is the failure
+        mode, and `_unmodelled_instruction`'s own contract is `(name, why)`.
+        """
+        import formal.arm64_proof_gen as G
+        for form, want in (("add x0, sp, x1", "ADD extended"),
+                           ("sub x0, sp, x1", "SUB extended"),
+                           ("subs x0, sp, x1", "SUBS/CMP extended"),
+                           ("cmp sp, x16", "SUBS/CMP extended")):
+            with self.subTest(form):
+                word = _assembler_word(form)
+                self.assertIsNotNone(word, f"clang refuses `{form}`")
+                self.assertIsNone(
+                    G._step_branch_index(word),
+                    f"`{form}` assembles to 0x{word:08x}, which now DECODES — so "
+                    f"either the extended-register class has a model branch (and "
+                    f"this row is stale) or the emitter started producing one")
+                name, why = G._unmodelled_instruction(word)
+                self.assertEqual(
+                    name, want,
+                    f"0x{word:08x} (what clang assembles for `{form}`) is named "
+                    f"{name!r}; an unmodelled word with no name is reported as "
+                    f"'an instruction', which sends the reader to a "
+                    f"disassembler for a word the answer is about")
+                self.assertIn("sp", why,
+                              "the reason has to say what the class IS, since "
+                              "the name alone does not say why it is missing")
+
 
 # ── the floor correction, decoded ───────────────────────────────────────────
 #
