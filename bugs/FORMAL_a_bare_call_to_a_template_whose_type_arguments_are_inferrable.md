@@ -4,12 +4,12 @@
 **Area:** `formal/monomorph.py` (`demands`) / `formal/model.py` (the callee
 refusal) · **Status: PARTIAL — §2's half is FIXED (2026-10-04): the refusal no
 longer tells a correct caller to add brackets, and says which side the fault is
-on. The inference is NOT done, and §5 is the measurement of what it would take:
-of 115 measured call sites, 32 are a matcher over annotation strings and 83 need
-a type inferrer or a trait-bound resolver, so §3's single feature is three of
-different sizes and §5 reorders them.** Measured 2026-10-04 by
-`project18:export-gate`, and §5 by `formal21-1` · **Layer:** 1/5 of the formal
-work
+on. The inference is NOT done, and §5b is the measurement of what it would take
+and it REORDERS §5: the matcher bucket §5 called a patch is 2 sites, not 32, and
+the largest of the three pieces is now return-type inference, which §3's step 1
+does not mention at all.** Measured 2026-10-04 by
+`project18:export-gate`, §5 by `formal21-1`, §5b by `formal23-1` · **Layer:** 1/5
+of the formal work
 
 Found while implementing the per-edge export-gate rule
 (`formal/imports.py::library_free_edges`, `work/formal18-export-gate`), which
@@ -261,3 +261,98 @@ of files and the one that needs the most machinery. **And one thing §3 step 3
 still owes whoever takes this:** the three build-and-RUN comparisons against
 CPython are only meaningful for a bucket this census calls solvable, so they
 belong with (a) and not before it.
+
+## 5b. §5's matcher bucket is 32 → 2, and §5's recommendation is REFUTED by it
+
+**Landed 2026-10-04 (`tools/formal_template_call_census.py`, with its two cases in
+`test_formal_monomorph.py`).** The same command over the same corpus:
+
+```console
+$ python3 tools/memslot.py --gb 8 --label tlc -- \
+      python3 tools/formal_template_call_census.py --rows 6
+files scanned: 420   bare calls to an imported name that is a declared template:
+115   call sites classified: 115
+        2  solvable from the annotations at the call site
+       28  the argument's type is written but does not unify
+       71  the argument's type is not written down
+        5  a type argument is not in the arguments at all
+        8  a type argument is settled by a comptime default
+        0  the declaration has no type parameter to substitute
+        1  the declaration could not be read
+```
+
+**§5's "32 sites, and it is the only piece of the three that is a patch" is
+wrong, and the four reasons are all in the instrument rather than in the
+corpus.** They are in the order they were found, and each one moved sites:
+
+| # | the defect | sites it moved | where |
+|---|---|---:|---|
+| 1 | **a KEYWORD argument is in `call.kwargs`, and the classifier iterated `call.args`** — so a site nothing was inspected of fell out of every test into `solvable` | **20** | 17 `ThinAllocation(unsafe_owned_ptr=…)`, `BytesIter(_slice=…)`, `CStringSpan(…)`, `PhiloxRandom(seed=…)` |
+| 2 | **a call with NO arguments reaches no test at all**, so a parameter settled only by a DEFAULT counted as decided — and `is_32bit`'s default is `CompilationTarget.current()`, a comptime expression | **8** | 7 `is_32bit`/`is_64bit`, `PhiloxRandom`'s `rounds: Int = 10` |
+| 3 | **the answer has to be a TYPE ARGUMENT**: an inference that yields the enclosing template's own parameter (`is_negative(val)` inside `def bit_width[dtype: DType, width: Int](val: SIMD[dtype, width])` gives `dtype := dtype`) or a `Self.T` (`ThinAllocation(unsafe_owned_ptr=…)` inside `OwnedPointer[T]`, whose parameter is annotated `Pointer[Self.T, MutUntrackedOrigin]`) is not something any instantiation can be mangled under | **3** | `std/bit/bit.mojo`, `std/memory/owned_pointer.mojo`, `std/collections/interval.mojo` |
+| 4 | **a `#` comment inside a header is a parameter this reader misreads and a bracket `_balanced` counts** — `dlsym`'s header reads `# Default `dlsym` result is an OpaquePointer.` above `result_type: OpaquePointer`, and the census reported a type parameter with the comment's text as its name | 1 | `std/ffi/__init__.mojo`'s `dlsym` — and after the fix it is one of the **2** real ones |
+
+**The two that survive are both real, and both are concrete:**
+
+| site | the answer |
+|---|---|
+| `std/collections/string/string_span.mojo:2893  is_negative(rhs)` — `var rhs: Int` three lines above | `dtype := Int` |
+| `std/ffi/__init__.mojo:665  dlsym(self.handle, …)` — `result_type: AnyType = NoneType`, no argument reaches it | `result_type := NoneType` (a default that IS a type spelling) |
+
+**So the three pieces of §3 are re-sized by this, and the order changes.** §5's
+(a) was "a matcher over two annotation strings, plus the call-site rewrite that
+makes the demand bindable" at 32 sites; it is **2 sites**, and both are in the
+stdlib's own tail rather than in a row that blocks files — so it converts
+nothing and unblocks nothing, which makes it a patch for its own sake and not a
+step toward the 170. §5's (b) — return-type inference, and with it the `dealloc`
+row (26 sites) and now `ThinAllocation`'s 17 — is **the largest of the three**,
+because defects 1 and 3 moved 20 of the 32 into it: a `ThinAllocation` site needs
+the FIELD's declared type (`self._data: Pointer[T]` on the enclosing struct), and
+`dealloc` needs `alloc`'s return type, and **nothing in `formal/` computes
+either**. §5's (c) — bound resolution, 28 sites and the `FormatStruct` row — is
+unchanged, and it is still the largest number of FILES.
+
+**Two buckets the instrument did not have, and why each is not `solvable`:**
+
+* **`a type argument is settled by a comptime default`** (8 sites). A default
+  settles a parameter, which is why `masked[T, invariant: Bool = False]` is not a
+  phantom — but `False` is a comptime VALUE and `CompilationTarget.current()` is
+  an EXPRESSION, and `formal/monomorph.py::type_arg_text` refuses both, so the
+  demand would be a mangled name no instantiation was ever built under. That is
+  the one direction a census may not round: its own header says "a census that
+  rounds an unrecognised shape into `solvable` is the one mistake that would make
+  the total an overstatement, and an overstatement here is a licence to build the
+  wrong thing", and this instrument was rounding 40 of its 115 sites into it.
+* **`the declaration has no type parameter to substitute`** (0 sites after the
+  `*`-sigil fix, 2 before it). `monomorph.instantiate` refuses `fcntl[
+  *types: Intable]` with "its declaration has no type parameter, so there is
+  nothing to substitute", and the census used to call the same site solvable.
+
+**What this does NOT do.** It infers nothing, and §5's own caveat stands and
+now matters more: even the 2 would need the call site rewritten to the
+instantiation the answer names, and `monomorph.demands` is only half of that.
+**The rewrite half is where the next worker should start**, and it is worth
+saying why it is the same half for all three buckets: the demand and the rewrite
+are keyed on `(base, args)` and a call site can only be rewritten to a mangled
+name it can recompute, so the inference and the rewrite cannot be landed apart
+whatever bucket the inference answers from. A matcher that cannot recompute its
+own answer at the rewrite site is worse than the refusal, which is what
+`type_arg_text`'s docstring is about.
+
+**The tests**, both in `test_formal_monomorph.py`, both changed by this and both
+changed because the classifier changed rather than because an expectation moved:
+`the_census_answers_each_of_its_seven_questions` (renamed from *the five*, with
+four new fixtures that each fail without their fix — a keyword argument, a
+comment inside the header, a comptime default, a `def pick[](v: Int)` with
+nothing to substitute — and `masked`'s own bucket corrected from `solvable`), and
+`the_census_reads_the_measured_shapes_out_of_the_corpus`, which now asserts
+`is_32bit` in the new bucket and treats `is_negative`'s two sites as the two
+shapes they are. That second test **could not run at all before this**: it took
+no `tmpdir` and the runner passes one to every test, so the case that pins the
+doc's measured shapes against the real stdlib has been an `ERROR` on every run
+since it was written.
+
+```console
+$ python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_monomorph.py
+formal monomorphization: PASS=17 EXPECTED=0 SKIP=0 FAIL=0
+```

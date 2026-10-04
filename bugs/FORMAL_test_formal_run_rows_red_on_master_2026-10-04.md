@@ -127,9 +127,10 @@ belongs in this doc rather than in a fix to the first one.
 ## Why this worker did not fix it
 
 **Both are in areas another worker holds.** §1's construct is the base/field
-merge — `bugs/FORMAL_a_subclass_drops_the_bases_fields.md` is claimed by
-`formal16-2`, and `construction_arity_refusal` is the message that merge reports
-through. §2 is the one-field mutator's receiver hand-off, which is
+merge — the fix for it landed in `5cf72641` ("a subclass's fields are its BASE's
+fields followed by its own"), whose doc is deleted with it, and
+`construction_arity_refusal` is the message that merge reports through. §2 is the
+one-field mutator's receiver hand-off, which is
 `bugs/FORMAL_a_one_field_mutator_has_no_method_contract.md` (claimed by
 `formal21-2`) and
 `bugs/FORMAL_a_one_word_frame_holder_constructor_is_answered_by_the_receiver_rule.md`

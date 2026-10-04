@@ -1229,15 +1229,24 @@ def _census_rows(root):
     return out, unresolved
 
 
-def test_the_census_answers_each_of_the_five_questions(tmpdir):
+def test_the_census_answers_each_of_its_seven_questions(tmpdir):
     """One small source per bucket, because the classifier IS the measurement.
 
     Each pair below is a library and a caller, and each caller is written so that
-    exactly one thing decides its bucket. The five are the five answers an
+    exactly one thing decides its bucket. The seven are the answers an
     implementation of `monomorph.all_instantiation_calls` has to be able to give,
     and a classifier that cannot tell them apart cannot be used to size the work
     either — it would report one number for a feature whose cost is the
     difference between a matcher and a type inferrer.
+
+    **Four of the seven are the corrections of 2026-10-04**
+    (`…_inferrable.md` §5b), and each has a fixture that fails without its fix:
+    a KEYWORD argument (`Kw`), a comment inside the header (`note`), a comptime
+    DEFAULT that is not a type (`cur`), and a declaration the export rule calls a
+    template with nothing to substitute (`pick`). Between them they took the
+    corpus's `solvable` count from 32 to 2, and the three that were the largest
+    of them — 17 `ThinAllocation`, 7 `is_32bit`, `dlsym`'s comment read as a
+    type parameter — were all invisible to the pre-2026-10-04 classifier.
     """
     root = os.path.join(tmpdir, "census")
     write_tree(root, {
@@ -1294,13 +1303,90 @@ def test_the_census_answers_each_of_the_five_questions(tmpdir):
                          "    var f = FormatStruct(writer)\n"
                          "    print(f)\n"),
         # 6. A DEFAULT settles a parameter no argument mentions, so this is not a
-        #    phantom: `invariant` is filled in by Mojo, not by the arguments.
+        #    phantom — `invariant` is filled in by Mojo, not by the arguments.
+        #    …and it is not SOLVABLE either, which is the correction: `False` is a
+        #    comptime VALUE, so the instantiation this site would need is
+        #    `masked[Int, False]` and `monomorph.type_arg_text` refuses a literal.
+        #    Reported as `solvable` before 2026-10-04, which made this fixture the
+        #    single largest false positive the instrument had.
         "masked.mojo": ("def masked[T: AnyType, invariant: Bool = False]"
                         "(v: SIMD[T, _]) -> T:\n    return v\n"),
+        #    The caller's annotation is `List[Int]` rather than
+        #    `SIMD[DType.float32, 4]` on purpose: a SIMD width is a LITERAL inside
+        #    a type application, `type_arg_text` refuses a literal, and this
+        #    fixture is about the comptime default and not about that. The
+        #    unspellable-annotation case is `spellable` below.
         "use_masked.mojo": ("from masked import masked\n"
                             "\n"
-                            "def main(n: SIMD[DType.float32, 4]):\n"
+                            "def main(n: List[Int]):\n"
                             "    print(masked(n))\n"),
+        # 7. A comptime DEFAULT that is not a type at all: `is_32bit`'s own
+        #    `target: CompilationTarget = CompilationTarget.current()`, which is
+        #    7 of the corpus's sites. The declaration is readable, the argument
+        #    list is empty, and there is nothing to unify — so the answer is not
+        #    "solvable" but "settled by something this path cannot spell".
+        #    One parameter, defaulted, and no value parameter at all — which is
+        #    `std/sys/info.mojo`'s `is_32bit` exactly. A second, undefaulted
+        #    parameter would make this a PHANTOM instead, which is a different
+        #    question and is already row 4 above.
+        "cur.mojo": ("def cur[target: CompilationTarget = "
+                     "CompilationTarget.current()]() -> Bool:\n"
+                     "    return False\n"),
+        "use_cur.mojo": ("from cur import cur\n"
+                         "\n"
+                         "def main():\n"
+                         "    print(cur())\n"),
+        # 8. A KEYWORD argument, which is 17 of the 32 sites the pre-2026-10-04
+        #    census called solvable and is the corpus's largest instance of the
+        #    shape: the argument is in `call.kwargs`, a reader that walks
+        #    `call.args` sees nothing at all, and a site nothing was inspected of
+        #    falls out of every test into `solvable`.
+        "kw.mojo": ("struct Kw[T: AnyType]:\n"
+                    "    var xs: List[T]\n"
+                    "\n"
+                    "    def __init__(out self, *, holder: List[T]):\n"
+                    "        self.xs = holder\n"),
+        "use_kw.mojo": ("from kw import Kw\n"
+                        "\n"
+                        "def main(xs: List[Int]):\n"
+                        "    var k = Kw(holder=xs)\n"
+                        "    print(k)\n"),
+        # 9. A COMMENT inside the header. It is not only a parameter this reader
+        #    would misread (`std/ffi/__init__.mojo`'s `dlsym` reported a type
+        #    parameter called "# Default `dlsym` result is an OpaquePointer."), it
+        #    is also a bracket `_balanced` would count.
+        "note.mojo": ("def note[\n"
+                      "    # the element type\n"
+                      "    T: AnyType = Int\n"
+                      "](v: List[T]) -> T:\n"
+                      "    return v[0]\n"),
+        "use_note.mojo": ("from note import note\n"
+                          "\n"
+                          "def main(xs: List[Int]):\n"
+                          "    print(note(xs))\n"),
+        # 10. An argument annotation that is a type but NOT one this path could
+        #     mangle: `SIMD[DType.float32, 4]`'s width is a literal, and
+        #     `type_arg_text` reads a literal as no type argument at all. The
+        #     bucket is `UNDECLARED` — the same place a call or an operator lands
+        #     — because what the implementer has to do is the same in both cases:
+        #     there is no type argument here to be had, whatever the source wrote.
+        "spellable.mojo": "def wide2[T: AnyType](v: T) -> T:\n    return v\n",
+        "use_spellable.mojo": ("from spellable import wide2\n"
+                               "\n"
+                               "def main(n: SIMD[DType.float32, 4]):\n"
+                               "    print(wide2(n))\n"),
+        # 11. A declaration the EXPORT RULE calls a template and which has no type
+        #     parameter to substitute — `def pick[](v: Int)`. `monomorph.instantiate`
+        #     refuses exactly this ("its declaration has no type parameter, so there
+        #     is nothing to substitute"), so a census that reports it `solvable` is
+        #     promising an instantiation nothing can build. It was `solvable` for
+        #     every `*`-sigil header (`fcntl[*types: Intable]`) before
+        #     2026-10-04.
+        "pick.mojo": "def pick[](v: Int) -> Int:\n    return v\n",
+        "use_pick.mojo": ("from pick import pick\n"
+                          "\n"
+                          "def main(n: Int):\n"
+                          "    print(pick(n))\n"),
     })
     sys.path.insert(0, os.path.join(HERE, "tools"))
     import formal_template_call_census as T
@@ -1314,7 +1400,12 @@ def test_the_census_answers_each_of_the_five_questions(tmpdir):
         "make_it": T.BUCKET_UNDECLARED,
         "pair_up": T.BUCKET_PHANTOM,
         "FormatStruct": T.BUCKET_NO_UNIFY,
-        "masked": T.BUCKET_SOLVABLE,
+        "masked": T.BUCKET_COMPTIME_DEFAULT,
+        "cur": T.BUCKET_COMPTIME_DEFAULT,
+        "Kw": T.BUCKET_SOLVABLE,
+        "note": T.BUCKET_SOLVABLE,
+        "pick": T.BUCKET_NO_PARAMETER,
+        "wide2": T.BUCKET_UNDECLARED,
     }
     for name, bucket in want.items():
         rows = got.get(name) or []
@@ -1331,9 +1422,18 @@ def test_the_census_answers_each_of_the_five_questions(tmpdir):
     check(all(r[2] for r in got["FormatStruct"]),
           f"FormatStruct's `ref[Self.o] writer: Self.T` did not set the "
           f"`Self.T` flag: {got['FormatStruct']}")
+    # The two `solvable` rows here are the only two of ten, and that is the
+    # point of the corrections rather than an accident of the fixture: three of
+    # the ten are shapes a pre-2026-10-04 reader called `solvable` (the keyword,
+    # the comment, the comptime default) and a fourth is a declaration with
+    # nothing to substitute at all.
+    check({n for n, b in want.items() if b == T.BUCKET_SOLVABLE} ==
+          {"widen", "Kw", "note"},
+          f"the fixture's solvable set moved: "
+          f"{sorted(n for n, b in want.items() if b == T.BUCKET_SOLVABLE)}")
 
 
-def test_the_census_reads_the_measured_shapes_out_of_the_corpus():
+def test_the_census_reads_the_measured_shapes_out_of_the_corpus(tmpdir):
     """The three symbols the doc measured, asked of the real stdlib.
 
     `bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
@@ -1364,7 +1464,11 @@ def test_the_census_reads_the_measured_shapes_out_of_the_corpus():
     want = {
         "FormatStruct": T.BUCKET_NO_UNIFY,     # `Some[Writer]` against `T: Writer`
         "dealloc": T.BUCKET_UNDECLARED,        # the argument is `x^`
-        "is_negative": T.BUCKET_SOLVABLE,      # `SIMD[dtype, _]` against `SIMD[dtype, _]`
+        # …and the row that moved: seven sites whose only type argument is settled
+        # by `CompilationTarget.current()`, which is a comptime EXPRESSION and not
+        # a type this path can mangle. Reported `solvable` before 2026-10-04
+        # because a call with no arguments reaches no test at all.
+        "is_32bit": T.BUCKET_COMPTIME_DEFAULT,
     }
     for name, bucket in want.items():
         sites = per.get(name) or []
@@ -1375,6 +1479,26 @@ def test_the_census_reads_the_measured_shapes_out_of_the_corpus():
               f"{name}(…) classified {wrong} where the doc's §2 says the "
               f"argument's type decides it ({bucket!r}); the census and the "
               f"measurement disagree")
+    # `is_negative` is the doc's third measured shape and it is TWO shapes, so it
+    # is asserted as a set rather than as one bucket: `std/bit/bit.mojo`'s site is
+    # inside `bit_width[dtype: DType, width: Int](val: SIMD[dtype, width])`, so the
+    # answer a matcher derives is the ENCLOSING template's own `dtype` and no
+    # instantiation can be mangled under it, while
+    # `std/collections/string/string_span.mojo`'s `is_negative(rhs)` reads a
+    # `var rhs: Int` and `dtype := Int` is a real answer. The 2026-10-04 change
+    # is what tells those two apart; before it, both were `solvable` and the
+    # `Solvable`-count the doc's §5 quotes was 32.
+    neg = per.get("is_negative") or []
+    check(neg, f"is_negative(…) has no site in the census over {stdlib}, so the "
+               f"doc's third measured shape is not being reproduced")
+    check({b for b, _bd, _s in neg} <= {T.BUCKET_SOLVABLE, T.BUCKET_UNDECLARED},
+          f"is_negative(…) classified {[b for b, _x, _y in neg]}, which is "
+          f"neither of the two shapes its sites are: an enclosing template's own "
+          f"`dtype` (not spellable) or a concrete `var rhs: Int` (spellable)")
+    check(any(b == T.BUCKET_SOLVABLE for b, _bd, _s in neg),
+          f"no is_negative(…) site is solvable, so the doc's §2 claim that its "
+          f"type argument is inferable from the argument's declared type is not "
+          f"reproduced anywhere in the corpus: {[(b, s) for b, _x, s in neg]}")
     check(any(bounded for _b, bounded, _s in per.get("FormatStruct", [])),
           "FormatStruct[T: Writer] classified with no trait-bound row, so the "
           "bound that makes its unification a bound-resolution question is "
@@ -1422,8 +1546,8 @@ TESTS = [
      test_a_bracketed_parameter_annotation_instantiates),
     ("a stated mangled spelling is the one the mangler produces",
      test_a_stated_mangled_spelling_is_the_one_the_mangler_produces),
-    ("the census answers each of the five questions",
-     test_the_census_answers_each_of_the_five_questions),
+    ("the census answers each of its seven questions",
+     test_the_census_answers_each_of_its_seven_questions),
     ("the census reads the measured shapes out of the corpus",
      test_the_census_reads_the_measured_shapes_out_of_the_corpus),
 ]
