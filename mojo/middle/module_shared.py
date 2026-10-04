@@ -405,6 +405,8 @@ def builtin_module_constant_names(module: str) -> tuple:
     return tuple(_BUILTIN_MODULE_CONSTANTS.get(module, {}).keys())
 
 
+import re as _re
+
 def module_qualifier(q) -> str:
     """The ONE module-string -> C-qualifier sanitization every cross-module
     registry key and symbol prefix in this codegen must agree on.

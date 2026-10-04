@@ -86,7 +86,7 @@ from mojo.middle.module_shared import *  # noqa: F401,F403
 # reading it from there would close the cycle
 # `module_gen -> module_shared -> gimple_codegen -> module_gen`, and the
 # name would be unavailable at the moment the import ran.
-from mojo.middle.types import dispatch_table_global_ctype
+from mojo.middle.types import _COMPILE_TIME_CALL_MODULES, dispatch_table_global_ctype
 from mojo.middle.module_shared import (
     _LIST_RETURNING_METHODS, _STR_RETURNING_METHODS, _UNKNOWN_FIELD_CTYPE, _as_boollit_node, _as_dict,
     _as_funcdef_node, _as_int, _as_intlit_node, _as_str, _as_structdef_node, _bytes_subclass_new_payload_name,
@@ -10206,7 +10206,7 @@ def gen_module_impl(self, stmts):
             if (isinstance(_scan_stmt.value, CallExpr)
                     and isinstance(_scan_stmt.value.func, MemberExpr)
                     and isinstance(_scan_stmt.value.func.obj, IdentExpr)
-                    and _scan_stmt.value.func.obj.name == 're'
+                    and _scan_stmt.value.func.obj.name in _COMPILE_TIME_CALL_MODULES
                     and _scan_stmt.value.func.member == 'compile'
                     and _scan_stmt.value.args
                     and isinstance(_scan_stmt.value.args[0], StringLiteral)):

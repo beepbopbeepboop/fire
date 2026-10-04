@@ -1176,6 +1176,20 @@ def _uncompiled_module_marker(gen, node) -> str:
     name = _as_str(obj.name)
     if name not in getattr(gen, '_module_alias_names', ()):
         return ''
+    # A module this compiler answers at COMPILE TIME (`re`: see
+    # `module_shared._COMPILE_TIME_CALL_MODULES`) is exempt, and the exemption
+    # is the SAME table the recogniser that makes it compile-time handled reads.
+    # `can_resolve_module_path` below is false for `re` — it asks whether there
+    # is Mojo SOURCE for a module under `TEST_PATH`/`std*`, and the real Python
+    # stdlib is neither — so without this the raise fired on a marker whose
+    # value nothing reads: `re.compile("...")` is stubbed to 0 and `.finditer()`
+    # is answered from `_regex_patterns`, which is the whole design, and raising
+    # turned a working `for m in re.compile(p).finditer(src)` into
+    # `NotImplementedError: module 're' is not compiled into this binary`. That
+    # is a regression against master, caught by
+    # `test_silent_noop_iter.py::finditer_still_lowered`.
+    if gimple_ctypes.compile_time_call_module(name):
+        return ''
     cache = getattr(gen, '_uncompiled_marker_cache', None)
     if cache is None:
         cache = {}
