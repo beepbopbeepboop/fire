@@ -1864,6 +1864,44 @@ def _unfold(hs_path, rex=()):
                      + _MEM_LEMMAS + _WRAPPER_DEFS + tuple(rex))
 
 
+#: **How many successor equations the closing read may UNFOLD, and why it is a
+#: number and not an always.**
+#:
+#: The evaluation is right and it is affordable at the sizes the corpus has --
+#: but "the sizes the corpus has" is doing real work in that sentence, and
+#: measured the other way round the cost is not affordable: what the read costs
+#: is the SIZE OF THE UNFOLDED CHAIN, once per fact, and at the length a call
+#: with a stack argument produces the file stops elaborating altogether.
+#:
+#: Measured, one program at a time, each under `tools/memslot.py` with the
+#: generated file exactly as emitted (the number is the largest `simp only` set
+#: in the file, i.e. the longest path's closing read):
+#:
+#: | fixture | longest unfold | wall | peak | verdict |
+#: |---|---|---|---|---|
+#: | `const2` | **19** | 3.9 s | 1.4 GB | `rc=0`, and the read is CLOSED: with the two `hrip` admissions deleted the file still checks |
+#: | a 3-argument call | 77 | 127.3 s | 5.2 GB | `rc=0`, but a `sorry` is still live -- the evaluation did not go through |
+#: | an 8-argument call | 113 | 222.6 s | 6.5 GB | **`rc=-6`**: `lean::memory_exception`, `excessive memory consumption detected at 'interpreter'` |
+#: | a 24-argument call | 184 | 258.8 s | 6.0 GB | the same abort, and the PRE-CHANGE emitter aborts on it too |
+#:
+#: So the boundary is between 19 and 77 for "the evaluation closes the read" and
+#: between 77 and 113 for "the file elaborates at all", and 64 is inside both
+#: gaps. **It is an interpolation and not a crossover measurement**: the exact
+#: point was not found, and a reader who wants it should bisect
+#: `w3np`/`w8np` rather than trust the number. What the number is FOR is that a
+#: chain past it keeps the pre-change shape, which is measured to check --
+#: `rc=0`, 225.5 s, 6.0 GB on the 8-argument fixture -- and a hole is a better
+#: outcome than an elaboration that never finishes, because it is countable.
+#:
+#: The fix that makes this constant unnecessary is the per-step separation
+#: invariant `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
+#: names: one cheap fact per step, so the read costs O(1) in the chain's length
+#: instead of O(length) once per crossing. That needs an emitter-side
+#: stack/frame tracker to make each write's address a literal, and it is not
+#: landed.
+_MAX_UNFOLD = 64
+
+
 def _concrete_read(hs_path, rex=()):
     """The two lines that ATTEMPT a memory read out of a CONCRETE state.
 
@@ -1895,6 +1933,10 @@ def _concrete_read(hs_path, rex=()):
     where there is no peel (`hpop`, and a closing read on a chain that crossed
     a frame -- the peel is measured unaffordable there) this is the only one.
 
+    **And past `_MAX_UNFOLD` it is not attempted at all**, which is a bound and
+    not a preference -- see that constant's own table for the three measurements
+    it is the interpolation of, and for what happens on the wrong side of it.
+
     `hs_path` is the walker's own list of the successor equations in scope,
     which must include the equation for the state the GOAL is about: at the
     closing `hrip` that is `hs{k+1}` (the state after the outermost `ret`), not
@@ -1903,6 +1945,13 @@ def _concrete_read(hs_path, rex=()):
     error -- so the `simp` is `try`-guarded and the fact is admitted, which is
     the same treatment every other attempt in this emitter gets.
     """
+    if len(hs_path) > _MAX_UNFOLD:
+        # The single equation that writes memory, and no evaluation: this is the
+        # shape the emitter used before `_concrete_read` existed, it costs one
+        # `simp` whatever the chain's length, and the guard admits the rest. It
+        # is what keeps a long chain CHECKED rather than unaffordable, which is
+        # the whole difference between a hole and an aborted elaboration.
+        return ["  try (simp only [%s])" % hs_path[-1]]
     return ["  try (simp only [%s])" % _unfold(hs_path, rex),
             "  try (first | native_decide | decide)"]
 
