@@ -2474,23 +2474,36 @@ def UNICODE():
     return 32
 
 
-def STATUS_OK():
+# THE FOUR STATUSES, ANNOTATED `-> int`, and the annotation is the whole point
+# of the paragraph. A cross-dylib call's result cannot be classified without the
+# CALLEE's return type in the manifest, so `if r == re.STATUS_NO():` in another
+# module was REFUSED at build time with the "they are unequal" message this
+# file's other docstrings quote -- a caller cannot compare a status it cannot
+# type. It was found by `test_formal_hostmods_conformance.py`, which lowers
+# CPython's own `test_re.py` calls to exactly that spelling.
+def STATUS_OK() -> int:
+    """The pattern is fine and it matched; the spans are in the caller's list."""
     return 1
 
 
-def STATUS_NO():
+def STATUS_NO() -> int:
+    """The pattern is fine and it did not match. NOT the same as a refusal."""
     return 0
 
 
-def STATUS_LIMIT():
+def STATUS_LIMIT() -> int:
+    """Gave up: bigger than this module compiles, or nested too deeply."""
     return 2
 
 
-def STATUS_UNSUPPORTED():
+def STATUS_UNSUPPORTED() -> int:
+    """The pattern uses something this engine does not compile (lookaround, a
+    backreference). A different answer from "no match", and the caller can see
+    the difference."""
     return 3
 
 
-def MAXGROUPS():
+def MAXGROUPS() -> int:
     """How many capturing groups a pattern may have."""
     return 8
 

@@ -525,7 +525,7 @@ class Case:
 
     __slots__ = ("module", "file", "line", "fn", "args", "keywords",
                  "oracle", "fidelity", "unicode", "case_number",
-                 "bound", "kind", "template")
+                 "bound", "kind", "template", "emit", "want")
 
     def __init__(self, **kw):
         for key in self.__slots__:
@@ -589,7 +589,9 @@ def build_cases(spec):
              "model spelling cannot express the call": 0,
              "CPython raises and the model has no exception surface": 0,
              "argument is not a str where one is required": 0,
-             "argument has no UTF-8 spelling (a lone surrogate)": 0}
+             "argument has no UTF-8 spelling (a lone surrogate)": 0,
+             "argument is not ASCII and the model matches bytes": 0,
+             "argument holds a NUL, which a formal string cannot": 0}
     files = cpython_test_files(spec.name)
     if not files:
         return [], stats, {"no CPython regression test for this module": 1}
@@ -626,6 +628,21 @@ def build_cases(spec):
         if entry.strings_only and any(not isinstance(v, str) for v in bound):
             stats["argument is not a str where one is required"] += 1
             continue
+        if spec.ascii_only and any(isinstance(v, str) and not v.isascii()
+                                   for v in bound):
+            stats["argument is not ASCII and the model matches bytes"] += 1
+            continue
+        if any(isinstance(v, str) and "\x00" in v for v in bound):
+            # A formal string is a bare NUL-TERMINATED `char *`
+            # (`bugs/FORMAL_string_value_model.md`), so a NUL inside an
+            # argument truncates it and the model would be asked about a
+            # DIFFERENT input rather than about this one. CPython's
+            # `test_re.py` has two cases that are exactly this --
+            # `re.match('\\0', '\x00')` and `re.match('\\08', '\x008')` --
+            # and answering them 0 is a wrong answer to a right question about
+            # an input that cannot be asked about.
+            stats["argument holds a NUL, which a formal string cannot"] += 1
+            continue
         if any(isinstance(v, str) and not _encodable(v) for v in bound):
             # A lone SURROGATE is CPython's own answer to "what is this path",
             # and it has no UTF-8 spelling — `test_posixpath.py` has four cases
@@ -640,6 +657,9 @@ def build_cases(spec):
             # mean a case that can only ever agree.
             stats["CPython raises and the model has no exception surface"] += 1
         asserted = _literal_expectation(case["node"])
+        want = None
+        if oracle[0] == "value" and entry.oracle is not None:
+            want = entry.oracle(oracle[1])
         out.append(Case(
             module=spec.name, file=case["file"], line=case["line"],
             fn=case["fn"], args=case["args"], keywords=case["keywords"],
@@ -648,6 +668,7 @@ def build_cases(spec):
                         for v in bound),
             case_number=len(out),
             bound=bound, kind=entry.kind, template=entry.template,
+            emit=entry.emit, want=want,
         ))
     detail = {}
     for case in cases:
@@ -680,10 +701,18 @@ class Fn:
         self.name = name
         if entry is None:
             return
-        kind, template, params = entry
+        kind, template, params, emit, oracle = entry
         self.kind = kind
         self.template = template
         self.params = params
+        self.emit = emit
+        # How CPython's ANSWER becomes the value the model's answer is compared
+        # with. `re.match` answers a match OBJECT or None, and the model's
+        # `match_at` answers a status word; comparing those two directly is
+        # comparing a class to an integer and every case would differ. So the
+        # entry says how to reduce CPython's answer to the same THING, and
+        # `None` means "use it as it is".
+        self.oracle = oracle
         self.strings_only = kind in ("s", "t")
 
     def bind(self, args, keywords):
@@ -737,34 +766,83 @@ class Spec:
     places and `spec.name` at all of them is worse to read than `spec.name`.
     """
 
-    def __init__(self, name, source, fns, note):
+    def __init__(self, name, source, fns, note, ascii_only=False):
         self.name = name
         self.source = source
         self.fns = fns
         self.note = note
+        # `re` sets it: this path has no code points, so `\w`, `\d` and `\b`
+        # are ASCII-only here whatever the flag says, which `re.mojo` records as
+        # a real difference from CPython's Unicode default for a `str` pattern.
+        # Comparing a non-ASCII case would measure that difference 26 times
+        # instead of once, and it is a property of the VALUE MODEL rather than
+        # of the matcher.
+        self.ascii_only = ascii_only
 
 
 def _hostmod(name):
     return os.path.join(HOSTMODS, name + ".mojo")
 
 
+
+# `re`'s three-valued answer, lowered in the IMAGE.
+#
+# `STATUS_UNSUPPORTED` and `STATUS_LIMIT` are the module's own documented
+# refusals -- `formal/hostmods/re.mojo` gives them for a pattern using
+# lookahead, a lookbehind or a backreference, and for one bigger or deeper than
+# it compiles -- and they are NOT "did not match". A table that read them as a
+# boolean would report every refused pattern as a WRONG ANSWER, which is both
+# wrong and useless: the whole point of a status is that the caller can tell the
+# two apart. So the status becomes a third value, the checker counts it as a
+# refusal, and a refusal is reported rather than passed over.
+#
+# The span list is a CALLER-owned literal of 20 words, which is
+# `test_re_formal.py`'s spelling for the same reason (a list built inside the
+# function lives in that function's frame). Twenty is room for ten groups; a
+# pattern with more would answer `STATUS_LIMIT` rather than overflow, and that
+# is the module's own guard doing its job.
+RE_EMIT = """\
+    var st = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var r = {call}
+    var bit = 2
+    if r == re.STATUS_NO():
+        bit = 0
+    if r == re.STATUS_OK():
+        bit = 1
+    emit_i({k}, bit)"""
+
+# The value the model emits for "this pattern is not one I compile".
+REFUSED = 2
+
+
+def IS_A_MATCH(value):
+    """CPython's match object or None, as the 1 or 0 the model's status becomes.
+
+    A named function rather than a lambda in the table above so the table stays
+    readable, and named `IS_A_MATCH` rather than `truthy` because `None` is
+    falsy and a match object is truthy -- the reduction is "did it match", not
+    "is the answer truthy", and those differ for a pattern that matched an
+    EMPTY string.
+    """
+    return 1 if value is not None else 0
+
 MODULES = [
     Spec(
         "posixpath",
         _hostmod("posixpath"),
         {
-            "basename":    (S1, "posixpath.basename(%s)", ["p"]),
-            "dirname":     (S1, "posixpath.dirname(%s)", ["p"]),
-            "normpath":    (S1, "posixpath.normpath(%s)", ["p"]),
-            "isabs":       (I1, "posixpath.isabs(%s)", ["p"]),
-            "abspath":     (S1, "posixpath.abspath(%s)", ["p"]),
-            "realpath":    (S1, "posixpath.realpath(%s)", ["p"]),
-            "expanduser":  (S1, "posixpath.expanduser(%s)", ["p"]),
-            "relpath":     (S1, "posixpath.relpath(%s, %s)", ["path", "start"]),
-            "split":       (T2, "posixpath.split(%s)", ["p"]),
-            "splitext":    (T2, "posixpath.splitext(%s)", ["p"]),
-            "splitdrive":  (T2, "posixpath.splitdrive(%s)", ["p"]),
-            "splitroot":   (S1, "posixpath.splitroot_root(%s)", ["p"]),
+            "basename":    (S1, "posixpath.basename(%s)", ["p"], None, None),
+            "dirname":     (S1, "posixpath.dirname(%s)", ["p"], None, None),
+            "normpath":    (S1, "posixpath.normpath(%s)", ["p"], None, None),
+            "isabs":       (I1, "posixpath.isabs(%s)", ["p"], None, None),
+            "abspath":     (S1, "posixpath.abspath(%s)", ["p"], None, None),
+            "realpath":    (S1, "posixpath.realpath(%s)", ["p"], None, None),
+            "expanduser":  (S1, "posixpath.expanduser(%s)", ["p"], None, None),
+            "relpath":     (S1, "posixpath.relpath(%s, %s)", ["path", "start"], None, None),
+            "split":       (T2, "posixpath.split(%s)", ["p"], None, None),
+            "splitext":    (T2, "posixpath.splitext(%s)", ["p"], None, None),
+            "splitdrive":  (T2, "posixpath.splitdrive(%s)", ["p"], None, None),
+            "splitroot":   (S1, "posixpath.splitroot_root(%s)", ["p"], None, None),
         },
         "`splitroot` is PROJECTED: CPython answers a three-element tuple "
         "and the model ships only the root half, which is one word "
@@ -777,8 +855,8 @@ MODULES = [
         "textwrap",
         _hostmod("textwrap"),
         {
-            "dedent": (S1, "textwrap.dedent(%s)", ["text"]),
-            "indent": (S1, "textwrap.indent(%s, %s)", ["text", "prefix"]),
+            "dedent": (S1, "textwrap.dedent(%s)", ["text"], None, None),
+            "indent": (S1, "textwrap.indent(%s, %s)", ["text", "prefix"], None, None),
         },
         "The model's `indent` has no `predicate`, so CPython's "
         "`indent(text, '    ', predicate)` cases are skipped and counted. "
@@ -789,7 +867,7 @@ MODULES = [
         "struct",
         _hostmod("struct"),
         {
-            "calcsize": (I1, "struct.calcsize(%s)", ["fmt"]),
+            "calcsize": (I1, "struct.calcsize(%s)", ["fmt"], None, None),
         },
         "`calcsize` is the one of the four the model has that a literal "
         "CPython case can be expressed for: `pack`/`unpack_from`/`pack_into` "
@@ -800,7 +878,7 @@ MODULES = [
         "shlex",
         _hostmod("shlex"),
         {
-            "quote": (S1, "shlex.quote(%s)", ["s"]),
+            "quote": (S1, "shlex.quote(%s)", ["s"], None, None),
         },
         "`shlex.split` returns a LIST and is absent from the model; "
         "`shlex.shlex` is a generator (`formal/hostmods/shlex.mojo`).",
@@ -809,12 +887,12 @@ MODULES = [
         "math",
         _hostmod("math"),
         {
-            "isqrt":     (I1, "math.isqrt(%s)", ["n"]),
-            "factorial": (I1, "math.factorial(%s)", ["n"]),
-            "comb":      (I1, "math.comb(%s, %s)", ["n", "k"]),
-            "perm":      (I1, "math.perm(%s, %s)", ["n", "k"]),
-            "gcd":       (I1, "math.gcd(%s, %s)", ["a", "b"]),
-            "lcm":       (I1, "math.lcm(%s, %s)", ["a", "b"]),
+            "isqrt":     (I1, "math.isqrt(%s)", ["n"], None, None),
+            "factorial": (I1, "math.factorial(%s)", ["n"], None, None),
+            "comb":      (I1, "math.comb(%s, %s)", ["n", "k"], None, None),
+            "perm":      (I1, "math.perm(%s, %s)", ["n", "k"], None, None),
+            "gcd":       (I1, "math.gcd(%s, %s)", ["a", "b"], None, None),
+            "lcm":       (I1, "math.lcm(%s, %s)", ["a", "b"], None, None),
         },
         "`math.gcd`/`lcm`/`comb`/`perm` are variadic or optional in CPython; "
         "the model has the two-argument form and the list form "
@@ -823,6 +901,33 @@ MODULES = [
         "not fit a 64-bit word — that is the model's documented status, and a "
         "case whose CPython answer does not fit is compared against the status "
         "rather than dropped.",
+    ),
+    Spec(
+        "re",
+        _hostmod("re"),
+        {
+            "match":     (I1, "re.match_at(st, 20, %s, %s, 0)",
+                          ["pattern", "string"], RE_EMIT, IS_A_MATCH),
+            "fullmatch": (I1, "re.fullmatch(st, 20, %s, %s, 0)",
+                          ["pattern", "string"], RE_EMIT, IS_A_MATCH),
+            "search":    (I1, "re.search(st, 20, %s, %s, 0)",
+                          ["pattern", "string"], RE_EMIT, IS_A_MATCH),
+            "escape":    (S1, "re.escape(%s)", ["string"], None, None),
+        },
+        "**The biggest case table in this file, and the one whose selection rule "
+        "is the model's own SUBSET rather than its name.** CPython's pattern "
+        "language is far larger than `formal/hostmods/re.mojo` compiles, and a "
+        "harvest that ignored that would report several hundred WRONG ANSWERS "
+        "for patterns the module never claimed. So the third value above does "
+        "the selecting: a pattern the module refuses is a documented refusal "
+        "(`STATUS_UNSUPPORTED`), counted and printed, and only a pattern the "
+        "module COMPILES and then answers differently is a divergence. That is "
+        "the same discipline `test_re_formal.py`'s "
+        "`test_unsupported_constructs_are_refused` applies, over CPython's own "
+        "patterns instead of this repository's. `findall`, `sub` and `split` "
+        "answer a LIST, which does not cross a dylib boundary in CPython's "
+        "shape, and `compile` has nowhere to live; both are counted.",
+        ascii_only=True,
     ),
 ]
 
@@ -944,7 +1049,20 @@ def program(spec, cases):
             else:
                 spellings.append(repr(value))
         call = case.template % tuple(spellings)
-        if case.kind == S1:
+        if case.emit is not None:
+            # A module whose answer is a STATUS rather than a value. `re` is the
+            # one here: its `search`/`match_at`/`fullmatch` return a status word
+            # and a caller that cannot tell "did not match" from "this pattern
+            # is refused" is reading a boolean out of an error. The snippet
+            # lowers the status to a THREE-valued answer and the checker counts
+            # the third value as the module's own documented refusal
+            # (`formal/hostmods/re.mojo`'s STATUS_UNSUPPORTED), which is a
+            # different thing from a wrong answer and is not allowed to pass
+            # silently either.
+            lines.extend(case.emit.format(k=case.case_number, call=call,
+                                          a0=spellings[0] if spellings else "")
+                         .split("\n"))
+        elif case.kind == S1:
             lines.append(f"    emit_s({case.case_number}, {call})")
         elif case.kind == I1:
             lines.append(f"    emit_i({case.case_number}, {call})")
@@ -1069,7 +1187,7 @@ def expected_parts(case):
     """
     if case.oracle[0] == "raises":
         return None
-    value = case.oracle[1]
+    value = case.want if case.want is not None else case.oracle[1]
     if case.kind == I1:
         return [value]
     if case.kind == S1:
@@ -1145,6 +1263,7 @@ def run_group(spec, verbose, backends):
                 f"{other.get(first)}")
 
     failures = []
+    refused = []
     for case in cases:
         want = expected_parts(case)
         if want is None:
@@ -1155,6 +1274,14 @@ def run_group(spec, verbose, backends):
                                 f"({case.fn}): the image emitted NO record")
                 continue
             got = model_parts(case, answers[case.case_number])
+            if len(want) == 1 and got[0] == REFUSED:
+                # The model's own documented refusal for a pattern it does not
+                # compile. Counted and printed, and NOT a pass either: a table
+                # that could not say how many of CPython's patterns this
+                # engine declines would be reporting a smaller number than it
+                # measured.
+                refused.append((backend, case))
+                continue
             for part, (g, w) in enumerate(zip(got, want)):
                 if g != w:
                     failures.append(
@@ -1179,6 +1306,23 @@ def run_group(spec, verbose, backends):
               f"{spec.name} tests, {fidelity}")
         if counted:
             print(f"      not expressible here: {counted}")
+    if refused:
+        # The distinct PATTERNS, not the cases: twelve refused cases over one
+        # construct is one limit, and a reader wants to know which construct.
+        # Counted ONCE per case, not once per backend: `refused` has an entry
+        # per (backend, case) and the two backends refuse the same patterns, so
+        # counting the list would double the headline on a two-backend run and
+        # make the number a function of the backend count.
+        cases_refused = {case.case_number for _b, case in refused}
+        distinct = sorted({(case.fn, case.args[0]) for _b, case in refused})
+        print(f"    {spec.name}: {len(cases_refused)} of CPython's own cases "
+              f"are a pattern this engine REFUSES (its own STATUS_UNSUPPORTED / "
+              f"STATUS_LIMIT), which is a documented limit and not an "
+              f"agreement. {len(distinct)} distinct (function, PATTERN) pairs:")
+        for fn, pattern in distinct[:14]:
+            print(f"      refused: {fn}({pattern!r})")
+        if len(distinct) > 14:
+            print(f"      ... and {len(distinct) - 14} more")
     check(not failures,
           f"{spec.name}: {len(failures)} divergences from CPython on "
           f"{len(cases)} of its own cases; first six:\n      "
