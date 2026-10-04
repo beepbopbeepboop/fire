@@ -115,14 +115,24 @@ printed no audit line at all must not look the same.
 
 THE KNOWN DIVERGENCES, AND WHY GENERATING THEM IS THE POINT
 -----------------------------------------------------------
-Three constructs in this subset are known to disagree with CPython today, and
-they are in `KNOWN_DIVERGENCES` with the document that owns each.  The
-generator emits them DELIBERATELY — `--mix signed` spells a division with two
-signed operands, which is the whole of the floor-versus-truncate disagreement,
-and `--mix strings` reads `s[i]`, which is a byte rather than a one-character
-string.  A generator that avoided them would be quieter, and quiet here means
-blind: a construct the corpus cannot produce cannot be noticed the day it is
-fixed, which is precisely the moment the tool exists for.
+One construct in this subset is known to disagree with CPython today, and it is
+in `KNOWN_DIVERGENCES` with the document that owns it.  The generator emits it
+DELIBERATELY — `--mix strings` reads `s[i]`, which is a byte rather than a
+one-character string.  A generator that avoided it would be quieter, and quiet
+here means blind: a construct the corpus cannot produce cannot be noticed the
+day it is fixed, which is precisely the moment the tool exists for.
+
+The floor-versus-truncate pair (`//` and `%` over two signed operands) was in
+that table until the day both backends floored them, and was DELETED in that
+commit — see `KNOWN_DIVERGENCES`' own note, because a row naming a construct
+that is now RIGHT forgives the next disagreement that happens to contain it.
+The corpus keeps generating the operators regardless, and what replaced the row
+is `MIX_MUST_GENERATE`, which says the weaker and still-load-bearing thing:
+**the mix must still produce a signed-over-signed division**.  That is a
+property of the GENERATOR and stays true while the backend is right; it is also
+the only thing that notices the day a change to the signedness decision stops
+emitting one, at which point this corpus would report the same clean tally
+either way.
 
 What keeps them from drowning a sweep is ATTRIBUTION, not avoidance.  A
 disagreement is minimised first, and then the reduced program is re-tested with
@@ -345,16 +355,23 @@ STACK_TRAP_STATUS = 2
 # **A row here is a CLAIM that the tool still measures the construct.** The
 # anti-rot is the row's own life: delete the construct's row in the same commit
 # that fixes it, or the corpus stops covering the day the bug goes away and the
-# table becomes a list of things nobody looks for. `bugs/
-# FORMAL_floor_division_on_a_signed_operand_is_truncated.md` §5 says so with its
-# own row as the example.
+# table becomes a list of things nobody looks for.
+#
+# **`floordiv` and `modulo` were deleted in the commit that fixed
+# `//`-floors-and-`%`-takes-the-sign-of-the-divisor** (both backends, with
+# `model.division_floors` as the one decision and `fdiv64`/`frem64` as the model
+# the source is checked against). Leaving them would have been worse than
+# useless: a disagreement the corpus still produces is neutralised by a
+# construct that is no longer wrong, so a REAL floor bug found later would be
+# explained away by a fixed one. What replaces them is not a row but
+# `MIX_MUST_GENERATE` below: `--mix signed` must still GENERATE a
+# signed-over-signed division, which `test_formal_fuzz.py::_check_generation`
+# asserts over its own index range, so deleting the rows without the mix would
+# pass here and measure nothing.
+#
+# `str_subscript` is the row still standing, and it is the shape of the claim
+# the other two carried: `bugs/FORMAL_string_value_model.md` owns it.
 KNOWN_DIVERGENCES = {
-    "floordiv": (
-        "`//` truncates toward zero instead of flooring (bugs/"
-        "FORMAL_floor_division_on_a_signed_operand_is_truncated.md)"),
-    "modulo": (
-        "`%` takes the sign of the DIVIDEND instead of the divisor (same doc as "
-        "`floordiv`)"),
     "str_subscript": (
         "`s[i]` is a byte, not a one-character string (bugs/"
         "FORMAL_string_value_model.md)"),
@@ -364,8 +381,6 @@ KNOWN_DIVERGENCES = {
 # program's text; a marker is only blamed when removing every occurrence of one
 # of its spellings makes the program agree.
 FEATURE_PATTERNS = {
-    "floordiv": (r"//",),
-    "modulo": (r"(?<![\w)])%(?![a-zA-Z_(])",),
     # Decided by `features_of`, not by a pattern: a subscript is correct on a
     # list and wrong on a string, and only the binding says which. An empty
     # pattern tuple is how this table says "handled specially", and keeping the
@@ -378,12 +393,8 @@ FEATURE_PATTERNS = {
 # types, or the offending line is replaced by an equivalent one. Shape matters
 # because the alternative — deleting the statements that mention the construct —
 # takes the definitions with them, so the program then fails for a reason that
-# has nothing to do with the disagreement and nothing is learned. Swapping `//`
-# for `-` leaves every name bound and every statement in place, so if the
-# program agrees afterwards then the division is what was wrong.
+# has nothing to do with the disagreement and nothing is learned.
 NEUTRALISERS = {
-    "floordiv": [(r"//", "-")],
-    "modulo": [(r"(?<![\w)])%(?![a-zA-Z_(])", "+")],
     # The index is `-?\d+` and not `\d+` because the minimiser's literal pass
     # rewrites an index to `0`, `1` or `-1` and takes whichever still
     # reproduces — so a reproducer that has been reduced by one line is the
@@ -1020,6 +1031,15 @@ MIXES = {
     # and cannot produce a zero. A mix that left this out of the corpus could
     # not notice the day the backend's `//` was fixed, which is the only moment
     # the tool is for.
+    #
+    # **They are STILL HERE after both were fixed**, and the reason is
+    # `MIX_MUST_GENERATE`: the operators did not stop being the interesting
+    # thing about this mix, they stopped being a KNOWN_DIVERGENCE. A signed
+    # `//` is where `formal/model.py::division_floors` (the one decision both
+    # emitters ask) has to be right, and a mix that dropped the only construct
+    # that exercises it would go on reporting a clean tally if it were deleted
+    # from the backend by mistake. Deleting the ROW was the fix's anti-rot;
+    # deleting the MIX would have been the fix's own coverage hole.
     "signed": (("assign", 3), ("div_signed", 5), ("mod_signed", 5),
                ("cmp", 3), ("logic", 2), ("if", 4), ("while", 2), ("for", 2),
                ("print", 2)),
@@ -1199,6 +1219,34 @@ MIXES = {
                ("str_startswith", 3), ("str_endswith", 2), ("str_lstrip", 2),
                ("str_meth_len", 2), ("if", 3), ("print", 2)),
     "fstrings": (("str_interp", 5), ("assign", 2), ("print", 2)),
+}
+
+#: mix -> (a pattern the mix must still PRODUCE, why it must).
+#:
+#: **This is a different table from `KNOWN_DIVERGENCES` and the difference is
+#: the whole point.**  A known-divergence row is a claim that the backend gets
+#: this construct wrong, and it must be DELETED the day that stops being true —
+#: a row naming a construct that is now right forgives the next disagreement
+#: that happens to contain it.  A row here is a claim about the GENERATOR: that
+#: this mix still emits a shape nothing else does.  That claim is unaffected by
+#: whether the backend is right about the shape, which is why it survives the
+#: fix that deleted the corresponding `KNOWN_DIVERGENCES` row and outlives it.
+#:
+#: `signed` is the row that matters today.  `--mix signed` is the only place a
+#: signed-over-signed `//` and `%` are generated at all, and that is where
+#: `formal/model.py::division_floors` — the one decision both emitters read —
+#: is exercised.  A change that made the signedness uniform, or dropped the
+#: operators from the mix, would leave every sweep reporting the same clean
+#: tally with one fewer thing measured, which is the failure mode
+#: `bugs/FORMAL_fuzz_ledger.md` §1 calls out: "a mix that stops producing a
+#: construct reports the same clean tally as one that never produced it".
+MIX_MUST_GENERATE = {
+    "signed": (r"//|(?<![\w)])%(?![a-zA-Z_(])",
+               "`--mix signed` is the only place a signed-over-signed division "
+               "is generated, and it is where `model.division_floors` is "
+               "exercised; the operators stay in the pool after both were "
+               "fixed precisely so a regression there is visible as a "
+               "coverage hole rather than as a quieter corpus"),
 }
 
 # The growing augmented operators, and the bound each one's RIGHT-HAND side is

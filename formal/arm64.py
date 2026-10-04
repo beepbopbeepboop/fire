@@ -634,6 +634,20 @@ def encode_asrv_xd_xn_xm(xd: int, xn: int, xm: int) -> bytes:
 def encode_msub_xd_xn_xm_xa(xd: int, xn: int, xm: int, xa: int) -> bytes:
     """MSUB Xd, Xn, Xm, Xa. Xd = Xa - Xn * Xm.
     Encoding: 1 0 0 11011 000 Rm 1 Ra Rn Rd = 0x9b008000 | ...
+
+    **The 0..30 range on every field is load-bearing and not cosmetic.** The
+    four-operand MADD/MSUB family has no SP form, so architecturally 31 here is
+    the zero register and `MSUB Xd, Xn, Xm, XZR` is a perfectly good encoding —
+    and `ProofLib.arm64_step`'s MSUB arm would read it correctly. It is still
+    refused, because `MUL`'s mask (`0xffe07c00`) and `MSUB`'s (`0xffe08000`) both
+    ACCEPT a word with `Ra = 31`, `arm64_step` tests MUL first, and the word is
+    then read as `X1 * X5`.  Measured, not reasoned: emitting
+    `MSUB X6, X1, X5, XZR` for the `//` correction's negation made
+    `formal/examples/udivmod.mojo`'s generated proof fail with the correction
+    having the WRONG SIGN.  `_emit_floor_remainder` spells that value with a mask
+    instead, and the reason is recorded there and in
+    `bugs/FORMAL_arm64_neg_is_shadowed_by_the_sub_register_arm.md`'s
+    neighbourhood.
     """
     assert all(0 <= r <= 30 for r in (xd, xn, xm, xa))
     insn = 0x9b008000 | (xm << 16) | (xa << 10) | (xn << 5) | xd

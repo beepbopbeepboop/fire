@@ -820,6 +820,75 @@ def srem64 (a b : UInt64) : UInt64 :=
   if b = 0 then 0
   else s64_to_u64 (Int.tmod (u64_toS64 a) (u64_toS64 b))
 
+/-- **The FLOOR correction**: `1` exactly when truncating division rounded toward
+    zero when the language's `//` floors — a non-zero remainder whose sign
+    differs from the divisor's — and `0` otherwise.
+
+    This is `Int.fdiv`'s condition, and it is decided from the remainder and the
+    DIVISOR alone: `sign(r) ≠ sign(d)` is `r ^^^ d` reading negative, which is
+    the `EOR`/`CMP`/`CSET` triple the arm64 and x86-64 emitters now emit, so the
+    dividend is not needed after the divide and `IDIV` (which leaves the dividend
+    nowhere) can still floor.
+
+    **Every clause is written in the form the machine's own `CMP`/`CSET` steps
+    LEAVE, and that is not a stylistic choice.** `arm64_cset_ne` leaves
+    `if r ≠ 0 then 1 else 0` and `arm64_cset_lt_s` leaves
+    `if (r ^^^ d ^^^ M) < M then 1 else 0` for `M = 0x8000000000000000`; both are
+    in `formal/arm64_proof_gen.py`'s `_VALUE_SIMP`, so the terminal value flow's
+    `simp only` rewrites the machine's two `CSET`s into these two clauses and the
+    goal then closes on `rfl`.  Spelled the equivalent-but-different ways this
+    was first written — `(if r = 0 then 0 else 1)` and
+    `(if (r ^^^ d) >>> 63 = 1 then 1 else 0)` — every tactic in the chain failed
+    instead: `rfl` cannot see `x >>> 63 = 1` is `x ^^^ M < M`, and `bv_decide`
+    spends its whole budget trying (20 000 000 heartbeats, exhausted) because
+    the `sdiv64 a b` atom in the same goal is an `Int.tdiv` it cannot evaluate.
+    **A model written for the reader and a model written for `rfl` are the same
+    model only when the reader's spelling is the machine's**, and here the
+    machine's is the one that also reads fine.
+
+    **Why the remainder is spelled `a - sdiv64 a b * b` and not `srem64 a b`.**
+    The two are the same word — `srem64_sub` in `work.lean` is the proof, and it
+    is the identity this function exists to avoid needing.  The machine computes
+    the remainder with an `MSUB` over two registers, so what reaches the `CMP`
+    is `a - sdiv64 a b * b`; spelling the model the same way makes the residual
+    goal of a dividing block a proposition over bit-vectors in which `sdiv64 a b`
+    is the only atom on BOTH sides.  Spelled through `srem64` instead, the left
+    side carries `Int.tmod` and the goal needs that bridge lemma to become the
+    same proposition at all. -/
+def fdiv_correction (a b : UInt64) : UInt64 :=
+  let r := a - sdiv64 a b * b
+  (if r ≠ 0 then 1 else 0) &&&
+    (if (r ^^^ b ^^^ 0x8000000000000000) < 0x8000000000000000 then 1 else 0)
+
+/-- Signed 64-bit division that **floors**, which is what the language's `//`
+    means; `0` when the divisor is 0 (codegen's div0 path traps before this).
+
+    `q_floored = q - c` with `q = sdiv64` and `c = fdiv_correction`: the
+    truncating quotient is one too large exactly when the remainder is non-zero
+    and the operands' signs differ. -/
+def fdiv64 (a b : UInt64) : UInt64 :=
+  if b = 0 then 0 else sdiv64 a b - fdiv_correction a b
+
+/-- The language's `%`, which takes the sign of the DIVISOR: exactly
+    `a - b * fdiv64 a b`.
+
+    **Spelled through `fdiv64` and not through the remainder, and that is the
+    whole reason this definition has the shape it does.**  The emitters compute
+    `%` as `n - d * (q - c)` — the floor-corrected QUOTIENT is what gets
+    multiplied, by one `MSUB` — so a model written as `r + b*c` states the same
+    number and the residual goal of a dividing block is then two different
+    expressions over the same atoms, which `bv_decide` declined: it has to know
+    `mask(c) AND d = d*c` for a `c` built out of two `ite`s, and it does not
+    split that on its own.  Written this way the goal is
+    `n - 7 * (sdiv64 n 7 - c) = n - 7 * fdiv64 n 7`, both sides the same word
+    once `fdiv64` is unfolded, and `rfl` closes it.
+
+    So this is `a - b * fdiv64 a b` on purpose: it is both the most readable
+    statement of Python's `%` available and the one the machine's own `MSUB`
+    spells. -/
+def frem64 (a b : UInt64) : UInt64 :=
+  if b = 0 then 0 else a - b * fdiv64 a b
+
 /-- Arithmetic (sign-extending) shift right of a 64-bit pattern by `sh` (mod 64). -/
 def asr64 (x : UInt64) (sh : UInt64) : UInt64 :=
   let s := sh.toNat % 64
@@ -881,9 +950,18 @@ def evalExpr (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : Str
   -- machine's SDIV/MSUB/ASR steps compute (see `arm64_step`), so the source
   -- model and the value flow cannot drift.  Reading `/` as UInt64's would make
   -- `-7 / 2` a huge positive number, which is a model of a different language.
+  --
+  -- `/` stays `sdiv64` and `//`/`%` are `fdiv64`/`frem64`, which is the same
+  -- split the emitters make: there is no float on this path, so `/` is the
+  -- documented int-only truncation (`FORMAL.md` §6 Phase 7 — `-7 / 2` answers
+  -- `-3` where CPython answers `-3.5`), while `//` FLOORS and `%` takes the
+  -- sign of the DIVISOR, which is what the source says.  `fdiv64`/`frem64` are
+  -- spelled over `sdiv64` and the `MSUB` remainder so that what the machine's
+  -- SDIV/EOR/CMP/CSET/AND/SUB sequence computes and what this term says are the
+  -- same bit-vector proposition, not two facts bridged by a lemma.
   | MojoExpr.binop "/" l r => sdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
-  | MojoExpr.binop "//" l r => sdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
-  | MojoExpr.binop "%" l r => srem64 (evalExpr callFunc l env) (evalExpr callFunc r env)
+  | MojoExpr.binop "//" l r => fdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
+  | MojoExpr.binop "%" l r => frem64 (evalExpr callFunc l env) (evalExpr callFunc r env)
   | MojoExpr.binop "<<" l r => evalExpr callFunc l env <<< evalExpr callFunc r env
   | MojoExpr.binop ">>" l r => asr64 (evalExpr callFunc l env) (evalExpr callFunc r env)
   | MojoExpr.binop "**" l r => u64pow (evalExpr callFunc l env) (evalExpr callFunc r env)
@@ -1032,8 +1110,8 @@ theorem evalExpr_binop (callFunc : String → UInt64 → UInt64) (op : String) (
   | "|" => evalExpr callFunc l env ||| evalExpr callFunc r env
   | "^" => evalExpr callFunc l env ^^^ evalExpr callFunc r env
   | "/" => sdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
-  | "//" => sdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
-  | "%" => srem64 (evalExpr callFunc l env) (evalExpr callFunc r env)
+  | "//" => fdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
+  | "%" => frem64 (evalExpr callFunc l env) (evalExpr callFunc r env)
   | "<<" => evalExpr callFunc l env <<< evalExpr callFunc r env
   | ">>" => asr64 (evalExpr callFunc l env) (evalExpr callFunc r env)
   | "**" => u64pow (evalExpr callFunc l env) (evalExpr callFunc r env)
@@ -3499,6 +3577,29 @@ theorem arm64_cset_le (a b : UInt64) :
   by_cases h : a ≤ b
   · rw [if_pos ((arm64_flag_le a b).mpr h), if_pos h]
   · rw [if_neg (fun hc => h ((arm64_flag_le a b).mp hc)), if_neg h]
+
+/-- `CSET Xd, lt` after `CMP Xn, #0` is "Xn is negative", which is the
+    floor-division correction's second half: the truncating remainder's sign
+    differs from the divisor's exactly when `remainder ^^^ divisor` reads
+    negative.  Written from `arm64_flag_lt_s` like the three above rather than
+    as a fresh `bv_decide`, so the CSET bridge has ONE shape in this file
+    instead of one per condition code.
+
+    **This is what closes a dividing block, together with `arm64_cset_ne`**,
+    and both are in `formal/arm64_proof_gen.py`'s `_VALUE_SIMP`, so the
+    terminal value flow's `simp only […, _VALUE_SIMP]` rewrites the machine's
+    two `CSET` steps into the source model's `fdiv_correction` — the goal then
+    has `fdiv_correction a b` on one side and `(if r = 0 …) &&& (if …)` on the
+    other with the same `r`, and `rfl` finishes it.  Nothing names either lemma
+    directly; they are in the value-flow simp set because that is where the
+    generator puts every such bridge (`arm64_cset_eq` has been there since the
+    comparison lowering needed one). -/
+theorem arm64_cset_lt_s (a b : UInt64) :
+    (if arm64_matches_condition 11 (arm64_subs_flags a b) then (1 : UInt64) else 0)
+      = (if (a ^^^ 0x8000000000000000) < (b ^^^ 0x8000000000000000) then 1 else 0) := by
+  by_cases h : (a ^^^ 0x8000000000000000) < (b ^^^ 0x8000000000000000)
+  · rw [if_pos ((arm64_flag_lt_s a b).mpr h), if_pos h]
+  · rw [if_neg (fun hc => h ((arm64_flag_lt_s a b).mp hc)), if_neg h]
 
 /-! # Generic countdown-style while-loop contract
 

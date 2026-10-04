@@ -8959,13 +8959,18 @@ ctor_field_value=self._ctor_field_value_for(name),
     def _emit_div_shift_pow(self, e: F.BinaryOp, op: str) -> None:
         """`/` `//` `%` `<<` `>>` `**` on the formal arm64 path.
 
-        Division is UDIV/SDIV (trunc toward zero; `//` matches `/` on the
-        unsigned default). Remainder is DIV then MSUB (n - (n/d)*d). Shifts
-        use LSLV/LSRV/ASRV (immediate form when the RHS is a small literal),
-        and an amount at or past the word's width SATURATES rather than being
-        masked to a shift by zero — `model.shift_saturated_is_zero` is the rule
-        and this is only its instruction selection. `**` unrolls a small
-        literal exponent.
+        Division is UDIV/SDIV; on a SIGNED operand `//` and `%` then apply the
+        FLOOR correction (`_emit_floor_correction`), because SDIV truncates
+        toward zero and the language's `//` floors and `%` takes the sign of the
+        divisor. Which of the three operators that is, is
+        `model.division_floors` — one decision read by both backends, and the
+        reason `/` keeps truncating here is stated there rather than as a
+        `signed and op == "//"` in one backend and nothing in the other.
+        Remainder is DIV then MSUB (n - (n/d)*d). Shifts use LSLV/LSRV/ASRV
+        (immediate form when the RHS is a small literal), and an amount at or
+        past the word's width SATURATES rather than being masked to a shift by
+        zero — `model.shift_saturated_is_zero` is the rule and this is only its
+        instruction selection. `**` unrolls a small literal exponent.
 
         The two decisions a shift makes are NOT the same decision, and only
         one of them promotes both operands: a shift's signedness comes from
@@ -8992,10 +8997,23 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self.asm.emit(encode_sdiv_xd_xn_xm(2, 0, 1))
             else:
                 self.asm.emit(encode_udiv_xd_xn_xm(2, 0, 1))
-            if op in ("/", "//"):
-                self.asm.emit(encode_mov_zr_xn(0, 2))
-            else:
+            # The FLOOR correction reads X0, so it has to run while X0 still
+            # holds the DIVIDEND: `_emit_floor_correction`'s first instruction
+            # is the `MSUB` that recomputes the remainder `SDIV` did not leave,
+            # and emitting that `MSUB`'s own answer into X0 first (as the `%`
+            # arm below used to do) replaced the dividend with the remainder
+            # and made the second `MSUB` compute `r - q*d` — `7 // -2` printed
+            # `-3` where the source says `-4`, and `7 % 3` printed `-2`.  So
+            # the correction is asked FIRST and each arm then finishes the
+            # operator itself.  x86-64 needs none of this: `IDIV` leaves `r` in
+            # RDX, so its correction reads the remainder where it is.
+            if M.division_floors(op, signed):
+                (self._emit_floor_remainder if op == "%"
+                 else self._emit_floor_quotient)()
+            elif op == "%":
                 self.asm.emit(encode_msub_xd_xn_xm_xa(0, 2, 1, 0))
+            else:
+                self.asm.emit(encode_mov_zr_xn(0, 2))
             self._emit_trunc(common_type(self._ttype(e.left),
                                          self._ttype(e.right)))
             self.asm.emit(encode_b(0))
@@ -9182,6 +9200,104 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         raise CodegenError(
             f"unsupported binary operator {op!r} on the formal arm64 path")
+
+    def _emit_floor_correction(self) -> None:
+        """`X5 = fdiv_correction(r, d)`, the 0-or-1 word `//` and `%` differ by.
+
+        Called with the truncating remainder `r` in X3 and the divisor `d` in
+        X1 — the state `_emit_div_shift_pow`'s `SDIV`+`MSUB` has just produced —
+        and it leaves X3 (`r`), X4 (`r XOR d`) and X5 (`c`) written, with X2 (the
+        quotient) and X0-X1 untouched.  Both callers need all three, which is why
+        this is one function and not two copies of half the sequence.
+
+        THE SEQUENCE, and why each instruction is here:
+
+            MSUB X3, X2, X1, X0   r = n - q*d      the remainder SDIV did not leave
+            EOR  X4, X3, X1      t = r XOR d      sign(r) XOR sign(d), as a bit
+            CMP  X3, #0 / CSET X5, ne             r != 0
+            CMP  X4, #0 / CSET X6, lt             t reads negative
+            AND  X5, X5, X6      c = the two ANDed
+
+        **No encoding containing `SDIV` can express a floor.** `SDIV` truncates,
+        so every `±tdiv(±n, ±d)` with at most a negation on one side is a
+        truncating quotient and the correction has to be CONDITIONAL; negating
+        the dividend, the divisor or the quotient computes a different function.
+        That is why the dividend is not needed after the divide: the correction
+        is decided from `r` and `d` alone, which is what makes the same shape
+        expressible on x86-64, where `IDIV` leaves the dividend nowhere.
+
+        Zero NEW instruction steps on either architecture — `MSUB`, `EOR`, `CMP`
+        (immediate), `CSET`, `AND`, `SUB` (register) and `ADD` are all already in
+        `ProofLib.arm64_step` and in `lib/X86.lean`, so
+        `formal/arm64_proof_gen.py` emits their steps mechanically and this costs
+        nothing there.  What it does cost is the block's residual goal, and that
+        is why `fdiv64`/`frem64` in `lib/ProofLib.lean` are spelled over
+        `sdiv64` and this `MSUB`'s remainder rather than over `srem64`: the goal
+        is then one proposition over bit-vectors, closed by the two
+        `arm64_cset_*` lemmas in `_VALUE_SIMP`, instead of two shapes plus
+        `srem64_sub`.  The sequence itself is `model.division_floors`'s
+        instruction selection, and `_emit_floor_quotient`/`_emit_floor_remainder`
+        say which of the two operators takes which tail."""
+        self.asm.emit(encode_msub_xd_xn_xm_xa(3, 2, 1, 0))
+        self.asm.emit(encode_eor_xd_xn_xm(4, 3, 1))
+        self.asm.emit(encode_cmp_xn_imm(3, 0))
+        self.asm.emit(encode_cset_xd_cond(5, "ne"))
+        self.asm.emit(encode_cmp_xn_imm(4, 0))
+        self.asm.emit(encode_cset_xd_cond(6, "lt"))
+        self.asm.emit(encode_and_xd_xn_xm(5, 5, 6))
+
+    def _emit_floor_quotient(self) -> None:
+        """`//` on a SIGNED operand: `X0 = q - c`, from `_emit_floor_correction`'s
+        `c` in X5 and the truncating quotient in X2.
+
+        One `SUB`, and the model's `fdiv64` is `sdiv64 a b - fdiv_correction a b`
+        in the same order, so the residual goal needs no associativity lemma."""
+        self._emit_floor_correction()
+        self.asm.emit(encode_sub_xd_xn_xm(0, 2, 5))
+
+    def _emit_floor_remainder(self) -> None:
+        """`%` on a SIGNED operand: `X0 = n - d*(q - c)`, i.e. `r + d*c`.
+
+        Called after the `SDIV` with X0 the dividend, X1 the divisor and X2 the
+        truncating quotient, and it finishes with the answer in X0:
+
+            SUB  X6, X2, X5        X6 = q - c      the FLOORED QUOTIENT
+            MSUB X0, X1, X6, X0    X0 = n - d*(q - c) = r + d*c
+
+        **Two instructions, and the second one is the reason `%` costs no more
+        than `//`.**  `a - b * fdiv64 a b` is what both backends' `%` computes —
+        the FLOOR-CORRECTED QUOTIENT is the thing that gets multiplied, which is
+        the same `q - c` `_emit_floor_quotient` already materialises — so the
+        source model's `frem64` is the same expression and a dividing block's
+        terminal value flow closes on `rfl` instead of on a bit-vector identity.
+
+        Two other spellings were measured and are the reason this one is here,
+        and both emit a word `ProofLib.arm64_step` reads as a DIFFERENT
+        instruction:
+
+        * **`NEG X6, X5 ; MSUB X0, X1, X6, X3`** — the obvious one — computes
+          `SP - c` in the model, because `NEG Xd, Xn` is `SUBS Xd, XZR, Xn` with
+          `Rn = 31` and `arm64_step`'s SUB-register arm reads
+          `arm64_reg_or_sp 31 s`. Every generated proof of a program with a NEG
+          then fails with `native_decide … is false`, on every input including
+          the ones where `c = 0`. That is
+          `bugs/FORMAL_arm64_neg_is_shadowed_by_the_sub_register_arm.md`, and it
+          is live on `master` today through unary minus (line 3352).
+        * **`SUB`/`MVN`/`AND`/`ADD`** — masking the divisor by `~(c-1)` instead
+          of negating it — is correct on both machines (it is what x86-64's
+          `_emit_floor_remainder` still does) and it does NOT close the proof:
+          the model's `r + b*c` and the machine's `r + (mask(c) AND b)` are two
+          expressions, and `bv_decide` declined to split the `ite`s inside `c`.
+          Multiplying the corrected quotient removes the question instead of
+          answering it.
+
+        `formal/arm64.py`'s `encode_msub_xd_xn_xm_xa` range assert and
+        `test_formal_call_proof_gen.py::TestFloorCorrectionDecodes` both record
+        what the words decode to, and the second of those is what would have
+        caught either of these."""
+        self._emit_floor_correction()
+        self.asm.emit(encode_sub_xd_xn_xm(6, 2, 5))
+        self.asm.emit(encode_msub_xd_xn_xm_xa(0, 1, 6, 0))
 
     def _emit_compare_chain(self, e: F.CompareChain) -> None:
         """`a < b < c` — each operand evaluated once; results ANDed.

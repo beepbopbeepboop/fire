@@ -998,16 +998,35 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
             # bit; LSR would shift a negative value in from the top).  These
             # were the last three places the untyped model could disagree with
             # the machine about an unannotated `int`, after the comparisons.
-            if vtypes is not None and cmp_signed(
-                    common_type(infer_expr(e.left, vtypes, call_types),
-                                infer_expr(e.right, vtypes, call_types))):
-                return f"(sdiv64 {l} {r})"
+            #
+            # `//` and `%` on a SIGNED operand name `fdiv64`/`frem64` rather
+            # than `sdiv64`/`srem64`, because that is what the emitter now
+            # computes: the divide is still an SDIV, but the block also carries
+            # the floor correction, and `fdiv64` is `sdiv64 a b -
+            # fdiv_correction a b` — the same subtraction the emitted `SUB`
+            # performs, with the correction spelled over the `MSUB` remainder
+            # the `CMP`s read.  Naming `sdiv64` here would make the model's
+            # answer the TRUNCATING quotient, which is what the backend used to
+            # emit and what CPython does not mean.  The gate is
+            # `model.division_floors`, the same decision both
+            # emitters ask, so the generator cannot name a term for an operator
+            # the machine was told not to correct.
+            t = None
+            if vtypes is not None:
+                t = common_type(infer_expr(e.left, vtypes, call_types),
+                                infer_expr(e.right, vtypes, call_types))
+            if t is not None and cmp_signed(t):
+                fn = ("fdiv64" if model.division_floors(k, True) else "sdiv64")
+                return f"({fn} {l} {r})"
             return f"({l} / {r})"
         if k == "%":
-            if vtypes is not None and cmp_signed(
-                    common_type(infer_expr(e.left, vtypes, call_types),
-                                infer_expr(e.right, vtypes, call_types))):
-                return f"(srem64 {l} {r})"
+            t = None
+            if vtypes is not None:
+                t = common_type(infer_expr(e.left, vtypes, call_types),
+                                infer_expr(e.right, vtypes, call_types))
+            if t is not None and cmp_signed(t):
+                fn = ("frem64" if model.division_floors(k, True) else "srem64")
+                return f"({fn} {l} {r})"
             return f"({l} % {r})"
         if k == "<<":
             return f"({l} <<< {r})"
@@ -1244,11 +1263,15 @@ def _expr_go_t(e, param: str, env: dict, vtypes: dict, call_types: dict,
         if k in ("/", "//"):
             t = common_type(infer_expr(e.left, vtypes, call_types),
                             infer_expr(e.right, vtypes, call_types))
+            if cmp_signed(t) and model.division_floors(k, True):
+                return _t_wrap(f"(fdiv64 {l} {r})", t)
             fnm = "sdiv64" if cmp_signed(t) else "/"
             return _t_wrap(f"({fnm} {l} {r})" if fnm == "sdiv64" else f"({l} / {r})", t)
         if k == "%":
             t = common_type(infer_expr(e.left, vtypes, call_types),
                             infer_expr(e.right, vtypes, call_types))
+            if cmp_signed(t) and model.division_floors(k, True):
+                return _t_wrap(f"(frem64 {l} {r})", t)
             if cmp_signed(t):
                 return _t_wrap(f"(srem64 {l} {r})", t)
             return _t_wrap(f"({l} % {r})", t)
@@ -2599,7 +2622,17 @@ _VALUE_SIMP = (
     "u64_sub_sub, u64_sub_add, u64_ofNat_add, u64_ofNat_sub, "
     "mem_read_after_write_u64_slot, mem_read_after_write_u64_slot', "
     "mem_read_after_write_u64, "
-    "arm64_cset_eq, UInt64.add_zero, u64_ofNat_zero, UInt64.ofNat_toNat"
+    "arm64_cset_eq, arm64_cset_ne, arm64_cset_lt_s, "
+    # The FLOOR terms, for the same reason `arm64_cset_eq` is here and for the
+    # same shape of reason: a goal that mentions `fdiv64` mentions a DEF whose
+    # body is an `if` on the divisor, and `rfl` cannot get through that `if`
+    # (`withReducible` does not decide `UInt64.ofNat 7 = 0`), so the two sides of
+    # the equality stay two different expressions and every tactic in the chain
+    # declines — `bv_decide` most expensively, at 20 000 000 heartbeats, because
+    # the `sdiv64 a b` atom beside it is an `Int.tdiv` it cannot evaluate.
+    # Unfolding them in the `simp only` leaves one word on both sides.
+    "fdiv_correction, fdiv64, frem64, "
+    "UInt64.add_zero, u64_ofNat_zero, UInt64.ofNat_toNat"
 )
 
 # `u64_sub_add` folds `(sp - a) + b` into a single subtraction.  Removing it
