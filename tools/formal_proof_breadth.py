@@ -138,6 +138,8 @@ import time
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 
+import formal.model as _model                                   # noqa: E402
+
 # Directories that hold no function worth proving. `formal/examples` is here
 # because it is sampled as whole FILES by its own rule; `lib` is Lean; `output`
 # is build products; the rest are trees this repository generates into.
@@ -149,6 +151,22 @@ SKIP_DIRS = {".git", ".tmp", "__pycache__", "cas", "output", "lib", "build",
 # disqualifies the candidate — which is what keeps `import os` (a fact about the
 # HOST, already counted 241 times in `formal/examples`' sweep) out of a census
 # about the proof layer.
+#
+# **It is a set of NAMES and not a claim that the backend lowers them, and the
+# two are different facts**, which is the whole of
+# `bugs/FORMAL_the_proof_census_allow_list_names_builtins_the_path_does_not_
+# lower.md`: of the 33 names below, the formal path lowers 11 and refuses 22,
+# and a reader of the ledger could not tell which was which — the 6 items this
+# census refused through the LINK AUDIT read as one bucket with a message about
+# symbols, which says nothing about whether the frontier is the proof layer or
+# the code generator. The split is `NOT_LOWERED_BUILTINS` below, read from the
+# ONE table `formal/model.py` publishes (`NOT_LOWERED_BUILTINS` there, measured
+# on both architectures and pinned by `test_formal_value_model.py`'s builtin
+# group), because a second hand-kept list of the same names is a list that goes
+# stale the day one of them is lowered and nothing says so. `test_
+# formal_proof_breadth.py` asserts the partition — every name here is in exactly
+# one of the two halves — so a name added to this set without a measured verdict
+# fails a test instead of quietly becoming a frontier nobody reported.
 BUILTIN_NAMES = {
     "True", "False", "None", "abs", "all", "any", "bin", "bool", "chr",
     "divmod", "enumerate", "float", "hex", "int", "len", "list", "max",
@@ -156,6 +174,57 @@ BUILTIN_NAMES = {
     "reversed", "round", "sorted", "staticmethod", "classmethod", "str",
     "sum", "tuple",
 }
+
+# The names the census lets through that the formal path does NOT lower, with
+# what lowering each one would take.  NOT a copy of anything: the model's own
+# table, read through the module rather than re-spelled, so this census and the
+# two backends cannot disagree about which builtins exist.
+NOT_LOWERED_BUILTINS = _model.NOT_LOWERED_BUILTINS
+
+# The builtins this census lets through that the path DOES lower, and why — the
+# other half of the partition, and the half that has to be WRITTEN rather than
+# derived because four of the eleven are literals or decorators rather than
+# calls, so no emitter table has them:
+#
+#   True/False/None   literals in the language, not calls; the source's own
+#                     spellings, which reach codegen as BoolLiteral and NoneExpr
+#   property/staticmethod/classmethod
+#                     decorators, and a decorated function is not eligible for
+#                     this census at all (`_eligible`'s first row)
+#   int               a width normalize (`INT_TYPE_CTORS`) and a text parse
+#                     (`strtoll`)
+#   len               a count word, or `strlen` over a literal
+#   print             the emitter builds its own format from the operand's kind
+#   range             materialized as a list blob
+#   str               the identity on an operand that IS text — and a REFUSAL on
+#                     one that is not, which is `model.string_conversion_refusal`
+#                     and is why `str` is on this side of the partition and
+#                     `NOT_LOWERED_BUILTINS`' side of it is about a different
+#                     question (see there)
+LOWERED_BUILTINS = {
+    "True": "a literal, not a call",
+    "False": "a literal, not a call",
+    "None": "a literal, not a call",
+    "property": "a decorator, and a decorated function is not eligible here",
+    "staticmethod": "a decorator, and a decorated function is not eligible here",
+    "classmethod": "a decorator, and a decorated function is not eligible here",
+    "int": "a width normalize, or `strtoll` on text",
+    "len": "a count word, or `strlen` over a literal",
+    "print": "the emitter builds its own format from the operand's kind",
+    "range": "materialized as a list blob",
+    "str": "the identity on an operand that is text; refused otherwise",
+}
+
+# The two markers that say "this refusal is about a CALL the build emitted and
+# nothing provides", one per emitter of the message, and both are contracts
+# rather than wording: `tools/formal_sweep.py`'s `_EXTERN_BUILD_MARK` quotes the
+# first, and the second is `model.builtin_binding_refusal`'s own sentence.  A
+# refusal carrying either is a fact about the PROGRAM, and the census gives it a
+# class of its own so a reader does not have to know that to see it.
+UNLOWERED_CALLEE_MARKS = (
+    "not lowered on this path",
+    "is refused on this path rather than bound to the C library",
+)
 
 MAX_STMTS = 14          # a "small-to-medium function", in top-level statements
 MAX_EMITTED_LINES = 140  # the function plus its transitive definitions
@@ -889,8 +958,15 @@ def run_item(item, arch, timeout, workdir, check=True):
         # `formal/build.py`'s `FormalBuildError` is what an import-closure walk
         # and the container checks raise. They are one class here because the
         # question is the same for both — did a construct in this program stop
-        # it — and a caller of the census cannot act on the difference.
-        return verdict(_refusal_class(str(e)), e)
+        # it — and a caller of the census cannot act on the difference. The one
+        # exception is a refusal about a builtin this path does not lower, which
+        # is a question with its own answer ("which builtin, and what would
+        # lowering it take") and gets its own class and its own detail;
+        # `_refusal_class`'s docstring is why the names are read off
+        # `item.source` rather than off the message.
+        names = _unlowered_builtins_in(item.source)
+        return verdict(_refusal_class(str(e), item.source),
+                       builtin_refusal_detail(names, e))
     except NotImplementedError as e:
         # The generator's own refusal, and only the generator raises this (29
         # sites in `arm64_proof_gen.py`, none in `formal/build.py`,
@@ -946,23 +1022,112 @@ def run_item(item, arch, timeout, workdir, check=True):
                    cached=cached)
 
 
-def _refusal_class(detail):
+def _refusal_class(detail, source=""):
     """A refusal, split by WHETHER it is about the source or about the target.
 
-    Two classes rather than one because the census's callers need to know which
-    of the two they are looking at, and `formal/examples`' sweep already
-    established the vocabulary: a program that reaches for a CPython module is
-    `not-answerable/host-import`, a fact about the TARGET, while a construct
-    this backend cannot lower is a gap in the backend and lives in this file.
-    The rule is deliberately coarse — it reads the refusal's own words, which is
-    where both facts are stated — and it errs toward `codegen-refused`, which
-    is the class a reader must not under-count.
+    Three classes rather than two because the census's readers need to know
+    which of "the backend refused", "the generator refused" and "I never got an
+    answer" they are looking at, and a fourth because a refusal about a BUILTIN
+    this path does not lower is neither of the first two:
+    `formal/examples`' sweep already established the vocabulary — a program that
+    reaches for a CPython module is `not-answerable/host-import`, a fact about
+    the TARGET, while a construct this backend cannot lower is a gap in the
+    backend and lives in this file. The rule is deliberately coarse — it reads
+    the refusal's own words, which is where both facts are stated — and it errs
+    toward `codegen-refused`, which is the class a reader must not under-count.
+    `refused-builtin` is a REFINEMENT of `codegen-refused` and not a fourth
+    kind of outcome: an aggregate that counts `codegen-refused` alone under-
+    counts the code generator's refusals by exactly the number of items that
+    stopped on a builtin, which is the class of row this census's own frontier
+    section is about.
+
+    **`refused-builtin` is the refinement `codegen-refused` owes its readers.**
+    A call to `max` used to be refused by the link audit as a SYMBOL nothing
+    provides, which is true and is not what a reader of a PROOF census needs to
+    know: the question behind the row is whether the frontier is the proof layer
+    or the code generator, and "the image would bind 1 symbol(s) that nothing
+    provides" answers neither. So a refusal carrying either of the two markers
+    `UNLOWERED_CALLEE_MARKS` names — and SPELLING a builtin this table has a
+    sentence for — is classified apart, and `builtin_refusal_detail` puts the
+    names and what each would take into the row. A refusal with the marker but
+    NO name from the table (a method call on a frame, say) stays
+    `codegen-refused`: the marker says what KIND of refusal it is and the table
+    is what says which builtin, and a class that guessed the second would be
+    reporting a name it did not read.
     """
     text = str(detail or "")
     if "host module" in text or "imports '" in text or \
             "unresolved import" in text:
         return "refused-import"
+    if any(mark in text for mark in UNLOWERED_CALLEE_MARKS) \
+            and _unlowered_builtins_in(source):
+        return "refused-builtin"
     return "codegen-refused"
+
+
+def _unlowered_builtins_in(source):
+    """The `NOT_LOWERED_BUILTINS` names `source` CALLS, sorted.
+
+    Read off the SOURCE rather than off the refusal's message, because the
+    message is a sentence about symbols and truncates its list at eight names,
+    and because a census row that names the builtin it hit is a fact about the
+    program the census emitted — which is in hand here and is the same text
+    `_entry_call` wrote. A NAME that merely appears (`x = max` binds a local
+    called `max`) is not a call, so the read is of call positions only.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return []
+    out = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in NOT_LOWERED_BUILTINS:
+            out.add(func.id)
+    return sorted(out)
+
+
+# The phrase `builtin_refusal_detail` leads a detail with, and `builtin_frontier`
+# reads back.  It is a constant rather than a literal in two places because the
+# two must agree exactly and nothing else checks them: the detail is TRUNCATED
+# to `_first_line`'s 300 characters, so the names have to be at the FRONT of it
+# to survive, and that is also what puts the frontier in front of a reader who
+# opens one ledger row.
+BUILTIN_DETAIL_MARK = "reads builtin(s) this path does not lower: "
+
+
+def builtin_refusal_detail(names, detail):
+    """WHICH builtin, and what lowering it would take, then the build's words.
+
+    The names LEAD rather than trail because `_first_line` keeps the first 300
+    characters of a detail and the link audit's own sentence is longer than
+    that — an appended clause was cut off the ledger row, which is where this
+    was going. The refusal's own message follows verbatim, because the census
+    quotes messages as contracts elsewhere and a rewritten detail would stop
+    quoting one.
+    """
+    if not names:
+        return detail
+    what = "; ".join(f"`{n}`: {NOT_LOWERED_BUILTINS[n]}" for n in names)
+    return f"{BUILTIN_DETAIL_MARK}{', '.join(names)} — {what} — the build " \
+           f"refused with: {detail}"
+
+
+def _builtins_named_in_detail(detail):
+    """The names `builtin_refusal_detail` led this detail with, or [].
+
+    Read back out of the ledger row rather than carried in a second field,
+    because a `Verdict` field is a schema change every committed ledger would
+    have to grow and `builtin_frontier` only needs the names for rows this run
+    classified, which is exactly the rows that carry the marker.
+    """
+    text = str(detail or "")
+    if not text.startswith(BUILTIN_DETAIL_MARK):
+        return []
+    rest = text[len(BUILTIN_DETAIL_MARK):].split(" — ", 1)[0]
+    return [n.strip() for n in rest.split(",") if n.strip()]
 
 
 def _bound_detail(detail):
@@ -973,7 +1138,8 @@ def _bound_detail(detail):
 # ── Reporting ────────────────────────────────────────────────────────────────
 CLASS_ORDER = ["pass", "admitted", "lean-rejected", "bound-exceeded",
                "proof-emitted", "proof-refused", "proof-crash",
-               "codegen-refused", "refused-import", "build-crash"]
+               "refused-builtin", "codegen-refused", "refused-import",
+               "build-crash"]
 
 # Classes that name no CONSTRUCT: a pass, and the phase-A-only row. An item in
 # one of them has nothing to disagree about — see `disagreements`.
@@ -993,7 +1159,17 @@ def _cause_key(v):
     Full messages stay in the ledger; the ranking is over a normalised head so
     that `... in a while-loop body` and `... in an argument position` do not
     count as two different causes when they are one.
+
+    **A builtin refusal ranks by the BUILTIN, not by this census's own phrase.**
+    The detail of such a row leads with `BUILTIN_DETAIL_MARK` — "reads
+    builtin(s) this path does not lower: max, min" — so the generic rule would
+    rank every one of them under a single cause whose text is this file's own
+    bookkeeping, which is a cause no reader can act on. The builtin is the
+    subject, and it is the subject `builtin_frontier` prints the sentence for.
     """
+    if v.cls == "refused-builtin":
+        names = _builtins_named_in_detail(v.detail)
+        return "builtin this path does not lower: " + ", ".join(names or ["?"])
     d = v.detail
     for cut in (" (build:", " -- ", " ("):
         if cut in d:
@@ -1037,8 +1213,38 @@ def report(results, arch_list):
         detail = ", ".join(f"{c}={counts[c]}" for c in CLASS_ORDER
                            if counts.get(c))
         lines.append(f"   {n:4d}  {cause[:96]:96s} [{detail}]")
+    lines.append(builtin_frontier(results))
     lines.append(disagreements(results, arch_list))
     return "\n".join(lines)
+
+
+def builtin_frontier(results):
+    """Which builtins this path does not lower stopped an item, and what each
+    one would take — the section the class column points at.
+
+    **It is printed from the ITEMS rather than from the table**, so it measures
+    the frontier this run reached instead of restating a list: a builtin in
+    `NOT_LOWERED_BUILTINS` that no item called is not in this run's frontier,
+    and one that four items called is worth four times the sentence. That is the
+    whole difference between a census and a table, and it is why the sentences
+    live in `formal/model.py` and the COUNTS live here.
+    """
+    hits = collections.Counter()
+    for v in results:
+        if v.cls != "refused-builtin":
+            continue
+        for n in _builtins_named_in_detail(v.detail):
+            hits[n] += 1
+    if not hits:
+        return ("\n== no item was refused on a builtin this path does not "
+                "lower")
+    out = [f"\n== the builtins that stopped an item, and what lowering each "
+           f"would take ({len(hits)} of {len(NOT_LOWERED_BUILTINS)} names the "
+           f"model publishes)"]
+    for name, n in hits.most_common():
+        out.append(f"   {('`' + name + '`'):14s} {n:3d} item(s)  "
+                   f"{NOT_LOWERED_BUILTINS[name]}")
+    return "\n".join(out)
 
 
 def disagreements(results, arch_list):
