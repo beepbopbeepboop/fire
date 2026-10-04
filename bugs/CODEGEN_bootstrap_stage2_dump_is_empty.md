@@ -18,9 +18,17 @@ Measured on `work/gatefix9`, same command as the entry below:
 |---|---|---|
 | items failing | 45 of 46 | **40 of 46** |
 | `TypeError: unhashable type: 'list'` | 20 inputs | **gone** (`mojo_id`) |
-| `Unexpected SEMICOLON(';')` at `fire_compiler.py:1301:38` | 2 inputs | 2 inputs (unchanged) |
-| silent SIGSEGV / SIGBUS, no output at all | (not counted separately) | **38 items** |
-| passing | `mojo_failures.mojo` | 6 inputs (`.mojo` and `.py` alike) |
+| `Unexpected SEMICOLON(';')` at `fire_compiler.py:1301:38` | 2 inputs | **gone** (`mojo_cstr_cmp_word`) |
+| silent SIGSEGV / SIGABRT / SIGBUS, no diagnostic | (not counted separately) | **all 40** |
+| passing | `mojo_failures.mojo` | 6 inputs: `array_ops_jit.mojo`, `bootstrap_test_single_expr.mojo`, `generated_dispatch.py`, `mojo_failures.mojo`, `t1.mojo`, `test_jit.mojo` |
+
+**Every loud class is now closed and what remains is one silent-crash
+class.** That is a change in KIND, not in count — 40 items failed before the
+last fix too — and it is worth saying plainly, because "the count did not move"
+is the least informative thing about it: the two `.py` closure inputs used to be
+refused with a diagnostic and now reach the codegen and crash (`fire_compiler.py`
+SIGSEGVs, `fire.py` SIGABRTs on `method_receiver_kind: unavailable in compiled
+mode`).
 
 TWO of the SIGSEGVs are closed, one per fix, and each was found by the same
 four-command `lldb` recipe at the top of this file rather than by reading the
@@ -43,7 +51,7 @@ compiled-path source:
   applied where the receiver is boxed and the codegen cannot see it. Both
   readers now share one `_mojo_tag_at`.
 
-**What the remaining 38 have in common, as far as it is measured:** they are
+**What the remaining 40 have in common, as far as it is measured:** they are
 crashes, not diagnostics, so the census needs one crash at a time and the
 `lldb` recipe is the instrument. The next two measured, both AFTER the two
 fixes above, so both are still open:
@@ -57,8 +65,10 @@ fixes above, so both are still open:
    `bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md`'s "a value
    read out of a heterogeneous container" case: something hands a struct's
    first word to a consumer that expected the pointer.
-2. the `SEMICOLON` refusal, which is a PARSER bug and not a crash — see "the
-   second, independent class" in the gatefix8 entry below.
+2. the `SEMICOLON` refusal, which was NOT a parser bug at all: the token
+   stream was right and the parser was right, and the divergence was in
+   `_lower_binary`'s `==` lowering comparing an `int64_t` slot holding a boxed
+   string by its LOW BYTE. Fixed as item 3 in "What was fixed".
 
 So the remaining class is a CRASH, not a diagnostic, and it is now the whole of
 what is left: 41 of the 46 inputs take the binary down with no message, and
@@ -181,7 +191,7 @@ for that file is byte-identical, so the divergence is in
 `fire_compiler.py::_split_on_separators` or in phase 2's sub-statement loop, not
 in the lexer.
 
-### What was fixed (four root causes, each with its own evidence)
+### What was fixed (five root causes, each with its own evidence)
 
 0. **`id()` returned the VALUE instead of an identity** (`work/gatefix9`, the
    fourth and last of this class's non-crash defects). The generated stub was
@@ -217,7 +227,21 @@ in the lexer.
    `mojo_regex_split` (runtime) + the `split` arm + `regex_prog_for`
    (consolidated out of `emit_loops` so `finditer`/`findall`/`sub`/`split` share
    one program per pattern).
-3. **A defaulted POINTER parameter was padded with the integer 0**, which for a
+3. **`c == in_str` compared an `int64_t` slot by its low byte** when the
+   other side was a `char *` value (`work/gatefix9`). `_to_char_star`'s
+   char-code path emitted `mojo_char_to_str((char)w)`, which TRUNCATES a boxed
+   string POINTER to one byte and builds a 1-character string from it — so a
+   quote character never matched itself. `fire_compiler.py`'s
+   `_strip_inline_comment` and `_split_on_separators` both leave a string open
+   on exactly that comparison (`c == in_str`, where `in_str` is an
+   unannotated local widened to `int64_t` and assigned a `char *` LATER IN THE
+   LOOP BODY than the read, so no single-pass `_actual_types` entry exists),
+   and with every single-quoted string left open the `;` separator after
+   ``in_str !='`'`` read as string content. Fixed with `mojo_cstr_cmp_word`
+   (runtime), asked only where the codegen cannot decide: `mojo_boxed_is_str`
+   tells a boxed string from a byte code exactly, and the byte-code arm answers
+   what the old path answered, so nothing that was right changed.
+4. **A defaulted POINTER parameter was padded with the integer 0**, which for a
    `char *` parameter `_emit_call` coerces through `mojo_cstr_or_int_str` into
    the one-character string `"0"` — a true, non-null pointer. So
    `Parser._expect(self, kind, value: str = None)` called as

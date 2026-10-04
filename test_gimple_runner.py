@@ -9877,6 +9877,81 @@ def main():
 main()
 """)
 
+    # `c == in_str` where one side is a `char *` VALUE and the other an
+    # `int64_t` slot that holds EITHER a boxed string pointer or a byte code:
+    # the codegen cannot tell them apart in one pass (the slot is assigned its
+    # `char *` LATER in the loop body than the read, so no `_actual_types`
+    # entry exists yet), and the guess it made was `mojo_char_to_str((char)w)`,
+    # which truncates a pointer to its low byte. So a quote character never
+    # matched itself, `fire_compiler.py`'s `_strip_inline_comment` /
+    # `_split_on_separators` left every single-quoted string open, and the `;`
+    # separator after ``in_str !='`'`` read as string content — the self-hosted
+    # parser then refused the file with `Unexpected SEMICOLON(';')`.
+    #
+    # CPython is the oracle and the program states no expected output: the two
+    # functions are the compiler's own, verbatim, and the lines are the ones its
+    # own source contains. Both were wrong on the parent commit — the `;` line
+    # did not split at all, because the single-quoted string never closed.
+    test_gimple_matches_cpython("gimple_erase_slot_holding_a_string", """\
+_CMT_CHAR = '#'
+_SEP_CHAR = ';'
+
+def _strip_inline_comment(s):
+    in_str = None
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if in_str:
+            if c == "\\\\" and in_str != '`': i += 2; continue
+            if c == in_str: in_str = None
+        elif c in ('"', "'", '`'):
+            in_str = c
+        elif i > 0 and c in ('"', "'") and s[i-1] in 'fFrRbBuUtT':
+            in_str = c
+        elif c == _CMT_CHAR:
+            return s[:i]
+        i += 1
+    return s
+
+def _split_on_separators(s):
+    parts, buf, in_str, depth = [], [], None, 0
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if in_str:
+            buf.append(c)
+            if c == "\\\\" and in_str != '`' and i + 1 < len(s):
+                i += 1; buf.append(s[i])
+            elif c == in_str:
+                in_str = None
+        elif c in ('"', "'", '`'):
+            in_str = c; buf.append(c)
+        elif c in ('[', '(', '{'):
+            depth += 1; buf.append(c)
+        elif c in (']', ')', '}'):
+            depth = max(0, depth - 1); buf.append(c)
+        elif c == _SEP_CHAR and depth == 0:
+            parts.append("".join(buf)); buf = []
+        else:
+            buf.append(c)
+        i += 1
+    parts.append("".join(buf))
+    return parts
+
+def main():
+    # The exact shapes the compiler's own source has.
+    for line in ("if c == '\\\\' and in_str != '`': i += 2; continue",
+                 "if x != '`': y = 1; z = 2",
+                 "if x != '`': y = 1",
+                 "if x: y = 1; z = 2",
+                 "s = 'a`b'", "s = `a`", "q = '#'; r = ';'",
+                 "f(x)  # a comment"):
+        print('strip', repr(_strip_inline_comment(line)))
+        print('split', _split_on_separators(line))
+
+main()
+""")
+
     _parser_struct_and_symbols()
 
 

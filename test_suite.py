@@ -1216,7 +1216,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
           f'(40 of its 46 items exit non-zero), and it is checked against the '
           f'per-item verdicts rather than against a summary line \u2014 see '
           f'`observed_fanout_failures`. `gimplerunner` is the merge worker\u0027s '
-          f'4 of 379 \u2014 the '
+          f'4 of 380 \u2014 the '
           f'compile-and-execute rows that are interactions between the ten '
           f'branches rather than a bug in any one of them (the census had to '
           f'learn it here too: adding a marker without adding its entry is '

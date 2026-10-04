@@ -2319,6 +2319,43 @@ int mojo_cstr_cmp(char *a, char *b)
     return strcmp(a, b);
 }
 
+/* `mojo_cstr_cmp(a, b)` for the case where ONE side is an int64_t slot whose
+ * REPRESENTATION the codegen could not resolve: a boxed string pointer, or a
+ * byte code (this backend lowers `s[i]` on a `char *` to a C `char`, so a
+ * `char`-typed operand holds the byte, and the 1-character string on the other
+ * side is spelled with mojo_char_to_str). Same convention as its twin --
+ * 0 means EQUAL -- so the codegen arm that calls it is the same shape as the
+ * one that calls `mojo_cstr_cmp`, and `!=` needs no separate answer.
+ *
+ * The codegen cannot tell those two representations apart at compile time,
+ * and guessing is what this replaces: `mojo_char_to_str((char)w)` truncated a
+ * boxed string POINTER to its low byte and compared that, so a quote character
+ * never matched itself. `fire_compiler.py`'s `_strip_inline_comment` and
+ * `_split_on_separators` leave a single-quoted string open on exactly that
+ * comparison (`c == in_str`, where `in_str` is an unannotated local widened to
+ * int64_t and assigned a `char *` LATER in the loop body than the read), so
+ * the `;` after ``in_str !='`'`` read as string content and the self-hosted
+ * parser refused the file with `Unexpected SEMICOLON(';')`
+ * (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md).
+ *
+ * At RUN time the two are trivially distinguishable and the answer is exact: a
+ * byte code is one byte, a boxed string is pointer-shaped.
+ *
+ * The word cases are exhaustive over what a slot can hold, and the LAST one is
+ * why this is not `mojo_cstr_or_int_str`: a larger integer's decimal spelling
+ * would compare equal to the string of those digits, and
+ * `3000000000 == "3000000000"` is False in Python. 0 (None) and a double's raw
+ * bits are likewise never equal to a string. Ordering is not answered at all,
+ * so the word side is always last and each operand order calls this once. */
+int mojo_cstr_cmp_word(char *s, int64_t w)
+{
+    if ((intptr_t)s < 65536) return 1;      /* a NULL/None string: never equal */
+    if (w > 0 && w < 256)
+        return (s[0] == (char)w && s[1] == '\0') ? 0 : 1;
+    if (mojo_boxed_is_str(w)) return strcmp(s, (char *)(intptr_t)w);
+    return 1;
+}
+
 int mojo_str_contains(char *haystack, char *needle)
 {
     if ((intptr_t)haystack < 65536 || (intptr_t)needle < 65536) return 0;

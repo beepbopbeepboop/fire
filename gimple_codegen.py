@@ -3371,6 +3371,7 @@ class GimpleGen:
         'mojo_str_endswith_char':   ('int',    ['char *', 'char']),
         'strcmp':                ('int',       ['char *', 'char *']),
         'mojo_cstr_cmp':         ('int',       ['char *', 'char *']),
+        'mojo_cstr_cmp_word':    ('int',       ['char *', 'int64_t']),
         'snprintf':              ('int',       ['char *', 'int64_t', 'char *']),
         'strlen':                ('int64_t',   ['char *']),
         'strcat':                ('char *',    ['char *', 'char *']),
