@@ -39,10 +39,18 @@ this function. So the shipped dylib was advertising 260 of its own 459 runtime
 entry points: a C client resolving `mojo_c_getenv` through reflection was told
 the symbol did not exist. This is on the gimple path and predates FORMAL.md.
 
-The fix is one optional `\\*?` in the separator. After it: 459 / 22 / 6 / 13 /
-18 / 15, with the only remaining gaps being `static inline` helpers (which have
+The fix is one optional `\\*?` in the separator. After it, on the 2026-09-27 tree
+it read 459 / 22 / 6 / 13 / 18 / 15 — a DATED reading, kept as the record of
+that fix, and not the scanner's current output: `fire_runtime.h` has grown since
+(the ladder in `test_every_declaration_is_seen` is the current one, and its last
+entry is 565). The only remaining gaps were `static inline` helpers (which have
 no external symbol and are correctly absent) and one name that appears only in a
 comment.
+
+`test_the_quoted_census_is_the_live_census` at the bottom is the check that
+keeps the OTHER copies of these numbers honest: five places in the tree quote
+the census in prose, and every one of them had gone stale at the same time,
+because nothing compared them with the headers they describe.
 
 These are pinned BY NAME, not by count. A count assertion would have to be
 rewritten every time the runtime grows a function, and would fail for a reason
@@ -467,10 +475,109 @@ def test_non_exports_stay_excluded():
         check(sym not in rt, f'fire_runtime.h: C-library {sym} is not re-exported')
 
 
+# Every place in the tree that QUOTES the census in prose, and which figure of
+# it each one quotes. This table exists because five such places had all gone
+# stale at the same time, in the same way, for the same reason: the census is
+# computed (`formal.model.runtime_abi`, off the headers) and a COMMENT is a
+# second copy of a computed number, so the copy drifts and nothing fails. The
+# check below reads each figure out of the file it lives in and compares it with
+# the live table, which is the difference between a comment and a derived
+# figure — a comment cannot be derived, so the next best thing is to refuse to
+# let it disagree.
+#
+# (path, a regex whose groups are the figures to compare, what those groups are)
+# The regexes are deliberately specific — each names the SENTENCE, not just a
+# number — because "some comment in this file contains 668" is not a check, and
+# a loose one would pass on a stale figure sitting next to a correct one.
+CENSUS_QUOTES = (
+    ('formal/model.py',
+     r'the shape answers the same question for all (\d+) entry\s*\n'
+     r'# points the headers declare',
+     ('total',)),
+    ('formal/model.py',
+     r'a rule that refuses all (\d+) entry points for that reason',
+     ('total',)),
+    ('bugs/FORMAL_known_limits.md',
+     r'\| entry points declared \| (\d+) \|',
+     ('total',)),
+    ('bugs/FORMAL_known_limits.md',
+     r'\| every type crossing the boundary is one word \| \*\*(\d+)\*\* \|',
+     ('word',)),
+    ('bugs/FORMAL_known_limits.md',
+     r'\| a box in an argument or the return \| (\d+) \|',
+     ('box',)),
+    ('bugs/FORMAL_known_limits.md',
+     r'\*\*(\d+) of (\d+) is what a link line converts',
+     ('word', 'total')),
+    ('bugs/FORMAL_known_limits.md',
+     r'For `mojo_sqlite3_\*` it is \*\*(\d+) of (\d+)\*\*',
+     ('sqlite_word', 'sqlite_total')),
+    ('build_stdlib_dylib.py',
+     r"of `fire_runtime\.h`'s (\d+)\n\s*entry points",
+     ('fire_runtime_h',)),
+)
+
+
+def test_the_quoted_census_is_the_live_census():
+    """Every prose copy of the ABI census agrees with `runtime_abi()`.
+
+    The figures come from ONE place — `formal.model.runtime_abi()`, which reads
+    every header in `runtime/` through `reflect.collect_runtime_exports_h` — and
+    this check is what stops the tree from carrying a second, drifting answer.
+    It is the check the five stale quotes were missing, and it is here rather
+    than in a formal suite because the thing being checked is a COMMENT's
+    agreement with a header scan, which is a question about this file's own
+    scanner.
+
+    A quote that cannot be found is a FAILURE and not a skip. A missing quote is
+    how this table rots: someone edits the sentence, the regex stops matching,
+    and a check that quietly stops checking is worse than no check at all.
+    """
+    sys.path.insert(0, HERE)
+    from formal import model as M
+    abi = M.runtime_abi()
+    total = len(abi)
+    word = sum(1 for e in abi.values() if e['word'])
+    box = total - word
+    sqlite = {k: e for k, e in abi.items() if 'sqlite' in k}
+    import reflect
+    hdr_dir = M._runtime_header_dir()
+    live = {
+        'total': total,
+        'word': word,
+        'box': box,
+        'sqlite_word': sum(1 for e in sqlite.values() if e['word']),
+        'sqlite_total': len(sqlite),
+        'fire_runtime_h': len(reflect.collect_runtime_exports_h(
+            os.path.join(hdr_dir, 'fire_runtime.h'))),
+    }
+    import re as _re
+    for path, pattern, keys in CENSUS_QUOTES:
+        full = os.path.join(HERE, path)
+        try:
+            with open(full, encoding='utf-8') as f:
+                text = f.read()
+        except OSError as e:
+            check(False, f'{path}: the census quote is readable', str(e))
+            continue
+        m = _re.search(pattern, text)
+        if m is None:
+            check(False, f'{path}: the census quote is still there',
+                  f'no text matches {pattern!r} — a quote that cannot be found '
+                  f'is a stale TABLE, not a passing check')
+            continue
+        for i, key in enumerate(keys, start=1):
+            got = int(m.group(i))
+            check(got == live[key],
+                  f'{path}: the quoted {key} count is {live[key]}',
+                  f'the text says {got}; `runtime_abi()` says {live[key]}')
+
+
 def main():
     test_pointer_returns_are_seen()
     test_every_declaration_is_seen()
     test_non_exports_stay_excluded()
+    test_the_quoted_census_is_the_live_census()
     npass = sum(1 for ok, _w in RESULTS if ok)
     nfail = len(RESULTS) - npass
     print(f"\n{npass} passed, {nfail} failed, {len(RESULTS)} checks")

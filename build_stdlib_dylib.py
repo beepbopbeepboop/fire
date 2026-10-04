@@ -1144,9 +1144,12 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         elif ('_' + e['name']) in all_defs:
             # The entry names a symbol the dylib really defines, but the
             # export-csym rule resolved it to a different one — see
-            # runtime_export_entries' report on why that is measured at 433 of
-            # fire_runtime.h's 459 entry points today, and why the fix is in
-            # reflect.export_csym rather than here. A separate class from the
+            # runtime_export_entries' report on why almost all of
+            # fire_runtime.h's 565 entry points are measured as misresolved on
+            # this tree, and why the fix is in reflect.export_csym rather than
+            # here. The exact figure is not written down here on purpose: it is
+            # printed by the report below on every build, so this comment cannot
+            # carry a second copy of a number the build measures for itself. A separate class from the
             # genuinely-orphaned entry below because nothing is missing here:
             # the definition is present and the table just is not naming it.
             _misresolved.append(f"{e['name']} -> {sym}")
@@ -1457,15 +1460,20 @@ def runtime_export_entries(gcc: str, objs: list) -> tuple:
         `_X`, and `reflect.export_csym` resolved the entry to some OTHER
         symbol. Nothing is missing; the shared export-csym rule is computing
         a Mojo overload-mangled name for a C prototype. This is a real,
-        currently-live defect measured on this tree: with
-        `fire_runtime.h`'s 459 entry points, only 26 survive
-        `build_stdlib()`'s `nm` cross-check, and 433 are dropped for exactly
-        this reason. So the stdlib dylib has never advertised 433 runtime
-        entry points it defines — including all of `mojo_str_*` and every
-        function whose parameters are not word-shaped. The fix belongs in
-        `reflect.export_csym` (agent [3]'s file; see the INTERFACE REQUEST),
-        and nothing here has to change when it lands: an entry that resolves
-        correctly passes this same check and is advertised.
+        currently-live defect measured on this tree: of `fire_runtime.h`'s 565
+        entry points, only a handful survive `build_stdlib()`'s `nm`
+        cross-check, and the rest are dropped for exactly this reason. So the
+        stdlib dylib has never advertised most of the runtime entry points it
+        defines — including all of `mojo_str_*` and every function whose
+        parameters are not word-shaped. The figure is deliberately NOT written
+        down here: `format_export_report` prints the kept / misresolved /
+        undefined split on every build, so the number to read is the one the
+        build reports and this paragraph cannot go stale against it. (It did,
+        once: it said "only 26 of 459" for months after both counts had
+        moved.) The fix belongs in `reflect.export_csym` (agent [3]'s file;
+        see the INTERFACE REQUEST), and nothing here has to change when it
+        lands: an entry that resolves correctly passes this same check and is
+        advertised.
       * UNDEFINED — the header declares it and no object in the dylib defines
         it. Either a dead declaration (fire_runtime.h has six) or a prototype
         satisfied by whoever links against the dylib (`py_tokenize` is

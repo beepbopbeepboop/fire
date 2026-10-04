@@ -16996,14 +16996,24 @@ def _runtime_library_for(ordered: list, arch: str, fmt: str):
 
     The second half of the decision `_runtime_word_calls` cannot make: a name
     being word-shaped says the CALL is answerable, and only the library's own
-    export table says whether this one answers it. They are different sets and
-    the difference is 51 entry points on this tree, because
-    `runtime_dylib` links `runtime_units(arch, None)` — the core runtime, the
-    coroutine runtime and the async scheduler — and NOT the OPTIONAL units
-    `fire_sqlite3.c`, `fire_ssl.c`, `fire_zlib.c` and `fire_ncurses.c`, which
-    the gimple path compiles on demand (`build_config.OPTIONAL_RUNTIME_UNITS`).
-    So `mojo_strlen` is exported and `mojo_sqlite3_step` is not, and both are
-    word-shaped.
+    export table says whether this one answers it. They are different sets
+    because `runtime_dylib` links `runtime_units(arch, None)` — the core
+    runtime, the coroutine runtime and the async scheduler — and NOT the
+    OPTIONAL units `fire_sqlite3.c`, `fire_ssl.c`, `fire_zlib.c` and
+    `fire_ncurses.c`, which the gimple path compiles on demand. (The table is
+    `build_config._OPTIONAL_RUNTIME_UNITS`, read through
+    `optional_unit_names()`; the un-underscored spelling this paragraph used to
+    name has never existed, so a reader who went looking for it found nothing
+    and had no way to tell that from a rename.) So `mojo_strlen` is exported
+    and `mojo_sqlite3_step` is not, and both are word-shaped.
+
+    The SIZE of the difference is a property of a PROGRAM, not of the tree, so
+    it is not written down here: a figure in this paragraph was 51 entry points
+    on the tree that measured it and means nothing to a reader on any other
+    one. The tree-level figures live in one place and are checked against the
+    live census by `test_runtime_header_scan.py` — `bugs/FORMAL_known_limits.md`
+    §3.1 for the word-shaped surface (668 entry points, 262 of them word-shaped,
+    measured over every header in `runtime/`).
 
     Checking the intersection rather than linking optimistically is what keeps
     the other 5 honest: a program that calls only `mojo_sqlite3_close` gets the
