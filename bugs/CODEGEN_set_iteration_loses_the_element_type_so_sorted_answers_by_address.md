@@ -45,9 +45,10 @@ the evidence that the element type really crossed: `mojo_set_iter_val_str` and
 `mojo_set_add_str` in the comprehension, `mojo_list_get_str` for the loop
 target, and `mojo_list_sorted_str` for the `sorted()`.
 
-`test_silent_noop_iter.py` — the intermittent red this was filed for — is
-27 passed / 0 failed, on consecutive whole-file runs (see "Verified" in the
-commit message for the count actually measured).
+`test_silent_noop_iter.py` — the intermittent red this was filed for, and the
+half of the acceptance bar that says "one green run proves nothing here" — is
+**27 passed / 0 failed on FIVE consecutive whole-file runs**, which is the whole
+of the bar it set.
 
 ## What is NOT fixed, and is larger: a set PARAMETER's container KIND
 
@@ -240,5 +241,5 @@ cursor/span paths are not reachable from that program. Verified before filing.
 
 The acceptance bar is met for the element-type half: the two-line program prints
 CPython's two lines in both pipeline modes, and `test_silent_noop_iter.py`
-passes on consecutive whole-file runs — one green run proves nothing here, which
-is how this reached a gate at all.
+passes on FIVE consecutive whole-file runs (27 passed / 0 failed each) — one
+green run proves nothing here, which is how this reached a gate at all.
