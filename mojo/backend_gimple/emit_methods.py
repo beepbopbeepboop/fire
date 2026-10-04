@@ -70,6 +70,7 @@ from mojo.middle.types import (
     # one name, one return type.
     _struct_value_codes, _struct_slot_kinds, _struct_elem_ctype,
 )
+from mojo.middle.calls_shared import _is_pointer_ctype
 from mojo.middle.methods_shared import *  # noqa: F401,F403
 from mojo.middle.methods_shared import (
     _SELFHOST_SIBLING_MODULE_PREFIXES, _as_str, _gmm_callexpr_node, _is_selfhost_sibling_alias, _is_selfhost_source_file, _sms_key
@@ -1784,6 +1785,45 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 t = gen._new_val('int64_t', f'(int64_t){_obj_val}')
                 return 'int64_t', t
 
+    # `<compile-time-known-pattern>.split(text)` — see _regex_prog_for.
+    #
+    # This arm exists because its absence was not a gap but a SILENT wrong
+    # answer, and it was the reason the self-hosted compiler could not compile
+    # its own source. `fire_compiler.py::_source_lines` asks
+    # `_LINE_TERMINATORS.split(src)` for a file's physical lines, and with no
+    # case here the receiver — a compiled-pattern object, which this codegen
+    # binds to a 0 marker — fell through to the `char *` string-method table
+    # and was emitted as
+    #
+    #     mojo_str_split ((char *)_LINE_TERMINATORS, src)
+    #
+    # i.e. the pattern OBJECT read as a C string and used as the separator. The
+    # split therefore returned nothing, `raw_lines` was empty, and the
+    # tokenizer emitted a single EOF token for every input: no tokens, no AST,
+    # no `.ci`, which is bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md, and
+    # the `.pyi` was still right because it comes from a different pass.
+    #
+    # `re.split(pattern, text)` (the module-level spelling) lowers the same
+    # way; `_LINE_TERMINATORS` is the only caller in the self-host closure.
+    if (func.member == 'split' and len(node.args) == 1
+            and isinstance(func.obj, gimple_ctypes.IdentExpr)
+            and func.obj.name in gen._regex_patterns
+            and not node.kwargs):
+        info = gimple_ctypes.regex_prog_for(gen, gen._regex_patterns[func.obj.name])
+        src_type, src_val = gen.lower_expr(node.args[0])
+        if src_type not in ('char *', 'void *'):
+            src_val = gen._new_val('char *', f'(char *){gen._ensure_local(src_type, src_val)}')
+        prog_local = gen._new_val('const ReNode *', info['prog_var'])
+        ranges_local = gen._new_val('const ReRange *', info['ranges_var'])
+        classinfo_local = gen._new_val('const ReClassInfo *', info['classinfo_var'])
+        t = gen._call_expr('MojoList *', 'mojo_regex_split', [
+            ('const ReNode *', prog_local), ('const ReRange *', ranges_local),
+            ('const ReClassInfo *', classinfo_local),
+            ('int', str(info['root'])), ('int', str(info['ngroups'])),
+            ('char *', src_val)])
+        gen._elem_types[t] = 'char *'
+        return 'MojoList *', t
+
     # `m.group()`/`m.start()` where m is a regex-match for-loop variable
     # (see _gen_for_regex_iter / regex_compile.py / BACKLOG-CODEGEN.md §4f).
     # Only the no-arg forms py_tokenize's own `for m in _TOKEN_RE.finditer(...)`
@@ -2303,32 +2343,28 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 folded_pattern = gen._try_const_fold_str(node.args[0])
                 info = None
                 if folded_pattern is not None:
-                    info = gen._regex_progs.get(_gmm_as_str(folded_pattern))
-                    if info is None:
-                        try:
-                            prog_id = f"re{len(gen._regex_progs)}"
-                            info = gimple_ctypes.regex_compile.compile_pattern(folded_pattern, prog_id)
-                            gen._regex_progs[folded_pattern] = info
-                        except Exception as e:
-                            # Not every real regex feature is implemented by this
-                            # codegen's own engine (e.g. lookahead `(?=...)`, used
-                            # by gimple_codegen.py's own inout/borrowed/... keyword
-                            # pattern) — fall back to mojo_re_sub_fn (POSIX) below
-                            # rather than letting compile_pattern's exception
-                            # propagate. That propagation previously blew up an
-                            # ancestor module's entire compile partway through
-                            # (caught far up by _compile_imported_module's own
-                            # generic except-and-rollback), which discarded that
-                            # attempt's whole output — including any *other*,
-                            # perfectly good regex declarations it had already
-                            # emitted — while _regex_progs_defined (not part of
-                            # that rollback) kept remembering them as "already
-                            # emitted," so no later successful recompile ever
-                            # emitted them either: real declarations silently
-                            # missing from the final file for patterns that had
-                            # nothing to do with the one that actually failed.
-                            info = None
-                            gimple_ctypes._debug_note(f're.sub compile-time regex compile failed for {folded_pattern!r}', e)
+                    try:
+                        info = gimple_ctypes.regex_prog_for(gen, _gmm_as_str(folded_pattern))
+                    except Exception as e:
+                        # Not every real regex feature is implemented by this
+                        # codegen's own engine (e.g. lookahead `(?=...)`, used
+                        # by gimple_codegen.py's own inout/borrowed/... keyword
+                        # pattern) — fall back to mojo_re_sub_fn (POSIX) below
+                        # rather than letting compile_pattern's exception
+                        # propagate. That propagation previously blew up an
+                        # ancestor module's entire compile partway through
+                        # (caught far up by _compile_imported_module's own
+                        # generic except-and-rollback), which discarded that
+                        # attempt's whole output — including any *other*,
+                        # perfectly good regex declarations it had already
+                        # emitted — while _regex_progs_defined (not part of
+                        # that rollback) kept remembering them as "already
+                        # emitted," so no later successful recompile ever
+                        # emitted them either: real declarations silently
+                        # missing from the final file for patterns that had
+                        # nothing to do with the one that actually failed.
+                        info = None
+                        gimple_ctypes._debug_note(f're.sub compile-time regex compile failed for {folded_pattern!r}', e)
                 is_callback = gen._re_sub_repl_is_callback(cb_arg)
                 if info is not None:
                     prog_local = gen._new_val('const ReNode *', info['prog_var'])
@@ -6074,12 +6110,30 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
         # defaulted position, so it indexes from
         # `expected_non_self - len(_method_dflts)` (BUG-2026-020 shape).
         _first_dflt = expected_non_self - len(_method_dflts)
+        # `full_param_list` carries the RECEIVER in slot 0 unless this is a
+        # static method reached through an instance, and `arg_pairs` does
+        # not — so a padded slot's declared type is read at `_pos + shift`.
+        _recv_shift = 0 if (is_class_ref and not _is_cls_receiver) else 1
         while len(arg_pairs) < expected_non_self:
             _pos = len(arg_pairs)
             _dv = (_method_dflts[_pos - _first_dflt][1]
                    if 0 <= _pos - _first_dflt < len(_method_dflts) else None)
-            arg_pairs.append(ggc._default_expr_to_pair(gen, _dv)
-                             if _dv is not None else ('int', '0'))
+            # "No value" for a POINTER parameter is a typed NULL, not the
+            # integer 0: 0 coerced into a `char *` parameter becomes the
+            # one-character string "0" (via `mojo_cstr_or_int_str`), which
+            # is true. Same fix as `_lower_named_call`'s identical loop; see
+            # `_default_expr_to_pair`'s `param_ctype` for the self-hosted
+            # parser failure it caused (`Parser._expect(self, kind, value: str
+            # = None)` delivered "0" and refused every file).
+            _pct = (full_param_list[_pos + _recv_shift]
+                    if 0 <= _pos + _recv_shift < len(full_param_list) else None)
+            if _dv is not None:
+                arg_pairs.append(ggc._default_expr_to_pair(gen, _dv,
+                                                           param_ctype=_pct))
+            elif _is_pointer_ctype(_pct):
+                arg_pairs.append((_pct, '0'))
+            else:
+                arg_pairs.append(('int', '0'))
     # Auto-stub if the mangled method name has no known declaration. Check
     # both the suffixed key (this specific overload) and the bare key
     # (set for ANY overload by Pass 2b's return-type inference, which

@@ -1,6 +1,134 @@
 # CODEGEN_bootstrap_stage2_dump_is_empty: the self-hosted binary exits 0 and writes no dump
 
-## Status
+## Status (2026-10-04, work/gatefix8 — the class is much narrower: THREE root
+## causes found and fixed, `.tok`/`.ast` are now byte-identical, and what is
+## left is a `TypeError` inside the compiled `gen_module`)
+
+**Still open, and still the right owner of this class — but its "new signature"
+section below is now WRONG about where the defect is, and this entry says so
+rather than leaving the old reading in place.**
+
+Measured on `work/gatefix8` after three fixes (see "What was fixed" for the
+commits and the per-fix evidence):
+
+    $ python3 tools/suite.py bootstrap --no-cache
+    suite: 4 passed, 1 failed, 5 skipped  (10 tests, 145 jobs, 208 s)
+
+`bootstrap-stage2-dumps` still fails, but **45 of its 46 inputs now get a real
+tokenizer and a real parser** instead of the old two-way split (25 refused with
+`unterminated string literal`, 21 silently emitting a 2-token stream):
+
+| artifact | stage1 | stage2 BEFORE | stage2 AFTER |
+|---|---|---|---|
+| `.tok` | correct | 42 bytes / absent | **byte-identical** (`diff` clean on every input measured) |
+| `.ast` | correct | 2 bytes / absent | **byte-identical** (`diff` clean on `t1.mojo`, the 45-file corpus agrees on `.tok`) |
+| `.ci` | 20-48 KB | a fixed ~33 KB skeleton | **still absent** — `compile_to_gimple` raises |
+
+and the failure has MOVED and changed shape: the 25 `unterminated string
+literal` refusals and the 21 empty-token files are gone, and what remains is
+
+    compile_to_gimple failed: TypeError: unhashable type: 'list'      (20 inputs)
+    Warning: Could not generate .ast: ../fire_compiler.py:1301:38: Unexpected SEMICOLON(';')   (2 inputs)
+
+So the "C/token/AST writers do not" reading below is superseded: the writers are
+fine and the COMPILED CODEGEN raises before it emits anything. That is a
+different bug in a different layer, and this doc now owns the census rather
+than a guess.
+
+### What is left, and how to see it (measured, one command)
+
+    $ rm -rf stage1 stage2 stage3
+    $ python3 tools/suite.py bootstrap --no-cache        # ~210 s wall, peak 1.9 GB
+    $ cd stage2 && printf 'x = 1\n' > /tmp/one.mojo && ./mojo --dump /tmp/one.mojo
+    compile_to_gimple failed: TypeError: unhashable type: 'list'
+
+`x = 1` is the whole reproduction: the `TypeError` is **input-independent** and
+it fires for an EMPTY file too, so it is in `gen_module_impl`'s prologue
+(`mojo/backend_gimple/module_gen.py:2430`) rather than in anything a statement
+reaches. The stages before it are all clean — verified by calling the closure's
+own exported C functions one at a time from a C main linked against
+`stage1/fire.ci` (that probe is the cheap instrument and it is worth rebuilding;
+see "The instrument" below):
+
+    py_tokenize -> 5 tokens
+    Parser() ok / with_filename ok / parse_module -> 1 stmts
+    _check_ownership ok
+    ast_rewriter.rewrite ok
+    desugar_genexps ok
+    GimpleGen() ok
+    gen_module -> raises TypeError: unhashable type: 'list'
+
+The unprobed remainder between `GimpleGen()` and the raise is
+`gimple_gen_coro.lower(stmts)` (not exported, so the probe steps over it),
+`register_abi_externs`, the `sys.path.insert` pre-scan (`_SYS_PATH_INSERT_RE`,
+whose `.findall` has no lowering outside a for-loop), and `gen_module_impl`
+itself. **A `.match`/`.search`/`.findall`/`.sub` receiver on a compile-time-known
+pattern is the largest known hole in the compiled path** — `finditer` in a
+for-loop and the bare `re.sub`/`re.escape` forms are the only regex lowerings
+that exist — and the closure's own codegen uses those missing methods in
+`elaborate.py`, `gimple_codegen.py`, `mojo/middle/{types,exprtypes,infra_infer}.py`,
+`monomorphize.py`, `reflect.py` and `emit_infra.py`. That inventory is the first
+thing to work through.
+
+The second, independent class is the `Unexpected SEMICOLON(';')` on
+`fire_compiler.py:1301` (`if c == "\\" and in_str != '`': i += 2; continue` — a
+backtick inside a single-quoted string on a `;`-bearing line). The token stream
+for that file is byte-identical, so the divergence is in
+`fire_compiler.py::_split_on_separators` or in phase 2's sub-statement loop, not
+in the lexer.
+
+### What was fixed (three root causes, each with its own evidence)
+
+1. **`str`'s optional `[start[, end]]` window was dropped** by every arm of
+   `_lower_str_method` (`startswith`/`endswith`/`find`/`index`/`rfind`/
+   `rindex`/`count`), so `src.startswith(delim, j)` compared from byte 0 of the
+   WHOLE FILE. That is `Parser._scan_string_end`'s question — "does the literal
+   opening at `i` close at `j`" — so every source with an ordinary string
+   literal was refused as `unterminated string literal` and every source that
+   begins with a `"""` docstring matched at every position and collapsed to a
+   2-token stream. **This was both halves of the old signature in this doc.**
+2. **`<compiled pattern>.split(text)` had no lowering**, and fell through to
+   the `char *` string-method table: `fire_compiler.py::_source_lines` asks
+   `_LINE_TERMINATORS.split(src)` for a file's physical lines, so the pattern
+   OBJECT was cast to `char *` and used as the separator, `raw_lines` came back
+   empty, and the tokenizer emitted one EOF token for everything. Fixed with
+   `mojo_regex_split` (runtime) + the `split` arm + `regex_prog_for`
+   (consolidated out of `emit_loops` so `finditer`/`findall`/`sub`/`split` share
+   one program per pattern).
+3. **A defaulted POINTER parameter was padded with the integer 0**, which for a
+   `char *` parameter `_emit_call` coerces through `mojo_cstr_or_int_str` into
+   the one-character string `"0"` — a true, non-null pointer. So
+   `Parser._expect(self, kind, value: str = None)` called as
+   `self._expect("LPAREN")` believed a value had been passed and refused every
+   file with `Expected '0' got ')'`. Fixed at every padding site
+   (`_default_expr_to_pair(param_ctype=...)`), which is why `.ast` is now real.
+
+**The instrument, for whoever picks this up** (it is ~100 s per rebuild and it
+is what made three fixes possible inside one session):
+
+1. `python3 -c "from gimple_codegen import compile_to_gimple; compile_to_gimple(open('fire_compiler.py').read(), do_imports=False, filename='fire_compiler.py')"`
+   — 2.1 s, 1.9 MB of C for the whole front end. Two edits make it gcc-able:
+   the self-call `compile_to_gimple (src, 0, filename)` needs the 4th argument
+   its own pinned prototype declares, and its `main` must be renamed so a probe
+   `main` can link.
+2. Link that against `runtime/fire_runtime.c` + the coro runtime +
+   `runtime/fire_coro_ctx_aarch64.S` (NOT `_generic.c` — duplicate
+   `_mojo_*{fctx,jump_fctx,make_fctx}`) with a C main that calls the
+   fixed-ABI `py_tokenize(char *)` and reads the `Token` struct
+   (`{int64_t __mojo_type_id; char *kind; char *value; int64_t line, col;}`,
+   listed off a `MojoList *` via `mojo_list_get_int`). That reproduces the
+   self-hosted tokenizer exactly — it is the same object graph the stage2 binary
+   runs — and it reproduced this doc's class byte for byte, including the
+   negative column numbers in the diagnostics.
+3. The same trick on `stage1/fire.ci` (45 MB, the whole closure) reaches the
+   LATER stages: the stage functions are exported with their hash suffixes
+   (`ownership_check_check_module_815e8f`, `ast_rewriter_rewrite_815e8f`,
+   `fire_compiler_desugar_genexps_815e8f`, `GimpleGen___init__`,
+   `GimpleGen_gen_module`), so a probe can call them one at a time and print
+   between them. `Parser`'s allocator is `static`, but its struct layout is in
+   the generated `typedef`, so a `calloc`'d copy works. ~100 s to build.
+
+## Status (2026-10-03 measurement, superseded by the entry above)
 
 Open. Measured on the 2026-10-03 full gate (commit `e59dae8c`, python3 3.14),
 and re-confirmed on `master` as of `99cdb9b7`; nothing in the compiled path
@@ -57,6 +185,10 @@ witnesses.
   signature (below) that the old census did not separate out.
 
 ## The new signature: `.pyi` right, `.ci` empty, `.tok`/`.ast` absent
+*(SUPERSEDED 2026-10-04: `.tok`/`.ast` are no longer absent — they are
+byte-identical to stage1's. See the Status entry at the top. What is left of
+this section's reasoning is the `.pyi`-is-right row, which still holds: the
+stub emitter runs before the failure and does not depend on the codegen.)*
 
 This is the part worth writing down, because it is narrower than "the
 self-hosted binary is wrong" and therefore cheaper to chase.

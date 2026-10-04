@@ -400,11 +400,14 @@ def _regex_prog_for(gen, pattern: str) -> dict:
     """Compile `pattern` into the emitted regex-program tables, reusing the
     one already built for that exact pattern text. Shared by the finditer
     and findall lowerings so `for m in P.finditer(s)` and
-    `for w in P.findall(s)` over the same pattern cost one program."""
-    if pattern not in gen._regex_progs:
-        prog_id = f"re{len(gen._regex_progs)}"
-        gen._regex_progs[pattern] = gimple_ctypes.regex_compile.compile_pattern(pattern, prog_id)
-    return gen._regex_progs[pattern]
+    `for w in P.findall(s)` over the same pattern cost one program.
+
+    A delegate to `gimple_ctypes.regex_prog_for`, which is the one
+    implementation — it lives in `mojo/middle/types.py` because this module
+    imports `emit_methods` and every `P.<method>(...)` arm in emit_methods
+    needs the same helper, so the reverse module-level import would be a
+    cycle."""
+    return gimple_ctypes.regex_prog_for(gen, pattern)
 
 
 def _emit_regex_scan(gen, pattern: str, text_val: str) -> tuple:

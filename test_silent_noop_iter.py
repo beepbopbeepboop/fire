@@ -736,6 +736,45 @@ def main():
 '''
 
 
+@case('compiled_pattern_split')
+def _():
+    # `<compiled pattern>.split(text)` had NO lowering, and that is worse than
+    # a refusal: the receiver is a compile-time-known pattern object, which
+    # this codegen binds to a 0 marker, so the call fell through to the
+    # `char *` string-method table and was emitted as
+    # `mojo_str_split ((char *)_PATTERN, text)` — the pattern OBJECT read as a
+    # C string and used as the separator. The result was a list of nonsense
+    # pieces (or none), silently.
+    #
+    # It is the same defect that made the self-hosted compiler dump nothing:
+    # `fire_compiler.py::_source_lines` asks
+    # `_LINE_TERMINATORS.split(src)` for a file's physical lines, so every
+    # source tokenized as ZERO lines self-hosted and every `.ci` came out
+    # empty (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md).
+    #
+    # The cases pin Python's three rules this has to match: the pieces BETWEEN
+    # the matches, the CAPTURING GROUPS interleaved between them, and the
+    # trailing empty field a text ending in a separator keeps.
+    #
+    # Printed in `main` and not through a helper, deliberately: a list of
+    # strings handed to an UNTYPED parameter loses its element type in the
+    # compiled path and each piece prints as its own address — true of
+    # `str.split` too, so it is a separate defect and not this case's subject.
+    return r'''import re
+_NL = re.compile(r'\r\n|\r|\n')
+_PAIR = re.compile(r'([a-z]+)=([0-9]+)')
+
+def main():
+    print("nl", _NL.split("a\nb\r\nc\rd\n"))
+    print("nl-len", len(_NL.split("a\nb\r\nc\rd\n")))
+    print("nl-nonl", _NL.split("a\nb"))
+    print("nl-leading", _NL.split("\n\n"))
+    print("nl-empty", _NL.split(""))
+    print("pair", _PAIR.split("x=1,yy=22"))
+    print("pair-none", _PAIR.split("nothing here"))
+'''
+
+
 @case('finditer_still_lowered')
 def _():
     # finditer already had a lowering; the findall work must not disturb it.

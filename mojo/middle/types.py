@@ -761,6 +761,29 @@ def compile_time_call_module(module: str) -> bool:
     return module in _COMPILE_TIME_CALL_MODULES
 
 
+def regex_prog_for(gen, pattern: str) -> dict:
+    """Compile `pattern` into `gen`'s emitted regex-program tables, reusing the
+    one already built for that exact pattern text.
+
+    THE one place a compile-time-known pattern becomes program tables, because
+    three lowerings need it (`finditer`/`findall` in emit_loops, and every
+    `P.<method>(...)` arm in emit_methods) and each of them open-coding the
+    "already compiled? reuse : compile" step is how they came to disagree about
+    WHICH tables a given pattern gets — two programs for one pattern text means
+    two `static const ARRAY[]` declarations of the same shape, and the second
+    one's name is a fresh `re<N>` the first lowering never heard of.
+
+    It lives HERE, not in `emit_loops`, because that module imports
+    `emit_methods` and the reverse import would be a cycle; this module is
+    imported by both (as `gimple_ctypes`) and already owns the regex-compile
+    dependency. `emit_loops._regex_prog_for` is a thin delegate to it.
+    """
+    if pattern not in gen._regex_progs:
+        prog_id = f"re{len(gen._regex_progs)}"
+        gen._regex_progs[pattern] = regex_compile.compile_pattern(pattern, prog_id)
+    return gen._regex_progs[pattern]
+
+
 def dispatch_table_global_ctype(name) -> str | None:
     """The C declaration type for the compiler-internal table global `name`,
     or None when it is not one of ours.

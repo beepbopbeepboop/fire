@@ -5341,6 +5341,55 @@ fn main():
      "True False False\nTrue False False\nTrue True False\n"
      "True True True\nFalse False\nTrue False False False\n")
 
+    # A defaulted POINTER parameter was padded with the INTEGER 0, which for
+    # a `char *` parameter `_emit_call` coerces through
+    # `mojo_cstr_or_int_str` into the one-character string "0" — a true,
+    # non-null pointer. So `def f(value: str = None)` called as `f()`
+    # delivered `"0"`, and every `if value:` in the callee took the
+    # non-None branch.
+    #
+    # It is not a local imprecision: `fire_compiler.py`'s
+    # `Parser._expect(self, kind, value: str = None)` is that exact shape, so
+    # the self-hosted parser's `self._expect("LPAREN")` believed a value had
+    # been passed and refused every file with "Expected '0' got ')'" — the
+    # parser half of the class in
+    # bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md, and the reason the
+    # tokenizer fix alone still left every `.ast` unwritten.
+    #
+    # CPython is the oracle. The cases cover a `str` default, a `list`
+    # default, a defaulted parameter that is NOT the last one, an explicit
+    # empty string (which must still read as absent), and an explicit value
+    # of each kind.
+    test_gimple_matches_cpython("gimple_null_default_for_pointer_param", """\
+def f(kind, value: str = None):
+    if value:
+        print(kind, "set", value)
+    else:
+        print(kind, "none")
+
+def g(items: list = None, n: int = 0):
+    if items:
+        print("g set", len(items), n)
+    else:
+        print("g none", n)
+
+def h(a, b: str = None, c: str = "z"):
+    print("h", a, b, c)
+
+def main():
+    f("a")
+    f("b", "x")
+    f("c", "")
+    g()
+    g([1, 2])
+    g([1, 2], 2)
+    h(1)
+    h(1, "q")
+    h(1, "q", "w")
+
+main()
+""")
+
     # The optional `[start[, end]]` window of startswith/endswith/find/index/
     # rfind/rindex/count was DROPPED: every one of those arms passed only the
     # needle to the no-window runtime helper, so `s.startswith(p, i)` compared

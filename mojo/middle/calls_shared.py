@@ -222,7 +222,47 @@ def _callable_param_generator_apis(gen, fn_node) -> dict:
     return _out
 
 
-def _default_expr_to_pair(gen, _dflt, cxx: bool = False) -> tuple:
+def _is_pointer_ctype(param_ctype) -> bool:
+    """Is `param_ctype` a C pointer, i.e. does a null for it have to be a
+    null POINTER rather than an integer 0?
+
+    The padding sites use this to type a "no value" default against the
+    callee's own declared parameter type — see
+    `_default_expr_to_pair`'s `param_ctype` argument for why the difference
+    is load-bearing rather than cosmetic."""
+    if not param_ctype:
+        return False
+    _t = param_ctype if isinstance(param_ctype, str) else str(param_ctype)
+    return _t.endswith('*')
+
+
+def _null_default_pair(param_ctype, int_ctype: str = 'int') -> tuple:
+    """The "no value" pair for a padding site: a typed NULL when the callee's
+    declared parameter type is a POINTER, else the integer zero.
+
+    `_default_expr_to_pair`'s `param_ctype` argument, applied at each of the
+    places that answer "this default has no value". The distinction is not
+    cosmetic: an integer 0 handed to a `char *` parameter is coerced by
+    `_emit_call` through `mojo_cstr_or_int_str`, which renders it as the
+    string `"0"` — a true, non-null pointer — so a callee testing `if value`
+    sees a value where Python passes None. See that function's docstring for
+    the self-hosted parser failure it caused."""
+    if _is_pointer_ctype(param_ctype):
+        return (_as_cstr(param_ctype), '0')
+    return (int_ctype, '0')
+
+
+def _as_cstr(param_ctype):
+    """`param_ctype` as text. On the self-hosted path a `(ctype, value)` tuple
+    read out of a list re-boxes both slots to int64_t, so a ctype that
+    reached here from `chosen['param_ctypes']` can be an integer (the erased
+    text) rather than a str; `str()` keeps the comparison in
+    `_is_pointer_ctype` meaningful instead of raising."""
+    return param_ctype if isinstance(param_ctype, str) else str(param_ctype)
+
+
+def _default_expr_to_pair(gen, _dflt, cxx: bool = False,
+                          param_ctype=None) -> tuple:
     """Convert a default-arg expression AST node to a (ctype, rvalue) pair,
     for padding a call site that omitted the argument. Mirrors the struct
     ctor default handling in _build_call_args_for_candidate.
@@ -230,6 +270,22 @@ def _default_expr_to_pair(gen, _dflt, cxx: bool = False) -> tuple:
     `cxx` = the caller is lowering into the C++20-coroutine body, which
     spells a callable value as a direct address rather than through the
     .c-side `_funcptr_` statics; see `_callable_value_symbol`.
+
+    `param_ctype` = the callee's DECLARED C type for the slot being padded,
+    when the padding site knows it. It changes exactly one thing, and that one
+    thing was a silent miscompile of the whole self-hosted compiler: a
+    `None`/`False`/unrepresentable default is "no value", and passed to a
+    POINTER parameter the integer 0 is not a null pointer — it is a
+    `char *` parameter, so `_emit_call`'s coercion runs it through
+    `mojo_cstr_or_int_str(0)` and hands the callee the one-character string
+    `"0"`, which is TRUE. `Parser._expect(self, kind, value: str = None)`
+    is the shape: `self._expect("LPAREN")` in the compiled binary delivered
+    `value == "0"`, so `if value and t.value != value:` fired on every
+    single-argument call and the parser refused every file with
+    "Expected '0' got ')'" — a class of failure with no message anyone would
+    connect to a defaulted parameter. `_expand_sole_spread_into_fixed_slots`
+    already typed its `char *` padding as `(char *)0` for exactly this reason;
+    this argument is that fix, applied to every padding site.
 
     A default that is a FUNCTION (`def walk_tree(root, *, walk=_walk_tree)`,
     `Tools/c-analyzer/c_common/fsutil.py`'s whole higher-order-parameter
@@ -244,7 +300,7 @@ def _default_expr_to_pair(gen, _dflt, cxx: bool = False) -> tuple:
     RESOLVABLE callable default stopped being indistinguishable from it.
     """
     if _dflt is None:
-        return ('int', '0')
+        return _null_default_pair(param_ctype)
     _cv = _callable_value_symbol(gen, _dflt, cxx=cxx)
     if _cv is not None:
         return _cv
@@ -270,11 +326,11 @@ def _default_expr_to_pair(gen, _dflt, cxx: bool = False) -> tuple:
     if isinstance(_dflt, gimple_ctypes.IntLiteral):
         return ('int', str(_dflt.value))
     if isinstance(_dflt, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr, gimple_ctypes.SetExpr, gimple_ctypes.DictExpr)):
-        return ('int64_t', '0')
+        return _null_default_pair(param_ctype, int_ctype='int64_t')
     if isinstance(_dflt, gimple_ctypes.IdentExpr) and _dflt.name in ('True',):
         return ('int', '1')
     if isinstance(_dflt, gimple_ctypes.IdentExpr) and _dflt.name in ('False', 'None'):
-        return ('int', '0')
+        return _null_default_pair(param_ctype)
     # A `module.attr` default (`def probe(x, *, g=os.walk)`) is a reference to
     # something this compile cannot resolve: whether `os.walk` was translated
     # into this translation unit at all is a property of the whole import
@@ -303,7 +359,7 @@ def _default_expr_to_pair(gen, _dflt, cxx: bool = False) -> tuple:
                              gen._intern_string(gimple_ctypes._c_escape(_nm)))
         gen._emit(f'  mojo_set_unavailable_callable_name ({_slit});')
         return ('void *', gen._new_val('void *', 'mojo_unavailable_callable_ptr ()'))
-    return ('int', '0')
+    return _null_default_pair(param_ctype)
 
 def _resolve_overload(gen, candidates: list, args: list, kwargs: list | None) -> dict | None:
     """Pick the candidate overload matching a call site's argument count/
@@ -468,6 +524,25 @@ def _pack_kwargs_dict(gen, kwarg_pairs) -> str:
         gen._dict_val_types[d] = _val_ty
     return d
 
+def _param_ctype_at(chosen: dict, index: int):
+    """`chosen`'s declared C type for parameter `index`, or None when the
+    candidate registration does not carry one (a list/tuple element read on
+    the self-hosted path, a candidate built without `param_ctypes`).
+
+    The padding sites hand this to `_default_expr_to_pair` so a "no value"
+    default for a POINTER parameter becomes a typed NULL instead of the
+    integer 0 that `_emit_call` would coerce into the string `"0"`."""
+    try:
+        _cts = chosen.get('param_ctypes') or []
+    except AttributeError:
+        return None
+    if not isinstance(_cts, (list, tuple)):
+        return None
+    if 0 <= index < len(_cts):
+        return _cts[index]
+    return None
+
+
 def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list | None,
                                    defaults: dict | None = None) -> list:
     """Build the C arg-value list (self excluded) for a resolved struct
@@ -505,7 +580,8 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
                 out.append(gen.lower_expr(kw.pop(_pname)))
                 continue
             _dflt = (defaults or {}).get(_pname) if _pname else None
-            out.append(gen._default_expr_to_pair(_dflt))
+            _pct = _param_ctype_at(chosen, _i)
+            out.append(gen._default_expr_to_pair(_dflt, param_ctype=_pct))
         out.append(gen._lower_varargs_pack(args[pre_n:]))
         # Post-star params are necessarily keyword-only (Python/Mojo
         # syntax). A `**kwargs` slot among them is a real MojoDict*
@@ -513,10 +589,19 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
         # pre-star binding above and by other named post-star params
         # into it (mirrors the non-varargs branch below), instead of
         # always leaving it null.
-        for pname in param_names[pre_n:]:
+        for _pi, pname in enumerate(param_names[pre_n:]):
             if pname.startswith('**'):
                 continue
-            out.append(gen.lower_expr(kw.pop(pname)) if pname in kw else ('int', '0'))
+            if pname in kw:
+                out.append(gen.lower_expr(kw.pop(pname)))
+            else:
+                # A keyword-only parameter left unbound is padded against its
+                # own DECLARED type — see `_default_expr_to_pair`'s
+                # `param_ctype`: for a pointer parameter, integer 0 would be
+                # coerced into the string "0" rather than a null pointer.
+                _pct2 = _param_ctype_at(chosen, pre_n + _pi)
+                out.append(('int', '0') if not _is_pointer_ctype(_pct2)
+                           else (_as_cstr(_pct2), '0'))
         if any(pn.startswith('**') for pn in param_names[pre_n:]):
             out.append(('MojoDict *', gen._pack_kwargs_dict(
                 {_kn: gen.lower_expr(_kv) for _kn, _kv in kw.items()})))
@@ -543,8 +628,10 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
         # default.md). No-default params still fall back to 0 here via
         # _default_expr_to_pair(None).
         while len(out) <= idx:
+            _fill = len(out)
             out.append(gen._default_expr_to_pair(
-                (defaults or {}).get(chosen['param_names'][len(out)])))
+                (defaults or {}).get(chosen['param_names'][_fill]),
+                param_ctype=_param_ctype_at(chosen, _fill)))
         out[idx] = gen.lower_expr(kw[pname])
     if _kw_idx >= 0:
         _named = set(chosen['param_names'])
@@ -553,8 +640,10 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
             if _kn not in _named:
                 _rest[_kn] = gen.lower_expr(kw[_kn])
         while len(out) <= _kw_idx:
+            _fill2 = len(out)
             out.append(gen._default_expr_to_pair(
-                (defaults or {}).get(chosen['param_names'][len(out)])))
+                (defaults or {}).get(chosen['param_names'][_fill2]),
+                param_ctype=_param_ctype_at(chosen, _fill2)))
         out[_kw_idx] = ('MojoDict *', gen._pack_kwargs_dict(_rest))
     # Pad up to max_arity, but never past the real parameter count — for a
     # `*args` overload max_arity is `float('inf')` (which the varargs
@@ -566,8 +655,10 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
     _pn_count = len(chosen['param_names'])
     _max_ar = chosen['max_arity']
     while len(out) < _pn_count and len(out) < _max_ar:
-        _dflt = (defaults or {}).get(chosen['param_names'][len(out)])
-        out.append(gen._default_expr_to_pair(_dflt))
+        _tail = len(out)
+        _dflt = (defaults or {}).get(chosen['param_names'][_tail])
+        out.append(gen._default_expr_to_pair(
+            _dflt, param_ctype=_param_ctype_at(chosen, _tail)))
     return out
 
 def user_dunder_repr_call(gen, struct_name: str, ctype: str, cval: str, prefer):

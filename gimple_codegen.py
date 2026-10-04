@@ -3334,6 +3334,13 @@ class GimpleGen:
                                            'int64_t *', 'int64_t *', 'int64_t *', 'int64_t *']),
         'mojo_regex_lastgroup':  ('char *', ['const char * *', 'int', 'int64_t *']),
         'mojo_regex_substr':     ('char *', ['char *', 'int64_t', 'int64_t']),
+        # `re.Pattern.split(text)` over this codegen's own regex engine — the
+        # entry point that makes fire_compiler.py's `_source_lines` (and so the
+        # whole self-hosted tokenizer) work; see its own comment in
+        # emit_methods.py's `<pattern>.split(...)` arm.
+        'mojo_regex_split':      ('MojoList *', ['const ReNode *', 'const ReRange *',
+                                                'const ReClassInfo *', 'int', 'int',
+                                                'char *']),
         # Matches runtime/fire_runtime.h's own declaration exactly
         # (`int mojo_getattr(int obj, char *attr)` — the honest
         # always-return-0 stub). The old entry here claimed
@@ -4233,8 +4240,8 @@ class GimpleGen:
     def _lower_fnptr_call_value(self, fp_type: str, fp_raw: str, node: CallExpr, ret_type: str='int64_t') -> tuple[str, str]:
         return ggc._lower_fnptr_call_value(self, fp_type, fp_raw, node, ret_type)
 
-    def _default_expr_to_pair(self, _dflt, cxx: bool = False) -> tuple:
-        return ggc._default_expr_to_pair(self, _dflt, cxx=cxx)
+    def _default_expr_to_pair(self, _dflt, cxx: bool = False, param_ctype=None) -> tuple:
+        return ggc._default_expr_to_pair(self, _dflt, cxx=cxx, param_ctype=param_ctype)
 
     def _pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread=False):
         return ggc._pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread)

@@ -11388,6 +11388,52 @@ char *mojo_regex_substr(const char *text, int64_t start, int64_t end) {
     return out;
 }
 
+/* re.Pattern.split(text) over this file's own engine (the `finditer` scan,
+ * accumulated into a list): each match's span is removed, every CAPTURING
+ * group that participated in it is emitted between the surrounding pieces
+ * (Python's rule -- `re.split(r'(,)', 'a,b')` is ['a', ',', 'b']), and a
+ * zero-width match advances one character so the scan terminates.
+ *
+ * The tail after the last match is appended, so a text ENDING in a separator
+ * keeps Python's trailing empty field ("a\nb\n" -> ['a', 'b', '']).
+ * `_source_lines` (fire_compiler.py) pops that one itself, which is why this
+ * has to be Python's shape and not "no trailing empty".
+ *
+ * This is the entry point that makes `fire_compiler.py`'s tokenizer work at
+ * all self-hosted: `_LINE_TERMINATORS = re.compile(r'\r\n|\r|\n')` is asked
+ * for `split(src)` there, and with no lowering for it the compiled path cast
+ * the compiled-pattern object to `char *` and called `mojo_str_split` with it
+ * as the SEPARATOR -- so every source tokenized as ZERO lines and every dump
+ * came out empty (see bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md). */
+MojoList *mojo_regex_split(const ReNode *prog, const ReRange *ranges,
+                           const ReClassInfo *classinfo, int root, int ngroups,
+                           char *src) {
+    MojoList *out = mojo_list_new();
+    if (!src) return out;
+    int64_t slen = (int64_t)strlen(src);
+    int64_t *gstart = (int64_t *)malloc(sizeof(int64_t) * (size_t)(ngroups + 2));
+    int64_t *gend = (int64_t *)malloc(sizeof(int64_t) * (size_t)(ngroups + 2));
+    int64_t last = 0;
+    int64_t pos = 0;
+    int64_t ms = 0, me = 0;
+    while (pos <= slen) {
+        if (!mojo_regex_search(prog, ranges, classinfo, root, ngroups, src, slen,
+                               pos, &ms, &me, gstart, gend))
+            break;
+        mojo_list_append_str(out, mojo_regex_substr(src, last, ms));
+        for (int i = 1; i <= ngroups; i++) {
+            if (gstart[i] >= 0)
+                mojo_list_append_str(out, mojo_regex_substr(src, gstart[i], gend[i]));
+        }
+        last = me;
+        pos = (me == ms) ? ms + 1 : me;
+    }
+    mojo_list_append_str(out, mojo_regex_substr(src, last, slen));
+    free(gstart);
+    free(gend);
+    return out;
+}
+
 /* re.sub(pattern, callback, src) backed by this file's own regex engine
  * instead of mojo_re_sub_fn's POSIX regcomp/regexec: POSIX ERE has neither
  * PCRE shorthand classes (\s, \S, \d, \w) nor non-greedy quantifiers (*?),
