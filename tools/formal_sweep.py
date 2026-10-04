@@ -795,6 +795,22 @@ _REFUSAL_FAMILIES = (
     # and the distinctions — which are the ones with different fixes — would
     # be lost. Order here is load-bearing; see _FRAME_ESCAPES above.
 ) + _FRAME_ESCAPES + (
+    # A container operation over a word that is ESTABLISHED not to be a
+    # container. Three members of one family with three different bases — a bare
+    # name holding a frame address, a bare name this function bound to an
+    # integer, and a struct FIELD declared a number or a type tag
+    # (`model.slot_container_operand_refusal`) — and one fix: the base is not a
+    # container. Split by base rather than lumped because the base decides which
+    # of them a reader has to look at, and because the field row is new (the
+    # two others were already being filed as "other refusal", which is the
+    # specific thing this table exists to prevent).
+    # The FIELD row comes first because its message also contains the clause the
+    # bare-name row matches, and order in this tuple is load-bearing for the
+    # same reason the frame escapes are: the first match wins, so a broader
+    # marker above a narrower one silently swallows it.
+    ("is a struct field declared to hold", "container operation on a scalar slot"),
+    ("asks for a container element, and", "container operation on a non-container"),
+    ("is a CONTAINER operation on a", "container operation on a frame address"),
     ("is a method call on a value", "method call on a value"),
     ("is a method on a string", "method call on a string"),
     ("is a real method of String", "string method needing a length"),

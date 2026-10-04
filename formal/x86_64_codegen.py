@@ -3544,6 +3544,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                or M.string_identity_method(method))
         if how == "list_append":
             self._emit_list_append(e)
+        elif how == "list_clear":
+            self._emit_list_clear(e)
         elif how == "file_write":
             self._emit_file_write(e)
         elif how == "file_close":
@@ -4111,6 +4113,35 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
             self._emit_setcc_bool(Reg.RAX, "sete")
 
+    def _emit_list_clear(self, e) -> None:
+        """`xs.clear()` — one store of zero at offset 0 of the blob.
+
+        The x86-64 twin of arm64's, over the same shared node
+        (`model.BUILTIN_VALUE_METHODS["clear"]`, whose KIND guard is asked by
+        `model.value_method_refusal` before this runs) and the same blob layout:
+        `[count][elem0]…`, so the COUNT is offset 0 and emptying the list is
+        that one store. It is `List.clear` in
+        `std/collections/binary_heap.mojo` and nothing else.
+
+        **No capacity check, and that is the difference from `append`** — an
+        append needs room the compile-time scan cannot find for a blob it did
+        not see built, so `_emit_list_append` refuses rather than growing one; a
+        clear needs no room at all.
+
+        The base is recomputed into R11 after the receiver is emitted, the
+        register discipline `_emit_block_store` and `_emit_file_write` both use:
+        evaluating a receiver can be anything, and both clobber R11.
+
+        Returns 0, this model's `None`, for `_emit_list_append`'s reason."""
+        if e.args or e.kwargs:
+            raise CodegenError(
+                f"list.clear() takes no arguments on this path "
+                f"(got {len(e.args or []) + len(e.kwargs or [])})")
+        self._emit_expr(e.func.obj)                     # RAX = the blob base
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
+        self.asm.emit(encode_mov_r64_imm64(Reg.RAX, 0))       # count = 0
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.RAX))
+
     def _emit_list_append(self, e) -> None:
         """`xs.append(v)` — store v at the blob's count and bump the count.
 
@@ -4566,6 +4597,37 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         raise CodegenError(M.non_container_element_refusal(
             op, M.spelled(obj), self.func_name or "<module>"))
 
+    def _refuse_slot_container_operand(self, op: str, obj) -> None:
+        """Raise if `obj` is a struct FIELD whose kind is an integer or a tag.
+
+        **The FIELD sibling of the two above, and the one they are both blind
+        to by design.** `_refuse_frame_container_operand` and
+        `_refuse_non_container_operand` are BARE-NAME-only, each saying why:
+        `h.x` is a 64-bit field and reading it as a blob is what a declared
+        `List` field is FOR. That is right about a field whose declared type
+        says nothing, and it is why `s.n[0]` on `s.n: Int` reached the blob walk
+        and SEGVED (exit 139) here while arm64 refused the same file with a
+        sentence about a node the source never wrote.
+        `model.slot_container_operand_refusal` has the measurement, the
+        three-row table and the corpus census that says the gate is the KIND
+        and that `None` stays out of it — which is why this asks
+        `_expr_str_kind` and not `own_shape_kind`: an unclassified field is a
+        word this image cannot read, and refusing it would refuse every
+        `h.xs[i]` on a field declared in another module.
+
+        Asked at the same four choke points as its two siblings, so a read, a
+        store, an augmented assignment, a slice, a membership test and a for-in
+        iteration all get this answer and the two architectures cannot come to
+        disagree about which bases qualify.
+        """
+        if not isinstance(obj, F.MemberExpr):
+            return
+        why = M.slot_container_operand_refusal(
+            op, self._expr_str_kind(obj), M.spelled(obj),
+            self.func_name or "<module>")
+        if why is not None:
+            raise CodegenError(why)
+
     def _emit_subscript_addr(self, e: F.SubscriptExpr,
                              for_store: bool = False) -> None:
         """RAX = the ADDRESS of `obj[index]` (not its value).
@@ -4586,6 +4648,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         so the two cannot drift again."""
         self._refuse_frame_container_operand("a subscript", e.obj)
         self._refuse_non_container_operand("a subscript", e.obj)
+        self._refuse_slot_container_operand("a subscript", e.obj)
         self._sub_width = 8
         if M.is_external_call_template(e):
             # The twin of arm64's check, and the same reasoning: `M.iter_nodes`
@@ -5039,6 +5102,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # the measurement, which is a wrong answer rather than a crash.
         self._refuse_frame_container_operand("a membership test", right)
         self._refuse_non_container_operand("a membership test", right)
+        self._refuse_slot_container_operand("a membership test", right)
         # The dict question, asked here for the same reason the `for`-in walk
         # asks it and for the same reason `model.walk_stride` exists: a dict is
         # a PAIR blob, so at the element stride this scan compares half the
@@ -5125,6 +5189,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # summing a four-field struct gave 99 on arm64 and 53 on x86-64.
             self._refuse_frame_container_operand("a for-in iteration", it)
             self._refuse_non_container_operand("a for-in iteration", it)
+            self._refuse_slot_container_operand("a for-in iteration", it)
             self._refuse_string_iteration("a for-in iteration", it)
             from mojo.middle.boundnames import _lbn_target_names
             tnames = _lbn_target_names(stmt.target) \
@@ -6960,6 +7025,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         argument for lowering the suffix case later."""
         self._refuse_frame_container_operand("a slice", obj)
         self._refuse_non_container_operand("a slice", obj)
+        self._refuse_slot_container_operand("a slice", obj)
         sreason = M.string_slice_refusal(
             self._expr_str_kind(obj), M.spelled(obj))
         if sreason is not None:
@@ -9199,6 +9265,26 @@ ctor_field_value=self._ctor_field_value_for(name),
             base = self._blob_base + site[1]
             self._emit_frame_nested((nested, site[1], ()))
             self._emit_frame_defaults(nested, base)
+            # …and the nested struct's OWN nested frames' ADDRESSES, which is
+            # the third step and the one whose absence was a NULL SLOT. The
+            # frame-valued sole field used to stop after the two above, on the
+            # reasoning that its own address is the result — which is true and
+            # says nothing about the frames INSIDE it. A `nested` whose own
+            # typed-nested field holds a frame had that field's slot left at the
+            # zero `_emit_frame_defaults` just wrote, so the first read through
+            # it was a load at address 0: measured, both architectures,
+            # `struct Deep: x, y` / `struct Inner: a, b, d: Deep` /
+            # `struct Outer: n: Inner` with `o.n.d.x = 5` built, ran and died of
+            # SIGSEGV (exit 139), while the depth-1 and depth-2 reads of the same
+            # three structs answered correctly.
+            # `bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
+            # frame.md` §2 has the disassembly.
+            #
+            # AFTER the defaults above and for the framed path's reason
+            # (`_emit_frame_positional`): the slot this stores into is one of
+            # the slots they wrote. `base` is ABSOLUTE here, as
+            # `_emit_nested_frame_addresses` documents.
+            self._emit_frame_nested_addresses(base, (nested, site[1], ()))
             # The ADDRESS last: every store above left something else in RAX.
             self._emit_blob_base(base, Reg.RAX)
             return

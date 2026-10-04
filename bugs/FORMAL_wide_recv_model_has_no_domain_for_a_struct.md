@@ -6,6 +6,11 @@ nearest owner is `formal16-8` (`bugs/FORMAL_wide_receiver_by_reference.md`), whi
 owns the frame-contract half of this example and does not claim the model's
 domain.
 
+**Status: the choice is MADE and the recording half is landed — `wide_recv` is
+in `test_formal.py`'s `EXPECTED_FAILURES` with this failure's own words, and a
+test pins both the refusal and the marker to each other. The model domain is
+still not there, and §"Why the domain is the next thing" says what it costs.**
+
 ## What I ran
 
 ```console
@@ -98,6 +103,80 @@ Which one is right is not this doc's call. What is this doc's is that the choice
 has not been made, and that until it is, the `formal` job is red for a reason no
 marker records.
 
+## 0. The choice, made (2026-10-04, `work/formal19-5`): recorded, and the marker
+## is pinned to the measurement
+
+**The second direction, and the reason the first is not this session's work.**
+The choice is not a coin flip between two similar amounts of effort: the two
+directions are one line long and one multi-session change, and the long one is
+the SAME change `subscript_var` is already carrying an entry for. Measured
+reasons, not preference:
+
+* **The two missing facts are `subscript_var`'s two missing facts, one type
+  over.** That marker's own words: "The first term needs a list domain in the
+  model and a memory image for the blob; the second is a `Frame.frameToEnv`-shaped
+  fact about the blob." A struct needs the first term's domain (a projection out
+  of an environment) and the second term's relation (the frame's slots ARE the
+  struct's fields), and nothing in this example lets one be done without the
+  other: `_expr_go`'s Python evaluator tracks `p` as a field map and emits
+  `(4 : UInt64)` for `p.get_x()`, but the emitted Lean term is only a statement
+  about the SOURCE once the frame stores at `[rsp + k]` are related to those
+  fields, and no emitted term does that.
+* **It is a change to `mojo` itself**, so it lands on every generated proof:
+  `mojo`, `eval_eq_mojo`, the run tests, every per-export contract and both
+  backends' generators. `mojo : UInt64 → UInt64` is quoted by name in eleven
+  places in `formal/arm64_proof_gen.py` alone. A value-model change of that
+  width is a project, and it is the one `bugs/FORMAL_proof_coverage_census_2026-10-03.md`
+  and `formal16-8`'s doc both already point at.
+
+**What landed, and why recording it is not silence.** `test_formal.py`'s
+`EXPECTED_FAILURES` holds `wide_recv` with the failure's own words — the refusal
+is `NotImplementedError: model: a struct field read has no value in the
+semantic model …`, and the marker's reason contains the generator's own phrase
+`struct field read`. The file's contract for an entry is "known unproven, for
+the stated reason — NOT 'passing'", so this converts an UNEXPECTED failure of a
+job the registry says must be green into a declared one; nothing is stubbed with
+`sorry`, and `test_formal.py`'s own stale check reports the entry the day the
+example starts passing.
+
+**And it cannot rot quietly**, which is the part that matters, because a marker
+whose reason has drifted from the failure is worse than no marker.
+`test_formal_call_proof_gen.py::TestStructFieldHasNoValueInTheModel` pins three
+things, all Lean-free:
+
+1. the example is still refused, and the refusal still contains
+   `struct field read` — so a model that grows a struct domain fails here first,
+   with the reason spelled out, instead of leaving a marker that forgives
+   nothing;
+2. `test_formal.py`'s marker names this refusal (so the two cannot become two
+   accounts of one gap);
+3. **the program still builds on BOTH backends with proof generation off** — the
+   measurement that decides which side of the boundary this example is on. It is
+   a model-domain gap, not a lowering one, and if that ever stops being true the
+   marker is wrong and this says so.
+
+`python3 test_formal_call_proof_gen.py`: 61 tests, 0 failures.
+
+## Why the domain is the next thing, stated as the size it is
+
+One field read needs, all of it before `wide_recv` can be proved:
+
+1. **a struct in the model's domain.** `mojo` becomes a function of an
+   environment; `Point()` starts from the class-level defaults the language
+   gives it (`0` for an unannotated `var x: Int`), and a field read projects
+   out of it. `subscript_var` wants the same with a list and a "memory image for
+   the blob".
+2. **the frame's slots related to those fields.** The source value is `4`; the
+   machine's is the word the emitter stored at `[rsp + k]`, and nothing emitted
+   says they are the same word. `Frame.frameToEnv`-shaped, per
+   `bugs/FORMAL_wide_receiver_by_reference.md`.
+3. **the method call's value.** `p.get_x()` is a call whose receiver is a frame
+   address; the model needs the frame's contents as an environment value, which
+   is (1) and (2) again from the other side.
+
+Nothing here is a dataflow question, and none of it is reachable by making the
+generator more careful: the term it would have to emit does not exist yet.
+
 ## Reproducing
 
 ```console
@@ -111,4 +190,5 @@ try:
 except Exception as e:
     print(type(e).__name__, e)"
 NotImplementedError model: a struct field read has no value in the semantic model
+$ python3 test_formal_call_proof_gen.py TestStructFieldHasNoValueInTheModel
 ```

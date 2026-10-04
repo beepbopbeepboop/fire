@@ -1581,6 +1581,109 @@ class TestLoopContractBlocks(unittest.TestCase):
                              f"{sorted(cited - defined)}")
 
 
+class TestStructFieldHasNoValueInTheModel(unittest.TestCase):
+    """The refusal `test_formal.py`'s `wide_recv` marker states, pinned.
+
+    `formal/examples/wide_recv.mojo` is the two-field receiver example, and the
+    arm64 proof generator refuses it at GENERATION time:
+
+        NotImplementedError: model: a struct field read has no value in the
+        semantic model (a `UInt64 → UInt64` function over the source's
+        arithmetic); refusing rather than modelling it as 0, which would be a
+        false statement about the source
+
+    The model is a function of the ENTRY ARGUMENT and nothing else, so a
+    struct's field is not a term in it: `p.x` is 4 and `p.y` is 0 whatever `n`
+    is.  Answering 0 would be a false statement about the source, which is why
+    the arm refuses rather than defaulting — and it is the same gap as
+    `subscript_var`'s ("the semantic model `mojo : UInt64 -> UInt64` has no
+    domain for a list, so `a[i]` has no value in it"), one type further.
+
+    So `wide_recv` is in `test_formal.py`'s `EXPECTED_FAILURES` with that reason,
+    and this class is what keeps the marker honest in both directions:
+
+      * the refusal is still the one the marker names — if the model grows a
+        struct domain the marker goes STALE, `test_formal.py` reports it, and
+        this assertion fails first with the reason spelled out;
+      * the marker names the same reason as this test, so the two cannot drift
+        into two different accounts of one gap;
+      * **the machine half is still fine** — the program builds on BOTH
+        backends, which is what makes the gap a model gap and not a lowering
+        one.  Checked with `prove=False`, so this stays Lean-free.
+    """
+
+    SOURCE = ("struct Point:\n"
+              "    var x: Int\n"
+              "    var y: Int\n"
+              "    fn set_x(self, v: Int): self.x = v\n"
+              "    fn get_x(self) -> Int: return self.x\n"
+              "    fn get_y(self) -> Int: return self.y\n"
+              "\n"
+              "def main(n) -> Int:\n"
+              "    var p = Point()\n"
+              "    p.set_x(3)\n"
+              "    p.set_x(4)\n"
+              "    return p.get_x() + p.get_y()\n")
+
+    #: The phrase the refusal must contain, and the phrase the marker states.
+    NEEDLE = "struct field read"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="a2-structdom-")
+        cls.proof, cls.error = _generate(cls.tmp, cls.SOURCE, "structdom")
+        cls.built = {}
+        import formal.build as fb
+        for arch in ("arm64", "x86_64"):
+            src = os.path.join(cls.tmp, "machine-%s.mojo" % arch)
+            with open(src, "w") as f:
+                f.write(cls.SOURCE)
+            try:
+                fb.compile_formal(src, arch=arch, output=os.path.join(
+                    cls.tmp, "machine-%s.aout" % arch), prove=False, check=False)
+                cls.built[arch] = None
+            except Exception as e:            # noqa: BLE001
+                cls.built[arch] = f"{type(e).__name__}: {e}"
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_the_refusal_is_the_model_domain_one(self):
+        self.assertIsNone(self.proof)
+        self.assertIsNotNone(self.error, "the example generated a proof, so the "
+                           "model has a domain for a struct field read and the "
+                           "marker in test_formal.py is stale")
+        self.assertIn(self.NEEDLE, self.error,
+                      "the refusal is not the one the marker states, so the "
+                      "marker describes a different gap than the one this "
+                      "example hits: %s" % self.error)
+
+    def test_the_marker_states_this_refusal_and_names_the_example(self):
+        import test_formal as T
+        self.assertIn("wide_recv", T.EXPECTED_FAILURES,
+                      "an UNMARKED failure of the `formal` suite job: the next "
+                      "session reads the marker list, sees this file is not in "
+                      "it, and re-derives the whole thing")
+        self.assertIn(self.NEEDLE, T.EXPECTED_FAILURES["wide_recv"],
+                      "the marker's reason and the measured refusal name "
+                      "different gaps: %r" % T.EXPECTED_FAILURES["wide_recv"])
+
+    def test_the_machine_half_builds_on_both_backends(self):
+        """The gap is a model domain, not a lowering — measured, not argued.
+
+        `bugs/FORMAL_wide_receiver_by_reference.md` §"The proposition" quotes
+        the mutator's frame contract, and `test_formal_run.py` runs the
+        program on both architectures.  What is checked here is the narrower
+        half that decides which side of the boundary this example is on: both
+        backends compile it, with proof generation switched off.
+        """
+        for arch, err in sorted(self.built.items()):
+            self.assertIsNone(err, "%s does not build this program, so the "
+                                "refusal above is not purely a model-domain "
+                                "gap: %s" % (arch, err))
+
+
 class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
     """An `exit` the COMPILER emits is not an `exit` the PROGRAM makes.
 

@@ -402,6 +402,7 @@ def step_lemmas():
     # `cmp`, and 0xff decoding as -1 is exactly the case.
     for name, enc_fn, opcode, digit, args in (
             ("add", X.encode_add_r64_imm32, 0x81, 0, ((R.RAX, 1000), (R.R9, -7))),
+            ("sub", X.encode_sub_r64_imm32, 0x81, 5, ((R.R10, 0x780000),)),
             ("and", X.encode_and_r64_imm32, 0x81, 4, ((R.RBX, -1), (R.R11, 255))),
             ("cmp", X.encode_cmp_r64_imm8, 0x83, 7, ((R.RAX, 0), (R.R11, -3)))):
         for reg, imm in args:
@@ -566,6 +567,15 @@ def _memory_samples():
         # and this row is here to pin the disp32 one.
         load("x86_step_lea_rm64_disp32", "lea r11, [rbx+4096]",
              X.encode_lea_r64_rm64(R.R11, R.RBX, 4096)),
+        # The RIP-relative mode, at the encoding `_emit_global_init` and
+        # `_emit_stack_floor_guard` both emit: `_lea_abs` is how every
+        # address-valued module global reaches a register.  `rm = 5` is what
+        # selects the mode, and `_rex_mem_hyps`' `rm ≠ 4` exclusion holds at it,
+        # so this row reuses the shared helper unchanged -- what it does NOT do
+        # is assert `rm ≠ 5`, which would be `5 ≠ 5` and would say the lemma is
+        # vacuous at the one encoding it exists for.
+        load("x86_step_lea_r64_rip", "lea r11, [rip+0x3ffc24]",
+             X.encode_lea_r64_rip(R.R11, 0x3ffc24)),
         # The disp32 LOAD, which is what a stack argument past the twentieth
         # encodes to: `_load_home_from_stack` reads `mov r11, [rbp + 16 + 8k]`
         # and `16 + 8k` crosses 127 at k = 14, so argument index 20 is the first
@@ -635,6 +645,23 @@ SUCCESSOR_FORMS = (
     ("cqo", X.encode_cqo(), "fun t => (t.rip, t.rdx)"),
     ("movq_xmm_rm64", X.encode_movq_xmm_rm64(3, X.Reg.RDI),
      "fun t => (t.rip, t.xmm3)"),
+    # The stack-floor guard's two, and the reason they are HERE rather than
+    # only in `_FORMS`.  Both are forms every image emits and neither had a
+    # successor row, so `_plan` refused the whole corpus by name before any of
+    # this ran; a row in `_FORMS` whose successor is never compared against the
+    # model is a claim, and these two are the measurement.
+    #
+    # `R10` and `R11` are the guard's own registers, at the guard's own operands
+    # (`STACK_FLOOR_BUDGET_BYTES`, and the `_lea_abs` displacement), so a row at
+    # some other pair would be a row about an encoding nothing emits.  Both start
+    # at 0 in `X86State.init 10 _`, which is what makes them discriminating: a
+    # successor that added the immediate instead of subtracting it, or that
+    # addressed the mode from a base register, differs from the model here and
+    # agrees nowhere else.
+    ("alu_ri32:sub_reg", X.encode_sub_r64_imm32(X.Reg.R10, 0x780000),
+     "fun t => (t.rip, t.r10)"),
+    ("lea_r64_rip", X.encode_lea_r64_rip(X.Reg.R11, 0x3ffc24),
+     "fun t => (t.rip, t.r11)"),
 )
 
 
@@ -659,7 +686,8 @@ def successor_lean_source(forms):
                    % (m, items, m))
         out.append("def sst_%d : X86State := X86State.init 10 %d" % (i, m))
     for i, (form, enc, probe) in enumerate(forms):
-        succ = ET._resolve(form, enc, BASE + 16 * i, "s", 0, length=len(enc))[1]
+        succ = ET._resolve(form, enc, BASE + 16 * i, "s", 0, length=len(enc),
+                           code_name="code")[1]
         claim = ("(let s := sst_%d; let code := scode_%d; "
                  "(x86_step s code).map (%s) = (some %s).map (%s))"
                  % (i, i, probe, succ, probe))
