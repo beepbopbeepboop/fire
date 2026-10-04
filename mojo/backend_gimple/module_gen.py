@@ -979,6 +979,121 @@ def _render_struct_typedef_body(struct_name, fields):
 
 
 
+# ── The generic-repr cluster, and the gate that withdraws it ────────────────
+#
+# Six `static` helpers — `_mojo_dispatch_repr`, `_mojo_generic_elem_repr`,
+# `_mojo_repr_list`, `_mojo_repr_dict`, `_mojo_repr_pair`, `_mojo_repr_set` —
+# that every module emitted whether or not the module could reach one of them.
+# Three facts make that removable per module:
+#
+#   * they are all `static`, so nothing outside the translation unit can name
+#     them;
+#   * nothing registers one BY ADDRESS — there is no repr-function-pointer
+#     table — so the only references are mutual, inside the cluster, plus the
+#     per-struct `_mojo_repr_<Struct>` / `_mojo_elem_repr_<Struct>` shims and
+#     `emit_infra.py`'s five `_mojo_repr_set` call sites;
+#   * hand-deleting all of them from a small client compiled and linked with no
+#     undefined reference, at 5208 bytes against 8760.
+#
+# So a module that cannot produce a container value and holds no reflected
+# struct should not carry a container repr. `test_module_cache.py`'s two
+# "client object is tiny" budgets were bumped three times for precisely this
+# family (`_mojo_repr_set`, then `_mojo_generic_elem_repr` + `_mojo_repr_pair`),
+# which is what stopped the guard guarding.
+#
+# The gate is REACHABILITY FROM THIS MODULE'S OWN GENERATED CODE, counted on
+# the text that was already emitted — not a source-text heuristic, which cannot
+# see that a struct stored in a container reaches `_mojo_generic_elem_repr`
+# through its field's own `__repr__`.
+#
+# The names, the exact forward-declaration strings and the definition block's
+# opening line are all spelled ONCE here and every emission site reads them from
+# this table, so the gate cannot disagree with what was emitted. Deleting a
+# declaration but keeping the definition (or the reverse) is a link error, and
+# `undefined reference to _mojo_repr_list` somewhere in the self-hosted closure
+# is the loud failure mode to expect while landing this.
+REPR_CLUSTER_NAMES = (
+    '_mojo_dispatch_repr',
+    '_mojo_generic_elem_repr',
+    '_mojo_repr_list',
+    '_mojo_repr_dict',
+    '_mojo_repr_pair',
+    '_mojo_repr_set',
+)
+# The four declarations EVERY module gets (`gen_module_impl`, ungated, because
+# a transitively-imported module is compiled with `emit_struct_defs=False` and
+# still calls these) plus the fifth only the `emit_struct_defs` module gets
+# (`_emit_reflection_fwd_decls`, which runs before the imported modules' code is
+# spliced in). Exact equality with a `parts` entry is how the gate finds them:
+# a part that is one of these strings IS a cluster declaration and nothing else
+# can be.
+REPR_CLUSTER_DECLS = (
+    'static char * _mojo_dispatch_repr (void *);',
+    'static char * _mojo_repr_list (MojoList *);',
+    'static char * _mojo_repr_dict (MojoDict *);',
+    'static char * _mojo_generic_elem_repr (int64_t);',
+    'static char * _mojo_repr_pair (MojoList *);',
+)
+# The single `parts` entry that carries all six definitions, recognised by its
+# first line. `_emit_reflection_dispatch` builds the block as ONE append, so one
+# prefix test withdraws it as a unit rather than six text edits that could leave
+# half a function behind.
+REPR_CLUSTER_DEFS_HEAD = 'static char * _mojo_dispatch_repr (void *obj) {'
+
+
+def _repr_cluster_reachable(parts: list) -> bool:
+    """Does THIS module's own emitted text name any cluster helper?
+
+    Read over every part with the cluster's OWN text excluded — the six
+    definitions, and the forward declarations — because the cluster references
+    itself and would otherwise always look reachable. Everything else counts,
+    including an inlined imported module's whole output, which is how a child
+    module that needs the cluster keeps the parent's definitions alive.
+
+    Plain `in` / `.find()` scanning, never `re.findall`: this file is in the
+    self-hosted compile closure, and `for w in pat.findall(s)` emits
+    `mojo_unsupported_iter` on this codegen (see `_dedup_variadic_externs`'s
+    note). A substring match also errs towards KEEPING the cluster, which is the
+    safe direction: a name inside a comment or a string literal keeps 3.5 KB of
+    static helpers this module cannot call, and a missed reference is a link
+    error.
+    """
+    text = []
+    for part in parts:
+        if part in REPR_CLUSTER_DECLS:
+            continue
+        if part.startswith(REPR_CLUSTER_DEFS_HEAD):
+            continue
+        text.append(part)
+    outside = '\n'.join(text)
+    for name in REPR_CLUSTER_NAMES:
+        if name in outside:
+            return True
+    return False
+
+
+def _drop_unreachable_repr_cluster(parts: list) -> list:
+    """`parts` without the generic-repr cluster when nothing reaches it.
+
+    The one decision, applied to BOTH emissions — the definitions
+    (`_emit_reflection_dispatch`) and the forward declarations
+    (`_emit_reflection_fwd_decls`, and the ungated four in `gen_module_impl`) —
+    because they are one unit: keeping a declaration whose definition is gone
+    is a link error and dropping a definition whose declaration survives is
+    worse. Neither is reachable without the other.
+    """
+    if _repr_cluster_reachable(parts):
+        return parts
+    out = []
+    for part in parts:
+        if part in REPR_CLUSTER_DECLS:
+            continue
+        if part.startswith(REPR_CLUSTER_DEFS_HEAD):
+            continue
+        out.append(part)
+    return out
+
+
 def _reflect_struct_names(self) -> list:
     """The structs `_emit_reflection_dispatch` emits helpers for, in content
     order, as an explicitly `_as_str`-typed list.
@@ -1108,11 +1223,10 @@ def _emit_reflection_fwd_decls(self, parts):
     """
     parts.append("static int64_t _mojo_dispatch_getattr (void *, char *);")
     parts.append("static void _mojo_dispatch_setattr (void *, char *, int64_t);")
-    parts.append("static char * _mojo_dispatch_repr (void *);")
-    parts.append("static char * _mojo_repr_list (MojoList *);")
-    parts.append("static char * _mojo_repr_dict (MojoDict *);")
-    parts.append("static char * _mojo_generic_elem_repr (int64_t);")
-    parts.append("static char * _mojo_repr_pair (MojoList *);")
+    # The repr cluster's five declarations, from the ONE table the gate reads
+    # (`REPR_CLUSTER_DECLS`) — spelling them again here is how the gate and the
+    # emission would come to disagree.
+    parts.extend(REPR_CLUSTER_DECLS)
     _emitted = _reflect_emitted_names(self)
     repr_fwd_decls = [f"static char * _mojo_repr_{sn} ({sn} *obj);"
                       for sn in _emitted]
@@ -1502,7 +1616,7 @@ def _emit_reflection_dispatch(self, parts):
             f'    if (_tag == {_struct_type_id(sn)}) return _mojo_repr_{sn}(({sn} *)(intptr_t)val);'
             for sn in reflect_emitted)
         parts.append(
-            ("static char * _mojo_dispatch_repr (void *obj) {\n"
+            (REPR_CLUSTER_DEFS_HEAD + "\n"
              "  if (!obj) return \"None\";\n"
              "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n")
             + f"{tag_cases_repr}\n"
@@ -13119,10 +13233,12 @@ def gen_module_impl(self, stmts):
     if self._asdict_dispatch_needed:  # see that flag's own declaration
         parts.append("static MojoDict * _mojo_dispatch_asdict (void *);")
     parts.append("static int _mojo_dispatch_is_dataclass (void *);")
-    parts.append("static char * _mojo_dispatch_repr (void *);")
-    parts.append("static char * _mojo_repr_list (MojoList *);")
-    parts.append("static char * _mojo_repr_dict (MojoDict *);")
-    parts.append("static char * _mojo_generic_elem_repr (int64_t);")
+    # The FOUR the ungated path needs, which is `REPR_CLUSTER_DECLS` without
+    # `_mojo_repr_pair` — the one member no generated call site names directly,
+    # so only the `emit_struct_defs` module's `_emit_reflection_fwd_decls` pass
+    # declares it. Sliced off the shared table rather than respelled, so the
+    # gate's table and this emission cannot drift.
+    parts.extend(REPR_CLUSTER_DECLS[:4])
     if 'type_name_table' in self._emitted_singletons:
         parts.append("static char * _mojo_type_name (int64_t);")
     parts.append('')
@@ -13774,7 +13890,13 @@ def gen_module_impl(self, stmts):
         _mg_introspected.add('definitions')
         parts.append(_gmi_device_glue.EMPTY_SIDECAR)
 
-    return self._dedup_variadic_externs(parts)
+    # LAST, and after every body: the generic-repr cluster is withdrawn when
+    # nothing this module emitted reaches it. It has to run here rather than at
+    # any of its three emission sites because the answer is not known until the
+    # bodies exist — a `print(x)` of a list literal in an IMPORTED module is a
+    # reference, and that module's text is spliced into this `parts` long after
+    # this module's own code was written.
+    return self._dedup_variadic_externs(_drop_unreachable_repr_cluster(parts))
 
 def __getattr__(name):
     import gimple_codegen as _gc
