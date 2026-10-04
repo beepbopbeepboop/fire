@@ -994,7 +994,10 @@ def gen():
     # of the call's positional arguments, so every parameter from `i` to the
     # last POSITIONAL one is a hole; it cannot supply a keyword-only
     # parameter, and the message says so rather than over-refusing one.
-    # See bugs/CODEGEN_star_unpack_call_argument_poisons_only_one_parameter.md.
+    # Fixed in the commit "A *-unpack call argument is a hole for every
+    # parameter it could fill"; the reasoning is in
+    # `mojo/middle/coro.py`'s `_scan_callsite_param_kinds._visit_call`,
+    # beside the rule it implements.
     test_generator_refused("generator_star_unpack_call_argument_is_a_hole_for_every_parameter_it_could_fill", """\
 def gen(a, b):
     yield b

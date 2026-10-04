@@ -17,15 +17,16 @@ and this one carries the measured state.
 python3 tools/memslot.py --gb 8 --label selfhost -- python3 tools/suite.py -j1 selfhost
 ```
 
-which is `python3 test_selfhost.py` under the runner. 914 s, peak 4.4 GB.
+which is `python3 test_selfhost.py` under the runner. 914 s and 643 s on two
+runs of this branch, peak 4.4 GB.
 
 ## What I see
 
 ```
   self-host closure: 62 modules, every generator/async lowered in place or its module refused whole: True
   dylib module path refuses an unlinkable generated_cpp: True
-  self-host closure: 1552 functions, 1 of them declared in fire_runtime.h under a pinned C name; every such declaration matches its definition: True
-Built: /Users/mrs/net/chatgpt/claude/work-422/.tmp/tmpdnco4xmp/mojo_selfhost
+  self-host closure: 1555 functions, 1 of them declared in fire_runtime.h under a pinned C name; every such declaration matches its definition: True
+Built: /Users/mrs/net/chatgpt/claude/work-422/.tmp/tmpjsttg9_q/mojo_selfhost
   self-hosted compiler on a two-line program: exit=-11 ci_bytes=0 stub_hits=0
   ✗ the self-hosted binary did not exit 0
 Results: 1 passed, 1 failed
@@ -94,10 +95,12 @@ Results: 1 passed, 1 failed
 
 **Identical stage, identical symptom, identical numbers** (`exit=-11`,
 `ci_bytes=0`, `stub_hits=0`), and the only difference is the function count:
-1548 on the base, 1552 here, which is exactly the four functions the
-star-spread fix added to the closure (`mojo/middle/types.py`'s
-`is_star_spread`, and `mojo/backend_gimple/emit_exprs.py`'s `_is_star_spread`,
-`_emit_star_spread` and `_literal_slot_kinds`).
+1548 on the base against 1555 here, which is exactly the seven functions this
+branch added to the closure: the four from the star-spread fix
+(`mojo/middle/types.py`'s `is_star_spread`, and
+`mojo/backend_gimple/emit_exprs.py`'s `_is_star_spread`, `_emit_star_spread` and
+`_literal_slot_kinds`), `mojo/middle/lambdareduce.py`'s `lambda_bound_to` and
+`params_supplied_at_calls`, and `emit_calls.py`'s `_pad_lambda_defaults`.
 
 So this is a standing red, it is not mine, and a session that reads a red
 `selfhost` in the gate after merging this branch should read it as inherited.
