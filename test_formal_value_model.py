@@ -1512,6 +1512,76 @@ REFUSALS = [
      "cannot tell whether IdentExpr"),
 ]
 
+# ── the builtin allow-list, one differential case per name ──
+#
+# `tools/formal_proof_breadth.py`'s `BUILTIN_NAMES` is "the names a synthesised
+# `main` is allowed to have in reach", and for a long time nothing checked that
+# claim against the backend — the allow-list was an assertion, and three names in
+# it were not true:
+#
+#   `abs`, `pow`, `round`   the C library DEFINES all three, so a call to one
+#                           bound libSystem's function and answered a different
+#                           value.  `pow(10, 2)` answered 0, `round(7)` answered
+#                           7 on arm64 and 0 on x86-64, `abs(2**40+5)` answered
+#                           5 on both — where CPython answers 100, 7 and
+#                           1099511627781.  Now refused by name, identically on
+#                           both architectures (`model.FOREIGN_ABI_BUILTINS`).
+#   `str`                   an IDENTITY type constructor applied to every
+#                           operand, so `str(n)` handed an INTEGER to everything
+#                           downstream: `len(str(n))` built, ran and died of
+#                           SIGSEGV (exit -11) on both, inside `strlen` walking
+#                           the bytes at address 10.  Now refused when the
+#                           operand is not text (`model.string_conversion_refusal`).
+#
+# **These are ORACLE cases and REFUSAL cases rather than pinned expectations**,
+# for the reason this file exists: the same text runs under CPython, so a
+# program that used to be wrong here and right there cannot be pinned to a
+# wrong value.  The refusal half is pinned by name — a refusal that stops naming
+# the builtin, or that starts applying to `str` of a STRING, is a regression in
+# either direction, and the direction that matters is the second one, so
+# `a_string_conversion_of_text_still_compiles` is here as an ORACLE row and not
+# as an afterthought.
+BUILTIN_REFUSALS = [
+    ("a_pow_call_is_refused_rather_than_bound_to_libm",
+     "def main(n):\n"
+     "    print(\"v:\", pow(n, 2))\n"
+     "    return 0\n",
+     "double pow(double, double)"),
+    ("a_round_call_is_refused_rather_than_bound_to_libm",
+     "def main(n):\n"
+     "    print(\"v:\", round(n))\n"
+     "    return 0\n",
+     "double round(double)"),
+    # `abs` is the one whose absence was silent on BOTH architectures and for
+    # every input, because libSystem's is `int abs(int)`: the image was right
+    # for |n| < 2**31 and wrong above it, which is the shape a corpus of small
+    # integers never sees.  The needle is the 32-BIT argument, because that is
+    # the fact rather than the name.
+    ("an_abs_call_is_refused_rather_than_bound_to_a_32_bit_c_abs",
+     "def main(n):\n"
+     "    print(\"v:\", abs(n))\n"
+     "    return 0\n",
+     "int abs(int)"),
+    ("a_string_conversion_of_an_integer_is_refused",
+     "def main(n):\n"
+     "    print(\"v:\", len(str(n)))\n"
+     "    return 0\n",
+     "str(n) is refused on this path"),
+]
+
+# The direction that must NOT move: `str` of something that IS text is the
+# identity and compiles, and `len` of the result is `strlen` over a literal.
+# CPython agrees, so this is an oracle case and the two engines must print the
+# same bytes.
+BUILTIN_CASES = [
+    ("a_string_conversion_of_text_still_compiles",
+     "def main(n):\n"
+     "    var s = \"abcd\"\n"
+     "    print(\"v:\", len(str(s)))\n"
+     "    return 0\n",
+     "v: 4\n"),
+]
+
 
 
 def run_cpython(source, tmpdir, verbose):
@@ -1624,8 +1694,10 @@ def main():
                   + [(c, False) for c in TUPLE_STORE_CASES]
                   + [(c, False) for c in HOLDER_ASSIGN_CASES]
                   + [(c, False) for c in MODULE_GLOBAL_CASES]
+                  + [(c, False) for c in BUILTIN_CASES]
                   + [(c, "fixed") for c in FIXED_CASES]
-                  + [(c, True) for c in REFUSALS])
+                  + [(c, True) for c in REFUSALS]
+                  + [(c, True) for c in BUILTIN_REFUSALS])
     selected = [c for c in everything if not args.cases or c[0][0] in args.cases]
     known = {c[0][0] for c in everything}
     if args.cases and len(selected) != len(args.cases):

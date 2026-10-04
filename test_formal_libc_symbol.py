@@ -3,7 +3,7 @@
 
     python3 test_formal_libc_symbol.py [-v] [group ...]
 
-Groups: `table`, `binding`, `dirent`, `stat`. With no argument, all of them.
+Groups: `table`, `retkind`, `builtin_abi`, `binding`, `dirent`, `stat`, `retvalue`. With no argument, all of them.
 
 WHAT THIS IS ABOUT. `readdir` is one function in a C header and TWO in macOS's
 C library: `_readdir` fills a `struct dirent` with a 32-bit `ino_t` (4-byte
@@ -35,11 +35,16 @@ Emitting the `$INODE64` spelling on arm64 would trade a silent wrong answer for
 a link failure, so `target_libc_symbol` is asked with the target and answers per
 target.
 
-THE THREE GROUPS, and why there are three. `table` asks the DECISION as a
+THE GROUPS, and why there are several. `table` asks the DECISION as a
 function, which is cheap and pins the two halves that could drift (the table and
-the suffix; the Mach-O-only, x86_64-only gate). `binding` reads the built
-image's own dyld bind stream, so what is asserted is the symbol the LOADER will
-look up rather than what a function returned — the two were the same decision
+the suffix; the Mach-O-only, x86_64-only gate). `builtin_abi` is the same kind of
+question with the opposite answer — the three builtins whose C NAMESAKE EXISTS,
+so the bind audit's provider check waves them through and an image calling one
+links into a function of a different signature (`double pow(double, double)`,
+`int abs(int)`); `formal/model.py::FOREIGN_ABI_BUILTINS` refuses them at the call
+and this group is what says that refusal is load-bearing rather than redundant.
+`binding` reads the built image's own dyld bind stream, so what is asserted
+is the symbol the LOADER will look up rather than what a function returned — the two were the same decision
 until they were not. `dirent` and `stat` then BUILD and EXECUTE, and compare
 against CPython in this process: 32 bytes of each of the first `readdir`
 entries against `ctypes`' own `readdir`, and six `struct stat` fields read at the
@@ -668,6 +673,76 @@ def hostmod_bare_callees():
     return out
 
 
+def group_builtin_abi(verbose):
+    """`FOREIGN_ABI_BUILTINS`: three builtins the C library DEFINES, so the
+    bind audit cannot be what refuses them.
+
+    This file is about "the symbol an unbound C callee binds to on THIS target",
+    and the three names in `formal/model.py`'s `FOREIGN_ABI_BUILTINS` are the
+    case where that question has a SURPRISING answer: the provider check asks the
+    C library (`dlsym`) and the C library has all three, so an image calling
+    `pow`, `round` or `abs` links, loads and runs — into a function of a
+    different signature.  Measured, both architectures, 2026-10-04, with CPython
+    as the arbiter: `pow(10, 2)` answered 0 where CPython answers 100,
+    `round(7)` answered 7 on arm64 and 0 here, and `abs(2**40+5)` answered 5 on
+    both where CPython answers 1099511627781 — libSystem's `abs` is
+    `int abs(int)`, so it sees the low half of the 64-bit word this path passes.
+
+    So the refusal has to happen at the CALL (`model.builtin_binding_refusal`,
+    asked by both emitters beside the intercepts that DO lower a name), and this
+    group is what makes that refusal load-bearing rather than redundant: it asks
+    the host's own C library whether these symbols exist, which is the fact that
+    says the bind audit would wave them through.  The differential half — the
+    wrong answers, and the refusal that replaced them — is
+    `test_formal_value_model.py`'s `BUILTIN_REFUSALS`, which builds and runs;
+    this group is the host fact and costs no build.
+    """
+    import formal.model as M
+    fails = []
+
+    def check(cond, msg):
+        if not cond:
+            fails.append(msg)
+        elif verbose:
+            print(f"      ok: {msg}")
+
+    names = sorted(M.FOREIGN_ABI_BUILTINS)
+    check(names == ["abs", "pow", "round"],
+          f"the three names whose C namesake is a different function: {names}")
+    # NOTHING lowers them, so the refusal at the call site is not shadowed by a
+    # lowering that arrived later — the intercepts the emitters consult come
+    # first, so a name in any of those tables would never reach
+    # `builtin_binding_refusal` and this table would be dead code.
+    for name in names:
+        check(name not in M.EMITTER_BUILTINS
+              and M.builtin_function(name) is None
+              and name not in M.INT_TYPE_CTORS
+              and name not in M.IDENTITY_TYPE_CTORS,
+              f"{name} is lowered by nothing, so the refusal is reached")
+    # …and the C library HAS them, which is the whole reason the bind audit does
+    # not catch them.  Darwin-only for the same reason `group_retkind`'s ctypes
+    # check is: the provider check the build performs is a `dlsym` against this
+    # host's library, so the fact worth asserting is the fact about THIS one.
+    if sys.platform == "darwin":
+        import ctypes
+        lib = ctypes.CDLL(None)
+        for name in names:
+            try:
+                getattr(lib, name)
+                check(True, f"libSystem defines `{name}`, so a call to it "
+                            f"would bind rather than dangle")
+            except AttributeError:
+                check(False,
+                      f"libSystem does NOT define `{name}` here, so the bind "
+                      f"audit would have refused it and the emitter refusal is "
+                      f"redundant on this host — and the measured wrong answers "
+                      f"this table records could not have happened")
+    elif verbose:
+        print("NOTE: not Darwin, so the provider check's own question cannot "
+              "be asked of this host's C library here")
+    return fails
+
+
 def group_retkind(verbose):
     """`bare_c_return_kind`: the prototype, the export exception, totality."""
     from formal.model import (BARE_C_RETURN_KINDS, EXTERN_RETURN_VOID,
@@ -832,6 +907,8 @@ GROUPS = {
     # wrong, and a check that is not run is not a check.
     "table": (lambda tmpdir, arch, verbose: group_table(verbose), False),
     "retkind": (lambda tmpdir, arch, verbose: group_retkind(verbose), False),
+    "builtin_abi": (lambda tmpdir, arch, verbose: group_builtin_abi(verbose),
+                    False),
     "binding": (group_binding, True),
     "dirent": (group_dirent, True),
     "stat": (group_stat, True),
