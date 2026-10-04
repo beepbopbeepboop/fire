@@ -94,14 +94,19 @@ the result (a fresh string, since the source's is shared)").
    extension is about to continue.
 4. Then `print(tup_str('ab'))` is `(0, 'a', 'b')` and
    `print(list_str('ab'))` is `[0, 'a', 'b']`, asserted against CPython on
-   both pipeline modes. Also re-run the `PERF_printed_container_repr_leaks_its_
-   cat_buffers` memory case: a growable kinds string is a new allocation per
-   extended list, and that bug's own doc is the standing argument that this
-   runtime leaks 16 B per printed container today.
+   both pipeline modes. Also re-measure the printed-container memory case: a
+   growable kinds string is a new allocation per extended list, and
+   `test_gimple_runner.py`'s `gimple_printed_container_repr_does_not_grow`
+   (seven shapes, 60 000 iterations, a 40 MB ceiling) is the instrument for
+   it. That case's own argument is the reason to re-measure rather than
+   assume: a ceiling loose enough that a real slope fits under it measures
+   nothing, and the repr-walker's release protocol is what that case was
+   written to protect — commit `b1b26609`, "Every repr walker releases its
+   cat buffers: 87.2 MB -> 12.8 MB on a printing loop".
 
 ## Related
 
 - `bugs/CODEGEN_star_spread_in_a_list_or_tuple_display_segfaults.md` — the fix
   this is the residue of, and whose Status records it.
-- `bugs/PERF_printed_container_repr_leaks_its_cat_buffers.md` — the same
-  repr-walker's ownership story.
+- `bugs/CODEGEN_print_of_a_container_never_frees_the_repr_it_asked_for.md` —
+  the same repr-walker's remaining ownership gap, on the `print` side.
