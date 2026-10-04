@@ -135,7 +135,9 @@ so the count is sites and not mentions):
 | `work` | 0 | 0 | 0 |
 
 The first two columns make §7's position true and are now pinned as hard
-equalities. The third is the finding: `native_decide` and `bv_decide` close a goal
+equalities, and the third vacuity shape — a declaration that asserts nothing — is
+pinned at 0 for `lib/` **and for the emitted `admitted_*` declarations**, read
+through `formal/lean.py::vacuous_declarations` over the comment-stripped text. The third is the finding: `native_decide` and `bv_decide` close a goal
 by compiling and running a decision procedure, so their proof terms reach Lean's
 `Lean.ofReduceBool` axiom and `#print axioms` reports it. `OPUS.md` §1 already
 says this about a generated theorem ("plus the project's usual

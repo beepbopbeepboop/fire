@@ -1110,8 +1110,41 @@ def test_the_library_trust_counts_are_pinned(tmpdir=None):
               f"lib/{mod}.lean uses a construct the trust census does not "
               f"count (`exact_decide`, `implemented_by` or `unsafe`); extend "
               f"`AXIOM_TACTICS`/the regexes in formal/admitted.py first")
+    # VACUITY, which is the third way a Lean declaration can assert nothing and
+    # the only one of the three that a text scan decides.  `formal/lean.py::
+    # vacuous_declarations` finds the two shapes it knows: a `def` whose declared
+    # return type is `Prop` and whose body is `True`, and a `∀ …, … → True` -- a
+    # statement no inhabitant can contradict.  Both are read over the
+    # comment-stripped text, for the same reason this census is.  The two shapes
+    # are the detector's, not this file's, and a third vacuous shape would need
+    # `vacuous_declarations` to learn it.
+    #
+    # The EMITTED contracts are checked here too, not only `lib/`: a `sorry` is
+    # the one thing this project admits on purpose, and a contract whose
+    # STATEMENT were vacuous would be a hole over nothing at all.
+    from formal import lean as _L
+    vacuous_lib = []
+    for mod in sorted(census):
+        with open(os.path.join(lib, mod + ".lean"), encoding="utf-8") as f:
+            raw = f.read()
+        vacuous_lib += [f"lib/{mod}.lean:{ln} {name} ({shape})"
+                        for name, shape, ln in
+                        _L.vacuous_declarations(A.lean_code_regions(raw))]
+    vacuous_admitted = []
+    for c in A.all_contracts():
+        emitted = A.lean_trust_header([c]) + "\n" + A.lean_declarations([c])
+        vacuous_admitted += [
+            f"the declaration for {c.qualified} at {c.source}:{c.line} ({shape})"
+            for name, shape, _ln in _L.vacuous_declarations(emitted)]
+    check(not vacuous_lib and not vacuous_admitted,
+          "a declaration that asserts nothing:\n    "
+          + "\n    ".join(vacuous_lib + vacuous_admitted)
+          + "\n    `True` as a statement, or `∀ …, … → True`, is a shape no "
+            "proof of it can repair -- and over an ADMITTED contract it is a "
+            "`sorry` over nothing.")
     total = sum(kinds["axiom_tactic"][0] for kinds in census.values())
-    return True, (f"0 axiom and 0 sorry across {len(census)} lib/ module(s); "
+    return True, (f"0 axiom, 0 sorry and 0 vacuous across {len(census)} lib/ "
+                  f"module(s) and {len(A.all_contracts())} emitted contract(s); "
                   f"{total} native_decide/bv_decide site(s), within the ceiling")
 
 
