@@ -59,6 +59,17 @@ than the next link in the chain. The tell is a group's count moving when a
 DIFFERENT group was stubbed, and `round N:` prints every group, so a reader sees
 it. Links measured before that starts are the ones worth acting on.
 
+The limit has a LOUD form, and the walk stops on it rather than reporting it.
+Dropping an import line from a file whose only use of the name was the only
+statement in an indented block leaves that block empty, and the next build
+reports a parse error for that file — which every file importing it then reports
+too. Measured on the 46-file `std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu}`
+scope, round 4 answered `build: 32:0: Unexpected INDENT('')` for all 42
+remaining files. That is one mangled file, not 42 files refusing a construct,
+and `mangled_copy` says so: such a round is counted as unmeasurable, the stop
+message names the first file and quotes the parser, and nothing measured up to
+that round is discarded.
+
 THE STDLIB IS ONLY EVER READ
 ----------------------------
 The copy is under `.tmp/chain-probe` and is rewritten every run; the real
@@ -109,6 +120,30 @@ _CHAIN_PREFIX_RE = re.compile(r"([\w./]+\.mojo): ")
 # prose instead.  The backtick span is the module name as the resolver spells it
 # — `std.format._utils`, `std.math`, `..fstat`, `.path`.
 _EXPORT_GATE_RE = re.compile(r"is imported from `([^`]+)`")
+
+# A message that says the COPY no longer parses, which is this tool's own edit
+# and not a link in the chain. Dropping a `from … import …` line from a file
+# whose only use of it was inside an indented block leaves the block with nothing
+# in it, and the next build says so. Measured on the 46-file
+# `std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu}` scope (round 4): all 42
+# remaining files reported `build: 32:0: Unexpected INDENT('')`, which is not 42
+# files hitting one construct — it is one mangled file and 41 files that import
+# it.
+_MANGLED_COPY_RE = re.compile(
+    r"Unexpected INDENT|IndentationError|unexpected indent|expected an indented"
+    r" block")
+
+
+def mangled_copy(msg) -> bool:
+    """Whether `msg` reports the THROW-AWAY COPY failing to parse.
+
+    True means this round measured the stub step's damage rather than a link in
+    the chain, and the caller must stop rather than group 42 files under a
+    parser's complaint: the neutering removed the names these files CALL, which
+    is this module's documented limit, and a parse error is the limit announcing
+    itself in the least readable way available.
+    """
+    return bool(_MANGLED_COPY_RE.search(msg or ""))
 
 
 def _resolve_module(name, importer, probe):
@@ -302,12 +337,16 @@ def main() -> int:
         rows = round_messages(scope, outdir, args.arch, env)
         groups = {}
         built = []
+        mangled = []
         for path, rc, msg in rows:
             if rc == 0:
                 built.append(path)
                 continue
             if rc is not None and "the backend raised" in msg:
                 crashed.append((path, msg))
+                continue
+            if mangled_copy(msg):
+                mangled.append((path, msg))
                 continue
             key, exact, stem = refusing_module(
                 msg, path, lambda p: under_stdlib(p, probe), probe)
@@ -321,7 +360,9 @@ def main() -> int:
                                        "members": []}
             group["members"].append((path, msg))
         print(f"\n=== round {rnd}: {len(built)} built, "
-              f"{len(groups)} refusing module(s)")
+              f"{len(groups)} refusing module(s)"
+              + (f", {len(mangled)} unmeasurable (the stub step left the copy "
+                 f"unparseable)" if mangled else ""))
         for mod in sorted(groups, key=lambda k: (-len(groups[k]["members"]), k)):
             members = groups[mod]["members"]
             path, msg = members[0]
@@ -329,6 +370,20 @@ def main() -> int:
             print(f"  {len(members):3d}  {mod}")
             print(f"       example: {rel}")
             print(f"       {msg[:300]}")
+        if mangled:
+            # Said here rather than as a group, because a group reads as a link
+            # in the chain and this is not one: it is the measurement's own
+            # wreckage. Everything measured up to this round stands; the links
+            # after it are not walkable with this stub, and reporting the parser
+            # complaint as 42 files refusing something would be the exact
+            # failure this tool exists to avoid.
+            path, msg = mangled[0]
+            print(f"\n  (stopping: {len(mangled)} of {len(scope)} file(s) no "
+                  f"longer parse, so this round measured the stub step and not "
+                  f"the chain — neutering a module removes the names its users "
+                  f"call, which is this tool's documented limit. First: "
+                  f"{under_stdlib(path, probe) or path}\n    {msg[:300]})")
+            break
         if not groups:
             break
         # The first group in sorted-path order THAT NAMES A FILE THIS TOOL MAY

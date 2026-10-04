@@ -270,5 +270,47 @@ class TestStubTargets(unittest.TestCase):
         self.assertTrue(all(t.name == "_io.mojo" for t in targets))
 
 
+@unittest.skipUnless(STDLIB.is_dir(), f"no stdlib at {STDLIB}")
+class TestMangledCopy(unittest.TestCase):
+    """The tool's OWN damage is not a link in the chain.
+
+    Round 4 of the measured run answered `build: 32:0: Unexpected INDENT('')`
+    for all 42 remaining files in a 46-file scope, and the round was about to be
+    reported as one link blocking 42 files. It is one mangled file: the stub step
+    dropped an import line that was the only statement in an indented block, and
+    every file importing that module reported the parser's complaint in its own
+    build. Grouping those 42 under a construct refusal is precisely the mistake
+    this tool exists to prevent, one level up from where it usually happens.
+    """
+
+    # Verbatim from the run: `build: 32:0: Unexpected INDENT('')`.
+    MEASURED = "build: 32:0: Unexpected INDENT('')"
+
+    def test_a_parse_error_in_the_copy_is_recognised(self):
+        self.assertTrue(P.mangled_copy(self.MEASURED))
+
+    def test_the_three_spellings_are_recognised(self):
+        for msg in ("build: x.mojo:12:3: IndentationError: unindent does not "
+                    "match any outer indentation level",
+                    "  File \"x.mojo\", line 9\n    unexpected indent",
+                    "build: expected an indented block after 'if' on line 4"):
+            with self.subTest(msg=msg):
+                self.assertTrue(P.mangled_copy(msg))
+
+    def test_a_real_refusal_is_not_taken_for_one(self):
+        """Every message the measured scope actually produced stays a link.
+
+        Pinned so the recogniser cannot widen: a refusal is a claim about a
+        construct, and this tool's job is to report those, not to discard the
+        awkward ones.
+        """
+        for msg in [m[1] for m in EXPORT_GATE.values()] + [CHAIN_PREFIX[0]]:
+            with self.subTest(msg=msg[:60]):
+                self.assertFalse(P.mangled_copy(msg))
+
+    def test_a_timeout_is_not_a_mangled_copy(self):
+        self.assertFalse(P.mangled_copy(f"TIMEOUT after {P.BUILD_TIMEOUT}s"))
+
+
 if __name__ == "__main__":
     unittest.main()
