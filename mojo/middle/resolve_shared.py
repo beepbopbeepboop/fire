@@ -961,7 +961,16 @@ def _infer_list_elem_type(gen, elements: list) -> str:
         _oe = gen._elem_types.get(_as_str(_op.name))
         if _oe:
             _spread_types.append(_oe)
-    stored = [e for e in elements if not gimple_ctypes.is_star_spread(e)]
+    # An explicit loop here too, and for the SAME reason as the `types` one
+    # below: `elements` is a `list` PARAMETER, so self-hosted it is a runtime
+    # `MojoList *`, and a comprehension over one emits a no-op — which would
+    # silently make this function believe a spread-bearing literal had no
+    # stored slots at all. The two loops are two halves of one question and
+    # are written the same way deliberately.
+    stored = []
+    for _e in elements:
+        if not gimple_ctypes.is_star_spread(_e):
+            stored.append(_e)
     if not stored:
         return gimple_ctypes.TypeLattice.join_all(_spread_types) if _spread_types else 'int64_t'
     # Explicit loop (NOT a comprehension): the self-hosted compiler has no
@@ -976,7 +985,10 @@ def _infer_list_elem_type(gen, elements: list) -> str:
         # A string spread beside non-string slots of its own: the join is
         # `char *`, and `_lower_list_literal` answers that by appending EACH
         # element by its own type (`per_element`), so the ints stay ints.
-        types = types + ['char *']
+        # `.append`, not `types = types + ['char *']`: the list-concat
+        # operator is not one of the shapes this module's own self-host notes
+        # vouch for, and appending is the idiom the loops above already use.
+        types.append('char *')
     _joined = gimple_ctypes.TypeLattice.join_all(types) if types else 'int64_t'
     # A HETEROGENEOUS literal is not a string list. `TypeLattice.join`
     # short-circuits to `char *` whenever either side is `char *`, which is
