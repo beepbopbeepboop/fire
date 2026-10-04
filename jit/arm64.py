@@ -245,7 +245,7 @@ int main() {{
                 if not build_executable(
                         filename, mojo_src, output=exe_file,
                         opt_flag=self.opt_flag, debug_flag=self.debug_flag or '-g0',
-                        work_dir=build_dir, quiet=True,
+                        quiet=True,
                         auto_gpu=self.auto_gpu):
                     print('JIT compilation failed: executable build failed', file=sys.stderr)
                     return False

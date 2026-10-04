@@ -713,12 +713,56 @@ def link_executable(objs, exe_file, extra_ldflags=None, cxx=False):
 
 def build_executable(input_file: str, src: str, output: str = None,
                      opt_flag: str = None, debug_flag: str = None,
-                     work_dir: str = None, quiet: bool = False,
+                     quiet: bool = False,
                      auto_gpu: bool = True) -> bool:
-    """Compile Mojo source to executable using GIMPLE codegen."""
-    basename = os.path.splitext(os.path.basename(input_file))[0] or 'main'
-    if work_dir is not None:
-        basename = os.path.join(work_dir, basename)
+    """Compile Mojo source to executable using GIMPLE codegen.
+
+    **Every intermediate goes in a scratch directory this call OWNS, beside the
+    artifact and removed on both returns.** That is a change: the five
+    intermediates (the generated `.ci`, the module `.o`, the runtime `.o`, the
+    generator `.cpp` and its `.o`, plus the coro/async/optional-unit objects)
+    used to be named after the input file's basename in the PROCESS's working
+    directory, and only a caller who passed `work_dir` got them anywhere else.
+    `fire.py build` did not, so building one file left up to five files in
+    wherever the user happened to be standing — measured, `python3
+    test_py314_full.py` from the repository root leaves
+    `grammar_snippet_gen.cpp` there, and two such files were committed before
+    `.gitignore` covered the pattern.
+
+    The collision half is the one that was a wrong ANSWER rather than litter:
+    two builds of two modules that share a basename (`a/gen.py` and
+    `b/gen.py`) both wrote `gen.ci`, `gen.o` and `gen_gen.cpp` into one shared
+    directory with no lock, and `tools/suite.py` runs jobs `-j18` from a common
+    checkout. The directory is derived from `output` — the path the caller asked
+    for — so two builds with two outputs cannot meet, and it is DETERMINISTIC
+    rather than a `mkdtemp`, so a given input and output still compile the same
+    bytes (the `.ci` path reaches the binary through `-g3`'s debug info, and a
+    random directory there would make every build of the same program a
+    different binary).
+
+    With no `output` the executable is the input's basename in the CWD, so the
+    scratch is `./.<stem>.build` and is still removed: the litter is gone
+    whether or not `-o` was passed.
+
+    `work_dir` is GONE rather than kept as an override, because a parameter with
+    one meaning in three call sites and a second meaning in the fourth is how the
+    fourth got this wrong — and its two callers (`jit/arm64.py`,
+    `test_module_cache.py`) both passed a `TemporaryDirectory`, which is exactly
+    what the default now is.
+    """
+    stem = os.path.splitext(os.path.basename(input_file))[0] or 'main'
+    # Resolved BEFORE the scratch directory: with no `output` the executable IS
+    # the stem, in the CWD, and the scratch goes beside it.
+    exe_file = output if output else stem
+    scratch = os.path.join(os.path.dirname(os.path.abspath(exe_file)),
+                           f".{stem}.build")
+    try:
+        os.makedirs(scratch, exist_ok=True)
+    except OSError as e:
+        print(f"Error building: cannot create the build directory "
+              f"{scratch}: {e}", file=sys.stderr)
+        return False
+    basename = os.path.join(scratch, stem)
     # Default to a debuggable unoptimized build; -O*/-g* on the command line override.
     # -ftrivial-auto-var-init=zero: matches Makefile's stage2/mojo build (see
     # its own comment there for the full story) — the generated .ci reads
@@ -881,8 +925,9 @@ def build_executable(input_file: str, src: str, output: str = None,
                     return False
                 extra_objs.append(_co)
 
-        # Link executable with CPython runtime
-        exe_file = output if output else basename
+        # Link executable with CPython runtime. `exe_file` was resolved at the
+        # top, before the scratch directory: with no `output` it is the stem in
+        # the CWD, NOT `basename`, which now lives in the scratch directory.
         # Get Python library path
         try:
             configdir = subprocess.run(
@@ -970,6 +1015,16 @@ def build_executable(input_file: str, src: str, output: str = None,
         import traceback
         traceback.print_exc(file=sys.stderr)
         return False
+
+    finally:
+        # Every `return False` above lands here too, which is the point: a
+        # failed build that kept its scratch would be the same litter this
+        # function just stopped doing, and a sweep's failures are most of its
+        # builds. `ignore_errors` because a scratch we cannot delete must not
+        # turn a successful build into a failed one — the caller has its answer
+        # either way, and the directory is named `.`+stem+`.build` so what is
+        # left is visible and attributable.
+        shutil.rmtree(scratch, ignore_errors=True)
 
 def main():
     # Pull -O*/-g* codegen flags and --backend out of argv first so they
