@@ -69,8 +69,12 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRE = os.path.join(HERE, "fire.py")
-BUILD_TIMEOUT = 300
-RUN_TIMEOUT = 60
+# The per-child budgets are `exec_budget`'s, for the reason its docstring gives:
+# a wall clock sized for "much more than a tiny program needs" fires on a loaded
+# machine, and a timeout inside a test file is reported as an ordinary FAIL of
+# the COMPILER. This file used to spell its own (300 and 60), which is the same
+# number in a place no reader can check against the others.
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 # The record terminator, for the reason every other formal test file gives
 # (`test_formal_dylib.py` states it): a separator this suite can read back
@@ -118,8 +122,12 @@ def rosetta():
     if sys.platform != "darwin":
         return None
     try:
+        # A host probe, not compiled code: `arch` running `/usr/bin/true`, whose
+        # answer is whether this host can run an x86-64 image at all. The RUN
+        # budget because it is the cheapest child in this file, and a comment
+        # because the same number as an image run would otherwise be ambiguous.
         p = subprocess.run(["arch", "-x86_64", "/usr/bin/true"],
-                           capture_output=True, timeout=60)
+                           capture_output=True, timeout=RUN_TIMEOUT_S)
         return p.returncode == 0
     except Exception:
         return False
@@ -129,7 +137,7 @@ def build(src, out, arch):
     cmd = [sys.executable, FIRE, "build", "--formal", "--no-prove",
            "--backend=" + arch, "-o", out, src]
     p = subprocess.run(cmd, capture_output=True, text=True,
-                       timeout=BUILD_TIMEOUT, cwd=HERE)
+                       timeout=COMPILE_TIMEOUT_S, cwd=HERE)
     return p.returncode, (p.stderr or p.stdout or "")
 
 
@@ -147,9 +155,9 @@ def run(out, arch):
         argv = ["arch", "-x86_64", out]        # Rosetta 2
     try:
         p = subprocess.run(argv, capture_output=True, text=True,
-                           timeout=RUN_TIMEOUT)
+                           timeout=RUN_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        return 124, "", f"the image did not finish within {RUN_TIMEOUT}s"
+        return 124, "", f"the image did not finish within {RUN_TIMEOUT_S}s"
     return p.returncode, p.stdout, p.stderr
 
 
@@ -379,6 +387,7 @@ def group_table(verbose):
 
 BINDING_PROGRAM = """\
 from os._syscalls import fs_opendir, fs_readdir, fs_stat, str_alloc
+import glob
 
 def main(n):
     var d = fs_opendir("@@DIR@@")
@@ -386,6 +395,8 @@ def main(n):
     printf("dirent=%d@@", e != 0)
     var buf: Pointer[UInt8] = str_alloc(256)
     printf("stat=%d@@", fs_stat("formal/model.py", buf) == 0)
+    var p = glob.glob("*.mojo", 0, 0)
+    printf("glob=%d@@", p != 0)
     return 0
 """
 
@@ -398,6 +409,22 @@ BINDING_EXPECTED = {
                "stat": "stat$INODE64"},
     "arm64": {"readdir": "readdir", "opendir": "opendir", "stat": "stat"},
 }
+
+# The host module's own exports the `glob` dylib must bind, by PREFIX, because
+# the hash suffix is a function of the module's path and identity and is not the
+# claim. `glob.mojo` calls `basename`/`dirname` without importing them, which is
+# what put them in the `retkind` census's unclassified list; which library
+# answers them is a whole-image fact, so it is read here out of the bind stream
+# rather than argued in a comment — see `HOSTMOD_NON_C_CALLEES`. libc's
+# `basename(3)`/`dirname(3)` are the wrong answer and a plausible one: both
+# names resolve in this very process (`ctypes.CDLL(None)`), so nothing about the
+# spelling separates them, and libc's `dirname` strips trailing slashes where
+# CPython's does not.
+HOSTMOD_EXPORT_BINDS = ("os_path_basename", "os_path_dirname")
+# …and the C-library spellings that must NOT appear, for the same reason the
+# `$INODE64` check above is two-sided: a bind of the bare name would be the
+# wrong library answering, and nothing else in this file would notice.
+HOSTMOD_C_SPELLINGS = ("basename", "dirname")
 
 
 def group_binding(tmpdir, arch, verbose):
@@ -443,6 +470,39 @@ def group_binding(tmpdir, arch, verbose):
             fails.append(f"the {arch} module ALSO binds {other}, the other "
                          f"function of that name — both exist on x86-64, so "
                          f"nothing but this check would notice")
+
+    # The same build, read a second time: the `glob` dylib's stream, for the two
+    # names `retkind`'s census could not classify until somebody asked which
+    # library answers them. One build per architecture serves both, because both
+    # questions are about bind streams and a second build would buy a second
+    # chance for the same linker to disagree with itself.
+    glob_libs = [n for n in linked_dylibs(out)
+                 if os.path.basename(n).startswith("glob.")]
+    if len(glob_libs) != 1:
+        fails.append(f"expected exactly one glob dylib on the {arch} link "
+                     f"line, got {[os.path.basename(n)
+                                  for n in linked_dylibs(out)]}")
+        return fails
+    try:
+        gnames = bind_symbols(glob_libs[0])
+    except ValueError as e:
+        fails.append(str(e))
+        return fails
+    if verbose:
+        print(f"      {os.path.basename(glob_libs[0])} binds: {sorted(gnames)}")
+    for prefix in HOSTMOD_EXPORT_BINDS:
+        if not any(n.startswith(prefix) for n in gnames):
+            fails.append(f"the {arch} glob module binds no {prefix}_<hash> "
+                         f"export, so `basename`/`dirname` in "
+                         f"HOSTMOD_NON_C_CALLEES is a claim about a binding "
+                         f"that is not there; it binds {sorted(gnames)}")
+    for spelling in HOSTMOD_C_SPELLINGS:
+        if spelling in gnames:
+            fails.append(f"the {arch} glob module binds libc's `{spelling}`, "
+                         f"which strips trailing slashes where CPython's "
+                         f"`os.path.{spelling}` does not — and "
+                         f"`HOSTMOD_NON_C_CALLEES` says this call reaches "
+                         f"os.path's own")
     return fails
 
 
@@ -608,16 +668,42 @@ def group_stat(tmpdir, arch, verbose):
 # and why each is not one. An exact list rather than a filter, so a new one has
 # to be classified here instead of being quietly skipped: the census below is
 # only meaningful if the exceptions are a list somebody maintains on purpose.
-# `str_alloc` and `str_copy` are the pair that makes the export gate in
-# `bare_c_return_kind` load-bearing — both are this project's own, reached by
-# `_syscalls.mojo` and `tempfile.mojo` WITHOUT an import statement, and both
-# spell names a C library has no business exporting.
+# `str_copy` is the row that makes the export gate in
+# `bare_c_return_kind` load-bearing — it is this project's own, reached by
+# `os/__init__.mojo` WITHOUT an import statement, and it spells a name a C
+# library has no business exporting.
+#
+# `basename` and `dirname` are the same shape and were found by the census when
+# `formal/hostmods/glob.mojo` grew calls to them without importing them. They
+# are NOT the POSIX `basename(3)`/`dirname(3)`, which is the reading the spelling
+# invites and the one this list would have carried had nobody measured: MEASURED,
+# the `glob` dylib binds `os_path_basename_<hash>` and `os_path_dirname_<hash>`
+# from the `os.path` dylib — ordinal 3 on its link line, next to the
+# `os_path_isdir`/`os_path_join` it imports explicitly — and binds no bare
+# `basename` or `dirname` at all. `formal/hostmods/os/path/__init__.mojo` is
+# where both are defined, and they answer CPython's rules (an ALIAS into the
+# input for a non-empty basename), which libc's `dirname(3)` does not: it strips
+# trailing slashes, so `basename("a/b/")` would be `"b"` where CPython says `""`.
+# That is also why the row cannot go in `BARE_C_RETURN_KINDS` even though both
+# names exist in libSystem — and they do, measured with `ctypes.CDLL(None)`, so
+# the "every table entry names a symbol this host's C library defines" check
+# below would NOT have caught the mistake. The `binding` group asserts the bind
+# stream itself, on both architectures, so the classification is pinned by the
+# image rather than by this comment.
+#
+# `str_alloc` WAS here and stopped being a bare callee: `os/__init__.mojo` now
+# writes `from ._syscalls import str_alloc, …`, so the census — which skips
+# imported names — no longer finds it, and the anti-rot check below requires the
+# entry to go. `str_copy` is still bare there, and the two are called side by
+# side, which is what makes the pair worth naming.
 HOSTMOD_NON_C_CALLEES = {
     "admitted": "`@admitted` is a contract decorator "
                 "(formal/admitted.py::ADMITTED_DECORATOR), not a call",
-    "str_alloc": "`os._syscalls`' own allocator, called from tempfile.mojo with "
-                 "no import statement — a Mojo export reached through the link "
-                 "line's flat table, not a C symbol",
+    "basename": "`os.path`'s own, reached by `glob.mojo` with no import "
+                "statement — it binds `os_path_basename_<hash>` from the "
+                "os.path dylib, measured in the `binding` group",
+    "dirname": "`os.path`'s own, the same shape and the same measurement as "
+               "`basename`",
     "str_copy": "`os._syscalls`' own byte copy, called from os/__init__.mojo "
                 "the same way",
 }

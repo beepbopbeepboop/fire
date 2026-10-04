@@ -1912,6 +1912,106 @@ def test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root():
           not stray, f'{stray}')
 
 
+# ── the per-child-budget residue: file -> how many literals it still spells ──
+#
+# The census `test_no_stale_per_child_budget_is_left_as_a_literal` walks, kept
+# as DATA so the check that reads it can be a ratchet instead of a prohibition.
+# Read the reasoning there and the per-file reading in
+# `bugs/TEST_stale_per_child_timeout_literals.md`; converting a file means
+# deleting its row here in the same commit, which is the only thing that makes
+# the number a measure of progress rather than a number.
+#
+# It is a per-file list rather than a regex over `timeout=[0-9]+` because the
+# question at a site is which KIND of child it is — a COMPILE, a LINK, a RUN, a
+# sweep, or none of the four — and that is not decidable from the text. Measured
+# 2026-10-04 with python3 3.14: 205 sites over 57 files, after this tree's
+# `test_formal_sweep.py` (7) and `test_formal_libc_symbol.py` (1) were converted.
+# That is this predicate's census — a `timeout=` KEYWORD read off the AST, over
+# `is_test_file_name`, which is EITHER spelling and so also holds the two
+# `formal/*_test.py` and the one `scripts/*_test.py` — and it is smaller than
+# the doc's 217-over-63 for two measurable reasons: a grep counts a `timeout=NN`
+# that is not a call keyword at all, and it walks `build/` and the other derived
+# trees this one skips.
+STALE_PER_CHILD_BUDGETS = {
+    'formal/x86_64_endtoend_test.py': 1,
+    'formal/x86_64_model_test.py': 1,
+    'scripts/bootstrap_full_test.py': 1,
+    'test_ab_native.py': 2,
+    'test_arm64_emission.py': 1,
+    'test_async_runtime_scaffold.py': 1,
+    'test_async_void_return.py': 5,
+    'test_async_with_lock_guard.py': 5,
+    'test_closure_capture_comptime_func_params.py': 2,
+    'test_comptime_bracket_params.py': 1,
+    'test_comptime_parity.py': 4,
+    'test_container_equality.py': 3,
+    'test_container_membership.py': 3,
+    'test_container_ordering.py': 3,
+    'test_coro_detached_async.py': 4,
+    'test_coro_future_await.py': 4,
+    'test_coro_nested_async_capture.py': 5,
+    'test_coro_runtime.py': 1,
+    'test_coro_scoreboard.py': 2,
+    'test_dict_tuple_key.py': 3,
+    'test_formal_admitted.py': 7,
+    'test_formal_argparse.py': 6,
+    'test_formal_cross_module.py': 2,
+    'test_formal_dylib.py': 2,
+    'test_formal_external_call.py': 1,
+    'test_formal_frame_return_overloads.py': 1,
+    'test_formal_imports.py': 4,
+    'test_formal_link_accounting.py': 2,
+    'test_formal_proof_breadth.py': 3,
+    'test_formal_runtime_link.py': 1,
+    'test_formal_specialization.py': 2,
+    'test_formal_sweep_cache_key.py': 2,
+    'test_formal_sys.py': 2,
+    'test_formal_tempfile.py': 3,
+    'test_formal_x86_64_dylib.py': 3,
+    'test_general_mutable_closure_capture.py': 2,
+    'test_gimple.py': 51,
+    'test_gimple_async_runner.py': 11,
+    'test_import_integration.py': 4,
+    'test_link_mode.py': 2,
+    'test_metal_codegen.py': 9,
+    'test_mixed_cpp_link.py': 1,
+    'test_mutable_async_capture.py': 5,
+    'test_nested_async_generic.py': 5,
+    'test_nonlocal.py': 2,
+    'test_ptr_registry.py': 2,
+    'test_python_source_mut_capture.py': 1,
+    'test_re_formal.py': 1,
+    'test_runtime_dylib.py': 1,
+    'test_selfhost.py': 1,
+    'test_selfhost_memory.py': 1,
+    'test_stdlib.py': 1,
+    'test_struct_formal.py': 1,
+    'test_taskgroup.py': 4,
+    'test_transitive_closure_capture.py': 5,
+    'test_x86_64_containers.py': 1,
+    'test_x86_64_decode.py': 1,
+}
+
+#: Files where a per-child literal is the SUBJECT rather than residue, with the
+#: reason each one is. Both are about admission and scheduling: a budget there
+#: is the thing under test, and converting one to `RUN_TIMEOUT_S` would make a
+#: self-test take hours and destroy what it asserts. Stated here rather than
+#: filtered, because a filter for "looks like a budget test" is a guess.
+BUDGET_IS_THE_SUBJECT = ('test_memslot.py', 'test_suite.py')
+BUDGET_SUBJECT_WHY = {
+    'test_memslot.py':
+        "p.wait(timeout=10) is testing that admission refuses an over-budget "
+        "request within a known window, and the sandbox jobs deliberately use "
+        "small budgets so the self-test finishes; RUN_TIMEOUT_S would make it "
+        "take hours and assert nothing",
+    'test_suite.py':
+        "the same subject from the runner's side — a driver under a cap, a "
+        "timeout that must be reported as its own class — plus the four "
+        "assertions that keep this file's own checks honest, whose windows are "
+        "what they are asserting about",
+}
+
+
 def test_no_stale_per_child_budget_is_left_as_a_literal():
     """A file that adopted the shared per-child budgets must not still spell one.
 
@@ -1999,6 +2099,77 @@ def test_no_stale_per_child_budget_is_left_as_a_literal():
           f'{len(literals)} site(s): ' + ', '.join(sorted(literals)[:12]))
     print(f'      budgets: {len(importers)} files on the shared constants, '
           f'{len(literals)} stale literal(s)')
+
+    # ── the rest of the corpus, as a RATCHET ────────────────────────────────
+    #
+    # The three checks above are scoped to files that IMPORT `exec_budget`,
+    # which is the set where "literal" is unambiguously wrong — and that scoping
+    # is also the hole: a file avoids the check forever by not importing, which
+    # is exactly what `test_gimple_runner.py` did (ten literals, no import)
+    # while its sibling `test_gimple_generator_runner.py` had the import and
+    # four literals anyway. So the other direction is asked here, over EVERY
+    # test file, and it is a ratchet rather than a prohibition:
+    # `STALE_PER_CHILD_BUDGETS` below is the census, and it has to match the
+    # walk EXACTLY — a file that is converted loses its row (or fails, if the
+    # count is stale), and a file that grows a literal appears in the diff and
+    # fails. That is what makes the residue shrink without making 56 files red
+    # on the day the rule is written.
+    #
+    # Converting a file is per-file reading, not a substitution: `test_gimple.py`
+    # mixes a 300 s `fire.py build` with a 30 s run of the executable it
+    # produced, and a site whose right answer is "none of these three" (a
+    # SIGTERM drain window, a host-tool probe) is named at the site rather than
+    # forced into a constant that does not describe it. The census, the
+    # exemptions and that reasoning are in
+    # `bugs/TEST_stale_per_child_timeout_literals.md`.
+    residue, subject = {}, {}
+    for rel in _test_files_in_repo():
+        path = os.path.join(HERE, rel)
+        try:
+            with open(path, 'r', errors='replace') as f:
+                tree = ast.parse(f.read(), filename=rel)
+        except (OSError, SyntaxError):
+            continue
+        n = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for kw in node.keywords:
+                if (kw.arg == 'timeout' and isinstance(kw.value, ast.Constant)
+                        and isinstance(kw.value.value, int)):
+                    n += 1
+        if not n:
+            continue
+        (subject if rel in BUDGET_IS_THE_SUBJECT else residue)[rel] = n
+
+    check('budgets: the residue census is the residue',
+          residue == STALE_PER_CHILD_BUDGETS,
+          'the census and the walk disagree. Converted a file? drop its row. '
+          'Added a literal? add the file with its count and read its call '
+          'sites. Difference: '
+          + '; '.join(
+              f'{k}: census {STALE_PER_CHILD_BUDGETS.get(k, 0)} vs walk '
+              f'{v}' for k, v in sorted(residue.items())
+              if STALE_PER_CHILD_BUDGETS.get(k) != v)
+          + ' | census-only: '
+          + ', '.join(sorted(set(STALE_PER_CHILD_BUDGETS) - set(residue))))
+    check('budgets: a file where the budget is the SUBJECT still has one',
+          sorted(subject) == sorted(BUDGET_IS_THE_SUBJECT),
+          'the exemption list and the files that actually carry literals '
+          'disagree: walk '
+          + repr(sorted(subject)) + ' vs declared '
+          + repr(sorted(BUDGET_IS_THE_SUBJECT)))
+    for rel in BUDGET_IS_THE_SUBJECT:
+        check(f'budgets: {rel} says why a literal is its subject',
+              len(BUDGET_SUBJECT_WHY.get(rel, '')) >= 40,
+              'the reason is what tells the next reader this is not residue')
+    check('budgets: the residue is not allowed to GROW',
+          len(residue) <= len(STALE_PER_CHILD_BUDGETS),
+          f'{len(residue)} files carry a literal against a census of '
+          f'{len(STALE_PER_CHILD_BUDGETS)}')
+    print(f'      budgets: {sum(residue.values())} literal(s) in '
+          f'{len(residue)} unconverted file(s), {sum(subject.values())} in '
+          f'{len(subject)} where the budget is the subject')
 
 
 def test_missing_fanout_item_is_a_named_failure():
@@ -3909,6 +4080,97 @@ def test_every_test_file_is_registered():
           f'reason, {len(undeclared)} undeclared, {len(dangling)} dangling')
 
 
+def test_no_test_name_is_registered_twice():
+    """A second `test('name', …)` overwrites the first, and nothing says so.
+
+    `test()` registers into a dict (`REGISTRY[s.name] = s`), so a duplicate name
+    is not a duplicate row — it is a LOST one. The name resolves to whichever
+    call came last, the earlier call costs a dict store, and `--list` shows one
+    line, so the only thing a reader can notice is that the `desc` in the
+    registry is whichever commit landed last.
+
+    Real, twice, both from different commits that each registered two test files
+    nobody had registered before: `formal-field-walk` (5b2e62c3, then 574d9135)
+    and `formal-glob` (the same pair). Their two `desc`s disagreed — "glob:
+    CPython's own glob, both backends, 6 groups" against "glob: has_magic,
+    hidden files, symlinks and escapes, against CPython" — so the sentence in
+    the registry was decided by commit order.
+
+    The registry cannot answer this question: by the time anything reads it the
+    overwrite has happened and there is one row per name. So this reads the
+    SOURCE, as an AST walk rather than a grep, so a name that appears in a
+    comment or in a string is not counted as a registration. Both registrars are
+    walked — `test()` and `fanout()` are two functions that each store into
+    `REGISTRY`, so a name registered once each is the same lost row. Three
+    extra properties keep it from being a rule that fails on its first day:
+
+      * it reads every registration CALL, including ones inside `if`/`for`,
+        which is what "written twice" means; and
+      * it cross-checks the count against `len(REGISTRY)`, so the walk and the
+        registry still agree about how many names there are. Without that, a
+        walk that silently found nothing would pass every row above vacuously —
+        and it is a real check here, not a formality: it is what found that
+        `fanout()` is a second registrar (three names: the bootstrap dump
+        fanouts), which a walk of `test()` calls alone would have read as three
+        names the registry invented.
+    """
+    path = os.path.join(HERE, 'tools', 'suite.py')
+    source = open(path).read()
+    tree = ast.parse(source, filename=path)
+    # The registrars are DISCOVERED, not listed: a module-level function whose
+    # body assigns into `REGISTRY`. A hardcoded ('test', 'fanout') would be a
+    # second copy of a fact `tools/suite.py` already states, and the day a third
+    # registrar appears this check would keep reporting agreement with a
+    # registry that has a name in it from nowhere — which is the same
+    # vacuous-pass direction as a walk that found nothing.
+    registrars = set()
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for sub in ast.walk(node):
+            targets = []
+            if isinstance(sub, ast.Assign):
+                targets = sub.targets
+            elif isinstance(sub, (ast.AnnAssign, ast.AugAssign)):
+                targets = [sub.target]
+            for t in targets:
+                if (isinstance(t, ast.Subscript)
+                        and isinstance(t.value, ast.Name)
+                        and t.value.id == 'REGISTRY'):
+                    registrars.add(node.name)
+    check('the registry: the registrar discovery found the registrars',
+          {'test', 'fanout'} <= registrars,
+          f'tools/suite.py registers through {sorted(registrars)}, and the two '
+          f'that were there when this was written are missing — the check below '
+          f'would be walking a subset and reporting it as agreement')
+    where = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if not (isinstance(fn, ast.Name) and fn.id in registrars):
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Constant):
+            continue
+        name = node.args[0].value
+        if not isinstance(name, str):
+            continue
+        where.setdefault(name, []).append(node.lineno)
+    dupes = {n: ls for n, ls in where.items() if len(ls) > 1}
+    check('the registry: no name is registered twice', not dupes,
+          'the second registration replaces the first and the first is dead '
+          'code — delete it and keep the one that runs: '
+          + '; '.join(f'{n} at lines {ls}' for n, ls in sorted(dupes.items())))
+    check('the registry: the source walk and the registry agree on the count',
+          len(where) == len(suite.REGISTRY),
+          f'the walk found {len(where)} distinct registered names and REGISTRY '
+          f'holds {len(suite.REGISTRY)}, so one of them is not counting the '
+          f'registrations this check is about')
+    print(f'      the registry: {len(where)} names registered in '
+          f'tools/suite.py through {sorted(registrars)}, {len(dupes)} of them '
+          f'more than once')
+
+
 def test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject():
     """The three ways this check can be present and still never run.
 
@@ -4453,6 +4715,7 @@ def main():
                test_checked_run_replays_a_pass_and_reruns_a_failure,
                test_cached_spec_names_its_own_test,
                test_every_test_file_is_registered,
+               test_no_test_name_is_registered_twice,
                test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
                test_a_deleted_bug_doc_is_not_still_cited,

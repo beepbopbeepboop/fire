@@ -36,6 +36,23 @@ import cas
 import formal_sweep as S
 import formal_sweep_parity as P
 import procrun
+# The per-child wall clocks below are `exec_budget`'s, not literals: a literal
+# is how a budget sized for "much more than a tiny program needs" spread across
+# 58 files and then fired on a loaded machine, where a timeout inside a test file
+# is reported as an ordinary FAIL — that is, as a sweep bug. Every site is
+# classified at the call, and the two that are NOT a child budget say so.
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
+
+#: How long this process waits for a memcap wrapper it has just SIGTERMed, and
+#: then for its corpse. NOT a per-child budget: `exec_budget`'s three constants
+#: size a COMPILE, a LINK and a RUN of compiled code, and these bound neither —
+#: they bound the wait after a signal, and the assertion they protect is that
+#: the wrapper accounted for the kill before it died
+#: (`formal_sweep_sigterm_drains_the_whole_scope`). Named here so the widened
+#: estate check sees a name rather than a bare number and does not have to be
+#: told this is deliberate.
+SIGTERM_DRAIN_S = 30
+SIGTERM_REAP_S = 10
 
 # ── The messages this classifies, verbatim ───────────────────────────────────
 # The host-import and unresolved-import wordings are the two ImportBuildError
@@ -454,7 +471,11 @@ class TestDyldProbe(unittest.TestCase):
             [sys.executable, os.path.join(S.REPO, "fire.py"), "build",
              "--formal", "--no-prove", f"--backend={arch}", "-o", out,
              os.path.join(cls._tmp.name, name)],
-            capture_output=True, text=True, cwd=S.REPO, timeout=300)
+            capture_output=True, text=True, cwd=S.REPO,
+             # A `fire.py build`: the COMPILE budget, not a literal that used
+             # to be 300 and meant "three minutes is plenty" for a link that
+             # takes as long as it takes under load.
+             timeout=COMPILE_TIMEOUT_S)
         return out, p
 
     @classmethod
@@ -484,10 +505,15 @@ class TestDyldProbe(unittest.TestCase):
         with open(out, "wb") as f:
             f.write(image)
         os.chmod(out, 0o755)
+        # `codesign` on a ~70 KB image, and its result is not asserted — only
+        # that dyld is not stopped by an unsigned image. The RUN budget because
+        # it is the cheapest child in this file, not because it is a run of
+        # compiled Mojo; a comment here because the two are the same number and
+        # a reader should not have to guess which one this is.
         self.subprocess.run(["codesign", "-s", "-", out],
-                            capture_output=True, timeout=120)
+                            capture_output=True, timeout=RUN_TIMEOUT_S)
         p = self.subprocess.run([out], capture_output=True, text=True,
-                                timeout=60)
+                                timeout=RUN_TIMEOUT_S)
         err = (p.stderr or "").strip().splitlines()
         return p.returncode, (err[0] if err else "")
 
@@ -574,6 +600,17 @@ class TestDyldProbe(unittest.TestCase):
           goes through the export trie, which is the only place `_macho_symbol`
           is used, so an arm64-only fixture would leave the function that
           replaced the `lstrip` untested.
+
+        The precondition is asked of the binds the FIXTURE creates, which is not
+        every bind on the link line. An image also binds whatever its ENTRY STUB
+        calls, and on x86-64 that includes libc's `exit` — a name no fixture can
+        give a leading underscore to, so asserting the precondition over the
+        whole bind list failed on a bind this test never made (measured: arm64
+        binds `['__pkg__helper_twice_9f63a2']`, x86_64 binds that plus `exit`).
+        The fixture's own binds are selected STRUCTURALLY rather than by
+        position: a bind the imported library exports under its mangled
+        spelling is this fixture's, and one only libSystem provides is the
+        stub's. Position would be a coin flip — it used to be, and `exit` won.
         """
         from formal import build as FB
         for arch, image in self.leading_underscore.items():
@@ -586,7 +623,13 @@ class TestDyldProbe(unittest.TestCase):
             self.assertIsNotNone(foreign, f"[{arch}] no imported library on "
                                           f"the link line: {dylibs}")
             exports = set(FB.macho_dylib_exports(foreign))
-            for name in names:
+            fixture_binds = [n for n in names if S._macho_symbol(n) in exports]
+            self.assertTrue(
+                fixture_binds,
+                f"[{arch}] precondition: no bind is one {foreign!r} exports, "
+                f"so this fixture made no bind to normalise — binds {names}, "
+                f"exports {sorted(exports)}")
+            for name in fixture_binds:
                 self.assertTrue(
                     name.startswith("_"),
                     f"[{arch}] precondition: the bind {name!r} does not begin "
@@ -1991,11 +2034,11 @@ class TestWrapperDied(unittest.TestCase):
                 with open(marker) as f:
                     pid = int(f.read())
                 proc.send_signal(_signal.SIGTERM)
-                out, _ = proc.communicate(timeout=30)
+                out, _ = proc.communicate(timeout=SIGTERM_DRAIN_S)
             finally:
                 if proc.poll() is None:
                     proc.kill()
-                    proc.communicate(timeout=10)
+                    proc.communicate(timeout=SIGTERM_REAP_S)
         self.assertEqual(proc.returncode, 143,
                          f"a SIGTERMed wrapper exits 128+15; got "
                          f"{proc.returncode} with output {out!r}")
@@ -2716,7 +2759,9 @@ class TestLibSystemBindSpelling(unittest.TestCase):
                 [sys.executable, os.path.join(S.REPO, "fire.py"), "build",
                  "--formal", "--no-prove", f"--backend={arch}", "-o", out,
                  os.path.join(S.REPO, cls.SOURCE)],
-                capture_output=True, text=True, cwd=S.REPO, timeout=600)
+                capture_output=True, text=True, cwd=S.REPO,
+                # A `fire.py build` again, on the formal `syscalls` source.
+                timeout=COMPILE_TIMEOUT_S)
             if p.returncode != 0 or not os.path.exists(out):
                 raise AssertionError(
                     f"building {cls.SOURCE} for {arch} failed: "
@@ -2741,7 +2786,8 @@ class TestLibSystemBindSpelling(unittest.TestCase):
         if (arch == "x86_64" and S._host_arch_name() == "arm64"
                 and sys.platform == "darwin"):
             argv = ["arch", "-x86_64", out]
-        p = self.subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        p = self.subprocess.run(argv, capture_output=True, text=True,
+                                timeout=RUN_TIMEOUT_S)
         err = (p.stderr or "").strip().splitlines()
         return p.returncode, (err[0] if err else "")
 
