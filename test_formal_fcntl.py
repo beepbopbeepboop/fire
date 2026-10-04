@@ -16,10 +16,11 @@ One line, spelled the same way in the three files that want it
 **It is worth ZERO files to PASS.** All three of those files also import
 `subprocess`, so all three move from "blocked on a module that could be written"
 to "blocked on a second process", which is a fact about the target with an owner
-rather than one with none. That is the same accounting
-`bugs/FORMAL_platform_reachable_row_measured.md` §2 records for the `platform`
-row, and it is stated here so that a future reader does not count this module as
-a coverage improvement.
+rather than one with none. That is the
+arithmetic every host-import row in this project reports — the `platform` row
+moved thirty files and none to `pass`, for the same reason — and it is stated
+here so that a future reader does not count this module as a coverage
+improvement.
 
 THE TWO PROPERTIES OF A LOCK THAT A LOCK MODULE GETS WRONG
 ---------------------------------------------------------

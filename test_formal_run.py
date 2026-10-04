@@ -10985,6 +10985,43 @@ CONSTRUCTION_REFUSALS = [
      "    return x.g\n",
      "refuse:whose body this path does not inline: `In1(…)`, a construction of a struct whose receiver is a frame",
      None),
+    # (7a) The SAME construction stored DIRECTLY into the one field, on a struct
+    # whose ONLY field is a nested frame — the shape a deleted bug doc was filed
+    # about, and the PROGRAM half of the pair `test_formal_dylib.py`'s `a
+    # receiver write-back is not a returned frame` refuses at a module
+    # boundary.  Both halves are here because they are two different questions
+    # with two different fixes, and a reader who has only one of them tends to
+    # assume the other one is the same refusal:
+    #
+    #   * in a PROGRAM the obstacle is the INLINE.  `Box1(20, 22)` is a call to a
+    #     declared `__init__`, this path inlines that body at the construction
+    #     site, and the body builds a frame the inlined copy has no prologue
+    #     site to put it in — `init_body_stores`, the same rule as (7).
+    #   * at a MODULE BOUNDARY the obstacle is the LIFETIME.  The constructor is
+    #     never inlined anywhere, and the frame it hands back is one it built in
+    #     its own prologue, so an importer that reserves the block the contract
+    #     describes reads a dead one.
+    #
+    # The needle is (7)'s, on purpose: the two programs differ by one field, one
+    # nesting level and where they run, and a reader who lands here should be
+    # sent to the same sentence rather than to a fourth one.
+    ("constr_refuse_a_one_word_ctor_that_assigns_a_nested_frame",
+     "struct In1b:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "struct Box1b:\n"
+     "    var inner: In1b\n"
+     "\n"
+     "    def __init__(out self, a: Int, b: Int):\n"
+     "        self.inner = In1b(a, b)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = Box1b(1, 2)\n"
+     "    return x.inner.a\n",
+     "refuse:whose body this path does not inline: `In1b(…)`, a construction of "
+     "a struct whose receiver is a frame",
+     None),
 # (8) The SAME construction into a field DECLARED with that struct's type, and
     # **this one used to be a refusal and is now the row that says why it is
     # not** (`model.init_stores_a_parameter_struct`, 2026-10-03).
@@ -11619,6 +11656,32 @@ CONSTRUCTION_REFUSALS = [
      "        pass\n"
      "    return 0\n",
      "refuse:derives from 'Widget', which this image does not declare", None),
+    # (3a) The NEGATIVE half of (3), and it is what keeps (3) from being a
+    # blanket rule. `ValueError` is an UNRESOLVED base by exactly the test that
+    # makes `Widget` one — nothing in this image declares it — and it must still
+    # construct, because every class CPython's `builtins` defines as an
+    # exception has exactly one instance field (`args`, filled by
+    # `BaseException.__new__` from the caller's arguments), so
+    # `raise ValueError("x")` is a legal one-argument construction of a class
+    # whose body is a docstring. That is `model.builtin_base_fields`'s answer,
+    # consulted before the unresolved-base question; a repair that read "an
+    # unresolved base means no fields" would take every `raise ValueError(…)` in
+    # the corpus with it and nothing else in this file would say so.
+    #
+    # Same program as (3) with `Widget` replaced and the construction made
+    # directly, which is the point twice over: the two differ by one name and
+    # must not come to the same verdict, and what is pinned here is the ARITY
+    # path (the subject of (3)) rather than what a raised exception does at run
+    # time — `bugs/FORMAL_an_exception_subclass_of_a_builtin_base_builds_and_
+    # then_dies.md` is that separate subject, measured.
+    ("constr_an_unresolved_BUILTIN_base_still_constructs",
+     "class MyErr(ValueError):\n"
+     "    \"\"\"no fields at all\"\"\"\n"
+     "\n"
+     "def main(n):\n"
+     "    var e = MyErr(\"the message\")\n"
+     "    print(\"built\")\n"
+     "    return 0\n", 0, "built"),
     # (4) What the merge CANNOT do, and the reason this is a refusal and not a
     # gap in the merge: a method is compiled against the layout of the class
     # that DECLARES it, and a call site carries no receiver type to check with,
@@ -13817,16 +13880,75 @@ POINTER_DEREF_REFUSALS = [
      "    if ru(t) != 4294967295:\n"
      "        return 2\n"
      "    return 0\n", 0, None),
-    # AN UNDECLARED receiver: a parameter with no annotation.  This is the other
-    # untyped direction, and it is the 14-of-47 `unsafe_value` case — a pointer
-    # that crossed a call boundary and lost its pointee on the way.
+        # AN UNDECLARED receiver: a parameter with no annotation.  This is the other
+    # untyped direction, and it was the 14-of-47 `unsafe_value` case — a pointer
+    # that crossed a call boundary and lost its pointee on the way.  It is now
+    # the case the image has NOTHING to say about: `read_x` has no call site in
+    # this unit at all, which is what an exported function looks like from inside
+    # the library that defines it and is the one shape no amount of walking this
+    # image can answer.  The two cases below are the other two shapes, and they
+    # are separate cases because a reader who hits one of them has a different
+    # fix from a reader who hits this one.
     ("deref_refuse_undeclared_receiver",
      "def read_x(p) -> Int:\n"
      "    return Int(p.value())\n"
      "def main(n: Int) -> Int:\n"
      "    var s = \"ABCDEFGH\"\n"
-     "    return read_x(s)\n",
+     "    return 0\n",
      "refuse:it is a word from the caller and its pointee is not recorded here", None),
+    # …and the ANSWERED half: the same unannotated parameter, reached only with
+    # arguments this image establishes, is now loaded at the pointee's width.  The
+    # value is the same word `deref_four_widths_at_one_address` reads with an
+    # ANNOTATION, so this case is the measure of the fix: 5208208757389214273 is
+    # `struct.unpack('<q', b'ABCDEFGH')` and 65 is what a one-byte read of the
+    # same address would say, so a callee that loaded the wrong width would be
+    # caught rather than agreeing with itself.
+    #
+    # `through` is the second hop on purpose: the pointee travels `main`'s
+    # declared `Pointer[Int64]` into `read_x` through a parameter of its own that
+    # nothing declares either, so the chain is walked rather than one level, and
+    # a reader who takes `seen` for a loop guard can see it terminate here.
+    ("deref_call_site_pointee_of_an_unannotated_parameter",
+     "def read_x(p) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def through(x) -> Int:\n"
+     "    return read_x(x)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    var q: Pointer[Int64] = s\n"
+     "    if through(q) != 5208208757389214273:  # struct.unpack('<q', b'ABCDEFGH')\n"
+     "        return 1\n"
+     "    return 0\n", 0, None),
+    # …and the first wrong answer this could have had: the same parameter reached
+    # with a `Pointer[UInt8]`.  One parameter has one pointee, the load's width is
+    # chosen per parameter, and one answer cannot serve both — so it is refused
+    # with both call sites named rather than compiled at whichever width was seen
+    # first.
+    ("deref_refuse_two_call_site_pointees",
+     "def read_x(p) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    var q8: Pointer[Int64] = s\n"
+     "    var q1: Pointer[UInt8] = s\n"
+     "    return read_x(q8) + read_x(q1)\n",
+     "refuse:this image reaches it with two different pointees", None),
+    # …and the third shape, which is the one a reader is most likely to hit: the
+    # image reads one call site and cannot place another's argument.  A string
+    # literal is a bare `char *` here, and `POINTEES_REFUSED` says in as many
+    # words that a list is a BLOB — a frame whose FIRST word is its count — so a
+    # width taken from the sites that DO answer would be a guess about the one
+    # that does not, and a blob would answer with a length the source never
+    # wrote.  The refusal names the site it cannot read, because the reader
+    # standing at that call is the one who can fix it.
+    ("deref_refuse_a_call_site_the_image_cannot_place",
+     "def read_x(p) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    var q: Pointer[Int64] = s\n"
+     "    return read_x(q) + read_x(s)\n",
+     "refuse:this image cannot say what one of its call sites passes", None),
     # The OFFSET, and the one that is still refused: the ALU scales an integer
     # offset it can read a POINTER and an ELEMENT WIDTH off a declaration for,
     # and this program's `k` has no annotation, so there is nothing to say

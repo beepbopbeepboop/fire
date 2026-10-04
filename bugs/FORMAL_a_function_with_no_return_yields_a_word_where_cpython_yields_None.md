@@ -100,7 +100,7 @@ a walk and this rule runs in the emitters:
 |---|---|
 | `python3 test_formal_hostmods_census.py` — every `formal/hostmods` module as a translation unit, both backends | **64/64 rows build** (that is §0a's `argparse.mojo` 456 rows and `re.mojo`'s 5, as BUILDS rather than as census rows) |
 | `python3 test_formal_argparse.py` | **PASS=9 FAIL=0** — `argparse.mojo` itself, built and run |
-| `python3 test_formal_run.py` | PASS=962 FAIL=**1**, and that one red is pre-existing and unrelated: `_collect_receiver_frame_escapes` reads `node.target` off a `VarDecl` and raises `AttributeError`, in another claim's area and filed as `bugs/FORMAL_a_one_field_mutators_frame_escape_reader_crashes_on_a_var_decl.md` |
+| `python3 test_formal_run.py` | PASS=995 FAIL=**0** on the tree this table was measured on. It carried a red for a while, and it was not this bug: a one-field mutator's receiver hand-off read `node.target` off a `VarDecl` and raised `AttributeError`, so the returned-frame refusal for that shape never printed. That collector has since been superseded by `_collect_one_field_receiver_rebinds`, which reads a `VarDecl`'s own `name` — `formal/model.py`'s single reader of "is this call a frame" is what it asks now, so there is no second place that can disagree — and `test_formal_run.py`'s `one_field_mutator_that_also_returns_a_frame_is_refused` is the row that pins the corrected behaviour |
 
 ### What is in the code, and why it is shaped this way
 

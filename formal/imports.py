@@ -258,8 +258,11 @@ HOST_MODELLED = frozenset((
     #     `mac_ver()` and `system_alias` in full including CPython's SunOS
     #     release arithmetic. It is the largest reachable host-import row in
     #     the sweep — thirty files, and all thirty ask for `machine()` — so it
-    #     is the row whose disappearance is worth counting; the accounting is in
-    #     `bugs/FORMAL_platform_reachable_row_measured.md`. What it cannot
+    #     is the row whose disappearance is worth counting.  Its accounting is
+    #     two sentences and both are here: the ceiling for a host-import row to
+    #     PASS is 0, because all thirty also want `subprocess` — a second
+    #     process is `HOST_UNREACHABLE` — so the row moved 30 files out of
+    #     "waiting for a module" and 0 files into `pass`.  What it cannot
     #     answer is written at the top of the file: `platform()` itself is one
     #     call away and blocked on `architecture()`, which needs `file(1)`, and
     #     `processor()`/`libc_ver()` are subprocesses and a readable file.
@@ -837,8 +840,9 @@ def _admitted_tier_conflicts() -> list:
 # record-lock implementation gets wrong (a SECOND descriptor of the same file
 # is refused, because a `flock` is per open file description). Worth saying
 # plainly: **it moves ZERO files to PASS**, since all three files that want
-# `fcntl` also want `subprocess` and move to that instead — the same accounting
-# `bugs/FORMAL_platform_reachable_row_measured.md` §2 records for `platform`.
+# `fcntl` also want `subprocess` and move to that instead — which is the
+# arithmetic every host-import row in this project reports, and the `platform`
+# entry above states.
 # What is absent is at the top of that file, and one absence is a SPELLING
 # rather than a fact about the target: the third argument of `fcntl(2)` does not
 # arrive, so `getfd`/`setfd`/`getfl`/`setfl` would be a `setfd` that reports

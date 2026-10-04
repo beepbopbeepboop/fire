@@ -1,5 +1,137 @@
 # FORMAL_pointer_value_model: what a pointer IS on the formal path, and why the 54-file group was never about that
 
+**§9 status, re-measured 2026-10-05 (`work/formal23-5`): FOUR of the eight items
+in "Also found, and NOT fixed" are now FIXED — the `p + k` offset scale
+(2026-10-03), the x86-64 one-field-struct field read, a STORE through a pointer
+(measured fixed on master, below), and §9's second item, which this update is
+about: a pointer's pointee now CROSSES A CALL BOUNDARY.** Two are decided rather
+than open (the `%d` narrowing, the pointer-to-pointer that no program can
+produce), and the two that remain are §9's last item — the `Pointer[SomeStruct]`
+identity, whose next step is one line in the holder fixpoint — and the
+UNDECLARED-OFFSET half of the scale, which is a types question and stays a
+types question. Nothing here is a value-model change: the decision §1 records
+still stands exactly as written.
+
+## §9's second item is CLOSED: the pointee travels with the parameter, when the
+## image agrees about it
+
+`bugs/FORMAL_pointer_value_model.md` §9's second item asked for "a
+`fn._param_pointees` table published by the same build pass that publishes
+`_frame_candidates`, and `pointer_pointee` consulting it". It is landed, and it
+did not need a table: the walk is over the image's own `functions` dict, which
+both backends already pass to `pointer_pointee`, so the two agree by
+construction rather than by a second derivation.
+
+| | where | what |
+|---|---|---|
+| the ask | `formal/model.py`, `parameter_call_site_pointees` | what THIS IMAGE passes for one unannotated parameter of `fn`: `("pointee", base, spellings)`, `("disagree", groups)`, `("silent", rows)` or None. It reuses `pointer_pointee` — the one reader of "what does this pointer point at" — plus `_parameter_position`, `call_spelling`, `declared_parameter_annotation` and the `seen` chain `parameter_call_site_pointers` already established, because this is that function's question with `p[i]` spelled `p.value()` |
+| the hook | `_name_pointee`'s two exits, through `_pointee_from_the_image_or` | "nothing to decide" and "refused" are both `(None, why)` one level down, and a caller testing only the base kept its own sentence for a disagreement between two call sites |
+| the sentences | `parameter_pointee_from_call_sites` | one per answer, both call sites named, because either call is the one the reader is standing at |
+
+Measured, both architectures, `fire.py build --formal --no-prove`:
+
+```
+def read_x(p) -> Int:  return Int(p.value())
+def through(x) -> Int: return read_x(x)
+main: s = "ABCDEFGH";  var q: Pointer[Int64] = s
+      if through(q) != 5208208757389214273: return 1     # struct.unpack('<q', b'ABCDEFGH')
+
+arm64   Built, exit 0        x86_64   Built, exit 0
+```
+
+`through` is a second hop on purpose: `x` is a parameter of its own that nothing
+declares either, so the chain is walked rather than one level, and
+`a(p) → b(p) → a(p)` is finite rather than a loop. **5208208757389214273 is not
+what a one-byte read of that address says (65 is),** so a callee that loaded the
+wrong width is caught rather than agreeing with itself.
+
+Two refusals, both of them the case a reader is most likely to hit:
+
+| program | what it says |
+|---|---|
+| two call sites, `Pointer[Int64]` and `Pointer[UInt8]` | "this image reaches it with two different pointees — a pointer to Int64 at `read_x(q8)` and a pointer to UInt8 at `read_x(q1)`. The load's WIDTH is chosen per parameter…" |
+| one site the image can place, one it cannot (`read_x(s)`, a string literal) | "this image cannot say what one of its call sites passes: `read_x(s)` — the receiver is a string literal…" |
+
+**The second is where the sibling's blob hazard is refused rather than
+inherited.** `parameter_call_site_pointers` records a site that answers `None`
+as saying *nothing*, because there `None` is the container walk and the other
+sites answer `memory` — mixing the two moves every container that reaches a
+helper through an untyped parameter a whole element. Here a site that says
+nothing is a site whose argument this image cannot place, and **a blob is
+exactly that**: `POINTEES_REFUSED` says a list is "a frame whose FIRST word is
+its count", so eight bytes at a blob's frame base read its LENGTH. A width taken
+from the sites that do answer is a guess about the one that does not, so one
+silent site vetoes the parameter and is named in the message — the reader
+standing at that call is the one who can fix it.
+
+### What it was worth, in this corpus's units: **0 sites, 6 files read, and 6 of
+### them are not even dereferences**
+
+`tools/formal_untyped_param_deref_census.py` (new; the sibling of
+`tools/formal_untyped_param_subscript_census.py`, asking the same question of
+`p.value()` instead of `p[i]`) asks the REAL
+`parameter_call_site_pointees` over the REAL `pointer_pointee` and the REAL
+`POINTEE_WIDTHS`, over every `.mojo` file in this repository and the stdlib:
+
+```
+TOTAL 6 sites in 461 .mojo files
+  ANSWERED       0
+  DISAGREE       0
+  SILENT         0
+  UNCHANGED      6      ← all of them `self.…` on a method receiver
+```
+
+Six `value()` / `unsafe_value()` sites have a PARAMETER as their receiver, and
+every one is a method receiver (`Optional.value` is an unwrap, `write_to` is a
+writer method), so **not one of them is a dereference and not one changes
+answer**. §9's "14 of the 47 `unsafe_value` sites are a callee's parameter" is
+about the receiver's SHAPE and not about what the model can do with it: a
+declared `Pointer[UInt8]` parameter was already answered. So the fix removes a
+refusal class this path can decide and gains **0 files**, which is the same
+answer §3 gives for the 54-file group and is stated here rather than left for a
+reader to assume otherwise.
+
+### The remainder, which is unchanged and is not this change's to take
+
+* **A call from ANOTHER image is invisible**, so an exported function's
+  unannotated parameter keeps the refusal. This is the open half
+  `parameter_call_site_pointers` already names, and the same one: carrying a
+  parameter's kind across a dylib edge is the manifest's job, beside
+  `frame_params`.
+* **A `p + k` inside an untyped parameter stays refused**, and that is
+  `pointer_offset_scale`'s declaration-based test unchanged: the emitter and
+  `model._offset_scale` ask it ONE question, and widening it to a recovered
+  pointee would move the emitter's `mul` as well as the model's answer. It is
+  the same types question as the undeclared-offset half above, not a new one.
+* **The `Pointer[SomeStruct]` identity is still refused** (§9's last item), and
+  its next step is still one line of recognition in the holder fixpoint: a name
+  bound from `p.value()` where `p` is declared `Pointer[SomeStruct]` of this unit
+  is a holder of that struct. The derivation is right; what is missing is
+  `_frame_receivers` recognising the name.
+
+### §9's fourth item, re-measured: a store through a pointer WORKS on both
+### architectures, and is no longer the silent failure that paragraph records
+
+```
+main:  var page: Pointer[UInt8] = mmap(0, 4096, 3, 0x1002, -1, 0)
+       page[0] = 200
+       printf("b0=%d\n", Int(page[0]))
+
+arm64  b0=200  exit 0        x86_64  b0=200  exit 0
+```
+
+§9 recorded "builds on both architectures and the process exits 1 with no
+diagnostic". That is fixed on master by the subscript work
+(`subscript_base_lowering` answering a declared-pointer base as memory rather
+than falling through to the blob walk), not by anything in this update. The
+paragraph is left as the record of what the measurement was, and **the
+SUBSCRIPT-STORE half of the family is now only visible through a name the model
+cannot place** — `var q = page; q[0] = 201` is refused by name on both
+architectures ("`q` is a value this function bound to an integer"), which is the
+right direction and is a coverage limit rather than a wrong answer.
+
+## 0. What landed before this update
+
 **Status:** the representation question is DECIDED and the decision is LANDED on
 both backends. A pointer stays one 64-bit word; **its pointee is a computation
 over its declared static type**, recovered under the same agree-or-refuse rule

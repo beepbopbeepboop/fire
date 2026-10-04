@@ -7074,9 +7074,12 @@ _RETURN_UNSOUND = "unsound"
 # appended return and therefore no return to tag). Nothing sets the tag, so both
 # readers returned the empty set on every function and the two sites that
 # consulted them had no producer left to classify.
-# `bugs/FORMAL_one_word_ctor_of_a_nested_frame_is_unexportable.md` §"Read this
-# before merging `work/formal13-5`" says exactly that — drop them rather than
-# reconcile them — and this is that.
+# The doc that filed this said exactly that — drop the tag's readers rather than
+# reconcile them — and it was deleted with the fix, so this comment is the
+# citation: its subject (a one-word struct whose only field is a nested frame,
+# refused as a dylib because its `__init__` was read as returning a frame) is
+# now the by-reference write-back above and the two assertions in
+# `test_formal_dylib.py`.
 
 
 def _returned_frame_construction(fn, value, callee, structs_by_name, fns):
@@ -7176,41 +7179,31 @@ A value is frame-valued in three ways, and they are the three the holder
     is a plain word that IS the field and is already covered by the first case.
 
 
-    **…and a third way that is not one of them: a RECEIVER WRITE-BACK.**
-    `_return_the_receiver` appends `return <receiver>` to every exit of a
-    one-field mutator, because a one-word struct's receiver IS its field and a
-    store to the callee's copy of that word has to come back.  That text is
-    indistinguishable from `return p` for a local that holds a frame — and when
-    the receiver is a frame ADDRESS and the body did not rebind it, it is not a
-    frame return at all: the function was handed the block and hands the same
-    block back, so there is nothing for a caller to reserve.  The
-    returned-frame convention is about a callee that BUILDS a block in a block
-    the CALLER reserved, and by construction a write-back does not.
+    **…and a case that is not a receiver question at all any more: a one-word
+    struct whose ONLY field is a nested frame.**  Its value on this path is that
+    frame's ADDRESS, so `self` is the address of a one-word cell rather than the
+    cell, and the constructor that WRITES THROUGH (`self.inner.a = a`) writes the
+    caller's own bytes while the one that ASSIGNS (`self.inner = Inner(a, b)`,
+    which `_rewrite_self_fields` collapses onto `self`) binds a frame the CALLEE
+    built in its own prologue.  The first is not a frame return and the second is
+    — and both were once the same text here, because `_return_the_receiver`
+    appended `return <receiver>` to the first and this function could not tell the
+    two apart.  Neither is a question for THIS function any more: the receiver is
+    handed over BY REFERENCE and written back through the caller's own storage
+    (`_take_the_receiver_by_reference`), so there is no appended return to read,
+    and the assigning shape is caught where the boundary is, by
+    `_collect_one_field_receiver_rebinds` →
+    `receiver_writeback_frame_library_refusal`.
 
-    So the write-back returns carry a tag (`_return_the_receiver` puts it there,
-    because it is the only place that knows which returns it made), and a tagged
-    return is counted only when the receiver was REBOUND in this body.  The test
-    for that is made here, after `_rewrite_self_fields` has collapsed
-    `self.<field> = v` onto `self` — which is what makes it the honest question
-    to ask, and the reason it cannot be asked in `_return_the_receiver` itself:
-    at that point a store THROUGH the receiver and a REBINDING of it are
-    different text and the same fact.
-
-    Measured, on the refusal this removes: `struct Inner: var a: Int; var b:
-    Int` / `struct Box1: var inner: Inner` with
-
-        def __init__(out self, a: Int, b: Int):
-            self.inner.a = a
-            self.inner.b = b
-
-    builds as a program on both architectures and was REFUSED as a dylib with
-    "`Box1___init__` returns a frame address, so it cannot be compiled into a
-    dylib" — on a function whose only frame is the caller's own object.  The
-    constructor that ASSIGNS a frame to its own one word
-    (`self.inner = Inner(a, b)`, which the rewrite makes a rebinding) is a real
-    frame return and is still refused; that is the other half of
-    `bugs/FORMAL_one_word_ctor_of_a_nested_frame_is_unexportable.md` and it is
-    right there.
+    The pair is pinned from both sides and neither side is this function:
+    `test_formal_dylib.py`'s `a receiver write-back is not a returned frame`
+    asserts that the write-through constructor IS exported with a `frame_params`
+    contract naming `Inner` and that the assigning one is refused, and
+    `test_formal_run.py`'s `constr_refuse_a_one_word_ctor_that_assigns_a_nested_
+    frame` pins the PROGRAM half — where the obstacle is a different one (the
+    constructor body is inlined at the construction site and has no prologue to
+    put a frame in), which is why the two are separate assertions rather than one
+    and why neither of them can stand in for the other.
 
     `returns_by_name` is the JOIN (`_returns_frame_by_name`), not the
     per-function table: the second case asks about a CALLEE, and a callee is
@@ -9216,9 +9209,12 @@ def _take_the_receiver_by_reference(fn, wb) -> None:
     `IntLiteral` and has no `self` at all. `model.receiver_writeback_name` is
     asked of THIS function rather than of the entry, which is what makes the
     guard able to fire; keeping it first is what keeps the refusals true.
-    `FORMAL_std_builtin_math_slice_2026-10-03.md` §2.1 has the measurements and
-    the generalisation — an entry in a table keyed by a lifted name is not
-    evidence about the function it is looked up on.
+    The measurements and the generalisation — an entry in a table keyed by a
+    LIFTED name is not evidence about the function it is looked up on, and this
+    guard is what makes the reader ask of the FUNCTION — are at `5f7d7c54`
+    (`formal14-std-builtin-math`), whose doc was deleted with the fix. The cases
+    are `an_implicit_converting_init_next_to_a_mutating_one_is_not_a_mutator` and
+    `a_mutating_init_keeps_its_write_back_beside_a_converting_one`.
     """
     recv = M.receiver_writeback_name(fn)
     if recv is None:

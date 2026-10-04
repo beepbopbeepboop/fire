@@ -150,9 +150,12 @@ WHAT IS NOT HERE, so the next reader does not have to measure it
     limit, not hidden.
   * dylib contracts (`generate_dylib_proof`'s `Contracts.agrees_of_body`), whose
     spec derivation is its own subject with its own refusals
-    (`bugs/FORMAL_per_export_contracts.md`) and its own teeth
-    (`test_formal_dylib.py::a_wrong_spec_is_rejected_not_believed`).  This file
-    is the PROGRAM path.
+    (`formal/arm64_proof_gen.py::_dylib_spec_lean`, which names the source
+    expression it cannot derive a spec for) and its own teeth
+    (`test_formal_dylib.py::a_wrong_spec_is_rejected_not_believed`).  That
+    contract is PROVED rather than admitted — the doc that recorded the proof
+    failing to go through was deleted with the fix.  This file is the PROGRAM
+    path.
   * cross-architecture disagreement.  `tools/formal_fuzz.py` builds every program
     twice for that, and it is a codegen question rather than a model question:
     the semantic model here is SHARED (`x86_64_proof_gen` imports the model

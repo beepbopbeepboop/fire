@@ -2,9 +2,12 @@
 FORMAL.md §11.5:** `IR-3-to-2-contracts-module.md` (the `formal/lean.py`
 registration, landed) and the resolved sections of
 `IR-3-to-2-dylib-contract-emitter.md` (the emitter, landed as `d9443ed`). The
-diagnosis those files carried is not lost — it is in
-`bugs/FORMAL_per_export_contracts.md` and in those commits' messages. One item
-is still open, and it is this one. The filename is kept rather than renamed
+diagnosis those files carried is not lost — it is in those commits' messages.
+The doc that carried the measurements was deleted once the per-export proof
+closed (`test_formal_dylib.py::default_path_emits_a_checked_proof` is the pin:
+the contract namespace is `sorry`-free, Lean accepts the file, and the generated
+`triple` contract checks in 7 s against the 1500 s bound it used to blow). One
+item is still open, and it is this one. The filename is kept rather than renamed
 because the subject is unchanged; the request in it is not.
 
 ---
@@ -58,7 +61,10 @@ export. The precise failures, so you do not have to re-derive them:
     finite and in principle reducible (15 steps, a 6-entry memory list, constant
     addresses), so this is a budget question, not a missing decision procedure.
     My earlier claim that this needed a symbolic `BitVec 64` machine model was
-    wrong and is retracted in `bugs/FORMAL_per_export_contracts.md`.
+    wrong — it was a NORMALISATION problem, `simp only` over the structure
+    accessors — and is retracted in the commits that closed this row
+    (`1ec7dd4f` is the retraction; the fix is the per-step pc discipline and
+    `runsTo` chain now in `formal/arm64_proof_gen.py::_dylib_contract_proof`).
   * `hx30` — the same abstraction, `bv_decide` handed
     `arm64_reg 30 (S13 (start n))`.
   * the pc discipline — `simp [...]; omega` hands `omega` an unnormalised

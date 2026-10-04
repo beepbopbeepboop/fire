@@ -166,7 +166,7 @@ worker's claim:
 | site | what it admits | owner |
 |---|---|---|
 | `formal/arm64_proof_gen.py:5619, 5811, 5819, 6542, 6549, 6627, 6643, 6878` | `all_goals (first \| done \| sorry)` — CFG leaves | `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md` |
-| `formal/arm64_proof_gen.py:9737` | a call through a callee the model has no `_go` for | `bugs/FORMAL_per_export_contracts.md` / `FORMAL_contract_work_handoff.md` |
+| `formal/arm64_proof_gen.py:9737` | a call through a callee the model has no `_go` for | `FORMAL_contract_work_handoff.md` |
 | `formal/arm64_proof_gen.py:10496` | a caller theorem whose callee is admitted | this file's §"what depends on a contract", below |
 | `formal/x86_64_proof_gen.py:332, 920` | the extern-call step, `True := by trivial` | FORMAL.md §7 rows 4–6 |
 
