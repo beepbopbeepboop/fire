@@ -6,18 +6,20 @@ is inside the compiled closure and therefore owes the `selfhost` job.
 **Pre-existing on master, measured rather than assumed** — see "Not a
 regression".
 
-## Why this doc exists when eight `CODEGEN_selfhost_*` docs already do
+## Where this doc stands against the other `CODEGEN_selfhost_*` docs
 
-Every one of those describes the SAME job failing in the GCC era, and that
-shape is GONE. `bugs/CODEGEN_selfhost_build_is_red_on_the_branch_base.md` and
-`CODEGEN_selfhost_red_on_the_merged_tree_149_gcc_errors.md` are about "157
-distinct gcc errors" and `CODEGEN_selfhost_closure_still_fails_gcc.md` says 13
-remain; there is no doc anywhere in `bugs/` whose subject is the state the job is
-in NOW, which is that the generated C compiles, links, and produces a binary
-that **crashes on the first program it is given**. A reader who runs the job and
-sees a SIGSEGV has no document that describes it, which is the whole reason
-this one is filed — and the eight stale ones are named below as the thing to
-reconcile rather than left to contradict it.
+The GCC-era docs are GONE, and this paragraph is the reconciliation they owed:
+six of them — the ones about a selfhost build red on the branch base, about
+"157 distinct gcc errors" on a merged tree, about 13 still remaining, and three
+siblings — were consolidated and deleted in `2e9349ed`, because the generated C
+now COMPILES AND LINKS and every one of their error counts stopped reproducing.
+The survivor is `bugs/CODEGEN_selfhost_closure_compiles_and_the_binary_segfaults.md`,
+which carries the same measurement this doc does (the closure builds, the
+two-line run is `exit=-11`) from a different tree; this file is the earlier
+filing and is kept for the two things that one does not say: the A/B against
+master that shows the shape is not a merge regression, and the module-by-module
+bisect plan below. Neither cites the deleted names, which is why
+`tools/dangling_doc_refs.py --ratchet` is clean on this file.
 
 ## What I ran, and what I saw
 
@@ -84,12 +86,11 @@ the crash is in.
    two-line program" — and `test_selfhost.py` already builds a named artifact,
    so a bisect harness over its own output is cheaper than a commit bisect over
    a 522-second job.
-2. **While in there, reconcile the eight `CODEGEN_selfhost_*` docs.** Each
-   states a gcc-error count that no longer holds. Per CLAUDE.md a doc for a
-   fully-fixed bug is DELETED rather than left to rot, so the ones whose error
-   count is now zero should go with their fix, and the one that survives should
-   carry the shape above. `tools/dangling_doc_refs.py --ratchet` is the check
-   for the citations they leave behind.
+2. ~~Reconcile the eight `CODEGEN_selfhost_*` docs.~~ DONE in `2e9349ed`: the
+   GCC-error docs are deleted and
+   `bugs/CODEGEN_selfhost_closure_compiles_and_the_binary_segfaults.md` carries
+   the state, so the only doc-level work left is deleting THIS one when the
+   bisect above lands, and its citations with it.
 3. **Then decide the registration.** A `selfhost` that cannot run its own
    output is either `expect=`'d with the reason this doc gives (cheap — 0.2 GB
    measured for the sibling, ~4.4 GB here) or fixed. It must not stay
