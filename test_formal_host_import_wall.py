@@ -96,20 +96,35 @@ class TestTheReadersAreTheBackends(TempTree):
     def test_a_file_the_backend_cannot_read_is_none_and_not_empty(self):
         """The distinction the header prints a count for.
 
-        This is not a hypothetical shape: `test_formal_libc_symbol.py` is a file
-        in this repository whose own source this tokenizer refuses — an f-string
-        replacement field with a newline in it, which CPython has accepted since
-        PEP 701 and `fire_compiler.py`'s tokenizer does not. A `[]` here would
-        make that file contribute no walls and look like a file that imports
-        nothing.
+        The shape is not hypothetical — the repository had one, and this row
+        used to BE it: `test_formal_libc_symbol.py` carries an f-string
+        replacement field with a newline in it, which this tokenizer refused
+        because the scanner asked "is there a line end here?" without ever
+        asking "am I inside code?". **That was FIXED on 2026-10-05**
+        (`work/formal32-sweep-b13`: a replacement field MAY span lines, per PEP
+        701), and the repository's own corpus disagreement with CPython is gone.
+
+        So the fixture has to be a file the backend still cannot read, or this
+        row would be asserting a defect that is fixed — and it would keep
+        asserting it until somebody noticed, which is the same stale-needle
+        shape the `bugs/TEST_*` family is about. It is now a genuinely
+        unlexable byte sequence, and the f-string is a POSITIVE case one row
+        down, because that is what it now is.
         """
-        path = self.path("broken.py", "s = f\"a {1 +\n 2} b\"\n")
+        path = self.path("broken.py", "def f(:\n  pass\n")
         self.assertIsNone(W.module_imports(path),
                           "an unreadable file must not read as 'imports "
                           "nothing' — that is the narrower answer wearing the "
                           "same word")
         ok = self.path("fine.py", "import pwd\n")
         self.assertEqual(W.module_imports(ok), ["pwd"])
+        # The shape that used to be the fixture, asserted in the direction it
+        # now goes: read, and read as importing nothing because it does.
+        multiline = self.path("multiline.py", "s = f\"a {1 +\n 2} b\"\n")
+        self.assertEqual(W.module_imports(multiline), [],
+                         "a replacement field spanning LINES parses (PEP 701) "
+                         "since 2026-10-05, and this program imports nothing, so "
+                         "[] is now the honest answer where None used to be")
 
     def test_the_closure_is_transitive_because_the_build_links_it(self):
         """A file that never spells the wall is still refused on it.
