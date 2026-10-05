@@ -2185,6 +2185,12 @@ class TestOleanCurrency(unittest.TestCase):
         "work": "import ProofLib\nimport X86\n",
         "Refine": "import ProofLib\n",
         "Contracts": "import ProofLib\nimport Refine\n",
+        # `lib/Peephole.lean`, added 2026-10-05 with `formal/peephole.py`. It
+        # imports X86 as well as ProofLib: the x86-64 half of the peephole pass
+        # needs `x86_step`, and a module that only imported ProofLib would make
+        # the currency check's graph a fiction in the one direction that hides a
+        # stale `.olean`.
+        "Peephole": "import ProofLib\nimport X86\n",
     }
 
     def setUp(self):
@@ -2283,11 +2289,11 @@ class TestOleanCurrency(unittest.TestCase):
         change to the fixture cannot quietly change what is being pinned.
 
         Editing `X86` — the case the defect was found on — rebuilds `work` and
-        leaves `ProofLib` (27MB, ~80s) and the two modules that never import it
-        alone. Editing `ProofLib` rebuilds everything that imports it, directly
-        or through one hop.
+        `Peephole`, and leaves `ProofLib` (27MB, ~80s) and the two modules that
+        never import it alone. Editing `ProofLib` rebuilds everything that
+        imports it, directly or through one hop.
 
-        The second set is the five names that are not `IEEE754`, and saying so
+        The second set is the six names that are not `IEEE754`, and saying so
         is the point: `IEEE754` is FIRST in `LIBRARY_MODULES` because it imports
         NOTHING, so editing the root leaves it exactly where it was. A reader who
         expects six has imported `IEEE754`'s position in the library for its
@@ -2302,11 +2308,12 @@ class TestOleanCurrency(unittest.TestCase):
         self._edit("X86")
         mid = self._digests()
         self.assertEqual({s for s in self.SOURCES if before[s] != mid[s]},
-                         {"X86", "work"})
+                         {"X86", "work", "Peephole"})
         self._edit("ProofLib")
         after = self._digests()
         self.assertEqual({s for s in self.SOURCES if mid[s] != after[s]},
-                         {"ProofLib", "X86", "work", "Refine", "Contracts"})
+                         {"ProofLib", "X86", "work", "Refine", "Contracts",
+                          "Peephole"})
 
     def test_a_touch_is_not_an_edit(self):
         """Content-based, with no `mtime` in the decision — at the DIGEST's

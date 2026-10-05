@@ -1260,6 +1260,14 @@ LIBRARY_TRUST = {
     # of this module is the finding, and it is why the arithmetic's cost is
     # bounded while the comparisons' is zero.
     "IEEE754": (0, 0, 19, 19),
+    # `lib/Peephole.lean`, added 2026-10-05: the three peephole rules
+    # `formal/peephole.py` may perform, each proved against the machine
+    # model with its side conditions stated. `0` in the axiom column is
+    # the point of the module — the rules reason about `Arm64State`
+    # with `omega` and `bv_decide` and reach no axiom, so a rewrite the
+    # pass performs is one whose soundness does not rest on a decision
+    # procedure's fidelity. Nine `bv_decide` sites, no `sorry`.
+    "Peephole": (0, 0, 9, 9),
 }
 
 #: What the CLOSURE census measured, per module: how many theorems were asked,

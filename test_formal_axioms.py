@@ -75,7 +75,8 @@ from formal import lean as L                      # noqa: E402
 # binary64 semantics over the `UInt64` bit pattern, and `group_census` has to
 # cover it for the same reason it covers every other module: a module outside
 # this tuple is a module whose axioms nobody counts.
-LIBRARY_MODULES = ("IEEE754", "ProofLib", "Refine", "X86", "work", "Contracts")
+LIBRARY_MODULES = ("IEEE754", "ProofLib", "Refine", "X86", "work", "Contracts",
+                    "Peephole")
 FOUNDATION = set(L.AXIOM_FOUNDATION)
 
 # The theorems whose axiom set this campaign CHANGED, plus the three that keep

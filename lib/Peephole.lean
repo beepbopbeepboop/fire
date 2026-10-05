@@ -109,11 +109,11 @@ theorem arm64_set_reg_nzcv (i : Nat) (s : Arm64State) (v : UInt64) :
     (arm64_set_reg i s v).nzcv = s.nzcv := by
   unfold arm64_set_reg; split <;> rfl
 
-theorem arm64_set_reg_mem' (i : Nat) (s : Arm64State) (v : UInt64) :
+theorem arm64_set_reg_mem_unchanged (i : Nat) (s : Arm64State) (v : UInt64) :
     (arm64_set_reg i s v).mem = s.mem := by
   unfold arm64_set_reg; split <;> rfl
 
-theorem arm64_set_reg_pc' (i : Nat) (s : Arm64State) (v : UInt64) :
+theorem arm64_set_reg_pc_unchanged (i : Nat) (s : Arm64State) (v : UInt64) :
     (arm64_set_reg i s v).pc = s.pc := by
   unfold arm64_set_reg; split <;> rfl
 
@@ -270,8 +270,8 @@ theorem peephole_arm64_mov_self (s : Arm64State) (code : Nat → UInt8)
       exact arm64_set_reg_reg_same _ _ _ hrn
     · exact arm64_reg_set_reg_other _ _ _ _ hi hix
   · rw [ht]; exact arm64_set_reg_nzcv _ s _
-  · rw [ht]; exact arm64_set_reg_mem' _ s _
-  · rw [arm64_steps_one_seq _ _ _ hs (by rw [ht, arm64_set_reg_pc', hpc])]
+  · rw [ht]; exact arm64_set_reg_mem_unchanged _ s _
+  · rw [arm64_steps_one_seq _ _ _ hs (by rw [ht, arm64_set_reg_pc_unchanged, hpc])]
     simp [hpc]
 
 /-- **Rule `arm64/add_imm_fuse`.** `add xd, xn, #i` followed by
@@ -371,8 +371,8 @@ theorem peephole_arm64_add_imm_fuse (s : Arm64State) (code : Nat → UInt8)
       + UInt64.ofNat j
       = arm64_reg (w1 >>> 5 &&& 0x1f).toNat s + UInt64.ofNat (i + j) := by
     rw [UInt64.add_assoc, u64_ofNat_add]
-  have hpc1 : s1.pc = s.pc := by rw [hs1', arm64_set_reg_pc']
-  have hpc3 : s3.pc = s.pc := by rw [hs3', arm64_set_reg_pc']
+  have hpc1 : s1.pc = s.pc := by rw [hs1', arm64_set_reg_pc_unchanged]
+  have hpc3 : s3.pc = s.pc := by rw [hs3', arm64_set_reg_pc_unchanged]
   refine ⟨?_, ?_, ?_, ?_, ?_⟩
   · intro k hk
     rw [e2 k hk, hs3']
@@ -390,8 +390,8 @@ theorem peephole_arm64_add_imm_fuse (s : Arm64State) (code : Nat → UInt8)
   · have hp := hpair
     rw [hstep2] at hp
     have e := congrArg (fun t : Arm64State => t.mem) (Option.some.inj hp)
-    rw [arm64_set_reg_mem'] at e
-    exact e.symm.trans (by rw [hs1', arm64_set_reg_mem'])
+    rw [arm64_set_reg_mem_unchanged] at e
+    exact e.symm.trans (by rw [hs1', arm64_set_reg_mem_unchanged])
   · rw [arm64_steps_two_seq _ _ _ _ hs1 hpc1 hpair]
     simp [hpc]
   · rw [arm64_steps_one_seq _ _ _ hs3 hpc3]
@@ -483,8 +483,8 @@ theorem peephole_arm64_copy_chain (s : Arm64State) (code : Nat → UInt8)
       = arm64_reg (w1 >>> 5 &&& 0x1f).toNat s := by
     rw [hs1', hlink]
     exact arm64_set_reg_reg_same _ _ _ hrd1
-  have hpc1 : s1.pc = s.pc := by rw [hs1', arm64_set_reg_pc']
-  have hpc3 : s3.pc = s.pc := by rw [hs3', arm64_set_reg_pc']
+  have hpc1 : s1.pc = s.pc := by rw [hs1', arm64_set_reg_pc_unchanged]
+  have hpc3 : s3.pc = s.pc := by rw [hs3', arm64_set_reg_pc_unchanged]
   refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · rw [hs3']
     exact arm64_set_reg_reg_eq _ _ _ hrd2
@@ -492,7 +492,7 @@ theorem peephole_arm64_copy_chain (s : Arm64State) (code : Nat → UInt8)
     rw [hs3']
     exact arm64_reg_set_reg_other k (w2 &&& 0x1f).toNat _ _ hk hne
   · rw [hs3', arm64_set_reg_nzcv]
-  · rw [hs3', arm64_set_reg_mem']
+  · rw [hs3', arm64_set_reg_mem_unchanged]
   · intro k hk
     by_cases hka : k = (w1 &&& 0x1f).toNat
     · exact Or.inr hka
@@ -513,8 +513,8 @@ theorem peephole_arm64_copy_chain (s : Arm64State) (code : Nat → UInt8)
   · have hp := hpair
     rw [hstep2] at hp
     have e := congrArg (fun t : Arm64State => t.mem) (Option.some.inj hp)
-    rw [arm64_set_reg_mem'] at e
-    exact e.symm.trans (by rw [hs1', arm64_set_reg_mem'])
+    rw [arm64_set_reg_mem_unchanged] at e
+    exact e.symm.trans (by rw [hs1', arm64_set_reg_mem_unchanged])
   · rw [arm64_steps_two_seq _ _ _ _ hs1 hpc1 hpair]
     simp [hpc]
   · rw [arm64_steps_one_seq _ _ _ hs3 hpc3]

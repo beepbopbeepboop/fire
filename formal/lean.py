@@ -139,7 +139,8 @@ import time
 # is INFRASTRUCTURE, and it is in this tuple rather than unbuilt because the
 # hole census and the `.olean` currency check read the tuple — a module outside
 # it is a module nothing checks.
-LIBRARY_MODULES = ("IEEE754", "ProofLib", "X86", "work", "Refine", "Contracts")
+LIBRARY_MODULES = ("IEEE754", "ProofLib", "X86", "work", "Refine", "Contracts",
+                  "Peephole")
 VERDICT_EXT = ".leanverdict"
 # Where a library module's own hole census is stored, beside the .olean it was
 # measured from and under the same key — so a cas HIT on the .olean is a hit on
