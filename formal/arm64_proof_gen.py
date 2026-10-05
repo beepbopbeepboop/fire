@@ -10026,7 +10026,12 @@ def generate_arm64_proof(prog, code, info) -> str:
     if refines is not None:
         refines_text = ("\n\n" + SPECS.refines_section(
             func_name, f"{func_name}_prog", refines,
-            machine_half=_opaque is None))
+            machine_half=_opaque is None,
+            missing_reason=(
+                "this function calls out of the image, so `arm64_step` "
+                "returns `none` at the call and no execution in this file "
+                "completes — the universal theorem above states reachability "
+                "of the call instead of a result value.")))
 
     if trunc_defs:
         trunc_defs_section = (

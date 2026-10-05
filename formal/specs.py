@@ -309,19 +309,25 @@ def _closed_range(rng: int) -> str:
 
 
 def refines_section(func_name: str, prog_name: str, ref: Refines,
-                    machine_half: bool = True) -> str:
+                    machine_half: bool = True,
+                    missing_reason: str = "") -> str:
     """The Lean text of the refinement section for one annotated program.
 
     `prog_name` is the `runProg` name the universal theorem is about — the same
     string `<func_name>_prog`, passed in rather than rebuilt so that the two
     halves of the composition cannot disagree about it.
 
-    `machine_half` is False when the generated file's universal theorem is not
-    the value-returning form (a function that calls out of the image), in which
-    case `main_refines_spec` would be a theorem about a run the model cannot
-    complete.  The model-level half is still emitted, because it is true and it
-    is the half a reader of the specification can check; the missing half is
-    named in a comment rather than left as an absence.
+    `machine_half` is False when the generated file's universal theorem cannot
+    be used to say what the machine RETURNS, in which case `main_refines_spec`
+    would be a theorem about a run the file has not characterised.  Two backends
+    are in that position and for different reasons, so `missing_reason` is the
+    caller's sentence and not one hard-coded here: on arm64 it is a function
+    that calls out of the image (`arm64_step` returns `none` at the call), and
+    on x86-64 it is an end-to-end theorem that is a `sorry`.  The model-level
+    half is still emitted in both cases, because it is true and it is the half a
+    reader of the specification can check; the missing half is NAMED in a
+    comment rather than left as an absence, because an absent half and a
+    forgotten half read the same in a diff.
     """
     spec = ref.spec
     rng = ref.rng
@@ -333,16 +339,14 @@ def refines_section(func_name: str, prog_name: str, ref: Refines,
         return (
             f"/- SPECIFICATION REFINEMENT: `{spec}`, over the {rng} inputs "
             f"`0 … {rng - 1}`.\n\n"
-            f"  Only the MODEL half is emitted here.  This function calls out "
-            f"of the image, so `arm64_step` returns `none` at the call and no "
-            f"execution in this file completes: the universal theorem above "
-            f"states reachability of the call instead of a result value.  "
-            f"`main_refines_spec` would therefore be a theorem about a run "
-            f"that never finishes, which is the shape a claim takes when "
-            f"nobody is looking at what the model supports.\n\n"
-            f"  What IS proved is that the model agrees with the "
-            f"specification on every one of the {rng} inputs, which is the "
-            f"half that does not need the call. -/\n"
+            f"  Only the MODEL half is emitted here, and the reason is this "
+            f"file's: {missing_reason.strip()}\n\n"
+            f"  Composing with a claim this file has not established would "
+            f"make Lean ACCEPT a statement about the machine while "
+            f"establishing nothing about it, which is the shape a believed "
+            f"falsehood takes.  What IS proved is that the model agrees with "
+            f"the specification on every one of the {rng} inputs — the half "
+            f"that does not need the machine. -/\n"
             + model)
     return (
         f"/- SPECIFICATION REFINEMENT: `{spec}`, over the {rng} inputs "
