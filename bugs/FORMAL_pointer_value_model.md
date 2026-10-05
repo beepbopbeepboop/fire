@@ -132,8 +132,10 @@ function (`pointer_frame_bindings` is collected in the loop that already walks
 every function once, and asked from inside the fixpoint rather than beside it).
 The 2026-10-02 per-struct census is the body of work that says what a
 build-cost number has to be measured against (its doc is deleted with its fix,
-and the one member of the family still open is
-`bugs/PERF_struct_field_names_is_still_asked_once_per_function.md`), and the
+and so is the last member of that family — the one-word sole-field chain, which
+asked the field set once per FUNCTION; `one_field_struct_names` now publishes
+the field's NAME as its value, so `model.sole_field_answer` reads it off the
+partition instead of re-deriving it), and the
 honest reading of this one is that a fixpoint EDGE is not free even when it
 merges nothing: the walk is per function and there are a thousand functions.
 

@@ -13,9 +13,11 @@ function: `#functions × #methods × body size` instead of
 `#structs × #methods × body size`.
 
 That is the shape the 2026-10-02 per-struct census measured (its doc is
-deleted with the fix, as is `bugs/PERF_struct_field_names_is_still_asked_once_per_function.md`,
-which was the last member of the family and is deleted with the fix that
-retired its asker) (43 508 redundant derivations on `myinterpreter.py`, 33 s of a
+deleted with its fix, and so is the last member of that family — whose symptom
+was `struct_field_names` asked once per FUNCTION by the one-word sole-field
+chain, and whose fix is that `one_field_struct_names` now publishes the field's
+NAME as its value, 2026-10-05) (43 508 redundant derivations on
+`myinterpreter.py`, 33 s of a
 97 s build) and its fix is the module-level tables `formal/build.py` derives once
 and threads: `framed_struct_names`, `one_field_struct_names`, the `wide` table.
 Three per-function askers survived that, and all three are fixed:
