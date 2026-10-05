@@ -11432,6 +11432,55 @@ print(run('x/y.txt'))
     test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable()
     test_print_of_a_function_value_is_not_a_decimal_address()
 
+    # `len()` of a value the codegen could not type, where that value is a
+    # LOCAL declared as a plain `int` — the shape that took out `make mojoc`,
+    # `selfhost` and `bootstrap-stage2-cc` together.
+    #
+    # `_len_of_boxed` (the `len()`-of-a-boxed-value lowering, which asks the
+    # runtime registries which container it holds) used to read its subject
+    # with `_new_val('int64_t', value)`, and `_new_val` casts a bare integer
+    # LITERAL and nothing else. So when the subject is a variable declared as
+    # any other scalar, the emitted line is `int64_t _tN = <that var>;` with
+    # no cast, which is `non-trivial conversion in 'var_decl'` under
+    # `-fgimple`'s strict verifier — a hard gcc error and no binary.
+    #
+    # The declaration is the whole reason this program exists. `info = None`
+    # types a local `int`, and a NESTED `def`'s local takes that path (the
+    # same source at module level declares `int64_t` and compiles), so
+    # `mojo/middle/coro.py`'s `_visit_call` — `pinfo = None` then
+    # `pinfo = gen_params[gname]` then `len(pinfo)` — is four of them, plus one
+    # in `myinterpreter.py`'s `MojoString`. `_ensure_local` is the chokepoint
+    # that already answers "this value in a temp of MY type, casting when its
+    # DECLARED type is a different scalar", and it emits nothing extra when
+    # there is no mismatch.
+    #
+    # Asserted as the emitted TEXT and not only as "it compiles": a `len()`
+    # that stopped routing through the registries at all would also compile,
+    # and would be the `mojo_list_len`-reads-a-string's-bytes bug that
+    # `_len_of_boxed` exists to fix. `mojo_is_registered_bytes` is in the
+    # must-have list for that reason, and `(int64_t)info` is the exact text
+    # whose absence is the bug.
+    test_c_shape("len_of_a_local_declared_from_None_is_cast_into_its_int64_t_copy", """\
+def outer(names, table):
+    def visit(node, caller):
+        info = None
+        key = names
+        if key in table:
+            info = table[key]
+        if info is None:
+            return 0
+        n = len(info)
+        return n
+    return visit(names, table)
+
+def main():
+    t = {"a": [1, 2, 3]}
+    print(outer("a", t))
+main()
+""", ["mojo_is_registered_bytes", "mojo_is_registered_dict", "(int64_t)info"],
+       ["int64_t _t = info;"])
+
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0
