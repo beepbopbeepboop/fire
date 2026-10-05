@@ -552,6 +552,20 @@ MEASURED_PEAK_GB = {
     # RSS of the tree), measured by the kernel instead of by a sampler, and
     # three runs agreed to within 2 MB: 30.4, 29.8, 30.3.
     'formal-field-walk': (0.03, 'measured'),  # 0.08 s, 3 cases, no builds
+    # …and `formal-host-import-wall`, the fourth file the estate check named
+    # (2026-10-04, with `work/formal27-6`'s tool), measured the same way:
+    # three runs, `/usr/bin/time -l` because 0.46 s is shorter than memcap's
+    # own poll interval. 0.46-0.47 s wall and 48.3-50.1 MB maximum RSS —
+    # `tiny` by 80x over its 4 GB ceiling.
+    'formal-host-import-wall': (0.05, 'measured'),  # 0.46 s, 17 cases
+    # …and `formal-per-struct-asks`, named by the same estate check on the same
+    # day and for the same reason — a test in NO bucket and NO `UNREGISTERED`,
+    # so seven assertions about a per-FUNCTION ask of a per-STRUCT table were
+    # red in nobody's tally. Measured the same way: 0.95-0.98 s and 42.1-42.5 MB
+    # maximum RSS over three runs, `tiny` by 95x, no build and no Lean (it
+    # measures `formal/model.py`'s own predicates with the per-struct tables
+    # stubbed).
+    'formal-per-struct-asks': (0.04, 'measured'),  # 0.96 s, 7 checks
     # `formal-glob` is the other file the same estate check named on 2026-10-04,
     # measured the same way (three runs, two instruments): 40.7 s wall and
     # 65.6 MB maximum RSS, which memcap's own poll rounds to the 0.1 GB its
@@ -2969,6 +2983,40 @@ test('formal-field-walk', [PY, 'test_formal_field_walk.py'], mem='tiny',
             'formal/imports.py', 'formal/build.py',
             'tools/formal_field_walk_differential.py'] + FORMAL_BUILD_INPUTS,
      desc='iter_statement_nodes against the full walk, 61 statement shapes')
+# The host-import WALL's READERS, not its numbers. `tools/formal_host_import_wall.py`
+# was promoted out of scratch by `work/formal27-6` and three bug docs had already
+# described it in prose, which is the shape a measurement's readers drift in: an
+# `ast`-based walk calls `traceback` a 38-file row where the backend says 0, and
+# a "could not be read" that returns `[]` reads as "imports nothing". So what is
+# pinned is the SET OF READERS — `imported_modules` really wants the node classes,
+# an unreadable file is `None`, `--unmodelled` is the before/after instrument,
+# `alone` means the only wall and not the first found. The numbers themselves are
+# deliberately NOT pinned; a snapshot of one is red within a week and means
+# nothing when it goes green.
+#
+# Registered rather than excused: 17 cases, 0.36 s, peak 0.0 GB, no build and no
+# Lean (`test_formal_host_import_wall.py`'s own docstring says so), so it is in
+# `check` for the `formal-field-walk` reason — at this price an excuse is the
+# wrong answer — and in `proofs` so the formal bucket is the whole picture.
+test('formal-host-import-wall', [PY, 'test_formal_host_import_wall.py'],
+     mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_host_import_wall.py', 'formal/imports.py',
+            'tools/formal_host_import_wall.py',
+            'tools/formal_sweep_causes.py'] + FORMAL_BUILD_INPUTS,
+     desc='the host-import wall tool: which readers it asks, not its numbers')
+# The other file the same estate check named on the same day, registered on
+# the same reasoning rather than excused: seven assertions that a per-STRUCT
+# predicate (`struct_is_framed`, `struct_is_one_field`, `struct_field_names`) is
+# not asked once per FUNCTION — the shape 43 508 redundant derivations on
+# `myinterpreter.py` measured, and the two surviving per-function askers the fix
+# left behind are what this pins. 0.96 s, no build, no Lean, so `check`.
+test('formal-per-struct-asks', [PY, 'test_formal_per_struct_asks.py'],
+     mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_per_struct_asks.py', 'formal/model.py',
+            'formal/build.py'] + FORMAL_BUILD_INPUTS,
+     desc='a per-struct predicate is asked once per struct, not once per function')
 # `glob`, differential against CPython's own. Registered rather than excused
 # twice over: this name was registered by two commits that each registered two
 # test files nobody had registered before (5b2e62c3 and 574d9135), and because
@@ -3133,6 +3181,15 @@ BUCKETS = {
               # loop; `formal-glob` is deliberately NOT here (31.8 s, two
               # machines per group).
               'formal-field-walk',
+              # The host-import WALL's readers. 17 cases, 0.36 s, no build and
+              # no Lean, so the `formal-field-walk` rule puts it in the everyday
+              # loop; it arrived with `work/formal27-6` in NO bucket and NO
+              # `UNREGISTERED`, which is what the estate check named.
+              'formal-host-import-wall',
+              # …and `formal-per-struct-asks`, named by the estate check on the
+              # same day for the same reason: in NO bucket and NO
+              # `UNREGISTERED`. 7 checks, 0.96 s, no build, no Lean.
+              'formal-per-struct-asks',
               # The suite tests ITSELF, and so does the inventory of what runs.
               # Both were in `smoke`, which is in no bucket, so `make gate`
               # never executed either — and `suite-self-test` is where the
@@ -3306,6 +3363,18 @@ BUCKETS = {
                # difference between an absent value and a value, and a wrong one
                # is a program that runs and answers the wrong thing.
                'formal-optional',
+               # …and `formal-host-import-wall`, which arrived with
+               # `work/formal27-6`'s tool in neither a bucket nor
+               # `UNREGISTERED`. It pins WHICH READERS
+               # `tools/formal_host_import_wall.py` asks and not the numbers it
+               # prints, and it is in `check` rather than only here for the
+               # `formal-field-walk` reason: no build, no Lean, 0.36 s.
+               'formal-host-import-wall',
+               # …and `formal-per-struct-asks`, in both buckets for the
+               # `formal-field-walk` reason — the estate check named it in NO
+               # bucket and NO `UNREGISTERED`, and at 0.96 s with no build an
+               # excuse is the wrong answer.
+               'formal-per-struct-asks',
                # …and the two that arrived with the formal3 batch and were in
                # NO bucket and NO `UNREGISTERED`, which is what the estate check
                # in `suite-self-test` was reporting — and it is a FAIL on a test

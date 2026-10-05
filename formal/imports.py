@@ -1009,6 +1009,97 @@ def _host_tier_conflicts() -> list:
 
 
 
+def host_module_verdict(name: str, relative_to: str = None,
+                        project_root: str = None) -> tuple:
+    """`(answer, detail)` — the ONE classification of a name, with every
+    outcome NAMED rather than encoded as an absence.
+
+    `answer` is one of six strings and there is no other answer:
+
+    | answer | meaning | detail |
+    |---|---|---|
+    | `'front-end'` | this backend's front end implements it as a compile-time transform | `''` |
+    | `'written'` | this tree has a SOURCE, so the name is answered here | the resolved path |
+    | `'admitted'` | written, and `@admitted` contracts answer the rest | the resolved path |
+    | `'modelled'` | reachable in principle, not implemented — a gap with an owner | `''` |
+    | `'unreachable'` | a permanent fact about the target | `''` |
+    | `'unclassified'` | CPython ships it and no tier says which of the two it is | `''` |
+    | `'not-a-module'` | nothing here provides it and CPython does not ship it — a typo or a gap in this repository | `''` |
+
+    **Why this exists, and what it is fixing.** `host_module_tier` answers a
+    membership question — "is this name in a tier" — and its `''` is ambiguous
+    in the one direction that matters to a report: a name this tree has
+    **WRITTEN** leaves its tier (that is the rule on `HOST_MODELLED`), so `os`,
+    `sys` and `os._syscalls` answer `''` and are the three most-imported modules
+    in the corpus, while 217 CPython standard-library names answer `''` and are
+    in no tier at all. Nothing in the return value tells those apart, so every
+    consumer that needed to know had to combine two functions, and three of them
+    did it three ways:
+
+      * `tools/formal_sweep_causes.py` inferred it from a `formal/hostmods/`
+        path existing, which is a THIRD definition again — it misses a
+        repository sibling, a package `__init__.mojo`, and every module outside
+        `formal/hostmods/`;
+      * `test_formal_imports.py::test_no_unclassified_stdlib_name_is_imported_by_anything`
+        paired the tier with `resolve_module_path`, which is the definition
+        below, and had to say so in a comment because the accessor did not;
+      * `tools/formal_host_import_wall.py` paired both with `is_cpython_stdlib`.
+
+    So a report could count a written module as "no verdict", or an
+    unclassified standard-library module as "reachable", and each of those is a
+    statement about the target that the table does not support. The doc that
+    records the whole area is
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md`, whose §0.1 calls
+    the ambiguous `''` "the load-bearing half".
+
+    **`'unclassified'` is the answer that makes the queue decidable.** The 217
+    are a real queue and this function does not pretend otherwise — it NAMES
+    them, so a coverage report counts them as "no verdict" because the function
+    said so rather than because a set lookup missed. Per-name placement stays
+    that doc's work, and `test_no_unclassified_stdlib_name_is_imported_by_anything`
+    stays the tripwire that queues a name the moment a file imports one.
+
+    **The order of the tests is the order of the facts.** Front-end first,
+    because `dataclasses` is answered by the compiler rather than by a module;
+    then `'admitted'`, which is the only tier whose own rule is "there is a
+    source" and so is true of a written name; then the SOURCE, because a name
+    with a source is answered whatever a tier entry left behind says — a tier
+    entry behind a written module is the bookkeeping state
+    `test_formal_link_accounting.py::HOST_SET_ADDED_THEN_WRITTEN` tracks, and
+    reporting it as `modelled` would schedule work that is done; then the two
+    claim tiers; then `is_cpython_stdlib`, whose authority is the interpreter's
+    own table; and `'not-a-module'` last, because it is the only answer that is
+    a statement about THIS repository rather than about the target.
+
+    `relative_to`/`project_root` go to `resolve_module_path` unchanged, so a
+    caller that has the importing file in hand gets the resolver's own
+    nearest-first answer and one that does not gets the repository-root answer.
+    Nothing here raises: a name that is empty, or a resolver that cannot be
+    consulted, degrades to the answer that is true without it.
+    """
+    if not name:
+        return ("not-a-module", "")
+    if is_frontend_provided(name):
+        return ("front-end", "")
+    tier = host_module_tier(name)
+    if tier == "admitted":
+        # The admitted tier is the one whose membership rule IS a source, so the
+        # path is asked for rather than reported empty — a reader asking "then
+        # what answers it" gets the file.
+        return ("admitted",
+                resolve_module_path(name, relative_to=relative_to,
+                                    project_root=project_root) or "")
+    resolved = resolve_module_path(name, relative_to=relative_to,
+                                   project_root=project_root)
+    if resolved:
+        return ("written", resolved)
+    if tier:
+        return (tier, "")
+    if is_cpython_stdlib(name):
+        return ("unclassified", "")
+    return ("not-a-module", "")
+
+
 def _is_host_module(name: str) -> bool:
     """Whether this name is a HOST MODULE this path refuses for want of source.
 

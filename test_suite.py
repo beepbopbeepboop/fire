@@ -1930,8 +1930,10 @@ def test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root():
 # It is a per-file list rather than a regex over `timeout=[0-9]+` because the
 # question at a site is which KIND of child it is — a COMPILE, a LINK, a RUN, a
 # sweep, or none of the four — and that is not decidable from the text. Measured
-# 2026-10-04 with python3 3.14: 205 sites over 57 files, after this tree's
-# `test_formal_sweep.py` (7) and `test_formal_libc_symbol.py` (1) were converted.
+# 2026-10-04 with python3 3.14: 206 sites over 58 files, after this tree's
+# `test_formal_sweep.py` (7) and `test_formal_libc_symbol.py` (1) were converted
+# and `test_formal_call_proof_gen.py` (1) joined the census — a `subprocess.run`
+# of an image the div0-guard case builds, added by `work/formal27-1`.
 # That is this predicate's census — a `timeout=` KEYWORD read off the AST, over
 # `is_test_file_name`, which is EITHER spelling and so also holds the two
 # `formal/*_test.py` and the one `scripts/*_test.py` — and it is smaller than
@@ -1961,6 +1963,7 @@ STALE_PER_CHILD_BUDGETS = {
     'test_dict_tuple_key.py': 3,
     'test_formal_admitted.py': 7,
     'test_formal_argparse.py': 6,
+    'test_formal_call_proof_gen.py': 1,
     'test_formal_cross_module.py': 2,
     'test_formal_dylib.py': 2,
     'test_formal_external_call.py': 1,
