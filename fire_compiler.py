@@ -1214,10 +1214,15 @@ def _prefix_is_interpolated(prefix: str) -> bool:
     brace-depth-aware closing-quote scan) and `replace_multiline_strings` (which
     needs to know whether a newline inside the literal is content, and whether
     the literal has to be collapsed to a placeholder). The second of those was
-    the bug `bugs/PARSE_FAIL_fire_compiler_cannot_lex_a_multiline_f_string.md`
-    records: with no shared predicate the scanner asked "is there a line end
-    here?" without ever asking "am I inside code?", and CPython's rule for a
-    replacement field is that it MAY span lines.
+    the bug whose symptom was `fire_compiler.py` refusing a PEP 701 f-string
+    whose replacement field spans **lines** — `test_formal_libc_symbol.py` was
+    the one file in the 2026-10-04 sweep whose refusal read `unterminated string
+    literal`, and the fix's record is
+    `bugs/FORMAL_sweep_work_map_2026-10-05_b13.md` §5 (fixed 2026-10-05; the
+    test is `test_string_literal_lexing.py`'s `LITERALS` block). With no shared
+    predicate the scanner asked "is there a line end here?" without ever asking
+    "am I inside code?", and CPython's rule for a replacement field is that it
+    MAY span lines.
 
     Explicit `==` comparisons, not `c in 'fFtT'`, for the reason
     `_string_prefix_start` gives in full: this codegen's compiled `in`-for-char*
@@ -2210,9 +2215,11 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                     # possible at all is `_scan_string_end`'s replacement-field
                     # depth; without that this branch is dead code, which is the
                     # shape of the bug
-                    # `bugs/PARSE_FAIL_fire_compiler_cannot_lex_a_multiline_f_string.md`
-                    # records — the first of the two halves was missing and this
-                    # is the second.
+                    # the fixed bug (a PEP 701 f-string whose replacement field
+                    # spans lines was refused as an unterminated literal; see
+                    # `_replacement_field_depth`'s docstring and
+                    # `bugs/FORMAL_sweep_work_map_2026-10-05_b13.md` §5) — the
+                    # first of the two halves was missing and this is the second.
                     interpolated = _prefix_is_interpolated(src[start:i])
                     end = _scan_string_end(src, i, c, False, interpolated)
                     if end < 0:
