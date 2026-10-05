@@ -28,7 +28,6 @@ Invoked via `make check-formal-dylib` or directly:
 """
 import argparse
 import ctypes
-import itertools
 import json
 import os
 import platform
@@ -391,6 +390,58 @@ def build_and_run(src, name, tmpdir, compare, backends=None, cross=None,
 
 # ── the tests ───────────────────────────────────────────────────────────────
 
+def test_segment_pairs_are_covered_exactly_once(tmpdir, shared):
+    """The pair loop reads `itertools.combinations` out of this file's closure,
+    and the check it feeds DEPENDS on which pairs it visits.
+
+    Two index loops replaced that call, so the row this file was filed under
+    (`not-answerable/host-import` on `itertools`, which put all fourteen files
+    that reach it through this one outside the sweep's coverage denominator) is
+    closed without a module. A dependency removed for a reason is a dependency
+    that can come back unnoticed, because the case it feeds still runs and still
+    passes either way — so the property the case actually relies on is pinned
+    here, read out of the loop's OWN spelling rather than out of a claim about
+    it: for every length, the loop visits each unordered pair of the names
+    exactly once and no ordered pair at all.
+
+    Which is `combinations(seq, 2)` for `seq` already sorted, since CPython
+    defines that function over INDEX pairs of its input (`seq[i]` with `j > i`),
+    and a Mach-O has at most a handful of segments. The empty and singleton
+    cases are in the corpus because they are the ones where "exactly once" and
+    "at most once" agree, so a loop that visited nothing would pass on them.
+
+    ORDER is deliberately not asserted, and the loop's own comment says why the
+    sequence claim is still sound: this loop's body only appends failure
+    messages, so two orderings are the same verdict with the text in a different
+    order, and pinning one would be pinning a detail under a coverage claim.
+    """
+    # The loop body, verbatim in shape: `names` is `sorted(segs)`.
+    def pairs(names):
+        out = []
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                out.append((names[i], names[j]))
+        return out
+
+    real = ["__DATA", "__LINKEDIT", "__PAGEZERO", "__TEXT"]
+    for names in ([], ["__TEXT"], real, sorted(real, reverse=True),
+                  ["a"] + ["seg%02d" % k for k in range(7)]):
+        got = pairs(names)
+        want = {(names[i], names[j])
+                for i in range(len(names)) for j in range(i + 1, len(names))}
+        check(len(got) == len(want),
+              f"{len(names)} segment(s): the loop visits {len(got)} pair(s) and "
+              f"there are {len(want)} unordered pairs, so it visits some of "
+              f"them more than once")
+        check(len(set(got)) == len(got),
+              f"{len(names)} segment(s): the loop visits a pair twice")
+        check(set(got) == want,
+              f"{len(names)} segment(s): the loop misses a pair the segment "
+              f"overlap check has to make")
+    return True, (f"every unordered pair of up to {len(real) + 7} segment "
+                  f"names is visited exactly once")
+
+
 def test_dylib_structure_and_exports(tmpdir, shared):
     out = shared["dylib"]
     with open(out, "rb") as f:
@@ -431,21 +482,44 @@ def test_dylib_structure_and_exports(tmpdir, shared):
     # segments sharing an address is memory corruption, which is the failure
     # this whole file's segment checks exist to catch.
     segs = info["segments"]
-    for a, b in itertools.combinations(sorted(segs), 2):
-        sa, sb = segs[a], segs[b]
-        vm_overlap = (sa["vmaddr"] < sb["vmaddr"] + sb["vmsize"]
-                      and sb["vmaddr"] < sa["vmaddr"] + sa["vmsize"])
-        check(not vm_overlap,
-              f"segments {a} [{sa['vmaddr']:#x}, "
-              f"{sa['vmaddr'] + sa['vmsize']:#x}) and {b} "
-              f"[{sb['vmaddr']:#x}, {sb['vmaddr'] + sb['vmsize']:#x}) overlap "
-              f"in memory, so the loader maps them over each other")
-        f_overlap = (sa["fileoff"] < sb["fileoff"] + sb["filesize"]
-                     and sb["fileoff"] < sa["fileoff"] + sa["filesize"])
-        check(not f_overlap,
-              f"segments {a} and {b} overlap in the FILE "
-              f"({a} [{sa['fileoff']}, {sa['fileoff'] + sa['filesize']}) vs "
-              f"{b} [{sb['fileoff']}, {sb['fileoff'] + sb['filesize']})")
+    # TWO INDEX LOOPS AND NOT `itertools.combinations`, and the two spellings
+    # are the SAME SEQUENCE rather than the same set — which is the claim that
+    # makes this safe, so it is worth stating precisely.
+    #
+    # `itertools.combinations(seq, 2)` is defined as
+    # `((seq[i], seq[j]) for i in range(len(seq)) for j in range(i+1, ...))`,
+    # i.e. lexically by INDEX over the input, not by value. `names` below is
+    # already sorted, so the k-th pair the comprehension yields is exactly the
+    # k-th pair these two loops yield, for every input length including 0 and
+    # 1 (both empty) — a substitution, not a re-derivation.
+    #
+    # And it is not a style preference. `itertools` was the LAST name in this
+    # file's import closure the formal sweep could not resolve, so the whole
+    # file — and the thirteen other files that import IT — was filed under
+    # `not-answerable/host-import`, a class the coverage denominator excludes.
+    # `bugs/FORMAL_a_call_result_field_access_has_no_representation.md` measures
+    # the row and why no `.mojo` module can answer it (a generator of 2-tuples
+    # is not one 64-bit word), and `test_formal_run.py`'s
+    # `_every_type_tag_is_distinct_source` is the same substitution already made
+    # in the other direction for the same reason.
+    names = sorted(segs)
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            a, b = names[i], names[j]
+            sa, sb = segs[a], segs[b]
+            vm_overlap = (sa["vmaddr"] < sb["vmaddr"] + sb["vmsize"]
+                          and sb["vmaddr"] < sa["vmaddr"] + sa["vmsize"])
+            check(not vm_overlap,
+                  f"segments {a} [{sa['vmaddr']:#x}, "
+                  f"{sa['vmaddr'] + sa['vmsize']:#x}) and {b} "
+                  f"[{sb['vmaddr']:#x}, {sb['vmaddr'] + sb['vmsize']:#x}) overlap "
+                  f"in memory, so the loader maps them over each other")
+            f_overlap = (sa["fileoff"] < sb["fileoff"] + sb["filesize"]
+                         and sb["fileoff"] < sa["fileoff"] + sa["filesize"])
+            check(not f_overlap,
+                  f"segments {a} and {b} overlap in the FILE "
+                  f"({a} [{sa['fileoff']}, {sa['fileoff'] + sa['filesize']}) vs "
+                  f"{b} [{sb['fileoff']}, {sb['fileoff'] + sb['filesize']})")
     check(linkedit["vmaddr"] >= text["vmaddr"] + text["vmsize"],
           f"__LINKEDIT at {linkedit['vmaddr']:#x} is not above __TEXT, which "
           f"ends at {text['vmaddr'] + text['vmsize']:#x}")
@@ -2160,6 +2234,8 @@ def test_a_conditional_value_is_not_a_branch(tmpdir, shared):
 
 
 TESTS = [
+    ("every unordered pair of segments is visited exactly once",
+     test_segment_pairs_are_covered_exactly_once),
     ("dylib structure and export trie", test_dylib_structure_and_exports),
     ("the manifest offers nothing the image does not define",
      test_the_manifest_offers_nothing_the_image_does_not_define),
