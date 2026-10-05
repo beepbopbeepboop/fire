@@ -1214,12 +1214,12 @@ LIBRARY_TRUST = {
 #: how many reached a decide axiom, and the two disagreements with the text
 #: census. Read out of a real `#print axioms` run over all of `lib/` through
 #: `formal/admitted.py::theorem_axiom_census`, and pinned because the number §7
-#: publishes is this one and there was nothing measuring it. **All 375 answered**
+#: publishes is this one and there was nothing measuring it. **All 423 answered**
 #: and the four columns partition each module exactly, which is asserted rather
 #: than hoped for: an unanswered theorem is counted in none of them.
 #:
-#: `reaches` is the honest fact: of the 375 theorems in `lib/`, **53** rest on a
-#: decide axiom and **304** are kernel-checked. `text_only` are theorems whose
+#: `reaches` is the honest fact: of the 423 theorems in `lib/`, **67** rest on a
+#: decide axiom and **344** are kernel-checked. `text_only` are theorems whose
 #: source names one of the tactics and whose closure has none — a losing tactic
 #: alternative is still text, so the site census overcounts, and each row is a
 #: place where a replacement would have changed nothing. `closure_only` are
@@ -1237,12 +1237,27 @@ LIBRARY_TRUST = {
 #: and is a measurement nothing can move without a Lean run. The merge of the two
 #: into one dict would make a site count and a theorem count differ by a row
 #: rather than by a table, which is how a reader ends up comparing them.
+#:
+#: **The whole table was re-derived on 2026-10-04 and the previous one was wrong
+#: in a DIRECTION, not only out of date.**  `AXIOM_SITE_RE`'s `decl` group was
+#: `[^.]+`, which cannot match a namespace-qualified declaration name — and five
+#: of the six `lib/` modules open a `namespace`, so Lean's per-use axiom name for
+#: every theorem inside one is `DylibExport.Semantics_refutable._native.…`,
+#: which that pattern rejected.  Every such theorem was therefore filed
+#: `text_only` ("its source names a tactic and its closure reaches none"), which
+#: is the one column whose purpose is to catch a closure the census cannot see.
+#: Consequences, all now corrected: `IEEE754` read `reaches 0` for 19 theorems
+#: that each carry their own `native_decide` axiom — while the comment on
+#: `LIBRARY_TRUST`'s IEEE754 row above asserted this very column said 19 — and
+#: `ProofLib`'s three `DylibExport` `native_decide` theorems were `text_only`.
+#: The fix is `AXIOM_SITE_RE`'s and is pinned by qualified-spelling samples in
+#: `test_the_axiom_names_are_classified_not_guessed`.
 AXIOM_CLOSURE = {
     #            asked  reaches  clean  text_only  closure_only  ofReduceBool
-    "Contracts": (7, 0, 6, 1, 0, 0),
-    "ProofLib": (255, 51, 192, 3, 9, 0),
-    "Refine": (22, 0, 20, 0, 2, 0),
-    "X86": (73, 2, 69, 1, 1, 0),
+    "Contracts": (7, 0, 7, 0, 0, 0),
+    "ProofLib": (267, 46, 213, 0, 8, 0),
+    "Refine": (29, 0, 29, 0, 0, 0),
+    "X86": (78, 2, 73, 1, 2, 0),
     "work": (18, 0, 17, 0, 1, 0),
     # Read out of a real `#print axioms` run over all 24 declarations of
     # `lib/IEEE754.lean`, on the pinned toolchain.  19 reach a decide axiom and
@@ -1252,6 +1267,13 @@ AXIOM_CLOSURE = {
     # also in its own closure and no theorem reaches an axiom through another
     # one, which is the opposite of `ProofLib`'s `arm64_cset_*` row and is
     # recorded as a contrast rather than left for a reader to infer.
+    #
+    # **This row is the one the regex defect was hiding**: the whole of
+    # `lib/IEEE754.lean` is inside `namespace IEEE754` (lines 49-415), so all 24
+    # of its axiom names are module-qualified and none of them matched
+    # `[^.]+`.  It read `reaches 0 / text_only 19` and the comment on
+    # `LIBRARY_TRUST`'s IEEE754 row — which says this column is where the 19
+    # comes from — was describing a measurement the code could not make.
     "IEEE754": (24, 19, 5, 0, 0, 0),
 }
 
@@ -2091,6 +2113,19 @@ def test_the_axiom_names_are_classified_not_guessed(tmpdir=None):
       theorem reported as unknown, so the FIRST measured run of this census
       parsed 193 of ProofLib's 255 and the shortfall was almost entirely
       theorems that reach nothing — the best outcome there is.
+
+    **A NAMESPACE-QUALIFIED `decl`, which is what four of the rows above do not
+    have and five of `lib/`'s six modules produce.**  `AXIOM_SITE_RE`'s `decl`
+    group was `[^.]+` and could not match one, so `axiom_site_tactic` answered
+    None for every theorem inside a `namespace` block and
+    `axiom_census_summary` filed each of them `text_only` — the column that
+    exists to catch a closure the census cannot see.  The names below are the
+    MEASURED `#print axioms` output of three theorems, one per shape of
+    qualification: a namespace (`DylibExport.Semantics_refutable`), a
+    module-named namespace wrapping the entire file
+    (`IEEE754.signed_zeros_are_equal`, and `lib/IEEE754.lean` is one `namespace`
+    from line 49 to 415), and a namespaced `bv_decide`
+    (`MF.fieldTag_inj`).
     """
     check(A.axiom_site_tactic("t32s_t8s._native.bv_decide.ax_1_5")
           == "bv_decide",
@@ -2098,6 +2133,29 @@ def test_the_axiom_names_are_classified_not_guessed(tmpdir=None):
     check(A.axiom_site_tactic("work_step_ldr_uoff._native.native_decide.ax_1_1")
           == "native_decide",
           "and neither is the native_decide spelling")
+    for qualified, tactic in (
+            ("DylibExport.Semantics_refutable._native.native_decide.ax_1_1",
+             "native_decide"),
+            ("IEEE754.signed_zeros_are_equal._native.native_decide.ax_1_1",
+             "native_decide"),
+            ("MF.fieldTag_inj._native.bv_decide.ax_1_1", "bv_decide"),
+            ("DylibExport.Semantics_refutable._native.bv_decide.ax_3_7",
+             "bv_decide"),
+    ):
+        check(A.axiom_site_tactic(qualified) == tactic,
+              f"the NAMESPACE-QUALIFIED measured name {qualified!r} is not "
+              f"classified to {tactic!r}. `AXIOM_SITE_RE`'s decl group must "
+              f"accept a dotted name, because every theorem inside a "
+              f"`namespace` — five of lib/'s six modules open one — carries "
+              f"one, and a classifier that answers None for those files every "
+              f"such theorem as `text_only`, which is the one column whose "
+              f"purpose is to catch a closure the census cannot see.")
+    check(A.AXIOM_SITE_RE.match(
+        "DylibExport.Semantics_refutable._native.native_decide.ax_1_1")
+        .group("decl") == "DylibExport.Semantics_refutable",
+        "the decl group must capture the WHOLE qualified name, so a reader can "
+        "tell which declaration the axiom belongs to; a pattern that stops at "
+        "the first dot classifies the right tactic for the wrong declaration")
     for standard in ("propext", "Classical.choice", "Quot.sound",
                      A.OF_REDUCE_BOOL):
         check(A.axiom_site_tactic(standard) is None,
@@ -2110,6 +2168,9 @@ def test_the_axiom_names_are_classified_not_guessed(tmpdir=None):
           "keeps the limit from being a silent gap")
     measured = ("'x86_step_ret' depends on axioms: [propext, Quot.sound]\n"
                 "'nat64' does not depend on any axioms\n"
+                "'IEEE754.signed_zeros_are_equal' depends on axioms: [propext, "
+                "Quot.sound, "
+                "IEEE754.signed_zeros_are_equal._native.native_decide.ax_1_1]\n"
                 "'mem_read_bytes_write_same' depends on axioms: [propext, "
                 "Classical.choice, Quot.sound, "
                 "mem_read_bytes_write_same._native.bv_decide.ax_1_15, "
@@ -2122,14 +2183,23 @@ def test_the_axiom_names_are_classified_not_guessed(tmpdir=None):
           f"the `does not depend on any axioms` form was dropped rather than "
           f"answered empty: {got!r}. An empty list is the result a replacement "
           f"proof is after, so it cannot be confused with an absence.")
+    # The qualified row through the PARSER as well as the classifier: the name
+    # carries a dot, so a name pattern written as `[^\x27]+` up to the next
+    # quote handles it while one written as `[^.]+` does not, and only the whole
+    # row exercises the two halves together.
+    check([a for a in got.get("IEEE754.signed_zeros_are_equal", [])
+           if A.axiom_site_tactic(a)]
+          == ["IEEE754.signed_zeros_are_equal._native.native_decide.ax_1_1"],
+          f"the measured namespace-qualified row did not parse and classify "
+          f"to one site: {got.get('IEEE754.signed_zeros_are_equal')!r}")
     sites = [a for a in got.get("mem_read_bytes_write_same", [])
              if A.axiom_site_tactic(a)]
     check(len(sites) == 2,
           f"the measured X86 row's two per-site axioms classified to {sites!r}")
     check(A.axiom_site_tactic("") is None and A.parse_print_axioms("") == {},
           "empty input must not raise and must not invent a row")
-    return True, ("3 axiom-name shapes and 3 `#print axioms` output shapes, "
-                  "all from a measured run")
+    return True, ("7 axiom-name shapes (3 unqualified + 4 namespace-qualified) "
+                  "and 4 `#print axioms` output shapes, all from a measured run")
 
 
 def test_every_native_axiom_in_lib_is_one_this_file_knows(tmpdir=None):

@@ -1921,13 +1921,32 @@ class TestAxiomClosureCensus(unittest.TestCase):
         # this project publishes becomes right again and the classifier in
         # `formal/admitted.py` stops matching — so both facts are asserted from
         # the measured run rather than from a docstring.
-        every_site = [a for rows in census["axioms"].values()
-                      for axioms in rows.values() for a in axioms
-                      if A.axiom_site_tactic(a)]
+        #
+        # **Filtered on `._native.` in the NAME, not on the classifier's
+        # verdict.**  Filtering on the verdict asks `axiom_site_tactic` whether
+        # it agrees with itself, so the check can only ever see the names the
+        # classifier already accepts — which is how `AXIOM_SITE_RE`'s `decl`
+        # group being `[^.]+` hid every namespace-qualified theorem in `lib/`
+        # from this assertion for as long as it stood, and the census with it.
+        # The two are the same statement now (below) rather than one implying
+        # the other.
+        native_names = [a for rows in census["axioms"].values()
+                        for axioms in rows.values() for a in axioms
+                        if "._native." in a]
+        every_site = [a for a in native_names if A.axiom_site_tactic(a)]
+        self.assertTrue(native_names,
+                        "no theorem in lib/ reports a `._native.` axiom at all, "
+                        "so the whole mechanism this file measures is gone (or "
+                        "Lean's spelling moved again)")
         self.assertTrue(every_site,
                         "no theorem in lib/ reaches a decide axiom, so the "
-                        "whole mechanism this file measures is gone (or the "
-                        "classifier no longer matches Lean's spelling)")
+                        "classifier matches none of the "
+                        f"{len(native_names)} `._native.` names Lean printed")
+        self.assertEqual(sorted(every_site), sorted(native_names),
+                         f"lib/ reports a `._native.` axiom the classifier does "
+                         f"not recognise, so the census silently under-reports "
+                         f"it: "
+                         f"{sorted(set(native_names) - set(every_site))[:5]}")
         self.assertTrue(all(A.axiom_site_tactic(a) in A.AXIOM_TACTICS
                             for a in every_site),
                         f"lib/ introduces a `._native.` axiom for a tactic "
