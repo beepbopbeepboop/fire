@@ -22,7 +22,11 @@ nothing when it went green.
     38-file row where the backend says 0;
   * **a file the backend cannot read is `None`, not `[]`** — "imports nothing"
     and "could not be read" are different answers, and the tool's own header
-    prints the count of the second;
+    prints the count of the second. The corpus no longer contains such a file
+    (`cca2a17f` closed the one CPython read and this tokenizer did not), so the
+    `None` is pinned on a shape no Python accepts and the closed case is pinned
+    beside it as a regression row — a reader that answered `None` for a file it
+    reads perfectly well would report a coverage hole that does not exist;
   * **`--unmodelled` is the before/after instrument** — a module landing
     UNMASKS the row behind it and never grows one, so a delta measured across
     two checkouts measures the merge. This is the one ability the promotion had
@@ -114,6 +118,31 @@ class TestTheReadersAreTheBackends(TempTree):
                           "same word")
         ok = self.path("fine.py", "import pwd\n")
         self.assertEqual(W.module_imports(ok), ["pwd"])
+
+    def test_a_file_cpython_reads_and_this_backend_used_to_refuse_is_read_now(self):
+        """The PEP 701 case, as a REGRESSION row for the lexer fix that closed it.
+
+        It belongs beside the `None` case rather than inside it because it is a
+        different claim: that one says "a file the backend cannot read must not
+        read as `[]`", and this one says the class of files that answer is now
+        empty over this tree's own corpus. Without it, the case above would go
+        quietly untrue — a reader that answered `None` for a file the backend
+        reads perfectly well would pass it, which is a wall tool reporting a
+        coverage hole that does not exist.
+
+        The file is `test_formal_libc_symbol.py` itself, the one the corpus-wide
+        comparison in `cca2a17f` measured as the single disagreement: tokenized
+        as `(kind, value, line, col)` per token, and now reaching
+        `module_imports` rather than a refusal.
+        """
+        here = os.path.join(HERE, "test_formal_libc_symbol.py")
+        self.assertTrue(os.path.isfile(here), here)
+        self.assertIsNotNone(
+            W.module_imports(here),
+            "the multiline f-string replacement field this file spells is "
+            "accepted by CPython since PEP 701 and by this tokenizer since "
+            "cca2a17f; if this goes red the lexer regressed and the tool is "
+            "understating its own corpus again")
 
     def test_the_closure_is_transitive_because_the_build_links_it(self):
         """A file that never spells the wall is still refused on it.

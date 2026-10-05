@@ -3359,6 +3359,134 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         self.assertNotIn("admitted (%s)", src,
                          "a report line still claims an identified hole")
 
+    def test_the_position_survives_the_two_streams_being_glued(self):
+        """The end-to-end case's failure mode, as a reader case.
+
+        `test_lean_says_which_sorry_fired_and_the_report_names_it` failed in the
+        gate with `None != "hstep7's side condition, line 363"` on a run whose
+        proof was correct: Lean DID report the hole, `fired` was True, and the
+        reader returned nothing. The cause is in how the two output streams meet.
+        Every caller concatenates them (`p.stdout + p.stderr`), and when the
+        warning is the last line of stdout and arrives without its trailing
+        newline it lands glued to the first line of a non-empty stderr — and the
+        reader's `\\s*$` anchor, which matches at a newline or at the very end of
+        the string but NOT in the middle of a line, then declines a message that
+        is perfectly well formed.
+
+        The replacement is `(?![0-9])`, a different claim: the DIGITS end here,
+        rather than the LINE. So a label followed by a backtick, by a space, or by
+        the next stream's first character is one answer, and `x:363:129` is not
+        read as `x:363:12`. The no-label case still returns `[]`, because "a hole
+        fired and I cannot say where" has to stay distinguishable from a position.
+        """
+        import formal.lean as L
+        warn = ("/…/.tmp/tmpcmqrxbe0.lean:117:8: warning: declaration uses "
+                "`sorry `«.tmp».tmpcmqrxbe0:363:12`")
+        self.assertEqual(L.sorry_source_positions(warn + "\n"), [(363, 12)],
+                         "the unglued warning is the baseline this row is about")
+        self.assertEqual(
+            L.sorry_source_positions(
+                warn + "libc++abi: terminating due to uncaught exception\n"),
+            [(363, 12)],
+            "a warning glued to the next stream's first line is still a warning "
+            "with a position; losing it turned a correct proof into 'a hole "
+            "fired and I cannot say where'")
+        self.assertEqual(
+            L.sorry_source_positions(
+                "/x.lean:117:8: warning: declaration uses `sorry "
+                "`«lib».X86:503:129`\n"),
+            [(503, 129)],
+            "the digits END at the lookahead, so a three-digit column is not "
+            "truncated to two")
+        self.assertEqual(
+            L.sorry_source_positions(
+                "/x.lean:117:8: warning: declaration uses `sorry`\n"),
+            [],
+            "a file without pp.sorrySource has no position, and that empty is "
+            "the answer a caller needs to see")
+
+    def test_a_hole_in_an_imported_module_is_not_attributed_to_this_file(self):
+        """The line is not an identity, and one reader was treating it as one.
+
+        Lean's `declaration uses `sorry`` label says which FILE the fired hole is
+        in (`«lib».ProofLib`), and `live_hole_phrase` used to read only the
+        digits — so a hole in an imported `.olean` arrived as a bare line number
+        in a file it had never seen, and `hole_at` resolved it against the
+        GENERATED text. Measured on `const2.mojo`'s emitted text: a
+        `«lib».X86:503:8` position came back as `"hstep11's side condition, line
+        503"`, which is confident, specific and completely wrong, because 503 is a
+        line in `lib/X86.lean` and a `sorry` of ours happens to sit on 503 of the
+        generated file. It returned `None` for `«lib».ProofLib:4624:8` only
+        because 4624 is past the end of that file — luck, not a rule.
+
+        Both are `None` now, and for the stated reason: a hole this emitter did
+        not write has no emitter fact to name. The rows are non-vacuous in both
+        directions — the same text still attributes OUR hole — and `module=None`
+        is the documented way to say "do not filter", so a caller with no
+        generated file in hand keeps the old behaviour rather than losing it.
+        """
+        import formal.x86_64_endtoend_test as E
+        text = self._emitted_path("const2")
+        module = E._module_of("/…/.tmp/tmpcmqrxbe0.lean")
+        self.assertEqual(module, "tmpcmqrxbe0",
+                         "the module Lean prints is the basename, whatever the "
+                         "guillemets sit around")
+        self.assertEqual(
+            E.live_hole_phrase(
+                text,
+                "/x.lean:117:8: warning: declaration uses `sorry "
+                "`«.tmp».tmpcmqrxbe0:503:8`\n", module),
+            "hstep11's side condition, line 503",
+            "the control: OUR hole at 503 still resolves, so the rows below are "
+            "refusing a library module and not refusing line 503")
+        for label, pos in (("«lib».X86", 503), ("«lib».ProofLib", 4624)):
+            self.assertIsNone(
+                E.live_hole_phrase(
+                    text,
+                    "/x.lean:117:8: warning: declaration uses `sorry "
+                    "`%s:%d:8`\n" % (label, pos), module),
+                "%s:%d is a line in a LIBRARY and a `sorry` of ours happens to "
+                "sit on %d of the generated file; resolving it there names a "
+                "fact that is not the hole" % (label, pos, pos))
+        self.assertEqual(
+            E.live_hole_phrase(
+                text,
+                "/x.lean:117:8: warning: declaration uses `sorry "
+                "`«lib».X86:503:8`\n"),
+            "hstep11's side condition, line 503",
+            "with no module to compare against nothing is filtered, so this is "
+            "the pre-existing behaviour and not a silent tightening: a caller "
+            "that has no generated file in hand still gets an answer, and it is "
+            "the caller's to distrust")
+
+    def test_the_module_name_is_read_from_all_three_lean_spellings(self):
+        """The guillemets are around the WRONG component, so the LAST one counts.
+
+        The label is a `Name`, and Lean parenthesises only the part that is not a
+        bare identifier: a module under a directory prints as
+        `«.tmp».tmpcmqrxbe0`, a balanced-looking pair around the wrong piece, and
+        a top-level module prints with no guillemets at all. Reading the last
+        dotted component gives the basename in every spelling, which is the only
+        comparison the filter above can rely on.
+        """
+        import formal.lean as L
+        for text_, want in (
+                ("`«.tmp».tmpcmqrxbe0:363:12`", ("tmpcmqrxbe0", 363, 12)),
+                ("`«lib».ProofLib:4624:8`", ("ProofLib", 4624, 8)),
+                ("`topmod:10:2`", ("topmod", 10, 2)),
+        ):
+            self.assertEqual(
+                L.sorry_source_labels(
+                    "/x.lean:117:8: warning: declaration uses `sorry %s`\n"
+                    % text_),
+                [want], text_)
+        self.assertEqual(
+            L.sorry_source_labels(
+                "/x.lean:117:8: warning: declaration uses `sorry`\n"),
+            [],
+            "a warning with no label has no position to attach a module to, so "
+            "it is absent rather than present with an empty one")
+
     def test_a_sorry_in_a_comment_is_not_an_admission(self):
         """Both comment forms, and the theorem's OWN docstring is the case.
 
