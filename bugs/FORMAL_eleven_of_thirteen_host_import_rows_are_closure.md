@@ -313,3 +313,103 @@ than this list said. Everything else stands.)
    noticing: the corpus's own run suite is one `itertools` call away, and §2's
    reason for it ("the one name this corpus uses answers a SEQUENCE") has not
    changed.
+
+## Status, 2026-10-05 (`formal31-3`): three of the rows have LANDED, the fourth
+## (`itertools`) is closed by the corpus rather than by a module, and the table
+## above is stale in a way that matters
+
+The measurement this document is has moved. It is kept above rather than
+rewritten because the table's numbers are what a reader has to check the new
+ones against, and because the reasoning about which rows are WORK and which are
+CLOSURE is the part that has held up across every re-run.
+
+### The rows that closed, by other branches, and what each was
+
+| module | the doc's row | what is in the tree now |
+|---|---|---|
+| `glob` | **7 terminal / 217 closure**, "WORK, and the largest reachable row left", §3 said it was not being taken here | `formal/hostmods/glob.mojo`, 816 lines, 24 functions; `test_formal_glob.py` 6/6. §3's four bullets were answered rather than skipped: `glob.glob` returns a run-time-length list as a **blob** (`_iglob` became a count/fill pair, because "a producer has to allocate where it can be SEEN to"), the `fnmatch` pattern half was already done and cost one import, and the `**` recursive form is `os.walk` plus a depth the caller passes |
+| `shlex` | item 2: reachable, blocked behind `glob` AND `signal`; item 3: entered `HOST_MODULES` with no source, failing `formal-link-accounting` | `formal/hostmods/shlex.mojo` exists, so item 3 took the doc's own option 1 (the `fcntl` route) and both `signal` and `shlex` are modelled |
+| `signal` | "not a module anyone has sized" — a capability question of its own | `formal/hostmods/signal.mojo` |
+
+`glob` was the doc's only "real row" and it is gone, which means the honest
+answer to "what is next" is no longer on this list at all.
+
+### The rows that are still closure, and the one that is still NOT WORK
+
+Re-measured 2026-10-05 with `formal/imports.py`'s own `resolve_module_path` —
+the same walk, the same definition of `terminal` ("this module is the ONLY thing
+standing between the file and a build"), and the same corpus rule (this
+repository's own files, `bugs/`, `formal/` and the build directories excluded):
+
+| file | unresolvable set, 2026-10-05 |
+|---|---|
+| **`test_formal_run.py`** | **{}** — see below |
+| `tools/suite.py` | {} |
+| `test_selfhost_memory.py` | {} |
+| `version.py` | `{'functools'}` — `functools` alone, as at `-11` |
+| `tools/apply_extraction.py` | `{'copy'}` — `copy` alone, as at `-11` |
+| `test_suite.py` | `abc, copy, importlib, importlib.util, memslot, suite, types` |
+
+`test_suite.py`'s line is the doc's own caveat about `memslot`, `suite` and
+`importlib.util` being repository siblings a static walk cannot resolve, and
+`abc`/`types`/`copy` are §2's three 0-terminal rows — so `test_suite.py` is a
+closure number and not a row, exactly as §"The rows, ranked by terminal files"
+said.
+
+### `itertools` — closed by the corpus, and the reasoning is worth keeping
+
+§4's caveat named `itertools` as the row worth noticing, because it was the
+ONLY blocker for one file and the file was "the corpus's own run suite".
+`itertools` is still not a host module and §2's reason is still true — the one
+name this corpus uses "answers a SEQUENCE", and a run-time-length sequence is
+`FORMAL_listdir_no_run_time_sequence.md`'s subject, which is a project.
+
+**But `test_formal_run.py` did not need a sequence, and that is the whole of
+what changed.** Its one use is `itertools.combinations(part, 2)` over a 26-element
+slice inside a Python function that GENERATES Mojo source. `part` is a slice of
+a list whose length the generator already knows, so every pair is an index pair
+in a double loop, and the comprehension that consumed a generator takes that
+without one. The generated Mojo is unchanged; the file loses a dependency.
+
+Measured, and it is the claim the doc's own §4 makes about a module — *"the
+verdict does not change, the SUBJECT of the refusal does, and a subject about the
+file is one a person can act on"*:
+
+```console
+$ python3 -c '… formal.build.compile_formal("test_formal_run.py", arch="arm64", prove=False, check=False)'
+REFUSED in 12.1s:
+an f-string literal on line 146 is refused on this path: its value is its INTERPOLATED text…
+```
+
+and `tools/formal_sweep.py::classify` on that message, with the file's own
+source and path, gives **`codegen`** — `ANSWERABLE`, `DIRTY` — where it was
+`not-answerable/host-import`, which is excluded from the coverage denominator
+entirely. So the 1043 build-and-run rows this suite holds are now under a class
+that counts them, and the next construct in front of them is named (an f-string
+literal, which is `FORMAL_string_composition_has_no_buffer.md`, claimed) rather
+than a module nobody has written.
+
+The rows are in `test_formal_run.py::check_type_value_tag_generator`, both of
+them no-compiler so they cost a second rather than a minute of images:
+
+  * **every pair, exactly once.** The `if X == Y` lines are read back out of
+    the GENERATED Mojo — not out of the loop that wrote them, which is what
+    makes it a property of the program the backend will compile — and asked to
+    cover every unordered pair of every 26-name chunk once and no pair twice.
+    786 pairs over 3 chunks. The ORDER is deliberately not asserted, and the
+    docstring says so: two orderings are two images and the same answer, so
+    pinning one would be pinning a detail under a coverage claim.
+  * **this file's own import closure**, walked with the resolver the BUILD uses
+    (not an `ast` approximation, which would pass on a file the sweep still files
+    as host-import). 12 modules, `{}` unresolvable.
+
+### What is left on the row
+
+`functools` for `version.py` and `copy` for `tools/apply_extraction.py`, one
+file each, and both are still §2's shapes: `lru_cache` is a decorator over a
+function value (`bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md`, and
+`version.py`'s one use is `@functools.lru_cache(maxsize=1)` on a function this
+repository could spell as a plain cached call), and `copy`'s is `deepcopy` over
+objects this path has no heap for. Neither is a module worth writing; the honest
+statement is that two files in this repository are one stdlib call away from
+being swept and each call is a capability question rather than a missing file.
