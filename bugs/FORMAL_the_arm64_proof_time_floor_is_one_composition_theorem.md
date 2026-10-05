@@ -7,6 +7,56 @@ chains), against `lib/ProofLib.lean`'s `arm64_go_exit` and `lib/work.lean`'s
 `rec1_glue_gen` / `go_exit_step`. **arm64 only** — the x86-64 generator proves a
 different thing over `lib/X86.lean` and shares none of this code.
 
+**Status: OPEN, measured, NOT FIXED. Re-measured 2026-10-05
+(`work/formal29-5`) and the attribution HOLDS, item 2's stated next step does
+NOT, and the instrument is now in the tree.** Below, in the order a reader needs
+them:
+
+* **`tools/formal_proof_shape.py` landed**, and every number in this document is
+  now re-derivable with one command instead of a `.tmp` script:
+  `--mode profile` is the ranked `lean --profile` (so the buckets are a list,
+  not a wall of text), `--mode goal` prints what the terminal value flow is
+  still trying to prove by replacing it with `trace_state` and admitting the
+  leaf. `test_formal_proof_shape.py` covers the text handling without Lean.
+  The two numbers this document's scratch scripts took are the tool's two
+  modes.
+* **The measurement below is CONFIRMED on this tree** (bitops, arm64):
+  wall **19.9 s**, cpu **27.9 s**, `simp` **7.0 s**, type checking **7.0 s** —
+  inside the ranges §"The measurement" gives (19.5-20.8 / 26.6-29.0, 8.48, 8.24).
+  Nothing has moved, so the percentages here still apply.
+* **ITEM 2's NEXT STEP IS NOT WORTH DOING, and the measurement is one line.**
+  `--mode profile` reports `tactic execution of Lean.Parser.Tactic.omega` at
+  **0.17 s in the whole file** — 0.9% of 19.9 s — and that is the ceiling on
+  what hoisting the per-step fuel-arithmetic `show … from by omega` rewrites
+  into one lemma per path can save, because those rewrites are all of the
+  `omega` this file runs. The 8.3 s §"What is actually left" attributes to the
+  walk is therefore NOT in the fuel arithmetic, and the `lib/work.lean`
+  composition route stays the only thing that addresses it.
+* **WHAT THE EXPENSIVE TACTIC IS PROVING, measured, is LARGE.** `--mode goal
+  --which 1` prints **two** goals (not one: `trace_state` prints one state per
+  goal the combinator hands it, and a tool that returned the last one reports
+  the wrong goal by an order of magnitude — that was this session's first
+  version, and the test now pins it), and the larger is **23 856 characters,
+  307 lines, and 33 fully-expanded 31-field `Arm64State` literals**. So the
+  `simp +decide only [107 names]` is being asked to traverse a term of that
+  shape, which agrees with §"What is ruled out" having measured that the rule
+  COUNT is not the lever.
+* **THE ONE LINK IN THAT IS NOT MEASURED, and it is the thing a worker should
+  measure first**: the 33 literals are how Lean PRINTS the goal, and Lean
+  zeta-expands `{st with pc := p}` into all 31 fields when it pretty-prints. So
+  "the elaborated TERM is that large" is NOT established — `lib/ProofLib.lean`
+  has `[simp] theorem arm64_reg_pc (j) (s) (p) : arm64_reg j { s with pc := p }
+  = arm64_reg j s`, which exists precisely so the rewrite never has to expand
+  the structure, and the walk's states are `qS`/`qT` defs over such updates.
+  **Whether the cost is the term or the pretty-print is the difference between
+  "decompose the value flow" (item 1, below) and "stop re-stating the state",
+  and it is a cheap measurement**: compare `--mode profile` on the file as
+  generated against the same file with the `qS`/`qT` chain replaced by opaque
+  `have`s of the same statements — a proof that is a chain of equalities rather
+  than one big `simp` — which is item 1's shape anyway.
+
+The rest of this document is unchanged and is still the analysis it was.
+
 **Status: OPEN, measured, NOT FIXED.** Filed from `work/formal24-proof-speed`
 immediately after landing the step-OK derivation (commit `6b1ddbe0`), which is
 what produced the attribution below. This doc is the *remainder* of that pass,
@@ -104,10 +154,20 @@ needing chunked composition rather than a cheaper tactic:
    biggest remaining item in the arm64 proof path.
 2. **8.3 s — the walk.** 114 `have`s, 62 `rw`s and 10 `refine`s of
    `rec1_glue_gen` / `go_exit_step` chains, per path. Same shape, same fix
-   direction: the per-path `h_adv_{bi}_{k}` fuel-arithmetic rewrites
+   direction: the per-path `h_adv_{bi}` fuel-arithmetic rewrites
    (`show 30 + (200000 + 48 * n.toNat - 48) = … from by omega`, repeated at
    every step of every path) are a per-step re-derivation of one monotone
    fuel identity, and hoisting them into one lemma per path is mechanical.
+   **THE HOIST IS NOT THE COST — MEASURED 2026-10-05, and this is the one
+   thing in this document that has been refuted.** `omega` costs **0.17 s in the
+   whole file** (`tools/formal_proof_shape.py --mode profile`, which sums the
+   per-call lines; see the Status section), those rewrites are all of the
+   `omega` there is, and 0.17 s cannot be 8.3 s. **So the fix for this item is
+   not in the emitter at all: it is a `lib/work.lean` lemma that composes
+   several `rec1_glue_gen` steps at once**, which is why §"What is ruled out"
+   is right that the `lib/*.lean` route costs every worker's `.olean` cache and
+   why that trade has to be made deliberately rather than by picking the
+   mechanical-looking half.
 
 **Do NOT start from "raise the ceiling".** `PROOF_WALL_S`/`PROOF_CPU_S` are
 1500 s and nothing in the 49-example corpus comes near them; the file that hurts
@@ -120,15 +180,36 @@ stale data.
 
 ## How to re-derive the table
 
-    python3 tools/memslot.py --gb 12 --label prooflib -- python3 -c "
-    import os,sys; sys.path.insert(0,os.getcwd())
-    from formal.lean import find_lean, ensure_library
-    ensure_library(find_lean(os.getcwd()), os.path.join(os.getcwd(),'lib'))"
+The scratch scripts this section used to point at (`.tmp/genproof.py`, and a
+prefix sweep that split the generated file at its column-0 declarations) are
+gone with the next `.tmp` clean. **`tools/formal_proof_shape.py` replaces the
+first and answers the question the sweep was reaching for**, and it goes
+through `formal/lean.py::run_lean` for every Lean run, so nothing here launches
+`lean` by hand:
 
-    # one proof, no Lean check during generation
-    python3 tools/memslot.py --gb 8 --label gen -- python3 .tmp/genproof.py \
-        formal/examples/bitops.mojo arm64 .tmp/out/bitops
+```sh
+export PATH=/opt/homebrew/bin:$PATH
 
-    # then the prefix sweep: split the generated file at its column-0
-    # declarations, write each prefix, and check each one through
-    # formal/lean.py::run_lean.  Never launch lean by hand.
+# The buckets, ranked.  This is §"The measurement"'s `lean --profile` line and
+# §"What is ruled out"'s `omega` number, and it sums the per-call lines, so
+# `simp` is ONE row rather than eight.
+python3 tools/memslot.py --gb 8 --label shape -- \
+  python3 tools/formal_proof_shape.py formal/examples/bitops.mojo --mode profile
+
+# What the terminal value flow is still trying to prove: the flow's `simp
+# +decide only` becomes `trace_state` and the leaf is admitted, and Lean
+# prints the residual goal.  `--which N` picks the Nth of the four.
+python3 tools/memslot.py --gb 8 --label shape -- \
+  python3 tools/formal_proof_shape.py formal/examples/bitops.mojo --mode goal --which 1
+
+# The instrument's own text handling, with no Lean at all.
+python3 test_formal_proof_shape.py
+```
+
+A prefix sweep is still the instrument for "which GROUP of the file costs what"
+— splitting at column-0 declarations and re-checking each prefix — and it is
+NOT in the tool: for `bitops` that is 339 prefixes at 2-20 s each, where the
+five groups this document's table has are worth five runs. If a worker wants it,
+the shape is in this section and the constraint that makes prefixes (rather
+than deletions) the right unit is in §"The measurement": a prefix is always a
+valid Lean file and a deletion is not.
