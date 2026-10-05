@@ -3921,12 +3921,44 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                             and isinstance(node.target, F.IdentExpr):
                         target, value = node.target.name, node.value
                     if target and isinstance(value, F.IdentExpr) \
-                            and value.name in hs and target not in hs:
+                            and value.name in hs:
                         # a copy: the same frame under a second name
-                        hs.add(target)
-                        hstruct[_fn_key(fn)][target] = \
-                            list(hstruct[_fn_key(fn)][value.name])
-                        changed = grew = True
+                        _known = hstruct[_fn_key(fn)].get(target)
+                        if _known is None:
+                            hs.add(target)
+                            hstruct[_fn_key(fn)][target] = \
+                                list(hstruct[_fn_key(fn)][value.name])
+                            changed = grew = True
+                        else:
+                            # …and the REBIND, which is the case
+                            # `target not in hs` used to skip and which made the
+                            # answer depend on which edge ran first: the
+                            # constructor seeding always runs first, so
+                            # `var q = Three()` fixed `q`'s layout before
+                            # `q = o` could contribute `Two`'s, and the second
+                            # layout was the one that disappeared.  Measured on
+                            # both architectures, `q.c` then read slot 2 of a
+                            # `Two` frame and the two machines disagreed (arm64
+                            # exit 0, x86-64 exit 208) because the word past the
+                            # end of the frame is whatever each machine's
+                            # scratch held.
+                            #
+                            # MERGE rather than decide, which is what the
+                            # pointer edge above already does and for the same
+                            # reason: the candidate list is a SET that only
+                            # grows, so the fixpoint stays monotone and
+                            # terminates, and the disagree-or-refuse decision
+                            # belongs to `model.struct_frame_slot_candidates` —
+                            # one place that already refuses `A` and `B`
+                            # disagreeing on a field.  A name whose two layouts
+                            # agree is unaffected, because one candidate and two
+                            # agreeing candidates answer a field read
+                            # identically.
+                            for _st in hstruct[_fn_key(fn)][value.name]:
+                                if _st in _known:
+                                    continue
+                                _known.append(_st)
+                                changed = grew = True
                     # A copy of a NESTED FRAME out of a field, which is the
                     # same edge one step along: the base is a holder, the field
                     # holds the ADDRESS of a frame of its own, and naming that
@@ -14881,8 +14913,30 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 raise CodegenError(_why or M.module_global_refusal(
                     name, sym, fn.name,
                     *_published_shape(getattr(sym, "module", None), link_line)))
-            raise CodegenError(M.unresolved_name_refusal(
-                name, fn.name, _why_unplaced(node, fn, frame_slots)))
+            # A name the closure lift RENAMED, asked immediately before the
+            # generic arm and for the same ordering reason as every other
+            # construct-naming refusal in this function: `unresolved_name_refusal`
+            # enumerates where a NAME lives — a register, a spill slot, a
+            # receiver field's frame, a folded module constant — and this name
+            # is in none of them, because it never wanted one. It is a function
+            # under a spelling the build no longer emits, so the register
+            # allocator did not lose it and there is nothing there to find.
+            #
+            # Asked at the LAST possible moment on purpose. Every table above
+            # declines this name for a reason that is TRUE and NOT THE REASON:
+            # it is not a parameter, not a local, not a struct, not a folded
+            # constant, and not a module symbol. The generic sentence is right
+            # about each of those and still misleads, because the reader's
+            # question is "what should I write instead", and the answer is a
+            # different program, not a different register.
+            _prelift = M.pre_lift_def(name)
+            raise CodegenError(
+                M.lifted_closure_value_refusal(
+                    name, fn.name, _prelift.lifted_name,
+                    _prelift.outer_name, _prelift.captures)
+                if _prelift is not None
+                else M.unresolved_name_refusal(
+                    name, fn.name, _why_unplaced(node, fn, frame_slots)))
         _refuse_variadic_reads(functions, fn, shape)
         _refuse_try_handlers(functions, fn)
         _refuse_returned_container_blobs(fn, returns_container,
@@ -16439,6 +16493,29 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     why_deco = M.unapplied_decorator_refusal(functions)
     if why_deco is not None:
         raise CodegenError(why_deco)
+    # A call to a CPython BUILTIN this path does not lower, asked HERE and for
+    # the same reason as the three above: one pipeline both front ends go
+    # through, so the executable and dylib paths cannot answer differently, and
+    # BEFORE any emitter — the whole closure is allocated and every other
+    # function emitted by the time the link audit notices.
+    #
+    # `NOT_LOWERED_BUILTINS` carries the reason for each of these names and
+    # nothing read it: `sorted([3, 1, 2])`, `map(dbl, [1, 2, 3])`,
+    # `filter(lambda v: v > 1, …)` and `sum([1, 2, 3])` each emitted a `BL` to a
+    # name nothing provides and were refused from a message about SYMBOLS,
+    # whose advice ("bind the name from a library that provides it") is about
+    # the link line rather than about the fact that no library on any line
+    # provides a Python builtin's semantics. Measured on both architectures,
+    # identical for all four. The sentence and the table are
+    # `model.not_lowered_builtin_refusal`'s.
+    #
+    # `symbols` is passed because a name this module BINDS is not the builtin:
+    # a module-level `def`, an import, a constant — a program that defines its
+    # own `sum` must still build, and a refusal that cannot tell those apart is
+    # the false refusal this check exists beside.
+    why_builtin = M.not_lowered_builtin_refusal(functions, symbols)
+    if why_builtin is not None:
+        raise CodegenError(why_builtin)
     # NAMED for what it holds, because the two tables in this function have the
     # same SUBJECTS and incompatible SHAPES and were interchanged once already
     # (`FORMAL_frame_receivers_is_handed_the_method_name_table`):
@@ -16917,6 +16994,47 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     ctx = FormalClosureCtx()
     discover_closures(ctx, stmts)
     functions = _flatten_closures(functions, ctx._all_closures)
+    # The PRE-LIFT spellings, published HERE because it is the only point where
+    # both halves are in hand: `ctx._all_closures` is the lift's own table and
+    # is the only place in the build that still knows a nested `def` was called
+    # `add` before `_flatten_closures` renamed it to `make_add` and stripped it
+    # from the body.
+    #
+    # Published immediately after the flatten and not read by it, which is the
+    # asymmetry that makes this necessary: `_flatten_closures` rewrites a CALL to
+    # a closure name (`_rewrite_closures_in_expr`) and deliberately leaves
+    # `make`'s own `return add` alone, because that read needs a VALUE and a
+    # value is not a call site. So the rename is silent at exactly the one place
+    # it is not local, and `check_module_symbols` — which runs last, on the
+    # FINAL function list — is the first reader that could notice.
+    #
+    # A bare nested `def` with no `ClosureInfo` is lifted keeping its name (see
+    # `_flatten_closures`'s own note), so it is already in `_callee_defs` and
+    # needs no row here: what lands in this table is exactly the set of names
+    # the build emitted under a DIFFERENT spelling, which is the only set
+    # `unresolved_name_refusal` could not have answered on its own.
+    #
+    # The pre-lift spelling is the `_all_closures` KEY and NOT
+    # `ci.inner_def.name`, which is the fact that makes this table necessary
+    # rather than convenient: `ClosureInfo` holds the very FunctionDef node
+    # `_flatten_closures` renames, IN PLACE, so by the time anyone downstream
+    # looks at `ci.inner_def.name` it already reads `make_add` — the spelling
+    # the SOURCE used is destroyed by the lift, and the dict key is the only
+    # copy of it left anywhere in the compiler. (That is also the mechanical
+    # form of what the bug doc says: the read is of a lifted function under
+    # its pre-lift name, and "no table in the build holds that spelling" is
+    # literally true rather than approximately.)
+    #
+    # `ci.captures` is a list of `(name, ctype)` PAIRS, so the name is element
+    # zero — read as the whole pair the refusal would print `('n', 'int64_t')`,
+    # which reads as a tuple the program never wrote.
+    M.publish_pre_lift_defs({
+        pre_lift: M.LiftedDef(
+            pre_lift, ci.lifted_name, outer_name,
+            [c[0] if isinstance(c, (tuple, list)) else c
+             for c in (getattr(ci, "captures", None) or ())])
+        for outer_name, inner_map in (ctx._all_closures or {}).items()
+        for pre_lift, ci in (inner_map or {}).items()})
     functions = _lift_lambdas(functions)
     # AFTER `_lift_lambdas`, because it is what records the symbol on the node:
     # this pass turns the lifted lambda into a read of that symbol, which is the
@@ -18109,10 +18227,18 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
         "constants": dict(constants or {}),
         "variables": sorted(variables or ()),
         "containers": sorted(containers or ()),
+        # `declaration` is the C DECLARATION a client writes, beside `signature`
+        # rather than in place of it: `signature` is the lookup key
+        # `formal/imports.py::linked_struct_owners` derives a struct name from
+        # (`Struct.method`), and a free function's is already a declaration.
+        # Absent (None) for an export with no receiver convention to state,
+        # which is what `model.method_boundary_declaration` answers when the
+        # receiver cannot be resolved — a client falls back to `signature`.
         "exports": [{"module": e["module"], "name": e["name"],
                      "symbol": e["symbol"], "arity": e.get("arity"),
                      "call": e.get("call"),
                      "signature": e.get("signature", ""),
+                     "declaration": e.get("declaration"),
                      "kind": e.get("kind"),
                      "frame_params": e.get("frame_params") or [],
                      "owned_blob": e.get("owned_blob") or None}
@@ -19317,6 +19443,26 @@ def _method_exports(source_paths: list, structs_by_file: dict,
     return out
 
 
+def _reflected_method_signature(exported: dict, lookup_key: str) -> str:
+    """`reflect`'s own C signature for the method this lookup key names, or ''.
+
+    The `_export_entries` table is keyed by the reflection entry's `name`, and
+    for a method that name is `Struct.method` — the same string
+    `_method_exports` publishes as the method row's `signature`. So the
+    declaration is built from reflect's OWN prototype (`int64_t
+    corpus_Point_sum (Point *)`) rather than from anything re-derived here,
+    which is what makes the manifest's method rows and the gimple dylib's
+    reflection table one table rather than two spellings of it.
+
+    '' when the table has no such entry, which is the honest absent answer: a
+    method `reflect` did not publish has no prototype to publish, and
+    `model.method_boundary_declaration` returns None for an empty one rather
+    than inventing a parameter list.
+    """
+    entry = (exported or {}).get(lookup_key)
+    return ((entry[1] or {}).get("signature") or "") if entry else ""
+
+
 def _formal_exports(source_paths: list, ordered: list, info: dict,
                     prefixes: dict = None, methods: dict = None) -> list:
     """The library's export table, per doc/ABI.md's boundary contract.
@@ -19392,16 +19538,31 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
                 # passes it, so the arity recorded is the whole signature.
                 "arity": len(fn.params),
                 "call": M.export_call_contract(fn),
-                # `Struct.method` for today, so this is a no-op — but it is
-                # applied here rather than left off, because the free-function
-                # row below and this one are the SAME published field and a
-                # declaration that is true for one kind of export and false for
-                # the other is the failure this whole boundary is for. See
-                # `model.formal_boundary_signature`, and
-                # `formal/imports.py::linked_struct_owners` for why the method
-                # rows are not a C declaration yet (filed in
-                # `bugs/FORMAL_a_method_export_publishes_no_c_declaration.md`).
+                # `Struct.method`, and it STAYS that string: it is the lookup
+                # key `formal/imports.py::linked_struct_owners` derives the
+                # struct name from, and a build-pass refusal
+                # (`check_construction_shapes`'s
+                # `undeclared_linked_struct_refusal` arm) needs to learn which
+                # structs a linked library provides from a manifest with no
+                # source in hand. Changing it to a declaration would make that
+                # reader return nothing.
                 "signature": M.formal_boundary_signature(signature),
+                # The C DECLARATION, ADDITIVE and beside the lookup key rather
+                # than in place of it — so a client reads this when it is there
+                # and `signature` when it is not, and `linked_struct_owners`
+                # keeps working with no edit. `None` for a method whose
+                # receiver convention cannot be resolved, which is the honest
+                # absent answer and a fall back rather than a gap.
+                #
+                # `fn` is the compiled method, so it carries `_owner_struct`
+                # (annotated in `_prepare_functions`) and its own `param_convs`
+                # — the two facts `model.method_boundary_declaration` reads the
+                # receiver convention from, and the same two both emitters ask.
+                "declaration": M.method_boundary_declaration(
+                    _reflected_method_signature(exported, signature),
+                    symbol,
+                    getattr(fn, "_owner_struct", None),
+                    fn),
                 "kind": "method",
                 "frame_params": _export_frame_contract(fn),
                 "owned_blob": _export_owned_blob(module, fn.name),

@@ -505,6 +505,26 @@ CAUSES = (
     ("a method of this file's own struct was never emitted into the image",
      (("are METHODS OF A STRUCT IN THIS FILE",),
       ("a method call here was not",))),
+    # A CPython BUILTIN this target does not lower — `sorted`, `map`, `filter`,
+    # `sum`, `all`, `any`, `min`, `max`, `reversed`, `list`, `tuple`, … — refused
+    # BY NAME before any emitter (`formal/model.py::not_lowered_builtin_refusal`).
+    #
+    # Its own row because until that check existed every one of these names was
+    # refused by the LINK AUDIT four stages after emission, from a message about
+    # SYMBOLS whose advice ("bind the name from a library that provides it") is
+    # about the link line rather than about the construct: no library on any line
+    # provides a Python builtin's semantics, so the advice cannot be taken. The
+    # fix is `formal/model.py::NOT_LOWERED_BUILTINS` gaining a reader, and the
+    # table quotes that table's reason verbatim — so the message, the ledger row
+    # `tools/formal_proof_breadth.py` builds and this label are three readers of
+    # one set of sentences.
+    #
+    # ABOVE the rows keyed on the link audit's own wording, which this message
+    # deliberately mentions ("the emitter treated it as an ordinary call to a C
+    # symbol"): the question behind the finding is which of the two happened, and
+    # this one is the construct.
+    ("a builtin this path does not lower",
+     (("is not lowered on this path",),)),
     # ── a call through a VALUE: three shapes, three rows, and the distinction
     #    is which DECLARATION is missing. They used to be one refusal, so all
     #    three sat in `other refusal`, which is the bucket that means nobody has

@@ -949,6 +949,24 @@ _REFUSAL_FAMILIES = (
      "a non-ASCII string: BYTES where CPython has CHARACTERS"),
     ("is refused on a string whose text is not ASCII",
      "a non-ASCII string: BYTES where CPython has CHARACTERS"),
+    # A CPython BUILTIN this target does not lower, refused BY NAME before any
+    # emitter (`formal/model.py::not_lowered_builtin_refusal`, asked from
+    # `_prepare_functions` beside the generator/`nonlocal`/decorator refusals).
+    # It has its own row because until that check existed these names were
+    # refused by the LINK AUDIT — a message about SYMBOLS, whose advice is about
+    # the link line rather than about the fact that no library on any line
+    # provides a Python builtin's semantics — and a reader who took that advice
+    # was told to bind a name that cannot be bound. `NOT_LOWERED_BUILTINS` is
+    # the table the refusal quotes, and `tools/formal_proof_breadth.py`'s
+    # `UNLOWERED_CALLEE_MARKS` includes this sentence's marker so a proof
+    # census files the row as `refused-builtin` rather than `codegen-refused`:
+    # one table, three readers, one marker.
+    #
+    # Placed here rather than lower down for the same reason every row's
+    # placement is load-bearing: the message contains "binding a symbol nothing
+    # provides", which is close to the wording rows further down key on, and
+    # this one must win.
+    ("is not lowered on this path", "a builtin this path does not lower"),
     ("multi-index subscript", "multi-index subscript"),
     # A call through a VALUE, in three shapes with three fixes: the callee's
     # declared type, the bracket, the keyword. Ahead of everything below

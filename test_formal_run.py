@@ -4302,6 +4302,72 @@ BYREF_REFUSALS = [
      "    print(r0, r1)\n"
      "    return 0\n",
      "refuse:the shapes do not agree on where 'v' lives", None),
+    # THE SAME DISAGREEMENT REACHED BY A DIFFERENT EDGE, and it is a separate
+    # case because the edge is. `byref_two_layouts_disagree` above is two
+    # CONSTRUCTOR bindings (`x = A()` and `x = B()`), which the seeding loop
+    # enumerates in one pass and hands the existing disagreement machinery.
+    # This one is a constructor binding plus a COPY from another holder —
+    # `q = o` where `o` is a declared `Two` parameter — and the copy edge in
+    # `_frame_receivers`' fixpoint SKIPPED a name that was already a holder, so
+    # `Two` never reached `q`'s candidate list and the second layout was the one
+    # that disappeared. The guard was there for a reason (a name already
+    # classified keeps its classification), but as written the outcome depended
+    # on which edge ran first, and the constructor seeding always runs first.
+    #
+    # **The measurement that makes it a case rather than a shrug**: the two
+    # architectures disagreed. Both builds SUCCEEDED and `q.c` read slot 2 of
+    # whatever `q` addressed — past the end of a two-slot `Two` frame, a word the
+    # program never writes — so arm64 exited 0 and x86-64 exited 208, and both
+    # were answers to a question the source does not ask. With two three-field
+    # structs the same program builds and returns a plausible number on both.
+    ("byref_a_rebind_from_another_holder_keeps_both_layouts",
+     "struct Three:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "\n"
+     "struct Two:\n"
+     "    var x: Int64\n"
+     "    var y: Int64\n"
+     "\n"
+     "def pick(o: Two, which: Int) -> Int:\n"
+     "    var q = Three()\n"
+     "    if which > 0:\n"
+     "        q = o\n"
+     "    return Int(q.c)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Two()\n"
+     "    return pick(o, n)\n",
+     "refuse:the shapes do not agree on where 'c' lives", None),
+    # …and the GUARD, because a merge is a widening and a widening needs its
+    # other direction measured: two layouts that AGREE must still build and
+    # answer CPython. `A` and `B` both put `v` at slot 0, so one candidate and two
+    # agreeing candidates answer the field read identically and the merge has
+    # nothing to refuse. Without this row a fix that refused every rebind would
+    # pass the case above.
+    ("byref_a_rebind_whose_two_layouts_agree_still_answers",
+     "struct A:\n"
+     "    var v: Int\n"
+     "    var pad: Int\n"
+     "\n"
+     "struct B:\n"
+     "    var v: Int\n"
+     "    var w: Int\n"
+     "\n"
+     "def touch(o: B, c: Int) -> Int:\n"
+     "    var x = A()\n"
+     "    x.v = 5\n"
+     "    if c > 0:\n"
+     "        x = o\n"
+     "    return x.v\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = B()\n"
+     "    b.v = 7\n"
+     "    print(touch(b, 0), touch(b, 1))\n"
+     "    return 0\n",
+     0, "5 7"),
     # A METHOD DISPATCHED BY NAME ONTO THE WRONG RECEIVER. `_rewrite_method_calls`
     # turns `self.go(5)` into `Helper_go(self, 5)` from the method name alone,
     # because `recv.m(x)` carries no type — which is fine until the receiver is a

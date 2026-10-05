@@ -321,6 +321,38 @@ CASES = [
      "def main():\n"
      "    print(g(3))\n"
      "    return 0\n"),
+
+    # The three shapes in which a `NOT_LOWERED_BUILTINS` NAME is not the
+    # builtin, which is the half of the pre-pass that decides whether it is a
+    # refusal at all — and the half no corpus row can reach, because every
+    # program in the tree that spells one of these names spells it as the
+    # builtin. Each is ANSWERED and diffed against CPython, so a check that
+    # refused a program for a name the reader is free to redefine fails here
+    # rather than in a sweep a reader has to go looking for. A module-level `def`
+    # of the same name (the image compiles it, so the call is a `BL` to a symbol
+    # this build defines), a PARAMETER of that name (the allocator gave it a
+    # register, so the callee is a word and not a symbol —
+    # `model.callee_is_a_bound_value` is the reader that says so), and a LOCAL
+    # `max` in the module body.
+    ("a_module_that_defines_its_own_sum_is_not_the_builtin",
+     "def sum(a, b):\n"
+     "    return a + b\n"
+     "def main():\n"
+     "    print(sum(2, 3))\n"
+     "    return 0\n"),
+    ("a_parameter_named_sorted_is_not_the_builtin",
+     "def first(sorted, xs):\n"
+     "    return sorted(xs)\n"
+     "def second(xs):\n"
+     "    return xs[0]\n"
+     "def main():\n"
+     "    print(first(second, [4, 5]))\n"
+     "    return 0\n"),
+    ("a_local_max_shadowing_the_builtin_is_not_the_builtin",
+     "def main():\n"
+     "    max = 3\n"
+     "    print(max + 1)\n"
+     "    return 0\n"),
 ]
 
 # ── REFUSAL cases: (name, source, needles) ────────────────────────────────
@@ -439,17 +471,30 @@ REFUSALS = [
      # The refusal names the NAME AT THE POINT THE CLOSURE IS HANDED BACK —
      # `make`'s `return add` is the statement that needs a value, and `a(5)` is
      # only where the missing value shows up. So the needle is the quoted
-     # spelling `'add'`, which is how `model.unresolved_name_refusal` prints it,
-     # and the enclosing function's name.
+     # spelling `'add'`, which is how the refusal prints it, and the enclosing
+     # function's name.
      #
-     # That this is `unresolved_name_refusal` and NOT the more specific
-     # `model.function_value_refusal` is a real gap in the diagnostic and is
-     # filed as `bugs/FORMAL_a_nested_def_handed_back_names_the_allocator.md`
-     # rather than papered over here: the better sentence exists in the model and
-     # this call site does not reach it, because a nested def is RENAMED to its
-     # lifted symbol by `_flatten_closures` before anything asks whether the name
-     # is a function.
-     ["'add'", "make"]),
+     # These used to be pinned on `unresolved_name_refusal`'s "has no home" and
+     # on a comment saying that was the WRONG sentence and that
+     # `model.function_value_refusal`'s was the right one. Both of those are
+     # stale now and neither is what the needle asserts. `function_value_refusal`
+     # says a function is not a value on this path, which stopped being true
+     # when the emitters began materializing a function's address as a word
+     # (`_load_var`/`_emit_call`), and it is dead code kept only for its wording;
+     # and `unresolved_name_refusal` lists the places a NAME can live, none of
+     # which is where `add` was. The sentence that is right names the rename:
+     # `build.py` publishes `_all_closures`' KEYS as
+     # `model.publish_pre_lift_defs`, because `ClosureInfo.inner_def` is the
+     # same node `_flatten_closures` renames in place and the dict key is the
+     # only surviving copy of the spelling the source used.
+     #
+     # So the needles are the three facts only the new sentence carries: the
+     # pre-lift spelling, the symbol the build actually emitted, and the
+     # capture. The last one is what makes a lifted closure differ from a plain
+     # function — a plain function's value IS its address here — so a message
+     # that dropped it would be back to being true about the general case and
+     # useless about this one.
+     ["'add'", "make", "'make_add'", "'n'"]),
     ("a_nested_def_without_a_capture_handed_back",
      "def make():\n"
      "    def inner(x):\n"
@@ -460,7 +505,10 @@ REFUSALS = [
      "    r = f(1)\n"
      "    print(r)\n"
      "    return 0\n",
-     ["'inner'", "make"]),
+     # The no-capture half, which is where a fix that only handled captures
+     # would go quiet: the rename is the same, the capture clause is not, and
+     # the sentence says why the value is still refused with nothing captured.
+     ["'inner'", "make", "'make_inner'", "nothing captured"]),
     # A lambda that CAPTURES, handed back as the function's return value — the
     # closure-as-a-value question again, and the capture is what the refusal
     # names rather than the returning.
@@ -571,11 +619,15 @@ REFUSALS = [
      "        s = s + y\n"
      "    print(s)\n"
      "    return 0\n",
-     ["sorted"]),
+     ["sorted", "is not lowered on this path"]),
     # Plain `sorted`, with no key at all \u2014 so the row cannot be satisfied by
     # anything about the CALLABLE half. This is the plainest instance of a name
-    # in `model.NOT_LOWERED_BUILTINS` being refused, and it is refused BY THE
-    # LINK AUDIT after the image is built rather than by name before it.
+    # in `model.NOT_LOWERED_BUILTINS` being refused, and since 2026-10-05 it is
+    # refused by the SAME pre-pass as the row above rather than by the link
+    # audit after the image is built: `formal/model.py`'s
+    # `not_lowered_builtin_refusal` quotes that table's own reason per name, so
+    # every one of these rows carries the sentence that says what lowering it
+    # would take and not merely the NAME.
     ("sorted_without_a_key",
      "def main():\n"
      "    ys = sorted([3, 1, 2])\n"
@@ -584,7 +636,7 @@ REFUSALS = [
      "        s = s + y\n"
      "    print(s)\n"
      "    return 0\n",
-     ["sorted"]),
+     ["sorted", "is not lowered on this path"]),
     ("map_over_a_literal_with_a_lambda",
      "def main():\n"
      "    s = 0\n"
@@ -592,7 +644,7 @@ REFUSALS = [
      "        s = s + v\n"
      "    print(s)\n"
      "    return 0\n",
-     ["map"]),
+     ["map", "is not lowered on this path"]),
     ("map_over_a_literal_with_a_function",
      "def dbl(v):\n"
      "    return v * 2\n"
@@ -602,7 +654,7 @@ REFUSALS = [
      "        s = s + v\n"
      "    print(s)\n"
      "    return 0\n",
-     ["map"]),
+     ["map", "is not lowered on this path"]),
     ("filter_over_a_literal",
      "def main():\n"
      "    s = 0\n"
@@ -610,12 +662,12 @@ REFUSALS = [
      "        s = s + v\n"
      "    print(s)\n"
      "    return 0\n",
-     ["filter"]),
+     ["filter", "is not lowered on this path"]),
     ("sum_over_a_literal",
      "def main():\n"
      "    print(sum([1, 2, 3]))\n"
      "    return 0\n",
-     ["sum"]),
+     ["sum", "is not lowered on this path"]),
     ("functools_partial_of_a_function",
      "import functools\n"
      "def add(a, b):\n"
