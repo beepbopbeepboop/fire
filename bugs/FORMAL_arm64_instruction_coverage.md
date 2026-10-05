@@ -1,13 +1,15 @@
 # FORMAL_arm64_instruction_coverage: the arm64 encoder survey, and what wiring the new instructions actually bought
 
-**Status: the survey is current as of 2026-10-03 and has been re-measured THREE
-times on this tree — once for the method, once for the two largest gaps, and
-once more the same day after the `CSEL` neighbourhood and `STRH` gained
-lowerings. `TBZ` and `TBNZ` are WIRED (encoder, machine model, proof tables, and
-a lowering that emits them). `CMN` remains the next unit of work by the survey's
-own ranking (§"the two largest gaps" below). The file stays a survey, for the
-reason below; the latest numbers are in §"Re-measured again, 2026-10-03
-(later)".** One ENCODING CLASS was added to the model's vocabulary on
+**Status: the survey is current as of 2026-10-05 and the METHOD changed a third
+time — and this time the change moved the number DOWN, which is the direction
+every previous change moved it. `TBZ`/`TBNZ` are WIRED (encoder, machine model,
+proof tables, and a lowering that emits them), and so are `CMN`/`TST` in the
+machine model while remaining UNREACHABLE in any image, which is the
+distinction §"Re-measured 2026-10-05" is about and the reason this file's own
+next-unit-of-work line had to be rewritten. `ccmp` (13,842) and the `CSEL`
+neighbours are what is left that this target has a use for. The file stays a
+survey, for the reason below; the latest numbers are in §"Re-measured
+2026-10-05".** One ENCODING CLASS was added to the model's vocabulary on
 2026-10-04, and §"The one class the census cannot see" says which and why it is
 not a mnemonic row.
 
@@ -19,6 +21,94 @@ twice. Bugs found *by* this work have their own documents — see
 and the loop-exit bugs, `FORMAL_arm64_known_proof_gaps.md` for the three
 unproved examples, and `FORMAL_arm64_bit_test_branch_is_not_provable.md` for the
 one gap the TBZ/TBNZ wiring left behind.
+
+## Re-measured 2026-10-05, and the METHOD changed again: a reference from
+## something that cannot EMIT is not a reference
+
+`python3 tools/arm64_insn_audit.py`, unchanged corpora, and the tool's second
+exclusion — "an encoder no lowering emits" — was asking its question over every
+`.py` in `formal/`. Two things in there are not lowerings, and each was enough
+to hold a real gap out of the report:
+
+* **`formal/arm64_proof_gen.py`**, which renders Lean text about instructions
+  and puts none of them into an image. It references `encode_cmn_xn_xm` and
+  `encode_tst_xn_xm` because `lib/ProofLib.lean`'s `arm64_step` needs a model
+  arm for each — so **27,307 instructions of real compiler output** (`tst`
+  16,345, `cmn` 10,603, and the 359 `br` its `br_xn` arm names) were counted as
+  **covered** for images that cannot contain them. This is the file's own
+  sharpest lesson applied one level deeper than it was written for: *"an
+  encoder with no CALLER is that failure one step earlier"* — and the caller
+  has to be a lowering.
+* **a DOCSTRING.** `encode_cmn_xn_xm` occurs in `formal/arm64.py` exactly once
+  outside its own definition, in the docstring of the encoder beside it
+  (*"`encode_cmn_xn_xm` already emitted and nothing on this path modelled"*), so
+  on its own that one mention held `cmn` out of the gap list.
+
+Both are the same defect as the two mapping bugs this file already records
+(`encode_blr_xn` mapping to no mnemonic; reading the table instead of the
+callers): **the survey answering a question nobody asked**, here in the
+over-reporting direction, which this file has twice said is the same defect as
+under-reporting.
+
+```
+encoders in formal/arm64.py : 88 (69 base mnemonics)
+emitted by a lowering       : 76 (62 base mnemonics)
+disassembled               : 4026231 instructions over 420 distinct mnemonics, 200 binaries
+covered by an encoder      : 3683266 (91.5%)      [was 3710573 (92.2%)]
+excluded by decision       : 122992               [was  95685]
+genuinely uncovered        : 219973 (5.5%)        [unchanged]
+```
+
+**The 27,307 is exactly the delta in both directions** — covered down by
+27,307, excluded up by 27,307, genuinely-uncovered unchanged — which is the
+arithmetic that says the change moved a classification and not a capability.
+And `genuinely uncovered` not moving is again this file's invariant: these were
+never missing, they were mis-filed.
+
+**The third class the exclusion needs, and it is the one that could have made
+the report far worse.** Scoping the search to the files that EMIT is not by
+itself sufficient, because the assembler builds some words without going
+through an encoder function: `Assembler.emit_adrp_add` emits the `ADRP` and its
+`ADD` as raw words, since the two share one page relocation and back-patching
+them separately is what the single-instruction encoder cannot express. So
+`encode_adrp` is byte-exact and uncalled, and a naive scoping reports **138,980
+instructions — 3.45% of every instruction a real compiler emits, and the single
+largest gap in the survey** — for a mnemonic this backend emits on every
+relocation. `tools/arm64_insn_audit.py::ASSEMBLER_EMITTED` is that third class:
+counted as covered, and **printed with the reason**, because an exclusion
+nobody can see is not one. `BR` is deliberately **not** in it — `encode_br_xn`
+really is uncalled, and `br`'s 359 occurrences are a genuine gap this change is
+what makes visible.
+
+What the gap list looks like now, top of it:
+
+| occurrences | mnemonic | why |
+|---|---|---|
+| **16,345** | `tst` | `ANDS XZR, Xn, Xm`. **The largest entry in this corpus that this target has a use for**, and it was the SECOND-largest when last measured — it moved up by being un-filed rather than by anything changing. Its model arm exists (that is what the proof generator's reference was); what is missing is a LOWERING that emits it |
+| 13,842 | `ccmp` | no encoder at all; "compare and set flags conditionally", the family whose absence forces `if a != b:` into a branch where one instruction would do |
+| **10,603** | `cmn` | `ADDS XZR, Xn, Xm` — the flags of a SUM, and the cheaper half of the `ccmp` row. Same state as `tst`: modelled, unwired |
+| 3,014 | `csinc` | the largest member of the `CSEL` family still unwired, unchanged from the 2026-10-03 measurement |
+| 359 | `br` | `encode_br_xn` uncalled |
+
+**So `CMN` is no longer "the next unit of work" in the sense the 2026-10-03
+entry meant, and the correction is worth more than the ranking.** That entry
+said `cmn` was "the cheaper half (`CMN Xn, Xm` is `SUBS XZR, Xn, Xm` with the
+result discarded)". `CMN` is `ADDS`, not `SUBS` — the flags of a sum — and
+`lib/ProofLib.lean`'s `arm64_adds_flags` is what models it, so the model is
+right and the survey's one-line gloss on it was wrong. `tst` is larger, and both
+need the same thing to become reachable: **a lowering that emits them**, which
+is not a `ProofLib` change at all, unlike every row behind them.
+
+**The test that pins all three classes**, in `test_arm64_encoders.py`, and each
+assertion was verified to FAIL against the tree it replaces:
+`test_a_reference_from_something_that_cannot_emit_is_not_a_caller`. It names
+`tst` and `cmn` deliberately — they are the two the proof layer references, and
+the way that claim goes stale (a lowering landing) is a green run rather than a
+false one. The other two are directions: the files treated as lowerings must be
+`arm64_codegen.py` and `arm64.py` and nothing that renders Lean, and
+`ASSEMBLER_EMITTED` must not claim a mnemonic whose encoder is now CALLED (asked
+of the tool's own prose-stripped text, because the `def` line answers the naive
+version of that question).
 
 ## Method
 
