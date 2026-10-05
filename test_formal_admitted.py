@@ -1260,6 +1260,16 @@ LIBRARY_TRUST = {
     # of this module is the finding, and it is why the arithmetic's cost is
     # bounded while the comparisons' is zero.
     "IEEE754": (0, 0, 19, 19),
+    # `lib/Specs.lean`, added 2026-10-05: the INDEPENDENT specification layer
+    # (reference definitions for the classic example programs, written by hand
+    # in `Nat`/`Int`/`List`).  Zero at 0 and zero at 1, and the zero at column 2
+    # is a MEASUREMENT rather than an absence of measurement: every theorem in
+    # it is closed under `decide`/`omega`/`rfl`, which is what a specification
+    # layer can afford to be — a spec whose own proof needed a reflection axiom
+    # would be resting on the same unverified evaluation the layer exists to
+    # check.  `AXIOM_CLOSURE`'s row below is what decided that, read out of a
+    # real `#print axioms` run over all 55 declarations.
+    "Specs": (0, 0, 0, 0),
 }
 
 #: What the CLOSURE census measured, per module: how many theorems were asked,
@@ -1353,6 +1363,12 @@ AXIOM_CLOSURE = {
     # the mirror defect, carrying its own declaration-head pattern with no `@[...]`
     # prefix, so 98 attributed declarations were never asked about at all.
     "IEEE754": (24, 19, 5, 0, 0, 0),
+    # All 55 declarations of `lib/Specs.lean` answered, none reaching a decide
+    # axiom, none dropped as `private`, and no `of_reduce_bool`.  Read out of
+    # `formal/admitted.py::theorem_axiom_census(..., modules=['Specs'])` on the
+    # pinned toolchain — which is the same instrument the five rows above were
+    # read out of, so the comparison is like for like.
+    "Specs": (55, 0, 55, 0, 0, 0),
 }
 
 
