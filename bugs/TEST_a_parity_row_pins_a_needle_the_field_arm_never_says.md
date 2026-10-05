@@ -7,6 +7,13 @@ fixed.** Found 2026-10-04 while merging `work/formal23-2` and
 is NOT caused by that merge: a pristine archive of `master`'s HEAD reproduces it
 identically (§"What I saw", third command).
 
+Re-measured 2026-10-04 again, on the tree that had `work/formal26-fuzz-5`'s
+x86-64 `del` and dict-walk fixes in it (`PASS=77 FAIL=1 (78 cases)`, same single
+row, same words) — so it survives the fuzz-5 session's backend changes too, and
+`work/formal26-fuzz-5` filed its own doc for the same red, which this one
+supersedes: its two proposed fixes are the two below, and the first is the one
+this file's "exact next step" already names.
+
 `test_formal_x86_64_parity.py` is not in `tools/suite.py`'s registry and is not in
 `test_suite.py`'s `UNREGISTERED` — it is named by bug docs as the place a
 refusal gets pinned per architecture and run by hand, so this red is invisible to

@@ -9473,12 +9473,25 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_cbz_xn(0, 0))
             self.asm.emit_label_rel(false_label, here_offset=-4)
 
+            # `LSL #4` on a dict pair blob and `LSL #3` on a list blob, which is
+            # `M.walk_stride`'s decision and the same one `_emit_for_list` asks
+            # for the same walk — a comprehension generator binds ONE thing per
+            # COUNT, so a dict yields its KEYS and at the element stride it read
+            # `k0, v0, k1`: `[k for k in {10: 1, 20: 2, 30: 3}]` built
+            # `[10, 1, 20]` and exited 0, and `len` of it agreed with CPython
+            # because three PAIRS and three WORDS are the same number — which is
+            # why measuring the count could not see it. x86-64's `_emit_compr_gen`
+            # is the twin of this line.
+            lsl = (encode_add_xd_xn_xm_lsl4
+                   if M.walk_stride(self._is_dict_subscript(gen.iterable))
+                   == M.PAIR_STRIDE
+                   else encode_add_xd_xn_xm_lsl3)
             self.asm.emit(encode_add_xd_xn_imm(2, 9, 8))
             if ci_reg is not None:
-                self.asm.emit(encode_add_xd_xn_xm_lsl3(2, 2, ci_reg))
+                self.asm.emit(lsl(2, 2, ci_reg))
             else:
                 self._load_var(ci_name, 0)
-                self.asm.emit(encode_add_xd_xn_xm_lsl3(2, 2, 0))
+                self.asm.emit(lsl(2, 2, 0))
             self.asm.emit(encode_ldr_xt_xn_imm(0, 2, 0))
 
             tnames = _lbn_target_names(gen.target) if isinstance(
@@ -9626,7 +9639,8 @@ ctor_field_value=self._ctor_field_value_for(name),
                         self._compr_append_elem(offset, cap)
                 else:
                     self._emit_expr(op)
-                    self._emit_star_splice(offset, cap)
+                    self._emit_star_splice(offset, cap,
+                                           self._is_dict_subscript(op))
             else:
                 self._emit_expr(el)
                 self._compr_append_elem(offset, cap)
@@ -9634,8 +9648,18 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_list_base(offset)
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
-    def _emit_star_splice(self, res_offset: int, cap: int) -> None:
+    def _emit_star_splice(self, res_offset: int, cap: int,
+                          is_dict: bool = False) -> None:
         """X0 = source blob; append every element into the result.
+
+        `is_dict` is `M.walk_stride`'s question about the SOURCE and it decides
+        the element address below, for the reason `_emit_compr_gen` asks the same
+        question about a comprehension's iterable: a splice binds ONE thing per
+        COUNT, and a dict's COUNT is a PAIR, so `[*d]` at the element stride read
+        `k0, v0, k1` and built a list of keys and values — `[10, 1, 20]` where
+        CPython builds `[10, 20, 30]`, exit 0. The default is `False` so a caller
+        with no opinion gets the list stride, which is what every non-dict
+        source wants.
 
         The source base, its count and the index live in X10/X11/X12 — NOT in
         X9/X3, which is what this used and was wrong twice over:
@@ -9669,7 +9693,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_cbnz_xn(0, 13))
         self.asm.emit_label_rel(done, here_offset=-4)
         self.asm.emit(encode_add_xd_xn_imm(5, 10, 8))
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(5, 5, 12))
+        self.asm.emit(encode_add_xd_xn_xm_lsl4(5, 5, 12) if is_dict
+                      else encode_add_xd_xn_xm_lsl3(5, 5, 12))
         self.asm.emit(encode_ldr_xt_xn_imm(0, 5, 0))
         self._compr_append_elem(res_offset, cap)
         self.asm.emit(encode_add_xd_xn_imm(12, 12, 1))

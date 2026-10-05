@@ -9,10 +9,10 @@ regression".
 ## Why this doc exists when eight `CODEGEN_selfhost_*` docs already do
 
 Every one of those describes the SAME job failing in the GCC era, and that
-shape is GONE. `bugs/CODEGEN_selfhost_build_is_red_on_the_branch_base.md` and
-`CODEGEN_selfhost_red_on_the_merged_tree_149_gcc_errors.md` are about "157
-distinct gcc errors" and `CODEGEN_selfhost_closure_still_fails_gcc.md` says 13
-remain; there is no doc anywhere in `bugs/` whose subject is the state the job is
+shape is GONE. The docs about "157 distinct gcc errors" on the branch base and
+about the merged tree's "149 gcc errors", and the one that said 13 remained, are
+all deleted now — their subject is fixed — and there is no doc anywhere in
+`bugs/` whose subject is the state the job is
 in NOW, which is that the generated C compiles, links, and produces a binary
 that **crashes on the first program it is given**. A reader who runs the job and
 sees a SIGSEGV has no document that describes it, which is the whole reason
