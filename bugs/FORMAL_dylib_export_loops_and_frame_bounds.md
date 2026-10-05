@@ -210,3 +210,111 @@ induction.
   everything STAGED, which is how the golden file
   `formal/golden/arm64_dylib_contract_triple.lean` was deleted by accident. Use
   `git commit -o <paths>`, or check `git status` first.
+## §6 ANSWERED by measurement (`formal37-2`, 2026-10-05): it is **neither** of the
+## two the section offered, and the ranking function is ALREADY BUILT
+
+§6 asked for one thing and said what it wanted: *"read the `halt_only` walk's
+fuel accounting and decide between a ranking function and a per-back-edge
+counter."* Done. **The choice as posed does not exist** — the ranking function is
+already implemented, already discharged for two loop shapes, and the dylib path
+never reaches it. What actually blocks `countdown` is one clause.
+
+### The clause, named and measured
+
+`_gen_universal_e2e_cfg` refuses a constant-fuel walk on four grounds
+(`formal/arm64_proof_gen.py`, the `if fuel is not None:` block):
+
+```python
+_acyclic = all(t > b["instrs"][-1] for b in blocks for t in b["targets"])
+if (recursive or not _acyclic or fuel < _TOTAL
+        or any(b["kind"] == "bl" for b in blocks)):
+    return None
+```
+
+Measured on a real `countdown` **dylib export** (not a plain program), by
+instrumenting `_cfg_blocks` inside `fire.py dylib --formal`:
+
+| clause | measured | fires? |
+|---|---|---|
+| `recursive` | the dylib passes `recursive=False` | no |
+| `not _acyclic` | **`False` — the walk IS cyclic** | **YES** |
+| `fuel < _TOTAL` | `200000 < 40` → **no** | no |
+| `any(b["kind"] == "bl")` | **0 `bl` blocks** — no call in the export | no |
+
+8 blocks, `_TOTAL = 40`, and exactly **one back edge**: block 6 (kind `b`) targets
+`0x1000002a0` = block 5. The walk returns `None` (not an exception — measured by
+wrapping the call), and `_dylib_total_proof`'s `except` turns that into the
+`OBLIGATION` text.
+
+**So `fuel` was never the problem, and §6's `PATH * n` framing is not where the
+work is.** The doc sized `exportFuel`'s `PATH * n` for a countdown and then
+reasoned about a fuel invariant; the walk bails on **cyclicity**, before fuel is
+compared against anything. A per-back-edge counter would not help either — it
+answers "how many times", and the question asked is "at all".
+
+### The ranking function is already here, and it is `FrameBound`
+
+§6's "a ranking function" is not a proposal; it is `FrameBound`, and the walk
+already emits back-edge obligations named for it:
+
+- `_dec_while_pattern` (line 1450) detects `while p > 0: p = p - 1; return p`,
+  and `_gen_countdown_loop` (line 4821) emits its contract with leaves
+  `dec-while-back-edge-decrement` and `dec-while-back-edge-frame-slot`.
+- `_gen_range_loop` does the same for `for i in range(n)` with five
+  `range-loop-*` leaves.
+- `test_formal_call_proof_gen.py`'s `EXPECTED_CFG_LEAF_SITES` **requires both
+  `dec-while-back-edge-decrement` and `loop-cond-step` to be reached** by its
+  corpus slice — so this is live, exercised machinery, not a stub.
+
+**The loop is found from the CFG, not from `fn`.** The walk computes `loop_check`
+by scanning blocks for a `b` whose target is a `cbz` block, and
+`loop_check_bottom` for the self-targeting `cbz`. Neither reads `fn`.
+`_gen_countdown_loop` takes an `fn` parameter and **never uses it** (verified by
+inspecting its body). And `_dylib_total_proof` passes `fn=None` anyway.
+
+### Why the dylib path cannot reach it, which is the real finding
+
+**The loop-contract code is downstream of the `return None`.** The
+`loop_check is not None and not recursive:` block that calls
+`_gen_range_loop`/`_gen_countdown_loop` sits at line ~8137, long after the
+cyclicity bail at line ~70. `fuel is not None` is exactly what the dylib path
+sets (it passes `fuel=_EXPORT_FUEL_BASE`), so the dylib walk **always** takes the
+acyclicity test and returns `None` for any cyclic export before the loop
+machinery is consulted.
+
+**So the next step is a ONE-LINE-REACHABLE reordering, not a scheme extension**:
+decide whether the loop contract should be consulted *before* the acyclicity
+bail. Two readings, and the doc should say which it wants:
+
+1. **Consult it first** — a cyclic export with a recognised loop shape gets its
+   contract, and `_acyclic` stays the guard for the shapes it was written for.
+   This is the smaller change and it is what the existing leaves suggest was
+   always intended, since a `dec-while` contract is precisely a ranking
+   function for the one loop whose back edge is bounded.
+2. **Split the flag** — a separate "this is a loop, take the contract path"
+   switch, leaving the constant-fuel acyclic walk exactly as it is.
+
+**Not decided and not landed here**, and honestly: this needs the loop-contract
+path to work under `halt_only` + `exit_at=func_end`, which is a different entry
+shape than the `frame=` callers that discharge those leaves today. That is a real
+experiment, not a reordering, and it is the next thing to try.
+
+### What is settled, and what is not
+
+**Settled:** `countdown`'s obligation is caused by the `not _acyclic` clause and
+nothing else; `fuel < _TOTAL` is false by four orders of magnitude (200000 vs
+40) and `bl` is 0; the ranking function exists as `FrameBound` with live,
+test-required back-edge leaves; and the loop detection does not depend on `fn`,
+so `fn=None` is a red herring. **Untested by this session:** whether the loop
+contract discharges `_semantics_total` under the dylib entry shape — reading 1 is
+a hypothesis until a proof exists, and reporting it as "fuel grows with n" is
+precisely the false-versus-unproved confusion §2 warns about three times.
+
+**One source-shape correction while measuring**, because it changes who should
+pick this up: `_dec_while_pattern` returns `'n'` for the doc's shape
+(`while n > 0: n = n - 1; return n`) and **`None`** for a loop over a *local*
+(`var i = n; while i > 0: i = i - 1`) — its first test is
+`len(fn.body) != 2`, and a `VarDecl` makes it 3. So "a `while` that decrements a
+counter" is true only when the counter IS the parameter. A worker writing a
+fixture must know that or will measure a refusal that has nothing to do with
+ranking.
