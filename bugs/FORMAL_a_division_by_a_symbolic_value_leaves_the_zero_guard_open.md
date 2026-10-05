@@ -13,7 +13,20 @@ and it does not settle the argument either — arm64 passes the exit status in
 `x0` and x86-64 passes it in `rdi`, so the word the run observes at the exit is
 1 on one backend and 0 on the other, and a shared `fdiv64` cannot state both.
 Predates the floor correction; found 2026-10-04 on `work/formal16-4`,
-re-measured 2026-10-04 on `work/formal27-1`.
+re-measured 2026-10-04 on `work/formal27-1`. **§0 is no longer REACHABLE
+through `a // b` on the current tree, and the defect is not fixed — the route
+is gone.** `_emit_exit` opens with `fflush(NULL)` (`e77131d5`), the div0 arm is
+its one exit, and ONE unfollowable call silently restates the universal theorem
+as `q_reaches_call_at_…` with `prop := True` instead of raising — so the walk
+emits no terminal value flow and there is no residual to read. The three rows of
+`test_formal_call_proof_gen.py::TestTheZeroDivisorGuardAgainstLean` that measured
+this are red for exactly that reason, and
+`bugs/FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md` has the
+measurement, the three-way taxonomy of what the generator does with 0 / 1 / ≥2
+opaque calls, and the next step. Read that one first; the three options in "The
+exact next step" below are still the right three, but option 1 is now a claim
+about a block the walk does not walk at all, which moves option 2 from third to
+first.
 
 ## 0. What the measurement is, and what it refutes
 
@@ -101,6 +114,13 @@ symptom of the same disagreement and it is the one a reader meets first.
 three ways out are a project each and they are listed under "The exact next
 step" below; what is landed is the measurement and the pins, so that none of the
 three is built on the refuted premise.
+
+**The transcript below is from `work/formal27-1`, where it was true.** On the
+current tree the third and fourth lines are FAIL and the reason is that the
+program no longer emits the walk terminal they read — the two Lean-free rows
+above them still pass, because the disagreement they assert is in the text and
+in the image and neither moved. Treat it as what was measured, not as what a
+reader will see:
 
 ```
 $ python3 tools/memslot.py --gb 8 --label t -- \
