@@ -1070,6 +1070,12 @@ class X86_64Codegen:
         # from being two different addresses for the same thing.
         self._image_returns_frame = dict(
             getattr(f, "_image_returns_frame", None) or {})
+        # The same shape for a CONTAINER this image hands back, published beside
+        # it by the same pass (`formal/build.py`'s `check_module_symbols`) and
+        # for the same reason: the sizes belong to the CALLEE's body and the
+        # emitter asking is the caller's, with no unit in hand.
+        self._image_returns_container_bytes = dict(
+            getattr(f, "_image_returns_container_bytes", None) or {})
         # THIS function's own answer, from `formal/build.py`'s per-function
         # table — not `self._image_returns_frame.get(f.name)`, which is the
         # by-name JOIN. Two definitions of one name can disagree about whether
@@ -1214,6 +1220,30 @@ class X86_64Codegen:
             self._functions.values(), self._return_types)
         self._list_cursor = (self._blob_base + self._frame_recv_bytes
                              + self._ret_frame_bytes)
+        # Blocks for CONTAINERS this function RECEIVES from a callee that
+        # returns one, and the COPY after each such call that fills them.  The
+        # third kind of block in the same region as the constructor frames and
+        # the returned-frame blocks, for arm64's reason read above: a block
+        # reserved here is in THIS function's frame, so it lives exactly as long
+        # as the value bound to it.
+        #
+        # `_image_returns_container_bytes`, NOT `self._image_returns_frame`:
+        # the two tables answer different questions about the same kind of
+        # value, and one is BYTES rather than a struct.  arm64's twin, over the
+        # same shared model, so the two reserve the same bytes at the same
+        # offsets and one source reserves the same blob on both machines.
+        self._ret_blob_sites = M.container_returned_blob_sites(
+            f, self._image_returns_container_bytes)
+        self._ret_blob_base = (self._frame_recv_bytes + self._ret_frame_bytes)
+        self._ret_blob_bytes = sum(v[0] for v in self._ret_blob_sites.values())
+        self._list_cursor += self._ret_blob_bytes
+        # The check arm64 makes against `_blob_cap`, asked here through the two
+        # shared accessors because this backend states the budget as a SIZE and
+        # the region's top as a negative frame OFFSET (see `_blob_available`).
+        if self._blob_used() > self._blob_available():
+            raise CodegenError(M.frame_blob_refusal(
+                "a container handed back by a call",
+                self._blob_used(), self._blob_available()))
         self._frame_bytes = _align16(self._top_bytes + _BLOB_BYTES
                                      + _TEMP_SLACK)
 
@@ -9276,6 +9306,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # argument, so it is the LAST register loaded and no earlier argument is
         # disturbed by it.
         sret_site = self._ret_frame_sites.get(id(e))
+        blob_site = self._ret_blob_sites.get(id(e))
         # The hidden word IS an argument — the callee reads it out of the
         # register after the last source one — so six source arguments to a
         # frame-returning function is a SEVEN-argument call.  It has to land in
@@ -9454,6 +9485,21 @@ ctor_field_value=self._ctor_field_value_for(name),
         # (`_load_home_from_stack`): RSP has moved a whole frame by then.
         if stack_bytes:
             self.asm.emit(encode_add_r64_imm32(Reg.RSP, stack_bytes))
+        if blob_site is not None:
+            # The callee handed back a blob in a block of ITS OWN frame, and
+            # that frame died with it: the values read back after this function's
+            # next call are whatever that call left there (measured, both
+            # architectures, two different wrong answers — see
+            # `model.returned_container_blob_bytes`).  So the block is copied
+            # into THIS function's own region HERE, immediately after the call
+            # and before anything else runs, and the call's value becomes the
+            # copy's address.  Immediately is the whole of the soundness
+            # argument: the callee's frame is still intact at this point, so the
+            # bytes copied are the callee's own.
+            self._emit_returned_blob_copy(blob_site[0],
+                                          self._blob_base
+                                          + self._ret_blob_base
+                                          + blob_site[1])
         if ext_return is not None:
             self._emit_extern_return(ext_return)
         elif is_extern:
@@ -9878,6 +9924,35 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_fresh_one_word(name, st, e)
             return
         self._emit_expr(value)
+
+    def _emit_returned_blob_copy(self, nbytes: int, offset: int) -> None:
+        """RAX = this function's own copy of the blob the call just returned.
+
+        The x86-64 twin of arm64's `_emit_returned_blob_copy`, over the same
+        shared `model.container_returned_blob_sites` offset, and the same three
+        steps in the same order: the SOURCE is RAX (the callee's blob base, the
+        value the call produced), the DESTINATION is the block this function
+        reserved for that call site, and the call's value becomes the
+        destination — so every later use of it is an ordinary blob access on
+        this function's own storage.
+
+        The register choice differs only because the addressing does.  Here the
+        destination is a compile-time RBP-relative offset (`_emit_blob_base`), so
+        it is computed once into R11 and stays there, RAX keeps the source base
+        — a store never writes its base register — and R10 carries each word, so
+        no base is recomputed per slot.  The destination ends in RAX because that
+        is the register every bare expression leaves its value in.
+
+        Only the displacement form is emitted, and for arm64's reason: a returned
+        blob is bounded by this function's own frame (the refusal above, and the
+        callee's own reservation before that), so the largest copy is a few
+        thousand bytes and `disp32` reaches it with room to spare.
+        """
+        self._emit_blob_base(offset, Reg.R11)
+        for byte in range(0, nbytes, 8):
+            self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RAX, byte))
+            self.asm.emit(encode_mov_rm64_r64(Reg.R11, byte, Reg.R10))
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R11))
 
     def _emit_frame_return(self, value) -> None:
         """`return <frame>` in a function the convention applies to.
