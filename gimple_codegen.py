@@ -5028,6 +5028,25 @@ class GimpleGen:
     def _emit_call(self, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]],
                     arg_nodes: list = None) -> None:
         return ginf._emit_call(self, ret_type, result_var, fname, arg_pairs, arg_nodes)
+    # ONE delegate for `emit_dict_int_value_store`, and it is here rather than
+    # after `_note_container_callable_ret` because that was where the SECOND copy
+    # lived: the duplicate the merge left could not be seen from the class object
+    # (Python keeps the last, both bodies identical), so `test_gimple.py`'s
+    # `no_name_is_defined_twice_in_a_codegen_class` reads this file's SOURCE.
+    #
+    # It is here at all because four branches still carried the pair and this
+    # merge resolved the two sides' copies into neither: `gimple_codegen.py` did
+    # not conflict, both sides had a delegation, and the result had none. The
+    # only thing that saw it was `test_suite.py`'s "the backend never calls a
+    # gen method GimpleGen does not have" — which was itself DEFINED and never
+    # CALLED, so `gimple` failed on the first dict store it lowered instead.
+    # Seven call sites in `emit_exprs.py` and `emit_stmts.py` were calling an
+    # attribute that did not exist, and the answer was an `AttributeError` during
+    # codegen: no exit code, no artifact, no test that does not lower this shape.
+    def _emit_dict_int_value_store(self, dict_val: str, key_ctype: str, key_val: str,
+                                   val_ctype: str, val: str, val_node=None) -> None:
+        return ginf.emit_dict_int_value_store(self, dict_val, key_ctype, key_val,
+                                              val_ctype, val, val_node)
     def _declared_int_ctype(self, val: str) -> str | None:
         return ginf._declared_int_ctype(self, val)
     def _ensure_local(self, ctype: str, val: str) -> str:

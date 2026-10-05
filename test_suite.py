@@ -5444,6 +5444,16 @@ def main():
                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
                test_a_deleted_bug_doc_is_not_still_cited,
                test_no_test_preflights_on_an_unbuildable_artifact,
+               # A missing DELEGATE is the same class of defect and the same
+               # escape: `'GimpleGen' object has no attribute
+               # '_emit_dict_int_value_store'` is an AttributeError raised
+               # during codegen, so it reaches no exit code and no test that
+               # does not happen to lower the shape that calls it. This one was
+               # DEFINED and never CALLED, which is the memory-campaign
+               # failure above in a second place — a guard nothing runs reports
+               # green forever — and it is the only check that can see the
+               # defect statically at all.
+               test_every_backend_call_of_a_gen_method_has_the_delegate,
                # The memory-campaign tests. They were DEFINED and never CALLED
                # — three functions, 300-odd lines, nothing in this list — which
                # is the same defect as a test file in no bucket: the coverage
