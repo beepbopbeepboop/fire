@@ -6812,8 +6812,10 @@ def outer():
     # pipeline actually produces, and its own docstring spelled a third prefix.
     # It is now the intersection of the two artifacts' own symbol names, which
     # is what makes it un-rot-able: a rename on the emitting side moves both
-    # halves together. See
-    # bugs/CODEGEN_refuse_dropped_companion_matches_a_prefix_nothing_emits.md.
+    # halves together. The guard's own doc — the one that said the refusal
+    # "matches a prefix nothing emits" — was deleted with its fix (the guard
+    # now fires), which is why this sentence names the defect rather than a
+    # path: nothing here should be a citation of a file that is gone.
     test_raises(
         "nested_generator_needing_the_cpp_companion_is_refused_by_name",
         """\

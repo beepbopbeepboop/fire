@@ -2035,7 +2035,9 @@ STALE_PER_CHILD_BUDGETS = {
     'test_formal_tempfile.py': 3,
     'test_formal_x86_64_dylib.py': 3,
     'test_general_mutable_closure_capture.py': 2,
-    'test_gimple.py': 51,
+    'test_gimple.py': 57,  # +6 on 2026-10-04: the merge of work/bugs6-1 and
+                                  # work/bugs6-2 (two-module build+run harnesses and a
+                                  # 120 s whole-closure compile)
     'test_gimple_async_runner.py': 11,
     'test_import_integration.py': 4,
     'test_link_mode.py': 2,
@@ -2048,7 +2050,8 @@ STALE_PER_CHILD_BUDGETS = {
     'test_python_source_mut_capture.py': 1,
     'test_re_formal.py': 1,
     'test_runtime_dylib.py': 1,
-    'test_selfhost.py': 1,
+    'test_selfhost.py': 2,  # +1 on 2026-10-04: work/bugs6-1's
+                                       # build_scratch_is_private_and_removed
     'test_selfhost_memory.py': 1,
     'test_stdlib.py': 1,
     'test_struct_formal.py': 1,
