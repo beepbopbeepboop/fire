@@ -38,12 +38,6 @@ import sys
 import tempfile
 import textwrap
 
-# Three kinds of child, three sites: a `fire.py build` (a COMPILE), the
-# executable that build produced (a RUN), and `fire.py run` — which is not a
-# build at all but this project's own INTERPRETER executing the program, so it
-# is a RUN and was 300 s for a reason that no longer holds.
-from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 
@@ -80,10 +74,10 @@ DIAG = "unavailable in compiled mode"
 def _run(src, tmp, i, exe):
     out = os.path.join(tmp, f"p{i}")
     b = subprocess.run([PY, "fire.py", "build", "-o", out, src], cwd=HERE,
-                       capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+                       capture_output=True, text=True, timeout=600)
     if b.returncode != 0:
         return None, b.stdout, b.stderr
-    r = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+    r = subprocess.run([out], capture_output=True, text=True, timeout=120)
     return r.stdout, r.stdout, r.stderr
 
 
@@ -112,7 +106,7 @@ def main() -> int:
         iout, iout2, ierr = _run(src, tmp, i, exe) if False else (None, None, None)
         # interpreted
         ri = subprocess.run([PY, "fire.py", "run", src], cwd=HERE,
-                            capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+                            capture_output=True, text=True, timeout=300)
         # compiled
         cout, _, cerr = _run(src, tmp, 100 + i, exe)
         checks = 1
@@ -134,7 +128,7 @@ def main() -> int:
         with open(src, "w") as f:
             f.write(PRELUDE + "fn main():\n" + textwrap.indent(body, "    ") + "\n")
         ri = subprocess.run([PY, "fire.py", "run", src], cwd=HERE,
-                            capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+                            capture_output=True, text=True, timeout=300)
         cout, _, cerr = _run(src, tmp, 200 + i, exe)
         if cout is None:
             failures.append(f"{label}: the build now FAILS. That is a change in "

@@ -16,74 +16,9 @@ Found while implementing the per-edge export-gate rule
 emptied `binary_heap.mojo`'s 163-file row at the gate and exposed what is behind
 it. **This is the next row, and it is one feature, not 98 bugs.**
 
-## 0. 2026-10-05: the census was counting this worktree's SCRATCH, and the fix is one reader
-
-**The 115 and every bucket under it are unchanged by this, and the file count
-was not.** `DEFAULT_PATHS` includes the REPOSITORY ROOT, and `collect`'s walk
-pruned nothing in place, so it descended into `.tmp/<some test's tmpdir>/` and
-counted `.mojo` files a test had written an hour earlier. Measured on this tree
-before the fix: **`files scanned: 409`, against 385 with them pruned** — 24
-scratch files — and **four of the instrument's `unresolved` rows were `.tmp/`**,
-one of them `pkg/uses_it.mojo` calling `pkg.inner.FormatStruct`: this document's
-own subject, in a file that does not exist and that no reader will ever find
-again.
-
-**Why it matters more here than anywhere else.** This census exists to be
-QUOTED — §5 and §5b are its output, and §5b's whole conclusion ("the matcher
-bucket is 2 sites and the largest piece is return-type inference") rests on
-totals that must mean the same thing on every machine and every hour. A number
-that moves with whatever a test ran is a claim about the test run.
-
-**And this is the SECOND instrument over the same corpus to have the defect.**
-`tools/formal_returnless_census.py` found it on 2026-10-04 (§0c of
-`FORMAL_a_function_with_no_return_…`) and fixed it with a hardcoded
-`(".tmp", ".git", "__pycache__")`. Two hardcoded triples are two answers to one
-question, and that is how one census counts a scratch file and the other does
-not, so **both now ask `checked_run.is_derived_dir`** — the repository's ONE
-answer to "is this directory's content an input", which
-`tools/dangling_doc_refs.py` already reuses rather than keeping a second list of
-"not part of the repo". It also covers `build/`, `aside/`, `bside/` and
-everything else `DERIVED_DIRS` names, which a hand-written triple does not.
-
-**The corpus census output is otherwise byte-identical**, which is the check
-that says the pruning removed scratch and not corpus:
-
-```
-$ python3 tools/memslot.py --gb 8 --label tlc -- \
-      python3 tools/formal_template_call_census.py --rows 4
-files scanned: 385   bare calls to an imported name that is a declared template:
-115   call sites classified: 115
-        2  solvable from the annotations at the call site
-       28  the argument's type is written but does not unify
-       71  the argument's type is not written down
-        5  a type argument is not in the arguments at all
-        8  a type argument is settled by a comptime default
-        0  the declaration has no type parameter to substitute
-        1  the declaration could not be read
-   of which some parameter is trait-bounded (`B`): 67
-   of which the declaration writes it as `Self.T` (`S`): 59
-```
-
-§5b quoted the same 115, the same seven buckets and the same two bounded/self
-counts, so **the reordering that doc did stands unchallenged**: (b) return-type
-inference is the largest piece, (c) bound resolution is the largest number of
-FILES, and (a) the matcher bucket is 2 sites that convert nothing. The only
-figure that moved is the one that was never about the corpus.
-
-Pinned by `test_formal_monomorph.py`'s
-`the census does not count this worktree's scratch`, which puts the SAME two
-modules in three places — real, `.tmp/`, `build/` — and requires that only the
-real one contributes a row. **Verified to fail without the prune**: with the
-walk restored to its pre-fix shape the case reports both `use_widen.mojo`
-paths. A note on its own fixture, because it is a trap worth recording: the
-runner's scratch directory is itself under `ROOT/.tmp/`, so the assertion is
-spelled in the tool's own `os.path.relpath(path, ROOT)` form — the question is
-which files the WALK reached, and asking whether an absolute path equals
-another one would have failed on the spelling rather than on the walk.
-
 ## 1. The measurement
 
-the `b9` round of `bugs/FORMAL_sweep_work_map.md` §4.1's 163 files, each built on
+`bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §4.1's 163 files, each built on
 the tree with the per-edge rule (`python3 fire.py build --formal --no-prove`,
 `--no-prove` so no lean runs, both architectures' refusal identical):
 
@@ -94,7 +29,7 @@ the tree with the per-edge rule (`python3 fire.py build --formal --no-prove`,
 | still at the gate | 30 | `std/sys/_io.mojo` (17) and a `constants.mojo` (13) — both, all 30, "declares no function and no type at all — only module-level constants" |
 
 So the row moves **3 files to a pass** and hands the rest to the shape below.
-the `b9` round of `bugs/FORMAL_sweep_work_map.md` §4.1 predicted "8-in-10 land on
+`bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §4.1 predicted "8-in-10 land on
 `tile.mojo`'s bracketed specialization" from a probe that returned `None` for
 every module the gate refused. **That probe also removed the refusal a bare call
 gets**, so it read one layer further out than the tree does: with the gate fixed
@@ -213,7 +148,7 @@ The 163-file classification this table comes from is one `fire.py build
 --formal --no-prove` per file under `tools/memslot.py`, and the list of paths is
 `grep -o 'CODEGEN/DEPENDENCY: [^ ]*' bugs/sweeps/sweep-arm-9{,-retry}.txt` on
 the lines that mention `binary_heap`. No lean runs; both architectures produce
-the same refusal, which is the `b9` round of `bugs/FORMAL_sweep_work_map.md` §2.2's
+the same refusal, which is `bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §2.2's
 standing measurement.
 ## 5. §3's one feature is three, and the biggest of the three is not the one §1's table leads with
 
@@ -259,7 +194,7 @@ and FALSE of what this path can read at a call site:
    the template's declared parameters against the parameter it appears in", reads
    as if the bounds did not matter: **they are the whole difficulty of the
    largest row in the corpus** (111 of the 170 files, per
-   the `b10` round of `bugs/FORMAL_sweep_work_map.md` §3.1).
+   `bugs/FORMAL_sweep_work_map_2026-10-04_b10.md` §3.1).
 3. **A quarter of the corpus's largest row IS a matcher**, so the feature has a
    cheap half and it is worth landing first: 32 sites need nothing but a
    structural comparison of two annotation strings (`SIMD[dtype, _]` against

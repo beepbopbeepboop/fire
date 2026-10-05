@@ -97,12 +97,10 @@ deleted with the fix). Four files were outside the inventory entirely before
 that, and one of them — `formal/x86_64_model_test.py`, the only check on
 `lib/X86.lean` that EXECUTES a machine model instead of typechecking it — ran
 by nothing. It is registered now (`formal-x86-machine-model`) and on its first
-run found a real model bug: `udivmod` disagreed with the hardware, real 4,
-model 7905747460161236410. Filed as its own doc with the emitted bytes, which
-rule out the obvious explanation; the defect was `idiv` writing its quotient
-through `UInt64.ofNat q.toNat`, which is zero for every negative quotient, and
-it was fixed on 2026-10-04 by `e54d2f4e` (one of nine model defects that commit
-found by fuzzing the model against the CPU).
+run found a real model bug: `udivmod` disagrees with the hardware, real 4,
+model 7905747460161236410. Filed as
+`bugs/CODEGEN_x86_model_udivmod_disagrees_with_hardware.md` with the emitted
+bytes, which rule out the obvious explanation.
 
 ### §5's other items are unchanged
 
@@ -201,7 +199,7 @@ one at equal severity, because a loud one is already reported.
 |---|---|---|
 | 1 | **`examples-parse` cannot see the 45 files it guards** | It exists because `19bc0dd` took 4 of `formal/examples/*.mojo` out of the parser and the only symptom was a coverage number 4 points low. It is `cache=True` with `extra=['fire_compiler.py', 'test_examples_parse.py']` — and none of the 45 example files is in the key. **Proven, not argued:** `open()` instrumented through `check_key` reads 48 repo files and **0** of them are under `formal/examples/`. A `SyntaxError` in any example cannot move the key, so a recorded PASS replays. The test created to make that loud is gated behind a cache that makes it quiet. §3.1 |
 | 2 | **4 tests dead at import on renamed files** | `test_myinterpreter_simple.py`, `test_myinterpreter_validation.py` (`mojo/ast_nodes.mojo`), `test_phase2_parser.py`, `test_phase2_parser_simple.py` (`mojo/parser.mojo`). **Neither file exists.** This is the `coro` failure verbatim, from `CLAUDE.md`: the same class, four more files, and the `coro` one was found by accident. §3.2 |
-| 3 | **`test_x86_64_containers.py` (59/60 x86-64, 52/60 arm64) and `test_x86_64_examples.py`** | The only files that EXECUTE x86-64 code and check what it computed. `test_x86_64_containers.py` is red today on `with-statement` (`with 7 as y: x = y` binds `y`, and the FORMAL backend refuses the read-before-store — the `with … as` alias is a binding that happens BEFORE the value its body sees, and the scan did not count that; fixed by adding the alias to `_bound_before_first_statement`, which is what the `x86-containers` `expect=` marker names). The arm64 slice and list-concat cases that used to sit beside it were answered in `eeb1baaf` and their doc deleted with them. The `x86` bucket runs `test_formal.py` and a model-coverage sweep; neither answers a question. A two-backend disagreement in a container operation is invisible until one of these runs: that is exactly how the dict-comprehension value bug and the two-backends'-one-program arm64 subscript refusal were found. |
+| 3 | **`test_x86_64_containers.py` (59/60 x86-64, 52/60 arm64) and `test_x86_64_examples.py`** | The only files that EXECUTE x86-64 code and check what it computed. `test_x86_64_containers.py` is red today on `with-statement` (`with 7 as y: x = y` binds `y`, and the FORMAL backend refuses the read-before-store; `bugs/FORMAL_a_local_read_before_its_first_assignment.md`, which is what the `x86-containers` `expect=` marker names). The arm64 slice and list-concat cases that used to sit beside it were answered in `eeb1baaf` and their doc deleted with them. The `x86` bucket runs `test_formal.py` and a model-coverage sweep; neither answers a question. A two-backend disagreement in a container operation is invisible until one of these runs: that is exactly how the dict-comprehension value bug and the two-backends'-one-program arm64 subscript refusal were found. |
 | 4 | **`test_arm64_encoders.py` (221 checks) and `test_x86_64_decode.py`** | Differential: our encoders against `as -arch arm64`, and every x86-64 encoder round-tripped through the decoder. A wrong encoder is a silently wrong instruction and the gate has no other way to see one. |
 | 5 | **`test_ownership_destruct.py`** | It decides which locals get destructors emitted, it is in `cas._COMPILER_SOURCES` so it changes generated C, and its only tests are fixtures nothing runs. A missed destructor is a leak — silent, and unbounded. |
 | 6 | **5 closure-capture files** | `test_transitive_closure_capture.py`, `test_python_source_mut_capture.py`, `test_general_mutable_closure_capture.py`, `test_mutable_async_capture.py`, `test_closure_capture_comptime_func_params.py`. A capture that binds the wrong cell computes a plausible wrong number. `test_general_mutable_closure_capture.py` is by-reference, which is the same frame-address defect `FORMAL.md` assigns to [4] on the *other* backend. |

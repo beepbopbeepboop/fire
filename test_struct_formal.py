@@ -37,8 +37,6 @@ Run:  python3 test_struct_formal.py [-v]
 """
 import argparse
 import os
-import re
-import shutil
 import signal
 import struct
 import subprocess
@@ -55,17 +53,8 @@ HOSTMODS = _FI._HOSTMODS_ROOT
 STRUCT_MODULE = os.path.join(HOSTMODS, "struct.mojo")
 import fire_compiler as F
 FIRE = os.path.join(HERE, "fire.py")
-# `exec_budget`'s, not this file's own `300`/`60`: the same pair of literals
-# every build-and-run suite grew, and the reason they are one pair is in the
-# module's docstring. `child_exit_reason` is `_how_it_died`'s whole subject.
-from exec_budget import (BUILD_TIMEOUT, RUN_TIMEOUT,   # noqa: E402
-                         child_exit_reason)
-
-#: Where a run that never finishes leaves the image, so that the one question
-#: about it can be asked.  `build/` is git-ignored and is already where
-#: `build/suite.log` goes, so it is the tree's own scratch area rather than a
-#: new one — see `_preserve_a_hung_image`.
-HANG_ARTIFACTS = os.path.join(HERE, "build", "hang-artifacts")
+BUILD_TIMEOUT = 300
+RUN_TIMEOUT = 60
 
 # Values chosen to exercise the parts that are easy to get wrong, not to be
 # round numbers: every one has a non-zero byte in every position of its width,
@@ -123,51 +112,22 @@ def _how_it_died(run):
     discarded at the point where it still exists, and the reported failure
     points at the struct tables when the real answer is a dead process.
 
-    The wording is `exec_budget.child_exit_reason`'s, which four suites had each
-    hand-rolled and one of which printed a bare `signal 9`: a negative
-    `returncode` is the ONLY record of which signal ended the child, and a
-    `SIGKILL` in particular is a fact about the machine rather than about the
-    module, which is a distinction four copies of this sentence could not keep
-    agreeing on.
+    `run.returncode` is negative when the child was killed by a signal, and
+    that negative number is the ONLY record of which signal, so it is
+    translated by name here rather than printed as `-11`.
     """
     if run.returncode == 0:
         return None
-    return child_exit_reason(run.returncode, run.stderr)
-
-
-def _preserve_a_hung_image(name, out, path):
-    """Copy the image and the source that produced it somewhere they survive.
-
-    Returns the directory they are in, or None if they could not be copied.
-
-    **Why this exists.**  The image used to live in a `TemporaryDirectory` and
-    the timeout message named a path that no longer existed by the time anybody
-    read the message, so the one question the timeout raises — "did this process
-    never get scheduled, or is it spinning inside the image?" — could only be
-    answered with the image in hand and the image was already gone.  The
-    `SIGKILL` sibling of that report needs no image: `-9` cannot be sent by a
-    process from inside, so it is a fact about the machine, and it is the
-    reading that was already taken (`bugs/FORMAL_a_calcsize_image_hangs_once_in_
-    several.md` §"Step 1").  **A hang is the one outcome where the harness holds
-    no evidence at all beyond "it did not finish",** which is why it is this one
-    that is preserved and why the copy is the whole of the fix.
-
-    `build/hang-artifacts/` rather than a new directory: `build/` is already the
-    tree's git-ignored scratch area (`build/suite.log`), so a directory beside
-    it needs no ignore rule and is where a reader looks.  A copy failure is
-    reported as None rather than raised, because losing a diagnostic must not
-    turn a reported hang into an IOError.
-    """
-    dest = os.path.join(HANG_ARTIFACTS, name)
-    try:
-        os.makedirs(dest, exist_ok=True)
-        for src in (out, path):
-            if os.path.isfile(src):
-                shutil.copy2(src, os.path.join(dest, os.path.basename(src)))
-    except OSError:
-        return None
-    return dest if os.path.isfile(os.path.join(dest, os.path.basename(out))) \
-        else None
+    if run.returncode < 0:
+        try:
+            signame = signal.Signals(-run.returncode).name
+        except ValueError:
+            signame = f"signal {-run.returncode}"
+        how = f"the image was killed by {signame} (wait status {run.returncode})"
+    else:
+        how = f"the image exited {run.returncode}"
+    err = (run.stderr or "").strip()
+    return how + (f", stderr: {err[-300:]}" if err else ", with no stderr")
 
 
 def build_and_run(tmpdir, name, source):
@@ -193,12 +153,6 @@ def build_and_run(tmpdir, name, source):
     instead of 148, because 21 checks were never reached and the report could
     not say so. A case that does not finish is a failed case, which is exactly
     what a build failure already was, and the fix is to make it one.
-
-    **And the image is KEPT** (`_preserve_a_hung_image`), because the message
-    names a path and a path that is gone by the time the message is read is not
-    one.  The message states both branches the hang could be — starved, or
-    spinning — because which one it is is a fact about the machine and about the
-    image respectively, and only one of them is the image's fault.
     """
     path = os.path.join(tmpdir, f"{name}.py")
     with open(path, "w") as f:
@@ -215,21 +169,12 @@ def build_and_run(tmpdir, name, source):
         run = subprocess.run([out], capture_output=True, text=True,
                              timeout=RUN_TIMEOUT)
     except subprocess.TimeoutExpired:
-        kept = _preserve_a_hung_image(name, out, path)
-        where = (f"the image and its source are kept in {kept}: `file "
-                 f"{os.path.join(kept, os.path.basename(out))}`, and "
-                 f"`tools/gdbtool.py` on the live process answers in seconds "
-                 f"whether it is looping" if kept else
-                 f"the image COULD NOT be copied out of {tmpdir}, so it is "
-                 f"gone and the only evidence is this message")
         raise AssertionError(
             f"the image was built and then did not finish within "
             f"{RUN_TIMEOUT}s — it is hung, not slow, and the cases after this "
             f"one in the same loop would not be reached if this were allowed "
-            f"to propagate.  Two readings, and they are not the same fault: a "
-            f"process that never got SCHEDULED is the machine (look at "
-            f"`build/suite.log`'s measured peak and at how many jobs ran at "
-            f"once), while a process SPINNING is the image — and {where}."
+            f"to propagate. `file {out}` and run it under "
+            f"`tools/gdbtool.py` to see where it is looping."
         ) from None
     return ([ln for ln in run.stdout.split("\n") if ln.strip() != ""],
             _how_it_died(run))
@@ -264,14 +209,7 @@ def expect_lines(tmpdir, name, source, expected, what, tally=None,
         got, died = build_and_run(tmpdir, name, source)
     except AssertionError as e:
         check(False, what, str(e), tally=tally, announce=announce)
-        # "the program did not build" was the only wording here, and it is
-        # false for the outcome `build_and_run` raises besides a build failure:
-        # an image that never finishes BUILDS.  The second check says which, by
-        # reading the first one's message, so a report cannot claim the compiler
-        # refused a program the compiler built.
-        why = str(e)
-        unreached("the program did not build" if why.startswith("build failed")
-                  else "the program did not finish (see the message above)")
+        unreached("the program did not build")
         return None
     if died is not None:
         # A case in this file prints its whole answer and then falls off the
@@ -1137,11 +1075,9 @@ def test_the_seven_importers_no_longer_refuse_on_the_import(tmpdir):
                 [sys.executable, FIRE, "build", "--formal", "--no-prove",
                  "-o", os.path.join(tmpdir, os.path.basename(rel) + ".bin"),
                  path],
-                capture_output=True, text=True, timeout=BUILD_TIMEOUT,
-                cwd=HERE)
+                capture_output=True, text=True, timeout=600, cwd=HERE)
         except subprocess.TimeoutExpired:
-            check(False, f"{rel} builds (timed out at BUILD_TIMEOUT="
-                         f"{BUILD_TIMEOUT}s)")
+            check(False, f"{rel} builds (timed out at 600s)")
             continue
         text = r.stderr + r.stdout
         check("imports 'struct'" not in text,
@@ -1171,22 +1107,14 @@ def test_the_harness_records_a_case_even_when_it_cannot_pass(tmpdir):
         was reported as a PASS. That is not a denominator problem, it is a
         correctness one, and no amount of counting finds it.
 
-    A fourth is not about the TOTAL but about what a failure leaves behind: the
-    timeout message named a path inside a `TemporaryDirectory`, so the image a
-    hang needs in order to be diagnosable was deleted by the time the message
-    was read (`_preserve_a_hung_image`).
-
     Each probe below records what it saw through `probe()`, which silences both
     the tally and the printing: every case here is SUPPOSED to fail, so a green
     run that printed eight red lines from its own self-test would be the same
     noise this docstring is about. Each probe's verdicts are appended once, at
-    the end, so this function contributes a FIXED nine checks whatever happens.
+    the end, so this function contributes a FIXED six checks whatever happens.
 
-    Against the pre-fix harness, four of the six that predate the hang case fail
-    — verified by restoring the old `expect_lines` and the old `build_and_run`
-    and re-running this — and the three that came with `_preserve_a_hung_image`
-    are pinned by the same mechanism, against the function that preserves
-    nothing.
+    Against the pre-fix harness, four of the six fail — verified by restoring
+    the old `expect_lines` and the old `build_and_run` and re-running this.
     """
     global build_and_run
     real_build_and_run, real_check = build_and_run, globals()['check']
@@ -1266,56 +1194,6 @@ def test_the_harness_records_a_case_even_when_it_cannot_pass(tmpdir):
         'answer is reported as dead, not as correct',
         f'{len(added)} check(s): {added}. A pass here is the defect: stdout '
         f'matched and the process had already exited nonzero.'))
-
-    # ONE REAL BUILD THAT DOES NOT FINISH, which is the fourth outcome no stub
-    # above can reach, and the one whose evidence used to be thrown away: the
-    # message named a path inside a `TemporaryDirectory`, so by the time anybody
-    # read it the image was gone and the two readings it offers — starved by
-    # the machine, or spinning inside the image — could not be told apart.  The
-    # probe lowers `RUN_TIMEOUT` rather than waiting 60 s for the real one, and
-    # then asks the two questions that matter: is the path in the message a
-    # file that EXISTS, and does the preserved copy actually hold the image.
-    real_timeout = RUN_TIMEOUT
-    globals()['RUN_TIMEOUT'] = 3
-    try:
-        added = probe(lambda: expect_lines(
-            tmpdir, "harness_hangs",
-            'def main():\n    i = 0\n    while True:\n        i = i + 1\n'
-            '    return 0\n', [0],
-            "a real image that never finishes"))
-    finally:
-        globals()['RUN_TIMEOUT'] = real_timeout
-    detail = added[0][2] if added else ''
-    kept = None
-    if HANG_ARTIFACTS in detail:
-        # The message names the directory by absolute path, so the tail after
-        # the prefix is appended to it: `os.path.join` would DISCARD the prefix
-        # for an absolute tail, which is how the first version of this test
-        # asked `os.path.isdir('/harness_hangs')` and reported a directory that
-        # exists as one that does not.
-        tail = re.split(r"[:`\s]", detail.split(HANG_ARTIFACTS, 1)[1],
-                        maxsplit=1)[0].lstrip("/")
-        if tail:
-            kept = HANG_ARTIFACTS.rstrip("/") + "/" + tail
-    verdicts.append((
-        len(added) == 2 and not added[0][0] and 'did not finish' in detail
-        and kept is not None and os.path.isdir(kept)
-        and os.path.isfile(os.path.join(kept, "harness_hangs.bin")),
-        'harness: an image that never finishes is KEPT, and the message names '
-        'a path that exists',
-        f'{len(added)} check(s): {added}. The message must name a directory '
-        f'under {HANG_ARTIFACTS} holding the image; it named '
-        f'{kept!r}, which '
-        + ('exists' if kept and os.path.isdir(kept) else 'DOES NOT EXIST')
-        + '. A message naming a path inside a TemporaryDirectory is the '
-          'defect: the image is gone by the time it is read.'))
-    verdicts.append((
-        'SCHEDULED' in detail and 'SPINNING' in detail,
-        'harness: a hang reports the two readings it has, because only one of '
-        'them is the image fault',
-        f'{detail!r}: a starved process and a spinning one are different '
-        f'faults in different places, and a message that offers only one sends '
-        f'the reader to the wrong one.'))
 
     for ok, what, detail in verdicts:
         RESULTS.append((ok, what, detail))

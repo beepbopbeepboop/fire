@@ -332,64 +332,6 @@ class TestClassifier(unittest.TestCase):
                "    return f(x)\n")
         self.assertEqual(self._class_of(src), "proof-refused")
 
-    def test_the_proof_layers_refusal_is_carried_by_a_flag_and_not_by_prose(self):
-        """WHY the two rows above are green, and what keeps them green.
-
-        `formal/build.py` re-raises the generators' `NotImplementedError` as a
-        `FormalBuildError` — correctly, so that `fire.py build --formal` prints
-        `build: <message>` instead of a forty-frame traceback — which put this
-        shape in `run_item`'s FIRST arm and filed it as `codegen-refused`. That
-        is the class the tool's own docstring says a reader must not
-        under-count, and it counted a hole in the SEMANTIC MODEL against the
-        code generator for a program `--no-prove` builds and runs.
-
-        So the fact travels as `FormalBuildError.proof_refused`, and this test is
-        about the MECHANISM rather than the class: a message that shares nothing
-        with the real sentence is still a proof refusal (so a re-word of
-        `formal/build.py`'s prose cannot silently move these rows back), and
-        every other exception this path raises is still NOT one (so the flag is
-        not a blanket "the build failed" label).
-        """
-        import formal.build as FB
-        from formal.build import ImportBuildError
-        src = ("def f(n):\n"
-               "    xs = [1, 2, 3]\n"
-               "    return xs[0] + n\n"
-               "def main(x):\n"
-               "    return f(x)\n")
-        tmp = tempfile.mkdtemp(prefix="pbf-")
-        try:
-            src_path = os.path.join(tmp, "prog.mojo")
-            with open(src_path, "w") as f:
-                f.write(src)
-            with self.assertRaises(FB.FormalBuildError) as caught:
-                FB.compile_formal(src_path, output=os.path.join(tmp, "prog.aout"),
-                                  test_input=10, prove=True, check=False,
-                                  arch="arm64")
-        finally:
-            import shutil
-            shutil.rmtree(tmp, ignore_errors=True)
-        raised = caught.exception
-        self.assertTrue(FB.proof_refused(raised),
-                        "the re-wrap lost the fact that the PROOF layer "
-                        f"refused, and run_item will file it as codegen-"
-                        f"refused again: {raised}")
-        self.assertNotIsInstance(raised, NotImplementedError)
-
-        # The flag is the classifier, not the sentence. A refusal whose message
-        # is nothing like the real one is still the proof layer's — which is the
-        # property a prefix match on prose cannot have.
-        unworded = FB.FormalBuildError("some entirely different diagnostic")
-        unworded.proof_refused = True
-        self.assertTrue(FB.proof_refused(unworded))
-        # And every other refusal on this path is not one.
-        self.assertFalse(FB.proof_refused(FB.FormalBuildError(
-            "t.mojo imports 'fcntl', which cannot be built either")))
-        self.assertFalse(FB.proof_refused(FB.CodegenError("a codegen refusal")))
-        self.assertFalse(FB.proof_refused(ImportBuildError("an import")))
-        self.assertFalse(FB.proof_refused(ValueError("not even an exception "
-                                                     "of this path")))
-
     def test_a_second_census_is_a_different_sample(self):
         """`--round-offset` / `--example-offset` / `--exclude-seen` / `--admit-returns`.
 
@@ -745,16 +687,8 @@ class TestTheBuiltinAllowListIsAMeasurement(unittest.TestCase):
     def test_a_builtin_refusal_is_its_own_class_and_names_the_builtin(self):
         """Both architectures, because the link audit's message is one message
         and the class must not depend on which emitter produced it."""
-        # `max` with ONE argument, and that is the whole of what this fixture
-        # is: the case is "a call to a builtin this path does not lower", and
-        # `max(n, 1)` stopped being one on 2026-10-05 — two positional arguments
-        # and no keyword is a compare and a select, which
-        # `formal/build.py`'s `_lower_builtin_extremum` lowers. A fixture that
-        # named a shape the path now answers would have kept asserting a class
-        # against a refusal that no longer happens, which is the stale-marker
-        # failure `expect=` has in the test suite and this file has in its rows.
         src = ("def f(n):\n"
-               "    return max(n)\n"
+               "    return max(n, 1)\n"
                "def main(x):\n"
                "    return f(x)\n")
         for arch in ("arm64", "x86_64"):
@@ -778,16 +712,8 @@ class TestTheBuiltinAllowListIsAMeasurement(unittest.TestCase):
         read."""
         marker = ("`append` is a call this build emitted and nothing provides "
                   "it, so that call is not lowered on this path")
-        # `max(n)` — ONE argument, so it is one of the three shapes the name
-        # still refuses. `max(n, 1)` was this fixture's call until 2026-10-05,
-        # and it stopped being a call the census may name the moment
-        # `formal/build.py::_lower_builtin_extremum` began lowering the
-        # two-argument form: `_unlowered_builtins_in` asks
-        # `model.extremum_call_is_a_select` and skips a lowered shape, which is
-        # the correct answer and would have made this row assert that a program
-        # which does not stop on a builtin stops on one.
         src = ("def f(n):\n"
-               "    return max(n)\n")          # a call, but not THE call
+               "    return max(n, 1)\n")          # a call, but not THE call
         src_without_call = "def f(n):\n    return n + 1\n"
         self.assertEqual(B._refusal_class(marker, src_without_call),
                          "codegen-refused")
@@ -799,7 +725,7 @@ class TestTheBuiltinAllowListIsAMeasurement(unittest.TestCase):
         is not in this run's frontier, and one four items called is worth four
         times the sentence."""
         src = ("def f(n):\n"
-               "    return max(n)\n"
+               "    return max(n, 1)\n"
                "def main(x):\n"
                "    return f(x)\n")
         import shutil
@@ -817,7 +743,7 @@ class TestTheBuiltinAllowListIsAMeasurement(unittest.TestCase):
         self.assertNotIn("`pow`", text,
                          "the frontier is what this run reached; `pow` stopped "
                          "nothing here and is printed as if it had")
-        self.assertIn("ARE A COMPARE AND A SELECT", text,
+        self.assertIn("a compare and a select", text,
                       "the frontier section without the sentence is the "
                       "allow-list assertion this file is about")
 

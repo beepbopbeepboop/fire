@@ -1501,15 +1501,15 @@ def check_predicate_is_two_argument():
 
 
 def check_sret_word_reaches_the_callee():
-    """Every backend that passes the hidden word must also MOVE it.
+    """Every backend that pushes the hidden word must also MOVE it.
 
     The convention has two ends and they can drift apart without either end
     looking wrong: the callee reads the block address out of an argument
     register (`ARG_REGS[len(params)]` on x86-64, X-`len(incoming)` on arm64),
-    and the call site stages the address and then has to put it in that same
-    register. x86-64 dropped it — the staged word was skipped, on the reasoning
-    that being first off the stack meant it was already in RAX, which is true
-    of arm64's X0 and of no register on this ABI.
+    and the call site pushes the address and then has to put it in that same
+    register. x86-64 dropped it — the popped word was skipped, on the reasoning
+    that being popped first meant it was already in RAX, which is true of
+    arm64's X0 and of no register on this ABI.
 
     It is a SIGSEGV rather than a wrong value because the hidden word lands in
     a callee-SAVED register, so the callee's prologue keeps whatever the
@@ -1521,62 +1521,46 @@ def check_sret_word_reaches_the_callee():
     the class name and only lacked the move.
 
     What is checked is therefore the strongest thing available without
-    building: the staged word has a use. `continue` inside the load loop is
-    refused outright, and the load loop is located by the plan it walks rather
-    than by a line number.
-
-    Two load shapes are accepted because the two backends stage differently:
-    arm64 pops a 16-byte spill slot and moves it across (`encode_mov_zr_xn`),
-    while x86-64 stages every argument into the reserved outgoing area — in
-    SOURCE ORDER, which is what makes source-order evaluation affordable — and
-    loads each one straight out of its slot into `ARG_REGS` with no scratch
-    register at all. Both are a move of the staged word into the register the
-    callee reads it from, which is the property; the instruction that performs
-    it is not.
+    building: the popped word has a use. `continue` inside the pop loop is
+    refused outright, and the pop loop is located by the pushes that feed it
+    rather than by a line number.
     """
     ok = True
     for backend in ("formal/arm64_codegen.py", "formal/x86_64_codegen.py"):
         path = os.path.join(HERE, backend)
         with open(path) as fh:
             src = fh.read()
-        # The load loop: it loads each staged argument and moves it into the
-        # argument register the plan names. Find it as the loop over the plan.
+        # The pop loop: it pops and moves, in both backends, in the shape the
+        # two architectures share. Find it as the loop that pops.
         pop_loop = None
         lines = src.splitlines()
         for i, line in enumerate(lines):
-            # `line.strip().startswith("for ")` and not `"{" in line` are what
-            # keep a DICT COMPREHENSION over the same plan (`{j: i for i, (j,
-            # …) in enumerate(reg_plan)}`, which x86-64 builds to index an
-            # argument's staging slot) from being taken for the load loop: it
-            # iterates the plan and its next line is not the loop body.
-            if (line.strip().startswith("for ") and "{" not in line
-                    and ("reg_plan" in line
-                         or "range(min(nargs" in line
-                         or "range(nargs" in line)):
-                pop_loop = lines[i:i + 14]
+            if "for " in line and ("reversed(reg_plan)" in line
+                                   or "range(min(nargs" in line
+                                   or "range(nargs" in line):
+                pop_loop = lines[i:i + 12]
                 break
         if pop_loop is None:
             ok = False
-            print(f"FAIL  {backend}: no argument load loop found, so the "
+            print(f"FAIL  {backend}: no argument pop loop found, so the "
                   f"hidden word's move cannot be checked")
             continue
         body = "\n".join(pop_loop)
         if "continue" in body:
             ok = False
-            print(f"FAIL  {backend}: the argument load loop skips a staged "
+            print(f"FAIL  {backend}: the argument pop loop skips a popped "
                   f"word with `continue`; the returned-frame hidden word was "
                   f"dropped exactly that way, and the callee then read "
                   f"whatever the previous call left in its argument register")
         if not any(m in body for m in ("encode_mov_r64_r64(ARG_REGS",
-                                       "encode_mov_r64_rm64(ARG_REGS",
                                        "encode_mov_zr_xn",
                                        "_load_home_from_reg",
                                        "encode_mov_zr_xn")):
             ok = False
-            print(f"FAIL  {backend}: the argument load loop moves no staged "
+            print(f"FAIL  {backend}: the argument pop loop moves no popped "
                   f"word into an argument register")
     if ok:
-        print("  PASS  every_staged_argument_word_reaches_its_register")
+        print("  PASS  every_popped_argument_word_reaches_its_register")
     return ok
 
 def run_cpython(source):

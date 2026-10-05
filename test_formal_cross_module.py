@@ -1651,7 +1651,7 @@ def test_the_executors_answer_the_same_questions(tmpdir, _):
 # is not "an API that is its top-level statements", and it is importable.
 #
 # This case exists because 16 files in the 668-file sweep
-# (the `b7` round of `bugs/FORMAL_sweep_work_map.md` §3) are refused for the OTHER
+# (`bugs/FORMAL_sweep_work_map_2026-10-02_b7.md` §3) are refused for the OTHER
 # answer — `module_loader.py`, `tools/memslot.py`, `formal/x86_64.py`,
 # `determinism_trace.py` have a body that genuinely must run — and the fix for
 # those is a load-time initializer in both object writers. **That fix cannot be

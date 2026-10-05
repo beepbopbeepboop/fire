@@ -45,22 +45,11 @@ one), and §2.3 adds **1020 programs over 13 sweeps**, TWO more fixes (§3.10's
 dict-walk stride and §3.11's `del` register clobber), one new `KNOWN_DIVERGENCES`
 row (`set_order`, owned by `bugs/FORMAL_set_value_model.md`), one new limit filed
 (`FORMAL_a_comprehension_target_over_a_string_keyed_dict_is_an_int.md`) and TWO
-more tool defects, and §4.11a adds **12 programs over one new sweep** and a
-RE-RUN of those same 12 — so the whole file is **11444 programs over 82 sweeps**
-and **fifteen** tool defects. The last eleven rows of §2.1 are the OLD mixes on
-fresh seed ranges, and the last three rows of §2.3 are the OLD mixes on another
-fresh seed range, which is what says the fixes did not cost the corpus anything it
+more tool defects — so the whole file is **11432 programs over 80 sweeps** and
+**fifteen** tool defects. The last eleven rows of §2.1 are the OLD mixes on fresh
+seed ranges, and the last three rows of §2.3 are the OLD mixes on another fresh
+seed range, which is what says the fixes did not cost the corpus anything it
 already had.
-
-**The re-run rows are counted as ROWS and not as programs, which is the honest
-way to count them.** §4.11a's `noreturn`/`ledger19` 0-11 row is a re-run of the
-row above it, and §4.12c's is this one: the `strings`/`sweepD` 4000-4001 programs
-were swept in §2.1's own table (100 programs at that mix's scale) and are counted
-there, so re-running two of them adds six NEW programs (`limits`, a seed range
-this file had not used) and not eight. §4.12c's tally line is not a fourteenth
-tool DEFECT either — it is the closing of §4.12's own "a REPORT with no owner",
-which is a missing aggregate rather than a wrong answer, and calling it a defect
-would make the count mean two things.
 
 | date | mix | seed | indexes | programs | tally | what came of it |
 |---|---|---|---|---|---|---|
@@ -78,10 +67,6 @@ would make the count mean two things.
 | 2026-10-03 | `signed` | `sweepF` | 6000-6099 | 100 | 31 match, 69 `KNOWN` (28 `floordiv`, 27 `modulo`, 14 both), 0 findings | nothing — every disagreement reduced to the documented one |
 | 2026-10-03 | `strings` | `sweepD` | 4000-4011 | 12 | 3 match, 7 `KNOWN:str_subscript`, 2 `MISMATCH-X86` | the 2 are §4.4, a minimiser artefact — **not** backend bugs |
 | 2026-10-04 | `signed` | `floor21` | 9000-9099 | 100 | **100 match**, 0 findings | the two `KNOWN_DIVERGENCES` rows this row retires were worth 62 of `sweepG`'s 100 (§2.1) — see §2.1a |
-| 2026-10-04 | `limits` | `ledger19` | 0-5 | 6 | 6 refusal (12 audited, `true=12`), 0 findings | nothing about the corpus; this row exists because a campaign with NO findings still has to print the reduction tally — §4.12c |
-| 2026-10-04 | `strings` | `sweepD` | 4000-4001 | 2 | 2 `KNOWN:str_subscript`, **both reductions `stopped-reproducing`** | nothing new in the backend: the reductions walked out of the known construct into a disagreement `blame` cannot name, which until §4.12c's tally line existed was a field in `findings.json` that nothing aggregates — §4.12c |
-| 2026-10-05 | `noreturn` | `ledger19` | 0-11 | 12 | 5 match, **7 `KNOWN:no_return_call`**, 0 refusal, **0 findings** | the corpus can now PRODUCE the no-`return` class §4.11 read 21 of 27 `MISMATCH-X86` rows of by hand — §4.11a |
-| 2026-10-05 | `noreturn` | `ledger19` | 0-11 | 0 (the same 12) | 7 `KNOWN:no_return_call`, every reduction `stopped-reproducing` | a RE-RUN of the row above, not 12 new programs, and it is what the reduction tally line of §4.12c is for — the same class, now named, still walks out of itself when the shrinker touches it |
 
 The first two rows are a BASELINE rather than a result: they ran on master's
 corpus with the five new mixes absent, which is what "the corpus covered
@@ -1005,10 +990,6 @@ The first sweep here at the `strings` mix's own scale (100 programs, seed
 | 21 | a `def` whose body the MINIMISER stripped of its `return`, so `print(helper(...))` is the no-`return` bug | §3.3 — filed, deliberately not in `KNOWN_DIVERGENCES` |
 | 6 | the `str_subscript` divergence itself, in a spelling the neutraliser cannot take apart | §3.1's row, and §4.4's attribution limit |
 
-**ANSWERED 2026-10-05 (`work/formal19-3-r2`): the 21 rows are now a MARKER and
-a MIX, and the 21 became 0 — see §4.11a below, which is also where the six
-`str_subscript` rows and the whole "read 27 rows by hand" cost went.**
-
 **No new backend bug is in there, and the fact that 27 rows had to be read by
 hand to establish that is the finding.** Both classes are known and both are
 properties of the ATTRIBUTION, not of the backends:
@@ -1150,73 +1131,13 @@ finding against the two kinds of candidate, no compiler — and non-vacuous:
 `_answers_only = lambda want: False` puts the `drops_a_refusal` row red with one
 build and nothing else.
 
-**Not fixed, and it is a campaign, not a patch:** the two programs above are
-the only findings the `strings` corpus still produces on one backend, and
+**Not fixed, and it is a campaign, not a patch:** the two programs above are the
+only findings the `strings` corpus still produces on one backend, and
 `reduced_verdict` for a reduction that stopped disagreeing is a REPORT with no
 owner — nothing acts on it. The honest next step is a tally line for it, the way
 `REFUSAL-FALSE` is a tally line for a message that is false of the program, so a
 campaign can report "N reductions stopped reproducing" instead of leaving it in a
 field.
-
-#### 4.12c FIXED 2026-10-04 (`work/formal19-3`): `reduced_verdict` is a tally
-#### line, and it has a number
-
-**Status: DONE**, and the campaign above is the measurement that says what the
-number is for — because re-running it is how the line was verified end to end,
-and the run it produced is the first evidence this corpus has had that a
-reduction can walk OUT of the known construct and into a disagreement nobody
-attributed:
-
-```
-python3 tools/formal_fuzz.py --mix strings --seed sweepD --seeds 4000-4001 \
-    -j 1 --max-min-steps 20 --min-kind x86 --work .tmp/fz/str
-  KNOWN:str_subscript  #4000
-      reduced 619 -> 396 bytes; the reduction itself is MISMATCH-X86
-  KNOWN:str_subscript  #4001
-      reduced 1117 -> 648 bytes; the reduction itself is MISMATCH-X86
-  reductions: reproduced=0, stopped-reproducing=2, no-oracle=0
-```
-
-Both findings are the documented `str_subscript` divergence, and **both
-reductions stopped reproducing it** — the shrinker reached a program that
-disagrees for a reason `blame` could not name. §4.11 already measured that the
-minimiser reaches a construct the corpus cannot generate (the no-`return`
-helper), and this is the same fact one level further out: the reduction is
-worse than the finding, and the only place that was visible was a field in
-`findings.json` that nothing aggregates.
-
-Three classes and the third is the one that could have been got wrong:
-
-| class | what it is | why it is its own class |
-|---|---|---|
-| `reproduced` | the reduction's own `classify` is the record's `verdict` | — |
-| `stopped-reproducing` | the reduction classified as SOMETHING ELSE | a reduction that stopped agreeing is not a quieter finding, it is a different one, and a campaign's number of these is the number of programs a reader would have taken at face value |
-| `no-oracle` | `reduced_want is None` — CPython rejects or times out the reduction | a reduction CPython cannot run has not stopped reproducing; it was never measured, and counting it as a shrinker regression would blame the shrinker for CPython's answer |
-
-A record the minimiser did not shrink contributes to **none** of them, and says
-so by being absent rather than by counting as `reproduced`: "it reproduced" is a
-claim about a reduction that exists. That is `reduction_tally_class`'s `None`,
-and it is why the line can print `0/0/0` on a clean campaign.
-
-**Printed zero-included**, for the reason `ALWAYS_REPORTED` gives: a campaign
-that shrank nothing has to be able to say so, and a line that appears only when
-it is non-zero cannot distinguish that from a summary that never mentioned
-shrinking. Measured, on a campaign with no findings at all:
-
-```
-python3 tools/formal_fuzz.py --mix limits --seed ledger19 --seeds 0-5 ...
-  reductions: reproduced=0, stopped-reproducing=0, no-oracle=0
-```
-
-**The line is a FUNCTION** (`formal_fuzz.py::reduction_tally_line`), not a
-`print` in the summary, because the summary is `main()` and `main()` needs a
-compiler, an oracle and a `--work` directory — so a line written there is a line
-nothing can check. `test_formal_fuzz.py`'s new `reduction` half pins the four
-record shapes, the coverage of `REDUCTION_TALLY` (the check `check_audit` already
-does for `AUDIT_VERDICTS`), and the two properties the line exists to have: the
-field ORDER (a reader is reading positions, not keys) and zero-inclusion. Four
-rows, no compiler.
-
 
 ### 4.13 The tool's OWN minimiser reduced a real disagreement to a program CPython cannot run
 
@@ -1334,15 +1255,10 @@ INHERITED class (`class B(A)` — probed on both architectures and it DROPS the
 base's fields and methods: `b.m()` reads `1` where CPython reads the inherited
 value, exit 0 on both, filed as a separate doc rather than fixed here), a
 comprehension whose target is over a string-keyed dict (§5.1), and
-`len()` of a subscript of a list of lists (NOW GENERATED — `comps`' `comp_nested`,
-and it is the row this file's §1 anti-rot rule is about: the construct was not
-absent because the corpus could not produce it but because the backends REFUSED
-it, so the family read the row through a second local and left the length
-unmeasured; `formal/model.py::_list_literal_elem_kind` landed on 2026-10-05 and
-`inner = R[i]; print(len(inner))` plus the nested `print(R[i][j])` are both
-emitted now, `10/10` programs matching CPython on both backends at
-`--mix comps --seed nestedchk2 --seeds 0-9`). Each remaining item is a family
-whose absence from this table is a coverage hole rather than a decision.
+`len()` of a subscript of a list of lists (`inner = rows[0]; len(inner)` is
+REFUSED on both backends with "classified as 'int'", which is a kind rule and not
+a family). Each is a family whose absence from this table is a coverage hole
+rather than a decision.
 
 ### 5.1 What the fuzz-3 sweep closed in this list, and what is still open
 
@@ -1380,113 +1296,3 @@ it is a FEATURE and this sweep's claim is the corpus.
 every row above re-runs byte for byte on any machine. The `--seed` is part of the
 row: two sweeps of the same mix with different seeds are two corpora, and the
 seed ranges here are disjoint so no row double-counts another's programs.
-
-#### 4.11a FIXED 2026-10-05 (`work/formal19-3-r2`): the no-`return` class is a
-#### mix and a marker, and 21 unexplained `MISMATCH-X86` rows became 0
-
-**Status: DONE**, and the §4.11 table's 21 rows were the reason it was worth a
-session rather than a reword. That section's next step read: *"The cheap
-improvement is a second marker on the no-`return` shape — the corpus can produce
-it by emitting a helper whose body ends without a `return`, which is exactly what
-the minimiser discovered — but that is a change to what the corpus measures, so
-it belongs in a session whose claim is the corpus rather than one commit at the
-end of another."* This session's claim is the corpus, and it is done.
-
-**The precondition was the whole of it, and §3.3 says so.** A
-`KNOWN_DIVERGENCES` row is a claim that the tool still MEASURES the construct,
-and this one could not be added before the generator emitted it: *"It must NOT
-become a `KNOWN_DIVERGENCES` row: … the corpus cannot produce a function with no
-`return` … If the generator is ever taught to emit a helper with an empty body,
-this is the construct to add, and this doc is what it should point at."* So
-`tools/formal_fuzz.py` grew `nor_define`/`nor_call`, a `--mix noreturn` of its
-own, the `no_return_call` row, and two readers.
-
-**The observation is `==` against a NON-NEGATIVE literal, and each half of that
-was measured rather than chosen.** The three candidate spellings:
-
-| spelling | what it does | why |
-|---|---|---|
-| `print(g(1, 2))` | **REFUSED** at build time on both architectures | `model.returnless_value_refusal`, asked from each emitter's `_print_call`. §0b of the bug doc measured that rule at **0 sites in 379 files**, so a printed one measures the refusal, not the construct |
-| `g(1, 2) + 1` | CPython raises `TypeError` | an oracle that cannot run the program takes its verdict with it, which is the trade `limits` already makes and is not one to make silently |
-| **`g(1, 2) == 0`** | **builds, and diverges** | `None == 0` is `False` in CPython, so the oracle answers, and the word here is `0`, so `0 == 0` takes this path's arm |
-
-Measured, both backends, before the mix existed:
-
-| | prints |
-|---|---|
-| CPython 3.14 | `notzero` — `None == 0` is `False` |
-| this path, arm64 **and** x86-64 | `zero` — the word is `0` |
-
-**And the literal must be non-negative**, which is the one measurement here that
-was not obvious. `f(...) == -1` is REFUSED — `nf14(...) == -1 compares two
-values this path can only call numbers` — because the sign reads as the shape of
-a POINTER and the comparison rule will not classify it; `f(...) == 0` builds and
-diverges. Measured across `0, 1, 7, -1, -5` on arm64: refusals `0, 0, 0, 1, 1`.
-A mix whose observation is half-refused measures the refusal, so the pool is
-`[0, 1, 3, 7]`.
-
-**Two readers, and one of them is not a pattern because a pattern is wrong
-here.** `features_of` decides the marker through
-`_defines_a_return_less_function` (a `def` whose body has no `return`, read off
-the text) and `observes_a_call_against_a_literal` (a small bracket matcher, not
-a regex). The matcher earned its place immediately: with a `[^()]*` argument
-class it marked **4 of 7** programs of the corpus's own, and the 3 it missed
-were the two- and three-level arguments this generator emits — `nf6((w4 & 7)) ==
-0` and `nf8(s2, ((w5 & 0xFFFF) << 1)) == 0`. `MIX_MUST_GENERATE`'s row is
-`_NOR_CALL_EQ`, the same shape as a pattern because `NEUTRALISERS` is a table of
-regexes, and its own text says it is the OBSERVATION and not the absence — a
-pattern cannot say "a `def` with no `return`", and the absence half is pinned by
-`_check_features`, which asks `features_of` about the program's own text.
-
-**The campaign, and the number §4.11 wanted.** 12 programs, `--mix noreturn
---seed ledger19 --seeds 0-11`, both backends, 819 s, peak 0.1 GB:
-
-```
-formal_fuzz seed=ledger19 mix=noreturn backends=x86_64,arm64 programs=12 in 819.5s
-  match              5
-  trapped            0
-  refusal            0
-  KNOWN:no_return_call 7
-  reductions: reproduced=0, stopped-reproducing=7, no-oracle=0
-findings written to .tmp/fz/nor/findings.json (0 programs)
-```
-
-**Zero findings and zero refusals, which is the point and not a lucky tally.**
-Before the mix, §4.11's `strings` sweep at the same scale produced **27
-`MISMATCH-X86`** of which 21 were this class with nothing able to name them; the
-same class over its own mix is now 7 named rows and 0 unexplained ones. The 5
-matches are programs that carried the helper without comparing it.
-
-**What the pinned half says.** `test_formal_fuzz.py`'s new `check_attribution`
-(no compiler) pins the two readers and, in the row that could have been got
-wrong, that a helper which **does** return is not marked: *"a marker that fires
-on ordinary programs forgives the next real disagreement that happens to contain
-one"*, which is the anti-rot `KNOWN_DIVERGENCES`' own header states for
-`str_subscript`. Its four rows — marked, not-marked-when-returning,
-nested-argument, and **not-marked-when-nothing-observes** — plus
-`_check_features`' 57/60 and `MIX_MUST_GENERATE`'s 57/60:
-
-```
-formal fuzz: attribute  PASS 4 attribution rows (no compiler)
-formal fuzz: generator noreturn  still generates '\b(\w+\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))\s*(==|!=|<=|>=|<|>)\s*(-?\d+)' in 57/60
-formal fuzz: generator noreturn  reaches no_return_call in 57/60
-formal fuzz: classify    PASS 15 verdicts (no compiler)
-formal fuzz: run arm64  PASS FAIL=0 (12 programs)
-formal fuzz: run x86_64 PASS FAIL=0 (12 programs)
-```
-
-**The bug is still open and is not this row's.** The row is a marker and a
-corpus; §"§0b. What is still not fixed" of
-`bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
-is unchanged — representing `None`, or refusing at every position that consumes
-the value — and a marker is a CLAIM that a construct is still wrong, which is
-what makes it deleteable the day the backend is right about it.
-
-```sh
-export PATH=/opt/homebrew/bin:$PATH
-python3 tools/memslot.py --gb 8 --label fz -- \
-    python3 tools/formal_fuzz.py --mix noreturn --seed ledger19 --seeds 0-11 \
-        -j 2 --work .tmp/fz/nor
-python3 tools/memslot.py --gb 8 --label t -- \
-    python3 test_formal_fuzz.py --no-build-check --mix noreturn --count 8 -j 2
-```

@@ -1,7 +1,7 @@
 # FORMAL_sweep_singles_second_half: four of §3.2's eight remaining single-file causes are not patches, measured
 
 **Status: filed 2026-10-03 from the sweep map
-the `b7` round of `bugs/FORMAL_sweep_work_map.md` §3.2/§5, claim
+`bugs/FORMAL_sweep_work_map_2026-10-02_b7.md` §3.2/§5, claim
 `sweep12:singles-b`. Three of the eight rows in the second half of that list
 were fixed on `work/formal12-singles-b` (the repetition one as a root-cause fix
 that also removed a SIGSEGV, the class-constant-reference one, and the
@@ -38,7 +38,7 @@ the constructor allocates — a frame-layout change shared by both backends and
 the ~40 passing Lean proofs; or (b) read the field through the class-level
 default when the instance slot is empty — which contradicts the
 read-before-store stance this backend takes everywhere else. Already measured,
-with the same reasoning, in the `repo-c` round of `bugs/FORMAL_sweep_work_map.md`
+with the same reasoning, in `bugs/FORMAL_sweep_work_map_2026-10-02_repo-c.md`
 §4.4. **Not the sweep's next step, and not cheap either way.**
 
 ## 2. "one parameter, two kinds of value" — `module_loader.py` — 20 FILES, UNOWNED, and its next wall is measured
@@ -60,7 +60,7 @@ rule for a fixed bug. (Named without the `bugs/` prefix on purpose:
 `tools/dangling_doc_refs.py` counts any citation of a doc that is not there, and
 re-introducing one to say it is missing would put this file back on its own census.)
 So the mechanism's record is this section and
-the `b8` round of `bugs/FORMAL_sweep_work_map.md` §4.2, and **the dangling citation was
+`bugs/FORMAL_sweep_work_map_2026-10-03_b8.md` §4.2, and **the dangling citation was
 the defect `bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md` exists to
 catch.** `formal10-3` has also exited, so "ANOTHER LANE'S" in this section's heading
 was true when written and is false now.
@@ -115,7 +115,7 @@ existing `computed_element` boundary moved one level out. **Not started here.**
 The refusal names the three representations a name may have (a construction of a
 framed struct, a copy of another holder, a parameter of a method of a framed
 struct) and `atom` is none of them. Same conclusion, same three options, in
-the `repo-c` round of `bugs/FORMAL_sweep_work_map.md` §4.5. **A source change to
+`bugs/FORMAL_sweep_work_map_2026-10-02_repo-c.md` §4.5. **A source change to
 `regex_compile.py` would be a workaround for a value-model gap; the gap is the
 work.**
 

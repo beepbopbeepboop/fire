@@ -39,13 +39,22 @@ build: len(xs) is len() of a value classified as 'int', and an integer has no
 ```
 
 A LIST PARAMETER, on both architectures, with `xs[i]` on the same parameter
-answering correctly. Filed as
-`bugs/FORMAL_len_of_a_list_parameter_is_refused_though_the_same_parameter_
-subscripts.md`, which measures the whole shape (annotation included: neither
-`List[Int]` nor `List[Cell]` helps, and a literal loop bound answers CPython's
-`10`, so the count field is reachable and one reader is asking the wrong
-question). **`reduce` is therefore two small steps from writable where §"The exact
-next step" says it is one big one.**
+answering correctly. Filed as its own document, and **that document is now
+DELETED — the reader it names is fixed** (`parameter_kinds_by_call_site`
+claims a counted blob from a parameter's CALL SITES, so `len(xs)` is the count
+field where it already was for the subscript; measured on both architectures,
+`reduce(add2, [1, 2, 3, 4], 0)` builds, runs and answers CPython's `10`).
+One correction to the filed doc's table, which is why it is worth repeating
+here: its ANNOTATED rows (`List[Int]`, `List[Cell]`) had already been answered
+by `ValueKinds.kind_of`'s `declared_param_kind` fallback when it was filed, so
+only the UNANNOTATED spelling was ever live. Both are pinned now, side by side,
+in `test_formal_run.py`'s `both_arch_len_of_a_container_annotated_parameter`
+(the guard) and `both_arch_len_of_an_unannotated_parameter_every_call_site_
+passes_a_list` (the fix).
+
+**So `reduce` is WRITABLE as of this commit**, measured end to end on both
+architectatures, and what stands between it and a `formal/hostmods/functools.mojo`
+is step 2 alone.
 
 **What has NOT moved, and is the rest of this document.** Step 2 — DECORATOR
 application — is unchanged and is `bugs/COMPILE_FAIL_decorator_application_dropped.md`'s
@@ -121,61 +130,6 @@ and `formal/model.py`'s copy-construction refusal both name the same missing
 capability, and whichever lands first unblocks this. Step 2 (decorator
 application) must land before any decorator is exported, and it is
 `bugs/COMPILE_FAIL_decorator_application_dropped.md`'s to own.
-
-## Status, 2026-10-05: the SECOND of the two small steps is DONE, and
-## `reduce` — the one name in this census a callable argument unblocked —
-## BUILDS AND ANSWERS CPYTHON on both architectures
-
-**This is why the doc stays, and it is a smaller remainder than the top of this
-file says.** The `len(seq)` step named in the 2026-10-04 note landed
-(`formal/model.py::parameter_kinds_by_call_site` — the unanimity table that
-already existed for a `char *` parameter, read for the container the call site's
-argument shape is), so the `reduce` this file measured as blocked is measured
-again:
-
-```console
-$ cat .tmp/reduce.mojo
-def reduce(func, xs, initial):
-    var acc = initial
-    var i = 0
-    while i < len(xs):
-        acc = func(acc, xs[i])
-        i = i + 1
-    return acc
-
-def add2(a, b):
-    return a + b
-
-def main():
-    printf("r=%d\n", reduce(add2, [1, 2, 3], 0))
-    return 0
-
-$ python3 fire.py build --formal --no-prove --backend=arm64 -o .tmp/red .tmp/reduce.mojo
-Built: .tmp/red  [arm64/macho]
-$ ./.tmp/red
-r=6
-$ python3 fire.py build --formal --no-prove --backend=x86_64 -o .tmp/red .tmp/reduce.mojo
-$ ./.tmp/red
-r=6
-```
-
-CPython's `reduce(add2, [1, 2, 3], 0)` is `6`, on both. Pinned by
-`test_formal_specialization.py`'s `functools.reduce's own shape runs, on both`
-— there rather than in a host-module suite precisely because no `functools`
-module exists, so without a row nothing would notice this capability regress.
-
-**What is left is exactly step 2, and it is not this file's to do.** Decorator
-application: `@tag` on a function is parsed and never applied
-(`bugs/COMPILE_FAIL_decorator_application_dropped.md` owns that), so the eight
-DECORATOR-row names and `lru_cache` must stay refused, and §"Why this is not
-write it anyway" still holds for them — a module named after a standard-library
-namespace whose most-used member it refuses is the judgement this file makes and
-the reason no name may be exported yet. The TYPE-OR-OBJECT row
-(`GenericAlias`, `itemgetter`, `MappingProxyType`, `RLock`, `Placeholder`) and
-`get_cache_token()` are untouched by either step and still need what they need.
-So: the CALLABLE row no longer blocks anything by itself, the DECORATOR row is
-the whole of the remaining blocker, and this document stays open because that
-row is a real defect in the compiler rather than a gap in a host module.
 
 ## What I ran
 

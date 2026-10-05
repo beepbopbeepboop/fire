@@ -331,23 +331,12 @@ def mac_ver_machine() -> str:
 def _int_is_space(b) -> int:
     """1 if the byte `b` is ASCII whitespace.
 
-    BY NUMERIC COMPARISON, not by membership in a string literal, and the reason
-    is the ARGUMENT rather than the escapes: `b` is a byte VALUE read out of `s`
-    by `_int_at`, and a set is a POINTER, so asking one means allocating a
-    one-byte string per call — inside the loop `_int_bounds` runs twice over
-    every byte of every release string `system_alias` parses. The six bytes are
-    named at each arm: SP, HT, LF, VT, FF, CR.
-
-    The reason this function used to give was false and had stopped being true
-    at `9023031b`: it said a literal's escapes are NOT interpreted on this path,
-    so `"\\t"` here would be a backslash and a `t`. A literal IS decoded, inside a
-    module as well as inside a program, on both architectures —
-    `fire_compiler.py`'s `decode_c_escapes`, the decoder every engine shares,
-    pinned by `test_formal_sys.py::test_a_literal_inside_a_module_is_decoded_too`.
-    It no longer decides anything here, and the comparison above would be the
-    right shape either way; `formal/hostmods/argparse.mojo` above its `_ws_set`
-    and `formal/hostmods/textwrap.mojo`'s module docstring record the same
-    correction for the `memset` sets that DO have the pointer to hand.
+    BY NUMERIC COMPARISON, not by a character set in a string literal, and the
+    reason is the value model: a Mojo string literal is copied byte for byte
+    and escapes are NOT interpreted (`bugs/FORMAL_string_value_model.md`), so
+    `"\t"` in a source is two characters — a backslash and a `t` — and a
+    whitespace SET written that way would match backslashes and letters. The
+    six bytes are named at each arm: SP, HT, LF, VT, FF, CR.
     """
     if b == 32:
         return 1

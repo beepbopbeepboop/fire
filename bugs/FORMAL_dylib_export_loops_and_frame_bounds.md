@@ -204,11 +204,8 @@ induction.
   generator's cannot drift without the file failing to typecheck. The Python
   side is `_export_extent`, the same rule, and each export states its exit as a
   `native_decide`d `exportEnd_here`.
-- **The ceiling on proved contracts is `_dylib_spec_lean`, not `Refine`.**
-  Measured, with the measurement and what landed: see
-  `bugs/FORMAL_a_conditional_value_in_a_dylib_export.md` §1 — the gate was a
-  substring test standing in for `Refine.Block.step`, and it was refusing every
-  export containing a `cset`.
+- **The ceiling on proved contracts is `_dylib_spec_lean`, not `Refine`.** See
+  `bugs/FORMAL_dylib_block_layer_is_not_the_ceiling.md`, which measured it.
 - **Never `git commit` a bare path in a tree with concurrent agents**: it commits
   everything STAGED, which is how the golden file
   `formal/golden/arm64_dylib_contract_triple.lean` was deleted by accident. Use
