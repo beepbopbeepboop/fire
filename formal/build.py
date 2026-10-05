@@ -2224,6 +2224,16 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     check_value_position_method_reads(functions, structs)
     check_construction_mismatches(functions)
     check_shadowed_global_reads(functions)
+    # …and the one that catches a `void`-returning runtime entry point whose
+    # RESULT is read. `mojo_async_init()` as a statement is a correct program and
+    # builds; `x = mojo_async_init()` reads a return register nothing wrote, and
+    # measured on both architectures that answered `-1 13582400 -1` and
+    # `0 20463624 0` with exit 0. It is HERE rather than in an emitter because
+    # the decision is one rule both architectures must apply identically, and
+    # this is the one pass they share — `formal/model.py::
+    # gimple_runtime_void_result_refusal` has the measurement and the reason
+    # `'void'` is a word for `void *` and not for a value.
+    M.check_runtime_void_results(functions)
     check_construction_shapes(functions, by_name, link_line)
     check_frame_return_shapes(functions)
     # …and the one hole the returned-frame convention opens in premise (B1),

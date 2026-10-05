@@ -786,6 +786,109 @@ def test_the_tagged_box_accessors_are_declared_and_callable():
               f'{arch}: …and the image carries a library at all', str(r))
 
 
+def test_a_void_return_is_a_legal_call_and_an_illegal_value():
+    """The `void` half of the word rule, which the word rule cannot see.
+
+    **`'void'` is in `_WORD_SCALARS` for a POINTER's sake** — `MojoFileHandle`
+    and `mojo_coro_handle` are both `typedef void*`, and reading either as the
+    bare spelling `void` is what made nine entry points look like by-value
+    aggregates (`bugs/FORMAL_runtime_library_on_the_link_line.md` §0.3). Carrying
+    that membership into RETURN position made **68** entry points word-shaped
+    whose callee writes nothing to the return register, so any of them could be
+    bound to whatever the call sequence happened to leave there.
+
+    Measured before the fix, both architectures, on
+    `a = mojo_async_init(); b = mojo_async_schedule_ready(0);
+    c = mojo_async_shutdown()`:
+
+        arm64   a=-1          b=13582400   c=-1
+        x86-64  a=0           b=20463624   c=0
+
+    and neither run crashed and both exited 0, so nothing downstream could tell.
+    That is the class of wrong answer this whole file exists to catch, and it
+    arrived through a rule that was RIGHT about every call it admitted.
+
+    **All four rows are here because the two halves are separate facts and a fix
+    that only had one would be wrong in the other direction.** `mojo_async_init()`
+    as a statement of its own is a CORRECT program — the effects happen and
+    nothing is read back — so refusing it would refuse a program that works.
+    That is why the rule is about POSITION and not about the callee, and why the
+    statement rows are built AND RUN rather than merely not refused.
+    """
+    # The table: how many, and the arithmetic behind the number.
+    table = M.runtime_abi()
+    void_word = sorted(n for n, e in table.items()
+                       if e.get('returns_void') and e['word'])
+    check(len(void_word) > 60,
+          'the void-returning word-shaped surface is a real row, not a handful',
+          f'{len(void_word)} names')
+    check('void' in M._WORD_SCALARS,
+          "…and 'void' is still a word, because a `void *` is: this row must "
+          "not be 'fixed' by deleting the membership")
+    # The pointer spellings the membership exists for are untouched.
+    for name in ('mojo_close', 'mojo_async_schedule_ready'):
+        entry = M.runtime_abi_entry(name)
+        check(entry is not None and entry['word'],
+              f'{name} is still word-shaped (a `void *` handle argument)',
+              entry['signature'] if entry else 'no entry')
+    check(all(not M.runtime_abi_entry(n).get('returns_void')
+              for n in ('mojo_strlen', 'mojo_write', 'mojo_read')),
+          '…and the entry points that DO return a value are not confused with '
+          'it')
+
+    # The POSITION: a statement builds, links, and runs.
+    stmt = ('def main():\n'
+            '    mojo_async_init()\n'
+            '    mojo_async_schedule_ready(0)\n'
+            '    mojo_async_shutdown()\n'
+            '    printf("done")\n'
+            '    return 0\n')
+    for arch in ('arm64', 'x86_64'):
+        r = build(stmt, 'voidstmt', arch=arch)
+        rc, out = run(r)
+        check(rc == 0 and 'done' in out,
+              f'{arch}: a void call as a STATEMENT builds, links and runs',
+              f'exit {rc!r}, stdout {out!r}')
+        check(r['linked_dylibs'],
+              f'{arch}: …and it really put the library on the link line', str(r))
+
+    # …and the other two positions are refused, with the SAME words from both
+    # architectures, which is the property this file's refusals are for.
+    bound = ('def main():\n'
+             '    a = mojo_async_init()\n'
+             '    printf("%d", a)\n'
+             '    return 0\n')
+    sunk = ('def sink(x):\n'
+            '    return 0\n'
+            '\n'
+            'def main():\n'
+            '    sink(mojo_async_init())\n'
+            '    return 0\n')
+    msgs = {}
+    for label, src in (('assigned', bound), ('inside an expression', sunk)):
+        for arch in ('arm64', 'x86_64'):
+            why = build_expecting_refusal(src, f'void_{label[:4]}_{arch}',
+                                          arch=arch)
+            check('returns nothing' in why,
+                  f'{arch}: a void call {label} is refused', why[-260:])
+            msgs.setdefault(label, []).append(why)
+    for label, seen in msgs.items():
+        check(len(set(seen)) == 1,
+              f'…and the two architectures say the SAME thing when {label}',
+              f'{len(set(seen))} distinct messages')
+
+    # The message names the callee, its real signature, and says the CALL is
+    # fine — because it is, and a reader who is told "this call is refused"
+    # would go looking for the wrong thing.
+    why = M.gimple_runtime_void_result_refusal('mojo_async_init')
+    check('mojo_async_init' in why and 'void mojo_async_init' in why,
+          'the refusal names the callee and the signature its header gives', why)
+    check('as a statement' in why,
+          '…and says a statement is where such a call belongs', why)
+    check(M.gimple_runtime_callable('mojo_async_init', provided=True),
+          '…and the CALL is still answerable, because it is')
+
+
 def main():
     test_word_shaped_call_links_and_runs()
     test_image_carries_the_load_command()
@@ -801,6 +904,7 @@ def main():
     test_bind_audit_not_weakened()
     test_module_dylib_carries_the_load_command()
     test_word_rule_moved_only_where_measured()
+    test_a_void_return_is_a_legal_call_and_an_illegal_value()
     test_the_tagged_box_accessors_are_declared_and_callable()
     npass = sum(1 for ok, _w in RESULTS if ok)
     nfail = len(RESULTS) - npass

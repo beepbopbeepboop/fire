@@ -16625,7 +16625,31 @@ def _runtime_abi_entry(scan: dict) -> dict:
                 boxes.append((ordinal, p, base, depth))
     return {'name': scan['name'], 'signature': scan['signature'],
             'ret': scan['ret'], 'params': scan['params'],
-            'word': not boxes, 'boxes': boxes}
+            'word': not boxes, 'boxes': boxes,
+            # A `void` RETURN is a different fact from an un-word-shaped one, and
+            # it is recorded beside `word` rather than inside it because the two
+            # rules answer different questions. `word` asks "can a formal image
+            # make this CALL at all", and a `void` call can be made — the effects
+            # happen and nothing is read back. `returns_void` asks "does this call
+            # produce a value to bind", and the answer is no.
+            #
+            # `'void'` is in `_WORD_SCALARS`, and it is there for a POINTER's
+            # sake: `MojoFileHandle` and `mojo_coro_handle` are both `typedef
+            # void*`, and reading either as the bare spelling `void` is what made
+            # nine entry points look like by-value aggregates. Carrying `void`
+            # into `_WORD_SCALARS` therefore also made a `void`-RETURNING entry
+            # point word-shaped, which is right for the call and wrong for the
+            # result, and the 68 such names could each be bound to whatever
+            # happened to be in the return register. Measured, both
+            # architectures, `a = mojo_async_init(); b = mojo_async_schedule_
+            # ready(0); c = mojo_async_shutdown(); printf("%d %d %d", a, b, c)`:
+            #
+            #     arm64   a=-1          b=13582400   c=-1
+            #     x86-64  a=0           b=20463624   c=0
+            #
+            # and neither run crashed, so nothing downstream could tell. See
+            # `gimple_runtime_void_result_refusal` and `check_runtime_void_results`.
+            'returns_void': scan['ret'].strip() == 'void'}
 
 
 # C's own scalar vocabulary — NOT this runtime's entry points, and not a list of
@@ -16916,6 +16940,95 @@ def gimple_runtime_callable(name: str, provided: bool = False) -> bool:
     if entry is None:
         return False        # no declaration anywhere: no shape, so not callable
     return entry['word'] and provided
+
+
+def gimple_runtime_void_result_refusal(name: str, signature: str = "") -> str:
+    """Why a `void`-RETURNING runtime entry point cannot be a value.
+
+    **A `void` call is a legal call and an illegal VALUE, and the two are
+    different questions, which is why this is beside
+    `gimple_runtime_callable` rather than inside it.** `gimple_runtime_callable`
+    asks whether a formal image can make the call at all, and it must keep
+    answering YES for these: `mojo_async_init()` as a statement of its own does
+    the work the source wrote and reads nothing back, so refusing it would
+    refuse a program that is correct. What cannot be right is `x =
+    mojo_async_init()` — the callee writes nothing to the return register, so
+    the read is whatever was there, and on this path that is a number the source
+    never wrote.
+
+    **The direction this moves is the same one the float rule moved and for the
+    same reason.** `'float'`/`'double'` are not in `_WORD_SCALARS` because a
+    value here holds an INTEGER and a callee would read an integer's bit pattern
+    as a `double` (`_box_why`'s float arm quotes the measurement: `2.5` returned
+    `2`). `void` is a member of `_WORD_SCALARS` for a POINTER's sake —
+    `MojoFileHandle` and `mojo_coro_handle` are `typedef void*` — and carrying
+    that membership into RETURN position is the same mistake one step further
+    out: the word is real, the value behind it is not.
+
+    `formal/imports.py`'s own `HOST_UNREACHABLE` row records the same reasoning
+    about a neighbouring shape ("a name LEAVES this set by being WRITTEN"), and
+    the difference in direction is what makes this a refusal rather than a
+    deletion: taking `void` out of `_WORD_SCALARS` outright would break the
+    `void *` spellings that section 0.3 of
+    `bugs/FORMAL_runtime_library_on_the_link_line.md` landed, so the membership
+    stays and this rule reads `returns_void` instead.
+
+    **It is asked about the POSITION, not the callee**, so the negative is
+    pinned by `test_formal_runtime_link.py`: a `void` call whose result is
+    discarded builds, runs, and its effects happen.
+    """
+    entry = runtime_abi_entry(name)
+    sig = signature or (entry['signature'] if entry else "")
+    return (
+        f"{name} returns nothing — `{sig}` — and its result is used as a value "
+        f"here. That is not a shape this path can give one: the callee writes "
+        f"nothing to the return register, so what a read of it returns is "
+        f"whatever the call sequence happened to leave there, and on this path "
+        f"that is a number the source never wrote. Measured on both "
+        f"architectures, `a = mojo_async_init(); b = mojo_async_schedule_"
+        f"ready(0); c = mojo_async_shutdown()` printed `-1 13582400 -1` on "
+        f"arm64 and `0 20463624 0` on x86-64, and both runs exited 0 — which "
+        f"is the class this backend's refusals exist for. This is not the "
+        f"word rule and it is not ceiling 3: every argument and the return of "
+        f"this call is a single word, so the CALL is right and only the READ "
+        f"is not. Call {name} as a statement of its own, which is where a "
+        f"`void` call belongs.")
+
+
+def check_runtime_void_results(functions) -> None:
+    """Refuse a `void`-returning runtime entry point whose RESULT is used.
+
+    The late check, asked once per function over both architectures from
+    `formal/build.py::_run_late_checks` — the one place the two front ends agree,
+    so this cannot be a per-emitter copy that answers differently about one
+    source file.
+
+    **`statement_call_ids` is the predicate and the reason it is not a search
+    for "a call with an unused result".** An `ExprStmt` is a statement, so the
+    call it owns has nowhere to put a result and the return register is
+    genuinely unobserved; a call inside an expression (`x = f()`, `sink(f())`)
+    is a value position and the read is the defect. That distinction is the
+    same one `mutating_receiver_value_refusal` is built on, for the same
+    reason, and it is why this check is about POSITION rather than about the
+    callee.
+
+    The names are read from `runtime_abi()` rather than from a list, so a
+    header that adds a `void` entry point is covered without editing anything,
+    and a name no header declares is left to `gimple_runtime_refusal` — which
+    is the refusal that is true of it.
+    """
+    for fn in functions or ():
+        discarded = statement_call_ids(fn)
+        for node in iter_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, F.CallExpr):
+                continue
+            callee = node.func
+            name = getattr(callee, "name", None) or getattr(callee, "id", None)
+            if not isinstance(name, str) or id(node) in discarded:
+                continue
+            entry = runtime_abi_entry(name)
+            if entry is not None and entry.get('returns_void'):
+                raise CodegenError(gimple_runtime_void_result_refusal(name))
 
 
 def _box_why(where: str, spelling: str, base: str, depth: int) -> str:
