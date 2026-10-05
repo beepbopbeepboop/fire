@@ -211,13 +211,16 @@ def records(text):
 #     values leaves room for three. The index is known when the format is
 #     built, so baking it in costs nothing and leaves seven — OF WHICH FIVE ARE
 #     USED, because the seventh argument is the first one that goes on the
-#     stack on SysV and `formal/x86_64_codegen.py` evaluates a stack-passed
-#     argument BEFORE the register ones
-#     (`bugs/FORMAL_x86_64_seven_argument_call_evaluates_its_stack_arguments_first.md`,
-#     measured: six `randrange` calls in one `printf` answer `2 3 4 5 6 1` on
-#     x86-64 where CPython's `random` gives `1 1 0 1 1 0`). Five values per
-#     call is under that line on both architectures, so this corpus does not
-#     depend on the bug being fixed; it is the bound, not a preference.
+#     stack on SysV. That used to matter twice over: x86-64's
+#     `formal/x86_64_codegen.py::_emit_call` evaluated a stack-passed argument
+#     BEFORE the register ones, so six `randrange` calls in one `printf`
+#     answered `2 3 4 5 6 1` on x86-64 where CPython's `random` gives
+#     `1 1 0 1 1 0`. That is FIXED (one reserved outgoing area, every argument
+#     staged into it in source order, the register half loaded out afterwards),
+#     and `test_formal_x86_64_parity.py`'s
+#     `variadic_arguments_are_evaluated_in_source_order` is the differential
+#     that pins it. Five values per call stays the bound anyway, so this corpus
+#     does not sit on the edge of the ABI; it is the bound, not a preference.
 PER_LINE = 5
 
 

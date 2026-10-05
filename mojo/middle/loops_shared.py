@@ -403,3 +403,26 @@ def _gfl_declare_target_name(gen, shadow_name, vn: str, se: str) -> None:
     else:
         gen._declare_var(vn, se, force=(vn == shadow_name))
 
+
+class ZipLongestFillRefusal(ValueError):
+    """A `zip_longest` `fillvalue` — or an ABSENT one — this value model
+    cannot put in a loop-target slot.
+
+    It lives here rather than in `emit_loops.py` because TWO modules have to
+    agree about it: the lowering raises it and `_gen_stmt_ForStmt` in
+    `emit_stmts.py` decides what to do with it, and that decision is the whole
+    point of the class.
+
+    A `ValueError` subclass, and the distinction is load-bearing rather than
+    cosmetic: a plain `ValueError` out of `_gen_for_zip_longest` means "this
+    narrowing does not handle the shape, fall back to the generic path", and
+    the generic path DROPS the loop and emits `mojo_unsupported_iter` — a
+    program that prints nothing and exits 0, which is a wrong answer with no
+    diagnostic. This class is the other case: the shape WAS understood and the
+    value it needs has no representation here, so the message IS the answer
+    and the caller re-raises instead of falling back.
+
+    Raised only where the fill can REACH the slot (`_zip_longest_reaches` in
+    `emit_loops.py`), so a slot whose own sequence is long enough that the
+    fill is never selected raises nothing.
+    """

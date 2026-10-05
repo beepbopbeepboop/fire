@@ -280,6 +280,44 @@ def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str):
                 pass
 
 
+def test_gimple_build_refusal(name: str, mojo_src: str, expected_substr: str):
+    """Assert the GENERATION step refuses the program, naming `expected_substr`.
+
+    The shape of a wrong-answer fix's counterpart, and it needs its own helper
+    because every other helper here compiles first: a refusal that arrives as a
+    gcc error is a different claim from one that arrives from the emitter, and
+    the one this file cares about is that the EMITTER decided — a value it
+    cannot represent, said so, rather than stored something.
+
+    `compile_to_gimple` is called directly rather than through
+    `compile_mojo_to_gimple_exe` because this asserts the exception, not a
+    binary: there is no binary. `do_imports=False` and a fixed filename are the
+    same ones `test_gimple_dict_value_accessor` uses, so the C is produced
+    without the stdlib closure this assertion does not need.
+
+    The substring is the sentence's OPERATIVE clause and not its whole framing,
+    for the reason `test_formal_time.py`'s `structroute` group records: a
+    reworded refusal that still names the cause must not turn the test red, and
+    a refusal that stops naming the cause must.
+    """
+    global _PASS, _FAIL
+    from gimple_codegen import compile_to_gimple
+    try:
+        compile_to_gimple(mojo_src, do_imports=False, filename='zl.py')
+    except Exception as e:
+        if expected_substr in str(e):
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: refused, but not naming {expected_substr!r}: "
+                  f"{e}")
+            _FAIL += 1
+        return
+    print(f"FAIL  {name}: built, where the refusal naming "
+          f"{expected_substr!r} is the answer")
+    _FAIL += 1
+
+
 def test_gimple_matches_cpython(name: str, mojo_src: str):
     """Compile, run, and require the COMPILED program's stdout and exit code
     to be byte-identical to CPython's on the same source.
@@ -2639,6 +2677,125 @@ print(",".join(3))
     test_gimple_runtime_error("gimple_bytes_join_of_a_non_container_raises", """\
 print(b"".join(9))
 """, "TypeError")
+
+    # ── `itertools.zip_longest`'s PADDED slot ──────────────────────────
+    #
+    # The fill a padded slot takes is the one value in this model with no
+    # representation of its own, and the three cases below are the three ways
+    # it used to produce a wrong answer instead of saying so. `zip_longest`
+    # hands every slot the value AS GIVEN, and each slot here is a C local of
+    # the sequence's own element type, so a value of one type in a slot of
+    # another is not a conversion — it is the wrong bits read back through the
+    # right type.
+    #
+    # The positive cases are here too and they are not the easy half: a
+    # `fillvalue` that MATCHES its slot is emitted and is right, a fill the
+    # loop can never select does not stop the program building, and the
+    # fillvalue is evaluated ONCE. That last one used to be once PER SLOT —
+    # `gen.lower_expr(fill_node)` sat inside the per-slot loop — so a
+    # fillvalue with a side effect ran twice.
+    test_gimple_build_refusal(
+        "gimple_zip_longest_a_padded_float_slot_is_refused", """\
+import itertools
+
+def main():
+    for a, b in itertools.zip_longest([1.5], ["q", "r"]):
+        print(a, b)
+    return 0
+
+main()
+""", "a padded `double` slot has no value that means `absent`")
+
+    test_gimple_build_refusal(
+        "gimple_zip_longest_a_string_fill_into_an_int_slot_is_refused", """\
+import itertools
+
+def main():
+    for a, b in itertools.zip_longest([1], ["p", "q"], fillvalue="-"):
+        print(a, b)
+    return 0
+
+main()
+""", "`fillvalue` is char * and cannot fill an integer sequence")
+
+    test_gimple_build_refusal(
+        "gimple_zip_longest_a_float_fill_into_an_int_slot_is_refused", """\
+import itertools
+
+def main():
+    for a, b in itertools.zip_longest([1, 2], [3], fillvalue=0.0):
+        print(a, b)
+    return 0
+
+main()
+""", "`fillvalue` is double and cannot fill an integer sequence")
+
+    # A float `fillvalue` into a float slot: emitted, and CPython's answer. The
+    # SECOND slot is a `char *` the fill can never reach (two elements, two
+    # iterations), and naming the fillvalue in it anyway was a hard gcc error
+    # rather than dead code — so this row is also what says an unreachable slot
+    # stops mentioning the fill.
+    test_gimple_matches_cpython("gimple_zip_longest_a_float_fill_fills_a_float_slot", """\
+import itertools
+
+def main():
+    for a, b in itertools.zip_longest([1.5], ["q", "r"], fillvalue=9.0):
+        print(a, b)
+    return 0
+
+main()
+""")
+
+    # The two sequences the same length, so NO slot is padded and a `fillvalue`
+    # of a type neither slot can hold is never asked for: this has to keep
+    # building and keep matching CPython. It is the row that stops the refusal
+    # above from costing correct code — the refusal is about a fill that can
+    # REACH a slot, and this fill reaches neither.
+    test_gimple_matches_cpython("gimple_zip_longest_equal_lengths_ignore_the_fill", """\
+import itertools
+
+def main():
+    for a, b in itertools.zip_longest([1.5, 2.5], ["q", "r"], fillvalue="-"):
+        print(a, b)
+    return 0
+
+main()
+""")
+
+    # The doc's own program: a string fill into an INTEGER slot that is never
+    # padded, plus a string slot that is. The first half is why the refusal
+    # needs `_zip_longest_reaches` rather than a type check per slot.
+    test_gimple_matches_cpython("gimple_zip_longest_a_fill_that_cannot_reach_still_builds", """\
+import itertools
+
+def main():
+    for a, b in itertools.zip_longest([1, 2], ["p"], fillvalue="-"):
+        print(a, b)
+    return 0
+
+main()
+""")
+
+    # The fillvalue evaluated ONCE, which CPython does and the per-slot
+    # `gen.lower_expr(fill_node)` did not: two slots, two evaluations.
+    test_gimple_matches_cpython("gimple_zip_longest_evaluates_the_fillvalue_once", """\
+import itertools
+
+_calls = 0
+
+def f():
+    global _calls
+    _calls = _calls + 1
+    return 7
+
+def main():
+    for a, b in itertools.zip_longest([1, 2], [3, 4], fillvalue=f()):
+        print(a, b)
+    print("fill calls =", _calls)
+    return 0
+
+main()
+""")
 
     # A boxed handle that IS a container: `all`/`any` used to answer from a
     # stub that never looked at the value, so this was True whatever `x` was.

@@ -9829,96 +9829,107 @@ ctor_field_value=self._ctor_field_value_for(name),
                 or f"calling {name}() needs one hidden word for the caller's "
                    f"block and there is no argument register left for it")
         nargs = len(args) + (1 if sret_site is not None else 0)
-        # The outgoing-argument area, reserved FIRST and as a multiple of 16 so
-        # RSP is still 16-byte aligned at the call — the same reason every other
-        # RSP movement in this backend is a multiple of 16.  SysV spacing is 8
-        # bytes per argument, so an ODD number of them rounds up and the
-        # padding lands at the HIGHER addresses: argument 6 must be at `[RSP+0]`,
-        # which is what the callee's `[RBP + 16 + 8k]` reads after its own
-        # prologue.  Reserving before anything is evaluated is what makes the
-        # slots safe: an argument expression that itself CALLS pushes and pops
-        # symmetrically, so it works strictly below the area this reserved and
-        # cannot land in it.
-        stack_bytes = 0
-        if n_stack:
-            stack_bytes = _SLOT * ((n_stack + 1) // 2)
-            self.asm.emit(encode_sub_r64_imm32(Reg.RSP, stack_bytes))
-        # The STACK arguments, each stored into the slot the callee will read it
-        # from.  FIRST is load-bearing and not a style preference: the register
-        # arguments below are spilled with a `_SLOT` push each, so evaluating
-        # them first would move RSP 96 bytes down and every `[RSP + 8k]` above
-        # would land in the register spill area instead of the reserved outgoing
-        # slots — the dropped-argument-as-zero answer, arriving by a different
-        # road.  Storing them before the register spills is also what makes a
-        # nested call in a stack argument safe: with the area reserved and
-        # nothing else pushed yet, that nested call pushes strictly below it.
-        for k in range(n_stack):
-            arg = args[next(j for j, (c, s) in enumerate(placement)
-                            if c == "stack" and s == k)]
-            self._emit_expr(arg)
-            self.asm.emit(encode_mov_rm64_r64(Reg.RSP, 8 * k, Reg.RAX))
-        # Evaluate left to right onto the stack, then pop in reverse into the
-        # argument registers: evaluating argument i+1 clobbers RAX and every
-        # caller-saved register, including the ones argument i belongs in.
-        # POP only ever targets RAX, so each popped value is moved across
-        # after the pop — including argument 0, whose register is RDI and not
-        # RAX the way the arm64 ABI's X0 would have been.
-        #
         # The register arguments are `placement`'s, not `args[:6]`: an SSE
         # argument goes in an XMM and so does not consume a GPR, which for
-        # `printf("%f %lld", d, n)` puts `n` in RDI rather than RSI. Pushing by
+        # `printf("%f %lld", d, n)` puts `n` in RDI rather than RSI. Spilling by
         # argument ORDER and popping into the plan's registers is what keeps the
         # two halves of one plan from disagreeing with each other.
         reg_plan = [(j, c, slot) for j, (c, slot) in enumerate(placement)
                     if c in ("gpr", "xmm")]
+        # The outgoing-argument area: the `n_stack` slots the callee reads at
+        # `[RSP + 8k]` once every spill below it has been popped. `_SLOT`
+        # rounding keeps RSP 16-byte aligned at the call and puts the padding at
+        # the HIGHER addresses, so argument 6 is still at `[RSP+0]` — which is
+        # what the callee's `[RBP + 16 + 8k]` reads after its own prologue.
+        # Reserving before anything is evaluated is what makes the slots safe: an
+        # argument expression that itself CALLS pushes and pops symmetrically,
+        # so it works strictly below the area this reserved and cannot land in
+        # it.
+        stack_bytes = 0
+        if n_stack:
+            stack_bytes = _SLOT * ((n_stack + 1) // 2)
+            self.asm.emit(encode_sub_r64_imm32(Reg.RSP, stack_bytes))
+        # A CALLEE REACHED THROUGH A WORD is evaluated and spilled FIRST, below
+        # every argument, and popped back after them. Both halves are forced:
+        # the source writes the callee before the arguments and an argument
+        # expression here can be an arbitrary call that clobbers every
+        # caller-saved register, so evaluating the callee after the arguments
+        # would read whatever the last one left; and it is spilled LOWEST because
+        # the pops are a fixed count, so a slot under them is the one still there
+        # when the count is spent. R11 is the destination (`SCRATCH_REGS`:
+        # caller-saved, holds no local), and at this point nothing transient is
+        # live — the last argument was popped.
+        if through_value:
+            self._emit_expr(e.func.obj if isinstance(e.func, F.SubscriptExpr)
+                            else e.func)
+            # RAX, not R11: `_emit_expr` leaves its value in RAX on this backend
+            # exactly as it leaves one in X0 on arm64, and R11 is where it comes
+            # BACK out (below). Pushing R11 would push whatever the callee's own
+            # name evaluation happened to leave there.
+            self._push_slot(Reg.RAX)
+        # How far below the area the register spills have carried RSP. It is a
+        # COMPILE-TIME count and it is what makes the evaluation order the
+        # SOURCE's without changing the spill mechanism: a stack argument is
+        # stored at `[RSP + 16 * spilled + 8k]`, so after the `spilled` register
+        # arguments before it have each taken a `_SLOT` the store lands exactly on
+        # the slot the callee will read, and the spills themselves went strictly
+        # below the area and cannot have touched it.
+        #
+        # It is the ORDER and nothing else that is new. Storing the stack
+        # arguments before the register spills — which is what the plain `[RSP +
+        # 8k]` said — evaluated every stack argument FIRST, so
+        # `join(tick(), …, tick())` gave argument 7 the counter value 1 and
+        # arguments 1-6 the values 2-7: each argument was stored in the slot its
+        # index names, and evaluated in the wrong order, which is why nothing
+        # about the emitted code looked wrong.
+        spilled = 0
+
+        def _spill() -> None:
+            nonlocal spilled
+            self._push_slot(Reg.RAX)
+            spilled += 1
+
         # A BY-REFERENCE RECEIVER is the one argument that is not an ordinary
         # expression: the callee writes the receiver's new value back through
         # it, so it is the ADDRESS of the caller's own storage rather than the
         # value in it.
         recv_arg = self._receiver_argument(e, name)
-        # A CALLEE REACHED THROUGH A WORD is evaluated and pushed FIRST, below
-        # every argument, and popped back after them. Both halves are forced:
-        # the source writes the callee before the arguments and an argument
-        # expression here can be an arbitrary call that clobbers every
-        # caller-saved register, so evaluating the callee after the arguments
-        # would read whatever the last one left; and it is pushed LOWEST because
-        # the pops below are a fixed count, so a slot under them is the one
-        # still there when the count is spent. R11 is the destination
-        # (`SCRATCH_REGS`: caller-saved, holds no local), and at this point
-        # nothing transient is live — the last argument was popped.
-        if through_value:
-            self._emit_expr(e.func.obj if isinstance(e.func, F.SubscriptExpr)
-                            else e.func)
-            # RAX, not R11: `_emit_expr` leaves its value in RAX on this
-            # backend exactly as it leaves one in X0 on arm64, and R11 is where
-            # it comes BACK out (below). Pushing R11 would push whatever the
-            # callee's own name evaluation happened to leave there.
-            self._push_slot(Reg.RAX)
-        for j, _c, _slot in reg_plan:
+        # EVERY argument, in SOURCE ORDER: a register argument is spilled and a
+        # stack argument is stored into the slot the callee will read it from.
+        # The order is the source's and it is the whole point — an argument
+        # whose evaluation is observable (`tick()`, a mutation, a division that
+        # traps) has to run where the source wrote it — and `_emit_expr` may
+        # call, so every argument is in memory before the next one is evaluated.
+        for j, (c, slot) in enumerate(placement):
             if j == recv_arg:
                 self._emit_receiver_argument(args[j], name)
             else:
                 self._emit_expr(args[j])
-            self._push_slot(Reg.RAX)
+            if c == "stack":
+                self.asm.emit(encode_mov_rm64_r64(Reg.RSP,
+                                                  _SLOT * spilled + 8 * slot,
+                                                  Reg.RAX))
+            else:
+                _spill()
         if sret_site is not None:
-            self._emit_blob_base(self._blob_base + self._ret_frame_base
-                                 + sret_site[1], Reg.RAX)
-            self._push_slot(Reg.RAX)
-            # The slot is the hidden word's own argument-register index, which
-            # is the ORDINARY GPR the callee reads it from — the same
-            # `ARG_REGS[len(params)]` its prologue names, one line above
-            # `_store_var(_SRET_LOCAL, …)`. So `"sret"` is in `reg_plan` only
-            # to carry that index, and it takes the same move as every `"gpr"`
-            # entry below.
+            # The hidden word is not a source argument and has no side effects,
+            # so it is computed after them and spilled like one, and it is
+            # spilled LAST so the pop loop below hands it back FIRST.
             #
-            # It used to `continue` past it, on the reasoning that being the
-            # FIRST register argument popped put it in RAX already. RAX is not
-            # an argument register on this ABI (arm64's X0 is, which is where
-            # the argument came from), and every ordinary argument popped after
-            # it overwrites it, so the word was dropped on the floor and the
-            # callee read whatever the previous call left in RDX. The symptom
-            # was a SIGSEGV rather than a wrong value because that word is a
-            # callee-SAVED register, so it survives the prologue and the
+            # Its register is the ORDINARY GPR the callee reads it from — the
+            # same `ARG_REGS[len(params)]` its prologue names, one line above
+            # `_store_var(_SRET_LOCAL, …)` — so `"sret"` is in `reg_plan` only
+            # to carry that index, and it takes the same move as every `"gpr"`
+            # entry there.
+            #
+            # It used to be SKIPPED by that loop, on the reasoning that being
+            # the first register argument popped put it in RAX already. RAX is
+            # not an argument register on this ABI (arm64's X0 is, which is
+            # where the argument came from), and every ordinary argument popped
+            # after it overwrote it, so the word was dropped on the floor and
+            # the callee read whatever the previous call left in RDX. The
+            # symptom was a SIGSEGV rather than a wrong value because that word
+            # is a callee-SAVED register, so it survives the prologue and the
             # callee dereferenced it as a block address: `make(1, 2)` copying
             # its result frame through a stale RDX. It only reached an argument
             # position when the returned struct's FIELD was read, because the
@@ -9926,7 +9937,17 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `r.give().x` re-derives the block from the site — which is why
             # the storage, the field read and a struct built locally were each
             # correct on their own and only the composition faulted.
+            self._emit_blob_base(self._blob_base + self._ret_frame_base
+                                 + sret_site[1], Reg.RAX)
+            _spill()
             reg_plan.append((len(args), "sret", len(reg_plan)))
+        # Evaluate left to right onto the stack, then pop in reverse into the
+        # argument registers: evaluating argument i+1 clobbers RAX and every
+        # caller-saved register, including the ones argument i belongs in.
+        # POP only ever targets RAX, so each popped value is moved across after
+        # the pop — including argument 0, whose register is RDI and not RAX the
+        # way the arm64 ABI's X0 would have been.
+        #
         # An SSE argument goes STRAIGHT from the pop into its XMM register and
         # never through a GPR, because SysV AMD64 passes a `double` in
         # XMM0..XMM7 and nowhere else: a `printf("%f", w)` whose word is in RDI
@@ -9941,6 +9962,14 @@ ctor_field_value=self._ctor_field_value_for(name),
         # check (`model.printf_text_conversion_refusal`) — one reader of one
         # format string, so the two cannot disagree about where a conversion's
         # argument is.
+        #
+        # The load is straight out of the staging slot into the argument
+        # register — one instruction, no RAX round trip — because every argument
+        # is already IN MEMORY by this point, which is the other half of what
+        # makes source order affordable. `RAX` is not an argument register on
+        # this ABI, so it is free as the GPR an XMM move needs, and `R11` (the
+        # callee word's destination) is loaded after this loop for the same
+        # reason.
         nxmm = 0
         for _j, c, slot in reversed(reg_plan):
             self._pop_slot(Reg.RAX)
