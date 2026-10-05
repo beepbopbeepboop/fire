@@ -8007,6 +8007,69 @@ _PRINTF_CONVERSION_RE = re.compile(
     r"%(?:%|[-+ #0\']*(?:[0-9]+|\*)?(?:\.(?:[0-9]+|\*)?)?"
     r"(?:hh|h|ll|l|L|z|j|t|q)?[a-zA-Z])")
 
+# The QUANTIFIER of one conversion specification — the flags, the width and
+# the precision — or None when it carries neither.
+#
+# A PRECISION is here with the width because it is the same defect: `%.3s` of
+# `"héllo"` emits three BYTES on this path (half a character, and invalid UTF-8)
+# where CPython emits three characters. `-` is a flag rather than a width, but
+# it is in the capture because the whole quantifier is what the message quotes.
+_PRINTF_QUANTIFIER_RE = re.compile(
+    r"^%([-+ #0\']*)((?:[0-9]+|\*)?)(?:\.([0-9]+|\*))?")
+
+
+def _printf_specs(fmt_text) -> list | None:
+    """One record per CONVERSION SPECIFICATION in `fmt_text`, or None if unparsed.
+
+    **`{quant, conv, stars}` per specification — one row each for a quantifier,
+    a conversion character and a `*` count, and NOT one row per argument.** The
+    two public readers below answer different questions and index different
+    things, which is why there are two of them: `printf_conversion_specifiers`
+    is an ARGUMENT-indexed classification (a `*` consumes one and is INTEGER),
+    and `printf_text_widths` is a SPECIFICATION-indexed quantifier. A third
+    reader that needs both the quantifier and the character — the width refusal,
+    which must ask "is this a `%s`" before it asks "is there a width" — was
+    reading the quantifier out of one and about to read the character out of the
+    other, and the two do not have the same LENGTH:
+
+        %*s        letters ['*', 's']   widths ['*']
+
+    so a positional pairing of the two lists puts the `%s`'s character on the
+    `*`'s argument. One scan is the alternative to that and it is why this
+    function exists.
+
+    `%%` matches and contributes nothing, which is the only skipping rule and is
+    the one `printf_conversion_specifiers` documents.
+
+    None for text this does not parse, and that is the permissive direction both
+    public readers already take — see their own docstrings.
+    """
+    if not isinstance(fmt_text, str):
+        return None
+    out = []
+    pos = 0
+    while True:
+        at = fmt_text.find("%", pos)
+        if at < 0:
+            return out
+        m = _PRINTF_CONVERSION_RE.match(fmt_text, at)
+        if m is None:
+            return None
+        spec = m.group(0)
+        conv = spec[-1]
+        if conv != "%":
+            qm = _PRINTF_QUANTIFIER_RE.match(spec)
+            flags, width, prec = qm.groups() if qm else ("", None, None)
+            if width == "*" or prec == "*":
+                quant = "*"
+            elif width or prec:
+                quant = flags + (width or "") + ("." + prec if prec else "")
+            else:
+                quant = None
+            out.append({"quant": quant, "conv": conv,
+                        "stars": spec.count("*")})
+        pos = m.end()
+
 
 def printf_conversion_specifiers(fmt_text) -> list | None:
     """The conversion characters of `fmt_text`, in order, or None if unparsed.
@@ -8022,40 +8085,19 @@ def printf_conversion_specifiers(fmt_text) -> list | None:
     format whose conversions cannot be enumerated is one the callers below say
     nothing about, so an unusual `%` in a corpus format string cannot become a
     new refusal.
+
+    **`_printf_specs` is the scan and this is its projection** — see that
+    function for why there is one scan rather than two readers of one regular
+    expression.
     """
-    if not isinstance(fmt_text, str):
+    specs = _printf_specs(fmt_text)
+    if specs is None:
         return None
     out = []
-    pos = 0
-    while True:
-        at = fmt_text.find("%", pos)
-        if at < 0:
-            return out
-        m = _PRINTF_CONVERSION_RE.match(fmt_text, at)
-        if m is None:
-            return None
-        conv = m.group(0)[-1]
-        if conv != "%":
-            out.extend(["*"] * m.group(0).count("*"))
-            out.append(conv)
-        pos = m.end()
-
-
-# The QUANTIFIER of one conversion specification — the flags, the width and
-# the precision — or None when it carries neither. A separate scanner rather
-# than a column of `printf_conversion_specifiers` because that function's output
-# is deliberately COUNT-based — it yields one entry per consumed argument, `*`
-# for a `*` width — and a quantifier is a property of the specification text,
-# not of the argument list. Two readers of one regular expression, which is the
-# alternative and is worse: the two would have to agree about where a
-# specification starts.
-#
-# A PRECISION is here with the width because it is the same defect: `%.3s` of
-# `"héllo"` emits three BYTES on this path (half a character, and invalid UTF-8)
-# where CPython emits three characters. `-` is a flag rather than a width, but
-# it is in the capture because the whole quantifier is what the message quotes.
-_PRINTF_QUANTIFIER_RE = re.compile(
-    r"^%([-+ #0\']*)((?:[0-9]+|\*)?)(?:\.([0-9]+|\*))?")
+    for s in specs:
+        out.extend(["*"] * s["stars"])
+        out.append(s["conv"])
+    return out
 
 
 def printf_text_widths(fmt_text) -> list | None:
@@ -8068,32 +8110,37 @@ def printf_text_widths(fmt_text) -> list | None:
     (which this build cannot see), and the quantifier's own TEXT otherwise —
     flags included, because `%-6s` and `%6s` pad on opposite sides and a
     message that quoted only the digits would not say which one is meant.
+
+    **`_printf_specs` is the scan, and this is its projection** — kept as its
+    own function because the trailing entries for extra `*`s are this reader's
+    own arithmetic and not a property of any specification. The extra entries
+    are what make the length disagree with `printf_conversion_specifiers` for
+    `%*s`, and that disagreement is load-bearing rather than a defect: a `*`
+    width IS the quantifier of the conversion that carries it, so the conversion
+    itself contributes no second row here.
+
+    **It has no caller in `formal/` any more, and that is said here rather than
+    left for a reader to discover.** `printf_text_width_refusal` used to reach
+    its quantifier through this list and now reads `_printf_specs` directly,
+    because the refusal needs the conversion CHARACTER as well and the two
+    projections do not have the same length. What is left is the SURFACE: this
+    is the named reader for "what quantifiers does this format string carry",
+    and `test_formal_unicode.py`'s in-process table pins its parsing — flags
+    kept (`%-6s` and `%6s` pad on opposite sides), `*`, `%%`, the positional
+    form and the unparsed form — which `_printf_specs` exercises only
+    transitively through it. Deleting it with its ten rows would delete the
+    coverage of the quantifier parse to save a wrapper, which is the wrong
+    trade; the scan is already shared, so there is no second implementation to
+    consolidate.
     """
-    if not isinstance(fmt_text, str):
+    specs = _printf_specs(fmt_text)
+    if specs is None:
         return None
     out = []
-    pos = 0
-    while True:
-        at = fmt_text.find("%", pos)
-        if at < 0:
-            return out
-        m = _PRINTF_CONVERSION_RE.match(fmt_text, at)
-        if m is None:
-            return None
-        spec = m.group(0)
-        if spec[-1] != "%":
-            qm = _PRINTF_QUANTIFIER_RE.match(spec)
-            flags, width, prec = qm.groups() if qm else ("", None, None)
-            stars = spec.count("*")
-            if width == "*" or prec == "*":
-                out.append("*")
-            elif width or prec:
-                out.append(flags + (width or "")
-                           + ("." + prec if prec else ""))
-            else:
-                out.append(None)
-            out.extend([None] * (stars - (1 if "*" in (width, prec) else 0)))
-        pos = m.end()
+    for s in specs:
+        out.append(s["quant"])
+        out.extend([None] * (s["stars"] - (1 if s["quant"] == "*" else 0)))
+    return out
 
 
 def printf_text_width_refusal(callee: str, fmt_text, args: list,
@@ -8128,23 +8175,62 @@ def printf_text_width_refusal(callee: str, fmt_text, args: list,
     width and hope. So an image of pure ASCII never sees this refusal, which is
     every program in the corpus, and an image with a non-ASCII table in it gets
     it for the one conversion it can be wrong about.
+
+    ## ONLY a `%s`, and that test used to be missing — the refusal named `%s`
+    ## for a conversion that was not one
+
+    `printf_text_widths` returns the quantifier of EVERY conversion, so the loop
+    below was reached by a `%f`, a `%d` and a `%c` as readily as by a `%s`, and
+    the refusal it returned named a conversion the format string does not
+    contain. Measured on the tree this landed in, on `test_formal_time.py`'s
+    `clocks` group, whose program prints six decimal places of a float:
+
+        printf("wall_bits=%.6f@@", time.time_seconds_bits())
+
+        build: the `%.6s` conversion in printf's format string is refused: …
+        This image holds a string literal that is not ASCII — "`round-half-even
+        (a * 2^k / den)`, for `a < 2^30` and `k >= 0`. …"
+
+    Two wrongnesses in one message: the format string says `%f` and the
+    refusal says `%.6s`, and a `%<precision>f` is six DECIMAL PLACES of a
+    number — there is no text in it, no character in it, and no encoding
+    question anywhere near it. The refusal was refusing a number because a
+    docstring in `IEEE754.mojo` holds an em-dash.
+
+    So the character is read here, from `_printf_specs`, rather than assumed —
+    and it is the scan's OWN row rather than `printf_conversion_specifiers`'
+    because the two lists do not have the same length (`%*s` is `['*','s']` and
+    `['*']`), so pairing them by position would ask about the `*`'s argument.
+    The `*` rows are skipped exactly as before: a `*` width is an argument this
+    build cannot see and there is nothing to quote.
     """
     if text_of_arg is None or callee not in PRINTF_TEXT_CONVERSIONS_CALLEES:
         return None
-    widths = printf_text_widths(fmt_text)
-    if widths is None:
+    specs = _printf_specs(fmt_text)
+    if specs is None:
         return None
-    for j, width in enumerate(widths):
-        if width is None or width == "*" or j >= len(args):
+    # `arg` is the vararg the NEXT specification reads. A `*` width or precision
+    # is itself a vararg and comes before the conversion's operand, so a
+    # specification consumes `stars + 1` of them — which is also the arithmetic
+    # `printf_text_widths`'s trailing entries approximate, and the reason this
+    # walk is over the specifications and not over that list.
+    arg = 0
+    for s in specs:
+        operand = arg + s["stars"]
+        arg = operand + 1
+        if s["conv"] != "s":
             continue
-        text = text_of_arg(args[j])
+        width = s["quant"]
+        if width is None or width == "*" or operand >= len(args):
+            continue
+        text = text_of_arg(args[operand])
         if text_is_ascii(text):
             continue
         if text is None and not non_ascii_strings():
             continue
         return codepoint_refusal(
             f"the `%{width}s` conversion in {callee}'s format string",
-            spelled(args[j]))
+            spelled(args[operand]))
     return None
 
 
@@ -11445,7 +11531,50 @@ def string_position_verdict(construct: str, haystack, needle, hay_text=None):
     return STRING_POSITION_STRLEN, None
 
 
-def string_element_refusal(base, index) -> str | None:
+def receiver_is_declared_bytes(fn, base, decls=None, functions=None) -> bool:
+    """True when this image declares `base`'s pointee to be ONE byte — `bytes`.
+
+    **A `bytes` and a `str` are different answers, not different types.** CPython
+    says `"héllo"[1]` is one character and `b"héllo"[1]` is the integer 195, so
+    "read one byte at `base + index`" is CPython's own answer for the second and
+    a wrong one for the first. That is what makes a one-byte pointee a
+    *criterion* rather than a shortcut: it is the spelling that says which of
+    the two objects this path is holding, and the criterion is checked only
+    where the two answers differ (see `string_element_refusal`).
+
+    **`pointer_pointee` is the reader, not a second one.** It is the reader the
+    emitter already asks for the width of the very same load — `base + i*width`
+    with `width` from `pointer_pointee` — so a byte exemption and a byte width
+    cannot come apart: if this says `bytes`, the load the emitter emits is the
+    one-byte load, and if `pointer_pointee` cannot establish a pointee this
+    returns False and the refusal stands.
+
+    **`fn is None` is False**, which is the conservative direction and the reason
+    the callers that have no function in hand (`test_formal_unicode.py`'s
+    in-process rows) get the refusal rather than an exemption nobody measured.
+
+    The pointee spellings are read through `annotation_base_name`'s inner
+    argument so `Pointer[UInt8]`, `UnsafePointer[UInt8]` and `DTypePointer[
+    UInt8]` are one answer; `Int8` is here beside `UInt8` because a signed byte
+    buffer is the same one-byte access and the sign is the width question the
+    emitter's own `subscript_base_lowering` already decided.
+    """
+    if fn is None or base is None:
+        return False
+    pointee, _why = pointer_pointee(fn, base, decls or {}, functions)
+    return pointee in BYTE_POINTER_ELEMENTS
+
+
+# The pointee spellings that make a pointer a BYTE buffer. A set rather than one
+# name because `pointer_pointee` reports the pointee's BASE name — the reduction
+# `annotation_base_name` does on the type argument — and every pointer spelling
+# in `POINTER_TYPE_CTORS` reduces to its own element type, so the element is the
+# one thing to compare and there is one answer for all of them.
+BYTE_POINTER_ELEMENTS = frozenset({"UInt8", "Int8"})
+
+
+def string_element_refusal(base, index, fn=None, decls=None,
+                           functions=None) -> str | None:
     """Why `base[index]` is not a CHARACTER of `base`, or None when it is.
 
     A string element on this path is one BYTE at `base + index`, and CPython's
@@ -11453,6 +11582,75 @@ def string_element_refusal(base, index) -> str | None:
     disagree about everything else: for ASCII the byte is the character, and for
     anything else `base + index` walks into the middle of a multi-byte sequence
     and reads a continuation byte that is not a character at all.
+
+    ## `bytes` is not `str`, and the receiver's DECLARED type is what says so
+
+    **`fn`/`decls`/`functions` are the receiver's declarations, and they are the
+    difference between a `str` and a `bytes`.** CPython agrees with this
+    function's refusal about `str` and disagrees with it about `bytes`, because
+    CPython's two objects differ in the answer rather than only in the type:
+    `"héllo"[1]` is a character and `b"héllo"[1]` is the integer 195. So a
+    receiver the source declares `Pointer[UInt8]` is a byte buffer, its subscript
+    is a byte load, and the byte is the answer — there is no character for this
+    refusal to protect.
+
+    Without those three arguments this is the refusal about a receiver whose
+    type NOTHING states, which is why the default is to refuse and the
+    exemption needs the declarations: `formal/arm64_codegen.py` and its x86-64
+    twin are the two callers that have them, and `test_formal_unicode.py` pins
+    the `fn=None` answer as the conservative one.
+
+    **The two spellings of the same declaration used to get opposite answers,
+    which is the whole measurement.** With one non-ASCII literal in the image,
+    one em-dash in a docstring, on both architectures, exit 0:
+
+        fn take(e: Pointer[UInt8]): return e[3]     ->  BUILT (a byte load)
+
+        fn str_alloc(n) -> str: return malloc(n+1)
+        def get(e):
+            var d: Pointer[UInt8] = str_alloc(8)   ->  REFUSED, this message
+            d[0] = e[0]
+            return d[0]
+
+    Same declared type, same byte subscript, and the parameter reading was the
+    byte one because `ValueKinds` seeds an annotated `Pointer[UInt8]` PARAMETER
+    to `INT_KIND` while `_value_kind` reads the LOCAL off its initializer's
+    declared return (`str_alloc` declares `-> str`), which is `STR_KIND`. So
+    `formal/hostmods/os/_syscalls.mojo`'s `fs_dirent_name` — which copies a
+    `readdir(3)` name one byte at a time, and whose own docstrings call the
+    annotation load-bearing for exactly that — was refused by a rule that asks
+    about characters, and 31 non-ASCII em-dashes in that file's prose were
+    enough to do it. That took `os`, `shlex`, `posixpath`, `argparse` and
+    `time` down with it: each imports `os._syscalls`, so each image carries
+    those literals.
+
+    **What it costs, measured over the 743 `.mojo` files of this repository and
+    its stdlib** (every parseable file; `pointer_pointee` is the reader, which
+    is the same one the emitter's own `subscript_base_lowering` asks for the
+    width, so the exemption and the width cannot come apart):
+
+        22 subscripts whose receiver's declared pointee is one byte,
+        22 of them in ONE file — formal/hostmods/os/_syscalls.mojo —
+        and every one is a byte copy or a byte read of a `struct dirent`,
+        a `le16`/`le32`/`le64` decoder, or a `name[0] == 46` test.
+
+    Of those 22, twenty already took the byte path (a `Pointer[UInt8]`
+    parameter is not `STR_KIND`) and two — `d[i]` — were refused. So the
+    exemption makes twenty-two sites agree instead of adding a reading: it does
+    not introduce a byte answer anywhere that did not already have one.
+
+    ## The residual, stated rather than hidden
+
+    A `Pointer[UInt8]` that holds TEXT and is subscripted as a CHARACTER read
+    would now get the byte where it got a refusal. This tree has no such site
+    (the census above), and the host module that declares most of them says out
+    loud why it does not use the byte subscript to ask a character question:
+    `formal/hostmods/os/_syscalls.mojo`'s `str_at` is
+    "A character test with no byte load, which is the only way to ask this
+    question on this target". So the byte subscript is not this path's way of
+    reading a character, in this module or in this corpus; what a `str` element
+    read costs is still recorded in `bugs/FORMAL_string_value_model.md` and is
+    still refused everywhere else.
 
     **This is a REFUSAL and not a fold, and the difference from `len` is the
     answer itself.** The character count is a NUMBER and a literal's text gives
@@ -11471,12 +11669,20 @@ def string_element_refusal(base, index) -> str | None:
     An index a KNOWN TEXT makes answerable is still not answerable, because the
     obstacle is where the answer would live rather than what it is: so this
     fires for a non-ASCII LITERAL receiver exactly as it does for a name. The
-    one thing that does clear it is the condition on the whole image, which is
-    the TEXT ENCODING block's argument: no literal with a byte >= 0x80 anywhere
+    two things that do clear it are the condition on the whole image, which is
+    the TEXT ENCODING block's argument (no literal with a byte >= 0x80 anywhere
     means no string in the image can have one, so every element read is a
-    character.
+    character), and a receiver the source declares a byte buffer — see the
+    section above.
     """
     if not non_ascii_strings():
+        return None
+    # The BYTE exemption is asked AFTER the image test and not before it,
+    # because it is the one reader here that walks the function's declarations
+    # and its call sites, and an all-ASCII image must not pay for it. The
+    # order is also the safe one for the same reason the image test is first:
+    # a false refusal is the expensive direction here, not the cheap one.
+    if receiver_is_declared_bytes(fn, base, decls, functions):
         return None
     text = string_literal_text(base)
     known = (f" The receiver is the literal {text!r}, so this build does know "

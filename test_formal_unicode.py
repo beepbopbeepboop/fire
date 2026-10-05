@@ -516,6 +516,109 @@ ORACLE_CASES = [
      '    xs = ["héllo", "日本"]\n'
      '    first = xs[0]\n'
      '    print("n=%d" % len(xs), end="\\n")\n'),
+
+    # The same, through a `Pointer[UInt8]`-declared parameter whose value is
+    # TEXT — which is the one shape the byte exemption cannot tell from a byte
+    # buffer, and which is why the criterion is a DECLARATION and not a use.
+    # It builds, and the CPython column is the honest `bytes` oracle for the
+    # same declaration: 195 is the LEAD byte of `é` (`C3 A9`), which is what
+    # `b"héllo"[1]` is in CPython too. So the divergence the refusal exists to
+    # catch is now reached by a program that DECLARED bytes, and
+    # `model.string_element_refusal`'s docstring states that residual instead of
+    # claiming the question is closed — this row is where a reader can measure
+    # it.
+    ("byte_pointer_over_text_is_the_residual_and_reads_its_byte",
+     'def first(e: Pointer[UInt8]) -> Int:\n'
+     '    return e[1]\n'
+     'def main(n):\n'
+     '    var table = ["unused"]\n'
+     '    var s = "héllo"\n'
+     '    printf("b=%d t=%d\\n", first(s), len(table))\n'
+     '    return 0\n',
+     'def main():\n'
+     '    table = [b"unused"]\n'
+     '    s = b"h\\xc3\\xa9llo"\n'
+     '    first = lambda e: e[1]\n'
+     '    print("b=%d t=%d" % (first(s), len(table)), end="\\n")\n'),
+
+    # ── `bytes`: the receiver's DECLARED type, and CPython's own answer ──
+
+    #
+    # These two rows are the other half of the block above and they are ORACLE
+    # rows, not guards, because CPython agrees with them: `"héllo"[1]` is one
+    # character and `b"héllo"[1]` is the integer 195. So a receiver the source
+    # declares `Pointer[UInt8]` holds a `bytes`, its subscript is a byte load,
+    # and the byte is the right answer — no refusal, and no fold either.
+    #
+    # **Every row in this group puts its non-ASCII text in a VALUE, never in a
+    # DOCSTRING**, and that is not a style choice. `is_docstring_statement`
+    # (`a1d56f97`) excludes a bare string statement from the published set on
+    # the measured ground that nothing can NAME it, so a docstring would make
+    # these rows vacuous the day that landed: the image would be ASCII and every
+    # one of them would pass without testing the condition it exists for. A list
+    # literal is a value, is reachable by construction, and is the shape
+    # `refuse_printf_width_on_an_unseen_operand_in_a_non_ascii_image` above
+    # already uses for exactly this reason.
+    #
+    # **Both rows are in an image that holds a non-ASCII literal**, which is the
+    # whole of what they measure: the refusal keys on the image AND on the
+    # receiver, and the receiver here is a byte buffer. Before the byte
+    # exemption the LOCAL spelling was refused while the PARAMETER spelling
+    # built, from the same `Pointer[UInt8]` declaration — see
+    # `model.string_element_refusal` for that measurement. So the two rows are
+    # also the pair that says the two spellings of one declaration agree.
+    ("bytes_element_of_a_declared_byte_local_reads_its_byte",
+     'fn buf(n) -> str:\n'
+     '    return malloc(n + 1)\n'
+     'def main(n):\n'
+     '    var table = ["héllo"]\n'
+     '    var d: Pointer[UInt8] = buf(8)\n'
+     '    d[0] = 97\n'
+     '    d[1] = 98\n'
+     '    printf("b0=%d b1=%d t=%d\\n", d[0], d[1], len(table))\n'
+     '    return 0\n',
+     'def main():\n'
+     '    table = ["héllo"]\n'
+     '    d = bytearray(8)\n'
+     '    d[0] = 97\n'
+     '    d[1] = 98\n'
+     '    print("b0=%d b1=%d t=%d" % (d[0], d[1], len(table)), end="\\n")\n'),
+
+    ("bytes_element_of_a_declared_byte_parameter_reads_its_byte",
+     'def at(e: Pointer[UInt8], i):\n'
+     '    return e[i]\n'
+     'def main(n):\n'
+     '    var table = ["héllo"]\n'
+     '    var s = "abc"\n'
+     '    printf("b0=%d b1=%d t=%d\\n", at(s, 0), at(s, 1), len(table))\n'
+     '    return 0\n',
+     'def main():\n'
+     '    table = ["héllo"]\n'
+     '    s = b"abc"\n'
+     '    at = lambda e, i: e[i]\n'
+     '    print("b0=%d b1=%d t=%d" % (at(s, 0), at(s, 1), len(table)), end="\\n")\n'),
+
+    # A QUANTIFIER on a conversion that is not a `%s`, in an image that holds a
+    # non-ASCII literal.  This is the row the width refusal used to fail: it
+    # answered for every conversion the format string names and then said `%s`
+    # in the message, so `printf("%.6f", …)` was refused as "the `%.6s`
+    # conversion" — a number refused because a docstring in `IEEE754.mojo` holds
+    # an em-dash.  `test_formal_time.py`'s `clocks` group is the program that
+    # found it, and it is a `%f`; this is a `%d`, so the expectation is a number
+    # CPython can print and the row needs no float.  The quantifier's meaning
+    # does not change: six DIGITS, of a number, which has no encoding at all.
+    # The `len(table)` is what makes the image non-ASCII without a docstring,
+    # for the reason the group comment gives.
+    ("quantifier_on_an_integer_conversion_beside_a_non_ascii_literal",
+     'def main(n):\n'
+     '    var table = ["héllo"]\n'
+     '    printf("q=[%.6d][%06d][%6.3d][%d] t=%d\\n",\n'
+     '           42, 7, 5, 42, len(table))\n'
+     '    return 0\n',
+     'def main():\n'
+     '    table = ["héllo"]\n'
+     '    print("q=[%.6d][%06d][%6.3d][%d] t=%d"\n'
+     '          % (42, 7, 5, 42, len(table)), end="\\n")\n'),
 ]
 
 
@@ -634,6 +737,23 @@ REFUSAL_CASES = [
      '    printf("[%6s]\\n", s)\n'
      '    return 0\n',
      ["`%6s`", "is refused", "'héllo'"]),
+
+    # A `String`-ANNOTATED receiver, which is the row that says the exemption
+    # beside the two `bytes` rows is keyed on the POINTEE and not on "this is a
+    # `char *`".  A `String` and a `Pointer[UInt8]` are the same word on this
+    # path — both are a bare `char *` — so a rule that only asked "is it a
+    # string-shaped word" would exempt both and turn this refusal into a byte
+    # answer.  The parameter also cannot see its argument, so this is the shape
+    # the image-wide condition exists for and the shape the byte exemption must
+    # not reach.
+    ("refuse_subscript_through_a_string_annotated_parameter",
+     'def first(s: String) -> Int:\n'
+     '    return s[1]\n'
+     'def main(n):\n'
+     '    printf("c=%d\\n", first("héllo"))\n'
+     '    return 0\n',
+     ["is refused on a string whose text is not ASCII",
+      "s[1]", "one CHARACTER"]),
 
     # ── the three TEXT BUILTINS with no lowering ──
     #
@@ -1215,6 +1335,37 @@ def model_checks():
     ok("widths: an unparsed format is None",
        M.printf_text_widths("%2$6s"), None)
 
+    # ── the width refusal asks whether the conversion is a `%s` ────────────
+    #
+    # Three rows, and the first is the defect this rule change was written for:
+    # `printf_text_widths` answers for EVERY conversion, so a refusal built on it
+    # alone names a `%s` the format string does not contain. `%.6f` is the
+    # measured one — `test_formal_time.py`'s `clocks` group, refused in an image
+    # whose `IEEE754.mojo` holds an em-dash — and the other two are here so a
+    # narrower fix ("only a float is fine") would fail.
+    unseen = lambda arg: None
+    ok("width refusal: a %.6f is not a text conversion",
+       M.printf_text_width_refusal("printf", "%.6f", [None], unseen), None)
+    ok("width refusal: a %6d is not a text conversion either",
+       M.printf_text_width_refusal("printf", "%6d", [None], unseen), None)
+    # The image has to hold a non-ASCII literal for the last one, which is the
+    # same condition the refusal has always had and the reason the two rows
+    # above would pass even with the `s` test missing.  Published and restored
+    # through `clear_*` + `publish_*` for the reason the block above gives.
+    saved_width = M.non_ascii_strings()
+    try:
+        M.clear_non_ascii_strings()
+        M.publish_non_ascii_strings(["héllo"])
+        ok("width refusal: a %.6s beside that %6d still is",
+           M.printf_text_width_refusal("printf", "%6d %.3s", [None, None],
+                                       unseen) is not None, True)
+        ok("width refusal: the %.6f is still not, in the same image",
+           M.printf_text_width_refusal("printf", "%6d %.6f", [None, None],
+                                       unseen), None)
+    finally:
+        M.clear_non_ascii_strings()
+        M.publish_non_ascii_strings(saved_width)
+
     # ── the two refusals are INDEPENDENT of each other ────────────────────
     #
     # A string INDEX (a string used to index a string) is refused by
@@ -1242,6 +1393,38 @@ def model_checks():
     finally:
         M.clear_non_ascii_strings()
         M.publish_non_ascii_strings(saved)
+
+    # ── `receiver_is_declared_bytes`, the exemption the element refusal asks ──
+    #
+    # Four rows and each is one answer the predicate must give, because the two
+    # that could be got wrong are the two that are silently wrong: a `String` is
+    # a `char *` too and must NOT be exempted, and `fn=None` must NOT be
+    # exempted either (that is what the rows above pin).
+    def fn_of(ann, body, params=None):
+        """A one-function module, and the `FunctionDef` inside it."""
+        src = "def f({}):\n{}".format(params or "", body)
+        return F.Parser(F.py_tokenize(src)).parse_module()[0]
+
+    ok("bytes: a Pointer[UInt8] parameter is bytes",
+       M.receiver_is_declared_bytes(
+           fn_of(None, "    return e[0]\n", "e: Pointer[UInt8]"),
+           F.IdentExpr("e"), {}, {}), True)
+    ok("bytes: a Pointer[UInt8] LOCAL is bytes too — the spelling that used "
+       "to disagree with the parameter",
+       M.receiver_is_declared_bytes(
+           fn_of(None, "    var d: Pointer[UInt8] = buf(8)\n"
+                       "    return d[0]\n"),
+           F.IdentExpr("d"), {}, {}), True)
+    ok("bytes: a String is not a byte buffer, though it is the same word",
+       M.receiver_is_declared_bytes(
+           fn_of(None, "    return s[0]\n", "s: String"),
+           F.IdentExpr("s"), {}, {}), False)
+    ok("bytes: a Pointer[Int64] is not a byte buffer either",
+       M.receiver_is_declared_bytes(
+           fn_of(None, "    return p[0]\n", "p: Pointer[Int64]"),
+           F.IdentExpr("p"), {}, {}), False)
+    ok("bytes: no function in hand is no exemption",
+       M.receiver_is_declared_bytes(None, F.IdentExpr("e"), {}, {}), False)
 
     return passed, failures
 
