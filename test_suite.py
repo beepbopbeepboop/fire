@@ -4832,6 +4832,26 @@ def test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency():
           f'only {len(in_a_bucket)} of {len(suite.REGISTRY)} registered tests '
           f'are in any bucket, so a rule that reads buckets is reading almost '
           f'nothing and would pass on a registry of one')
+    # A name listed TWICE in one bucket is a second comment claiming the reader
+    # has been told something they have not, and the duplicate is invisible to
+    # every other check here: `expand_bucket` de-duplicates, so `in_a_bucket` is
+    # the same set either way, and nothing else reads the raw lists. Six such
+    # rows were live on this tree when this check was written — one in `check`
+    # and five in `proofs`, each added by a commit that did not see the one
+    # above it — and the cost of that is not a double run (expansion
+    # schedules a test once per run) but a reader who counts the entries in a
+    # bucket, which is exactly what a bucket list is for.
+    repeated = []
+    for bucket, names in suite.BUCKETS.items():
+        seen = set()
+        twice = sorted({n for n in names if n in seen or seen.add(n)})
+        if twice:
+            repeated.append(f'{bucket}: {", ".join(twice)}')
+    check('the buckets: no name is in one twice', not repeated,
+          'a test listed twice in the same bucket is a duplicate comment, not a '
+          'second run (expansion schedules each test once), and it makes the '
+          'entry count of a bucket a number nobody can read: '
+          + '; '.join(repeated))
     check('the buckets: every registered test is in one, or declares dep=True',
           not [n for n, s in sorted(suite.REGISTRY.items())
                if n not in in_a_bucket and not getattr(s, 'dep', False)],

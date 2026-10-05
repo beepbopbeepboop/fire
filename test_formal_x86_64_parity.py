@@ -1842,6 +1842,24 @@ REFUSALS = [
     # established by the CONSTRUCTOR rather than by a class-level default, so
     # nothing folds to a literal and nothing refuses. A type's value is its tag
     # word, and a tag has no count and no elements.
+    #
+    # ONE field, and that is what this row is for rather than a shorter program:
+    # a one-field struct's sole field is in `model.one_field_struct_names`, so
+    # `_rewrite_self_fields` is entitled to collapse `self.d` onto `self` and
+    # hand the emitter a bare `self` — which is the shape whose arm64 refusal
+    # this file's first `REFUSALS` comment describes as "a message about the
+    # literal a one-field rewrite folded the field to". The `__init__` is what
+    # STOPS the fold here, because the slot's value is whatever the constructor
+    # was handed, so `s.d` is still a `MemberExpr` when the gate sees it and the
+    # FIELD arm of `scalar_container_base_evidence` is the one that answers.
+    # Hence the needle, and hence why the sibling row below pins the SAME
+    # sentence for the same construct: that one declares two fields, so it is not
+    # in `one_field_struct_names` at all, and the two rows differ on the rewrite
+    # rather than on the diagnostic.
+    #
+    # This row's needle was `is a TYPE value` — the NON-field arm's words, and an
+    # arm this program does not reach. It is the row that is worth keeping a
+    # non-field sibling for; that sibling is three rows down.
     ("a_subscript_on_a_type_value_faulted_identically",
      "struct S:\n"
      "    var d: DType = 5\n"
@@ -1851,6 +1869,25 @@ REFUSALS = [
      "def main() -> Int:\n"
      "    var s = S(DType.int32)\n"
      "    printf(\"%d\", s.d[0])\n"
+     "    return 0\n",
+     "is a struct field declared to hold a TYPE TAG"),
+    # … and the sibling that IS the non-field arm: a type VALUE rather than a
+    # slot holding one. `scalar_container_base_evidence` has two `TYPE_KIND`
+    # arms and they are different sentences — a field is "a struct field
+    # declared to hold a TYPE TAG", anything else is "a TYPE value — the tag
+    # word this path gives a type name" — so a needle taken from one of them
+    # does not pin the other and a corpus that only builds fields leaves the
+    # second arm unpinned.
+    #
+    # A LOCAL rather than a `DType`-annotated parameter on purpose: this is the
+    # only spelling of a bare type value the gate classifies as `TYPE_KIND`. A
+    # parameter declared `DType` is not classified as one and `t[0]` on it
+    # BUILDS, which is a different defect with its own doc and is not what this
+    # row is measuring.
+    ("a_subscript_on_a_bare_type_value_faulted_identically",
+     "def main() -> Int:\n"
+     "    var t = DType.int32\n"
+     "    printf(\"%d\", t[0])\n"
      "    return 0\n",
      "is a TYPE value"),
     # A CALLEE this backend does not lower, which used to stop at a link audit

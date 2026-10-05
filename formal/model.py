@@ -2689,6 +2689,8 @@ BARE_C_RETURN_KINDS = {
     "fclose": (32, True),
     "fflush": (32, True),
     "flock": (32, True),
+    "getpid": (32, True),
+    "kill": (32, True),
     "memcmp": (32, True),
     "mkdir": (32, True),
     "mkstemps": (32, True),       # the row that measured the bug
@@ -2730,6 +2732,7 @@ BARE_C_RETURN_KINDS = {
     "fopen": EXTERN_RETURN_WORD,
     "getcwd": EXTERN_RETURN_WORD,
     "getenv": EXTERN_RETURN_WORD,
+    "getpwnam": EXTERN_RETURN_WORD,
     "malloc": EXTERN_RETURN_WORD,
     "memcpy": EXTERN_RETURN_WORD,
     "memmove": EXTERN_RETURN_WORD,
@@ -2741,6 +2744,16 @@ BARE_C_RETURN_KINDS = {
     "realpath": EXTERN_RETURN_WORD,
     "strcat": EXTERN_RETURN_WORD,
     "strchr": EXTERN_RETURN_WORD,
+    "strsignal": EXTERN_RETURN_WORD,
+    # `getpwnam` and `strsignal` are the two `struct passwd *` / `char *`
+    # returns `formal/hostmods/os/_syscalls.mojo` reads, and both are here for
+    # the reason the whole pointer group is: an address is below
+    # `0x0000_8000_0000_0000` on every user-space target this backend emits, so
+    # a NULL compares as 0 either way and the conversion has nothing to do. The
+    # question they raise is the OPPOSITE one from `getpid`/`kill` above — both
+    # of those are `int`, so BOTH need the sign-extension — and all four are
+    # asked of the same census, which is what makes the pair worth stating
+    # together.
     "CC_MD5": EXTERN_RETURN_WORD,
     "CC_SHA1": EXTERN_RETURN_WORD,
     "CC_SHA224": EXTERN_RETURN_WORD,

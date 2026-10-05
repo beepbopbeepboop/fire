@@ -489,20 +489,28 @@ class TestCensusReport(unittest.TestCase):
 # `formal/hostmods/zlib.mojo` — the "project to argue about" the queue's own
 # work map called it — would have moved ZERO of them.
 #
-# Same shape, three more rows: `resource` (2 files, both of which spell
+# Same shape, two more rows: `resource` (2 files, both of which spell
 # `resource.getrusage(resource.RUSAGE_CHILDREN)` inside the STRING of a child
-# program they write out, never in code), `sysconfig` (`fire.py`, which the work
-# map already recorded as "imports it and never uses it"), and `traceback`
-# (1 file).
+# program they write out, never in code) and `sysconfig` (`fire.py`, which the
+# work map already recorded as "imports it and never uses it").
 #
-# What the four have in common is that the row is ENTIRELY dead imports, which
+# **A FOURTH one left this table on 2026-10-05 rather than being worked off it:
+# `traceback`, which got a model** (`formal/hostmods/traceback.mojo`, with
+# `signal` beside it, in the same commit). A row whose module the compiler now
+# compiles is not a row of work at all — importing it builds — so this table is
+# about modules with NO model and a name that cannot be read. That is the
+# section's own `assertIsNone(_host_model_source(name))` asserting it, which is
+# why leaving the name in was a loud failure rather than a slow drift; the fix
+# was to say which of the two facts changed.
+#
+# What the three have in common is that the row is ENTIRELY dead imports, which
 # is what makes them this test's subject rather than a list: a dead import in a
 # file whose row has real users costs nothing (`signal` has five, so
 # `test_memslot.py`'s dead one is invisible and is left alone), while a row that
 # is nothing but dead imports is a row of work that is not work.
 
-# The four, and the census of what is left, printed rather than asserted.
-_DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig", "traceback")
+# The three, and the census of what is left, printed rather than asserted.
+_DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig")
 # Modules with no readable names that STILL have users, so their rows are real:
 # `itertools` (>=3 files spell it), `builtins` (>=2), `atexit` (1, through
 # `test_ab_native.py`'s `atexit.register`). Asserted to still have users, so a
@@ -1998,13 +2006,23 @@ class TestOleanCurrency(unittest.TestCase):
     Every case here is pure file-content arithmetic, so none of it runs Lean.
     """
 
-    # The real graph's SHAPE, which is the part that matters: one root that
-    # imports nothing from the set (`ProofLib`), a middle module, and two
-    # leaves that reach it by different routes. Two modules importing `X86` is
-    # the case the defect was measured on — three modules rebuilt from one
-    # edit — and one importing only the root is what says the fix does not
-    # over-invalidate.
+    # The real graph's SHAPE, which is the part that matters: roots that import
+    # nothing from the set (`ProofLib`, and `IEEE754` beside it), a middle
+    # module, and two leaves that reach a root by different routes. Two modules
+    # importing `X86` is the case the defect was measured on — three modules
+    # rebuilt from one edit — and one importing only the root is what says the
+    # fix does not over-invalidate.
+    #
+    # `IEEE754` is here because `formal/lean.py::LIBRARY_MODULES` names it and
+    # this fixture asserts it EQUALS that tuple — it is the binary64 semantics,
+    # in their own module so a 400KB `ProofLib.lean` is not the thing every
+    # change to it edits, and it imports nothing from the set for exactly the
+    # reason `formal/lean.py` says: it is infrastructure that does not yet
+    # reach a backend's step functions. A second root is a SECOND direction for
+    # the invalidation cases below: nothing imports it, so editing it must move
+    # nothing, which is the over-reach half with a witness of its own.
     SOURCES = {
+        "IEEE754": "import Lean\n",
         "ProofLib": "import Lean\n",
         "X86": "import ProofLib\n",
         "work": "import ProofLib\nimport X86\n",

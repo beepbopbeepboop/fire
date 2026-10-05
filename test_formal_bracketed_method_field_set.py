@@ -1070,11 +1070,49 @@ def run_census_case(case, tmpdir, verbose):
     import formal.model as M
 
     name, source, want = case
-    stmts = FB.parse_module(source, name + ".mojo")
+    # The census counter goes on the PARSE, because that is where the derivation
+    # runs. `struct_field_names` returns the list `attach_inherited_fields`
+    # published during the parse when a merge is attached, so counting around a
+    # LATER call to it measures a reader of a published answer and reports zero —
+    # which is what these rows reported for every case, and it is not evidence
+    # about anything. Two sites are counted instead, because there are two paths
+    # and each is a place a per-method asker could reappear:
+    #
+    #   * `parse_module`, which derives each struct's OWN field names once to
+    #     publish the merge, and
+    #   * `_own_field_names`, which is what `struct_field_names` FALLS THROUGH
+    #     to for a struct nothing published a merge for — a struct read without
+    #     `formal.build`, which is how a module imported from another image is
+    #     asked. Measured on `a_declared_name_that_is_also_a_method_stays_a_field`
+    #     (a 2-method struct): 1 ask during the parse, 1 from `_own_field_names`,
+    #     0 from a second `struct_field_names`.
+    #
+    # Asserting the ask COUNT rather than only the answer LISTS is the point of
+    # the group: a derivation that re-walked every method body once per method
+    # would answer identically and still be the pre-fix shape.
+    calls = []
+    real = M.struct_receiver_stores
+
+    def counted(struct_def, receivers_arg):
+        calls.append(getattr(struct_def, "name", None))
+        return real(struct_def, receivers_arg)
+
+    M.struct_receiver_stores = counted
+    try:
+        stmts = FB.parse_module(source, name + ".mojo")
+    finally:
+        M.struct_receiver_stores = real
     structs = [s for s in stmts if isinstance(s, F.StructDef)]
     if len(structs) != 1:
         return False, f"the case declares {len(structs)} structs, expected 1"
     st = structs[0]
+    n_methods = len(M.struct_methods(st))
+    if len(calls) != 1 or calls[0] != st.name:
+        return False, (f"deriving the field set of a {n_methods}-method struct "
+                       f"asked struct_receiver_stores {len(calls)} times while "
+                       f"parsing the module (for {calls}); it is a property of "
+                       f"the STRUCT, so it is asked once")
+
     got = M.struct_field_names(st)
     if got != want:
         return False, f"struct_field_names == {got}, expected {want}"
@@ -1095,23 +1133,22 @@ def run_census_case(case, tmpdir, verbose):
                            f"the old per-method formula "
                            f"{sorted(spelled - demoted)}")
 
+    # …and the path that DERIVES rather than reading a published list. Its answer
+    # is asserted as well as its cost, so a future change that made the two
+    # disagree fails here rather than in whichever reader happened to see it.
     calls = []
-    real = M.struct_receiver_stores
-
-    def counted(struct_def, receivers_arg):
-        calls.append(1)
-        return real(struct_def, receivers_arg)
-
     M.struct_receiver_stores = counted
     try:
-        M.struct_field_names(st)
+        own = M._own_field_names(st)
     finally:
         M.struct_receiver_stores = real
-    n_methods = len(M.struct_methods(st))
     if len(calls) != 1:
-        return False, (f"deriving the field set of a {n_methods}-method struct "
-                       f"asked struct_receiver_stores {len(calls)} times; it is "
-                       f"a property of the STRUCT, so it is asked once")
+        return False, (f"deriving {st.name}'s OWN field names asked "
+                       f"struct_receiver_stores {len(calls)} times; it is a "
+                       f"property of the STRUCT, so it is asked once")
+    if own != got:
+        return False, (f"{st.name}'s own field names {own} are not the list "
+                       f"struct_field_names published for it ({got})")
     if verbose:
         print(f"      field set {got}; {n_methods} methods, 1 census")
     return True, ""

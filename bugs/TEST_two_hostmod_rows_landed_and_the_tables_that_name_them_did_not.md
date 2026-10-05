@@ -84,9 +84,13 @@ Editing `formal/hostmods/` is outside this merge's claim.
     python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_sweep_truth.py
 
 Neither file is registered in `tools/suite.py`, so nothing in a gate catches
-either today; `bugs/TEST_estate_check_red_on_five_hostmod_test_files.md` is the
-doc that says so for its own five, and `test_suite.py`'s `UNREGISTERED` table is
-where a name is excused.
+either today. That half is also no longer true of the estate as a whole: the
+five per-construct suites the estate check named (`test_formal_admitted`,
+`_fcntl`, `_math`, `_shutil`, `_stat`) are all registered now, so
+`test_suite.py` is green and the excuse for an UNREGISTERED formal suite is a
+per-file judgement again rather than the standing answer. `UNREGISTERED` is
+where a name is still excused, and the rule is the deciding instrument in both
+directions.
 
 ## Reproducing the "not this merge's" half
 
