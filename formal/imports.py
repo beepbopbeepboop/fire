@@ -487,7 +487,31 @@ HOST_MODELLED = frozenset((
     #     (FORMAL.md phase 7).
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
-    "random", "decimal", "fractions",
+    #
+    #   `random`  — WRITTEN 2026-10-05, `formal/hostmods/random.mojo`: `seed`
+    #     and `randrange` only, a Mersenne Twister over a 624-word
+    #     module-level state, every answer checked against CPython's own
+    #     `random` by `test_formal_random.py` on BOTH backends: the two call
+    #     sites in this repository verbatim (forty draws of
+    #     `randrange(140, 5000)` after `seed(23)`, and a hundred and twenty
+    #     draws of `randrange(1, 4_000_000_000 * 10**9)` after `seed(17)`),
+    #     one case per branch of `getrandbits`, 700 draws so the 624-word
+    #     twist is inside the corpus, fifteen seeds of one, two and three key
+    #     words in both signs, and seven widths just under a power of two so
+    #     the rejection loop runs.
+    #
+    #     **It is 2 of the 8 files the row was worth, and the other six are not
+    #     a module.** Five of them spell `random.Random(seed)` — an OBJECT with
+    #     624 words of state behind a pointer, which is
+    #     `bugs/FORMAL_module_state_no_storage.md` and not something a `.mojo`
+    #     file changes; the sixth is closure. What made the module reachable at
+    #     all is that a module's OWN globals DO have storage: measured, both
+    #     architectures, a module-level `var` written through `global` by one
+    #     function and read by another survives across calls in one process,
+    #     which is what `module_attribute_refusal`'s own advice ("give it an
+    #     accessor … which reads the same slot and lowers today") already
+    #     assumed. That is worth knowing beside the row it contradicts.
+    "decimal", "fractions",
     #   `operator`  — LEFT on 2026-10-04 for `formal/hostmods/operator.mojo`:
     #     the 27 names that take two WORDS and answer a word, which is the whole
     #     of what a 64-bit value can compute. The three places CPython raises and

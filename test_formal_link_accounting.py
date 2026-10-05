@@ -443,6 +443,22 @@ PROVIDED_NEVER_A_HOST_MODULE = {
     # does NOT have (`split`, `join`, the `shlex` reader) is refused there by
     # name, which is what keeps a one-file row from reading as a whole module.
     "shlex": "test_formal_shlex.py",
+    # `random` left `HOST_MODELLED` on 2026-10-05 the same way and for the same
+    # reason, with one thing the others did not need: its module-level STATE is
+    # what the algorithm is made of (624 words, advanced by every draw), so the
+    # premise that made it reachable — a module's OWN `global` has storage and
+    # survives across calls in one process, measured on both architectures — is
+    # half of what its test checks. Its test is `test_formal_random.py`, which
+    # checks `seed` + `randrange` against CPython's own `random` over the two
+    # call sites in this repository verbatim, one case per branch of
+    # `getrandbits`, 700 draws so the 624-word twist is inside the corpus,
+    # fifteen seeds of one to three key words in both signs, seven widths just
+    # under a power of two so the rejection loop runs, and the two ranges
+    # CPython raises on as the -1 statuses they are here. What the module does
+    # NOT have — `Random`, `getrandbits`, `random`, `randint` — is refused there
+    # by name, which is what keeps a 2-of-8-files row from reading as a whole
+    # module.
+    "random": "test_formal_random.py",
     # `traceback` and `signal` left `HOST_UNREACHABLE` on 2026-10-04 the way
     # `shutil` and `tempfile` did, and for the same half of the reason: the
     # OBJECT half of their entries is still true — there is no unwinder for
