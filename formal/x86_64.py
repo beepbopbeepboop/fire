@@ -104,8 +104,29 @@ def _rm_disp(base: Reg, disp: int) -> tuple:
     x86 addresses a base register either directly (mod=00, no displacement) or
     through a disp8/disp32 (mod=01/10). `[RBP]`/`[R13]` are the two low-
     encodable registers that have no disp=0 form — mod=00 with rm=5 means
-    RIP-relative — so they always carry at least a disp8."""
-    if disp == 0 and base.value != Reg.RBP.value:
+    RIP-relative — so they always carry at least a disp8.
+
+    **R13 is in that list because `mod=00, rm=101` is RIP-relative in 64-bit
+    mode whatever REX.B says**, and the check for that used to name only RBP.
+    So `_rm_disp(R13, 0)` answered `(0, b"")` and `encode_mov_r64_rm64(RBX,
+    R13, 0)` emitted `49 8b 05` — THREE bytes: a RIP-relative load whose disp32
+    was simply absent, so the instruction that follows started four bytes early.
+    Found by `tools/formal_isa_census.py`, whose canonical word for that
+    encoder would not decode (a 3-byte buffer where a 7-byte instruction is
+    claimed). Two independent measurements agree that mod=00/rm=101 is
+    RIP-relative rather than `[r13]`:
+      * `as`: `movq (%r13), %rax` assembles to `49 8b 45 00` — mod=01, disp8=0,
+        not `49 8b 05`;
+      * the CPU: a hand-written `4d 8b 05 00000000` with `r13` pointing at
+        `buf[0] = 0x1111` read `0x200dcaad0`, an address inside the probe stub,
+        i.e. `rip + 0` and nothing to do with `r13`.
+
+    The backend does not use R13 as a memory base today (R11/RBP/RSP are the
+    bases it emits), so no image built before this carried the form; the fuzz
+    harness does use R13 as a base and draws displacement 0, which is where the
+    census found it.
+    """
+    if disp == 0 and base.value not in (Reg.RBP.value, Reg.R13.value):
         return 0, b""
     if -128 <= disp <= 127:
         return 1, bytes([disp & 0xFF])
