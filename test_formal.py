@@ -44,6 +44,16 @@ DEFAULT_JOBS = max(4, min(os.cpu_count() or 8, 20))
 BUILD_TIMEOUT = 900
 LEAN_TIMEOUT = 600
 
+# Two readers of Lean's own memory ceiling, and they are IMPORTS rather than a
+# copy of the sentence: `formal/lean.py` is the module that SETS `-M`, so it is
+# the only place that can say both that the sentence is a bound firing and that
+# the bound is ours. `tools/formal_proof_census.py` asks the same function for
+# the same reason, and the three of them agreeing is what makes "TOO-LARGE"
+# mean one thing in this file and in the census's baseline.
+sys.path.insert(0, HERE)
+from formal.lean import (lean_refused_on_its_own_memory_ceiling,
+                         LEAN_MEMORY_MB as formal_lean_memory_mb)
+
 # Examples whose proof is a genuine, documented gap rather than a regression.
 #
 # An entry here means "known unproven, for the stated reason" — NOT "passing".
@@ -54,6 +64,52 @@ LEAN_TIMEOUT = 600
 # check. If a stem here starts passing, it is reported as a STALE entry and
 # the entry must be removed (see the stale check in main), so the list cannot
 # quietly drift from reality.
+#
+# **AND IT IS NOT THE SAME LIST AS `TOO_LARGE`'s, which does not exist and must
+# not.** A proof Lean's own `-M` ceiling refuses is not a proof that was checked
+# and came out wrong, and it is not a proof that is known-unproven either: it is
+# the ABSENCE of a measurement, which `tools/formal_proof_census.py`'s
+# `NOT_A_VERDICT` already says and this runner now says too, in its own output.
+# Marking one of those stems `EXPECTED_FAILURES` would be a lie of a specific
+# kind — "known unproven" is a claim about the proof, and the whole point is
+# that nobody has a claim — and it would also be unreachable in practice: Lean
+# is not run at all for a stem that is expected to fail (that is the point of
+# the list), so a ceiling that fires would never be observed on a marked stem and
+# the marker would sit there describing a failure nobody is measuring.
+# `bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md`
+# §4 is the measurement: `both` and `either` both stop at the same line with
+# `(kernel) excessive memory consumption detected`.
+def classify_stem(stem: str, passed: bool, detail: str,
+                  expected_failures) -> str:
+    """The tag this runner prints for one example's outcome.
+
+    **FOUR, and the fourth is the one this function exists for.** `PASS`,
+    `KNOWN-GAP` (a stem in `EXPECTED_FAILURES`: known unproven, for the stated
+    reason) and `FAIL` (a regression) are all verdicts about a PROOF, and the
+    fourth is not: `TOO-LARGE` is Lean's own `-M` ceiling firing, which means
+    no checker decided the proof at all. Folding it into `FAIL` reports a proof
+    that may be entirely correct as one Lean could not check — and `both` and
+    `either` both stop at exactly that sentence
+    (`bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_
+    declared.md` §4). Folding it into `KNOWN-GAP` is worse, because
+    "known unproven" is a claim about the proof and the whole content of this
+    class is that nobody has one.
+
+    A pure function of four values, with no I/O and no clock, because the
+    alternative is the decision living inside a `concurrent.futures` result
+    loop where nothing can reach it — which is where it was, and which is why
+    `test_formal_proof_census.py` had to be the only thing that could test the
+    census tool's own version of the same question.
+    """
+    if passed:
+        return "PASS"
+    if stem in expected_failures:
+        return "KNOWN-GAP"
+    if lean_refused_on_its_own_memory_ceiling(detail or ""):
+        return "TOO-LARGE"
+    return "FAIL"
+
+
 EXPECTED_FAILURES = {
     # `fib(n) = fib(n-1) + fib(n-2)` — tree recursion, one goal left.  The
     # caller's FrameOk window read sits over the callee's store stack, whose
@@ -408,23 +464,30 @@ def main():
     # silently ignored, so the list cannot drift from reality.
     expected_failed = [s for s, (passed, _) in zip(stems, results)
                        if not passed and s in expected_failures]
-    unexpected_failed = [s for s, (passed, _) in zip(stems, results)
-                         if not passed and s not in expected_failures]
+    tags = [classify_stem(stem, passed, detail, expected_failures)
+            for stem, (passed, detail) in zip(stems, results)]
+    unexpected_failed = [s for s, tag in zip(stems, tags) if tag == "FAIL"]
+    too_large = [s for s, tag in zip(stems, tags) if tag == "TOO-LARGE"]
     stale_expected = sorted(s for s, (passed, _) in zip(stems, results)
                             if passed and s in expected_failures)
 
-    for i, (stem, (passed, detail)) in enumerate(zip(stems, results)):
-        if passed:
-            tag = "PASS"
-        elif stem in expected_failures:
-            tag = "KNOWN-GAP"
-        else:
-            tag = "FAIL"
+    for i, (stem, (passed, detail), tag) in enumerate(
+            zip(stems, results, tags)):
         suffix = "" if passed or not detail else f"  ({detail})"
         print(f"  [{i+1}/{total}] {tag}  {stem}{suffix}")
 
     print(f"\nResults for {backend} formal proofs: PASS={ok} "
-          f"KNOWN-GAP={len(expected_failed)} FAIL={len(unexpected_failed)}")
+          f"KNOWN-GAP={len(expected_failed)} FAIL={len(unexpected_failed)} "
+          f"TOO-LARGE={len(too_large)}")
+    if too_large:
+        print("  TOO-LARGE is NOT a verdict on the proof and NOT a known gap: "
+              "Lean's own memory ceiling fired, so no checker decided it. "
+              "Each of these is a statement about `-M "
+              f"{formal_lean_memory_mb()} MB` and about the proof's size.")
+    if set(too_large) & set(expected_failures):
+        print("  ERROR: a stem is both KNOWN-GAP and TOO-LARGE, so the marker "
+              "is claiming to know a fact the run could not measure",
+              file=sys.stderr)
     if SORRY_CENSUS:
         total = sum(SORRY_CENSUS.values())
         worst = sorted(SORRY_CENSUS.items(), key=lambda kv: (-kv[1], kv[0]))

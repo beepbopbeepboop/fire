@@ -1179,6 +1179,51 @@ AXIOM_FOUNDATION = frozenset({"propext", "Quot.sound", "Classical.choice"})
 # no test may pin an index).  The declaration group is GREEDY: a namespaced
 # declaration's axiom is `DylibExport.backward_branch_run_none._native.…` and a
 # lazy `.+` would hand `DylibExport` to `decl` and fail to match at all.
+#: Lean's OWN memory ceiling, in its own words on the pinned toolchain, and the
+#: second shape the same ceiling takes when it fires from a different place.
+#: **This lives here and not in a caller because this module is what SETS the
+#: ceiling** (`lean_flags`'s `-M LEAN_MEMORY_MB`), so it is the only layer that
+#: can say both halves of the claim: that the sentence is a bound firing and that
+#: the bound is ours. Two readers of one sentence is how a reworded ceiling ends
+#: up classified as a proof failure by one tool and as an absence by another —
+#: and that disagreement is exactly what
+#: `bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md`
+#: records for `both` and `either`, the two examples whose proof Lean's `-M`
+#: refuses rather than rejects.
+LEAN_MEMORY_REFUSAL_RE = re.compile(
+    r"excessive memory consumption detected|maximum memory has been reached")
+
+
+def lean_refused_on_its_own_memory_ceiling(text: str) -> str | None:
+    """The line on which Lean hit ITS OWN memory ceiling, or None.
+
+    **A ceiling firing is not a verdict on the proof, and the two must not be
+    counted as one.** `formal/lean.py`'s own comment on `LEAN_MEMORY_MB` says
+    why: the project's 4 GB line cannot be enforced by capping Lean, and
+    raising the cap is not tightening a policy, it is letting the work through —
+    so at some size a proof stops being CHECKED and the only true sentence is
+    "the checker ran out". A caller that files that as `lean-rejected` reports a
+    proof that may be fine as one Lean could not decide, and a caller that files
+    it as a pass has swapped one lie for another.
+
+    Matched on the RUN'S output rather than on `compile_formal`'s exception text,
+    because the run is the thing that said it, and a replayed verdict's stored
+    detail is that sentence followed by the diagnostics — so an anchored pattern
+    would find the header and produce a different string from the same failure
+    on the two paths.
+
+    The LINE is returned rather than a boolean, so a caller can print what Lean
+    said instead of paraphrasing it: the two forms are
+    `…:8: error: (kernel) excessive memory consumption detected` and
+    `maximum memory has been reached`, and a reader who has to guess which one
+    fired cannot tell a kernel allocation from an elaboration budget.
+    """
+    for line in (text or "").splitlines():
+        if LEAN_MEMORY_REFUSAL_RE.search(line):
+            return line.strip()
+    return None
+
+
 GENERATED_AXIOM_RE = re.compile(
     r"^(?P<decl>.+)\._native\.(?P<tactic>[A-Za-z_]\w*)\.ax_\d+_\d+$")
 
