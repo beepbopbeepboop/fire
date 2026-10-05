@@ -210,6 +210,20 @@ any other value. The two-word alternative — `Optional[T]` the ADDRESS of a
 frame machinery this file's receiver section already documents, and its cost and
 its three measured obstacles are in `bugs/FORMAL_optional_needs_a_niche.md`.
 
+**`OptionalReg[T]` is NOT in that table and is refused by name.** It was, on the
+strength of the spelling, and that was a wrong answer rather than a missing one:
+the register-passable sibling's storage is a PAIR — `std/collections/optional.mojo`
+picks `_NicheableOptionalRegStorage[T]` (a `StaticTuple[T, 1]`) or
+`_DefaultOptionalRegStorage[T]` (a `!kgen.variant<T, i1>`) through
+`_OptionalRegStorageFor[T]`, so `x is None` here would compare against a niche
+the value does not have. Which of the two applies is a `conforms_to(T,
+UnsafeNicheable)` decided inside the stdlib module, and a build reads
+declarations rather than resolving conformances, so `formal/build.py`'s
+`refuse_optional_reg_annotations` refuses every annotation of it — parameter,
+field, local or return — and names the two storages. A client that wants the
+two-word form for `OptionalReg` is asking for the same project as the next
+paragraph.
+
 **A client binding one of these symbols needs to know the niche only if it
 hand-builds the value.** For a payload whose niche is 0 — every
 reference-shaped one — a client cannot tell the two apart by construction either,

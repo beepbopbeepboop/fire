@@ -31958,16 +31958,49 @@ def is_none_expr(node) -> bool:
 # the two-word row decidable rather than guessed at: one table says which `T`
 # the two-word form is needed for, so that work is a list and not a project.
 #
-# ## Why `OptionalReg` is in `OPTIONAL_TYPE_NAMES`
+# ## Why `OptionalReg` is NOT in `OPTIONAL_TYPE_NAMES`
 #
-# `std/collections/optional.mojo`'s `OptionalReg` is the register-passable
-# sibling and it is spelled `OptionalReg[T]`, so a reader who annotates it must
-# get the same answer as one who annotates `Optional[T]`.  Its own payload
-# constraint (`T: TrivialRegisterPassable`) is narrower and is not checked
-# here: the representation question is the same either way, and refusing the
-# narrower half would be refusing a construct whose representation this
-# section states.
-OPTIONAL_TYPE_NAMES = frozenset({"Optional", "OptionalReg"})
+# It WAS, and the reason it was given here ("a reader who annotates it must get
+# the same answer as one who annotates `Optional[T]`") was the one this section
+# exists to refute: the two types do not have the same representation, so giving
+# them the same answer gives one of them a wrong one.
+#
+# `std/collections/optional.mojo:1150` declares
+# `struct OptionalReg[T: TrivialRegisterPassable]` with a single field
+# `var _value: Self._Storage`, and `_OptionalRegStorageFor[T]`
+# (`std/collections/optional.mojo:1144`) picks between TWO storages:
+#
+#   * `_NicheableOptionalRegStorage[T]`, for a `T` that conforms to
+#     `UnsafeNicheable` — `var storage: Self.StorageType`, which is `StaticTuple[
+#     T, 1]` unless `T` has an `UnsafeCustomNicheStorage`.  A payload plus a
+#     capacity-1 index: **two words**.
+#   * `_DefaultOptionalRegStorage[T]` — `var _value: !kgen.variant<T, i1>`, a
+#     TAGGED value: **two words**, and the tag is `kgen.variant.is[…]`'s input.
+#
+# So `OptionalReg[T]` is a pair for every `T` this build cannot read the
+# conformance of, where `Optional[T]` here is ONE word holding the payload (the
+# table above).  Reading `OptionalReg[Int]` as that one word makes
+# `x is None` compare against a niche the pair does not have: for a `Bool`
+# payload it would compare against 2, for a `String` against 0, and in both cases
+# the answer is about a word that is only half the value.  `Some(0)` and `None`
+# being the same word is the ambiguity `bugs/FORMAL_optional_needs_a_niche.md`
+# opened this representation to remove, and admitting the two-word sibling under
+# the one-word name puts it back for a reader who annotated `OptionalReg`.
+#
+# The missing fact is NAMED rather than guessed: which of the two storages
+# `_OptionalRegStorageFor[T]` selects is a TRAIT CONFORMANCE
+# (`conforms_to(T, UnsafeNicheable)`) evaluated at compile time in the stdlib
+# module, and this build reads declarations from the unit it is compiling, not
+# trait resolution.  So `optional_reg_refusal` says that, and the two-word
+# alternative is `OPTIONAL_TWO_WORD`'s — the same project this section already
+# prices for `Optional[Int]`.
+OPTIONAL_TYPE_NAMES = frozenset({"Optional"})
+
+#: The register-passable sibling, kept as its own name because it is REFUSED
+#: rather than answered and the refusal has to be able to say which name it is
+#: refusing.  A caller that wants "is this annotation optional-shaped at all"
+#: asks `optional_reg_payload_annotation` as well as `optional_payload_annotation`.
+OPTIONAL_REG_TYPE_NAMES = frozenset({"OptionalReg"})
 
 # The lowerings this section provides, as names.  `or_else` covers `value_or`
 # and `or` because they are the same question with two spellings — a
@@ -32000,7 +32033,10 @@ def optional_payload_annotation(ann) -> str | None:
     `Some[F]` — the spelling the stdlib uses for a function-valued optional —
     is NOT here.  It is a different type constructor with its own
     representation question, and treating it as this one would make
-    `Some[def() -> Int]` answer with an `Int` niche.
+    `Some[def() -> Int]` answer with an `Int` niche.  `OptionalReg[T]` is the
+    same argument for a different reason and gets its own reader below: it is a
+    PAIR, not a word, so answering it as one is a wrong answer rather than a
+    missing one.
     """
     if not isinstance(ann, str) or not ann.strip():
         return None
@@ -32015,6 +32051,60 @@ def optional_payload_annotation(ann) -> str | None:
         return None
     payload = args[0].strip()
     return payload or None
+
+
+def optional_reg_base_name(ann) -> str | None:
+    """`'OptionalReg'` for `OptionalReg` and for `OptionalReg[Int]`; else None.
+
+    The sibling of `optional_payload_annotation` and deliberately NOT a member of
+    it: this one exists so a caller can REFUSE the annotation by name, and a
+    reader that answered for both would make the refusal unreachable and put the
+    two-word type back under the one-word name. It answers the BASE rather than
+    the payload, which is what makes the bare spelling (`var z: OptionalReg`)
+    refusable — a type with no argument is still a pair, and a reader that asked
+    for the payload would report "not one of those" about it.
+
+    It returns the name rather than a bool so the caller can print what it
+    matched, which is the same reason `annotation_base_name` does.
+    """
+    if not isinstance(ann, str) or not ann.strip():
+        return None
+    text = _strip_type_decorations(ann.strip(), None)
+    if text is None:
+        return None
+    base = _strip_type_args(text)
+    return base if base in OPTIONAL_REG_TYPE_NAMES else None
+
+
+def optional_reg_refusal(annotation, where: str = None) -> str:
+    """Why an `OptionalReg[…]` annotation has no answer on this target.
+
+    `where` names the site (`a parameter of f`, `field S.x`) so a reader is sent
+    to the declaration rather than to the type; it is a phrase with no trailing
+    punctuation, because the sentence below supplies the rest.
+    """
+    spelled = annotation if isinstance(annotation, str) and annotation.strip() \
+        else "an `OptionalReg`"
+    site = f" {where}" if where else ""
+    return (
+        f"`{spelled}`{site} is the REGISTER-PASSABLE optional, and its storage "
+        f"is a PAIR of words rather than one: "
+        f"`std/collections/optional.mojo`'s `_OptionalRegStorageFor[T]` is "
+        f"`_NicheableOptionalRegStorage[T]` — a `StaticTuple[T, 1]`, the payload "
+        f"plus a capacity-1 index — for a `T` that conforms to "
+        f"`UnsafeNicheable`, and `_DefaultOptionalRegStorage[T]` — a "
+        f"`!kgen.variant<T, i1>`, a tagged value — otherwise. An `Optional[T]` on "
+        f"this path is ONE word holding the payload, with `None` a word `T` "
+        f"cannot produce (`formal/model.py`'s `optional_none_word` is the one "
+        f"table that says which `T` those are), so substituting that niche here "
+        f"would compare against a word the value does not have. Which of the two "
+        f"storages applies is a TRAIT CONFORMANCE "
+        f"(`conforms_to(T, UnsafeNicheable)`) decided inside the stdlib module, "
+        f"and this build reads declarations rather than resolving conformances — "
+        f"so the fact that decides the layout is not one it has. Annotate the "
+        f"receiver `Optional[T]` with a `T` that table answers and `x is None`, "
+        f"`x == None`, `x.or_else(…)`, `x.value_or(…)`, `x.or(…)` and "
+        f"`x.unsafe_value()` all lower from the one representation")
 
 
 # A scalar type name -> `(width in BITS, signed)`, or None for a name that is
