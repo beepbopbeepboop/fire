@@ -62,10 +62,16 @@ one unrepresentable case. Step 3 remains cheap and safe to land on its own
 precisely because that case is silently wrong today.
 
 **One thing the plan does not yet account for**, found while fixing defect 2:
-`print` now formats a function value correctly, but the CLOSURE form does not
-compile at all on this tree, so the arm is not exercised for the
-`MojoBoundMethod *` spelling a capturing closure lowers to. Filed as
-`bugs/CODEGEN_a_closure_value_in_a_local_does_not_declare.md`.
+`print` now formats a function value correctly, but the CLOSURE form did not
+compile at all on this tree, so the arm was not exercised for the
+`MojoBoundMethod *` spelling a capturing closure lowers to. That compile
+failure is fixed (a module-scope `f = outer(3)` now mints its globals-struct
+field, builds and answers 13; pinned by `test_gimple_runner.py`'s
+`gimple_module_scope_closure_value_is_declared`). What is still missing is the
+`print` half for that spelling — a capturing closure read as a value has no
+repr and prints its address decimal, which is what this plan's step 1 would
+have to cover as well; see
+`bugs/CODEGEN_closure_value_repr_prints_its_address.md`.
 
 ## Status (2026-10-02 — re-measured: the compiled half is STILL wrong, and the two candidate fixes are now MEASURED, one of them ruled out)
 

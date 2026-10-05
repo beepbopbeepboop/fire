@@ -855,6 +855,47 @@ main()
     # hop one level in (the factory's own `outer()()`) and passes.
     # `test_gimple_execution` is the honest assertion for that: it fails on a
     # gcc error, which is what this case is about.
+    # A CLOSURE VALUE stored at MODULE SCOPE. `_gen_stmt_AssignStmt` routes a
+    # module-scope assignment to this module's `_root_globals` struct, whose
+    # fields are minted by the Phase-1.7 global passes — and the inference for
+    # a name bound to a call's result (`outer(3)` -> a `MojoBoundMethod *`)
+    # was not one of them, so the file did not compile at all: `_root_globals`
+    # had no field `f`, and the diagnostic pointed at an `#include <stdio.h>`
+    # line three statements above the store that failed. Two shapes are pinned
+    # because the question that decided it was "is the gap specific to
+    # `MojoBoundMethod *`, or is it every global whose type comes from a call?"
+    # and the answer has to be visible from the test, not from a comment: a
+    # closure value, a dict literal, and a struct-returning call all route
+    # through the same struct with three different inferred types.
+    #
+    # `print(f)` is NOT part of this case: a `MojoBoundMethod *` read as a
+    # value has no `__repr__` lowering yet and prints its address decimal,
+    # which is a different defect with its own doc
+    # (bugs/CODEGEN_closure_value_repr_prints_its_address.md).
+    test_gimple_matches_cpython("gimple_module_scope_closure_value_is_declared", """\
+class Tok:
+    def __init__(self, k):
+        self.k = k
+    def show(self):
+        return 'Tok:' + self.k
+
+def outer(a):
+    def inner(x):
+        return x + a
+    return inner
+
+def mk():
+    return Tok('z')
+
+f = outer(3)
+print(f(10))
+D = {'k': 1}
+print(D['k'])
+t = mk()
+print(t.show())
+main_unused = 1
+""")
+
     test_gimple_execution("gimple_capturing_lambda_nested_def_ptr_kinds_build", """\
 def outer_str():
     t = 'x'
