@@ -409,7 +409,22 @@ def test_every_declaration_is_seen():
     # behaviour; a decimal address on this target). One name: the codegen half
     # is a `print` dispatch arm, which adds no runtime entry point. bugs4-8
     # counted from its own base's 543 and wrote `544`.
-    for header, want in (('fire_runtime.h', 565),
+    for header, want in (('fire_runtime.h', 571),
+    # 570 -> 571: `mojo_len_of_word`, the LENGTH discriminator the `len()`
+    # lowering asks when the operand's slot is type-erased and no single kind
+    # was recorded for it -- `bugs/CODEGEN_len_of_a_param_called_with_both_a_
+    # list_and_a_str.md`. It is the `mojo_cstr_or_int_str` family member
+    # `len` was missing: a parameter called with both a list and a string had
+    # its length measured as `mojo_list_len` over a `char *`, which reads a
+    # header out of string bytes and so answers differently run to run.
+    #
+    # 565 -> 570 is NOT accounted for here: five names were added to the
+    # merged header by `a35765a0` and `d8cdca63` without a rung, so this
+    # count was already 5 stale before the +1 above. Filed as
+    # `bugs/CODEGEN_the_runtime_export_ladder_is_five_behind.md`; the prose
+    # copies of the census in `formal/model.py`, `build_stdlib_dylib.py` and
+    # `bugs/FORMAL_known_limits.md` are stale by the same amount and are that
+    # doc's to fix, not this file's.
     # 561 -> 565 (2026-10-02, `bugs4-9`), FOUR names on the merged header
     # (its own ledger said five, from its base's 543 -> 548):
     #   +1  `mojo_str_cat_free`, the left-operand-releasing cat every repr

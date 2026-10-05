@@ -1391,6 +1391,78 @@ y = g("a", "b")
 print(f"result: {y}")
 """, "result: ab\n")
 
+    # 15a. `len()` on a parameter whose call sites are BOTH a list and a
+    # string. The parameter has ONE C type (`int64_t` — one 64-bit slot, two
+    # kinds) and therefore NO recorded `_actual_types` kind, so `len` used to
+    # fall through to an unconditional `mojo_list_len((MojoList *)word)`:
+    # a `MojoList` header read out of a `char *`'s bytes, or the reverse.
+    # `print` on the same parameter was already right, because its operand
+    # goes through the runtime's `mojo_cstr_or_int_str` discriminator; `len`
+    # was the one member of that family with no guard, and it now asks
+    # `mojo_len_of_word` the same question.
+    #
+    # REPEATED, not single-run: the old answer was whatever bytes followed
+    # the operand in the heap, so it was right some of the time (measured 3
+    # on one run of five and a 19-digit garbage word on the others). A
+    # one-shot assertion here passes often enough to be worthless — which is
+    # how the bug stayed in the tree. The string call site is in the program
+    # so a fix cannot simply resolve the slot to a container.
+    test_gimple_stdout_repeated("gimple_len_of_param_called_with_list_and_str", """\
+def lst(x):
+    return len(x)
+
+print(lst([1, 2, 3]))
+print(lst("abcd"))
+""", "3\n4\n")
+
+    # The same discriminator reached through a dict and a set, and through a
+    # value forwarded from a call rather than a literal.
+    test_gimple_stdout_repeated("gimple_len_of_param_called_with_dict_and_str", """\
+def dct(x):
+    return len(x)
+
+print(dct({"a": 1, "b": 2}))
+print(dct("hello"))
+""", "2\n5\n")
+    test_gimple_stdout_repeated("gimple_len_of_param_called_with_set_and_str", """\
+def st(x):
+    return len(x)
+
+print(st({1, 2, 3}))
+print(st("xy"))
+""", "3\n2\n")
+    test_gimple_stdout_repeated("gimple_len_of_forwarded_param_list_and_str", """\
+def ident(x):
+    return x
+
+print(len(ident([1, 2, 3])))
+print(len(ident("abcd")))
+""", "3\n4\n")
+
+    # Two polymorphic parameters in ONE call, so the discriminator is reached
+    # for a slot that is neither first nor special.
+    test_gimple_stdout_repeated("gimple_len_of_two_polar_param_slots", """\
+def both(a, b):
+    return len(a) + len(b)
+
+print(both("ab", [1, 2, 3]))
+print(both([1, 2, 3], "ab"))
+""", "5\n5\n")
+
+    # A slot whose call sites AGREE must keep the direct accessor, not pay a
+    # runtime probe: both arms are lists, and the second is a list built and
+    # returned by another function.
+    test_gimple_stdout_repeated("gimple_len_of_unanimous_param_stays_direct", """\
+def lst(x):
+    return len(x)
+
+def mk():
+    return [4, 5, 6, 7]
+
+print(lst([1, 2, 3]))
+print(lst(mk()))
+""", "3\n4\n")
+
     # 15b. Mojo's CAPITALIZED type constructors are the same operations as
     # the lowercase builtins (and the interpreter already treats them that
     # way). `String(i)` used to fall through to the generic call path and be

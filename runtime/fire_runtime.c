@@ -10128,6 +10128,45 @@ char *mojo_int_str_transient(int64_t v) {
    all of which copy or merely read the key. Never call it for a key that was
    stored by reference (a list element, a __missing__ argument): those keep
    the unreleased conversion. See doc/MEMORY.html, "Transient keys". */
+/* The LENGTH counterpart of `mojo_cstr_or_int_str`, and the answer to the same
+   question one level up: what is this type-erased word, and therefore how long
+   is it?
+
+   `len()` had no such discriminator. Every static spelling of `len` is a
+   direct call to the one accessor the codegen picked for the operand's
+   DECLARED C type -- `mojo_strlen` for `char *`, `mojo_list_len` for
+   `MojoList *`, and so on -- so the only question asked was "what did the type
+   resolver decide this slot is", and a slot whose call sites disagree (a
+   parameter called with both a list and a string, a conditional that assigns
+   two kinds) got ONE of them. That answer is not wrong by accident, it is
+   wrong by construction: `mojo_list_len` on a `MojoList` reinterpreted from a
+   `char *` reads a length header out of string bytes. Measured, and
+   non-deterministic, because what follows the string's bytes in the heap
+   decides it (bugs/CODEGEN_len_of_a_param_called_with_both_a_list_and_a_str.md):
+   `len(x)` for `x` in ("abcd") answered 3 on one run and
+   7308325556857761645 on the next. `print` never had this problem because it
+   already routed its word through `mojo_cstr_or_int_str`, which asks instead
+   of assuming; this is the length of that same idea.
+
+   Order matters and mirrors `mojo_boxed_is_str`'s own exclusion list: the three
+   container registries are tested FIRST (they are the only answers that need a
+   dereference, and they are also the shapes `mojo_boxed_is_str` refuses so it
+   never strcmps a container), then the string test. A word that is none of
+   those -- a real int64_t, a struct box, a small int -- is NOT a sequence at
+   all, and Python's answer to `len(3)` is a TypeError; the honest shape for a
+   lowering that must return a number is 0, which is also what the scalar
+   contract wants. Notably this REPLACES the previous unconditional
+   `mojo_list_len((MojoList *)word)` fallback, which was the wild read: for a
+   word that is not a list at all it measured a header out of whatever the
+   pointer happened to address. */
+int64_t mojo_len_of_word(int64_t v) {
+    if (mojo_is_registered_list(v)) return mojo_list_len((MojoList *)(intptr_t)v);
+    if (mojo_is_registered_dict(v))  return mojo_dict_len((MojoDict *)(intptr_t)v);
+    if (mojo_is_registered_set(v))   return mojo_set_len((MojoSet *)(intptr_t)v);
+    if (mojo_boxed_is_str(v))        return mojo_strlen((char *)(intptr_t)v);
+    return 0;
+}
+
 void mojo_cstr_or_int_release(int64_t orig, char *s) {
     if ((int64_t)(intptr_t)s == orig) return;     /* a borrowed boxed string */
     /* A content key is an ordinary heap string from the repr walker, NOT a
