@@ -6658,6 +6658,30 @@ def gen_module_impl(self, stmts):
             _xf_ct = self._xmod_ctor_field_hints[_xf_key]
             if not _xf_ct or _xf_hstruct not in self.struct_field_types:
                 continue
+            # The hint's key half is the CONSTRUCTOR PARAMETER's name, because
+            # that is what the `_xf_record` producer above indexes with and
+            # what `_ctor_param_evidence` (the OTHER consumer of this table,
+            # through `_xf_own_ctor_params`) looks up when it types the
+            # `self.<f> = <p>` store. It is NOT necessarily a FIELD's name,
+            # and writing it into `struct_field_types` unconditionally turned
+            # every constructor parameter into one:
+            #
+            #     class Parser:
+            #         def __init__(self, tokens):
+            #             self.toks = tokens
+            #
+            # emitted `MojoList * tokens;` as a second field, and the generated
+            # `_mojo_getattr_Parser` answered for it — so
+            # `getattr(p, 'tokens')` returned the never-written slot and
+            # printed `[]` where CPython raises `AttributeError`: a
+            # plausible-looking wrong value, exit 0, rather than an error.
+            #
+            # So a hint may only REFINE a field the struct actually declares.
+            # One whose name is not already in the table is not a field at
+            # all, whatever the constructor called its parameter, and the
+            # right answer for it is the `int64_t` default it already has.
+            if _xf_hfield not in self.struct_field_types[_xf_hstruct]:
+                continue
             _xf_cur = self.struct_field_types[_xf_hstruct].get(_xf_hfield)
             if _xf_cur in (None, 'int', 'int64_t'):
                 self.struct_field_types[_xf_hstruct][_xf_hfield] = _xf_ct

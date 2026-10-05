@@ -10448,6 +10448,81 @@ def main():
                           "main()\n",
     }, 'colln4_main.py')
 
+    # An IMPORTED class's `__init__` PARAMETER names must not become struct
+    # FIELDS. `_xmod_ctor_field_hints` records what a foreign call site
+    # proves about a constructor argument and the defining temp_gen writes it
+    # straight into `struct_field_types[<struct>][<key>]` — and the key used to
+    # be the PARAMETER's name, so a parameter the class never assigns to a
+    # field of that name became a field, and the generated
+    # `_mojo_getattr_Parser` answered for it. `getattr(p, 'tokens')` then
+    # returned the never-written slot and printed `[]` where CPython raises
+    # `AttributeError`: a plausible-looking wrong value rather than an error,
+    # exit 0. The field is now derived from the `self.<f> = <param>`
+    # assignment, which is the shape the literal evidence is actually proof
+    # about.
+    #
+    # Asserted as the `AttributeError` (the only user-observable half of the
+    # three symptoms, and the one that distinguishes "the field is absent"
+    # from "the field exists and happens to be empty"), with the real field
+    # read in the same program so the fix cannot be "declare no fields at
+    # all", and with a second parameter the constructor stores NOWHERE so the
+    # fix cannot be "declare one field per parameter, correctly typed".
+    _check_agrees_with_cpython("imported_class_ctor_params_are_not_fields", {
+        'cparam_def.py': "class Parser:\n"
+                         "    def __init__(self, tokens, extra):\n"
+                         "        self.toks = tokens\n",
+        'cparam_main.py': "from cparam_def import Parser\n"
+                          "p = Parser([9], 'ignored')\n"
+                          "try:\n"
+                          "    print(getattr(p, 'tokens'))\n"
+                          "except AttributeError:\n"
+                          "    print('AttributeError')\n"
+                          "try:\n"
+                          "    print(getattr(p, 'extra'))\n"
+                          "except AttributeError:\n"
+                          "    print('AttributeError')\n"
+                          "print(p.toks)\n",
+    }, 'cparam_main.py')
+
+    # …and the case the table EXISTS for, so the fix cannot be "drop the
+    # hints": the field still takes its type from the FOREIGN call site's
+    # literal. The value is the assertion — an `int64_t` field would print the
+    # pointer's own bits and an untyped `char *` would be a `strlen` of a small
+    # integer — and the guard is on the FIELD name being one the struct
+    # declares, so a same-named field has to keep working.
+    #
+    # The RENAMED spelling (`def __init__(self, payload): self.body = payload`)
+    # is deliberately NOT here: it does not work on this tree, before or after
+    # this fix, because the hint's key half is the parameter's name and
+    # nothing maps it to the field. Filed as
+    # bugs/CODEGEN_imported_ctor_hint_does_not_reach_a_renamed_field.md,
+    # which is the same table and a different question from this one.
+    _check_agrees_with_cpython("imported_class_ctor_literal_still_types_the_field", {
+        'cparam2_def.py': "class Box:\n"
+                          "    def __init__(self, name):\n"
+                          "        self.name = name\n"
+                          "    def show(self):\n"
+                          "        return self.name\n",
+        'cparam2_main.py': "from cparam2_def import Box\n"
+                           "print(Box('hello').show())\n"
+                           "print(Box('there').show())\n",
+    }, 'cparam2_main.py')
+
+    # …through the ALIASED and MODULE-QUALIFIED spellings, which resolve the
+    # defining module by a different route (`_find_symbol_home_module`) and
+    # would keep the old key if the fix only landed on the direct one.
+    _check_agrees_with_cpython("imported_class_ctor_hints_survive_an_alias", {
+        'cparam3_def.py': "class Box:\n"
+                          "    def __init__(self, payload):\n"
+                          "        self.body = payload\n"
+                          "    def show(self):\n"
+                          "        return self.body\n",
+        'cparam3_main.py': "from cparam3_def import Box as B\n"
+                           "import cparam3_def\n"
+                           "print(B('hi').show())\n"
+                           "print(cparam3_def.Box('there').show())\n",
+    }, 'cparam3_main.py')
+
     # `from b import K` at MODULE level, with `K` read from a function body
     # in the importing module: the value is b's, so the read is
     # `_b_globals.K`, and before the fix it was `_root_globals.K` — a field
