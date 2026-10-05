@@ -10212,6 +10212,126 @@ print(str(d))
             print("PASS  user_struct_named_parser_emits_its_own_layout_and_qualifier")
             _PASS += 1
 
+    # `id(x)` must be an INT, and the generated stub returned the VALUE
+    # (`static int64_t id (int64_t x) { return x; }`). For a container that is
+    # the live HANDLE, so the container registries read the token as that
+    # container: `mojo/middle/lambdareduce.py`'s `if id(body) in cache` reached
+    # `mojo_dict_key_for`, which rightly refuses a list as a dict key, and the
+    # self-hosted compiler raised `TypeError: unhashable type: 'list'` inside
+    # gen_module_impl on every input — the failure that stopped it compiling
+    # anything (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md).
+    #
+    # CPython is the oracle and the program states no expected output, because
+    # the addresses differ. What has to match is the SEMANTICS: the token is
+    # stable for one object, distinct across objects, usable as a dict/set
+    # member, and readable back as an integer.
+    test_gimple_matches_cpython("gimple_id_is_an_integer", """\
+def show(label, x):
+    print(label, isinstance(id(x), int), id(x) == id(x))
+
+def main():
+    a = [1, 2]
+    b = [1, 2]
+    show('list', a)
+    show('list', b)
+    print('distinct', id(a) != id(b))
+    print('same', id(a) == id(a))
+    # The shape that raised: a membership test keyed by an id.
+    cache = {}
+    print('miss', id(a) in cache)
+    cache[id(a)] = 'A'
+    print('hit', id(a) in cache, cache[id(a)] == 'A')
+    print('other', id(b) in cache)
+    # A set of ids, and reading one back as a number.
+    ids = {id(a), id(b), id(a)}
+    print('set', len(ids), int(id(a)) > 0, id(None) == id(None))
+    # id() of a non-container is still an integer, and distinct objects of
+    # different kinds never share a token.
+    s = 'text'
+    t = 'text'
+    print('str', id(s) != id(t), isinstance(id(s), int))
+    # The dict VALUE survives a round trip through the token's integer form.
+    d = {int(id(a)): 'v'}
+    print('int key', d[int(id(a))] == 'v')
+
+main()
+""")
+
+    # `c == in_str` where one side is a `char *` VALUE and the other an
+    # `int64_t` slot that holds EITHER a boxed string pointer or a byte code:
+    # the codegen cannot tell them apart in one pass (the slot is assigned its
+    # `char *` LATER in the loop body than the read, so no `_actual_types`
+    # entry exists yet), and the guess it made was `mojo_char_to_str((char)w)`,
+    # which truncates a pointer to its low byte. So a quote character never
+    # matched itself, `fire_compiler.py`'s `_strip_inline_comment` /
+    # `_split_on_separators` left every single-quoted string open, and the `;`
+    # separator after ``in_str !='`'`` read as string content — the self-hosted
+    # parser then refused the file with `Unexpected SEMICOLON(';')`.
+    #
+    # CPython is the oracle and the program states no expected output: the two
+    # functions are the compiler's own, verbatim, and the lines are the ones its
+    # own source contains. Both were wrong on the parent commit — the `;` line
+    # did not split at all, because the single-quoted string never closed.
+    test_gimple_matches_cpython("gimple_erase_slot_holding_a_string", """\
+_CMT_CHAR = '#'
+_SEP_CHAR = ';'
+
+def _strip_inline_comment(s):
+    in_str = None
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if in_str:
+            if c == "\\\\" and in_str != '`': i += 2; continue
+            if c == in_str: in_str = None
+        elif c in ('"', "'", '`'):
+            in_str = c
+        elif i > 0 and c in ('"', "'") and s[i-1] in 'fFrRbBuUtT':
+            in_str = c
+        elif c == _CMT_CHAR:
+            return s[:i]
+        i += 1
+    return s
+
+def _split_on_separators(s):
+    parts, buf, in_str, depth = [], [], None, 0
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if in_str:
+            buf.append(c)
+            if c == "\\\\" and in_str != '`' and i + 1 < len(s):
+                i += 1; buf.append(s[i])
+            elif c == in_str:
+                in_str = None
+        elif c in ('"', "'", '`'):
+            in_str = c; buf.append(c)
+        elif c in ('[', '(', '{'):
+            depth += 1; buf.append(c)
+        elif c in (']', ')', '}'):
+            depth = max(0, depth - 1); buf.append(c)
+        elif c == _SEP_CHAR and depth == 0:
+            parts.append("".join(buf)); buf = []
+        else:
+            buf.append(c)
+        i += 1
+    parts.append("".join(buf))
+    return parts
+
+def main():
+    # The exact shapes the compiler's own source has.
+    for line in ("if c == '\\\\' and in_str != '`': i += 2; continue",
+                 "if x != '`': y = 1; z = 2",
+                 "if x != '`': y = 1",
+                 "if x: y = 1; z = 2",
+                 "s = 'a`b'", "s = `a`", "q = '#'; r = ';'",
+                 "f(x)  # a comment"):
+        print('strip', repr(_strip_inline_comment(line)))
+        print('split', _split_on_separators(line))
+
+main()
+""")
+
     _parser_struct_and_symbols()
 
 

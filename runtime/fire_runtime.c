@@ -1055,6 +1055,115 @@ char *mojo_repr_boxed(int64_t v)
 }
 
 
+/* ── id(): an identity token that IS an integer ─────────────────────────────
+ *
+ * CPython's `id(x)` is an `int`, and every consumer in this runtime depends
+ * on that being true rather than on the value being an address: the self-host
+ * closure keys its memo caches on it (`if id(body) in cache`, `{id(n) for n
+ * in ...}`, `str(id(func))`), so a token that any predicate here reads as
+ * something other than an integer is a WRONG ANSWER, not an approximation.
+ *
+ * What this replaces was the generated stub `static int64_t id (int64_t x)
+ * { return x; }` — the VALUE rather than the identity. For an integer
+ * argument that is merely imprecise; for a container it hands back the live
+ * HANDLE, and the container registries (`mojo_is_registered_list` and its
+ * siblings) then read the token as that very container. `mojo_dict_key_for`
+ * correctly refuses a list as a dict key, so
+ * `mojo/middle/lambdareduce.py`'s `if id(body) in cache` raised
+ * `TypeError: unhashable type: 'list'` — inside `gen_module_impl`, on every
+ * input including an empty one, which is why the self-hosted compiler
+ * compiled nothing at all (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md).
+ *
+ * So the token is a BOX holding the address. A box is this runtime's existing
+ * answer to "an int64_t that is not self-describing", and every classifier
+ * already treats a registered box as an integer: `mojo_boxed_is_str` excludes
+ * boxes (so the token is never mistaken for a string) and `_value_kind`
+ * matches only the list/dict/set registries (so never for one of those).
+ * `int(token)` and `str(token)` read it back through `mojo_box_int` /
+ * `mojo_repr_boxed` as the object's own address, so a program that PRINTS an
+ * id still prints an address, as it does under CPython.
+ *
+ * The box is INTERNED per address, and that is not an optimisation: it is what
+ * makes `id(x) == id(x)`, which the caches depend on (`cache[id(body)]` reads
+ * and then writes the same key, so a fresh box per call would never hit).
+ * The table is open-addressed on the word itself, the same shape as `_PtrReg`
+ * above, and deliberately NOT a `MojoDict` keyed by the value: a container key
+ * makes a dict build a CONTENT key — walking the whole list — on every single
+ * `id()` call, and `id()` is called on statement lists in inner loops.
+ *
+ * The table is never pruned. That is the same rule the box cache follows (a
+ * boxed value read out of a list outlives the list) and it is what keeps
+ * `id(x)` STABLE for the life of the process; one 24-byte cell per distinct
+ * `id()`-ed word is a rounding error against the containers themselves.
+ * Occupancy is `v[j] != 0` rather than `k[j] != 0`, because the key here is
+ * an arbitrary word and one of them is 0 (`id(None)`). */
+typedef struct {
+    uint64_t *k;
+    uint64_t *v;      /* the box address; 0 means the slot is empty */
+    uint64_t  cap;    /* power of two */
+    uint64_t  used;
+    int       shift;  /* 64 - log2(cap) */
+} _IdTab;
+
+static _IdTab _id_tab;
+
+static void _id_rehash(uint64_t ncap)
+{
+    uint64_t *ok = _id_tab.k, *ov = _id_tab.v, ocap = _id_tab.cap;
+    _id_tab.k = (uint64_t *)calloc((size_t)ncap, sizeof(uint64_t));
+    _id_tab.v = (uint64_t *)calloc((size_t)ncap, sizeof(uint64_t));
+    _id_tab.cap = ncap;
+    _id_tab.shift = 64;
+    for (uint64_t c = ncap; c > 1; c >>= 1) _id_tab.shift--;
+    _id_tab.used = 0;
+    for (uint64_t i = 0; i < ocap; i++) {
+        if (!ov[i]) continue;
+        uint64_t h = ((ok[i] >> 3) * 0x9E3779B97F4A7C15ULL) >> _id_tab.shift;
+        while (_id_tab.v[h]) h = (h + 1) & (ncap - 1);
+        _id_tab.k[h] = ok[i];
+        _id_tab.v[h] = ov[i];
+        _id_tab.used++;
+    }
+    free(ok);
+    free(ov);
+}
+
+static uint64_t _id_slot(uint64_t key)
+{
+    uint64_t mask = _id_tab.cap - 1;
+    uint64_t j = ((key >> 3) * 0x9E3779B97F4A7C15ULL) >> _id_tab.shift;
+    while (_id_tab.v[j] && _id_tab.k[j] != key) j = (j + 1) & mask;
+    return j;
+}
+
+int64_t mojo_id(int64_t x)
+{
+    if (!_id_tab.cap) _id_rehash(256);
+    uint64_t key = (uint64_t)x;
+    uint64_t j = _id_slot(key);
+    if (_id_tab.v[j]) return (int64_t)_id_tab.v[j];
+    /* Same load invariant as `_pr_add`: grow at half full, so a probe always
+     * reaches an empty slot. */
+    if ((_id_tab.used + 1) * 2 > _id_tab.cap) {
+        _id_rehash(_id_tab.cap * 2);
+        j = _id_slot(key);
+    }
+    MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
+    /* Out of memory is not a shape this runtime reports; returning the word
+     * unchanged keeps the program running with the OLD (wrong) answer rather
+     * than a NULL token that would read as `id(x) == 0`. */
+    if (!bx) return x;
+    bx->magic = MOJO_BOX_MAGIC;
+    bx->bits = x;
+    bx->kind = 'i';
+    _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
+    _id_tab.k[j] = key;
+    _id_tab.v[j] = (uint64_t)(uintptr_t)bx;
+    _id_tab.used++;
+    return (int64_t)(uintptr_t)bx;
+}
+
+
 /* The ONE definition of "this int64_t is a real heap/static pointer", shared
  * by every predicate in this file that has to dereference one. Both
  * requirements below are what makes that safe, and both were found by
@@ -2208,6 +2317,43 @@ int mojo_cstr_cmp(char *a, char *b)
     if (a == NULL || b == NULL)
         return a == b ? 0 : 1;
     return strcmp(a, b);
+}
+
+/* `mojo_cstr_cmp(a, b)` for the case where ONE side is an int64_t slot whose
+ * REPRESENTATION the codegen could not resolve: a boxed string pointer, or a
+ * byte code (this backend lowers `s[i]` on a `char *` to a C `char`, so a
+ * `char`-typed operand holds the byte, and the 1-character string on the other
+ * side is spelled with mojo_char_to_str). Same convention as its twin --
+ * 0 means EQUAL -- so the codegen arm that calls it is the same shape as the
+ * one that calls `mojo_cstr_cmp`, and `!=` needs no separate answer.
+ *
+ * The codegen cannot tell those two representations apart at compile time,
+ * and guessing is what this replaces: `mojo_char_to_str((char)w)` truncated a
+ * boxed string POINTER to its low byte and compared that, so a quote character
+ * never matched itself. `fire_compiler.py`'s `_strip_inline_comment` and
+ * `_split_on_separators` leave a single-quoted string open on exactly that
+ * comparison (`c == in_str`, where `in_str` is an unannotated local widened to
+ * int64_t and assigned a `char *` LATER in the loop body than the read), so
+ * the `;` after ``in_str !='`'`` read as string content and the self-hosted
+ * parser refused the file with `Unexpected SEMICOLON(';')`
+ * (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md).
+ *
+ * At RUN time the two are trivially distinguishable and the answer is exact: a
+ * byte code is one byte, a boxed string is pointer-shaped.
+ *
+ * The word cases are exhaustive over what a slot can hold, and the LAST one is
+ * why this is not `mojo_cstr_or_int_str`: a larger integer's decimal spelling
+ * would compare equal to the string of those digits, and
+ * `3000000000 == "3000000000"` is False in Python. 0 (None) and a double's raw
+ * bits are likewise never equal to a string. Ordering is not answered at all,
+ * so the word side is always last and each operand order calls this once. */
+int mojo_cstr_cmp_word(char *s, int64_t w)
+{
+    if ((intptr_t)s < 65536) return 1;      /* a NULL/None string: never equal */
+    if (w > 0 && w < 256)
+        return (s[0] == (char)w && s[1] == '\0') ? 0 : 1;
+    if (mojo_boxed_is_str(w)) return strcmp(s, (char *)(intptr_t)w);
+    return 1;
 }
 
 int mojo_str_contains(char *haystack, char *needle)
@@ -6934,6 +7080,48 @@ static int _mojo_tagged_addr_ok(int64_t addr)
     return 1;
 }
 
+/* The ONE read of a struct's leading `__mojo_type_id`, for both readers
+ * below, and it validates what it read.
+ *
+ * A tag is 31 bits BY CONSTRUCTION: `_struct_type_id(name)` is
+ * `h * 31 + c & 2147483647` (mojo/middle/exprtypes.py), and every struct the
+ * backend emits stamps one into its first field (module_gen.py's two
+ * `_struct_type_id` call sites). The codegen already relies on that where it
+ * CAN see the receiver: `__class__` on a `char *`/`MojoList *`/`MojoSet *`/
+ * `MojoDict *` lowers to a literal 0 for exactly this reason (emit_exprs.py's
+ * `__class__` arm — "every real struct tag comes from `_struct_type_id`, a
+ * nonzero hash"). This is the same rule for the receivers it cannot see,
+ * which is every value boxed as an int64_t — an erased parameter, a field read
+ * out of a heterogeneous container, a call result.
+ *
+ * So a wider word is not a failed tag read: it is a SUCCESSFUL read of eight
+ * bytes that are something else. The case that matters is a `char *` where a
+ * struct pointer was expected — the compiler's own generic AST walkers recurse
+ * into plain `str` fields, a heap string is a valid 8-aligned allocation of at
+ * least 8 bytes, and its first eight CHARACTERS came back as an "identity".
+ *
+ * That is not a cosmetic wrong answer. `mojo/middle/exprtypes.py`'s
+ * `_WALK_DATACLASS_CACHE` is keyed by `type(node)`, so the bytes of the string
+ * "print" became the integer 0x746e697270 — inside [2^31, 2^47), which every
+ * pointer predicate in this file accepts — and the dict store then classified
+ * it as a boxed string and handed it to `strcmp`, i.e. dereferenced an address
+ * that was never mapped. SIGSEGV, on the self-hosted compiler's own AST walk
+ * (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md; the same shape as
+ * bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md, at its one
+ * producer this file can answer for).
+ *
+ * 0 is the honest answer for a value that is not a tagged struct, and it is
+ * what these readers already return for every address they refuse — so the
+ * check makes the read's failure mode match its own contract instead of
+ * inventing an identity out of adjacent memory. */
+static int64_t _mojo_tag_at(int64_t addr)
+{
+    if (!_mojo_tagged_addr_ok(addr)) return 0;
+    int64_t tag = *(int64_t *)(intptr_t)addr;
+    if (tag <= 0 || tag > 0x7fffffff) return 0;
+    return tag;
+}
+
 int64_t mojo_read_type_tag(int64_t addr) {
     /* Was: `if (!addr) return 0; return *(int64_t*)addr;` — but once the
      * compiler's own generic AST walkers actually recurse (mojo_isinstance
@@ -6942,8 +7130,7 @@ int64_t mojo_read_type_tag(int64_t addr) {
      * type-tag, and the bare deref segfaulted. Same guard as
      * mojo_read_type_tag_safe: nothing legitimate lives below 2GiB on any
      * platform this runtime targets. */
-    if (!_mojo_tagged_addr_ok(addr)) return 0;
-    return *(int64_t *)(intptr_t)addr;
+    return _mojo_tag_at(addr);
 }
 
 /* Like mojo_read_type_tag, but for callers that don't statically know
@@ -6964,8 +7151,7 @@ int64_t mojo_read_type_tag_safe(int64_t addr) {
      * here and dereference the tag as a pointer. On every platform this
      * runtime targets a genuine heap/stack/static address is far above
      * 2GiB, so nothing legitimate is lost. */
-    if (!_mojo_tagged_addr_ok(addr)) return 0;
-    return *(int64_t *)(intptr_t)addr;
+    return _mojo_tag_at(addr);
 }
 
 char *mojo_str(void *obj) {

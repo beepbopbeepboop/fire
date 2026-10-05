@@ -1135,6 +1135,56 @@ def test_an_expect_marker_count_is_checked_against_the_run():
           'four markers in the registry describe a condition rather than a set '
           'of cases, and inventing a number for them would be a fiction')
 
+    # …and the FANOUT shape, which is the one count in the registry that has
+    # no summary line to read: `bootstrap-stage2-dumps` is 46 `./mojo --dump`
+    # processes, and its marker's count is checked against the per-item
+    # verdicts. Before this the count was read out of the LONGEST item's
+    # output — one file's compiler diagnostic, which has no "N passed, M
+    # failed" line in it — so a count-checked marker on a fanout reported
+    # UNCHECKED and therefore FAILED, which is the marker being unusable
+    # rather than the rule being strict.
+    ITEMS = ['a', 'b', 'c', 'd', 'e']
+
+    def fanout_verdict(expect, statuses):
+        fan = suite.Fanout(name='m', cmd=ok_cmd('pass'), items=ITEMS,
+                           mem='tiny', expect=expect)
+        with Sandbox(m=fan):
+            spec = suite.REGISTRY['m']
+            state = {'m': suite.FAIL}
+            res = {f'm:{it}': suite.Result(st, 0.0, output='')
+                   for it, st in zip(ITEMS, statuses)}
+            suite._apply_expectations({'m': len(ITEMS)}, state,
+                                      suite.Log(None), res)
+            return state['m']
+
+    def fanout_count(statuses):
+        fan = suite.Fanout(name='m', cmd=ok_cmd('pass'), items=ITEMS,
+                           mem='tiny')
+        with Sandbox(m=fan):
+            spec = suite.REGISTRY['m']
+            res = {f'm:{it}': suite.Result(st, 0.0, output='')
+                   for it, st in zip(ITEMS, statuses)}
+            return suite.observed_fanout_failures(spec, res)
+
+    check('expect count: a fanout marker is checked against its item verdicts',
+          fanout_verdict('2 of 5: a thing',
+                         [suite.PASS, suite.FAIL, suite.FAIL, suite.PASS,
+                          suite.PASS]) == suite.EXPECTED,
+          'the control, on the shape the one fanout marker in the registry has')
+    check('expect count: …and a NEW failing item in a marked fanout is a '
+          'FAILURE',
+          fanout_verdict('2 of 5: a thing',
+                         [suite.PASS, suite.FAIL, suite.FAIL, suite.PASS,
+                          suite.FAIL]) == suite.FAIL,
+          'the same anti-rot as a single-process marker: three items failed '
+          'against a marker that claims two')
+    check('expect count: a fanout marker counts FAIL and ERROR items and '
+          'neither a RESOURCE nor a TIMEOUT one',
+          fanout_count([suite.PASS, suite.FAIL, suite.ERROR, suite.RESOURCE,
+                        suite.TIMEOUT]) == 2,
+          'those two are facts about the machine: a marker never forgives '
+          'them, so it must not count them as its cases either')
+
     # …and the real registry, so the rule cannot rot into matching nothing.
     counted = {n: suite.marker_failures(getattr(s, 'expect', '') or '')
                for n, s in suite.REGISTRY.items()
@@ -1148,7 +1198,8 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     check('expect count: the counts the registry states are the ones the '
           'reader sees',
           stated == {'async-runtime-scaffold': 1, 'async-void-return': 3,
-                     'async-with-lock-guard': 2, 'coro-detached-async': 2,
+                     'async-with-lock-guard': 2,
+                     'bootstrap-stage2-dumps': 40, 'coro-detached-async': 2,
     # bugs4-10's entry, MINUS the two it still listed and master has since
     # dropped: `formal-external-call` and `formal-module-attr` no longer carry
     # an `expect=` (both markers were removed on 2026-10-02, once the failures
@@ -1167,7 +1218,11 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      'x86-containers': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '
-          f'is for. `gimplerunner` is the merge worker\u0027s 4 of 376 \u2014 the '
+          f'is for. `bootstrap-stage2-dumps` is the one count a FANOUT states '
+          f'(40 of its 46 items exit non-zero), and it is checked against the '
+          f'per-item verdicts rather than against a summary line \u2014 see '
+          f'`observed_fanout_failures`. `gimplerunner` is the merge worker\u0027s '
+          f'4 of 380 \u2014 the '
           f'compile-and-execute rows that are interactions between the ten '
           f'branches rather than a bug in any one of them (the census had to '
           f'learn it here too: adding a marker without adding its entry is '

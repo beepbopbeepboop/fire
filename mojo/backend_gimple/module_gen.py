@@ -11267,7 +11267,14 @@ def gen_module_impl(self, stmts):
         '#define _MOJO_UNIMPL_STUBS',
         'static char * _ReflectTable_in_dll (int64_t a, int64_t b, char * c) { return (char *)dlsym((void *)b, c); }',
         'static MojoList * _Bool_items (int64_t a) { return mojo_list_new(); }',
-        'static int64_t id (int64_t x) { return x; }',
+        # `id(x)` is an INT in Python, and a stub that returned `x` handed back
+        # the VALUE: for a container that is the live handle, which the
+        # container registries then read as that container, so `id(body) in
+        # cache` reached `mojo_dict_key_for` and raised `TypeError: unhashable
+        # type: 'list'` inside gen_module_impl on every input. `mojo_id` is an
+        # interned box holding the word — see its own comment in
+        # runtime/fire_runtime.c.
+        'static int64_t id (int64_t x) { return mojo_id (x); }',
         '#endif',
     ])
 

@@ -742,6 +742,77 @@ static void test_dict_container_keys(void) {
     mojo_dict_free(d);
 }
 
+/* `mojo_read_type_tag`/`_safe` read eight bytes at an address and used to
+ * return them UNVALIDATED. A `char *` is a valid 8-aligned allocation of at
+ * least 8 bytes, so a heap string passed the address guard and its first
+ * eight CHARACTERS came back as an "identity" -- and an identity in
+ * [2^31, 2^47) is a value every pointer predicate in the runtime accepts, so
+ * the dict keyed by it dereferenced an address that was never mapped.
+ * Measured on the self-hosted compiler's own AST walk: `type(node)` over a
+ * plain `str` field of a node returned the bytes of "print"
+ * (0x746e697270) and `_WALK_DATACLASS_CACHE.get(...)` SIGSEGVed
+ * (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md).
+ *
+ * A tag is 31 bits by construction (`_struct_type_id` is
+ * `h * 31 + c & 2147483647`), so this group pins the shape directly: a real
+ * struct's tag comes back, and a string's characters do not. */
+typedef struct { int64_t __mojo_type_id; int payload; } TagProbe;
+
+static TagProbe *tag_probe(int64_t tag)
+{
+    /* malloc'd, deliberately: `_mojo_tagged_addr_ok` requires the address to
+     * be a real allocation (`MOJO_MALLOC_USABLE_SIZE >= sizeof(int64_t)`), so
+     * a STACK copy of the same struct is refused and answers 0. That is the
+     * reader's existing contract, not something this group changes. */
+    TagProbe *p = (TagProbe *)malloc(sizeof *p);
+    p->__mojo_type_id = tag;
+    p->payload = 1;
+    return p;
+}
+
+static void test_type_tag_read(void) {
+    /* a real struct: the tag is the caller's own, unchanged */
+    TagProbe *probe = tag_probe(0x2A5B3C71LL);
+    assert(mojo_read_type_tag((int64_t)(intptr_t)probe) == 0x2A5B3C71LL);
+    assert(mojo_read_type_tag_safe((int64_t)(intptr_t)probe) == 0x2A5B3C71LL);
+    free(probe);
+
+    /* the same struct through a `calloc`, which is how a probe harness spells
+     * one and which zeroes the tag -- 0 is "no tag", which stays 0 */
+    TagProbe *zeroed = (TagProbe *)calloc(1, sizeof *zeroed);
+    assert(mojo_read_type_tag_safe((int64_t)(intptr_t)zeroed) == 0);
+    free(zeroed);
+
+    /* NOT a struct: a heap string whose first eight bytes are a value no tag
+     * can be. Before the check this came back as that value, and a caller
+     * using it as a key dereferenced it. */
+    char *s = (char *)malloc(16);
+    memcpy(s, "print\0\0\0", 8);
+    assert(mojo_read_type_tag_safe((int64_t)(intptr_t)s) == 0);
+    assert(mojo_read_type_tag((int64_t)(intptr_t)s) == 0);
+    free(s);
+
+    /* the widest and narrowest tags are both still tags: 1 and 2^31-1 */
+    TagProbe *lo = tag_probe(1);
+    assert(mojo_read_type_tag_safe((int64_t)(intptr_t)lo) == 1);
+    free(lo);
+    TagProbe *hi = tag_probe(0x7fffffffLL);
+    assert(mojo_read_type_tag_safe((int64_t)(intptr_t)hi) == 0x7fffffffLL);
+    free(hi);
+    /* and one bit past the range is not a tag: this is the boundary the fix
+     * draws, and `2^31` is the value a four-character string can produce */
+    TagProbe *over = tag_probe(0x80000000LL);
+    assert(mojo_read_type_tag_safe((int64_t)(intptr_t)over) == 0);
+    free(over);
+
+    /* the values that were never tags stay 0 -- small scalars, None, and the
+     * 31-bit range itself (a tag used as an ADDRESS) */
+    assert(mojo_read_type_tag_safe(0) == 0);
+    assert(mojo_read_type_tag_safe(1) == 0);
+    assert(mojo_read_type_tag_safe(65536) == 0);
+    assert(mojo_read_type_tag_safe(0x7fffffffLL) == 0);
+}
+
 int main(int argc, char **argv) {
     const char *only = (argc > 1) ? argv[1] : NULL;
     int ran = 0;
@@ -754,6 +825,7 @@ int main(int argc, char **argv) {
     GROUP("dict_set_inline", test_dict_set_inline)
     GROUP("dict_float_keys", test_dict_float_keys)
     GROUP("dict_container_keys", test_dict_container_keys)
+    GROUP("type_tag", test_type_tag_read)
     GROUP("boxedstr", test_boxed_str_discrimination)
 #undef GROUP
     if (!ran) { fprintf(stderr, "no such group: %s\n", only); return 2; }
@@ -860,7 +932,7 @@ def _build_and_run(tmp, cc, opt, extra=(), group=None):
 # into a FAILURE of that marker (drop the marker) instead of a silent no-op.
 GREEN_GROUPS = ("ptrreg", "kinds_table", "list_inline", "dict_and_itoa",
                 "dict_int_keys", "dict_set_inline", "dict_float_keys",
-                "dict_container_keys")
+                "dict_container_keys", "type_tag")
 KNOWN_BAD_GROUPS = ("boxedstr",)
 
 

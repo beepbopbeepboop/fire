@@ -718,6 +718,11 @@ int         mojo_is_boxed(int64_t v);
 double      mojo_box_double(int64_t v);
 int64_t     mojo_box_int(int64_t v);
 char       *mojo_repr_boxed(int64_t v);
+/* `id(x)`, as the integer CPython says it is: an interned box holding the
+ * word, so every classifier here reads the token as an integer rather than as
+ * the container the word happens to point at. See mojo_id's own comment in
+ * fire_runtime.c for the failure this prevents. */
+int64_t     mojo_id(int64_t x);
 void      mojo_list_free(MojoList *l);
 /* A list that SOLELY owns its string elements: frees every element as a
  * `char *` and then the list. NOT the default free for a list of strings —
@@ -852,6 +857,10 @@ int mojo_str_isnumeric(char *s);
 int mojo_str_startswith_char(char *s, char c);
 int mojo_str_endswith_char(char *s, char c);
 int mojo_cstr_cmp(char *a, char *b);
+/* `mojo_cstr_cmp` with ONE side an int64_t slot that holds either a boxed
+ * string or a byte code; 0 means equal, as in its twin. See the comment on the
+ * definition. */
+int mojo_cstr_cmp_word(char *s, int64_t w);
 int mojo_str_contains(char *haystack, char *needle);
 MojoList *mojo_str_split(char *s, char *sep);
 MojoList *mojo_str_splitlines(char *s);

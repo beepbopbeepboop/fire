@@ -409,7 +409,22 @@ def test_every_declaration_is_seen():
     # behaviour; a decimal address on this target). One name: the codegen half
     # is a `print` dispatch arm, which adds no runtime entry point. bugs4-8
     # counted from its own base's 543 and wrote `544`.
-    for header, want in (('fire_runtime.h', 565),
+    for header, want in (('fire_runtime.h', 566),
+    # 565 -> 566 (2026-10-04, `gatefix9`): `mojo_id`, the identity token. One
+    # name, and the codegen half of it is a change to the `id` STUB rather than
+    # a new entry point, so there is nothing else to account for. It is public
+    # because the stub `static int64_t id (int64_t x)` that every generated
+    # program emits calls it — the stub used to return its argument, which
+    # for a container is the live handle, and the container registries then
+    # read an `id()` token as that container (bugs/
+    # CODEGEN_bootstrap_stage2_dump_is_empty.md).
+    #
+    # The header carries 571 declarations, so this ledger is 5 SHORT of the
+    # tree: five names arrived on branches merged after the last entry above
+    # and nobody added their ledger row. That is the check working — see
+    # bugs/TEST_runtime_header_scan_ledger_is_five_short.md — and this +1 is
+    # only this branch's own name, deliberately NOT rounded up to 571.
+    #
     # 561 -> 565 (2026-10-02, `bugs4-9`), FOUR names on the merged header
     # (its own ledger said five, from its base's 543 -> 548):
     #   +1  `mojo_str_cat_free`, the left-operand-releasing cat every repr

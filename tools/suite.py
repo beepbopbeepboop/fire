@@ -1776,16 +1776,40 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
 # is where a reader of the tally will actually see this. The constant is kept,
 # renamed, because its text is still the truest short description of the class
 # in the tree and `bootstrap-verify`/`bootstrap-validate` both cite it.
+#
+# 2026-10-04: and now the fanout is RED and carries a marker again, for a
+# reason worth writing down, because it is the THIRD move of this marker and
+# the rule that produced it. What the 2026-10-03 entry above reasoned about
+# was a fanout that could not see the class: the compiled binary wrote an
+# EMPTY `.ci` and exited 0, so `reject=` had nothing to match and the per-item
+# exit code said 0. That is no longer the shape. gatefix8 fixed the tokenizer
+# and the parser, so `.tok`/`.ast` are now byte-identical to stage1's and the
+# failure has moved INTO the compiled codegen, where it is no longer silent:
+# `compile_to_gimple` raises `TypeError: unhashable type: 'list'`, or the
+# parser refuses with `SEMICOLON`, or the binary dies on SIGSEGV/SIGBUS.
+# 45 of the 46 items now exit non-zero and only `mojo_failures.mojo` passes.
+#
+# So the general rule the three moves add up to: "this job cannot SEE the
+# defect" was true on 2026-10-03 and stopped being true on 2026-10-04, and the
+# honest response to a job that has become RED is a marker on THAT job — not a
+# comment explaining why it is not red, and not a marker left off because the
+# defect "really" belongs to a sibling job. A RED job with no marker is a hole
+# in the gate: nothing reports it, and `expect=` costs 4 s here.
 SELFHOST_STAGE2_EMPTY_DUMP = (
     'the self-hosted binary no longer segfaults (re-measured 2026-09-27: '
     'exit 0 on a two-line program, 12.1 MB, 94.6 M instructions) and no longer '
     'emits `mojo_unsupported_iter` (re-measured 2026-10-03: the per-item '
     'fanout rejects none), but `--dump` on the compiled binary writes a correct '
-    '`.pyi`, an EMPTY `.ci` and NO `.tok`/`.ast`, and exits 0 — so '
-    '`bootstrap-stage2-dumps` passes while 87 of its products are not dumps. A '
-    'silent-wrong-answer class no exit code reports; stage2 and stage3 agree '
-    'with each other exactly (0 diffs), so it is the binary computing something '
-    'other than the reference, deterministically. See '
+    '`.pyi` and a `.tok`/`.ast` BYTE-IDENTICAL to stage1\'s and then fails: 43 '
+    'of its 46 inputs exit non-zero — 41 of them die on SIGSEGV/SIGBUS with no '
+    'output at all, and the two `.py` closure inputs are refused with '
+    '`Unexpected SEMICOLON(\';\')` — so no `.ci` is written. (Re-measured '
+    '2026-10-04: this text said the `.tok`/`.ast` were ABSENT and the `.ci` '
+    'EMPTY, which was the shape before the tokenizer and parser fixes landed, '
+    'and 45 of 46 before `mojo_id` closed the `TypeError` class.) stage2 and '
+    'stage3 agree with each other exactly '
+    '(0 diffs), so it is the binary computing something other than the '
+    'reference, deterministically. See '
     'bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md')
 # `ab-native`/`native-dumpfull` no longer segfault (verified 2026-09-27,
 # BLOW.md §0) but are STILL red for a different, real reason: their corpora
@@ -2036,23 +2060,42 @@ test('bootstrap-stage2-cc', ['stage2/mojo'], driver='make', mem='tiny',
 # never close to this workload — it was ~48x it — and what made the number
 # matter was never the ceiling, it was the reservation the class stands for.
 #
-# `expect=` WAS HERE until 2026-10-03 and is deliberately NOT here now. This
-# fanout PASSES and cannot be made to fail by the defect it used to be marked
-# for: `reject` is a regex over a child's OUTPUT (`run_job`), a child that opens
-# a `.ci` and writes nothing into it prints nothing, and the measured shape is
-# exactly that — a correct `.pyi`, a 0-byte `.ci`, no `.tok`/`.ast`, exit 0.
-# Keeping the marker would have meant either a FAILURE every gate ("marked
-# expect= but it PASSES") or dropping a claim that is still true of the
-# capability; the marker is on `bootstrap-verify`/`bootstrap-validate` instead,
-# which compare the trees and can see it. So do not read this row passing as
-# evidence that the self-hosted binary dumps correctly — it is evidence that
-# this row does not look at what it produced.
+# `expect=` WAS HERE until 2026-10-03, was deliberately NOT here from then
+# until 2026-10-04, and is here again. The middle paragraph of that history is
+# kept because the reasoning was correct FOR THE SHAPE THAT EXISTED: this
+# fanout passed, and could not be made to fail by the defect it was marked
+# for, because `reject` is a regex over a child's OUTPUT (`run_job`) and a
+# child that opens a `.ci` and writes nothing into it prints nothing — the
+# measured shape was a correct `.pyi`, a 0-byte `.ci`, no `.tok`/`.ast`,
+# exit 0. Nothing about the fanout changed; the COMPILER did. The fixes to the
+# tokenizer and the parser made `.tok`/`.ast` byte-identical and moved the
+# failure into the compiled codegen, where it is loud.
+#
+# `expect=` IS here, and it is COUNT-CHECKED, because this fanout is RED:
+# measured 2026-10-04, 43 of the 46 items exit non-zero (45 of them before
+# `mojo_id` closed the `TypeError` class) and only `mojo_failures.mojo`,
+# `t1.mojo` and `bootstrap_test_single_expr.mojo` pass. See the 2026-10-04 entry in the history block
+# above for why the "this fanout cannot see the class" reasoning that retired
+# the marker on 2026-10-03 stopped being true: the compiled binary no longer
+# writes a silent empty `.ci`, it fails. The count is what makes the marker a
+# claim rather than a category — as items go green this has to be updated (or
+# dropped, which the runner says out loud), and a NEW failure inside the
+# already-marked sweep is a FAILURE rather than an absorbed EXPECTED.
 fanout('bootstrap-stage2-dumps',
        ['./mojo', '--dump', '../{file}'],
        items=BOOTSTRAP_INPUTS, cwd='stage2',
        env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='tiny',
        deps=['bootstrap-stage2-cc'], reject='mojo_unsupported_iter',
        items_are_files=True,
+       expect='40 of 46: the self-hosted binary dumps a correct `.pyi` and a '
+              '`.tok`/`.ast` byte-identical to stage1\'s, then FAILS — all 40 '
+              'die on SIGSEGV/SIGABRT/SIGBUS with no diagnostic, which is the '
+              'whole of what is left (the loud classes are gone: no more '
+              '`TypeError: unhashable type: \'list\'`, no more `Unexpected '
+              'SEMICOLON`). Re-measured 2026-10-04: 45 of 46 before `mojo_id` '
+              'closed the TypeError class, 43 before the struct-tag read was '
+              'validated. See '
+              'bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md',
        desc='stage2: the compiled binary dumps every source')
 # Same ordering constraint as stage1's: the per-file loop writes fire.ci into
 # stage2/ from a single-module dump, so the closure dump has to go last or
@@ -4393,12 +4436,12 @@ def marker_failures(reason: str):
     """The failing-case count an `expect=` reason claims, or None.
 
     None means the marker states no count, and this is a real answer rather
-    than a failure: four markers in the registry describe a whole-job
-    condition (`native-dumpfull`'s bootstrap pre-pass cost,
-    `bootstrap-stage2-dumps`' silent-wrong-answer class, `ptrreg-boxed-str`'s
-    segfault, `formal-struct`'s arity refusal) where "how many cases" is not
-    the question. What is NOT allowed is for a marker that does state a count
-    to be unchecked, and that is what `observed_failures` below is for.
+    than a failure: the markers that describe a whole-job CONDITION rather
+    than a set of cases (`native-dumpfull`'s bootstrap pre-pass cost,
+    `ptrreg-boxed-str`'s segfault, `formal-struct`'s arity refusal) are the
+    ones where "how many cases" is not the question. What is NOT allowed is
+    for a marker that does state a count to be unchecked, and that is what
+    `observed_failures` / `observed_fanout_failures` below are for.
     """
     m = _MARKER_FAILURES.search(reason or '')
     return int(m.group('n')) if m else None
@@ -4422,6 +4465,25 @@ def observed_failures(output: str):
     return best
 
 
+def observed_fanout_failures(spec, results):
+    """The failing-case count a FANOUT produced: its own per-item verdicts.
+
+    A fanout is N independent processes (`bootstrap-stage2-dumps` is 46
+    `./mojo --dump` runs), so it has no harness, no summary line and nothing
+    for `observed_failures` to read — and feeding it the LONGEST item's output
+    would be reading one file's compiler diagnostic as a count of the sweep.
+    The number a fanout's marker can be checked against is the one this runner
+    already decided per item: how many items came back FAIL or ERROR, the two
+    verdicts `expect=` forgives. A RESOURCE or TIMEOUT item is not counted,
+    for the same reason neither is forgiven — those are facts about the
+    machine, not a known bug — and in fact they make the whole test's status
+    something no marker can absorb, so they never reach this.
+    """
+    prefix = spec.name + ':'
+    return sum(1 for key, res in (results or {}).items()
+               if key.startswith(prefix) and res.status in (FAIL, ERROR))
+
+
 def _expect_count_drift(spec, reason, results):
     """Why this EXPECTED verdict is not the one its marker described, or ''.
 
@@ -4432,13 +4494,17 @@ def _expect_count_drift(spec, reason, results):
     claimed = marker_failures(reason)
     if claimed is None:
         return ''
-    seen = None
-    for key, res in (results or {}).items():
-        if key == spec.name or key.startswith(spec.name + ':'):
-            seen = res.output if res.output and (seen is None or
-                                                len(res.output) > len(seen)) \
-                else seen
-    got = observed_failures(seen)
+    got = None
+    if isinstance(spec, Fanout):
+        got = observed_fanout_failures(spec, results)
+    else:
+        seen = None
+        for key, res in (results or {}).items():
+            if key == spec.name or key.startswith(spec.name + ':'):
+                seen = res.output if res.output and (seen is None or
+                                                    len(res.output) > len(seen)) \
+                    else seen
+        got = observed_failures(seen)
     if got is None:
         return (f'marked expect={reason!r} for {claimed} failing case(s), '
                 f'but the run printed no failure count this runner can read, '
