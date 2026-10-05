@@ -4,6 +4,42 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-10-04 — unchanged for THIS file, and its closure has moved: the preprocessor's 17 gcc errors are 7
+
+Re-measured on this tree (`python3 fire.py build -o .tmp/out .tmp/ca/c_analyzer/info.py`,
+sources from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/`, arm64, ~8 s).
+
+**This file's own ten gcc errors remain fixed** — no `c_analyzer/info.py:NNN` line appears
+in the output at all, which is the entry below's own conclusion and it still holds. The
+imported-module floor is the same two `next(...)` shapes it recorded, `.iterutil` and
+`c_parser.info`, plus the two `_ind` errors in `c_parser/parser/_common.py` that
+`bugs/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md` owns.
+
+What HAS moved is the third module this closure reaches, `c_parser/preprocessor/__init__.py`,
+and it is worth recording here because the previous entries did not list it as failing:
+it used to contribute ~17 gcc errors, and seven remain:
+
+    :59:10  too many arguments to function 'source_good_file_2dbb98'; expected 0, have 2
+    :69:8   assignment to 'int64_t' from 'MojoList *'
+    :123:10 'incldirs' undeclared        :125:10 'includes' undeclared
+    :127:10 'macros' undeclared          :129:10 'samefiles' undeclared
+    :191:10 implicit declaration of 'c_common_fsutil_match_glob_2dbb98'; did you mean
+            'c_common_fsutil_match_glob_c2eb2a'?
+
+The six `expected ')' before ',' token` errors and the `'i'`/`'v'` undeclared pair that
+used to sit at :115/:117 and :171-:204 are GONE: they were a `for i, in _resolve_file_
+values(...)` / `[i for i, in _resolve_file_values(...)]` 1-slot tuple target reaching the
+generator consumer, which declared the target's own spelling `(i,)` as a C variable. Fixed
+on this tree (`_single_loop_target_name`), pinned by
+`test_gimple_generator_runner.py`'s `gen_one_slot_tuple_target_binds_one_name`.
+
+The four undeclared names at :123-129 are the SAME statement's other half: they are the
+comprehension's RESULT locals (`includes = [i for i, in _resolve_file_values(...)]`), read
+back three statements later inside `preprocess(**kwargs)`. So the fix above bound the
+target but the comprehension's own result local is still not declared, which is a separate
+defect in `_compr_generator_loop`/`_gen_compr_append` and the natural next step for anyone
+picking this file up — it is a NAME that was never declared, not a wrong type.
+
 ## Status 2026-10-01 — this file's OWN ten errors are GONE (10 → 0). Three UNRELATED imported-module blockers remain, and the doc's "foreign-claim" caveat turned out to be wrong about one thing
 
 `python3 fire.py build .tmp/ca/c_analyzer/info.py` (sources copied from

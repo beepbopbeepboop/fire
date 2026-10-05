@@ -4,6 +4,38 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-10-04 — the refusal names the callee and still will not answer; `read_table` is the module-level blocker
+
+Re-measured on this tree (`python3 fire.py build -o .tmp/out .tmp/ca/c_common/tables.py`,
+sources from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/`, arm64, ~8 s). The file still
+does not build and the module-level refusal is `read_table`:
+
+    Error building: cannot compile module: function(s) read_table (generator function(s),
+      contain a `yield`/`yield from`)
+
+`MOJO_DEBUG=1` still prints the three refusal shapes this file contributes, all unchanged
+and all naming their callee:
+
+    read_table: a `for` over a call through the callable-valued local/parameter
+      '_get_reader(...)' is not supported in a compiled generator/coroutine body
+    chain:      every `yield` must carry a value, and all values must agree on one
+                scalar type (int64_t/double/_Bool)
+
+**Nothing in this entry's three sub-problems has moved**, and the entry's own correction
+still stands: `_get_reader` is NOT declared with either callable ctype, so step 1 is two
+steps (bind the default's type, then carry a signature).
+
+One measurement that IS new and that a next session should not have to make: **this file's
+closure reaches `c_common/fsutil.py`, and `MOJO_DEBUG=1` prints fsutil's own shapes while
+building `tables.py`** — `_walk_tree` and `glob_tree` refused on the same
+callable-valued-parameter `for`, plus `iter_files`' variadic lambda, plus a fourth,
+`iter_many`, refused on `a call to unresolved callee 'onempty(...)'`. So the three-file
+grouping in the entry below ("one fix, three files") is really four, and
+`bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`'s own status says its blocker list
+has shrunk from four to three — `process_filenames`' `Exception(...)` is no longer among
+them, so `onempty(...)` is the same shape reached from another module and both should be
+counted once.
+
 ## Status 2026-10-02 — the suggested first slice is DONE: the refusal names the callable
 
 The slice the entry below asks for ("make the refusal NAME the

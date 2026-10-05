@@ -4,6 +4,40 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-10-04 — same blocker (`check_all`), and the imported-module floor is the two `next(...)` shapes
+
+Re-measured on this tree (`python3 fire.py build -o .tmp/out .tmp/ca/c_analyzer/__init__.py`,
+sources from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/`, arm64, ~8 s). The file still
+does not build, and the module-level refusal is `check_all`:
+
+    Error building: cannot compile module: function(s) check_all (generator function(s),
+      contain a `yield`/`yield from`)
+
+which is this file's own shape, unchanged: `for check in checks or ():` binds a
+CALLABLE-VALUE local and `check(analysis)` is the iterable. `MOJO_DEBUG=1` names it the way
+the sibling entries now name theirs — "a `for` over a call through the callable-valued
+local/parameter `'check(...)'` is not supported in a compiled generator/coroutine body" —
+so the entry below's "the refusal does not even name which call it could not type" is
+answered; what is not answered is what the call RETURNS, which is what
+`bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md`'s "Next step" lists as its three
+sub-problems, and that doc is still the one to read.
+
+**The imported-module floor is down to two modules and both are `next(...)`** — the three
+this entry listed in its 2026-10-01 status (`c_parser.info`, `._func_body`, `c_parser.match`)
+are all past:
+
+    # ERROR: compiling imported module '.iterutil' from .../c_common/iterutil.py:
+      `next(...)` on next(IdentExpr) (receiver typed `MojoList *`) has no lowering
+    # ERROR: compiling imported module 'c_parser.info' from .../c_parser/info.py:
+      `next(...)` on next(CallExpr) (receiver typed `int64_t`) has no lowering
+
+`iterutil`'s is the cheaper of the two (`items = iter(items); next(items)` — a rebound
+list-iterator local, which the compiler already supports elsewhere and which
+`bug:CODEGEN_next_on_bound_list_iter_cursor_off_by_one` is about), so it is the one to
+take first, after reading that doc. Both this file and
+`bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer_info.md` now name the same two, which makes
+them the shortest path to a smaller closure for three of these files at once.
+
 ## Status 2026-10-02 — the imported-module floor is down to TWO, and `check_all` is still the one own-file blocker
 
 Re-measured on the current tree (`python3 fire.py build`, sources copied from

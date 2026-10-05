@@ -4,6 +4,37 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/scriptutil.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-10-04 — unchanged: ONE blocker, `_iter_filenames` on `process(...)`, and the closure's `next(...)` floor is still what stops the rest
+
+Re-measured on this tree (`python3 fire.py build -o .tmp/out .tmp/ca/c_common/scriptutil.py`,
+sources from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/`, arm64, ~8 s). The complete
+module-level refusal list is still one name:
+
+    Error building: cannot compile module: function(s) _iter_filenames (generator
+      function(s), contain a `yield`/`yield from`)
+
+and `MOJO_DEBUG=1` still names the shape the 2026-10-02 entry recorded:
+
+    _iter_filenames: a call to unresolved callee 'process(...)' is not supported in a
+      compiled generator/coroutine body
+
+So items 1 and 2 of that entry stay landed (`iter_marks` compiles; the module-member VALUE
+read is `_cpp_module_global_field` plus the `builtin_module_constant` table) and item 3 —
+the callable-value-local signature discovery — is untouched, with its three sub-problems
+still all three. Nothing here regressed and nothing moved.
+
+**Both new measurements are about the floor rather than this file.** First, this closure
+cannot be built until `c_common/iterutil.py` compiles, and its blocker is `next(...)` on
+`next(IdentExpr)` — `peek_and_iter` doing `items = iter(items)` then `next(items)`, i.e. a
+REBOUND list-iterator local, which is the shape
+`bug:CODEGEN_next_on_bound_list_iter_cursor_off_by_one` is about and which this compiler
+already supports in its direct form. That is the cheapest thing in the whole c-analyzer
+family and three of these six files now name it. Second, `c_parser/preprocessor/__init__.py`
+— which this closure reaches — used to contribute ~17 gcc errors and now contributes seven,
+because the 1-slot tuple target over a generator (`for patterns, in _resolve_file_values(...)`)
+is fixed; the detail and the four still-undeclared names are in
+`bugs/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md`'s 2026-10-04 status.
+
 ## Status 2026-10-02 — items 1 and 2 are FIXED; `iter_marks` compiles. ONE blocker left, and it is item 3
 
 Fresh `python3 fire.py build -o .tmp/out/ca/scriptutil

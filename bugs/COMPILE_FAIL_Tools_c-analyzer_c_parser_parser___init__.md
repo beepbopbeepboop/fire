@@ -4,6 +4,78 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_parser/parser/__in
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-10-04 — EIGHT gcc errors are TWO, and the two that are left are the `_ind` pair this doc said to re-check last
+
+Re-measured on this tree (`python3 fire.py build -o .tmp/out .tmp/ca/c_parser/parser/__init__.py`,
+sources copied from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/`, arm64, ~8 s). The
+complete `error:` list is now:
+
+    c_parser/parser/_common.py:50:9: error: implicit declaration of function
+      'parser__regexes__ind_15d274'
+    c_parser/parser/_common.py:50:7: error: assignment to 'char *' from 'int'
+      makes pointer from integer without a cast
+
+and nothing else. Every error the 2026-10-02 entry listed besides that pair is GONE, and
+it is worth saying which is which, because the entry's own next step ordered them:
+
+* **Step 1 is already in the tree** — the bare-name global read does consult the module's
+  OWN field list first, in three documented steps (`emit_exprs._lower_IdentExpr`'s
+  `_module_global_field_type(_read_mod, name)` → the recorded import home → the owner),
+  and its GATE refuses the whole `_<mod>_globals.<name>` read when this module has no field
+  for the name and no recorded home. That gate is why `'struct ___common_toplev' has no
+  member named '_logger'` (three sites), `'STRING_LITERAL'` and `'_func_body`'s
+  `'DECL_BODY_PARSERS'` no longer appear: the names are read as something else rather than
+  off a struct that does not declare them.
+* **Step 2 is fixed** — `mojo_mark_dict_bool_values` does not exist in the runtime and no
+  emitter calls it, so `_global.py:125` cannot be an implicit declaration any more. The five
+  producer sites that used to emit it were consolidated into `emit_infra`'s
+  `emit_dict_int_value_store`; confirmed by grep (`mojo/backend_gimple/emit_exprs.py`,
+  `emit_stmts.py`, `emit_infra.py`, `runtime/`: prose comments only) and by the
+  compiled-vs-CPython case `gimple_dict_of_bool_values` /
+  `gimple_dict_store_shapes_share_one_bool_slot` in `test_gimple_runner.py`.
+* **Step 3 was the right thing to re-check and it is what is left.** The `_ind` pair is a
+  dangling reference to a module whose body was thrown away, not a field-registry problem:
+  `c_parser/parser/_regexes.py` compiles fine alone (`_ind` present 37 times in its own
+  `.c`).
+
+The imported-module floor is unchanged and is two modules, both `next(...)`:
+
+    # ERROR: compiling imported module '.iterutil' from .../c_common/iterutil.py:
+      `next(...)` on next(IdentExpr) (receiver typed `MojoList *`) has no lowering
+    # ERROR: compiling imported module '..info' from .../c_parser/info.py:
+      `next(...)` on next(CallExpr) (receiver typed `int64_t`) has no lowering
+
+**So this file's own gcc errors are down to the pair, and the honest next step is the
+roll-back, not the registry.** `_compile_imported_module`'s `except` handler rolls back
+`_compiled_modules`, structs, ptr helpers and inline defs for the failed subtree but
+explicitly NOT `_module_globals` / `_module_global_inits` — which is why the root still
+emits `extern struct __parser__regexes_toplev` and still CALLS
+`__parser__regexes_toplevel()` in `main()` while that module's own body was discarded. The
+`next(...)` floor has to go first, and the `next(...)` floor is TWO shapes with two answers:
+
+1. `iterutil.peek_and_iter` does `items = iter(items)` then `next(items)` — a REBOUND
+   list-iterator local, which the compiler already supports elsewhere. This is the cheaper
+   of the two and is adjacent to
+   `bug:CODEGEN_next_on_bound_list_iter_cursor_off_by_one` (another worker's claim), so the
+   first move is to read that doc's measurement rather than re-derive it.
+2. `c_parser/info.py`'s `rendered, = rendered` is `next(<a call returning a generator>)` —
+   a different question, and `c_parser/info.py`'s own doc entry carries its detail.
+
+One more measurement, because it is in this closure and it is the `next(...)` floor's
+SIBLING: `c_parser/preprocessor/__init__.py` used to contribute ~17 gcc errors of its own,
+including six `expected ')' before ',' token` and `'i'`/`'v'` undeclared at its two
+`for i, in _resolve_file_values(...)` / `[i for i, in _resolve_file_values(...)]` lines.
+Seven of those are still there and the trailing-comma ones are GONE, because a `for`/
+comprehension target over a generator that yields ONE value now binds the target's single
+NAME instead of declaring the target's own spelling (`(i,)`) as a C variable — fixed on
+this tree, regression in `test_gimple_generator_runner.py`'s
+`gen_one_slot_tuple_target_binds_one_name`. What remains there is `source_good_file`
+called with two arguments (a callable-valued-parameter signature), a `MojoList *` into an
+`int64_t` at :69, four result locals never declared at :123-129, and
+`c_common_fsutil_match_glob_2dbb98` vs `..._c2eb2a` at :191 — that last one is the
+mangled-suffix family `b88c3dce` fixed for `_common`, so it is worth checking whether
+`c_common.fsutil` reaches the same spelling before treating it as a new defect.
+
 ## Status 2026-10-02 — the two gcc errors this doc named are GONE; what is left is ONE root cause, and it is the self-host doc's `_module_globals` lead
 
 Fresh `python3 fire.py build -o .tmp/out/ca/p
