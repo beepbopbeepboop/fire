@@ -377,9 +377,11 @@ is the unowned doc and it is right about the shape: the row's real blocker is on
 file that has to lower first, and **`pop` is an ABI decision, not an emitter
 exercise** — a one-field mutator's single return word is already the receiver, so
 the repair is either a second return register on both backends (which is also a Lean
-model change) or the method split. The write set overlaps `formal13-5`'s
-(`FORMAL_one_field_receiver_rebound_propagates` names `receiver_writeback_name` in
-its own Area), so **it is not a light worker's row.**
+model change) or the method split. The write set overlaps the one-field
+RECEIVER rule's (`formal/build.py`'s `_collect_receiver_rebinds` /
+`_collect_one_field_receiver_rebinds` over `formal/model.py`'s
+`receiver_writeback_name`, `formal13-5`'s area), so **it is not a light worker's
+row.**
 
 And behind it is the wall that doc measured: past every codegen refusal in that
 file, the module-dylib build fails at the **export gate**, because
