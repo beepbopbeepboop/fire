@@ -93,6 +93,33 @@ reading and this document's usual one: still 259 sites over 104 operations, and
 `formal16-2`). **The value is that the two rows are no longer wrong**, and that
 `pop.rem`'s one corpus-unreachable row now computes what it says.
 
+**Status 2026-10-04 (`work/formal29-3`): the one item this document leaves is
+still NOT worth building, and the condition it names — "when some FILE's terminal
+is the cast rather than when one file two rows back has one" — is still unmet.
+Re-measured on this tree, arm64:
+
+    $ python3 fire.py build --formal --no-prove --backend=arm64 -o .tmp/simd \
+          ../new-modular/Mojo/stdlib/std/builtin/simd_length.mojo
+    build: simd_length.mojo imports 'std.utils._select', which cannot be built
+    either: _select.mojo: formal dylib has no public functions …
+
+**Same terminal as the 2026-10-04 Status, one row further on and unchanged since:
+`_select.mojo`'s export rule**, which is
+`FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` (`formal29-1`). So the
+cast is still one refusal behind a refusal this document does not own, and the
+`4` files the MLIR row carries are unchanged.
+
+**And the builtin field table would not be the one-line widening it looks like
+from here**, which is worth recording because it is the reason to leave it: the
+table's job is to let `mlir_operand_declared_type` read `Int._mlir_value` as
+`__mlir_type.index`, and then `pop.cast_to_builtin` rewrites to the operand — at
+which point the build is reading a FIELD of a builtin struct, which is a
+value-model question this path has no field table for either. So the table moves
+the refusal from `mlir_dialect_op_refusal` to `field_access_refusal` rather than
+removing it, unless the table comes with a builtin-struct field model, and the
+§Correction's own argument against a speculative widening applies twice over.
+The next step, when `_select.mojo` closes, is that pair or neither.
+
 **Status (2026-10-04, `work/formal21-5`): the last false sentence in this
 document's own subject is fixed, and the item it leaves behind is named — and it
 is NOT reachable from the corpus today, which is a measurement rather than an

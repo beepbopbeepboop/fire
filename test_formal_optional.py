@@ -623,6 +623,57 @@ REFUSALS = [
      "        printf(\"empty\\n\")\n"
      "    return 0\n",
      "is an `Optional[Slice]`"),
+    # **`OptionalReg[T]` is a PAIR and this path's `Optional[T]` is a WORD**, so
+    # reading it as this one is a wrong answer rather than a missing one. It was
+    # in `model.OPTIONAL_TYPE_NAMES` on the strength of the SPELLING alone
+    # ("a reader who annotates it must get the same answer"), which made
+    # `x is None` compare against the one-word niche — `x == 2` for a `Bool`
+    # payload, `x == 0` for a `String` — and both are about half the value:
+    # `std/collections/optional.mojo`'s `_OptionalRegStorageFor[T]` is
+    # `_NicheableOptionalRegStorage[T]` (a `StaticTuple[T, 1]`) or
+    # `_DefaultOptionalRegStorage[T]` (a `!kgen.variant<T, i1>`). Which one
+    # applies is a TRAIT CONFORMANCE (`conforms_to(T, UnsafeNicheable)`) this
+    # build does not resolve, so the fact that decides the layout is one it has
+    # no source for.
+    #
+    # Dropping the name from the table WITHOUT this refusal would be worse than
+    # the bug: nothing would recognise the annotation, the substitution would not
+    # fire, and `x is None` would fold to `== 0` — the `Some(0) == None`
+    # ambiguity the whole niche representation exists to remove, back through a
+    # different door. That is why the case is here and why it pins the WORD: the
+    # refusal has to be reachable, and it has to be about the annotation rather
+    # than about the arithmetic that happens to follow it.
+    ("optional_reg_is_a_pair_and_is_refused",
+     "def main(n):\n"
+     "    var z: OptionalReg[Bool] = None\n"
+     "    if z is None:\n"
+     "        printf(\"empty\\n\")\n"
+     "    return 0\n",
+     "is the REGISTER-PASSABLE optional"),
+    # The same refusal for the other two spellings a declaration can take, each
+    # of which is a site `apply_optional_none_representation` cannot reach: a
+    # FIELD (a field holding a pair is a frame whose layout this path cannot
+    # describe — `struct_default_word`'s `("nested_frame", …)` row is the same
+    # argument) and a PARAMETER (whose annotation only the callee has). Both
+    # name the site, so a reader is sent to the declaration rather than to the
+    # type.
+    ("optional_reg_field_is_refused",
+     "struct Holder:\n"
+     "    var slot: OptionalReg[String]\n"
+     "\n"
+     "def main(n):\n"
+     "    var h = Holder()\n"
+     "    if h.slot is None:\n"
+     "        printf(\"empty\\n\")\n"
+     "    return 0\n",
+     "declared type of field `Holder.slot`"),
+    ("optional_reg_parameter_is_refused",
+     "def take(z: OptionalReg[Int32]) -> Int:\n"
+     "    return 1\n"
+     "\n"
+     "def main(n):\n"
+     "    return take(0)\n",
+     "declared type of parameter `z` of `take`"),
 ]
 
 

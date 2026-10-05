@@ -6,6 +6,35 @@ sentence false about the name it names. Fixed; the two items this document's
 tables still name (an EXPORTED SLOT, and `argv`'s SOURCE) are unchanged and
 are still projects.** Read this before "What is left", which does not move.
 
+**Re-measured 2026-10-04 (`work/formal29-3`): both items are still items, and
+the reason is stated here so the next session does not re-derive it — nothing in
+this document moved, and the two refusals a reader meets are the same sentences.**
+`sys.argv` still stops at the §(2) boundary on both architectures:
+
+    build: main: sys.argv reads 'argv' out of the imported module `sys`, and a
+    module is not a value this path can place: there is no register, frame slot or
+    `__DATA` word for it because it is not one — it is the library on this link
+    line, and what a dylib publishes is its FUNCTIONS …
+
+and the sweep's 4-file row (`sys.argv` ×3, `sys.stderr` ×1, per the 2026-10-03
+re-measurement) is 4 files for the same reason. **What this costs as a project is
+unchanged and is the whole of "What is left":** an EXPORTED SLOT is a symbol kind,
+a relocation the loader honours (which `_emit_global_init`'s own measurement says
+is not available for `__DATA` on this target, so it has to be reached by an
+imported FUNCTION rather than by a data symbol) and a lifetime story in the
+proof; `sys.argv`'s SOURCE is the entry stub overwriting the kernel's `argc`/`argv`
+before the first statement runs, which is a change to the stub and to the test
+input convention and not to storage — and which item 2 has to precede, because the
+words are in the EXECUTABLE's image at entry and `sys` is a dylib.
+
+**One thing measured here that the document does not say, because it is a
+consequence rather than a step:** `formal/hostmods/sys.mojo` publishes no
+`argv`, so a file that reaches §(2) for `argv` is refused twice over — the
+boundary AND the absence — and the §(2) refusal is the one it sees. Landing item
+2 alone therefore moves those files one row along (to §(4), "the command line is
+gone before the first statement"), not to `pass`, which is `FILES BLOCKED IS AN
+UPPER BOUND` again and is the reading the 2026-10-03 table already recorded.
+
 **A name the module does not publish AT ALL is now its own answer.**
 `model.module_attribute_refusal` had two arms for a name it *can* see —
 a published VARIABLE (`mylib.G`, an `Int` that crosses fine and is stopped by

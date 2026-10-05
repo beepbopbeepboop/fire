@@ -3,7 +3,12 @@
 **Claim** `project21:optional` on `work/formal21-optional`. **PARTIALLY
 FIXED**, and the remainder is one payload family rather than the 43-file row the
 sweep map names — measured, below, and the measurement is the most useful thing
-in this document.
+in this document. **§5 is FIXED as of 2026-10-04** (`work/formal29-3`): the
+register-passable sibling is out of the table and refused by name, because read
+from the stdlib's own source its storage is a PAIR and the table's own argument is
+about a word. What is left is §2 (the two-word value, for `Int`), §3 (an unstated
+payload) and §4 (an imported callee's `Optional` parameter) — each written below
+with its own next step.
 
 ## What landed, and what it is
 
@@ -181,17 +186,77 @@ parameter's type from the call, which is how a payload is built with the wrong
 width. **The next step** is for `formal/imports.py`'s per-module function tables
 to carry parameter annotations, which is a project and not a patch.
 
-### 5. `OptionalReg` is in `OPTIONAL_TYPE_NAMES` on the strength of the
-### spelling alone
+### 5. `OptionalReg` was in `OPTIONAL_TYPE_NAMES` on the strength of the
+### spelling alone — FIXED 2026-10-04, and the second half of the fix was the
+### part that mattered
 
-`std/collections/optional.mojo`'s `OptionalReg[T]` is the register-passable
-sibling, so a reader who annotates it gets the same niche — but its own payload
-constraint (`T: TrivialRegisterPassable`) is NOT checked, and its two niche
-storage strategies (`_NicheableOptionalRegStorage`, `_DefaultOptionalRegStorage`)
-are not modelled. Measured: no case in this file uses `OptionalReg`, so the row
-is a claim about the NAME and not about a construction. **The next step** if it
-matters: either drop it from `OPTIONAL_TYPE_NAMES` or give it its own
-representation keyed on `_OptionalRegStorageFor[T]`.
+**It is no longer in `OPTIONAL_TYPE_NAMES`, and it is now REFUSED BY NAME.** The
+doc's own two options were "drop it, or give it its own representation keyed on
+`_OptionalRegStorageFor[T]`", and the measurement settles which: read
+`std/collections/optional.mojo` rather than its spelling.
+
+```mojo
+struct OptionalReg[T: TrivialRegisterPassable](…):
+    comptime _Storage = _OptionalRegStorageFor[Self.T]
+    var _value: Self._Storage
+
+comptime _OptionalRegStorageFor[T: TrivialRegisterPassable]: _OptionalRegStorageTraits =
+    _NicheableOptionalRegStorage[T] if conforms_to(T, UnsafeNicheable)
+    else _DefaultOptionalRegStorage[T]
+
+struct _NicheableOptionalRegStorage[T](…):
+    var storage: Self.StorageType        # StaticTuple[T, 1] — the payload + an index
+
+struct _DefaultOptionalRegStorage[T](…):
+    var _value: !kgen.variant<T, i1>     # a TAGGED value
+```
+
+**Both storages are TWO WORDS.** So `OptionalReg[T]` is a pair for every `T` whose
+`UnsafeNicheable` conformance this build cannot see, and reading it as the one-word
+`Optional[T]` is a WRONG ANSWER rather than a missing one: `x is None` became
+`x == niche`, and a niche is a word of a value that has two — `2` for a `Bool`
+payload, `0` for a `String`, neither of which is what an empty `OptionalReg` holds.
+Which storage applies is a `conforms_to(T, UnsafeNicheable)` decided inside the
+stdlib module; a build reads declarations rather than resolving conformances, so
+the fact that decides the layout is one it has no source for.
+
+**Dropping the name ALONE would have been worse than the bug**, and that is the
+half worth recording: with nothing recognising the annotation,
+`apply_optional_none_representation` substitutes nothing and `x is None` folds to
+`== 0` — the `Some(0) == None` ambiguity this whole representation opened to
+remove, back through a different door. So the two halves are one change:
+`model.OPTIONAL_REG_TYPE_NAMES` + `model.optional_reg_base_name` (the BASE, so the
+bare `OptionalReg` is refusable too — a type with no argument is still a pair) +
+`model.optional_reg_refusal`, and `formal/build.py::refuse_optional_reg_annotations`
+asked where `apply_optional_none_representation` is asked and for its reason.
+
+**A FIELD is included in the refusal even when nothing reads it as an
+`OptionalReg`**, because a field holding a pair is a frame whose layout this path
+cannot describe — the same argument `struct_default_word`'s `("nested_frame", …)`
+arm makes for a one-word holder of a frame. That is why the pass walks the whole
+unit rather than the comparisons.
+
+Measured, both architectures, all four declaration spellings refused with the
+construct in the message: a local, a field (`Holder.slot`), a parameter
+(`take(z: OptionalReg[Int32])`), and the bare `OptionalReg`.
+`test_formal_optional.py` is 25 cases — 22 before, three new REFUSAL rows, where
+the refusal-is-a-failure rule is theirs — and `test_formal_value_model.py` is 82/82.
+`doc/ABI.md`'s `Optional[T]` section says the same thing where a client binding the
+symbols reads it.
+
+Cost in files: **zero**, measured — `OptionalReg` appears in no file in this
+repository and in no `formal/hostmods/` module, and in the stdlib only in six
+modules (`std/collections/optional.mojo` and `__init__.mojo`,
+`std/collections/check_bounds.mojo`, `std/memory/unsafe_pointer.mojo`,
+`std/_plugin/_trait.mojo`, `std/ffi/__init__.mojo`), none of which this build
+compiles. So this was a claim about a NAME, and it is now a claim about a
+REFUSAL, which is the same claim with a diagnostic.
+
+**What this does not do:** it does not give `OptionalReg` a representation. The
+two-word answer is `OPTIONAL_TWO_WORD`'s, priced once above and needed by both
+`Optional[Int]` and `OptionalReg[T]`, so it is the same project either way — and
+`OptionalReg`'s case additionally needs the trait conformance resolved, which the
+niche table's argument does not have.
 
 ## What was verified, and how
 

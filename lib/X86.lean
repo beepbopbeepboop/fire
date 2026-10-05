@@ -500,10 +500,19 @@ def x86_narrow_extend (narrow : UInt64) (sz : Nat) (sign : Bool) : UInt64 :=
   else if sz = 2 then x86_sign_extend16 narrow
   else x86_sign_extend32 narrow
 
-@[simp] theorem x86_mask_one : x86_mask 1 = 0xff := by native_decide
-@[simp] theorem x86_mask_two : x86_mask 2 = 0xffff := by native_decide
-@[simp] theorem x86_mask_four : x86_mask 4 = 0xffffffff := by native_decide
-@[simp] theorem x86_mask_eight : x86_mask 8 = 0xffffffffffffffff := by native_decide
+-- These four are GROUND facts over `Nat`/`UInt64` literals — `x86_mask n` is
+-- `if n ≥ 8 then … else UInt64.ofNat (2^(8n) - 1)`, and every argument here is a
+-- literal — so the KERNEL discharges them and no generated axiom is introduced.
+-- `native_decide` was compiling a decision procedure to C and asserting the
+-- answer, which on this toolchain is one axiom per use
+-- (`x86_mask_one._native.native_decide.ax_1_N`); the statement is byte-identical
+-- and only the tactic differs.  Measured, standalone through
+-- `formal/lean.py::run_lean`: all four elaborate and `#print axioms` answers
+-- "does not depend on any axioms" for each — not even `propext`/`Quot.sound`.
+@[simp] theorem x86_mask_one : x86_mask 1 = 0xff := by decide
+@[simp] theorem x86_mask_two : x86_mask 2 = 0xffff := by decide
+@[simp] theorem x86_mask_four : x86_mask 4 = 0xffffffff := by decide
+@[simp] theorem x86_mask_eight : x86_mask 8 = 0xffffffffffffffff := by decide
 
 /-- `cqo`: RDX = the SIGN EXTENSION of the whole 64-bit RAX — all ones if bit
     63 is set, zero otherwise.  This is NOT `x86_sign_extend32`, which is

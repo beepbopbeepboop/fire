@@ -1,8 +1,140 @@
-# The axiom is NOT `Lean.ofReduceBool`, and 53 of `lib/`'s 375 theorems is what the sites are
+# The axiom is NOT `Lean.ofReduceBool`, and **67** of `lib/`'s **520** theorems is what the sites are
 
 The `native_decide`/`bv_decide` sites put a GENERATED axiom in a theorem's
 closure — one per USE, named after the declaration that used it — and §7's
 inventory had no row for them at all.
+
+**Status 2026-10-04 (`work/formal29-3`): items 3 and 4 are DONE, and the CENSUS
+that item 2 produced was reporting the wrong thing — both of its halves.** The
+four cheap sites `§5` left in `X86` are gone (they are `decide`-discharged
+closed facts, and removing them freed a FIFTH theorem's closure through
+`x86_mask_eight`), every ceiling moved with the measurement, and
+`test_formal_admitted.py` — **RED on master** while this was worked on, on four
+rows, all of them drift this doc's subject explains — is green. Read this before
+§"The measurement, which is the point", whose table is measured on an instrument
+that has since been fixed, and before `AXIOM_CLOSURE`, whose figures were all
+wrong.
+
+### What landed, and what it is worth in this document's units
+
+**1. Four `native_decide` sites in `lib/X86.lean` are `decide` now** —
+`@[simp] theorem x86_mask_{one,two,four,eight}` on four lines side by side at
+`:503..506`, which is where the red came from: they landed after the ceilings
+were written and `LIBRARY_TRUST`'s `X86` row (3) had not moved with them, so the
+file reported 7 against a ceiling of 3. They are CLOSED facts —
+`x86_mask n` is `if n ≥ 8 then 0xffff… else UInt64.ofNat (2^(8n) - 1)` and every
+argument is a literal — so `decide` discharges them and **the KERNEL checks the
+answer**. Measured standalone through `formal/lean.py::run_lean` (0.3 s,
+168 MB): all four elaborate, and `#print axioms` answers *"does not depend on
+any axioms"* for each — not even `propext`/`Quot.sound`.
+
+**Worth FIVE theorems and four sites**, and the fifth is the argument for
+measuring the closure at all: `X86.x86_step_movsx_r64_r8` names no decide tactic
+of its own and reached `x86_mask_eight._native.native_decide.ax_1_N` **through**
+it, so it is kernel-checked now. `X86` goes 6 theorems reaching → 2.
+
+| | before | after |
+|---|---|---|
+| `lib/X86.lean` sites | 7 | **3** (all `bv_decide`, all `∀ w, …`) |
+| `lib/` sites, whole tree | 711 | **707** |
+| theorems reaching a decide axiom (of 520 asked) | 71 | **67** |
+| `REPLACEABLE_THEOREMS`, item 3's work list | 8 named, 22 live | **0** |
+
+### 2. The census was wrong in BOTH halves, and a false `clean` is the one thing
+### a trust census may not produce
+
+**`AXIOM_SITE_RE`'s declaration group was `[^.]+`.** It cannot match a DOTTED
+name at all — so every namespaced declaration's axiom read as "not one of ours",
+and `axiom_census_summary` reads the classifier's answer as "this closure has no
+site", which turned a false `None` into a false `clean`. `formal/lean.py`'s
+`GENERATED_AXIOM_RE` is the only other place this shape is matched, it uses a
+greedy `.+`, and its comment already says why: *"a lazy `.+` would hand
+`DylibExport` to `decl` and fail to match at all."* Two copies of one pattern
+with different greediness is how a §7 figure comes to be 53 when the answer is
+67.
+
+| module | `reaches` with `[^.]+` | `reaches` with `.+` | what the difference was |
+|---|---:|---:|---|
+| `IEEE754` | **0** (`text_only` **19**) | **19** (`text_only` 0) | every one of its declarations is namespaced |
+| `ProofLib` | 43 | **46** | `DylibExport.*` and `Frame.*` |
+
+**`library_theorems` could not see an ATTRIBUTED declaration.** It carried its
+own `heads`/`opens`/`closes` triple rather than projecting `_declarations`, and
+its head pattern had no `@[...]` prefix — so **98** attributed declarations
+(`ProofLib` 31, `X86` 66, `work` 1) were never asked about at all, and each was
+filed as `clean`: a clean row for a proof nobody asked Lean about. Four of the
+X86 ones are `@[simp] theorem x86_mask_*`, on four lines side by side. Sharing
+the walk fixes it, and `test_formal_admitted.py` now asserts the agreement in
+the direction that was missing — every attributed THEOREM visible to the census,
+plus the four named, because a count moves when the corpus grows and a name is
+what a reader goes and looks at.
+
+**A corollary worth keeping: the instrument's own bug was being counted as a
+finding.** §"The measurement" below praises "`text_only` … a place where a
+replacement would have changed nothing", and 22 of its rows were `IEEE754`'s and
+`ProofLib`'s namespaced declarations landing in the wrong bucket. With the group
+greedy, **`text_only` is 0 across all of `lib/`** — the SITE census is *exact* at
+theorem granularity, which is a stronger statement than "both directions are
+non-empty", and `test_formal_sweep_truth.py` now pins that direction at 0 with
+the bug's own numbers in the message.
+
+### 3. Every ceiling moved with the measurement, and `FORMAL.md` §7 row 10 is a
+### LEDGER
+
+`test_formal_admitted.py` was **red on master** on four rows before this change
+(`the Lean library's trust counts are pinned`, `native_decide is only where
+decide cannot go`, `the replaced native_decide count is what it claims`, `the
+census is attributed to theorems, not only to lines`) — 711 sites against a
+published 688, 40 one-site theorems against a ceiling of 19, and four
+`native_decide` in `X86` that `NATIVE_DECIDE_ALLOWED` does not name. All four
+are now green, and `AXIOM_CLOSURE` is re-measured over **six** modules:
+
+| | asked | reaches | clean | text_only | closure_only | `ofReduceBool` |
+|---|---:|---:|---:|---:|---:|---:|
+| `Contracts` | 7 | 0 | 7 | 0 | 0 | 0 |
+| `IEEE754` | 24 | 19 | 5 | 0 | 0 | 0 |
+| `ProofLib` | 297 | 46 | 243 | 0 | 8 | 0 |
+| `Refine` | 29 | 0 | 29 | 0 | 0 | 0 |
+| `X86` | 144 | 2 | 141 | 0 | 1 | 0 |
+| `work` | 19 | 0 | 17 | 0 | 2 | 0 |
+| **total** | **520** | **67** | **442** | **0** | **11** | **0** |
+
+(5.7 s and 1.1 GB for the whole thing, through `formal/lean.py::run_lean`.) One
+declaration is unanswered and by design: `ProofLib.ifUpdate_congr`, the
+`private theorem` at `lib/ProofLib.lean:7364`, whose name Lean mangles — so
+`theorem_axiom_census` now asks only about the `public` rows and REPORTS the
+rest rather than dropping them, and `test_formal_admitted.py` checks that no
+unaskable declaration carries a site (this one does not).
+
+**`ONE_SITE_THEOREMS` 19 → 36, and the rise is not new work**: 19 of the new ones
+are `IEEE754`'s, which arrived with the file. **`REPLACEABLE_THEOREMS` 8 → 0**,
+and that needed the LIST's definition rather than only its number: it now
+excludes the declarations `NATIVE_DECIDE_ALLOWED` already justifies by name (the
+19 `IEEE754` arithmetic theorems and `ProofLib`'s three `DylibExport` ones),
+because a row that table answers is not on a work list. Without the exclusion
+the list reported 22 items of which 22 were justified, and the next reader would
+have had to re-derive that.
+
+**Row 10's figures are now total 774 / replaced 67 / remaining 707, and the
+TOTAL IS A LEDGER**: 751 when the pay-down started, 63 replaced, and **23 that
+arrived afterwards** (19 with `lib/IEEE754.lean`, 4 in `lib/X86.lean`). The test
+enforces `total - remaining == replaced`, which is why the total has to carry the
+arrivals — a row that can only fall absorbs new debt silently, and the 4 `X86`
+sites are exactly that case. `NATIVE_DECIDE_REPLACED`'s `X86` row says which
+four and why they were worth five theorems.
+
+### What is still open, unchanged
+
+* **The 685 `bv_decide`** — `∀ w, w &&& mask ≠ value` over a free 32-bit word.
+  §5's argument is a MEASUREMENT and it stands: `decide` would enumerate 2^32.
+* **The 19 `IEEE754` `native_decide`** — ground binary64 facts over
+  `Float.ofBits`/`toBits`, which are compiled primitives, so `decide` gets stuck
+  at `UInt64.decEq`. The alternative is a bit-level IEEE implementation, which is
+  a second implementation of arithmetic both machines already perform. Named one
+  by one in `NATIVE_DECIDE_ALLOWED`.
+* **`test_formal_axioms.py`'s own per-declaration arithmetic** is untouched and
+  green: 695 declarations asked, 706 generated axioms for 707 counted sites, the
+  difference being `SITES_NEEDING_NO_AXIOM`'s one row.
 
 **Status: the CLOSED-FACT half is DONE and MEASURED, the closure census is
 DONE and it corrected the name, and the quantified half is refuted rather than
@@ -75,10 +207,18 @@ toolchain**, and one of them was false of the tree:
 
 ## The measurement, which is the point
 
+**SUPERSEDED — every number in this section was measured on an instrument that
+was wrong in both halves, and the corrected table is in the Status at the top of
+this file.** Read that first; this section is kept because the reasoning that
+produced the instrument is what a next session needs, and because a corrected
+figure with no record of the wrong one teaches nobody that the census can be
+wrong at all.
+
 `formal/admitted.py::theorem_axiom_census` — one `#print axioms` line per
 theorem, ONE Lean run per module, all of `lib/` in **4-5 s** through
-`formal/lean.py::run_lean` under the library bounds. **375 of 375 answered**, and
-the four columns partition each module:
+`formal/lean.py::run_lean` under the library bounds. **375 of 375 answered** (of
+the five modules it knew about; `lib/IEEE754.lean` had arrived and was not
+counted), and the four columns partition each module:
 
 | module | theorems asked | reach a decide axiom | kernel-checked | text_only | closure_only | `ofReduceBool` |
 |---|---:|---:|---:|---:|---:|---:|

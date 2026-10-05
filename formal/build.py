@@ -15533,6 +15533,71 @@ def _optional_call_argument_none(call, callee_defs, structs_by_name):
         _replace_none_with_niche(call, arg, ann, structs_by_name)
 
 
+def refuse_optional_reg_annotations(functions: list,
+                                    structs_by_name: dict = None) -> None:
+    """Refuse an `OptionalReg[...]` annotation wherever this unit declares one.
+
+    `OptionalReg` was in `model.OPTIONAL_TYPE_NAMES` until 2026-10-04, so a
+    reader who annotated `OptionalReg[Bool]` got the one-word niche: `x is None`
+    became `x == 2`, which is right about a word and wrong about a value that is
+    a `StaticTuple[T, 1]` or a `!kgen.variant<T, i1>`. That is the
+    `Some(0) == None` ambiguity the whole representation exists to remove, and
+    it came back through the two-word sibling's name. `model.OPTIONAL_TYPE_NAMES`
+    no longer holds it, which on its own would be WORSE: with no reader
+    recognising the name, `apply_optional_none_representation` substitutes
+    nothing and `x is None` folds to `== 0` — a silent wrong answer instead of a
+    wrong one with a diagnostic. So dropping the name and refusing it are ONE
+    change, and this is the half that refuses.
+
+    **Asked over the whole unit, at the point `apply_optional_none_representation`
+    is first asked and for its reason**: the obligation is discharged where the
+    SOURCE states the type, and after that pass the `None` is an `IntLiteral`
+    that no longer says what it was. A field is included even when nothing reads
+    it as an `OptionalReg`, because a field holding a pair is a frame whose
+    layout this path has no way to describe — the same argument
+    `struct_default_word`'s `("nested_frame", …)` row makes for a one-word holder
+    of a frame.
+
+    The three spellings a declaration can take are each read through the reader
+    that already answers for it — a parameter through the signature, a field
+    through `model.struct_field_declared_type` (the ONE reading of a declared
+    type, so a caller that wants to refuse a field cannot answer differently
+    from a caller that wants to know what it holds), and a local through the
+    node's own annotation.
+    """
+    for st in (structs_by_name or {}).values():
+        for name in M.struct_field_names(st):
+            _base, ann, _why, declared = M.struct_field_declared_type(st, name)
+            if declared and M.optional_reg_base_name(ann):
+                raise CodegenError(M.optional_reg_refusal(
+                    ann, f"as the declared type of field "
+                         f"`{getattr(st, 'name', '?')}.{name}`"))
+    for fn in functions:
+        fname = getattr(fn, "name", None) or "<module body>"
+        for param in (list(getattr(fn, "params", None) or [])):
+            if not (isinstance(param, (tuple, list)) and len(param) > 1):
+                continue
+            if M.optional_reg_base_name(param[1]):
+                raise CodegenError(M.optional_reg_refusal(
+                    param[1], f"as the declared type of parameter "
+                               f"`{param[0]}` of `{fname}`"))
+        ann = getattr(fn, "return_type", None)
+        if M.optional_reg_base_name(ann):
+            raise CodegenError(M.optional_reg_refusal(
+                ann, f"as the declared return type of `{fname}`"))
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            found = None
+            if isinstance(node, F.VarDecl):
+                found = getattr(node, "type_ann", None)
+            elif isinstance(node, F.AssignStmt):
+                found = getattr(node, "annotation", None)
+            if M.optional_reg_base_name(found):
+                what = "local" if isinstance(node, F.VarDecl) else "assignment"
+                raise CodegenError(M.optional_reg_refusal(
+                    found, f"as the declared type of {what} "
+                           f"`{getattr(node, 'name', '?')}` in `{fname}`"))
+
+
 def apply_optional_none_representation(functions: list,
                                        structs_by_name: dict,
                                        method_owners: dict = None) -> None:
@@ -16243,6 +16308,15 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # a reader actually writes (`x.kind == y.kind`, `x.kind == Kind.A`,
     # `Reg.A.value == Reg.B.value`) are not this rule's business.
     refuse_enum_member_comparisons(functions, structs_by_name)
+    # …and the `Optional` sibling this path CANNOT answer, asked here for the
+    # same reason and because this is the last point before the substitution
+    # below turns a `None` into an `IntLiteral`: `OptionalReg[T]` is a PAIR of
+    # words (`StaticTuple[T, 1]` or a `!kgen.variant<T, i1]`, per the stdlib's
+    # `_OptionalRegStorageFor[T]`) where an `Optional[T]` here is one, so the
+    # niche word would be about half the value. Refusing the annotation BY NAME
+    # is what keeps dropping `OptionalReg` out of `model.OPTIONAL_TYPE_NAMES`
+    # from turning into a silent `== 0` fold.
+    refuse_optional_reg_annotations(functions, structs_by_name)
     # …and the half of the `None` question that ANSWERS rather than refuses,
     # asked at the same point for the same reason. `refuse_none_comparisons`
     # above protects the comparison whose operand's type nothing states;
@@ -16815,33 +16889,64 @@ def _call_receiver_verdict(call, elems: dict, structs_by_name: dict,
     `recv` holds".
 
     **A CONSTRUCTION is refused here even though its type is known**, which is
-    the one answer this function gives that `model.receiver_struct` would not:
-    `Box()` names `Box`, and `Box().get()` still cannot be lifted, because a
-    one-word struct's fields live in a FRAME (`model.one_word_sole_field_frame`
-    makes that storage an address) and a construction in argument position
-    builds no frame — measured on both architectures, `Box().get()` through the
-    lift reads at address 0 and answers 0, which is a number no source wrote.
-    `bugs/FORMAL_method_call_on_a_construction_is_not_rewritten.md` is the doc
-    and `test_formal_receiver_position.py`'s
-    `refuse_a_method_call_on_a_construction_receiver` is the pin.
+    the one answer this function gives that `model.receiver_struct` would not,
+    and the reason it gives has MOVED twice. `Box()` names `Box`, so its type was
+    never in question. It was refused because a construction in argument
+    position "builds no frame" — measured on both architectures as `Box().get()`
+    through the lift reading at address 0 — and that stopped being true on
+    2026-10-03, when `4af77b16` made a construction bring the nested frame up at
+    a site the prologue reserved (`model.struct_construction_yields_frame_address`
+    is the one reader). So the construction now LIFTS, and what is left to refuse
+    is the case where the bring-up did not write every slot it reserved: a
+    nested struct with a declared `__init__` is not CALLED by a bring-up, which
+    writes field defaults, and lifting over it would read a frame of zeros where
+    the source wrote stores.
+    `test_formal_receiver_position.py` holds both halves —
+    `a_method_call_on_a_construction_receiver` (the lift, and it STORES through
+    the frame, because a read cannot tell a real address from address 0) and
+    `refuse_a_method_call_on_a_construction_whose_nested_constructor_is_not_run`.
+    The wrong answer the second one holds back is its own bug doc.
     """
     func = call.func
     if not (isinstance(func, F.MemberExpr) and isinstance(func.obj,
                                                            F.CallExpr)):
         return None, None
     inner = func.obj
+    established = None
     # A construction, before any type question: the struct is named by the
     # callee spelling and that is the whole of what is established, and it is
     # not enough (the `why` above).
     if isinstance(inner.func, F.IdentExpr) \
             and inner.func.name in (structs_by_name or {}):
-        return structs_by_name[inner.func.name], "construction"
+        _st0 = structs_by_name[inner.func.name]
+        # A CONSTRUCTION is refused here even though its type is known, because a
+        # one-word struct's fields live in a FRAME and this used to hand the
+        # callee a construction that built none.  It no longer does:
+        # `model.struct_construction_yields_frame_address` says a construction
+        # puts a FRAME ADDRESS in the name — for a struct with a frame of its
+        # own and for a one-field struct whose sole field holds a placed nested
+        # frame — and both backends' `_emit_fresh_one_word` bring that frame up
+        # before they hand back its address, at a site the prologue reserved.
+        # So what is left to check is whether the bring-up writes every slot it
+        # reserves, which is `model.construction_bringup_is_complete`: a nested
+        # struct with a declared `__init__` is NOT run by a bring-up, and lifting
+        # over it would answer a frame of zeros where the source wrote stores.
+        if not M.struct_construction_yields_frame_address(
+                _st0, structs_by_name):
+            return _st0, "construction"
+        ok, why_incomplete = M.construction_bringup_is_complete(
+            _st0, structs_by_name)
+        if not ok:
+            return (_st0, "construction_frame",
+                    getattr(_st0, "name", str(_st0)), why_incomplete)
+        established = _st0
     # `one_field=False`: the gate is applied HERE rather than inside the
     # predicate, because a multi-field answer is a refusal this message has to
     # be able to NAME.  A receiver declared `Wide` says which struct it is, and
     # "what is missing is the receiver's TYPE" would be false about it.
-    st = M.receiver_struct(inner, fn, structs_by_name, owner, bound, elems,
-                           functions or {}, one_field=False)
+    st = established if established is not None else M.receiver_struct(
+        inner, fn, structs_by_name, owner, bound, elems,
+        functions or {}, one_field=False)
     if st is None:
         # Not a struct of THIS module.  That is the answer for a receiver whose
         # type nothing establishes, and a DIFFERENT one for a call whose
@@ -16856,6 +16961,8 @@ def _call_receiver_verdict(call, elems: dict, structs_by_name: dict,
         return (None, "other module", base) if base and base not in (
             structs_by_name or {}) else (None, None)
     if not M.struct_is_one_field(st):
+        if established is not None and M.struct_width_cost(st) == "":
+            pass
         return st, "frame"
     named = [m for m in M.struct_methods(st) if m.name == func.member]
     if not named:

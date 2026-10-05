@@ -211,11 +211,14 @@ CONSTRUCTION case and this one got the SAME sentence, and for both of them it
 was false.
 
 **One cross-reference for whoever owns the construction case.**
-`bugs/FORMAL_method_call_on_a_construction_is_not_rewritten.md` (`formal13-4`)
-quotes the OLD sentence for `Box().get()` in its Status, twice, and says the
-advice it gives is the shape that crashes. All three halves of that still hold —
-the construct is still refused, for the same reason, by the same rule — but the
-message it quotes no longer exists, and the new one names the REPRESENTATION
+The construction-receiver doc (`formal13-4`'s, `Box().get()`) quoted the OLD
+sentence twice in its Status and said the advice it gives was the shape that
+crashes; both of those were right, and on 2026-10-04 the construct stopped being
+refused at all — the nested frame is now brought up at a construction site
+(`4af77b16`), so the lift runs and the residual gap is a nested struct's
+`__init__` not being run by that bring-up
+(`bugs/FORMAL_a_construction_does_not_run_a_nested_structs_constructor.md`). The
+message it quotes still does not exist, and the current one names the REPRESENTATION
 (`… because a CONSTRUCTION is not a value this path can pass as a receiver: the
 struct is named, and a one-word struct's fields live in a frame that the
 construction in an argument position never builds`) instead of asking the reader

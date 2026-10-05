@@ -184,7 +184,7 @@ def _library_declarations():
         with open(path, encoding="utf-8") as f:
             code = A.lean_code_regions(f.read())
         yes, no = [], []
-        for _line, name, public in A._declarations(code):
+        for _line, name, public, _kind in A._declarations(code):
             if not public:
                 no.append(name)
             elif name.endswith(UNASKABLE_SUFFIX):
@@ -211,7 +211,7 @@ def _dropped_with_sites(dropped):
         with open(os.path.join(lib, mod + ".lean"), encoding="utf-8") as f:
             code = A.lean_code_regions(f.read()).split("\n")
         decls = A._declarations("\n".join(code))
-        for i, (line, name, _public) in enumerate(decls):
+        for i, (line, name, _public, _kind) in enumerate(decls):
             if name not in names:
                 continue
             last = decls[i + 1][0] if i + 1 < len(decls) else len(code) + 1
