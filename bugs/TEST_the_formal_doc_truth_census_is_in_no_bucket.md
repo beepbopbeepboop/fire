@@ -4,15 +4,6 @@
 published counts). Found 2026-10-05 on `work/formal25-5-r2`, while verifying
 that `formal/` changes had not made a document's claims false.
 
-**Re-measured 2026-10-05 (`work/formal41-exports-and-strings`), same 8 rows and
-the same `PASS=425 FAIL=8`, on a tree several commits later.** The table below
-has drifted with the tree and is kept as written so the doc's own argument is
-readable; **the current numbers are `683` / `272` / `411` / `580`, `fire_runtime.c`
-`523` KB, `52` examples, phase 2 `266`** — which is the point of the doc rather
-than a correction to it: eight numbers nobody refreshes because no gate runs the
-file that checks them. Independently confirmed pre-existing on that tree too, by
-reverting the one `formal/build.py` change it carried and re-running.
-
 ## What I ran
 
 ```console

@@ -35,14 +35,10 @@ are not holes at all for the shape they were written for.
 
 **Two reds this entry's `PASS=39 KNOWN-GAP=6 FAIL=0` no longer describes, both
 pre-existing and neither a `sorry`:** `count` fails at proof line 5330
-(`bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md`), and `sgt8`/`sle8` failed
-on the obligation `⊢ t32s (t8s n) = n` — a narrow typed parameter's universal
-contract, which is RESOLVED as of 2026-10-05 (the theorem now carries the range
-the truncation needs, and `bugs/FORMAL_arm64_known_proof_gaps.md`'s "Two
-examples are missing from this file entirely" records the resolution; the
-document that owned them was deleted with the fix, which is why the citation
-that used to sit here dangled). Neither stem is in `test_formal.py`'s
-`EXPECTED_FAILURES`.
+(`bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md`), and `sgt8`/`sle8` fail
+on the obligation `⊢ t32s (t8s n) = n`
+(`bugs/FORMAL_arm64_a_narrow_typed_parameter_makes_the_universal_contract_false.md`).
+Neither stem is in `test_formal.py`'s `EXPECTED_FAILURES`.
 
 **`Still open 3` below is unchanged and is still the whole of what is left here.**
 What is new is that the work is now pinned to two model changes with the sites

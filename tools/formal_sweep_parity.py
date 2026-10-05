@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare two formal_sweep.py logs per FILE, so an architecture gap is visible.
 
-the `b7` round of `bugs/FORMAL_sweep_work_map.md` §2.5 reported the two
+`bugs/FORMAL_sweep_work_map_2026-10-02_b7.md` §2.5 reported the two
 architectures as the same sweep: 542 files classified on both, "of those, class
 CHANGED: 0", one x86-64-only row. That is the right claim and it was computed by
 hand, from the two logs, with a scratch script nobody could run again — so the

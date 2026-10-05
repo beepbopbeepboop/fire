@@ -405,70 +405,6 @@ CASES = [
      "    print(\"v:\", a, b)\n"
      "    return 0\n",
      "v: 5 6\n"),
-    # ── a LIST OF LISTS: the element word is itself a blob ──
-    #
-    # `len()` OF A SUBSCRIPT OF A LIST OF LISTS was a REFUSAL on both
-    # architectures — "len(inner) is len() of a value classified as 'int', and an
-    # integer has no length" — until `formal/model.py::_list_literal_elem_kind`
-    # landed (2026-10-05). The cause was that the kind table FLATTENED a blob
-    # layout it nests: `rows` classified as a bare `list`, so `rows[0]`'s kind
-    # was `list_elem_kind("list")` = None, and the name the subscript was bound
-    # to fell to this file's own "a word is an integer" default — about a blob
-    # whose count field was sitting at offset 0 of a live heap address. The doc
-    # that measured it is deleted with its fix; this row is what it left behind.
-    #
-    # `expected` is what CPython prints, so the row cannot be pinned to a wrong
-    # number: the old failure mode for this construct was a plausible number,
-    # which is exactly what a hardcoded expectation would have hidden.
-    ("a_subscript_of_a_list_of_lists_is_a_blob",
-     "def main(n):\n"
-     "    var rows = [[1, 2], [3, 4]]\n"
-     "    var inner = rows[0]\n"
-     "    print(\"n:\", len(inner), \"v:\", inner[1])\n"
-     "    return 0\n",
-     "n: 2 v: 2\n"),
-    # The NESTED SUBSCRIPT straight into `print`, which the same doc measured as
-    # a second refusal ("cannot tell whether SubscriptExpr is a string or a
-    # number") and which is the reason that doc's "Why the corpus does not
-    # generate it" section had to route the corpus's read through a second
-    # local: `print(R[0][1])` needs `kind_of` to reach the element's element
-    # twice, and it now does.
-    ("a_nested_subscript_of_a_list_of_lists_is_a_number",
-     "def main(n):\n"
-     "    var R = [[1, 2], [3, 4]]\n"
-     "    print(\"v:\", R[0][1], R[1][0])\n"
-     "    return 0\n",
-     "v: 2 3\n"),
-    # The MODULE-GLOBAL spelling of the same literal, which is a DIFFERENT
-    # reader (`formal/model.py::global_slot_kind` →
-    # `container_literal_elem_kind`) and refused identically before the change.
-    # Two readers of one question is the defect this repository keeps paying
-    # for, so it is a row rather than a comment.
-    ("a_module_global_list_of_lists_subscript_is_a_blob",
-     "L = [[1, 2], [3, 4]]\n"
-     "\n"
-     "def main(n):\n"
-     "    var inner = L[0]\n"
-     "    print(\"n:\", len(inner), \"v:\", L[1][0])\n"
-     "    return 0\n",
-     "n: 2 v: 3\n"),
-    # A TUPLE of tuples, so the rule is not a list-literal special case: the
-    # blob layout is `[count][e0][e1]` for all three container literals.
-    ("a_subscript_of_a_tuple_of_tuples_is_a_blob",
-     "def main(n):\n"
-     "    var t = ((1, 2), (3, 4))\n"
-     "    print(\"n:\", len(t[0]), \"v:\", t[1][0])\n"
-     "    return 0\n",
-     "n: 2 v: 3\n"),
-    # And THREE deep, which is what makes it a rule about the LAYOUT rather
-    # than about one subscript: the kind is `list:list:list:int` and every
-    # reader peels one element at a time.
-    ("a_subscript_of_a_list_of_lists_of_lists_is_a_blob",
-     "def main(n):\n"
-     "    var r = [[[1, 2]], [[3, 4]]]\n"
-     "    print(\"n:\", len(r[0][0]), \"v:\", r[0][0][1])\n"
-     "    return 0\n",
-     "n: 2 v: 2\n"),
     # ── the OTHER TWO walks that yield one thing per count ──
     #
     # The `for`-in walk and the membership needle both ask
@@ -566,52 +502,17 @@ CASES = [
      "    printf(\"s=%d\", keys({10: 100, 20: 200, 30: 300}))\n"
      "    return 0\n",
      "s=60"),
-    # A STRING-keyed dict, and it is HERE rather than in `REFUSALS` because the
-    # rule is now the same one a `for`-in target goes through.  `for k in
-    # {"ab": 1, "cde": 2}` binds a STRING (`model._iterable_dict_key_kind`
-    # reads the keys out of the literal) and a comprehension's target asked
-    # `_kind_of_simple`, which classifies a LITERAL and has no arm for a name —
-    # so `[k for k in d]`'s result classified as the bare `list`, the walk over
-    # it fell back to "a word is an integer", and `len(k)` was refused with
-    # "an integer has no length" about a string the source plainly wrote, on both
-    # architectures.  The kind is now asked in the comprehension's OWN generator
-    # scope (`ValueKinds.kind_of`'s `Comprehension` arm, over
-    # `comprehension_generator_scopes`), which is where the names its element
-    # mentions are bound; the generator scope already said `str`, and the loss
-    # was on the way out.  An ORACLE row because `len(k)` over string keys is a
-    # construct CPython runs verbatim: 2 then 3.
-    ("comprehension_over_a_string_keyed_dict_binds_a_string_target",
-     "def main(n):\n"
-     "    var d = {\"ab\": 100, \"cde\": 200}\n"
-     "    var ks = [k for k in d]\n"
-     "    for k in ks:\n"
-     "        print(\"n:\", len(k))\n"
-     "    return 0\n",
-     "n: 2\nn: 3\n"),
-    # The second-order shape the doc filed separately and this fix covers too,
-    # because the rule is about the ITERABLE and not about the container's
-    # spelling: `{k: 1 for k in d}` builds a pair blob, and the walk over THAT
-    # has to bind the same string.  It was not reachable by fixing the literal
-    # comprehension's arm alone, and it is the row that says so.
-    ("dict_comprehension_over_a_string_keyed_dict_binds_a_string_target",
-     "def main(n):\n"
-     "    var d = {\"ab\": 100, \"cde\": 200}\n"
-     "    var e = {k: 1 for k in d}\n"
-     "    for k in e:\n"
-     "        print(\"n:\", len(k))\n"
-     "    return 0\n",
-     "n: 2\nn: 3\n"),
-    # The control that says the scope is not over-reaching: an element that is
-    # NOT the generator's own target still classifies as itself, and a
-    # comprehension over a list of ints is still `list:int` rather than the bare
-    # `list` the string-keyed shape used to produce.
-    ("a_comprehension_element_that_is_not_a_target_keeps_its_own_kind",
-     "def main(n):\n"
-     "    var xs = [10, 20, 30]\n"
-     "    var ys = [x + 1 for x in xs]\n"
-     "    printf(\"n=%d s=%d\", len(ys), ys[0] + ys[2])\n"
-     "    return 0\n",
-     "n=3 s=42"),   # 11 + 31
+    # A STRING-keyed dict is NOT here, and the reason is worth more than the
+    # case would be.  `for k in {"ab": 1, "cde": 2}` binds a STRING target
+    # (`model.iterable_dict_key_kind` reads the keys out of the literal) but a
+    # comprehension's target does not go through that walk, so `[k for k in
+    # d]` over string keys classifies its target as an int and `len(k)` is
+    # refused — on BOTH architectures, with a message that is true about the
+    # classification and false about the source, which is the property a
+    # REFUSALS row is for.  It is a row in `REFUSALS` rather than here because
+    # it measures a KIND rule and not the stride this group is about, and it is
+    # filed as `FORMAL_a_comprehension_target_over_a_string_keyed_dict_is_an_int`
+    # so the gap is a queue entry rather than a footnote.
     # A LIST is the control for all three walks, and it is what a fix that moved
     # the stride unconditionally to the pair would break: the walk over a
     # one-word-per-count blob steps one word, and at the pair stride this reads
@@ -1943,15 +1844,26 @@ REFUSALS = [
      "    print(\"v:\", a)\n"
      "    return 0\n",
      "cannot tell whether IdentExpr"),
-    # NOT HERE: `a_comprehension_target_over_a_string_keyed_dict_is_an_int` was
-    # pinned in `REFUSALS` with the message "an integer has no length", and it is
-    # an ORACLE row in `CASES` now
-    # (`comprehension_over_a_string_keyed_dict_binds_a_string_target`).  The
-    # refusal was never right about the source — the keys are strings and the
-    # `for`-in walk over the same literal already said so — and a `REFUSALS` row
-    # asserting a false message is a row that would have held the defect in
-    # place, so it is deleted rather than reworded.
-    # A CALL THAT PRODUCES NO VALUE, printed. CPython evaluates `g(1, 2)` to
+    # A COMPREHENSION'S TARGET over a dict is classified as an integer where the
+    # `for`-in walk over the same dict binds a string, and the message says
+    # `len()` of an integer where the source wrote a string key.  The stride is
+    # right here (`walk_stride` reads the pair-ness of the iterable, and the
+    # `comprehension_over_a_dict_*` rows in `CASES` are about that), so what is
+    # missing is the KIND: `model.iterable_dict_key_kind` is asked when a `for`
+    # target is bound and a comprehension's target store does not ask it.
+    #
+    # A row rather than nothing, because the alternative is a construct that is
+    # refused with a false sentence about the reader's own source and no test
+    # says so.  Filed as
+    # `FORMAL_a_comprehension_target_over_a_string_keyed_dict_is_an_int`.
+    ("a_comprehension_target_over_a_string_keyed_dict_is_an_int",
+     "def main(n):\n"
+     "    var d = {\"ab\": 100, \"cde\": 200}\n"
+     "    var ks = [k for k in d]\n"
+     "    for k in ks:\n"
+     "        print(\"n:\", len(k))\n"
+     "    return 0\n",
+     "an integer has no length"),    # A CALL THAT PRODUCES NO VALUE, printed. CPython evaluates `g(1, 2)` to
     # `None` and prints `None`; a value on this path is one 64-bit word and the
     # epilogue writes no return register, so the image printed `0` — measured on
     # BOTH architectures from this same text, and `0` is not even stable: a call
@@ -2057,111 +1969,6 @@ BUILTIN_CASES = [
      "    print(\"v:\", len(str(s)))\n"
      "    return 0\n",
      "v: 4\n"),
-]
-
-# ── `max` / `min`: the two builtins whose ordinary call is a SELECT ───────────
-#
-# `formal/model.py::NOT_LOWERED_BUILTINS` measured both of these on 2026-10-04 and
-# wrote down what lowering each takes — "a compare and a select; both emitters
-# already have the select" — and `formal/build.py::_lower_builtin_extremum` is
-# that sentence cashed, so these rows are the MEASUREMENT of it: every one is an
-# oracle case (the same text runs under CPython and `run_case` requires the same
-# bytes from both images), which is the only kind of row that can catch an
-# image answering a different number — the failure `formal_sweep_causes.py`'s own
-# docstring calls worse than a refusal.
-#
-# **THE COMPARISON IS ON THE SECOND OPERAND and these rows are what pin it.**
-# CPython's `max(a, b)` keeps the first as the largest and replaces it only when
-# `b > a`, so the left fold is `b > a ? b : a` and NOT `a < b ? b : a`. The two
-# agree on every total order over integers, so a tie and an ordinary comparison
-# cannot tell them apart — only a NaN can, because IEEE `>` is false against one
-# and this path holds a double's bit pattern in an integer word. The tie row is
-# here anyway, because "returns the FIRST on a tie" is a real property of the
-# answer and a rewrite that returned the second would agree with CPython on
-# `max(5, 5)` and nowhere else worth looking.
-BUILTIN_EXTREMUM_CASES = [
-    ("max_of_a_name_and_a_literal_is_a_compare_and_a_select",
-     "def main(n):\n"
-     "    var a = 3\n"
-     "    print(\"v:\", max(a - 1, 0))\n"
-     "    return 0\n",
-     "v: 2\n"),
-    ("min_of_a_name_and_a_literal_is_a_compare_and_a_select",
-     "def main(n):\n"
-     "    var b = 9\n"
-     "    print(\"v:\", min(b, 100), min(100, b))\n"
-     "    return 0\n",
-     "v: 9 9\n"),
-    ("a_three_argument_extremum_is_the_same_select_folded",
-     "def main(n):\n"
-     "    var a = 3\n"
-     "    var b = 9\n"
-     "    print(\"v:\", max(a, b, 5), min(4, b, a))\n"
-     "    return 0\n",
-     "v: 9 3\n"),
-    ("an_extremum_over_negatives_and_a_tie",
-     "def main(n):\n"
-     "    var a = 3\n"
-     "    print(\"v:\", max(5, 5), min(0 - 9, 3), max(0 - 9, 3))\n"
-     "    return 0\n",
-     "v: 5 -9 3\n"),
-    ("an_extremum_of_arithmetic_over_names_and_a_literal",
-     "def main(n):\n"
-     "    var a = 3\n"
-     "    var b = 9\n"
-     "    print(\"v:\", max(a - 1, b + 1, 0))\n"
-     "    return 0\n",
-     "v: 10\n"),
-]
-
-# The three shapes the rewrite DECLINES, and each one's needle says which
-# refusal answered it. The first two are the table row's own sentence; the third
-# is the blob refusal, and it is here rather than only in
-# `test_formal_run.py`'s operator group because it is the shape this guard
-# exists for: with no integer literal on either side there is nothing in the
-# source that says the operands are numbers, and comparing a blob's address
-# answers a different number on each architecture (measured, and the message
-# quotes it).
-BUILTIN_EXTREMUM_REFUSALS = [
-    ("max_of_one_argument_is_refused_rather_than_folded_over_a_sequence",
-     "def main(n):\n"
-     "    var xs = [1, 5, 2]\n"
-     "    print(\"v:\", max(xs))\n"
-     "    return 0\n",
-     "`max(...)` is not lowered on this path"),
-    ("max_with_a_key_is_refused_rather_than_calling_through_a_value",
-     "def main(n):\n"
-     "    var a = 3\n"
-     "    var b = 9\n"
-     "    print(\"v:\", max(a, b, key=lambda v: 0 - v))\n"
-     "    return 0\n",
-     "`max(...)` is not lowered on this path"),
-    ("max_of_two_names_is_refused_rather_than_comparing_two_addresses",
-     "def main(n):\n"
-     "    var a = 3\n"
-     "    var b = 9\n"
-     "    print(\"v:\", max(a, b))\n"
-     "    return 0\n",
-     "`max(...)` is not lowered on this path"),
-    ("an_extremum_of_a_container_and_a_literal_is_refused_by_the_blob_table",
-     "def main(n):\n"
-     "    var a = [1, 2]\n"
-     "    print(\"v:\", len(max(a, 0)))\n"
-     "    return 0\n",
-     "'>' is refused when the right operand is a list"),
-    # The GUARD's own boundary, and the row that makes it a decision rather
-    # than an accident: an integer literal has to be a BARE one. `a - 1` and
-    # `b + 1` are arithmetic over names, which says nothing about either
-    # operand holding a number, so the rewrite declines and the refusal is the
-    # table row's. The row above it is the same program with `, 0` added, which
-    # is the whole of the difference between the two answers.
-    ("an_extremum_of_two_arithmetic_expressions_with_no_literal_is_refused",
-     "def main(n):\n"
-     "    var a = 3\n"
-     "    var b = 9\n"
-     "    print(\"v:\", max(a - 1, b + 1))\n"
-     "    return 0\n",
-     "`max(...)` is not lowered on this path"),
 ]
 
 
@@ -2302,8 +2109,6 @@ def main():
                   + [(c, False) for c in HOLDER_ASSIGN_CASES]
                   + [(c, False) for c in MODULE_GLOBAL_CASES]
                   + [(c, False) for c in BUILTIN_CASES]
-                  + [(c, False) for c in BUILTIN_EXTREMUM_CASES]
-                  + [(c, True) for c in BUILTIN_EXTREMUM_REFUSALS]
                   + [(c, "fixed") for c in FIXED_CASES]
 + [(c, True) for c in REFUSALS]
                   + [(c, True) for c in BUILTIN_REFUSALS]

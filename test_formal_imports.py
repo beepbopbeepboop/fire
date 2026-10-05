@@ -3638,7 +3638,7 @@ def test_a_module_nobody_binds_a_concrete_name_from_needs_no_library(
     that per edge and `build_module_dylib` and `_resolve_imports` both act on
     it. `BinaryHeap` is the measured case (`std/collections/__init__.mojo`
     re-exports it and 162 of the 163 files the export gate blocked name nothing
-    it declares), and the `b9` round of `bugs/FORMAL_sweep_work_map.md` §4.1 is the
+    it declares), and `bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §4.1 is the
     measurement.
 
     What this pins is the half that could have gone wrong silently: the program
@@ -3805,174 +3805,6 @@ def test_a_constants_only_module_is_not_told_nothing_could_be_added(
           and "BACKEND" not in other,
           f"the constants-only wording leaked into the private branch, whose "
           f"reason is a different fact: {other}")
-
-
-def test_a_constants_only_module_is_importable(tmpdir, _shared):
-    """A module of nothing but folded constants is a LIBRARY, and its values
-    reach the importer — on both architectures, against CPython.
-
-    **This is the feature `test_a_constants_only_module_is_not_told_nothing_
-    could_be_added` names as missing, and it is 33 of the 59 files on the
-    `module exports no public functions` row of
-    the `b13` round of `bugs/FORMAL_sweep_work_map.md` §4.** That row's largest
-    single group was "blocked in `constants.mojo`", and the map could not even
-    say WHICH `constants.mojo` — the chain names a module by basename and this
-    tree has three of them — so the row read as unmeasurable. It is
-    `std/math/constants.mojo`: eight `comptime` constants and no declaration
-    at all, and `std/math/__init__.mojo`'s `from .constants import e, pi, tau`
-    was refused with it.
-
-    The refusal was right about the module and wrong about the consequence.
-    Right: `constants.mojo` has no SYMBOL, so there is nothing an importer can
-    bind in an export trie. Wrong: the importer was not asking for a symbol. It
-    was asking for a VALUE, and a value crosses a boundary through the
-    manifest's `constants` table — one value of a folded module-level name in a
-    whole program, so the consumer materializes the same one in its own image.
-    That route is not new: `sys.byteorder` and every package that re-exports a
-    constant already take it. What was missing was a module whose whole API is
-    such values being allowed to be a library at all, which is exactly what
-    `_namespace_library` emits — a real MH_DYLIB with an empty trie and a
-    populated constants table.
-
-    **The oracle is CPython, on the same text, and the fixture is deliberately
-    a package-relative import** (`from .constants import …` out of an
-    `__init__`), because that is the shape the row is made of: `std/math/
-    __init__.mojo` is not the module that declares the constants, and a test that
-    imported them from a top-level module would not be exercising the chain that
-    fails. The two architectures are compared with each other as well as with
-    CPython, so a value one backend materializes and the other does not is
-    caught even if both happened to agree with CPython here.
-    """
-    tree = {
-        # The program IS the package `__init__`, because that is the chain the
-        # row is made of: `std/math/__init__.mojo` is not the module that
-        # declares the constants, and a fixture that imported them from a
-        # top-level module would not be exercising the failing edge.
-        "constlib/__init__.mojo": "from .constants import ALPHA, BETA\n"
-                                  "\n"
-                                  "def main():\n"
-                                  "  print(ALPHA)\n"
-                                  "  print(BETA)\n",
-        # `ALPHA` is written the way the stdlib writes one — folded from an
-        # expression rather than spelled — and `BETA` is a plain literal, so the
-        # two cover `fold_module_value`'s folder and `fold_literal_expr`'s.
-        "constlib/constants.mojo": "comptime ALPHA: Int = 3 + 4\n"
-                                    "comptime BETA: String = \"beta\"\n",
-    }
-    seen = {}
-    for arch in ("arm64", "x86_64"):
-        root = os.path.join(tmpdir, arch)
-        os.makedirs(root)
-        fresh_cas()
-        write_tree(root, tree)
-        out = os.path.join(root, "constlib.aout")
-        result = run_fire(["build", "--formal", "--no-prove", f"--backend={arch}",
-                           "-o", out,
-                           os.path.join(root, "constlib", "__init__.mojo")],
-                          cwd=root)
-        check(result.returncode == 0,
-              f"{arch}: the program importing a constants-only module did not "
-              f"build: {(result.stderr or result.stdout).strip()[-400:]}")
-        code, text = run(out)
-        check(code == 0,
-              f"{arch}: the program importing a constants-only module did not "
-              f"run: {text.strip()[-300:]}")
-        seen[arch] = text.split()
-        # CPython, asked directly about the SAME declarations. `print` on an int
-        # and on a str gives `7` and `beta`, and the formal program must give
-        # the same two words — not merely the same numbers, because the second
-        # name is the one that proves a STRING crossed rather than a word.
-        # `RUN_TIMEOUT_S`, not a `120`: this is a RUN of a compiled-adjacent
-        # child and the file already imports the shared constant for its three
-        # other runs, so the literal was a fourth spelling of a number the
-        # module has an opinion about. It is 120 today, which is why nothing
-        # broke — and that is the failure mode the residue census exists for.
-        # `test_suite.py`'s `STALE_PER_CHILD_BUDGETS` counts this file at 0 and
-        # the walk found 1, so the row and the walk disagreed until here.
-        oracle = subprocess.run(
-            [sys.executable, "-c",
-             "ALPHA = 3 + 4\nBETA = 'beta'\nprint(ALPHA)\nprint(BETA)\n"],
-            capture_output=True, text=True, timeout=RUN_TIMEOUT_S).stdout.split()
-        check(seen[arch] == oracle,
-              f"{arch}: the values read across the boundary are {seen[arch]}, "
-              f"and CPython on the same declarations gives {oracle}")
-        # The library itself is the artifact the fix is about, so it is
-        # inspected rather than inferred from the program's output — read here,
-        # inside the loop, because `fresh_cas()` above empties the cache between
-        # architectures and a manifest read afterwards would be looking for a
-        # library this test deleted. An empty EXPORT TRIE with a populated
-        # constants table is what "a module with no symbols and a complete API"
-        # means in this container, and a trie that had quietly grown an entry
-        # would be the export-rule bug `no_public_api_reason`'s docstring is
-        # the longest argument against.
-        payload = manifest(module_dylib("constlib_constants", arch=arch))
-        check(payload.get("kind") == "namespace",
-              f"{arch}: the constants-only library is not marked as a "
-              f"table-less one: {payload.get('kind')!r}")
-        check(payload.get("exports") == [],
-              f"{arch}: a module with no declarations grew an export table: "
-              f"{payload.get('exports')}")
-        check(sorted(payload.get("constants") or {}) == ["ALPHA", "BETA"],
-              f"{arch}: the manifest publishes "
-              f"{sorted(payload.get('constants') or {})}, not the two folded "
-              f"names — so the program above read them from somewhere else "
-              f"and this is not the route it was meant to take")
-        # …and not `__file__` beside them. It is in every module's folded
-        # table, it is the path of the file the DEFINING build compiled, and a
-        # consumer reading it would get another checkout's path rather than its
-        # own; so it is a fact about the build and not part of the module's
-        # API. Publishing it would put a second tree's path into a program's
-        # constants, which is why `_publishable_constant_names` drops it.
-        check("__file__" not in (payload.get("constants") or {}),
-              f"{arch}: the build's own source path was published as one of "
-              f"this module's constants: "
-              f"{sorted(payload.get('constants') or {})}")
-    check(seen["arm64"] == seen["x86_64"],
-          f"the two architectures disagree about a value read across a dylib "
-          f"boundary: arm64 {seen['arm64']}, x86_64 {seen['x86_64']}")
-
-
-def test_a_constants_only_module_with_an_unfoldable_value_is_still_refused(
-        tmpdir, _shared):
-    """The half of the constants-only row that has no way across stays refused.
-
-    `a_constants_only_module_is_importable` is the fix; this is its boundary,
-    and without it the fix is a hole. `std/sys/_io.mojo` — 23 of the 59 files —
-    is `comptime stdin = FileDescriptor(0)`: a struct CONSTRUCTION, which
-    `fold_module_value` has no arm for, so there is no value to publish and no
-    symbol either. A module in that shape has genuinely nothing an importer
-    could reach, and building it would put a name on a link line that resolves
-    to nothing.
-
-    The refusal must also still be the one that names the real reason, because
-    the wrong sentence here is what `no_public_api_reason`'s docstring calls
-    "worse than no message". `test_formal_dylib.py`'s
-    `the refusal names the real reason` builds the same shape through the
-    `dylib` command; this is the same fact asked through an IMPORT, where the
-    refusal reaches a file that did not write the module at all — which is the
-    chain that put 23 files on the row.
-    """
-    root = os.path.join(tmpdir, "unfoldable")
-    os.makedirs(root)
-    fresh_cas()
-    write_tree(root, {
-        "fdlib/__init__.mojo": "from .descriptors import stdin\n"
-                               "\n"
-                               "def main():\n"
-                               "  print(0)\n",
-        "fdlib/descriptors.mojo": "comptime stdin = FileDescriptor(0)\n",
-    })
-    result = run_fire(["build", "--formal", "--no-prove", "-o",
-                       os.path.join(root, "fdlib.aout"),
-                       os.path.join(root, "fdlib", "__init__.mojo")], cwd=root)
-    text = (result.stderr or result.stdout or "").strip()
-    check(result.returncode != 0,
-          "a module whose only names are struct constructions was built as a "
-          f"library, which publishes nothing an importer could bind: {text}")
-    check("declares no function and no type at all" in text,
-          f"the refusal does not name the shape it fired on: {text}")
-    check("descriptors.mojo" in text,
-          f"the refusal does not name the module it is about: {text}")
 
 
 def test_a_clib_named_definition_is_refused_not_blamed_on_privacy(tmpdir,
@@ -4874,10 +4706,6 @@ TESTS = [
      test_a_generic_template_is_not_exported_under_its_base_name),
     ("a constants-only module is not told nothing could be added",
      test_a_constants_only_module_is_not_told_nothing_could_be_added),
-    ("a constants-only module is imported, and its values reach the program",
-     test_a_constants_only_module_is_importable),
-    ("a constants-only module with an unfoldable value is still refused",
-     test_a_constants_only_module_with_an_unfoldable_value_is_still_refused),
     ("a C-library-named definition is not blamed on privacy",
      test_a_clib_named_definition_is_refused_not_blamed_on_privacy),
     ("a concrete and a generic of one name are told apart",

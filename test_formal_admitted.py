@@ -396,7 +396,7 @@ SCOPE_PROBES = (
     # `_EXPLANATORY` had no row, so removing any of them was a no-op and the
     # table could not tell a live connective from a dead one — which is the
     # defect `tools/formal_sweep_causes.py` was fixed for in
-    # the `b10` round of `bugs/FORMAL_sweep_work_map.md` §5.1, and the reason that
+    # `bugs/FORMAL_sweep_work_map_2026-10-04_b10.md` §5.1, and the reason that
     # map's `check_cause_table` asserts every label is reachable from a sample.
     # Generated, a connective added to `_EXPLANATORY` brings its row with it and
     # the row fails if the connective does not fire.

@@ -130,7 +130,7 @@ Three of those BUILD, and the artifacts are the stronger check:
 `tools/formal_sweep.py` over all 710 files, and the Lean half. The twelve above
 are a sample chosen for size and for the fact that three of them build at all;
 they are not a census, and the doc that would settle the question is
-the `b10` round of `bugs/FORMAL_sweep_work_map.md`'s next round.
+`bugs/FORMAL_sweep_work_map_2026-10-04_b10.md`'s next round.
 
 **What it costs: 0.10 s on `formal/model.py`, 3 runs each, best of three.**
 1.86 s before, 1.96 s after — about 5 %, and it is one extra body walk per

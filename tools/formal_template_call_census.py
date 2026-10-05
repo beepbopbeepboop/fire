@@ -10,7 +10,7 @@ inferred, and what each one would take — the measurement
 largest codegen cause is one sentence — "`X` is called, and it is imported from
 `M`, so the call has to bind a symbol `M` exports. That module does not export
 it" — 170 files, 14 symbols, 79 call sites, measured over 710 files by
-the `b10` round of `bugs/FORMAL_sweep_work_map.md` §3.1. Every one of those calls is
+`bugs/FORMAL_sweep_work_map_2026-10-04_b10.md` §3.1. Every one of those calls is
 a BARE call to a name the defining module declares a TEMPLATE, and Mojo infers
 a template call's type arguments, so the source is correct and this path is
 short. The doc's §3 step 1 is "derive its type arguments from the call's

@@ -1,7 +1,7 @@
 # FORMAL_sweep12_singles_a: the §3.2 single-file causes, first half — what landed on 2026-10-03 and what is left
 
 **Claim** `sweep12:ctor-self-and-singles-a`. This is the state of ONE HALF of
-the `b7` round of `bugs/FORMAL_sweep_work_map.md` §3.2's single-file causes, plus the
+`bugs/FORMAL_sweep_work_map_2026-10-02_b7.md` §3.2's single-file causes, plus the
 two rows that map names separately. It is a STATUS document, not a queue entry:
 every cause below is either fixed here, fixed by somebody else, blocked on a
 cause another claim holds, or not makeable from a repository worktree — and the

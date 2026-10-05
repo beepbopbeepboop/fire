@@ -600,6 +600,55 @@ ORACLE_CASES = [
      '    at = lambda e, i: e[i]\n'
      '    print("b0=%d b1=%d t=%d" % (at(s, 0), at(s, 1), len(table)), end="\\n")\n'),
 
+    # The SAME subscript with the image's ONLY non-ASCII in a DOCSTRING, which
+    # is the one combination the block above never had: `bytes_*` put theirs in
+    # a `var table = ["héllo"]` VALUE on purpose (the group comment says so —
+    # a docstring would make the row vacuous the day the exclusion landed), and
+    # the two `CROSS_MODULE_CASES` docstring rows subscript a `String` rather
+    # than a byte pointer. So the shape this bug was actually filed about was
+    # unpinned in BOTH directions.
+    #
+    # It is `formal/hostmods/os/_syscalls.mojo`'s own `fs_dirent_name`:
+    # `var d: Pointer[UInt8] = str_alloc(1024)` then `d[i] = e[21 + i]`, in a
+    # file whose 31 non-ASCII literals are all docstrings and whose own comment
+    # calls the annotation load-bearing. That image refused `d[i]` by name as a
+    # CHARACTER read, and it took `os`, `shlex`, `posixpath`, `argparse` and
+    # `time` down with it — three rows of `test_formal_imports.py`.
+    #
+    # **`s[1]` is in this row because it is what makes the row discriminate**,
+    # and saying so is the point: the byte-pointer read alone would NOT. Two
+    # independent rules cover it — `receiver_is_declared_bytes` (a declared
+    # `UInt8` pointee) and the docstring exclusion — so neutering either one
+    # leaves it building, and a row built only from it would pass against a tree
+    # with the bug back. Measured: with `is_docstring_statement` forced to
+    # False in-process, `at(s, 0)`/`at(s, 1)` over a `Pointer[UInt8]` parameter
+    # still BUILD on both backends, while the `s[1]` in this row is REFUSED with
+    # `string_element_refusal`. So `s[1]` is the load-bearing half and the byte
+    # pointer is the doc's subject, and a row that had only the second would be
+    # decoration.
+    #
+    # ANSWERED against CPython, which is the whole claim: the build must answer,
+    # and match. The Python column is the honest oracle for the same
+    # DECLARATION — `Pointer[UInt8]` is one 64-bit word and `b"abc"[0]` is the
+    # byte 97 — and `s[1]` is printed through `%c`, which is the spelling the
+    # two agree on (CPython's `"abc"[1]` is a one-CHARACTER `str`, recorded in
+    # `subscript_into_an_ascii_string_reads_its_byte`).
+    ("a_docstring_only_image_reads_a_byte_pointer_element",
+     'def at(e: Pointer[UInt8], i):\n'
+     '    return e[i]\n'
+     'def main(n):\n'
+     '    """Wide prose — with an em-dash, an ellipsis … and a\n'
+     '    section sign § that no program can read."""\n'
+     '    var s = "abc"\n'
+     '    printf("c=%c b0=%d b1=%d\\n", s[1], at(s, 0), at(s, 1))\n'
+     '    return 0\n',
+     'def main():\n'
+     '    """Wide prose — with an em-dash, an ellipsis … and a\n'
+     '    section sign § that no program can read."""\n'
+     '    s = b"abc"\n'
+     '    at = lambda e, i: e[i]\n'
+     '    print("c=%s b0=%d b1=%d" % ("b", at(s, 0), at(s, 1)), end="\\n")\n'),
+
     # A QUANTIFIER on a conversion that is not a `%s`, in an image that holds a
     # non-ASCII literal.  This is the row the width refusal used to fail: it
     # answered for every conversion the format string names and then said `%s`

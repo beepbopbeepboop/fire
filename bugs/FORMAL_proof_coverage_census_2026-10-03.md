@@ -1,51 +1,5 @@
 # FORMAL_proof_coverage_census_2026-10-03: 60 functions from THIS repository, both backends, with proofs on
 
-**§0.9 is new (2026-10-05, `work/formal37-3`): the instrument's largest class was
-being FILLED with the proof layer's own refusals, and the A/B on one tree is 7
-of 60 items.** `tools/formal_proof_breadth.py::run_item` had two refusal arms and
-the second was dead for this shape: `formal/build.py` re-raises a generator's
-`NotImplementedError` as a `FormalBuildError` — correctly, so `fire.py build
---formal` prints `build: <message>` instead of a forty-frame traceback — so the
-shape arrived as arm 1 and was filed `codegen-refused`. `_refusal_class`'s own
-docstring, and this document's §0.2, both name that as the class a reader must
-not UNDER-count. The fact now travels on the exception
-(`formal.build.proof_refused`, one reader, three callers), and the measurement
-is an A/B over the SAME 60 items on the SAME tree with the flag forced both ways:
-
-| class | flag off (before) | flag on (after) |
-|---|---:|---:|
-| **`codegen-refused`** | **40** | **33** |
-| `proof-refused` | 0 | **7** |
-| `proof-emitted` (phase A only) | 15 | 15 |
-| `refused-builtin` | 5 | 5 |
-
-**The 7, named:** `cas.py:176:reset_stats`, `formal/macho_linker.py:
-270:executable_entry_offset`, `formal/x86_64.py:64:cond_negated`,
-`myinterpreter.py:2333:_scalar_max2`, `test_formal_glob.py:209:cases`,
-`test_formal_hostmods_conformance.py:972:IS_A_MATCH`,
-`test_formal_interop.py:94:mask`. All seven are `_no_value_model` refusals, all
-seven build and RUN under `--no-prove` on the same architecture, and all seven
-were holes in the SEMANTIC MODEL counted against the code generator.
-
-**What this does to the numbers in this document.** Every `codegen-refused`
-figure below was produced by the old classifier, so a re-run now reports fewer
-of them and a `proof-refused` figure it did not report at all — which is why
-§0.7's "the counts above are NOT a delta" warning is now also true of the
-CLASS. The committed ledgers (`bugs/sweeps/proof_breadth_*.jsonl`) keep the old
-labels, and a `Counter` over one of them is still a faithful reading of what
-that run measured; what has changed is what a NEW run files. **The sample is
-what makes any of the counts a claim about this tree rather than about a
-different one**, and it has moved again: measured off the committed ledgers with
-`formal_proof_breadth.function_key`, the CURRENT 60-item sample shares **24**
-idents with §0's own `proof_breadth_2026-10-03.jsonl`, 30 with §0.2's, 33 with
-round 0's and **2** with either round-2 ledger. So the 7 above are 7 of the
-CURRENT 60 and not a delta against any figure printed here — which is §0.6's
-warning about a sample that moves, measured again.
-
-The two reds it fixes are in `test_formal_proof_breadth.py` and were red on
-`master`; `tools/formal_proof_fuzz.py` filed the same shape the same way, and
-`tools/formal_proof_census.py` filed it as `phase="build"`.
-
 **§0.8 is new (2026-10-05, `work/formal30-proof-regression`): a RATCHET over the
 other half of the corpus — all 52 `formal/examples/*.mojo`, arm64, through
 `compile_formal(prove=True, check=True)` — with a committed per-example baseline
@@ -121,7 +75,7 @@ largest is **`+` on two strings at 10 of 31**, with `'%'` on a string at 4, a
 field access through a value at 5, a number compared with a string at 3, and a
 method call on a value at 2. The `+` family is the string-value-model row, so the
 census's top codegen cause is now the same one the sweep's 170-file row is
-(the `b10` round of `bugs/FORMAL_sweep_work_map.md` §3.1), and it is a
+(`bugs/FORMAL_sweep_work_map_2026-10-04_b10.md` §3.1), and it is a
 value-model project rather than a patch.
 
 **And a negative measurement, because a change that adds a refusal has to say

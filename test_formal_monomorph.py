@@ -6,7 +6,7 @@ is, and this file pins what that means on the formal dylib path: a module that
 declares only `struct Pair[T]` now publishes `prefix_Pair_Int` and its methods,
 and a program that writes `Pair[Int]()` binds them. Before this the module had no
 boundary symbol at all and the whole thing was one refusal — the second wall
-behind the 165-file row in the `b8` round of `bugs/FORMAL_sweep_work_map.md` §4.1,
+behind the 165-file row in `bugs/FORMAL_sweep_work_map_2026-10-03_b8.md` §4.1,
 which sits behind the codegen wall in `std/collections/binary_heap.mojo` and so
 was invisible until that file's own constructs lower.
 
@@ -682,7 +682,7 @@ def test_a_package_reexport_attributes_the_demand_to_the_defining_module(
 
     — a complaint about the LINK LINE for a library that had been built and was
     simply not on it. 162 of the 165 files in
-    the `b8` round of `bugs/FORMAL_sweep_work_map.md` §3.1 reach
+    `bugs/FORMAL_sweep_work_map_2026-10-03_b8.md` §3.1 reach
     `binary_heap.mojo` through `std/collections/__init__.mojo`'s re-export and
     not by naming it, so this is the shape the row actually has.
 
@@ -1569,177 +1569,6 @@ def main():
 """
 
 
-# The STRUCT half of the same construct, read through `Self`. `Self.values` is
-# the parameter, and the only reason it works is that the template's OWN body is
-# not the body that runs: `instantiate` substitutes it, so the body in the image
-# reads `len([1, 2, 3, 4])` and needs no knowledge of the parameter at all. The
-# template's own body has no instantiation in scope, so a read of it there is
-# refused — and `monomorph.without_template_bodies` is what keeps that body out
-# of the compilation unit.
-SELF_BRACKET_LIB = """\
-struct Sized[T: AnyType, values: List[T]]:
-    var tag: Int
-
-    def size(self) -> Int:
-        return len(Self.values)
-"""
-
-SELF_BRACKET_PROG = """\
-from sizelib import Sized
-
-def main():
-    var a = Sized[Int, [1, 2, 3, 4]]()
-    a.tag = 7
-    print(a.size())
-    var b = Sized[Int, [9]]()
-    b.tag = 7
-    print(b.size())
-"""
-
-SELF_BRACKET_CPYTHON = """\
-class Sized:
-    def __init__(self):
-        self.tag = 0
-        self.values = []
-    def size(self):
-        return len(self.values)
-
-def main():
-    a = Sized()
-    a.tag = 7
-    a.values = [1, 2, 3, 4]
-    print(a.size())
-    b = Sized()
-    b.tag = 7
-    b.values = [9]
-    print(b.size())
-"""
-
-# The ONE-FILE shape of the same read: the module declares AND applies the
-# template, so `formal/imports.py::_own_instantiations` appends the
-# instantiated statements to the executable's own and the executable's own
-# statement list is where the template's declaration has to leave.
-SELF_BRACKET_ONE_FILE = """\
-struct Sized[T: AnyType, values: List[T]]:
-    var tag: Int
-
-    def size(self) -> Int:
-        return len(Self.values)
-
-def main():
-    var a = Sized[Int, [1, 2, 3, 4]]()
-    a.tag = 7
-    print(a.size())
-"""
-
-SELF_BRACKET_ONE_FILE_CPYTHON = """\
-class Sized:
-    def __init__(self):
-        self.tag = 0
-        self.values = []
-    def size(self):
-        return len(self.values)
-
-def main():
-    a = Sized()
-    a.tag = 7
-    a.values = [1, 2, 3, 4]
-    print(a.size())
-"""
-
-
-def test_a_struct_templates_body_is_not_the_body_that_runs(tmpdir):
-    """`len(Self.values)` in a generic STRUCT builds, runs, and answers CPython.
-
-    The construct is a bracket VALUE parameter read through `Self` from a
-    method, and before this it was refused on BOTH architectures with "the
-    source does not say what this operand holds" — from the TEMPLATE's own body,
-    which is analysed with no instantiation in scope and where `Self.values`
-    names a parameter nothing has supplied. It was refused in one file and in
-    two, because a module dylib is compiled from the module's own source *and*
-    from every instantiated source its consumer asked for.
-
-    The fix is not a new reader for `Self.<param>`; it is that the template's
-    own body is not part of the compilation unit, because it is not part of any
-    image — `instantiate` substitutes the parameter and the instantiated body
-    reads `len([1, 2, 3, 4])`. `monomorph.without_template_bodies` is the rule
-    and both paths ask it: the module path in `formal/build.py`'s
-    `_formal_module_functions`, the executable path in `compile_formal` AFTER
-    `_imported_structs` has appended the instantiated statements.
-
-    Two instantiations with different lengths, because a lowering that answered
-    the FIRST program's length for both would print a plausible number — and
-    `4` against `1` is that number's easiest form.
-    """
-    for arch in ARCHES:
-        got = run_pair_case(tmpdir, arch, "mm_selfbracket", SELF_BRACKET_LIB,
-                            SELF_BRACKET_PROG, SELF_BRACKET_CPYTHON,
-                            libname="sizelib.mojo")
-        check(got == "4\n1\n",
-              f"[{arch}] printed {got!r} for two instantiations of one template "
-              f"whose bracket value parameter is [1, 2, 3, 4] and then [9]")
-
-
-def test_the_same_read_works_in_one_file(tmpdir):
-    """The executable path asks the same rule, and one file is where it is
-    reachable without a dylib at all.
-
-    `build_pair_case(lib=None)` writes the ONE-FILE shape — this module is both
-    the library and the consumer — which is the case `formal/imports.py`'s
-    `_own_instantiations` covers: it appends the instantiated statements to the
-    executable's own list, so the filter has to run after that append or it
-    takes the instantiated bodies with it. That ordering is the whole content of
-    this case, and a filter placed one line earlier fails it.
-    """
-    for arch in ARCHES:
-        got = run_pair_case(tmpdir, arch, "mm_selfonefile", None,
-                            SELF_BRACKET_ONE_FILE,
-                            SELF_BRACKET_ONE_FILE_CPYTHON)
-        check(got == "4\n",
-              f"[{arch}] printed {got!r} for one file declaring and applying "
-              f"Sized[Int, [1, 2, 3, 4]]")
-
-
-def test_a_function_templates_body_is_still_compiled(_tmpdir):
-    """The filter drops STRUCT templates and keeps FUNCTION templates, and the
-    second half is not tidiness — it is three registered tests.
-
-    A function template's call site binds through `comptime.specialization_name`
-    to the template's OWN definition (`twice[Int](n)` beside `def twice[T]`), so
-    its body IS in an image and removing it leaves a call against a symbol
-    nothing emitted. Measured, dropping both kinds together took
-    `test_formal_specialization.py` from 19/19 to 16/3 — the three are "a local
-    specialization lowers and matches CPython" and the two that run a
-    specialization through a value.
-
-    So this is a unit assertion over `without_template_bodies` rather than a
-    build, and it asserts the KIND: `monomorph.template_kind` is the reader that
-    tells a struct template from a function one, so the filter has exactly one
-    answer to consult and a second reader here would be a second rule to be
-    wrong about.
-    """
-    import fire_compiler as FC
-    from formal import monomorph as MM
-    src = ("struct Box[T]:\n"
-           "    var v: T\n"
-           "def twice[T](n: T) -> T:\n"
-           "    return n + n\n"
-           "def plain(x: Int) -> Int:\n"
-           "    return x\n")
-    stmts = FC.Parser(FC.py_tokenize(src)).parse_module()
-    kept = {getattr(s, "name", None)
-            for s in MM.without_template_bodies(stmts, src)}
-    check(kept == {"twice", "plain"},
-          f"the filter kept {sorted(n for n in kept if n)}, and it must keep "
-          f"the FUNCTION template `twice` — a specialization call binds to it "
-          f"through comptime.specialization_name — and the ordinary `plain`, "
-          f"dropping only the struct template `Box`")
-    check(MM.template_kind(src, "Box") == MM.KIND_STRUCT
-          and MM.template_kind(src, "twice") == MM.KIND_FN,
-          "template_kind no longer tells the two kinds apart, so the filter's "
-          "one reader of that question is gone")
-
-
 def test_a_value_bracket_argument_reaches_the_boundary_symbol(tmpdir):
     """`total[Int, [1, 2, 3]]` binds the library's symbol, and `keys[0]` is `1`.
 
@@ -1750,12 +1579,11 @@ def test_a_value_bracket_argument_reaches_the_boundary_symbol(tmpdir):
     makes the value observable at all: it is the one read of a bracket value
     parameter that lowers today, because the parameter's own annotation
     (`keys: List[T]`) classifies the subscript base and the substitution puts a
-    list literal there.  A read that goes through `len()` instead did not, and
-    that is now fixed twice over: `len()` reads the parameter's own annotation
-    (`formal/model.py::declared_param_kind`), and a read spelled through `Self`
-    needed the template's own body to leave the compilation unit, which is
-    `test_a_struct_templates_body_is_not_the_body_that_runs` below.  So this case
-    reads element zero — the one spelling that needed neither.
+    list literal there.  A read that goes through `len()` instead does not (see
+    the bug doc deleted with the consumer-side fix, `§"What is not the cause"`
+    and the wall it stopped at, now
+    `bugs/FORMAL_a_value_bracket_parameter_cannot_be_read_in_the_template.md`),
+    which is why this case reads element zero.
 
     Both spellings of a display and two different values of it, so the
     distinctness the mangling has to provide is exercised rather than asserted:
@@ -2563,12 +2391,6 @@ TESTS = [
      test_a_literal_display_is_a_bracket_argument_and_a_bare_literal_is_not),
     ("a value bracket argument reaches the boundary symbol",
      test_a_value_bracket_argument_reaches_the_boundary_symbol),
-    ("a struct template's body is not the body that runs",
-     test_a_struct_templates_body_is_not_the_body_that_runs),
-    ("the same read works in one file",
-     test_the_same_read_works_in_one_file),
-    ("a function template's body is still compiled",
-     test_a_function_templates_body_is_still_compiled),
     ("a bracketed parameter annotation instantiates",
      test_a_bracketed_parameter_annotation_instantiates),
     ("a stated mangled spelling is the one the mangler produces",
