@@ -47,9 +47,12 @@ that the builtin ran.
 fixed:** a bare `import X` + `<X>.<free_fn>(...)` module-qualified call
 answers 0 on the link/build path where the same source is correct on the
 single-TU inline path and where `from X import fn` is correct everywhere.
-See `bugs/CODEGEN_bare_import_module_qualified_call_answers_zero.md`. It
-is the shape behind four of `Lib/ctypes/util.py`'s errors, not this
-file's.
+The shape is a bare-`import` module-qualified call on the LINK path, fixed
+2026-10-02 (the member registration lives in `funcs_shared.
+register_imported_symbol`, shared with `_register_link_imports`; pinned by
+`test_link_mode.py`'s
+`test_bare_import_sibling_function_call_through_module`). It is the shape
+behind four of `Lib/ctypes/util.py`'s errors, not this file's.
 
 **This file's own 21 remaining errors** (it contributed ZERO before the
 ambiguity fix, because the refusal fired first — so every claim in the

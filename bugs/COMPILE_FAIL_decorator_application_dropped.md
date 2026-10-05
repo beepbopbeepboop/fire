@@ -190,7 +190,8 @@ recording before anyone attempts it:
   module-level DEFINITION or an import. A name bound to a VARIABLE is not
   something it can answer for at all — the same "the bare-name tables
   cannot see it" shape, measured in
-  `CODEGEN_bare_import_module_qualified_call_answers_zero.md`, which is
+  the bare-`import` module-qualified call, fixed 2026-10-02 (the member
+  registration is `funcs_shared.register_imported_symbol`), which is
   the failure a decorated name runs into.
 
 Neither is part of this bug; both are prerequisites or neighbouring

@@ -1302,8 +1302,8 @@ def _inline_bare_import_struct(gen, stmt, marker_reads) -> None:
     one. This used to ask only `_source_defines_struct`, deliberately scoped
     to a struct "because a FUNCTION reached through a bare marker is a
     separately tracked bug with its own filed doc" — that doc is
-    `bugs/CODEGEN_bare_import_module_qualified_call_answers_zero.md`, and it
-    is closed by this change, so the exclusion has nothing left to exclude.
+    the bare-`import` module-qualified-call doc, which is closed by this
+    change, so the exclusion has nothing left to exclude.
     `_classify_unresolved_export` is the same classifier the `from M import X`
     spelling uses, it already answers for a plain top-level FUNCTION (inline
     the module) as well as a struct, and the docstring of the two duplicated

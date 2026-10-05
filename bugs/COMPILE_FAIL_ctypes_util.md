@@ -18,10 +18,18 @@ and so is the `shutil.which` one except for the single line above. So this doc's
 own error count is 4 → 1, and nothing in this file is left to fix here.
 
 The one that remains is `shutil.which(...)` reached through a BARE
-`import shutil` (this file's line 2), which is
-`CODEGEN_bare_import_module_qualified_call_answers_zero.md` — filed from this
-doc, owned elsewhere, and **still live**, measured on this tree with its own
-two-file repro through `compile_to_gimple`: the generated C still carries
+`import shutil` (this file's line 2), which was filed from this doc and
+**fixed 2026-10-02**: a bare `import X` registered `imported_symbols['X']`
+for the MODULE and nothing for its members, so `_func_mangleable` answered
+False for `X.fn`; the call site now registers the member through
+`funcs_shared.register_imported_symbol` with the DEFINING module's own
+parsed signature, which is what `_func_csym`/`_effective_param_types` need
+to emit the same symbol the defining module did. Pinned by
+`test_link_mode.py`'s
+`test_bare_import_sibling_function_call_through_module` (with the
+`from SIBLING import fn` spelling as its control in the same build). The
+member-classifier half (`_inline_bare_import_struct` now asking
+`_classify_unresolved_export`) is the other half.
 
 ```c
 __attribute__((weak)) int64_t deep_fn (...) { mojo_print ((char *)"deep_fn: unavailable in compiled mode"); return (int6…
@@ -39,7 +47,7 @@ are ordinary gcc errors in other modules: genericpath 99, ntpath 88, threading
 65, subprocess 58, ctypes/__init__ 55, _osx_support 46, sysconfig 41, os 39,
 and 7 more. None of those is `ctypes/util.py`'s.
 
-## Status (2026-10-01 — this file's own errors are ONE defect, now root-caused to a bare-`import` module-qualified call; filed as `CODEGEN_bare_import_module_qualified_call_answers_zero.md`)
+## Status (2026-10-01 — this file's own errors are ONE defect, root-caused to a bare-`import` module-qualified call, FIXED 2026-10-02 — see the section below)
 
 Re-measured on this tree, and the file's remaining errors are fewer and
 better understood than the entry below records. `python3 fire.py build
@@ -73,8 +81,7 @@ each call site emits is well-formed and module-qualified
 translation unit defines any of them, so gcc reports each as an implicit
 declaration.
 
-Reduced to a two-file repro and root-caused in
-`bugs/CODEGEN_bare_import_module_qualified_call_answers_zero.md`: a bare
+Reduced to a two-file repro and root-caused, then FIXED: a bare
 `import X` records `imported_symbols['X']` for the MODULE and nothing for
 its members, so `_func_mangleable` answers False for `X.fn` and the call
 lowers to a weak `0`-returning stub. In the reduced case this is a silent
