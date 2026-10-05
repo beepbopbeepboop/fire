@@ -1214,10 +1214,9 @@ def _prefix_is_interpolated(prefix: str) -> bool:
     brace-depth-aware closing-quote scan) and `replace_multiline_strings` (which
     needs to know whether a newline inside the literal is content, and whether
     the literal has to be collapsed to a placeholder). The second of those was
-    the bug `bugs/PARSE_FAIL_fire_compiler_cannot_lex_a_multiline_f_string.md`
-    records: with no shared predicate the scanner asked "is there a line end
-    here?" without ever asking "am I inside code?", and CPython's rule for a
-    replacement field is that it MAY span lines.
+    the bug commit `cca2a17f` fixed: with no shared predicate the scanner asked
+    "is there a line end here?" without ever asking "am I inside code?", and
+    CPython's rule for a replacement field is that it MAY span lines.
 
     Explicit `==` comparisons, not `c in 'fFtT'`, for the reason
     `_string_prefix_start` gives in full: this codegen's compiled `in`-for-char*
@@ -2209,10 +2208,8 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                     # per multi-line f-string. What makes such a literal
                     # possible at all is `_scan_string_end`'s replacement-field
                     # depth; without that this branch is dead code, which is the
-                    # shape of the bug
-                    # `bugs/PARSE_FAIL_fire_compiler_cannot_lex_a_multiline_f_string.md`
-                    # records — the first of the two halves was missing and this
-                    # is the second.
+                    # shape of the bug `cca2a17f` fixed — the first of the two
+                    # halves was missing and this is the second.
                     interpolated = _prefix_is_interpolated(src[start:i])
                     end = _scan_string_end(src, i, c, False, interpolated)
                     if end < 0:
