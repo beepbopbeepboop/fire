@@ -8056,6 +8056,20 @@ def printf_text_widths(fmt_text) -> list | None:
     `%*s`, and that disagreement is load-bearing rather than a defect: a `*`
     width IS the quantifier of the conversion that carries it, so the conversion
     itself contributes no second row here.
+
+    **It has no caller in `formal/` any more, and that is said here rather than
+    left for a reader to discover.** `printf_text_width_refusal` used to reach
+    its quantifier through this list and now reads `_printf_specs` directly,
+    because the refusal needs the conversion CHARACTER as well and the two
+    projections do not have the same length. What is left is the SURFACE: this
+    is the named reader for "what quantifiers does this format string carry",
+    and `test_formal_unicode.py`'s in-process table pins its parsing — flags
+    kept (`%-6s` and `%6s` pad on opposite sides), `*`, `%%`, the positional
+    form and the unparsed form — which `_printf_specs` exercises only
+    transitively through it. Deleting it with its ten rows would delete the
+    coverage of the quantifier parse to save a wrapper, which is the wrong
+    trade; the scan is already shared, so there is no second implementation to
+    consolidate.
     """
     specs = _printf_specs(fmt_text)
     if specs is None:
