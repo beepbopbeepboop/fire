@@ -313,6 +313,68 @@ local of the enclosing function — and that half is
   `_expect("RBRACKET")` → `Expected RBRACKET got NAME('async')`. There is no such
   target to count, which is a stronger answer than an exclusion would have been.
 
+## A FIFTH artifact class probed and CLOSED: a nested `def`'s assignment does
+## NOT satisfy the enclosing function's read (measured 2026-10-04,
+## `work/formal28-1`)
+
+Step 1 below names the likely next artifact class — "a nested `def`/lambda
+inside the body has its own locals and must not be attributed to the outer one,
+which `model.iter_nodes` does not distinguish from an ordinary walk" — and it is
+the class that would be expensive: a missed refusal is a silent wrong answer,
+whereas every class above is a false one. Two shapes, both architectures, both
+with the oracle run at the SAME argument the image gets (`test_input`'s default
+of 10, which is what a `main(n)` with no caller receives — an oracle called
+`main(7)` here is a disagreement about the harness, not about the program):
+
+```python
+# (a) the dangerous direction: does the nested scope's store satisfy the
+#     enclosing read?
+def main(n: Int) -> Int:
+    if n > 0:
+        w = 1
+    def helper() -> Int:
+        w = 99
+        return w
+    printf("r=%d", w)
+    return 0
+```
+REFUSED on both architectures — `main: 'w' is read at line 7 before anything in
+this function stores it, and CPython raises UnboundLocalError for that program`,
+which is CPython's own answer at `n <= 0` and the refusal the doc's §0 landed.
+**So the nested scope's `w = 99` did not mask it**, and the artifact class does
+not exist in this direction: `model._build_cfg` does not descend into a nested
+`FunctionDef`'s body for its `stored` set, even though `model.iter_nodes` does
+when the question is "which nodes are there". Those are two different questions
+and the code already answers them from two different walks.
+
+```python
+# (b) the other direction: is a name that only the NESTED scope binds refused
+#     for the right reason?
+def main(n: Int) -> Int:
+    def helper() -> Int:
+        q = compute()
+        return q
+    printf("r=%d", q)
+    return 0
+```
+REFUSED on both architectures with the name-placement sentence
+(`'q' has no home: the module-level symbol table is empty for this unit …`),
+not with the read-before-store one — and that is right, because `q` is not a
+LOCAL of `main` at all: CPython's answer is `NameError`, and a refusal that said
+`UnboundLocalError` about a name no local list contains would be false about the
+program. The doc's `read_before_store` message already carries the
+`(NameError at module level)` clause for exactly this.
+
+**Nothing here needs a fix, and the reason is worth recording so the class is not
+re-derived:** the two rules that read a nested scope's statements and the rule
+that reads a function's local set are not the same walk, and the one that matters
+(`_build_cfg`) stops at the function boundary on purpose — it is the same reason
+`_function_locals` subtracts a comprehension's target, and the same reason a
+nested scope must not be walked into when the question is "which names does THIS
+function bind". The pin is `test_formal_read_before_store.py`, which has 157
+cases and none of these two shapes; they are worth adding as rows, and the first
+of them is a row that must STAY refused.
+
 ## Next step for the general rule, in the order it should be done
 
 1. **Make the scan cheap enough to run on every file, every time.** The three
