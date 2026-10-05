@@ -7646,7 +7646,11 @@ def gen_module_impl(self, stmts):
         boxed pointer decimal, and `{v for v in f({'r','q'})}` then STORED
         those decimals, so `sorted(...)` of the result ordered by address and
         the answer depended on where the string literals happened to land.
-        See `bugs/CODEGEN_set_iteration_loses_the_element_type_so_sorted_answers_by_address.md`.
+        The element-type half of that is this arm; the container-KIND half (a
+        set parameter's `MojoSet *`, which a `for` over it has to dispatch on)
+        is `_param_container_types` below, read by
+        `funcs_shared.param_binding_ctype`, and both are pinned by
+        `gimple_set_param_container_kind_from_its_call_sites`.
 
         Only `ListExpr` and `SetExpr` qualify, and `TupleExpr` is NOT added
         for free: a tuple literal lowers to the same `MojoList *` but its
@@ -7817,8 +7821,12 @@ def gen_module_impl(self, stmts):
             # landed, which depends on what the same process compiled before.
             # `TupleExpr` is deliberately still absent: it lowers to the same
             # MojoList but is heterogeneous by nature, so the joined element
-            # type is a lossy summary rather than a description.
-            # See `bugs/CODEGEN_set_iteration_loses_the_element_type_so_sorted_answers_by_address.md`.
+            # type is a lossy summary rather than a description. A set
+            # literal's ELEMENT type is this arm; its CONTAINER kind is
+            # `_param_container_types` (`_record_param_container`, and
+            # `funcs_shared.param_binding_ctype` as the reader) — a `for` over
+            # a set parameter has to dispatch on `it_type == 'MojoSet *'` or
+            # it iterates the hash table through the list accessors.
             _e = self._infer_list_elem_type(a.elements)
             if _e == 'int64_t':
                 return None, None

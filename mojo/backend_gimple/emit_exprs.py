@@ -5735,9 +5735,9 @@ def _literal_slot_kinds(gen, lowered) -> str:
     the runtime's own documented fallback ("a slot the string does not cover
     ... falls back to the int accessor") describes the rest.
 
-    Getting this wrong is a SEGFAULT rather than a wrong digit, which is the
-    whole of `bugs/CODEGEN_star_spread_in_a_list_or_tuple_display_segfaults.md`:
-    the spread contributed one byte carrying the SPREAD OPERAND's kind
+Getting this wrong is a SEGFAULT rather than a wrong digit, which
+    is what the `*expr`-in-a-display fix was filed for (its doc is deleted with
+    it): the spread contributed one byte carrying the SPREAD OPERAND's kind
     (`MojoList *` -> `'l'`, the nested-list slot), so `[0, *a, 9]` recorded
     `"ili"` — three bytes for a FOUR-slot list, every byte after the first
     spread describing the wrong slot, and slot 1 (the integer 1 inside `a`)
