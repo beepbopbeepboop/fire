@@ -8,6 +8,31 @@ recorded because it is a property of the backend's value model that every float
 program inherits, and a reader who finds it by running one deserves the
 explanation rather than the symptom.
 
+**Measured 2026-10-04 (`work/formal29-3`), because the document's item 2 below is
+about the two backends AGREEING and that had never been measured over more than
+one divisor: it is.** Ten divisions in one program — `1.0/0.0`, `-1.0/0.0`,
+`0.0/0.0`, `1.0/-0.0`, `1.0/1.0e-320` (a denormal), `1.0/1.0e300`,
+`1.0e300/1.0`, `1.0e-320/1.0e-320`, `0.0/1.0`, `-0.0/1.0` — build and run on both
+architectures and **every answer is byte-identical between them** (`inf`, `-inf`,
+`nan`, `-inf`, `inf`, `0.000000`, the 309-digit expansion of 1e300, `1.000000`,
+`0.000000`, `-0.000000`), and every one is the IEEE answer CPython's model agrees
+with where CPython has an answer at all.
+
+Three things that measurement settles, and none of them is a fix:
+
+* **The divergence is with CPython and ONLY with CPython**, on the four
+  zero-divisor cases — so item 2's worry ("a model-level predicate should own
+  `bits & 0x7FFFFFFFFFFFFFFF == 0` so the two backends cannot answer differently
+  about it") is satisfied by the absence of the test rather than by a predicate:
+  there is no zero test in either backend for there to disagree about, and adding
+  a shared predicate nobody calls would be dead code with a reassuring name on it.
+* **`-0.0` is not a separate case here.** `1.0 / -0.0` answers `-inf` on both
+  machines, so the "the divisor's PATTERN is a zero" test item 2 describes has no
+  other spelling to keep consistent with on this path.
+* **`1.0 // 0.0` and `1.0 % 0.0`** raise in CPython too and are the same class;
+  nothing in this backend inspects a divisor for either operator, so the two are
+  one row in `FORMAL.md` §6 phase 5's queue rather than two.
+
 ## What was run
 
 ```
