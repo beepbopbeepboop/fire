@@ -37,6 +37,8 @@ from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           DTYPE_TYPE_NAMES, FLOAT_TYPE_NAMES)
 from formal.x86_64 import *  # noqa: F401,F403 — encoders, Reg, Assembler
 
+import collections
+
 import fire_compiler as F
 import mojo.middle.comptime as comptime_eval
 from formal import model as M
@@ -603,8 +605,14 @@ class X86_64Codegen:
                  module_source: str = "", dylib_exports: list = None,
                  globals_base: int = None, target_fmt: str = "macho",
                  import_aliases: dict = None, extern_decls: dict = None,
-                 entry_args: list = None):
+                 entry_args: list = None, opt: bool = False):
         """test_input: the value the startup stub passes to the entry.
+
+        opt: run the verified peephole pass (`formal/peephole.py`) over the
+          emitted instruction list. No x86-64 rule is enabled yet — see
+          `X86_RULES` there — so this runs the pass and rewrites nothing, which
+          is what makes the flag safe to expose on this backend before the
+          proofs exist.
 
         extern_style: how a call to an unbound symbol is emitted.
           "stub" — `call rel32` to a __TEXT,__stubs trampoline that jumps
@@ -647,6 +655,7 @@ class X86_64Codegen:
         if extern_style not in ("stub", "got"):
             raise CodegenError(
                 f"unknown extern_style {extern_style!r} (expected stub|got)")
+        self.opt = bool(opt)
         self.test_input = test_input
         # The startup stub's argument values, already NORMALISED by
         # `formal/build.py::_make_codegen` (the one place both backends are
@@ -993,6 +1002,11 @@ class X86_64Codegen:
             self.asm.emit(data)
 
         self.asm.resolve()
+        self.peephole_stats = None
+        if self.opt:
+            from formal.peephole import peephole_x86
+            self.peephole_stats = collections.Counter()
+            peephole_x86(self.asm, self.peephole_stats)
         code = bytes(self.asm.sections["text"])
         external_syms = list({sym for sym, _, _, _ in self.asm.extern_refs})
         extern_calls = sorted(

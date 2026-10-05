@@ -227,9 +227,23 @@ def _extract_gpu_flags(args: list):
 
 
 def _extract_formal_flags(args: list):
+    """`--formal`, `--no-prove`, `--check-contracts`, `--opt`, and the rest.
+
+    `--check-contracts` asks for the host contracts' assumption TEXT rather
+    than their count; `--opt` turns on `formal/peephole.py`, the verified
+    peephole pass. Both are off by default and both defaults are deliberate.
+    For `--opt` the reason is that every rewrite the pass performs is licensed
+    by a theorem in `lib/Peephole.lean` saying the machine model is unchanged,
+    but a proved rewrite is only as good as the pass's ability to decide the
+    rewrite's side conditions, and the flag is how the corpus and the
+    differential fuzzer are run both ways so the OUTPUT can be compared.
+    `bugs/FORMAL_peephole_rules_without_proofs.md` has what is enabled and what
+    is not.
+    """
     formal = False
     prove = True
     check_contracts = False
+    opt = False
     remaining = []
     for a in args:
         if a == '--formal':
@@ -238,9 +252,11 @@ def _extract_formal_flags(args: list):
             prove = False
         elif a == '--check-contracts':
             check_contracts = True
+        elif a == '--opt':
+            opt = True
         else:
             remaining.append(a)
-    return formal, prove, check_contracts, remaining
+    return formal, prove, check_contracts, opt, remaining
 
 
 def _pop_flag_value(argv: list, flag: str):
@@ -381,7 +397,8 @@ def _trust_note(result) -> str:
 
 def _formal_executable(input_file: str, output, test_input: int, prove: bool,
                        run_it: bool, link_dylibs=None, arch: str = "arm64",
-                       check_contracts: bool = False) -> int:
+                       check_contracts: bool = False,
+                       opt: bool = False) -> int:
     """The one formal executable path: `fire build --formal` and bare
     `fire --formal <file>` both land here, and nothing else builds one.
 
@@ -398,7 +415,12 @@ def _formal_executable(input_file: str, output, test_input: int, prove: bool,
                                     prove=prove, check=prove,
                                     arch=arch,
                                     check_contracts=check_contracts,
-                                    link_dylibs=list(link_dylibs or []))
+                                    link_dylibs=list(link_dylibs or []),
+                                    opt=opt)
+        if result.get("peephole"):
+            fired = ", ".join(f"{k}×{v}" for k, v
+                              in sorted(result["peephole"].items()))
+            print(f"peephole: {fired}")
     except _fb.FormalBuildError as e:
         print(f"build: {e}", file=sys.stderr)
         return 1
@@ -1153,7 +1175,7 @@ def main():
     opt_flag, debug_flag, rest = _extract_codegen_flags(sys.argv[1:])
     backend_explicit = _backend_was_explicit(sys.argv[1:])
     backend, rest = _extract_backend(rest)
-    formal, prove, check_contracts, rest = _extract_formal_flags(rest)
+    formal, prove, check_contracts, opt, rest = _extract_formal_flags(rest)
     # --no-gpu: turn off auto-offload of recognised parallel loop nests. Marked
     # @gpu/@kernel code is unaffected. Extracted here, alongside the other
     # flags, so it is stripped from argv before `program_args = sys.argv[2:]`
@@ -1430,7 +1452,8 @@ def main():
                 input_file, build_output,
                 10 if formal_test_input is None else formal_test_input,
                 prove, run_it=False, link_dylibs=build_link_dylibs,
-                arch=backend, check_contracts=check_contracts))
+                arch=backend, check_contracts=check_contracts, opt=opt))
+
         try:
             import driver
             rc = driver.compile_program(
@@ -1602,7 +1625,7 @@ def main():
                 input_file, None,
                 10 if formal_test_input is None else formal_test_input,
                 prove, run_it=True, arch=backend,
-                check_contracts=check_contracts))
+                check_contracts=check_contracts, opt=opt))
         try:
             import driver
             rc = driver.compile_program(

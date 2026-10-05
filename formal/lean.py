@@ -142,11 +142,16 @@ import time
 # `Specs` is LAST and imports only `ProofLib`: it is the INDEPENDENT
 # specification layer — reference definitions for the classic example programs,
 # written by hand in Lean's own `Nat`/`Int`/`List` rather than derived from a
-# source file the same way `mojo` is.  It is last because it is the only module
-# no other library module imports, and a generated proof imports it only when
-# its source carries an `@refines(...)` annotation.
+# source file the same way `mojo` is.  It is last because no library module
+# imports it, and a generated proof imports it only when its source carries an
+# `@refines(...)` annotation.
+#
+# `Peephole` sits ahead of it and imports `ProofLib` and `X86` — the same pair
+# `work` does — because the peephole rules are stated over the machine model's
+# step functions (`arm64_step`, `x86_step`), so build order puts it after `X86`
+# and there is nothing in it that could import `Specs`.
 LIBRARY_MODULES = ("IEEE754", "ProofLib", "X86", "work", "Refine", "Contracts",
-                   "Specs")
+                   "Peephole", "Specs")
 VERDICT_EXT = ".leanverdict"
 # Where a library module's own hole census is stored, beside the .olean it was
 # measured from and under the same key — so a cas HIT on the .olean is a hit on

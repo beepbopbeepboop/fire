@@ -240,3 +240,44 @@ $ python3 tools/memslot.py --gb 8 --label pb -- python3 tools/suite.py prooflib
 $ python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_sweep_truth.py
 $ python3 test_formal_admitted.py truth        # the two SITE rows above
 ```
+
+---
+
+## Addendum 2026-10-05 (`work/merge-formal39`): two more arrivals, and a THIRD copy of the numbers
+
+Found while merging `work/formal36-verified-peephole`, which added
+`lib/Peephole.lean`. Neither item below is a new bug; both are this doc's subject
+arriving again, and neither is visible to any assertion, which is why it is here.
+
+**1. `AXIOM_CLOSURE` has no `Peephole` row, so one library module's closure is
+unmeasured and silently so.** `lib/` now has EIGHT modules and the table has
+seven: `IEEE754`, `ProofLib`, `Refine`, `X86`, `work`, `Contracts`, `Specs`.
+`lib/Peephole.lean` (521 lines, three `peephole_arm64_*` rules) is missing. The
+assertion cannot notice — `test_formal_sweep_truth.py:2209` reads
+`for mod, want in AXIOM_CLOSURE.items()`, so it iterates the TABLE, not the
+library, and a module nobody measured is a module nobody is checking. The
+one-line fix is a row read out of
+`A.theorem_axiom_census(lean, lib, modules=['Peephole'])` on the pinned
+toolchain, and it must be a MEASUREMENT: `LIBRARY_TRUST["Peephole"]` is
+`(0, 0, 9, 9)` — zero `sorry`, zero `axiom`, nine `bv_decide` sites — which is the
+site census and says nothing about how many of those nine the kernel reaches.
+
+**2. `FORMAL.md` §7 row 10 publishes a FOURTH set of figures, and it disagrees
+with the table it claims to summarise.** The row's closing clause reads "of
+`lib/`'s **520** askable declarations, **67** rest on one of these axioms and
+**442** are kernel-checked … 5.7 s over all **six** modules". `AXIOM_CLOSURE`
+sums to **589** asked, **81** reaching, **497** clean over **seven** modules —
+and 67 + 442 = 509 ≠ 520 even on its own terms, so the clause was already not a
+sum of its two halves before this merge. The row's `total`/`replaced`/`remaining`
+triple (1616 / 67 / 1549) IS checked, by
+`test_formal_admitted.py::test_the_axiom_tactic_count_is_consistent`, which reads
+it by STRUCTURE out of the document; the closure clause has no such reader,
+which is why it drifted while the triple did not.
+
+**The next step is the same one this file already names, plus this:** re-derive
+the table (§"The exact next step" steps 1–2) and then publish the row's closure
+clause FROM the table rather than beside it — or, if the prose is meant to be a
+narrative, say so in it. A row of §7 that restates a measurement no test reads
+is a fourth copy, and this repository already knows what four copies of one
+number cost (§0.3 of the doc this one lives beside is the same failure in the
+classification tables).

@@ -78,9 +78,11 @@ from formal import lean as L                      # noqa: E402
 # `Specs` is last for the same reason it is last in `formal/lean.py`'s tuple:
 # it is the independent specification layer, imports only `ProofLib`, and is
 # covered here for the reason every module in the tuple is — a module outside
-# it is a module whose axioms nobody counts.
+# it is a module whose axioms nobody counts. `Peephole` sits ahead of it and
+# imports `ProofLib` and `X86`, like `work`, because its rules are stated over
+# the two step functions.
 LIBRARY_MODULES = ("IEEE754", "ProofLib", "Refine", "X86", "work", "Contracts",
-                   "Specs")
+                   "Peephole", "Specs")
 FOUNDATION = set(L.AXIOM_FOUNDATION)
 
 # The theorems whose axiom set this campaign CHANGED, plus the three that keep
