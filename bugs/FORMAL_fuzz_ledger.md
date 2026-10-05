@@ -41,10 +41,19 @@ bugs fixed, five limits filed, and eight defects in the tool itself. §2.1 adds
 **5100 programs over 41 more sweeps**, THREE more fixes and three more tool
 defects, and §2.1a one more sweep of 100 programs and one more fix, and §4.12's
 fix adds one more tool defect found by its own first run (the thirteen is that
-one), so the whole file is **10412 programs over 67 sweeps** and **thirteen** tool
+one), so the whole file is **10418 programs over 68 sweeps** and **thirteen** tool
 defects — and the last eleven rows of §2.1 are the OLD mixes on fresh seed
 ranges, which is what says the fixes did not cost the corpus anything it already
 had.
+
+**The last row is §4.12c's and it is a RE-RUN, which is the honest way to count
+it**: the `strings`/`sweepD` 4000-4001 programs were swept in §2.1's own table
+(100 programs at that mix's scale) and are counted there, so re-running two of
+them adds six NEW programs (`limits`, a seed range this file had not used) and
+not eight. §4.12c's tally line is not a fourteenth tool DEFECT either — it is
+the closing of §4.12's own "a REPORT with no owner", which is a missing
+aggregate rather than a wrong answer, and calling it a defect would make the
+count mean two things.
 
 | date | mix | seed | indexes | programs | tally | what came of it |
 |---|---|---|---|---|---|---|
@@ -62,6 +71,8 @@ had.
 | 2026-10-03 | `signed` | `sweepF` | 6000-6099 | 100 | 31 match, 69 `KNOWN` (28 `floordiv`, 27 `modulo`, 14 both), 0 findings | nothing — every disagreement reduced to the documented one |
 | 2026-10-03 | `strings` | `sweepD` | 4000-4011 | 12 | 3 match, 7 `KNOWN:str_subscript`, 2 `MISMATCH-X86` | the 2 are §4.4, a minimiser artefact — **not** backend bugs |
 | 2026-10-04 | `signed` | `floor21` | 9000-9099 | 100 | **100 match**, 0 findings | the two `KNOWN_DIVERGENCES` rows this row retires were worth 62 of `sweepG`'s 100 (§2.1) — see §2.1a |
+| 2026-10-04 | `limits` | `ledger19` | 0-5 | 6 | 6 refusal (12 audited, `true=12`), 0 findings | nothing about the corpus; this row exists because a campaign with NO findings still has to print the reduction tally — §4.12c |
+| 2026-10-04 | `strings` | `sweepD` | 4000-4001 | 2 | 2 `KNOWN:str_subscript`, **both reductions `stopped-reproducing`** | nothing new in the backend: the reductions walked out of the known construct into a disagreement `blame` cannot name, which until §4.12c's tally line existed was a field in `findings.json` that nothing aggregates — §4.12c |
 
 The first two rows are a BASELINE rather than a result: they ran on master's
 corpus with the five new mixes absent, which is what "the corpus covered
@@ -946,13 +957,72 @@ finding against the two kinds of candidate, no compiler — and non-vacuous:
 `_answers_only = lambda want: False` puts the `drops_a_refusal` row red with one
 build and nothing else.
 
-**Not fixed, and it is a campaign, not a patch:** the two programs above are the
-only findings the `strings` corpus still produces on one backend, and
+**Not fixed, and it is a campaign, not a patch:** the two programs above are
+the only findings the `strings` corpus still produces on one backend, and
 `reduced_verdict` for a reduction that stopped disagreeing is a REPORT with no
 owner — nothing acts on it. The honest next step is a tally line for it, the way
 `REFUSAL-FALSE` is a tally line for a message that is false of the program, so a
 campaign can report "N reductions stopped reproducing" instead of leaving it in a
 field.
+
+#### 4.12c FIXED 2026-10-04 (`work/formal19-3`): `reduced_verdict` is a tally
+#### line, and it has a number
+
+**Status: DONE**, and the campaign above is the measurement that says what the
+number is for — because re-running it is how the line was verified end to end,
+and the run it produced is the first evidence this corpus has had that a
+reduction can walk OUT of the known construct and into a disagreement nobody
+attributed:
+
+```
+python3 tools/formal_fuzz.py --mix strings --seed sweepD --seeds 4000-4001 \
+    -j 1 --max-min-steps 20 --min-kind x86 --work .tmp/fz/str
+  KNOWN:str_subscript  #4000
+      reduced 619 -> 396 bytes; the reduction itself is MISMATCH-X86
+  KNOWN:str_subscript  #4001
+      reduced 1117 -> 648 bytes; the reduction itself is MISMATCH-X86
+  reductions: reproduced=0, stopped-reproducing=2, no-oracle=0
+```
+
+Both findings are the documented `str_subscript` divergence, and **both
+reductions stopped reproducing it** — the shrinker reached a program that
+disagrees for a reason `blame` could not name. §4.11 already measured that the
+minimiser reaches a construct the corpus cannot generate (the no-`return`
+helper), and this is the same fact one level further out: the reduction is
+worse than the finding, and the only place that was visible was a field in
+`findings.json` that nothing aggregates.
+
+Three classes and the third is the one that could have been got wrong:
+
+| class | what it is | why it is its own class |
+|---|---|---|
+| `reproduced` | the reduction's own `classify` is the record's `verdict` | — |
+| `stopped-reproducing` | the reduction classified as SOMETHING ELSE | a reduction that stopped agreeing is not a quieter finding, it is a different one, and a campaign's number of these is the number of programs a reader would have taken at face value |
+| `no-oracle` | `reduced_want is None` — CPython rejects or times out the reduction | a reduction CPython cannot run has not stopped reproducing; it was never measured, and counting it as a shrinker regression would blame the shrinker for CPython's answer |
+
+A record the minimiser did not shrink contributes to **none** of them, and says
+so by being absent rather than by counting as `reproduced`: "it reproduced" is a
+claim about a reduction that exists. That is `reduction_tally_class`'s `None`,
+and it is why the line can print `0/0/0` on a clean campaign.
+
+**Printed zero-included**, for the reason `ALWAYS_REPORTED` gives: a campaign
+that shrank nothing has to be able to say so, and a line that appears only when
+it is non-zero cannot distinguish that from a summary that never mentioned
+shrinking. Measured, on a campaign with no findings at all:
+
+```
+python3 tools/formal_fuzz.py --mix limits --seed ledger19 --seeds 0-5 ...
+  reductions: reproduced=0, stopped-reproducing=0, no-oracle=0
+```
+
+**The line is a FUNCTION** (`formal_fuzz.py::reduction_tally_line`), not a
+`print` in the summary, because the summary is `main()` and `main()` needs a
+compiler, an oracle and a `--work` directory — so a line written there is a line
+nothing can check. `test_formal_fuzz.py`'s new `reduction` half pins the four
+record shapes, the coverage of `REDUCTION_TALLY` (the check `check_audit` already
+does for `AUDIT_VERDICTS`), and the two properties the line exists to have: the
+field ORDER (a reader is reading positions, not keys) and zero-inclusion. Four
+rows, no compiler.
 
 ## 5. What the corpus still cannot say, and what it costs to run
 

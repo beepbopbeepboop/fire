@@ -4275,6 +4275,7 @@ def main():
     started = time.time()
     counts = {}
     blamed = {}
+    reductions = {}
     findings = []
     constructs = {}
     audits = {}
@@ -4287,6 +4288,13 @@ def main():
                 range(args.start, args.start + args.count)))
         for rec in recs:
             counts[rec["verdict"]] = counts.get(rec["verdict"], 0) + 1
+            # The reduction tally, counted over EVERY program and not over the
+            # findings: a reduction belongs to a record that has one, and the
+            # point of the line is that "0 stopped reproducing" is a fact about
+            # the campaign rather than about the subset of it that shrank.
+            reduced = reduction_tally_class(rec)
+            if reduced is not None:
+                reductions[reduced] = reductions.get(reduced, 0) + 1
             line = report(rec, args)
             if line and rec["verdict"] != "refusal":
                 print(line, flush=True)
@@ -4340,6 +4348,11 @@ def main():
     for v, n in sorted(counts.items(), key=lambda kv: -kv[1]):
         if v not in ALWAYS_REPORTED:
             print(f"  {v:<18} {n}")
+    # Always, zero included — see REDUCTION_TALLY's own paragraph. Placed with
+    # the refusal audit rather than among the verdicts because it is a tally
+    # ABOUT the findings rather than another verdict, and a reader looking for
+    # the verdict counts must not read its numbers as one.
+    print("  " + reduction_tally_line(reductions))
     if constructs:
         print("  refusals by construct (the mix this corpus reached, per backend):")
         for (backend, what), n in sorted(constructs.items(),
@@ -4513,6 +4526,60 @@ MIN_KINDS = {"x86_64": "x86", "arm64": "arm"}
 #: are here.  A CPython timeout is the ORACLE's verdict and says nothing about
 #: the backends, which is why it is neither a finding nor counted as one.
 ALWAYS_REPORTED = ("match", "trapped", "refusal", "CPYTHON-TIMEOUT")
+
+#: What became of each finding's REDUCTION, counted and printed ALWAYS. §4.12 of
+#: `bugs/FORMAL_fuzz_ledger.md` put `reduced_verdict` on the record and named the
+#: honest next step: it is a REPORT with no owner, because nothing acts on it —
+#: "the two programs above are the only findings the `strings` corpus still
+#: produces on one backend, and `reduced_verdict` for a reduction that stopped
+#: disagreeing is a REPORT with no owner — nothing acts on it. The honest next
+#: step is a tally line for it, the way `REFUSAL-FALSE` is a tally line for a
+#: message that is false of the program". This is that line.
+#:
+#: A campaign's number is its findings, so a number about its REPRODUCERS is a
+#: number about the campaign: `stopped-reproducing` counts shrinker regressions
+#: that a reader would otherwise meet one `findings.json` at a time, and it is
+#: the honest complement of `verdict`, which is never changed by it (the finding
+#: is about the program that produced it).
+#:
+#: Printed zero-included for the reason `ALWAYS_REPORTED` gives — a sweep that
+#: shrank nothing has to be able to say so, and a line that appears only when it
+#: is non-zero cannot. `no-oracle` is the third class rather than folded into
+#: the second because a reduction CPython cannot run has not STOPPED
+#: reproducing; it was never measured, and counting it as a shrinker regression
+#: would blame the shrinker for CPython's answer.
+REDUCTION_TALLY = ("reproduced", "stopped-reproducing", "no-oracle")
+
+
+def reduction_tally_class(rec) -> str | None:
+    """Which of `REDUCTION_TALLY` this finding's reduction is, or None.
+
+    None for a finding the minimiser did not shrink — `--max-min-steps 0`, or a
+    refusal a predicate could not reduce — and None rather than
+    `reproduced`, because "it reproduced" is a claim about a reduction that
+    exists and there is none here.
+    """
+    if "reduced_verdict" not in rec:
+        return None
+    if rec.get("reduced_want") is None:
+        return "no-oracle"
+    return ("reproduced" if rec["reduced_verdict"] == rec["verdict"]
+            else "stopped-reproducing")
+
+
+def reduction_tally_line(counts: dict) -> str:
+    """The summary's one reduction line, every class in `REDUCTION_TALLY`.
+
+    A function rather than a `print` in the summary because the summary is
+    `main()` and `main()` needs a compiler, an oracle and a `--work`
+    directory — so a line written there is a line nothing can check. `AUDIT_
+    VERDICTS`'s own line is spelled in the summary for the same reason it is
+    spelled in one place; this one is a function for the stronger reason, which
+    is that the field order and the zero-inclusion are the two properties worth
+    pinning and neither is visible from a dict.
+    """
+    return "reductions: " + ", ".join(
+        f"{v}={counts.get(v, 0)}" for v in REDUCTION_TALLY)
 
 #: The refusal audit's own verdicts, in the order a summary prints them.  Named
 #: here rather than derived from the records so the line is the SAME four fields

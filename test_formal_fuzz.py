@@ -853,6 +853,75 @@ def check_record(verbose=False):
     return failures
 
 
+def check_reduction_tally(verbose=False):
+    """A reduction that STOPPED reproducing is a tally line, not a field.
+
+    No compiler: `reduction_tally_class` reads a record and the summary line is a
+    function, so the whole of §4.12's "the honest next step is a tally line for
+    it, the way `REFUSAL-FALSE` is a tally line for a message that is false of
+    the program" is reachable here — and it was not before, because
+    `reduced_verdict` was on every record and in no aggregate, so a campaign's
+    number of shrinker regressions could only be had by reading
+    `findings.json`.
+
+    Four rows and the shape of the fourth is the point: a reduction CPython
+    cannot run has NOT stopped reproducing, it was never measured, and folding
+    it into `stopped-reproducing` would blame the shrinker for CPython's
+    answer. Plus the coverage check `check_audit` already does for
+    `AUDIT_VERDICTS`, so a fourth class cannot be added without a case here.
+    """
+    failures = 0
+    cases = (
+        ({"verdict": "MISMATCH-X86", "reduced_verdict": "MISMATCH-X86",
+          "reduced_want": {"exit": 0, "stdout": "1\n"}}, "reproduced"),
+        ({"verdict": "MISMATCH-X86", "reduced_verdict": "match",
+          "reduced_want": {"exit": 0, "stdout": "1\n"}},
+         "stopped-reproducing"),
+        ({"verdict": "MISMATCH-X86", "reduced_verdict": "generator-error",
+          "reduced_want": None}, "no-oracle"),
+        ({"verdict": "MISMATCH-X86"}, None),
+    )
+    reached = set()
+    for rec, want in cases:
+        got = F.reduction_tally_class(rec)
+        reached.add(got)
+        if got != want:
+            failures += _fail(
+                "reduction_tally_class", f"a record with "
+                f"verdict={rec['verdict']!r} and "
+                f"reduced_verdict={rec.get('reduced_verdict')!r} is {got!r}, "
+                f"expected {want!r}", verbose)
+    missing = set(F.REDUCTION_TALLY) - reached
+    if missing:
+        failures += _fail(
+            "reduction_tally_has_no_case_for",
+            f"{sorted(missing)} is in REDUCTION_TALLY and in no row here. The "
+            f"summary prints that class whether or not it happened, so a class "
+            f"with no case is a number no reader can interpret", verbose)
+
+    # The line itself: EVERY class, in `REDUCTION_TALLY`'s order, zero included.
+    # Zero-inclusion is the property worth pinning — a line that appears only
+    # when it is non-zero cannot distinguish a campaign that shrank nothing from
+    # a campaign whose summary never mentioned shrinking.
+    empty = F.reduction_tally_line({})
+    if empty != "reductions: reproduced=0, stopped-reproducing=0, no-oracle=0":
+        failures += _fail(
+            "reduction_tally_line_empty",
+            f"an empty tally printed {empty!r}, so a sweep that shrank nothing "
+            f"cannot say so", verbose)
+    full = F.reduction_tally_line({"no-oracle": 1, "reproduced": 4,
+                                   "stopped-reproducing": 2})
+    if full != ("reductions: reproduced=4, stopped-reproducing=2, no-oracle=1"):
+        failures += _fail(
+            "reduction_tally_line_full",
+            f"a tally of 4/2/1 printed {full!r} — the classes have to appear in "
+            f"REDUCTION_TALLY's order whatever the dict's is, because a reader "
+            f"is reading positions", verbose)
+    print(f"formal fuzz: reduction  {'PASS' if not failures else 'FAIL'} "
+          f"{len(F.REDUCTION_TALLY)} classes (no compiler)")
+    return failures
+
+
 def check_shrink_predicate(verbose=False):
     """`_still_fails` preserves the KIND of disagreement it was given.
 
@@ -1184,6 +1253,7 @@ def main():
     failures = check_classifier(args.verbose)
     failures += check_audit(args.verbose)
     failures += check_record(args.verbose)
+    failures += check_reduction_tally(args.verbose)
     failures += check_shrink_predicate(args.verbose)
     failures += check_frame_budget(args.verbose)
     for mix in mixes:
