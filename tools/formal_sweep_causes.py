@@ -907,11 +907,18 @@ _REFUSED_NAME_RE = re.compile(r"'([A-Za-z_]\w*)'")
 # it says the row is not that project's priority.
 CAUSE_NO_BOUNDARY_SYMBOL = "module exports no public functions"
 
+#: The bucket a message lands in when no cause in `CAUSES` claims it, named here
+#: because `formal_sweep.py`'s loud unclassified-shape finding — its
+#: `unclassified_report`, which owns the shapes, the threshold and the sweep's
+#: exit 4 — is fed this same string from this side, and two spellings of one
+#: bucket would be two buckets.
+UNCLASSIFIED = "other refusal"
+
 DEFAULT_MIN = 1
 
 
-def classify_message(msg):
-    """The cause label for one terminal message, or `"other refusal"`.
+def classify_message(msg: str):
+    """The cause label for one terminal message, or `UNCLASSIFIED`.
 
     ANY alternative matching is enough; every marker WITHIN an alternative must
     be present. See the module docstring for what happens when either half is
@@ -921,7 +928,7 @@ def classify_message(msg):
         for markers in alternatives:
             if all(marker in msg for marker in markers):
                 return label
-    return "other refusal"
+    return UNCLASSIFIED
 
 
 # ── `uses:` — of the files a refusing module blocks, how many name anything it
@@ -1103,7 +1110,16 @@ def _uses_table(rows_for_label):
 
 
 def rank(log_path):
-    """`[{cause, files, in_file, refused_in, example, text}]`, biggest first."""
+    """`([{cause, files, in_file, refused_in, example, text}], lines, unclassified)`.
+
+    `lines` is the total this table accounted for, and `unclassified` is
+    `[(path, terminal message)]` for every row this table could not name — which
+    is what `formal_sweep.py`'s loud unclassified-shape finding is fed, so that
+    the alarm is ONE implementation reached from both instruments rather than a
+    threshold and a printer that have to be kept in step here. Returns a third
+    value because the pairs are read off the same pass over the log as the
+    counts; a second pass would be a second reader of the same file.
+    """
     rows = []
     with open(log_path, errors="replace") as f:
         for raw in f:
@@ -1111,6 +1127,7 @@ def rank(log_path):
             if m and m.group("cls") in ("CODEGEN", "CODEGEN/DEPENDENCY"):
                 rows.append((m.group("cls"), m.group("path"), m.group("detail")))
 
+    unclassified = []
     blocked = collections.Counter()
     in_file = collections.Counter()
     where = collections.defaultdict(collections.Counter)
@@ -1132,6 +1149,8 @@ def rank(log_path):
         refuser = FS._refuser(term) or FS.refusing_module(msg)
         label = classify_message(msg)
         blocked[label] += 1
+        if label == UNCLASSIFIED:
+            unclassified.append((path, msg))
         if cls == "CODEGEN":
             in_file[label] += 1
         # Where the refusal really came from, which is NOT the file the sweep
@@ -1160,7 +1179,7 @@ def rank(log_path):
             "example": path,
             "text": msg,
         })
-    return out, sum(blocked.values())
+    return out, sum(blocked.values()), unclassified
 
 
 # ── the HOST row: `not-answerable/host-import`, ranked by the MODULE ─────────
@@ -1713,55 +1732,90 @@ def main():
             print_host_table(table, args.minimum, lines, files_all)
         return 0
 
-    table, total = rank(args.log)
+    table, total, unclassified = rank(args.log)
     shown = [r for r in table if r["files"] >= args.minimum]
     if args.json:
         json.dump(shown, sys.stdout, indent=1)
         print()
-    else:
-        print(f"{'files':>5} {'in-file':>7}  cause")
-        for r in shown:
-            print(f"{r['files']:>5} {r['in_file']:>7}  {r['cause']}")
-            print(f"        refused in: "
-                  f"{', '.join(f'{k} x{v}' for k, v in r['refused_in'])}")
-            if r["refused_names"]:
-                print("        names:      "
-                      + ", ".join(f"{k} x{v}"
-                                  for k, v in r["refused_names"][:8]))
-            for refuser, src, blocks, uses, declared in r["uses"]:
-                if src is None:
-                    note = ("NOT MEASURED: the chain names this module by "
-                            "basename only and that basename is absent or "
-                            "ambiguous in this tree")
-                elif not declared:
-                    note = ("measured 0, and it cannot be otherwise: the "
-                            "module declares no name the export rule could "
-                            "exclude")
-                elif uses == 0:
-                    note = ("the refusal is about the import CLOSURE, not "
-                            "about these files — see the module docstring")
-                elif uses == blocks:
-                    note = "every blocked file uses it, so the row is work"
-                else:
-                    note = (f"{blocks - uses} of the {blocks} name nothing it "
-                            f"declares; the rest of the row is closure")
-                print(f"        uses:        "
-                      f"{'not measured' if src is None else uses} "
-                      f"of {blocks} blocked by {refuser} name anything it "
-                      f"declares"
-                      + (f" ({', '.join(declared[:6])})" if declared else "")
-                      + f"  [{note}]")
-            print(f"        example:    {r['example']}")
-        shown_files = sum(r["files"] for r in shown)
-        print(f"\n{shown_files} of {total} codegen/dependency lines "
-              f"accounted for, in {len(shown)} cause(s) of "
-              f"{len(table)}")
-        print("FILES BLOCKED IS AN UPPER BOUND: a file's terminal cause is the "
-              "first refusal reached,\nso fixing one usually moves it to the "
-              "next. Measure a cause's real value by\nre-sweeping the files it "
-              "blocks — the census is "
-              "bugs/FORMAL_sweep_work_map_2026-09-30_r2.md, which replaced "
-              "§3 of the 2026-09-30 original.")
+        return 0
+    print(f"{'files':>5} {'in-file':>7}  cause")
+    for r in shown:
+        print(f"{r['files']:>5} {r['in_file']:>7}  {r['cause']}")
+        print(f"        refused in: "
+              f"{', '.join(f'{k} x{v}' for k, v in r['refused_in'])}")
+        if r["refused_names"]:
+            print("        names:      "
+                  + ", ".join(f"{k} x{v}"
+                              for k, v in r["refused_names"][:8]))
+        for refuser, src, blocks, uses, declared in r["uses"]:
+            if src is None:
+                note = ("NOT MEASURED: the chain names this module by "
+                        "basename only and that basename is absent or "
+                        "ambiguous in this tree")
+            elif not declared:
+                note = ("measured 0, and it cannot be otherwise: the "
+                        "module declares no name the export rule could "
+                        "exclude")
+            elif uses == 0:
+                note = ("the refusal is about the import CLOSURE, not "
+                        "about these files — see the module docstring")
+            elif uses == blocks:
+                note = "every blocked file uses it, so the row is work"
+            else:
+                note = (f"{blocks - uses} of the {blocks} name nothing it "
+                        f"declares; the rest of the row is closure")
+            print(f"        uses:        "
+                  f"{'not measured' if src is None else uses} "
+                  f"of {blocks} blocked by {refuser} name anything it "
+                  f"declares"
+                  + (f" ({', '.join(declared[:6])})" if declared else "")
+                  + f"  [{note}]")
+        print(f"        example:    {r['example']}")
+    shown_files = sum(r["files"] for r in shown)
+    print(f"\n{shown_files} of {total} codegen/dependency lines "
+          f"accounted for, in {len(shown)} cause(s) of "
+          f"{len(table)}")
+    print("FILES BLOCKED IS AN UPPER BOUND: a file's terminal cause is the "
+          "first refusal reached,\nso fixing one usually moves it to the "
+          "next. Measure a cause's real value by\nre-sweeping the files it "
+          "blocks — the census is "
+          "bugs/FORMAL_sweep_work_map_2026-09-30_r2.md, which replaced "
+          "§3 of the 2026-09-30 original.")
+
+    # THE UNCLASSIFIED BUCKET, LOUDLY, and it is `formal_sweep.py`'s alarm
+    # rather than a second one: its `unclassified_report` owns the shape
+    # grouping, the threshold and the wording, and this table calls it with ITS
+    # OWN classifier's unclassified rows and with the sweep's family table as the
+    # other opinion — so a shape this table cannot name but the sweep's can is
+    # reported here as a one-row fix in `CAUSES`, and a shape NEITHER can name
+    # is reported as what it is, which is the 2026-10-04 b12 failure: 236 of this
+    # table's files, the corpus's largest row, found by reading a work map
+    # afterwards instead of by running anything.
+    #
+    # The exit status is unchanged, and the module docstring's rule is why: this
+    # tool reports on another tool's output and has no opinion about it. The
+    # sweep that produced the log is the thing that exits 4, over the same rows
+    # measured by the same function.
+    print()
+    FS.unclassified_report(unclassified, _swept(args.log),
+                           other_classify=FS._refusal_family,
+                           other_name="formal_sweep.py's _REFUSAL_FAMILIES")
+    return 0
+
+
+def _swept(log_path):
+    """The file total from a sweep log's own summary line, or 0 if it has none.
+
+    Read for the SHARE half of the honesty bar, and a missing line is 0 rather
+    than a guess: with no denominator the bar is the file count alone, which is
+    the stricter of the two, so a log without a summary line under-reports the
+    finding instead of inventing one.
+    """
+    with open(log_path, errors="replace") as f:
+        for raw in f:
+            m = FS.SUMMARY_RE.match(raw)
+            if m:
+                return int(m.group("files"))
     return 0
 
 
