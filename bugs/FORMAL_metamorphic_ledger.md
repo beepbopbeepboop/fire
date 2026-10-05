@@ -58,6 +58,32 @@ No build, no memslot pressure worth naming (well under 0.1 GB), and it is the
 cheapest thing in this file per unit of coverage: it is what catches a defect in
 a transform before any image exists, and it found the twelfth one in §5.
 
+**Sweep 7 — the LARGE-PROGRAM sweep, and the only one that found anything.** Every
+row above is `--stmts 8 20` or `8 24`. All 22 mixes at `--stmts 30 60`, 8
+programs each, **1760 pairs**, both architectures, `-j 4`, 3.8-112.9 s per mix.
+**0 findings, 0 `transform-invalid`, 0 `transform-crash`** — after the three
+fixes in §5b, each of which was a false positive on ten programs or seven.
+Peak 0.3 GB.
+
+Three reasons this row exists and the others do not substitute for it:
+
+* **programs are 3x the frame.** Every one of §2's programs is small, so a rule
+  that is only wrong on large programs is indistinguishable from a rule that is
+  right. `REFUSAL-DIVERGES` compared LINE NUMBERS, and it fired on 10 of 10
+  `limits` programs here and on none of the 440 in §2's sweep 6 — because a small
+  program has no refusal to quote a line from.
+* **the `refused by backend` line is what makes the row readable at all.** Every
+  program of `limits` and of `fstrings` is REFUSED on both machines, which the
+  tally reported as `match` — so "1760 pairs, 0 findings" is 160 of those pairs
+  measuring nothing, and before the line existed the screen said `match 10` and
+  nothing else.
+* **`CROSS-MACHINE-REFUSAL` is new** and this sweep is what reached it: 1 of 8
+  `slicing` programs, where x86-64 refused a slice view for the container budget
+  and arm64 built it. That one is the DOCUMENTED asymmetry (§4b), so the sweep
+  reports it as a measurement rather than a finding — which is the point of the
+  row: it says how often the budget is the binding constraint, and a reader can
+  now see the answer instead of inferring it from a clean tally.
+
 ## 3. What metamorphic testing reaches that differential testing cannot, and the measurement
 
 `formal_fuzz` finds a miscompile only where the program PRINTS the value whose lowering is wrong. That is a property of the program, not of the backend, and it is structural: a register-allocation bug in a frame slot the program never prints is invisible to a corpus whose programs all have the same shape.
@@ -124,6 +150,57 @@ Measured: 7 of the 51 examples are measured in a dialect this tool rewrote
 answered the same**. It costs no build when no rule fired, which is the whole
 generated corpus and 45 of the 52 examples.
 
+## 5b. Three defects that only a LARGE-PROGRAM sweep could reach, and what each would have been filed as
+
+Sweep 7 is the row that found them and the reason §2's rows did not is in §2's own
+words: a small program has no refusal, and a rule that only fires on a refusal has
+nothing to fire on. All three are in `tools/formal_metamorph.py` and all three are
+the same shape — **the comparison was right about the sentence and wrong about
+something the sentence POINTS AT**.
+
+| what | measured | would have been filed as |
+|---|---|---|
+| `REFUSAL-DIVERGES` compared LINE NUMBERS, and six of the ten transformations move every line below the one they add | 10 of 10 `limits` programs at `--stmts 30 60`, every one the identical sentence at `line 46` and `line 51` | a backend that refuses the same program in two words |
+| …and QUOTED SOURCE. The generator spells `F'v={s1} '`, `ast.unparse` spells it `f'v={s1} '`, and a twin is an AST always, and the refusal quotes the token the parser kept | 7 of 8 `fstrings` programs, every one the same construct | as above |
+| a `+` in the advice sentence ("build the text with `+` once that is lowered") was folded or not according to whether `+` appeared ANYWHERE in the program | 2 of 8, and it is why the rule needs "more than one character" | as above, intermittently — which is worse, because it would have been a finding nobody could reproduce |
+
+And one that is not a comparison at all: **every finding was written with an EMPTY
+reproducer.** `main` writes `<stem>.mojo` from the program record, and `rec["text"]`
+was only ever set on a normalisation failure — so all ten of the first sweep's
+findings shipped with the diagnostic in `findings.json` and nothing to feed it
+back in. A finding nobody can re-run is a claim, not a finding.
+
+The fourth thing sweep 7 reached is a **verdict that did not exist**:
+`CROSS-MACHINE-REFUSAL`. Every other verdict here compares two answers from ONE
+backend, so a program x86-64 refused and arm64 answered agreed with itself twice
+and read as `match`. 1 of 8 `slicing` programs is that shape — and §4b is what it
+turned out to be.
+
+## 4b. The one cross-machine asymmetry, and why it is not a finding
+
+`sweep 7`'s `slicing` program: x86-64 refuses with
+
+    build: a slice view does not fit in the frame: it needs 520 bytes and this
+    function has 152 left for containers.
+
+and arm64 builds it and answers. This is **documented and deliberate**, and the
+tree says so in the place that counts: `tools/formal_fuzz.py`'s note on the
+constant it imports reads "`formal/model.py::CONTAINER_BUDGET` is the smaller of
+the two and the one a program has to fit to build on both machines". A program over
+x86-64's budget answers on arm64 and is refused on x86-64 by design.
+
+So the tool counts it, names it, and prints one line per program:
+
+    cross-machine refusals that are the DOCUMENTED container-budget asymmetry,
+    not findings: 1
+      metamorph:4:slicing: x86_64 refused it and arm64 answered …
+
+**Narrow on purpose.** The exemption is the message head
+`formal_fuzz.FRAME_BLOB_REFUSAL_HEAD` and nothing else: a refusal about a
+construct in either direction is still a `CROSS-MACHINE-REFUSAL`, or the exemption
+would be a blanket one. And it is reported rather than dropped, because "how many
+programs were over the budget" is a measurement of the corpus and "none" is not.
+
 ## 6. Where the ledger's numbers came from, and what would change them
 
 Every row in §2 is reproducible from the seed and the index range:
@@ -169,3 +246,31 @@ first three items of the previous session's list are now DONE and are recorded i
    and `slicing` (7/20), which are now the mixes to look at. A future session
    should MEASURE the remaining decline reasons as §2a did rather than guess at
    them; that is the one piece of advice here this file has to earn twice.
+
+## 7. What sweep 7 did NOT settle, and it is the honest end of this ledger
+
+Sweep 7 is the largest sweep in this file — 1760 pairs at 3x the frame, both
+architectures — and it found **no backend bug**. That is a result, and it is worth
+being precise about what it is a result ABOUT:
+
+* **it is a result about the shape.** Every generated program is a flat `main` with
+  locals, integer arithmetic, `print`, and the occasional helper. Register
+  allocation, frame layout, spill placement and stack alignment are properties of
+  code with *many live ranges across calls*, and this corpus has almost no calls at
+  all — `inline_helper` skipped every program of sweep 7, and `extra_param` skipped
+  every program of `core`, `limits`, `lists` and `loopelse`. So "no finding" here
+  is much weaker evidence about those four bug classes than the pair count suggests.
+* **the one cross-machine asymmetry it reached was a budget, not a miscompile**
+  (§4b), which is the more likely outcome at 3x the frame: the first thing a large
+  program meets is the container budget, not a wrong value.
+* **the deepest reach it has into register allocation is indirect** — `rename` and
+  `swap_add` change what the allocator sees without changing the program, and they
+  are the two transforms that apply to nearly every program. That is real coverage
+  of slot ASSIGNMENT. It is not coverage of spilling, of callee-saved handling, or
+  of anything that needs a call frame to exist.
+
+So the next session should not read this file as "the backend is right about 10,000
+pairs of the same program twice". It should read §6's item 2 — the stdlib — as the
+place where the shapes this corpus does not have actually live, and it should read
+`bugs/FORMAL_the_stack_floor_budget_is_in_bytes_so_x86_64_allows_8x_the_recursion_depth_arm64_does.md`
+as the place where a measured asymmetry turned up on a shape the corpus does have.
