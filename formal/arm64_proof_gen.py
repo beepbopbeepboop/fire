@@ -32,6 +32,13 @@ import fire_compiler as F
 # ONE name for it, not two: this file said both `model` and `model as M`, and a
 # second spelling of one module is a second place for the two to disagree.
 from formal import model
+# `specs` for the `@refines(...)` annotation: the ONE reader of it and the ONE
+# emitter of the theorems that put the machine and an independent specification
+# on opposite sides of an equation.  It lives in its own module because this one
+# is 11k lines several branches edit, and because `x86_64_proof_gen.py` needs the
+# same two functions — a second copy would be a second place for the two backends
+# to disagree about what an annotation means.
+from formal import specs as SPECS
 from formal.arm64_codegen import var_register_map, _SCRATCH
 from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
@@ -9503,14 +9510,40 @@ def generate_arm64_proof(prog, code, info) -> str:
 
     _fmethods = _frame_methods(prog, code, info)
     if _fmethods:
-        return _generate_frame_proof(prog, code, info, _fmethods, func_name,
+        text = _generate_frame_proof(prog, code, info, _fmethods, func_name,
                                      base_addr, test_input)
+        # A by-reference receiver's proof has no `mojo` and no `runProg`: it is a
+        # contract about one method's own straight-line code, so there is no model
+        # to compare a specification against.  The annotation is reported rather
+        # than dropped, because an annotation that is silently ignored is
+        # indistinguishable from one that was never written -- and the reader who
+        # wrote it is the person who has to know.
+        _ref = SPECS.spec_refinement(fn, where=func_name)
+        if _ref is not None:
+            text += (
+                f"\n/- NOTE: `@{SPECS.REFINES_DECORATOR}({_ref.spec}; "
+                f"{_ref.rng})` on `{func_name}` was NOT checked.  This proof "
+                f"is a by-reference receiver's method contract: it has no "
+                f"`mojo`, no `runProg`, and no end-to-end theorem, so there is "
+                f"nothing to state a refinement over.  See "
+                f"`bugs/FORMAL_a_specification_layer_that_stops_at_a_finite_"
+                f"range.md`. -/\n")
+        return text
 
     fn = next((f for f in prog.functions if f.name == func_name), None)
     if fn is None and prog.functions:
         fn = prog.functions[0]
         func_name = fn.name
     param = fn.params[0][0] if fn.params else "n"
+    # The INDEPENDENT specification this program asks to be checked against, or
+    # None.  Read here rather than at the end of the function because it decides
+    # the HEADER (the generated file imports `lib/Specs.lean` only when something
+    # in it names `Specs`), and a header decided at the bottom of a 500-line
+    # emitter is a header that is easy to forget.  `SPECS.RefinesRefusal` is
+    # allowed to escape: an annotation this module cannot honour is a build
+    # refusal, not something to be quietly dropped, because the alternative is a
+    # program that carries a specification nobody checked.
+    refines = SPECS.spec_refinement(fn, where=func_name)
     # WHY THE AST MODEL CANNOT STATE THIS BODY, or `''` when it can: read ONCE
     # here because three decisions below are that one question (emit the bridge,
     # build `ast`, run the call-gap check) and three reads of it is how they
@@ -9982,6 +10015,19 @@ def generate_arm64_proof(prog, code, info) -> str:
         raise NotImplementedError(_cfg_decomposition_refusal(
             func_name, code, base_addr, func_entry_addr))
 
+    # The SPECIFICATION REFINEMENT section, when the source asked for one.  It
+    # goes LAST because both of its theorems are stated about names the
+    # universal theorem above introduces, and it is emitted whether or not the
+    # run test above exists.  `machine_half` is False for a function that calls
+    # out of the image: its universal theorem states reachability of the call
+    # rather than a result value, so there is no run to say anything about and
+    # only the model-level half is claimed.
+    refines_text = ""
+    if refines is not None:
+        refines_text = ("\n\n" + SPECS.refines_section(
+            func_name, f"{func_name}_prog", refines,
+            machine_half=_opaque is None))
+
     if trunc_defs:
         trunc_defs_section = (
             "\n/- Fixed-width truncators (sign/zero-extension to 64 bits); shared\n"
@@ -9990,10 +10036,7 @@ def generate_arm64_proof(prog, code, info) -> str:
     else:
         trunc_defs_section = "\n"
 
-    return f"""import ProofLib
-import work
-import Refine
-
+    return f"""{SPECS.header_imports(bool(refines))}
 set_option maxRecDepth 100000
 set_option maxHeartbeats 20000000
 set_option linter.unusedSimpArgs false
@@ -10027,7 +10070,7 @@ set_option linter.unusedVariables false
 
 {concrete_test}
 
-    {universal_section}
+    {universal_section}{refines_text}
     """
 
 

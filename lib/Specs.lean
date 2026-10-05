@@ -66,6 +66,34 @@ integer, and therefore the first input a signed comparison sees as `< 0`. -/
 def signBit : Nat := 2 ^ 63
 
 theorem wordLimit_eq : wordLimit = 18446744073709551616 := by decide
+
+/-- Reading a literal word back gives the literal.  `UInt64.ofNat` is
+truncating, so this is false for `n ≥ 2^64` and needs the bound — and it is the
+fact every generated refinement theorem needs when it puts `n ∈ List.range N`
+next to a universal theorem whose own side condition is stated over
+`(UInt64.ofNat n).toNat`. -/
+theorem ofNat_toNat (n : Nat) (h : n < wordLimit) :
+    (UInt64.ofNat n).toNat = n := by
+  rw [UInt64.toNat_ofNat']
+  exact Nat.mod_eq_of_lt h
+
+/-- `1024` fits in a word, which is what every refinement range in this tree is
+bounded by (`formal/specs.py::MAX_RANGE`) and why the bound a generated proof has
+to discharge is a pair of decimal literals rather than a comparison against
+`2 ^ 64` that `omega` cannot see through. -/
+theorem small_lt_wordLimit (n : Nat) (h : n < 1024) : n < wordLimit := by
+  show n < 2 ^ 64
+  have hp : 2 ^ 10 ≤ 2 ^ 64 :=
+    Nat.pow_le_pow_right (n := 2) (by decide) (i := 10) (j := 64) (by decide)
+  have hten : (2 ^ 10 : Nat) = 1024 := by decide
+  omega
+
+/-- The `ofNat_toNat` a generated refinement theorem uses: reading a word built
+from a `Nat` below `1024` gives that `Nat` back.  `1024` is the literal rather
+than `MAX_RANGE` so the caller's side condition is `n < 1024`, which follows
+from `n ∈ List.range 1024` by `omega` alone. -/
+theorem ofNat_toNat_small (n : Nat) (h : n < 1024) : (UInt64.ofNat n).toNat = n :=
+  ofNat_toNat n (small_lt_wordLimit n h)
 theorem wordMax_eq : wordMax = 18446744073709551615 := by decide
 theorem signBit_eq : signBit = 9223372036854775808 := by decide
 
@@ -230,8 +258,36 @@ theorem sumTo_eq (n : Nat) : 2 * sumTo n = n * (n - 1) := by
       rw [sumTo, h2, ih, h3, Nat.mul_one, h1]
       omega
 
+/-- The sum of `0, 1, …, n` — `sumTo` one input further along.
+
+This is a SEPARATE specification and not a re-spelling, and the reason is the
+best worked example in this module of what the layer is for.  `sum_range.mojo`
+and `sum.mojo` are the same function written two ways — a `for` loop over
+`range(n)` and a recursion — and they compute DIFFERENT things at the ends:
+`for i in range(n)` visits `0 … n-1`, while `if n == 0: 0 else: n + sum(n - 1)`
+visits `1 … n`.  Annotating `sum.mojo` with `sumTo64` therefore failed the build
+with
+
+    Tactic `native_decide` evaluated that the proposition
+      ∀ n, n ∈ List.range 64 → mojo (UInt64.ofNat n) = Specs.sumTo64 (UInt64.ofNat n)
+    is false
+
+which is the layer working: the two readings disagreed at `n = 1`, and the
+build said so instead of believing either.  `sumThrough64` is the right
+specification for the recursion, and `sumTo64` is still the right one for the
+loop. -/
+def sumThrough (n : Nat) : Nat := sumTo (n + 1)
+
+/-- Its closed form, which is `sumTo_eq` one input along. -/
+theorem sumThrough_eq (n : Nat) : 2 * sumThrough n = (n + 1) * n := by
+  show 2 * sumTo (n + 1) = (n + 1) * n
+  exact sumTo_eq (n + 1)
+
 /-- Its word reading. -/
 def sumTo64 (w : UInt64) : UInt64 := UInt64.ofNat (sumTo w.toNat)
+
+/-- Its word reading — the one `sum.mojo` refines. -/
+def sumThrough64 (w : UInt64) : UInt64 := UInt64.ofNat (sumThrough w.toNat)
 
 /-! ## max and min -/
 
@@ -255,6 +311,97 @@ theorem minNat_le (a b : Nat) : minNat a b ≤ a ∧ minNat a b ≤ b := by
 /-- Their word readings.  `max`/`min` of two word values is a word value. -/
 def maxNat64 (a b : UInt64) : UInt64 := UInt64.ofNat (maxNat a.toNat b.toNat)
 def minNat64 (a b : UInt64) : UInt64 := UInt64.ofNat (minNat a.toNat b.toNat)
+
+/-! ## Products, powers, and the small affine maps
+
+The word readings of the arithmetic the other examples in the corpus compute.
+They are here for the same reason `id64` is: a specification layer is only
+useful against programs somebody actually wrote, and `localmul`, `pair`,
+`chain` and `udivmod` are programs somebody actually wrote. -/
+
+/-- The product of two consecutive naturals, `n * (n + 1)`. -/
+def consecutiveProduct (n : Nat) : Nat := n * (n + 1)
+
+/-- Its word reading. -/
+def consecutiveProduct64 (w : UInt64) : UInt64 :=
+  UInt64.ofNat (consecutiveProduct w.toNat)
+
+/-- The square of `n + 1`. -/
+def succSquare (n : Nat) : Nat := (n + 1) * (n + 1)
+
+/-- Its word reading. -/
+def succSquare64 (w : UInt64) : UInt64 := UInt64.ofNat (succSquare w.toNat)
+
+/-- `2n + 1`: doubling and adding one, which is what a shift-and-add program
+computes. -/
+def doubleSuccOne (n : Nat) : Nat := 2 * n + 1
+
+/-- Its word reading. -/
+def doubleSuccOne64 (w : UInt64) : UInt64 := UInt64.ofNat (doubleSuccOne w.toNat)
+
+/-- Euclid's division, as the SUM of its two parts: `n / d + n % d`.  Stated over
+`Nat` because that is where `Nat.div`/`Nat.mod` are the classical operations;
+the machine's own `/` on a word is a truncating divide by the same theorem. -/
+def quotPlusRem (d n : Nat) : Nat := n / d + n % d
+
+/-- Its word reading, at the divisor `d`. -/
+def quotPlusRem64 (d w : UInt64) : UInt64 :=
+  UInt64.ofNat (quotPlusRem d.toNat w.toNat)
+
+/-- Euclid's division is exact: the quotient and the remainder account for `n`.
+Stated over `n / d` rather than over `quotPlusRem` because the multiplication
+`d * (n / d)` is not something `omega` can reason about — and it is Lean's own
+theorem, so restating it would say nothing. -/
+theorem quotRem_reconstruct (d n : Nat) :
+    n = d * (n / d) + n % d := (Nat.div_add_mod n d).symm
+
+/-- `quotPlusRem` really is the quotient plus the remainder: subtracting the
+remainder recovers the quotient.  This is the statement a `divmod`
+specification exists to make, and it is stated about the SPECIFICATION's own
+function rather than about any program's code. -/
+theorem quotPlusRem_left (d n : Nat) :
+    quotPlusRem d n - n % d = n / d := by
+  rw [quotPlusRem]
+  exact Nat.add_sub_cancel_right _ _
+
+/-- `n` is nonzero, as a `Bool` — what a machine comparison's answer becomes
+when it is returned as a word. -/
+def isNonzero (n : Nat) : Bool := n != 0
+
+/-- Its word reading: `1` and `0`. -/
+def isNonzero64 (w : UInt64) : UInt64 := if isNonzero w.toNat then 1 else 0
+
+@[simp] theorem isNonzero_zero : isNonzero 0 = false := rfl
+@[simp] theorem isNonzero_one : isNonzero 1 = true := by decide
+theorem isNonzero_true_iff {n : Nat} : isNonzero n = true ↔ n ≠ 0 := by
+  simp [isNonzero]
+
+/-- `(n << 3) + (n >> 2)`: a left shift, a right shift, and their sum — the
+classic "combine two bit fields" arithmetic. -/
+def shiftMix (n : Nat) : Nat := Nat.shiftLeft n 3 + Nat.shiftRight n 2
+
+/-- Its word reading.  `8n + n/4 ≤ 8n + n`, so it is exact for every input
+below `2^61`. -/
+def shiftMix64 (w : UInt64) : UInt64 := UInt64.ofNat (shiftMix w.toNat)
+
+/-- `(n & 0xff) + (n | 0xf0) + (n ^ 0x55)`: masking, setting and inverting
+three different bit fields and adding the results. -/
+def maskedMix (n : Nat) : Nat :=
+  (n &&& 0xff) + (n ||| 0xf0) + (n ^^^ 0x55)
+
+/-- Its word reading.  Each term is below `0x100`, so the sum is below `0x300`
+and never truncates. -/
+def maskedMix64 (w : UInt64) : UInt64 := UInt64.ofNat (maskedMix w.toNat)
+
+/-- `100000 + n` for positive `n` and `0` otherwise — a step function with a
+dead zone, which is what `if n <= 0: 0 else: C + n` computes. -/
+def stepConst (n : Nat) : Nat := if n = 0 then 0 else 100000 + n
+
+/-- Its word reading. -/
+def stepConst64 (w : UInt64) : UInt64 := UInt64.ofNat (stepConst w.toNat)
+
+theorem stepConst_zero : stepConst 0 = 0 := by decide
+theorem stepConst_one : stepConst 1 = 100001 := by decide
 
 /-! ## Absolute value -/
 
