@@ -51,10 +51,19 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from exec_budget import (BUILD_TIMEOUT, RUN_TIMEOUT, TIMEOUT_RC,   # noqa: E402
+                         child_died_by_signal, child_exit_reason)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRE = os.path.join(HERE, "fire.py")
-BUILD_TIMEOUT = 300
-RUN_TIMEOUT = 60
+# `BUILD_TIMEOUT` and `RUN_TIMEOUT` are `exec_budget`'s, not this file's own
+# numbers. They were `300` and `60` here, which is the shape of literal
+# `tools/suite.py`'s `doc-refs` ratchet exists to stop: a reader cannot tell a
+# deliberate budget from a stale one, and this file's `stat_*` cases build and
+# execute two images each, so the pair IS this file's cost. `COMPILE_TIMEOUT_S`
+# and `RUN_TIMEOUT_S` are both 600 and 120 against a whole-file measurement of a
+# few minutes.
 
 # The record terminator, for the reason `test_formal_os.py` gives: a separator
 # this suite can read back without asking whether the image decoded a literal,
@@ -1375,9 +1384,21 @@ def run(out, arch, env=None):
     never terminates is one of the wrong answers this file exists to catch, and
     the way it showed up before was `subprocess.TimeoutExpired` escaping `main`
     and taking the remaining twenty-odd cases with it — so the one case that
-    hangs is reported and every other case still runs. `rc` is the shell's
-    timeout convention (124) and stderr names the timeout, so the caller sees a
-    case that failed with a reason rather than a case that vanished.
+    hangs is reported and every other case still runs. `rc` is `exec_budget`'s
+    `TIMEOUT_RC` (the shell's timeout convention, 124, which is a status no
+    compiled program of ours returns and is deliberately not a signal) and
+    stderr names the timeout, so the caller sees a case that failed with a
+    reason rather than a case that vanished.
+
+    **A SIGNAL is not that, and the caller is told which it is.** `rc` is
+    negative when the kernel ended the child rather than the child exiting, and
+    this file's own history is the reason this is stated rather than assumed: two
+    of six full runs were 56/58 and both times the same pair of `stat_*` cases
+    reported `exit -9, stderr ''` and nothing else — which reads as a defect in
+    the `os` module, and is a machine that killed a build (memcap's ceiling, the
+    OOM killer, or another process; nothing here signals a child it launched).
+    `run_case` turns that into its own `KILLED` status, so "the machine killed it"
+    and "the module answered wrongly" cannot both print `FAIL`.
 
     `env` replaces the environment the image starts with; `None` inherits this
     process's, which is what every case but `environ_view` wants. It is the
@@ -1391,7 +1412,8 @@ def run(out, arch, env=None):
         p = subprocess.run(argv, capture_output=True, text=True,
                            timeout=RUN_TIMEOUT, env=env)
     except subprocess.TimeoutExpired:
-        return 124, "", f"the image did not finish within {RUN_TIMEOUT}s"
+        return (TIMEOUT_RC, "",
+                f"the image did not finish within {RUN_TIMEOUT}s")
     return p.returncode, p.stdout, p.stderr
 
 
@@ -1459,18 +1481,43 @@ def rosetta():
 
 # ── the runner ────────────────────────────────────────────────────────────
 
+# The three statuses a case can end in, and the reason a SIGNAL is one of them
+# rather than a flavour of FAIL. `KILLED` is what `child_died_by_signal` fires
+# on, and it exists because this file's `stat_*` cases were twice observed dying
+# with `exit -9, stderr ''` on a machine carrying a dozen other builds — a fact
+# about the machine that printed the same line a wrong `os` module would print.
+# A reader who cannot tell those apart will attribute a resource death to the
+# module, and `bugs/OPEN_WORK.md` §C2 records that this area has been
+# misdiagnosed twice already by doing so.
+PASS = "PASS"
+FAIL = "FAIL"
+KILLED = "KILLED"
+
+
+def _image_status(rc, stderr, what):
+    """`(status, detail)` for an image that did not exit 0.
+
+    The three answers a caller has to be able to tell apart, and each needs a
+    different next step: `FAIL` is the module's, `KILLED` is the machine's, and
+    a build budget is neither. The wording is `exec_budget`'s, shared with the
+    three other suites that had their own copy.
+    """
+    reason = child_exit_reason(rc, stderr, subject=what)
+    return (KILLED if child_died_by_signal(rc) else FAIL), reason
+
+
 def run_listdir_case(arch, tmpdir, fixture, verbose):
-    """(ok, detail) for the `listdir`/`walk` program on one architecture."""
+    """(status, detail) for the `listdir`/`walk` program on one architecture."""
     src = os.path.join(tmpdir, "os_listdir.mojo")
     with open(src, "w") as f:
         f.write(LISTDIR_PROGRAM.replace("@@ROOT@@", fixture))
     out = os.path.join(tmpdir, "os_listdir." + arch)
     rc, text = build(src, out, arch)
     if rc != 0:
-        return False, f"build failed: {text.strip()[-400:]}"
+        return FAIL, f"build failed: {text.strip()[-400:]}"
     rc, stdout, stderr = run(out, arch)
     if rc != 0:
-        return False, f"exit {rc}, stderr {stderr.strip()[:200]!r}"
+        return _image_status(rc, stderr, "the image")
     want = {(k.split()[0], k.split()[1] if len(k.split()) > 1 else "",
             k.split()[2] if len(k.split()) > 2 else ""): v
             for k, v in _listdir_oracle(fixture).items()}
@@ -1478,12 +1525,12 @@ def run_listdir_case(arch, tmpdir, fixture, verbose):
     bad = [f"{k}: the image says {got.get(k)!r}, os.listdir says {v!r}"
            for k, v in sorted(want.items()) if got.get(k) != v]
     if bad:
-        return False, ("%d of %d answers differ from CPython's:\n      %s"
-                       % (len(bad), len(want), "\n      ".join(bad[:20])))
+        return FAIL, ("%d of %d answers differ from CPython's:\n      %s"
+                      % (len(bad), len(want), "\n      ".join(bad[:20])))
     if verbose:
         print(f"      {len(want)} listing answers identical to os.listdir/"
               f"os.walk")
-    return True, ""
+    return PASS, ""
 
 
 # The fixture root, for the oracle of a case whose program names `@@ROOT@@`.
@@ -1493,13 +1540,18 @@ _FIXTURE = [""]
 
 
 def run_case(case, arch, tmpdir, verbose, fixture=None):
-    """(ok, detail) for one case on one architecture.
+    """(status, detail) for one case on one architecture.
 
     `@@ROOT@@` is the fixture directory every case's source may name, so a case
     can ask a question about a directory whose contents it did not write. The
     convention is `LISTDIR_PROGRAM`'s own, generalised from it: a case that does
     not mention the marker is unaffected, and one that does gets the same
     `run_listdir_case` does.
+
+    `status` is `PASS` / `FAIL` / `KILLED` and the last is its own value rather
+    than a flavour of `FAIL`, for `run_listdir_case`'s reason: the `stat_*`
+    cases are the ones a resource death lands on, and a `KILLED` line says so in
+    the one column a reader scans.
     """
     src = os.path.join(tmpdir, case.name + ".mojo")
     with open(src, "w") as f:
@@ -1509,35 +1561,39 @@ def run_case(case, arch, tmpdir, verbose, fixture=None):
     rc, text = build(src, out, arch)
     if case.refusal:
         if rc == 0:
-            return False, ("it BUILT. A base whose pointee is not established "
-                           "must be refused: the blob path bounds-checks "
-                           "against the byte at offset 0 of the pointer and "
-                           "returns a number assembled out of it")
+            return FAIL, ("it BUILT. A base whose pointee is not established "
+                          "must be refused: the blob path bounds-checks "
+                          "against the byte at offset 0 of the pointer and "
+                          "returns a number assembled out of it")
         if case.refusal not in text:
-            return False, (f"refused, but the message does not name "
-                           f"{case.refusal!r}: {text.strip()[-300:]}")
+            return FAIL, (f"refused, but the message does not name "
+                          f"{case.refusal!r}: {text.strip()[-300:]}")
         if verbose:
             print(f"      refused with: {text.strip()[-160:]}")
-        return True, ""
+        return PASS, ""
     if rc != 0:
-        return False, f"build failed: {text.strip()[-400:]}"
+        # A build the machine killed is the same shape as a run it killed, and
+        # it is the one this file's `stat_*` cases were twice observed dying in:
+        # `fire.py build` is the biggest child here, so it is the first thing a
+        # memory ceiling reaches.
+        return _image_status(rc, text, "the build")
     rc, stdout, stderr = run(out, arch, case.env)
     if rc != 0:
-        return False, f"exit {rc}, stderr {stderr.strip()[:200]!r}"
+        return _image_status(rc, stderr, "the image")
     got = parse(stdout)
     want = case.expect
     if want is None and case.oracle is not None:
         want = case.oracle()
     if want is None:
-        return False, "the case has neither `expect` nor an `oracle`"
+        return FAIL, "the case has neither `expect` nor an `oracle`"
     bad = [f"{k}: the image says {got.get(k)!r}, the expected answer is {v!r}"
            for k, v in want.items() if got.get(k) != v]
     if bad:
-        return False, ("%d of %d answers wrong:\n      %s"
-                       % (len(bad), len(want), "\n      ".join(bad)))
+        return FAIL, ("%d of %d answers wrong:\n      %s"
+                      % (len(bad), len(want), "\n      ".join(bad)))
     if verbose:
         print(f"      {len(want)} answers correct")
-    return True, ""
+    return PASS, ""
 
 
 def build_stat_case(path, tmpdir):
@@ -1548,6 +1604,20 @@ def build_stat_case(path, tmpdir):
                                path.replace("\\", "\\\\").replace('"', '\\"'))
     return Case("stat_" + os.path.basename(path).replace(".", "_"),
                 src, None, oracle=lambda: _stat_oracle(path))
+
+
+def _line(status, name, arch, detail):
+    """One screen line, and the status is the FIRST thing on it."""
+    pad = " " * (max(len(PASS), len(FAIL), len(KILLED)) - len(status))
+    return (f"{status}{pad}  {name} [{arch}]"
+            + (("  " + detail) if detail else ""))
+
+
+def _tally(status, name, arch, failed, killed):
+    """Book a result. `KILLED` is its own list, so neither tally hides it."""
+    if status == PASS:
+        return
+    (killed if status == KILLED else failed).append(f"{name}[{arch}]")
 
 
 def main():
@@ -1566,6 +1636,7 @@ def main():
               "arm64 only")
 
     failed = []
+    killed = []
     total = 0
     with tempfile.TemporaryDirectory() as tmpdir:
         fixture = os.path.realpath(os.path.join(tmpdir, "fx"))
@@ -1595,25 +1666,28 @@ def main():
                         print(f"SKIP {n} [{arch}]  ({case.archs_reason})")
                         continue
                     total += 1
-                    ok, detail = run_listdir_case(arch, tmpdir, fixture,
-                                                  args.verbose)
-                    print(("PASS " if ok else "FAIL ") + f"{n} [{arch}]" +
-                          (("  " + detail) if detail else ""))
-                    if not ok:
-                        failed.append(f"{n}[{arch}]")
+                    status, detail = run_listdir_case(arch, tmpdir, fixture,
+                                                      args.verbose)
+                    print(_line(status, n, arch, detail))
+                    _tally(status, n, arch, failed, killed)
                 continue
             for arch in archs:
                 if case.archs is not None and arch not in case.archs:
                     print(f"SKIP {n} [{arch}]  ({case.archs_reason})")
                     continue
                 total += 1
-                ok, detail = run_case(case, arch, tmpdir, args.verbose,
-                                      fixture)
-                print(("PASS " if ok else "FAIL ") + f"{n} [{arch}]" +
-                      (("  " + detail) if detail else ""))
-                if not ok:
-                    failed.append(f"{n}[{arch}]")
-    print(f"\n{total - len(failed)}/{total} passed")
+                status, detail = run_case(case, arch, tmpdir, args.verbose,
+                                          fixture)
+                print(_line(status, n, arch, detail))
+                _tally(status, n, arch, failed, killed)
+    # Three numbers rather than two, and the split is the point: a `KILLED` case
+    # is not a wrong answer and is not counted as one. Before this file could
+    # say so, `exit -9, stderr ''` printed `FAIL stat_fifo [arm64]`, which is
+    # the same line a defect in `os` prints — and `bugs/OPEN_WORK.md` §C2 says
+    # this area has already been misdiagnosed twice that way.
+    print(f"\n{total - len(failed) - len(killed)}/{total} passed"
+          + (f", {len(killed)} killed by a signal (not a verdict about the "
+             f"module: {', '.join(killed)})" if killed else ""))
     return 1 if failed else 0
 
 

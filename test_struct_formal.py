@@ -37,7 +37,6 @@ Run:  python3 test_struct_formal.py [-v]
 """
 import argparse
 import os
-import signal
 import struct
 import subprocess
 import sys
@@ -53,8 +52,11 @@ HOSTMODS = _FI._HOSTMODS_ROOT
 STRUCT_MODULE = os.path.join(HOSTMODS, "struct.mojo")
 import fire_compiler as F
 FIRE = os.path.join(HERE, "fire.py")
-BUILD_TIMEOUT = 300
-RUN_TIMEOUT = 60
+# `exec_budget`'s, not this file's own `300`/`60`: the same pair of literals
+# every build-and-run suite grew, and the reason they are one pair is in the
+# module's docstring. `child_exit_reason` is `_how_it_died`'s whole subject.
+from exec_budget import (BUILD_TIMEOUT, RUN_TIMEOUT,   # noqa: E402
+                         child_exit_reason)
 
 # Values chosen to exercise the parts that are easy to get wrong, not to be
 # round numbers: every one has a non-zero byte in every position of its width,
@@ -112,22 +114,16 @@ def _how_it_died(run):
     discarded at the point where it still exists, and the reported failure
     points at the struct tables when the real answer is a dead process.
 
-    `run.returncode` is negative when the child was killed by a signal, and
-    that negative number is the ONLY record of which signal, so it is
-    translated by name here rather than printed as `-11`.
+    The wording is `exec_budget.child_exit_reason`'s, which four suites had each
+    hand-rolled and one of which printed a bare `signal 9`: a negative
+    `returncode` is the ONLY record of which signal ended the child, and a
+    `SIGKILL` in particular is a fact about the machine rather than about the
+    module, which is a distinction four copies of this sentence could not keep
+    agreeing on.
     """
     if run.returncode == 0:
         return None
-    if run.returncode < 0:
-        try:
-            signame = signal.Signals(-run.returncode).name
-        except ValueError:
-            signame = f"signal {-run.returncode}"
-        how = f"the image was killed by {signame} (wait status {run.returncode})"
-    else:
-        how = f"the image exited {run.returncode}"
-    err = (run.stderr or "").strip()
-    return how + (f", stderr: {err[-300:]}" if err else ", with no stderr")
+    return child_exit_reason(run.returncode, run.stderr)
 
 
 def build_and_run(tmpdir, name, source):
@@ -1075,9 +1071,11 @@ def test_the_seven_importers_no_longer_refuse_on_the_import(tmpdir):
                 [sys.executable, FIRE, "build", "--formal", "--no-prove",
                  "-o", os.path.join(tmpdir, os.path.basename(rel) + ".bin"),
                  path],
-                capture_output=True, text=True, timeout=600, cwd=HERE)
+                capture_output=True, text=True, timeout=BUILD_TIMEOUT,
+                cwd=HERE)
         except subprocess.TimeoutExpired:
-            check(False, f"{rel} builds (timed out at 600s)")
+            check(False, f"{rel} builds (timed out at BUILD_TIMEOUT="
+                         f"{BUILD_TIMEOUT}s)")
             continue
         text = r.stderr + r.stdout
         check("imports 'struct'" not in text,

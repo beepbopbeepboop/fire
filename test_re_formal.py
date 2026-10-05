@@ -56,6 +56,14 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import formal.imports as _FI
+# `BUILD_TIMEOUT` for the child budget (this loop compiles EIGHT files of this
+# repository's own source — `fire_compiler.py`, `reflect.py`, the `spec_gen.py`
+# and `exprtypes.py` pair — so it is a compile and gets the compile budget), and
+# `child_exit_reason` for the four suites' one sentence about how a child died.
+# Measured over these eight on this tree, 2026-10-05: 0.2, 6.5, 10.7, 10.5, 5.9,
+# 5.5, 2.0, 1.1 s — so `COMPILE_TIMEOUT_S`'s 600 is ~56x the worst of them and
+# still 6x inside `DEFAULT_JOB_TIMEOUT_S`. The literal this replaced was 900.
+from exec_budget import BUILD_TIMEOUT, child_exit_reason   # noqa: E402
 
 RE_MODULE = os.path.join(_FI._HOSTMODS_ROOT, "re.mojo")
 FIRE = os.path.join(HERE, "fire.py")
@@ -604,21 +612,14 @@ def build_and_run(tmpdir, name, source, backend=None):
     # rather than about what happened. Observed on a loaded machine before this
     # check existed — an image that had been killed reported itself as a corpus
     # that answered nothing, which reads as a wrong answer rather than as a
-    # process that is not there. A negative status is a signal (`-11` is SIGSEGV,
-    # `-9` SIGKILL), so it is reported with its name.
+    # process that is not there. `exec_budget.child_exit_reason` names the
+    # signal when the status is negative (`-11` is SIGSEGV, `-9` SIGKILL) and
+    # says, for the two a harness sends on its own account, that it sent them:
+    # the shared wording four suites had each hand-rolled, one of which printed
+    # a bare `signal 9`.
     if run.returncode != 0:
-        import signal as _signal
-        st = run.returncode
-        name = ""
-        if st < 0:
-            try:
-                name = " (%s)" % _signal.Signals(-st).name
-            except ValueError:                  # pragma: no cover
-                name = " (signal %d)" % -st
-        raise AssertionError("the image exited %d%s with no usable output; "
-                             "stderr: %s"
-                             % (st, name,
-                                (run.stderr or "").strip()[-300:]))
+        raise AssertionError(child_exit_reason(run.returncode, run.stderr)
+                             + " with no usable output")
     return [ln for ln in run.stdout.split("\n") if ln.strip() != ""]
 
 
@@ -1558,9 +1559,11 @@ def test_the_sweep_files_no_longer_refuse_on_the_import(tmpdir):
             r = subprocess.run(
                 [sys.executable, FIRE, "build", "--formal", "--no-prove",
                  "-o", os.path.join(tmpdir, os.path.basename(rel) + ".bin"),
-                 path], capture_output=True, text=True, timeout=900, cwd=HERE)
+                 path], capture_output=True, text=True,
+                 timeout=BUILD_TIMEOUT, cwd=HERE)
         except subprocess.TimeoutExpired:
-            check(False, "%s builds (timed out)" % rel)
+            check(False, "%s builds (timed out at BUILD_TIMEOUT=%ds)"
+                  % (rel, BUILD_TIMEOUT))
             continue
         text = r.stderr + r.stdout
         check("imports 're'" not in text,
