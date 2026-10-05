@@ -10797,8 +10797,11 @@ def _refuse_container_operands_on_scalar_slots(fn, structs_by_name: dict,
     refused at reports the node it was HANDED, which by then is the
     substituted literal — and one of the two architectures dereferences the
     `5`. So the question is asked here, where `s.n` is still `s.n`, and the
-    emitters' own arm (`_refuse_slot_container_operand`, over what the
-    substitution could not match) is the second line rather than the only one.
+    emitters' own arm (`_refuse_scalar_container_operand`) is the second line
+    rather than the only one. That arm is asked of ANY expression, not of a
+    bare name: `scalar_container_base_evidence` now answers a scalar literal, a
+    type value and a declared field as well as `s.n` itself, so "over what the
+    substitution could not match" understates what it is handed.
 
     The base's STRUCT comes from the same three recognisers
     `_constant_read_sites` uses for the same purpose, which is what keeps the
