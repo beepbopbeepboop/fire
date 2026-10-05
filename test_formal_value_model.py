@@ -1323,6 +1323,62 @@ MODULE_GLOBAL_CASES = [
 # asks the RIGHT operand's `__eq__` when the left one's returns NotImplemented,
 # and this path has no representation for NotImplemented to be returned as.
 REFUSALS = [
+    # THE GENERAL RULE, with NO module-level binding of the name anywhere, and
+    # its sibling two entries below this list apart is the case where there IS
+    # one (`a_local_read_before_its_first_assignment_is_refused`, which reads the
+    # module's `G`).  Both are here because they are two DIFFERENT rules and a
+    # test that pins only the narrower one cannot tell which of them fired: the
+    # narrow rule's message names the module-level binding and the general one's
+    # does not, so this case's needle is a clause the narrow message does not
+    # contain.
+    #
+    # It is the case that was open for years as a QUESTION rather than a defect:
+    # a syntactic scan measured the general rule at 233 sites in 57 files and
+    # concluded that enforcing it was "a coverage cost of a different order
+    # from the one site the module-global rule fixes", so only the narrow rule
+    # shipped. That scan was a FLOOR produced by a different, weaker algorithm:
+    # the rule is
+    # enforced by `formal/model.py::read_before_store`, a "definitely stored"
+    # FIXPOINT over the function's CFG, so a store in every arm of a conditional
+    # dominates a read and no syntactic ordering can see that. Measured on this
+    # tree 2026-10-05 through `formal/build.py::_unstored_read` — the
+    # implementation's own reader, not a re-derivation — over the 975 functions
+    # of `formal/hostmods/`, the modules the gate compiles: **0 findings**, and
+    # the sweep's ranked-cause table has no read-before-store row at three files
+    # or more. `test_formal_read_before_store.py` now reports that number as a
+    # case so it cannot rot silently, which is what the old figure did.
+    #
+    # The message matters as much as the refusal: it says CPython raises
+    # `UnboundLocalError` for this program, and it says WHY this path cannot
+    # (the allocator gives `x` a home because the function assigns it somewhere,
+    # and the image has no way to mean "unbound"). A refusal that named only the
+    # local would be a sentence about register allocation for what is a
+    # statement about the language.
+    ("a_local_read_before_its_first_store_is_refused_with_no_module_binding",
+     "def bump(n):\n"
+     "    x = x + n\n"
+     "    return x\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"r=%d\", bump(n))\n"
+     "    return 0\n",
+     "before anything in this function stores it"),
+    # …and the same rule at a position that is neither a `return` nor an
+    # assignment's right-hand side, because the analysis is a dominance question
+    # over the CFG and a rule that only fired on straight-line code would have
+    # been the syntactic scan all over again. `p` is stored in ONE arm of the
+    # `if` and read in the `print` below it: CPython raises whenever `n` is
+    # falsey, and the read is the only use of the name.
+    ("a_local_read_in_one_arm_then_read_after_the_if_is_refused",
+     "def pick(n):\n"
+     "    if n > 2:\n"
+     "        p = n * 2\n"
+     "    print(p)\n"
+     "    return 0\n"
+     "\n"
+     "def main(n):\n"
+     "    return pick(n)\n",
+     "before anything in this function stores it"),
     # A `DType`-ANNOTATED FRAME SLOT is a TYPE, and the kind table now says so.
     # `S` has ONE field, so `self` IS `self.d` (`one_word_receiver_kind`), and
     # `len(self)` is `len()` of a type tag. Before the `DType` row this was

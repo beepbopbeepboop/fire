@@ -713,12 +713,15 @@ CAUSES = (
     # with no address to compute from. 2 files, in-file.
     ("a constructor body that reads `self` is not inlined",
      (("whose body this path does not inline",),)),
-    # A local read before anything in the function stores it. `formal/build.py`
-    # enforces this for module-global names and not for locals, which is what
-    # `bugs/FORMAL_a_local_read_before_its_first_assignment.md` measures; 1
-    # file, in-file. Below the bar a cause clears to be worth a row, and here
-    # anyway: a cause with a doc and no marker is a cause nobody can find from
-    # the table.
+    # A local read before anything in the function stores it, which
+    # `formal/build.py` enforces for EVERY local (`_unstored_read`, asked for
+    # every function of every unit) and not only for a name that is also a
+    # module-level binding. The row exists because a corpus CAN still hit it —
+    # the enforcement is per-unit and a file the sweep refuses earlier never
+    # reaches this question — so the marker is what tells a reader which of the
+    # two rules a file is sitting behind. 1 file, in-file; below the bar a cause
+    # clears to be worth a row, and here anyway: a cause with no marker is a
+    # cause nobody can find from the table.
     ("a local read before its first assignment",
      (("before anything in this function stores it",),)),
     # ── the two x86-64-only refusals, which are arch DRIFT rather than a

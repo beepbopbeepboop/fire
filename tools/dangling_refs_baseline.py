@@ -67,7 +67,6 @@ BASELINE = {
     'bugs/COMPILE_FAIL_zipfile___init__.md': 7,
     'bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md': 1,
     'bugs/FORMAL_a_calcsize_image_hangs_once_in_several.md': 2,
-    'bugs/FORMAL_a_local_read_before_its_first_assignment.md': 1,
     'bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md': 1,
     'bugs/FORMAL_callee_no_def_ceiling_zero.md': 3,
     'bugs/FORMAL_cross_module_call_arity_is_never_checked.md': 1,

@@ -3867,9 +3867,9 @@ def _match_case_binds(case) -> set:
 
     A capture binds BEFORE the arm's body runs, which makes it the same shape as
     a `for` target and a `with` alias: a binding that exists before the value
-    the body sees. `bugs/FORMAL_a_local_read_before_its_first_assignment.md`
-    names this as the next shape to check after `with`, and checking it found
-    that the arm's body was refused for reading its own capture:
+    the body sees. Asking that here — it was the next construct to check after
+    `with` — found that the arm's body was refused for reading its own
+    capture:
 
         def f(n):
             match n:
