@@ -516,6 +516,80 @@ ORACLE_CASES = [
      '    xs = ["héllo", "日本"]\n'
      '    first = xs[0]\n'
      '    print("n=%d" % len(xs), end="\\n")\n'),
+
+    # The same, through a `Pointer[UInt8]`-declared parameter whose value is
+    # TEXT — which is the one shape the byte exemption cannot tell from a byte
+    # buffer, and which is why the criterion is a DECLARATION and not a use.
+    # It builds, and the CPython column is the honest `bytes` oracle for the
+    # same declaration: 195 is the LEAD byte of `é` (`C3 A9`), which is what
+    # `b"héllo"[1]` is in CPython too. So the divergence the refusal exists to
+    # catch is now reached by a program that DECLARED bytes, and
+    # `model.string_element_refusal`'s docstring states that residual instead of
+    # claiming the question is closed — this row is where a reader can measure
+    # it.
+    ("byte_pointer_over_text_is_the_residual_and_reads_its_byte",
+     'def first(e: Pointer[UInt8]) -> Int:\n'
+     '    return e[1]\n'
+     'def em():\n'
+     '    """A — em-dash."""\n'
+     '    return 0\n'
+     'def main(n):\n'
+     '    var s = "héllo"\n'
+     '    printf("b=%d e=%d\\n", first(s), em())\n'
+     '    return 0\n',
+     'def main():\n'
+     '    s = b"h\\xc3\\xa9llo"\n'
+     '    first = lambda e: e[1]\n'
+     '    print("b=%d e=0" % first(s), end="\\n")\n'),
+
+    # ── `bytes`: the receiver's DECLARED type, and CPython's own answer ──
+
+    #
+    # These two rows are the other half of the block above and they are ORACLE
+    # rows, not guards, because CPython agrees with them: `"héllo"[1]` is one
+    # character and `b"héllo"[1]` is the integer 195. So a receiver the source
+    # declares `Pointer[UInt8]` holds a `bytes`, its subscript is a byte load,
+    # and the byte is the right answer — no refusal, and no fold either.
+    #
+    # **Both rows are in an image that holds a non-ASCII literal**, which is the
+    # whole of what they measure: the refusal keys on the image AND on the
+    # receiver, and the receiver here is a byte buffer. Before the byte
+    # exemption the LOCAL spelling was refused while the PARAMETER spelling
+    # built, from the same `Pointer[UInt8]` declaration — see
+    # `model.string_element_refusal` for that measurement. So the two rows are
+    # also the pair that says the two spellings of one declaration agree.
+    ("bytes_element_of_a_declared_byte_local_reads_its_byte",
+     'def em():\n'
+     '    """A — em-dash, so this image holds a non-ASCII literal."""\n'
+     '    return 0\n'
+     'fn buf(n) -> str:\n'
+     '    return malloc(n + 1)\n'
+     'def main(n):\n'
+     '    var d: Pointer[UInt8] = buf(8)\n'
+     '    d[0] = 97\n'
+     '    d[1] = 98\n'
+     '    printf("b0=%d b1=%d e=%d\\n", d[0], d[1], em())\n'
+     '    return 0\n',
+     'def main():\n'
+     '    d = bytearray(8)\n'
+     '    d[0] = 97\n'
+     '    d[1] = 98\n'
+     '    print("b0=%d b1=%d e=0" % (d[0], d[1]), end="\\n")\n'),
+
+    ("bytes_element_of_a_declared_byte_parameter_reads_its_byte",
+     'def em():\n'
+     '    """A — em-dash, so this image holds a non-ASCII literal."""\n'
+     '    return 0\n'
+     'def at(e: Pointer[UInt8], i):\n'
+     '    return e[i]\n'
+     'def main(n):\n'
+     '    var s = "abc"\n'
+     '    printf("b0=%d b1=%d e=%d\\n", at(s, 0), at(s, 1), em())\n'
+     '    return 0\n',
+     'def main():\n'
+     '    s = b"abc"\n'
+     '    at = lambda e, i: e[i]\n'
+     '    print("b0=%d b1=%d e=0" % (at(s, 0), at(s, 1)), end="\\n")\n'),
 ]
 
 
@@ -634,6 +708,23 @@ REFUSAL_CASES = [
      '    printf("[%6s]\\n", s)\n'
      '    return 0\n',
      ["`%6s`", "is refused", "'héllo'"]),
+
+    # A `String`-ANNOTATED receiver, which is the row that says the exemption
+    # beside the two `bytes` rows is keyed on the POINTEE and not on "this is a
+    # `char *`".  A `String` and a `Pointer[UInt8]` are the same word on this
+    # path — both are a bare `char *` — so a rule that only asked "is it a
+    # string-shaped word" would exempt both and turn this refusal into a byte
+    # answer.  The parameter also cannot see its argument, so this is the shape
+    # the image-wide condition exists for and the shape the byte exemption must
+    # not reach.
+    ("refuse_subscript_through_a_string_annotated_parameter",
+     'def first(s: String) -> Int:\n'
+     '    return s[1]\n'
+     'def main(n):\n'
+     '    printf("c=%d\\n", first("héllo"))\n'
+     '    return 0\n',
+     ["is refused on a string whose text is not ASCII",
+      "s[1]", "one CHARACTER"]),
 
     # ── the three TEXT BUILTINS with no lowering ──
     #
@@ -1179,6 +1270,38 @@ def model_checks():
     finally:
         M.clear_non_ascii_strings()
         M.publish_non_ascii_strings(saved)
+
+    # ── `receiver_is_declared_bytes`, the exemption the element refusal asks ──
+    #
+    # Four rows and each is one answer the predicate must give, because the two
+    # that could be got wrong are the two that are silently wrong: a `String` is
+    # a `char *` too and must NOT be exempted, and `fn=None` must NOT be
+    # exempted either (that is what the rows above pin).
+    def fn_of(ann, body, params=None):
+        """A one-function module, and the `FunctionDef` inside it."""
+        src = "def f({}):\n{}".format(params or "", body)
+        return F.Parser(F.py_tokenize(src)).parse_module()[0]
+
+    ok("bytes: a Pointer[UInt8] parameter is bytes",
+       M.receiver_is_declared_bytes(
+           fn_of(None, "    return e[0]\n", "e: Pointer[UInt8]"),
+           F.IdentExpr("e"), {}, {}), True)
+    ok("bytes: a Pointer[UInt8] LOCAL is bytes too — the spelling that used "
+       "to disagree with the parameter",
+       M.receiver_is_declared_bytes(
+           fn_of(None, "    var d: Pointer[UInt8] = buf(8)\n"
+                       "    return d[0]\n"),
+           F.IdentExpr("d"), {}, {}), True)
+    ok("bytes: a String is not a byte buffer, though it is the same word",
+       M.receiver_is_declared_bytes(
+           fn_of(None, "    return s[0]\n", "s: String"),
+           F.IdentExpr("s"), {}, {}), False)
+    ok("bytes: a Pointer[Int64] is not a byte buffer either",
+       M.receiver_is_declared_bytes(
+           fn_of(None, "    return p[0]\n", "p: Pointer[Int64]"),
+           F.IdentExpr("p"), {}, {}), False)
+    ok("bytes: no function in hand is no exemption",
+       M.receiver_is_declared_bytes(None, F.IdentExpr("e"), {}, {}), False)
 
     return passed, failures
 

@@ -5096,8 +5096,12 @@ ctor_field_value=self._ctor_field_value_for(name),
                 raise CodegenError(ireason)
             # A byte is not a CHARACTER: the TEXT ENCODING half of the same
             # question, and asked here because this is the single choke point a
-            # read, a store and an augmented assignment all pass through.
-            why = M.string_element_refusal(e.obj, e.index)
+            # read, a store and an augmented assignment all pass through. The
+            # declarations are passed because the refusal is about a `str` and
+            # this function's own local is not one — see
+            # `model.string_element_refusal`'s section on `bytes`.
+            why = M.string_element_refusal(e.obj, e.index, self._cur_fn,
+                                           self._structs, self._functions)
             if why is not None:
                 raise CodegenError(why)
             self._sub_width = 1

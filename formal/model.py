@@ -11266,7 +11266,50 @@ def string_position_verdict(construct: str, haystack, needle, hay_text=None):
     return STRING_POSITION_STRLEN, None
 
 
-def string_element_refusal(base, index) -> str | None:
+def receiver_is_declared_bytes(fn, base, decls=None, functions=None) -> bool:
+    """True when this image declares `base`'s pointee to be ONE byte — `bytes`.
+
+    **A `bytes` and a `str` are different answers, not different types.** CPython
+    says `"héllo"[1]` is one character and `b"héllo"[1]` is the integer 195, so
+    "read one byte at `base + index`" is CPython's own answer for the second and
+    a wrong one for the first. That is what makes a one-byte pointee a
+    *criterion* rather than a shortcut: it is the spelling that says which of
+    the two objects this path is holding, and the criterion is checked only
+    where the two answers differ (see `string_element_refusal`).
+
+    **`pointer_pointee` is the reader, not a second one.** It is the reader the
+    emitter already asks for the width of the very same load — `base + i*width`
+    with `width` from `pointer_pointee` — so a byte exemption and a byte width
+    cannot come apart: if this says `bytes`, the load the emitter emits is the
+    one-byte load, and if `pointer_pointee` cannot establish a pointee this
+    returns False and the refusal stands.
+
+    **`fn is None` is False**, which is the conservative direction and the reason
+    the callers that have no function in hand (`test_formal_unicode.py`'s
+    in-process rows) get the refusal rather than an exemption nobody measured.
+
+    The pointee spellings are read through `annotation_base_name`'s inner
+    argument so `Pointer[UInt8]`, `UnsafePointer[UInt8]` and `DTypePointer[
+    UInt8]` are one answer; `Int8` is here beside `UInt8` because a signed byte
+    buffer is the same one-byte access and the sign is the width question the
+    emitter's own `subscript_base_lowering` already decided.
+    """
+    if fn is None or base is None:
+        return False
+    pointee, _why = pointer_pointee(fn, base, decls or {}, functions)
+    return pointee in BYTE_POINTER_ELEMENTS
+
+
+# The pointee spellings that make a pointer a BYTE buffer. A set rather than one
+# name because `pointer_pointee` reports the pointee's BASE name — the reduction
+# `annotation_base_name` does on the type argument — and every pointer spelling
+# in `POINTER_TYPE_CTORS` reduces to its own element type, so the element is the
+# one thing to compare and there is one answer for all of them.
+BYTE_POINTER_ELEMENTS = frozenset({"UInt8", "Int8"})
+
+
+def string_element_refusal(base, index, fn=None, decls=None,
+                           functions=None) -> str | None:
     """Why `base[index]` is not a CHARACTER of `base`, or None when it is.
 
     A string element on this path is one BYTE at `base + index`, and CPython's
@@ -11274,6 +11317,75 @@ def string_element_refusal(base, index) -> str | None:
     disagree about everything else: for ASCII the byte is the character, and for
     anything else `base + index` walks into the middle of a multi-byte sequence
     and reads a continuation byte that is not a character at all.
+
+    ## `bytes` is not `str`, and the receiver's DECLARED type is what says so
+
+    **`fn`/`decls`/`functions` are the receiver's declarations, and they are the
+    difference between a `str` and a `bytes`.** CPython agrees with this
+    function's refusal about `str` and disagrees with it about `bytes`, because
+    CPython's two objects differ in the answer rather than only in the type:
+    `"héllo"[1]` is a character and `b"héllo"[1]` is the integer 195. So a
+    receiver the source declares `Pointer[UInt8]` is a byte buffer, its subscript
+    is a byte load, and the byte is the answer — there is no character for this
+    refusal to protect.
+
+    Without those three arguments this is the refusal about a receiver whose
+    type NOTHING states, which is why the default is to refuse and the
+    exemption needs the declarations: `formal/arm64_codegen.py` and its x86-64
+    twin are the two callers that have them, and `test_formal_unicode.py` pins
+    the `fn=None` answer as the conservative one.
+
+    **The two spellings of the same declaration used to get opposite answers,
+    which is the whole measurement.** With one non-ASCII literal in the image,
+    one em-dash in a docstring, on both architectures, exit 0:
+
+        fn take(e: Pointer[UInt8]): return e[3]     ->  BUILT (a byte load)
+
+        fn str_alloc(n) -> str: return malloc(n+1)
+        def get(e):
+            var d: Pointer[UInt8] = str_alloc(8)   ->  REFUSED, this message
+            d[0] = e[0]
+            return d[0]
+
+    Same declared type, same byte subscript, and the parameter reading was the
+    byte one because `ValueKinds` seeds an annotated `Pointer[UInt8]` PARAMETER
+    to `INT_KIND` while `_value_kind` reads the LOCAL off its initializer's
+    declared return (`str_alloc` declares `-> str`), which is `STR_KIND`. So
+    `formal/hostmods/os/_syscalls.mojo`'s `fs_dirent_name` — which copies a
+    `readdir(3)` name one byte at a time, and whose own docstrings call the
+    annotation load-bearing for exactly that — was refused by a rule that asks
+    about characters, and 31 non-ASCII em-dashes in that file's prose were
+    enough to do it. That took `os`, `shlex`, `posixpath`, `argparse` and
+    `time` down with it: each imports `os._syscalls`, so each image carries
+    those literals.
+
+    **What it costs, measured over the 743 `.mojo` files of this repository and
+    its stdlib** (every parseable file; `pointer_pointee` is the reader, which
+    is the same one the emitter's own `subscript_base_lowering` asks for the
+    width, so the exemption and the width cannot come apart):
+
+        22 subscripts whose receiver's declared pointee is one byte,
+        22 of them in ONE file — formal/hostmods/os/_syscalls.mojo —
+        and every one is a byte copy or a byte read of a `struct dirent`,
+        a `le16`/`le32`/`le64` decoder, or a `name[0] == 46` test.
+
+    Of those 22, twenty already took the byte path (a `Pointer[UInt8]`
+    parameter is not `STR_KIND`) and two — `d[i]` — were refused. So the
+    exemption makes twenty-two sites agree instead of adding a reading: it does
+    not introduce a byte answer anywhere that did not already have one.
+
+    ## The residual, stated rather than hidden
+
+    A `Pointer[UInt8]` that holds TEXT and is subscripted as a CHARACTER read
+    would now get the byte where it got a refusal. This tree has no such site
+    (the census above), and the host module that declares most of them says out
+    loud why it does not use the byte subscript to ask a character question:
+    `formal/hostmods/os/_syscalls.mojo`'s `str_at` is
+    "A character test with no byte load, which is the only way to ask this
+    question on this target". So the byte subscript is not this path's way of
+    reading a character, in this module or in this corpus; what a `str` element
+    read costs is still recorded in `bugs/FORMAL_string_value_model.md` and is
+    still refused everywhere else.
 
     **This is a REFUSAL and not a fold, and the difference from `len` is the
     answer itself.** The character count is a NUMBER and a literal's text gives
@@ -11292,12 +11404,20 @@ def string_element_refusal(base, index) -> str | None:
     An index a KNOWN TEXT makes answerable is still not answerable, because the
     obstacle is where the answer would live rather than what it is: so this
     fires for a non-ASCII LITERAL receiver exactly as it does for a name. The
-    one thing that does clear it is the condition on the whole image, which is
-    the TEXT ENCODING block's argument: no literal with a byte >= 0x80 anywhere
+    two things that do clear it are the condition on the whole image, which is
+    the TEXT ENCODING block's argument (no literal with a byte >= 0x80 anywhere
     means no string in the image can have one, so every element read is a
-    character.
+    character), and a receiver the source declares a byte buffer — see the
+    section above.
     """
     if not non_ascii_strings():
+        return None
+    # The BYTE exemption is asked AFTER the image test and not before it,
+    # because it is the one reader here that walks the function's declarations
+    # and its call sites, and an all-ASCII image must not pay for it. The
+    # order is also the safe one for the same reason the image test is first:
+    # a false refusal is the expensive direction here, not the cheap one.
+    if receiver_is_declared_bytes(fn, base, decls, functions):
         return None
     text = string_literal_text(base)
     known = (f" The receiver is the literal {text!r}, so this build does know "

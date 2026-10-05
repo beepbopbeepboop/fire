@@ -838,16 +838,18 @@ from os import listdir, listdir_len, listdir_get, listdir_free
 #
 #   1. THE LOCAL MUST BE ANNOTATED, and an unannotated one is now REFUSED
 #      rather than quietly wrong.  `os._syscalls.str_alloc` is declared
-#      `-> str`, so `var p = str_alloc(8)` is a string and its subscript
-#      indexes the buffer with no annotation at all.  `re.escape` is declared
+#      `-> str`, so `var p = str_alloc(8)` says nothing about bytes and its
+#      subscript is a CHARACTER read, which an image holding a non-ASCII
+#      literal refuses by name.  `re.escape` is declared
 #      `-> Pointer[UInt8]`, whose manifest signature is `uint8_t *` — not a
 #      kind this path carries into an unannotated local — so `r[0]` used to
 #      address the LOCAL's own storage: measured 0/0 where the buffer holds
 #      65/66, while `printf("%s", r)` in the same program printed `AB`
 #      correctly, and `r[0] = 90` built, ran and exited 0 writing to a slot
 #      nothing reads.  A subscript through such a name is refused by name now
-#      (BLOB_UNTYPED_PROGRAM below); the annotated spelling is the answer and is
-#      still here, answering 65/66.
+#      (BLOB_UNTYPED_PROGRAM below); the annotated spelling is the answer, and
+#      BOTH arms here carry it — `var p: Pointer[UInt8]` and
+#      `var annotated: Pointer[UInt8]`, answering 65/66.
 #   2. THERE ARE TWO CONVENTIONS, not one.  `str_alloc` is RAW: byte 0 is byte
 #      0.  `listdir` is HEADERED: byte 0 is the entry COUNT and byte `1 + i` is
 #      entry `i`'s `malloc`'d pointer.  A container keyed on 0 collides with the
@@ -865,7 +867,18 @@ from os import listdir, listdir_len, listdir_get, listdir_free
 #      well as the answers above.
 def main(n):
     # -- the raw convention ------------------------------------------------
-    var p = str_alloc(64)
+    # ANNOTATED, and that is the whole of what changed here on 2026-10-05.  The
+    # spelling below was `var p = str_alloc(64)`, which says nothing about what
+    # `p` holds, so the only evidence was `str_alloc`'s own `-> str` — and a
+    # `str` whose subscript is a CHARACTER read is refused by name in an image
+    # that holds a non-ASCII literal (`model.string_element_refusal`), which is
+    # exactly right: this program asks for BYTES.  Declaring the buffer is what
+    # says so, and it is the same declaration the `escape` arm below has carried
+    # since it was written, for the same reason.  Measured on both
+    # architectures, before and after: the unannotated spelling is refused with
+    # that message and this one answers 65/66 exactly as before — the answers
+    # did not move, the program stopped misdeclaring itself.
+    var p: Pointer[UInt8] = str_alloc(64)
     p[0] = 65
     p[1] = 66
     p[2] = 0

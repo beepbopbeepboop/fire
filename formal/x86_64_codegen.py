@@ -5055,8 +5055,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 raise CodegenError(ireason)
             # A byte is not a CHARACTER: the TEXT ENCODING half of the same
             # question, and asked here because this is the single choke point a
-            # read, a store and an augmented assignment all pass through.
-            why = M.string_element_refusal(e.obj, e.index)
+            # read, a store and an augmented assignment all pass through. The
+            # declarations are passed because the refusal is about a `str` and
+            # this function's own local is not one — see
+            # `model.string_element_refusal`'s section on `bytes`.
+            why = M.string_element_refusal(e.obj, e.index, self._cur_fn,
+                                           self._structs, self._functions)
             if why is not None:
                 raise CodegenError(why)
             # A string is a plain byte run: no header, no count, so there is
