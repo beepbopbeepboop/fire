@@ -173,8 +173,11 @@ names itself:
 * **Every branch and call**: `B`, `BL`, `CBZ`, `CBNZ`, `TBZ`, `TBNZ`, `B.cond`,
   `BR`, `BLR`, `RET`. A case is straight-line, so the pc check is `+4n` on both
   sides and a branch would take the two engines to different places. The
-  conditions themselves are covered indirectly, through NZCV and through
-  `csel`/`cset`.
+  conditions themselves are covered indirectly, through NZCV — **and through
+  `csel`/`cset` only as of 2026-10-04; both of those now step, so read "through
+  NZCV" alone** (`cset` landed with the `cmn` work, and `csel` as of the
+  2026-10-05 re-measure is the corpus's largest remaining NOSTEP class at 32 of
+  40, so a `csel`-dependent condition is NOT covered by anything here yet).
 * **`MSR`/`MRS`, `SVC`, `ADRP`, `ADR`** — none is emitted by a lowering, and
   `MSR`/`MRS` do not work in EL0 on this platform anyway.
 * **Anything at a non-zero pc base.** The model's SP and pc are compile-time
@@ -208,8 +211,8 @@ will happily delete the guilty instruction and report a different bug.
 | `subs x11, x20, x19` | `x11` unchanged | `x11 = x20 - x19` | the same arm never wrote `Rd` | **FIXED** |
 | `ldr x11, [sp, #64]` | `0000000000000000` | `cc3886474dac2e47` | LDR/STR (unsigned offset) reads the base with `arm64_reg`, so `Rn = 31` is zero and the address is `imm` | **FILED** |
 | `str w25, [x9, #32]` | 8 bytes written | 4 bytes written | `mem_write_u64` in a 32-bit store | **FILED**, same doc |
-| `cmn x0, x3` | — | — | no arm: `arm64_step` returns `none` |
-| `csel x1, x5, x1, lt` | — | — | no arm |
+| `cmn x0, x3` | — | — | ~~no arm~~ **STEPS NOW** (`work_step_cmn`, `lib/ProofLib.lean`) — measured 2026-10-05, and `flags` went 35/0/25 → 60/0/0 |
+| `csel x1, x5, x1, lt` | — | — | no arm — **still true**, and now the corpus's largest NOSTEP class |
 | `ldrb w27, [sp, #27]` | — | — | no arm |
 | `ldrsb x29, [x9, #11]` | — | — | no arm |
 | `ldrsw x25, [x9, #24]` | — | — | no arm |
@@ -238,3 +241,65 @@ count that moved, measured:
 
 The 86/99 `NOSTEP`s are the nine encodings
 `bugs/FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` carries.
+## Re-measured 2026-10-05 (`formal37-2`): **every row in §2 and §2.1 had moved,
+## and `WRONG 0` was a day stale in the direction of "better"**
+
+Re-ran the ledger's own corpora — same seeds, same counts, `--lean-chunk 25`, on
+this tree. **Nothing here is a defect found; it is the ledger doing the one thing
+it exists to do and finding that its own numbers were out of date.** Which is the
+argument for a ledger being a measurement and not a target (§2's own framing):
+a row that is a day old is a fact about the day, not about the tree.
+
+### The two 296-case rows
+
+| seed | recorded (2026-10-04) | measured (2026-10-05) |
+|---|---|---|
+| `sweepB` | AGREE 197, WRONG 0, NOSTEP 99 | **AGREE 279, WRONG 0, NOSTEP 17** |
+| `sweepC` | AGREE 210, WRONG 0, NOSTEP 86 | **AGREE 273, WRONG 0, NOSTEP 23** |
+
+**`NOSTEP` fell 99 → 17 and 86 → 23 with `WRONG` still 0.** Per §2.1's own
+reading — "a fix that moved NOSTEP would have been a fix to the harness" — this
+movement is from the MODEL gaining arms, not from the harness changing. It is
+the shape of ~80 instructions the model could not step a day ago and can now,
+agreeing with the CPU on every one.
+
+### §2.1 per-mix, seed `ledgerA`, 60 each
+
+| mix | AGREE | WRONG | NOSTEP | what the NOSTEPs are |
+|---|---:|---:|---:|---|
+| `shifts` | 60 | 0 | 0 | — unchanged, and still the row that stands in for `FORMAL_arm64_right_shift_is_always_arithmetic.md` |
+| `alu` | 60 | 0 | 0 | was 60/0/0 |
+| `ext` | 60 | 0 | 0 | was 60/0/0 |
+| `muldiv` | 60 | 0 | 0 | was 60/0/0 |
+| `flags` | **60** | 0 | **0** | was 35/0/25 — **`cmn` now steps** |
+| `select` | **28** | 0 | **32** | was 18/0/42 — `cset` now steps, `csel` still has no arm |
+| `mem` | **60** | **0** | **0** | was 11/**4**/45 — **the two filed memory defects are cleared** |
+| `memreg` | **60** | 0 | **0** | was **0**/0/60 — the whole mix went from nothing to everything |
+
+**Three of these are a defect closing, not just coverage.** `mem` was the row
+carrying §5's two `WRONG`s — `LDR`/`STR (unsigned offset)` reading register 31 as
+zero, and `STR Wt` writing eight bytes — and §5 already said both were "fixed in
+`lib/ProofLib.lean`". That was true of the fix and **was not true of the mix**:
+the mix still reported 4 `WRONG` and 45 `NOSTEP` on 2026-10-04. Measured today it
+is 60/0/0, so §5's "after" row (`sweepC` AGREE 210) understated what the fix
+achieved.
+
+### What is left, precisely: `csel`, and only `csel`
+
+`select` is a 50/50 `csel`/`cset` draw (`gen_select`, `tools/formal_model_fuzz.py`),
+so 28 AGREE / 32 NOSTEP is `cset` stepped and `csel` not. Confirmed by reading
+`lib/ProofLib.lean` rather than inferring it from the tally: `work_step_cmn`
+exists (which is why `flags` reached 60/0/0), and there is **no `csel` arm**.
+So §5's table entry "`csel x1, x5, x1, lt` — no arm" is still true, and it is now
+the single largest NOSTEP class in the whole corpus at 32 of the 40 remaining.
+
+**This is the row to pick up, and it is one instruction**: `csel Xd, Xn, Xm, cond`
+is a conditional move with no memory access and no link register, so it is
+`csinc`-shaped and every input is already a word. §4's "the conditions themselves
+are covered indirectly, through NZCV and through `csel`/`cset`" was true when
+`cset` was also a NOSTEP and is now **false of `csel` specifically** — the
+conditions are covered through NZCV alone. **Not filed as a doc by this session**
+(it is a `lib/ProofLib.lean` capability addition and another worker may hold the
+row); recorded here because §4's sentence is a claim about coverage that has
+become wrong, and a false coverage claim is what §2's `WRONG 0` discussion warns
+about.
