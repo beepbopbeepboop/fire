@@ -6,6 +6,12 @@ scope's files** — that is the finding, and it is the answer to the question th
 sweep cannot answer. What is left open is the per-file refusal table, the chain
 underneath it, and an owner per link.
 
+**Status (2026-10-05, `work/formal25-5-r2`): §6 item 2 is CLOSED as a MESSAGE
+(§0.4) — the false clause "nothing this backend could add" is gone and the
+sentence now names the backend RULE that would remove it and the feature that
+holds it. It did not need `formal16-2` to land.** The items below are as
+`work/formal25-5` left them.
+
 **Status (2026-10-04, `work/formal25-5`): §6 item 3 is CLOSED — the stub step no
 longer stops the walk, and it was the stub step, not the chain.** The document's
 own reading of why was wrong by half and right by half: the shape it named (an
@@ -499,6 +505,42 @@ no build), `test_a_forwarded_type_is_not_demanded_as_a_symbol` (the build, both
 arches) and `test_a_forwarded_name_nothing_defines_is_still_refused` (the guard
 on the guard).
 
+## 0.4 §6 item 2's dead end is CLOSED, and it was a MESSAGE rather than
+## `formal16-2`'s feature (`work/formal25-5-r2`)
+
+The item said the refusal is *"not true — the backend could inline them, which
+is `formal16-2`'s feature"*, and asked for a doc edit **when that lands**. It
+has not landed, and the sentence it complained about was false in a way that
+did not depend on it.
+
+`formal/build.py::no_public_api_reason`'s constants-only branch ended:
+
+> There is nothing an importer could bind, and **nothing this backend could
+> add**.
+
+**Measured on this tree, the second clause is false today.** Those constants are
+already inlined at their use sites by the module-constant substitution —
+`formal/model.py`'s own `collect_module_symbols` docstring lists *"a
+module-level BINDING whose value FOLDS to a literal, bound once"* as body that
+is not a declaration, which is exactly this. And a build of it does not even
+reach the branch: a two-file fixture whose module is `comptime` constants only
+**builds** on arm64, because the importer reads the constant and links nothing.
+So the branch is reachable only for a shape the module-constant substitution does
+not fold, and for that shape what is missing is a RULE ("a module with nothing
+to export needs no dylib at all") and not an implementation.
+
+**The sentence now says both halves** — the refusal is correct, and the missing
+thing is a backend rule, with the feature named and its doc cited — so the six
+files this row is worth have an owner and a next step instead of a dead end. The
+private-sibling branch is a different branch on a different fact and was not
+touched; both directions are pinned by
+`test_formal_imports.py::test_a_constants_only_module_is_not_told_nothing_could_be_added`,
+next to the file's three existing `no_public_api_reason` message-accuracy guards.
+
+**What this does NOT do:** it lowers nothing and moves no file. The feature is
+still `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`'s and still
+`formal16-2`'s. This item asked for a sentence, and the sentence is now true.
+
 ## 6. What is left
 
 1. ~~**The cause-ranking instrument cannot rank this scope's causes.**~~ **CLOSED
@@ -507,10 +549,19 @@ on the guard).
    dotted name with `formal.imports.resolve_module_path`, so `refused in:` names
    the DEFINING module and the `uses:` column is measured for every group whose
    name resolves.
-2. **`__init__`-only modules are refused with "nothing this backend could
-   add"**, which is not true — the backend could inline them, which is
-   `formal16-2`'s feature. Worth a doc edit when that lands, because the sentence
-   is a dead end for whoever reads the 6 files first.
+ 2. ~~**`__init__`-only modules are refused with "nothing this backend could
+    add"**, which is not true — the backend could inline them, which is
+    `formal16-2`'s feature.~~ **CLOSED as a MESSAGE — §0.4, and it is not
+    `formal16-2`'s feature to land.** The false clause is gone and the sentence
+    now names both halves: the refusal itself is correct (nothing an importer
+    could bind), and what would remove it is a **backend RULE** rather than work
+    on the module — those constants are already inlined at their use sites by
+    the module-constant substitution, and what is absent is "a module with
+    nothing to export needs no dylib at all", which is the one feature
+    `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` writes down.
+    The six files behind this row now have a next step and an owner instead of
+    a dead end, which is what this item asked for.
+
 3. ~~**The chain walk stops at link 4 and cannot be pushed further by this
    tool.**~~ **CLOSED — §0.2, and the premise was wrong as well as the tool.**
    The stop was never the tool's limit: it was one deleted line of a

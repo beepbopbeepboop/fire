@@ -3587,6 +3587,66 @@ def test_a_generic_template_is_not_exported_under_its_base_name(tmpdir,
           f"and nothing else")
 
 
+def test_a_constants_only_module_is_not_told_nothing_could_be_added(
+        tmpdir, _shared):
+    """A module of nothing but constants is not told "nothing this backend
+    could add".
+
+    The fourth message-accuracy guard on `no_public_api_reason`, and the one
+    `bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` §6 item 2
+    filed as a dead end: the branch's text ended "There is nothing an importer
+    could bind, and nothing this backend could add." — and the second clause
+    is **false**, which is why that document said of it "the sentence is a dead
+    end for whoever reads the 6 files first".
+
+    The constants are already inlined at their use sites by the
+    module-constant substitution; what is absent is a RULE that a module with
+    nothing to export needs no dylib at all, so an importer reading the
+    constant directly needs no library. That is one feature, and
+    `bugs/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` is where
+    it is written down — so the message now says which feature it is and where
+    it lives, rather than telling a reader that nothing would help.
+
+    **The assertion is on the false clause and on the owner being named**, and
+    both directions matter: a message that merely stopped saying the false thing
+    would leave the 6 files with no next step, which is the same dead end in a
+    quieter form.
+    """
+    sys.path.insert(0, HERE)
+    from formal.build import no_public_api_reason
+    path = os.path.join(tmpdir, "constants_only.mojo")
+    with open(path, "w") as f:
+        f.write('comptime ALPHA: Int = 7\ncomptime BETA: String = "x"\n')
+    reason = no_public_api_reason([path])
+    check("declares no function and no type at all" in reason,
+          f"the constants-only branch did not fire: {reason}")
+    check("nothing this backend could add" not in reason,
+          "the refusal still tells the reader that nothing could be added, "
+          f"which is false — the constants are already inlined at their use "
+          f"sites and the missing thing is a rule, not an implementation: "
+          f"{reason}")
+    check("FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib" in reason,
+          "the refusal does not name the feature that would remove it, so the "
+          f"6 files behind this row still have no next step: {reason}")
+    check("BACKEND" in reason,
+          "the refusal does not say the missing thing is a backend RULE "
+          f"rather than work on the module, which is the part a reader acts "
+          f"on: {reason}")
+    # …and the branch's own judgement is untouched: there really is nothing an
+    # importer could bind, and the refusal is still correct.
+    check("nothing an importer could bind" in reason,
+          f"the refusal stopped saying why the refusal is correct: {reason}")
+    # The private sibling is a DIFFERENT branch and must not have been edited.
+    priv = os.path.join(tmpdir, "private_only.mojo")
+    with open(priv, "w") as f:
+        f.write("def _hidden() -> Int:\n  return 1\n")
+    other = no_public_api_reason([priv])
+    check("every declaration in it is private" in other
+          and "BACKEND" not in other,
+          f"the constants-only wording leaked into the private branch, whose "
+          f"reason is a different fact: {other}")
+
+
 def test_a_clib_named_definition_is_refused_not_blamed_on_privacy(tmpdir,
                                                                   _shared):
     """A module defining only `strlen` is refused, and NOT told it is private.
@@ -4095,6 +4155,8 @@ TESTS = [
      test_a_bare_call_to_a_template_is_refused_by_the_export_rule),
     ("a generic template is not exported under its base name",
      test_a_generic_template_is_not_exported_under_its_base_name),
+    ("a constants-only module is not told nothing could be added",
+     test_a_constants_only_module_is_not_told_nothing_could_be_added),
     ("a C-library-named definition is not blamed on privacy",
      test_a_clib_named_definition_is_refused_not_blamed_on_privacy),
     ("a concrete and a generic of one name are told apart",

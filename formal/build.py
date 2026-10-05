@@ -17793,8 +17793,17 @@ def no_public_api_reason(source_paths: list) -> str:
         return (f"{head} exports nothing under doc/ABI.md's rules because it "
                 f"declares no function and no type at all — only module-level "
                 f"constants, which are inlined at their use site and cross no "
-                f"boundary. There is nothing an importer could bind, and "
-                f"nothing this backend could add.")
+                f"boundary. There is nothing an importer could bind, so the "
+                f"refusal itself is correct. What would remove it is not more "
+                f"work on the module but a decision about the BACKEND: those "
+                f"constants are already inlined at their use sites by the "
+                f"module-constant substitution, and what is absent is a rule "
+                f"that a module with nothing to export needs no dylib at all — "
+                f"an importer reading the constant directly instead of linking "
+                f"a library for it. That is one feature, and "
+                f"`bugs/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib"
+                f".md` is where it is written down, so nothing here is waiting "
+                f"on this file.")
     # The C-LIBRARY-SYMBOL case, checked before the generic ones because it is
     # the only rule that is a NAME test rather than a shape test, so it can hold
     # whatever the declarations look like. Its exclusion is right for a CALL and
