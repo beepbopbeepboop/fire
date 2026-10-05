@@ -981,6 +981,22 @@ _REFUSAL_FAMILIES = (
     # the address is not the problem, the ABSENCE of storage is.
     ("has no module-global storage for it",
      "module-global name has no storage"),
+    # A `try` whose arm cannot be entered, because the body can reach a `raise`
+    # and a `raise` here is `exit(1)` rather than an exception. It is its own
+    # family and not a clause of the handler-arm refusal (which this table has
+    # no row for either, and `formal_sweep_causes.py` has one row for each of
+    # the two): the two messages describe DIFFERENT wrong programs — that one
+    # loses the arm's body, this one loses every statement the `try` was
+    # supposed to continue into — and both of them carry the clause "no edge
+    # runs from a raise site into an arm", so a shared marker would make the
+    # first match win and report this construct as that one.
+    #
+    # Keyed on the clause only this message writes. Zero files today, measured
+    # over this repository's 479 `.py`/`.mojo` files and the stdlib's 252: every
+    # file the question reaches is already refused for another reason, so this
+    # row exists to name the construct rather than to count a backlog.
+    ("cannot catch it, so the `try` is refused",
+     "a `try` that can reach a raise, whose arm cannot catch it"),
     ("takes exactly one value to convert", "wrong argument count"),
     # Reachable from `codegen` only through a rule that has not fired yet; it
     # is here so the breakdown has a name for the day it does, and so a future

@@ -1491,7 +1491,7 @@ dylib_exports: list = None, globals_base: int = None,
                 # every other fall-through, and the caller of a mutator ignores
                 # it.
                 self._emit_receiver_writeback()
-            self.asm.emit(encode_movz_xd_imm(0, 0))
+            self.asm.emit(encode_movz_wd_imm(0, 0))
             self._emit_epilogue()
 
         self._current_function = None
@@ -1716,8 +1716,8 @@ dylib_exports: list = None, globals_base: int = None,
         # is decoded from. `lib/ProofLib.lean` reads that address out of
         # `info["compiler_traps"]`, so a flush here would silently move the
         # decoded trap under the proof layer.
-        self.asm.emit(encode_movz_xd_imm(0, M.STACK_TRAP_STATUS))
-        self.asm.emit(encode_movz_xd_imm(16, 1))
+        self.asm.emit(encode_movz_wd_imm(0, M.STACK_TRAP_STATUS))
+        self.asm.emit(encode_movz_wd_imm(16, 1))
         self.asm.emit(encode_svc(0x80))
         # `label`, not `emit_label_rel`: this DEFINES where the branch above
         # goes, and it lands on the first instruction of the BODY because the
@@ -1799,7 +1799,7 @@ dylib_exports: list = None, globals_base: int = None,
             # filled while another still holds its link-time address.
             self._adrp_add_abs(16, base + image.init_flag_offset)
             self._adrp_add_abs(17, base + image.init_flag_offset)
-            self.asm.emit(encode_movz_xn_imm(16, 1))
+            self.asm.emit(encode_movz_xd_imm(16, 1))
             self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))
             # `label`, not `emit_label_rel`: this DEFINES where the check above
             # branches to. Recording a relocation here would be a second branch
@@ -2091,7 +2091,7 @@ dylib_exports: list = None, globals_base: int = None,
             if stmt.value is None:
                 if self._recv_ref_receiver is not None:
                     self._emit_receiver_writeback()
-                self.asm.emit(encode_movz_xd_imm(0, 0))
+                self.asm.emit(encode_movz_wd_imm(0, 0))
             elif self._returns_frame is not None:
                 self._emit_frame_return(stmt.value)
             else:
@@ -2545,8 +2545,8 @@ dylib_exports: list = None, globals_base: int = None,
         """
         self._emit_call(F.CallExpr(func=F.IdentExpr(name="fflush"),
                                    args=[F.IntLiteral(0)]))
-        self.asm.emit(encode_movz_xd_imm(0, status))
-        self.asm.emit(encode_movz_xd_imm(16, 1))
+        self.asm.emit(encode_movz_wd_imm(0, status))
+        self.asm.emit(encode_movz_wd_imm(16, 1))
         self.asm.emit(encode_svc(0x80))
 
     def _emit_diverge(self) -> None:
@@ -3028,7 +3028,7 @@ dylib_exports: list = None, globals_base: int = None,
             finally:
                 self._container_ctx -= 1
             self._store_var(fb_name, 0)
-            self.asm.emit(encode_movz_xd_imm(0, 0))
+            self.asm.emit(encode_movz_wd_imm(0, 0))
             self._store_var(fi_name, 0)
 
             self._loops.append({"start": start_label, "step": step_label,
@@ -3195,7 +3195,7 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 8))   # X5 = src base
         self.asm.emit(encode_ldr_xt_xn_imm(3, 5, 0))    # X3 = count
         self.asm.emit(encode_sub_xd_xn_imm(3, 3, 6))    # rest_count
-        self.asm.emit(encode_movz_xd_imm(4, 0))         # i = 0
+        self.asm.emit(encode_movz_wd_imm(4, 0))         # i = 0
 
         self._while_counter += 1
         loop = f"{tag}_sl{self._while_counter}"
@@ -3402,13 +3402,13 @@ dylib_exports: list = None, globals_base: int = None,
             # BoolLiteral; None stays IdentExpr). Materialize them as
             # integers so `x is None` compares against 0, not a random var reg.
             if expr.name == "None":
-                self.asm.emit(encode_movz_xd_imm(0, 0))
+                self.asm.emit(encode_movz_wd_imm(0, 0))
                 return
             if expr.name == "True":
-                self.asm.emit(encode_movz_xd_imm(0, 1))
+                self.asm.emit(encode_movz_wd_imm(0, 1))
                 return
             if expr.name == "False":
-                self.asm.emit(encode_movz_xd_imm(0, 0))
+                self.asm.emit(encode_movz_wd_imm(0, 0))
                 return
             self._load_var(expr.name, 0)
             return
@@ -3418,7 +3418,7 @@ dylib_exports: list = None, globals_base: int = None,
             return
 
         if isinstance(expr, F.NoneLiteral):
-            self.asm.emit(encode_movz_xd_imm(0, 0))
+            self.asm.emit(encode_movz_wd_imm(0, 0))
             return
 
         if isinstance(expr, F.StringLiteral):
@@ -3699,7 +3699,7 @@ dylib_exports: list = None, globals_base: int = None,
             if expr.value is not None:
                 self._emit_expr(expr.value)
             else:
-                self.asm.emit(encode_movz_xd_imm(0, 0))
+                self.asm.emit(encode_movz_wd_imm(0, 0))
             return
 
         if isinstance(expr, F.WalrusExpr):
@@ -3716,7 +3716,7 @@ dylib_exports: list = None, globals_base: int = None,
             if lam_name and lam_name in self._functions:
                 self.asm.emit_adrp_add(0, lam_name)
                 return
-            self.asm.emit(encode_movz_xd_imm(0, 0))
+            self.asm.emit(encode_movz_wd_imm(0, 0))
             return
 
         raise CodegenError(
@@ -4636,7 +4636,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         keeps its own live state in X0-X9.
         """
         elems = self._static_key_needle(needle)
-        self.asm.emit(encode_movz_xd_imm(ok, 1))
+        self.asm.emit(encode_movz_wd_imm(ok, 1))
         if elems is None:
             self._emit_key_const(needle, 11)
             self.asm.emit(encode_cmp_xn_xm(cand, 11))
@@ -4736,7 +4736,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         base_off = 16 if key_pushed else 0
         self.asm.emit(encode_ldr_xt_xn_imm(9, 31, base_off))  # X9 = base
         self.asm.emit(encode_ldr_xt_xn_imm(2, 9, 0))    # X2 = count
-        self.asm.emit(encode_movz_xd_imm(3, 0))         # X3 = i
+        self.asm.emit(encode_movz_wd_imm(3, 0))         # X3 = i
 
         self.asm.label(loop_label)
         self.asm.emit(encode_cmp_xn_xm(3, 2))
@@ -5143,7 +5143,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                 # one-byte element and is the SECOND element for any other
                 # width, which is the same trap `_offset_scale` refuses rather
                 # than guesses on the dereference path.
-                self.asm.emit(encode_movz_xd_imm(2, width))
+                self.asm.emit(encode_movz_wd_imm(2, width))
                 self.asm.emit(encode_mul_xd_xn_xm(1, 1, 2))
             self.asm.emit(encode_add_xd_xn_xm(9, 9, 1))  # X9 = &elem
             self.asm.emit(encode_mov_zr_xn(0, 9))
@@ -6121,7 +6121,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_cset_xd_cond(0, "eq"))
         self._emit_b_to(done_label)
         self.asm.label(no_label)
-        self.asm.emit(encode_movz_xd_imm(0, 0))
+        self.asm.emit(encode_movz_wd_imm(0, 0))
         self.asm.label(done_label)
         _emit_add_imm(self.asm, 31, 31, 32)
 
@@ -6228,7 +6228,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit_label_rel(empty, here_offset=-4)
         self.asm.emit(encode_ldr_xt_xn_imm(3, 31, 0))
         self.asm.emit(encode_str_xt_xn_imm(3, 31, 24))         # cursor = s
-        self.asm.emit(encode_movz_xd_imm(3, 0))
+        self.asm.emit(encode_movz_wd_imm(3, 0))
         self.asm.emit(encode_str_xt_xn_imm(3, 31, 32))         # count = 0
         self.asm.label(loop)
         self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 24))
@@ -6295,7 +6295,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                 f"(got {len(e.args or []) + len(e.kwargs or [])})")
         self._emit_expr(e.func.obj)                     # X0 = the blob base
         self.asm.emit(encode_mov_zr_xn(9, 0))
-        self.asm.emit(encode_movz_xd_imm(0, 0))         # count = 0
+        self.asm.emit(encode_movz_wd_imm(0, 0))         # count = 0
         self.asm.emit(encode_str_xt_xn_imm(0, 9, 0))
 
     def _emit_list_append(self, e: F.CallExpr) -> None:
@@ -6377,7 +6377,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                 recv.name if isinstance(recv, F.IdentExpr) else "<expr>", cap))
         self._emit_exit(1)
         self.asm.label(ok)
-        self.asm.emit(encode_movz_xd_imm(0, 0))     # None
+        self.asm.emit(encode_movz_wd_imm(0, 0))     # None
 
     def _emit_list_clear(self, e: F.CallExpr) -> None:
         """`xs.clear()` — store 0 at the blob's count, which empties it.
@@ -6408,9 +6408,9 @@ ctor_field_value=self._ctor_field_value_for(name),
         recv = e.func.obj
         self._emit_expr(recv)                      # X0 = the blob base
         self.asm.emit(encode_mov_zr_xn(1, 0))      # X1 = base
-        self.asm.emit(encode_movz_xd_imm(2, 0))    # X2 = 0
+        self.asm.emit(encode_movz_wd_imm(2, 0))    # X2 = 0
         self.asm.emit(encode_str_xt_xn_imm(2, 1, 0))   # [X1+0] = X2
-        self.asm.emit(encode_movz_xd_imm(0, 0))    # None
+        self.asm.emit(encode_movz_wd_imm(0, 0))    # None
 
     def _emit_overflow_diagnostic(self, text: str) -> None:
         """`write(2, text, len)` — say WHICH bound was hit before stopping.
@@ -6433,8 +6433,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         label = self._intern_string(text)
         _emit_sub_imm(self.asm, 31, 31, 16)
         self.asm.emit_adrp_add(1, label)
-        self.asm.emit(encode_movz_xd_imm(0, 2))              # fd = stderr
-        self.asm.emit(encode_movz_xd_imm(2, len(text)))      # length
+        self.asm.emit(encode_movz_wd_imm(0, 2))              # fd = stderr
+        self.asm.emit(encode_movz_wd_imm(2, len(text)))      # length
         self._emit_extern_call("write", 3)
         _emit_add_imm(self.asm, 31, 31, 16)
 
@@ -6495,7 +6495,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_expr(text_expr)                        # X0 = s
         self.asm.emit(encode_str_xt_xn_imm(0, 31, 0))     # [sp+0] = s
         _emit_add_imm(self.asm, 1, 31, 8)                 # X1 = &end
-        self.asm.emit(encode_movz_xd_imm(2, base))         # X2 = base
+        self.asm.emit(encode_movz_wd_imm(2, base))         # X2 = base
         self._emit_extern_call("strtoll", 3)               # X0 = value
         self.asm.emit(encode_str_xt_xn_imm(0, 31, 16))    # [sp+16] = value
         self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 8))     # X1 = end
@@ -6764,7 +6764,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         for i in range(count):
             self._emit_list_base(offset)
             if stride == 1:
-                self.asm.emit(encode_movz_xd_imm(10, 0))
+                self.asm.emit(encode_movz_wd_imm(10, 0))
                 self.asm.emit(encode_strb_wd_wn(10, 9, M.BLOB_HEADER_BYTES + i))
             else:
                 self._emit_mov_imm("X10", 0)
@@ -6992,7 +6992,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                 else None
             self._emit_expr_to(e.right, "X1")
             if scale:
-                self.asm.emit(encode_movz_xd_imm(2, scale))
+                self.asm.emit(encode_movz_wd_imm(2, scale))
                 self.asm.emit(encode_mul_xd_xn_xm(1, 1, 2))
             self.asm.emit(encode_ldp_sp_post(0, 2))
             self.asm.emit(alu[op](0, 0, 1))
@@ -7694,7 +7694,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._container_ctx -= 1
         self.asm.emit(encode_mov_zr_xn(9, 1))
         self.asm.emit(encode_ldr_xt_xn_imm(2, 9, 0))
-        self.asm.emit(encode_movz_xd_imm(3, 0))
+        self.asm.emit(encode_movz_wd_imm(3, 0))
 
         self.asm.label(loop_label)
         self.asm.emit(encode_cmp_xn_xm(3, 2))
@@ -7740,12 +7740,12 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         self.asm.label(notfound_label)
         _pop_needle()
-        self.asm.emit(encode_movz_xd_imm(0, 1 if invert else 0))
+        self.asm.emit(encode_movz_wd_imm(0, 1 if invert else 0))
         self._emit_b_to(end_label)
 
         self.asm.label(found_label)
         _pop_needle()
-        self.asm.emit(encode_movz_xd_imm(0, 0 if invert else 1))
+        self.asm.emit(encode_movz_wd_imm(0, 0 if invert else 1))
 
         self.asm.label(end_label)
 
@@ -8170,8 +8170,11 @@ ctor_field_value=self._ctor_field_value_for(name),
             else:
                 # `_emit_mov_imm`, not a hand-rolled movz: it is the one
                 # materializer on this backend and it covers the whole 64-bit
-                # word, which `encode_movz_xn_imm` does not -- a class-level
+                # word, which `encode_movz_wd_imm` does not -- a class-level
                 # default past 0xffff (or below zero) emitted a truncated word.
+                # (That encoder used to be called `encode_movz_xd_imm`, which
+                # named the 64-bit form while encoding the 32-bit one; the two
+                # MOVZ encoders are now named after the width each emits.)
                 # Carried over from the `_emit_nested_frame_init` this replaced,
                 # where it was the same store one level down.
                 self._emit_mov_imm("X0", int(payload or 0))
@@ -9454,7 +9457,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         finally:
             self._container_ctx -= 1
         self._store_var(cb_name, 0)
-        self.asm.emit(encode_movz_xd_imm(0, 0))
+        self.asm.emit(encode_movz_wd_imm(0, 0))
         self._store_var(ci_name, 0)
 
         self._loops.append({"start": start_label, "step": step_label,
@@ -9683,7 +9686,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         """
         self.asm.emit(encode_mov_zr_xn(10, 0))         # X10 = src base
         self.asm.emit(encode_ldr_xt_xn_imm(11, 10, 0))  # X11 = src count
-        self.asm.emit(encode_movz_xd_imm(12, 0))       # X12 = i = 0
+        self.asm.emit(encode_movz_wd_imm(12, 0))       # X12 = i = 0
         self._while_counter += 1
         loop = f"{self.func_name}_spl{self._while_counter}"
         done = f"{self.func_name}_spd{self._while_counter}"
@@ -9842,7 +9845,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             if lit is not None and 0 <= lit <= 64:
                 n = lit
                 if n == 0:
-                    self.asm.emit(encode_movz_xd_imm(0, 1))
+                    self.asm.emit(encode_movz_wd_imm(0, 1))
                     return
                 self._emit_expr(e.left)
                 if n == 1:
@@ -9866,7 +9869,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             if lit is not None and lit < 0:
                 # Integer ** negative → 0 (matches Python for |base| > 1
                 # and the formal int lattice has no fractions).
-                self.asm.emit(encode_movz_xd_imm(0, 0))
+                self.asm.emit(encode_movz_wd_imm(0, 0))
                 return
             # Runtime exponent: result = 1; while exp > 0: result *= base;
             # exp >>= 1; base *= base (binary exponentiation). Negative exp
@@ -9896,7 +9899,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_cbnz_xn(0, 1))
             self.asm.emit_label_rel(neg, here_offset=-4)
             # result = 1 in X2; keep exp in X0, base on stack
-            self.asm.emit(encode_movz_xd_imm(2, 1))
+            self.asm.emit(encode_movz_wd_imm(2, 1))
             self.asm.label(loop)
             self.asm.emit(encode_cmp_xn_imm(0, 0))
             self.asm.emit(encode_cset_xd_cond(1, "le"))
@@ -9904,7 +9907,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit_label_rel(done, here_offset=-4)
             self.asm.label(body)
             # if exp & 1: result *= base  (X1 = exp & 1; skip if zero)
-            self.asm.emit(encode_movz_xd_imm(4, 1))
+            self.asm.emit(encode_movz_wd_imm(4, 1))
             self.asm.emit(encode_and_xd_xn_xm(1, 0, 4))  # exp & 1
             so = f"{fn}_pow{pid}_so"
             self.asm.emit(encode_cbz_xn(0, 1))
@@ -9937,7 +9940,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_b_to(f"{fn}_pow{pid}_end")
             self.asm.label(neg)
             self.asm.emit(encode_ldp_sp_post(4, 5))
-            self.asm.emit(encode_movz_xd_imm(0, 0))
+            self.asm.emit(encode_movz_wd_imm(0, 0))
             self.asm.label(f"{fn}_pow{pid}_end")
             return
 
@@ -10105,12 +10108,12 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self.asm.emit(encode_str_xt_xn_imm(1, 31, 0))
 
         self.asm.emit(encode_ldp_sp_post(0, 2))
-        self.asm.emit(encode_movz_xd_imm(0, 1))
+        self.asm.emit(encode_movz_wd_imm(0, 1))
         self.asm.emit(encode_b(0))
         self.asm.emit_label_rel(end_label, here_offset=-4)
         self.asm.label(false_label)
         self.asm.emit(encode_ldp_sp_post(0, 2))
-        self.asm.emit(encode_movz_xd_imm(0, 0))
+        self.asm.emit(encode_movz_wd_imm(0, 0))
         self.asm.label(end_label)
 
     def _emit_slice(self, expr: F.SliceExpr) -> None:
@@ -10205,7 +10208,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # the other and cannot know which; an omitted one pushes 0 and
         # `count - 1`, which is the whole reason the two exist.
         if start_e is None:
-            self.asm.emit(encode_movz_xd_imm(4, 0))          # X4 = 0
+            self.asm.emit(encode_movz_wd_imm(4, 0))          # X4 = 0
             self.asm.emit(encode_stp_sp_pre(4, 31))           # start
             self.asm.emit(encode_mov_zr_xn(6, 9))
             self.asm.emit(encode_sub_xd_xn_imm(6, 6, 1))      # count - 1
@@ -10219,7 +10222,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         if stop_e is None:
             self.asm.emit(encode_mov_zr_xn(5, 9))             # X5 = count
             self.asm.emit(encode_stp_sp_pre(5, 31))           # stop
-            self.asm.emit(encode_movz_xd_imm(6, 1))
+            self.asm.emit(encode_movz_wd_imm(6, 1))
             self.asm.emit(encode_neg_xd_xn(6, 6))             # X6 = -1
             self.asm.emit(encode_stp_sp_pre(6, 31))           # stop_d
         else:
@@ -10229,7 +10232,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_stp_sp_pre(6, 31))           # stop_d
 
         if step_e is None:
-            self.asm.emit(encode_movz_xd_imm(8, 1))
+            self.asm.emit(encode_movz_wd_imm(8, 1))
         else:
             self._emit_expr_to(step_e, "X8")
         self.asm.emit(encode_stp_sp_pre(8, 31))                # step
@@ -10278,7 +10281,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_cbz_xn(0, 0))
             f0 = f"{self.func_name}_sll{self._while_counter}{tag}"
             self.asm.emit_label_rel(f0, here_offset=-4)
-            self.asm.emit(encode_movz_xd_imm(reg, 0))
+            self.asm.emit(encode_movz_wd_imm(reg, 0))
             self.asm.emit(encode_str_xt_xn_imm(reg, 31, slot))
             self.asm.label(f0)
             if expr is None:
@@ -10410,7 +10413,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_ldr_xt_xn_imm(3, 8, 0))
 
         if target.start is None:
-            self.asm.emit(encode_movz_xd_imm(4, 0))
+            self.asm.emit(encode_movz_wd_imm(4, 0))
         else:
             self._emit_expr_to(target.start, "X4")
         if target.stop is None:
@@ -10458,7 +10461,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_cset_xd_cond(0, "eq"))
         self.asm.emit(encode_cbz_xn(0, 0))
         self.asm.emit_label_rel(fail_label, here_offset=-4)
-        self.asm.emit(encode_movz_xd_imm(7, 0))
+        self.asm.emit(encode_movz_wd_imm(7, 0))
         loop = f"{fn}_ssl{sid}"
         self.asm.label(loop)
         self.asm.emit(encode_cmp_xn_xm(7, 6))
@@ -10541,12 +10544,12 @@ ctor_field_value=self._ctor_field_value_for(name),
         if imm > 0xffffffffffffffff:
             imm = imm & 0xffffffffffffffff
         if imm == 0:
-            self.asm.emit(encode_movz_xd_imm(rd, 0))
+            self.asm.emit(encode_movz_wd_imm(rd, 0))
         elif imm <= 0xffff:
-            self.asm.emit(encode_movz_xd_imm(rd, imm))
+            self.asm.emit(encode_movz_wd_imm(rd, imm))
         else:
             low16 = imm & 0xffff
-            self.asm.emit(encode_movz_xd_imm(rd, low16))
+            self.asm.emit(encode_movz_wd_imm(rd, low16))
             imm >>= 16
             pos = 16
             while imm > 0 and pos <= 48:
@@ -10639,7 +10642,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         amount at or past 64. `X0` holds the value being shifted on entry, so
         the sign is read from it rather than recomputed."""
         if M.shift_saturated_is_zero(op, signed):
-            self.asm.emit(encode_movz_xd_imm(0, 0))
+            self.asm.emit(encode_movz_wd_imm(0, 0))
         else:
             self.asm.emit(encode_asr_xd_xn_imm(0, 0, 63))
 
@@ -10919,7 +10922,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_list_base(offset)
         self.asm.emit(encode_str_xt_xn_imm(4, 9, 0))
         # copy left elements
-        self.asm.emit(encode_movz_xd_imm(5, 0))         # i = 0
+        self.asm.emit(encode_movz_wd_imm(5, 0))         # i = 0
         self._while_counter += 1
         cl = f"{self.func_name}_lcl{self._while_counter}"
         cld = f"{self.func_name}_lcd{self._while_counter}"
@@ -10944,7 +10947,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_b_to(cl)
         self.asm.label(cld)
         # copy right elements at nL+i
-        self.asm.emit(encode_movz_xd_imm(5, 0))         # j = 0
+        self.asm.emit(encode_movz_wd_imm(5, 0))         # j = 0
         self._while_counter += 1
         cr = f"{self.func_name}_lcr{self._while_counter}"
         crd = f"{self.func_name}_lrd{self._while_counter}"
@@ -11021,8 +11024,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_ldp_sp_post(0, 31))         # drop blob
         self.asm.emit(encode_ldr_xt_xn_imm(2, 7, 0))     # nL
         self._emit_list_base(offset)                     # X9 = result base
-        self.asm.emit(encode_movz_xd_imm(5, 0))           # k = 0
-        self.asm.emit(encode_movz_xd_imm(10, 0))          # k*nL = 0
+        self.asm.emit(encode_movz_wd_imm(5, 0))           # k = 0
+        self.asm.emit(encode_movz_wd_imm(10, 0))          # k*nL = 0
         self._while_counter += 1
         ck = f"{self.func_name}_rep{self._while_counter}"
         ckd = f"{ck}d"
@@ -11031,7 +11034,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_cset_xd_cond(0, "ge"))
         self.asm.emit(encode_cbnz_xn(0, 0))
         self.asm.emit_label_rel(ckd, here_offset=-4)
-        self.asm.emit(encode_movz_xd_imm(6, 0))           # i = 0
+        self.asm.emit(encode_movz_wd_imm(6, 0))           # i = 0
         self._while_counter += 1
         ci = f"{self.func_name}_repi{self._while_counter}"
         cid = f"{ci}d"
@@ -11120,7 +11123,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_list_base(offset)
         self.asm.emit(encode_str_xt_xn_imm(4, 9, 0))
         # copy all of left into result[0..nL)
-        self.asm.emit(encode_movz_xd_imm(5, 0))
+        self.asm.emit(encode_movz_wd_imm(5, 0))
         self._while_counter += 1
         ul = f"{self.func_name}_sul{self._while_counter}"
         uld = f"{self.func_name}_sud{self._while_counter}"
@@ -11141,7 +11144,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.label(uld)
         # append right elements not already in result[0..count)
         # X2=nL, X3=nR, X5=j; result count reloaded each inner scan
-        self.asm.emit(encode_movz_xd_imm(5, 0))         # j = 0
+        self.asm.emit(encode_movz_wd_imm(5, 0))         # j = 0
         self._while_counter += 1
         ur = f"{self.func_name}_sur{self._while_counter}"
         ur_next = f"{self.func_name}_sun{self._while_counter}"
@@ -11160,7 +11163,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # scan result[0..count)
         self._emit_list_base(offset)
         self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))     # count
-        self.asm.emit(encode_movz_xd_imm(0, 0))          # k = 0
+        self.asm.emit(encode_movz_wd_imm(0, 0))          # k = 0
         self.asm.label(urs)
         self.asm.emit(encode_cmp_xn_xm(0, 1))
         self.asm.emit(encode_cset_xd_cond(4, "ge"))
@@ -11271,7 +11274,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             needle = F.decoded_literal(left)
             haystack = F.decoded_literal(right)
             found = needle == "" or needle in haystack
-            self.asm.emit(encode_movz_xd_imm(
+            self.asm.emit(encode_movz_wd_imm(
                 0, (0 if found else 1) if invert else (1 if found else 0)))
             return
         how = M.string_membership_lowering(
@@ -11340,7 +11343,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_cmp_xn_imm(0, 0))               # NE iff found
         self.asm.emit(encode_cbnz_xn(0, 0))
         self.asm.emit_label_rel(hit, here_offset=-4)
-        self.asm.emit(encode_movz_xd_imm(0, 0))              # NULL → absent
+        self.asm.emit(encode_movz_wd_imm(0, 0))              # NULL → absent
         self._emit_b_to(end)
         # `miss` — the `0 in s` exit — is placed BETWEEN the two, and BRANCHES
         # to `end` rather than falling into it, so the `hit` block's own fall
@@ -11350,10 +11353,10 @@ ctor_field_value=self._ctor_field_value_for(name),
         # FALSE for `"ell" in "hello"` on both backends. Measured, and it is
         # the reason this comment is here rather than a `b` nobody questions.
         self.asm.label(miss)
-        self.asm.emit(encode_movz_xd_imm(0, 0))
+        self.asm.emit(encode_movz_wd_imm(0, 0))
         self._emit_b_to(end)
         self.asm.label(hit)
-        self.asm.emit(encode_movz_xd_imm(0, 1))              # non-NULL → present
+        self.asm.emit(encode_movz_wd_imm(0, 1))              # non-NULL → present
         self.asm.label(end)
         # The SP restore comes AFTER the constant materialisations, and those
         # are flag-free, so the result in X0 is the only thing anything
@@ -11653,7 +11656,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_stp_sp_pre(0, 2))  # key
         self._load_var(base_name, 9)
         self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))  # count
-        self.asm.emit(encode_movz_xd_imm(2, 0))       # i = 0
+        self.asm.emit(encode_movz_wd_imm(2, 0))       # i = 0
         self._if_counter += 1
         sid = self._if_counter
         fn = self.func_name
@@ -11787,7 +11790,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # later offset conditional too (`del lst[:2]` read the count out of
         # the slot `start` had not taken and removed nothing).
         if start is None:
-            self.asm.emit(encode_movz_xd_imm(2, 0))
+            self.asm.emit(encode_movz_wd_imm(2, 0))
         else:
             self._emit_expr_to(start, "X2")
             self._emit_slice_bound_normalize(2, 0)
@@ -11886,7 +11889,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_cset_xd_cond(3, "lt"))
         self.asm.emit(encode_cbz_xn(0, 3))
         self.asm.emit_label_rel(clamped, here_offset=-4)
-        self.asm.emit(encode_movz_xd_imm(reg, 0))
+        self.asm.emit(encode_movz_wd_imm(reg, 0))
         self.asm.label(clamped)
 
 

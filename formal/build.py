@@ -15472,10 +15472,34 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # Why a refusal and not the arm being emitted: there is no unwinder to emit
     # it into. See the docstring for the measurement — a `try` whose handler
     # printed built, ran, printed nothing and exited 0.
+    #
+    # The call graph is built ONCE, before the loop, because the question below
+    # is about the MODULE rather than about a function: which of this unit's
+    # functions can end the process, so that a `try` with arms anywhere in the
+    # unit can be told that its arms are unreachable. `BARE_C_RETURN_KINDS` is
+    # the extern set — a C symbol returns and there is no frame of ours for it
+    # to raise into, so `printf(…)` inside a `try` is not a reason to refuse
+    # anything.
+    raise_graph = M.RaiseGraph(functions, externs=M.BARE_C_RETURN_KINDS)
     for fn in functions:
         found = M.unemitted_handler_arm(fn)
         if found is not None:
             raise CodegenError(M.refuse_dropped_handler_arm(fn, found))
+        # And the OTHER half of the same missing edge, asked in the same loop
+        # because it is the same fact seen from the raise site: an arm whose
+        # body is `pass` loses nothing by being dropped, but a `raise` that was
+        # supposed to REACH it ends the process instead, so every statement
+        # after the `try` is unreachable in the image and reachable in CPython.
+        # Measured on both architectures, that program built, printed nothing
+        # and exited 1 against CPython's `caught` / 0 — and it passed the check
+        # above, correctly, because there was nothing in the arm to drop.
+        # `formal/model.py`'s `uncatchable_raise` / `refuse_uncatchable_raise`
+        # are the walk and the sentence, and the walk asks the call graph
+        # because the `raise` is usually in ANOTHER function: `try: boom()`
+        # contains no `raise` at all.
+        uncaught = M.uncatchable_raise(fn, raise_graph)
+        if uncaught is not None:
+            raise CodegenError(M.refuse_uncatchable_raise(uncaught))
     # NAMED for what it holds, because the two tables in this function have the
     # same SUBJECTS and incompatible SHAPES and were interchanged once already
     # (`FORMAL_frame_receivers_is_handed_the_method_name_table`):

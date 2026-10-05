@@ -1,7 +1,12 @@
 # The arm64 exit cannot flush without a call, and a call on any proof-walked path breaks proof generation — the precondition for `FORMAL_arm64_exit_trap_does_not_flush_so_a_program_that_prints_then_exits_1_prints_nothing`
 
 **Area:** FORMAL, both backends. **Status: OPEN, and it is the PRECONDITION for the
-doc named above, measured on this tree 2026-10-04 (`work/formal23-2`).** That
+doc named above, measured on this tree 2026-10-04 (`work/formal23-2`). RE-MEASURED
+2026-10-05 on `work/formal27-2` and still open, with two things landed and the
+next step now stated in terms of the Lean signature it has to change — see
+"What changed on 2026-10-05" at the end. NOT fixed: the fix is a
+`lib/ProofLib.lean` change whose soundness cannot be established without the
+Lean gate, which a light worker may not run.** That
 doc's §"Exact next step" step 1 — one `_emit_exit` helper that emits
 `fflush(NULL)` before the three-instruction trap, at all 21 sites — **is
 measured NOT to land as written**: it makes `formal/examples/udivmod.mojo` stop
@@ -104,3 +109,77 @@ deleting them; `formal/examples/udivmod.mojo` is the whole case. No Lean is
 involved — generation alone raises, which is why this is cheap to check and why
 it was not noticed while the exit-flush bug was still described as an emitter
 decision.
+
+## What changed on 2026-10-05 (`work/formal27-2`)
+
+**The reproduction no longer needs an emitter change, and the addresses in the
+section above are stale.** The two-instruction experiment is still the right
+experiment — applied to `_emit_div_shift_pow`'s divide-by-zero arm on this tree,
+`formal/examples/udivmod.mojo` stops generating with
+
+```
+NotImplementedError: universal theorem: 2 calls this walk cannot follow
+(0x100000448 -> 0x1000004d4 (opaque), 0x1000004a8 -> 0x1000004d4 (opaque)), and
+ONE halt address cannot discharge them.
+```
+
+— the same shape, at addresses that have moved (`…4b4` above is `…4d4` now, and
+the second call is at `…4a8`, not `…488`) — but a TWO-LINE program reaches the
+identical refusal with no patch at all:
+
+```python
+def main(n):
+    if n > 0:
+        printf("pos\n")
+    else:
+        printf("neg\n")
+    return 0
+```
+
+Two `printf`s on opposite arms is the smallest program with the shape, so the
+next worker does not have to edit `formal/arm64_codegen.py` to find out whether
+the precondition moved. That program is now the fixture behind
+`test_formal_call_proof_gen.py`'s
+`TestCallProofs::test_two_calls_out_of_the_image_are_refused_by_name`, which
+pins the state of the gap in the three ways a reader needs: refused rather than
+emitted (an emitted theorem here would be FALSE — `arm64_step` answers `none` at
+both addresses, so the `none` branch of `x0 = mojo n` is `False`), both
+addresses named, and the word "disjunction" present so the work can be sized.
+`formal/examples/udivmod.mojo` still generates its proof on this tree, which is
+the anti-rot for the other half: a change that made it stop generating would be a
+regression whatever it fixed.
+
+**The next step is in `lib/ProofLib.lean`, not in `walk-terminal`, and that is
+the correction worth having.** The doc's step 1 says the terminal proposition is
+assembled at `walk-terminal` and that this is "the one line to change". It is
+not: the halt address is a single `Nat` compared against `st.pc` in the model's
+own loop, and it is threaded through EVERY run lemma the walk's induction is
+built from:
+
+```lean
+def arm64_go_exit (st : Arm64State) (code : Nat → UInt8) (exit : Nat) (fuel : Nat) : Option Arm64State :=
+  if fuel = 0 then none
+  else if st.pc = exit then some st
+  …
+```
+
+`arm64_exec_go_exit` is that call, `arm64_go_exit_call` is the same test again,
+`lib/Refine.lean`'s `Prog` carries `p.exit`, and `formal/arm64_proof_gen.py`'s
+`emit_runs` passes `exit_pc` to `runs_avoid_append` on each of its three paths
+(the prologue segment, the call, and the segment itself) through one
+`append_avoid` closure. So a block that ends at a SECOND opaque call has no
+lemma to invoke, and per-block terminals need either
+
+1. a set-valued exit — `arm64_go_exit` over a list of addresses plus a gluing
+   family beside `go_exit_step`/`go_exit_b`, which is the whole of `runProg`'s
+   exit discipline re-proved once per shape; or
+2. two independent induction chains, one per halt address, which cannot work
+   because a path reaching the other call executes a `BL` the model cannot step
+   (so each chain's run lemma fails on the other's block) — this is why "run it
+   twice and disjoin the theorems" is not the cheap version of the fix.
+
+Option 1 is the work. It is a `ProofLib` project with an emitter change beside
+it, and **it cannot be landed without the Lean gate**: a per-block terminal that
+does not close produces a theorem with a `sorry` in it, which the census reads as
+clean, and one that closes by accident produces a false theorem. That is the
+whole of why this is still open.

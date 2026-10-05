@@ -188,7 +188,103 @@ def cases():
         c.append((f"scvtf d{dn}, x{xn}", A.encode_scvtf_dn_xn(dn, xn)))
     for (xd, dn) in ((0, 0), (0, 1), (9, 8), (30, 7)):
         c.append((f"fcvtzs x{xd}, d{dn}", A.encode_fcvtzs_xn_dn(xd, dn)))
+    # ── MOVZ / MOVK / MOVN, BOTH widths, every field non-zero ─────────────
+    #
+    # **This file had no `movz`, `movk` or `movn` case at all**, so the three
+    # most-used immediate encoders in the backend were the three it did not
+    # mention, and one of them was misnamed: `encode_movz_xd_imm` emitted
+    # `0x52800000` — `sf = 0`, so `movz wD` — under a name that says `xd`.
+    # Nothing caught it because 103 call sites all pass an immediate under 2^16,
+    # for which the 32- and 64-bit forms produce the same value; the defect was
+    # in the NAME, and a name is only checkable against the assembler's word for
+    # the text a reader would expect that name to mean. Hence both widths here
+    # under both names.
+    #
+    # Swept rather than sampled, because the thing that was wrong is a single
+    # bit — `sf` in bit 31 — and any one case that happened to use the width the
+    # encoder emitted would pass. `movz x31` is NOT here: MOVZ's destination is
+    # written and register 31 there is XZR, so `as` rejects the text outright
+    # and the bound is asserted instead (`test_movz_cannot_write_xzr`).
+    for imm in (0, 1, 0xff, 0x100, 0x5555, 0xffff):
+        c.append((f"movz x0, #{imm}", A.encode_movz_xd_imm(0, imm)))
+        c.append((f"movz w0, #{imm}", A.encode_movz_wd_imm(0, imm)))
+        c.append((f"movn w0, #{imm}", A.encode_movn_wd_imm(0, imm)))
+        for pos in (0, 16, 32, 48):
+            lsl = "" if pos == 0 else f", lsl #{pos}"
+            c.append((f"movk x0, #{imm}{lsl}",
+                      A.encode_movk_xd_imm(0, imm, pos)))
+    for (xd, imm) in ((1, 1), (5, 0x1234), (28, 0xffff), (30, 0x8000)):
+        c.append((f"movz x{xd}, #{imm}", A.encode_movz_xd_imm(xd, imm)))
+        c.append((f"movz w{xd}, #{imm}", A.encode_movz_wd_imm(xd, imm)))
+        c.append((f"movn w{xd}, #{imm}", A.encode_movn_wd_imm(xd, imm)))
+        c.append((f"movk x{xd}, #{imm}, lsl #32",
+                  A.encode_movk_xd_imm(xd, imm, 32)))
+    # ── the SP frame PAIRS, and the XZR slot a pair load may discard ──────
+    #
+    # `ldp` and `stp` are the whole of this backend's frame traffic
+    # (`encode_stp_sp_pre` in a prologue, `encode_ldp_sp_post` in an epilogue),
+    # and neither had a case in this file — which is how `encode_ldp_xn_xt_sp`
+    # survived here at all: it claimed the `LDP [SP]` mnemonic, encoded a
+    # single-register load off a register base with its two arguments swapped,
+    # and shared nothing with the assembler but the base opcode. The pairs are
+    # checked at both ends of their range and with `Rt2 = 31`, which the
+    # architecture allows (the second load lands in XZR's slot and is
+    # discarded) and which a `assert 0 <= rt2 <= 30` would have refused.
+    for rt1, rt2 in ((0, 1), (0, 31), (1, 31), (30, 29)):
+        for b in (8, 16, 64, 504):
+            c.append((f"stp x{rt1}, x{rt2}, [sp, #-{b}]!",
+                      A.encode_stp_sp_pre(rt1, rt2, b)))
+        for b in (8, 16, 64, 504):
+            c.append((f"ldp x{rt1}, x{rt2}, [sp], #{b}",
+                      A.encode_ldp_sp_post(rt1, rt2, b)))
+    # …and the STORE's far end, which the load cannot reach: imm7 is signed, so
+    # -512 is representable and +512 is not (`as`: "range [-512, 504]").
+    for b in (512,):
+        c.append((f"stp x0, x1, [sp, #-{b}]!", A.encode_stp_sp_pre(0, 1, b)))
     return c
+
+
+def test_the_sp_pair_offset_is_bounded():
+    """A frame offset past the signed imm7 field must RAISE, not wrap.
+
+    imm7 is signed and scaled by 8, so +512 bytes is not representable and
+    masking it into the field produces -512: the pair lands 1024 bytes from
+    where the caller asked, the program runs to completion, and nothing says
+    so. `as` refuses the text outright, which is the same fact stated by the
+    only oracle that can execute the instruction.
+    """
+    for enc, args, why in ((A.encode_ldp_sp_post, (0, 1, 512), "load"),
+                           (A.encode_stp_sp_pre, (0, 1, 520), "store"),
+                           (A.encode_ldp_sp_post, (0, 1, 4), "unaligned")):
+        try:
+            enc(*args)
+        except AssertionError:
+            continue
+        raise TestFailure(
+            f"{enc.__name__} accepted an unrepresentable {why} offset "
+            f"{args[-1]}, which the assembler rejects")
+
+
+def test_movz_cannot_write_xzr():
+    """Register 31 is a DESTINATION here, so it is XZR and not a register.
+
+    An encoder that accepts a word the assembler will not produce is a defect
+    waiting for its first caller, and MOVZ's destination bound used to be 31 —
+    the reading being "any general register", which is what 31 is in a SOURCE
+    field and not in a destination one. `as` says so itself: `movz x31, #1` is
+    an error, not a MOVZ into a scratch register.
+    """
+    for enc, args in ((A.encode_movz_xd_imm, (31, 1)),
+                      (A.encode_movz_wd_imm, (31, 1)),
+                      (A.encode_movn_wd_imm, (31, 1)),
+                      (A.encode_movk_xd_imm, (31, 1, 0))):
+        try:
+            enc(*args)
+        except AssertionError:
+            continue
+        raise TestFailure(
+            f"{enc.__name__} accepted XZR as a destination, which is not "
+            f"writable; the word it returns cannot be assembled")
 
 
 def test_range_is_enforced():
@@ -347,6 +443,9 @@ def main():
                 print(f"  ERROR {text}: {type(e).__name__}: {e}")
 
     for name, fn in (("out-of-range raises", test_range_is_enforced),
+                     ("movz cannot write XZR", test_movz_cannot_write_xzr),
+                     ("the SP pair offset is bounded",
+                      test_the_sp_pair_offset_is_bounded),
                      ("every encoder names a base mnemonic",
                       test_a_base_mnemonic_is_either_wired_or_named),
                      ("the survey counts emitted encoders, not table entries",
