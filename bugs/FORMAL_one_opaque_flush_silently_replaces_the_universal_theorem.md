@@ -65,11 +65,13 @@ $ python3 .tmp/gen_img2.py "$PWD" "$PWD/.tmp"     # and again with $PWD/.tmp/f27
 # HEAD: external_syms = ["fflush"]  extern_calls = [{'sym': 'fflush', 'addr': 4294968436}]
 ```
 
-`4294968436` is the instruction after `q_dv2_z` (`4294968424`), so the call is ON
-the divide-by-zero path: `_emit_exit(1)` opens with `fflush(NULL)` since
-`e77131d5` ("formal/arm64: one `_emit_exit`, and every exit flushes what the
-program printed"), and `e77131d5` is on `master` and was never on
-`work/formal27-1` (`ccb157ed` is not an ancestor of it). Every label in the two
+`4294968436` is `0x1000004bc`, which is PAST the last label in the image
+(`q_dv2_ok`, `0x100000488`): it is in the unnamed exit block, the one every
+`_emit_exit` site shares, and `a // b` has no other exit — which is exactly why
+there is exactly one unfollowable call. `_emit_exit(1)` opens with `fflush(NULL)`
+since `e77131d5` ("formal/arm64: one `_emit_exit`, and every exit flushes what
+the program printed"), and `e77131d5` is on `master` and was never on
+`work/formal27-1` (`ccb157ed` is not an ancestor of it). Every LABEL in the two
 images is identical; the flush is the only difference.
 
 ## Why one call is silent and two are not — the part the other doc does not cover
@@ -145,7 +147,8 @@ methods now fail for the same reason — there is no residual goal to read:
   did not happen".
 
 `formal-call-proofgen` is a registered gate job with `deps=['preflight',
-'prooflib']`, so this is a real red in the tally and is declared by no `expect=`.
+'prooflib']` and `timeout=1200`, so this is a real red in the tally and is
+declared by no `expect=`.
 Its sibling class `TestTheZeroDivisorGuardIsAFalseGoal`, which needs no Lean and
 asserts the same subject from the text (`fdiv64`'s div0 arm is the literal `0`,
 and a zero divisor leaves the image with status 1), is **green** — the defect
