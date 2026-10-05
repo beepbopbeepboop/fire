@@ -6,6 +6,14 @@ scope's files** — that is the finding, and it is the answer to the question th
 sweep cannot answer. What is left open is the per-file refusal table, the chain
 underneath it, and an owner per link.
 
+**Status (2026-10-05, `work/formal27-5`): §6 item 2 is CLOSED too — the
+constants-only refusal was false in both of its clauses and no longer is, with
+cases on both architectures. The FEATURE it was standing in for is still
+`formal16-2`'s and still unlanded, so this document still has no fix of its own
+in it; what landed is the sentence.** §0.1 below is item 1, item 3 is unchanged,
+and item 4 was filed by its own branch (`FORMAL_a_dotted_import_resolves_to_a_
+nearer_leaf`, `formal21-1`).
+
 **Status (2026-10-04, `work/formal21-6`): §6 item 1 is CLOSED — the instrument
 can now rank this scope's causes, and the table it prints is measured rather
 than 21 rows of `NOT MEASURED`.** §6 items 2 and 3 are unchanged and item 4 was
@@ -310,10 +318,56 @@ it: the queue can now PRIORITISE the corpus's largest construct.
    dotted name with `formal.imports.resolve_module_path`, so `refused in:` names
    the DEFINING module and the `uses:` column is measured for every group whose
    name resolves.
-2. **`__init__`-only modules are refused with "nothing this backend could
+2. ~~**`__init__`-only modules are refused with "nothing this backend could
    add"**, which is not true — the backend could inline them, which is
    `formal16-2`'s feature. Worth a doc edit when that lands, because the sentence
-   is a dead end for whoever reads the 6 files first.
+   is a dead end for whoever reads the 6 files first.~~ **The sentence is fixed
+   (2026-10-05, `work/formal27-5`); the FEATURE is not, and this item is the
+   reason a doc can be half-closed.** What the branch of
+   `no_public_api_reason` behind those 6 files said was wrong in BOTH of its
+   clauses, and the second one is the sharper half:
+
+   * "There is nothing an importer could bind, and **nothing this backend could
+     add**" — false, and it is false about a capability rather than about the
+     file. The two things that would answer it are not declarations this module
+     is missing: a value model for a container-valued module constant inlined at
+     the use site (`FORMAL_module_state_no_storage.md`) and a rule that a module
+     nothing binds needs no library at all. The second of those is **not even a
+     new capability** — `_namespace_library` already emits a real library with
+     an EMPTY export trie for a package `__init__` that declares nothing, for
+     the same reason, and its gate is
+     `_declares_nothing_but_a_package_body`. So the refusal's author was one
+     predicate away from the answer and the message told the reader the answer
+     did not exist.
+   * "only module-level constants, **which are inlined at their use site** and
+     cross no boundary" — false in the same breath and for a sharper reason:
+     nothing is inlined, because the module is REFUSED and no library is ever
+     built. A sentence describing a mechanism this path did not take sends the
+     reader looking for the inline.
+
+   The message now says a constant is not a boundary symbol (which is true, and
+   is `doc/ABI.md`'s rule rather than a gap), names the two things that would
+   answer it, says they do not exist here, and says the refusal is at the build
+   rather than at the loader. **The verdict is unchanged and the test says so
+   first** — a test that wanted the module to build would be asking for
+   `formal16-2`'s feature and would be testing the wrong thing.
+   `test_formal_monomorph.py`'s `a constants-only module is refused without
+   saying nothing could be added` is the pin, on arm64 and x86-64, and it
+   asserts the two NEGATIVES (`"nothing this backend could add"`,
+   `"are inlined at their use site"`) as well as the two names, so a reword
+   that brings either false clause back goes red.
+
+   **And the sweep's own hand-copy of the sentence was the second place it was
+   false.** `test_formal_sweep.py`'s `EXPORTS` fixture quoted the old wording
+   verbatim to pin the cause label, so the reword left it matching a string
+   nothing emits while the test that exists to catch exactly that reported
+   green. That fixture is now **generated** — `formal.build.no_public_api_reason`
+   called on a two-line module — which is the treatment
+   `FORMAL_sweep_work_map_2026-10-04_b11.md` §5.4 gives the two samples it could
+   generate, and the three fixtures that quote messages this tree only reaches
+   through a 700-file sweep keep their hand-copies because there is nothing to
+   call.
+
 3. **The chain walk stops at link 4 and cannot be pushed further by this tool.**
    Removing an import line whose only use was the only statement in an indented
    block is the limit; a stub that also removed the block would extend it. Not

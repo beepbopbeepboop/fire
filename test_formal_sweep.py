@@ -2986,12 +2986,25 @@ class TestRoundOverRound(unittest.TestCase):
         "publishes: api_version, byteorder, flush_output, … "
         "`bugs/FORMAL_module_state_no_storage.md` records the design and what "
         "would have to be true to close it, and §(2) is this shape")
-    EXPORTS = (
-        "formal dylib has no public functions: constants.mojo exports nothing "
-        "under doc/ABI.md's rules because it declares no function and no type at "
-        "all — only module-level constants, which are inlined at their use site "
-        "and cross no boundary. There is nothing an importer could bind, and "
-        "nothing this backend could add.")
+    def _exports_message(self):
+        """`no_public_api_reason`'s own sentence for a constants-only module,
+        CALLED rather than hand-quoted.
+
+        The other three fixtures are hand-copies of messages this tree only
+        reaches through a 700-file sweep, and there is no function to call for
+        them. This one is built by `formal.build.no_public_api_reason` from a
+        two-line module, so a reword of the refusal cannot leave the fixture
+        quoting a sentence nothing emits — which is exactly what happened here:
+        `formal/` reworded this message (it used to end \"nothing this backend
+        could add\", false in both clauses) and the hand-copy went on matching
+        the OLD wording, so the fixture was pinning a dead string while the test
+        that exists to catch that reported green.
+        """
+        import formal.build as B
+        path = os.path.join(self._tmp.name, "constants.mojo")
+        with open(path, "w") as f:
+            f.write("STDIN = 0\nSTDOUT = 1\n")
+        return B.no_public_api_reason([path])
 
     #: fixture name -> (message, the cause label it must still classify to)
     FIXTURES = (("FSTRING", "string composition: nothing to compose into"),
@@ -3050,7 +3063,11 @@ class TestRoundOverRound(unittest.TestCase):
         import formal_sweep_causes as C
         for name, label in self.FIXTURES:
             with self.subTest(fixture=name):
-                message = getattr(self, name)
+                # `EXPORTS` is GENERATED (see `_exports_message`) and the other
+                # three are quoted, so the one that has to be asked for is named
+                # here rather than read off the class.
+                message = (self._exports_message() if name == "EXPORTS"
+                           else getattr(self, name))
                 self.assertEqual(C.classify_message(message), label,
                                  f"{name} no longer classifies to {label!r}. "
                                  f"If formal/ reworded the message, take the "
@@ -3092,7 +3109,7 @@ class TestRoundOverRound(unittest.TestCase):
         # "which row emptied" answer above is quietly short by it.
         rows = [("a.py", "codegen", self.HANDLER),
                 ("b.py", "codegen", self.MODATTR),
-                ("c.py", "codegen", self.EXPORTS)]
+                ("c.py", "codegen", self._exports_message())]
         out = self._printed(rows, rows)
         for kind in ("to a pass", "from a pass", "cause", "class", "unchanged"):
             self.assertRegex(out, rf"  {kind:<12} \d")

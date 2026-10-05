@@ -18635,7 +18635,20 @@ def no_public_api_reason(source_paths: list) -> str:
 
       * it declares nothing at all (module-level `comptime` constants only —
         `std/sys/_io.mojo`'s `stdin`/`stdout`/`stderr`): there is no
-        function and no type to cross, and there never will be;
+        function and no type to cross, and there never will be. **This
+        branch's message used to close with "nothing this backend could
+        add", and that was FALSE in both of its clauses** — a
+        container-valued constant is exactly what a value model would
+        inline at the use site, and "skip the library for a module nothing
+        binds" is a rule rather than a declaration. The message now names
+        those two and says they do not exist yet, because a reader who is
+        told there is nothing to add stops, and 6 of one stdlib scope's 46
+        files and 56 of the corpus sit behind this sentence
+        (`bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` §6
+        item 2, which is where the fix was asked for). The same sentence
+        also claimed the constants "are inlined at their use site", which
+        is not true of a module this path refuses: nothing is inlined,
+        because the library is never built.
       * every public function is a GENERIC template (`std/stat/stat.mojo`'s
         seven `S_ISxxx[intable: Intable]`): doc/ABI.md is explicit that a
         generic is not a single boundary symbol, each INSTANTIATION is. This
@@ -18715,9 +18728,18 @@ def no_public_api_reason(source_paths: list) -> str:
                     f"another module.")
         return (f"{head} exports nothing under doc/ABI.md's rules because it "
                 f"declares no function and no type at all — only module-level "
-                f"constants, which are inlined at their use site and cross no "
-                f"boundary. There is nothing an importer could bind, and "
-                f"nothing this backend could add.")
+                f"constants, and a constant is not a boundary symbol: there is "
+                f"no address an importer could bind. What would change that is "
+                f"not a declaration this file is missing, and saying so is the "
+                f"point: the two things that would answer it are a value model "
+                f"for a container-valued module constant — inline it at the use "
+                f"site, which needs storage this path does not have "
+                f"(`bugs/FORMAL_module_state_no_storage.md`) — and a rule that "
+                f"a module nothing binds needs no library at all. Neither "
+                f"exists here, so this is refused at the build rather than "
+                f"linked as a library with nothing in it. An importer that "
+                f"wants one of these constants is answered by name and per "
+                f"constant elsewhere, not by this message.")
     # The C-LIBRARY-SYMBOL case, checked before the generic ones because it is
     # the only rule that is a NAME test rather than a shape test, so it can hold
     # whatever the declarations look like. Its exclusion is right for a CALL and

@@ -778,6 +778,67 @@ def test_a_bare_call_to_an_imported_generic_is_still_refused(tmpdir):
               f"[{arch}] the bracketed spelling printed {bracketed!r}")
 
 
+def test_a_constants_only_module_is_refused_without_saying_nothing_could_be_added(
+        tmpdir):
+    """`stdin = 0` is a real API with no address, and the refusal says so.
+
+    THE MESSAGE WAS WRONG IN BOTH OF ITS CLAUSES, which is the only reason this
+    test exists. `formal/build.py::no_public_api_reason` closed this branch with
+    "There is nothing an importer could bind, and nothing this backend could
+    add" — and both halves are false:
+
+      * "nothing this backend could add" is false because the two things that
+        WOULD answer it are not declarations this file is missing. One is a
+        value model for a container-valued module constant, inlined at the use
+        site (`bugs/FORMAL_module_state_no_storage.md`); the other is a rule
+        that a module nothing binds needs no library at all, which is the empty
+        export trie `_namespace_library` already emits for a package `__init__`
+        that declares nothing. A reader told there is nothing to add stops, and
+        this refusal is the wall behind 6 of one stdlib scope's 46 files and 56
+        of the corpus's (`std/sys/_io.mojo` x23 + `std/math/constants.mojo`
+        x33, `tools/formal_sweep_causes.py --min 3` on the b11 arm).
+      * "only module-level constants, which are inlined at their use site" is
+        false in the same breath, and for a sharper reason: nothing is inlined,
+        because the module is REFUSED and no library is ever built. A sentence
+        that describes a mechanism this path did not take is worse than no
+        sentence — it is a reader looking for the inline at the use site.
+
+    The verdict itself is unchanged and correct, and the test says so first:
+    the feature is not landed, and a test that wanted it to be would be asking
+    for a value model. What is pinned is the MESSAGE, on both architectures,
+    because it is a property of the refusal a program gets rather than of the
+    file — the same distinction `test_a_bare_call_to_an_imported_generic_is_
+    still_refused` draws.
+    """
+    lib = ("STDIN = 0\n"
+           "STDOUT = 1\n"
+           "MAX_FD = 2\n")
+    prog = ("from pairlib import STDIN\n"
+            "\n"
+            "def main():\n"
+            "    print(STDIN)\n")
+    for arch in ARCHES:
+        fresh_cas()
+        msg = run_pair_case(tmpdir, arch, "mm_consts", lib, prog, "",
+                            expect_ok=False)
+        check("has no public functions" in msg,
+              f"[{arch}] a constants-only module is still refused, which is "
+              f"correct while the empty-library rule and the constant value "
+              f"model are both missing: {msg.strip()[-400:]}")
+        check("nothing this backend could add" not in msg,
+              f"[{arch}] the refusal tells the reader there is nothing this "
+              f"backend could add, which is false of both halves: "
+              f"{msg.strip()[-600:]}")
+        check("are inlined at their use site" not in msg,
+              f"[{arch}] the refusal describes an inlining this path did not "
+              f"do — the module is refused, so no use site ever reads it: "
+              f"{msg.strip()[-600:]}")
+        check("a value model" in msg and "needs no library at all" in msg,
+              f"[{arch}] the refusal does not name the two things that would "
+              f"answer it, so a reader is left with a wall and no next step: "
+              f"{msg.strip()[-700:]}")
+
+
 def test_a_non_concrete_type_argument_is_still_refused(tmpdir):
     """`Pair[t]()` has no instantiation to name, so it is not one.
 
@@ -2208,6 +2269,8 @@ TESTS = [
      test_an_instantiation_agrees_with_the_concrete_struct_of_the_same_shape),
     ("a bare call to an imported generic is still refused",
      test_a_bare_call_to_an_imported_generic_is_still_refused),
+    ("a constants-only module is refused without saying nothing could be added",
+     test_a_constants_only_module_is_refused_without_saying_nothing_could_be_added),
     ("a non-concrete type argument is still refused",
      test_a_non_concrete_type_argument_is_still_refused),
     ("only the export rule says what is a template",
