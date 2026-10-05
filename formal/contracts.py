@@ -887,6 +887,30 @@ def contract_theorems(contract, params, model_name=None, fn=None,
     antecedent = " ∧ ".join(f"({p})" for p in pre_text) if pre_text else "True"
     post = " ∧ ".join(f"({p})" for p in post_text) if post_text else "True"
     goal = f"{antecedent} → ({post})"
+    # The hypothesis NAMES the preconditions will carry.  They have to be
+    # `intro`d and, where there is more than one, SPLIT -- and this is the
+    # whole difference between a contract the ladder closes and one it cannot.
+    #
+    # It did not `intro` at all, so the preconditions were never in context:
+    # `simp +decide [at_offset_go, sKey] <;> omega` on `@requires(i >= 0)
+    # @requires(i < n) @ensures(result <= n)` could not see either assumption,
+    # `decide` had nothing to decide, and `omega` was handed a `Fin` goal it
+    # has no arithmetic for.  Measured: `contract_at_offset.lean` exits 1,
+    # while the same clause with `intro h; obtain ⟨h0, h1⟩ := h` in front
+    # closes.  An unproved contract reported UNKNOWN is honest but is also
+    # useless if the reason is that the emitter forgot two lines.
+    pre_names = [f"hpre{i}" for i in range(len(pre_text))]
+    if not pre_names:
+        hypo = []
+    elif len(pre_names) == 1:
+        # Named AT the `intro`.  It was `intro hpre` followed by
+        # `rename_i hpre0`, which names three binders for a two-parameter
+        # theorem and is refused as "too many variable names provided" --
+        # i.e. the emitted proof did not even reach the ladder.
+        hypo = [f"  intro {pre_names[0]}"]
+    else:
+        hypo = ["  intro hpre",
+                "  obtain ⟨" + ", ".join(pre_names) + "⟩ := hpre"]
     # The SPLIT prelude.  A clause over a model with an `if` in it has to be
     # case-split before `omega` can see it, and the model's own conditions are
     # the same strings `eval_eq_mojo` splits on.  This is the step whose
@@ -896,17 +920,50 @@ def contract_theorems(contract, params, model_name=None, fn=None,
     splits = model_conditions(fn, params) if fn is not None else None
     emitted_split = splits is not None
     splits = splits or []
+    hs = [f"h{i}" for i in range(len(splits))]
+    by_cases = (" ".join(f"by_cases {h} : {c} <;>" for h, c in zip(hs, splits))
+                if splits else "")
+    simp = (", ".join(hs + pre_names + [model, "sKey",
+                                        "u64_lt_iff_false_of_le",
+                                        "u64_le_iff_false_of_lt"]))
+    # The ladder, as a `first | … | … | …`.  `first` tries each rung and takes
+    # the first that CLOSES the goal; a rung that merely leaves the goal open
+    # (which is what `simp_all` and `decide` do when they cannot) falls
+    # through, and the LAST rung is `omega`, whose failure is an error and
+    # therefore the theorem's own failure.  So the script either proves the
+    # contract or fails loudly with the theorem named -- there is no rung that
+    # can leave it silently open, which is the whole requirement.
+    #
+    # The rung order is measurement.  `simp_all +decide` closes a clause whose
+    # model the simplifier can evaluate under the split, which is the common
+    # case; `omega` closes the linear-arithmetic ones the simplifier cannot;
+    # `decide` is the last resort for a fully concrete goal.  `bv_decide` is
+    # NOT here and `LADDER` says why: it decides `BitVec` goals and `UInt64`
+    # is a `Fin`, so on this goal it is a category error rather than a weaker
+    # tactic.
+    rung = (f"first\n"
+            f"    | (simp_all [{simp}])\n"
+            f"    | omega\n"
+            f"    | decide")
     lines = [f"theorem {contract.name}_contract {binders} :",
-             f"    {goal} := by"]
-    if splits:
-        by_cases = " ".join(f"by_cases h{i} : {c} <;>"
-                            for i, c in enumerate(splits))
-        hs = " ".join(f"h{i}" for i in range(len(splits)))
-        simp = (f"{hs}, {model}, sKey, "
-                f"u64_lt_iff_false_of_le, u64_le_iff_false_of_lt")
-        lines.append(f"  {by_cases} simp_all +decide [{simp}] <;> omega")
-    else:
-        lines.append(f"  simp +decide [{model}, sKey] <;> omega")
+             f"    {goal} := by"] + hypo
+    if not posts:
+        # A contract with only preconditions: `pre → True`, which `intro`
+        # alone discharges.  Emitted rather than skipped because a `@requires`
+        # with no `@ensures` is a real promise and the reader is entitled to see
+        # it discharged.
+        lines = [f"theorem {contract.name}_contract {binders} :",
+                 f"    {antecedent} → True := by",
+                 "  trivial"]
+        return Emission("\n".join(lines), goal, emitted_split, contract,
+                        params, fn, model)
+    # One bullet per postcondition, each opening with the case split the model
+    # needs.  Bullets rather than one `And` split because each postcondition is
+    # then separately checkable: a failure names which one broke.
+    for i, _p in enumerate(post_text):
+        if i:
+            lines.append("  constructor")
+        lines.append(f"  · {by_cases}{rung}")
     if source_note:
         spelled = ", ".join(f"`@{c.name}(...)`" if not c.is_pragma
                             else f"`# {c.name}:`" for c in contract.clauses)
@@ -1728,7 +1785,13 @@ def _mojo_of(node, result_term=None):
         b = _mojo_of(node[3], result_term)
         if a is None or b is None:
             return None
-        return F.BinaryOp(op=node[1], left=a, right=b)
+        # `_Op.CMP` spells `==` as `=`, because that is what the Lean printer
+        # wants.  Leaking that into a Mojo AST produced `unsupported binary
+        # operator '=' on the formal arm64 path` for every `@ensures(a == b)`
+        # -- found by RUNNING the instrumentation, not by reading it, which is
+        # the argument for the test running it on both backends.
+        return F.BinaryOp(op="==" if node[1] == "=" else node[1],
+                          left=a, right=b)
     if tag in (_Op.AND, _Op.OR):
         a = _mojo_of(node[1], result_term)
         b = _mojo_of(node[2], result_term)
@@ -1747,11 +1810,44 @@ def _mojo_of(node, result_term=None):
         if cond is None or then is None or other is None:
             return None
         return F.TernaryExpr(condition=cond, then_val=then, else_val=other)
-    if tag in (_Op.ABS, _Op.MIN, _Op.MAX, _Op.CLAMP):
-        args = [_mojo_of(a, result_term) for a in node[1:]]
-        if any(a is None for a in args):
+    if tag == _Op.ABS:
+        # A builtin is lowered to the SELECTION the machine can make, not to a
+        # call.  `@ensures(result == abs(n))` instrumented to `abs(n)` put a
+        # `BL abs` in the image, and the link audit refused it: nothing on this
+        # link line defines `abs`.  The refusal is the right answer and it is
+        # also the wrong experience -- the clause was readable, the CHECK was
+        # expressible, and only the printer refused.  Expanding here is also
+        # what makes the check agree with the Lean printer, which expands for
+        # the same reason (`omega` cannot unfold a library function).
+        x = _mojo_of(node[1], result_term)
+        if x is None:
             return None
-        return F.CallExpr(func=F.IdentExpr(name=tag), args=args)
+        return F.TernaryExpr(
+            condition=F.BinaryOp(op="<", left=x,
+                                 right=F.IntLiteral(value=0)),
+            then_val=F.UnaryOp(op="-", operand=x),
+            else_val=x)
+    if tag in (_Op.MIN, _Op.MAX):
+        a = _mojo_of(node[1], result_term)
+        b = _mojo_of(node[2], result_term)
+        if a is None or b is None:
+            return None
+        return F.TernaryExpr(
+            condition=F.BinaryOp(op="<" if tag == _Op.MIN else ">",
+                                 left=a, right=b),
+            then_val=a, else_val=b)
+    if tag == _Op.CLAMP:
+        x = _mojo_of(node[1], result_term)
+        lo = _mojo_of(node[2], result_term)
+        hi = _mojo_of(node[3], result_term)
+        if x is None or lo is None or hi is None:
+            return None
+        inner = F.TernaryExpr(
+            condition=F.BinaryOp(op=">", left=x, right=hi),
+            then_val=hi, else_val=x)
+        return F.TernaryExpr(
+            condition=F.BinaryOp(op="<", left=x, right=lo),
+            then_val=lo, else_val=inner)
     return None
 
 
