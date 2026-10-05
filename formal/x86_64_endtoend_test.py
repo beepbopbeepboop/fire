@@ -802,6 +802,24 @@ def _byte_facts(insns, code, base):
 _BYTES = "first | native_decide | simp [read_i32_le, read_i8, hb]"
 
 
+#: What is missing for each form the decoder learned and `_FORMS` did not, in
+#: the words of the encoder that emits it.  Named because `_resolve`'s refusal
+#: has to say WHICH of the two halves of the pair is absent, and "add a row" is
+#: not actionable without knowing that the missing row is a MEMORY successor for
+#: a pointee width the model already steps.
+_UNKNOWN_FORM_HINT = {
+    "mov_rm8_r8": "`encode_mov_rm8_r8`'s 1-byte store",
+    "mov_rm16_r16": "`encode_mov_rm16_r16`'s 2-byte store (`66 89 /r`)",
+    "mov_rm32_r32_mem": "`encode_mov_rm32_r32`'s 4-byte MEMORY store",
+    "mov_r32_rm32": "`encode_mov_r32_rm32`'s 4-byte MEMORY load",
+    "movzx_r64_rm8": "`encode_movzx_r64_rm8`'s 1-byte unsigned load",
+    "movzx_r64_rm16": "`encode_movzx_r64_rm16`'s 2-byte unsigned load",
+    "movsx_r64_rm8": "`encode_movsx_r64_rm8`'s 1-byte signed load",
+    "movsx_r64_rm16": "`encode_movsx_r64_rm16`'s 2-byte signed load",
+    "movsx_r64_rm32": "`encode_movsx_r64_rm32`'s 4-byte signed load",
+}
+
+
 def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
              length=1, rip=None, code_name="rc"):
     """`(call, succ)` for one instruction: the step lemma applied at `addr`, and
@@ -830,7 +848,29 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
     disagrees with the model's step" — was the right report about a claim that
     was not the one anybody meant to make.
     """
-    lemma, takes_imm, conds = _FORMS[form]
+    entry = _FORMS.get(form)
+    if entry is None:
+        # A form the decoder knows and `_FORMS` does not, named rather than a
+        # bare `KeyError`. It is the two halves of this module disagreeing
+        # about one instruction: `formal/x86_64_decode.py` is a claim about
+        # the BYTE STREAM and grew the pointee-width memory forms because
+        # `formal/x86_64.py` emits them, while `_FORMS` is a claim about what
+        # this emitter has a step lemma and a successor for. A `KeyError` says
+        # `'mov_rm32_r32_mem'`, which names the form and nothing else; this says
+        # what is missing and where, which is the difference between a reader
+        # who can act and a reader who has to go looking.
+        #
+        # It is a refusal and not a wrong successor on purpose. `_SUCCS`'s
+        # register rows read the ModRM's register field, and handing one of them
+        # a memory encoding produces a successor about a different instruction
+        # that typechecks — which is the failure this whole pair of files exists
+        # to make visible rather than to produce.
+        raise ValueError(
+            "no step lemma wired for: %s — the decoder knows this form (the "
+            "backend emits it) and `_FORMS` has no row for it, so there is no "
+            "successor to write. Add a `_FORMS`/`_SUCCS` pair, or do not decode "
+            "the form: %s" % (form, _UNKNOWN_FORM_HINT.get(form, "")))
+    lemma, takes_imm, conds = entry
     imm = int.from_bytes(raw[3:7], "little", signed=True) if takes_imm else None
     # Each side condition is a `try (<attempt>)` and then an `all_goals sorry`
     # ON ITS OWN LINE, so one that does not go through is admitted rather than

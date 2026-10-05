@@ -138,12 +138,58 @@ def samples():
     # length arithmetic is a single `+ 1` will get wrong in the two directions
     # that are not the same direction.
     # `formal/x86_64_model_fuzz.py --census` found it; this list is what should
-    # have. The MEMORY half of the same family, the byte and halfword STORES
-    # (`88 /r`, `66 REX 89 /r`) and the memory widen/narrow loads cannot be added
-    # until `formal/x86_64_decode.py` stops refusing them -- see
-    # `bugs/FORMAL_x86_64_coverage_test_misses_eight_encoders.md`.
+    # have.
     add("mov_rm32_r32", "mov r15d, r13d", X.encode_mov_r32_r32(R.R15, R.R13))
     add("mov_rm32_r32", "mov esi, edi", X.encode_mov_r32_r32(R.RSI, R.RDI))
+
+    # ── the pointee-WIDTH memory forms: eight encoders this list could not name
+    #
+    # A blob on this path is the frame, and a pointer into it has a declared
+    # width, so an 8-byte load or store would over-read or over-write it. The
+    # encoder has a narrower instruction for each of 1, 2 and 4 bytes; the
+    # model steps all of them (`lib/X86.lean`'s `0x88` arm, `x86_step_op66`, the
+    # `0x0F` arm and the `63` arm); and this list named NONE of them, because
+    # `formal/x86_64_decode.py` used to refuse them and a sample that does not
+    # decode is reported as a decoder failure rather than as coverage. So the
+    # property this file states — "every byte sequence this backend can emit is
+    # one `x86_step` can step" — was not being asked about eight of the
+    # encoders.
+    #
+    # Two rows per shape where the shape has a register form already sampled,
+    # because the memory and register forms are different instructions to the
+    # model (`x86_step_rex`'s arm and the `0x0F` arm) and a check at one of them
+    # says nothing about the other. Every base/displacement pair here is one the
+    # backend emits, and the `disp32` rows are there for the same reason the
+    # 64-bit ones above are: `_rm_disp` picks the narrowest form, so a row only
+    # at a small displacement never exercises the four-byte path, which is the
+    # one that resumed inside its own displacement before.
+    for base, disp in ((R.RBX, 0), (R.RBP, 8), (R.R13, 300)):
+        add("mov_rm8_r8", "mov byte [%s+%d], sil" % (base.name, disp),
+            X.encode_mov_rm8_r8(base, disp, R.RSI))
+        add("mov_rm16_r16", "mov word [%s+%d], r11w" % (base.name, disp),
+            X.encode_mov_rm16_r16(base, disp, R.R11))
+        add("mov_rm32_r32_mem", "mov dword [%s+%d], r11d" % (base.name, disp),
+            X.encode_mov_rm32_r32(base, disp, R.R11))
+        add("mov_r32_rm32", "mov eax, [%s+%d]" % (base.name, disp),
+            X.encode_mov_r32_rm32(R.RAX, base, disp))
+        add("movzx_r64_rm8", "movzx rax, byte [%s+%d]" % (base.name, disp),
+            X.encode_movzx_r64_rm8(R.RAX, base, disp))
+        add("movzx_r64_rm16", "movzx r11, word [%s+%d]" % (base.name, disp),
+            X.encode_movzx_r64_rm16(R.R11, base, disp))
+        add("movsx_r64_rm8", "movsx r9, byte [%s+%d]" % (base.name, disp),
+            X.encode_movsx_r64_rm8(R.R9, base, disp))
+        add("movsx_r64_rm16", "movsx rax, word [%s+%d]" % (base.name, disp),
+            X.encode_movsx_r64_rm16(R.RAX, base, disp))
+        add("movsx_r64_rm32", "movsxd rax, dword [%s+%d]" % (base.name, disp),
+            X.encode_movsx_r64_rm32(R.RAX, base, disp))
+    # …and the two that need a FOUR-byte displacement to exist at all, since
+    # `128` is the first one `_rm_disp` widens.
+    add("mov_rm8_r8", "mov byte [rbp+128], dil",
+        X.encode_mov_rm8_r8(R.RBP, 128, R.RDI))
+    add("movsx_r64_rm32", "movsxd rax, dword [rbp-0x410]",
+        X.encode_movsx_r64_rm32(R.RAX, R.RBP, -0x410))
+    add("movzx_r64_rm16", "movzx rax, word [rbx+4096]",
+        X.encode_movzx_r64_rm16(R.RAX, R.RBX, 4096))
 
     add("movsxd_r64_r32", "mov rax, edx",
         X.encode_movsx_r64_r32(R.RAX, R.RDX))
