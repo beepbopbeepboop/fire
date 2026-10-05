@@ -2301,9 +2301,35 @@ dylib_exports: list = None, globals_base: int = None,
             if isinstance(stmt.target, F.MemberExpr):
                 slot = _member_slot_key(stmt.target)
                 if slot is None:
-                    raise CodegenError(
-                        "unsupported augmented assignment target on the "
-                        "formal arm64 path")
+                    # A base that is an EXPRESSION has no name to key on, and
+                    # that is a question about the BINDING of the base rather
+                    # than about the shape of the target — so it is the shared
+                    # `member_access_refusal`, the fourth of this backend's
+                    # sites to raise it, and the same one x86-64's
+                    # `_refuse_member_target` raises. This arm used to raise a
+                    # literal of its own ("unsupported augmented assignment
+                    # target on the formal arm64 path"), which is FALSE about
+                    # this file for the same reason x86-64's pre-fix sentence
+                    # was false about its own: a `MemberExpr` target IS lowered
+                    # here whenever the member is a frame slot, and `a.n += 1`
+                    # builds and answers on both machines. Two architectures
+                    # refusing one construct with two sentences is the class of
+                    # defect `FORMAL_the_two_backends_refuse_different_
+                    # constructs_in_the_same_function.md` is about, and its fix
+                    # landed for the store arm and for x86-64's — this arm was
+                    # the one that kept it alive.
+                    #
+                    # The base is EMITTED first, which is what makes the message
+                    # the SPECIFIC one rather than a generic field complaint:
+                    # `q.value().x += 5` has a pointer base, and emitting it says
+                    # so ("a load from the address the receiver holds, and the
+                    # load's width is the pointee's") where `member_access_
+                    # refusal` alone would blame an unclassifiable field. This is
+                    # the ordering `model.member_access_refusal`'s docstring calls
+                    # load-bearing, and the three other arm64 sites already do it.
+                    self._emit_expr(M.member_base_node(stmt.target))
+                    raise CodegenError(M.member_access_refusal(
+                        stmt.target, self.func_name, self._frame_holders))
                 name = slot
             elif isinstance(stmt.target, F.IdentExpr):
                 name = stmt.target.name

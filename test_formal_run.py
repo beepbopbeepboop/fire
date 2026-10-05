@@ -14897,24 +14897,23 @@ POINTER_DEREF_REFUSALS = [
     # and it is pinned so it is a recorded limit rather than a surprise.  The
     # augmented-assignment arm works from a NAME (`_load_var`/`_store_var` on a
     # `_frame_slots` key), and a base that is an EXPRESSION has no name to key
-    # on, so the two backends refuse it from their own augmented arms.  Their
-    # WORDS differ, which is a pre-existing divergence in that diagnostic and not
-    # one of the pointer model's — hence `refuse_either:` with both needles
-    # rather than one, which is the honest encoding of "refused on both, and the
-    # two disagree about how they say so".  The named spelling is answered:
+    # on, so both backends refuse it — but they refuse it with ONE sentence,
+    # `model.member_access_refusal`, because the real premise is the BINDING of
+    # the base and not the shape of the target.  The named spelling is answered:
     # `deref_struct_pointee_augmented_through_a_name`.
     #
-    # **x86-64's half of `refuse_either:` is master's WORDS, not the ones this
-    # row was written against.**  It used to say "augmented assignment target
-    # must be a plain name on the formal x86-64 path", which is FALSE about the
-    # file: a `MemberExpr` target IS lowered when the member is a frame slot, so
-    # the real premise is the BINDING OF THE BASE — and that is what the shared
-    # `model.member_access_refusal` says, which is what the arm now raises
-    # (`_refuse_member_target`).  arm64 has not caught up and still refuses from
-    # its own augmented arm, which is the divergence this encoding records.  The
-    # needle is the clause that names the BASE rather than the whole sentence,
-    # for the reason every other needle in this file is a clause: the sentence
-    # is one function's and the clause is the fact.
+    # **This row carried `refuse_either:` until arm64 caught up** (its augmented
+    # arm raised a literal of its own, "unsupported augmented assignment target
+    # on the formal arm64 path", while x86-64 raised `_refuse_member_target`).
+    # Both sentences were about the same construct and the arm64 one was FALSE
+    # about its own file — a `MemberExpr` target IS lowered on both machines
+    # when the member is a frame slot (`a.n += 1` builds and answers 5 on both).
+    # The `refuse_either:` is GONE rather than narrowed, which is the point of
+    # removing it: a two-needle row goes green either way, so it would have
+    # survived the fix and reported the divergence forever after it was over.
+    # The needle is the clause that names the BASE rather than the whole
+    # sentence, for the reason every other needle in this file is a clause: the
+    # sentence is one function's and the clause is the fact.
     ("deref_refuse_augmented_through_a_pointer_frame",
      "struct P3:\n"
      "    var a: Int64\n"
@@ -14926,8 +14925,7 @@ POINTER_DEREF_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    var t = P3()\n"
      "    return bump(t)\n",
-     "refuse_either:unsupported augmented assignment target on the formal arm64"
-     " path|is a field access through 'p.value(...)'", None),
+     "refuse:is a field access through 'p.value(...)'", None),
     # A FLOAT pointee.  A formal value has no float kind distinct from an int
     # (the same absence that refuses `__mlir_bool__`), so a 4-byte float load
     # would put IEEE binary32 bits in a register the program then treats as an
