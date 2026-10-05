@@ -61,7 +61,9 @@ CANONICAL_ELEM_TYPES = (F.IntLiteral, F.BoolLiteral, F.StringLiteral)
 # The count is a PAIR count for a dict, which is why scanning one at the
 # element stride only ever reaches the first half of it (slot i of a pair blob
 # alternates key, value). `walk_stride` is the rule that keeps a walk over a
-# blob — a `for` target, a membership test — from making that mistake.
+# blob — a `for` target, a membership test, a comprehension generator, a `*`
+# splice — from making that mistake, and it enumerates those four consumers
+# because a consumer it does not name is one nobody audits.
 
 BLOB_HEADER_BYTES = 8      # the i64 count
 ELEM_STRIDE = 8            # list element / pair slot stride
@@ -106,16 +108,27 @@ def walk_stride(is_dict: bool, elem_stride: int = ELEM_STRIDE) -> int:
     a pair blob and a walk over it steps by the pair.  At the element stride a
     walk alternates keys and values, which is wrong in two ways at once: it
     binds half the values, and bounded by the pair count it can only ever see
-    half the dict.  Every walk that yields ONE THING per count asks this, which
-    is a `for x in …` target and a `x in …` membership needle and nothing else;
-    the emitters that also want the address of pair `i`'s VALUE want
+    half the dict.  Every walk that yields ONE THING per count asks this; the
+    emitters that also want the address of pair `i`'s VALUE want
     `pair_value_offset` and are not asking this question.
-
-    `elem_stride` is the blob's OWN element stride (`blob_elem_stride`), which
+`elem_stride` is the blob's OWN element stride (`blob_elem_stride`), which
     is `ELEM_STRIDE` for every blob but a byte one. A dict is a pair blob in
     both cases and its stride ignores the argument, which is why the default
     keeps every existing caller correct: a caller with no kind in hand reads a
     word per element, which is what every blob but a byte one holds.
+
+    **There are FOUR consumers, and the list used to name two of them**, which is
+    the whole reason the other two drifted: a `for x in …` target, a `x in …`
+    membership needle, a comprehension generator's iterable, and a `*` splice's
+    operand.  The last two were hardcoded to the element stride on BOTH
+    backends while this function and both `for`-in walkers read it, so
+    `[k for k in d]` and `[*d]` built `[k0, v0, k1]` and exited 0 — and the
+    COUNT of the result was right, because three PAIRS and three WORDS are the
+    same number, so a measurement that looked only at `len` agreed with CPython
+    on the buggy programs.  The finding and its four sites are
+    `bugs/FORMAL_fuzz_ledger.md` §3.10.  So this docstring enumerating its
+    consumers is load-bearing rather than decorative: a consumer not named here
+    is a consumer that will not be audited.
     """
     return PAIR_STRIDE if is_dict else elem_stride
 
@@ -8979,9 +8992,12 @@ def interpolated_literal_refusal(node, where: str = "") -> str:
         f"(the field may be a runtime value) or at run time (there is no "
         f"heap); this is the same missing buffer that keeps string "
         f"concatenation and the length-dependent methods refused (see "
-        f"`string_concat_refusal` and LENGTH_DEPENDENT_METHODS). Print the "
-        f"parts as separate operands, or build the text with `+` once that is "
-        f"lowered.")
+        f"`string_concat_refusal` and LENGTH_DEPENDENT_METHODS). Pass the "
+        f"interpolated value to `printf` as an ARGUMENT — "
+        f"`printf(\"n=%d\", n)` — which is the same text and is what this "
+        f"path lowers; `print(\"n=\", n)` is NOT the same program, because "
+        f"`print` inserts a space between its operands, and building the text "
+        f"with `+` is the same missing buffer refused under another name.")
 
 
 def refuse_interpolated_literals(stmts) -> None:
@@ -13246,6 +13262,16 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
     taught to look at it.  A second arity for the new answer would make every
     reader a two-tuple branch, and the whole reason this function is shared is
     that the two architectures cannot come to different answers about a load.
+
+    **The fourth answer, `("frame", struct, False)`, is the STRUCT pointee, and
+    it is emitted rather than refused** (`pointer_frame_pointee` is its decision
+    and the three places that consume it are the two backends'
+    `_emit_dereference` and `pointer_frame_bindings`).  Nothing is loaded: the
+    word in the receiver already IS the pointee, and the answer is that word —
+    the same identity `Pointer()` gives and the same shape as a string's length
+    being a computation rather than a field.  It is a load-width answer with no
+    width in it, and the third element stays `False` so the two readers that
+    ignore the shape are not handed a `struct` where they expect a bool.
     """
     unwrapped, unwrap_why = nullable_pointer_unwrap(fn, expr, decls,
                                                     functions)
@@ -13278,23 +13304,23 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
                       f"direction")
     st = (structs_by_name or {}).get(inner)
     if st is not None:
-        # A STRUCT pointee is REFUSED, and this is the load-bearing decision of
-        # the whole section, so the reasoning is long and it is worth reading.
+        # A STRUCT pointee is the IDENTITY, and this is the load-bearing
+        # decision of the whole section, so the reasoning is long and it is
+        # worth reading.
         #
-        # The DERIVATION is right and it is not the problem: a struct's value on
-        # this path is a frame ADDRESS, so the word in the receiver already IS
-        # the pointee, exactly as `Pointer()` is (wave 4's D4) and exactly as a
-        # string's length is a computation rather than a field.  Emitting the
-        # identity and reading the fields off it is what the model says.
+        # The DERIVATION is right and it is the only thing that was ever in
+        # doubt: a struct's value on this path is a frame ADDRESS, so the word
+        # in the receiver already IS the pointee, exactly as `Pointer()` is
+        # (wave 4's D4) and exactly as a string's length is a computation
+        # rather than a field.  Nothing is loaded; the answer is the receiver.
         #
-        # What is missing is the HOLDER ANALYSIS, and without it the answer is a
-        # use-after-free wearing a pointer's clothes.  Reading fields off a
-        # frame address on this path is `_frame_receivers`' job: it decides
-        # which names hold frame addresses, and it recognises them from a
-        # CONSTRUCTOR BINDING (`x = A()`) or from being a callee's first
-        # parameter.  A name bound from `p.value()` is neither, so the analysis
-        # does not see it, and `q.b` then falls to the value-member path and
-        # reads a word of nothing.  Measured, on both architectures, with the
+        # It WAS refused, and the refusal named its own reason honestly: the
+        # machinery that reads fields off a frame address is `_frame_receivers`'
+        # job, it decides which names hold frame addresses, and it recognised
+        # them from a CONSTRUCTOR BINDING (`x = A()`) or from being a callee's
+        # first parameter.  A name bound from `p.value()` was neither, so the
+        # analysis did not see it and `q.b` fell to the value-member path and
+        # read a word of nothing.  Measured, on both architectures, with the
         # identity lowering in place:
         #
         #     struct P3:  var a: Int64 / var b: Int64 / var c: Int64
@@ -13302,57 +13328,51 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
         #     main:  t = P3(); t.b = 22;  printf(..., f(t))
         #
         # printed **0** on arm64 and on x86-64, where the source says 22.  So
-        # the identity is not refused for being unprovable — it is refused
-        # because emitting it produces a wrong answer today, and a wrong answer
-        # is the outcome this model exists to prevent.
+        # the identity was refused for producing a wrong answer, not for being
+        # unprovable — and a wrong answer is the outcome this model exists to
+        # prevent, which is the right reason to refuse and not a reason to leave
+        # it refused.
         #
-        # It is also the frame-lifetime trap this whole section is arranged
-        # around, and naming it is the point: a `Pointer[SomeStruct]` IS a
-        # frame address, so storing one in a field or returning it hands the
-        # caller a pointer into a frame whose lifetime this pass cannot follow
-        # — the same use-after-free `formal/build.py` refuses for a struct
-        # receiver returned from the function that created it, and the same one
-        # D2 made an enforced invariant for a blob in a field.  A pointer to a
-        # SCALAR has no such problem, which is why exactly the scalar branch
-        # above is answerable and this one is not.
+        # What made it answerable is `pointer_frame_pointee`'s three consumers,
+        # and they are the same three for both machines: `_frame_receivers`
+        # seeds a name bound here into the holder tables
+        # (`pointer_frame_bindings`), `_frame_return_status` counts a `return`
+        # of one as returning a FRAME so the caller's block is reserved and the
+        # callee copies into it, and both `_emit_dereference`s emit the
+        # receiver and nothing else.  A frame reaching a caller is then a COPY
+        # in the caller's own scratch — the returned-frame convention — rather
+        # than an address of somebody else's, which is what the frame-lifetime
+        # half of the old refusal was about and is why the answer is safe rather
+        # than merely reachable.
         #
-        # THE NEXT STEP, and it is one line of recognition rather than a model
-        # change: teach `_frame_receivers`' fixpoint that a name bound from
-        # `p.value()` where `p` is declared `Pointer[SomeStruct]` of this unit
-        # is a holder, with the pointee's struct as its candidate.  Everything
-        # downstream of that — the frame layout, the escape analysis, the field
-        # reads — already exists and already works for a directly constructed
-        # struct, which is `c1.mojo`/`c3.mojo` in the reproducer set.  This is
-        # `formal/build.py`, which is not this change's lane.
+        # **A ONE-FIELD pointee is still refused**, and it is a different fact
+        # rather than a half-answer: such a struct's value is the word ITSELF,
+        # not an address of one, so there is nothing at the address and the
+        # identity would be wrong rather than right.  `struct_is_framed` is the
+        # one test for the two, as it is everywhere else on this path.
         if not struct_is_framed(st):
             return (None, f"the pointee is {inner}, a one-field struct whose "
                           f"value on this path is the word itself rather than "
                           f"memory, so there is nothing at the address to load "
                           f"and the honest reading is not a dereference at all")
-        return (None, f"the pointee is {inner}, a STRUCT, and a struct's value "
-                      f"on this path is a frame ADDRESS rather than memory "
-                      f"contents — so this is not a load at all: the word in the "
-                      f"receiver already is the pointee, and the answer is the "
-                      f"identity, the same one `Pointer()` gives. It is refused "
-                      f"anyway because the machinery that reads fields off a "
-                      f"frame address recognises a frame by its CONSTRUCTOR "
-                      f"BINDING or by being a callee's first parameter, and a "
-                      f"name bound from `p.value()` is neither — so `q.b` off "
-                      f"the result falls to the value-member path and reads a "
-                      f"word of nothing. Measured with the identity in place: "
-                      f"`p.value().b` returns 0 on both architectures where the "
-                      f"source says 22. This is also the frame-lifetime trap: a "
-                      f"`Pointer[{inner}]` is a frame address, so storing one in "
-                      f"a field or returning it hands the caller a pointer into "
-                      f"a frame whose lifetime this pass cannot follow — the "
-                      f"use-after-free `formal/build.py` already refuses for a "
-                      f"struct receiver returned from the function that created "
-                      f"it. The next step is one line of recognition, not a "
-                      f"value-model change: teach the holder fixpoint that a "
-                      f"name bound from `p.value()` on a `Pointer[{inner}]` is "
-                      f"a holder, and every field read, layout and escape check "
-                      f"below that already works for a constructed struct starts "
-                      f"working through the pointer too")
+        return (("frame", st, False),
+                f"the pointee is {inner}, a STRUCT, and a struct's value on this "
+                f"path is a frame ADDRESS rather than memory contents — so this "
+                f"is not a load at all: the word in the receiver already is the "
+                f"pointee, and the answer is the identity, the same one "
+                f"`Pointer()` gives. It is emitted as that word and nothing else, "
+                f"and the {inner} frame's fields are read off it through the "
+                f"holder tables `_frame_receivers` publishes for it "
+                f"(`pointer_frame_bindings`) — which is the one piece of "
+                f"recognition the refusal above said was missing. A "
+                f"`Pointer[{inner}]` is a frame address, so the channels that "
+                f"would hand the CALLER an address of somebody else's frame are "
+                f"still refused where they are for any holder: a `return` of one "
+                f"goes through the returned-frame convention, which copies into "
+                f"a block in the caller's own scratch, and a store of one into "
+                f"a field or a container is `formal/build.py`'s frame-escape "
+                f"refusal, exactly as it is for a constructed "
+                f"{inner}")
     return (None, f"the pointee is {inner}, which is not a width this model "
                   f"establishes and not a struct this image declares, so no "
                   f"load at that address has a known width — and a load whose "
@@ -13364,6 +13384,150 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
 
 def _declared_note(why) -> str:
     return f"It was declared as {why!r}." if why and " " not in why else ""
+
+
+def pointer_frame_pointee(fn, expr, decls: dict, structs_by_name: dict = None):
+    """`(StructDef, why)` when this POINTER receiver points at a FRAME of a
+    struct THIS IMAGE declares, else `(None, why)`.
+
+    The decision `dereference_lowering`'s `("frame", …)` answer is made of, and
+    the reason it is a function rather than three call sites: a pointer to a
+    frame has to be recognised by the build pass (which seeds the holder
+    tables), by the returned-frame fixpoint (which decides whether to reserve a
+    block for it) and by both backends (which emit it), and four
+    recognitions of one fact is four things that agree until the day they do
+    not.  `pointer_pointee` is the ONE reader of what a pointer points at and
+    this adds nothing to it but the two questions that follow from the answer:
+    is the pointee a struct of this unit, and is that struct framed.
+
+    **No image-wide call-site table is asked here, deliberately.**  `functions`
+    is not a parameter, so a receiver whose pointee only the CALL SITES could
+    establish — an unannotated parameter — has no pointee here and is refused,
+    which is the safe direction and the one `dereference_lowering`'s own
+    `parameter_call_site_pointees` hook widens elsewhere.  The alternative was a
+    fourth recognitions problem of a sharper kind: the two backends have a
+    `{name: FunctionDef}` table and the build pass has a LIST, so passing each
+    what it has would make the two answer differently about an overloaded
+    name's second definition.  One spelling of the rule, asked with what every
+    caller has.
+
+    A STRUCT OF ANOTHER MODULE is not a frame this pass can lay out: its field
+    list is in that module's own compilation, not here, and a slot index read
+    from a dylib's manifest would be a second source of layout truth.  So a
+    pointee base name this image does not declare is not a frame, and the
+    refusal says which of the three it is not.
+    """
+    inner, why = pointer_pointee(fn, expr, decls)
+    if inner is None:
+        return (None, why)
+    st = (structs_by_name or decls or {}).get(inner)
+    if st is None:
+        return (None, f"the pointee is {inner}, which is not a struct this "
+                      f"image declares: its field list lives in the module that "
+                      f"declares it, so there is no layout here to read the "
+                      f"pointee's fields through")
+    if not struct_is_framed(st):
+        return (None, f"the pointee is {inner}, a one-field struct whose value "
+                      f"on this path is the word itself rather than a frame, so "
+                      f"there is no frame at that address for a name to hold")
+    return (st, why)
+
+
+def pointer_frame_expression(fn, expr, decls: dict,
+                             structs_by_name: dict = None):
+    """`(StructDef, why)` when `expr` is a `p.value()` / `p.unsafe_value()`
+    whose answer is a FRAME, else `(None, why)`.
+
+    `pointer_frame_pointee` asked of the whole DEREFERENCE CALL rather than of
+    its receiver, and it exists so that the three consumers can each hand it the
+    expression they happen to have:
+
+      * `pointer_frame_bindings` has a binding's VALUE;
+      * `_frame_return_status` has a `return`'s value;
+      * both backends' member-read arm has `expr.obj`.
+
+    Each of those reaches the same fact by spelling the dereference differently,
+    and `DEREFERENCE_TRY_NAMES` is the ONE spelling of "the two names this path
+    cannot tell apart" — so a third spelling of the dereference is a third
+    construct.
+    """
+    if not isinstance(expr, F.CallExpr) \
+            or not isinstance(expr.func, F.MemberExpr) \
+            or expr.func.member not in DEREFERENCE_TRY_NAMES:
+        return (None, f"`{spelled(expr)}` is not a dereference on this path, so "
+                      f"it is not the place a frame comes from")
+    return pointer_frame_pointee(fn, expr.func.obj, decls, structs_by_name)
+
+
+def pointer_frame_member_refusal(expr, st) -> str:
+    """`p.value().f` where `f` is not a field of the struct the pointer names.
+
+    The sibling of `member_access_refusal`, and it exists for the same reason
+    that one does: **both backends raise it, and they must raise the SAME
+    WORDS.** The emitters' fall-through for a field access whose base this path
+    cannot classify is one message in this module for exactly that reason, and a
+    construct that newly became answerable — a pointer to a frame of this image —
+    would otherwise have had its "no such field" sentence written out four
+    times (two machines × read and store), which is four texts that agree until
+    the day one of them is edited.
+
+    The frame is known here, which is what makes the sentence specific: the
+    struct's own field summary is the evidence, and "which word is this" is a
+    question about THAT struct's layout rather than about the path's ignorance.
+    """
+    return (f"{spelled(expr)} reads {expr.member!r} out of a {st.name} this "
+            f"pointer points at, and that struct's "
+            f"{struct_field_summary(st)} has no such field: this path has no "
+            f"way to know which word that is, and reading the wrong one is a "
+            f"wrong answer rather than a failure")
+
+
+def pointer_frame_store_refusal(expr, st) -> str:
+    """`p.value().f = v` where `f` is not a field of the struct the pointer
+    names — `pointer_frame_member_refusal`'s store half, and a separate function
+    for the same reason it is a separate sentence: storing to the wrong word is
+    not the same failure as reading it, and a reader who is told "reading the
+    wrong one is a wrong answer" is being sent to look at a read that is not
+    what their program does."""
+    return (f"{spelled(expr)} stores into {expr.member!r} of a {st.name} this "
+            f"pointer points at, and that struct's "
+            f"{struct_field_summary(st)} has no such field: this path has no "
+            f"way to know which word that is, and storing to the wrong one is a "
+            f"wrong answer rather than a failure")
+
+
+def pointer_frame_bindings(fn, decls: dict, structs_by_name: dict = None):
+    """`{name: [struct, …]}` for the locals in `fn` bound from a POINTER to a
+    frame of a struct this image declares.
+
+    A LIST per name, for `struct_constructor_bindings`' reason and not by
+    imitation of it: `q = p.value()` on one path and `q = make()` on another is
+    one name with two layouts, and the candidate list is what makes that a
+    refusal (`struct_frame_slot_candidates`) instead of whichever binding
+    happened to be walked last.  A second binding that agrees is deduped.
+
+    This is the reader `_frame_receivers`' fixpoint seeds from, and it is
+    enumerated rather than inferred for the reason its docstring gives: a name
+    wrongly added becomes a name whose field accesses are memory accesses, and a
+    name wrongly missing is the silent one.  The shapes it covers are the two
+    `frame_binding_target` recognises (`var q = p.value()` and `q = p.value()`)
+    and nothing else — a tuple target binds a frame in a position that is a
+    different question, and `frame_binding_target` is already the one reader of
+    which statements are bindings.
+    """
+    out: dict = {}
+    for node in iter_nodes(getattr(fn, "body", None)):
+        name = frame_binding_target(node)
+        if not name:
+            continue
+        st, _why = pointer_frame_expression(fn, frame_binding_value(node),
+                                            decls, structs_by_name)
+        if st is None:
+            continue
+        got = out.setdefault(name, [])
+        if st not in got:
+            got.append(st)
+    return out
 
 
 def _rhs_declared_text(fn, expr, decls, functions):
@@ -34277,6 +34441,256 @@ def unemitted_handler_arm(fn):
     return None
 
 
+def _emitted_nodes(node):
+    """`iter_nodes` minus every `handlers` list, whatever node it hangs off.
+
+    A `handlers` list is never emitted — both `_emit_try`s skip the arms — so a
+    walk that descends into one finds statements the image does not contain and
+    reasons about a program nobody wrote. That is the whole difference from
+    `iter_nodes`, and it is why this is a function rather than a filter: the
+    arms are the one subtree whose absence is load-bearing.
+    """
+    if isinstance(node, (list, tuple)):
+        for x in node:
+            yield from _emitted_nodes(x)
+        return
+    if not hasattr(node, "__dataclass_fields__"):
+        return
+    yield node
+    for name in _node_field_names(node):
+        if name == "handlers" and isinstance(node, F.TryStmt):
+            continue
+        yield from _emitted_nodes(getattr(node, name))
+
+
+def _emitted_regions(try_stmt) -> tuple:
+    """The three statement lists of a `TryStmt` that reach the image.
+
+    `body`, `else_body`, `finally_body` — everything but `handlers`, which is
+    the arm the emitters skip. A `raise` in any of the three leaves the image
+    the same way, so all three are one question; `else_body` counts because it
+    is emitted inline on the success path and a `raise` in it is just as
+    terminal.
+    """
+    return (getattr(try_stmt, "body", None),
+            getattr(try_stmt, "else_body", None),
+            getattr(try_stmt, "finally_body", None))
+
+
+def _call_keys(node) -> tuple:
+    """The distinct callee KEYS of an emitted subtree: `("plain"|"method", name)`.
+
+    `("plain", "boom")` for `boom(…)` and `("method", "get")` for `x.get(…)`,
+    deduplicated because the question is "can this region reach a raise", not
+    "how many times". A callee that is neither shape gets the key
+    `("other", "")`, and `external_call[…]` gets none at all: it is a C symbol
+    by construction, it returns, and there is no frame of ours for it to raise
+    into.
+    """
+    out = set()
+    for n in _emitted_nodes(node):
+        if not isinstance(n, F.CallExpr):
+            continue
+        func = getattr(n, "func", None)
+        if is_external_call_template(func):
+            continue
+        if isinstance(func, F.IdentExpr):
+            out.add(("plain", func.name))
+        elif isinstance(func, F.MemberExpr):
+            out.add(("method", func.member))
+        else:
+            out.add(("other", ""))
+    return tuple(sorted(out))
+
+
+class RaiseGraph:
+    """Which calls in one image can reach a `raise`, resolved as far as it goes.
+
+    **A `raise` is not an exception on this path, it is `exit(1)`.**
+    `_emit_diverge` flushes the pending `finally` clauses and then traps, from
+    WHATEVER function contains the statement — so no frame anywhere can catch
+    one, not even across a call into a linked library, whose own `raise` exits
+    that library's process just the same. That single fact is what this whole
+    class exists to propagate: which of an image's functions can end the
+    process, so that a `try` with arms can be told before it is emitted that
+    its arms are unreachable.
+
+    The set is a fixed point over the image's own call graph rather than one
+    sweep, because `a()` calling `b()` calling `raise` is the ordinary shape and
+    a single pass would miss it; a cycle cannot hide a raise behind itself,
+    because membership only ever grows.
+
+    **A callee this pass cannot see is NOT counted as raising**, and that is a
+    measured decision rather than the safe-looking one. A bare name with no
+    definition in this unit and no C prototype, a method name nothing here
+    declares (`dict.get`, `Path.is_file`, a hostmod entry point), and a callee
+    that is an expression rather than a name are all UNKNOWN, and an unknown
+    callee inside a `try` with arms is exactly where the conservative answer
+    would refuse. Measured over this repository's 479 `.py`/`.mojo` files by
+    asking this question and nothing else (parse-only, no codegen): the definite
+    answer is 14 files, the unknown answer is 82 — a five-fold over-refusal of
+    the whole corpus, nearly all of it `try: … except OSError:` around I/O this
+    path cannot raise from, bought against a POSSIBILITY rather than a fact.
+    So the question is asked of what can be resolved, the residual is written
+    down where a taker will find it
+    (`bugs/FORMAL_a_try_around_a_callee_this_pass_cannot_resolve.md`), and the
+    rule the pair of them obeys is: refuse on a FACT, and say so where the fact
+    is missing.
+    """
+
+    def __init__(self, functions, externs=()):
+        by_name = {}
+        for fn in functions or ():
+            name = getattr(fn, "name", None)
+            if isinstance(name, str):
+                by_name.setdefault(name, fn)
+        self.externs = frozenset(externs or ())
+        self.defined = frozenset(by_name)
+        # Method dispatch on this path is BY NAME — a call site carries no
+        # receiver type — so `x.f(…)` is answered by every method of that name,
+        # which is the same over-approximation the dispatch itself makes.
+        self.methods = frozenset(
+            name.partition("_")[2] for name in by_name
+            if name.partition("_")[2])
+        edges, lexical = {}, set()
+        for name, fn in by_name.items():
+            plain, method, other = set(), set(), False
+            for kind, callee in _call_keys(getattr(fn, "body", None)):
+                if kind == "plain":
+                    plain.add(callee)
+                elif kind == "method":
+                    method.add(callee)
+                else:
+                    other = True
+            # A method name resolves to every lifted name `<Struct>_<method>`,
+            # and a dotted/module call (`mod.f`) is as unresolved here as it is
+            # in the emitter until the link resolves it — so `other` seeds the
+            # unknown set for this function, not just for the region.
+            edges[name] = plain | {n for n in by_name
+                                   if n.partition("_")[2] in method}
+            if other:
+                edges[name] |= {_UNRESOLVED}
+            if any(isinstance(n, F.RaiseStmt)
+                   for n in _emitted_nodes(getattr(fn, "body", None))):
+                lexical.add(name)
+        self.raising = set(lexical)
+        changed = True
+        while changed:
+            changed = False
+            for name, callees in edges.items():
+                if name in self.raising:
+                    continue
+                # Only DEFINITE reachability propagates here. `_UNRESOLVED` in
+                # `callees` says "some callee this pass cannot see", which is
+                # not by itself evidence that this function raises; the
+                # image-wide question is `may_reach_raise`'s, asked per call
+                # site, where the reader's own spelling is in hand.
+                if callees & self.raising:
+                    self.raising.add(name)
+                    changed = True
+        self.raising_methods = frozenset(
+            attr for attr in self.methods
+            if any(other.partition("_")[2] == attr and other in self.raising
+                   for other in by_name))
+        self.any_raising = bool(self.raising)
+
+    def _callee_raises(self, kind, name) -> bool:
+        """Can this callee end the process? `False` for everything unresolved.
+
+        Both branches answer `False` for a name they cannot place, which is the
+        decision the class docstring measures: a refusal on an unresolvable
+        callee would take 82 of this repository's files against a possibility,
+        and the 14 it can prove are worth having on their own.
+        """
+        if kind == "plain":
+            if name in self.externs:
+                return False
+            return name in self.defined and name in self.raising
+        if kind == "method":
+            if name in self.raising_methods:
+                return True
+            return False
+        return False
+
+    def may_reach_raise(self, node) -> tuple:
+        """`(kind, name)` for a callee in `node` that can end the process, else None.
+
+        The first one found, in the region's own order, so the message can name
+        the call the reader wrote rather than the callee set.
+        """
+        for key in _call_keys(node):
+            if self._callee_raises(*key):
+                return key
+        return None
+
+
+#: The sentinel an unresolved callee contributes to the edge set. A string a
+#: program cannot spell as a function name, so it cannot collide with one.
+_UNRESOLVED = "\x00unresolved\x00"
+
+
+def uncatchable_raise(fn, graph=None) -> tuple:
+    """The first `raise` a `try` in `fn` cannot deliver to any of its arms.
+
+    `(raise_stmt_or_None, try_stmt, handler, callee)` — the first arm is named
+    because the message is about the arm the reader wrote, the same reason
+    `unemitted_handler_arm` returns the handler beside the statement. The
+    statement is `None` and the `callee` key is set when the raise is reached
+    THROUGH a call rather than written inside the `try`, which is the shape
+    almost every instance of this has.
+
+    **This is the other half of `unemitted_handler_arm`, and it is about
+    CONTROL FLOW rather than about an arm's body.** That check asks whether an
+    arm holds a statement whose absence would be visible; it says nothing about
+    what happens to the `raise` that was supposed to REACH the arm, so
+    `except: pass` passed it — correctly, since there is nothing in the arm to
+    drop — and the program still came out wrong. Measured on both
+    architectures:
+
+        class MyErr(ValueError): ...
+        def boom():
+            raise MyErr("the message")
+        def main(n):
+            try:
+                boom()
+            except:
+                pass
+            print("caught")
+            return 0
+
+    built, exited 1, and printed NOTHING; CPython prints `caught` and exits 0.
+    The arms are not the loss — an empty arm loses nothing — the loss is that
+    the `raise` ends the process where CPython runs the arm and CONTINUES, so
+    every statement after the `try` is unreachable in the image and reachable in
+    the program. That is the wrong-but-exit-0 artifact CLAUDE.md names as the
+    failure this backend exists to make impossible, wearing an exit status of 1.
+
+    Note where the `raise` is: in ANOTHER FUNCTION. That is why this asks
+    `RaiseGraph` and not a lexical walk — `try: boom()` contains no `raise` at
+    all, and a walk would have called this program fine. A try with NO arms is
+    not asked about, and neither is a raise outside any try, because there
+    `_emit_diverge` is exactly CPython's answer for an exception nothing catches
+    (status 1). The refusal is about the one shape where this path silently
+    computes something else.
+    """
+    for node in iter_nodes(getattr(fn, "body", None)):
+        if not isinstance(node, F.TryStmt):
+            continue
+        handlers = getattr(node, "handlers", None) or []
+        if not handlers:
+            continue
+        for region in _emitted_regions(node):
+            for inner in _emitted_nodes(region):
+                if isinstance(inner, F.RaiseStmt):
+                    return (inner, node, handlers[0], None)
+            if graph is not None:
+                hit = graph.may_reach_raise(region)
+                if hit is not None:
+                    return (None, node, handlers[0], hit)
+    return None
+
+
+
 def exception_type_spelling(handler) -> str:
     """`ValueError`, `(TypeError, KeyError)`, `except:`, `except E as e`.
 
@@ -34346,6 +34760,73 @@ def refuse_dropped_handler_arm(fn, found) -> str:
         f"leaving it out. Otherwise: move the work into the `try` body or after "
         f"the statement (a `finally` if it is cleanup for the success path), or "
         f"end the arm with `raise` if the program is meant to fail there.")
+
+
+def refuse_uncatchable_raise(found) -> str:
+    """Why this `raise` cannot be caught by the arm written above it.
+
+    `found` is `uncatchable_raise`'s `(raise_stmt, try_stmt, handler, callee)`.
+    The last element names the CALL when the raise is reached through one,
+    because "this `try` cannot catch its own exceptions" sends the reader
+    looking at the arms while the thing that ends the process is a function two
+    frames away.
+
+    **It reuses the arm refusal's own facts rather than stating new ones**,
+    because there is one reason here and not two: this path has no exception
+    unwinder, so no edge runs from a raise site into an arm. `refuse_dropped_
+    handler_arm` says that when the arm holds a statement whose absence is
+    visible; this says it when the arm holds nothing and the `raise` still goes
+    past it — which is the shape `except: pass` is, and the commonest one in the
+    corpus (`_HANDLER_ARM_NO_EFFECT`'s comment says so and is right about the
+    ARM, which loses nothing, while saying nothing about the control flow that
+    follows).
+
+    The symptom is a build that succeeds and a program that is not the one
+    written, and the exit status makes it worse rather than better: CPython
+    enters the arm and continues, so the statements after the `try` are part of
+    the program's answer; here the `raise` leaves the image with status 1 and
+    those statements are not in it at all. The two halves of the old behaviour —
+    the arm skipped, the raise terminal — were each defensible alone. Together
+    they are a `try` that catches nothing and a program that stops where CPython
+    does not.
+
+    The ways out are the three that are true of this path, and the first is the
+    one most of these programs want: **nothing in the `try` can raise**, so drop
+    the `except` and keep the `try` for its `finally` — which IS emitted, on
+    every path out including the one that raises.
+    """
+    stmt, _try, handler, callee = found
+    line = getattr(stmt, "line", 0) or 0
+    where = f"line {line}: " if line else ""
+    if stmt is not None:
+        how = "this `raise` is inside the `try`"
+    else:
+        kind, name = callee
+        if kind == "plain":
+            how = f"the `try` body calls `{name}(…)`"
+        elif kind == "method":
+            how = f"the `try` body calls the method `{name}(…)`"
+        else:
+            how = ("the `try` body calls something this pass cannot resolve to a "
+                   "definition")
+        how += ", which can end the process"
+    return (
+        f"{where}{how}, and the arm written as "
+        f"{exception_type_spelling(handler)} cannot catch it, so the `try` is "
+        f"refused rather than silently ignored: `formal` has no exception "
+        f"unwinder, so no edge runs from a raise site into an arm. A `raise` "
+        f"here flushes the enclosing `finally` clauses and exits the process "
+        f"with status 1, which is what CPython does for an exception nothing "
+        f"catches — but CPython DOES catch this one and goes on to the "
+        f"statements after the `try`, so the image would build, print nothing "
+        f"and exit 1 where the program prints its answer and exits 0. Nothing "
+        f"is lost by leaving the ARM out (an arm of `pass`, `raise`, `continue` "
+        f"or `break` is not refused for its body), and that is exactly why this "
+        f"shape was missed: the arm loses nothing, the control flow after it "
+        f"loses everything. If nothing in the `try` can raise, drop the arm and "
+        f"keep the `finally`, which is emitted on every path. If the program "
+        f"means to fail here, let the `raise` stand on its own outside any "
+        f"`try` — that is emitted and is CPython's own answer.")
 
 
 def call_result_frame_struct(call, functions: dict, decls: dict):

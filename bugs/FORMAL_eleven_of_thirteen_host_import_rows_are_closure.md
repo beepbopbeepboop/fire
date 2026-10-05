@@ -15,6 +15,13 @@ every number below is measured NOW, by walking each file's import closure with
 `formal/imports.py`'s own `resolve_module_path`, which is the resolver the build
 itself uses.
 
+**THIS WALK IS NOW A TOOL (2026-10-05).** `tools/formal_host_import_wall.py`,
+with `test_formal_host_import_wall.py` pinning its readers, prints the `alone` /
+`shared` / `reach` columns this table is made of, and keeps `--unmodelled` —
+which is the only way to measure a module landing as a delta on ONE tree rather
+than a difference between two checkouts. Read the tool for the numbers and this
+document for the readings.
+
 **RE-MEASURED LATER THE SAME DAY (2026-10-03, second pass) and the conclusion
 holds: eleven of thirteen are still closure, and `glob` is still the only real
 row. §"Re-measured" has today's numbers, an order-independent definition of

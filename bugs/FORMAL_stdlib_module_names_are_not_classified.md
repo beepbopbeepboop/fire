@@ -141,6 +141,75 @@ the failure `formal/imports.py:101` warns about. The census test is what makes
 that deferral safe rather than merely convenient: the work is now queued by the
 consumer that arrives, not by a reader's guess about which names matter.
 
+## 0.3 What landed 2026-10-05 (`work/formal27-6`): the AMBIGUOUS `''` is gone,
+## and the queue is a named answer rather than an absence
+
+**The 217 per-name judgements are still not done, and this section is why that
+is now a QUEUE rather than a gap in what a report can say.** §0.1 calls
+`host_module_tier`'s empty answer "the load-bearing half" of this doc's cost, and
+§0.2 records the first version of the census test getting it wrong because the
+accessor could not say which kind of empty it was. It can now.
+
+**`formal/imports.py::host_module_verdict(name)` is the one classification of a
+name, and it has six answers, none of them an absence:** `front-end`,
+`written`, `admitted`, `modelled`, `unreachable`, `unclassified` — plus
+`not-a-module` for a name nothing here provides and CPython does not ship, which
+is the TYPO sentence's answer and the only one that is a statement about this
+repository rather than about the target. `written` and `admitted` carry the
+resolved path, because those are the two answers a reader's next question is
+"then what provides it".
+
+**The ambiguity was real and it had already been worked around three times**, in
+three different ways, which is the measurement that made the accessor worth
+adding rather than tidying:
+
+| consumer | how it told "written" from "unclassified" | what that misses |
+|---|---|---|
+| `test_formal_imports.py::test_no_unclassified_stdlib_name_is_imported_by_anything` | paired the tier with `resolve_module_path` | nothing — it had to spell the pairing out in a comment because the accessor did not |
+| `tools/formal_sweep_causes.py` | inferred it from a `formal/hostmods/<name>.mojo` existing | a repository sibling, a package `__init__.mojo`, and every module outside `formal/hostmods/` — all three came out `UNTIERED`, which is a DEFECT claim about a module that is answered |
+| `tools/formal_host_import_wall.py` (this round) | paired the tier with the resolver AND `is_cpython_stdlib` | nothing, but it was a fourth copy of a fact with one home |
+
+All three now read the one function. **And it corrects a row the day it landed:**
+`html.parser` is a SUBMODULE of the written `formal/hostmods/html.mojo`, so the
+verdict is `written` while `host_module_tier` says `''` and the wall table
+printed `unclassified` for it a commit earlier — the exact false statement the
+three-way split was hiding.
+
+**The partition is now a CLOSED invariant, which is what makes the remaining work
+a queue with a direction.** `test_formal_imports.py::
+test_every_name_has_one_named_verdict_and_no_answer_is_an_absence` walks every
+name in `sys.stdlib_module_names` and asserts each gets exactly one of the six,
+that `not-a-module` is unreachable for them (CPython ships every one), and that
+no name is in a claim tier AND has a source — which is the rule
+`HOST_MODELLED` states ("a name LEAVES a tier by being WRITTEN") and which
+nothing asserted until now. Measured over the 303 names CPython ships on this
+tree:
+
+| verdict | n |
+|---|---:|
+| `unclassified` | **216** |
+| `written` | 29 |
+| `modelled` | 29 |
+| `unreachable` | 18 |
+| `admitted` | 4 |
+| `front-end` | 1 (`dataclasses`) |
+
+216 rather than 217 because `html.parser` moved to `written`. **The count is
+still a fact about the table and not about the corpus**, so it is printed by the
+accessor rather than inferred by a reader — and
+`test_no_unclassified_stdlib_name_is_imported_by_anything` still asks the
+corpus question, which is the one that decides whether filling the queue is
+worth doing. It is a queue with a trigger now, not a gap with an ambiguity in
+it.
+
+**What is still not done, unchanged:** the 216 per-name judgements. §0.1's
+reason still stands — nothing imports them, so there is no measurement to tell a
+right entry from a plausible one, and filling them by category from a distance is
+the failure `formal/imports.py:101` warns about. What changed is that the work is
+queued by a NAME the tree can print, by a tripwire that fires when a consumer
+arrives, and by a test that will go red if a name is ever left with no answer at
+all rather than with the wrong one.
+
 ## What I ran
 
 ```console

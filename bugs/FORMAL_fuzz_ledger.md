@@ -41,10 +41,15 @@ bugs fixed, five limits filed, and eight defects in the tool itself. §2.1 adds
 **5100 programs over 41 more sweeps**, THREE more fixes and three more tool
 defects, and §2.1a one more sweep of 100 programs and one more fix, and §4.12's
 fix adds one more tool defect found by its own first run (the thirteen is that
-one), so the whole file is **10412 programs over 67 sweeps** and **thirteen** tool
-defects — and the last eleven rows of §2.1 are the OLD mixes on fresh seed
-ranges, which is what says the fixes did not cost the corpus anything it already
-had.
+one), and §2.3 adds **1020 programs over 13 sweeps**, TWO more fixes (§3.10's
+dict-walk stride and §3.11's `del` register clobber), one new `KNOWN_DIVERGENCES`
+row (`set_order`, owned by `bugs/FORMAL_set_value_model.md`), one new limit filed
+(`FORMAL_a_comprehension_target_over_a_string_keyed_dict_is_an_int.md`) and TWO
+more tool defects — so the whole file is **11432 programs over 80 sweeps** and
+**fifteen** tool defects. The last eleven rows of §2.1 are the OLD mixes on fresh
+seed ranges, and the last three rows of §2.3 are the OLD mixes on another fresh
+seed range, which is what says the fixes did not cost the corpus anything it
+already had.
 
 | date | mix | seed | indexes | programs | tally | what came of it |
 |---|---|---|---|---|---|---|
@@ -237,9 +242,89 @@ a family that did not exist before this sweep.
 five divergences are all the container-budget pair (§3.5.3) and the shrinker
 cannot reduce a construct that is not in the program.
 
+### 2.3 The fuzz-5 sweep (2026-10-04, seed `fuzz5`) — 900 programs, seven mixes
+
+**Four new mixes over two index ranges each, plus three old mixes on one fresh
+range.** The four are the constructs §5 listed as things the corpus could not
+produce, and each was PROBED ON BOTH ARCHITECTURES before it was written down,
+for §2.1's reason: a mix that measures a refusal spends its budget
+re-deriving `bugs/FORMAL_known_limits.md`. Three findings came out of the
+probing and one out of the sweeps — **§3.10** and **§3.11** — and the two
+`KNOWN_DIVERGENCES` rows and the twenty-six regression rows that pin them are
+named under each.
+
+| date | mix | seed | indexes | programs | tally | what came of it |
+|---|---|---|---|---|---|---|
+| 2026-10-04 | `comps` | `fuzz5` | 9000-9099 | 100 | 100 match | nothing — after §3.10's fix; the range that found it is §3.10's |
+| 2026-10-04 | `comps` | `fuzz5` | 9200-9299 | 100 | 100 match | nothing |
+| 2026-10-04 | `objs` | `fuzz5` | 9000-9099 | 100 | 100 match | nothing |
+| 2026-10-04 | `objs` | `fuzz5` | 9200-9299 | 100 | 100 match | nothing |
+| 2026-10-04 | `refs` | `fuzz5` | 9000-9099 | 100 | 99 match, 1 refusal (`!=`, `true=2`) | the `del` clobber — §3.11 |
+| 2026-10-04 | `refs` | `fuzz5` | 9200-9299 | 100 | 96 match, 4 refusal (`==`/`!=`, `true=8`) | nothing |
+| 2026-10-04 | `sets` | `fuzz5` | 9000-9099, `--max-min-steps 30` | 100 | 34 match, 66 `KNOWN:set_order`, 0 findings | nothing — every disagreement attributed |
+| 2026-10-04 | `sets` | `fuzz5` | 9200-9299, `--max-min-steps 30` | 100 | 34 match, 66 `KNOWN:set_order`, 0 findings | nothing |
+| 2026-10-04 | `refs` | `fuzz5` | 9300-9399 | 100 | 100 match | nothing |
+| 2026-10-04 | `comps` | `fuzz5` | 9300-9319, `--stmts 30 50` | 20 | 1 match, 19 `REFUSAL-DIVERGES-FRAME-BUDGET-X86` | the container-budget pair again (§3.5.3) — and the cost |
+| 2026-10-04 | `containers` | `fuzz5` | 9200-9299 | 100 | 100 match | nothing — the old mixes on a fresh range: two fixes cost the corpus nothing it had |
+| 2026-10-04 | `lists` | `fuzz5` | 9200-9299 | 100 | 100 match | nothing |
+| 2026-10-04 | `classes` | `fuzz5` | 9200-9299 | 100 | 100 match | nothing |
+
+**The two ranges are worth reading together, because agreeing with each other is
+the measurement.** `comps`, `objs` and `sets` score identically on both ranges
+(100, 100, 34+66), and `refs` reaches the same `==`/`!=` refusals at different
+indexes on each (99+1 and 96+4) plus a clean 100 on the third. A mix whose
+tallies track across disjoint ranges is measuring the MIX; one that does not is
+measuring its seed, and §1's warning is the other direction.
+
+**The `--stmts 30 50` row is the SPILL axis and it costs 143 s a program** — 20
+programs in 2865 s, the slowest row in this file and 70x the same mix at the
+default body (§2.1 records `chains` at 400 s for 100 as "the widest body in this
+table", so `comps` at this width is worse). 19 of its 20 are
+`REFUSAL-DIVERGES-FRAME-BUDGET-X86`, which is §3.5.3's container-budget pair
+understood and not a capability difference: x86-64's blob region is 16384 bytes
+and a fifty-statement body holding a dozen comprehensions does not fit in it,
+while arm64's frame scratch is 131072. The one match is the program that stayed
+inside the smaller budget. The row is here because a corpus that cannot be run
+at the width where the SPILL paths live is a corpus that does not measure them,
+and because the cost is the number a future session needs before choosing the
+size.
+
+**The cost is 0.2 GB peak** (`tools/memslot.py --gb 8`), `-j 4`, both backends —
+nothing here is within an order of magnitude of the 3-4 GB line. Per program:
+`comps` and `objs` 1.5-2.0/s, `refs` 1.6-2.1/s, and **`sets` 0.2/s** — 8x
+everything else, because two thirds of its programs disagree with CPython and
+every one pays for a reduction that attribution then neutralises. `--max-min-
+steps 30` is what keeps that at 465 s for 100 rather than the 20 minutes §5
+warns about for `strings`; it is not optional for this mix in practice, and the
+mix's own comment says so.
+
+**What the four mixes are, and what each one is for:**
+
+- `comps` — the comprehension walks and the `*` splice: the OTHER TWO walks that
+  bind one thing per count, beside `for k in d` and `k in d`. §3.10 is theirs.
+  Every observation WALKS its result rather than measuring its `len`, and the
+  reason is §3.10's: the count was right.
+- `refs` — aliasing and mutation through a REFERENCE. Two names for one blob, a
+  write through the second read through the first and then the other way round,
+  a container in a struct field aliased to a local, a write through a PARAMETER
+  across a call, a straight-line `del`, and the ORDER a walk yields (printed one
+  key per line — an accumulator is commutative and blind to order, which is the
+  same trap as §3.10's one level up, and the corpus's own `dict_iter` was doing
+  it). §3.11 is this mix's.
+- `objs` — a class whose `__init__` takes ARGUMENTS, `__len__` as a dunder
+  reached through a builtin rather than a method call, and nested data in a
+  struct field. `define_class` has always built `C()` with two fields set to
+  constants, so the constructor's own argument passing was reachable from no mix.
+- `sets` — a set, which `formal/model.py` lowers as a LIST, so `len` and
+  membership agree with CPython and the iteration order does not. That
+  divergence is `KNOWN_DIVERGENCES`' new `set_order` row and it is generated on
+  purpose, owned by `bugs/FORMAL_set_value_model.md`.
+
 ## 3. Findings
 
-Nine, in the order they were found. Each is a SILENT wrong answer or a
+**Eleven.** Nine from the first three sweeps and two from this one; §3.10 is the
+dict-walk stride and §3.11 is the `del` register clobber. Each is a SILENT wrong
+answer or a
 one-sided refusal — not a crash, not a diagnostic — because that is the class
 this tool exists for and the class every other suite here misses. §3.7, §3.8 and
 §3.9 are the fuzz-3 sweep's three, and each was found by a construct the corpus
@@ -574,12 +659,103 @@ answer:
    exactly that shape on the path, which is why the generator declares a dict
    unpack's targets as STRINGS.
 
-## 4. TWELVE defects in the TOOL, all found by using it
+### 3.10 A comprehension over a dict, and a `*` splice of one, read the VALUES as keys
 
-(EIGHT after `sweepG`, THREE more from the fuzz-3 sweep and one more
-from the floor sweep — `## 4` was renumbered when the last of those
-landed, so a §4.9 in this file is the fuzz-3 sweep's and §4.12 is the
-floor sweep's.)
+**Found:** by hand-probing `references`/`comprehensions` shapes while writing
+the `comps` mix — which is what §5 had already listed as the next thing to
+generate ("a comprehension whose generator has a CONDITION over a dict walk").
+**Fixed:** `086cd7f7`, four emitters.
+**Pinned:** `test_formal_value_model.py` — eight `comprehension_over_a_dict_*` /
+`dict_comprehension_over_a_dict_*` / `star_splice_of_*` rows, ORACLE rows against
+CPython on both backends, plus two control rows that a list still steps one word.
+
+    d = {10: 100, 20: 200, 30: 300}
+    ks = [k for k in d]
+    for k in ks:
+        print(k)
+
+| | CPython | arm64 and x86-64 (before) |
+|---|---|---|
+| the three keys | `10 20 30` | `10 100 20` |
+| `len([k for k in d])` | `3` | **`3` — correct** |
+| `[k for k in d if k > 15]`; `len` | `2` | `1` |
+| the same, accumulated | `50` | `20` |
+| `{k: 1 for k in d}` walked | `10 20 30` | `10 100 20` |
+| `[*d]` walked | `10 20 30` | `10 100 20` |
+
+A dict is a PAIR blob, `[count][k0][v0][k1][v1]…`, and its count is a count of
+PAIRS. At the ELEMENT stride a walk alternates keys and values, so bounded by the
+pair count it reads `k0, v0, k1` — half the values bound as keys, half the keys
+never read.
+
+**The count of the result was RIGHT, and that is the whole measurement.** Three
+PAIRS and three WORDS are the same number, so `len` of the buggy list agreed with
+CPython. The corpus's only dict-comprehension family, `dict_comp_count`, measures
+exactly `len` and a trip count — so no sweep of `containers` could ever have seen
+this, and §3.1's fix (which repaired the `for`-in walk's stride) could not have
+caught it either. A generator CONDITION is what turned a wrong CONTENT into a
+wrong COUNT, which is what made it findable at all: `[k for k in d if k > 15]`
+filters the word sequence `10, 100, 20` against `15` and keeps one element where
+CPython keeps two.
+
+The four sites, and the reason they drifted: `model.walk_stride` exists for
+precisely this question, both `for`-in walkers read it, and its docstring
+enumerated its consumers — naming **two**, and saying "and nothing else". Both
+named ones were real and both were fixed together, and the enumeration read as
+exhaustive, so a comprehension generator and a `*` splice — which yield one
+thing per count in exactly the same way and live in different emitters — kept a
+hardcoded `LSL #3` / `scale=3` on both backends. **The docstring is part of the
+fix** and now names all four, because a consumer it does not name is one nobody
+audits. §4.13 is the static check that keeps the two ends of that honest.
+
+### 3.11 `del` destroyed a LOCAL, on x86-64 only, because the lowering used the registers the allocator hands out
+
+**Found:** the `refs` mix, seed `fuzz5` index 9000 — reported as 8 `MISMATCH-X86`
+out of 20 programs, with arm64 agreeing with CPython on every one.
+**Fixed:** `086cd7f7`, all three x86-64 `del` lowerings.
+**Pinned:** `test_formal_x86_64_parity.py` — four rows, one per lowering plus the
+reversed declaration order, plus `static_del_scratch_check`.
+
+    def main() -> Int32:
+        a = 11
+        xs = [0]
+        b = 22
+        del xs[0]
+        print(a, b)          # CPython and arm64: 11 22   x86-64: 11 0
+        return 0
+
+`formal/x86_64.py`'s `CALLEE_SAVED` is `(RBX, R12, R13, R14, R15)` and it is the
+WHOLE of the allocator's pool — `self._var_regs` maps names onto it and nothing
+else. All three `del` lowerings used R12–R15 as scratch, holding a blob base, a
+count and an index across a loop. `b`'s home was R13, which the list lowering
+loaded with the blob's COUNT and then decremented, so `print(b)` answered 0; move
+the `xs = [0]` line above the two integers and the home is R12 and the printed
+value is the blob's ADDRESS (13095839192 above) — one defect, two wrong answers,
+selected by nothing but declaration order. `del d[k]` and `del xs[a:b]` are the
+same class and the same measurement (`11 1` where CPython says `11 22`).
+
+arm64 was never affected, and the reason is what makes the rule statable rather
+than a list of registers: arm64's local file stops at X9 and its `del` lowerings
+use X10–X15, so the property is "scratch outside the allocator's pool", and x86-64
+has no such gap — R8–R11 are the emitter's own and the nine non-callee-saved
+registers are enough for every one of these loops.
+
+**Why no existing row caught it.** Every `del` row in
+`test_formal_x86_64_parity.py` puts the container and the observation in the same
+statement or reads the container back, so none of them can see an unrelated
+LOCAL that the `del` overwrote. The four new rows put two integers on either
+side of the container and print them afterwards, and `static_del_scratch_check`
+reads the three emitters' source — a register-allocation property is not
+something four programs can check.
+
+## 4. FIFTEEN defects in the TOOL, all found by using it
+
+(EIGHT after `sweepG`, THREE more from the fuzz-3 sweep, one more from the floor
+sweep, ONE more that fixing that floor sweep's §4.12 itself exposed — it is
+§4.12b, the only defect in this file filed as a `####` under another — and TWO
+from the fuzz-5 sweep. `## 4` was renumbered each time one landed, so a §4.9 in
+this file is the fuzz-3 sweep's, §4.12 is the floor sweep's, and §4.13-§4.14 are
+the fuzz-5 sweep's.)
 
 None is a backend bug. Between them they cost more time than the backend bugs
 did, and each one made the tool report LESS than it should. §4.5-§4.8 are the
@@ -963,6 +1139,53 @@ owner — nothing acts on it. The honest next step is a tally line for it, the w
 campaign can report "N reductions stopped reproducing" instead of leaving it in a
 field.
 
+### 4.13 The tool's OWN minimiser reduced a real disagreement to a program CPython cannot run
+
+**Found:** the `refs` sweep, on §3.11's finding. `--minimize` on the program the
+sweep saved returned this:
+
+    def mu13(p14, p15, p16):
+        print(w25, w30, w38, w39, s1)
+
+**which is not a reduction of anything** — `main` is gone, five names are
+undefined, CPython raises `NameError`, and no image can agree with it. The
+finding is real and reproducible; the reproducer is not, and §4.12 is the
+sibling of this (a record describing a program other than the one on disk).
+
+**Why `_still_fails` accepts it.** `--min-kind x86` asks whether the x86-64
+image still disagrees with the ORIGINAL's recorded `want`, and this program
+produces no output at all against a `want` that has output — so the test is
+satisfied by a program that computes nothing. The two properties a reduction has
+to keep are "the disagreement is still there" and "the program still RUNS", and
+only the first is checked. The second is one call: `cpython_answer(reduced)`
+must produce an answer rather than `("error", …)`.
+
+**What to do instead of trusting `--minimize` on this class**, which is what the
+finding was minimised with in the end: a 40-line line-granularity ddmin that
+keeps a reduction only when CPython answers it, the x86-64 build succeeds, and
+the two still differ. It took the 60-line generated program to 12 lines and then
+to the five-line reproducer in §3.11 in about four minutes — so the shape is
+right and only the acceptance test is wrong.
+
+### 4.14 A caller's own reading of the oracle's return shape is a coin flip
+
+`cpython_answer` returns `((exit, stdout), stderr)`, and **every caller in the
+tool unpacks it first** (`ref, err = cpython_answer(...)`), which is what makes
+`ref[0] == "error"` mean "CPython rejected the program": unpacked, `ref[0]` is
+either the answer tuple or the literal `"error"`. Reading the nested shape
+instead — `has_oracle` on the un-unpacked value — answers **True for a rejected
+program**, because `ref[0]` is then the tuple `("error", …)`, which is not the
+string `"error"`.
+
+Measured, twice, in the same session: a minimiser written against the nested
+shape reported a disagreement on **every** program including
+`class H: … def main(): return 0`, and reduced a real x86-64 miscompile to a
+one-line `SyntaxError`. The signature is not the problem — `check_one`'s
+unpacking makes the convention correct everywhere it is followed — so the
+defect is that the convention is invisible at the definition. The fix is a
+named accessor (`oracle_answer(ref)` returning the pair or `None`), which cannot
+be read the other way.
+
 ## 5. What the corpus still cannot say, and what it costs to run
 
 **`strings` costs 45 s to 3 min per program**, and the cost moved when §4.4 was
@@ -1026,9 +1249,16 @@ context manager CPython can also run, which is why `limits` leaves it out — a
 with it), a `try`/`except` shape (NOW GENERATED — `limits`' `try_handler`, which
 is the single largest row in its construct mix at 114 of 190 refusals, so the
 next thing to vary there is the arm body), a comprehension whose generator has a
-CONDITION over a dict walk, and a `global` container mutated through two
-different helpers. Each is a family whose absence from this table is a coverage
-hole rather than a decision.
+CONDITION over a dict walk (NOW GENERATED — `comps`' `comp_cond`, and it is what
+found §3.10), a `global` container mutated through two different helpers, an
+INHERITED class (`class B(A)` — probed on both architectures and it DROPS the
+base's fields and methods: `b.m()` reads `1` where CPython reads the inherited
+value, exit 0 on both, filed as a separate doc rather than fixed here), a
+comprehension whose target is over a string-keyed dict (§5.1), and
+`len()` of a subscript of a list of lists (`inner = rows[0]; len(inner)` is
+REFUSED on both backends with "classified as 'int'", which is a kind rule and not
+a family). Each is a family whose absence from this table is a coverage hole
+rather than a decision.
 
 ### 5.1 What the fuzz-3 sweep closed in this list, and what is still open
 

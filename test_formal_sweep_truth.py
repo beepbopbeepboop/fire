@@ -502,7 +502,20 @@ class TestCensusReport(unittest.TestCase):
 # is nothing but dead imports is a row of work that is not work.
 
 # The four, and the census of what is left, printed rather than asserted.
-_DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig", "traceback")
+# `traceback` was in this tuple and LEFT IT on 2026-10-04, by being WRITTEN:
+# `formal/hostmods/traceback.mojo` answers CPython's own text for the one state
+# this target can be in (no exception in flight), which `test_formal_traceback.py`
+# checks against CPython. Its own wave note records that it moved NO sweep row —
+# the 38 files an `ast`-based walk attributed to it were all `import traceback`
+# inside `if`/`try` blocks, which `imported_modules` does not descend into — so
+# the row it was here for is the one row the landing did not move.
+#
+# It is named rather than quietly dropped because this tuple is a PREMISE and the
+# test that reads it says so in its own failure message: a name that gains a
+# model stops being this test's subject, which is a reason to be told.
+# `bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md` §0/§2 is where that
+# wave and its measurement are written down.
+_DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig")
 # Modules with no readable names that STILL have users, so their rows are real:
 # `itertools` (>=3 files spell it), `builtins` (>=2), `atexit` (1, through
 # `test_ab_native.py`'s `atexit.register`). Asserted to still have users, so a
@@ -560,12 +573,12 @@ def _imports_of(path):
 
 class TestHostImportRowsAreNotDeadImports(unittest.TestCase):
     def test_the_premise_each_row_is_unbuildable(self):
-        """Each of the four names has no Mojo source and no front-end transform.
+        """Each of the three names has no Mojo source and no front-end transform.
 
         The property below says "this repository does not import a module it
         cannot build without reading it", and that is only worth anything if the
         modules really are unbuildable. So the premise is asked of the build's
-        own wording rather than trusted, and it is asked for all four at once
+        own wording rather than trusted, and it is asked for all of them at once
         because a name that gains a `formal/hostmods/` model stops being this
         test's subject — which is a reason to be told, not a reason to be quiet.
         """
@@ -589,7 +602,7 @@ class TestHostImportRowsAreNotDeadImports(unittest.TestCase):
                               f"about does not exist")
 
     def test_no_file_imports_one_of_them_and_reads_nothing(self):
-        """No `.py` of this repository imports one of the four and reads nothing.
+        """No `.py` of this repository imports one of them and reads nothing.
 
         The reader is `tools/formal_sweep_causes.py::_host_mentions_module`, the
         same one the ranking's `uses` fallback asks, so the test and the report
@@ -616,7 +629,7 @@ class TestHostImportRowsAreNotDeadImports(unittest.TestCase):
     def test_the_other_rows_still_have_users(self):
         """The rows NOT in this section still have files that read the module.
 
-        A check over the four names above cannot see a fifth, and the way it
+        A check over the names above cannot see another, and the way it
         gets extended by accident is by widening the list. So the three rows
         that share their shape and are NOT dead imports are asserted to have
         users — which is the statement that keeps them out.
@@ -634,7 +647,7 @@ class TestHostImportRowsAreNotDeadImports(unittest.TestCase):
                 self.assertTrue(
                     users.get(name),
                     f"no file of this repository reads `{name}`, so its row is "
-                    f"dead imports like the four above and belongs in "
+                    f"dead imports like the ones above and belongs in "
                     f"_DEAD_ROW_MODULES rather than in this list")
 
 
@@ -2018,17 +2031,24 @@ class TestOleanCurrency(unittest.TestCase):
     """
 
     # The real graph's SHAPE, which is the part that matters: one root that
-    # imports nothing from the set (`ProofLib`), a middle module, and two
+    # imports nothing from the set (`ProofLib`), a middle module, and three
     # leaves that reach it by different routes. Two modules importing `X86` is
     # the case the defect was measured on — three modules rebuilt from one
     # edit — and one importing only the root is what says the fix does not
     # over-invalidate.
+    #
+    # `IEEE754` is the sixth member of `LIBRARY_MODULES` and was missing here,
+    # which is what `test_the_fixtures_are_the_real_graph` exists to catch: it
+    # asserts the two sets are EQUAL, so a library module with no fixture fails
+    # the check whose subject is that a fixture outside the set exercises
+    # nothing. `d9269a0f` added the module and not the fixture line.
     SOURCES = {
         "ProofLib": "import Lean\n",
         "X86": "import ProofLib\n",
         "work": "import ProofLib\nimport X86\n",
         "Refine": "import ProofLib\n",
         "Contracts": "import ProofLib\nimport Refine\n",
+        "IEEE754": "import ProofLib\n",
     }
 
     def setUp(self):
@@ -2130,6 +2150,12 @@ class TestOleanCurrency(unittest.TestCase):
         leaves `ProofLib` (27MB, ~80s) and the two modules that never import it
         alone. Editing `ProofLib` rebuilds everything, because every other
         module imports it, directly or through one hop.
+
+        The second set is therefore every name in `LIBRARY_MODULES`: `IEEE754`
+        imports `ProofLib` like the other leaves, so "everything" is six and
+        not five. It was five because the fixture was five, which is the whole
+        hazard this case states — a fixture set that is not the library's makes
+        both answers a fact about the fixture.
         """
         before = self._digests()
         self._edit("X86")
@@ -2139,7 +2165,7 @@ class TestOleanCurrency(unittest.TestCase):
         self._edit("ProofLib")
         after = self._digests()
         self.assertEqual({s for s in self.SOURCES if mid[s] != after[s]},
-                         {"ProofLib", "X86", "work", "Refine", "Contracts"})
+                         set(L.LIBRARY_MODULES))
 
     def test_a_touch_is_not_an_edit(self):
         """Content-based, with no `mtime` in the decision — at the DIGEST's
