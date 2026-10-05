@@ -1,11 +1,64 @@
 # FORMAL_proof_coverage_census_2026-10-03: 60 functions from THIS repository, both backends, with proofs on
 
-**§0.8 is new (2026-10-05, `work/formal30-proof-regression`): a RATCHET over the
+**§0.9 is new (2026-10-05, `work/formal27-5`): the ratchet's COST is a property
+of the TREE, and there is now a mode that says what it is in 1.7 seconds instead
+of in forty minutes of Lean.** §0.8 quotes "cost, warm **4.6 s**" and that
+figure is true only of a tree where every example's verdict is still in
+`formal/lean.py`'s cache — which is not a property of this tool.
+`formal/lean.py::proof_verdict_key` covers the six `LIBRARY_MODULES` `.olean`
+**digests** and the proof's **exact bytes**, so a codegen change to one example's
+proof invalidates that row, and a rebuild of `lib/ProofLib.olean` — which any
+change under `lib/` causes on the next use, and which a fresh worktree has not
+done at all — invalidates **all 52 at once**, whatever the cache held a minute
+earlier. `tools/formal_proof_census.py --cache-report` asks that per row, with
+no Lean at all: codegen only (`compile_formal(prove=True, check=False)`), then
+the tool's own key against the CAS, printing the stems NAMED because a count
+nobody can act on is not a budget. On this tree it answers in **1.7 s**:
+**48 replay, 4 emit no proof (the `refused` class, nothing to elaborate), 0 would
+be elaborated.**
+
+**The measurement that produced the mode, and it is a small one.** A full
+`formal_proof_census.py` on this branch was still going after forty minutes and
+was stopped; `lib/*.olean` carry the timestamp of that minute, and
+`formal/lean.py::_library_is_current` now says they are current, so the library
+step is the first thing to suspect and the run's per-example output was lost with
+it (`tail` buffers, and the command was killed before the pipe closed — which is
+its own reminder that a backgrounded run's output is worth capturing to a file).
+What the mode adds is not a cheaper measurement; it is that the question is now
+**askable before the money**, and it separates the two cases a count conflates: a
+library that is ABSENT (every key misses, and the report says UNMEASURED rather
+than inventing a cost) and a library that is present but **STALE** (a run
+rebuilds it first, the rebuild changes every key, and the report says so in
+those words instead of printing "48 replay" on the tree where the next run
+elaborates 48).
+
+**One fragility this document's own instrument test has, recorded because it
+cost ten minutes to be sure of.** `test_formal_proof_census.py`'s
+`test_a_failed_check_with_a_proof_on_disk_is_a_lean_verdict` fakes
+`compile_formal` and lets the real `formal/lean.py::proof_census` run on the
+FAKE proof it wrote, because the hole count for a failed check comes from there
+and nowhere else. So on a tree whose library has just been rebuilt, that one test
+**elaborates a two-line fabricated Lean file** — it failed on
+`lean_cpu_s == 0.0` instead of `None` the first time it ran after a rebuild, and
+is green now that the verdict is cached. It is not a defect in the tool and the
+test is right to go through the real reader; it is a test whose result depends on
+the machine's CAS state, and `--cache-report` is now the instrument that can say
+so about a whole corpus at once.
+
+**§0.8b: the two sections numbered §0.8 in this document were §0.8 (the
+instrument: one PROCESS per item) and §0.8 (the ratchet over
+`formal/examples`). The second is §0.8b and the first stays §0.8**, which is the
+order they were written in; three places above and one in `§0.7` refer to them
+and say which they mean. Left as two §0.8s, a reader who follows the reference
+lands in the wrong one about half the time, and a document whose subject is
+"which row emptied" is not the place to have two rows with one name.
+
+**§0.8b is new (2026-10-05, `work/formal30-proof-regression`): a RATCHET over the
 other half of the corpus — all 52 `formal/examples/*.mojo`, arm64, through
 `compile_formal(prove=True, check=True)` — with a committed per-example baseline
 and a test that fails when one gets worse.** It is not this census: §0 measures
 how much of this repository's own `*.py` the proof layer can prove, over a
-sample that moves whenever the tree's file list does; §0.8 measures the fixed
+sample that moves whenever the tree's file list does; §0.8b measures the fixed
 corpus `test_formal.py` already exercises and keeps a RECORD of it, which
 nothing did. Its first run's headline is **34 of 52 proved, 12 Lean rejections,
 4 generator refusals, 2 too large for Lean's own memory ceiling**, and the
@@ -703,7 +756,7 @@ the arm64 universal theorem (11 items) and the Lean half of this round, which is
 still not measured and still needs the integrator's budget (§0.3). Everything
 else at the top is a value model with its own doc and its own claim.
 
-## 0.8 The RATCHET over the fixed corpus: 52 examples, one row each, and a
+## 0.8b The RATCHET over the fixed corpus: 52 examples, one row each, and a
 ## baseline that fails when a row gets worse (`work/formal30-proof-regression`,
 ## 2026-10-05)
 
@@ -711,11 +764,11 @@ else at the top is a value model with its own doc and its own claim.
 difference is the point.** §0 measures how much of this repository's own `*.py`
 the proof layer can prove, over a sample chosen round-robin over sorted paths —
 so §0.6 is explicit that the sample MOVES whenever the tree's file list does,
-and that two runs of it are two samples. §0.8 is over `formal/examples/*.mojo`,
+and that two runs of it are two samples. §0.8b is over `formal/examples/*.mojo`,
 **all 52 of them, the whole directory, sorted, forever**, and it keeps what
 §0 throws away.
 
-### 0.8.1 What did not exist before this
+### 0.8b.1 What did not exist before this
 
 `test_formal.py` runs every example through `fire.py build --formal` and prints
 today's pass/fail against a hand-maintained `EXPECTED_FAILURES` dict. That is
@@ -743,7 +796,7 @@ check=True)` — **the call `fire.py build --formal` makes** — through
 tool's own. The wall/CPU/peak figures are read out of the `LeanRun` that call
 produces, which `run_lean` already measures and returns.
 
-### 0.8.2 The run
+### 0.8b.2 The run
 
 ```console
 $ export PATH=/opt/homebrew/bin:$PATH
@@ -763,7 +816,7 @@ $ python3 tools/memslot.py --gb 8 --label census-reseed -- \
 | examples | **52**, the whole directory, sorted | the same 52 |
 | what it keeps | status, reason, `sorry` count, admitted contracts, `decide` sites, proof lines, wall, CPU, peak, `timed_on` | a boolean per example |
 | what it gates | a status that got worse, a `sorry` or admitted contract that appeared, a proof over **2x** its recorded CPU | pass/fail against a hand-written list of 7 |
-| cost, warm | **4.6 s, 0.076 GB** (`/usr/bin/time -l`, three runs) | a subprocess per example |
+| cost, warm | **4.6 s, 0.076 GB** (`/usr/bin/time -l`, three runs) — **on a tree whose verdicts are all still cached; §0.9 is the section that says what makes that true and `--cache-report` is how to check before paying** | a subprocess per example |
 | cost, Lean elaborating | 28 min for 17 rows, 4.4 GB peak | the same work, inside `formal` |
 
 **"0 measured by this run and 48 replayed" is the sentence to read twice, and it
@@ -778,7 +831,7 @@ carries the same `cached` field for the same reason: a replayed verdict once
 recorded `formal/examples/either.mojo` as a pass on a date it had never been
 checked.
 
-### 0.8.3 The census, over the 52
+### 0.8b.3 The census, over the 52
 
 | status | n | what it is | who owns it |
 |---|---:|---|---|
@@ -818,7 +871,7 @@ it has never been told about.** Three of them were re-measured through
 `fire.py build --formal` itself to be sure the instrument was not inventing
 them.
 
-### 0.8.4 What it gates, and the three things it deliberately does not
+### 0.8b.4 What it gates, and the three things it deliberately does not
 
 * **It gates CPU seconds at 2x, and reports wall.** A wall clock on this corpus
   measures the box as much as the proof — `lean` runs a thread pool,
@@ -839,7 +892,7 @@ them.
   useful. An unrequested fourth gate on a number measured on one machine is not
   this change's business; the data is there for whoever wants it.
 
-### 0.8.5 How to bank an improvement, and the one number that made the writer
+### 0.8b.5 How to bank an improvement, and the one number that made the writer
 ### non-trivial
 
 `--write-baseline` is the answer, and it says so on every IMPROVEMENT row. Two
@@ -858,7 +911,7 @@ properties it had to have, both learned the hard way and both now tested:
   out of the committed baseline. `write_baseline` now reads the file itself and
   takes the corpus as its only filter, so the mistake is not available.
 
-### 0.8.6 The cost of the baseline as it stands, said plainly
+### 0.8b.6 The cost of the baseline as it stands, said plainly
 
 **16 of the 52 rows carry a measured time and 36 carry `null`.** The 16 are the
 expensive proofs, seeded by one `--remeasure --only <17 stems> --write-baseline`
@@ -872,17 +925,22 @@ the documented way to fill one in is
 Filling all 52 is about 75 minutes of Lean on an idle box; it is a budget
 decision, not a code one, and it is the integrator's.
 
-### 0.8.7 Reproducing
+### 0.8b.7 Reproducing
 
 ```sh
 export PATH=/opt/homebrew/bin:$PATH
 python3 tools/formal_proof_census.py --list                    # the corpus, no builds
+python3 tools/memslot.py --gb 8 --label census-cost -- \
+  python3 tools/formal_proof_census.py --cache-report          # WHAT IT WOULD COST, no Lean
 python3 tools/memslot.py --gb 8 --label census -- \
   python3 tools/formal_proof_census.py                         # 4.6 s warm, exit 1 on a regression
 python3 tools/formal_proof_census.py --write-baseline          # bank
 python3 tools/formal_proof_census.py --remeasure --only udivmod --write-baseline
 python3 test_formal_proof_census.py                           # the instrument, no Lean
 ```
+
+**Run `--cache-report` FIRST**, and the 4.6 s above is a measurement rather than
+a hope: §0.9 is the section that says what makes it 4.6 s and what does not.
 
 ## 0.6 Round 2: 78 functions that share NONE of round 1's, and what stops each
 

@@ -704,6 +704,98 @@ class TestClassifyShape(unittest.TestCase):
         self.assertEqual((got.status, got.phase), ("refused", "generate"))
 
 
+class TestCacheReport(unittest.TestCase):
+    """`--cache-report`: what a run would COST, asked before the money.
+
+    The cost this tool quotes for itself ("4.6 s warm") is a property of the
+    TREE, not of the tool: `formal/lean.py::proof_verdict_key` covers the six
+    `LIBRARY_MODULES` `.olean` digests and the proof's exact bytes, so a codegen
+    change to one example, or a rebuild of `lib/ProofLib.olean` (which any change
+    under `lib/` causes on the next use), invalidates the affected rows and a run
+    elaborates them for real. Before this mode the only way to find that out was
+    to start the run, and a blind full run on the tree that introduced this was
+    still going after forty minutes.
+
+    Four properties, and each is a way the report could be a comfortable lie:
+
+      * **it starts no Lean.** A budget tool that spends the budget to report
+        the budget is worse than no tool, and the way to be sure is to run it on
+        a corpus and see that it did not elaborate.
+      * **it says WHICH rows**, because a count nobody can act on is not a
+        budget: `elaborate` is the list to hand `--only` and `--remeasure`.
+      * **a library that is present but STALE is reported as a rebuild**, and
+        the message says the rebuild invalidates the WHOLE cache. This is the
+        half that matters: a report that only noticed a missing `.olean` would
+        print "48 replay" on the tree where the next run elaborates all 48.
+      * **a row with no proof is not a cache miss.** It is the `refused` class
+        and there is nothing to elaborate, so calling it a miss would invent a
+        cost.
+    """
+
+    def _rows(self):
+        return C.cache_report(["identity", "udivmod"], "arm64")
+
+    def test_it_runs_and_answers_every_row_it_was_asked_about(self):
+        rows = dict(self._rows())
+        self.assertEqual(sorted(rows), ["identity", "udivmod"])
+        for stem, verdict in rows.items():
+            self.assertIn(verdict, ("replay", "elaborate", "no-proof",
+                                    "no-library"),
+                          f"{stem}: {verdict!r} is not a bucket this report "
+                          f"knows how to print")
+
+    def test_it_starts_no_lean(self):
+        """Asked of the LAUNCHER, which is the only place the claim can fail.
+
+        `formal/lean.py::run_lean` is the one function in this tree that starts
+        a `lean` process, so replacing it with something that raises turns "this
+        report starts no Lean" from a claim about the code into a fact about the
+        run. Asserting the census's own recorder was not installed would be
+        weaker and would still pass if some other path launched Lean.
+        """
+        from formal import lean as L
+        real = L.run_lean
+
+        def forbidden(*a, **kw):
+            raise AssertionError("the cache report launched lean")
+        L.run_lean = forbidden
+        try:
+            rows = self._rows()
+        finally:
+            L.run_lean = real
+        self.assertEqual(len(rows), 2)
+
+    def test_a_rebuild_is_reported_as_rebuilding_the_whole_cache(self):
+        text = "\n".join(C.format_cache_report(
+            [("a", "replay"), ("b", "replay")], (), ["ProofLib"]))
+        self.assertIn("REBUILD", text)
+        self.assertIn("invalidates the WHOLE cache", text)
+        self.assertIn("ProofLib", text)
+
+    def test_a_missing_olean_is_reported_as_unmeasured_rather_than_as_a_miss(self):
+        text = "\n".join(C.format_cache_report(
+            [("a", "no-library")], ["ProofLib"], ()))
+        self.assertIn("UNMEASURED", text)
+        self.assertIn("unmeasured: the library is not built", text)
+
+    def test_the_buckets_name_their_stems(self):
+        text = "\n".join(C.format_cache_report(
+            [("alpha", "elaborate"), ("beta", "replay"),
+             ("gamma", "no-proof")]))
+        for stem in ("alpha", "beta", "gamma"):
+            self.assertIn(stem, text)
+        self.assertIn("ELABORATED FOR REAL", text)
+
+    def test_library_state_agrees_with_the_question_it_asks(self):
+        import formal.lean as L
+        absent, stale = C.library_state(L, os.path.join(HERE, "lib"))
+        self.assertEqual(absent, [],
+                         f"lib/ is missing {absent}; every key would miss and "
+                         f"the report would be reporting the wrong thing")
+        for stem in stale:
+            self.assertIn(stem, L.LIBRARY_MODULES)
+
+
 class TestEntryPoint(unittest.TestCase):
     """`--list` builds nothing, which is what makes the tool inspectable."""
 

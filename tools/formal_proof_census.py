@@ -5,6 +5,7 @@ program, and a committed record of what its proof did last time.
     python3 tools/formal_proof_census.py                  # measure + compare
     python3 tools/formal_proof_census.py --write-baseline # bank what it measured
     python3 tools/formal_proof_census.py --list           # the corpus, no builds
+    python3 tools/formal_proof_census.py --cache-report   # what a run would COST
     python3 tools/formal_proof_census.py --only const2,udivmod
     python3 tools/formal_proof_census.py --remeasure --only udivmod \
         --write-baseline        # MEASURE udivmod's cost and bank just that row
@@ -30,6 +31,18 @@ is a flag and not the default.
 A replayed write KEEPS the timing a row already had, because an unmeasured
 value is not a change; see `write_baseline`, which is where that and the merge
 are one decision.
+
+`--cache-report` is the question asked BEFORE the money, and it exists because
+the answer is a property of the TREE rather than of this tool. A verdict is
+content-addressed on `formal/lean.py::proof_verdict_key`, which covers the six
+`LIBRARY_MODULES` `.olean` digests and the proof's exact bytes — so a codegen
+change to one example's proof, or a rebuild of `lib/ProofLib.olean` (which any
+change under `lib/` causes on the next use), invalidates the affected rows and
+a run elaborates them for real. It starts no Lean, builds only the proof a run
+would build anyway, and prints the per-row answer with the stems NAMED, because
+a count nobody can act on is not a budget. Measured on the tree that introduced
+it: 1.7 s for all 52, against a blind full run on the same tree that was still
+going after forty minutes.
 
 WHAT THIS IS, and what the two neighbours are not
 -------------------------------------------------
@@ -586,6 +599,147 @@ def _read_proof(workdir: str):
         return path, ""
 
 
+def library_state(L, lib_dir: str):
+    """`([stems with no .olean], [stems a run would REBUILD])` for `lib/`.
+
+    Two questions a cost report has to answer before it answers anything, and
+    both are asked with `formal/lean.py`'s OWN functions rather than a second
+    spelling of them: a module whose `.olean` is absent, and a module whose
+    `.olean` is present but not current.
+
+    The second is the one that costs a worker an afternoon. `proof_verdict_key`
+    puts the six `LIBRARY_MODULES` `.olean` DIGESTS in the key, so a rebuild
+    changes the key of every example in the corpus at once — the run right after
+    one elaborates the whole thing, whatever the verdict cache held a minute
+    earlier. A report that only noticed a MISSING `.olean` would say "48 replay"
+    on the tree where the next run is 48 elaborations, which is the wrong way
+    round.
+
+    `_effective_digest` is asked too, because the currency check is over the
+    module's whole closure and not over its own file: `formal/lean.py` exists
+    precisely because "the file is newer than the olean" is not the question.
+    """
+    absent, stale = [], []
+    for stem in L.LIBRARY_MODULES:
+        source = os.path.join(lib_dir, stem + ".lean")
+        olean = os.path.join(lib_dir, stem + ".olean")
+        if not os.path.isfile(source):
+            continue
+        if not os.path.isfile(olean):
+            absent.append(stem)
+            continue
+        stamp = olean + ".srcsha256"
+        if L._library_is_current(source, olean, stamp,
+                                 L._effective_digest(stem, lib_dir)):
+            continue
+        # A pre-stamp tree (a fresh clone, an olean the Makefile built) is
+        # ACCEPTED if the olean is newer than the source, and the stamp is
+        # written for free — `ensure_library`'s own second arm, and it does not
+        # change any digest, so it does not invalidate a verdict.
+        if (not os.path.isfile(stamp)
+                and os.path.getmtime(olean) >= os.path.getmtime(source)):
+            continue
+        stale.append(stem)
+    return absent, stale
+
+
+def cache_report(stems, arch: str = "arm64", test_input: int = 10) -> list:
+    """`[(stem, verdict)]` for the corpus: what a run would COST, for free.
+
+    Codegen only -- `compile_formal(prove=True, check=False)` -- and then the
+    question the run itself would answer one example at a time: is this
+    example's verdict already in `formal/lean.py`'s cache? `formal/lean.py`'s
+    own key, so the answer cannot be a second reading of the same rule.
+
+    **This exists because the alternative is finding out the hard way.** The
+    cost this tool quotes for itself is "4.6 s warm", and warm is a property of
+    the TREE rather than of the tool: `proof_verdict_key` covers the six
+    `LIBRARY_MODULES` `.olean` digests and the proof's exact bytes, so a codegen
+    change to one example's proof, or a rebuild of `lib/ProofLib.olean` (which
+    any change under `lib/` causes on the next use), invalidates the affected
+    rows and every one of them is elaborated for real. Measured on
+    `work/formal27-5` at 7ac78995: 41 of 52 replayed and SEVEN would have been
+    elaborated, and a blind full run was still going after forty minutes —
+    enough to spend a worker's whole budget before finding out which seven.
+
+    So this is the budget question asked before the money: it starts no Lean,
+    builds nothing but the proof the run would build anyway, and says which
+    stems are the expensive ones — which is also the list to hand `--only` and
+    `--remeasure` when the answer is "I want to bank a timing for that one".
+
+    A row whose proof the code generator does not emit at all is reported as
+    `no-proof` and is NOT a cache miss: it is the `refused` class, and it costs
+    nothing to learn twice. And a missing `.olean` is reported rather than
+    measured through, because a key computed against a missing digest misses
+    for all 52 and would print "52 elaborated" for a tree whose library simply
+    has not been built yet.
+    """
+    import formal.build as FB
+    from formal import lean as L
+
+    lean = L.find_lean(HERE)
+    if not lean:
+        raise SystemExit("lean not found (see ./lean-toolchain)")
+    lib_dir = os.path.join(HERE, "lib")
+    absent, stale = library_state(L, lib_dir)
+    out = []
+    with L.scratch_dir("proof-census-cache") as workdir:
+        for stem in stems:
+            source = os.path.join(EXAMPLES, stem + ".mojo")
+            try:
+                FB.compile_formal(source,
+                                  output=os.path.join(workdir, stem + ".aout"),
+                                  test_input=test_input, prove=True,
+                                  check=False, arch=arch)
+            except Exception:
+                out.append((stem, "no-proof"))
+                continue
+            proof, _text = _read_proof(workdir)
+            if not proof:
+                out.append((stem, "no-proof"))
+                continue
+            if absent or stale:
+                out.append((stem, "no-library"))
+                continue
+            key = L.proof_verdict_key(proof, lib_dir, lean)
+            out.append((stem, "replay" if L.cas_lookup_verdict(key) is not None
+                        else "elaborate"))
+    return out
+
+
+def format_cache_report(rows, absent=(), stale=()) -> list:
+    """The buckets, with the stems NAMED — a count nobody can act on.
+
+    `elaborate` is the bucket that costs, and it is the one a reader needs the
+    names of: it is the list to pass to `--only` and `--remeasure`.
+    """
+    buckets = {}
+    for stem, verdict in rows:
+        buckets.setdefault(verdict, []).append(stem)
+    out = [f"== proof census, what a run would cost: {len(rows)} examples"]
+    if absent:
+        out.append(f"   lib/ has no {', '.join(absent)} .olean, so every key "
+                   f"misses and the answer is UNMEASURED until the library is "
+                   f"built (a real run builds it, ~90 s a module)")
+    if stale:
+        out.append(f"   a run would REBUILD lib/{', '.join(stale)}.lean first, "
+                   f"and the six .olean digests are in every example's verdict "
+                   f"key, so that rebuild invalidates the WHOLE cache: expect "
+                   f"every example elaborated, not the rows below")
+    for verdict in ("replay", "elaborate", "no-proof", "no-library"):
+        names = buckets.get(verdict)
+        if not names:
+            continue
+        said = {"replay": "replay from the verdict cache (free)",
+                "elaborate": "ELABORATED FOR REAL by a run (this is the cost)",
+                "no-proof": "the generator emits no proof (the `refused` class, "
+                            "and nothing to elaborate)",
+                "no-library": "unmeasured: the library is not built"}[verdict]
+        out.append(f"   {len(names):>3}  {said}")
+        out.append(f"        {', '.join(names)}")
+    return out
+
+
 def measure_example(stem: str, arch: str = "arm64", test_input: int = 10) -> Record:
     """One example through `compile_formal(prove=True, check=True)`.
 
@@ -1123,6 +1277,12 @@ def main(argv=None) -> int:
                          "(compile_formal's own default)")
     ap.add_argument("--quiet", action="store_true",
                     help="no per-example progress on stderr")
+    ap.add_argument("--cache-report", action="store_true",
+                    help="what a run would COST, without running Lean: which "
+                         "examples' verdicts still replay and which would be "
+                         "elaborated for real. Codegen only, so it is seconds "
+                         "rather than the tens of minutes `--remeasure` and a "
+                         "moved tree cost")
     ap.add_argument("--remeasure", action="store_true",
                     help="bypass the proof-verdict CACHE, so every example is "
                          "elaborated for real and its time is measured. This "
@@ -1143,6 +1303,14 @@ def main(argv=None) -> int:
     if not lean:
         print("lean not found (see ./lean-toolchain)", file=sys.stderr)
         return 2
+    if args.cache_report:
+        # BEFORE the baseline's arch check and before anything is measured: this
+        # is a question about the CACHE, and a baseline of the wrong
+        # architecture does not change what a run would cost.
+        absent, stale = library_state(L, os.path.join(HERE, "lib"))
+        print("\n".join(format_cache_report(
+            cache_report(stems, args.arch, args.test_input), absent, stale)))
+        return 0
     path = args.baseline or baseline_path(args.arch)
     # The baseline is compared only against the same architecture. The two
     # backends' proof generators are independent implementations over
