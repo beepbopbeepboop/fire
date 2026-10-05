@@ -900,6 +900,63 @@ _SORRY_NAMED_RE = re.compile(r"declaration ['\u2018]([^'\u2019]+)['\u2019] uses"
 _DECL_NAME_RE = re.compile(r"^\s*(?:private\s+|protected\s+|noncomputable\s+)*"
                            r"(?:theorem|lemma|def)\s+([A-Za-z_][\w'.]*)")
 
+# The hole's OWN position, which `_SORRY_LOC_RE` above does not carry: that
+# regex reads the `file:line:col` at the START of the warning, which is where
+# the DECLARATION begins, so two holes in one declaration are the same location
+# and one hole in a 3000-line theorem says nothing about which of its steps
+# failed.
+#
+# Lean has had the answer in the warning itself since a labelled `sorry` went in
+# (`Lean/Meta/Sorry.lean`: `mkLabeledSorry` builds a `SorryLabelView` carrying
+# module, line, column and LSP range into the sorry's own type, "supporting
+# pretty printing the sorry with an indication of source position when the
+# option `pp.sorrySource` is true"). The option is the whole mechanism — with
+# `set_option pp.sorrySource true` in the file, the warning becomes
+#
+#   /…/.tmp/tmpcmqrxbe0.lean:117:8: warning: declaration uses `sorry `«.tmp».tmpcmqrxbe0:363:12`
+#
+# and 363:12 is the `all_goals sorry` that fired, measured on this tree's own
+# generated output (`formal/examples/const2.mojo`, one guard deliberately made
+# unsatisfiable). Without the option the same run prints `declaration uses
+# `sorry`` and there is nothing to parse, so a caller that wants positions has to
+# ASK for them in the file it generates.
+#
+# **The label's module name is NOT delimited by the guillemets**, which is the
+# shape a first reader would parse it by: the label is a `Name`, and Lean
+# parenthesises only the component that is not a bare identifier, so a module
+# under a directory prints as `«.tmp».tmpcmqrxbe0` — a balanced-looking pair
+# around the WRONG part. What is unambiguous is that the position is the
+# `:line:col` the message ENDS in, so that is what this reads, and the module is
+# not captured at all: nothing downstream wants it, because the caller has the
+# file it generated and matches on the line.
+#
+# The trace option a project reaches for first — `trace.Meta.Tactic.sorryAx` —
+# does not exist in the pinned 4.32.2 (`error: Unknown option`), which is why this
+# is a reader of the warning rather than a probe: no second elaboration, no
+# `run_cmd` block, no `import Lean.Elab.Command` in a generated file.
+_SORRY_LABEL_RE = re.compile(
+    r"declaration uses\s+[`'\u2018]?sorry\b[^\n]*?:(\d+):(\d+)[`'\u2018\u2019]?\s*$",
+    re.M)
+
+
+def sorry_source_positions(text: str) -> list:
+    """`(line, col)` for each `declaration uses` warning that carries a position.
+
+    Empty for a run whose file did not set `pp.sorrySource`, and that empty is
+    the answer rather than a failure: Lean's warning still said the declaration
+    uses `sorry`, so the hole is real and this only declines to say where. Callers
+    read the emptiness instead of assuming a position, because a position invented
+    from the declaration's own line is the wrong line more often than it is the
+    right one.
+
+    **One position per declaration, and it is the FIRST hole in it.** Lean emits
+    the warning once per declaration — measured on a three-theorem control, where
+    the declaration with two `sorry`s reported one — so this is the first live
+    hole in a file and not the census of them.
+    """
+    return [(int(m.group(1)), int(m.group(2)))
+            for m in _SORRY_LABEL_RE.finditer(text or "")]
+
 
 def _declaration_at(lines, lineno: int) -> str:
     """The declaration a warning at `lineno` belongs to, or `line N`.
