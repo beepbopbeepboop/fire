@@ -2052,7 +2052,7 @@ def test_no_unclassified_stdlib_name_is_imported_by_anything(tmpdir, _shared):
 
 def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
         tmpdir, _shared):
-    """`host_module_verdict`: the six answers, one row each, and the partition.
+    """`host_module_verdict`: the eight answers, one row each, and the partition.
 
     `host_module_tier` answers a MEMBERSHIP question and its `''` is ambiguous in
     the one direction a report cares about: a name this tree has WRITTEN leaves
@@ -2072,11 +2072,11 @@ def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
     where there is one: `written` and `admitted` are the two answers that answer
     "then what provides it", so an empty path for either would be a row that
     names a state and withholds the file.
-
     The partition is the part that is worth having. Over every name CPython
-    ships, the verdict is one of the five answers that are statements about the
-    target or about this tree, and `not-a-module` is unreachable for them — so
-    the classification of the standard library is COMPLETE, which is the closed
+    ships, the verdict is one of the seven answers that are statements about
+    the target, about this tree or about CPython's own content, and
+    `not-a-module` is unreachable for them — so the classification of the
+    standard library is COMPLETE, which is the closed
     invariant that replaces this file's earlier `count > 100` placeholder. The
     `unclassified` count is still asserted to be large, so this row stays about
     the names in no tier; what changed is that they are a NAMED answer rather
@@ -2108,6 +2108,10 @@ def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
         ("binascii", "unclassified",
          "CPython ships it, no source here, no tier: the queue "
          "`FORMAL_stdlib_module_names_are_not_classified.md` carries"),
+        ("this", "not-code",
+         "CPython ships it AND its content is a module-level string — the "
+         "answer whose sentence is 'not code', not the one whose sentence is "
+         "'CPython does not ship it', which is false of this name"),
         ("definitely_not_a_real_module_9f3a", "not-a-module",
          "nothing here provides it and CPython does not ship it — a typo, or a "
          "gap in this repository, which `tools/formal_sweep.py` classes as "
@@ -2138,20 +2142,22 @@ def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
     for name in _sys.stdlib_module_names:
         answer, _detail = verdict(name)
         tally[answer] = tally.get(answer, 0) + 1
-        # `not-a-module` is unreachable for a CPython-shipped name AS AN
-        # ABSENCE, and `HOST_NOT_A_MODULE` is what makes that distinction
-        # checkable rather than a matter of taste: `this`, `antigravity` and
-        # `turtledemo` are shipped AND answer `not-a-module`, and the only thing
-        # separating them from the typo answer is a tier that says why. So the
-        # invariant is the pair — no shipped name gets the typo answer, and
-        # every shipped name that DOES get it is one a table claims.
-        check(answer != "not-a-module"
-              or I.host_module_tier(name) == "not-a-module",
+        # `not-a-module` is unreachable for a CPython-shipped name, and it is
+        # unreachable as a strict inequality rather than as a matter of taste.
+        # It was once reachable — `this`, `antigravity` and `turtledemo` are
+        # shipped AND were reported `not-a-module`, whose sentence is the TYPO
+        # sentence, and this check had to be relaxed to a pair ("no shipped name
+        # gets the typo answer unless a tier says the name is shipped-and-empty")
+        # to survive that. `HOST_NOT_A_MODULE` members now answer `not-code`,
+        # so the pair collapses back to the strict form: the tier's fourth
+        # answer is the one that means "not code" and this one means "CPython
+        # does not ship it", which no shipped name can satisfy.
+        check(answer != "not-a-module",
               f"CPython ships {name}, so no verdict can reach the TYPO "
               "sentence's answer — nothing here provides it and CPython does "
-              "not ship it — as an absence; a tier that says the name is "
-              f"shipped-and-empty is the other half, and `host_module_tier"
-              f"({name!r})` is {I.host_module_tier(name)!r}")
+              "not ship it — as an absence; "
+              f"`host_module_verdict({name!r})` answered {answer!r} with tier "
+              f"{I.host_module_tier(name)!r}")
         if answer in ("modelled", "unreachable"):
             # The rule `HOST_MODELLED` states and this file's other rows pin: a
             # name LEAVES a tier by being WRITTEN, because an entry left behind
@@ -2163,19 +2169,20 @@ def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
                                         project_root=probe) is None,
                   f"{name} is {answer!r} AND has a source, so it is in a tier "
                   "and answered at once — remove the stale entry or the source")
-    # SEVEN, and the seventh is `not-a-module` — the one answer that is a
-    # statement about THIS repository rather than about the target or about
-    # CPython's list. It is in `host_module_verdict`'s own table (which says
-    # "six strings" over a seven-row table, corrected here), and it became
-    # reachable for a name CPython ships when `HOST_NOT_A_MODULE` landed: a
-    # spec exists and what is behind it is not code. Listing it here rather than
-    # leaving the check to enumerate six is what stops the NEXT answer from
-    # arriving undocumented, which is the failure this row exists to catch.
+    # SEVEN of `host_module_verdict`'s EIGHT answers are reachable for a name
+    # CPython ships, and the seventh is `not-code` — a spec exists and what is
+    # behind it is not code, which `HOST_NOT_A_MODULE` says and which the check
+    # above can therefore state strictly. The eighth, `not-a-module`, is the one
+    # answer that is a statement about THIS repository rather than about the
+    # target or about CPython's list, so it is absent here BY the check above
+    # rather than by omission: enumerating the seven reachable ones is what
+    # stops the NEXT answer from arriving undocumented, which is the failure
+    # this row exists to catch.
     for answer in tally:
         check(answer in ("front-end", "written", "admitted", "modelled",
-                         "unreachable", "unclassified", "not-a-module"),
-              f"the verdict {answer!r} is not one of the seven answers, so a "
-              "report reading it has an eighth case nobody documented")
+                         "unreachable", "unclassified", "not-code"),
+              f"the verdict {answer!r} is not one of the eight answers, so a "
+              "report reading it has a ninth case nobody documented")
     check(tally.get("unclassified", 0) > 100,
           f"precondition: only {tally.get('unclassified', 0)} CPython "
           "standard-library names are unclassified, so this row is about the "
@@ -4284,13 +4291,78 @@ def _a_real_wall_name(W):
     reason — which is the one kind of failure that trains a reader to ignore a
     red suite. The tables are the same ones the tool ranks with, so this is the
     same question the ranking asks, asked once here.
+
+    **A `HOST_NOT_A_MODULE` member is eligible here, and used to be skipped.**
+    The skip existed because the instrument did not count one as a wall, so a
+    file naming `abc` AND `antigravity` reported `alone = 1` for `abc` when
+    `antigravity` was a wall too — which is the number this helper's own caller
+    exists to read. The instrument counts them now (`_is_wall` accepts the
+    `not-code` verdict, measured by building such a file and reading the
+    refusal), so the skip would only hide the case from the row that pins it.
     """
     for name in sorted(I.HOST_MODULES):
         if name in sys.stdlib_module_names \
-                and I.host_module_tier(name) != "not-a-module" \
                 and I.resolve_module_path(name) is None:
             return name
     return None
+
+
+def test_a_module_whose_content_is_not_code_is_still_a_wall(tmpdir, _shared):
+    """`not-code` counts, and the BUILD is the measurement rather than a rule.
+
+    `this`, `antigravity` and `turtledemo` are CPython modules whose content is
+    not code — a module-level string, a side effect, a directory of example
+    programs — and `HOST_NOT_A_MODULE` is the set that says so. The build refuses
+    an import of each one, so a file naming one does not build and the name is a
+    wall by the only test that matters.
+
+    It was not counted, and the way it showed was the `alone` column: with
+    `antigravity` invisible, a file importing `abc` AND `antigravity` read as
+    though `abc` were its ONLY wall, which is the statement that column exists
+    to make true and was false. So the two halves are pinned separately, because
+    either alone would pass with the other broken:
+
+    * `host_module_verdict` answers `not-code` and NOT `not-a-module` — the
+      latter's sentence is "CPython does not ship it", which is false of all
+      three, and `sys.stdlib_module_names` is the oracle for it;
+    * the instrument's own predicate counts it, measured by building a file that
+      imports one and reading the refusal off it.
+    """
+    W = _wall_module()
+    names = [n for n in sorted(I.HOST_NOT_A_MODULE)
+             if n in sys.stdlib_module_names]
+    check(names,
+          "HOST_NOT_A_MODULE holds no CPython module, so this row has nothing "
+          "to be about")
+    for name in names:
+        answer, detail = I.host_module_verdict(name)
+        check(answer == "not-code" and detail == "",
+              f"{name} is a HOST_NOT_A_MODULE member and answers {answer!r}, "
+              "not 'not-code' — 'not-a-module' asserts CPython does not ship "
+              f"it, and `sys.stdlib_module_names` says it does (detail {detail!r})")
+        check(W._is_wall(name),
+              f"{name} is not counted as a wall by "
+              f"`tools/formal_host_import_wall.py::_is_wall`, so a file that "
+              "imports it is reported as one wall lighter than it is")
+    # And the build itself, so "is a wall" is measured rather than argued: the
+    # instrument's rule is that a name the build REFUSES is a wall, and the
+    # refusal for each of these is its own sentence naming no content.
+    root = os.path.join(str(tmpdir), "notcode")
+    os.makedirs(root)
+    name = names[0]
+    write_tree(root, {"prog.mojo": "import %s\ndef main() -> Int:\n    return 0\n"
+                      % name})
+    fresh_cas()
+    # `expect_ok=False`: the refusal IS the measurement, so a successful build
+    # would be the failure rather than a happy accident.
+    res, _out = build(root, "prog.aout", expect_ok=False)
+    err = res.stderr or res.stdout
+    check(res.returncode != 0 and "no content to compile" in err,
+          f"a program importing `{name}` should be refused with the "
+          f"no-content sentence; it exited {res.returncode} with {err[-300:]!r}")
+    check(not I.is_cpython_stdlib("definitely_not_a_real_module_9f3a"),
+          "precondition: the typo's name is not a CPython module, so the two "
+          "answers cannot be told apart by the table alone")
 
 
 def test_the_wall_instrument_separates_reach_from_alone(tmpdir, _shared):
@@ -4313,14 +4385,10 @@ def test_the_wall_instrument_separates_reach_from_alone(tmpdir, _shared):
     wall_a = _a_real_wall_name(W)
     wall_b = None
     for name in sorted(I.HOST_MODULES):
-        # …and a `HOST_NOT_A_MODULE` member is skipped for the same reason
-        # `_a_real_wall_name` skips it: the instrument's `alone` column asks
-        # "is this the only WALL on this file", and `antigravity` is not one —
-        # it is a name the table says has no content to compile. Counting it
-        # made `alone` wrong by one on the file that names both, which is the
-        # number the row exists to read.
+        # No `HOST_NOT_A_MODULE` skip here, for the reason `_a_real_wall_name`
+        # gives: the instrument counts a `not-code` name as a wall, so naming
+        # one on this file is a second wall and `alone` has to say so.
         if name != wall_a and name in sys.stdlib_module_names \
-                and I.host_module_tier(name) != "not-a-module" \
                 and I.resolve_module_path(name) is None:
             wall_b = name
             break
@@ -4670,6 +4738,8 @@ TESTS = [
      test_the_wall_instrument_separates_reach_from_alone),
     ("a dead import is not a wall this tree has to climb",
      test_a_dead_import_is_not_a_wall_this_tree_has_to_climb),
+    ("a module whose content is not code is still a wall",
+     test_a_module_whose_content_is_not_code_is_still_a_wall),
     ("the wall instrument measures a delta on one tree",
      test_the_wall_instrument_measures_a_delta_on_one_tree),
     ("the wall instrument reads the sweep column with its own peel",

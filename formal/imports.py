@@ -1161,7 +1161,7 @@ def host_module_verdict(name: str, relative_to: str = None,
     """`(answer, detail)` — the ONE classification of a name, with every
     outcome NAMED rather than encoded as an absence.
 
-    `answer` is one of SEVEN strings and there is no other answer:
+    `answer` is one of EIGHT strings and there is no other answer:
 
     | answer | meaning | detail |
     |---|---|---|
@@ -1171,7 +1171,26 @@ def host_module_verdict(name: str, relative_to: str = None,
     | `'modelled'` | reachable in principle, not implemented — a gap with an owner | `''` |
     | `'unreachable'` | a permanent fact about the target | `''` |
     | `'unclassified'` | CPython ships it and no tier says which of the two it is | `''` |
-    | `'not-a-module'` | CPython does not ship it, so nothing here provides it — a typo or a gap in this repository; OR `HOST_NOT_A_MODULE` claims it and CPython's own `find_spec` finds a real file with nothing computable behind it | `''` |
+    | `'not-code'` | CPython ships it and its content is not code — a module-level string, a demonstration, a directory of example programs — so there is nothing to implement and nothing missing from the target | `''` |
+    | `'not-a-module'` | nothing here provides it and CPython does not ship it — a typo or a gap in this repository | `''` |
+
+    **`'not-code'` and `'not-a-module'` are two answers, and they used to be
+    one string carrying two meanings**, which is a defect rather than a naming
+    preference. `host_module_tier` answers `'not-a-module'` for a
+    `HOST_NOT_A_MODULE` name — "this module's content is not code" — while this
+    function's `'not-a-module'` says "CPython does not ship this", and for
+    `this`, `antigravity` and `turtledemo` the second is FALSE: CPython ships
+    all three, and `importlib.util.find_spec` finds each on this host
+    (`test_formal_link_accounting.py`'s ledger says so, and
+    `unresolvable_import_error`'s own arm for them says "a CPython
+    standard-library module with no content to compile"). So a name CPython
+    ships was reported with the answer whose sentence is the typo sentence, and
+    `tools/formal_host_import_wall.py` — which takes its wall set from this
+    function — dropped those three files out of its `reach` and `alone`
+    columns, which made a file importing `abc` AND `antigravity` read as if
+    `abc` were its only wall. `'not-code'` is what the tier's own docstring
+    always meant by its fourth answer, and `HOST_NOT_A_MODULE` keeps its name
+    because it names the SET, which is unchanged.
 
     **Why this exists, and what it is fixing.** `host_module_tier` answers a
     membership question — "is this name in a tier" — and its `''` is ambiguous
@@ -1213,10 +1232,13 @@ def host_module_verdict(name: str, relative_to: str = None,
     with a source is answered whatever a tier entry left behind says — a tier
     entry behind a written module is the bookkeeping state
     `test_formal_link_accounting.py::HOST_SET_ADDED_THEN_WRITTEN` tracks, and
-    reporting it as `modelled` would schedule work that is done; then the two
-    claim tiers; then `is_cpython_stdlib`, whose authority is the interpreter's
-    own table; and `'not-a-module'` last, because it is the only answer that is
-    a statement about THIS repository rather than about the target.
+    reporting it as `modelled` would schedule work that is done; then the three
+    tier answers, where the tier's own fourth (`'not-code'`) is renamed on the
+    way out because the tier's string is about CONTENT and this one's would be
+    about SHIPPING; then `is_cpython_stdlib`, whose authority is the
+    interpreter's own table; and `'not-a-module'` last, because it is the only
+    answer that is a statement about THIS repository rather than about the
+    target.
 
     `relative_to`/`project_root` go to `resolve_module_path` unchanged, so a
     caller that has the importing file in hand gets the resolver's own
@@ -1240,6 +1262,13 @@ def host_module_verdict(name: str, relative_to: str = None,
                                    project_root=project_root)
     if resolved:
         return ("written", resolved)
+    if tier == "not-a-module":
+        # The TIER's fourth answer, renamed on the way out: the tier means
+        # "this module's content is not code", and this function's
+        # `not-a-module` means "CPython does not ship it", which is false of
+        # every member of `HOST_NOT_A_MODULE`. One string, two meanings, and a
+        # report reading the wrong one.
+        return ("not-code", "")
     if tier:
         return (tier, "")
     if is_cpython_stdlib(name):

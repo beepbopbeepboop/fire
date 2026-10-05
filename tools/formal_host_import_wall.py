@@ -66,16 +66,21 @@ itself uses, and the reason is not tidiness:
 
 ## What a WALL is
 
-Four of the six answers `host_module_verdict` can give, and the two that are not
-walls are the whole rule: a name this tree has a SOURCE for is **written** (and
-answered), and a name CPython does not ship is **not-a-module** — a typo, or a
-gap in this repository, which `tools/formal_sweep.py` classes as
-`not-answerable/unresolved-import`. The four that remain are `modelled` (a gap
+Five of the EIGHT answers `host_module_verdict` can give, and the three that are
+not walls are the whole rule: a name the compiler answers itself is
+**front-end**, a name this tree has a SOURCE for is **written** (and answered),
+and a name CPython does not ship is **not-a-module** — a typo, or
+a gap in this repository, which `tools/formal_sweep.py` classes as
+`not-answerable/unresolved-import`. The five that remain are `modelled` (a gap
 with an owner), `unreachable` (a permanent fact about the target), `admitted`
-(answers under a declared contract) and `unclassified` — CPython ships it and no
+(answers under a declared contract), `unclassified` — CPython ships it and no
 tier says which of the two it is, which is the queue
 `bugs/FORMAL_stdlib_module_names_are_not_classified.md` carries and what the
-`tier` column prints as `unclassified`.
+`tier` column prints as `unclassified` — and `not-code`, which is CPython
+shipping a name whose content is not code at all (`this`, `antigravity`,
+`turtledemo`). **`not-code` is a wall because the BUILD refuses the import**, with
+its own sentence per name; a file naming one does not build, so a table that did
+not count it was reporting a file as cleaner than it is.
 
 Nothing here builds anything, and no Lean runs: the question is what a file
 IMPORTS, which is decidable from source, and a build would answer a different
@@ -202,14 +207,31 @@ def _is_wall(name: str) -> bool:
     so `''` means both "answered" and "nobody classified it", and three
     consumers had grown three ways of telling those apart.
 
-    Only two answers are walls, and the two that are not are the point: a name
-    this tree has a source for is answered, and a name CPython does not ship is
-    a typo or a gap in this repository — which `tools/formal_sweep.py` reports
-    as `not-answerable/unresolved-import`, a different class that a wall table
+    Two answers are NOT walls, and they are the point: a name this tree has a
+    source for is answered, and a name CPython does not ship is a typo or a gap
+    in this repository — which `tools/formal_sweep.py` reports as
+    `not-answerable/unresolved-import`, a different class that a wall table
     counting it would misattribute to the target.
+
+    **`'not-code'` IS a wall, and leaving it out was a measurement bug rather
+    than a judgement.** `this`, `antigravity` and `turtledemo` are
+    `HOST_NOT_A_MODULE` members: CPython ships all three and their content is
+    not code. The build refuses an import of any of them — `measured, each with
+    its own sentence`: "a CPython standard-library module with no content to
+    compile — it is documentation or a demonstration, not an API" — so a file
+    naming one does not build and the name is a wall by the only test that
+    matters. While `host_module_verdict` answered `not-a-module` for them, this
+    predicate dropped them, and the drop was visible in the columns: `reach` and
+    `alone` both under-counted, and because `alone` is computed over the names
+    this function recognises, a file importing `abc` AND `antigravity` read as
+    though `abc` were its only wall — a false statement about the file, which is
+    the whole thing the `alone` column exists to say (see
+    `test_formal_imports.py::test_the_wall_instrument_separates_reach_from_alone`,
+    which was red for exactly this).
     """
     answer, _detail = I.host_module_verdict(name)
-    return answer in ("modelled", "unreachable", "admitted", "unclassified")
+    return answer in ("modelled", "unreachable", "admitted", "unclassified",
+                      "not-code")
 
 
 def _sweep_host_lines(sweep_path: str):
