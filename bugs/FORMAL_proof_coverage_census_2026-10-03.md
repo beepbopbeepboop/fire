@@ -1,5 +1,18 @@
 # FORMAL_proof_coverage_census_2026-10-03: 60 functions from THIS repository, both backends, with proofs on
 
+**§0.8 is new (2026-10-05, `work/formal30-proof-regression`): a RATCHET over the
+other half of the corpus — all 52 `formal/examples/*.mojo`, arm64, through
+`compile_formal(prove=True, check=True)` — with a committed per-example baseline
+and a test that fails when one gets worse.** It is not this census: §0 measures
+how much of this repository's own `*.py` the proof layer can prove, over a
+sample that moves whenever the tree's file list does; §0.8 measures the fixed
+corpus `test_formal.py` already exercises and keeps a RECORD of it, which
+nothing did. Its first run's headline is **34 of 52 proved, 12 Lean rejections,
+4 generator refusals, 2 too large for Lean's own memory ceiling**, and the
+eleven of those eighteen that `test_formal.py`'s `EXPECTED_FAILURES` does not
+name are in `bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_
+are_declared.md`.
+
 **§0.7 is new (2026-10-04, `work/formal21-5`): §0.2's table is RE-MEASURED on
 this tree, and the honest headline is that it is not comparable — the sample
 moved, so only the per-item method and the two families are.** Phase A only, no
@@ -586,6 +599,187 @@ moved the right way:**
 the arm64 universal theorem (11 items) and the Lean half of this round, which is
 still not measured and still needs the integrator's budget (§0.3). Everything
 else at the top is a value model with its own doc and its own claim.
+
+## 0.8 The RATCHET over the fixed corpus: 52 examples, one row each, and a
+## baseline that fails when a row gets worse (`work/formal30-proof-regression`,
+## 2026-10-05)
+
+**This is a different instrument from every other section here, and the
+difference is the point.** §0 measures how much of this repository's own `*.py`
+the proof layer can prove, over a sample chosen round-robin over sorted paths —
+so §0.6 is explicit that the sample MOVES whenever the tree's file list does,
+and that two runs of it are two samples. §0.8 is over `formal/examples/*.mojo`,
+**all 52 of them, the whole directory, sorted, forever**, and it keeps what
+§0 throws away.
+
+### 0.8.1 What did not exist before this
+
+`test_formal.py` runs every example through `fire.py build --formal` and prints
+today's pass/fail against a hand-maintained `EXPECTED_FAILURES` dict. That is
+the right gate and it is not a record: **no wall time, no CPU time, no peak
+memory, no count of the `native_decide`/`bv_decide` sites the proof rests on,
+and no history.** So a proof that got five times slower, or started admitting
+holes, or started needing 3 GB, leaves the suite green and prints `PASS`.
+
+One field of the record is worth its own note because it was 1.7 MB before it
+was right: **`reason` is Lean's first diagnostic line and not its output.** A
+rejected proof's detail is hundreds of characters of the same goal state
+repeated, and a replayed verdict's stored detail is the same diagnostics behind
+the header Lean prints first — so comparing whole blobs reported "same status,
+different reason" on three corpus rows on *every* run for no reason at all. One
+line, taken the same way from both paths, made the committed baseline 30 KB and
+the report quiet.
+
+The instrument is `tools/formal_proof_census.py`; the committed record is
+`tools/formal_proof_census_baseline.json`; the test is
+`tools/formal_proof_census.py` itself registered as `formal-proof-census` in
+`tools/suite.py`, with its own instrument test as `formal-proof-census-tool`.
+The measurement per example is `formal.build.compile_formal(prove=True,
+check=True)` — **the call `fire.py build --formal` makes** — through
+`formal/lean.py::run_lean`'s three bounds, with no launcher and no bound of this
+tool's own. The wall/CPU/peak figures are read out of the `LeanRun` that call
+produces, which `run_lean` already measures and returns.
+
+### 0.8.2 The run
+
+```console
+$ export PATH=/opt/homebrew/bin:$PATH
+$ python3 tools/memslot.py --gb 8 --label census-reseed -- \
+      python3 -u tools/formal_proof_census.py --write-baseline
+== formal proof census, arm64: 52 examples
+   52 examples: 34 of them reach a proof Lean accepted, 0 measured by this run
+   and 48 replayed from the verdict cache, largest Lean peak 0.00 GB
+   proved           34
+   lean-rejected    12
+   refused           4
+   too-large         2   <- not a verdict on the proof
+```
+
+| | this census | `test_formal.py` |
+|---|---|---|
+| examples | **52**, the whole directory, sorted | the same 52 |
+| what it keeps | status, reason, `sorry` count, admitted contracts, `decide` sites, proof lines, wall, CPU, peak, `timed_on` | a boolean per example |
+| what it gates | a status that got worse, a `sorry` or admitted contract that appeared, a proof over **2x** its recorded CPU | pass/fail against a hand-written list of 7 |
+| cost, warm | **4.6 s, 0.076 GB** (`/usr/bin/time -l`, three runs) | a subprocess per example |
+| cost, Lean elaborating | 28 min for 17 rows, 4.4 GB peak | the same work, inside `formal` |
+
+**"0 measured by this run and 48 replayed" is the sentence to read twice, and it
+is not a defect.** `formal/lean.py`'s verdict cache is content-addressed on the
+proof's exact bytes, every `.olean`'s digest and the toolchain version, so a
+repeat run of an unchanged corpus replays every verdict in about a tenth of a
+second and **measures no time at all**. That is why `--remeasure` exists (it
+bypasses the cache for the run), why a replayed row carries `null` and never
+`0.0`, and why `formal/lean.py`'s "a cached verdict is not a measurement" is
+this tool's first rule rather than a footnote. `tools/formal_proof_breadth.py`
+carries the same `cached` field for the same reason: a replayed verdict once
+recorded `formal/examples/either.mojo` as a pass on a date it had never been
+checked.
+
+### 0.8.3 The census, over the 52
+
+| status | n | what it is | who owns it |
+|---|---:|---|---|
+| `proved` | **34** | typechecked, zero holes, zero admitted contracts | — |
+| `lean-rejected` | **12** | a proof was emitted and Lean did not accept it | three families, below |
+| `refused` | **4** | the proof GENERATOR refused, before Lean | 2 universal-theorem, 1 `ListExpr`, 1 struct-field |
+| `too-large` | **2** | Lean's own `-M` refused the proof — **not a verdict** | `formal/lean.py`'s `LEAN_MEMORY_MB` |
+
+**The three `lean-rejected` families, by the site they stop at** (each row is a
+`Counter` over the committed baseline, and every one of these is one subject
+with a doc of its own):
+
+| n | the site | whose |
+|---:|---|---|
+| 5 | `<stem>_proof.lean:2880:16` / `:2587:16` / `:3250:16: Tactic 'rfl' failed` on the epilogue's `x30` read through a materialised address | `FORMAL_three_examples_fail_their_proofs_on_master.md` |
+| 5 | `⊢ (if sKey a ≤ sKey b then 1 else 0) = …` or a `t32s (t8s n) = n` round trip, all at `:2332:41` / `:2212:41` / `:61:57` | `FORMAL_arm64_a_narrow_typed_parameter_makes_the_universal_contract_false.md` and `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` §Still open 3 |
+| 2 | a frame-condition read: `fib`'s tree-recursion `FrameOk` window and `sum_range`'s conditions-operand slot | each has its own doc, both linked from `FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md` |
+
+**`too-large` is two examples at the SAME line** — `both_proof.lean:2600:8` and
+`either_proof.lean:2600:8`, both `(kernel) excessive memory consumption
+detected`. The same site in two unrelated programs says this is a shared library
+lemma meeting Lean's memory ceiling and not anything in either example, which is
+exactly why the class exists and why it is ranked with `bound-exceeded` rather
+than with the verdicts.
+
+**The `sorry` column is small and that is the strongest thing in the table.**
+Three of the rejected proofs admit holes — `countdown` 2, `sum_range` 1, `wge`
+1 — and **every one of the 34 `proved` examples admits zero holes and zero
+admitted host contracts.** So the green half is green in the strong sense
+(`formal/lean.py`'s definition of a census that cannot say "zero" would have
+said "unmeasured" instead).
+
+**The finding this produced on its first run is in
+`bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md`:
+`EXPECTED_FAILURES` names 7 of the 18, so the `formal` job reports 11 `FAIL`s
+it has never been told about.** Three of them were re-measured through
+`fire.py build --formal` itself to be sure the instrument was not inventing
+them.
+
+### 0.8.4 What it gates, and the three things it deliberately does not
+
+* **It gates CPU seconds at 2x, and reports wall.** A wall clock on this corpus
+  measures the box as much as the proof — `lean` runs a thread pool,
+  `test_formal.py` runs 20 examples at once, and these numbers were taken at load
+  13-40 — and a 2x wall gate on a 15 s proof is a 30 s threshold a loaded
+  neighbour crosses routinely. Whole-tree CPU seconds are summed by `run_lean`
+  from `ps`, so they barely move with load.
+* **It does not gate a changed example against its old row.** `source_sha256` is
+  in every record so the tool can say "this is a different program" instead of
+  comparing two programs' times.
+* **It does not gate a refusal's REASON moving inside one rank.** A value-model
+  project moves refusals along the pipeline on purpose — §0.4 closed a nine-item
+  family and the corpus moved to the next row with the class count unchanged — so
+  a gate that fired on that would be fired at every step of it.
+* **It has no memory gate**, and the peak is recorded per example and printed as
+  the corpus maximum because `>3-4 GB` is a project debt standard
+  (`bugs/PERF_memory_over_4gb_is_a_bug.md`) and a ratchet watching it would be
+  useful. An unrequested fourth gate on a number measured on one machine is not
+  this change's business; the data is there for whoever wants it.
+
+### 0.8.5 How to bank an improvement, and the one number that made the writer
+### non-trivial
+
+`--write-baseline` is the answer, and it says so on every IMPROVEMENT row. Two
+properties it had to have, both learned the hard way and both now tested:
+
+* **A replayed write KEEPS a row's existing timing.** The common banking case is
+  a warm run, which measures no time, and overwriting with that would reset
+  every row the operator touched to "no timing known" — a ratchet decaying
+  through ordinary use of its own writer. An unmeasured value is not a change.
+  All four figures (`lean_wall_s`, `lean_cpu_s`, `lean_peak_gb`, `timed_on`)
+  move together, so a preserved timing never shows one elaboration's CPU beside
+  another's date.
+* **A merge and a drop are ONE decision.** The first version let the caller pass
+  which old rows to keep, the caller passed the rows it had just measured, and a
+  `--only <17> --remeasure --write-baseline` silently deleted the other 35 rows
+  out of the committed baseline. `write_baseline` now reads the file itself and
+  takes the corpus as its only filter, so the mistake is not available.
+
+### 0.8.6 The cost of the baseline as it stands, said plainly
+
+**16 of the 52 rows carry a measured time and 36 carry `null`.** The 16 are the
+expensive proofs, seeded by one `--remeasure --only <17 stems> --write-baseline`
+pass — 28 minutes wall on a box at load 13-40, 1060 s of Lean CPU in total,
+`sqsum` at 167 s CPU / 4.37 GB peak the largest and `identity` at 14.6 s the
+smallest. **They are the rows where a 2x regression is most expensive to
+notice**, which is why they are the ones seeded. The 36 `null` rows are not a defect and not a silent
+gap — they are rows whose timing has never been measured, the tool says so, and
+the documented way to fill one in is
+`python3 tools/formal_proof_census.py --remeasure --write-baseline --only <stem,…>`.
+Filling all 52 is about 75 minutes of Lean on an idle box; it is a budget
+decision, not a code one, and it is the integrator's.
+
+### 0.8.7 Reproducing
+
+```sh
+export PATH=/opt/homebrew/bin:$PATH
+python3 tools/formal_proof_census.py --list                    # the corpus, no builds
+python3 tools/memslot.py --gb 8 --label census -- \
+  python3 tools/formal_proof_census.py                         # 4.6 s warm, exit 1 on a regression
+python3 tools/formal_proof_census.py --write-baseline          # bank
+python3 tools/formal_proof_census.py --remeasure --only udivmod --write-baseline
+python3 test_formal_proof_census.py                           # the instrument, no Lean
+```
 
 ## 0.6 Round 2: 78 functions that share NONE of round 1's, and what stops each
 

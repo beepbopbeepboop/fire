@@ -575,6 +575,26 @@ MEASURED_PEAK_GB = {
     # the same way: 7.9 s, no Lean, and the largest of the three new ones at
     # 0.135 GB because 22 of its 60 items compile a formal image.
     'formal-proof-breadth-tool': (0.135, 'measured'),
+    # …and the proof-regression ratchet with its instrument, measured the same
+    # way (one at a time, arm64, python 3.14.7). The instrument is 46
+    # assertions over the tool's own logic and the committed baseline: 0.45 s
+    # and 55 MB by `/usr/bin/time -l`, three runs within 3 MB of each other
+    # (53.4 / 54.6 / 56.3) — `/usr/bin/time` rather than memcap's poll for
+    # `formal-field-walk`'s reason, the run is shorter than one poll interval.
+    # The ratchet itself is TWO numbers and the class comes from the larger: on
+    # a warm `formal/lean.py` verdict cache — the state every repeat run of this
+    # repository is in, since a verdict is content-addressed on the proof's
+    # exact bytes — the 52 Lean checks are ~0.1 s each, the whole job is **4.6 s
+    # and 0.076 GB** by `/usr/bin/time -l` (three runs: 4.54 / 4.56 / 4.66 s and
+    # 76.4 / 79.4 / 78.9 MB); with Lean ACTUALLY elaborating (a `--remeasure` pass, which
+    # is what a cold tree or any change to a proof generator puts this job into)
+    # it is **28 min for 17 of the 52 and 4.4 GB**, the peak being `sqsum`'s one
+    # elaboration (167 s of Lean CPU for that row alone).
+    # Both are stated because the honest reservation is for the state the job
+    # can be in, not the state it was last seen in, and `mem='small'` is 1.8x
+    # the larger.
+    'formal-proof-census':      (4.40, 'measured'),
+    'formal-proof-census-tool': (0.05, 'measured'),
     # …and the one `work/formal13-1` brought in, a pure SOURCE check over
     # `HOST_OWNED_BLOBS` and the `hostmods` it describes: 0.036 GB and 0.63 s,
     # the same cost class as the two below it and measured the same way one at a
@@ -2885,6 +2905,85 @@ test('formal-proof-breadth-tool', [PY, 'test_formal_proof_breadth.py'],
      extra=['test_formal_proof_breadth.py', 'tools/formal_proof_breadth.py',
             'lib/ProofLib.lean'] + FORMAL_BUILD_INPUTS,
      desc='the proof-breadth census instrument: deterministic, closed, honest')
+# ── the proof REGRESSION ratchet, and the instrument behind it ───────────────
+# Two registrations because they are two different questions, and the split is
+# `formal-proof-breadth-tool`'s above for the same reason: what a job MEASURES
+# and what keeps the measurement honest are not the same job, and folding them
+# together would make the cheap one pay for the expensive one.
+#
+# `formal-proof-census` is the ratchet. `tools/formal_proof_census.py` runs all
+# 52 `formal/examples/*.mojo` through `formal.build.compile_formal(prove=True,
+# check=True)` — the call `fire.py build --formal` makes — through
+# `formal/lean.py::run_lean`'s bounds, and compares the result against the
+# committed `tools/formal_proof_census_baseline.json`, failing when an example's
+# status gets worse, a `sorry` or an admitted contract appears, or a proof costs
+# more than twice what it cost. It exists because that RECORD did not exist:
+# `formal` (test_formal.py) prints today's pass/fail against a hand-maintained
+# `EXPECTED_FAILURES` dict and throws the rest away, so a proof that got five
+# times slower, or started admitting holes, or started needing 3 GB, leaves the
+# suite green. `§0.8` of `bugs/FORMAL_proof_coverage_census_2026-10-03.md` is
+# the census's own summary and the finding it produced on its first run.
+#
+# Why it is a separate job from `formal` and not folded into it: `formal` runs
+# `fire.py` as a subprocess and learns a boolean per example, this one keeps the
+# per-example record, and the two have different costs (`formal` is 52 subprocess
+# launches plus Lean; this is one process plus a comparison). Its own cost is
+# dominated by the same Lean work `formal` already pays for, and on a warm
+# verdict cache — which is the state every repeat run of this repo is in, since
+# `formal/lean.py` publishes verdicts content-addressed on the proof's bytes —
+# the Lean half is ~0.1 s per example and the whole job is the codegen.
+#
+# `-j 1` on purpose (`tools/formal_proof_census.py`'s own default, and the tool
+# reads no `-j` from the suite): this is a TIMING measurement, and it gates on
+# CPU seconds rather than wall for that reason. `mem='small'` from the peak
+# measured with Lean ACTUALLY elaborating (a `--remeasure` pass, below), which is
+# the state a cold tree or a changed generator puts this job in; the warm number
+# is far smaller and is stated in the comment at the registration.
+#
+# `formal-proof-census-tool` is `test_formal_proof_census.py`: 46 assertions, no
+# Lean, no build — the corpus is the whole directory and sorted, the rank order
+# is the documented one, an unmeasured time is never compared and never zero, a
+# changed example is never compared against its old row, the three check
+# outcomes classify apart, and the COMMITTED baseline is honest about all of it
+# (every example has a row, every status is one the tool has, no row claims a
+# zero-second proof, every timing names the date it was taken, and at least one
+# carries a real measured time so the 2x gate is not inert). That last one is the
+# check that keeps a hand-edited baseline from being a green light.
+test('formal-proof-census', [PY, 'tools/formal_proof_census.py'],
+     mem='small', timeout=3600, deps=['preflight', 'prooflib'],
+     memwhy='4.40 GB is LEAN, not this job: it is one elaboration of '
+            '`formal/examples/sqsum.mojo` (4552 lines, 505 native_decide '
+            'sites) under `formal/lean.py`\'s own `LEAN_MEMORY_MB = 6144`, '
+            'whose docstring argues that the project\'s 4 GB line cannot be '
+            'enforced by capping Lean — measured there, at `-M 4096` the '
+            '`lib/ProofLib.lean` build fails with "(kernel) excessive memory '
+            'consumption" and peaks at 7.8 GB. The census\'s own process is '
+            '0.14 GB on a warm verdict cache and its Python half never exceeds '
+            'that. The debt is real and it is filed against the checker: see ' +
+            MEM_DEBT_DOC + ' and `formal/lean.py`\'s measurements for every '
+            'example in `lib/`.',
+     extra=['tools/formal_proof_census.py',
+            'tools/formal_proof_census_baseline.json',
+            'test_formal_proof_census.py', 'formal/lean.py', 'formal/build.py',
+            'formal/admitted.py', 'formal/model.py', 'formal/imports.py',
+            'formal/arm64.py', 'formal/arm64_proof_gen.py',
+            'formal/macho_linker.py', 'formal/macho.py', 'formal/elf.py',
+            'formal/types.py', 'lib/ProofLib.lean', 'lib/Refine.lean',
+            'lib/X86.lean', 'lib/work.lean', 'lib/Contracts.lean',
+            'lib/IEEE754.lean'] + FORMAL_BUILD_INPUTS,
+     # `formal/examples/*.mojo` is in the key and not decoration: this job's
+     # subject IS those 52 files, and an example added, edited or deleted is the
+     # difference between "52 of 52 verdicts" and a count of 51.
+     extraglob=['formal/examples/*.mojo'],
+     desc='every formal/examples proof against its recorded state: a worse '
+          'status, a new hole, or a 2x slower proof fails')
+test('formal-proof-census-tool', [PY, 'test_formal_proof_census.py'],
+     mem='tiny', deps=['preflight'],
+     extra=['test_formal_proof_census.py', 'tools/formal_proof_census.py',
+            'tools/formal_proof_census_baseline.json', 'formal/admitted.py',
+            'formal/lean.py'],
+     desc='the proof-regression ratchet: ranked statuses, no phantom timings, '
+          'an honest committed baseline')
 # `doc/ABI.md` §Generics on the formal path: a module declaring only
 # `struct Pair[T]` has no boundary symbol, and each INSTANTIATION is one. The
 # estate check named this file on `work/formal15-generic-monomorph`, and it is
@@ -3381,7 +3480,17 @@ BUCKETS = {
                 # `prove=True` over 60 items, so 22 of them build an image and
                 # the `proof-crash` vs `proof-refused` distinction it pins is
                 # only observable with the generator actually running.
-                'formal-proof-breadth-tool',
+'formal-proof-breadth-tool',
+                # …and the proof REGRESSION ratchet with its instrument, in
+                # `proofs` and not `check` for the reason the whole bucket
+                # exists: both drive Lean. `formal-proof-census` runs all 52
+                # examples through `compile_formal(prove=True, check=True)`
+                # against a committed per-example baseline — the same
+                # `formal/lean.py` bounds `formal` pays for, and `deps` on
+                # `prooflib` for the same reason — and
+                # `formal-proof-census-tool` is the cheap half (46 assertions,
+                # no Lean, no build) that keeps that baseline honest.
+                'formal-proof-census', 'formal-proof-census-tool',
                 # …and the five the estate check named on the formal6 merge,
                 # which is the same reason stated once more because it is now
                 # the fourth time: four host-module differentials and the
