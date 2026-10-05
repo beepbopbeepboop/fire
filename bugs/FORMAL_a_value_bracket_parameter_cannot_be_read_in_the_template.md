@@ -1,5 +1,47 @@
 # FORMAL_a_value_bracket_parameter_cannot_be_read_in_the_template: the library is compiled from the TEMPLATE too, and `len(keys)` / `Self.keys` are refused there
 
+**Status: option 1 of the next steps is LANDED (2026-10-04, `formal28-2`) and
+option 2 is not. `len(keys)` where `keys: List[T]` now builds on both
+architectures and answers CPython; `len(Self.keys)` and
+`comptime length = len(Self.keys)` are still refused, for the reason §"What it
+costs" gives — there is no instantiation at that point, so `Self.keys` names a
+value nothing has supplied — and the filter question §"The next step" poses for
+option 2 (stop compiling a template's own body, or compile only the
+instantiations) is still open.**
+
+What option 1 needed, and it is more than the classifier: **the annotation was
+being thrown away at the PARSE.** `def total[T: AnyType, keys: List[T]](base:
+Int)` puts `keys` in the bracket parameter block, and the block recorded the
+NAME and the declared DEFAULT and discarded the TYPE — so no reader anywhere
+could ask what a bracket parameter holds, which is why `len(keys)` was refused
+with "the source does not say what this operand holds" while `keys[0]` in the
+same body lowered. Three places moved together:
+
+  * `fire_compiler.py` keeps the bracket parameters' declared types now
+    (`FunctionDef.comptime_param_annotations`, additive);
+  * `formal/model.py::param_annotation` reads that table as well as the runtime
+    parameter list, and `declared_param_kind` (new) is the ONE reader of the
+    question — asked by both backends' `_declared_kind_for` rather than by each
+    deciding for itself;
+  * `formal/model.py::ValueKinds` seeds a bracket parameter's kind from that
+    annotation, which is what `len()`'s operand classifier reads.
+
+The discrimination between a TYPE parameter and a VALUE one is self-selecting and
+needs no parser support: a type parameter's annotation is a trait or a width
+(`AnyType`, `DType`, `SIMDSize`, `CompilationTarget`), none of which maps to a
+value kind, so only an annotation naming a container or a string produces one.
+
+Measured: `total[Int, [1, 2, 3]](10)` prints 13 on arm64 and on x86-64, where
+CPython prints 13 for `10 + len([1, 2, 3])`; the row is
+`test_formal_cross_module.py`'s `a bracket VALUE parameter is read by its own
+declaration`, cross-module because that is where the construct is reachable (a
+module dylib is compiled from the module's own source AND from every
+instantiated source, so the template's body is compiled before any
+substitution). `std/collections/type_dict.mojo` — the measured casualty in §"What
+it costs" — is NOT re-measured here: that is a stdlib sweep, and the one thing
+this document records about it is that its `comptime length = len(Self.values)`
+is option 2 and not option 1, so it does not move.
+
 **Area:** `formal/imports.py::_instantiated_sources` (why the template is
 compiled at all) and the two refusals in `formal/model.py` that fire on the
 template's own body. Found 2026-10-04 on `work/formal25-1`, immediately after
@@ -102,11 +144,13 @@ refusal, when the first reading is the wrong one).
 
 Two spellings, in order of cost:
 
-1. **`len()` reads a parameter's bracket annotation.** Contained, and the
-   corpus case is one function. It must NOT read it for a *struct field*
-   (`Self.keys`), because there the binding rather than the declaration decides
-   the lowering three different ways — that is what the `Self.keys` refusal
-   says, and it is right.
+1. ~~**`len()` reads a parameter's bracket annotation.**~~ **DONE** (see §Status):
+   it reads it for a bare name that the SIGNATURE binds, through one shared
+   reader, and it does NOT read it for a *struct field* (`Self.keys`) — there the
+   binding rather than the declaration decides the lowering three different ways,
+   which is what that refusal says and why it is right. What is still open is
+   option 2 below, which is a class-attribute question rather than a container
+   one.
 2. **`Self.<param>` in a template.** Harder, and it is a class-attribute rule
    rather than a container rule: at that point there is no instantiation, so
    `Self.keys` names a value nothing has supplied. The honest options are to
