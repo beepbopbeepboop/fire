@@ -1,9 +1,8 @@
 # The runtime export ladder is five behind, and five prose copies of the ABI census are stale with it
 
-Found 2026-10-04 while landing
-`bugs/CODEGEN_len_of_a_param_called_with_both_a_list_and_a_str.md` (fixed and
-deleted), whose fix adds one runtime export and therefore one rung to
-`test_runtime_header_scan.py`'s declaration ladder.
+Found 2026-10-04 while making `len()` ask the runtime what a type-erased word
+is instead of assuming a list (`mojo_len_of_word`, one new runtime export), whose
+fix adds one rung to `test_runtime_header_scan.py`'s declaration ladder.
 
 ## What I ran
 
