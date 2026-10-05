@@ -6,6 +6,32 @@ files** — that is the finding, and it is the answer to the question the sweep
 cannot answer. What is left open is the chain, link by link, with an owner per
 link.
 
+**Status 2026-10-05 (`work/formal27-5`): link 1′ is DONE, and the document's own
+prediction is what happened — the module it named moved ON to row 2 rather than
+to `pass`.** `List.clear` is in `formal/model.py::BUILTIN_VALUE_METHODS` with a
+positive kind guard (`is_list_kind` of the receiver's kind, not the absence of a
+refusal), and it is measurably RIGHT rather than merely present: a program that
+does `a = [1,2,3]; a.clear(); a.append(9); print(a[0])` prints **9** on arm64
+and on x86-64, and CPython prints 9 — which is only true if the clear zeroed the
+count word, since `a[0]` would otherwise still be 1. `std/collections/
+binary_heap.mojo` built alone is now refused at **`self.unsafe_ptr()`** on both
+architectures, and its own message lists the method it used to lack: *"this
+backend lowers only append, **clear**, close, write (on a file descriptor) and
+the string methods"*. That is this document's §2 row 2 and §5's "row 2 is
+`unsafe_ptr`, a pointer model", so the row this document called "the cheapest
+thing in the whole chain" is closed and the chain is one link further along than
+when it was written. The fix was `formal18-2`'s and is not this claim's; what
+was missing was the record that it landed, and the message this document quotes
+verbatim for row 1′ is two methods out of date.
+
+**One measurement worth keeping with it, because it is the shape of every probe
+against this value model**: a list subscript one past the count is a **silent
+`exit(1)` with nothing printed**. `printf("%d %d", a[0], a[1])` after a
+clear-and-append answers nothing and exits 1; the same program with only `a[0]`
+answers 9. That is the same bargain `FORMAL_os_environ_is_a_view_and_the_sweep_
+row_behind_it.md` records for a store past a list's end, and it is why the
+differential above is written with the subscript the program can answer.
+
 **Status (2026-10-04, `work/formal21-6`: nothing left to do here, and the reason
 is worth one line.** Round 2 of this scope
 (`FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md`, `sweep20:std-os-io-2`)
@@ -116,7 +142,7 @@ the refusal, because none of them is behind another (§4 has the loop).
 | link | refusing module | files | what it refuses | owner |
 |---|---|---|---|---|
 | **1** | `std/collections/binary_heap.mojo` | **40** | **the export gate**, not a codegen refusal: `formal dylib has no public functions: binary_heap.mojo exports nothing under doc/ABI.md's rules: it declares only the generic struct template(s) BinaryHeap, and the template itself is not a boundary symbol. Its INSTANTIATIONS are — formal/monomorph.py compiles each one an importer asks for … so this message means nothing asked for one` | `FORMAL_binary_heap_mojo_after_the_len_value.md` §2 (`formal18-2`), and behind it §2b's measurement: lifting this wall moves 8 of 10 sampled files onto link 2 and 2 onto link 3 |
-| 1′ | `std/collections/binary_heap.mojo`, built alone | (0 of this scope — it is what link 1 would hit next) | `self.clear() is a method call on a value …` — `List.clear` has no entry in the emitter's method table | same doc, §3 row 1 |
+| 1′ | `std/collections/binary_heap.mojo`, built alone | (0 of this scope — it is what link 1 would hit next) | **CLOSED 2026-10-05, and what it moved to is this table's row 2**: `self.unsafe_ptr() is a method call on a value … this backend lowers only append, **clear**, close, write …` (both architectures, byte-identical). `List.clear` was the missing lowering, it is in `formal/model.py::BUILTIN_VALUE_METHODS` behind an `is_list_kind` guard, and it is right rather than present (Status at the head) | was `formal18-2`'s §3 row 1; **done** |
 | **2** | `std/algorithm/backend/tile.mojo` | 0 today (behind link 1) | `workgroup_function[…](…) calls a name this unit does not compile, so the brackets cannot be bound` — re-measured on BOTH architectures, unchanged | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value` (`formal16-7`) and `project18:tile-specialization` |
 | **3** | `std/builtin/builtin_slice.mojo` | **3** | `self.step.or_else() is an Optional unwrap: it answers by knowing which of two words was the empty one, and on this path there is no way to know` | `FORMAL_stdlib_optional_needs_a_representation` (`formal16-7`) — which names this exact refusal as `builtin_slice.mojo`'s terminal cause. The two docs the first pass named here (the one-field receiver rebinding rule, `formal/build.py`'s `_collect_one_field_receiver_rebinds`, and `FORMAL_builtin_slice_optional_field_is_a_frame_holder`) are not what fires |
 
@@ -279,7 +305,7 @@ this pass:
 | what | how many of the 46 | owner |
 |---|---|---|
 | link 1, the export gate on `binary_heap.mojo` | 40 | `FORMAL_binary_heap_mojo_after_the_len_value.md` §2 / §2b (`formal18-2`) |
-| link 1′, `List.clear` has no lowering (what link 1's module hits next) | 0 | same doc, §3 row 1 |
+| link 1′, `List.clear` has no lowering (what link 1's module hits next) | 0 | **DONE** (Status at the head) — and the module moved ON to `self.unsafe_ptr()`, a pointer model, so this link's closure cost this scope nothing and bought the next link |
 | link 2, `tile.mojo`'s bracketed specialization | 0 today | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value` (`formal16-7`), `project18:tile-specialization` |
 | link 3, `Optional`'s missing representation in `builtin_slice.mojo` | 3 | `FORMAL_stdlib_optional_needs_a_representation.md` (`formal16-7`) |
 
