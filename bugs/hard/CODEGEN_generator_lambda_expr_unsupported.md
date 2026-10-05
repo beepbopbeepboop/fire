@@ -245,11 +245,8 @@ Four rows as of 2026-10-02; the three 2026-09-29 rows are unchanged.
 | `sorted(key=<any user function>)` | correct | interpreter crash | `CODEGEN_interpreter_user_function_as_builtin_callback_crashes` — so the compiled path cannot be diffed against the interpreter for that shape. |
 
 Two more were found and filed while measuring, and are also not this doc's:
-a callable reached through a subscript (`d['k'](2, 3)` printing `0`, and the
-list/tuple/call-result siblings — all fixed since, by the container-neutral
-`note_container_callable_ret` and its three chokepoints, pinned by
-`gimple_call_through_subscript_callee` and
-`gimple_call_through_a_list_subscript_callee`), and
+`bugs/CODEGEN_call_through_subscript_callee_stubbed.md` (a callable reached
+through a subscript, `d['k'](2, 3)`, prints `0`) and
 `“CODEGEN: a lambda whose body is a bool returns int64 0/1”`'s sibling, a named function
 with `*args` taken as a value — which WAS this defect and IS fixed, see
 `gimple_variadic_named_function_through_a_value`.

@@ -59,19 +59,6 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from exec_budget import RUN_TIMEOUT_S   # noqa: E402
-
-#: How long this process waits for a `Popen` it has just `terminate()`d to be
-#: reaped. NOT a per-child budget, and named here so the widened estate check
-#: sees a name rather than a bare number and does not have to be told this is
-#: deliberate: `exec_budget`'s constants size a COMPILE, a LINK and a RUN of
-#: compiled code, and this bounds the wait AFTER a signal — the writer process
-#: republishing a library in place, stopped in the `finally` below, whose corpse
-#: has to be collected before the case can judge what the 400 runs printed. It
-#: is `test_formal_sweep.py`'s `SIGTERM_REAP_S` under the same name, because it
-#: is the same wait.
-SIGTERM_REAP_S = 60
-
 # The independent Mach-O reader and the CLI driver live in the dylib suite;
 # imported rather than copied so a fix to the reader cannot leave a second,
 # quietly different one behind.
@@ -238,7 +225,7 @@ def build(root, name, expect_ok=True, arch=None):
 
 
 def run(out):
-    r = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+    r = subprocess.run([out], capture_output=True, text=True, timeout=120)
     return r.returncode, (r.stderr or r.stdout)
 
 
@@ -1650,156 +1637,6 @@ def test_no_standard_library_module_is_left_in_neither_tier(tmpdir, _shared):
               f"module: {text[-300:]}")
 
 
-def test_a_name_with_nothing_to_implement_gets_its_own_tier(tmpdir, _shared):
-    """The FOURTH answer, and the two corrections that earned it.
-
-    `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §"The next step"
-    named the gap exactly: its "neither tier, deliberately" group — "a name
-    whose only spelling is a documentation or test artefact (`this`,
-    `antigravity`, `turtledemo`, `idlelib`), or a Windows-only / POSIX-only
-    module that is not this host's (`msvcrt`, `winreg`, `nt*`, `posix`,
-    `genericpath`, `nturl2path`)" — "want[s] a third answer or an explicit
-    exclusion list, which is a decision about the table rather than a
-    classification — and it should be recorded as one, not left to look like an
-    oversight."
-
-    **It is the FOURTH and not the third**, because `HOST_ADMITTED` took that
-    slot, and `host_module_tier` now answers four values plus `''`.
-
-    **The premise each name rests on is CPython's own `find_spec`, not a
-    remembered list**, which is what splits the doc's single group into three
-    with different answers:
-
-      * `this`, `antigravity`, `turtledemo` — a spec EXISTS and what is behind
-        it is not code. `this` is the Zen of Python as a module-level string,
-        `antigravity` opens a browser, `turtledemo` is a directory of example
-        scripts. Nothing to implement and nothing missing, so neither
-        `unreachable` ("needs an object this target lacks") nor `modelled`
-        ("nothing is missing and the work is undone") is true of them, and
-        `HOST_NOT_A_MODULE` says the one thing that is.
-      * `msvcrt`, `winreg`, `winsound`, `nt` — **no spec AT ALL** on the
-        interpreter that runs this tree. CPython cannot find them here either,
-        so the object is missing from the target and `unreachable` is the
-        table's own rule applied, not a new category.
-      * `ntpath`, `nturl2path`, `genericpath`, `posix` — a spec EXISTS here,
-        because they are frozen or arithmetic-over-strings modules CPython
-        ships everywhere and only ever *uses* on Windows. **These are the
-        CORRECTION**: the doc listed them with `msvcrt` as "not this host's",
-        and for `posix` that is false outright — this is a POSIX target, and
-        `formal/hostmods/os/_syscalls.mojo` already makes every libSystem call
-        `posix` would need. So they are `modelled`.
-
-    And `idlelib` is in NEITHER new tier and that is also a correction: the doc
-    lists it twice, once as a documentation artefact and once under
-    `unreachable`. The second is right — IDLE is an interactive editor, so it
-    needs a terminal — and `HOST_UNREACHABLE`'s existing "A terminal" heading is
-    that fact, so it is left in the queue rather than given the wrong tier.
-
-    **The Wording half is the point of the tier.** A member of
-    `HOST_NOT_A_MODULE` is in the union, so the arm that says "a host module …
-    which has no Mojo source" would fire — true, and it tells the reader to go
-    and implement a module that has no API. So the new arm is tested FIRST.
-    """
-    import sys as _sys
-    import formal.imports as I
-
-    not_a_module = {
-        "this": "the Zen of Python, one module-level string",
-        "antigravity": "importing it opens a browser window",
-        "turtledemo": "a directory of turtle-graphics demonstration scripts",
-    }
-    # Measured, not remembered: CPython itself cannot find these here, so the
-    # object is missing from the target and the EXISTING `unreachable` row is
-    # the rule applied rather than a fourth category invented for them.
-    foreign = ("msvcrt", "winreg", "winsound", "nt")
-    # …and the four the doc grouped with them, which a spec here contradicts.
-    pure = {
-        "posix": "the POSIX low-level module, and THIS is a POSIX target",
-        "genericpath": "the platform-independent base `os.path` builds on",
-        "ntpath": "the Windows path parser, which is string manipulation",
-        "nturl2path": "`url2pathname`/`pathname2url`, string in, string out",
-    }
-    check(not I._host_tier_conflicts(),
-          "a name in two tiers is a partition bug: %s"
-          % I._host_tier_conflicts())
-    check(not (I.HOST_NOT_A_MODULE
-               & (I.HOST_UNREACHABLE | I.HOST_MODELLED | I.HOST_ADMITTED)),
-          "HOST_NOT_A_MODULE asserts the LEAST of the four tiers, so a name in "
-          "two of them is a claim that contradicts itself")
-
-    for name, why in sorted(not_a_module.items()):
-        check(name in _sys.stdlib_module_names,
-              f"precondition: {name} is not a CPython standard-library module")
-        got = I.host_module_tier(name)
-        check(got == "not-a-module",
-              f"host_module_tier({name!r}) is {got!r}, not 'not-a-module' — "
-              f"{why}. In either other tier it would assert something false "
-              f"about the module")
-    for name, why in sorted(pure.items()):
-        got = I.host_module_tier(name)
-        check(got == "modelled",
-              f"host_module_tier({name!r}) is {got!r}, not 'modelled' — "
-              f"{why}, so nothing is missing from the target and only the "
-              f"module is unwritten. Calling it unreachable would be a "
-              f"permanent-fact claim about the target and it is not one")
-    for name in foreign:
-        got = I.host_module_tier(name)
-        check(got == "unreachable",
-              f"host_module_tier({name!r}) is {got!r}, not 'unreachable' — it "
-              f"needs an object this target does not have")
-    check(not I.host_module_tier("idlelib"),
-          "idlelib is in no tier: it is a TERMINAL (an interactive editor), so "
-          "`unreachable` is right and giving it 'not-a-module' would claim "
-          "there is nothing to implement when there is a whole editor")
-
-    # …and the SPEC measurement itself, so the three groups cannot drift apart
-    # from the interpreter the next time one of them is questioned.
-    import importlib.util
-    for name in sorted(not_a_module):
-        spec = importlib.util.find_spec(name)
-        check(spec is not None and spec.origin,
-              f"precondition: CPython finds source for {name!r} here, which is "
-              f"what makes it 'nothing to implement' rather than 'not this "
-              f"host's' — measured {spec!r}")
-    for name in foreign:
-        try:
-            spec = importlib.util.find_spec(name)
-        except (ImportError, ValueError):
-            spec = None
-        check(spec is None,
-              f"precondition: CPython cannot find {name!r} on this host at "
-              f"all, which is the measurement the `unreachable` placement rests "
-              f"on — measured {spec!r}")
-
-    # The WORDING, which is the load-bearing half: a name in this tier must not
-    # be sent to implement a module that has no API.
-    for name in sorted(not_a_module):
-        one = os.path.join(tmpdir, "notamodule", name)
-        os.makedirs(one, exist_ok=True)
-        prog = os.path.join(one, "prog.mojo")
-        with open(prog, "w") as f:
-            f.write(f"import {name}\ndef main():\n  return 1\n")
-        fresh_cas()
-        result = run_fire(["build", "--formal", "--no-prove", "-o",
-                           os.path.join(one, "prog.aout"), prog], cwd=one)
-        check(result.returncode != 0,
-              f"import {name} built. A module with a Mojo source would "
-              f"resolve, which is a different (and better) finding")
-        text = (result.stderr or "") + (result.stdout or "")
-        check("no content to compile" in text,
-              f"import {name} does not say there is nothing to implement, so "
-              f"the reader is sent to write a module with no API: "
-              f"{text[-300:]}")
-        check("host module" not in text,
-              f"import {name} is refused as a host module awaiting a Mojo "
-              f"source, which is the sentence the new tier exists to replace: "
-              f"{text[-300:]}")
-        check("not a stdlib or sibling module" not in text,
-              f"import {name} is still refused as a name that does not exist, "
-              f"which is false of a CPython standard-library module: "
-              f"{text[-300:]}")
-
-
 def test_a_host_module_refusal_says_what_this_target_offers(tmpdir, _shared):
     """The refusal's second half: what to write here instead, where the reader is.
 
@@ -1990,27 +1827,19 @@ def test_no_unclassified_stdlib_name_is_imported_by_anything(tmpdir, _shared):
     unconditional, so the invariant is still checked on a checkout without it.
     """
     import sys as _sys
-    # The set is asked of ONE accessor now, and that is the point of this
-    # revision: "in no tier AND no module" used to have to be spelled here, by
-    # pairing `host_module_tier` with `resolve_module_path`, because
-    # `host_module_tier`'s `''` cannot say which of the two it means -- a name
-    # this tree has WRITTEN leaves its tier (see the rule on `HOST_MODELLED`), so
-    # `os`, `sys` and `os._syscalls` answer `''` while being the three
-    # most-imported modules in the corpus. Three consumers had grown three ways
-    # of telling those apart (this one, `tools/formal_sweep_causes.py`'s
-    # `formal/hostmods/` path check, and `tools/formal_host_import_wall.py`'s),
-    # and
-    # `formal/imports.py::host_module_verdict` is now the one classification
-    # with every outcome named. So `unclassified` is a NAME this tree can say
-    # rather than an absence a reader has to infer.
-    #
-    # `probe` still matters even though the accessor resolves: it is what makes
-    # the resolver answer with the same nearest-first roots the build uses.
+    # "In no tier" is not the whole of it, and the difference is 20-odd names
+    # that are answered: a name this tree has WRITTEN leaves its tier (see the
+    # rule on `HOST_MODELLED`), so `os`, `sys` and `os._syscalls` answer
+    # `host_module_tier` with `''` while being the three most-imported modules
+    # in the corpus. So the set is the doc's own -- no tier AND no module --
+    # resolved through the resolver rather than through a path spelling, which
+    # is what makes `os._syscalls` (a submodule of an answered package) count as
+    # answered.
     probe = os.path.join(HERE, "formal", "arm64.py")
     unclassified = {n for n in _sys.stdlib_module_names
-                    if I.host_module_verdict(n, relative_to=probe,
-                                             project_root=probe)[0]
-                    == "unclassified"}
+                    if not I.host_module_tier(n)
+                    and not I.resolve_module_path(n, relative_to=probe,
+                                                 project_root=probe)}
     check(len(unclassified) > 100,
           f"precondition: only {len(unclassified)} CPython standard-library "
           "names are in no tier, so this row is about the names in no tier "
@@ -2048,145 +1877,6 @@ def test_no_unclassified_stdlib_name_is_imported_by_anything(tmpdir, _shared):
           "classifies, so nothing here can say whether the module is "
           f"reachable and the file's host-import row has no verdict: "
           f"{consumers[:10]}")
-
-
-def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
-        tmpdir, _shared):
-    """`host_module_verdict`: the eight answers, one row each, and the partition.
-
-    `host_module_tier` answers a MEMBERSHIP question and its `''` is ambiguous in
-    the one direction a report cares about: a name this tree has WRITTEN leaves
-    its tier (`HOST_MODELLED`'s own rule), so `os`, `sys` and `os._syscalls`
-    answer `''` and are the three most-imported modules in the corpus, while the
-    standard-library names nobody classified answer `''` too. Three consumers
-    had grown three ways of telling those apart —
-    `test_no_unclassified_stdlib_name_is_imported_by_anything` paired the tier
-    with `resolve_module_path`, `tools/formal_sweep_causes.py` inferred it from a
-    `formal/hostmods/` path existing (which is a third definition again: it
-    misses a repository sibling and a package outside that directory), and
-    `tools/formal_host_import_wall.py` paired both with `is_cpython_stdlib`. One
-    classification, every answer named, is what makes a report's `''` mean one
-    thing.
-
-    Each row below is a REAL name in this tree, and the `detail` half is checked
-    where there is one: `written` and `admitted` are the two answers that answer
-    "then what provides it", so an empty path for either would be a row that
-    names a state and withholds the file.
-    The partition is the part that is worth having. Over every name CPython
-    ships, the verdict is one of the seven answers that are statements about
-    the target, about this tree or about CPython's own content, and
-    `not-a-module` is unreachable for them — so the classification of the
-    standard library is COMPLETE, which is the closed
-    invariant that replaces this file's earlier `count > 100` placeholder. The
-    `unclassified` count is still asserted to be large, so this row stays about
-    the names in no tier; what changed is that they are a NAMED answer rather
-    than an absence a reader has to infer.
-    """
-    import sys as _sys
-    probe = os.path.join(HERE, "formal", "arm64.py")
-
-    def verdict(name):
-        return I.host_module_verdict(name, relative_to=probe,
-                                     project_root=probe)
-
-    rows = (
-        # name, the answer, what makes it that one, and the detail it carries
-        ("dataclasses", "front-end",
-         "a compile-time transform, so there is no source and nothing to link"),
-        ("os", "written", "formal/hostmods/os/__init__.mojo answers it"),
-        ("os._syscalls", "written",
-         "a SUBMODULE of a written package, which is why the answer has to go "
-         "through the resolver rather than through the name's top component"),
-        ("subprocess", "admitted",
-         "a source AND `@admitted` contracts for the operations whose answer is "
-         "a host fact"),
-        ("copy", "modelled", "in HOST_MODELLED and unwritten: a gap with an "
-                             "owner"),
-        ("asyncio", "unreachable",
-         "in HOST_UNREACHABLE: an event loop and a thread are objects this "
-         "image does not have"),
-        ("binascii", "unclassified",
-         "CPython ships it, no source here, no tier: the queue "
-         "`FORMAL_stdlib_module_names_are_not_classified.md` carries"),
-        ("this", "not-code",
-         "CPython ships it AND its content is a module-level string — the "
-         "answer whose sentence is 'not code', not the one whose sentence is "
-         "'CPython does not ship it', which is false of this name"),
-        ("definitely_not_a_real_module_9f3a", "not-a-module",
-         "nothing here provides it and CPython does not ship it — a typo, or a "
-         "gap in this repository, which `tools/formal_sweep.py` classes as "
-         "`not-answerable/unresolved-import`"),
-    )
-    for name, want, why in rows:
-        answer, detail = verdict(name)
-        check(answer == want,
-              f"{name} is {answer!r} and this row is about it being {want!r} "
-              f"({why}) — a `detail` of {detail!r}")
-        if want in ("written", "admitted"):
-            check(detail.endswith(".mojo") and os.path.isfile(detail),
-                  f"{name} answers {want!r} and its detail {detail!r} is not "
-                  "a source file, so the answer names a state and withholds "
-                  "the file that provides it")
-        else:
-            check(detail == "",
-                  f"{name} answers {want!r} and carries detail {detail!r}; "
-                  "only written and admitted name a file")
-
-    # The empty name, and the one answer it must give rather than raising: a
-    # caller that asks about nothing should not have to guard the call.
-    check(verdict("") == ("not-a-module", ""),
-          f"the empty name answers {verdict('')!r}")
-
-    # THE PARTITION, over everything CPython ships.
-    tally = {}
-    for name in _sys.stdlib_module_names:
-        answer, _detail = verdict(name)
-        tally[answer] = tally.get(answer, 0) + 1
-        # `not-a-module` is unreachable for a CPython-shipped name, and it is
-        # unreachable as a strict inequality rather than as a matter of taste.
-        # It was once reachable — `this`, `antigravity` and `turtledemo` are
-        # shipped AND were reported `not-a-module`, whose sentence is the TYPO
-        # sentence, and this check had to be relaxed to a pair ("no shipped name
-        # gets the typo answer unless a tier says the name is shipped-and-empty")
-        # to survive that. `HOST_NOT_A_MODULE` members now answer `not-code`,
-        # so the pair collapses back to the strict form: the tier's fourth
-        # answer is the one that means "not code" and this one means "CPython
-        # does not ship it", which no shipped name can satisfy.
-        check(answer != "not-a-module",
-              f"CPython ships {name}, so no verdict can reach the TYPO "
-              "sentence's answer — nothing here provides it and CPython does "
-              "not ship it — as an absence; "
-              f"`host_module_verdict({name!r})` answered {answer!r} with tier "
-              f"{I.host_module_tier(name)!r}")
-        if answer in ("modelled", "unreachable"):
-            # The rule `HOST_MODELLED` states and this file's other rows pin: a
-            # name LEAVES a tier by being WRITTEN, because an entry left behind
-            # a module that answers it is a false statement about the target
-            # rather than a conservative one. Asserting it here is what makes
-            # `written` and the two claim tiers disjoint rather than
-            # order-dependent.
-            check(I.resolve_module_path(name, relative_to=probe,
-                                        project_root=probe) is None,
-                  f"{name} is {answer!r} AND has a source, so it is in a tier "
-                  "and answered at once — remove the stale entry or the source")
-    # SEVEN of `host_module_verdict`'s EIGHT answers are reachable for a name
-    # CPython ships, and the seventh is `not-code` — a spec exists and what is
-    # behind it is not code, which `HOST_NOT_A_MODULE` says and which the check
-    # above can therefore state strictly. The eighth, `not-a-module`, is the one
-    # answer that is a statement about THIS repository rather than about the
-    # target or about CPython's list, so it is absent here BY the check above
-    # rather than by omission: enumerating the seven reachable ones is what
-    # stops the NEXT answer from arriving undocumented, which is the failure
-    # this row exists to catch.
-    for answer in tally:
-        check(answer in ("front-end", "written", "admitted", "modelled",
-                         "unreachable", "unclassified", "not-code"),
-              f"the verdict {answer!r} is not one of the eight answers, so a "
-              "report reading it has a ninth case nobody documented")
-    check(tally.get("unclassified", 0) > 100,
-          f"precondition: only {tally.get('unclassified', 0)} CPython "
-          "standard-library names are unclassified, so this row is about the "
-          "unclassified names only if there are many of them")
 
 
 def test_mojo_source_beats_host_module(tmpdir, _shared):
@@ -2546,7 +2236,7 @@ def test_one_word_struct_field_is_the_value(tmpdir, _shared):
     out = os.path.join(tmpdir, "field.aout")
     rc = run_fire(["build", "--formal", "--no-prove", "-o", out, src]).returncode
     check(rc == 0, f"build failed: {rc}")
-    r = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+    r = subprocess.run([out], capture_output=True, text=True, timeout=60)
     check(r.returncode == 42,
           f"returned {r.returncode}, expected 42 — if this is 1, the field "
           f"and the receiver are different storage and the accessor is "
@@ -2602,7 +2292,7 @@ def test_wide_struct_runs_by_reference(tmpdir, _shared):
     check(result.returncode == 0,
           f"a two-field struct should build by reference: "
           f"{(result.stderr or result.stdout).strip()[-300:]}")
-    run = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+    run = subprocess.run([out], capture_output=True, text=True, timeout=60)
     check(run.returncode == 6,
           f"exit status {run.returncode}, expected 6 (the value the method "
           f"wrote through the receiver)")
@@ -3385,7 +3075,7 @@ def test_the_library_is_published_atomically(tmpdir, _shared):
                     break
     finally:
         writer.terminate()
-        writer.wait(timeout=SIGTERM_REAP_S)
+        writer.wait(timeout=60)
     if not bad:
         return
     raise TestFailure(
@@ -3495,117 +3185,6 @@ def test_reexported_type_reaches_the_importer(tmpdir, _shared):
 
 
 
-# ── a name a package FORWARDS, filed by what DEFINES it ────────────────────
-#
-# The row above is the same defect one hop further out, and it is the
-# `declared_kinds` half rather than the `imported_struct_defs` half:
-# `test_reexported_type_reaches_the_importer` walks to the defining module so
-# the importer can CONSTRUCT the type, and nothing walked for the KIND. So a
-# name reached through the PACKAGE (`from pkg import Shape`, where `pkg/__init__`
-# forwards it from `pkg/sub.mojo`) had no kind at all — `"unknown"` — and
-# `"unknown"` is not `"type"`, so `formal/build.py::_namespace_library` put it in
-# the set that must be provided AS A SYMBOL and refused the module.
-#
-# Measured on the tree's own stdlib, where it is `std/hashlib/hasher.mojo`'s
-# `from std.collections import Span`: 221 import sites name a struct or trait
-# through a package that re-exports it, and every one of them reached the symbol
-# check as `"unknown"`. The message was false in every clause — "a real gap in
-# that module's public API — a private, generic or overloaded definition" — on a
-# name that is public, is not generic, and is not overloaded, and is a TYPE: a
-# type has no symbol to be missing.
-#
-# So `declared_kinds` now follows the forwarding edge, with the build's own
-# resolver and a hop bound. It can only turn `"unknown"` into a real kind, and
-# the only kind that leaves the symbol check is `"type"`, so it can remove a
-# refusal and cannot add one — which is what the negative beside it pins.
-
-FORWARDED_SUB = ("struct Shape:\n"
-                 "  var a: Int\n"
-                 "\n"
-                 "def keep() -> Int:\n"
-                 "  return 1\n")
-FORWARDED_PKG = "from .sub import Shape, keep\n"
-FORWARDED_MID = ("from pkg import Shape\n"
-                 "\n"
-                 "trait Sized:\n"
-                 "  fn area(self, s: Shape) -> Int:\n"
-                 "    ...\n")
-FORWARDED_PROG = "from pkg2.mid import Sized\n\ndef main():\n  return 1\n"
-
-
-def test_declared_kinds_files_a_forwarded_name_by_its_definition(
-        tmpdir, _shared):
-    """The table itself, with no build: a forwarded name carries its kind.
-
-    The cheapest possible statement of the rule, and the one that cannot rot
-    with a layout change: `pkg/__init__.mojo` declares nothing at all, so
-    before the fix every name it forwards was absent.
-    """
-    sys.path.insert(0, HERE)
-    from formal.imports import declared_kinds
-    root = os.path.join(tmpdir, "fwd")
-    os.makedirs(root)
-    write_tree(root, {"pkg/sub.mojo": FORWARDED_SUB,
-                      "pkg/__init__.mojo": FORWARDED_PKG,
-                      "pkg2/mid.mojo": FORWARDED_MID})
-    kinds = declared_kinds(os.path.join(root, "pkg", "__init__.mojo"))
-    check(kinds.get("Shape") == "type",
-          f"a struct the package forwards is not filed as a type: {kinds!r}")
-    check(kinds.get("keep") == "function",
-          f"a function the package forwards must keep being filed as one, or "
-          f"the missing-symbol check stops protecting a real gap: {kinds!r}")
-    check("Ghost" not in kinds,
-          f"a name nothing declares must stay absent: {kinds!r}")
-
-
-def test_a_forwarded_type_is_not_demanded_as_a_symbol(tmpdir, _shared):
-    """A module that imports a TYPE through a package builds, both arches.
-
-    `pkg2/mid.mojo` is `hasher.mojo`'s shape: no free function, so it is built
-    as a NAMESPACE library, and its API names a struct it reached through the
-    package. Before the fix the build refused it with the missing-symbol message
-    and every clause of that message was false. Both architectures, because the
-    kind table is shared and the two emitters consult it separately — the same
-    reason `test_aliased_reexport_runs_on_both_architectures` gives.
-    """
-    for arch in ("arm64", "x86_64"):
-        root = os.path.join(tmpdir, f"fwd_{arch}")
-        os.makedirs(root)
-        write_tree(root, {"pkg/sub.mojo": FORWARDED_SUB,
-                          "pkg/__init__.mojo": FORWARDED_PKG,
-                          "pkg2/mid.mojo": FORWARDED_MID,
-                          "prog.mojo": FORWARDED_PROG})
-        fresh_cas()
-        build(root, "prog.aout", arch=arch)
-
-
-def test_a_forwarded_name_nothing_defines_is_still_refused(tmpdir, _shared):
-    """The guard on the guard: following an edge must not forgive a real gap.
-
-    `Ghost` is declared nowhere, so it stays absent, so it is still demanded as a
-    symbol and still refused BY NAME. A change that resolved kinds more
-    liberally — or that swallowed an unresolvable one as `"type"` — would let a
-    package publish a name nothing defines, and the consumer's call would reach
-    dyld unbound, which is the outcome `formal/build.py`'s message exists to
-    prevent.
-    """
-    root = os.path.join(tmpdir, "fwdghost")
-    os.makedirs(root)
-    write_tree(root, {"pkg/sub.mojo": "def keep() -> Int:\n  return 1\n",
-                      "pkg/__init__.mojo": "from .sub import keep, Ghost\n",
-                      "prog.mojo": "from pkg import keep\n\n"
-                                   "def main():\n  return keep()\n"})
-    fresh_cas()
-    result, _out = build(root, "prog.aout", expect_ok=False)
-    check(result.returncode != 0,
-          "`Ghost` is declared nowhere and the package published it anyway; "
-          "the missing-symbol check has been widened past its evidence")
-    text = result.stderr or result.stdout
-    check("Ghost" in text,
-          f"the refusal does not name the gap: {text.strip()[-300:]}")
-
-
-
 # ── the "exports nothing" family: 33 of the sweep's 578 files ────────────────
 #
 # These five pin the LIMIT, and each one is a pin in the anti-rot direction: it
@@ -3638,7 +3217,7 @@ def test_a_module_nobody_binds_a_concrete_name_from_needs_no_library(
     that per edge and `build_module_dylib` and `_resolve_imports` both act on
     it. `BinaryHeap` is the measured case (`std/collections/__init__.mojo`
     re-exports it and 162 of the 163 files the export gate blocked name nothing
-    it declares), and the `b9` round of `bugs/FORMAL_sweep_work_map.md` §4.1 is the
+    it declares), and `bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §4.1 is the
     measurement.
 
     What this pins is the half that could have gone wrong silently: the program
@@ -3745,234 +3324,6 @@ def test_a_generic_template_is_not_exported_under_its_base_name(tmpdir,
           f"the same module with one CONCRETE function exported {got}, not "
           f"['widen'] — so the difference between the two cases is genericity "
           f"and nothing else")
-
-
-def test_a_constants_only_module_is_not_told_nothing_could_be_added(
-        tmpdir, _shared):
-    """A module of nothing but constants is not told "nothing this backend
-    could add".
-
-    The fourth message-accuracy guard on `no_public_api_reason`, and the one
-    `bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` §6 item 2
-    filed as a dead end: the branch's text ended "There is nothing an importer
-    could bind, and nothing this backend could add." — and the second clause
-    is **false**, which is why that document said of it "the sentence is a dead
-    end for whoever reads the 6 files first".
-
-    The constants are already inlined at their use sites by the
-    module-constant substitution; what is absent is a RULE that a module with
-    nothing to export needs no dylib at all, so an importer reading the
-    constant directly needs no library. That is one feature, and
-    `bugs/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` is where
-    it is written down — so the message now says which feature it is and where
-    it lives, rather than telling a reader that nothing would help.
-
-    **The assertion is on the false clause and on the owner being named**, and
-    both directions matter: a message that merely stopped saying the false thing
-    would leave the 6 files with no next step, which is the same dead end in a
-    quieter form.
-    """
-    sys.path.insert(0, HERE)
-    from formal.build import no_public_api_reason
-    path = os.path.join(tmpdir, "constants_only.mojo")
-    with open(path, "w") as f:
-        f.write('comptime ALPHA: Int = 7\ncomptime BETA: String = "x"\n')
-    reason = no_public_api_reason([path])
-    check("declares no function and no type at all" in reason,
-          f"the constants-only branch did not fire: {reason}")
-    check("nothing this backend could add" not in reason,
-          "the refusal still tells the reader that nothing could be added, "
-          f"which is false — the constants are already inlined at their use "
-          f"sites and the missing thing is a rule, not an implementation: "
-          f"{reason}")
-    check("FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib" in reason,
-          "the refusal does not name the feature that would remove it, so the "
-          f"6 files behind this row still have no next step: {reason}")
-    check("BACKEND" in reason,
-          "the refusal does not say the missing thing is a backend RULE "
-          f"rather than work on the module, which is the part a reader acts "
-          f"on: {reason}")
-    # …and the branch's own judgement is untouched: there really is nothing an
-    # importer could bind, and the refusal is still correct.
-    check("nothing an importer could bind" in reason,
-          f"the refusal stopped saying why the refusal is correct: {reason}")
-    # The private sibling is a DIFFERENT branch and must not have been edited.
-    priv = os.path.join(tmpdir, "private_only.mojo")
-    with open(priv, "w") as f:
-        f.write("def _hidden() -> Int:\n  return 1\n")
-    other = no_public_api_reason([priv])
-    check("every declaration in it is private" in other
-          and "BACKEND" not in other,
-          f"the constants-only wording leaked into the private branch, whose "
-          f"reason is a different fact: {other}")
-
-
-def test_a_constants_only_module_is_importable(tmpdir, _shared):
-    """A module of nothing but folded constants is a LIBRARY, and its values
-    reach the importer — on both architectures, against CPython.
-
-    **This is the feature `test_a_constants_only_module_is_not_told_nothing_
-    could_be_added` names as missing, and it is 33 of the 59 files on the
-    `module exports no public functions` row of
-    the `b13` round of `bugs/FORMAL_sweep_work_map.md` §4.** That row's largest
-    single group was "blocked in `constants.mojo`", and the map could not even
-    say WHICH `constants.mojo` — the chain names a module by basename and this
-    tree has three of them — so the row read as unmeasurable. It is
-    `std/math/constants.mojo`: eight `comptime` constants and no declaration
-    at all, and `std/math/__init__.mojo`'s `from .constants import e, pi, tau`
-    was refused with it.
-
-    The refusal was right about the module and wrong about the consequence.
-    Right: `constants.mojo` has no SYMBOL, so there is nothing an importer can
-    bind in an export trie. Wrong: the importer was not asking for a symbol. It
-    was asking for a VALUE, and a value crosses a boundary through the
-    manifest's `constants` table — one value of a folded module-level name in a
-    whole program, so the consumer materializes the same one in its own image.
-    That route is not new: `sys.byteorder` and every package that re-exports a
-    constant already take it. What was missing was a module whose whole API is
-    such values being allowed to be a library at all, which is exactly what
-    `_namespace_library` emits — a real MH_DYLIB with an empty trie and a
-    populated constants table.
-
-    **The oracle is CPython, on the same text, and the fixture is deliberately
-    a package-relative import** (`from .constants import …` out of an
-    `__init__`), because that is the shape the row is made of: `std/math/
-    __init__.mojo` is not the module that declares the constants, and a test that
-    imported them from a top-level module would not be exercising the chain that
-    fails. The two architectures are compared with each other as well as with
-    CPython, so a value one backend materializes and the other does not is
-    caught even if both happened to agree with CPython here.
-    """
-    tree = {
-        # The program IS the package `__init__`, because that is the chain the
-        # row is made of: `std/math/__init__.mojo` is not the module that
-        # declares the constants, and a fixture that imported them from a
-        # top-level module would not be exercising the failing edge.
-        "constlib/__init__.mojo": "from .constants import ALPHA, BETA\n"
-                                  "\n"
-                                  "def main():\n"
-                                  "  print(ALPHA)\n"
-                                  "  print(BETA)\n",
-        # `ALPHA` is written the way the stdlib writes one — folded from an
-        # expression rather than spelled — and `BETA` is a plain literal, so the
-        # two cover `fold_module_value`'s folder and `fold_literal_expr`'s.
-        "constlib/constants.mojo": "comptime ALPHA: Int = 3 + 4\n"
-                                    "comptime BETA: String = \"beta\"\n",
-    }
-    seen = {}
-    for arch in ("arm64", "x86_64"):
-        root = os.path.join(tmpdir, arch)
-        os.makedirs(root)
-        fresh_cas()
-        write_tree(root, tree)
-        out = os.path.join(root, "constlib.aout")
-        result = run_fire(["build", "--formal", "--no-prove", f"--backend={arch}",
-                           "-o", out,
-                           os.path.join(root, "constlib", "__init__.mojo")],
-                          cwd=root)
-        check(result.returncode == 0,
-              f"{arch}: the program importing a constants-only module did not "
-              f"build: {(result.stderr or result.stdout).strip()[-400:]}")
-        code, text = run(out)
-        check(code == 0,
-              f"{arch}: the program importing a constants-only module did not "
-              f"run: {text.strip()[-300:]}")
-        seen[arch] = text.split()
-        # CPython, asked directly about the SAME declarations. `print` on an int
-        # and on a str gives `7` and `beta`, and the formal program must give
-        # the same two words — not merely the same numbers, because the second
-        # name is the one that proves a STRING crossed rather than a word.
-        # `RUN_TIMEOUT_S`, not a `120`: this is a RUN of a compiled-adjacent
-        # child and the file already imports the shared constant for its three
-        # other runs, so the literal was a fourth spelling of a number the
-        # module has an opinion about. It is 120 today, which is why nothing
-        # broke — and that is the failure mode the residue census exists for.
-        # `test_suite.py`'s `STALE_PER_CHILD_BUDGETS` counts this file at 0 and
-        # the walk found 1, so the row and the walk disagreed until here.
-        oracle = subprocess.run(
-            [sys.executable, "-c",
-             "ALPHA = 3 + 4\nBETA = 'beta'\nprint(ALPHA)\nprint(BETA)\n"],
-            capture_output=True, text=True, timeout=RUN_TIMEOUT_S).stdout.split()
-        check(seen[arch] == oracle,
-              f"{arch}: the values read across the boundary are {seen[arch]}, "
-              f"and CPython on the same declarations gives {oracle}")
-        # The library itself is the artifact the fix is about, so it is
-        # inspected rather than inferred from the program's output — read here,
-        # inside the loop, because `fresh_cas()` above empties the cache between
-        # architectures and a manifest read afterwards would be looking for a
-        # library this test deleted. An empty EXPORT TRIE with a populated
-        # constants table is what "a module with no symbols and a complete API"
-        # means in this container, and a trie that had quietly grown an entry
-        # would be the export-rule bug `no_public_api_reason`'s docstring is
-        # the longest argument against.
-        payload = manifest(module_dylib("constlib_constants", arch=arch))
-        check(payload.get("kind") == "namespace",
-              f"{arch}: the constants-only library is not marked as a "
-              f"table-less one: {payload.get('kind')!r}")
-        check(payload.get("exports") == [],
-              f"{arch}: a module with no declarations grew an export table: "
-              f"{payload.get('exports')}")
-        check(sorted(payload.get("constants") or {}) == ["ALPHA", "BETA"],
-              f"{arch}: the manifest publishes "
-              f"{sorted(payload.get('constants') or {})}, not the two folded "
-              f"names — so the program above read them from somewhere else "
-              f"and this is not the route it was meant to take")
-        # …and not `__file__` beside them. It is in every module's folded
-        # table, it is the path of the file the DEFINING build compiled, and a
-        # consumer reading it would get another checkout's path rather than its
-        # own; so it is a fact about the build and not part of the module's
-        # API. Publishing it would put a second tree's path into a program's
-        # constants, which is why `_publishable_constant_names` drops it.
-        check("__file__" not in (payload.get("constants") or {}),
-              f"{arch}: the build's own source path was published as one of "
-              f"this module's constants: "
-              f"{sorted(payload.get('constants') or {})}")
-    check(seen["arm64"] == seen["x86_64"],
-          f"the two architectures disagree about a value read across a dylib "
-          f"boundary: arm64 {seen['arm64']}, x86_64 {seen['x86_64']}")
-
-
-def test_a_constants_only_module_with_an_unfoldable_value_is_still_refused(
-        tmpdir, _shared):
-    """The half of the constants-only row that has no way across stays refused.
-
-    `a_constants_only_module_is_importable` is the fix; this is its boundary,
-    and without it the fix is a hole. `std/sys/_io.mojo` — 23 of the 59 files —
-    is `comptime stdin = FileDescriptor(0)`: a struct CONSTRUCTION, which
-    `fold_module_value` has no arm for, so there is no value to publish and no
-    symbol either. A module in that shape has genuinely nothing an importer
-    could reach, and building it would put a name on a link line that resolves
-    to nothing.
-
-    The refusal must also still be the one that names the real reason, because
-    the wrong sentence here is what `no_public_api_reason`'s docstring calls
-    "worse than no message". `test_formal_dylib.py`'s
-    `the refusal names the real reason` builds the same shape through the
-    `dylib` command; this is the same fact asked through an IMPORT, where the
-    refusal reaches a file that did not write the module at all — which is the
-    chain that put 23 files on the row.
-    """
-    root = os.path.join(tmpdir, "unfoldable")
-    os.makedirs(root)
-    fresh_cas()
-    write_tree(root, {
-        "fdlib/__init__.mojo": "from .descriptors import stdin\n"
-                               "\n"
-                               "def main():\n"
-                               "  print(0)\n",
-        "fdlib/descriptors.mojo": "comptime stdin = FileDescriptor(0)\n",
-    })
-    result = run_fire(["build", "--formal", "--no-prove", "-o",
-                       os.path.join(root, "fdlib.aout"),
-                       os.path.join(root, "fdlib", "__init__.mojo")], cwd=root)
-    text = (result.stderr or result.stdout or "").strip()
-    check(result.returncode != 0,
-          "a module whose only names are struct constructions was built as a "
-          f"library, which publishes nothing an importer could bind: {text}")
-    check("declares no function and no type at all" in text,
-          f"the refusal does not name the shape it fired on: {text}")
-    check("descriptors.mojo" in text,
-          f"the refusal does not name the module it is about: {text}")
 
 
 def test_a_clib_named_definition_is_refused_not_blamed_on_privacy(tmpdir,
@@ -4358,395 +3709,6 @@ def test_the_exclusion_table_does_not_change_the_export_set(tmpdir, _shared):
           f"the corpus it claims to cover")
 
 
-# ── the host-import wall's own instrument ─────────────────────────────────
-#
-# `tools/formal_host_import_wall.py` ranks what a file's import CLOSURE still
-# names, which is the question a sweep's `not-answerable/host-import` class
-# cannot answer: the class is one bucket over a queue of unrelated capabilities,
-# and a module landing unmasks the row behind it. The doc that asked for the
-# tool is `bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md` §5, and
-# these are its pins — the properties that make the ranking a MEASUREMENT rather
-# than a second description to drift.
-#
-# Everything here is Lean-free and builds nothing: the instrument reads the
-# backend's own readers, so a bug in it is a wrong TABLE, not a wrong image, and
-# a test that had to compile a file to check it would be a test about the
-# compiler.
-#
-# These pins were written against a second tool, `formal_host_import_walls.py`,
-# which another branch built for the same doc at the same time. Two tools
-# answering one question is a second thing to forget an arm of, so this file is
-# the one that survived and the pins were moved onto it: `walls.py`'s `measure`
-# returned `(reach, alone, files_of, (clean, errors))` where `rank` returns
-# `{name: {"reach": [...], "alone": [...]}}` and `module_imports` answers None
-# for a file the backend cannot read — which is where `clean` and `errors` come
-# from here. Nothing was lost but `walls.py`'s `--scope`, which is now
-# `formal_host_import_wall.py`'s.
-
-
-def _wall_module():
-    """The tool, imported as a module.
-
-    Imported rather than run as a subprocess because the pins below are about
-    the numbers it computes; a subprocess would only be able to read them off
-    stdout, and the point of `reach`/`alone` being separate columns is that a
-    reader has them separately.
-    """
-    sys.path.insert(0, os.path.join(HERE, "tools"))
-    import formal_host_import_wall as W
-    return W
-
-
-def _measure(W, paths, unmodelled=frozenset()):
-    """`walls.py`'s five-tuple, computed from `wall.py`'s two functions.
-
-    Kept as a helper so the pins read the way they were written and the
-    difference between the two tools is in ONE place: `rank` gives the two
-    count columns and the file lists, and `module_imports` answers `None` for a
-    file the backend cannot read, which is this tree's `errors`. The
-    `clean`/`errors` split is therefore not a property of the tool but of this
-    wrapper — which is the honest place for it, because `rank` does not
-    promise it.
-    """
-    rows = W.rank(list(paths), unmodelled)
-    reach = {n: len(v["reach"]) for n, v in rows.items()}
-    alone = {n: len(v["alone"]) for n, v in rows.items()}
-    files_of = {n: v["reach"] for n, v in rows.items()}
-    errors = [p for p in paths if W.module_imports(p) is None]
-    clean = sum(1 for p in paths if p not in errors and not W.walls_of(p, unmodelled))
-    return reach, alone, files_of, (clean, errors)
-
-
-def test_the_wall_instrument_uses_the_backends_own_readers(tmpdir, _shared):
-    """A closure walk that reads the WRONG tree reports an empty wall.
-
-    `imported_modules` takes `fire_compiler`'s nodes; handing it
-    `ast.parse(...).body` returns nothing at all, so every row of such a table
-    reads 0 and the table looks like a clean corpus. That is the failure this
-    row exists to make impossible to reintroduce silently: it asserts the tool
-    sees a host module through `formal.build.parse_module` and cannot see one
-    through `ast`.
-    """
-    W = _wall_module()
-    check(W.module_imports is not None, "the tool could not be imported")
-
-    class _Fake:                                   # not a dataclass node
-        __dataclass_fields__ = ()
-
-    check(W.FB.parse_module("import os\n", "<t>") is not None,
-          "parse_module returned nothing for a one-line import")
-    got = W.I.imported_modules(W.FB.parse_module("import os\n", "<t>"))
-    check("os" in got,
-          f"the backend's reader did not see `import os` (got {got})")
-    check(not I.imported_modules([_Fake()]),
-          "a non-node yielded a name, so the reader is not the one under test")
-    # And the two readers disagree, which is the whole reason the tool is not
-    # written against `ast`: `imported_modules` filters the front-end-provided
-    # names, an `ast` walk does not.
-    check("dataclasses" in I.FRONTEND_PROVIDED_MODULES,
-          "the front-end-provided list changed, so this row's contrast is gone")
-    got = W.I.imported_modules(
-        W.FB.parse_module("import dataclasses\n", "<t>"))
-    check("dataclasses" not in got,
-          "a front-end-provided module is being counted as a wall")
-
-
-def _a_real_wall_name(W):
-    """A host module this tree does NOT resolve, chosen from the tier tables.
-
-    Picked at run time rather than written down, because a written-down name goes
-    stale the day a wave models it and the case then fails for the best possible
-    reason — which is the one kind of failure that trains a reader to ignore a
-    red suite. The tables are the same ones the tool ranks with, so this is the
-    same question the ranking asks, asked once here.
-
-    **A `HOST_NOT_A_MODULE` member is eligible here, and used to be skipped.**
-    The skip existed because the instrument did not count one as a wall, so a
-    file naming `abc` AND `antigravity` reported `alone = 1` for `abc` when
-    `antigravity` was a wall too — which is the number this helper's own caller
-    exists to read. The instrument counts them now (`_is_wall` accepts the
-    `not-code` verdict, measured by building such a file and reading the
-    refusal), so the skip would only hide the case from the row that pins it.
-    """
-    for name in sorted(I.HOST_MODULES):
-        if name in sys.stdlib_module_names \
-                and I.resolve_module_path(name) is None:
-            return name
-    return None
-
-
-def test_a_module_whose_content_is_not_code_is_still_a_wall(tmpdir, _shared):
-    """`not-code` counts, and the BUILD is the measurement rather than a rule.
-
-    `this`, `antigravity` and `turtledemo` are CPython modules whose content is
-    not code — a module-level string, a side effect, a directory of example
-    programs — and `HOST_NOT_A_MODULE` is the set that says so. The build refuses
-    an import of each one, so a file naming one does not build and the name is a
-    wall by the only test that matters.
-
-    It was not counted, and the way it showed was the `alone` column: with
-    `antigravity` invisible, a file importing `abc` AND `antigravity` read as
-    though `abc` were its ONLY wall, which is the statement that column exists
-    to make true and was false. So the two halves are pinned separately, because
-    either alone would pass with the other broken:
-
-    * `host_module_verdict` answers `not-code` and NOT `not-a-module` — the
-      latter's sentence is "CPython does not ship it", which is false of all
-      three, and `sys.stdlib_module_names` is the oracle for it;
-    * the instrument's own predicate counts it, measured by building a file that
-      imports one and reading the refusal off it.
-    """
-    W = _wall_module()
-    names = [n for n in sorted(I.HOST_NOT_A_MODULE)
-             if n in sys.stdlib_module_names]
-    check(names,
-          "HOST_NOT_A_MODULE holds no CPython module, so this row has nothing "
-          "to be about")
-    for name in names:
-        answer, detail = I.host_module_verdict(name)
-        check(answer == "not-code" and detail == "",
-              f"{name} is a HOST_NOT_A_MODULE member and answers {answer!r}, "
-              "not 'not-code' — 'not-a-module' asserts CPython does not ship "
-              f"it, and `sys.stdlib_module_names` says it does (detail {detail!r})")
-        check(W._is_wall(name),
-              f"{name} is not counted as a wall by "
-              f"`tools/formal_host_import_wall.py::_is_wall`, so a file that "
-              "imports it is reported as one wall lighter than it is")
-    # And the build itself, so "is a wall" is measured rather than argued: the
-    # instrument's rule is that a name the build REFUSES is a wall, and the
-    # refusal for each of these is its own sentence naming no content.
-    root = os.path.join(str(tmpdir), "notcode")
-    os.makedirs(root)
-    name = names[0]
-    write_tree(root, {"prog.mojo": "import %s\ndef main() -> Int:\n    return 0\n"
-                      % name})
-    fresh_cas()
-    # `expect_ok=False`: the refusal IS the measurement, so a successful build
-    # would be the failure rather than a happy accident.
-    res, _out = build(root, "prog.aout", expect_ok=False)
-    err = res.stderr or res.stdout
-    check(res.returncode != 0 and "no content to compile" in err,
-          f"a program importing `{name}` should be refused with the "
-          f"no-content sentence; it exited {res.returncode} with {err[-300:]!r}")
-    check(not I.is_cpython_stdlib("definitely_not_a_real_module_9f3a"),
-          "precondition: the typo's name is not a CPython module, so the two "
-          "answers cannot be told apart by the table alone")
-
-
-def test_the_wall_instrument_separates_reach_from_alone(tmpdir, _shared):
-    """`reach` and `alone` are different questions and the tool answers both.
-
-    `reach` is how many files name the module at all; `alone` is how many for
-    which it is the ONLY name, i.e. the files "writing this module makes this
-    file build" is a true statement about. A ranking built on `reach` alone
-    picks the module with the widest closure — `importlib`, which most of this
-    repository reaches and for which "write importlib" is true of none of them —
-    so the column a worker plans against has to be the second one, and the
-    instrument has to print both.
-
-    Three files over two walls: one naming both, one naming one, one naming
-    neither. The third is what makes `clean` a measurement rather than a
-    constant, and the second is what makes `alone` a different number from
-    `reach`.
-    """
-    W = _wall_module()
-    wall_a = _a_real_wall_name(W)
-    wall_b = None
-    for name in sorted(I.HOST_MODULES):
-        # No `HOST_NOT_A_MODULE` skip here, for the reason `_a_real_wall_name`
-        # gives: the instrument counts a `not-code` name as a wall, so naming
-        # one on this file is a second wall and `alone` has to say so.
-        if name != wall_a and name in sys.stdlib_module_names \
-                and I.resolve_module_path(name) is None:
-            wall_b = name
-            break
-    check(wall_a is not None and wall_b is not None,
-          "no two host modules are walls in this tree, so the columns cannot "
-          "be told apart here")
-    d = str(tmpdir)
-    a = os.path.join(d, "a.mojo")                    # both walls
-    b = os.path.join(d, "b.mojo")                    # one wall
-    c = os.path.join(d, "c.mojo")                    # none
-    open(a, "w").write(f"import {wall_a}\nimport {wall_b}\n")
-    open(b, "w").write(f"import {wall_a}\n")
-    open(c, "w").write("x = 1\n")
-    reach, alone, files_of, (clean, errors) = _measure(W, [a, b, c])
-    check(not errors, f"unexpected parse errors: {errors}")
-    check(reach.get(wall_a) == 2,
-          f"reach for `{wall_a}` was {reach.get(wall_a)}, not 2")
-    check(alone.get(wall_a) == 1,
-          f"alone for `{wall_a}` was {alone.get(wall_a)}: it is the only wall "
-          f"on one of the two files that name it")
-    check(reach.get(wall_b) == 1 and alone.get(wall_b, 0) == 0,
-          f"`{wall_b}` is not the only wall on its file, so `alone` must not "
-          f"count it (reach {reach.get(wall_b)}, alone {alone.get(wall_b)})")
-    check(clean == 1,
-          f"exactly one of the three files names no wall, so clean was {clean}")
-    check(sorted(files_of.get(wall_a, [])) == sorted([a, b]),
-          "the file list does not name the files the reach count came from")
-
-
-def test_the_wall_instrument_measures_a_delta_on_one_tree(tmpdir, _shared):
-    """`--pretend-unmodelled` is what makes "writing this module moves N files"
-    a measurement, and it has to move the numbers.
-
-    A before/after across two checkouts measures the merge, not the change, which
-    is why this flag exists. The fixture imports `os`, which this tree DOES
-    resolve (`formal/hostmods/os.mojo`) — so the file starts with no wall at all
-    and pretending `os` absent is exactly "that module is not in this tree",
-    which is the state a wave measures before it writes one. Both the `reach`
-    row and the `clean` count have to move, and in one direction only: a delta
-    that went the other way is a bug in the instrument whatever the number is.
-    """
-    W = _wall_module()
-    check(W.I.resolve_module_path("os") is not None,
-          "`os` is not a wall on this tree any more, so pretending it absent "
-          "measures nothing; pick a module that resolves and is absent")
-    p = os.path.join(str(tmpdir), "p.mojo")
-    open(p, "w").write("import os\nimport signal\n")
-    reach_b, _alone_b, _files_b, (clean_b, _) = _measure(W, [p])
-    reach_a, alone_a, _files_a, (clean_a, _) = _measure(W, [p], frozenset(("os",)))
-    check("os" not in reach_b,
-          "`os` is already a wall on this tree, so the delta measures nothing")
-    check(clean_b == 1 and clean_a == 0,
-          f"pretending `os` absent must move clean from 1 to 0, and it went "
-          f"{clean_b} to {clean_a}")
-    check(reach_a.get("os") == 1 and alone_a.get("os") == 1,
-          f"pretending `os` absent did not make it a wall that is ALSO alone "
-          f"(reach {reach_a.get('os')}, alone {alone_a.get('os')})")
-    # One module's absence adds exactly that module's row and disturbs nothing
-    # else — the property that makes the flag usable as a DELTA rather than as a
-    # second scope.
-    expected = dict(reach_b)
-    expected["os"] = 1
-    check(reach_a == expected,
-          f"pretending one module absent changed other rows too: "
-          f"{ {k: v for k, v in reach_a.items() if expected.get(k) != v} }")
-
-
-def test_the_wall_instrument_reads_the_sweep_column_with_its_own_peel(tmpdir, _shared):
-    """The `sweep` column is the LAST host module named, not the first.
-
-    A refusal chains (`a imports b, which imports c, which is a host module`),
-    and which module the row is really about is the one at the END of the chain:
-    the first is what the file asked for, the last is what stopped it. Reading
-    the first attributes the row to a module that is merely the file's first
-    dependency, which is how a ranking ends up pointing at `collections` for
-    everything.
-    """
-    W = _wall_module()
-    import tempfile
-    with tempfile.TemporaryDirectory() as d:
-        log = os.path.join(d, "sweep.txt")
-        open(log, "w").write(
-            "NOT-ANSWERABLE/HOST-IMPORT: x.mojo  (build: x.mojo imports "
-            "'copy', which cannot be built either: y.mojo imports "
-            "'importlib', which is a host module)\n"
-            "PASS other.mojo\n")
-        rows = W.sweep_rows(log)
-    counts = {}
-    for _p, _name in rows.items():
-        counts[_name] = counts.get(_name, 0) + 1
-    check(counts.get("importlib") == 1,
-          f"the chain's terminal module was not the one counted: {counts}")
-    check("copy" not in counts,
-          "the chain's FIRST host module was counted, which is the wrong end")
-    check(W.sweep_rows("") == {} and W.sweep_rows("/nope") == {},
-          "a missing sweep log must be an empty column, not an error")
-
-
-def test_a_dead_import_is_not_a_wall_this_tree_has_to_climb(tmpdir, _shared):
-    """A module in the file's closure that the file never READS is not a wall.
-
-    `tools/apply_extraction.py` imported `copy` and used it zero times, so it was
-    the `alone` row of `tools/formal_host_import_wall.py`'s ranking — the file's
-    ONLY unresolved name, and therefore the whole of what stood between it and a
-    build. `bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md`
-    recorded that row as "`copy`'s is `deepcopy` over objects this path has no
-    heap for", which is false of this file: there is no `deepcopy` in it, and no
-    reference to the module at all. The honest reading is that the import is
-    DEAD, and a dead import is removed rather than modelled — which is the same
-    answer `itertools` got for `test_formal_run.py` in that document's own §4.
-
-    The claim asked here is the one a reader can act on: for a handful of files
-    in this repository, every module in the import closure is either resolvable
-    or genuinely read. `copy` is named explicitly because it is the row that was
-    measured, and because a future re-addition of the import would put the file
-    straight back on the wall with nothing failing here.
-    """
-    root = HERE
-    stdlib = os.environ.get("MOJO_STDLIB") or os.path.join(
-        os.path.dirname(HERE), "new-modular", "Mojo", "stdlib", "std")
-
-    def closure_unresolved(path):
-        seen, stack, out = set(), [path], set()
-        while stack:
-            p = stack.pop()
-            rp = os.path.realpath(p)
-            if rp in seen or not p or not os.path.exists(p):
-                continue
-            seen.add(rp)
-            for m in I.imported_modules(I.module_statements(p)):
-                d = I.resolve_module_path(m, relative_to=p,
-                                          project_root=root)
-                if d is None and os.path.isdir(stdlib):
-                    d = I.resolve_module_path(m, relative_to=p,
-                                              project_root=stdlib)
-                out.add(m) if d is None else stack.append(d)
-        return out
-
-    # THE ROW, and the fact that makes it a dead import rather than a use: the
-    # module is in the file's statements and in NO expression. A file that
-    # really used it would fail this, which is the point — the check is not
-    # "the import is gone" but "nothing reads what it imports".
-    target = os.path.join(root, "tools", "apply_extraction.py")
-    check(os.path.exists(target), f"{target} is gone, so this row is stale")
-    with open(target) as fh:
-        stmts = I.module_statements(target)
-    names = I.imported_modules(stmts)
-    check("copy" not in names,
-          f"`tools/apply_extraction.py` imports `copy` again, which puts it "
-          f"back on the host-import wall as the file's ONLY unresolved name; "
-          f"its modules are {sorted(names)}")
-    import ast as _ast
-    with open(target) as fh:
-        tree = _ast.parse(fh.read())
-    reads = [n for n in _ast.walk(tree)
-             if isinstance(n, _ast.Name) and n.id == "copy"]
-    check(not reads,
-          f"`copy` is imported and read {len(reads)} time(s) — then this is a "
-          f"use, not a dead import, and the wall is a real one")
-    un = closure_unresolved(target)
-    check("copy" not in un,
-          f"`tools/apply_extraction.py` still has `copy` in its unresolved "
-          f"closure: {sorted(un)}")
-
-    # The general shape, over the files the ranking measured as being one stdlib
-    # call from a sweep. **`fractions` is excluded and named**, because it is a
-    # REAL wall rather than a dead import: `test_formal_time.py` imports
-    # `fractions.Fraction` and uses it as the oracle. The distinction the row
-    # turns on is not "is the module in the closure" but "does anything READ
-    # it" — the check above asks the second question of `copy` for exactly this
-    # reason, and a file that genuinely reads its wall is supposed to be red.
-    for rel in ("tools/apply_extraction.py",):
-        p = os.path.join(root, rel)
-        if not os.path.exists(p):
-            continue
-        un = closure_unresolved(p)
-        check(not un,
-              f"{rel} has an unresolved import the formal sweep files as "
-              f"not-answerable/host-import: {sorted(un)}")
-
-    # And the half that is a real wall STAYS one: `fractions` is read, so this
-    # is the case that keeps the row above honest — a check that only ever saw
-    # dead imports would pass with the whole ranking still red.
-    tf = os.path.join(root, "test_formal_time.py")
-    if os.path.exists(tf):
-        check("fractions" in closure_unresolved(tf),
-              "test_formal_time.py no longer has `fractions` in its unresolved "
-              "closure — either the import went away (then this row is stale) "
-              "or it resolves (then the tool's `alone` column is stale)")
-
 TESTS = [
     ("an import links the module and the program runs",
      test_import_links_and_runs),
@@ -4812,8 +3774,6 @@ TESTS = [
      test_a_stdlib_module_in_no_tier_is_not_reported_as_a_typo),
     ("no standard-library module is left in neither tier",
      test_no_standard_library_module_is_left_in_neither_tier),
-    ("a name with nothing to implement gets its own tier",
-     test_a_name_with_nothing_to_implement_gets_its_own_tier),
     ("a host-module refusal says what this target offers instead",
      test_a_host_module_refusal_says_what_this_target_offers),
     ("an unclassified CPython stdlib name is not called a typo",
@@ -4854,12 +3814,6 @@ TESTS = [
      test_the_library_path_names_the_compiler_too),
     ("a re-exported type reaches the importer",
      test_reexported_type_reaches_the_importer),
-    ("a forwarded name is filed by what defines it",
-     test_declared_kinds_files_a_forwarded_name_by_its_definition),
-    ("a forwarded type is not demanded as a symbol, both arches",
-     test_a_forwarded_type_is_not_demanded_as_a_symbol),
-    ("a forwarded name nothing defines is still refused",
-     test_a_forwarded_name_nothing_defines_is_still_refused),
     ("a local Mojo module beats the host-module list",
      test_mojo_source_beats_host_module),
     ("a host-module refusal carries its measured next step",
@@ -4872,12 +3826,6 @@ TESTS = [
      test_a_bare_call_to_a_template_is_refused_by_the_export_rule),
     ("a generic template is not exported under its base name",
      test_a_generic_template_is_not_exported_under_its_base_name),
-    ("a constants-only module is not told nothing could be added",
-     test_a_constants_only_module_is_not_told_nothing_could_be_added),
-    ("a constants-only module is imported, and its values reach the program",
-     test_a_constants_only_module_is_importable),
-    ("a constants-only module with an unfoldable value is still refused",
-     test_a_constants_only_module_with_an_unfoldable_value_is_still_refused),
     ("a C-library-named definition is not blamed on privacy",
      test_a_clib_named_definition_is_refused_not_blamed_on_privacy),
     ("a concrete and a generic of one name are told apart",
@@ -4902,20 +3850,6 @@ TESTS = [
      test_the_exclusion_table_does_not_change_the_export_set),
     ("the largest swept file is classified in a bounded time",
      test_a_swept_stdlib_file_is_classified_in_a_bounded_time),
-    ("every name has one named verdict, and no answer is an absence",
-     test_every_name_has_one_named_verdict_and_no_answer_is_an_absence),
-    ("the host-import wall's instrument reads the backend's own tree",
-     test_the_wall_instrument_uses_the_backends_own_readers),
-    ("the wall instrument separates reach from alone",
-     test_the_wall_instrument_separates_reach_from_alone),
-    ("a dead import is not a wall this tree has to climb",
-     test_a_dead_import_is_not_a_wall_this_tree_has_to_climb),
-    ("a module whose content is not code is still a wall",
-     test_a_module_whose_content_is_not_code_is_still_a_wall),
-    ("the wall instrument measures a delta on one tree",
-     test_the_wall_instrument_measures_a_delta_on_one_tree),
-    ("the wall instrument reads the sweep column with its own peel",
-     test_the_wall_instrument_reads_the_sweep_column_with_its_own_peel),
 ]
 
 

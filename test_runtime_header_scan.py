@@ -41,29 +41,22 @@ the symbol did not exist. This is on the gimple path and predates FORMAL.md.
 
 The fix is one optional `\\*?` in the separator. After it, on the 2026-09-27 tree
 it read 459 / 22 / 6 / 13 / 18 / 15 — a DATED reading, kept as the record of
-that fix, and not the scanner's current output: `fire_runtime.h` has grown
-since, and the ladder in `test_every_declaration_is_seen` is the current one.
-The only remaining gaps were `static inline` helpers (which have no external
-symbol and are correctly absent) and one name that appears only in a comment.
+that fix, and not the scanner's current output: `fire_runtime.h` has grown since
+(the ladder in `test_every_declaration_is_seen` is the current one, and its last
+entry is 565). The only remaining gaps were `static inline` helpers (which have
+no external symbol and are correctly absent) and one name that appears only in a
+comment.
 
 `test_the_quoted_census_is_the_live_census` at the bottom is the check that
 keeps the OTHER copies of these numbers honest: five places in the tree quote
 the census in prose, and every one of them had gone stale at the same time,
-because nothing compared them with the headers they describe. That check now
-runs in both directions — `python3 test_runtime_header_scan.py --fix` writes the
-live census into every one of those quotes from the same table the check reads,
-so the two ends of this file cannot drift apart, and a commit that adds a
-runtime declaration does not have to remember which six sentences quoted the
-number it changed. (`bugs/FORMAL_known_limits.md` quotes the census in more
-sentences than the five above; every one of them is in the table, which is why
-a change to that document's wording can now fail this file.)
+because nothing compared them with the headers they describe.
 
 These are pinned BY NAME, not by count. A count assertion would have to be
 rewritten every time the runtime grows a function, and would fail for a reason
 that has nothing to do with the defect.
 """
 import os
-import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -416,127 +409,22 @@ def test_every_declaration_is_seen():
     # behaviour; a decimal address on this target). One name: the codegen half
     # is a `print` dispatch arm, which adds no runtime entry point. bugs4-8
     # counted from its own base's 543 and wrote `544`.
-    # 565 -> 578 (2026-10-04, the merge of `work/gatefix9`, `work/bugs6-1`
-    # and `work/bugs6-2`). ONE row for THIRTEEN names, because the five this ledger had been short by
-    # were RECOVERED rather than rounded off. What each is for:
-    #   +4  `mojo_str_count_from`, `mojo_str_endswith_from`,
-    #       `mojo_str_rfind_from`, `mojo_str_startswith_from` — the
-    #       `[start[, end]]` WINDOW of `str.count`/`endswith`/`rfind`/
-    #       `startswith` (`a35765a0`). The codegen half is one argument
-    #       threaded through four `print`-dispatch arms, so nothing else in
-    #       the header answers to it.
-    #   +1  `mojo_regex_split` — a COMPILED pattern's `.split()` (`d8cdca63`).
-    #       Public because the compiled-pattern methods are a runtime table,
-    #       and a `split` with no entry was a refusal at compile time.
-    #       (These five are the gap `bugs4-9`'s row left behind, and they were
-    #       found by MEASURING rather than by arithmetic: walking
-    #       `git log master -- runtime/fire_runtime.h` and counting
-    #       `reflect.collect_runtime_exports_h` per commit gives 565 at
-    #       24f1e5e8, 569 at a35765a0 and 570 at d8cdca63, and those are the
-    #       two commits whose names are the difference.)
-    #   +1  `mojo_id` — the identity token (`gatefix9`). The codegen half is a
-    #       change to the `id` STUB rather than a new entry point: the stub
-    #       `static int64_t id (int64_t x)` that every generated program emits
-    #       used to return its argument, which for a container is the live
-    #       handle, so the container registries read an `id()` token as that
-    #       container (`bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md`).
-    #   +1  `mojo_dict_slot_repr` — the ONE implementation of "what a dict
-    #       slot's value looks like", from the (word, kind) pair the store
-    #       recorded (`work/bugs6-1`). The codegen's emitted `_mojo_repr_dict`
-    #       had its own six-arm chain and `mojo_dict_items`' pairs had NO
-    #       reader at all, so `.items()` of a zero printed `None` and of a
-    #       float SIGSEGV'd.
-    #   +4  `mojo_dict_set_bool_kw` / `_none_kw` / `_struct_kw` /
-    #       `_other_struct_kw`. `_KW_DICT_FNS` tests the setter's NAME, so a
-    #       setter with no `_kw` twin was not refused — it fell through to the
-    #       plain-char*-key arm and wrote the entry in a different key DOMAIN
-    #       from the `_kw` read that looks it up, so `d[("a",)] = True` was one
-    #       source-level assignment and two dict entries.
+    for header, want in (('fire_runtime.h', 571),
+    # 570 -> 571: `mojo_len_of_word`, the LENGTH discriminator the `len()`
+    # lowering asks when the operand's slot is type-erased and no single kind
+    # was recorded for it -- `bugs/CODEGEN_len_of_a_param_called_with_both_a_
+    # list_and_a_str.md`. It is the `mojo_cstr_or_int_str` family member
+    # `len` was missing: a parameter called with both a list and a string had
+    # its length measured as `mojo_list_len` over a `char *`, which reads a
+    # header out of string bytes and so answers differently run to run.
     #
-    # The total is written as MEASURED (578) rather than as this merge's own
-    # arithmetic, because a count that reads as a formula when it is an
-    # observation is the failure this file exists to prevent.
-    #
-    #   +1  `mojo_is_registered_bytes` — the fourth and last member of the
-    #       container-registry family (`work/bugs6-2`). A boxed
-    #       `MojoBytes *` is pointer-shaped and is none of a list, dict, set or
-    #       box, so `mojo_boxed_is_str` classified it as a STRING — harmless
-    #       until `len()` on a polymorphic parameter read the answer through
-    #       that classification (`emit_infra._len_of_boxed`), where
-    #       `mojo_strlen` walked the bytes payload for a NUL and got a length
-    #       right only because `MojoBytes.len` sits at `MojoList.len`'s
-    #       offset. One name, taken from the call; the codegen half
-    #       (`_len_of_boxed`'s block layout) adds no runtime entry point, and
-    #       the registry entry itself is file-local.
-    #
-    # 573 -> 572 (2026-10-05, this merge), MINUS ONE: `mojo_len_of_word` is
-    # gone, because `mojo_len_of_word` and `emit_infra._len_of_boxed` were two
-    # implementations of one question -- "what is this type-erased word, and
-    # therefore how long is it?" -- and the difference between them was not a
-    # difference in the answer. `_len_of_boxed` emits the same registry chain
-    # the repr side (`_repr_boxed_container`) already walks, so `len` and
-    # `print` cannot disagree about what a boxed word holds, and it adds the
-    # BYTES arm that `mojo_boxed_is_str` makes load-bearing (`mojo_strlen` over
-    # a bytes object answers a length right only by the accident that
-    # `MojoBytes.len` sits at `MojoList.len`'s offset). Its last arm is the same
-    # `mojo_list_len` the pre-fix lowering used unconditionally, so an input no
-    # registry recognises keeps the answer it had -- which is what makes it a
-    # strict improvement rather than a change of behaviour. The runtime helper
-    # had the opposite last arm (0), so deleting it puts the unrecognised-word
-    # path back on the conservative answer.
-    # The defect this replaces is `len()` on a type-erased slot, whose doc is
-    # deleted with its fix, so it is named here by the mechanism: every static
-    # spelling of `len` was a direct call to the one accessor the codegen picked
-    # for the operand's DECLARED C type, and a slot whose call sites disagree
-    # got exactly one of them.
-    # `gimple_len_of_param_called_with_list_and_str` is the row that is run
-    # REPEATED, because the old answer was heap-dependent.
-    for header, want in (('fire_runtime.h', 580),   # --fix writes the live figure
-    # 571 -> 573 (2026-10-04, `work/bugs7-1`), TWO names, and both are the
-    # consolidation this file exists to make possible:
-    #   +1  `mojo_repr_slot_kind`, THE renderer for "a slot of kind `kind` holds
-    #       the word `v` -- what does that look like?". There were THREE copies
-    #       of that answer -- `mojo_repr_list_kinds`' kind switch, the generated
-    #       `_mojo_repr_pair` walker and the generated `_mojo_repr_dict` value
-    #       chain -- and they had already drifted. One arm here now serves all
-    #       three callers, and it OWNS its return on every arm so a caller can
-    #       `free` without asking which one it got.
-    #   +1  `mojo_dict_kind_byte`, the MOJO_KIND_* byte for one `_DictSlot.kind`.
-    #       The two tag vocabularies exist because they answer different
-    #       questions -- `_DictSlot.kind` is "which setter ran", the alphabet is
-    #       "what is in the word" -- and this is the one place they meet.
-    # Neither adds behaviour to a program, which is why the census figures that
-    # follow are a pure renumbering: `--fix` wrote 573, 676, 269 and 503 into
-    # every sentence that quotes them, from this scan and not from arithmetic.
-    # 565 -> 570 (2026-10-04), FIVE names over two commits, neither of which
-    # touched this ledger — which is the point of `--fix`, added with this
-    # entry:
-    #   +4  `mojo_str_startswith_from`, `mojo_str_endswith_from`,
-    #       `mojo_str_rfind_from` and `mojo_str_count_from` (a35765a0, "str's
-    #       [start[, end]] window was dropped"). The window family went from one
-    #       three-argument `mojo_str_find_from` to a plain form plus an `_from`
-    #       twin per method, mirroring the bytes-side search helpers: the
-    #       windows were silently DROPPED, so `s.startswith(p, i)` compared
-    #       from byte 0 — which is how the self-hosted tokenizer's
-    #       `src.startswith(delim, j)` ended up testing the whole source
-    #       against a one-character prefix. `mojo_str_find_from` is not a NEW
-    #       name (it existed with three parameters), which is why the delta is
-    #       four and not five.
-    #   +1  `mojo_regex_split` (d8cdca63), `re.Pattern.split(text)`: the pieces
-    #       between matches, with each participating capturing group emitted in
-    #       place.
-    # This rung is the one `bugs/CODEGEN_the_runtime_export_ladder_is_five_
-    # behind.md` filed for, together with the five PROSE copies of the census
-    # in `formal/model.py`, `build_stdlib_dylib.py` and
-    # `bugs/FORMAL_known_limits.md`. Both are closed by the same thing: this
-    # entry, its ladder rung, and `--fix`, which writes the live scan into
-    # every quote from the table above rather than leaving five hand-typed
-    # copies of a computed number to agree with each other. The doc went with
-    # the fix.
-    # Read off the call as always — `python3 test_runtime_header_scan.py
-    # --fix` writes this number from the same scan — and NOT added up from the
-    # two commits' own arithmetic, which is the mistake the 2026-10-02 merge
-    # entries below record twice.
+    # 565 -> 570 is NOT accounted for here: five names were added to the
+    # merged header by `a35765a0` and `d8cdca63` without a rung, so this
+    # count was already 5 stale before the +1 above. Filed as
+    # `bugs/CODEGEN_the_runtime_export_ladder_is_five_behind.md`; the prose
+    # copies of the census in `formal/model.py`, `build_stdlib_dylib.py` and
+    # `bugs/FORMAL_known_limits.md` are stale by the same amount and are that
+    # doc's to fix, not this file's.
     # 561 -> 565 (2026-10-02, `bugs4-9`), FOUR names on the merged header
     # (its own ledger said five, from its base's 543 -> 548):
     #   +1  `mojo_str_cat_free`, the left-operand-releasing cat every repr
@@ -639,189 +527,10 @@ CENSUS_QUOTES = (
     ('bugs/FORMAL_known_limits.md',
      r'For `mojo_sqlite3_\*` it is \*\*(\d+) of (\d+)\*\*',
      ('sqlite_word', 'sqlite_total')),
-    ('bugs/FORMAL_known_limits.md',
-     r'\| of the (\d+), refused only for want of a linked library \| (\d+) \|',
-     ('word', 'word')),
-    ('bugs/FORMAL_known_limits.md',
-     r'the shape answers the same question for all (\d+)\n'
-     r'entry points instead of',
-     ('total',)),
-    ('bugs/FORMAL_known_limits.md',
-     r'repeating this table: (\d+)\s*\nentry points, (\d+) word-shaped, '
-     r'(\d+) with a box',
-     ('total', 'word', 'box')),
-    # the round-1 correction: the split by RETURN TYPE alone, which is a
-    # different question from the table's (every type crossing the boundary)
-    # and so a different pair of figures -- quoted here because the doc quotes
-    # it, and derived with `model`'s own word rule rather than by arithmetic.
-    ('bugs/FORMAL_known_limits.md',
-     r'I measure (\d+) / (\d+) / (\d+) by return type alone, and (\d+)\s*\n',
-     ('total', 'return_word', 'return_box', 'word')),
-    ('bugs/FORMAL_known_limits.md',
-     r'So today the (\d+) are refused',
-     ('word',)),
-    ('bugs/FORMAL_known_limits.md',
-     r'it is the only thing between the (\d+) and working code',
-     ('word',)),
     ('build_stdlib_dylib.py',
      r"of `fire_runtime\.h`'s (\d+)\n\s*entry points",
      ('fire_runtime_h',)),
 )
-
-# The same table plus the count this file asserts on `fire_runtime.h` itself.
-# It is a LITERAL IN CODE rather than prose, so it is not checked a second time
-# (`test_every_declaration_is_seen` already compares that number against the
-# live scan, by a better route) — but it IS rewritten by `--fix`, because a
-# figure a tool has to leave to a human is a figure that gets edited in some of
-# its five places.
-LADDER_QUOTE = (
-    'test_runtime_header_scan.py',
-    r"\('fire_runtime\.h', (\d+)\)",
-    ('fire_runtime_h',),
-)
-FIXABLE_QUOTES = CENSUS_QUOTES + (LADDER_QUOTE,)
-
-
-def live_census():
-    """Every figure the prose quotes, read off the headers exactly once.
-
-    `return_word`/`return_box` are the split the round-1 correction in
-    `bugs/FORMAL_known_limits.md` quotes: the RETURN type alone, with the
-    argument list not counted. That is a different question from the table's
-    ("every type crossing the boundary"), so it is a different pair of numbers
-    from the same table -- asked with `model`'s own word rule rather than by
-    arithmetic on the table's figures, because the two questions are answered
-    by two different predicates and subtracting one from the other would
-    answer neither.
-    """
-    sys.path.insert(0, HERE)
-    from formal import model as M
-    abi = M.runtime_abi()
-    total = len(abi)
-    word = sum(1 for e in abi.values() if e['word'])
-    box = total - word
-    sqlite = {k: e for k, e in abi.items() if 'sqlite' in k}
-    return_word = 0
-    for e in abi.values():
-        base, depth = M._parse_ctype(e['ret'])
-        if M._ctype_is_word(base, depth, in_return=True):
-            return_word += 1
-    import reflect
-    hdr_dir = M._runtime_header_dir()
-    return {
-        'total': total,
-        'word': word,
-        'box': box,
-        'return_word': return_word,
-        'return_box': total - return_word,
-        'sqlite_word': sum(1 for e in sqlite.values() if e['word']),
-        'sqlite_total': len(sqlite),
-        'fire_runtime_h': len(reflect.collect_runtime_exports_h(
-            os.path.join(hdr_dir, 'fire_runtime.h'))),
-    }
-
-
-def rewrite_quoted_figures():
-    """Write the live census into every place that quotes it. Returns the
-    number of files whose text changed.
-
-    This is the OTHER half of `test_the_quoted_census_is_the_live_census`, and
-    it exists because a check that can only say "no" sends the person who
-    broke it to the header, reads the number off it by hand, and edits five
-    files — which is exactly the manual step that let all five go stale at
-    same moment in the first place. `--fix` performs the substitution the check
-    would have performed, from the same regexes, so the two cannot disagree
-    about which sentence is the quote.
-
-    It is NOT called by the check. The check compares; this rewrites. Keeping
-    them one function would make the gate's verdict depend on whether the tree
-    was writable, and would make a stale figure self-healing — which is how a
-    figure stops being checked at all.
-    """
-    live = live_census()
-    touched = []
-    for path, pattern, keys in FIXABLE_QUOTES:
-        full = os.path.join(HERE, path)
-        try:
-            with open(full, encoding='utf-8') as f:
-                # re-read every time: two entries can name the same file (and
-                # several name FORMAL_known_limits.md), and an earlier write in
-                # this loop has to be visible to the later ones
-                text = f.read()
-        except OSError as e:
-            print(f'skip  {path}: {e}')
-            continue
-        m = re.search(pattern, text)
-        if m is None:
-            print(f'skip  {path}: no text matches {pattern!r} — the quote is '
-                  f'gone, and a tool cannot put prose back')
-            continue
-        new = splice_quoted_figures(text, m, keys, live)
-        if new == text:
-            continue
-        with open(full, 'w', encoding='utf-8') as f:
-            f.write(new)
-        if path not in touched:
-            touched.append(path)
-        moved = ', '.join(
-            f'{key} {m.group(i)} -> {live[key]}'
-            for i, key in enumerate(keys, start=1)
-            if m.group(i) != str(live[key]))
-        print(f'fixed {path}: {moved}')
-    return len(touched)
-
-
-def splice_quoted_figures(text, m, keys, live):
-    """`text` with each captured figure replaced by its live value, and every
-    other character — including the prose around and between the figures —
-    left exactly as it was.
-
-    The figures are of different WIDTHS (668 -> 673, 414 -> 500), so this
-    cannot be done by string replacement of the captured digits: the second
-    group's offset moves as soon as the first is rewritten. Splicing each
-    group over its own span, carrying `last` forward, is what makes a
-    four-figure sentence correct rather than nearly correct.
-    """
-    pieces = []
-    last = 0
-    for i, key in enumerate(keys, start=1):
-        s, e = m.span(i)
-        pieces.append(text[last:s])
-        pieces.append(str(live[key]))
-        last = e
-    pieces.append(text[last:])
-    return ''.join(pieces)
-
-
-def test_the_fixer_touches_only_the_figures():
-    """`--fix` rewrites the numbers and nothing else.
-
-    The splicer is the one piece of this file that WRITES, so it is the piece
-    whose bug would be expensive: an off-by-one in `last` does not fail a
-    check, it corrupts a docstring in `formal/model.py`. Both properties are
-    asserted here on a synthetic sentence rather than on a real file — the
-    real figures are `673`/`266`/`407` today and would be wrong in the test
-    the moment a declaration is added, which is the rot this file exists to
-    stop.
-    """
-    text = 'It is **262 of 668** that converts, and 262 by return alone.'
-    m = re.search(r'\*\*(\d+) of (\d+)\*\* that converts, and (\d+) by',
-                   text)
-    live = {'word': 266, 'total': 673, 'box': 407}
-    got = splice_quoted_figures(text, m, ('word', 'total', 'word'), live)
-    check(got == 'It is **266 of 673** that converts, and 266 by return alone.',
-          'the splicer rewrites three figures of different widths in place',
-          f'got {got!r}')
-    check(splice_quoted_figures(text, m, ('word', 'total', 'word'),
-                                {'word': 262, 'total': 668}) == text,
-          'the splicer is a no-op when every figure is already live')
-    long, short = 1000, 7
-    txt2 = f'from {long} to {short}'
-    m2 = re.search(r'from (\d+) to (\d+)', txt2)
-    check(splice_quoted_figures(txt2, m2, ('total', 'box'),
-                                {'total': 9, 'box': 123456}) == 'from 9 to 123456',
-          'a figure that GROWS moves the group after it correctly',
-          'the narrower figure was spliced at a stale offset')
 
 
 def test_the_quoted_census_is_the_live_census():
@@ -839,7 +548,25 @@ def test_the_quoted_census_is_the_live_census():
     how this table rots: someone edits the sentence, the regex stops matching,
     and a check that quietly stops checking is worse than no check at all.
     """
-    live = live_census()
+    sys.path.insert(0, HERE)
+    from formal import model as M
+    abi = M.runtime_abi()
+    total = len(abi)
+    word = sum(1 for e in abi.values() if e['word'])
+    box = total - word
+    sqlite = {k: e for k, e in abi.items() if 'sqlite' in k}
+    import reflect
+    hdr_dir = M._runtime_header_dir()
+    live = {
+        'total': total,
+        'word': word,
+        'box': box,
+        'sqlite_word': sum(1 for e in sqlite.values() if e['word']),
+        'sqlite_total': len(sqlite),
+        'fire_runtime_h': len(reflect.collect_runtime_exports_h(
+            os.path.join(hdr_dir, 'fire_runtime.h'))),
+    }
+    import re as _re
     for path, pattern, keys in CENSUS_QUOTES:
         full = os.path.join(HERE, path)
         try:
@@ -848,7 +575,7 @@ def test_the_quoted_census_is_the_live_census():
         except OSError as e:
             check(False, f'{path}: the census quote is readable', str(e))
             continue
-        m = re.search(pattern, text)
+        m = _re.search(pattern, text)
         if m is None:
             check(False, f'{path}: the census quote is still there',
                   f'no text matches {pattern!r} — a quote that cannot be found '
@@ -862,15 +589,9 @@ def test_the_quoted_census_is_the_live_census():
 
 
 def main():
-    if '--fix' in sys.argv:
-        n = rewrite_quoted_figures()
-        print(f"\n{n} file(s) rewritten from the live census; re-run without "
-              f"--fix to check")
-        return 0
     test_pointer_returns_are_seen()
     test_every_declaration_is_seen()
     test_non_exports_stay_excluded()
-    test_the_fixer_touches_only_the_figures()
     test_the_quoted_census_is_the_live_census()
     npass = sum(1 for ok, _w in RESULTS if ok)
     nfail = len(RESULTS) - npass

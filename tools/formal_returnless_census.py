@@ -50,7 +50,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
-import checked_run                                          # noqa: E402
 import fire_compiler as F                                   # noqa: E402
 from formal.build import parse_module                       # noqa: E402
 import formal.model as M                                    # noqa: E402
@@ -211,80 +210,6 @@ def _position(parent) -> str:
     return kind
 
 
-def decided_names(index) -> dict:
-    """`{name: this path has said what the function produces}`.
-
-    A name is in the table when every one of its definitions agrees about both
-    halves, and a name that is in it is out of the census when EITHER half is
-    true — a value-returning `return`, or a declared return type.
-    `_declares_a_return`'s docstring states the second half in its own words ("it
-    states a type, so this path has said what it means even where the value is not
-    what CPython's is"), and §0b of
-    `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
-    measures the rule with that half switched OFF, which is only a measurement if
-    it is ON by default.
-
-    **It was `and`, and that is worth a paragraph because it inverted the
-    measurement the whole refusal decision rests on.** A function that returns a
-    value WITHOUT declaring one is the ordinary shape of this corpus:
-    `formal/hostmods/argparse.mojo`'s `_fld`, `_cp`, `_alpha_index` and
-    `_name_ptr` each end in `return p` / `return u + n` / `return k` and none of
-    them declares a type, so `True and False` filed every one of their call sites
-    as "the value of a function that returns nothing" — and `collect()` had all
-    four right (`returns_a_value=True`), so the conjunction was the only thing
-    wrong. Measured over this repository, `formal/hostmods/` and the stdlib: the
-    same-file candidate count went from **507 in 22 files to 17 in 7**, and
-    `argparse.mojo` from **456 to 0**. Every one of the 17 is in the stdlib, so
-    "a refusal asked at every consumed value regresses the build" is no longer a
-    claim about this repository at all.
-
-    One reader, and not only because a wrong answer in three places is three wrong
-    answers: `test_formal_returnless_census.py` carried its own copy of this
-    comprehension, and its only case for the DECLARED half spelled a function that
-    returns AND declares — so every copy agreed on every case the tests had, and
-    the conjunction was never exercised in isolation by anything.
-    """
-    return {name: defs[0][2] or defs[0][3]
-            for name, defs in index.items()
-            if len(defs) == 1 or all(d[2] == defs[0][2]
-                                     and d[3] == defs[0][3]
-                                     for d in defs)}
-
-
-def candidate_rows(index, calls):
-    """`(decided, kinds, rows)` — the report's three tables, once.
-
-    `kinds` is the "call sites whose value is consumed, by what the callee is"
-    counter and `rows` the candidate list the report prints, so the counting and
-    the printing cannot disagree — which is the same reason `decided_names` is a
-    function and not a comprehension written twice.
-    """
-    decided = decided_names(index)
-    kinds: collections.Counter = collections.Counter()
-    rows: list = []
-    for path, line, name, through_recv, position in calls:
-        if name not in decided:
-            kinds["callee's name is undecided"] += 1
-            continue
-        if decided[name]:
-            kinds["callee returns something"] += 1
-            continue
-        defs = index[name]
-        # SAME FILE or not is the difference between a candidate a refusal would
-        # really reach and one that is a different function of the same name
-        # elsewhere in the corpus: a module dylib refuses on what its own imports
-        # resolve to, and a name defined only in another module is exactly the
-        # ambiguity this index cannot settle without `formal/imports.py`'s
-        # binding table.
-        same_file = any(d[0] == path for d in defs)
-        kinds["CANDIDATE (same file)"
-              if same_file else "CANDIDATE (same name, other file)"] += 1
-        rows.append((same_file, path, line, name, through_recv, position,
-                     defs))
-    rows.sort(key=lambda r: (not r[0], r[1], r[2]))
-    return decided, kinds, rows
-
-
 def collect(paths):
     """`{name: [(file, line, returns_a_value, declares_a_return)]}`, plus rows.
 
@@ -310,15 +235,7 @@ def collect(paths):
             # pruned in place because `DEFAULT_PATHS` includes the repository
             # root, so the walk descends into `.tmp/<test tmpdir>/` and finds
             # `.mojo` files a test wrote an hour ago.
-            # `checked_run.is_derived_dir` is the REPOSITORY'S one answer to
-            # "is this directory's content an input" — `.tmp` by the leading
-            # dot, `build` and `__pycache__` by name — and it is the reader
-            # `tools/dangling_doc_refs.py` reuses rather than keeping a second
-            # list. A hardcoded triple here and a hardcoded triple in
-            # `tools/formal_template_call_census.py` are two answers to one
-            # question, and that is how a scratch file ends up counted by one
-            # census and not the other.
-            dirs[:] = [d for d in dirs if not checked_run.is_derived_dir(d)]
+            dirs[:] = [d for d in dirs if d not in (".tmp", ".git", "__pycache__")]
             files += [os.path.join(dirpath, n) for n in sorted(names)
                       if n.endswith(".mojo")]
     seen = set()
@@ -390,7 +307,11 @@ def main(argv=None):
 
     index, calls, n_defs, n_returnless, n_structs = collect(
         args.paths or DEFAULT_PATHS)
-    decided, kinds, rows = candidate_rows(index, calls)
+    decided = {name: defs[0][2] and defs[0][3]
+               for name, defs in index.items()
+               if len(defs) == 1 or all(d[2] == defs[0][2]
+                                        and d[3] == defs[0][3]
+                                        for d in defs)}
     undecided = sorted(n for n in index if n not in decided)
 
     print(f"definitions: {n_defs}   "
@@ -406,6 +327,28 @@ def main(argv=None):
                               for f, ln, _r, _d in index[name][:6])
             print(f"    {name:24s} {sites}")
 
+    kinds = collections.Counter()
+    rows: list = []
+    for path, line, name, through_recv, position in calls:
+        if name not in decided:
+            kinds["callee's name is undecided"] += 1
+            continue
+        if decided[name]:
+            kinds["callee returns something"] += 1
+            continue
+        defs = index[name]
+        # SAME FILE or not is the difference between a candidate a refusal would
+        # really reach and one that is a different function of the same name
+        # elsewhere in the corpus: a module dylib refuses on what its own
+        # imports resolve to, and a name defined only in another module is
+        # exactly the ambiguity this index cannot settle without `formal/
+        # imports.py`'s binding table.
+        same_file = any(d[0] == path for d in defs)
+        kinds["CANDIDATE (same file)"
+              if same_file else "CANDIDATE (same name, other file)"] += 1
+        rows.append((same_file, path, line, name, through_recv, position,
+                     defs))
+    rows.sort(key=lambda r: (not r[0], r[1], r[2]))
     print()
     print("call sites whose value is consumed, by what the callee is:")
     for k, v in kinds.most_common():

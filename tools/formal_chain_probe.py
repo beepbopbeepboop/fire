@@ -8,7 +8,7 @@ answer to "what is the FIRST thing this file cannot build" and the wrong answer
 to "what is wrong with this file", and the sweep's own work map says so in one
 line — *"FILES BLOCKED IS AN UPPER BOUND: a file's terminal cause is the first
 refusal its build walk reaches, so fixing one moves the file to the next with the
-count unchanged"* (the `b7` round of `bugs/FORMAL_sweep_work_map.md` §3). This tool
+count unchanged"* (`bugs/FORMAL_sweep_work_map_2026-10-02_b7.md` §3). This tool
 measures the rest of the chain, one link per round.
 
 WHAT IT DOES, per round
@@ -19,9 +19,8 @@ WHAT IT DOES, per round
    example file and the message for each group;
 3. replaces one refusing module — the first in sorted-path order that names a
    file this tool may rewrite, so the walk is deterministic — in a THROWAWAY COPY
-   of the stdlib with a stub that exports one function, and replaces the import
-   lines naming it with `pass`, so its re-exports stop being what the next round
-   reports and the copy still parses (`stubbed_import_edit`);
+   of the stdlib with a stub that exports one function, and drops the import
+   lines naming it, so its re-exports stop being what the next round reports;
 4. asks again.
 
 WHICH MODULE REFUSED
@@ -60,34 +59,16 @@ than the next link in the chain. The tell is a group's count moving when a
 DIFFERENT group was stubbed, and `round N:` prints every group, so a reader sees
 it. Links measured before that starts are the ones worth acting on.
 
-THE LIMIT HAS A LOUD FORM, and the walk stops on it rather than reporting it
-------------------------------------------------------------------------
-Neutering is a source edit, and an edit can leave the copy unparseable — which is
-the least readable way available for the walk to announce that its own stub is
-what it is measuring. The shape is a PARENTHESISED import spanning lines:
-`from .primitives import (` is one line the walk's pattern matches, and the
-names under it are on the lines after it, so dropping that line leaves them at an
-indentation no header introduces. Measured on the 46-file
-`std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu}` scope, where round 3
-answered `build: 32:0: Unexpected INDENT('')` for 43 of 46 files — and
-`parsing_floats.mojo:32`, the file that stopped the walk, is the tail of a
-`from .constants import (` whose head had been dropped.
-
-**It is the only shape, and the other one this doc used to name is not one.**
-An import that is the *only statement* of an indented block can be deleted with
-no consequence at all: `fire_compiler.py::_parse_block` substitutes a
-`PassStmt` for an empty suite rather than refusing it (*"Empty block:
-comment-only body produces DEDENT with no INDENT"*), measured over a module-level
-`if`, a `try` arm, a function body, a `struct` body, a `while` and a `for`. So
-the repair is one mechanism and not two — `stubbed_import_edit` REPLACES the
-import, all of it including the continuation lines, with `pass`, which is that
-very `PassStmt` spelled out; it introduces no construct this dialect does not
-already lower, and it keeps the two shapes on one code path.
-
-`mangled_copy` stays, because it is what makes a real parse error loud instead of
-a silent hole: such a round is counted as unmeasurable, the stop message names the
-first file and quotes the parser, and nothing measured up to that round is
-discarded.
+The limit has a LOUD form, and the walk stops on it rather than reporting it.
+Dropping an import line from a file whose only use of the name was the only
+statement in an indented block leaves that block empty, and the next build
+reports a parse error for that file — which every file importing it then reports
+too. Measured on the 46-file `std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu}`
+scope, round 4 answered `build: 32:0: Unexpected INDENT('')` for all 42
+remaining files. That is one mangled file, not 42 files refusing a construct,
+and `mangled_copy` says so: such a round is counted as unmeasurable, the stop
+message names the first file and quotes the parser, and nothing measured up to
+that round is discarded.
 
 THE STDLIB IS ONLY EVER READ
 ----------------------------
@@ -107,13 +88,7 @@ which is reported per path.
 """
 
 import argparse
-# `collections` was imported here and read NOTHING through it, so it was
-# one of the `collections` row's blocked files for the reason an absent
-# module would be — a dead import blocks a file exactly as hard as a
-# missing one and costs the same. `tools/formal_host_import_shapes.py`
-# reads it as `DEAD` and `formal_sweep_causes.py`'s `mentions` column is
-# the older measure of the same thing; see
-# `bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §3.
+import collections
 import os
 import pathlib
 import re
@@ -147,14 +122,12 @@ _CHAIN_PREFIX_RE = re.compile(r"([\w./]+\.mojo): ")
 _EXPORT_GATE_RE = re.compile(r"is imported from `([^`]+)`")
 
 # A message that says the COPY no longer parses, which is this tool's own edit
-# and not a link in the chain. `stubbed_import_edit` below is what keeps the
-# stub step from doing this; this is what makes it loud if it happens anyway —
-# dropping a `from … import (` line from a parenthesised import leaves the names
-# under it at an indentation no header introduces, and every file importing the
-# mangled one reports the parser's complaint in its own build. Measured on the
-# 46-file `std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu}` scope (round 3):
-# 43 of 46 files reported `build: 32:0: Unexpected INDENT('')`, which is not 43
-# files hitting one construct — it is one mangled file and 42 files that import
+# and not a link in the chain. Dropping a `from … import …` line from a file
+# whose only use of it was inside an indented block leaves the block with nothing
+# in it, and the next build says so. Measured on the 46-file
+# `std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu}` scope (round 4): all 42
+# remaining files reported `build: 32:0: Unexpected INDENT('')`, which is not 42
+# files hitting one construct — it is one mangled file and 41 files that import
 # it.
 _MANGLED_COPY_RE = re.compile(
     r"Unexpected INDENT|IndentationError|unexpected indent|expected an indented"
@@ -171,93 +144,6 @@ def mangled_copy(msg) -> bool:
     itself in the least readable way available.
     """
     return bool(_MANGLED_COPY_RE.search(msg or ""))
-
-
-# What a dropped import is replaced with. `pass` is a statement of this Mojo
-# dialect (`fire_compiler.py::_parse_pass` → `PassStmt`, lowered to nothing by
-# both formal codegens and by `formal/model.py`) and it is exactly what
-# `_parse_block` inserts for an empty suite, so the substitution cannot introduce
-# a construct the tree does not already answer for. `var _x: Int = 0` would have
-# parsed in most of the copy and lowered nowhere useful — a field with an
-# initialiser is not legal in every struct/trait body the stdlib contains.
-NEUTRALISED = "pass"
-
-
-def _bracket_delta(line):
-    """Net unclosed brackets in `line`, ignoring comments and quoted spans.
-
-    A count and not a parse: the only question is whether an import line's
-    bracket list continues onto the lines after it. A string or a comment on the
-    line may hold brackets that never close, and reading those as structure is
-    how a substitution ends up eating the rest of a file.
-    """
-    depth = 0
-    i, n = 0, len(line)
-    while i < n:
-        ch = line[i]
-        if ch == "#":
-            break
-        if ch in "\"'":
-            quote = line[i:i + 3] if line[i:i + 3] in ('"""', "'''") else ch
-            i += len(quote)
-            while i < n:
-                if line[i] == "\\":
-                    i += 2
-                    continue
-                if line.startswith(quote, i):
-                    i += len(quote)
-                    break
-                i += 1
-            continue
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            depth -= 1
-        i += 1
-    return depth
-
-
-def stubbed_import_edit(src, pat):
-    """`src` with every import line matching `pat` replaced by `pass`.
-
-    Returns `(new_src, n_replaced)`. This is the stub step's whole edit to the
-    copy, and it is a REPLACEMENT rather than a deletion because deleting is what
-    broke it: a parenthesised `from x import (` is one line the pattern matches
-    and the names under it are on the lines after it, so the deletion leaves them
-    at an indentation no header introduces (`build: 32:0: Unexpected INDENT('')`
-    for 43 of 46 files, measured — see this module's docstring).
-
-    `pass` is the substitution because it is this dialect's own answer for a
-    statement that is not there any more (`_parse_block` returns `[PassStmt()]` for
-    an empty suite), so it parses at every scope and lowers to nothing, and one
-    mechanism covers both shapes the edit can take.
-
-    A line inside a docstring that happens to match `pat` is replaced too —
-    harmless, since the text is inside a string either way, and it was already
-    being dropped before.
-    """
-    lines = src.split("\n")
-    out = []
-    i = 0
-    replaced = 0
-    while i < len(lines):
-        line = lines[i]
-        if not pat.match(line):
-            out.append(line)
-            i += 1
-            continue
-        # One LOGICAL line: an import whose bracket list is still open at the end
-        # of its own line continues below, and leaving those lines behind is the
-        # measured parse error.
-        last = i
-        depth = _bracket_delta(line)
-        while depth > 0 and last + 1 < len(lines):
-            last += 1
-            depth += _bracket_delta(lines[last])
-        out.append(line[: len(line) - len(line.lstrip())] + NEUTRALISED)
-        replaced += 1
-        i = last + 1
-    return "\n".join(out), replaced
 
 
 def _resolve_module(name, importer, probe):
@@ -522,13 +408,13 @@ def main() -> int:
                          + r"\b.*$")
         dropped = 0
         for p in probe.rglob("*.mojo"):
-            src = p.read_text()
-            new, n = stubbed_import_edit(src, pat)
-            if n:
-                p.write_text(new)
+            lines = p.read_text().split("\n")
+            keep = [l for l in lines if not pat.match(l)]
+            if len(keep) != len(lines):
+                p.write_text("\n".join(keep))
                 dropped += 1
-        print(f"  stubbed {victim} ({len(stubbed)} file(s)) and replaced "
-              f"import lines in {dropped} file(s); next round")
+        print(f"  stubbed {victim} ({len(stubbed)} file(s)) and dropped "
+              f"import lines from {dropped} file(s); next round")
 
     for path, msg in crashed:
         print(f"BACKEND-CRASH: {path}  (the backend raised, which is a finding "

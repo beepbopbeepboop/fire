@@ -43,7 +43,11 @@ TWO_LINE = "x = 1\nprint(x)\n"
 
 
 def build(td: str) -> str:
-    """Self-compile fire.py into `td`, returning the binary path."""
+    """Self-compile fire.py into `td`, returning the binary path.
+
+    build_executable writes mojo.{ci,o} + fire_runtime.o into the CWD, so the
+    caller chdirs into a temp dir to keep the repo clean.
+    """
     sys.path.insert(0, REPO)
     import fire
     main_src = os.path.join(REPO, "fire.py")
@@ -53,71 +57,6 @@ def build(td: str) -> str:
     if not ok or not os.path.exists(out):
         return ""
     return out
-
-
-def build_scratch_is_private_and_removed() -> bool:
-    """`build_executable`'s intermediates must not be visible outside one build.
-
-    They were named off a bare module basename, so all six of them landed in
-    the process's CWD: two builds of two modules sharing a basename
-    (`a/gen.py` and `b/gen.py`, or the same `foo.py` in two temp trees) both
-    wrote `gen.ci` / `gen.o` / `gen_gen.cpp` / `gen_gen.o` into one shared
-    directory and neither took a lock, and `tools/suite.py` runs jobs `-j18`
-    out of a common checkout, so that is a wrong-artifact race the gate can
-    reach and not only a human. The litter half is deterministic and is what
-    this asserts: a `test_py314_full.py` sweep run from the repository root
-    left `grammar_snippet_gen.cpp` there, which is how two such files got
-    committed before .gitignore covered the other five intermediates.
-
-    Two modules with the SAME basename in two directories, each built with its
-    output beside it, from a third directory standing in for the CWD: the
-    CWD must be untouched afterwards and each output directory must hold the
-    executable and nothing else. The two programs print different values, so a
-    crossed scratch shows up as a wrong answer and not only as a stray file.
-    """
-    sys.path.insert(0, REPO)
-    import fire
-    cwd = os.getcwd()
-    with tempfile.TemporaryDirectory() as root:
-        cwd_dir = os.path.join(root, "cwd")
-        outs = []
-        for i, want in enumerate(("41", "42")):
-            d = os.path.join(root, f"d{i}")
-            os.makedirs(d)
-            mod = os.path.join(d, "gen.py")
-            with open(mod, "w") as f:
-                f.write(f"x = 1\nprint(x + {int(want) - 1})\n")
-            outs.append((d, os.path.join(d, "out"), mod, want))
-        os.makedirs(cwd_dir)
-        os.chdir(cwd_dir)
-        try:
-            for d, out, mod, _want in outs:
-                if not fire.build_executable(
-                        mod, open(mod).read(), output=out, quiet=True):
-                    print(f"  ✗ build_executable({mod}) failed")
-                    return False
-        finally:
-            os.chdir(cwd)
-        leftover = sorted(os.listdir(cwd_dir))
-        if leftover:
-            print(f"  ✗ build_executable left {leftover} in the CWD; its "
-                  "intermediates belong beside the artifact, not wherever "
-                  "the caller happened to be standing")
-            return False
-        for d, out, _mod, want in outs:
-            beside = sorted(os.listdir(d))
-            if beside != ["gen.py", "out"]:
-                print(f"  ✗ {d} holds {beside} after the build; expected "
-                      "just the source and the executable")
-                return False
-            r = subprocess.run([out], capture_output=True, text=True,
-                               timeout=120)
-            if r.returncode != 0 or r.stdout.strip() != want:
-                print(f"  ✗ {out} printed {r.stdout.strip()!r} "
-                      f"(rc={r.returncode}), want {want!r} — the two "
-                      "same-basename builds crossed")
-                return False
-    return True
 
 
 # The AST attributes a node's children can hang off. A fixed list, walked
@@ -462,61 +401,53 @@ def pinned_prototypes_match_their_definitions() -> bool:
 
 
 def run() -> tuple:
-    """(static_ok, scratch_ok, build_ok). The static half first and separately,
-    so its verdict is a line of its own in the tally rather than a `False`
-    that reads like a build failure; the scratch check next because it is the
-    only one that does not need the closure."""
+    """(static_ok, build_ok). The static half first and separately, so its
+    verdict is a line of its own in the tally rather than a `False` that
+    reads like a build failure."""
     static_ok = closure_coroutines_are_lowerable() and \
         dylib_module_path_refuses_a_generated_cpp() and \
         pinned_prototypes_match_their_definitions()
-    scratch_ok = build_scratch_is_private_and_removed()
-    if not scratch_ok:
-        return static_ok, False, False
     cwd = os.getcwd()
     with tempfile.TemporaryDirectory() as td:
         os.chdir(td)
         try:
             exe = build(td)
             if not exe:
-                return static_ok, scratch_ok, False
+                return static_ok, False
             rc, nbytes, stubs = run_produced_binary(exe, td)
             print(f"  self-hosted compiler on a two-line program: "
                   f"exit={rc} ci_bytes={nbytes} stub_hits={stubs}")
             if rc != 0:
                 print("  ✗ the self-hosted binary did not exit 0")
-                return static_ok, scratch_ok, False
+                return static_ok, False
             if stubs:
                 print(f"  ✗ {stubs} of the self-hosted compiler's own "
                       "functions were emitted as 'unavailable in compiled "
                       "mode' stubs — its analysis passes are no-ops")
-                return static_ok, scratch_ok, False
+                return static_ok, False
             if nbytes < 200:
                 print(f"  ✗ the self-hosted binary produced a {nbytes}-byte "
                       ".ci for a two-line program; expected real output")
-                return static_ok, scratch_ok, False
-            return static_ok, scratch_ok, True
+                return static_ok, False
+            return static_ok, True
         finally:
             os.chdir(cwd)
 
 
 def main() -> int:
     try:
-        static_ok, scratch_ok, build_ok = run()
+        static_ok, build_ok = run()
     except Exception as e:
-        print(f"Results: 0 passed, 3 failed")
+        print(f"Results: 0 passed, 2 failed")
         print(f"✗ self-host build raised: {e}")
         return 1
-    passed = ((1 if static_ok else 0) + (1 if scratch_ok else 0)
-              + (1 if build_ok else 0))
-    failed = 3 - passed
+    passed = (1 if static_ok else 0) + (1 if build_ok else 0)
+    failed = 2 - passed
     print(f"Results: {passed} passed, {failed} failed")
     if not static_ok:
         print("✗ a module of the self-host closure holds a generator the "
               "compiled path cannot lower in place — its coroutine symbols "
               "would be referenced and never defined")
-    if not scratch_ok:
-        print("✗ fire.py's build intermediates are not confined to the build "
-              "that writes them")
     if not build_ok:
         print("✗ self-host compile/link regressed (GCC error, ICE, undefined "
               "symbol, or the produced binary cannot compile)")

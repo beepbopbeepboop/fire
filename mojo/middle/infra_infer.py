@@ -18,27 +18,24 @@ from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.types import _struct_value_codes  # underscore name: `import *` won't carry it
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
-# NO module-level `import gimple_codegen` here: nothing in this file reads
-# anything from it (the import's comment claimed "constants used by some
-# extracted helpers"; the only two mentions left are prose, at `_lower_slice`'s
-# chase note and in `_local_field_types`'s docstring). THIS module was the one
-# edge that made the middle tier unreachable-first — `gimple_codegen` imports
-# the whole `mojo/backend_gimple/*` tier at its own top level
-# (gimple_codegen.py:738) and `mojo/backend_gimple/emit_infra.py` reads `_FC_SEP`
-# and friends back out of THIS module at its top level, so entering through any
-# middle module ran `gimple_codegen` -> the backend -> back into a half-built
-# `infra_infer`:
+# NO top-level `import gimple_codegen` here, and that is the layering rule
+# rather than an omission. This module was the one edge that made the middle
+# tier unreachable-first: it sat above `gimple_codegen`, which imports the whole
+# `mojo/backend_gimple/*` tier at its own top level (gimple_codegen.py:738),
+# and `mojo/backend_gimple/emit_infra.py` reads `_FC_SEP` and friends back out
+# of THIS module at its top level -- so entering through any middle module ran
+# `gimple_codegen` -> the backend -> back into a half-built `infra_infer`:
 #
 #   ImportError: cannot import name '_FC_SEP' from partially initialized
 #   module 'mojo.middle.infra_infer' (most likely due to a circular import)
 #
-# Only `test_suite.py`'s declared exemption list kept that from being a red. A
-# middle module that does need something from `gimple_codegen` imports it at its
-# USE SITE, which is what `mojo/backend_gimple/module_gen.py:6727` and `:9368`
-# already do for this very module and what `mojo/middle/types.py` does for the
-# same reason. The rule in full, and why a function-local `import X` survives
-# where `from X import NAME` cannot, is in
-# `mojo/middle/methods_shared.py`'s header comment.
+# The import used to carry the comment "constants used by some extracted
+# helpers"; no code here read one (the only two mentions of the module left are
+# prose in comments, at `_lower_slice`'s chase note and in `_local_field_types`'s
+# docstring), so it was pure cycle. A middle module that needs something from
+# `gimple_codegen` imports it at its USE SITE, which is what
+# `mojo/backend_gimple/module_gen.py:6727` and `:9368` already do for this very
+# module, and what `mojo/middle/types.py` does for the same reason.
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes

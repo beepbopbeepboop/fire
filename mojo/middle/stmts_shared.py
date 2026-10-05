@@ -15,18 +15,15 @@ import mlir
 from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
-# NO module-level `import gimple_codegen` here: nothing in this file reads
-# anything from it. The edge middle-tier -> `gimple_codegen` (which imports the
-# whole `mojo/backend_gimple/*` tier at its own top level, gimple_codegen.py:738)
-# -> that tier reading THIS module back at ITS top level is an import CYCLE, and
-# only `test_suite.py`'s declared exemption list was hiding it — a process
-# entering through a middle module met a half-built module and an ImportError
-# about a name in it, a long way from the edge that closed the loop. A middle
-# module that does need something from `gimple_codegen` imports it at its USE
-# SITE, the shape `mojo/backend_gimple/module_gen.py:6727` already uses for
-# `mojo/middle/infra_infer.py`. The rule in full, and why a function-local
-# `import X` survives where `from X import NAME` cannot, is in
-# `mojo/middle/methods_shared.py`'s header comment.
+# NO top-level `import gimple_codegen`: `gimple_codegen` imports the whole
+# `mojo/backend_gimple/*` tier at its own top level (gimple_codegen.py:738),
+# and that tier reads this module back at ITS top level, so a top-level
+# import here means this module cannot be a process's first `mojo.*`
+# import. Nothing in this file read one (the import's comment claimed
+# "constants used by some extracted helpers" and there were none), so
+# deleting it breaks no reference. A middle module that does need
+# something from `gimple_codegen` imports it at its USE SITE, the shape
+# `mojo/backend_gimple/module_gen.py:6727` uses for this same module.
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes

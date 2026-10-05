@@ -405,237 +405,6 @@ CASES = [
      "    print(\"v:\", a, b)\n"
      "    return 0\n",
      "v: 5 6\n"),
-    # ── a LIST OF LISTS: the element word is itself a blob ──
-    #
-    # `len()` OF A SUBSCRIPT OF A LIST OF LISTS was a REFUSAL on both
-    # architectures — "len(inner) is len() of a value classified as 'int', and an
-    # integer has no length" — until `formal/model.py::_list_literal_elem_kind`
-    # landed (2026-10-05). The cause was that the kind table FLATTENED a blob
-    # layout it nests: `rows` classified as a bare `list`, so `rows[0]`'s kind
-    # was `list_elem_kind("list")` = None, and the name the subscript was bound
-    # to fell to this file's own "a word is an integer" default — about a blob
-    # whose count field was sitting at offset 0 of a live heap address. The doc
-    # that measured it is deleted with its fix; this row is what it left behind.
-    #
-    # `expected` is what CPython prints, so the row cannot be pinned to a wrong
-    # number: the old failure mode for this construct was a plausible number,
-    # which is exactly what a hardcoded expectation would have hidden.
-    ("a_subscript_of_a_list_of_lists_is_a_blob",
-     "def main(n):\n"
-     "    var rows = [[1, 2], [3, 4]]\n"
-     "    var inner = rows[0]\n"
-     "    print(\"n:\", len(inner), \"v:\", inner[1])\n"
-     "    return 0\n",
-     "n: 2 v: 2\n"),
-    # The NESTED SUBSCRIPT straight into `print`, which the same doc measured as
-    # a second refusal ("cannot tell whether SubscriptExpr is a string or a
-    # number") and which is the reason that doc's "Why the corpus does not
-    # generate it" section had to route the corpus's read through a second
-    # local: `print(R[0][1])` needs `kind_of` to reach the element's element
-    # twice, and it now does.
-    ("a_nested_subscript_of_a_list_of_lists_is_a_number",
-     "def main(n):\n"
-     "    var R = [[1, 2], [3, 4]]\n"
-     "    print(\"v:\", R[0][1], R[1][0])\n"
-     "    return 0\n",
-     "v: 2 3\n"),
-    # The MODULE-GLOBAL spelling of the same literal, which is a DIFFERENT
-    # reader (`formal/model.py::global_slot_kind` →
-    # `container_literal_elem_kind`) and refused identically before the change.
-    # Two readers of one question is the defect this repository keeps paying
-    # for, so it is a row rather than a comment.
-    ("a_module_global_list_of_lists_subscript_is_a_blob",
-     "L = [[1, 2], [3, 4]]\n"
-     "\n"
-     "def main(n):\n"
-     "    var inner = L[0]\n"
-     "    print(\"n:\", len(inner), \"v:\", L[1][0])\n"
-     "    return 0\n",
-     "n: 2 v: 3\n"),
-    # A TUPLE of tuples, so the rule is not a list-literal special case: the
-    # blob layout is `[count][e0][e1]` for all three container literals.
-    ("a_subscript_of_a_tuple_of_tuples_is_a_blob",
-     "def main(n):\n"
-     "    var t = ((1, 2), (3, 4))\n"
-     "    print(\"n:\", len(t[0]), \"v:\", t[1][0])\n"
-     "    return 0\n",
-     "n: 2 v: 3\n"),
-    # And THREE deep, which is what makes it a rule about the LAYOUT rather
-    # than about one subscript: the kind is `list:list:list:int` and every
-    # reader peels one element at a time.
-    ("a_subscript_of_a_list_of_lists_of_lists_is_a_blob",
-     "def main(n):\n"
-     "    var r = [[[1, 2]], [[3, 4]]]\n"
-     "    print(\"n:\", len(r[0][0]), \"v:\", r[0][0][1])\n"
-     "    return 0\n",
-     "n: 2 v: 2\n"),
-    # ── the OTHER TWO walks that yield one thing per count ──
-    #
-    # The `for`-in walk and the membership needle both ask
-    # `model.walk_stride` whether the container is a dict pair blob, and both
-    # were fixed together when `for k in d` read `k0, v0, k1` (the
-    # `FIXED_CASES` group "walking a DICT, which is not walking a list").  A
-    # comprehension generator and a `*` splice yield one thing per count in
-    # exactly the same way and were hardcoded to the ELEMENT stride on both
-    # backends, so they read the same `k0, v0, k1` and exited 0.
-    #
-    # **These are ORACLE rows and the reason is the measurement.**  The count of
-    # the result was RIGHT: three PAIRS and three WORDS are the same number, so
-    # `len([k for k in d])` answered 3 and agreed with CPython on the buggy
-    # program.  What disagreed was the CONTENT, and a suite that measured only
-    # the count — which is what `tools/formal_fuzz.py`'s `dict_comp_count`
-    # family did, over 100-program sweeps — cannot see a content defect at all.
-    # So the observations below are `for` loops over the RESULT, not its `len`.
-    #
-    # Keys and values differ by magnitude in every table, so a value cannot pass
-    # for a key: the buggy walk printed `1` in the second column.
-    ("comprehension_over_a_dict_yields_keys_not_values",
-     "def main(n):\n"
-     "    var d = {10: 100, 20: 200, 30: 300}\n"
-     "    var ks = [k for k in d]\n"
-     "    for k in ks:\n"
-     "        print(\"k:\", k)\n"
-     "    return 0\n",
-     "k: 10\nk: 20\nk: 30\n"),
-    # The same walk ACCUMULATED, which is the shape that turns a read value
-    # into a wrong number rather than a wrong line.
-    ("comprehension_over_a_dict_sums_the_keys",
-     "def main(n):\n"
-     "    var d = {10: 100, 20: 200, 30: 300}\n"
-     "    var s = 0\n"
-     "    var ks = [k for k in d]\n"
-     "    for k in ks:\n"
-     "        s = s + k\n"
-     "    printf(\"s=%d\", s)\n"
-     "    return 0\n",
-     "s=60"),
-    # A CONDITION on the generator, which is where the wrong stride is not even
-    # a wrong ANSWER to the count: it filters a word sequence that alternates
-    # keys and values, so the rejection decision is made about values too and
-    # the result can be short by more than one.  Measured before the fix on both
-    # architectures: `2` where CPython prints `2` is the lucky case, and
-    # `{10: 1, 20: 2, 30: 3}` with `k > 15` answered `len` 1 and iterated
-    # `[20]` — one of the two keys it should have kept.
-    ("comprehension_over_a_dict_with_a_condition_keeps_every_key",
-     "def main(n):\n"
-     "    var d = {10: 100, 20: 200, 30: 300}\n"
-     "    var ks = [k for k in d if k > 15]\n"
-     "    var s = 0\n"
-     "    for k in ks:\n"
-     "        s = s + k\n"
-     "    printf(\"n=%d s=%d\", len(ks), s)\n"
-     "    return 0\n",
-     "n=2 s=50"),
-    # A DICT comprehension over the same iterable: the generator walk is the
-    # same code and the result is a pair blob, so a fix that taught only the
-    # LIST comprehension's arm would leave this one reading values.
-    ("dict_comprehension_over_a_dict_yields_every_key",
-     "def main(n):\n"
-     "    var d = {10: 100, 20: 200, 30: 300}\n"
-     "    var e = {k: 1 for k in d}\n"
-     "    for k in e:\n"
-     "        print(\"k:\", k)\n"
-     "    return 0\n",
-     "k: 10\nk: 20\nk: 30\n"),
-    # The `*` splice, whose loop is a different emitter entirely
-    # (`_emit_star_splice`) with the same one-thing-per-count contract.
-    ("star_splice_of_a_dict_yields_keys_not_values",
-     "def main(n):\n"
-     "    var d = {10: 100, 20: 200, 30: 300}\n"
-     "    var xs = [*d]\n"
-     "    var s = 0\n"
-     "    for x in xs:\n"
-     "        s = s + x\n"
-     "    printf(\"n=%d s=%d\", len(xs), s)\n"
-     "    return 0\n",
-     "n=3 s=60"),
-    # A dict that arrives as an ANNOTATED PARAMETER, where the pair-ness is
-    # stated by the signature and not by any binding statement in the function
-    # that walks it — the shape `_is_dict_subscript`'s `ValueKinds` arm exists
-    # for, and the one where a fix that only taught the literal case would pass
-    # every row above.
-    ("comprehension_over_a_dict_parameter_yields_every_key",
-     "def keys(d: dict):\n"
-     "    var ks = [k for k in d]\n"
-     "    var s = 0\n"
-     "    for k in ks:\n"
-     "        s = s + k\n"
-     "    return s\n"
-     "\n"
-     "def main(n):\n"
-     "    printf(\"s=%d\", keys({10: 100, 20: 200, 30: 300}))\n"
-     "    return 0\n",
-     "s=60"),
-    # A STRING-keyed dict, and it is HERE rather than in `REFUSALS` because the
-    # rule is now the same one a `for`-in target goes through.  `for k in
-    # {"ab": 1, "cde": 2}` binds a STRING (`model._iterable_dict_key_kind`
-    # reads the keys out of the literal) and a comprehension's target asked
-    # `_kind_of_simple`, which classifies a LITERAL and has no arm for a name —
-    # so `[k for k in d]`'s result classified as the bare `list`, the walk over
-    # it fell back to "a word is an integer", and `len(k)` was refused with
-    # "an integer has no length" about a string the source plainly wrote, on both
-    # architectures.  The kind is now asked in the comprehension's OWN generator
-    # scope (`ValueKinds.kind_of`'s `Comprehension` arm, over
-    # `comprehension_generator_scopes`), which is where the names its element
-    # mentions are bound; the generator scope already said `str`, and the loss
-    # was on the way out.  An ORACLE row because `len(k)` over string keys is a
-    # construct CPython runs verbatim: 2 then 3.
-    ("comprehension_over_a_string_keyed_dict_binds_a_string_target",
-     "def main(n):\n"
-     "    var d = {\"ab\": 100, \"cde\": 200}\n"
-     "    var ks = [k for k in d]\n"
-     "    for k in ks:\n"
-     "        print(\"n:\", len(k))\n"
-     "    return 0\n",
-     "n: 2\nn: 3\n"),
-    # The second-order shape the doc filed separately and this fix covers too,
-    # because the rule is about the ITERABLE and not about the container's
-    # spelling: `{k: 1 for k in d}` builds a pair blob, and the walk over THAT
-    # has to bind the same string.  It was not reachable by fixing the literal
-    # comprehension's arm alone, and it is the row that says so.
-    ("dict_comprehension_over_a_string_keyed_dict_binds_a_string_target",
-     "def main(n):\n"
-     "    var d = {\"ab\": 100, \"cde\": 200}\n"
-     "    var e = {k: 1 for k in d}\n"
-     "    for k in e:\n"
-     "        print(\"n:\", len(k))\n"
-     "    return 0\n",
-     "n: 2\nn: 3\n"),
-    # The control that says the scope is not over-reaching: an element that is
-    # NOT the generator's own target still classifies as itself, and a
-    # comprehension over a list of ints is still `list:int` rather than the bare
-    # `list` the string-keyed shape used to produce.
-    ("a_comprehension_element_that_is_not_a_target_keeps_its_own_kind",
-     "def main(n):\n"
-     "    var xs = [10, 20, 30]\n"
-     "    var ys = [x + 1 for x in xs]\n"
-     "    printf(\"n=%d s=%d\", len(ys), ys[0] + ys[2])\n"
-     "    return 0\n",
-     "n=3 s=42"),   # 11 + 31
-    # A LIST is the control for all three walks, and it is what a fix that moved
-    # the stride unconditionally to the pair would break: the walk over a
-    # one-word-per-count blob steps one word, and at the pair stride this reads
-    # past the end of the table into whatever the frame holds next.
-    ("comprehension_over_a_list_still_steps_one_word",
-     "def main(n):\n"
-     "    var xs = [10, 20, 30]\n"
-     "    var ks = [k for k in xs]\n"
-     "    var s = 0\n"
-     "    for k in ks:\n"
-     "        s = s + k\n"
-     "    printf(\"n=%d s=%d\", len(ks), s)\n"
-     "    return 0\n",
-     "n=3 s=60"),
-    ("star_splice_of_a_list_still_steps_one_word",
-     "def main(n):\n"
-     "    var xs = [10, 20, 30]\n"
-     "    var ys = [*xs]\n"
-     "    var s = 0\n"
-     "    for y in ys:\n"
-     "        s = s + y\n"
-     "    printf(\"n=%d s=%d\", len(ys), s)\n"
-     "    return 0\n",
-     "n=3 s=60"),
     # The CONSERVATIVE DIRECTION of the return-less refusal, and the row that
     # says the evidence is about a NAME and not about a function: `v` is bound to
     # a call that produces no value and then to a number, so it holds the number
@@ -1413,88 +1182,15 @@ MODULE_GLOBAL_CASES = [
 
 # (name, source, needle the refusal must contain)
 #
-# AGREE-OR-REFUSE, and the two rows are now TWO DIFFERENT REFUSALS rather than
-# one — which is what their needles are for, because they are the two halves of
-# the split and a rule that answered either shape with the other's message would
-# pass the looser of the pair.
-#
-#   * `one_name_two_candidate_structs`: the NAME holds a different frame on each
-#     path that binds it and only ONE candidate declares a dunder, so which call
-#     the comparison lowers to depends on the path and this analysis has no path
-#     sensitivity. The needle is that clause.
-#   * `two_structs_only_one_with_a_dunder`: each name is bound ONCE and to a
-#     single struct, so there is no path to be insensitive to and that clause
-#     was FALSE about this program. The real reason is CPython's REFLECTED
-#     dispatch — it asks the RIGHT operand's `__eq__` when the left one's returns
-#     `NotImplemented`, and this path has no representation for `NotImplemented`
-#     to be returned as — so the needle is that. The message also says the old
-#     advice could not have worked ("giving both structs a `__eq__` will not
-#     either: two owners is the case that refuses").
-#
-# **The pre-change tree answered `cross_struct` with a flag-setting compare of
-# two addresses and NO DIAGNOSTIC**, and that was a wrong answer rather than an
-# absent one; the refusal above replaced it, and its REASON was a half-written
-# paragraph until 2026-10-05 — it told a reader to "give each name one binding,
-# or give every candidate the same `__eq__`", neither of which can fix a program
-# whose names are already bound once each. See
-# `bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md`.
+# AGREE-OR-REFUSE, and both of these are the shape the rule exists for: the
+# name holds a different frame on each path that binds it, and only ONE of the
+# candidates declares a dunder, so which call the comparison lowers to depends
+# on the path and this analysis has no path sensitivity.  The pre-change tree
+# answered both of them with a flag-setting compare of two addresses and no
+# diagnostic — and for `cross_struct` that was a wrong answer, because CPython
+# asks the RIGHT operand's `__eq__` when the left one's returns NotImplemented,
+# and this path has no representation for NotImplemented to be returned as.
 REFUSALS = [
-    # THE GENERAL RULE, with NO module-level binding of the name anywhere, and
-    # its sibling two entries below this list apart is the case where there IS
-    # one (`a_local_read_before_its_first_assignment_is_refused`, which reads the
-    # module's `G`).  Both are here because they are two DIFFERENT rules and a
-    # test that pins only the narrower one cannot tell which of them fired: the
-    # narrow rule's message names the module-level binding and the general one's
-    # does not, so this case's needle is a clause the narrow message does not
-    # contain.
-    #
-    # It is the case that was open for years as a QUESTION rather than a defect:
-    # a syntactic scan measured the general rule at 233 sites in 57 files and
-    # concluded that enforcing it was "a coverage cost of a different order
-    # from the one site the module-global rule fixes", so only the narrow rule
-    # shipped. That scan was a FLOOR produced by a different, weaker algorithm:
-    # the rule is
-    # enforced by `formal/model.py::read_before_store`, a "definitely stored"
-    # FIXPOINT over the function's CFG, so a store in every arm of a conditional
-    # dominates a read and no syntactic ordering can see that. Measured on this
-    # tree 2026-10-05 through `formal/build.py::_unstored_read` — the
-    # implementation's own reader, not a re-derivation — over the 975 functions
-    # of `formal/hostmods/`, the modules the gate compiles: **0 findings**, and
-    # the sweep's ranked-cause table has no read-before-store row at three files
-    # or more. `test_formal_read_before_store.py` now reports that number as a
-    # case so it cannot rot silently, which is what the old figure did.
-    #
-    # The message matters as much as the refusal: it says CPython raises
-    # `UnboundLocalError` for this program, and it says WHY this path cannot
-    # (the allocator gives `x` a home because the function assigns it somewhere,
-    # and the image has no way to mean "unbound"). A refusal that named only the
-    # local would be a sentence about register allocation for what is a
-    # statement about the language.
-    ("a_local_read_before_its_first_store_is_refused_with_no_module_binding",
-     "def bump(n):\n"
-     "    x = x + n\n"
-     "    return x\n"
-     "\n"
-     "def main(n):\n"
-     "    printf(\"r=%d\", bump(n))\n"
-     "    return 0\n",
-     "before anything in this function stores it"),
-    # …and the same rule at a position that is neither a `return` nor an
-    # assignment's right-hand side, because the analysis is a dominance question
-    # over the CFG and a rule that only fired on straight-line code would have
-    # been the syntactic scan all over again. `p` is stored in ONE arm of the
-    # `if` and read in the `print` below it: CPython raises whenever `n` is
-    # falsey, and the read is the only use of the name.
-    ("a_local_read_in_one_arm_then_read_after_the_if_is_refused",
-     "def pick(n):\n"
-     "    if n > 2:\n"
-     "        p = n * 2\n"
-     "    print(p)\n"
-     "    return 0\n"
-     "\n"
-     "def main(n):\n"
-     "    return pick(n)\n",
-     "before anything in this function stores it"),
     # A `DType`-ANNOTATED FRAME SLOT is a TYPE, and the kind table now says so.
     # `S` has ONE field, so `self` IS `self.d` (`one_word_receiver_kind`), and
     # `len(self)` is `len()` of a type tag. Before the `DType` row this was
@@ -1627,10 +1323,7 @@ REFUSALS = [
      "        v = B(1, 2, 3)\n"
      "    printf(\"r=%d\", 1 if v == v else 0)\n"
      "    return 0\n",
-     # The PATH-SENSITIVITY clause, and it is this row's needle rather than the
-     # shared opening one because the two rows here share that opening and the
-     # SPLIT is what this pair exists to pin.
-     "no path sensitivity to say which one is live at"),
+     "compares two FRAME ADDRESSES"),
     ("two_structs_only_one_with_a_dunder_is_refused",
      "class A:\n"
      "    x: int\n"
@@ -1655,13 +1348,7 @@ REFUSALS = [
      "    var b = B(1, 2, 3)\n"
      "    printf(\"r=%d\", 1 if a == b else 0)\n"
      "    return 0\n",
-     # The REFLECTED DISPATCH, which is the real reason and which the message
-     # did not say until 2026-10-05. `NotImplemented` is the load-bearing word
-     # behind it: it is the third answer a dunder needs, it has no
-     # representation on this path, and a message naming anything else would be
-     # telling the reader to change the bindings of a program whose bindings are
-     # already right.
-     "CPython's REFLECTED dispatch"),
+     "does not settle it"),
     # A NAME THAT STOPS BEING A FRAME.  The holder set is additive — nothing
     # ever removes a name from it — so `r = 5` after `r = R()` leaves every
     # `r.<field>` lowered as a load at `[5 + 8·slot]`.  Measured on both
@@ -1943,14 +1630,6 @@ REFUSALS = [
      "    print(\"v:\", a)\n"
      "    return 0\n",
      "cannot tell whether IdentExpr"),
-    # NOT HERE: `a_comprehension_target_over_a_string_keyed_dict_is_an_int` was
-    # pinned in `REFUSALS` with the message "an integer has no length", and it is
-    # an ORACLE row in `CASES` now
-    # (`comprehension_over_a_string_keyed_dict_binds_a_string_target`).  The
-    # refusal was never right about the source — the keys are strings and the
-    # `for`-in walk over the same literal already said so — and a `REFUSALS` row
-    # asserting a false message is a row that would have held the defect in
-    # place, so it is deleted rather than reworded.
     # A CALL THAT PRODUCES NO VALUE, printed. CPython evaluates `g(1, 2)` to
     # `None` and prints `None`; a value on this path is one 64-bit word and the
     # epilogue writes no return register, so the image printed `0` — measured on
@@ -2059,110 +1738,6 @@ BUILTIN_CASES = [
      "v: 4\n"),
 ]
 
-# ── `max` / `min`: the two builtins whose ordinary call is a SELECT ───────────
-#
-# `formal/model.py::NOT_LOWERED_BUILTINS` measured both of these on 2026-10-04 and
-# wrote down what lowering each takes — "a compare and a select; both emitters
-# already have the select" — and `formal/build.py::_lower_builtin_extremum` is
-# that sentence cashed, so these rows are the MEASUREMENT of it: every one is an
-# oracle case (the same text runs under CPython and `run_case` requires the same
-# bytes from both images), which is the only kind of row that can catch an
-# image answering a different number — the failure `formal_sweep_causes.py`'s own
-# docstring calls worse than a refusal.
-#
-# **THE COMPARISON IS ON THE SECOND OPERAND and these rows are what pin it.**
-# CPython's `max(a, b)` keeps the first as the largest and replaces it only when
-# `b > a`, so the left fold is `b > a ? b : a` and NOT `a < b ? b : a`. The two
-# agree on every total order over integers, so a tie and an ordinary comparison
-# cannot tell them apart — only a NaN can, because IEEE `>` is false against one
-# and this path holds a double's bit pattern in an integer word. The tie row is
-# here anyway, because "returns the FIRST on a tie" is a real property of the
-# answer and a rewrite that returned the second would agree with CPython on
-# `max(5, 5)` and nowhere else worth looking.
-BUILTIN_EXTREMUM_CASES = [
-    ("max_of_a_name_and_a_literal_is_a_compare_and_a_select",
-     "def main(n):\n"
-     "    var a = 3\n"
-     "    print(\"v:\", max(a - 1, 0))\n"
-     "    return 0\n",
-     "v: 2\n"),
-    ("min_of_a_name_and_a_literal_is_a_compare_and_a_select",
-     "def main(n):\n"
-     "    var b = 9\n"
-     "    print(\"v:\", min(b, 100), min(100, b))\n"
-     "    return 0\n",
-     "v: 9 9\n"),
-    ("a_three_argument_extremum_is_the_same_select_folded",
-     "def main(n):\n"
-     "    var a = 3\n"
-     "    var b = 9\n"
-     "    print(\"v:\", max(a, b, 5), min(4, b, a))\n"
-     "    return 0\n",
-     "v: 9 3\n"),
-    ("an_extremum_over_negatives_and_a_tie",
-     "def main(n):\n"
-     "    var a = 3\n"
-     "    print(\"v:\", max(5, 5), min(0 - 9, 3), max(0 - 9, 3))\n"
-     "    return 0\n",
-     "v: 5 -9 3\n"),
-    ("an_extremum_of_arithmetic_over_names_and_a_literal",
-     "def main(n):\n"
-     "    var a = 3\n"
-     "    var b = 9\n"
-     "    print(\"v:\", max(a - 1, b + 1, 0))\n"
-     "    return 0\n",
-     "v: 10\n"),
-]
-
-# The three shapes the rewrite DECLINES, and each one's needle says which
-# refusal answered it. The first two are the table row's own sentence; the third
-# is the blob refusal, and it is here rather than only in
-# `test_formal_run.py`'s operator group because it is the shape this guard
-# exists for: with no integer literal on either side there is nothing in the
-# source that says the operands are numbers, and comparing a blob's address
-# answers a different number on each architecture (measured, and the message
-# quotes it).
-BUILTIN_EXTREMUM_REFUSALS = [
-    ("max_of_one_argument_is_refused_rather_than_folded_over_a_sequence",
-     "def main(n):\n"
-     "    var xs = [1, 5, 2]\n"
-     "    print(\"v:\", max(xs))\n"
-     "    return 0\n",
-     "`max(...)` is not lowered on this path"),
-    ("max_with_a_key_is_refused_rather_than_calling_through_a_value",
-     "def main(n):\n"
-     "    var a = 3\n"
-     "    var b = 9\n"
-     "    print(\"v:\", max(a, b, key=lambda v: 0 - v))\n"
-     "    return 0\n",
-     "`max(...)` is not lowered on this path"),
-    ("max_of_two_names_is_refused_rather_than_comparing_two_addresses",
-     "def main(n):\n"
-     "    var a = 3\n"
-     "    var b = 9\n"
-     "    print(\"v:\", max(a, b))\n"
-     "    return 0\n",
-     "`max(...)` is not lowered on this path"),
-    ("an_extremum_of_a_container_and_a_literal_is_refused_by_the_blob_table",
-     "def main(n):\n"
-     "    var a = [1, 2]\n"
-     "    print(\"v:\", len(max(a, 0)))\n"
-     "    return 0\n",
-     "'>' is refused when the right operand is a list"),
-    # The GUARD's own boundary, and the row that makes it a decision rather
-    # than an accident: an integer literal has to be a BARE one. `a - 1` and
-    # `b + 1` are arithmetic over names, which says nothing about either
-    # operand holding a number, so the rewrite declines and the refusal is the
-    # table row's. The row above it is the same program with `, 0` added, which
-    # is the whole of the difference between the two answers.
-    ("an_extremum_of_two_arithmetic_expressions_with_no_literal_is_refused",
-     "def main(n):\n"
-     "    var a = 3\n"
-     "    var b = 9\n"
-     "    print(\"v:\", max(a - 1, b + 1))\n"
-     "    return 0\n",
-     "`max(...)` is not lowered on this path"),
-]
 
 
 def run_cpython(source, tmpdir, verbose):
@@ -2302,8 +1877,6 @@ def main():
                   + [(c, False) for c in HOLDER_ASSIGN_CASES]
                   + [(c, False) for c in MODULE_GLOBAL_CASES]
                   + [(c, False) for c in BUILTIN_CASES]
-                  + [(c, False) for c in BUILTIN_EXTREMUM_CASES]
-                  + [(c, True) for c in BUILTIN_EXTREMUM_REFUSALS]
                   + [(c, "fixed") for c in FIXED_CASES]
 + [(c, True) for c in REFUSALS]
                   + [(c, True) for c in BUILTIN_REFUSALS]

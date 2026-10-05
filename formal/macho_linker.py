@@ -17,7 +17,6 @@ x86-64). Each is a parameter here rather than a second copy of the builder,
 so the two architectures cannot drift apart on the parts that must match.
 """
 
-import hashlib
 import struct
 
 
@@ -449,7 +448,6 @@ def build_macho_executable(code: bytes, arch: str = "arm64",
     file[o : o + DYLINKER_CMDSIZE] = _dylinker_cmd()
     o += DYLINKER_CMDSIZE
 
-    uuid_at = o + 8
     patch(o + 0, "<I", UUID_CMD)
     patch(o + 4, "<I", 24)
     o += 24
@@ -472,7 +470,6 @@ def build_macho_executable(code: bytes, arch: str = "arm64",
     file[entryoff : entryoff + len(code)] = code
     if has_globals:
         file[g_file : g_file + len(gblob)] = gblob
-    _stamp_content_uuid(file, uuid_at)
     _assert_no_unclaimed_bytes(file, [(0, text_size)]
                                + ([(g_file, g_size)] if has_globals else [])
                                + [(linkedit_file, linkedit_size)])
@@ -605,45 +602,6 @@ def _assert_no_unclaimed_bytes(image: bytes, segments: list) -> None:
         raise ValueError(
             f"image is {len(image)} bytes but its segments claim only {end}: "
             f"a byte was inserted past the end of the last segment")
-
-
-def _stamp_content_uuid(image: bytearray, uuid_at: int) -> None:
-    """Put a CONTENT-DERIVED value in the LC_UUID payload at `uuid_at`.
-
-    LC_UUID is the image's identity as far as dyld's caches are concerned
-    (dyld4 keys its closure cache on the path AND the uuid AND the inode's
-    mtime/size), so an all-zero uuid says "every image this compiler has ever
-    produced is the same image". That was literally true of this backend: all
-    three builders emitted the load command and then left its 16 payload bytes
-    zero, because nothing here read them back. A real linker derives them from
-    the link — `ld64` hashes the output — so two rebuilds of one input agree and
-    a rebuild after any change does not, and that is the property a loader's
-    cache actually needs.
-
-    **The digest is over the image with this field ZEROED**, and the zeroing is
-    explicit rather than an assumption that `image` is still zero there, so the
-    function is idempotent and cannot be its own fixed point: a hash that
-    included the previous run's answer would be a second, different value on
-    every call. One pass, no iteration — the field is 16 bytes inside the input
-    and 16 bytes of output, so there is nothing to solve for.
-
-    It is placed by the CALLER, at the end of each builder, because only then is
-    the image complete: hashing earlier would digest a file whose code, stubs,
-    GOT and __LINKEDIT were still zero, and every builder would then publish a
-    uuid for an image that does not exist. The signature is not part of the
-    input and cannot be: `codesign` runs afterwards, on the published file, and
-    `formal/build.py::_signature_identity` derives the ad-hoc identifier from
-    the same unsigned bytes.
-
-    Determinism is the property this exists for, so it is worth being explicit
-    about what it is a function of: the bytes of THIS image, and nothing else.
-    Not the clock (there is no timestamp field left to fill), not the output
-    path (which the ad-hoc identifier used to leak), not a dict's iteration
-    order (the builders sort), not the machine.
-    """
-    image[uuid_at : uuid_at + 16] = bytes(16)
-    digest = hashlib.sha256(bytes(image)).digest()
-    image[uuid_at : uuid_at + 16] = digest[:16]
 
 
 def _uleb_bytes(value: int) -> bytes:
@@ -983,7 +941,6 @@ def build_macho_executable_extern(
     o += DYLINKER_CMDSIZE
 
     # LC_UUID
-    uuid_at = o + 8
     patch(o + 0, "<I", UUID_CMD)
     patch(o + 4, "<I", 24)
     o += 24
@@ -1058,7 +1015,6 @@ def build_macho_executable_extern(
     file[bind_file : bind_file + bind_len] = bind
     if has_globals:
         file[g_file : g_file + len(gblob)] = gblob
-    _stamp_content_uuid(file, uuid_at)
     _assert_no_unclaimed_bytes(file, [(0, text_size), (data_file, data_size)]
                                + ([(g_file, g_size)] if has_globals else [])
                                + [(bind_file, bind_len)])
@@ -1474,40 +1430,7 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     # dylib there is — one with externs and no globals — and produced an image
     # whose load commands ran off the end of a 31-byte file.
     linkedit_file = text_size + (data_size if n else 0) + g_size
-    # The export trie is a byte stream of arbitrary length, so the bind stream
-    # that follows it lands on whatever offset the trie's length happens to
-    # leave — and Apple's linker REFUSES the whole library when that is not
-    # eight-byte aligned:
-    #
-    #   ld: mis-aligned LINKEDIT content 'bind opcodes',
-    #       fileOffset=0x0000C22A in 'libinterop.arm64.dylib'
-    #
-    # so `clang foo.c lib.dylib` — the one thing anyone does with a formal
-    # dylib — failed to link, with no diagnostic naming anything a person could
-    # act on. It is size-dependent and therefore invisible on the small corpora
-    # the tree tests with: this corpus's trie is 554 bytes and 554 % 4 == 2,
-    # while a three-function library's is a multiple of four. The EXECUTABLE
-    # path could never hit it, because its `bind_file` is a sum of page-sized
-    # segments and so is aligned by construction; only the dylib builder had a
-    # byte-length blob in front of the bind data.
-    #
-    # The padding is inside __LINKEDIT and inside its declared filesize, so
-    # `_assert_no_unclaimed_bytes` still sees every byte claimed, and the code
-    # signature `codesign` appends after this lands where it always did.
-    #
-    # With no externs there IS no bind stream, so the trie is the whole of
-    # __LINKEDIT's content and `bind_off` is 0 as it was: a `linkedit_len`
-    # computed from the (empty) bind stream would be negative and every byte of
-    # the trie past `linkedit_file` would be unclaimed, which is the invariant
-    # `_assert_no_unclaimed_bytes` exists to catch — as it did, here, in the four
-    # x86-64 dylib cases that build a library with no externs.
-    if n:
-        bind_file = _align_up(linkedit_file + len(trie), 8)
-        linkedit_len = bind_file + len(bind) - linkedit_file
-    else:
-        bind_file = 0
-        linkedit_len = len(trie)
-    file = bytearray(linkedit_file + linkedit_len)
+    file = bytearray(linkedit_file + len(trie) + len(bind))
 
     def patch(off, fmt, *vals):
         struct.pack_into(fmt, file, off, *vals)
@@ -1568,10 +1491,7 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     patch(o + 4, "<I", 72)
     file[o + 8 : o + 24] = b"__LINKEDIT".ljust(16, b"\0")
     patch(o + 24, "<Q", TEXT_BASE + linkedit_file)
-    # `linkedit_len` was computed where the bind stream's ALIGNED offset was
-    # decided, and is not recomputed here: recomputing it from `len(trie)` is
-    # exactly the drift that put the bind data at an offset the linker rejects
-    # (see the `bind_file` comment above).
+    linkedit_len = len(trie) + len(bind)
     patch(o + 32, "<Q", ((linkedit_len + PAGE_SIZE - 1) // PAGE_SIZE) * PAGE_SIZE)
     patch(o + 40, "<Q", linkedit_file)
     patch(o + 48, "<Q", linkedit_len)
@@ -1605,7 +1525,6 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     patch(o + 20, "<I", 0)
     o += 24
 
-    uuid_at = o + 8
     patch(o, "<I", UUID_CMD)
     patch(o + 4, "<I", 24)
     o += 24
@@ -1616,7 +1535,7 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     # rebase_off/rebase_size stay zero (see the noextern builder).
     patch(o + 8, "<I", 0)
     patch(o + 12, "<I", 0)
-    patch(o + 16, "<I", bind_file)
+    patch(o + 16, "<I", linkedit_file + len(trie) if n else 0)
     patch(o + 20, "<I", len(bind))
     o += 48
 
@@ -1640,8 +1559,7 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     if init_blob:
         file[init_file : init_file + len(init_blob)] = init_blob
     file[linkedit_file : linkedit_file + len(trie)] = trie
-    file[bind_file : bind_file + len(bind)] = bind
-    _stamp_content_uuid(file, uuid_at)
+    file[linkedit_file + len(trie) : linkedit_file + linkedit_len] = bind
     _assert_no_unclaimed_bytes(
         file,
         [(0, text_size)]

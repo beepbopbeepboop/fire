@@ -35,16 +35,10 @@ export probe dead on any module with a dataclass field carrying a default.
 ## Two open items in the arm64 per-export-contract work (agent [3])
 
 Not part of the sweep families above, and not re-measured by this audit. Both
-were **true** claims. **The first is FIXED** — `lib/Contracts.lean` compiles
-clean with 0 holes, `bodyCert`/`agrees_of_body`/`hreg` are emitted, and
-`bugs/FORMAL_a_conditional_value_in_a_dylib_export.md` §1 carries the
-measurement and what landed. **The second is `OPUS-4`** in
-`bugs/FORMAL_dylib_export_loops_and_frame_bounds.md`, which names the write set
-(`lib/ProofLib.lean`'s `exportFuel`, `formal/arm64_proof_gen.py`) and the two
-questions with no answer in the code (superclass matching, and what
-`except A as e` binds). The handoff document that used to sit between them —
-`FORMAL_contract_work_handoff.md`, deleted 2026-10-05 — was a finished task's
-notes, not a third owner.
+are **true** claims, both unfinished; the single home for their full state —
+every measurement, every trap hit on the way, and the exact next step — is:
+
+> **`FORMAL_contract_work_handoff.md`** — read §1 and §3 of it to start.
 
 | item | measured | is the claim true? | what closes it |
 |---|---|---|---|
@@ -328,7 +322,7 @@ other direction: the walk got FURTHER (the `List[Self.T]()` and then the
 `len(self._data)` refusals are both gone as of 2026-10-03,
 `work/formal12-binary-heap`) and the family is still this size, because the
 export gate is waiting behind both of them. The re-measurement is
-the `2026-09-30_r2` round of `bugs/FORMAL_sweep_work_map.md` §3.2, and it notes what is NOT
+`bugs/FORMAL_sweep_work_map_2026-09-30_r2.md` §3.2, and it notes what is NOT
 available: with the 35 files behind it, this family is now the largest single
 cause on the tree that nobody owns, and its ceiling is Stage 5 (§1.2), not a
 bug.
@@ -914,7 +908,7 @@ a NUL-terminated `char *`, so the interned `""` is the answer and `len` of it is
 `model.gimple_runtime_callable(name, provided)` is the whole rule: every type
 crossing the call boundary is one 64-bit word, AND the symbol is on the link
 line. `GIMPLE_LIST_PREFIX` is **gone** — it was a hand-kept list of prefixes
-standing in for a shape, and the shape answers the same question for all 683
+standing in for a shape, and the shape answers the same question for all 668
 entry points instead of the 40-odd names one prefix covered.
 
 The two halves are independent and both are needed, which is what the prefix
@@ -925,24 +919,21 @@ because nothing provides it.
 
 | | measured over all 11 headers in `runtime/` |
 |---|---|
-| entry points declared | 683 |
-| every type crossing the boundary is one word | **272** |
-| a box in an argument or the return | 411 |
-| of the 272, refused only for want of a linked library | 272 |
+| entry points declared | 668 |
+| every type crossing the boundary is one word | **262** |
+| a box in an argument or the return | 406 |
+| of the 262, refused only for want of a linked library | 262 |
 
-**272 of 683 is what a link line converts into working code with no backend
+**262 of 668 is what a link line converts into working code with no backend
 change at all.** For `mojo_sqlite3_*` it is **16 of 22**.
 
 (Re-measured 2026-10-04 on this tree with `formal.model.runtime_abi()`, which
-is the authority and reads the headers rather than repeating this table: 683
-entry points, 272 word-shaped, 411 with a box. The figures above were right for
+is the authority and reads the headers rather than repeating this table: 668
+entry points, 262 word-shaped, 406 with a box. The figures above were right for
 the tree this section was written on and had been drifting since, which is what
 `test_runtime_header_scan.py`'s census check now prevents — it reads each of
 these numbers out of the file and compares it with the live table, so a comment
-cannot be the second copy of a count. `python3 test_runtime_header_scan.py
---fix` is the other half of it: it writes the live figures into every one of
-those sentences, so a runtime declaration added today does not leave five files
-quoting yesterday's number.)
+cannot be the second copy of a count.)
 
 ### Two numbers from the round-1 brief that the headers do not support
 
@@ -951,7 +942,7 @@ heap box" and "for sqlite, **20 of 22** … the only two that are not are
 `mojo_sqlite3_query` and `_query_dict`". Measured, both are off, and the reason
 is worth recording because it is a rule, not a typo:
 
-1. **455 / 352 / 101.** I measure 683 / 510 / 173 by return type alone, and 272
+1. **455 / 352 / 101.** I measure 668 / 414 / 254 by return type alone, and 262
    once the ARGUMENTS are counted too. Neither matches 455/352/101. The
    scanner those numbers were taken with recorded `char *f` as returning `char`
    (see below), so every pointer-returning function was scored as a scalar —
@@ -997,10 +988,10 @@ Neither is closed by a test in the tree, so both are in
 
 A word-shaped call is emitted only when the symbol is on the link line, and the
 executable path (`build --formal`, which every suite drives) has no runtime
-library on its link line at all. So today the 272 are refused *for want of a
+library on its link line at all. So today the 223 are refused *for want of a
 library*, which the new message says plainly instead of claiming there is
 nothing to lower. INTERFACE REQUEST to [1] for the optional-runtime-unit
-registry; it is the only thing between the 272 and working code.
+registry; it is the only thing between the 223 and working code.
 
 ---
 

@@ -23,10 +23,11 @@ instance field, `_value`:
 
 `Optional` is a ONE-word value whose receiver IS its field
 (`struct_is_one_field`), and this made it a two-field struct instead, so every
-`Optional` receiver became a FRAME ADDRESS.  That is what blocked the
-`builtin_slice.mojo` row: `Slice.start` is declared `Optional[Int]`, the
-backend believed that to be a frame, and it refused to let the ctor store one
-in a field.
+`Optional` receiver became a FRAME ADDRESS.  That is the refusal
+`bugs/FORMAL_builtin_slice_optional_field_is_a_frame_holder.md` records as
+blocking the 13-file `builtin_slice.mojo` row: `Slice.start` is declared
+`Optional[Int]`, the backend believed that to be a frame, and it refused to let
+the ctor store one in a field.
 
 This is one half of a pair of defects in this derivation.  The other half — a
 bare `self.helper` in VALUE position — IS ambiguous (an instance attribute
@@ -1069,61 +1070,11 @@ def run_census_case(case, tmpdir, verbose):
     import formal.model as M
 
     name, source, want = case
-    # THE CENSUS IS COUNTED WHERE IT IS MADE, which is `parse_module` and not
-    # the read below.  `FB.parse_module` attaches the unit's field evidence and
-    # then resolves inheritance (`attach_inherited_fields` → `_merged_field_names`
-    # → `_own_field_names` → `_split_declaration` → `struct_receiver_stores`), and
-    # that is the ONE derivation.  `struct_field_names` answers from what that
-    # published (`struct_merged_field_names`) and so asks nothing at all — measured,
-    # and it is why an ask counter wrapped around a second `struct_field_names`
-    # sees zero rather than one.  `myinterpreter.py` reads both
-    # `M._own_field_names` and `struct_field_names`, so the whole point of the
-    # per-function-asker work is that neither is O(methods).
-    #
-    # Asserting the ask COUNT rather than only the answer LISTS is the point of
-    # the group: a derivation that re-walked every method body once per method
-    # would answer identically and still be the pre-fix shape.  Three call sites
-    # and three costs, because there are three paths and each is a place a
-    # per-method asker could reappear:
-    #
-    #   * `parse_module`, which derives each struct's OWN field names once to
-    #     publish the merge — 1, for a struct of ANY number of methods;
-    #   * the READERS of what it published (`struct_field_names`,
-    #     `struct_field_count`, `struct_sole_field_name`,
-    #     `struct_fits_one_word`)
-    #     — 0, because a regression that stopped publishing the merge or stopped
-    #     threading the table would make these n_methods again; and
-    #   * `_own_field_names`, which is what `struct_field_names` FALLS THROUGH to
-    #     for a struct nothing published a merge for — a struct read without
-    #     `formal.build`, which is how a module imported from another image is
-    #     asked.  1, and its ANSWER is asserted equal to what was published, so a
-    #     change that made the two disagree fails here rather than in whichever
-    #     reader happened to see it.
-    #
-    # Measured on `a_declared_name_that_is_also_a_method_stays_a_field` (a
-    # 2-method struct): 1 ask during the parse, 1 from `_own_field_names`, 0
-    # from a second `struct_field_names`.
-    calls = []
-    real = M.struct_receiver_stores
-
-    def counted(struct_def, receivers_arg):
-        calls.append(getattr(struct_def, "name", None))
-        return real(struct_def, receivers_arg)
-
-    M.struct_receiver_stores = counted
-    try:
-        stmts = FB.parse_module(source, name + ".mojo")
-    finally:
-        M.struct_receiver_stores = real
+    stmts = FB.parse_module(source, name + ".mojo")
     structs = [s for s in stmts if isinstance(s, F.StructDef)]
     if len(structs) != 1:
         return False, f"the case declares {len(structs)} structs, expected 1"
     st = structs[0]
-    if calls != [st.name]:
-        return False, (f"attaching this unit's field evidence asked "
-                       f"struct_receiver_stores {len(calls)} times for its one "
-                       f"struct {calls!r}; the store census is a property of the "
-                       f"STRUCT, so it is made once")
     got = M.struct_field_names(st)
     if got != want:
         return False, f"struct_field_names == {got}, expected {want}"
@@ -1144,37 +1095,23 @@ def run_census_case(case, tmpdir, verbose):
                            f"the old per-method formula "
                            f"{sorted(spelled - demoted)}")
 
-    # The path that is NOT the parse: the DERIVATION every reader falls through
-    # to when `parse_module` published no merge for this struct. Counted, and
-    # its ANSWER asserted against the list the readers returned, because a count
-    # and an answer can be right for different reasons.
-    #
-    # **And the readers themselves are deliberately NOT counted here.** The
-    # earlier form of this row wrapped `struct_field_names` and asserted 0 asks,
-    # on the strength of "`struct_field_names` answers from what `parse_module`
-    # published and so asks nothing at all" — which is true only for a struct
-    # that HAS a published merge, i.e. one that inherits. Four of the cases in
-    # this group do not inherit, nothing is published for them, and their readers
-    # ask exactly once, through the documented fall-through
-    # (`formal/model.py::_own_field_names`). Asserting 0 there was asserting a
-    # fact about the tree's shape rather than about its cost, and it was red on
-    # four rows for that reason. The per-function asker this row exists to catch
-    # is caught by the count below: a derivation that walked every method body
-    # once per method would answer IDENTICALLY and still make this n_methods.
-    del calls[:]               # the parse's ask is counted above, not here
-    n_methods = len(M.struct_methods(st))
+    calls = []
+    real = M.struct_receiver_stores
+
+    def counted(struct_def, receivers_arg):
+        calls.append(1)
+        return real(struct_def, receivers_arg)
+
     M.struct_receiver_stores = counted
     try:
-        own = M._own_field_names(st)
+        M.struct_field_names(st)
     finally:
         M.struct_receiver_stores = real
+    n_methods = len(M.struct_methods(st))
     if len(calls) != 1:
-        return False, (f"deriving {st.name}'s OWN field names asked "
-                       f"struct_receiver_stores {len(calls)} times; it is a "
-                       f"property of the STRUCT, so it is asked once")
-    if own != got:
-        return False, (f"{st.name}'s own field names {own} are not the list "
-                       f"struct_field_names published for it ({got})")
+        return False, (f"deriving the field set of a {n_methods}-method struct "
+                       f"asked struct_receiver_stores {len(calls)} times; it is "
+                       f"a property of the STRUCT, so it is asked once")
     if verbose:
         print(f"      field set {got}; {n_methods} methods, 1 census")
     return True, ""

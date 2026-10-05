@@ -1,81 +1,5 @@
 # `__mlir_op`: 259 sites over 104 dialect operations were refused as "there is no MLIR on this path", and for a quarter of the arithmetic ones that is false
 
-**Status 2026-10-05 (`formal25-4`): the CAST is closed, and the refusal was
-arguing with ITSELF about the operand — the document's own subject, one branch
-in.** Read this before every "the next step" below, all of which describe the
-cast as the one thing left.
-
-**A message that said both things at once, on both architectures, byte-identical.**
-`mlir_dialect_op_refusal`'s typed-result branch carried ONE tail for the word
-case and it read *"What is therefore missing is the OPERAND's DECLARED type, and
-nothing in this unit states one"* — while `mlir_operand_clause`, appended right
-after it, said *"Its operand is declared `__mlir_type.index`, which is ONE 64-bit
-word here"*. Both clauses in ONE refusal, at every site whose operand the reader
-can establish, and this document has spent three rounds removing exactly this
-shape one sentence at a time:
-
-    struct S:
-        var v: __mlir_type.index
-        var n: Int
-        def from_builtin(self) -> Int:
-            return __mlir_op.`pop.cast_from_builtin`[_type=__mlir_type.index](self.v)
-
-`mlir_operand_declared_type` resolves that operand — the `MLIR_SELF_TYPE_NAMES`
-half, through `self`, which is six of the corpus's nine word-typed sites written
-that way — so the message said it could not establish a type it had established
-three sentences earlier. **The two fields are load-bearing and the corpus's own
-row already explains why**: a ONE-field struct's receiver IS its field, so
-`self.v` is rewritten to `self` before any dialect pass runs and the operand
-stops being a declared `__mlir_type.index` at all.
-
-**And the CAST itself now lowers, which is what "what is missing is the
-OPERATION" is a statement about.** `pop.cast_to_builtin[_type=
-__mlir_type.index](x)` converts one `index` to the same `index` — pointer-sized,
-signed, one 64-bit word here — so the rewrite is **the operand itself**, with no
-instruction selection at all. `formal/build.py::_lower_dialect_casts` does it in
-the shared pipeline beside `_lower_dialect_arith` and `_lower_dialect_select`,
-over the same `_rewrite_dialect_in` walk, so "both architectures" is a
-statement about ONE code path rather than about two implementations agreeing.
-
-**The operand gate is § Correction's argument in its purest form, and it is why
-the table could not have been keyed on the name.** `pop.cast_to_builtin` over a
-VECTOR is not the identity — it would extract a lane — so a table keyed on the
-operation's name alone would be right at `std/builtin/simd_length.mojo:76` and
-wrong at every vector site. The three gates are the three the refusal asks
-about, so the message and the rewrite cannot disagree about which sites are in
-scope.
-
-**A documented DECLINE is not rewritten, and the first version of the pass got
-that wrong in the direction this document exists to catch.** The advice lives in
-`model.MLIR_WORD_CAST_OPS` — all three casts, with what each WOULD become —
-because that is the refusal's vocabulary: "here is what this operation would
-become, and here is why we do not". Gating the rewrite on that table built
-`builtin.unrealized_conversion_cast[_type=__mlir_type.index](x)` on both
-architectures, and that row's own text says the source does not spell the
-conversion out at all. So the answerable set is `model.MLIR_WORD_CAST_LOWERED`,
-ONE name, and `mlir_dialect_cast_advice` is the reader both the refusal and the
-naming ask — a message cannot decline an operation the pass rewrites.
-
-**What it is worth in this document's units: 0 corpus files.** The cast is
-`std/builtin/simd_length.mojo:76`, and that FILE still does not reach it — its
-terminal is `_select.mojo`'s export rule (`formal16-2`'s claim), exactly as the
-2026-10-04 Status above re-measured. What moved is the REFUSAL, which was false
-at every site the reader had already answered, and one construct this path
-computes and said it could not. `test_formal_mlir_precedence.py` is 40/40 (was
-35): two `GUARDED` rows that BUILD AND RUN the identity on both architectures
-through a parameter-annotated operand and through a field and a receiver, and
-three `CLASSIFIED` rows that pin the new sentence AND assert the old one
-**absent** — a reword that kept "nothing in this unit states one" while adding
-the new one would pass every other row in that file.
-
-**What is left is nothing this document was about.** Every remaining row is a
-named capability project with its own next step: `pop.floordiv` (no corpus site),
-`pop.div` (the name does not say which division), the saturating and
-NaN-aware `pop.*`, every `!kgen.scalar<uiN>` (an N-bit unsigned in a word wraps
-at 2^N), every `pop.simd.*`, and the `lit.*` ownership effects. The census is
-unchanged and is meant to be: still 259 sites over 104 operations, and a message
-that reports more is a message that classifies differently.
-
 **Status (2026-10-04, `formal18-4`): the ARITHMETIC TABLE had two rows that were
 a SILENT WRONG ANSWER, and they were wrong for as long as the floor correction
 had been in the tree — this document's own measurement of them had been
@@ -168,33 +92,6 @@ reading and this document's usual one: still 259 sites over 104 operations, and
 (`FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`, claimed by
 `formal16-2`). **The value is that the two rows are no longer wrong**, and that
 `pop.rem`'s one corpus-unreachable row now computes what it says.
-
-**Status 2026-10-04 (`work/formal29-3`): the one item this document leaves is
-still NOT worth building, and the condition it names — "when some FILE's terminal
-is the cast rather than when one file two rows back has one" — is still unmet.
-Re-measured on this tree, arm64:
-
-    $ python3 fire.py build --formal --no-prove --backend=arm64 -o .tmp/simd \
-          ../new-modular/Mojo/stdlib/std/builtin/simd_length.mojo
-    build: simd_length.mojo imports 'std.utils._select', which cannot be built
-    either: _select.mojo: formal dylib has no public functions …
-
-**Same terminal as the 2026-10-04 Status, one row further on and unchanged since:
-`_select.mojo`'s export rule**, which is
-`FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` (`formal29-1`). So the
-cast is still one refusal behind a refusal this document does not own, and the
-`4` files the MLIR row carries are unchanged.
-
-**And the builtin field table would not be the one-line widening it looks like
-from here**, which is worth recording because it is the reason to leave it: the
-table's job is to let `mlir_operand_declared_type` read `Int._mlir_value` as
-`__mlir_type.index`, and then `pop.cast_to_builtin` rewrites to the operand — at
-which point the build is reading a FIELD of a builtin struct, which is a
-value-model question this path has no field table for either. So the table moves
-the refusal from `mlir_dialect_op_refusal` to `field_access_refusal` rather than
-removing it, unless the table comes with a builtin-struct field model, and the
-§Correction's own argument against a speculative widening applies twice over.
-The next step, when `_select.mojo` closes, is that pair or neither.
 
 **Status (2026-10-04, `work/formal21-5`): the last false sentence in this
 document's own subject is fixed, and the item it leaves behind is named — and it
@@ -994,16 +891,6 @@ of this file is the current reading and this is the plan it was planned against.
 and 3 landed. It is a `_type=` over an `Int`'s dialect value, which is a value-
 model question about `Int` rather than about the arithmetic, and it is
 `bugs/FORMAL_known_limits.md` §2.2's territory rather than this document's.
-
-**SUPERSEDED by the Status at the head of this file (2026-10-05,
-`formal25-4`): the cast is CLOSED, and the one remaining thing here was not the
-cast.** `pop.cast_to_builtin[_type=__mlir_type.index](x)` over a word is the
-IDENTITY and now lowers to the operand, in the shared pipeline. What is left of
-*this* document is a list of named capability projects — `pop.floordiv`,
-`pop.div`, the saturating `pop.*`, the `!kgen.scalar<uiN>` rows, `pop.simd.*`,
-the `lit.*` effects — each with the reason written at the head. The corpus FILE
-still does not reach the cast, and the reason is unchanged and is not this
-document's: `_select.mojo`'s export rule, `formal16-2`'s claim.
 
 **Both clauses of that paragraph were superseded by "What landed" above, and both
 in the same direction.** The file's terminal is no longer the cast: it is

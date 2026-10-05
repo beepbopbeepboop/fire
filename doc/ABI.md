@@ -54,63 +54,6 @@ the obvious C scalars:
 | `Float16/32/64` | `__fp16` / `float` / `double` |
 | `None` | `void` (return) |
 
-### Integer semantics: what a `Int` is allowed to do
-
-**CPython's `int` is arbitrary precision and a value here is one 64-bit
-word.** That is the whole reason this subsection exists: `ADD`, `SUB`, `MUL`,
-`LSL`, `SDIV` and `strtoll` all answer their result **modulo 2^64**, and
-nothing downstream can tell a wrapped answer from a computed one. The decision
-per operation is below; the shared predicates are `formal/model.py`'s
-`int_overflow_traps` (which of them must refuse) and the `*_overflow_refusal`
-family (the build-time messages), and both backends ask those rather than
-writing the rule out, so they cannot word one operation differently.
-
-**A refusal is a build failure carrying CPython's exact value**, never a
-silent number and never a fabricated one:
-
-| operation | answer on this target | why |
-|---|---|---|
-| `a + b`, `a - b`, `a * b` | the exact value, or a **refusal** when it does not fit | `int_overflow_traps` |
-| the same on `Int8`…`Int32` | **wraps** | a narrow type is a declared bit width; `x: Int8 = 127; x + 1` is `-128` in every Mojo that has `Int8` |
-| the same on `UInt64` | **wraps** | the source spelled the wrap down, and CPython has no unsigned to disagree with |
-| the same on a `Pointer[T]` | **wraps** | `p + 1` is an ADDRESS, and a one-past-the-end pointer is not an overflow |
-| `a // b`, `a % b` | exact, **flooring** (`-7 // 2` is `-4`, `-7 % 3` is `2`) | `model.division_floors` |
-| `a // -1` at `INT64_MIN` | **refused** — the answer is 2^63 | the only division that overflows; A64's `SDIV` answers the dividend and x86-64's `IDIV` raises `#DE` and the image dies on SIGFPE, so one source had one wrong number and one signal |
-| `a / b` | **truncates** toward zero (`-7 / 2` is `-3`) | there is no float on this path; `FORMAL.md` §6 Phase 7 |
-| `a ** b`, `b ≥ 0` | the exact value, or a **refusal** when it does not fit | `power_overflow_refusal` |
-| `a ** b`, `b < 0` | **refused** | CPython answers a **float** (`2 ** -1` is `0.5`) and this target has no float division; the `0` this used to materialise is a number the source never wrote |
-| `pow(a, b, m)` | **refused** by arity | a different question — every step reduces modulo `m`, so it cannot overflow |
-| `divmod(a, b)` | **refused** | — |
-| `x << n`, `n < 64` | the exact value, or a **refusal** when the RESULT does not fit (`1 << 63` is 2^63) | `shift_overflow_refusal`; the immediate form's `0..63` range test is not a safety test |
-| `x << n`, `n ≥ 64` | **refused** | CPython's `int` is unbounded, so `1 << 64` is 18446744073709551616. The hardware masks the amount, and the "saturate to 0" rule that answered it was CPython's for `>>` and a fabrication here |
-| `x >> n`, `n ≥ 64` | **0** for a non-negative `x`, **-1** for a negative one | Python's `>>` floors and keeps replicating the sign, so saturation IS the answer here; the two cases are why the shift refusal is `<<`-only |
-| `a << n`, `a >> n` with `n < 0` | **refused** | CPython raises `ValueError: negative shift count` |
-| `a & b`, `a \| b`, `a ^ b`, `~a` | exact | bitwise: the result is in range whenever the operands are, so there is nothing to refuse |
-| unary `-a` | exact; `INT64_MIN` is representable | `-(2^63)` is the one value that is its own negation as a word |
-| `abs(a)` | **refused** by name | the C library's is `int abs(int)` — 32 bits — and answering it would truncate a word |
-| `int(s)`, `int(s, base)` | the exact value, or a **refusal** when it does not fit | `strtoll` CLAMPS to `LLONG_MAX` and sets `errno`; the clamp used to be the answer (`int("9223372036854775808")` printed `-1`) |
-| `int(s, base)` with base `0` | **refused** by name | CPython's auto-detection and `strtoll`'s are three different rules |
-| `int(x)` on a double | truncation toward zero (`int(2.9)` is `2`) | a conversion, not a parse |
-| comparisons | exact, **signed** for an unannotated `int` | `types.DEFAULT_INT_TYPE` is signed, so `-3 < 2` is true |
-| `range(a, b, c)`, `len`, `len(x) + k` | exact | a length and a count are words; `len(range(0, 10, 3))` is `4` |
-| `(x).bit_length()` | **refused** | no libc binding for it on this link line |
-
-**Reading an integer out is not in this table because it is a separate
-question, and it has its own defect**: `printf("%d", x)` renders **32 bits**
-(libc's `%d` reads a C `int`), so `printf("%d", 2**62)` prints `0` while
-`printf("%lld", x)` and `print(x)` are right. Use `print` or `%lld` for a
-`Int`. Measured on both backends; `bugs/FORMAL_printf_d_renders_32_bits.md`.
-
-**The one row that is a wrong number rather than a refusal.** Every row above
-is exact or refused **when the build can fold the operands**. A variable
-operand cannot be folded, and the run-time check for it is not landed: `a = n
-+ n` with `n = 2^62` answers 0 today. `bugs/FORMAL_integer_overflow_at_run_
-time_is_still_untrapped.md` has the measurements, the emitters and instruction
-sequences that are written and working, and the one proof-framework obstacle
-in front of turning them on;
-`test_formal_int_semantics.py`'s `VARIABLE_ROWS` section pins today's answer
-so the gap is a row rather than an absence.
-
 ## Pointers
 
 | Mojo | C ABI |
@@ -232,107 +175,6 @@ formal backends alike. A client that sends text as an escape spelling rather tha
 as UTF-8 bytes crosses this boundary with the wrong bytes. Measured, and filed:
 `bugs/LEXER_unicode_escapes_are_not_decoded.md`.
 
-### A formal boundary is one 64-bit WORD: `Float64` is not a `double`, and a narrow integer is not a narrow register
-
-**Revised 2026-10-05** (`work/formal30-interop`), for the whole **Scalar types**
-section above — the table there is the COMPILED (GIMPLE) path's, where a
-`Float64` really is a C++ `double` and clang puts it in the platform's FP
-register file. This section is the formal backends' row for the same values, and
-before it was written the formal backends published the table above UNCHANGED, so
-a client that generated its declaration from a formal dylib's own manifest got
-one the library does not implement.
-
-| on the formal backends | what it is at the boundary | agrees with the table above? |
-|---|---|---|
-| `Int`, `Int64`, `UInt`, `UInt64` | one 64-bit word in a general-purpose register | **yes** |
-| `Int8/16/32`, `UInt8/16/32` | one 64-bit word whose low `w` bits carry the value; the callee SIGN-extends a signed one (`sxtw x19, w19`) and ZERO-extends an unsigned one (`and x19, x19, #0xffffffff`) | **yes** — the platform ABI's own rule for a `w`-bit integer in a register is to use its low `w` bits |
-| `Bool` | one word holding 0 or 1 | **yes** |
-| `String` / `str` | `char *` | **yes** |
-| `Float64` | **one 64-bit word holding the IEEE-754 bit pattern, in a GENERAL-PURPOSE register** — not a `double` in an FP register | **NO.** This is the row that was false. |
-| `Float32`, `Float16` | a word, by the same rule; the rewrite in `formal_boundary_signature` is uniform over the C float types | no — and neither is there a `Float32` to measure yet (`bugs/FORMAL_float_binary64_only.md`) |
-
-**So a client sends and receives a `Float64` as a word and converts it itself**
-(`memcpy` to and from a `double`, or a union), and the manifest now says so:
-`formal/model.py`'s `formal_boundary_signature` rewrites the published
-declaration, and `double fadd (double, double)` became
-`int64_t fadd (int64_t, int64_t)`.
-
-**Measured, both architectures, on a library whose whole source is three lines**
-(`def fadd(a: Float64, b: Float64) -> Float64: return a + b`), called from a C
-program linked against it and from `ctypes`:
-
-| | arm64 | x86-64 |
-|---|---|---|
-| declared `double fadd (double, double)`, args in the FP registers | `2.14e-314` | `6.42e-314` |
-| declared `int64_t fadd (int64_t, int64_t)`, args as bit patterns | `3.75` | `3.75` |
-| what CPython says | `3.75` | `3.75` |
-
-**The callee is not wrong about the arithmetic, and the disassembly says exactly
-where the word becomes a float** — inside the callee, and not at the boundary:
-
-```console
-$ otool -tv lib.dylib            # _p2_fadd_17720c, arm64
-1000002c4:  add  x19, x0          # argument 0 arrives in a GENERAL register
-1000002c8:  add  x20, x1          # argument 1 too
-1000002e4:  fmov d0, x0           # …and only now becomes an FP register
-1000002e8:  fmov d1, x1
-1000002ec:  fadd d0, d0, d1
-1000002f0:  fmov x0, d0           # and the answer goes back to a GENERAL one
-100000300:  ret
-```
-
-**On arm64 the two register classes are not interchangeable, which is why a
-client cannot make the two conventions work by relying on the aliasing it would
-need.** Measured directly, on this host: a callee handed `bits(1.5)` in `d0` and
-`bits(2.25)` in `d1` read `x0` and `x1` and got the numbers the PREVIOUS call left
-there, and `fmov d1, x2` left `x1` at its old value while `d1` changed. So `D0`
-and `X0` are separate storage, and `fmov` between them is a move rather than a
-reinterpretation — which is why this is a contract row and not a caveat.
-
-**What is deliberately NOT rewritten, and each exclusion is a reason:**
-
-* **A POINTER keeps its spelling.** A pointer is already a word, and its pointee
-  is information a client needs: `uint8_t *` is what
-  `formal/model.py::dylib_export_pointer_pointee` reads to know that a result is
-  a subscriptable buffer rather than an opaque blob, so `Pointer[UInt8]`
-  publishing `int64_t *` would have thrown that away.
-* **`void` is not a value.** It is also how an unannotated function's "returns
-  nothing" is spelled (`reflect._c_signature`), and both backends' emitters read
-  it (`formal/arm64_codegen.py`'s and `formal/x86_64_codegen.py`'s
-  `_callee_returns_nothing`), so it has to survive the rewrite.
-* **A METHOD's `signature` is a lookup key, not a declaration** — it is
-  `Struct.method`, and `formal/imports.py::linked_struct_owners` reads the struct
-  name out of it, so it stays that string. **The declaration is a second,
-  additive manifest field, `declaration`** (`formal/model.py`'s
-  `method_boundary_declaration`, published by `formal/build.py`'s
-  `_formal_exports`), spelled with the receiver convention below applied to
-  argument 0 — `int64_t Point_sum (struct Point *)` for a frame receiver,
-  `int64_t Cell_get (int64_t)` for a one-field struct's plain `self`. A client
-  reads `declaration` when it is there and `signature` otherwise; the field is
-  absent for an export whose receiver convention cannot be resolved, which is
-  the honest absent answer rather than a wrong declaration. Checked by
-  `test_formal_interop.py`, which generates a C client's declaration from it and
-  requires the library to compute what CPython computes. The method ROW itself —
-  `R Struct_method (Struct *self, args…)` — is real for the compiled path and
-  needs the receiver convention below on a formal one.
-
-**Why a narrow integer's word matters even though the low bits are all the
-callee reads.** `sxtw`/`and` means a `w`-bit argument can be passed in a `w`-bit
-register field exactly as the platform ABI passes it, so a plain `Int32` works
-under either declaration. The case that cannot is an **`Optional[Int32]`**: its
-empty word is `1 << 32` (below), which is 33 bits, so a declaration that reads
-`w0` returns `0` where the empty case is `4294967296` — and `Some(0)` and `None`
-are one value again, which is the exact defect the niche word was introduced to
-remove. That is why the manifest's word is 64 bits wide rather than the type's.
-
-**Checked by `test_formal_interop.py`**, which builds a real dylib per
-architecture, generates its C declarations from the manifest, and calls every
-export from a C program and from `ctypes` against CPython's answer. The
-`Optional` word table below is asked of `formal/model.py::optional_none_word` by
-`test_the_optional_niches_are_the_documented_words`, and the receiver table in
-"the formal backend's receiver convention" is re-derived from `reflect`'s own
-method signature and from the emitter's own receiver rule.
-
 ### `Optional[T]` on the formal backends: the payload word, and a NICHE for `None`
 
 **A formal value is one 64-bit word, so an `Optional[T]` is one word: the
@@ -367,20 +209,6 @@ any other value. The two-word alternative — `Optional[T]` the ADDRESS of a
 `{tag, payload}` pair — is what a payload with no niche needs, it reuses the
 frame machinery this file's receiver section already documents, and its cost and
 its three measured obstacles are in `bugs/FORMAL_optional_needs_a_niche.md`.
-
-**`OptionalReg[T]` is NOT in that table and is refused by name.** It was, on the
-strength of the spelling, and that was a wrong answer rather than a missing one:
-the register-passable sibling's storage is a PAIR — `std/collections/optional.mojo`
-picks `_NicheableOptionalRegStorage[T]` (a `StaticTuple[T, 1]`) or
-`_DefaultOptionalRegStorage[T]` (a `!kgen.variant<T, i1>`) through
-`_OptionalRegStorageFor[T]`, so `x is None` here would compare against a niche
-the value does not have. Which of the two applies is a `conforms_to(T,
-UnsafeNicheable)` decided inside the stdlib module, and a build reads
-declarations rather than resolving conformances, so `formal/build.py`'s
-`refuse_optional_reg_annotations` refuses every annotation of it — parameter,
-field, local or return — and names the two storages. A client that wants the
-two-word form for `OptionalReg` is asking for the same project as the next
-paragraph.
 
 **A client binding one of these symbols needs to know the niche only if it
 hand-builds the value.** For a payload whose niche is 0 — every

@@ -1,51 +1,5 @@
 # FORMAL_proof_coverage_census_2026-10-03: 60 functions from THIS repository, both backends, with proofs on
 
-**§0.9 is new (2026-10-05, `work/formal37-3`): the instrument's largest class was
-being FILLED with the proof layer's own refusals, and the A/B on one tree is 7
-of 60 items.** `tools/formal_proof_breadth.py::run_item` had two refusal arms and
-the second was dead for this shape: `formal/build.py` re-raises a generator's
-`NotImplementedError` as a `FormalBuildError` — correctly, so `fire.py build
---formal` prints `build: <message>` instead of a forty-frame traceback — so the
-shape arrived as arm 1 and was filed `codegen-refused`. `_refusal_class`'s own
-docstring, and this document's §0.2, both name that as the class a reader must
-not UNDER-count. The fact now travels on the exception
-(`formal.build.proof_refused`, one reader, three callers), and the measurement
-is an A/B over the SAME 60 items on the SAME tree with the flag forced both ways:
-
-| class | flag off (before) | flag on (after) |
-|---|---:|---:|
-| **`codegen-refused`** | **40** | **33** |
-| `proof-refused` | 0 | **7** |
-| `proof-emitted` (phase A only) | 15 | 15 |
-| `refused-builtin` | 5 | 5 |
-
-**The 7, named:** `cas.py:176:reset_stats`, `formal/macho_linker.py:
-270:executable_entry_offset`, `formal/x86_64.py:64:cond_negated`,
-`myinterpreter.py:2333:_scalar_max2`, `test_formal_glob.py:209:cases`,
-`test_formal_hostmods_conformance.py:972:IS_A_MATCH`,
-`test_formal_interop.py:94:mask`. All seven are `_no_value_model` refusals, all
-seven build and RUN under `--no-prove` on the same architecture, and all seven
-were holes in the SEMANTIC MODEL counted against the code generator.
-
-**What this does to the numbers in this document.** Every `codegen-refused`
-figure below was produced by the old classifier, so a re-run now reports fewer
-of them and a `proof-refused` figure it did not report at all — which is why
-§0.7's "the counts above are NOT a delta" warning is now also true of the
-CLASS. The committed ledgers (`bugs/sweeps/proof_breadth_*.jsonl`) keep the old
-labels, and a `Counter` over one of them is still a faithful reading of what
-that run measured; what has changed is what a NEW run files. **The sample is
-what makes any of the counts a claim about this tree rather than about a
-different one**, and it has moved again: measured off the committed ledgers with
-`formal_proof_breadth.function_key`, the CURRENT 60-item sample shares **24**
-idents with §0's own `proof_breadth_2026-10-03.jsonl`, 30 with §0.2's, 33 with
-round 0's and **2** with either round-2 ledger. So the 7 above are 7 of the
-CURRENT 60 and not a delta against any figure printed here — which is §0.6's
-warning about a sample that moves, measured again.
-
-The two reds it fixes are in `test_formal_proof_breadth.py` and were red on
-`master`; `tools/formal_proof_fuzz.py` filed the same shape the same way, and
-`tools/formal_proof_census.py` filed it as `phase="build"`.
-
 **§0.8 is new (2026-10-05, `work/formal30-proof-regression`): a RATCHET over the
 other half of the corpus — all 52 `formal/examples/*.mojo`, arm64, through
 `compile_formal(prove=True, check=True)` — with a committed per-example baseline
@@ -121,7 +75,7 @@ largest is **`+` on two strings at 10 of 31**, with `'%'` on a string at 4, a
 field access through a value at 5, a number compared with a string at 3, and a
 method call on a value at 2. The `+` family is the string-value-model row, so the
 census's top codegen cause is now the same one the sweep's 170-file row is
-(the `b10` round of `bugs/FORMAL_sweep_work_map.md` §3.1), and it is a
+(`bugs/FORMAL_sweep_work_map_2026-10-04_b10.md` §3.1), and it is a
 value-model project rather than a patch.
 
 **And a negative measurement, because a change that adds a refusal has to say
@@ -133,15 +87,6 @@ census's numbers are unmoved by it.
 **§0.7 (2026-10-04, `work/formal21-5`) is the re-measurement and it is below
 §0.6's paragraph; read it for the committed ledger and for the two items §0
 asked about by name.**
-
-**§0.8 is new (2026-10-04, `work/formal23-5-r2`) and it is about the INSTRUMENT,
-not the coverage: a verdict in this census depended on `-j`, because the tool
-measured several items at once in one interpreter and `formal/model.py` keeps the
-current unit's module-level symbol table in a process global.** One item of 78 on
-arm64, and the class counts identical either way — which is why §0.1 through
-§0.7's numbers are all still right and why nobody noticed. Fixed by one PROCESS
-per item (`tools/formal_proof_breadth.py::_worker_pool`); the ledger is committed
-as `bugs/sweeps/proof_breadth_2026-10-04_round2-phaseA-isolated.jsonl`.
 
 **§0.6 is new (2026-10-04, `work/formal19-4`): §0.2's "a module global with
 storage but no initializer" family is 0, and it was a MISDIAGNOSIS rather than a
@@ -572,100 +517,6 @@ corpus it is 37 of 60 programs, against 0 of 60 for the default `plain` mix —
 `bugs/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`
 carries the measurement and why closing it is three layers deep rather than a
 ten-line arm.
-
-## 0.8 The instrument was measuring several items at once in ONE interpreter,
-## and 1 of 78 verdicts depended on that
-
-**This section is about the census as an INSTRUMENT, and it is in this document
-because an instrument whose numbers move with `-j` cannot decide what to work on
-next.** It is also the reason every count in §0.1–§0.7 survives: the damage is
-one item, and it is invisible in a tally.
-
-Same tree, same flags, phase A (`--no-check`), arm64, 78 items, one flag changed:
-
-```
-$ python3 tools/memslot.py --gb 8 --label pb -- python3 -u \
-    tools/formal_proof_breadth.py --no-check --arch arm64 -j 4 -t 400 \
-    --repo 60 --examples 45 --example-offset 1 --admit-returns \
-    --exclude-seen bugs/sweeps/proof_breadth_2026-10-03.jsonl --ledger .tmp/j4.jsonl
-$ … the same command with -j 1 --ledger .tmp/j1.jsonl
-```
-
-| item | `-j 4` | `-j 1` |
-|---|---|---|
-| `test_formal_math.py:365:combperm_source` | `'BIG_N' has no home: the module-level symbol table is empty for this unit` | `'BIG_N' has storage here — it is one of the module-global slots in this image's `__DATA`` |
-
-**One verdict of 78, and every class count identical**: arm64
-17 `proof-emitted` / 21 `proof-refused` / 40 `codegen-refused` under both, so
-§0.7's table is unaffected and so is §0.6's. What differs is the per-item
-detail — which is what a reader opens the ledger for.
-
-The two sentences are chosen by `formal/build.py::_declared_module_names`, which
-asks `formal/model.py`'s `module_symbols()` whether the unit declares any
-module-level name at all. **That table is a process global**
-(`formal/model.py::_MODULE_SYMBOLS`, installed by `publish_module_symbols`, which
-REPLACES rather than merges), and the census was submitting every item to one
-`ThreadPoolExecutor`. So an item that ran beside another unit's `compile_formal`
-read that unit's table and reported its own unit as empty.
-
-The direct check, because "the tool disagrees with itself" is not evidence until
-the tool's own emitted program is built by hand — `--list` prints the program
-the item compiles, and building it with `fire.py build --formal --no-prove` gives
-the `-j 1` sentence on both architectures and on a `git archive HEAD` export.
-
-### Why it survived six rounds of this census: a tally cannot see it
-
-A `-j`-dependent verdict is a tally-invariant defect, and this document's own
-subject is tallies. The counts are the same, the class is the same
-(`codegen-refused` either way), and the row that would have shown it — the
-detail — is one line in a 156-line JSON ledger.
-
-**And one of the two answers is what the report compares ACROSS ARCHITECTURES.**
-`DIFFERENT CONSTRUCTS on the two architectures` is the most alarming thing this
-tool can print, and under `-j 4` this run printed it for `combperm_source`:
-
-```
-== 2 item(s) refused DIFFERENT CONSTRUCTS on the two architectures
-   test_formal_math.py:365:combperm_source
-      arm64   … the module-level symbol table is empty for this unit
-      x86_64  … one of the module-global slots in this image's `__DATA`
-```
-
-The isolated run prints **one** such row (`test_formal_stat.py:179:corpus`, which
-is real — the two machines have different container budgets in the frame). So the
-instrument could manufacture its most alarming output, and a queue that reads it
-would go and look for a two-backend disagreement that does not exist.
-
-### The fix, and what it costs
-
-`tools/formal_proof_breadth.py::_worker_pool` is a `ProcessPoolExecutor` with a
-`spawn` context: one process per item, and `spawn` rather than `fork` because
-`fork` copies whatever the parent already imported and published — the same
-hazard with an extra step. The worker moved to module level (`_run_one`) because
-a process pool **pickles** what it submits and the closure over `args` it
-replaced could not be pickled at all.
-
-| | threaded | isolated |
-|---|---|---|
-| 156 verdicts, phase A | 2 s | **6.6 s** |
-| peak | 0.1 GB | **0.4 GB** |
-| `-j 4` vs `-j 1` verdicts differing | 1 of 78 | **0 of 78** |
-
-The 4.6 s and the 0.3 GB are a spawned interpreter per item, which is noise
-beside the phase B proof this census exists for — and phase A was always the cheap
-half (the doc's own cost note: 8 min for a cold 120-item run with Lean).
-
-`test_formal_proof_breadth.py`'s `TestWorkerIsolation` pins the decision, and
-says why it is a STRUCTURAL test: a symptom test would have to put two
-interfering items in flight and assert that they disagree, which is a race that
-mostly passes on the broken version.
-
-**What this does NOT establish:** that no other item is order-dependent. It
-establishes that the census no longer measures items in the same interpreter as
-each other, which is the only way an order-dependence could enter. A census over
-a tree where two units' `compile_formal` calls could interleave in one process
-would need the compiler fixed instead — `publish_module_symbols` per unit rather
-than per process — and that is a compiler change, not this tool's.
 
 ## 0.7 Round 2 RE-MEASURED on a tree three merges later: the largest cause in the
 ## corpus is now an f-string literal, and it moved 7 items OUT of the proof layer

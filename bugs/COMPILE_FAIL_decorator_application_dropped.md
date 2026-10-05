@@ -62,24 +62,10 @@ one unrepresentable case. Step 3 remains cheap and safe to land on its own
 precisely because that case is silently wrong today.
 
 **One thing the plan does not yet account for**, found while fixing defect 2:
-`print` now formats a function value correctly, but the CLOSURE form did not
-compile at all on this tree, so the arm was not exercised for the
-`MojoBoundMethod *` spelling a capturing closure lowers to. That is FIXED
-(`work/bugs6-1`, 2026-10-04): `_root_globals` now mints the field and the call
-reads it, so a module-scope `f = outer(3)` compiles and `f(10)` answers `13` —
-pinned by `test_gimple_runner.py`'s
-`gimple_module_scope_closure_value_is_declared_and_callable`, which calls it
-twice so the field cannot be right by accident on the first read.
-
-What did NOT come with it is `print(f)`'s text: a capturing closure read as a
-value still has no repr and prints its address decimal where CPython prints
-`<function outer.<locals>.inner at 0x...>`, so this doc's first paragraph is
-still true for the closure spelling. That is filed, with its own next step, as
-`bugs/CODEGEN_closure_value_repr_prints_its_address.md`. The wider gap the
-same measurement turned up — a module-scope global bound to a
-container-returning CALL is declared `int64_t` and does not compile — is
-`bugs/CODEGEN_a_module_scope_global_bound_to_a_container_returning_call_is_a_box.md`,
-and the two are separate: one is a repr, the other is a declaration.
+`print` now formats a function value correctly, but the CLOSURE form does not
+compile at all on this tree, so the arm is not exercised for the
+`MojoBoundMethod *` spelling a capturing closure lowers to. Filed as
+`bugs/CODEGEN_a_closure_value_in_a_local_does_not_declare.md`.
 
 ## Status (2026-10-02 — re-measured: the compiled half is STILL wrong, and the two candidate fixes are now MEASURED, one of them ruled out)
 
@@ -198,8 +184,7 @@ recording before anyone attempts it:
   module-level DEFINITION or an import. A name bound to a VARIABLE is not
   something it can answer for at all — the same "the bare-name tables
   cannot see it" shape, measured in
-  the bare-`import` module-qualified call, fixed 2026-10-02 (the member
-  registration is `funcs_shared.register_imported_symbol`), which is
+  `CODEGEN_bare_import_module_qualified_call_answers_zero.md`, which is
   the failure a decorated name runs into.
 
 Neither is part of this bug; both are prerequisites or neighbouring

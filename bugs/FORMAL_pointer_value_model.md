@@ -1,178 +1,16 @@
 # FORMAL_pointer_value_model: what a pointer IS on the formal path, and why the 54-file group was never about that
 
-**§9 status, re-measured 2026-10-04 (`work/formal23-5-r2`): SIX of the eight
-items in "Also found, and NOT fixed" are now closed, and the two that remain are
-both named as another lane's question.** Closed: the `p + k` offset scale
-(2026-10-03), the x86-64 one-field-struct field read (**measured fixed on this
-tree, below** — the case was stale, not the backend), a STORE through a pointer
-(fixed on master, below), §9's second item (a pointer's pointee crosses a call
-boundary), and §9's LAST item — **the `Pointer[SomeStruct]` identity, which is
-this update's subject and is answered on both architectures.** Two are decided
-rather than open (the `%d` narrowing, the pointer-to-pointer no program can
-produce). What remains is the UNDECLARED-OFFSET half of the scale, which is a
-types question, and the CROSS-IMAGE half of §9's second item, which is the
-dylib manifest's job. Nothing here is a value-model change: the decision §1
-records still stands exactly as written.
-
-## §9's last item is CLOSED: `p.value()` on a `Pointer[SomeStruct]` is the receiver, and a frame a pointer names is a HOLDER
-
-§4's "the next step is one line of recognition" is landed, on arm64 and on
-x86-64, and what it took was that line plus the three consumers it feeds.
-
-| | where | what |
-|---|---|---|
-| the decision | `formal/model.py`, `pointer_frame_pointee` | what a POINTER receiver points at when that is a FRAME of a struct this image declares. One reader, because three places consume it and four recognitions of one fact is four things that agree until the day they do not |
-| the answer | `dereference_lowering` | `("frame", struct, False)` — a load-width answer with no width in it. Both `_emit_dereference`s emit the receiver and nothing else, because a load at the frame's FIRST slot would answer `a` where the source says `b` |
-| the name | `pointer_frame_bindings` → `_frame_receivers` | a local bound from `q = p.value()` is a frame HOLDER, so `q.b`, `q.b = v` and `q.b += v` all work through `_frame_slots` unchanged |
-| the return | `_frame_return_status` | `return p.value()` returns a FRAME, so the convention copies it into a block in the CALLER's scratch |
-| the base | both backends' member-read and member-store arms | the DIRECT spelling `p.value().b`, one `LDR`/`mov` at `[address, 8*slot]` |
-
-Measured, both architectures, `fire.py build --formal --no-prove`, on §4's own
-reproducer:
-
-```mojo
-struct P3:  var a: Int64 / var b: Int64 / var c: Int64
-def read_field(p: Pointer[P3]) -> Int:  return Int(p.value().b)
-main:  var t = P3(); t.b = 22;  return read_field(t)
-```
-
-```
-arm64   exit 22        x86_64   exit 22        # was 0 on both, and REFUSED
-```
-
-**22, and not `a`.** A load at the frame's first slot answers 0 here, so the
-case could have passed by accident; that is what the named-binding sibling
-(`deref_struct_pointee_through_a_name_is_a_holder`) is for, and what the store
-case's second assertion — the value has to be visible in the CALLER's frame
-afterwards — is for.
-
-Three things about it are worth more than the answer, and all three are refusals
-that stayed refusals:
-
-* **The frame-LIFETIME half is closed by the convention rather than by a new
-  rule.** A `Pointer[P3]` IS a frame address, so `return p.value()` hands the
-  caller a pointer into a frame — and the returned-frame convention makes that
-  a COPY in a block the caller reserved, which is the one shape of "a frame
-  reaches a caller" this path can follow. Without the `_frame_return_status`
-  arm the function was classified `_RETURN_WORD`, which is the silently-wrong
-  direction twice: no caller reserved a block, and the address of the caller's
-  own frame came back as a plain word. Every other channel is already refused
-  for a holder and is measured refusing for this shape too — a store into a
-  field is `deref_refuse_a_pointer_frame_stored_in_a_field`.
-* **The SEEDING is a fixpoint EDGE and not a seed, and that is a bug this work
-  nearly introduced.** The first version seeded the holder table where
-  `_constructor_bindings` seeds, and a name bound both ways
-  (`q = p.value()` in one branch, `q = o` — a callee's holder — in another)
-  then kept only the pointer's layout, because the copy edge skips a name that
-  is already a holder. The edge appends its candidate instead, so the two-layout
-case is a candidate list of two. **The copy edge did not MERGE, and that was
-   the same hole one step back — a constructor binding with no pointer anywhere
-   near it: `var q = Three(); q = o` built on both architectures and answered 0
-   and 208. FIXED 2026-10-05 (`work/formal35-2`): the copy edge now appends its
-   candidate instead of skipping a name that is already a holder, so the
-   pre-seeded `q` sees `o`'s layout too and `model.struct_frame_slot_candidates`
-   refuses the disagreement — the same fixpoint edge this section describes for
-   the pointer, applied to the arm that was already there.
-   `test_formal_run.py`'s `byref_a_rebind_from_another_holder_keeps_both_
-   layouts` (refused, both architectures) and `byref_a_rebind_whose_two_layouts_
-   agree_still_answers` (still builds and answers CPython) pin both directions.
-* **A ONE-FIELD struct pointee is still REFUSED**, and it is a different fact
-  rather than a half-answer: its value is its own field, so there is nothing at
-  the address and the identity would be wrong rather than right
-  (`deref_refuse_one_field_struct_pointee`). A struct of ANOTHER module is
-  refused too — no layout here to read its fields through. And
-  `p.value().b += 5` is still refused on both architectures: the augmented arm
-  works from a NAME, so a base that is an expression has none to key on, and the
-  two backends refuse it with different words, which is a pre-existing
-  divergence in that diagnostic and is pinned as such
-  (`deref_refuse_augmented_through_a_pointer_frame`, `refuse_either:` with both
-  needles) rather than papered over.
-
-**What it was worth in this corpus's units: nothing measurable, and that is the
-same answer §3 gives for the 54-file group.** There is not one `.value().` in
-any of the repository's or the stdlib's 461 `.mojo` files — measured over the
-same scope `tools/formal_untyped_param_deref_census.py` uses — so this closes a
-refusal class this path can decide and moves no file. It is worth having
-because the refusal was a *false* limit rather than an unknown one: the model
-said the answer was the identity and then declined to give it.
-
-### Before/after over twelve real modules, which is the standard this change owes
-
-It edits `formal/build.py`'s holder fixpoint, which runs for **every function in
-every module**, so "the new cases pass" is not the evidence — the evidence is
-that nothing else moved. Twelve modules, each built twice from a `git archive
-HEAD` export with no diff applied, comparing the build's whole output:
-
-```
-IDENTICAL  formal/model.py            IDENTICAL  std/builtin/string.mojo
-IDENTICAL  formal/build.py            IDENTICAL  std/collections/optional.mojo
-IDENTICAL  gimple_codegen.py          IDENTICAL  std/collections/list.mojo
-IDENTICAL  myinterpreter.py           IDENTICAL  formal/x86_64_decode.py
-IDENTICAL  test_suite.py              IDENTICAL  tools/formal_sweep.py
-IDENTICAL  formal/hostmods/concurrent/futures.mojo
-IDENTICAL  formal/hostmods/subprocess.mojo
-IDENTICAL  formal/hostmods/ctypes.mojo
-```
-
-`myinterpreter.py` and `formal/model.py` are in that list deliberately: they are
-the two largest modules the pass sees, and `formal/build.py`'s own source is a
-file this change edits.
-
-Three of those BUILD, and the artifacts are the stronger check:
-
-| artifact | before vs after |
-|---|---|
-| `futures.mojo` (67 568 bytes) | **byte-identical** |
-| `subprocess.mojo` (83 984 bytes) | **byte-identical** |
-| `ctypes.mojo` (67 712 bytes) | 43 bytes differ, in two clusters and **neither is code**: 12 inside an `LC_LOAD_DYLIB` name (the CAS dylib's content hash, which includes the output path — and the two trees were given two different ones on purpose) and 31 inside the `LC_CODE_SIGNATURE` region (`dataoff 49328`, `datasize 18384`). Two trees cannot produce one signature without one path. |
-
-**What it does not cover, and it is the integrator's:** a whole-scope
-`tools/formal_sweep.py` over all 710 files, and the Lean half. The twelve above
-are a sample chosen for size and for the fact that three of them build at all;
-they are not a census, and the doc that would settle the question is
-the `b10` round of `bugs/FORMAL_sweep_work_map.md`'s next round.
-
-**What it costs: 0.10 s on `formal/model.py`, 3 runs each, best of three.**
-1.86 s before, 1.96 s after — about 5 %, and it is one extra body walk per
-function (`pointer_frame_bindings` is collected in the loop that already walks
-every function once, and asked from inside the fixpoint rather than beside it).
-The 2026-10-02 per-struct census is the body of work that says what a
-build-cost number has to be measured against (its doc is deleted with its fix,
-and the one member of the family still open is
-`bugs/PERF_struct_field_names_is_still_asked_once_per_function.md`), and the
-honest reading of this one is that a fixpoint EDGE is not free even when it
-merges nothing: the walk is per function and there are a thousand functions.
-
-### §9's sixth item, re-measured: the x86-64 one-field field read is FIXED, and
-### what the measurement was is the record
-
-```
-struct One:  var v: Int64
-def raw(h: One) -> Int:  return Int(h.v)
-main:  o = One(); o.v = 4242;  if raw(o) == 4242: return 1
-
-arm64 exit 1        x86_64 exit 1        # on `git archive HEAD`, no diff applied
-```
-
-§9 recorded "PRE arm64: raw=4242 / PRE x86-64: raw=0". On this tree both
-architectures answer 4242, and they did so before this branch's first commit —
-so the row was stale rather than the backend fixed-in-place, and the case
-(`X86_ONLY_1SLOT_BUG_CASE`) has been pinning the arm64 half of a fixed pair all
-along. It is left as it is: a case whose name says "correct on arm64" that runs
-on the host's architecture is the right shape for the assertion it makes, and
-re-shaping it is a test-suite decision rather than this document's.
-
-**§9 status as of 2026-10-05 (`work/formal23-5`, SUPERSEDED by the block above
-this one — kept because the section it introduces is still the record of what
-that change was): FOUR of the eight items
+**§9 status, re-measured 2026-10-05 (`work/formal23-5`): FOUR of the eight items
 in "Also found, and NOT fixed" are now FIXED — the `p + k` offset scale
 (2026-10-03), the x86-64 one-field-struct field read, a STORE through a pointer
 (measured fixed on master, below), and §9's second item, which this update is
 about: a pointer's pointee now CROSSES A CALL BOUNDARY.** Two are decided rather
 than open (the `%d` narrowing, the pointer-to-pointer that no program can
-produce), and the two that were §9's last item — the `Pointer[SomeStruct]`
-identity, closed by the block above — and the UNDECLARED-OFFSET half of the
-scale, which is a types question and stays a types question.
+produce), and the two that remain are §9's last item — the `Pointer[SomeStruct]`
+identity, whose next step is one line in the holder fixpoint — and the
+UNDECLARED-OFFSET half of the scale, which is a types question and stays a
+types question. Nothing here is a value-model change: the decision §1 records
+still stands exactly as written.
 
 ## §9's second item is CLOSED: the pointee travels with the parameter, when the
 ## image agrees about it
@@ -639,11 +477,8 @@ whose lifetime this pass cannot follow — the same use-after-free
 function that created it, and the same one D2 made an enforced invariant for a
 blob in a field. **No slot was created that can hold a pointer to a callee's
 scratch**; the one case that could have become one is a refusal. Pinned by
-`deref_refuse_struct_pointee` when this section was written, whose message said
-all of this and named the next step; **that case is now an ANSWERED one**
-(`deref_struct_pointee_is_the_receiver`, and five siblings — see the Status
-block at the head of this file) and the refusal that took its place as the
-lifetime pin is `deref_refuse_a_pointer_frame_stored_in_a_field`.
+`deref_refuse_struct_pointee`, whose message says all of this and names the next
+step.
 
 **The next step is one line of recognition, not a value-model change:** teach
 the holder fixpoint that a name bound from `p.value()` where `p` is declared
@@ -651,18 +486,6 @@ the holder fixpoint that a name bound from `p.value()` where `p` is declared
 candidate. Everything downstream — the frame layout, the escape analysis, the
 field reads — already exists and already works for a directly constructed
 struct. `formal/build.py` is not this change's lane.
-
-> **Answered 2026-10-04 (`work/formal23-5-r2`), and the paragraph above is what
-> was asked for.** `model.pointer_frame_pointee` is the recognition, its three
-> consumers are the seeding, the returned-frame decision and the two backends,
-> and `p.value().b` answers 22 on arm64 and on x86-64 where this section records
-> 0 and a refusal. **One line was an undercount of the work rather than an
-> overcount of it**, and the reason is worth keeping: the holder tables decide
-> only what a NAME means, so the spelling with no name — `p.value().b` — needs an
-> emitter arm of its own, and `return p.value()` needs the frame-return
-> convention or the answer is a use-after-free. Three pieces, one derivation.
-> The section at the head of this file has the measurement and the three
-> refusals that stayed.
 
 ---
 
@@ -1110,20 +933,6 @@ the `("frame", …)` branch of §4 and is refused for a different reason.
   construction.
 - **The struct-pointee branch is correct and unreachable**, which is §4. One
   line in the holder fixpoint closes it and it is `formal/build.py`.
-  **CLOSED 2026-10-04 (`work/formal23-5-r2`)** — `pointer_frame_pointee` plus its
-  three consumers, and `p.value()` on a `Pointer[SomeStruct]` answers 22 where it
-  used to answer 0 and refuse. The "next step" paragraph below is the record of
-  what was asked for; the section at the head of this file is what landed.
-- **A name bound from a POINTER FRAME and rebound from another holder used to
-  keep the pointer's layout**, which was the copy edge's hole and not this
-  document's item — the pointer shape inherited it, and so did a constructor
-  binding with no pointer anywhere near it. **CLOSED 2026-10-05
-  (`work/formal35-2`)**: the copy edge MERGES its candidate into a name that
-  already has one, so `struct_frame_slot_candidates` refuses the two-layout case
-  for the pointer shape and for the constructor shape alike.
-  `test_formal_run.py`'s `byref_a_rebind_from_another_holder_keeps_both_layouts`
-  is the reproducer as a refusal and
-  `byref_a_rebind_whose_two_layouts_agree_still_answers` is the guard.
 - **A concurrent-wave collision, reported not resolved.** `formal/build.py` gained
   ~465 lines during this wave from another agent, and its new refusal ("'h' is
   bound here as a parameter, so none of the three is established, and a store to

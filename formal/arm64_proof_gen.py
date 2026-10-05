@@ -32,13 +32,6 @@ import fire_compiler as F
 # ONE name for it, not two: this file said both `model` and `model as M`, and a
 # second spelling of one module is a second place for the two to disagree.
 from formal import model
-# `specs` for the `@refines(...)` annotation: the ONE reader of it and the ONE
-# emitter of the theorems that put the machine and an independent specification
-# on opposite sides of an equation.  It lives in its own module because this one
-# is 11k lines several branches edit, and because `x86_64_proof_gen.py` needs the
-# same two functions — a second copy would be a second place for the two backends
-# to disagree about what an annotation means.
-from formal import specs as SPECS
 from formal.arm64_codegen import var_register_map, _SCRATCH
 from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
@@ -996,39 +989,7 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
             # `^` already uses and `UInt64.xor` is 64-bit, so the whole
             # complement is one term with no library helper.
             return f"({op} ^^^ 0xFFFFFFFFFFFFFFFF)"
-        if e.op == "+":
-            # Unary plus is the IDENTITY, and it used to be modelled as a
-            # LOGICAL NEGATION: this arm had three cases (`-`, `~`, and
-            # everything else), `not` was the only thing the third was for, and
-            # `+` fell into it. So
-            #
-            #     def up(n):
-            #         return +n
-            #
-            # was emitted as
-            #
-            #     def up_go (n : UInt64) : UInt64 := (if n = 0 then 1 else 0)
-            #
-            # which is `not n` — **a model of a program the source does not
-            # contain**. Measured on this tree: the IMAGE answers 10 for `+10`
-            # on both backends (it is the identity in the emitter too), and the
-            # x86-64 and arm64 run tests — `result n = mojo n`, decided by
-            # `native_decide` over the machine model — are what caught it, as a
-            # FALSE obligation. That is the run tests doing their job, and it
-            # is also the only reason this was ever a question: the corpus had
-            # no example with a unary `+` in it until
-            # `formal/examples/unary_ops.mojo`, whose proof Lean rejected at
-            # `unary_ops_proof.lean:81:2` with a spurious counterexample for a
-            # program whose only unusual operator is the one that was modelled
-            # wrongly.
-            return op
-        if e.op == "not":
-            return f"(if {op} = 0 then (1 : UInt64) else (0 : UInt64))"
-        raise NotImplementedError(
-            f"model: the unary operator `{e.op}` has no term in the semantic "
-            f"model, and answering the one below for an operator nobody "
-            f"wrote down is how `+` came to be modelled as `not`. Refusing "
-            f"rather than guessing: `{op}`")
+        return f"(if {op} = 0 then (1 : UInt64) else (0 : UInt64))"
     if isinstance(e, BinOp):
         l = _expr_go(e.left, param, env, vtypes, call_types, scope)
         r = _expr_go(e.right, param, env, vtypes, call_types, scope)
@@ -1208,93 +1169,11 @@ def _stmts_go(stmts, param: str, env: dict, fname: str, loop_counter: list,
         helper_env = dict(env)
         helper_env[param] = p
         cond = _cmp_go(st.condition, param, helper_env, vtypes, call_types, scope)
-        body_env = helper_env
-        # `_bind_one`, the one binder, for the reason its own docstring gives:
-        # the rule "an assignment binds this name to this term" was written out
-        # four times and the copies DIVERGED by being incomplete, so it is now
-        # defined once. This fold was the fifth copy and it was incomplete in
-        # exactly the way the other three were -- it recognised `Assign` and
-        # nothing else, so `total += i` and `var step: Int = i + 1` inside a
-        # `while` body bound nothing. What that cost is measured, not
-        # conjectured: `formal/examples/var_typed_loop.mojo` (a `var` with a
-        # type, declared and read inside a `while`) was REFUSED with
-        #
-        #     model: `step` is read here and this generator binds it to nothing
-        #     (the model's environment is ['i', 'n', 'total'])
-        #
-        # which is FALSE about the source -- `_stmts_go`'s own top-level arm
-        # binds the same statement three lines above -- and no earlier example
-        # could see it, because every loop in the 52-example corpus assigned
-        # with `=`.
+        body_env = dict(helper_env)
         for b in st.body:
-            body_env = _bind_one(body_env, b, param, _expr_go, vtypes,
-                                 call_types, scope)
-        # **The loop's state is ONE word, and this fold says so.** The helper
-        # below takes the recursion's single argument, so the only name whose
-        # value can cross an iteration is the one that argument carries. A body
-        # that changes any OTHER name has a loop the model cannot state: the
-        # update is dropped, so the term is not the source's arithmetic.
-        #
-        # What that used to cost is measured, and it is worse than a lost
-        # update. `formal/examples/accum_max.mojo`:
-        #
-        #     i = 0
-        #     best = 0
-        #     while i != n:
-        #         if i > best:
-        #             best = i
-        #         i = i + 1
-        #     return best
-        #
-        # has an induction variable (`i`) that is NOT the entry parameter, so
-        # `updated` was the parameter's own unchanged value and the emitted
-        # helper was
-        #
-        #     partial def accum_max_go_loop_0 (n_0 : UInt64) : UInt64 :=
-        #       (if ((UInt64.ofNat 1) ≠ n_0) then accum_max_go_loop_0 (n_0)
-        #        else (UInt64.ofNat 0))
-        #
-        # — a `partial def` that DIVERGES on every input that enters the loop,
-        # emitted as `mojo`. On arm64 that never reached a proof file (the
-        # `eval_eq_mojo` gate refuses the shape first). **On x86-64 it did**,
-        # because `x86_64_proof_gen` shares this fold, and the generator then
-        # emitted its run test over it:
-        #
-        #     theorem accum_max_runs_10 : accum_max_result 10 = mojo 10 := by
-        #       native_decide
-        #
-        # `mojo 10` diverges and `accum_max_result 10` is 9, so that obligation
-        # is FALSE, and `native_decide` does not report a false obligation — it
-        # runs the interpreter until the launcher's bound kills it. Measured on
-        # this tree: 7+ minutes with no verdict, against 25 s for the same
-        # proof's siblings.
-        #
-        # So the rule is the honest one: a loop whose state is not one word, or
-        # whose body is not a straight-line run of bindings, is REFUSED here
-        # rather than modelled as something that is not the program. On x86-64
-        # the refusal reaches the generator's own placeholder path
-        # (`_placeholder_model`), which emits the gap as a gap and omits the
-        # run tests instead of stating a false one — see
-        # `bugs/FORMAL_a_loop_that_is_neither_a_decrement_nor_a_range_loop_has_
-        # no_contract.md`.
-        dropped = sorted(name for name, term in body_env.items()
-                         if name != param and term != helper_env.get(name))
-        shaped = [type(b).__name__ for b in st.body
-                  if not isinstance(b, (Assign, AugAssign, VarDecl))]
-        if dropped or shaped:
-            raise NotImplementedError(
-                "model: this `while` loop's state is more than the one word "
-                "the model carries"
-                + (f" — the body changes {', '.join(dropped)}, and the loop "
-                   f"helper's single argument can carry only the induction "
-                   f"variable" if dropped else "")
-                + (f", and its body is not a straight-line run of bindings "
-                   f"({', '.join(shaped)})" if shaped else "")
-                + f", so the fold would emit a model that is not this "
-                f"program's arithmetic. Refusing rather than emitting one: "
-                f"`_dec_while_pattern` (a counter that IS the parameter) and "
-                f"`_range_loop_pattern` (a range loop with one accumulator) "
-                f"are the shapes the model can state today")
+            if isinstance(b, Assign):
+                body_env[_target_name(b)] = _expr_go(
+                    b.value, param, body_env, vtypes, call_types, scope)
         updated = body_env.get(param, p)
         rest_term = (_stmts_go(rest, param, helper_env, fname, loop_counter,
                                helpers, vtypes, call_types, scope)
@@ -1376,15 +1255,7 @@ def _expr_go_t(e, param: str, env: dict, vtypes: dict, call_types: dict,
             # how the narrow result is read back.
             return _t_wrap(
                 f"({op} ^^^ 0x{mask_of(resolve(t)):x})", t)
-        if e.op == "+":
-            # The typed twin of `_expr_go`'s identity arm, and the same defect:
-            # `+` fell through to the logical negation below. See that comment.
-            return _t_wrap(op, t)
-        if e.op == "not":
-            return f"(if {op} = 0 then (1 : UInt64) else (0 : UInt64))"
-        raise NotImplementedError(
-            f"typed model: the unary operator `{e.op}` has no term in the "
-            f"semantic model; refusing rather than guessing")
+        return f"(if {op} = 0 then (1 : UInt64) else (0 : UInt64))"
     if isinstance(e, BinOp):
         l = _expr_go_t(e.left, param, env, vtypes, call_types, scope)
         r = _expr_go_t(e.right, param, env, vtypes, call_types, scope)
@@ -2051,183 +1922,6 @@ def _entry_arg_names(arity: int) -> list:
     return ["n"] + [f"n{i}" for i in range(1, max(1, arity))]
 
 
-def _narrow_param_bound(fn) -> list:
-    """`(name, bound)` for each entry parameter whose DECLARED type is narrower
-    than 64 bits, or `[]`.
-
-    **This is the hypothesis a narrow typed parameter's theorem was missing, and
-    the obligation it discharges is FALSE without it.**  `def sgt8(n: Int8)`
-    narrows the incoming word the way the architecture says to — `SXTB` then
-    `SXTW`, rendered `t32u (t8s n)` then `t32s` — so the walk's
-    `have hprior_0_n : (s_0).x19 = n` asks Lean for
-
-        ⊢ t32s (t32u (t8s n)) = n
-
-    which holds exactly when `n` is a value the declared type can hold.  The
-    theorem's `n` is a `UInt64` with no range hypothesis at all — `hn` bounds the
-    FUEL and nothing bounds the argument — so the obligation is false for every
-    `n >= 2^(w-1)` and `sgt8` and `sle8` do not typecheck.  Measured on
-    `formal/examples/sgt8.mojo`: 12 diagnostics, four of them this goal at four
-    `hprior`s and eight `grind` counterexamples at the four `hcond`s that read
-    the same value, and zero `sorry` — Lean REJECTS the proof, which is why the
-    hole census reads 0 and why nothing noticed.
-
-    `bound` is `2^(w-1)` for a SIGNED type and `2^w` for an unsigned one, which
-    is the range in which `t{w}s (t{w}u (x)) = x` holds: `t8s` is the identity
-    on `0..127` and `t8u` on `0..255`, and the walk's SXTB-then-SXTW pair is
-    `t32u (t8s …)` for a signed parameter and `t32u (t8u …)` for an unsigned
-    one.  `formal/types.py::function_var_types` is the ONE reader of a
-    parameter's declared type and this asks it, so a second table of widths
-    cannot disagree with the one the codegen narrows by.
-
-    **It is a hypothesis and not a `Post` change, which is what makes this a
-    generator fix rather than a library project.**  The universal theorem states
-    its conclusion over `runProg {name}_prog n` directly for a non-recursive
-    entry, so adding a binder needs nothing from `lib/Refine.lean` — where
-    widening `Post`/`contract_sound` would have touched every recursive example
-    in the corpus.  The alternative, dropping the narrowing so the machine
-    agrees with the source on out-of-range values, is the narrower bug and the
-    wrong place: the truncation is what the architecture does.
-
-    A width-64 parameter contributes nothing, so `[]` for every program whose
-    parameters are unannotated — which is all of them but the four this fixes.
-    """
-    if fn is None:
-        return []
-    from formal.types import function_var_types
-    try:
-        vtypes = function_var_types(fn, None)
-    except Exception:                        # noqa: BLE001 - unresolvable types
-        return []
-    out = []
-    arity = _entry_arity(fn)
-    enames = _entry_arg_names(arity)
-    for i, (pname, _ptype) in enumerate(fn.params or []):
-        t = vtypes.get(pname)
-        if t is None or t.width >= 64:
-            continue
-        out.append((enames[i] if i < len(enames) else f"n{i}",
-                    1 << (t.width - 1 if t.signed else t.width)))
-    return out
-
-
-def _narrow_param_hyps(fn, fuel=None) -> list:
-    """The theorem BINDERS for `_narrow_param_bound`, as `(name : type)` text.
-
-    `None` for a function whose parameters are all 64 bits wide, which is every
-    program in the corpus but the four with a narrow typed parameter — so the
-    emitted theorem is byte-identical for everything this does not fix, which is
-    the property that keeps a change to the universal theorem's statement from
-    being a change to 40-odd proofs.
-
-    The bound is in the WORD's own `<`, not `x.toNat < k`, and that is not a
-    style choice: `bv_decide` bit-blasts `x < 128` on a `UInt64` and discharges
-    it, while the `Nat`-valued form is neither bit-blastable nor something
-    `omega` can see — `omega` does not derive `x.toNat < 128` from `x < 128`, and
-    it cannot reason about `Nat`'s `&&&` at all, which is what `UInt64`'s `&&&`
-    rewrites to. Measured: three attempts at a `Nat`-shaped hypothesis, all
-    failing on `simp made no progress` or `omega could not prove the goal`, and
-    the word-ordered form closing on the first try.
-
-    `fuel` is `None` for the ordinary entry-point theorem and a fuel expression
-    for the RECURSIVE arm; the recursive arm's own header is emitted by a
-    different code path and is NOT given these binders, because
-    `contract_sound` quantifies `arg` itself and widening it is the library
-    project this fix exists to avoid. See `_narrow_param_bound`.
-    """
-    return [f"{nm}w : {nm} < {b}" for nm, b in _narrow_param_bound(fn)]
-
-
-# The identity each narrow typed narrowing needs, as the Lean TEXT of a proved
-# lemma. Emitted into the proof file (never into `lib/ProofLib.lean`, which a
-# bounded worker cannot rebuild) and used by `simp`, so it is the ONE place the
-# statement of "the truncation is the identity on the declared range" exists.
-#
-# The statement is the composition the CODEGEN emits for that width and
-# signedness, not a generic one, and both spellings were measured rather than
-# derived — `formal/examples/ug8.mojo`'s residual goal is `⊢ t8u n = n` (a
-# zero-extend and nothing more) while `sgt8`'s and `sle8`'s is
-# `⊢ t32s (t32u (t8s n)) = n`. A generic lemma for the longer composition would
-# not have matched `ug8`'s goal at all.
-#
-# Each row carries the truncators to UNFOLD with it, because `unfold` fails on
-# a name the goal does not mention — measured, with one shared six-name `unfold`
-# every one of the three red examples reported `Tactic unfold failed`. The list
-# is derived from the statement rather than typed twice.
-_NARROW_LEMMAS = {
-    (8, True): ("t32s (t32u (t8s x))", 128),
-    (8, False): ("t8u x", 256),
-    (16, True): ("t32s (t16s x)", 32768),
-    (16, False): ("t32s (t16u x)", 65536),
-    (32, True): ("t32s x", 2147483648),
-}
-_TRUNCATORS = ("t32s", "t32u", "t16s", "t16u", "t8s", "t8u")
-
-
-def _narrow_lemma_texts(fn) -> list:
-    """The `_NARROW_LEMMAS` entries this function's narrow parameters need.
-
-    Keyed on the theorem stem so two narrow parameters of different widths in
-    one function get two differently-named lemmas rather than a collision, and
-    `[]` for everything else — the same all-or-nothing shape as
-    `_narrow_param_bound`, so a proof cannot gain a lemma without also gaining
-    the hypothesis that uses it.
-    """
-    from formal.types import function_var_types
-    try:
-        vtypes = function_var_types(fn, None)
-    except Exception:                        # noqa: BLE001 - unresolvable types
-        return []
-    out, seen = [], set()
-    for pname, _ptype in (fn.params or ()):
-        t = vtypes.get(pname)
-        if t is None or t.width >= 64:
-            continue
-        key = (t.width, t.signed)
-        if key in seen or key not in _NARROW_LEMMAS:
-            continue
-        seen.add(key)
-        body, bound = _NARROW_LEMMAS[key]
-        name = f"narrow_t{t.width}{'s' if t.signed else 'u'}"
-        # Only the truncators this statement MENTIONS: `unfold` fails on a name
-        # the goal does not contain, so one shared list is a hard error for every
-        # lemma that does not use all six.
-        used = [tr for tr in _TRUNCATORS if tr in body]
-        out.append(f"theorem {name} : ∀ (x : UInt64), x < {bound} → {body} = x := by\n"
-                   f"  unfold {' '.join(used)}\n"
-                   f"  bv_decide")
-    return out
-
-
-def _narrow_simp_args(fn) -> list:
-    """`[narrow_t8s, hnw, …]` — the `simp` arguments that close the truncation.
-
-    The proved lemma NAME and the theorem hypothesis that supplies its side
-    condition, and both come from `_NARROW_LEMMAS` and `_narrow_param_bound`
-    rather than being spelled here: a `simp` argument list that could name a
-    lemma the file does not contain, or a hypothesis the theorem does not have,
-    is a proof that stops elaborating for a reason no reader can see from the
-    emission.
-    """
-    from formal.types import function_var_types
-    try:
-        vtypes = function_var_types(fn, None)
-    except Exception:                        # noqa: BLE001 - unresolvable types
-        return []
-    out, seen = [], set()
-    for i, (pname, _ptype) in enumerate(fn.params or ()):
-        t = vtypes.get(pname)
-        if t is None or t.width >= 64:
-            continue
-        key = (t.width, t.signed)
-        if key in seen or key not in _NARROW_LEMMAS:
-            continue
-        seen.add(key)
-        out.append(f"narrow_t{t.width}{'s' if t.signed else 'u'}")
-        out.append(_narrow_param_hyps(fn)[i].split(" : ")[0])
-    return out
-
-
 def _entry_binders(arity: int) -> str:
     """`mojo`'s parameter list, at the entry's arity."""
     return " ".join(f"({n} : UInt64)" for n in _entry_arg_names(arity))
@@ -2577,25 +2271,7 @@ def _expr_ast(e, scope=None) -> str:
         # itself wrong -- the bridge compared two renderings of `not` for a
         # program whose machine answer is MVN/NOT, and agreed about a different
         # program than the one that ran.
-        # `+` is the identity and `evalExpr`'s catch-all arm
-        # (`MojoExpr.unop _ operand => evalExpr … operand`) already evaluates it
-        # as one, so it needs no case in `lib/ProofLib.lean` — but it does need
-        # its own NAME here, because this mapping used to spell it `"not"`:
-        # `.get(e.op, "not")` is right for `not` and wrong for everything else,
-        # which is the same defect `_expr_go`'s unary arm had (see there). The
-        # two agreed with each other about `+` being a negation, so `simp`
-        # closed `eval_eq_mojo` over a program neither side had — and the run
-        # test caught it. An operator this table does not name is now refused
-        # rather than guessed.
-        if e.op == "not":
-            opname = "not"
-        elif e.op in ("-", "~", "+"):
-            opname = {"-": "neg", "~": "bnot", "+": "pos"}[e.op]
-        else:
-            raise NotImplementedError(
-                f"AST bridge: the unary operator `{e.op}` has no "
-                f"`MojoExpr.unop` name here, and the old table's catch-all "
-                f"(`\"not\"`) is how `+` came to be evaluated as a negation")
+        opname = {"-": "neg", "~": "bnot"}.get(e.op, "not")
         return f'(MojoExpr.unop "{opname}" ({_expr_ast(e.operand, scope)}))'
     if isinstance(e, BinOp):
         return (f'(MojoExpr.binop "{_lean_op(e.op)}" '
@@ -3087,58 +2763,6 @@ _STEP_CONDS = [
     # getting that wrong would mean a branch to the wrong address, silently.
     (0xff000000, 0x36000000),
     (0xff000000, 0x37000000),
-    # 54-65: the narrower and unscaled access forms. APPENDED for the reason 51
-    # was — every index above is hard-coded in `_step_rhs` and in the block
-    # scanner, so a new instruction goes at the end and the indices do not move —
-    # and here the append is also what keeps `lib/ProofLib.lean`'s chain honest:
-    # `arm64_step` has these twelve arms at the END of its `if` chain for the
-    # same reason, so no existing `work_step_*` lemma's rewrite chain changes and
-    # each of the twelve new ones states the `¬` fact for every arm before it.
-    #
-    # The masks clear the 12-bit offset (`0xffd00000`), the 9-bit one with its `Rn`/`Rt`
-  # (`0xffe00c00`), or `Rm`/`option`/`S` for the register-offset pair (`0xffe0fc00`),
-    # because the 12-bit unsigned offset occupies bits 21:10 and the 9-bit
-    # unscaled one bits 20:12; a mask that kept bit 21 would claim words of the
-    # `LDR Xt, [Xn, #imm]` class above. A consequence stated rather than hidden:
-    # an offset with bit 11 set falls outside these masks and is therefore
-    # REFUSED by the generator rather than mis-read, which is the direction this
-    # path wants. Every one of the twelve encoders is WIRED — measured, each has
-    # a call site in `formal/arm64_codegen.py` and none appears in
-    # `tools/arm64_insn_audit.py::unwired_encoders`.
-    (0xffd00000, 0x39400000),  # 54 LDRB Wt, [Xn, #imm]
-    (0xffd00000, 0x39000000),  # 55 STRB Wt, [Xn, #imm]
-    (0xffd00000, 0x79400000),  # 56 LDRH Wt, [Xn, #imm]
-    (0xffd00000, 0x79000000),  # 57 STRH Wt, [Xn, #imm]
-    (0xffd00000, 0x39800000),  # 58 LDRSB Xt, [Xn, #imm]
-    (0xffd00000, 0x79800000),  # 59 LDRSH Xt, [Xn, #imm]
-    (0xffd00000, 0xb9800000),  # 60 LDRSW Xt, [Xn, #imm]
-    (0xffd00000, 0xb9400000),  # 61 LDR Wt, [Xn, #imm]
-    (0xffe0fc00, 0xf8606800),  # 62 LDR Xt, [Xn, Xm] (register offset, LSL #0)
-    (0xffe0fc00, 0xf8206800),  # 63 STR Xt, [Xn, Xm] (register offset, LSL #0)
-    (0xffe00c00, 0xf8400000),  # 64 LDUR Xt, [Xn, #imm9] (unscaled, signed)
-    (0xffe00c00, 0xf8000000),  # 65 STUR Xt, [Xn, #imm9] (unscaled, signed)
-    # 66 CMN, 67 TST. **Both encoders are UNWIRED on this tree** — measured:
-    # `grep -c encode_cmn_xn_xm formal/arm64_codegen.py` is 0, the same for
-    # `encode_tst_xn_xm`, and both are in
-    # `tools/arm64_insn_audit.py::unwired_encoders`. That CORRECTS this file's own
-    # §2 measurement, which listed them among "every encoder in the table above is
-    # wired" and called `encode_cmn_xn_xm` "emitted by `formal/arm64_codegen.py`";
-    # no lowering emits either, so an image cannot contain them and by the
-    # distinguishing test this table exists for, a model that cannot step them
-    # costs nothing.
-    #
-    # They are modelled anyway, and the reason is worth stating because it is not
-    # the doc's: the audit's test is about IMAGES, and the other consumer of
-    # `arm64_step` is `tools/formal_model_fuzz.py`, whose pool draws from the
-    # ENCODER TABLE rather than from the images. So an unwired encoder still shows
-    # up there as a `NOSTEP` — 38 of them on seed `sweepB` before these two arms,
-    # every one `CMN` or `TST` — and the number a reader of the fuzzer's own tally
-    # sees is a measurement of the MODEL, not of the emitter. Two arms and two
-    # `work_step_*` lemmas take it to zero, which is cheaper than the alternative
-    # (a pool that hides the gap) and leaves the model complete for every encoding
-    # `formal/arm64.py` can produce.
-    (0xffe00000, 0xab000000),  # 66 CMN Xn, Xm (SUBS XZR, Xn, Xm with the add flag)
-    (0xffe00000, 0xea000000),  # 67 TST Xn, Xm (ANDS XZR, Xn, Xm)
     # CSEL is EMITTED and UNMODELLED, and saying so here is the point of this
     # comment: `arm64_codegen.py` calls `encode_csel_xd_xm_cond` at six sites
     # (6394, 6396, 6410, 6412, 8998, 9008 — a ternary is a CSEL), so a reader of
@@ -3207,12 +2831,12 @@ def _step_rhs(w: int, idx: int):
     # n` for every register form, `s.sp` for the immediate ones — and that
     # asymmetry is deliberate: the step-result lemma is closed by `exact`-ing the
     # library lemma INSTANTIATED AT THIS WORD, so the two right-hand sides only
-    # have to be defeq, and on a literal index they are.
-    #
-    # The unsigned-offset `LDR`/`STR` rows below use `_base_of`, which is this
-    # same rule applied to a base register: `s.sp` at 31 and `arm64_reg n`
-    # otherwise, because their model's arms read through `arm64_reg_or_sp` and
-    # `exact` needs the two sides to be defeq.
+    # have to be defeq, and on a literal index they are.  Emitting
+    # `arm64_reg_or_sp` here instead would make that `exact` trivial but put
+    # `arm64_reg_or_sp n s` into every downstream value-flow goal, and those are
+    # simplified with `simp only [..., arm64_reg, arm64_set_reg]` lists that do
+    # not carry the helper — measured: 8 examples typecheck with the spelling
+    # below and the helper is not in those lists.
     # `test_formal_call_proof_gen.py`'s `TestRegister31` pins both halves of that
     # sentence, INCLUDING the reachability the NEG defect was hiding behind: the
     # table used to check the branch's source text, which the decoder cannot
@@ -3349,26 +2973,24 @@ def _step_rhs(w: int, idx: int):
         rt = w & 0x1f
         rn = (w >> 5) & 0x1f
         imm12 = (w >> 10) & 0xfff
-        # SP-aware through `_base_of`, which spells `s.sp` at `Rn = 31` — the
-        # form has an SP encoding, so `encode_ldr_xt_xn_imm(_, 31, off)` is what
-        # `formal/arm64_codegen.py` emits at ten sites for a stack read, and this
-        # row used to model every one of them as a read from address `off`
-        # (`arm64_reg 31 s` IS 0). Measured against the CPU by
-        # `tools/formal_model_fuzz.py`: `ldr x0, [sp, #32]` gave the model 0 and
-        # the hardware the word. The 32-bit store row below is the same fix.
+        # `arm64_reg 31 s`, not `s.sp`: the RHS has to be the SYNTACTIC mirror
+        # of `work_step_ldr_uoff`'s statement, because that is what `exact`
+        # unifies against, and a hand-simplified base is a different term even
+        # where it is equal.
+        #
+        # BUG, measured and not yet fixed: this form HAS an SP encoding, so
+        # `Rn = 31` is the stack pointer and both this row and
+        # `work_step_ldr_uoff` model `encode_ldr_xt_xn_imm(_, 31, off)` — ten
+        # sites in `formal/arm64_codegen.py` — as a load from address `off`.
+        # `bugs/FORMAL_arm64_ldr_str_unsigned_offset_reads_register_31_as_zero.md`.
         return (f"some (arm64_set_reg {rt} s (mem_read_u64 s.mem "
-                f"({_base_of(rn)} + UInt64.ofNat {imm12 * 8}).toNat))")
+                f"(arm64_reg {rn} s + UInt64.ofNat {imm12 * 8}).toNat))")
     if idx == 19:  # STR Wt, [Xn, #imm] (unsigned-offset 32-bit STORE)
         rt = w & 0x1f
         rn = (w >> 5) & 0x1f
         imm12 = (w >> 10) & 0xfff
-        # FOUR bytes, because the instruction is four bytes wide: this row wrote
-        # eight and clobbered the four above the word the program stored, which
-        # the hardware leaves alone (measured: `tools/formal_model_fuzz.py`,
-        # seed `sweepC`, case 123). The base is SP-aware for the reason the LDR
-        # row's is — this class has an SP encoding for `Rn` too.
-        return (f"some {{ s with mem := mem_write_u32 s.mem "
-                f"({_base_of(rn)} + UInt64.ofNat {imm12 * 4}).toNat "
+        return (f"some {{ s with mem := mem_write_u64 s.mem "
+                f"(arm64_reg {rn} s + UInt64.ofNat {imm12 * 4}).toNat "
                 f"(arm64_reg {rt} s) }}")
     if idx == 20:  # ADRP
         rd = w & 0x1f
@@ -3387,29 +3009,17 @@ def _step_rhs(w: int, idx: int):
         rt = w & 0x1f
         rn = (w >> 5) & 0x1f
         imm12 = (w >> 10) & 0xfff
-        # SP-aware for the reason the LDR row above gives: this form has an SP
-        # encoding for `Rn`, so `encode_str_xt_xn_imm(_, 31, off)`'s ten call
-        # sites are stack writes and `arm64_reg 31 s` modelled every one of them
-        # as a write at `off`. `_base_of`'s docstring says why the answer is
-        # spelled rather than left to `arm64_reg_or_sp`.
+        # BUG, measured and not yet fixed: as for the LDR row above, `Rn = 31`
+        # is the stack pointer here too and this spells it as the zero register.
         return (f"some {{ s with mem := mem_write_u64 s.mem "
-                f"({_base_of(rn)} + UInt64.ofNat {imm12 * 8}).toNat "
+                f"(arm64_reg {rn} s + UInt64.ofNat {imm12 * 8}).toNat "
                 f"(arm64_reg {rt} s) }}")
-    if idx == 32:  # LDP [<Rn|SP>, #imm7*8] (signed-offset pair load)
-        # `Rt1` is bits 4:0, `Rn` is 9:5 (the BASE, read SP-aware), `Rt2` is
-        # 14:10 and `imm7` is 21:15 SIGNED. This arm read `Rt1` from 9:5 — the
-        # base register — and `Rt2` from 4:0, so it loaded into the base and the
-        # first destination and left the second one alone, and it read the
-        # displacement out of `imm7 | Rt2` as an unsigned 12-bit count of
-        # eighties, which also made every negative displacement inexpressible.
-        rt1 = w & 0x1f
-        rn = (w >> 5) & 0x1f
-        rt2 = (w >> 10) & 0x1f
-        imm7 = (w >> 15) & 0x7f
-        off = (imm7 * 8) if imm7 < 64 else -((128 - imm7) * 8)
-        addr = f"(arm64_reg_or_sp {rn} s + UInt64.ofNat {off})" if off >= 0 else \
-               f"(arm64_reg_or_sp {rn} s - UInt64.ofNat {-off})"
-        return (f"some (arm64_set_reg {rt2} (arm64_set_reg {rt1} s "
+    if idx == 32:  # LDP [SP, #imm] (offset load pair)
+        d1 = (w >> 5) & 0x1f
+        d2 = w & 0x1f
+        imm12 = (w >> 10) & 0xfff
+        addr = f"(s.sp + UInt64.ofNat {imm12 * 8})"
+        return (f"some (arm64_set_reg {d2} (arm64_set_reg {d1} s "
                 f"(mem_read_u64 s.mem {addr}.toNat)) "
                 f"(mem_read_u64 s.mem ({addr} + 8).toNat))")
     if idx == 33:  # ORN (shifted register): Rd = Rn OR (NOT Rm)
@@ -3428,53 +3038,6 @@ def _step_rhs(w: int, idx: int):
         return f"some {{ s with pc := (arm64_reg {rn} s).toNat }}"
     if idx == 35:  # SVC (modelled no-op)
         return "some s"
-    # The twelve narrower/unscaled access forms, in `arm64_step`'s order. The
-    # base is `_base_of` (SP at 31), the scale is the instruction's own, and the
-    # memory helper is the one at that width — the widths are the whole point of
-    # these arms: `LDRB` reads ONE byte where `LDR` reads eight.
-    if idx == 66:  # CMN Xn, Xm: the flags of Xn + Xm, which is not CMP's
-        return (f"some {{ s with nzcv := arm64_adds_flags (arm64_reg "
-                f"{(w >> 5) & 0x1f} s) (arm64_reg {(w >> 16) & 0x1f} s) }}")
-    if idx == 67:  # TST Xn, Xm: the logical flags of Xn & Xm, C and V clear
-        return (f"some {{ s with nzcv := arm64_logic_flags (arm64_reg "
-                f"{(w >> 5) & 0x1f} s &&& arm64_reg {(w >> 16) & 0x1f} s) }}")
-    if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65):
-        rn = (w >> 5) & 0x1f
-        base = _base_of(rn)
-        if idx in (62, 63):                      # register offset, LSL #0
-            addr = f"({base} + arm64_reg {(w >> 16) & 0x1f} s)"
-        elif idx in (64, 65):                    # unscaled, signed imm9
-            imm9 = (w >> 12) & 0x1ff
-            addr = (f"(if {imm9} ≥ 256 then {base} - UInt64.ofNat ({512 - imm9}) "
-                    f"else {base} + UInt64.ofNat {imm9})")
-        else:
-            scale = {54: 1, 55: 1, 56: 2, 57: 2, 58: 1, 59: 2,
-                     60: 4, 61: 4}[idx]
-            imm12 = (w >> 10) & 0xfff
-            addr = (f"({base} + UInt64.ofNat {imm12 * scale})"
-                    if scale == 1 else
-                    f"({base} + UInt64.ofNat ({imm12} * {scale}))")
-        if idx in (54, 56, 61):                 # zero-extending loads
-            width = {54: 8, 56: 16, 61: 32}[idx]
-            return (f"some (arm64_set_reg {rd} s "
-                    f"(mem_read_u{width} s.mem {addr}.toNat))")
-        if idx in (58, 59, 60):                 # sign-extending loads
-            width, helper = {58: (8, "t8s"), 59: (16, "t16s"),
-                             60: (32, "t32s")}[idx]
-            return (f"some (arm64_set_reg {rd} s ({helper} "
-                    f"(mem_read_u{width} s.mem {addr}.toNat)))")
-        if idx in (55, 57):                     # narrow stores
-            width = {55: 8, 57: 16}[idx]
-            return (f"some {{ s with mem := mem_write_u{width} s.mem "
-                    f"{addr}.toNat (arm64_reg {rd} s) }}")
-        if idx == 63:
-            return (f"some {{ s with mem := mem_write_u64 s.mem {addr}.toNat "
-                    f"(arm64_reg {rd} s) }}")
-        if idx == 65:
-            return (f"some {{ s with mem := mem_write_u64 s.mem {addr}.toNat "
-                    f"(arm64_reg {rd} s) }}")
-        return (f"some (arm64_set_reg {rd} s "
-                f"(mem_read_u64 s.mem {addr}.toNat))")
     if idx in (36, 37, 38):  # SXTB / SXTH / SXTW (sign-extend chains)
         # The arm64_step result is definitionally the t-w sign-extension helper
         # (same let/if body); emitting the helper keeps the value flow clean and
@@ -3520,36 +3083,7 @@ def _step_rhs(w: int, idx: int):
         sh = 63 - imms
         return (f"some (arm64_set_reg {rd} s (arm64_reg {rn} s <<< "
                 f"UInt64.ofNat {sh}))")
-    if idx == 54:  # ADDS / CMN (Rd = 31 is CMN): add AND set the flags
-        rn_sp = f"(arm64_reg_or_sp {rn} s)" if rn == 31 else f"(arm64_reg {rn} s)"
-        return (f"some {{ (arm64_set_reg {rd} s ({rn_sp} + arm64_reg {rm} s)) "
-                f"with nzcv := arm64_adds_flags {rn_sp} (arm64_reg {rm} s) "
-                f"({rn_sp} + arm64_reg {rm} s) }}")
-    if idx == 55:  # SMULH: the signed HIGH half, and no flag
-        return f"some (arm64_set_reg {rd} s (smulhi64 (arm64_reg {rn} s) (arm64_reg {rm} s)))"
     return None
-
-
-def _base_of(rn: int) -> str:
-    """`Rn`'s value at this word, spelled CONCRETELY.
-
-    `s.sp` for 31 and `arm64_reg n` for every other register — the same choice
-    the add/subtract immediate rows above make, and for the same reason: the
-    step-result lemma is closed by `exact`-ing the library lemma instantiated at
-    this word, so the two right-hand sides only have to agree up to `defeq`, and
-    a concrete index makes that a computation rather than a search.
-
-    It is spelled concretely rather than as `arm64_reg_or_sp n` because the
-    helper would then survive into every downstream value-flow goal, and the
-    eighteen emitted `simp only` lists name `arm64_reg` and not the helper's two
-    lemmas — so `hx30_*` and the entry-state `FrameOk` conjuncts would arrive at
-    a goal with `arm64_reg_or_sp 17 s` still folded and fail to close. Measured
-    both ways on this tree: the helper spelling, with the two simp lemmas added
-    to every list, still left three programs of
-    `test_formal_call_proof_gen.py` red on an obligation that is otherwise
-    unchanged; spelling the answer, every list is untouched.
-    """
-    return "s.sp" if rn == 31 else f"arm64_reg {rn} s"
 
 
 _RD = "((w &&& 0x1f).toNat)"
@@ -3638,8 +3172,7 @@ def _step_rhs_generic(idx: int):
         return (f"some (arm64_set_reg {_RD} s (mem_read_u64 s.mem "
                 f"({_BASE} + UInt64.ofNat ({_I12} * 8)).toNat))")
     if idx == 19:  # STR Wt, [Xn, #imm] -- unsigned-offset 32-bit STORE, base = Rn
-        # `mem_write_u32`, for the four-byte reason the word-relative row gives.
-        return (f"some {{ s with mem := mem_write_u32 s.mem "
+        return (f"some {{ s with mem := mem_write_u64 s.mem "
                 f"({_BASE} + UInt64.ofNat ({_I12} * 4)).toNat (arm64_reg {_RD} s) }}")
     if idx == 20:
         off = (f"(if {_IMM21} ≥ 2^20 then (UInt64.ofNat {_IMM21}) - (UInt64.ofNat (2^21)) "
@@ -3671,17 +3204,10 @@ def _step_rhs_generic(idx: int):
     if idx == 31:  # STR [Xn, #imm] -- unsigned-offset STORE, base = Rn
         return (f"some {{ s with mem := mem_write_u64 s.mem "
                 f"({_BASE} + UInt64.ofNat ({_I12} * 8)).toNat (arm64_reg {_RD} s) }}")
-    if idx == 32:  # LDP [<Rn|SP>, #imm7*8] — signed-offset pair load
-        # The same correction as the word-relative row above: `Rt1` is `_RD`,
-        # `Rt2` is `_RT2`, the base is SP-aware, and the displacement is the
-        # SIGNED `imm7` at 21:15 — which is `_ADDR7`, the same expression the
-        # pre-index STP row uses. That row had it right, which is the check
-        # that this one was wrong rather than differently-shaped: two arms of
-        # one pair-load family, one with a signed seven-bit displacement out of
-        # bits 21:15 and one reading twelve unsigned bits out of 10 and up.
-        return (f"some (arm64_set_reg {_RT2} (arm64_set_reg {_RD} s "
-                f"(mem_read_u64 s.mem {_ADDR7}.toNat)) "
-                f"(mem_read_u64 s.mem ({_ADDR7} + 8).toNat))")
+    if idx == 32:
+        addr = f"(s.sp + UInt64.ofNat ({_I12} * 8))"
+        return (f"some (arm64_set_reg {_RN} (arm64_set_reg {_RD} s "
+                f"(mem_read_u64 s.mem {addr}.toNat)) (mem_read_u64 s.mem ({addr} + 8).toNat))")
     if idx == 33:  # ORN (shifted register): Rd = Rn OR (NOT Rm)
         return (f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s ||| "
                 f"((arm64_reg {_RM} s) ^^^ (0xffffffffffffffff : UInt64))))")
@@ -3689,43 +3215,6 @@ def _step_rhs_generic(idx: int):
         return f"some {{ s with pc := (arm64_reg {_RN} s).toNat }}"
     if idx == 35:
         return "some s"
-    if idx == 66:
-        return (f"some {{ s with nzcv := arm64_adds_flags (arm64_reg {_RN} s) "
-                f"(arm64_reg {_RM} s) }}")
-    if idx == 67:
-        return (f"some {{ s with nzcv := arm64_logic_flags (arm64_reg {_RN} s "
-                f"&&& arm64_reg {_RM} s) }}")
-    if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65):
-        _I9G = "(((w >>> 12) &&& 0x1ff).toNat)"
-        _IDX = "(((w >>> 10) &&& 0xfff).toNat)"
-        if idx in (62, 63):
-            _ADDR = f"({_BASE} + arm64_reg {_RM} s)"
-        elif idx in (64, 65):
-            _ADDR = (f"(if {_I9G} ≥ 256 then {_BASE} - UInt64.ofNat ((512 - {_I9G})) "
-                     f"else {_BASE} + UInt64.ofNat {_I9G})")
-        else:
-            _SCALE = {54: 1, 55: 1, 56: 2, 57: 2, 58: 1, 59: 2,
-                      60: 4, 61: 4}[idx]
-            _ADDR = (f"({_BASE} + UInt64.ofNat {_IDX})" if _SCALE == 1
-                     else f"({_BASE} + UInt64.ofNat ({_IDX} * {_SCALE}))")
-        if idx in (54, 56, 61):
-            _W = {54: 8, 56: 16, 61: 32}[idx]
-            return (f"some (arm64_set_reg {_RD} s "
-                    f"(mem_read_u{_W} s.mem {_ADDR}.toNat))")
-        if idx in (58, 59, 60):
-            _W, _H = {58: (8, "t8s"), 59: (16, "t16s"),
-                      60: (32, "t32s")}[idx]
-            return (f"some (arm64_set_reg {_RD} s ({_H} "
-                    f"(mem_read_u{_W} s.mem {_ADDR}.toNat)))")
-        if idx in (55, 57):
-            _W = {55: 8, 57: 16}[idx]
-            return (f"some {{ s with mem := mem_write_u{_W} s.mem {_ADDR}.toNat "
-                    f"(arm64_reg {_RD} s) }}")
-        return (f"some {{ s with mem := mem_write_u64 s.mem {_ADDR}.toNat "
-                f"(arm64_reg {_RD} s) }}"
-                if idx in (63, 65) else
-                f"some (arm64_set_reg {_RD} s "
-                f"(mem_read_u64 s.mem {_ADDR}.toNat))")
     if idx == 42:
         return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s / arm64_reg {_RM} s))"
     if idx == 43:
@@ -3798,24 +3287,6 @@ _WORK_STEP = [
     (33, "work_step_orn", [(0xffe0fc00, 0xaa200000)]),
     (34, "work_step_br", [(0xfffffc1f, 0xd61f0000)]),
     (35, "work_step_svc", [(0xffe0001f, 0xd4000001)]),
-    # The twelve narrower/unscaled access forms, APPENDED with their arms: the
-    # lemma name is what `exact`s the step RESULT, so a row here is what turns a
-    # model's branch into a fact a generated block can use. Each is one entry
-    # because each is one word test.
-    (54, "work_step_ldrb", [(0xffd00000, 0x39400000)]),
-    (55, "work_step_strb", [(0xffd00000, 0x39000000)]),
-    (56, "work_step_ldrh", [(0xffd00000, 0x79400000)]),
-    (57, "work_step_strh", [(0xffd00000, 0x79000000)]),
-    (58, "work_step_ldrsb", [(0xffd00000, 0x39800000)]),
-    (59, "work_step_ldrsh", [(0xffd00000, 0x79800000)]),
-    (60, "work_step_ldrsw", [(0xffd00000, 0xb9800000)]),
-    (61, "work_step_ldr_uoff32", [(0xffd00000, 0xb9400000)]),
-    (62, "work_step_ldr_regoff", [(0xffe0fc00, 0xf8606800)]),
-    (63, "work_step_str_regoff", [(0xffe0fc00, 0xf8206800)]),
-    (64, "work_step_ldur", [(0xffe00c00, 0xf8400000)]),
-    (65, "work_step_stur", [(0xffe00c00, 0xf8000000)]),
-    (66, "work_step_cmn", [(0xffe00000, 0xab000000)]),
-    (67, "work_step_tst", [(0xffe00000, 0xea000000)]),
 ]
 
 _WORK_STEP_BY_IDX = {idx: (lemma, tests) for idx, lemma, tests in _WORK_STEP}
@@ -4563,7 +4034,7 @@ def _cfg_blocks(words: dict, func_entry: int, func_end: int):
 def _regs_written(w: int, idx: int):
     """GPR indices (0..31, 31 = sp) written by the instruction, or None if unknown."""
     rd = w & 0x1f
-    if idx in (0, 6, 13, 14, 16, 17, 34, 35, 51, 66, 67):
+    if idx in (0, 6, 13, 14, 16, 17, 34, 35, 51):
         return set()
     if idx == 15:
         return {30}
@@ -4582,19 +4053,7 @@ def _regs_written(w: int, idx: int):
     if idx == 31:
         return set()
     if idx == 32:
-        # LDP writes BOTH destinations: `Rt1` at bits 4:0 and `Rt2` at 14:10.
-        # This row said `{(w >> 5) & 0x1f, rd}` — the base register and `Rt1` —
-        # which is the same misreading the model's arm had, and it is the row
-        # that decides what a block's certificate is allowed to assert about
-        # the registers a step clobbered.
-        return {w & 0x1f, (w >> 10) & 0x1f}
-    if idx in (54, 56, 58, 59, 60, 61, 62, 64):
-        # The loads of the twelve appended arms: one destination, and no `sp` —
-        # none of these forms has a writeback, which is what distinguishes them
-        # from the pre/post-index pair arms above.
-        return {rd}
-    if idx in (55, 57, 63, 65):
-        return set()
+        return {(w >> 5) & 0x1f, rd}
     return None
 
 
@@ -6141,100 +5600,6 @@ def _unfollowable_calls(code: bytes, base: int, func_entry: int,
     return out
 
 
-def _reached_without_a_condition(code: bytes, base: int, func_entry: int,
-                                 func_end: int, pc: int,
-                                 cond_branches=None) -> bool:
-    """Whether `pc` is reachable from `func_entry` on a path that crosses no
-    SOURCE conditional — i.e. on a path whose shape the run cannot decide
-    differently for a different entry value.
-
-    The question the universal theorem's own premise asks, asked of the CFG
-    instead of of Lean. `arm64_go_exit` is emitted with `exit_pc` = the first
-    `BL` out of the image, and the theorem's premise is that the run REACHES
-    that address; the emitted `have hpc : ({name}_pre_{i}).pc = {pc}` is
-    `native_decide`d against the concrete `init` state, so when the run does
-    not get there the premise is FALSE and the proof fails on its own belief:
-
-        error: Tactic `native_decide` evaluated that the proposition
-          main_pre_0.pc = 4294968416
-        is false
-
-    Measured on this tree before the check existed, and it is
-    `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s own
-    reproducer — `def main(n): if n > 100: printf("hi"); return 0` at test input
-    10 — which is `exit 1` and eleven Lean errors from a program with no integer
-    arithmetic in it at all. That is what makes this a limit of the WALK and not
-    of the trap that document's author wanted to add; it names the limit here.
-
-    **`cond_branches` is the filter, and it is the same one the `hcond`/`hsrc`
-    emission already uses** (`_gen_universal_e2e_cfg`'s `_cond_blocks`): the
-    emitter publishes the pcs of the branches that came from a source-level
-    `if`/`while`/range test, and everything else in the image that branches is
-    the emitter's own structure. Only the former is a fact about the DATA, so
-    only the former can make the run's path depend on the entry value. That
-    distinction is load-bearing rather than a convenience, and it is measurable:
-    `printf("hi"); return 0` — one call, no `if` — branches five times inside
-    the `printf` expansion, so blocking on every `cbz`-kinded block would refuse
-    a program that proves today (measured on this tree, exit 0, proof checked).
-
-    So a block on the path blocks only when it is `cbz`-kinded AND its branch pc
-    is in `cond_branches`; a `b` block is followed to its target, and a `seq`
-    block falls through to the next block by ADDRESS, which is what
-    `_cfg_blocks`' own ordering (`sorted(starts)`, and a `seq` block running to
-    the next start) means. A `cbz` that is not a source condition is followed
-    down its FALL-THROUGH, which is the conservative choice for the same
-    reason the follow is: the walk does not know which way an emitter-internal
-    branch goes, so it takes the edge a straight-line run would have taken.
-
-    An EMPTY `cond_branches` means the emitter recorded no source conditional
-    at all, and then nothing on the path is a fact about the data — so the
-    answer is permissive. That is deliberately NOT the fallback
-    `_gen_universal_e2e_cfg`'s `_cond_blocks` uses, and the difference is the
-    question: that one asks WHICH source condition a block carries (picking
-    wrongly there attributes a proof to the wrong expression), while this one
-    asks WHETHER a source condition is on the path at all. Measured on this tree:
-    `printf("hi"); return 0` has five `cbz`-kinded blocks and an empty
-    `cond_branches`, and it PROVES today — exit 0, proof checked — so treating
-    every conditional as a source one would refuse a working program.
-    """
-    words = {base + i: int.from_bytes(code[i:i + 4], "little")
-             for i in range(0, len(code) - len(code) % 4, 4)}
-    if func_entry not in words:
-        return True                    # nothing to decide: leave it to Lean
-    blocks = _cfg_blocks(words, func_entry, func_end)
-    order = [b["start"] for b in blocks]
-    seen = set()
-    reached = set()
-    queue = [func_entry]
-    while queue:
-        start = queue.pop()
-        if start in seen or start not in order:
-            continue
-        seen.add(start)
-        reached.add(start)
-        block = blocks[order.index(start)]
-        if block["kind"] == "b":
-            tgt = block["targets"][0]
-            if tgt is not None:
-                queue.append(tgt)
-        elif block["kind"] == "cbz":
-            if cond_branches and block["instrs"][-1] in cond_branches:
-                return False           # a SOURCE condition sits on the path
-            # BOTH edges of a branch that is not a source condition.  The walk
-            # cannot know which way an emitter-internal branch goes — `a // b`
-            # puts its `__div0` call on the TAKEN edge of the guard's own
-            # `CBZ Xb` — and following both is the over-approximating answer,
-            # which is the permissive direction for a question whose failure
-            # mode is a false refusal.
-            queue.extend(t for t in block["targets"] if t is not None)
-        elif block["kind"] == "seq":
-            i = order.index(start)
-            if i + 1 < len(order):
-                queue.append(order[i + 1])
-    return any(pc in b["instrs"] for b in blocks if b["start"] in reached)
-
-
-
 def _unmodelled_instruction(word: int):
     """`(name, why)` for an instruction word `arm64_step` has no branch for.
 
@@ -6871,12 +6236,6 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         # therefore along a path and never across one, and that is the most
         # that is sound without changing what `s_{pb}` is.
         ctx["hprior_memo"] = dict(ctx.get("hprior_memo", {}))
-        # The `simp` arguments that discharge a narrow typed parameter's
-        # truncation: each proved lemma NAME plus the hypothesis that supplies
-        # its side condition, read once here rather than rebuilt per site.
-        # `[]` for every function whose parameters are 64 bits wide, which is
-        # all of the corpus but `sgt8`/`sle8`/`ug8`/`n8`.
-        _narrow_simp = list(ctx.get("narrow_simp") or ())
         EXIT = ctx.get("exit", exit_pc)
         is_contract = ctx.get("is_contract", False)
         exit_cond = "by omega"
@@ -7647,19 +7006,6 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                 A(f"{IND}  all_goals try simp (disch := decide) [mem_read_after_write_u64, "
                                   f"mem_read_after_write_u64_ne, mem_read_two_writes_same, UInt64.add_zero]")
                                 A(f"{IND}  all_goals try rfl")
-                                # A narrow TYPED parameter's truncation, and the
-                                # last discharge in this list. `sgt8`'s residual
-                                # here is `⊢ t32s (t32u (t8s n)) = n`, which is
-                                # FALSE over the theorem's unconstrained `n` —
-                                # so with no `n < 128` binder on the theorem
-                                # there is nothing to discharge, which is why
-                                # `sgt8`/`sle8`/`ug8` were REJECTED by Lean with
-                                # zero `sorry` and so invisible to the hole
-                                # census. Emitted only when such a binder exists,
-                                # so every other proof is byte-identical.
-                                if _narrow_simp:
-                                    A(f"{IND}  all_goals try simp "
-                                      f"[{', '.join(_narrow_simp)}]")
                                 _hpriors.append(_hp)
                             if _ctr is not None:
                                 _cv, _crhs = _ctr
@@ -7676,23 +7022,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                 A(f"{IND}  all_goals try rfl")
                                 _hpriors.append(_hp)
                 if not _is_bit_test and (not _Xs or _fl is None):
-                    # `NotImplementedError`, not `ValueError`: this is the same
-                    # "I will not write a model I do not have" signal every
-                    # other refusal in this file raises, and the TYPE is what
-                    # two readers depend on.
-                    # `tools/formal_proof_census.py` classifies a
-                    # `NotImplementedError` as `refused` (rank 4, a statement
-                    # about the generator) and anything else that escapes as
-                    # `crash` (rank 5, "something was RAISED that is not a
-                    # refusal — a bug"), so the old spelling made
-                    # `formal/examples/dead_branch.mojo` — a program refused for
-                    # a reason stated in a sentence — read as the most alarming
-                    # class in the census. `test_formal.py` treats the two the
-                    # same way (a non-zero build), which is why nothing else
-                    # noticed.
-                    raise NotImplementedError(
-                        "unsupported: branch condition value flow "
-                        "(frame/flag unavailable)")
+                    raise ValueError("unsupported: branch condition value flow (frame/flag unavailable)")
 
                 def _rw_spills(tolerant, line_instrs, cur_instrs, state):
                     """The `rw` that resolves this path's spill reads, if any.
@@ -8711,19 +8041,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # statement is the same execution, and nothing is dropped by not routing it
     # through the framework's `Prog`.
     _via_prog = not (_fr.get("no_change") or entry_arity > 1)
-    # The RANGE hypothesis for a narrow TYPED parameter, as an extra binder on
-    # the universal theorem.  This is the whole of the fix for `sgt8`/`sle8`/
-    # `ug8`/`n8`: without it the walk asks Lean for `t32s (t32u (t8s n)) = n`
-    # over an unconstrained `UInt64`, which is false, so Lean rejects the file
-    # and the hole census reads 0.  `_narrow_param_bound` is the reader and
-    # `_narrow_param_hyps` the binder list, so the RECURSIVE arm below — which
-    # emits its own theorem header — cannot answer a different question about
-    # the same function.
-    _narrow_hyps = _narrow_param_hyps(fn, fuel)
     if fuel is None:
         A(f"    (hn : {stride} * (n.toNat + 1) + {stride} ≤ 18446744073709551600)")
-    for _h in _narrow_hyps:
-        A(f"    ({_h})")
     for _h in (_fr.get("hyps") or []):
         A(f"    ({_h[0]} : {_h[1]})")
     if _fr.get("hbnd_binder"):
@@ -8755,12 +8074,6 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         A("     | none => False)")
     A(f"  rw [arm64_exec_go_exit]")
     _init_ctx = {"loop_contract": _loop_contract} if _loop_contract else {}
-    # The narrow-parameter `simp` arguments, from the SAME pair that produced
-    # the binders above — one reader for "what is this parameter's range" and
-    # one for "what closes the truncation", so a proof cannot gain a discharge
-    # without the hypothesis that makes it sound.
-    if _narrow_hyps:
-        _init_ctx["narrow_simp"] = _narrow_simp_args(fn)
     if (frame or {}).get("lets"):
         _init_ctx["lets"] = list(frame["lets"])
     if (frame or {}).get("hx30_lets"):
@@ -9973,40 +9286,14 @@ def generate_arm64_proof(prog, code, info) -> str:
 
     _fmethods = _frame_methods(prog, code, info)
     if _fmethods:
-        text = _generate_frame_proof(prog, code, info, _fmethods, func_name,
+        return _generate_frame_proof(prog, code, info, _fmethods, func_name,
                                      base_addr, test_input)
-        # A by-reference receiver's proof has no `mojo` and no `runProg`: it is a
-        # contract about one method's own straight-line code, so there is no model
-        # to compare a specification against.  The annotation is reported rather
-        # than dropped, because an annotation that is silently ignored is
-        # indistinguishable from one that was never written -- and the reader who
-        # wrote it is the person who has to know.
-        _ref = SPECS.spec_refinement(fn, where=func_name)
-        if _ref is not None:
-            text += (
-                f"\n/- NOTE: `@{SPECS.REFINES_DECORATOR}({_ref.spec}; "
-                f"{_ref.rng})` on `{func_name}` was NOT checked.  This proof "
-                f"is a by-reference receiver's method contract: it has no "
-                f"`mojo`, no `runProg`, and no end-to-end theorem, so there is "
-                f"nothing to state a refinement over.  See "
-                f"`bugs/FORMAL_a_specification_layer_that_stops_at_a_finite_"
-                f"range.md`. -/\n")
-        return text
 
     fn = next((f for f in prog.functions if f.name == func_name), None)
     if fn is None and prog.functions:
         fn = prog.functions[0]
         func_name = fn.name
     param = fn.params[0][0] if fn.params else "n"
-    # The INDEPENDENT specification this program asks to be checked against, or
-    # None.  Read here rather than at the end of the function because it decides
-    # the HEADER (the generated file imports `lib/Specs.lean` only when something
-    # in it names `Specs`), and a header decided at the bottom of a 500-line
-    # emitter is a header that is easy to forget.  `SPECS.RefinesRefusal` is
-    # allowed to escape: an annotation this module cannot honour is a build
-    # refusal, not something to be quietly dropped, because the alternative is a
-    # program that carries a specification nobody checked.
-    refines = SPECS.spec_refinement(fn, where=func_name)
     # WHY THE AST MODEL CANNOT STATE THIS BODY, or `''` when it can: read ONCE
     # here because three decisions below are that one question (emit the bridge,
     # build `ast`, run the call-gap check) and three reads of it is how they
@@ -10362,48 +9649,6 @@ def generate_arm64_proof(prog, code, info) -> str:
             f"correct for all of them; what is missing is the machine half.  "
             f"Raised here rather than left to the walk, which reported this as "
             f"a recursion problem.")
-    if _opaque is not None and not _reached_without_a_condition(
-            code, base_addr, func_entry_addr, _opaque["func_end"], _opaque["pc"],
-            cond_branches=set(info.get("cond_branches") or ())):
-        # The ONE call on a path the test input does not take, which is the
-        # half of the neighbouring refusal that was not named and arrived as a
-        # crash: the theorem's premise is that the run REACHES the halt address,
-        # it is `native_decide`d against the concrete `init`, and when the run
-        # does not get there the premise is false and Lean fails on the
-        # generator's own belief about where the machine is.  A refusal is what
-        # this file owes the reader here, and `NotImplementedError` is the type
-        # every other limit in it raises.
-        #
-        # Measured on this tree before this check, both spellings, and the
-        # second is the same failure with no arithmetic in the program at all:
-        #
-        #     def main(n):
-        #         if n > 100:
-        #             printf("hi")
-        #         return 0
-        #   -> exit 1, eleven Lean errors ending in
-        #      "Tactic `native_decide` evaluated that the proposition
-        #         main_pre_0.pc = 4294968392 is false"
-        #
-        # which is `bugs/FORMAL_integer_overflow_at_run_time_is_still_
-        # trapped.md`'s measured obstacle, named there as PRE-EXISTING and as the
-        # thing standing in front of its own step 2.  What is still missing is
-        # the other half of that doc's step 2 — a trap BLOCK the walk treats as
-        # terminal — which is what would let a conditional path carry a call
-        # rather than refuse it.
-        raise NotImplementedError(
-            f"universal theorem: the call at {_opaque['pc']:#x} -> "
-            f"{_opaque['target']:#x} is the halt address, and it is behind a "
-            f"CONDITIONAL, so whether the run reaches it is a fact about the "
-            f"test input rather than about the CFG. The theorem's premise is "
-            f"that it does, and `native_decide` checks it against the concrete "
-            f"entry state: when the run does not get there the premise is false "
-            f"and the proof fails on the generator's own belief about where the "
-            f"machine is. Refused here rather than left to fail that way -- "
-            f"which is what it did, with eleven Lean errors, on "
-            f"`if n > 100: printf(\"hi\")` before this check. The semantic model "
-            f"is emitted and correct; what is missing is the machine half for a "
-            f"call on a path a condition selects.")
     # The AST bridge's own limit, asked AFTER the machine half's so that the
     # refusal a two-function program gets names the bigger of the two gaps: the
     # CFG walk cannot follow the call at all, where the bridge could be fixed
@@ -10520,24 +9765,6 @@ def generate_arm64_proof(prog, code, info) -> str:
         raise NotImplementedError(_cfg_decomposition_refusal(
             func_name, code, base_addr, func_entry_addr))
 
-    # The SPECIFICATION REFINEMENT section, when the source asked for one.  It
-    # goes LAST because both of its theorems are stated about names the
-    # universal theorem above introduces, and it is emitted whether or not the
-    # run test above exists.  `machine_half` is False for a function that calls
-    # out of the image: its universal theorem states reachability of the call
-    # rather than a result value, so there is no run to say anything about and
-    # only the model-level half is claimed.
-    refines_text = ""
-    if refines is not None:
-        refines_text = ("\n\n" + SPECS.refines_section(
-            func_name, f"{func_name}_prog", refines,
-            machine_half=_opaque is None,
-            missing_reason=(
-                "this function calls out of the image, so `arm64_step` "
-                "returns `none` at the call and no execution in this file "
-                "completes — the universal theorem above states reachability "
-                "of the call instead of a result value.")))
-
     if trunc_defs:
         trunc_defs_section = (
             "\n/- Fixed-width truncators (sign/zero-extension to 64 bits); shared\n"
@@ -10545,20 +9772,11 @@ def generate_arm64_proof(prog, code, info) -> str:
             "    SXTB/SXTW/AND-imm branches. -/\n" + trunc_defs + "\n")
     else:
         trunc_defs_section = "\n"
-    # The narrow-parameter identities, beside the truncators they are about and
-    # for the same reason: both exist only because a parameter declared `Int8`
-    # is truncated at the entry, and both are emitted only when one is. See
-    # `_NARROW_LEMMAS`.
-    _narrow_lemmas = _narrow_lemma_texts(fn)
-    if _narrow_lemmas:
-        trunc_defs_section += (
-            "\n/- A narrow TYPED parameter's truncation is the identity on the\n"
-            "    declared range. Proved by bv_decide, which is possible only because\n"
-            "    the bound is in the hypothesis: over an unconstrained UInt64 the\n"
-            "    statement is FALSE, which is the defect these close. -/\n"
-            + "\n\n".join(_narrow_lemmas) + "\n")
 
-    return f"""{SPECS.header_imports(bool(refines))}
+    return f"""import ProofLib
+import work
+import Refine
+
 set_option maxRecDepth 100000
 set_option maxHeartbeats 20000000
 set_option linter.unusedSimpArgs false
@@ -10592,7 +9810,7 @@ set_option linter.unusedVariables false
 
 {concrete_test}
 
-    {universal_section}{refines_text}
+    {universal_section}
     """
 
 

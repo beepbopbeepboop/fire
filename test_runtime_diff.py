@@ -518,31 +518,6 @@ BUILTIN_PROGRAMS = {
             for si, *srest in enumerate("ab"):
                 print(si, srest)
     """),
-    # A starred for-target over a DICT, whose item is the KEY — and a key is a
-    # `str`, so the target unpacks the key STRING: CPython gives `k == 'a'` and
-    # `vs == ['b', 'c']`. Three engines disagreed here, and the middle one is
-    # why this case had to wait for the other two: the interpreter bound the
-    # WHOLE key ("abc" and an empty `vs`) because `_bind_comprehension_target`
-    # exempted `str`/`bytes` from the unpack, and the compiled path REFUSED the
-    # shape outright (`_emit_unsupported_iter`) because lowering CPython's
-    # reading while the interpreter disagreed would have made the two engines
-    # differ on the one comparison this file is. Both are fixed (2026-10-04,
-    # with the filing deleted).
-    #
-    # All three positions the star can be in, because each is a different piece
-    # of arithmetic and the slots after the star are counted from the END of the
-    # key. Distinct target names per loop, for the first-decl-wins reason
-    # `for_target_starred_rest` states.
-    "for_target_starred_rest_over_a_dict": textwrap.dedent("""\
-        def main():
-            d = {"abc": 1, "de": 2, "fgh": 3}
-            for k1, *vs1 in d:
-                print(k1, vs1, len(vs1))
-            for k2, *mid2, w2 in d:
-                print(k2, mid2, w2)
-            for *only3, in d:
-                print(only3)
-    """),
     "dict_ops": textwrap.dedent("""\
         def main():
             var d = {"a": 1, "b": 2}
@@ -601,42 +576,6 @@ BUILTIN_PROGRAMS = {
             print(struct_pointer_live())
             print(char_star_live())
     """),
-    # The SAME fresh-binding rule, against a binding that is not a local at
-    # all: a MODULE constant. `_declare_var` writes `var_types[name]`, and
-    # `_lower_IdentExpr`\'s module-global branch is gated on
-    # `(name in _func_declared_globals or name not in var_types)`, so a target
-    # named like a module global silently REBOUND that global for the rest of
-    # the enclosing function \u2014 `var_types` was the only thing routing the
-    # later read away from `root__mojo_global_get_G()`. The compiled path
-    # answered 3 (the iterable\'s last element) where CPython answers 6.
-    # Both engines and CPython agree on `6` now; see
-    # `module_shared.bare_global_read_plan`, which is the one decision both the
-    # read and the comprehension lowering ask.
-    "comprehension_target_does_not_shadow_a_module_constant": textwrap.dedent("""\
-        G = 5
-
-        def f(rows):
-            out = [G for G in rows]
-            return G + out[0]
-
-        def main():
-            print(f([1, 2]))
-    """),
-    # And the OTHER half of the same pair, which the module-constant case
-    # cannot reach: an arm that DID take the shadow (`_declare_var(\'',
-    # force=True)`) but never undid it, so the shadow outlived the
-    # comprehension and the enclosing function\'s own `x` read back as the
-    # loop\'s last value. The list/set/cursor arms already restored; the range
-    # arm did not. `3` vs CPython\'s `5` before, `5` now.
-    "comprehension_target_does_not_outlive_its_own_loop": textwrap.dedent("""\
-        def f(n):
-            x = 5
-            out = [x for x in range(n)]
-            return x
-
-        def main():
-            print(f(3))
-    """),
     # A dict value slot the runtime TAGGED as a plain int went through the
     # generic element repr, whose 0-is-the-None-sentinel rule turned a real
     # int 0 into `None` (`{i: i for i in range(2)}` printed `{'0': None, '1': 1}`).
@@ -672,48 +611,6 @@ BUILTIN_PROGRAMS = {
             d["k"] = 0
             d["j"] = 1
             print(d)
-    """),
-    # The SAME value kinds, read back through `.items()` instead of through
-    # `print(d)`. The dict's own repr reads `_DictSlot.kind`; a `(key, value)`
-    # PAIR does not, because a pair slot is a raw int64_t and the pair is built
-    # by the runtime with nothing from the dict slot travelling with it. So the
-    # two halves of one program disagreed: `print({'mid': 0})` printed `0` and
-    # `sorted({'mid': 0}.items())` printed `[('mid', None)]` — and a float value
-    # did not merely print wrong, it SEGFAULTED, because the pair walker handed
-    # the IEEE-754 bits to the runtime type-tag reader, which dereferences them.
-    # `mojo_dict_items` records a per-slot kinds row on each pair now (the same
-    # bargain `mojo_list_set_kinds` and `MojoDict.val_repr` make), and
-    # `mojo_repr_slot_kind` is the ONE renderer every walker asks.
-    #
-    # `list(d.items())` is deliberately NOT here: that spelling reads each pair
-    # pointer as an integer and segfaults, which is the element-type half of
-    # `list(<a boxed container>)` and is already filed as
-    # `bugs/CODEGEN_materialized_container_has_no_element_type.md`. Adding it
-    # here would make this case a place where an unrelated red lives.
-    "dict_items_reads_each_slot_kind": textwrap.dedent("""\
-        def main():
-            d = {}
-            d["z"] = 0
-            d["n"] = None
-            d["b"] = True
-            d["f"] = 1.5
-            d["s"] = "q"
-            d["c"] = [1, 2]
-            d["d"] = {"x": 1}
-            print(d)
-            print(sorted(d.items()))
-            # `for k, v in d.items()` is deliberately NOT here: the loop\'s slot-1
-            # accessor comes from `_dict_items_val_elems`, ONE value type per
-            # dict, so a HETEROGENEOUS dict reads every value with that one
-            # accessor (a container prints as a pointer decimal, a float as its
-            # IEEE-754 bits). The kinds row fixes what a pair PRINTS with, not
-            # what a subscript loop READS with, and that half is still open —
-            # `bugs/CODEGEN_dict_slot_read_loses_its_value_kind.md`.
-            #
-            # The keyed spec of the SAME value kinds, which was already right and
-            # is the control that keeps this case from being satisfied by
-            # broadening something else.
-            print("%(z)s %(n)s %(b)s %(f)s" % d)
     """),
     # `getattr(o, name, default)` computed the default-selection ternary
     # correctly -- `_mojo_getattr_missed` was set, `_t9 = missed ? dflt : raw`
@@ -1455,19 +1352,10 @@ CPYTHON_COMPARABLE = {
     "for_target_one_tuple_vs_paren_name",
     "for_target_one_tuple_dict_and_nested",
     "for_target_starred_rest",
-    # …and the dict-KEY shape above it: the compiled path used to REFUSE it
-    # rather than disagree with the interpreter, and a refusal here scores
-    # JIT-COMPILE-FAILED, which the summary counts and does NOT fail on — so
-    # without CPython in the comparison the case could have stayed a green
-    # non-check.
-    "for_target_starred_rest_over_a_dict",
     "comprehension_starred_rest",
     "comprehension_target_shadows_an_enclosing_local",
-    "comprehension_target_does_not_shadow_a_module_constant",
-    "comprehension_target_does_not_outlive_its_own_loop",
     "comprehension_result_elem_type_across_a_branch",
     "dict_repr_zero_value_is_not_the_none_sentinel",
-    "dict_items_reads_each_slot_kind",
     "getattr_default_on_a_miss",
     "dict_update_preserves_insertion_order",
     "string_body_that_starts_with_a_prefix",

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare two formal_sweep.py logs per FILE, so an architecture gap is visible.
 
-the `b7` round of `bugs/FORMAL_sweep_work_map.md` §2.5 reported the two
+`bugs/FORMAL_sweep_work_map_2026-10-02_b7.md` §2.5 reported the two
 architectures as the same sweep: 542 files classified on both, "of those, class
 CHANGED: 0", one x86-64-only row. That is the right claim and it was computed by
 hand, from the two logs, with a scratch script nobody could run again — so the
@@ -78,11 +78,9 @@ LINE_RE = CAUSES.LINE_RE
 # The summary line: `[x86_64] 668 files: PASS=125 not-pass=543`. Read for the
 # architecture the log is about and for the two counts, so a report that says
 # "one file differs" can be checked against the totals it was derived from.
-# TAKEN FROM `formal_sweep.py`, which prints the line, rather than written out
-# here as it was: the second reader of a format needs the format's owner, and a
-# rewritten summary line is exactly the way one tool keeps matching a log while
-# another does not.
-SUMMARY_RE = FS.SUMMARY_RE
+SUMMARY_RE = re.compile(
+    r"^\[(?P<arch>[a-z0-9_]+)\] (?P<files>\d+) files: PASS=(?P<pass>\d+) "
+    r"not-pass=(?P<notpass>\d+)\s*$")
 
 # An architecture NAME in a message, folded out — but only where the name is a
 # LABEL for a machine rather than part of a file name. `x86_64` in "on the

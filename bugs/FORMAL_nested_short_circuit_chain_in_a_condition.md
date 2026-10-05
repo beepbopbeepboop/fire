@@ -1,94 +1,9 @@
 # FORMAL_nested_short_circuit_chain_in_a_condition: `((a or b) or c)` is still unproved
 
 `if a or b:` and `if a and b:` as a whole condition are **proved** (the
-per-path entry statement they needed is in `formal/arm64_proof_gen.py`).
-A chain NESTED inside a chain is not, and this says why and what closes it.
-
-**Status 2026-10-04 (`work/formal29-3`): NO FIX ATTEMPTED, and the reason is
-that this area is not VERIFIABLE today — on this tree `formal/examples/either.mojo`
-and `both.mojo` do NOT typecheck**, which is the premise every earlier Status
-section below rests on ("`either`/`both` are the canary and must keep proving").
-Measured, both, this session, through `formal/lean.py::check_proof_cached`:
-
-```
-either_proof.lean:2600:8: error: (kernel) excessive memory consumption detected
-   → peak 6.9 GB across 2 processes
-both_proof.lean:2600:8:   (the same line, the same error)  → peak 7.0 GB
-```
-
-That is the whole of `test_formal_short_circuit_cond.py::TestLean` red, it is
-`bugs/FORMAL_a_generated_proof_over_leans_memory_ceiling_is_rejected.md`'s
-subject (that doc's Status measures the cause as the `bv_decide` cost of the
-per-block branch-condition facts and says what is missing is a lemma for a
-short-circuit condition's value flow — an UNOWNED doc), and it means a generator
-change here could not be checked even if it were right: the change that fixes the
-nested chain would land in the same file that emits the 6.9 GB proof the kernel
-already refuses. The project's own rule names that outcome as the worst one
-("statements which LOOK right and are not proved"), and this document's own 2026-10-03
-section declines the work for the same reason at a smaller scale. So this session
-measured the next step instead, which is below and is new.
-
-### Where the machinery actually stops, measured (this is the new part)
-
-**An inner chain gets NO merge block, NO statement and NO travelling fact — and
-that is upstream of everything the two Status sections above hypothesised.** Read
-off the generator's own tables for `n > 10 or n == 0 or n < -4` (11 blocks: five
-`cbz`, two `ret`, four `seq`; the outer chain's own branch is the `cbz` at
-`4294968124` and the outer merge is `4294968164`):
-
-| what | measured |
-|---|---|
-| `_cond_nodes(fn, …)` yields | **ONE** node — the outer `or`. The inner `or` is not a separate entry |
-| the codegen's `_cond_pairs` records | **ONE** pair — `(4294968164, <the whole condition>)` |
-| `_sc_by_merge` therefore holds | **ONE** entry: `{m: 4294968164, s: 4294968124, kind: or, l: <the inner chain's VALUE>, r: C}` |
-| the `hcond` statements in the emitted proof | **TWO distinct shapes**, `hcond_6` ×8 and `hcond_8` ×16 — and **no statement at all about the inner merge's register** |
-
-So the inner chain's truth value reaches the outer chain's own branch as a bare
-register, and the statement there is `arm64_reg 0 s_6 ≠ 0 ↔ ((A ≠ 0) ∨ (B ≠ 0))`
-— a proposition about the machine that is TRUE, and one that `by_cases h : …`
-plus `simp [h]` cannot discharge because the register arrived along two
-different `cset`s and only one of them is unfolded into the goal's shape. The
-`hcond_8` at `4294968164` is the same statement with the sense flipped, and its
-other shape (`↔ ¬(C ≠ 0)`) is the passing two-operand one, on the path where the
-register really does hold C's `cset`.
-
-**The next step is therefore one level UPSTREAM of the two Status sections
-below**, and it is a codegen-side recording question rather than a statement to
-re-word: **`_cond_pairs` must record a pair per CHAIN in the condition tree, and
-`_cond_nodes` must yield one entry per chain, so that the inner chain's merge
-becomes a block the generator knows about.** Then the inner merge gets its own
-per-operand statement (the shape `hcond_8 ↔ ¬(C ≠ 0)` already has), its own
-travelling fact, and the outer chain's left operand is a NAME (`hscL_<inner
-merge>`) rather than a re-derivation of `A ∨ B` at a place where two `cset`s meet.
-Until that recording exists, no change to `_hcond_mem_rws`, to the `simp only`
-set or to the statement's right-hand side can reach this program — which is what
-the 2026-10-03 measurement ("the `rw`/`simp only` lines are character-for-character
-the passing case's") was already telling us, read from the other end.
-
-**What is NOT claimed:** that the recording change is small. It is in
-`formal/arm64_codegen.py` (what `info["cond_branches"]` records) and in
-`_cond_nodes`, and the recording is what `either`/`both`'s passing proofs depend
-on — so it needs the memory problem above fixed first, or at least measured
-against it.
-
-### One instrument defect found while measuring this, filed, and since FIXED
-
-`formal/lean.py::proof_verdict_key` did not cover the proof's DIRECTORY, and
-`_run_lean`'s `LEAN_PATH` puts that directory FIRST, so two byte-identical
-proofs in different directories were not the same proposition to Lean — while the
-cache could not tell them apart. Measured here: a run from `.tmp/sc` with
-`repo_root='.'` (which made `lib_dir` relative and therefore unresolvable from
-the proof's own directory) cached the failure `unknown module prefix 'ProofLib'`,
-and that verdict was then served for the same bytes from `.tmp/scroot` where the
-library resolves. Filed separately and **fixed in the branch that closed it**:
-`formal/lean.py::_proof_search_digest` now hashes what the proof's directory can
-supply (`_VERDICT_VERSION` v5), and the relative-`lib_dir` half of this
-measurement had already been fixed at that site by `os.path.abspath(lib_dir)`.
-The poisoned CAS entry still had to be deleted by hand to get a real run — the
-version bump is what makes every entry published under the old key unreachable
-from here on, and a CAS that is machine-wide and shared with every other
-checkout cannot be flushed from a worktree at all — which is the "a red that no
-fix can clear" shape this project keeps arguing against.
+per-path entry statement they needed is in `formal/arm64_proof_gen.py`;
+`formal/examples/either.mojo` and `both.mojo` build AND typecheck). A chain
+NESTED inside a chain is not, and this says why and what closes it.
 
 ## Status 2026-10-03 (`work/formal13-4`): NOT FIXED, and BOTH of the 2026-10-03
 ## Status section's hypotheses are now MEASURED FALSE. The discriminator is

@@ -39,33 +39,7 @@ class ConformanceError(Exception):
 # the before/after and `std/collections/type_dict.mojo` as the case).
 
 
-#: One derived answer per distinct module source, bounded and FIFO. The answer is
-#: a pure function of the text and of nothing else, which is what makes this
-#: sound rather than a cache with an invalidation argument attached — the same
-#: argument `formal/monomorph.py::_derived_from_source` makes for the same
-#: reason. Keyed by the TEXT rather than by `id()`, because a key that is an
-#: address can be handed to a different object once the first is freed
-#: (`bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`'s hazard
-#: 2), and hashing the text costs far less than the scan it stands in for.
-#:
-#: 8 entries, far above one elaboration's working set: the three readers below
-#: ask about the SAME module within one call, and the module being re-asked
-#: about is the one a re-instantiation touches. An eviction is a
-#: re-derivation, never a wrong answer.
-#:
-#: THE ORDER IS A LIST BESIDE THE DICT rather than `next(iter(the_dict))`, which
-#: is the spelling `formal/monomorph.py::_derived_from_source` uses and which
-#: this file may not: `elaborate.py` is inside the self-host closure
-#: (`cas.selfhost_inputs()` lists it, `formal/*` does not), and `next()` over a
-#: container is one of the constructs the self-hosted codegen does not lower —
-#: the same reason `_bind_comprehension_target` avoids it. `queue.pop()` in
-#: `cas.py` is the shape that is proven to lower.
-_BRACKET_DEPTH_CACHE = {}
-_BRACKET_DEPTH_ORDER = []
-_BRACKET_DEPTH_CACHE_MAX = 8
-
-
-def _bracket_depth_by_line(module_src: str) -> tuple[int, ...]:
+def _bracket_depth_by_line(module_src: str) -> list[int]:
     """depths[j] = bracket nesting depth (from `([{`) in effect at the START
     of 0-indexed line `j` of `module_src.splitlines()`. Comment- and
     string-literal-aware (including triple-quoted docstrings and single
@@ -81,25 +55,7 @@ def _bracket_depth_by_line(module_src: str) -> tuple[int, ...]:
     the `]`/`)` that closes the parameter list — starting at column 0. A
     plain "dedent to <= base indentation ends the block" check misreads that
     continuation line as the end of the function/struct, silently truncating
-    the extracted template before its real body.
-
-    **A tuple, and memoised, and both are the same decision.** Three readers ask
-    this question about the same module inside one elaboration
-    (`extract_fn_source`, `extract_overloads`, `extract_struct_source`), each
-    re-running the whole scan, and it was 5.4 s of tottime / 8.4 s cumulative of
-    a 21.6 s instrumented `std/simd.mojo` build — 39% of what was left after
-    `formal/monomorph.py`'s call-site fix, which is the measurement
-    `bugs/PERF_formal_import_asks_are_products_of_the_closure.md` §4d records.
-
-    It is a TUPLE rather than a list because the memo hands every reader the SAME
-    object, and a reader that mutated it would corrupt every later one — the
-    hazard the same doc's §"the memo's hazards" states for a shared list. A tuple
-    removes it structurally rather than by a check that a future caller could
-    forget: `_find_block_end` only READS it, so nothing has to be migrated.
-    """
-    cached = _BRACKET_DEPTH_CACHE.get(module_src)
-    if cached is not None:
-        return cached
+    the extracted template before its real body."""
     depth = 0
     depths = [0]
     in_str = None  # None, or '"', "'", '"""', "'''"
@@ -141,16 +97,10 @@ def _bracket_depth_by_line(module_src: str) -> tuple[int, ...]:
         if c == '\n':
             depths.append(depth)
         i += 1
-    out = tuple(depths)
-    if len(_BRACKET_DEPTH_ORDER) >= _BRACKET_DEPTH_CACHE_MAX:
-        _BRACKET_DEPTH_CACHE.pop(_BRACKET_DEPTH_ORDER.pop(0))
-    _BRACKET_DEPTH_CACHE[module_src] = out
-    _BRACKET_DEPTH_ORDER.append(module_src)
-    return out
+    return depths
 
 
-def _find_block_end(lines: list[str], depths: tuple[int, ...],
-                    start: int, base: int) -> int:
+def _find_block_end(lines: list[str], depths: list[int], start: int, base: int) -> int:
     """First line index after `start` that both dedents to <= `base`
     indentation AND sits at bracket depth 0 — i.e. an ordinary top-level
     statement boundary, not a continuation of a still-open `([{` header."""

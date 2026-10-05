@@ -161,62 +161,6 @@ import formal.lean as L           # noqa: E402
 LEAN_BIN = L.find_lean(ROOT)
 LIB = os.path.join(ROOT, "lib")
 
-#: The `LEAN_PATH` every `lean` run in this file gets, in the order Lean searches
-#: it. One list, because it is an INPUT to two answers that must not drift:
-#: `LEAN_PATH` itself, and the module name `_module_of` derives from it — a
-#: generated file that is under the first entry is named by its basename and one
-#: that is under none is named `_stdin`, so deriving against a different list is
-#: the same bug with a different argument (see `_module_of`).
-SEARCH_PATHS = (ROOT, LIB)
-LEAN_PATH = ":".join(SEARCH_PATHS)
-
-#: Has `ensure_lean_ready` run in this process?  `_run_lean` is called once per
-#: theorem per example (86 times over the corpus) and `ensure_library` is not
-#: free even when it builds nothing — it digests each `lib/*.lean` together with
-#: the modules that one's `import` lines name — so the answer is taken once.
-_LIBRARY_READY = False
-
-
-def ensure_lean_ready():
-    """Make every `lib/*.olean` a generated proof here IMPORTS current.
-
-    **This file was the one emitter of the four that did not do this**, and the
-    cost was a check that reported a proof failure for a missing artifact.
-    `_header` emits `import X86`, so every run below reads `lib/X86.olean`, and
-    `formal/x86_64_model_test.py`, `formal/x86_64_model_coverage_test.py` and
-    `formal/x86_64_model_fuzz.py` each open with `L.ensure_library` for exactly
-    that reason.  What happened here instead is the reason the three have it:
-    `formal/x86_64_endtoend_test.py` runs fine when the suite's `prooflib` step
-    got there first (`formal-x86-endtoend` deps on it), so the omission was
-    invisible until something else called `_run_lean` — the end-to-end case in
-    `test_formal_sweep_truth.py`, which is in `check`, a bucket that does NOT
-    run `prooflib`.  Lean then said
-
-        <tmp>.lean:1:0: error: unknown module prefix 'X86'
-
-    and exited 1, which `_run_lean` reported as ``lean exited 1: no error
-    message`` — a broken library read as an elaboration that refused to
-    elaborate.  The guard is the fix for both halves: the library is current
-    before the first run, and a `lib/*.lean` that does not elaborate stops here
-    (`ensure_library` raises with the build's own diagnostic) instead of turning
-    all 86 runs into the same unexplained exit.
-
-    Cheap by design, which is why this is affordable in an everyday check:
-    `ensure_library` takes the build lock, re-checks currency inside it, serves
-    the content-addressed store on a hit and writes through a private temp, so
-    sixteen concurrent callers queue and exactly one builds.  On a warm store
-    this is a few hundred milliseconds and no memory.
-    """
-    global _LIBRARY_READY
-    if _LIBRARY_READY:
-        return
-    if LEAN_BIN:
-        L.ensure_library(LEAN_BIN, LIB)
-    # Set either way: with no toolchain there is nothing to build, and the
-    # `run_lean` call every path reaches afterwards already reports the absence
-    # in its own words rather than as a TypeError from `Popen`.
-    _LIBRARY_READY = True
-
 #: Bounds for the per-example Lean runs below. Each is ONE generated theorem
 #: over one example, so the policy's proof bounds apply; the numbers are passed
 #: explicitly because this file makes dozens of Lean runs and its own two call
@@ -858,24 +802,6 @@ def _byte_facts(insns, code, base):
 _BYTES = "first | native_decide | simp [read_i32_le, read_i8, hb]"
 
 
-#: What is missing for each form the decoder learned and `_FORMS` did not, in
-#: the words of the encoder that emits it.  Named because `_resolve`'s refusal
-#: has to say WHICH of the two halves of the pair is absent, and "add a row" is
-#: not actionable without knowing that the missing row is a MEMORY successor for
-#: a pointee width the model already steps.
-_UNKNOWN_FORM_HINT = {
-    "mov_rm8_r8": "`encode_mov_rm8_r8`'s 1-byte store",
-    "mov_rm16_r16": "`encode_mov_rm16_r16`'s 2-byte store (`66 89 /r`)",
-    "mov_rm32_r32_mem": "`encode_mov_rm32_r32`'s 4-byte MEMORY store",
-    "mov_r32_rm32": "`encode_mov_r32_rm32`'s 4-byte MEMORY load",
-    "movzx_r64_rm8": "`encode_movzx_r64_rm8`'s 1-byte unsigned load",
-    "movzx_r64_rm16": "`encode_movzx_r64_rm16`'s 2-byte unsigned load",
-    "movsx_r64_rm8": "`encode_movsx_r64_rm8`'s 1-byte signed load",
-    "movsx_r64_rm16": "`encode_movsx_r64_rm16`'s 2-byte signed load",
-    "movsx_r64_rm32": "`encode_movsx_r64_rm32`'s 4-byte signed load",
-}
-
-
 def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
              length=1, rip=None, code_name="rc"):
     """`(call, succ)` for one instruction: the step lemma applied at `addr`, and
@@ -904,29 +830,7 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
     disagrees with the model's step" — was the right report about a claim that
     was not the one anybody meant to make.
     """
-    entry = _FORMS.get(form)
-    if entry is None:
-        # A form the decoder knows and `_FORMS` does not, named rather than a
-        # bare `KeyError`. It is the two halves of this module disagreeing
-        # about one instruction: `formal/x86_64_decode.py` is a claim about
-        # the BYTE STREAM and grew the pointee-width memory forms because
-        # `formal/x86_64.py` emits them, while `_FORMS` is a claim about what
-        # this emitter has a step lemma and a successor for. A `KeyError` says
-        # `'mov_rm32_r32_mem'`, which names the form and nothing else; this says
-        # what is missing and where, which is the difference between a reader
-        # who can act and a reader who has to go looking.
-        #
-        # It is a refusal and not a wrong successor on purpose. `_SUCCS`'s
-        # register rows read the ModRM's register field, and handing one of them
-        # a memory encoding produces a successor about a different instruction
-        # that typechecks — which is the failure this whole pair of files exists
-        # to make visible rather than to produce.
-        raise ValueError(
-            "no step lemma wired for: %s — the decoder knows this form (the "
-            "backend emits it) and `_FORMS` has no row for it, so there is no "
-            "successor to write. Add a `_FORMS`/`_SUCCS` pair, or do not decode "
-            "the form: %s" % (form, _UNKNOWN_FORM_HINT.get(form, "")))
-    lemma, takes_imm, conds = entry
+    lemma, takes_imm, conds = _FORMS[form]
     imm = int.from_bytes(raw[3:7], "little", signed=True) if takes_imm else None
     # Each side condition is a `try (<attempt>)` and then an `all_goals sorry`
     # ON ITS OWN LINE, so one that does not go through is admitted rather than
@@ -2998,21 +2902,6 @@ def _header(code, insns, base, steps):
            # a genuine unused simp argument inside `lib/` is still reported,
            # because the option is scoped to this file.
            "set_option linter.unusedSimpArgs false\n",
-           # The option that makes Lean's OWN hole report name the hole.  Every
-           # generated file carries `all_goals sorry` in two places -- a named
-           # fact's own last line, and each step lemma's inline side condition --
-           # and which of them is LOAD-BEARING is a property of the elaborated
-           # term, not of the text, so a census of the text cannot answer it.
-           # With this set, the warning carries the fired `sorry`'s own
-           # `file:line:col` (measured: ``uses `sorry `«P:362:12»`` ``, which is
-           # the `all_goals sorry` inside one step lemma's first side condition),
-           # and `formal/lean.py::sorry_source_positions` reads it back into an
-           # exact attribution.  It costs one option and no second elaboration:
-           # `trace.Meta.Tactic.sorryAx`, the trace class this would otherwise
-           # want, does not exist in the pinned 4.32.2.  Scope note: it changes
-           # how a `sorry` is PRINTED, so it touches warning text and nothing
-           # else -- every theorem in the file is the same statement.
-           "set_option pp.sorrySource true\n",
            "def rc (addr : Nat) : UInt8 :=",
            "  if addr < %d then 0 else" % base,
            "  ([%s].getD (addr - %d) 0)\n"
@@ -3686,8 +3575,7 @@ def _probe_input_independent(path):
         f.write(text)
         tmp = f.name
     try:
-        ensure_lean_ready()
-        env = dict(os.environ, LEAN_PATH=LEAN_PATH)
+        env = dict(os.environ, LEAN_PATH="%s:%s" % (ROOT, LIB))
         p = L.run_lean(LEAN_BIN, [tmp], env=env, wall_s=PROOF_WALL_S,
                        cpu_s=PROOF_CPU_S)
         if p.exceeded:
@@ -3734,55 +3622,6 @@ def _has_loop(path):
 
 _ERR = re.compile(r"^\S*\.lean:\d+:\d+: ")
 
-#: How much of a failed `lean`'s own output a report may carry. Three lines is
-#: not an arbitrary number: `unknown module prefix 'X86'` is followed by the
-#: search path Lean looked in, so the first line alone names a symptom and the
-#: second is where the cause is.
-_REASON_LINES = 3
-_REASON_CHARS = 400
-
-
-def lean_failure_reason(out):
-    """What a non-zero `lean` exit put in the report, in its OWN words.
-
-    The fallback used to be the literal string `no error message`, and it was a
-    claim about the output that was not true.  Lean prints its diagnostics on
-    **stdout**, and the one that matters for a generated proof is an
-    elaboration that never started:
-
-        <tmp>.lean:1:0: error: unknown module prefix 'X86'
-
-        No directory 'X86' or file 'X86.olean' in the search path entries:
-        /repo
-        /repo/lib
-
-    Six lines, 316 bytes, and `_run_lean` printed `lean exited 1: no error
-    message` — because the search was for `memory_exception`/`libc++abi`, which
-    is right for the ONE failure it was written for (`lean::memory_exception`
-    aborts rather than reports, so its own line is the only place the cause
-    appears) and wrong for every other.  A missing library is the worst thing to
-    report that way: it is a broken BUILD read as a proof that would not
-    elaborate, and the sentence that said so was the sentence the reader had.
-
-    So the C++ runtime's line still wins where it is there, and everything else
-    is Lean's output with the temp path stripped — bounded, because a
-    non-zero exit is also what a runaway produces and a report is not a log.
-    """
-    lines = [_ERR.sub("", l).strip() for l in out.splitlines()]
-    lines = [l for l in lines if l]
-    # Unchanged from the search this replaced, and in the same order: the first
-    # line naming either is the C++ runtime's own, because
-    # `lean::memory_exception` aborts rather than reports and that line is the
-    # only place the cause appears.
-    hit = next((l for l in lines
-                if "memory_exception" in l or "libc++abi" in l), None)
-    if hit:
-        return hit
-    if not lines:
-        return "lean wrote nothing at all (no stdout, no stderr)"
-    reason = " | ".join(lines[:_REASON_LINES])
-    return reason if len(reason) <= _REASON_CHARS else reason[:_REASON_CHARS] + "…"
-
 
 #: A NAMED fact whose proof this emitter ADMITTED rather than closed:
 #: `have <name> … := by`, followed — inside its body — by a `sorry`.
@@ -3815,15 +3654,6 @@ _SORRY_ALONE = re.compile(r"^\s*(?:all_goals\s+)?sorry\s*$")
 #: A `/- … -/` block comment, replaced by blank lines so the line numbers the
 #: check reports still point at the source.
 _BLOCK_COMMENT = re.compile(r"/-.*?-/", re.S)
-#: …and replaced by the same NUMBER of newlines rather than by nothing, which is
-#: what the comment above says and what `sub("")` does not do. Every line after
-#: the first `/-- … -/` in a generated file was numbered lower than it is, so a
-#: `sorry`'s reported line and Lean's `line:col` were off by the comment's height
-#: — two lines on `const2`, more on a chain whose theorem carries a long
-#: docstring — and `hole_at` matched nothing. This is the same rule as the `--`
-#: filter below: the check reports source lines, so it must not move them.
-def _blank_block(m):
-    return "\n" * m.group(0).count("\n")
 #: **A `sorry` that shares its line with other syntax is inside an inline `by`,
 #: and one alone on its line is a named fact's own admission.**  That is the
 #: whole discriminator, and the emitter's two shapes are what makes it work:
@@ -3887,23 +3717,27 @@ def admitted_facts(text):
     **Neither count decides the verdict** — `_run_lean` asks Lean, which is the
     only thing that knows whether any of these `sorry`s is load-bearing. The
     counts are for NAMING a hole once Lean has said there is one, and **a name
-    here is a CANDIDATE and not an identification**, which is why the report says
-    `admitted candidate` in that case.
+    here is a CANDIDATE and not an identification**, which is why the report
+    says `admitted candidate` and why this docstring's sentence needed the other
+    half of its claim.
 
-    **The name is now the OWNER, though, and that is not the nearest `have`.**
-    It was: `_HAVE_BY` used to require `:= by`, and a step lemma is emitted
-    `have hstep7 : … :=` with the `:=` on the STATEMENT line and no `by`, so the
-    cursor stayed on the previous fact and every guarded side condition was
-    charged to the one above it. `_HAVE_BY` no longer requires the `by` (see its
-    comment), and measured on this tree's own output the guarded rows are charged
-    to the step they belong to: on `formal/examples/const2.mojo` every one of the
-    159 is `hstep{k}`, and on `wide_recv` the largest count is 13 per step.
-
-    **`line` is the `sorry`'s OWN line, which is what makes the position Lean
-    reports usable.** It used to be the enclosing fact's line, so the answer to
-    "which `sorry` is this" could not be looked up — the caller had a position and
-    the function had a fact's header. `_run_lean` resolves a fired hole by
-    EXACT line through `hole_at`, with no nearest-above rule to be wrong.
+    The attribution is the nearest `have … := by` ABOVE the `sorry`, and that is
+    exact for a fact's own admission and approximate for a side condition's: a
+    side condition belongs to the step application that encloses it, and a step
+    lemma is emitted WITHOUT a `by` (`have hstep7 : … := x86_step_…`), so `cur`
+    is still the previous named fact when the side condition is read. Measured on
+    `formal/examples/const2.mojo` — 16 steps, no `call`, so its closing read is
+    the one at `X86State.init`'s stack — the census names `hrip`, and deleting the
+    two `hrip` blocks' admissions and nothing else leaves the file checking
+    with `returncode 0` and no errors while Lean still reports `declaration uses
+    sorry`. **So the live hole is in one of the guarded side conditions and the
+    name is the nearest enclosing fact, not the hole's owner.** Retiring that
+    needs Lean's own positions — `set_option trace.Meta.Tactic.sorryAx`, which
+    the tool this doc's next step names, DOES NOT EXIST in the pinned 4.32.2
+    (`error: Unknown option`), and the real mechanism is a labeled sorry
+    (`Lean.Meta.mkLabeledSorry`) read back with `Declaration.forEachSorryM`,
+    which is a probe over the elaborated term and therefore a cost question
+    rather than a flag.
 
     Counted off the generated TEXT rather than kept in a counter beside it, for
     the reason the rest of this file's numbers are: a tally maintained next to
@@ -3912,190 +3746,52 @@ def admitted_facts(text):
     any `have` is reported under `_body`, so it cannot go missing.
     """
     out = []
-    cur = "_body"
+    cur = None
     # Comments first, and BOTH forms: the generated file carries `/- … -/`
     # docstrings whose prose names the thing being counted ("No `sorry`: …"), and
     # a `--`-only filter charged the theorem's own docstring as an admission —
     # reported as `_body`, which is precisely the "a check that cannot fail is
     # green" shape this is meant to remove.
-    body = _BLOCK_COMMENT.sub(_blank_block, text)
+    body = _BLOCK_COMMENT.sub("", text)
     for n, line in enumerate(body.split("\n"), start=1):
         if line.lstrip().startswith("--"):
             continue
         m = _HAVE_BY.match(line)
         if m:
-            cur = m.group(1)
+            cur = (m.group(1), n)
         if _SORRY_ALONE.match(line):
-            out.append((cur, n, "admitted"))
+            out.append((cur if cur is not None else ("_body", n), "admitted"))
         elif _SORRY.search(line):
-            out.append((cur, n, "guarded"))
-    return out
+            out.append((cur if cur is not None else ("_body", n), "guarded"))
+    return [(nm, ln, kind) for (nm, ln), kind in out]
 
 
-def hole_at(text, line):
-    """`(name, kind)` for the `sorry` Lean says fired on `line`, or `None`.
-
-    **`line` is the hole's own line, from
-    `formal/lean.py::sorry_source_positions`, and the match is exact.** That is
-    the whole of the attribution problem this replaces: the report used to name
-    the nearest `have` above the `sorry`, which is a place to start looking
-    rather than the fact that is unproved, and the word `candidate` existed
-    because a text census cannot tell which of them fired.
-
-    A `None` is a real answer in both directions and neither is an error: the
-    position may be in no `sorry` at all (a `sorry` the emitter did not write,
-    which `_run_lean`'s cross-check already reports as a leaked library hole), or
-    the run carried no position (a file without `pp.sorrySource`, which is what a
-    caller falls back to a candidate list for). Nothing here guesses.
-    """
-    for name, n, kind in admitted_facts(text):
-        if n == line:
-            return (name, kind)
-    return None
-
-
-#: What Lean names a source file it cannot derive a module name for, measured on
-#: the pinned toolchain: `…/tmp1qomz6pi.lean` elaborated from outside every
-#: `LEAN_PATH` entry reports ``declaration uses `sorry `«_stdin:363:12»`` — the
-#: whole file is one anonymous declaration, so its holes are attributed to
-#: `_stdin` rather than to the file. It is a module name like any other to
-#: `sorry_source_labels`, which is exactly why `_module_of` has to produce it.
-_STDIN_MODULE = "_stdin"
-
-
-def _module_of(path, search_paths):
-    """The module name Lean will print for `path`, given the search paths it ran with.
-
-    Lean's module name for a source file is its path RELATIVE TO A SEARCH PATH,
-    with `/` becoming `.` — so the `«…».name:line:col` label ends in the last
-    component of that, which is the basename. It is derived rather than passed in
-    so that the caller cannot get it subtly wrong: a caller that spelled the
-    module by hand would silently disable the library-hole filter the moment it
-    disagreed with Lean's spelling, which is the failure that filter exists to
-    prevent.
-
-    **A file outside every search path has no module name, and Lean says so with
-    `_stdin`.** This used to answer `basename` unconditionally, which is right for
-    a file under a search path and wrong for every other one — and the other ones
-    are the DEFAULT, because where `_run_lean`'s temporary file lands is
-    `TMPDIR`'s business. Measured on this tree's own end-to-end case, with
-    `TMPDIR` at the system default so the temp file is not inside the checkout:
-
-        TMPDIR=<checkout>/.tmp   label `«.tmp».tmp1qomz6pi:363:12`  module tmp1qomz6pi
-        TMPDIR unset             label `«_stdin:363:12»`             module _stdin
-
-    Under the second, `live_hole_phrase`'s library filter compared `tmp1qomz6pi`
-    with `_stdin`, refused OUR OWN hole as if it were an imported `.olean`'s, and
-    `live` came back `None` — so `_run_lean` fell back to "N admitted candidate
-    (…)" on a proof it had just proved had one identified hole. That is the
-    fallback `live_hole_phrase` exists to avoid, reached by the filter that
-    exists to avoid a worse one, and it made
-    `test_lean_says_which_sorry_fired_and_the_report_names_it` fail on any machine
-    whose `TMPDIR` is not inside the checkout — which is why the suite job's
-    verdict depended on the runner's environment rather than on the tree.
-
-    So the derivation implements Lean's rule instead of assuming it: the first
-    search path that contains the file, then the basename; `_stdin` when there is
-    none. `search_paths` is the same list that went into `LEAN_PATH`, because a
-    name derived against a DIFFERENT search path is the bug again.
-    """
-    real = os.path.abspath(path)
-    for root in search_paths:
-        root = os.path.abspath(root)
-        if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
-            return os.path.splitext(os.path.basename(real))[0]
-    return _STDIN_MODULE
-
-
-def live_hole_phrase(text, out, module=None):
-    """`"hstep7's side condition, line 362"` for the hole Lean says fired, or `None`.
-
-    The question this answers is "WHICH `sorry`", and it is asked of Lean's own
-    output rather than of the text: `_header` puts `set_option pp.sorrySource true`
-    in every generated file, so a `declaration uses `sorry`` warning carries the
-    fired `sorry`'s own `line:col`
-    (`formal/lean.py::sorry_source_labels`), and `hole_at` resolves that line
-    to the fact it belongs to. Measured end to end on this tree's own output: with
-    `formal/examples/const2.mojo`'s first guard on `hstep7` made unsatisfiable,
-    Lean prints ``uses `sorry `«.tmp».tmpcmqrxbe0:363:12»`` `` and this returns
-    `"hstep7's side condition, line 363"` — the `all_goals sorry` on that line,
-    attributed to the step whose hypothesis argument it is.
-
-    **One hole, and it is the first.** Lean emits the warning once per
-    declaration, and these files are one declaration, so a chain with three live
-    holes names one of them and the summary line's counts are what say how many
-    emissions could have fired. `None` when the run named no position, and the
-    caller then falls back to the candidate list rather than inventing one.
-
-    **`module` is the generated file's own module name, and passing it is what
-    makes a LIBRARY hole refusable instead of misattributed.** Lean's label says
-    which file the fired `sorry` is in, and this used to read only the line: so a
-    hole in an imported `.olean` arrived here as a bare line number in a file
-    this function had never seen, and `hole_at` matched it against the GENERATED
-    text. Measured on `const2.mojo`'s emitted text (722 lines): a
-    `«lib».X86:503:8` position resolved to `"hstep11's side condition, line
-    503"` — a confident, specific and completely wrong answer, because 503 is a
-    line in `lib/X86.lean` and a `sorry` of ours happens to sit on 503 of the
-    generated file. It returned `None` for `«lib».ProofLib:4624:8` only because
-    4624 is past the end of the generated file, which is luck and not a rule.
-
-    A hole this emitter did not write has no emitter fact to name, so it is
-    skipped exactly as an unresolvable position always was — but now for the
-    stated reason rather than by coincidence. `module` is what `_module_of`
-    derives for the generated file, which is the BASENAME when the file is under
-    a search path and `_stdin` when it is under none (both measured; see
-    `_module_of`, and see the failure this corrected — a caller that passed the
-    basename while Lean printed `_stdin` had its OWN hole refused as a library
-    one, and `None` is a fallback, so the identification was silently lost on
-    every machine whose `TMPDIR` is not inside the checkout). `sorry_source_labels`
-    reports the same string whatever Lean spells it with (its own docstring has
-    the three spellings); `None` means "do not filter", which is the pre-existing
-    behaviour and is what a caller with no generated file in hand passes.
-    """
-    for name_in_file, line, _col in L.sorry_source_labels(out):
-        if module is not None and name_in_file != module:
-            # A hole in an IMPORTED module. There is no fact of ours to attribute
-            # it to, and resolving its line against our text would invent one.
-            continue
-        at = hole_at(text, line)
-        if at is None:
-            # A position in no `sorry` of ours: a `sorry` written by something
-            # other than this emitter, which `_run_lean` reports in its own
-            # words. Naming nothing here is right — there is no emitter fact to
-            # name.
-            continue
-        name, kind = at
-        what = "own admission" if kind == "admitted" else "side condition"
-        return "%s's %s, line %d" % (name, what, line)
-    return None
-
-
-def admitted_phrase(n_admitted, names, n_guarded=None, live=None):
+def admitted_phrase(n_admitted, names, n_guarded=None):
     """The one wording for "proved, and something in it is not proved".
 
-    **`live` is the word that was wrong, and its absence is now a FALLBACK rather
-    than the claim.** A name in `names` is the enclosing fact of an emitted
-    `all_goals sorry`, which is a place to start looking and not the hole: Lean
-    emits that line whether or not the tactic above it closed the goal, so the
-    list can be empty where the chain has five holes and can name five where it
-    has none. When `live` is known — which is Lean's own `line:col` resolved
-    through `hole_at` — the report says so and drops the list, because a name it
-    cannot support is worse than no name. Both theorems report through here so
-    the two lines cannot drift into different claims about the same number, and a
-    test can ask the wording a question without running Lean at all.
+    **The word `candidate` is load-bearing and is in this function because both
+    report lines use it.** A name here is the nearest `have … := by` above a
+    `sorry`, which is exact for a fact's own admission and is NOT the owner of a
+    side condition's — a step lemma is emitted without a `by`, so a guard that
+    fires inside one is charged to the fact before it. Measured on
+    `formal/examples/const2.mojo`: the census named `hrip`, and deleting the two
+    `hrip` blocks' admissions and nothing else left the file checking with
+    `returncode 0` and no errors while Lean still reported `declaration uses
+    sorry`. So the name is where the search STARTS. `admitted_facts` has the rest.
+
+    Both theorems report through here so the two lines cannot drift into
+    different claims about the same number, and a test can ask the wording a
+    question without running Lean at all.
     """
-    if live:
-        out = "1 live hole (%s)" % live
-    else:
-        out = "%d admitted candidate (%s)" % (
-            n_admitted, ", ".join(names) or "unattributed")
+    out = "%d admitted candidate (%s)" % (
+        n_admitted, ", ".join(names) or "unattributed")
     if n_guarded is not None:
         out += ", %d guarded" % n_guarded
     return out
 
 
 def _run_lean(text):
-    """`(ok, n_admitted, fired, first_error, live)` for one generated Lean file.
+    """`(ok, n_admitted, fired, first_error)` for one generated Lean file.
 
     `n_admitted` is `admitted_facts`' count of the holes THIS emitter opened
     with nothing attempted above them, and `fired` is the one number only Lean
@@ -4104,12 +3800,6 @@ def _run_lean(text):
     0 or 1 here and that is all the caller needs — it is the difference between
     "the guards all held" and "at least one did not", and no text census can
     see it.
-
-    **`live` is WHICH hole, and it comes from the same line of output.** With
-    `_header`'s `pp.sorrySource`, that warning carries the fired `sorry`'s own
-    `line:col`; `live_hole_phrase` resolves it to the fact, so the caller can
-    print an identification rather than the nearest enclosing fact's name. It is
-    `None` when the run named no position, which is a fallback and not a verdict.
 
     **The verdict is driven by `fired` and not by `n_admitted`, and that is the
     fix rather than a detail.** It was driven by `n_admitted`, which is a fact
@@ -4131,16 +3821,7 @@ def _run_lean(text):
         f.write(text)
         tmp = f.name
     try:
-        try:
-            ensure_lean_ready()
-        except RuntimeError as exc:
-            # The five-tuple is how this function reports EVERY reason a file
-            # did not elaborate, so a library that would not build is one of them
-            # rather than a traceback out of the one caller that asks this
-            # directly. `ensure_library` carries the build's own diagnostic.
-            return (False, 0, False, "lib/*.olean is not current: %s" % exc,
-                    None)
-        env = dict(os.environ, LEAN_PATH=LEAN_PATH)
+        env = dict(os.environ, LEAN_PATH="%s:%s" % (ROOT, LIB))
         p = L.run_lean(LEAN_BIN, [tmp], env=env, wall_s=PROOF_WALL_S,
                        cpu_s=PROOF_CPU_S)
         if p.exceeded:
@@ -4149,7 +3830,7 @@ def _run_lean(text):
             # element as the reason a theorem did not hold. Returning it there
             # would put "we stopped watching" in the output where a reader is
             # looking for "the model disagrees".
-            return (False, 0, False, p.exceeded, None)
+            return (False, 0, False, p.exceeded)
         out = p.stdout + p.stderr
         if p.returncode != 0:
             # **A non-zero exit is not a PROOF, and it used to read as one.**
@@ -4169,9 +3850,15 @@ def _run_lean(text):
             # them. This is the doc's own sentence about a check that is worse
             # than no check, arrived at from the other end: the guard was not
             # reporting a false proof, it was reporting no proof.
+            #
+            # The reason is the C++ runtime's own line where there is one,
+            # because `lean::memory_exception` aborts rather than reports and
+            # "exited -6" alone names the symptom rather than the cause.
+            reason = next((l for l in out.splitlines()
+                           if "memory_exception" in l or "libc++abi" in l), "")
             return (False, 0, False,
-                    "lean exited %s: %s" % (p.returncode,
-                                           lean_failure_reason(out)), None)
+                    "lean exited %s: %s" % (p.returncode, reason
+                                           or "no error message"))
         # Drop the temp path and the line:col, which would otherwise eat the
         # whole message under the `[:60]` slice below and print as a filename.
         errs = [_ERR.sub("", l) for l in out.splitlines() if ": error" in l]
@@ -4183,21 +3870,13 @@ def _run_lean(text):
                 "Lean reports this declaration as using `sorry` and the "
                 "generated file contains no `sorry` at all: a library hole has "
                 "leaked into it, and reporting it as clean would be worse")
-        # The module name is what makes the identification an identification: it
-        # is the name Lean gives the file this process just wrote — the basename
-        # under a search path, `_stdin` outside every one of them, which is what
-        # `_module_of` derives from `SEARCH_PATHS` — and it is what lets
-        # `live_hole_phrase` refuse a hole that fired in an IMPORTED module
-        # rather than resolving that module's line against this file's text.
-        return ((not errs), sorries, fired, (errs[0] if errs else ""),
-                live_hole_phrase(text, out, _module_of(tmp, SEARCH_PATHS))
-                if fired else None)
+        return (not errs), sorries, fired, (errs[0] if errs else "")
     finally:
         os.unlink(tmp)
 
 
 def _check(path, expected):
-    """`_run_lean`'s five-tuple for the value theorem."""
+    """`(proved, n_admitted, fired, first_error)` for the value theorem."""
     return _run_lean(emit(path, expected))
 
 
@@ -4233,16 +3912,6 @@ def main(argv):
         # theorems is 86 identical failures instead of one line.
         print("lean not found (see ./lean-toolchain)")
         return 1
-    try:
-        ensure_lean_ready()
-    except RuntimeError as exc:
-        # The same reason, once. Every generated proof below imports `X86`, so a
-        # `lib/*.lean` that will not elaborate would otherwise be 86 identical
-        # unexplained exits — and this one carries the build's own diagnostic,
-        # which is the whole reason to build the library up front rather than
-        # discovering the problem inside the first proof.
-        print("lib/*.olean is not current: %s" % exc)
-        return 1
     val_ok = val_gap = term_ok = term_gap = 0
     val_holes = []
     fails = notree = noform = nocall = nosize = hole_total = guard_total = 0
@@ -4266,7 +3935,7 @@ def main(argv):
         if 0 <= expected <= 255:
             uncovered = None
             try:
-                good, val_sorries, val_fired, msg, val_live = _check(t, expected)
+                good, val_sorries, val_fired, msg = _check(t, expected)
                 val_holes = sorted({n for n, _l, k in admitted_facts(
                     emit(t, expected)) if k == "admitted"})
             except ValueError as exc:
@@ -4288,8 +3957,7 @@ def main(argv):
                 # this suite once read as 36 failing when 2 were.
                 val_gap += 1
                 vs = "  value:     rax = %d, every input, %s" % (
-                    expected, admitted_phrase(val_sorries, val_holes,
-                                              live=val_live))
+                    expected, admitted_phrase(val_sorries, val_holes))
             elif uncovered is not None:
                 vs = "  value:     -  (%s)" % (
                     uncovered if uncovered.startswith(BRANCHING)
@@ -4309,7 +3977,7 @@ def main(argv):
         # --- the termination theorem ---
         try:
             text = emit_terminates(t)
-            ok, sorries, fired, err, live = _run_lean(text)
+            ok, sorries, fired, err = _run_lean(text)
             # The NAMES, not just the number, because the number alone cannot be
             # acted on: `admitted_facts`' docstring has the measurement that Lean
             # reports one line per DECLARATION, so four `hpop`s read as one gap.
@@ -4351,18 +4019,21 @@ def main(argv):
                 # Lean's own answer, not the census's: a guarded `sorry` that
                 # fell through is a hole and `fired` is what says so.
                 #
-                # **The hole is IDENTIFIED here, by Lean, and the census names
-                # are only the fallback.** With `_header`'s `pp.sorrySource` the
-                # `declaration uses `sorry`` warning carries the fired `sorry`'s
-                # own `line:col`, `hole_at` resolves that line to the fact it is
-                # in, and `live` names it — measured end to end on
-                # `formal/examples/const2.mojo`, whose first guard on `hstep7`
-                # was made unsatisfiable and came back as
-                # `1 live hole (hstep7's side condition, line 362)`.
-                #
-                # The candidate list is still counted and still printed when no
-                # position came back, because a name the emitter gave is a place
-                # to start and an unproven fact is better than none.
+                # **The names are CANDIDATES, and the word says so.** They are
+                # the nearest `have … := by` above each `sorry`, which is exact
+                # for a fact's own admission and is NOT the owner of a side
+                # condition's: a step lemma is emitted without a `by`, so a
+                # guard that fires inside one is charged to the previous fact.
+                # Measured on `formal/examples/const2.mojo` (16 steps, no call):
+                # the census names `hrip`, and deleting the two `hrip` blocks'
+                # admissions and nothing else leaves the file checking with
+                # `returncode 0` and no errors while Lean still reports
+                # `declaration uses sorry` — so the live hole is one of the
+                # guarded side conditions and `hrip` is where the search
+                # starts. `admitted_facts` has the whole measurement; the
+                # alternative is a probe over the elaborated term, and the
+                # trace option this project would have reached for does not
+                # exist in the pinned Lean.
                 #
                 # "unattributed" stays a real answer rather than a placeholder:
                 # a `sorry` before any `have` has no name at all.
@@ -4370,7 +4041,7 @@ def main(argv):
                 hole_total += sorries
                 guard_total += guarded
                 ts = "  terminates: proved, %s" % admitted_phrase(
-                    sorries, holes, guarded, live=live)
+                    sorries, holes, guarded)
             else:
                 fails += 1
                 ts = "  terminates: FAIL %s" % err.strip()[:60]
@@ -4381,14 +4052,14 @@ def main(argv):
     print("  terminates : %d proved with no sorry, %d proved with a sorry"
           % (term_ok, term_gap))
     # What the sorry COUNT is, since it is not Lean's and the two disagree: these
-    # are the holes THIS emitter EMITTED, counted off the generated text by the
-    # name the emitter gave them. It is not a count of live holes — Lean reports
-    # one per DECLARATION, so a file with five of these may have none fired — and
-    # the per-file line above now says which hole is live by Lean's own position.
+    # are the holes THIS emitter opened, counted off the generated text by the
+    # name the emitter gave them. `admitted_facts` has why Lean cannot supply it
+    # — and why the name is a candidate and not the hole's owner, which is the
+    # one thing about these numbers a reader must not take as settled.
     print("               %d admitted fact(s) and %d guarded side condition(s) "
           "in the proved-with-a-sorry files, counted by name from the generated "
-          "text: that is what was EMITTED, and the per-file line above says "
-          "which of it Lean found load-bearing"
+          "text; the name is the nearest enclosing fact, so a live `sorry` in a "
+          "guarded side condition is charged to the step before it"
           % (hole_total, guard_total))
     print("               %d no finite tree (%d loop, %d uncovered form, "
           "%d returns into a caller, %d too large to prove)"

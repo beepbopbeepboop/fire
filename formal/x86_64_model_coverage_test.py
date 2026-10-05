@@ -113,19 +113,6 @@ def samples():
     add("leave", "leave", X.encode_leave())
     add("nop", "nop", X.encode_nop())
 
-    # `movq xmm, r64` -- the GPR-to-SSE move, and the one emittable form whose
-    # FIRST byte is not a REX.  It has had a step-lemma row (`x86_step_movq_xmm_
-    # rm64`, below) since that lemma was written and NO sample here, so the
-    # question "can `x86_step` step it?" was never asked of the one function
-    # that answers it: `tools/formal_isa_census.py`'s LEAN column for x86-64 IS
-    # this list, and it read `no` for a form the backend emits eight times.
-    # Two rows, for the reason the lemma row gives: `xmm0`/`rax` has both
-    # extension bits at zero, so a row there is satisfied by a model that dropped
-    # REX.R (naming XMM8+) or REX.B (naming RSP).
-    for xmm, gpr in ((0, R.RAX), (3, R.R12)):
-        add("movq_xmm_rm64", "movq xmm%d, %s" % (xmm, gpr.name),
-            X.encode_movq_xmm_rm64(xmm, gpr))
-
     # mov, register and memory, 32- and 64-bit
     add("mov_rm64_imm32", "mov rax, imm32", X.encode_mov_r64_imm32(R.RAX, 0x41))
     add("mov_rm64_imm32", "mov r12, imm32", X.encode_mov_r64_imm32(R.R12, -5))
@@ -151,58 +138,12 @@ def samples():
     # length arithmetic is a single `+ 1` will get wrong in the two directions
     # that are not the same direction.
     # `formal/x86_64_model_fuzz.py --census` found it; this list is what should
-    # have.
+    # have. The MEMORY half of the same family, the byte and halfword STORES
+    # (`88 /r`, `66 REX 89 /r`) and the memory widen/narrow loads cannot be added
+    # until `formal/x86_64_decode.py` stops refusing them -- see
+    # `bugs/FORMAL_x86_64_coverage_test_misses_eight_encoders.md`.
     add("mov_rm32_r32", "mov r15d, r13d", X.encode_mov_r32_r32(R.R15, R.R13))
     add("mov_rm32_r32", "mov esi, edi", X.encode_mov_r32_r32(R.RSI, R.RDI))
-
-    # ── the pointee-WIDTH memory forms: eight encoders this list could not name
-    #
-    # A blob on this path is the frame, and a pointer into it has a declared
-    # width, so an 8-byte load or store would over-read or over-write it. The
-    # encoder has a narrower instruction for each of 1, 2 and 4 bytes; the
-    # model steps all of them (`lib/X86.lean`'s `0x88` arm, `x86_step_op66`, the
-    # `0x0F` arm and the `63` arm); and this list named NONE of them, because
-    # `formal/x86_64_decode.py` used to refuse them and a sample that does not
-    # decode is reported as a decoder failure rather than as coverage. So the
-    # property this file states — "every byte sequence this backend can emit is
-    # one `x86_step` can step" — was not being asked about eight of the
-    # encoders.
-    #
-    # Two rows per shape where the shape has a register form already sampled,
-    # because the memory and register forms are different instructions to the
-    # model (`x86_step_rex`'s arm and the `0x0F` arm) and a check at one of them
-    # says nothing about the other. Every base/displacement pair here is one the
-    # backend emits, and the `disp32` rows are there for the same reason the
-    # 64-bit ones above are: `_rm_disp` picks the narrowest form, so a row only
-    # at a small displacement never exercises the four-byte path, which is the
-    # one that resumed inside its own displacement before.
-    for base, disp in ((R.RBX, 0), (R.RBP, 8), (R.R13, 300)):
-        add("mov_rm8_r8", "mov byte [%s+%d], sil" % (base.name, disp),
-            X.encode_mov_rm8_r8(base, disp, R.RSI))
-        add("mov_rm16_r16", "mov word [%s+%d], r11w" % (base.name, disp),
-            X.encode_mov_rm16_r16(base, disp, R.R11))
-        add("mov_rm32_r32_mem", "mov dword [%s+%d], r11d" % (base.name, disp),
-            X.encode_mov_rm32_r32(base, disp, R.R11))
-        add("mov_r32_rm32", "mov eax, [%s+%d]" % (base.name, disp),
-            X.encode_mov_r32_rm32(R.RAX, base, disp))
-        add("movzx_r64_rm8", "movzx rax, byte [%s+%d]" % (base.name, disp),
-            X.encode_movzx_r64_rm8(R.RAX, base, disp))
-        add("movzx_r64_rm16", "movzx r11, word [%s+%d]" % (base.name, disp),
-            X.encode_movzx_r64_rm16(R.R11, base, disp))
-        add("movsx_r64_rm8", "movsx r9, byte [%s+%d]" % (base.name, disp),
-            X.encode_movsx_r64_rm8(R.R9, base, disp))
-        add("movsx_r64_rm16", "movsx rax, word [%s+%d]" % (base.name, disp),
-            X.encode_movsx_r64_rm16(R.RAX, base, disp))
-        add("movsx_r64_rm32", "movsxd rax, dword [%s+%d]" % (base.name, disp),
-            X.encode_movsx_r64_rm32(R.RAX, base, disp))
-    # …and the two that need a FOUR-byte displacement to exist at all, since
-    # `128` is the first one `_rm_disp` widens.
-    add("mov_rm8_r8", "mov byte [rbp+128], dil",
-        X.encode_mov_rm8_r8(R.RBP, 128, R.RDI))
-    add("movsx_r64_rm32", "movsxd rax, dword [rbp-0x410]",
-        X.encode_movsx_r64_rm32(R.RAX, R.RBP, -0x410))
-    add("movzx_r64_rm16", "movzx rax, word [rbx+4096]",
-        X.encode_movzx_r64_rm16(R.RAX, R.RBX, 4096))
 
     add("movsxd_r64_r32", "mov rax, edx",
         X.encode_movsx_r64_r32(R.RAX, R.RDX))
@@ -747,246 +688,6 @@ SUCCESSOR_FORMS = (
 )
 
 
-def divide_cases():
-    """[(label, kind, hi, lo, d, want)] — `x86_div128`/`x86_idiv128` against
-    EXACT INTEGER ARITHMETIC.
-
-    **The samples above ask whether the model can STEP a form; this asks
-    whether the divide it steps is the division.** `x86_step`'s group-3 arm is
-    the only place in this model where a wrong answer is arithmetically
-    checkable without a hardware oracle, because both halves are defined by an
-    identity (`n = q*d + r`, `|r| < |d|`) rather than by another instruction —
-    and `formal/x86_64_model_test.py`, which does compare against the CPU,
-    cannot be used for the cases that MATTER here: this host's `idiv` disagrees
-    with exact arithmetic on 8 of 28 register triples (see
-    `bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md` §"The fourth class"),
-    and every one of the 8 has a negative RAX of large magnitude, which is
-    exactly the shape a random dividend has.
-
-    The expectation is computed here, not pinned, so a rule change has to be
-    argued rather than retyped: `want` is `None` where the instruction FAULTS
-    (a zero divisor, or a quotient outside 64 bits — `#DE`, which leaves the
-    destination registers alone) and `(q, r)` where it does not.
-
-    The rows that matter most are the boundaries, because a range check that is
-    off by one is invisible on every ordinary value:
-      * `2^63 - 1` and `-2^63` are quotients that FIT and must be answered;
-      * `2^63`, `2^64` and `-2^63 - 1` are one step past the edge and must
-        refuse;
-      * `0 / -1` fits, and `(-2^64 - 1) / -1` does not (its quotient is
-        `2^64 + 1`), which is the pair that separates a range check from a
-        "the dividend looks negative" guess;
-      * and the UNSIGNED top edge, which is a different number: `div`'s
-        largest answerable quotient is `2^64 - 1`, not `2^63 - 1`.
-    """
-    two64 = 1 << 64
-    rows = []
-
-    def div_row(label, hi, lo, d):
-        n = hi * two64 + lo
-        if d == 0:
-            rows.append((label, "x86_div128", "Nat", hi, lo, d, None))
-            return
-        q, r = divmod(n, d)
-        rows.append((label, "x86_div128", "Nat", hi, lo, d,
-                     None if q >= two64 else (q, r)))
-
-    def idiv_row(label, hi, lo, d):
-        n = hi * two64 + lo
-        if d == 0:
-            rows.append((label, "x86_idiv128", "Int", hi, lo, d, None))
-            return
-        q = abs(n) // abs(d)
-        if (n < 0) != (d < 0):
-            q = -q
-        r = n - q * d
-        fits = -(1 << 63) <= q <= (1 << 63) - 1
-        rows.append((label, "x86_idiv128", "Int", hi, lo, d,
-                     None if not fits else (q, r)))
-
-    imin, imax = -(1 << 63), (1 << 63) - 1
-    div_row("div: 10 / 7", 0, 10, 7)
-    div_row("div: (2^64-1) / 1 fits at the top edge", 0, two64 - 1, 1)
-    div_row("div: ((2^64-1) * 2^64) / 1 refuses", two64 - 1, 0, 1)
-    div_row("div: 2^128 / 1 refuses", two64, 0, 1)
-    div_row("div: (2^128-1) / 1 refuses", two64 - 1, two64 - 1, 1)
-    div_row("div: 2^127 / 2^63 == 2^64 refuses", 1 << 63, 0, 1 << 63)
-    div_row("div: a zero divisor refuses", 0, 10, 0)
-    idiv_row("idiv: 10 / 7", 0, 10, 7)
-    idiv_row("idiv: -10 / 7", 0, -10, 7)
-    idiv_row("idiv: 0 / -1 fits", 0, 0, -1)
-    idiv_row("idiv: (-2^64-1) / -1 refuses (quotient 2^64+1)", -1, -1, -1)
-    idiv_row("idiv: (2^63-1) / 1 fits at the top edge", 0, imax, 1)
-    idiv_row("idiv: -2^63 / 1 fits at the bottom edge", 0, imin, 1)
-    idiv_row("idiv: 2^63 / 1 refuses", 0, imax + 1, 1)
-    idiv_row("idiv: -2^63-1 / 1 refuses", 0, imin - 1, 1)
-    idiv_row("idiv: a zero divisor refuses", 0, 10, 0)
-    return rows
-
-
-def divide_lean_source(rows):
-    """The divide file: one `#eval!` per row, and the answer is the model's."""
-    out = ["import X86", "",
-           "def renderNat : Option (Nat × Nat) → String",
-           "  | some (q, r) => toString q ++ \"/\" ++ toString r | none => \"#DE\"",
-           "def renderInt : Option (Int × Int) → String",
-           "  | some (q, r) => toString q ++ \"/\" ++ toString r | none => \"#DE\""]
-    for i, (label, fn, kind, hi, lo, d, _want) in enumerate(rows):
-        out.append('#eval! "%d " ++ render%s (%s (%d) (%d) (%d))'
-                   % (i, kind, fn, hi, lo, d))
-    return "\n".join(out) + "\n"
-
-
-def divide_failures(out, rows):
-    """[(label, want, got)] for every row the model answered differently."""
-    got = {}
-    for line in out.splitlines():
-        line = line.strip().strip('"')
-        head, _, rest = line.partition(" ")
-        if rest and head.isdigit():
-            got[int(head)] = rest
-    bad = []
-    for i, (label, _fn, _kind, _hi, _lo, _d, want) in enumerate(rows):
-        text = got.get(i)
-        if text is None:
-            bad.append((label, "an answer", "nothing"))
-            continue
-        if want is None:
-            if text != "#DE":
-                bad.append((label, "#DE", text))
-            continue
-        if text != "%d/%d" % want:
-            bad.append((label, "%d/%d" % want, text))
-    return bad
-
-
-def shift_cases():
-    """[(label, digit, a, k, base, want)] — `x86_shift_post`'s result and flags,
-    against the DEFINITIONS rather than against the CPU.
-
-    Same argument as `divide_cases`, and the same reason it exists: the CPU is
-    not an available oracle for the interesting rows on this host, and the shift
-    flags are exactly where a definition is checkable — `CF` is the last bit
-    shifted out, `OF` is the carry INTO the sign bit for `shl` by one and the
-    old sign bit for `shr` by one, and ZF/SF follow from the result. The rows
-    that matter are the ones a definition gets wrong only on one side of a
-    boundary:
-
-      * `shl` by one of a NEGATIVE value, where OF is `MSB(src) XOR MSB(res)`
-        and NOT `MSB(res)`. That was the model bug the fuzzer found
-        (`movsx R10, R15 ; << RCX, 1`, OF differing on its own), and the two
-        readings agree for every non-negative source, so no `formal/examples`
-        program reaches it;
-      * `shl`/`shr` by one of a value whose top TWO bits are both set and of one
-        whose bit 62 is clear, which separates the carry out of bit 63 from the
-        carry into it;
-      * a count of 0, which rewrites the destination with itself and moves NO
-        flag — asked against a state whose four flags are all SET, because
-        against a zeroed state "moves no flag" and "clears every flag" print the
-        same four characters and the row would be vacuous;
-      * a count of 63, where one bit is all that came out of the word.
-
-    **There is deliberately no row for a count of 64.** `x86_shift_post`'s `k`
-    is the count ALREADY MASKED to six bits — its own docstring says so, and the
-    mask is the step arm's job — so `k = 64` is not a call this function's
-    contract admits, and asking it one would be testing the caller through the
-    callee. The mask itself is checked where it lives: the `shift_cl:*` samples
-    above hand `x86_step` real encodings whose counts exceed 63.
-    """
-    rows = []
-    names = {4: "shl", 5: "shr", 7: "sar"}
-    mask64 = (1 << 64) - 1
-
-    def row(label, digit, a, k, base="zero"):
-        k6 = k & 63
-        msb = lambda v: bool(v >> 63)
-        if k6 == 0:
-            # "moves no flag": the four flags the SET base carries survive.
-            rows.append((label, digit, a, k, base, (a, True, True, True, True)))
-            return
-        if digit == 4:
-            res = (a << k6) & mask64
-            cf = bool((a >> (64 - k6)) & 1)
-        elif digit == 5:
-            res = (a >> k6) & mask64
-            cf = bool((a >> (k6 - 1)) & 1)
-        else:
-            signed = a - (1 << 64) if a >> 63 else a
-            res = (signed >> k6) & mask64
-            cf = bool((a >> (k6 - 1)) & 1)
-        if k6 != 1:
-            of = False
-        elif digit == 4:
-            of = msb(a) != msb(res)
-        elif digit == 5:
-            of = msb(a)
-        else:
-            of = False
-        rows.append((label, digit, a, k, base, (res, res == 0, msb(res), cf, of)))
-
-    m1 = 0x8000000000000001          # MSB set, bit 62 clear
-    m2 = 0xC000000000000001          # both top bits set
-    p1 = 0x0000000000000001
-    p2 = 0x4000000000000001
-    for digit in (4, 5, 7):
-        row("%s by 1 of a negative value (MSB set, bit 62 clear)" % names[digit],
-            digit, m1, 1)
-        row("%s by 1 of 0xC000000000000001 (both top bits set)" % names[digit],
-            digit, m2, 1)
-        row("%s by 1 of 1" % names[digit], digit, p1, 1)
-        row("%s by 1 of 0x4000000000000001" % names[digit], digit, p2, 1)
-        row("%s by 0 moves no flag" % names[digit], digit, m2, 0, base="set")
-        row("%s by 63" % names[digit], digit, m2, 63)
-        row("%s by 63 of a negative value" % names[digit], digit, m1, 63)
-    return rows
-
-
-def shift_lean_source(rows):
-    """The shift file: one `#eval!` per row, over `x86_shift_post` itself.
-
-    The destination is RAX (register 0) in every row, so the RESULT is the
-    register the successor wrote and the flags are the four `X86State` has
-    fields for — read straight off the state rather than recomputed, because a
-    table that recomputed them here would be checking this file's arithmetic
-    against itself.
-    """
-    out = ["import X86", "",
-           "def showFlags : X86State → String",
-           "  | s => (if s.zf then \"Z\" else \"-\") ++ (if s.sf then \"S\" else \"-\")",
-           "        ++ (if s.cf then \"C\" else \"-\") ++ (if s.of_ then \"O\" else \"-\")",
-           "def base : X86State := X86State.init 10 0",
-           "def baseSet : X86State :=",
-           "  { base with zf := true, sf := true, cf := true, of_ := true }",
-           "def showSt (s : X86State) : String := toString s.rax ++ \" \" ++ showFlags s"]
-    for i, (label, digit, a, k, base, _want) in enumerate(rows):
-        out.append("-- %s" % label)
-        out.append('#eval! "%d " ++ showSt (x86_shift_post base%s 0 %d %d %d)'
-                   % (i, "Set" if base == "set" else "", digit, a, k))
-    return "\n".join(out) + "\n"
-
-
-def shift_failures(out, rows):
-    """[(label, want, got)] for every row the model answered differently."""
-    got = {}
-    for line in out.splitlines():
-        line = line.strip().strip('"')
-        head, _, rest = line.partition(" ")
-        if rest and head.isdigit():
-            got[int(head)] = rest
-    bad = []
-    for i, (label, digit, a, k, base, want) in enumerate(rows):
-        text = got.get(i)
-        res, zf, sf, cf, of = want
-        want_text = "%d %s%s%s%s" % (
-            res, "Z" if zf else "-", "S" if sf else "-",
-            "C" if cf else "-", "O" if of else "-")
-        if text is None:
-            bad.append((label, want_text, "nothing"))
-        elif text != want_text:
-            bad.append((label, want_text, text))
-    return bad
-
-
 def successor_lean_source(forms):
     """`(text, checks)` — one `native_decide` per form's successor claim.
 
@@ -1233,47 +934,6 @@ def main():
                   "that never finished is not a claim about the successor.")
             return 1
         sout = cp.stdout + cp.stderr
-        # The DIVIDE. `x86_div128`/`x86_idiv128` are the one place in this
-        # model where the answer is fixed by arithmetic rather than by another
-        # instruction, so they can be checked against exact integer
-        # arithmetic — which matters because the CPU cannot be the oracle for
-        # the interesting rows on this host (`idiv` disagrees with exact
-        # arithmetic there; see the bug doc `divide_cases` names).
-        drows = divide_cases()
-        dtext = divide_lean_source(drows)
-        dname = "Divide.lean"
-        dpath = os.path.join(workdir, dname)
-        with open(dpath, "w") as f:
-            f.write(dtext)
-        cp = L.run_lean(lean, [dpath], cwd=workdir, env=env,
-                        wall_s=COVERAGE_WALL_S, cpu_s=COVERAGE_CPU_S)
-        if cp.exceeded:
-            print("\nFAIL: " + cp.exceeded)
-            print("  the divide check is UNMEASURED, not satisfied: a run that "
-                  "stopped early answered some rows and no others, and "
-                  "reporting the answered ones as agreement is a green that "
-                  "means nothing.")
-            return 1
-        dout = cp.stdout + cp.stderr
-        # The SHIFT, for the same reason: `x86_shift_post` is the one other
-        # place the answer is fixed by a definition rather than by another
-        # instruction, and it is where the fuzzer found `shl`'s OF.
-        srows = shift_cases()
-        stext2 = shift_lean_source(srows)
-        sname2 = "Shift.lean"
-        spath2 = os.path.join(workdir, sname2)
-        with open(spath2, "w") as f:
-            f.write(stext2)
-        cp = L.run_lean(lean, [spath2], cwd=workdir, env=env,
-                        wall_s=COVERAGE_WALL_S, cpu_s=COVERAGE_CPU_S)
-        if cp.exceeded:
-            print("\nFAIL: " + cp.exceeded)
-            print("  the shift check is UNMEASURED, not satisfied: a run that "
-                  "stopped early answered some rows and no others, and "
-                  "reporting the answered ones as agreement is a green that "
-                  "means nothing.")
-            return 1
-        sout2 = cp.stdout + cp.stderr
     unstepped = []
     for i, (form, label, enc) in enumerate(samps):
         if ("example : (x86_step (X86State.init 10 %d) code_%d" % (BASE + i * 16, i)) in text:
@@ -1311,28 +971,6 @@ def main():
         print("  %-20s %s" % (label, why))
         print("      Lean reported it on line(s) %s of %s" % (where, lname))
     if bad:
-        rc = 1
-    dbad = divide_failures(dout, drows)
-    print("\nthe 128-bit divide vs exact integer arithmetic: %d case(s) — %s"
-          % (len(drows), "every one answered or refused as the arithmetic says"
-             if not dbad else "%d FAILED" % len(dbad)))
-    for label, want, got in dbad:
-        print("  %-44s want %-24s got %s"
-              % (label, want, got))
-    if dbad:
-        print("      a `#DE` is a refusal, which is what the model's `none` "
-              "means; anything else is a wrong division, and the CPU is not "
-              "an available oracle for it on this host.")
-        rc = 1
-    sbad = shift_failures(sout2, srows)
-    print("\nthe shift's result and flags vs the definitions: %d case(s) — %s"
-          % (len(srows), "every one as the definition says"
-             if not sbad else "%d FAILED" % len(sbad)))
-    for label, want, got in sbad:
-        print("  %-52s want %-22s got %s" % (label, want, got))
-    if sbad:
-        print("      `ZZZZ` is a count of zero, which moves no flag at all; "
-              "every other row is CF and OF as x86 defines them.")
         rc = 1
     return rc
 

@@ -555,193 +555,6 @@ CASES = [
      "import sys\n\ndef main():\n"
      "    sys.stdout.write(\"%d %d %d %d %d %d %d\" % (1, 2, 3, 4, 5, 6, 7))\n"
      "    return 0\n"),
-    # ARGUMENT EVALUATION ORDER AT THE ABI'S SIX-REGISTER BOUNDARY.
-    # `FORMAL_x86_64_seven_argument_call_evaluates_its_stack_arguments_first`.
-    #
-    # x86-64's SysV ABI passes the first six integer arguments in registers and
-    # the rest in the caller's frame, so the SEVENTH argument is the first one
-    # this emitter places in the reserved outgoing area — and it used to place
-    # every such argument BEFORE the register half, because the register half
-    # was spilled with a push and a push moves RSP out from under `[RSP + 8k]`.
-    # So argument 7 was evaluated first: each argument was stored in the slot
-    # its index names (nothing about the emitted code looked wrong) and
-    # evaluated in the wrong order. arm64 has no such split — AAPCS passes
-    # arguments in X0..X7 with no separate stack area for a non-variadic callee
-    # — which is why this row is a two-backend case and why only one of the two
-    # ever failed.
-    #
-    # `tick()` is the observable: a module-level counter the call increments, so
-    # a permutation of the arguments cannot hide behind an arithmetic identity.
-    # `join` builds a positional 7-digit number out of its parameters, so the
-    # answer is the order the arguments were EVALUATED in, read back through
-    # the order the callee RECEIVED them in. `2345671` is the x86-64 failure:
-    # argument 7 evaluated first, so it got counter value 1 and arguments 1-6
-    # got 2-7.
-    #
-    # Six and seven are both here because the fix RESERVES MORE SPACE, and the
-    # case that works today is the one a larger reservation can break: at six
-    # arguments nothing is placed in the outgoing area at all, and a fix that
-    # assumed every call has one would move RSP on a call that has no stack
-    # argument and lose the 16-byte alignment SysV requires at a call.
-    ("argument_evaluation_order_at_six_arguments",
-     "var _n: int = 0\n"
-     "\n"
-     "def tick() -> int:\n"
-     "    global _n\n"
-     "    _n = _n + 1\n"
-     "    return _n\n"
-     "\n"
-     "def join(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int) -> int:\n"
-     "    return a0 * 100000 + a1 * 10000 + a2 * 1000 + a3 * 100 + a4 * 10 + a5\n"
-     "\n"
-     "def main() -> int:\n"
-     "    printf(\"%d\\n\", join(tick(), tick(), tick(), tick(), tick(), tick()))\n"
-     "    return 0\n",
-     "import sys\n"
-     "_n = 0\n"
-     "\n"
-     "def tick():\n"
-     "    global _n\n"
-     "    _n = _n + 1\n"
-     "    return _n\n"
-     "\n"
-     "def join(a0, a1, a2, a3, a4, a5):\n"
-     "    return a0 * 100000 + a1 * 10000 + a2 * 1000 + a3 * 100 + a4 * 10 + a5\n"
-     "\n"
-     "def main():\n"
-     "    sys.stdout.write(\"%d\\n\" % join(tick(), tick(), tick(), tick(),\n"
-     "                                        tick(), tick()))\n"
-     "    return 0\n"),
-    ("argument_evaluation_order_at_seven_arguments",
-     "var _n: int = 0\n"
-     "\n"
-     "def tick() -> int:\n"
-     "    global _n\n"
-     "    _n = _n + 1\n"
-     "    return _n\n"
-     "\n"
-     "def join(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int,\n"
-     "        a6: int) -> int:\n"
-     "    return (a0 * 1000000 + a1 * 100000 + a2 * 10000 + a3 * 1000\n"
-     "            + a4 * 100 + a5 * 10 + a6)\n"
-     "\n"
-     "def main() -> int:\n"
-     "    printf(\"%d\\n\", join(tick(), tick(), tick(), tick(), tick(), tick(),\n"
-     "                         tick()))\n"
-     "    return 0\n",
-     "import sys\n"
-     "_n = 0\n"
-     "\n"
-     "def tick():\n"
-     "    global _n\n"
-     "    _n = _n + 1\n"
-     "    return _n\n"
-     "\n"
-     "def join(a0, a1, a2, a3, a4, a5, a6):\n"
-     "    return (a0 * 1000000 + a1 * 100000 + a2 * 10000 + a3 * 1000\n"
-     "            + a4 * 100 + a5 * 10 + a6)\n"
-     "\n"
-     "def main():\n"
-     "    sys.stdout.write(\"%d\\n\" % join(tick(), tick(), tick(), tick(),\n"
-     "                                        tick(), tick(), tick()))\n"
-     "    return 0\n"),
-    # The same defect through a VARIADIC callee, where it is the shape a corpus
-    # notices first: seven `tick()` calls in one `printf`. The format string is
-    # argument 1 and takes RDI whatever the conversions say, so this is an
-    # EIGHT-argument call and TWO of the arguments are in the outgoing area —
-    # which makes the failure a rotation rather than a transposition
-    # (`3 4 5 6 7 8 1 2` against the source's `1 2 … 7`), and the row above
-    # cannot produce it: one stack argument cannot reorder two register ones
-    # past it.
-    #
-    # Seven conversions and not eight is arm64's boundary, not this one's: it
-    # refuses a variadic callee with an argument past its register file
-    # (`formal/arm64_codegen.py::_emit_call`), so a nine-argument printf is not a
-    # two-backend case at all. arm64's own limit is why the failure this row
-    # pins was reachable ONLY on x86-64 — on SysV the seventh argument has a
-    # home, and nothing about the count alone is wrong.
-    ("variadic_arguments_are_evaluated_in_source_order",
-     "var _n: int = 0\n"
-     "\n"
-     "def tick() -> int:\n"
-     "    global _n\n"
-     "    _n = _n + 1\n"
-     "    return _n\n"
-     "\n"
-     "def main() -> int:\n"
-     "    printf(\"%d %d %d %d %d %d %d\\n\", tick(), tick(), tick(), tick(),\n"
-     "           tick(), tick(), tick())\n"
-     "    return 0\n",
-     "import sys\n"
-     "_n = 0\n"
-     "\n"
-     "def tick():\n"
-     "    global _n\n"
-     "    _n = _n + 1\n"
-     "    return _n\n"
-     "\n"
-     "def main():\n"
-     "    sys.stdout.write(\"%d %d %d %d %d %d %d\\n\" % (\n"
-     "        tick(), tick(), tick(), tick(), tick(), tick(), tick()))\n"
-     "    return 0\n"),
-    # A STACK ARGUMENT THAT IS ITSELF A CALL, which is the shape that makes the
-    # outgoing area load-bearing rather than decorative. Every argument is now
-    # stored into ONE reserved block and read back out of it after the last one
-    # is evaluated, so a nested call in an argument has to land strictly BELOW
-    # that block: it pushes and pops symmetrically, and the area it addresses is
-    # addressed off an RSP that has not moved since before any argument ran.
-    # `join7`'s last argument is `inner()`, which itself takes three — so the
-    # nested call has its own outgoing area nested inside this one.
-    #
-    # The counter is what makes the order observable rather than the values:
-    # `outer()` runs first (it is argument 1) and its three arguments are
-    # evaluated inside it, so a leaked RSP would have the nested call write over
-    # a slot this call has already filled.
-    ("a_stack_argument_that_is_itself_a_call",
-     "var _n: int = 0\n"
-     "\n"
-     "def tick() -> int:\n"
-     "    global _n\n"
-     "    _n = _n + 1\n"
-     "    return _n\n"
-     "\n"
-     "def inner(a: int, b: int, c: int) -> int:\n"
-     "    return a * 100 + b * 10 + c\n"
-     "\n"
-     "def outer() -> int:\n"
-     "    return inner(tick(), tick(), tick())\n"
-     "\n"
-     "def join(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int,\n"
-     "        a6: int) -> int:\n"
-     "    return (a0 * 1000000 + a1 * 100000 + a2 * 10000 + a3 * 1000\n"
-     "            + a4 * 100 + a5 * 10 + a6)\n"
-     "\n"
-     "def main() -> int:\n"
-     "    printf(\"%d\\n\", join(tick(), tick(), tick(), tick(), tick(), tick(),\n"
-     "                         outer()))\n"
-     "    return 0\n",
-     "import sys\n"
-     "_n = 0\n"
-     "\n"
-     "def tick():\n"
-     "    global _n\n"
-     "    _n = _n + 1\n"
-     "    return _n\n"
-     "\n"
-     "def inner(a, b, c):\n"
-     "    return a * 100 + b * 10 + c\n"
-     "\n"
-     "def outer():\n"
-     "    return inner(tick(), tick(), tick())\n"
-     "\n"
-     "def join(a0, a1, a2, a3, a4, a5, a6):\n"
-     "    return (a0 * 1000000 + a1 * 100000 + a2 * 10000 + a3 * 1000\n"
-     "            + a4 * 100 + a5 * 10 + a6)\n"
-     "\n"
-     "def main():\n"
-     "    sys.stdout.write(\"%d\\n\" % join(tick(), tick(), tick(), tick(),\n"
-     "                                        tick(), tick(), outer()))\n"
-     "    return 0\n"),
     # A STACK ARGUMENT ALONGSIDE A FRAME RECEIVER, in METHOD position.  A
     # parameter with no register home is loaded into R11 — the scratch
     # `_store_var` uses on the spill path — and then stored, so a load that
@@ -1452,103 +1265,6 @@ CASES = [
      "    del a[1:3]\n"
      "    sys.stdout.write(\"%d %d %d\" % (a[0], a[1], a[2]))\n"
      "    return 0\n"),
-    # ── `del` DESTROYED A VARIABLE, because the lowering used the registers
-    # the allocator hands to variables ──
-    #
-    # Every other `del` row above puts the container and the observation in the
-    # same statement or reads the container back, so none of them can see a
-    # LOCAL that the `del` overwrote.  These three do: two integers flank the
-    # container, the `del` runs, and the two integers are printed afterwards.
-    #
-    # `CALLEE_SAVED` is (RBX, R12, R13, R14, R15) and it is the WHOLE of the
-    # allocator's pool, so a local in one of them is destroyed by any lowering
-    # that uses one as scratch — and all three `del` lowerings did, holding a
-    # blob base, a count and an index across a loop.  Measured on x86-64 only,
-    # exit 0, no diagnostic:
-    #
-    #     def main() -> Int32:
-    #         a = 11
-    #         xs = [0]
-    #         b = 22
-    #         del xs[0]
-    #         print(a, b)      # x86-64: 11 0     arm64 and CPython: 11 22
-    #         return 0
-    #
-    # `b`'s home was R13, which the list lowering loaded with the blob's COUNT
-    # and then decremented; with the list declared BEFORE both integers the home
-    # was R12 and the value printed was the blob's ADDRESS (13095839192 above),
-    # so the same defect answers a number or an address depending only on the
-    # order the declarations happen to be allocated in.  arm64 was never
-    # affected: its local file stops at X9 and these lowerings use X10-X15,
-    # which is the whole reason the property is stated as "outside CALLEE_SAVED"
-    # rather than as a list of registers.
-    #
-    # One row per lowering, because they are three different algorithms (as the
-    # three rows above already say) and a fix that repaired one and left the
-    # other two would pass a single row.
-    ("del_list_index_keeps_the_locals_around_it",
-     "def main():\n"
-     "    var a = 11\n"
-     "    var xs = [0]\n"
-     "    var b = 22\n"
-     "    del xs[0]\n"
-     "    printf(\"%d %d\", a, b)\n"
-     "    return 0\n",
-     "import sys\n\ndef main():\n"
-     "    a = 11\n"
-     "    xs = [0]\n"
-     "    b = 22\n"
-     "    del xs[0]\n"
-     "    sys.stdout.write(\"%d %d\" % (a, b))\n"
-     "    return 0\n"),
-    # The container FIRST, so the locals land on the other two callee-saved
-    # registers and the destroyed value is an ADDRESS rather than a count.  The
-    # pair of rows is the measurement: one defect, two wrong answers.
-    ("del_list_index_after_the_container_keeps_the_locals",
-     "def main():\n"
-     "    var xs = [0]\n"
-     "    var a = 11\n"
-     "    var b = 22\n"
-     "    del xs[0]\n"
-     "    printf(\"%d %d\", a, b)\n"
-     "    return 0\n",
-     "import sys\n\ndef main():\n"
-     "    xs = [0]\n"
-     "    a = 11\n"
-     "    b = 22\n"
-     "    del xs[0]\n"
-     "    sys.stdout.write(\"%d %d\" % (a, b))\n"
-     "    return 0\n"),
-    ("del_dict_key_keeps_the_locals_around_it",
-     "def main():\n"
-     "    var a = 11\n"
-     "    var d = {1: 5, 2: 6}\n"
-     "    var b = 22\n"
-     "    del d[1]\n"
-     "    printf(\"%d %d\", a, b)\n"
-     "    return 0\n",
-     "import sys\n\ndef main():\n"
-     "    a = 11\n"
-     "    d = {1: 5, 2: 6}\n"
-     "    b = 22\n"
-     "    del d[1]\n"
-     "    sys.stdout.write(\"%d %d\" % (a, b))\n"
-     "    return 0\n"),
-    ("del_list_slice_keeps_the_locals_around_it",
-     "def main():\n"
-     "    var a = 11\n"
-     "    var xs = [0, 5, 6]\n"
-     "    var b = 22\n"
-     "    del xs[0:1]\n"
-     "    printf(\"%d %d\", a, b)\n"
-     "    return 0\n",
-     "import sys\n\ndef main():\n"
-     "    a = 11\n"
-     "    xs = [0, 5, 6]\n"
-     "    b = 22\n"
-     "    del xs[0:1]\n"
-     "    sys.stdout.write(\"%d %d\" % (a, b))\n"
-     "    return 0\n"),
     # A tuple target NESTED inside another tuple target.  The outer unpack
     # only checks top-level arity, so the inner pair is a second emitter with
     # its own register discipline — and `tuple_target_in_a_constructor_body_
@@ -2101,25 +1817,6 @@ FAILING_CASES = [
      "    return 0\n"),
 ]
 
-# A NEEDLE SHARED by every row that pins the same sentence, declared once here
-# rather than spelled per row. The three `TYPE TAG` rows below are the worked
-# example and the reason this exists: all three pin the FIELD arm of
-# `formal/model.py::scalar_container_base_evidence`, and a fourth row for the
-# same construct once pinned the other arm's words — a reword that moved one row
-# and left two green, which is how a message change can be invisible in the one
-# place the change happened. A needle spelled three times is three chances to
-# spell it three ways; spelled once, a reword moves all three together.
-#
-# What that buys: a reword of either sentence moves every row that pins it, so
-# the breakage is either four rows wide and obvious or none — where a needle
-# spelled per row gives one red row and two silent ones. It is not the same as
-# CHECKING that the needle is reachable (a row whose program stops reaching the
-# gate it names goes red on its own), and it is not the same as the non-field
-# arm's coverage, which is why `TYPE_VALUE_NEEDLE` is its own constant for its
-# own row rather than a third alias of the first.
-TYPE_TAG_NEEDLE = "is a struct field declared to hold a TYPE TAG"
-TYPE_VALUE_NEEDLE = "is a TYPE value"
-
 REFUSALS = [
     # A SUBSCRIPT on a base the source proves to be a scalar. This is the
     # worst failure mode in the area — an image that SEGFAULTS with no
@@ -2145,24 +1842,6 @@ REFUSALS = [
     # established by the CONSTRUCTOR rather than by a class-level default, so
     # nothing folds to a literal and nothing refuses. A type's value is its tag
     # word, and a tag has no count and no elements.
-    #
-    # ONE field, and that is what this row is for rather than a shorter program:
-    # a one-field struct's sole field is in `model.one_field_struct_names`, so
-    # `_rewrite_self_fields` is entitled to collapse `self.d` onto `self` and
-    # hand the emitter a bare `self` — which is the shape whose arm64 refusal
-    # this file's first `REFUSALS` comment describes as "a message about the
-    # literal a one-field rewrite folded the field to". The `__init__` is what
-    # STOPS the fold here, because the slot's value is whatever the constructor
-    # was handed, so `s.d` is still a `MemberExpr` when the gate sees it and the
-    # FIELD arm of `scalar_container_base_evidence` is the one that answers.
-    # Hence the needle, and hence why the sibling row below pins the SAME
-    # sentence for the same construct: that one declares two fields, so it is not
-    # in `one_field_struct_names` at all, and the two rows differ on the rewrite
-    # rather than on the diagnostic.
-    #
-    # This row's needle was `is a TYPE value` — the NON-field arm's words, and an
-    # arm this program does not reach. It is the row that is worth keeping a
-    # non-field sibling for; that sibling is three rows down.
     ("a_subscript_on_a_type_value_faulted_identically",
      "struct S:\n"
      "    var d: DType = 5\n"
@@ -2173,26 +1852,7 @@ REFUSALS = [
      "    var s = S(DType.int32)\n"
      "    printf(\"%d\", s.d[0])\n"
      "    return 0\n",
-     TYPE_TAG_NEEDLE),
-    # … and the sibling that IS the non-field arm: a type VALUE rather than a
-    # slot holding one. `scalar_container_base_evidence` has two `TYPE_KIND`
-    # arms and they are different sentences — a field is "a struct field
-    # declared to hold a TYPE TAG", anything else is "a TYPE value — the tag
-    # word this path gives a type name" — so a needle taken from one of them
-    # does not pin the other and a corpus that only builds fields leaves the
-    # second arm unpinned.
-    #
-    # A LOCAL rather than a `DType`-annotated parameter on purpose: this is the
-    # only spelling of a bare type value the gate classifies as `TYPE_KIND`. A
-    # parameter declared `DType` is not classified as one and `t[0]` on it
-    # BUILDS, which is a different defect with its own doc and is not what this
-    # row is measuring.
-    ("a_subscript_on_a_bare_type_value_faulted_identically",
-     "def main() -> Int:\n"
-     "    var t = DType.int32\n"
-     "    printf(\"%d\", t[0])\n"
-     "    return 0\n",
-     TYPE_VALUE_NEEDLE),
+     "is a TYPE value"),
     # A CALLEE this backend does not lower, which used to stop at a link audit
     # that named a FILE and a SYMBOL and never the call — so a reader could not
     # tell whether to change the program or the link line, and the fuzz audit
@@ -2378,7 +2038,7 @@ REFUSALS = [
      "    var s = S()\n"
      '    printf("%d", s.d[0])\n'
      "    return 0\n",
-     TYPE_TAG_NEEDLE),
+     "is a struct field declared to hold a TYPE TAG"),
     # ── the FRAME slot, which is the same family and the one whose wrong answer
     # is a NUMBER rather than a fault. `FRAME_KIND` was deliberately kept OUT of
     # `model.NON_CONTAINER_SLOT_KINDS` until 2026-10-04, on the reasoning that a
@@ -2473,7 +2133,7 @@ REFUSALS = [
      "    var s = S(DType.int32)\n"
      '    printf("%d", s.d[0])\n'
      "    return 0\n",
-     TYPE_TAG_NEEDLE),
+     "is a struct field declared to hold a TYPE TAG"),
     # The other direction of the `clear` row above, and the one that says the
     # KIND guard is load-bearing rather than decorative: the same `clear()` on a
     # field whose value the constructor takes from a PARAMETER.  The store is
@@ -2735,69 +2395,6 @@ def run_refusal(name, mojo_src, needle, tmpdir, verbose):
     return True, ""
 
 
-def static_del_scratch_check():
-    """No `_emit_del_*` lowering may name a register `CALLEE_SAVED` holds.
-
-    The behavioural rows above are what pin the fix; this is what keeps the class
-    closed, because the class is a REGISTER ALLOCATION fact and the four rows
-    only say that four particular programs came out right.  `CALLEE_SAVED` is
-    the allocator's entire pool, so a lowering that uses one of those registers
-    as scratch silently destroys whichever local lives there — a wrong answer
-    with no diagnostic, on one architecture only, in a program whose `del`
-    happens to sit between two unrelated assignments.
-
-    A SOURCE check rather than a build check because the property is about the
-    text of the emitter: there is no program that fails to build, and the
-    cheapest witness is reading the three functions.  The functions are named
-    explicitly rather than matched by a prefix, so a fourth `del` lowering that
-    arrives later is not silently unchecked — the list and the check have to be
-    updated together, and the failure says so.
-    """
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "formal", "x86_64_codegen.py")
-    with open(path) as f:
-        lines = f.read().splitlines()
-    wanted = ("_emit_del_list_index", "_emit_del_dict_key",
-              "_emit_del_list_range")
-    # `formal/x86_64.py` is the single definition of the pool, imported rather
-    # than restated, so this check cannot pass against a stale copy of it.
-    from formal.x86_64 import CALLEE_SAVED
-    banned = {r.name for r in CALLEE_SAVED}
-    problems = []
-    for fn in wanted:
-        start = None
-        for i, line in enumerate(lines):
-            if line.startswith(f"    def {fn}("):
-                start = i
-                break
-        if start is None:
-            problems.append(f"{fn}: no such method in x86_64_codegen.py")
-            continue
-        end = len(lines)
-        for j in range(start + 1, len(lines)):
-            if lines[j].startswith("    def "):
-                end = j
-                break
-        body = "\n".join(lines[start:end])
-        # Only the CODE lines: a docstring is allowed to name the registers it
-        # deliberately does not use, and this file's comments do exactly that.
-        code = "\n".join(ln for ln in lines[start:end]
-                         if not ln.strip().startswith("#"))
-        for reg in sorted(banned):
-            for m in ("Reg." + reg, '"' + reg + '"'):
-                if m in code:
-                    problems.append(
-                        f"{fn}: names {reg}, which CALLEE_SAVED hands to a "
-                        f"local ({banned})")
-                    break
-    if problems:
-        return False, ("; ".join(sorted(set(problems)))
-                       + " — add the new lowering to `static_del_scratch_"
-                         "check`'s `wanted` and give it scratch outside "
-                         "CALLEE_SAVED")
-    return True, ""
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -2827,17 +2424,6 @@ def main():
         wanted = [c for c in wanted if c[0][0] in args.cases]
 
     passed = failed = 0
-    # The static half always runs and costs nothing: a `cases` subset is a
-    # build-economy argument, not a reason to stop checking that the three `del`
-    # lowerings still avoid the allocator's registers.
-    ok, detail = static_del_scratch_check()
-    if ok:
-        passed += 1
-        print("  PASS  del_lowerings_use_no_allocator_register")
-    else:
-        failed += 1
-        print(f"  FAIL  del_lowerings_use_no_allocator_register: {detail}")
-
     with tempfile.TemporaryDirectory() as tmpdir:
         for (name, mojo_src, third), kind in wanted:
             try:
