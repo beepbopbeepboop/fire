@@ -194,7 +194,18 @@ here, and the refusal — `Span[StaticString, ImmStaticOrigin] is a compile-time
 explicit-parameter list on a generic, not a subscript` — is the shape
 `bugs/FORMAL_generic_monomorph_scope.md` §"what is not covered" already holds. It
 is filed nowhere of its own, and 4 files of this scope sit behind it, so it is
-worth a doc rather than a mention. **The stop is the tool's documented limit** —
+worth a doc rather than a mention. **The doc now exists
+(`bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md`,
+2026-10-05) and §8 of the monomorph doc does NOT in fact list it** — the shape
+is a bracket that IS written whose second element is a comptime VALUE, which is
+neither the bare-call inference row nor that doc's §1 (a type argument in a
+non-call position). Five synthetic cases isolate it: a one-element type bracket
+builds and runs, the same instantiation inferred builds and runs, and the
+two-element type-plus-value bracket is refused — so the comptime half is the
+whole of the wall. That doc also records TWO messages in the neighbourhood that
+are wrong about the source (one recommends the spelling the program already
+uses; one blames a module for a call the program does not contain), neither of
+which is this claim's to fix.** The stop is the tool's documented limit —
 neutering a module removes the names its users call — and it is now detected and
 reported as such rather than as 43 files refusing a construct (§4).
 

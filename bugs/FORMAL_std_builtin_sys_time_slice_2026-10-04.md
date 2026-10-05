@@ -1,5 +1,23 @@
 # FORMAL_std_builtin_sys_time_slice_2026-10-04: round 2 over eight `std/` directories — one root cause fixed, and the claim census that says why the other 73 refusals are not this slice's
 
+**Status 2026-10-05 (`work/formal27-5`): §3's row 12 is no longer "the same
+monomorphisation wall as 11, from the other side" — it is its own wall, it now
+has a doc, and the "other side" is a comptime VALUE parameter rather than a
+type.** `std/sys/arg.mojo:51` is `Span[StaticString, ImmStaticOrigin]()`: a
+bracket that IS written, whose second element is a comptime value. Measured on
+five synthetic cases (`bugs/FORMAL_an_explicit_parameter_list_naming_a_
+comptime_value.md`): a one-element type bracket on a constructor builds and
+runs, the same instantiation inferred builds and runs, and the two-element
+bracket is refused — so row 11 (a comptime parameter that cannot fold) and row
+12 are two different walls, and neither is the bare-call inference row. The
+refusal's own sentence is TRUE and worth keeping: a comptime value parameter is
+substituted by the language, so a plausible constant would be a fabricated
+answer. The doc also records two messages in that neighbourhood that are wrong
+about the source, which is the finding a queue entry wants and a mention cannot
+carry. **Nothing else in this slice moved and nothing else here is this
+claim's** — §3's other twelve rows and §4's sixty are each another claim's, as
+the table says.
+
 **Slice:** the 85 `.mojo` files under
 `../new-modular/Mojo/stdlib/std/{builtin,math,bit,random,format,utils,sys,time}`
 (builtin 38, math 6, bit 3, random 4, format 4, utils 13, sys 15, time 2).
@@ -125,7 +143,7 @@ fourteen are the bare-call row of §2**, and they are one feature, not six bugs:
 | 9 | `builtin/type_aliases.mojo` | `comptime Never = __mlir_type.\`!kgen.never\`` | an MLIR TYPE bound to a module-level `comptime`. `FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops` (`formal19-4`) |
 | 10 | `format/repr.mojo` | `value.write_repr_to(string)` on a type parameter | a generic body is never specialized, and behind it `return string^` returns a 3-field `String`. Written up in `FORMAL_sweep_work_map_2026-10-02_std-b.md` §6 |
 | 11 | `math/polynomial.mojo` | `comptime num_coefficients = len(coefficients)` | `coefficients` is a comptime parameter, and on this path a comptime parameter is an ordinary leading ARGUMENT — so there is nothing to fold. `FORMAL_known_limits.md` §1.2 (monomorphisation) |
-| 12 | `sys/arg.mojo` | `Span[StaticString, ImmStaticOrigin]()` — an explicit-parameter list naming a TYPE and a comptime VALUE | the same monomorphisation wall as 11, from the other side: the brackets are types and comptime values, neither of which is a word. **New in this slice** (`sys/` was out of round 1's scope) |
+| 12 | `sys/arg.mojo` | `Span[StaticString, ImmStaticOrigin]()` — an explicit-parameter list naming a TYPE and a comptime VALUE | **its own wall, and it has a doc since 2026-10-05:** `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md`. It is NOT row 11 from the other side and NOT the bare-call inference row — a one-element type bracket builds and runs (measured), and the wall is the comptime VALUE half, which the demand walk has no substitution for. **New in this slice** (`sys/` was out of round 1's scope) |
 | 13 | `utils/_serialize.mojo` | `p.unsafe_load(off)` — a read at an OFFSET | round 1 §2.2 fixed the name; what is left is the POINTE's width, and the pointee is `Scalar[dtype]` with `dtype` a comptime parameter, so no width is established. Same wall as 11 |
 | — | `builtin/float_literal.mojo` | `self.__int_literal__().__int__(…)` | **§5.** The receiver's type is in a `-> T` and the callee is in another module |
 
