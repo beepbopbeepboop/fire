@@ -462,7 +462,7 @@ CASES = [
      "    printf(\"n=%d s=%d\", len(ks), s)\n"
      "    return 0\n",
      "n=2 s=50"),
-    # A DICT comprehension over the same iterable: the generator walk is the
+    # A dict comprehension over the same iterable: the generator walk is the
     # same code and the result is a pair blob, so a fix that taught only the
     # LIST comprehension's arm would leave this one reading values.
     ("dict_comprehension_over_a_dict_yields_every_key",
@@ -473,6 +473,83 @@ CASES = [
      "        print(\"k:\", k)\n"
      "    return 0\n",
      "k: 10\nk: 20\nk: 30\n"),
+    # STRING keys, through BOTH comprehension spellings, and this is the pair
+    # that used to be a `REFUSALS` row — a build-time refusal whose sentence was
+    # false about the reader's own source, because `len()` of the walk's target
+    # came back "an integer has no length" on both architectures while the source
+    # plainly wrote string keys.  `for_in_a_dict_of_strings_binds_a_string_target`
+    # answered the same walk's key spelling, so two walks over one dict disagreed.
+    #
+    # What was missing was not the STRIDE (the rows above) and not
+    # `_iterable_dict_key_kind` (which is asked for a `for` target and was
+    # already right); it was that a comprehension's ELEMENT is evaluated inside
+    # its own generators' scope, and `kind_of` read it with the module-level
+    # `_kind_of_simple`, which cannot resolve a NAME.  So `[k for k in d]` bound
+    # `ks` to a blob of unstated elements, the walk over `ks` fell to the word
+    # default, and `k` became an integer.  The rule that fixes it is about the
+    # comprehension's ITERABLE, which is why the dict comprehension below — one
+    # step later and through a blob the comprehension BUILT — is the row that
+    # says so rather than the row that says it happened once.
+    ("comprehension_over_a_string_keyed_dict_yields_string_targets",
+     "def main(n):\n"
+     "    var d = {\"ab\": 100, \"cde\": 200}\n"
+     "    var ks = [k for k in d]\n"
+     "    for k in ks:\n"
+     "        print(\"n:\", len(k))\n"
+     "    return 0\n",
+     "n: 2\nn: 3\n"),
+    ("dict_comprehension_over_a_string_keyed_dict_yields_string_targets",
+     "def main(n):\n"
+     "    var d = {\"ab\": 100, \"cde\": 200}\n"
+     "    var e = {k: 1 for k in d}\n"
+     "    for k in e:\n"
+     "        print(\"n:\", len(k))\n"
+     "    return 0\n",
+     "n: 2\nn: 3\n"),
+    # And a walk of a string-keyed comprehension's result ACCUMULATED, which is
+    # the shape that turns the refused read into a wrong NUMBER rather than a
+    # wrong line — the difference between a diagnostic and a silent fault, and
+    # the reason the group above measures sums as well as prints.
+    ("comprehension_over_a_string_keyed_dict_sums_the_key_lengths",
+     "def main(n):\n"
+     "    var d = {\"ab\": 100, \"cde\": 200}\n"
+     "    var s = 0\n"
+     "    var ks = [k for k in d]\n"
+     "    for k in ks:\n"
+     "        s = s + len(k)\n"
+     "    printf(\"n=%d s=%d\", len(ks), s)\n"
+     "    return 0\n",
+     "n=2 s=5"),
+    # The other direction, and the one that was SILENT rather than refused: an
+    # element that is a NAME none of the generators bind is a read of the
+    # ENCLOSING scope, and it used to be classified as nothing, so `k` became
+    # the word default and `print(k)` wrote the interned string's ADDRESS twice
+    # (`4299818428`) with exit 0 and nothing on stderr.  Both rows above are the
+    # wrong-scope defect too — one asked the generators for a name they own, the
+    # other refused to ask anyone for a name they do not — so they are one fix
+    # and this is the row that says a narrower fix would not have been one.
+    ("a_comprehension_element_named_by_nothing_it_generates_reads_its_own_scope",
+     "def main(n):\n"
+     "    var out = \"zz\"\n"
+     "    var ks = [out for i in range(2)]\n"
+     "    for k in ks:\n"
+     "        print(\"v:\", k)\n"
+     "    return 0\n",
+     "v: zz\nv: zz\n"),
+    # A name the generators own AND the enclosing scope also binds, with the two
+    # bindings of DIFFERENT kinds: the comprehension's own wins, which is
+    # Python's rule and the reason `scope_lookup` answers a name it has rather
+    # than falling through to the enclosing map.  `len` over the walk's result is
+    # what observes it — the enclosing `k` is an integer, so a fall-through would
+    # classify the comprehension as a blob of integers and refuse.
+    ("a_comprehension_target_shadows_the_enclosing_binding_of_its_own_name",
+     "def main(n):\n"
+     "    var k = 5\n"
+     "    var ks = [k for k in [\"ab\", \"cde\"]]\n"
+     "    for j in ks:\n"
+     "        print(\"n:\", len(j))\n"
+     "    return 0\n",
+     "n: 2\nn: 3\n"),
     # The `*` splice, whose loop is a different emitter entirely
     # (`_emit_star_splice`) with the same one-thing-per-count contract.
     ("star_splice_of_a_dict_yields_keys_not_values",
@@ -502,17 +579,14 @@ CASES = [
      "    printf(\"s=%d\", keys({10: 100, 20: 200, 30: 300}))\n"
      "    return 0\n",
      "s=60"),
-    # A STRING-keyed dict is NOT here, and the reason is worth more than the
-    # case would be.  `for k in {"ab": 1, "cde": 2}` binds a STRING target
-    # (`model.iterable_dict_key_kind` reads the keys out of the literal) but a
-    # comprehension's target does not go through that walk, so `[k for k in
-    # d]` over string keys classifies its target as an int and `len(k)` is
-    # refused — on BOTH architectures, with a message that is true about the
-    # classification and false about the source, which is the property a
-    # REFUSALS row is for.  It is a row in `REFUSALS` rather than here because
-    # it measures a KIND rule and not the stride this group is about, and it is
-    # filed as `FORMAL_a_comprehension_target_over_a_string_keyed_dict_is_an_int`
-    # so the gap is a queue entry rather than a footnote.
+    # A STRING-keyed dict is here too, over both comprehension spellings, and it
+    # is the third reader this group pins: `model.iterable_dict_key_kind` for a
+    # `for` target, `walk_stride` for what a generator addresses, and the KIND a
+    # comprehension's own element reads at its own position.  A STRING-keyed dict
+    # is the shape that separates all three — every row above uses integer keys,
+    # which every walk agrees about — so the stride rows would all pass with the
+    # kind rule still absent.  It used to be a `REFUSALS` row, which meant the
+    # honest answer on both architectures was a sentence false about the source.
     # A LIST is the control for all three walks, and it is what a fix that moved
     # the stride unconditionally to the pair would break: the walk over a
     # one-word-per-count blob steps one word, and at the pair stride this reads
@@ -1844,26 +1918,15 @@ REFUSALS = [
      "    print(\"v:\", a)\n"
      "    return 0\n",
      "cannot tell whether IdentExpr"),
-    # A COMPREHENSION'S TARGET over a dict is classified as an integer where the
-    # `for`-in walk over the same dict binds a string, and the message says
-    # `len()` of an integer where the source wrote a string key.  The stride is
-    # right here (`walk_stride` reads the pair-ness of the iterable, and the
-    # `comprehension_over_a_dict_*` rows in `CASES` are about that), so what is
-    # missing is the KIND: `model.iterable_dict_key_kind` is asked when a `for`
-    # target is bound and a comprehension's target store does not ask it.
-    #
-    # A row rather than nothing, because the alternative is a construct that is
-    # refused with a false sentence about the reader's own source and no test
-    # says so.  Filed as
-    # `FORMAL_a_comprehension_target_over_a_string_keyed_dict_is_an_int`.
-    ("a_comprehension_target_over_a_string_keyed_dict_is_an_int",
-     "def main(n):\n"
-     "    var d = {\"ab\": 100, \"cde\": 200}\n"
-     "    var ks = [k for k in d]\n"
-     "    for k in ks:\n"
-     "        print(\"n:\", len(k))\n"
-     "    return 0\n",
-     "an integer has no length"),    # A CALL THAT PRODUCES NO VALUE, printed. CPython evaluates `g(1, 2)` to
+    # A COMPREHENSION'S TARGET over a dict used to be classified as an integer
+    # where the `for`-in walk over the same dict bound a string, and the message
+    # said `len()` of an integer where the source wrote a string key.  The stride
+    # was right here and the KIND was not, and both halves are now rows in
+    # `CASES` — `comprehension_over_a_string_keyed_dict_yields_string_targets`
+    # and its dict-comprehension twin — because the REFUSAL was the bug: it was a
+    # message that was true about the classification and false about the source,
+    # which is the property a `REFUSALS` row exists to record until it is fixed.
+    # A CALL THAT PRODUCES NO VALUE, printed. CPython evaluates `g(1, 2)` to
     # `None` and prints `None`; a value on this path is one 64-bit word and the
     # epilogue writes no return register, so the image printed `0` — measured on
     # BOTH architectures from this same text, and `0` is not even stable: a call

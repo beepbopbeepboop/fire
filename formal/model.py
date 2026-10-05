@@ -22148,14 +22148,70 @@ class ValueKinds:
             # literal's element kind comes from.
             return list_kind(container_literal_elem_kind(e))
         if isinstance(e, F.Comprehension):
+            # The ELEMENT and the KEY are evaluated INSIDE this comprehension's
+            # own scope, so they are read through `kind_of`'s OWN `scopes`
+            # argument — the same reader every site inside a comprehension gets
+            # from the emitters (`_compr_scopes`), and the same one a container
+            # LITERAL's element names get through `_element_kind_in_flow`. It was
+            # `_kind_of_simple` here instead, a module-level reader with no scope
+            # stack and no flow map, so a comprehension's element was classified
+            # only when it was a LITERAL.
+            #
+            # The comprehension's own generators are what the scope stack carries,
+            # and a generator's kind comes from its ITERABLE
+            # (`comprehension_generator_scopes`), which is the only reader that
+            # asks "what does a walk over this dict yield" and therefore the only
+            # one that can say "a KEY". The cost was a message about the reader's
+            # own source, twice over and both measured on both architectures:
+            #
+            #   * `d = {"ab": 100, "cde": 200}`; `ks = [k for k in d]` classified
+            #     `ks`'s element as NOTHING, so `for k in ks` fell to the word
+            #     default, `k` became an integer, and `len(k)` came back "len()
+            #     of a value classified as 'int'" — while the `for k in d` one
+            #     line away, asked through the same `_iterable_dict_key_kind`,
+            #     answered CPython. A REFUSAL, so not silent.
+            #   * `out = "zz"`; `ks = [out for i in range(2)]` is the other
+            #     direction and it is NOT a refusal: `k` was an integer and
+            #     `print(k)` wrote `4299818428` twice — the interned `"zz"` as a
+            #     `char *` formatted as a word, exit 0, no diagnostic. A name no
+            #     generator binds is a read of the ENCLOSING scope, which is what
+            #     the fall-through to `name_kind` below `scope_lookup` answers.
+            #
+            # The two failures are one defect: an element expression read at the
+            # wrong SCOPE. The first is the unsafe direction (a claim the source
+            # contradicts) and the second is the quiet one, which is why the fix
+            # had to be the shared reader rather than a narrower rule for the
+            # first case — a rule that only asked the generators would leave the
+            # second printing addresses.
+            inner = self.comprehension_generator_scopes(e)
             if e.kind == "dict":
-                # `e.element` is the dict comprehension's VALUE (`e.key` is the
-                # key), so this is the same arm as the `DictExpr` above and not
-                # the key/value unification a LIST comprehension does below.
-                return list_kind(_kind_of_simple(e.element))
-            ek = _kind_of_simple(e.element)
+                # `e.element`, NOT `e.key` — and the two field names are the
+                # other way round from what they look like:
+                # `fire_compiler.py::_parse_dict_or_set` builds
+                # `Comprehension(kind="dict", element=first, key=val)` where
+                # `first` is the part BEFORE the colon. The comment here used to
+                # say the opposite and name `e.key` as the key, which sent the
+                # next reader to the wrong field in a dict comprehension; the
+                # LINE was right and is now labelled. A KEY is also the right
+                # thing to classify a pair blob by, for a structural reason
+                # rather than this parser's spelling: `_emit_dict` lays one out
+                # as `[count][k0][v0][k1][v1]…`, so word 0 is a key, a walk over
+                # one yields keys at `M.PAIR_STRIDE`, and `len` reads the count.
+                # A dict LITERAL is classified by its VALUES instead
+                # (`container_literal_elem_kind`, the `DictExpr` arm above)
+                # because its initializer states both and the element a
+                # subscript leaves in hand is the value — so this arm and that
+                # one answer two different questions and are both right.
+                #
+                # Which is also why the wrong SCOPE above reached this row one
+                # step later than the list one: `e = {k: 1 for k in d}` over
+                # string keys was classified as a blob of unstated elements, so
+                # `for k in e: print(len(k))` came back "len() of a value
+                # classified as 'int'" while CPython printed 2 and 3.
+                return list_kind(self.kind_of(e.element, inner))
+            ek = self.kind_of(e.element, inner)
             if e.key is not None:
-                ek = _unify(ek, _kind_of_simple(e.key))
+                ek = _unify(ek, self.kind_of(e.key, inner))
             return list_kind(ek)
         if isinstance(e, F.CallExpr):
             callee = _flat_callee(e)
