@@ -567,6 +567,33 @@ def _lift_lambdas(functions) -> list:
 
     def make_fn(lam: F.LambdaExpr, base: str) -> str:
         name = fresh_name(base)
+        # A lambda that reads its ENCLOSING scope, refused before it is lifted.
+        # The lift is to a module-level function of the lambda's OWN declared
+        # parameters, so a name that is not one of them has no home in the
+        # lifted body and the emitter answers `'m' has no home` — a message
+        # about the register allocator for what is a fact about the LANGUAGE:
+        # a nested `def` has an environment (the by-value capture parameters
+        # `_flatten_closures` prepends, via `discover_closures`) and a lambda
+        # never participates in that mechanism, so a CAPTURING lambda has
+        # nowhere to put the enclosing frame's value.
+        #
+        # Asked here, in the shared lift, and not by either emitter: both would
+        # raise the same sentence about a node neither of them can explain, and
+        # a refusal asked from a backend is a second copy of one decision that
+        # the executable and dylib paths could then answer differently about.
+        #
+        # The free names come off `model.free_names_in_lambda`, which is the one
+        # walk that answers "which names does this lambda read that are not its
+        # own"; the lambda's declared parameters are subtracted here because the
+        # question this asks is about the ENCLOSING scope, and the module the
+        # compiled path uses for the same question
+        # (`mojo/middle/lambdareduce.py`'s `free_names`) takes the enclosing
+        # scope as an argument — a table this call site does not have, since
+        # the lift runs per-lambda and has no view of the enclosing body.
+        declared = set(pn for pn, _pd in (lam.params or []))
+        free = M.free_names_in_lambda(lam) - declared
+        if free:
+            raise CodegenError(M.capturing_lambda_refusal(free, base))
         params = []
         param_has_default: dict = {}
         param_defaults: dict = {}
@@ -699,6 +726,87 @@ def _lift_lambdas(functions) -> list:
         fn.body = walk_body(fn.body, fn.name)
         # Default values / param-level lambdas (rare): leave as-is.
     return functions + lifted
+
+
+def _name_lifted_lambda_values(functions) -> None:
+    """Replace every already-LIFTED bare `lambda` with a read of its symbol.
+
+    `_lift_lambdas` lifts a lambda found in ANY value position and records the
+    new symbol on the node itself (`lam._lifted_name`), leaving the `LambdaExpr`
+    in place for the emitters to materialize as an address. That is enough for
+    the ONE shape it was written for — the lambda handed back as an argument —
+    and it leaves two defects behind, both measured on this tree before this
+    pass:
+
+      * the lambda's own PARAMETERS were demanded as locals of the ENCLOSING
+        function. A name-allocation walk that descends into the `LambdaExpr`
+        finds `v` in `v * 3`, finds no home for it (the lifted `FunctionDef` is
+        where `v` is a parameter, not `main`), and refused: `apply2(lambda v: v
+        * 3, 7)` answered `main: 'v' has no home`. So a lambda passed as an
+        argument \u2014 the commonest higher-order spelling there is \u2014 could not be
+        built at all, on either backend.
+      * the same descent made `sorted(xs, key=lambda v: 0 - v)` and
+        `map(lambda v: v * 2, xs)` report `v` as an unbound local instead of
+        naming the builtin that cannot be lowered, so the diagnostic pointed at
+        the lambda rather than at the construct the reader has to change.
+
+    Naming the symbol fixes both, and leaves the emitters a plain name read \u2014
+    which is a shape they already lower: `f = g; print(f(1))` and `h(g, 1)` both
+    work today, so an argument that IS a function is a word holding a code
+    address and a call through it is emitted. The two emitters' `LambdaExpr`
+    branch stays as the safety net for a lambda `_lift_lambdas` did not reach
+    (a default argument's own value); it is unreachable for a lifted one after
+    this pass, and deleting it would remove the only refusal a future lambda
+    position has.
+
+    Deliberately does NOT descend into a `LambdaExpr`: once a lambda is replaced
+    by a read of its symbol its body belongs to the lifted `FunctionDef`, and a
+    lambda nested inside a lambda's body was never lifted by `make_fn` either,
+    so there is nothing here to name.
+    """
+    def swap(node):
+        """`node` with every lifted lambda directly inside it named.
+
+        Returns the replacement when `node` ITSELF is a lifted lambda, which is
+        what the caller writes back; a lambda reached through a list element or a
+        dataclass field is written by that container's own branch.
+        """
+        if node is None or isinstance(node, (str, int, float, bool, bytes)):
+            return None
+        if isinstance(node, F.LambdaExpr):
+            name = getattr(node, "_lifted_name", None)
+            if not name:
+                return None
+            return F.IdentExpr(name, line=getattr(node, "line", 0),
+                               col=getattr(node, "col", 0))
+        if isinstance(node, list):
+            for i, child in enumerate(node):
+                node[i] = swap_seq(child)
+            return None
+        for attr in getattr(node, "__dataclass_fields__", {}):
+            value = getattr(node, attr, None)
+            if isinstance(value, list):
+                swap(value)
+            elif hasattr(value, "__dict__"):
+                setattr(node, attr, swap(value) or value)
+        return None
+
+    def swap_seq(item):
+        """`item`, with a lifted lambda at ITS OWN level replaced.
+
+        A tuple is the one immutable container in this tree \u2014 a `CallExpr`'s
+        `kwargs` is a list of `(name, value)` pairs and a comprehension
+        generator is a `(target, iterable, …)` tuple \u2014 so it is rebuilt rather
+        than written through, and a lambda nested inside a tuple ELEMENT is
+        that element's own `swap`, not this one.
+        """
+        if isinstance(item, tuple):
+            return tuple(swap(x) or x if isinstance(x, F.LambdaExpr) else x
+                         for x in item)
+        return swap(item) or item
+
+    for fn in functions:
+        swap(getattr(fn, "body", None))
 
 
 def _extract_functions(stmts: list, synthetic: bool = True,
@@ -15980,6 +16088,14 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     discover_closures(ctx, stmts)
     functions = _flatten_closures(functions, ctx._all_closures)
     functions = _lift_lambdas(functions)
+    # AFTER `_lift_lambdas`, because it is what records the symbol on the node:
+    # this pass turns the lifted lambda into a read of that symbol, which is the
+    # shape the emitters already lower for a function argument. Before this,
+    # the lambda's parameters were demanded as locals of the enclosing function
+    # and every lambda-in-argument-position program was refused as an unbound
+    # name — measured, on both backends, for `apply2(lambda v: v * 3, 7)`,
+    # `sorted(xs, key=lambda v: 0 - v)` and `map(lambda v: v * 2, xs)`.
+    _name_lifted_lambda_values(functions)
     # The module-global `__DATA` slots, on the FINAL function list and BEFORE
     # the substitution below. Both positions are load-bearing:
     #

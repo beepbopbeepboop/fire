@@ -35276,6 +35276,93 @@ _UNRESOLVED_NAME_ALLOWED = frozenset({
 })
 
 
+def free_names_in_lambda(lam) -> set:
+    """Every bare name `lam`'s own body reads, its parameters included.
+
+    ONE walk, because the question it answers is asked from two places that
+    must not disagree: `formal/build.py`'s `_lift_lambdas` subtracts the
+    lambda's own parameters to decide whether the lambda CAPTURES its enclosing
+    scope, and the compiled path's `mojo/middle/lambdareduce.py::free_names`
+    needs the same set for the same lambda. Two readers of one tree is two
+    chances for one of them to see a name the other does not, and a name missed
+    here is a capture that lifts into a body with no home for it \u2014 the
+    refusal that costs is the emitter's "'m' has no home", which is a sentence
+    about the register allocator where the reader wrote a closure.
+
+    Deliberately a WHOLE-TREE walk and not the enclosing scope's view: the
+    reader is handed the lambda alone, so it answers "which names does this
+    body read" and the caller decides which of those are free. The alternative
+    \u2014 threading the enclosing function's locals into every call \u2014 is what
+    `lambdareduce.free_names` does for the compiled path and it cannot be
+    copied here, because the formal lift runs per-lambda and has no view of the
+    body the lambda appears in.
+
+    A read is an `IdentExpr` anywhere in the subtree, INCLUDING a nested
+    lambda's body, because a nested lambda is not a scope this path can lift
+    separately: `lambdareduce._referenced_names` descends for the same reason.
+    A callee NAME is still a read (`f(x)` reads `f`), which is why the caller
+    has to subtract the parameters itself rather than trust this to exclude
+    them.
+    """
+    out: set = set()
+
+    def rec(node):
+        if node is None or isinstance(node, (str, int, float, bool, bytes)):
+            return
+        if isinstance(node, F.IdentExpr):
+            out.add(node.name)
+            return
+        if isinstance(node, (list, tuple)):
+            for x in node:
+                rec(x)
+            return
+        for name in getattr(node, "__dataclass_fields__", {}):
+            rec(getattr(node, name))
+
+    rec(getattr(lam, "body", None))
+    for _pname, pdefault in (getattr(lam, "params", None) or []):
+        rec(pdefault)
+    return out
+
+
+def capturing_lambda_refusal(free, base: str) -> str:
+    """Why a lambda that reads its enclosing scope is refused, in its own terms.
+
+    `free` is `free_names_in_lambda`'s answer minus the lambda's own parameters:
+    the names the body reads that the enclosing function, not the lambda, holds.
+    `base` is the name the lambda would have been lifted under, which is the
+    caller's local (`f` for `f = lambda …`, the enclosing function's name for one
+    written at a call site) and is quoted so a reader can find the line.
+
+    The lift is to a module-level function of the lambda's OWN declared
+    parameters, so a free name has nowhere to go in the lifted body. That is not
+    a gap in the register allocator and this path does not have the machinery to
+    close it for a lambda: a nested `def` gets an environment \u2014 the by-value
+    capture parameters `_flatten_closures` prepends, from `discover_closures`'s
+    closure map \u2014 and `discover_closures` does not record lambdas, so a lambda
+    never participates in it. The compiled path answers the common shape of this
+    by BETA-REDUCTION instead (`mojo/middle/lambdareduce.py`: a lambda bound to
+    a local and called through that name in the same function is inlined at the
+    call site, which is safe only when the local is assigned the lambda exactly
+    once, never rebound, and every other mention of its name is a call's callee).
+    Handing the lambda to another function is not that shape \u2014 there is no local
+    to reduce through \u2014 so the remedy named here is the one that holds for every
+    spelling: pass the value as an ARGUMENT and make it a parameter.
+    """
+    names = ", ".join(f"`{n}`" for n in sorted(free))
+    return (
+        f"the lambda assigned to {base!r} reads {names} from the scope it is "
+        f"written in, and a lambda has no environment to be given them: this "
+        f"path lifts a lambda to a module-level function of its OWN declared "
+        f"parameters, so a name that is not one of those has nowhere to live in "
+        f"the lifted body. A nested `def` is not affected \u2014 it is captured by "
+        f"VALUE (`formal/build.py`'s `_flatten_closures` prepends the captured "
+        f"names as leading parameters), which is why a closure written as `def "
+        f"inner(): return m` builds and this does not. Pass the value instead: "
+        f"`lambda v: v * m` becomes `lambda v, m: v * m` and the caller passes "
+        f"`m` as a second argument")
+
+
 def name_resolves_without_a_local(name: str) -> bool:
     """True when a bare read of `name` has a value with no local to hold it.
 
