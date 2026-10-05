@@ -1555,6 +1555,38 @@ def _dict_val_is_known(gen, name: str) -> bool:
     return name in gen._dict_val_types
 
 
+def _copy_dict_metadata(gen, dst: str, src: str) -> None:
+    """Carry a copied dict's VALUE type and recorded struct repr to `dst`.
+
+    The same argument `mojo_list_copy` makes for `mojo_list_inherit_kinds`, and
+    it is the same two properties: a copy holds the same values, so it has to
+    describe them the same way, and one function here for both callers
+    (`dict(<a dict>)` in `_lower_builtin_dict` and `d.copy()` in
+    `_lower_dict_method`) rather than one block each — a per-caller copy is how
+    a third derivation would end up not asking at all.
+
+    Both halves are needed and neither is recoverable at the read. The runtime
+    already does its half (`mojo_dict_update` copies `src->val_repr`, which is
+    what `mojo_dict_copy` and `d | other` come through), so the value list it
+    builds IS rendered by the struct's own `__repr__` at run time — and the
+    CODEGEN still chose `mojo_repr_list_ints` for it, because the walker is
+    picked from this table and the copy had no entry in it. Measured:
+    `p = P("a"); d = {}; d['k'] = p; f = dict(d); print(f.values())` printed a
+    raw pointer decimal where CPython prints `[R<a>]` and where `d.values()`
+    one line earlier printed `[R<a>]`.
+
+    Copies only, deliberately: nothing here invents a value type, so a source
+    this codegen knows nothing about still yields a copy that says nothing,
+    which is the honest answer and what every reader already handles.
+    """
+    _vt = gen._dict_val_types.get(src)
+    if _vt:
+        gen._dict_val_types[dst] = _vt
+    _vr = gen._dict_val_repr.get(src)
+    if _vr:
+        gen._dict_val_repr[dst] = _vr
+
+
 _CAST_ONLY_RE = re.compile(r'^\(\s*[A-Za-z_][A-Za-z0-9_ ]*\*?\s*\)\s*\(?\s*'
                            r'([A-Za-z_][A-Za-z0-9_]*)\s*\)?$')
 

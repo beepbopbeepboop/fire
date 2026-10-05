@@ -8770,6 +8770,73 @@ def shapes():
 shapes()
 """, "[('k', R<a>)]\n{'p': R<a>, 'q': Q(y='b')}\n")
 
+    # The three DERIVED containers, which is where a struct value stopped
+    # being its own `__repr__` even though the dict's own repr was already
+    # right. The dict's repr consults `d->val_repr`, which
+    # `emit_dict_int_value_store` records from the value's static type — so
+    # `print(d)` always worked. Everything the dict goes on to BUILD consults
+    # a WALKER chosen at compile time from `gen._elem_types`, and that table
+    # said `int64_t`:
+    #
+    #   * `dict_literal_val_ctype` could not name a struct at all (its three
+    #     answers were double / char * / int64_t), so the dict LITERAL
+    #     `{"k": p}` recorded `int64_t` where the SUBSCRIPT store `d['k'] = p`
+    #     recorded `P *`. Two spellings of one dictionary, two answers;
+    #   *   `mojo_dict_values` does hand the recorded function to the list it
+    #     builds, so the generic walker was already the right one — the int
+    #     walker was chosen over it and rendered each slot with
+    #     `mojo_repr_int`, i.e. the struct's own address as a decimal;
+    #   * `dict(d)` / `d.copy()` produced a dict with no entry in either table
+    #     at all, for the same reason and one derivation further out.
+    #
+    # Asserted through `list(...)`, which is the wrapper-free spelling on both
+    # sides: CPython's `d.values()` prints as `dict_values([R<a>])` and this
+    # codegen has no view wrapper, which is the OTHER open row of this doc's
+    # subject and is pinned by `gimple_dict_value_repr_remaining_two_shapes`
+    # above. Pinning it here too would make this case about the wrapper rather
+    # than about the repr. The bare `.values()` rows are the next case.
+    test_gimple_matches_cpython("gimple_dict_derived_containers_use_the_struct_dunder", """\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+
+def main():
+    p = P("a")
+    stored = {}
+    stored['k'] = p
+    literal = {"k": p}
+    vs = literal.values()
+    print(list(stored.values()))
+    print(list(literal.values()))
+    print(list(vs))
+    print(list(dict(stored).values()))
+    print(list(stored.copy().values()))
+main()
+""")
+
+    # The bare `.values()` rows, pinned as they are for the reason the case
+    # above gives: CPython wraps them in `dict_values(...)` and this codegen
+    # does not, so there is no CPython stdout to agree with byte for byte. The
+    # CONTENT is the user's `__repr__` and not a pointer decimal, which is what
+    # this fix is about, and that is what these expectations say.
+    test_gimple_stdout("gimple_dict_values_view_prints_the_dunder_without_a_wrapper", """\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+
+def main():
+    p = P("a")
+    literal = {"k": p}
+    print(literal.values())
+    print(dict(literal).values())
+
+main()
+""", "[R<a>]\n[R<a>]\n")
+
     # §4.2a: print([True, False]) printed [1, None] -- the generic list repr
     # both formats a bool slot with %d instead of True/False AND treats a
     # False (0) slot as the None sentinel.
@@ -9250,6 +9317,112 @@ def via_for(box):
 def main():
     print(pick({'r', 'q'}))
     print(via_for({'r', 'q'}))
+main()
+""")
+
+    # The line above fixed the set literal's ELEMENT type across the call
+    # boundary and said nothing about which CONTAINER the parameter holds, so
+    # a set argument to a parameter whose body iterates it still took the LIST
+    # path. Nothing in this tree typed a parameter's container kind from its
+    # call sites: `_scalar_obs`'s container-literal arm records `'void *'`,
+    # which its own application loop rejects on purpose (a non-scalar member
+    # in the set drops the slot to the `int64_t` box), so the parameter kept
+    # whatever its USAGE evidence guessed -- and an iteration-shaped body is
+    # equally consistent with a list and a set, so that guess is always
+    # `MojoList *`.
+    #
+    # That was invisible for as long as it stayed a header detail: `MojoSet`'s
+    # first two fields are `len` and `data` exactly as `MojoList`'s are, so
+    # `mojo_list_len` and `mojo_list_get_str` read the right words. It stops
+    # being invisible at the two things the set runtime is FOR -- iteration in
+    # INSERTION order (`mojo_set_order_indices`, the runtime's own determinism
+    # requirement) and `sorted()` over string content -- and the four lines
+    # below are those: a set of strings printed `[4294967295, 0, 0]` for three
+    # elements (the hash-table order read as integers) and then the process
+    # segfaulted.
+    #
+    # `sorted_of(s)` with `s` a LOCAL and `sorted_of({'r','q'})` with the
+    # literal written in place are the two halves of the fix and are kept
+    # apart on purpose: the container kind comes from the argument either way,
+    # but the ELEMENT type of a local set is a second contract
+    # (`_scan_container_elems`'s set arm) and the literal's is
+    # `_literal_arg_elems`, so a fix that only handled the local would still
+    # print pointer decimals here. `forward` is the third shape: a
+    # forwarding chain, where the intermediate's parameter is itself a
+    # parameter, which the contract settles by iterating its collection twice
+    # (the dict-value twin's own arrangement).
+    #
+    # Every line is `sorted()`-ed, deliberately: a set's ITERATION order is a
+    # runtime detail on this side and PYTHONHASHSEED-dependent on CPython's,
+    # so an unsorted `for v in box: print(v)` could not be compared against
+    # CPython at all. `count_of` iterates without sorting, and asserts a sum.
+    #
+    # The dict rows are the same contract's other two answers and were already
+    # right (a subscript-usage parameter resolves to `MojoDict *` on its own);
+    # they are here so that re-pointing a container kind cannot quietly break
+    # the kind it is not about.
+    test_gimple_matches_cpython("gimple_set_param_container_kind_from_its_call_sites", """\
+def count_of(box):
+    n = 0
+    for v in box:
+        n = n + len(v)
+    return n
+
+def sorted_of(box):
+    out = []
+    for v in box:
+        out.append(v)
+    return sorted(out)
+
+def forward(box):
+    return count_of(box)
+
+def keys_of(d):
+    out = []
+    for k in d:
+        out.append(k)
+    return sorted(out)
+
+def val_of(d):
+    return d["a"]
+
+def main():
+    s = {"bb", "aa", "cc"}
+    print(sorted_of(s))
+    print(sorted_of({'r', 'q'}))
+    print(count_of(s))
+    print(forward(s))
+    print(keys_of({"b": 1, "a": 2}))
+    print(val_of({"a": 5}))
+main()
+""")
+
+    # The case the contract must NOT resolve, and the reason it is here: a
+    # parameter reached from two call sites that disagree about the container
+    # kind is a POLYMORPHIC slot, and a polymorphic slot's elements are not
+    # decided either. The element contract on its own cannot see this, because
+    # `int64_t` is deliberately not positive evidence there
+    # (`_informative_elem_ctype`: recording it would collide with a real
+    # `char *` observation and erase it), so `either`'s string-set site would
+    # hand the parameter an element type that its int-list site then reads
+    # wrongly -- `sorted([3, 1])` printed `[3, 1]`.
+    #
+    # Both rows are correct here because both sites agree on the ELEMENT
+    # domain (ints), which is exactly what makes them a test of the
+    # retraction rather than of the set path. The string-set version of the
+    # same disagreement is deliberately NOT asserted: it prints a pointer
+    # decimal, and freezing an ASLR-dependent wrong answer in a test is how a
+    # divergence stops being a report.
+    test_gimple_matches_cpython("gimple_multi_kind_container_param_stays_unknown", """\
+def either(box):
+    out = []
+    for v in box:
+        out.append(v)
+    return sorted(out)
+
+def main():
+    print(either([3, 1]))
+    print(either({7, 8}))
 main()
 """)
 

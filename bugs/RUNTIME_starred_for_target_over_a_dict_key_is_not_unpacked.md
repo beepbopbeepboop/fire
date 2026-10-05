@@ -1,9 +1,13 @@
 # RUNTIME: `for k, *rest in <dict>` binds the whole key instead of unpacking it
 
-Found 2026-10-02 while fixing
-`bugs/CODEGEN_starred_rest_in_a_for_target_is_a_slot_named_star.md` (whose
-compiled-path half is fixed; this is the OTHER engine, and the compiled path
-now refuses the shape rather than disagreeing with this one).
+Found 2026-10-02 while fixing the `*rest` element in a `for` target that was
+lowered as a C slot literally named `*rest` (fixed and deleted; the mechanism
+is `mojo/middle/loops_shared.py`'s `starred_slot_index` /
+`starred_slot_name` / `_emit_starred_slot_list`, consumed by
+`emit_loops.py::_gen_for_list`, with `for_target_starred_rest` in
+`test_runtime_diff.py` as the regression). Its compiled-path half is fixed;
+this is the OTHER engine, and the compiled path now refuses the shape rather
+than disagreeing with this one.
 
 ## What I ran
 

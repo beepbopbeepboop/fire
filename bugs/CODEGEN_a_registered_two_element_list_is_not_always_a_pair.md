@@ -1,17 +1,20 @@
 # CODEGEN: `_mojo_repr_pair` fires on any registered TWO-ELEMENT list, so an ordinary inner list prints as a tuple
 
-**Found 2026-10-04** while fixing
-`bugs/CODEGEN_star_spread_in_a_list_or_tuple_display_segfaults.md`, whose
-`*args` case pins `sorted(a)` through a tuple and so runs straight into it.
+**Found 2026-10-04** while fixing the `*expr` spread in a list/tuple display
+that SIGSEGVed (that doc is deleted with its fix; the four mechanisms behind it
+are `mojo/middle/types.py::is_star_spread`, `emit_exprs.py`'s
+`_literal_slot_kinds`, its `_emit_star_spread`, both lowerings lowering the
+spread's OPERAND, and `resolve_shared.py::_infer_list_elem_type`). Its
+`*args` case pins `sorted(a)` through a tuple and so runs straight into this.
 Filed, not fixed: the repair is a runtime-side predicate in the generated
 repr helper, which is `mojo/backend_gimple/*` territory and a different class
 of change from the spread fix that exposed it.
 
 ## What I ran
 
-`bugs/CODEGEN_star_spread_in_a_list_or_tuple_display_segfaults.md`'s own
-third shape, reduced so the vararg packing is not in the picture at all — an
-ordinary list holding an ordinary two-element list:
+That fix's own third shape (the `*args` case), reduced so the vararg packing is
+not in the picture at all — an ordinary list holding an ordinary two-element
+list:
 
 ```python
 x = [1, 2]
@@ -110,7 +113,7 @@ unpinned.
 
 ## Related
 
-- `bugs/CODEGEN_star_spread_in_a_list_or_tuple_display_segfaults.md` — the fix
-  that made these shapes reachable enough to see.
+- The `*expr`-spread-in-a-display fix (doc deleted with it) — what made these
+  shapes reachable enough to see.
 - `bugs/CODEGEN_user_defined_dunder_repr_not_consulted_by_str_and_container_spellings.md`
   — the same generated walker's other known wrong answer.

@@ -5,6 +5,40 @@ the walk found 335; renaming it would churn every citation of it, and this
 doc's own lesson is that citations outlive their filenames. The first line is
 the subject.)*
 
+## Status, 2026-10-05: the `bugs/`-prefixed corpus is down to its deliberate floor; the BARE spelling is what is left
+
+Measured on this tree with the tool this doc added:
+
+```
+$ python3 tools/dangling_doc_refs.py --by-file
+6 citations of 5 bugs/ docs that are not there, across 1 files
+294 BARE citations (no `bugs/` prefix) of 151 doc names that are nowhere in the
+tree, across 109 files
+     6  test_suite.py
+         DELETED_ONCE.md, NEVER_WRITTEN.md, NEVER_WRITTEN_REAL.md …
+```
+
+**The `bugs/`-prefixed half is finished, and what remains is the six
+`test_suite.py` deliberately names.** That file is skipped by the walk's own
+design ("it is where a walk for missing files is guaranteed to find one — the
+`expect=`/`disabled=` marker checks below deliberately name `NEVER_WRITTEN.md`
+and `NO_SUCH_DOC_ANYWHERE.md` to prove they can fail"), so 6/6 are the marker
+tests' own fixtures and the actionable count is **zero**.
+
+So this doc's original subject — 335, then 476 citations of deleted docs — is
+closed for the spelling it was written about, and the remaining 294 are the
+**BARE** spelling the walk reports separately and deliberately does not
+ratchet: a bare doc name with no `bugs/` prefix cannot be told apart from an
+ordinary prose word, which is why putting it under the ratchet would fail on
+the corpus rather than on a regression (see `BARE_REF`'s comment in
+`tools/dangling_doc_refs.py` for the decision that would have to be made
+first). `--by-file` is still the landing order for those, and the two halves
+have different owners: a compiler file's citation is that file's owner's
+business, and the top of the bare list is where to read which files those are.
+
+This doc keeps its own one dangling citation, named below for the same reason
+as before.
+
 ## Status, 2026-10-02: the missing piece was not the sweep, it was the FLOOR — the corpus cannot now grow
 
 What landed, in three parts:

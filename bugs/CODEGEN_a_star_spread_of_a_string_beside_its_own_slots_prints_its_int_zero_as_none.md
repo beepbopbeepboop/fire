@@ -1,10 +1,14 @@
 # CODEGEN: a `*str` spread BESIDE a literal slot of its own prints that slot's zero as `None`
 
-**Found 2026-10-04** while fixing
-`bugs/CODEGEN_star_spread_in_a_list_or_tuple_display_segfaults.md`, which
-fixed the SIGSEGV and left this. Filed, not fixed: the repair needs a runtime
-length for a per-slot kinds string, which is a change to
-`runtime/fire_runtime.c`'s private kinds table.
+**Found 2026-10-04** while fixing the `*expr` spread in a list/tuple display
+that SIGSEGVed (that doc is deleted with its fix; its four mechanisms are
+`mojo/middle/types.py::is_star_spread`, `emit_exprs.py`'s
+`_literal_slot_kinds` and `_emit_star_spread`, both lowerings lowering the
+spread's OPERAND rather than the `UnaryOp` wrapper, and
+`resolve_shared.py::_infer_list_elem_type`). That fix fixed the SIGSEGV and
+left this. Filed, not fixed: the repair needs a runtime length for a per-slot
+kinds string, which is a change to `runtime/fire_runtime.c`'s private kinds
+table.
 
 ## What I ran
 
@@ -106,8 +110,8 @@ the result (a fresh string, since the source's is shared)").
 
 ## Related
 
-- `bugs/CODEGEN_star_spread_in_a_list_or_tuple_display_segfaults.md` — the fix
-  this is the residue of, and whose Status records it.
+- The `*expr`-spread-in-a-display fix (doc deleted with it) — this is the
+  residue of it.
 - The same repr-walker's remaining ownership gap, on the `print` side: a
   printed container's repr buffer was never freed (16.4 B per print), and
   neither were the four other consumers of the same walkers — `str(xs)`,

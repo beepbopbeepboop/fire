@@ -1,5 +1,60 @@
 # Compiled `stat` has no mode constants, so any module touching `stat.S_IR*` dies at startup
 
+## Status 2026-10-05: the defect is narrower than "any imported module's constant" — it is `comptime`, and it is compiled-path-only
+
+Measured on this tree, in-repo, with no out-of-tree stdlib involved. Two
+two-file fixtures under `.tmp`, same directory, `fire.py build` under
+`tools/memslot.py --gb 8`:
+
+    # mymod.py            # main.py                     # compiled        # interpreter
+    comptime OCT = 15     import mymod                   AttributeError:   15
+    comptime TAG = "hi"   def main():                    OCT  (exit 1)     hi
+    def helper(): ...     print(mymod.OCT) ...           ...              2
+
+    VALUE = 7             import mymod                   7                 7
+    TAG = "hello"         def main():                    hello             hello
+    def helper(): ...     print(mymod.VALUE) ...         1                 1
+
+**So three things the 2026-10-02 entry above left open are now settled:**
+
+1. **It is `comptime`, not "any module-level constant".** A plain
+   `VALUE = 7` in an imported module reads back correctly through the compiled
+   path — the globals-struct field is populated for it. Only a `comptime`
+   declaration is unreachable, which is a much smaller surface and says the
+   missing piece is the comptime scan rather than a module-globals registry.
+   (That also retires the doc's second suggested remedy, "populate
+   `_root_globals.<module>` from the same scan": the globals struct is not the
+   hole.)
+2. **It is compiled-path-only.** `python3 fire.py run` prints `15` / `hi` / `2`
+   for the `comptime` fixture — CPython cannot run `comptime` at all, so the
+   interpreter is the oracle here, not CPython, and the compiled path diverges
+   from the OTHER ENGINE on a program that otherwise works. That makes it
+   testable without the out-of-tree stdlib, which the `stat` case is not.
+3. **The failing read is the generic runtime getattr**, as the 2026-10-02 entry
+   said: the module's globals struct is empty for a `comptime` name, the read
+   falls to `_mojo_dispatch_getattr(marker, "OCT")`, and the miss raises
+   `AttributeError` at exit 1.
+
+**Where the fix goes, narrowed to one insertion point.** `module_gen.py`'s
+imported-module scan already parses an imported module and asks
+`_gmi_find_comptime_one(self, _imp_stmts, _iname, _found)` — but only for a
+`FromImportStmt`, writing into the flat `self._comptime_vals` (the loop at
+~2582). `import X` followed by `X.NAME` never runs it: no `ImportStmt` arm
+exists, and nothing else populates a per-module table. So the fix is one table
+(`{module qualifier: {name: comptime value}}`) filled from the same
+`_gmi_find_comptime_one` over the same `_parsed_import` result, plus one
+consult at the MemberExpr read — before the read becomes a globals-struct field
+plus `_mojo_dispatch_getattr`. `os.sep` and `sys.platform` are answered by a
+different, name-keyed mechanism and are not evidence that this path exists.
+
+NOT attempted here, deliberately: that MemberExpr read is the same
+neighbourhood as the open `own_module_global_beats_the_imported_homonym`
+failure (a deleted name this tree still resolves to another module's field), and
+its only real verification is a whole-closure build of a file that reads
+`stat.S_IF*` — which a light worker must not run. The measurement above is what
+makes the next attempt cheap to check: `mymod.OCT` on the two-line fixture is
+the whole acceptance test, and it has an oracle (the interpreter).
+
 ## Status 2026-10-02 (work/bugs4-5): the "Next step" below is WRONG, and this
 ## doc's own conclusion is right for the wrong reason. The constants are NOT
 ## missing from the `stat` module — the compiled path cannot read ANY imported

@@ -4354,8 +4354,17 @@ def _lower_builtin_dict(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     elif at in ('int64_t', 'int') or not at.endswith(' *') or at == 'void *':
         raw = gen._coerce_to_type(at, 'MojoDict *', av)
         gen._emit_call('MojoDict *', t, 'mojo_dict_copy', [('MojoDict *', raw)])
+        av = raw
     else:
         gen._emit_call('MojoDict *', t, 'mojo_dict_copy', [(at, av)])
+    # A copy holds the same values, so it describes them the same way -- see
+    # `_copy_dict_metadata`, which is the one place that says so (and which
+    # `d.copy()` calls too). Function-local import, not a top-level one:
+    # `emit_infra` imports THIS module, so a top-level edge the other way is a
+    # cycle. Same arrangement as `emit_funcs._struct_method_qualifier`, and for
+    # the reason `module_gen.py`'s own header spells out.
+    import mojo.backend_gimple.emit_infra as _gdi
+    _gdi._copy_dict_metadata(gen, t, av)
     return 'MojoDict *', t
 
 

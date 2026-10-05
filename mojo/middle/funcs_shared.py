@@ -311,6 +311,31 @@ def param_binding_ctype(gen, func_name: str, pname: str, ctype: str) -> str:
         func_name, {}).get(pname)
     if _bound in ('MojoDict *', 'MojoList *', 'MojoSet *') and _bound != ctype:
         return _bound
+    # ...and the third estimator: what every call site of this function
+    # actually PASSES. `_infer_param_types` sees the body and nothing else, and
+    # an iteration-shaped body is equally consistent with a list and a set, so
+    # it answers `MojoList *` for both and the set is then read through the
+    # list accessors -- which works, because `MojoSet`'s first two fields are
+    # `len` and `data` exactly as `MojoList`'s are, and is therefore invisible
+    # until it is not: a `for` over such a parameter took the LIST path
+    # (`_gen_for_set` is the one that iterates in insertion order, so the
+    # hash-table order came out), and a set of strings printed
+    # `[4294967295, 0, 0]` before the process segfaulted.
+    #
+    # Checked AFTER `_bound`, not before: the callee's own bindings are a
+    # stronger statement than what its call sites pass (a body that rebinds
+    # the slot to a list says what it stores there whatever arrives), and the
+    # whole point of this function's narrowness is that a slot with no
+    # binding-site evidence is the only one it touches. The contract's
+    # unanimity rule is what keeps it honest from there: disagreeing call
+    # sites resolve to `''`, which is not a container kind and so is ignored.
+    _xc = None
+    _pct = getattr(gen, '_param_container_types', None) or {}
+    _xcf = _pct.get(func_name)
+    if _xcf is not None:
+        _xc = _xcf.get(pname)
+    if _xc in ('MojoDict *', 'MojoList *', 'MojoSet *') and _xc != ctype:
+        return _xc
     return ctype
 
 
