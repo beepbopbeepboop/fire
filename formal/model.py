@@ -25056,6 +25056,19 @@ def receiver_rebound_from_a_word_refusal(fn_name: str, receiver: str,
     reason: it copies the address, the caller's slot already holds it, and the
     method's field writes still land where the caller expects.
 
+    **The two the rule now also allows, and both are about a receiver that is
+    an ADDRESS** (`formal/build.py`'s `_collect_receiver_rebinds`, which asks
+    `model.one_field_answer` for that rather than deciding it here). A name of
+    the receiver's own type that is neither a receiver nor a parameter — a
+    callee-private `var t = R()`, from `receiver_own_type_names`'s second set —
+    is a copy of the same layout, and Python's rebinding points `self` at `t`
+    too, with the caller's frame left alone; and a rebinding **nothing reads
+    afterwards** cannot drop a store, because there is none left to drop and no
+    later field read to load at `[base + 8·slot]`. A one-word struct whose sole
+    field holds a placed frame is the case that gets NEITHER, and it is why this
+    message does not promise them: there the receiver word IS the address the
+    caller still holds, so the same assignment destroys it.
+
     `struct_names` is the struct the receiver belongs to, so the message can
     name it rather than making the reader re-derive it from the method."""
     who = ", ".join(sorted({st.name for st in (struct_names or ())})) or "its own"
@@ -25073,9 +25086,10 @@ def receiver_rebound_from_a_word_refusal(fn_name: str, receiver: str,
         f"is not a program that computes a different answer, it is one that does "
         f"not mean what it looks like. What a receiver may be assigned is a "
         f"CONSTRUCTION of {who} (`{receiver} = Self(...)`, which is how a Mojo "
-        f"constructor rebinds its own object) or another receiver of the same "
-        f"type, which copies the address and leaves the caller's slot pointing "
-        f"where the writes land")
+        f"constructor rebinds its own object), another receiver of the same "
+        f"type, or a name of that type this method binds for itself — each of "
+        f"which copies an address the caller's slot already holds — and, when "
+        f"this method never reads {receiver} again, any word at all")
 
 
 def method_member_name(struct_def, fn) -> str:
