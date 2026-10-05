@@ -1874,6 +1874,64 @@ def test_the_census_answers_each_of_its_seven_questions(tmpdir):
           f"{sorted(n for n, b in want.items() if b == T.BUCKET_SOLVABLE)}")
 
 
+def test_the_census_does_not_count_this_worktrees_scratch(tmpdir):
+    """`.tmp/` is not CORPUS, and a census that counts it cannot be quoted.
+
+    `DEFAULT_PATHS` includes the REPOSITORY ROOT, so the walk descends into
+    `.tmp/<some test's tmpdir>/` and finds `.mojo` files a test wrote an hour
+    ago.  Measured 2026-10-05 on this tree, before the fix: **24 such files**
+    were in the walk (`files scanned: 409`, against 385 with them pruned), and
+    four of the instrument's `unresolved` rows were scratch — one of them a
+    call to `FormatStruct`, this doc's own subject, in a file that does not
+    exist and that no reader will ever find again.
+
+    That is the defect `bugs/FORMAL_a_function_with_no_return_...` §0c already
+    recorded for the OTHER census over the same corpus ("a census whose numbers
+    move with the worktree's scratch is not a measurement"), fixed there with a
+    hardcoded `(".tmp", ".git", "__pycache__")`.  Both censuses now ask
+    `checked_run.is_derived_dir`, which is the repository's ONE answer to "is
+    this directory's content an input" and is the reader `tools/dangling_doc_
+    refs.py` reuses rather than keeping a second list.  Two hardcoded triples
+    are two answers to one question, and that is how one census counts a
+    scratch file and the other does not.
+
+    The fixture puts the SAME two modules in two places — one real, one under
+    `.tmp/` — so the assertion is about the WALK and not about the classifier:
+    the scratch copy must contribute no row, and `build/` must not either.
+    """
+    root = os.path.join(tmpdir, "scratch")
+    lib = "def widen[T: AnyType](v: T) -> T:\n    return v\n"
+    use = ("from widen import widen\n"
+           "\n"
+           "def main(n: Int):\n"
+           "    print(widen(n))\n")
+    write_tree(root, {
+        "widen.mojo": lib,
+        "use_widen.mojo": use,
+        ".tmp/test_dirty/widen.mojo": lib,
+        ".tmp/test_dirty/use_widen.mojo": use,
+        "build/widen.mojo": lib,
+        "build/use_widen.mojo": use,
+    })
+    sys.path.insert(0, os.path.join(HERE, "tools"))
+    import formal_template_call_census as T
+    rows, _n_files, _n_calls, unresolved = T.collect([root])
+    # The tool reports a path RELATIVE to the repository root (`ROOT`), and the
+    # runner's scratch directory is itself under `ROOT/.tmp/`, so the expected
+    # answer is spelled the same way rather than as the absolute path: the
+    # question is which files the WALK reached, not how it spells them.
+    paths = sorted({p for p, _l, _n, _m, _b, _bd, _s, _pr in rows})
+    want = [os.path.relpath(os.path.join(root, "use_widen.mojo"),
+                            os.path.dirname(os.path.join(HERE, "tools")))]
+    check(paths == want,
+          f"the census counted {paths} and only {want} is corpus: a `.tmp/` or "
+          f"`build/` file this walk descends into makes every figure in this "
+          f"instrument a function of whatever a test ran earlier")
+    check(not unresolved,
+          f"{len(unresolved)} (file, name) pair(s) in the fixture named a "
+          f"module that did not resolve: {unresolved[:4]}")
+
+
 def test_the_census_reads_the_measured_shapes_out_of_the_corpus(_tmpdir):
     """The three symbols the doc measured, asked of the real stdlib.
 
@@ -2095,6 +2153,8 @@ TESTS = [
      test_the_census_answers_each_of_its_seven_questions),
     ("the census reads the measured shapes out of the corpus",
      test_the_census_reads_the_measured_shapes_out_of_the_corpus),
+    ("the census does not count this worktree's scratch",
+     test_the_census_does_not_count_this_worktrees_scratch),
     ("a variadic bracket parameter takes the extra arguments",
      test_a_variadic_bracket_parameter_takes_the_extra_arguments),
 ]

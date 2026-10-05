@@ -50,6 +50,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
+import checked_run                                          # noqa: E402
 import fire_compiler as F                                   # noqa: E402
 from formal.build import parse_module                       # noqa: E402
 import formal.model as M                                    # noqa: E402
@@ -235,7 +236,15 @@ def collect(paths):
             # pruned in place because `DEFAULT_PATHS` includes the repository
             # root, so the walk descends into `.tmp/<test tmpdir>/` and finds
             # `.mojo` files a test wrote an hour ago.
-            dirs[:] = [d for d in dirs if d not in (".tmp", ".git", "__pycache__")]
+            # `checked_run.is_derived_dir` is the REPOSITORY'S one answer to
+            # "is this directory's content an input" — `.tmp` by the leading
+            # dot, `build` and `__pycache__` by name — and it is the reader
+            # `tools/dangling_doc_refs.py` reuses rather than keeping a second
+            # list. A hardcoded triple here and a hardcoded triple in
+            # `tools/formal_template_call_census.py` are two answers to one
+            # question, and that is how a scratch file ends up counted by one
+            # census and not the other.
+            dirs[:] = [d for d in dirs if not checked_run.is_derived_dir(d)]
             files += [os.path.join(dirpath, n) for n in sorted(names)
                       if n.endswith(".mojo")]
     seen = set()

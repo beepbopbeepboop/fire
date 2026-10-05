@@ -108,6 +108,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
+import checked_run                                           # noqa: E402
 import elaborate                                             # noqa: E402
 import fire_compiler as F                                    # noqa: E402
 from formal.build import parse_module                        # noqa: E402
@@ -936,9 +937,27 @@ def collect(paths):
         if os.path.isfile(base):
             files.append(base)
             continue
-        for dirpath, _dirs, names in os.walk(base):
+        for dirpath, dirs, names in os.walk(base):
             if "/build/" in dirpath or dirpath.endswith("/build"):
                 continue
+            # `.tmp` and `.git` are not CORPUS, they are this worktree's
+            # scratch and its history, and a census whose numbers move with
+            # whatever a scratch build left behind cannot be quoted in a bug
+            # doc — which is the only reason this instrument exists. It is
+            # pruned IN PLACE because `DEFAULT_PATHS` includes the repository
+            # root, so the walk descends into `.tmp/<some test's tmpdir>/` and
+            # counts `.mojo` files a test wrote an hour ago; measured on
+            # 2026-10-05, four of this instrument's `unresolved` rows were
+            # `.tmp/` scratch and one of them was a call to `FormatStruct` —
+            # this doc's own subject, in a file that does not exist.
+            #
+            # `checked_run.is_derived_dir` is the REPOSITORY'S one answer to
+            # "is this directory's content an input", and it is the reader
+            # `tools/dangling_doc_refs.py` already reuses rather than keeping a
+            # second list of "not part of the repo"; two lists are two answers
+            # to one question and they eventually disagree. `formal_returnless_
+            # census.py` walks the same corpus and now asks the same reader.
+            dirs[:] = [d for d in dirs if not checked_run.is_derived_dir(d)]
             files += [os.path.join(dirpath, n) for n in sorted(names)
                       if n.endswith(".mojo")]
     rows, unresolved = [], []
