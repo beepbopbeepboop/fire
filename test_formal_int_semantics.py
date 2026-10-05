@@ -45,9 +45,9 @@ Run:  python3 test_formal_int_semantics.py [-v] [-k SUBSTRING] [--only-row N]
 """
 import argparse
 import os
-import re
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -416,8 +416,10 @@ def main():
     else:
         rows = [r for r in rows if args.substring in r[0]]
 
-    with __import__("tempfile").TemporaryDirectory(dir=os.path.join(
-            HERE, "build")) as tmpdir:
+    # Under `build/` rather than the system temp: the images are ~100 KB each
+    # and 162 of them land in one directory, and `build/` is the tree's own
+    # scratch (and already git-ignored), so a run leaves nothing anywhere else.
+    with tempfile.TemporaryDirectory(dir=os.path.join(HERE, "build")) as tmpdir:
         run_table(tmpdir, rows, only=args.only_row)
 
     npass = sum(1 for ok, _ in RESULTS if ok)

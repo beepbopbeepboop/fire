@@ -3404,8 +3404,8 @@ class _IntTypeShape:
 _DEFAULT_INT_TYPE = _IntTypeShape(64, True)
 
 
-def int_overflow_traps(op: str, result_type, *, pointer_arith: bool = False,
-                       operand_types=()) -> bool:
+def int_overflow_traps(op: str, result_type, *,
+                       pointer_arith: bool = False) -> bool:
     """Whether `op` on these operands must refuse rather than wrap.
 
     The ONE predicate both backends ask before they emit an overflow check, and
@@ -3426,14 +3426,14 @@ def int_overflow_traps(op: str, result_type, *, pointer_arith: bool = False,
          wraps by definition);
       4. otherwise → True.
 
-    `operand_types` is accepted and NOT used for the decision, on purpose. The
-    temptation is to let a narrow operand exempt the operation — "the left side
-    is an `Int8`, so `a + b` cannot overflow" — and it is wrong twice: the
-    promotion has already happened by the time this is asked (`a + b` with an
-    `Int8` and an `Int64` is an `Int64` operation), and CPython's `int` has no
-    narrow types at all, so there is no source that could be asking for a
-    narrow result. The parameter exists so that a caller which HAS the operand
-    types can pass them without changing shape when the rule grows to use them.
+    **It takes the RESULT type and not the operand types**, and the tempting
+    alternative — "the left side is an `Int8`, so `a + b` cannot overflow" — is
+    wrong twice over: the promotion has already happened by the time this is
+    asked (`a + b` with an `Int8` and an `Int64` is an `Int64` operation), and
+    CPython's `int` has no narrow types at all, so there is no source that
+    could be asking for a narrow result. A parameter for the operand types
+    would be a second place for the rule to be edited, which is the thing this
+    function exists to prevent.
     """
     if op not in INT_OVERFLOW_OPS:
         return False
@@ -3478,6 +3478,53 @@ def int_overflow_trap_message(op: str) -> str:
             f"one.\n")
 
 
+#: The largest power `power_overflow_refusal` will COMPUTE in order to put the
+#: exact value in its message. 4096 bits is 1234 decimal digits, which formats
+#: in no time and reads; past it the message carries a bit count instead, so a
+#: source spelling `10 ** 10 ** 7` cannot cost a build half a minute.
+_EXACT_POWER_BITS = 4096
+
+#: How far `_digits` counts before it gives up and says "more than this". It is
+#: above CPython's own 4300-digit int-to-str limit, which is the number the
+#: message quotes, so "more than 5000 digits" is always a true statement about
+#: a value `str` refused -- and counting to it costs 5000 divisions instead of
+#: ten million.
+_DIGIT_COUNT_CAP = 5000
+
+
+def _digits(value: int) -> int:
+    """How many decimal digits `abs(value)` has, capped at `_DIGIT_COUNT_CAP`.
+
+    The cap is what makes this a bounded amount of work: `10 ** 10 ** 7` has
+    ten million digits and counting them one integer division at a time is a
+    ten-million-iteration loop inside a build. Returning the cap is honest
+    because the only caller is reporting a value CPython's own `str` already
+    refused, and CPython's limit is below the cap.
+    """
+    n, v = 0, abs(value)
+    while v and n < _DIGIT_COUNT_CAP:
+        n += 1
+        v //= 10
+    return n or 1
+
+
+def _render_int(value) -> str:
+    """`value` as a decimal string, or its DIGIT COUNT when CPython will not.
+
+    A power like `10 ** 10 ** 7` has ten million digits, and CPython's own
+    `int`→`str` conversion refuses above 4300 — `print(10 ** 10 ** 7)` raises
+    `ValueError: Exceeds the limit (4300 digits)`. An f-string here raises the
+    same thing, which would turn a refusal into a traceback out of a build: the
+    message IS the answer, and a message that cannot be formatted is not one.
+    So the digit count is the fallback, and it says that is what it is."""
+    try:
+        return str(value)
+    except (ValueError, OverflowError):
+        return ("a number of more than %d decimal digits (CPython's own `print` "
+                "refuses it too -- its int-to-str limit is 4300)"
+                % _digits(value))
+
+
 def literal_overflow_refusal(op: str, value, operands=None) -> str:
     """The BUILD-TIME refusal for an operation whose exact value is already known.
 
@@ -3502,7 +3549,8 @@ def literal_overflow_refusal(op: str, value, operands=None) -> str:
         shown = None
     return (f"an integer overflow the build can decide: "
             f"{('`%s`' % shown) if shown else ('`%s`' % op)} is "
-            f"{value} in CPython, which is outside the signed 64-bit range "
+            f"{_render_int(value)} -- a value outside the signed "
+            f"64-bit range "
             f"({INT64_MIN} .. {INT64_MAX}) this target keeps an integer in. "
             f"CPython's `int` is arbitrary precision and answers it exactly; "
             f"the word this image computes in would answer the wrapped value "
@@ -3545,11 +3593,17 @@ def fold_overflow(op: str, left, right, result_type=None,
 def _apply_op(op: str, a, b):
     """CPython's own `a op b`, for the handful of operators this module needs.
 
-    Deliberately `eval`-free and not a re-implementation: this IS the oracle,
-    in the only process that has arbitrary precision. `eval` on an operator
-    drawn from a fixed tuple of two-character names is safe in a way `eval` on
-    source is not, and it cannot be wrong about `//` flooring or `-1 ** 2` in a
-    way a hand-written table can."""
+    Not a re-implementation and not an `eval`: **this IS the oracle**, in the
+    only process in the build that has arbitrary precision, so the operators
+    are the language's own and there is no second table here to be wrong about
+    `//` flooring or the sign of a `%`. The `op` comes from
+    `INT_OVERFLOW_OPS` or a literal at the two call sites, never from source, so
+    the dispatch below cannot be steered.
+
+    `b is None` is the unary spelling (`~a`), and asking for a binary operator
+    with no right operand is a programming error here rather than a source
+    shape — hence `ValueError` and not a silent `None`.
+    """
     if op == "+":
         return a + b
     if op == "-":
@@ -3691,10 +3745,26 @@ def power_overflow_refusal(base, exponent, operands=None) -> str | None:
         return _negative_power_refusal(exponent, operands)
     if base in (0, 1, -1):
         return None                       # 0**0 = 1, 1**n = 1, (-1)**n = ±1
+    # The BIT BOUND, before the value is computed. `10 ** 10 ** 7` is a
+    # ten-million-digit number and tens of seconds of build time (measured:
+    # 25.9 s for the `str` of it alone), and its size is not in doubt: a
+    # non-zero base of `b` bits needs `exponent * (b - 1) + 1` bits or fewer,
+    # so past 64 of them it cannot fit whatever the digits are.
+    #
+    # Under `_EXACT_POWER_BITS` the value is still computed, because the exact
+    # number is the better message and 4096 bits is a few hundred digits of
+    # arithmetic. Above it the message carries the bit COUNT instead, which is
+    # the same loss `_render_int` already makes for a value `str` refuses.
+    bits = exponent * (abs(base).bit_length() - 1) + 1
+    if bits > INT_WORD_WIDTH and bits > _EXACT_POWER_BITS:
+        return literal_overflow_refusal(
+            "**", "%s ** %d, which needs %d bits" % (base, exponent, bits),
+            operands)
     try:
         value = base ** exponent
     except (OverflowError, MemoryError, ValueError):
-        return literal_overflow_refusal("**", -1, operands)
+        return literal_overflow_refusal("**", "a value no machine holds",
+                                        operands)
     if int_value_fits(_DEFAULT_INT_TYPE, value):
         return None
     return literal_overflow_refusal("**", value, operands)
