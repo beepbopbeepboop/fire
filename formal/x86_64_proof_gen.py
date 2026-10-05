@@ -225,7 +225,11 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     # `eval_eq_mojo` needs; see `_cmp_go`.
     vtypes = function_var_types(fn)
     call_types = {}
-    conds = AP._collect_conds(fn, param, env, vtypes, call_types)
+    # `AP.eval_split_conds`, not `AP._collect_conds`: the same source-level
+    # list plus the extra propositions a chain NESTED inside a chain needs, so
+    # the two architectures split on the same propositions — which is what makes
+    # `eval_eq_mojo` the same statement on both.  See that function's docstring.
+    conds = AP.eval_split_conds(fn, param, env, vtypes, call_types)
     simp_lems = ", ".join(["mojo", "%s_go" % func_name, "ast", "evalFunc",
                            "MojoEnv", "evalBody", "evalBodyEnv", "evalExpr",
                            "u64pow", "u64powGo", "sKey"] + list(go_lemmas or []))

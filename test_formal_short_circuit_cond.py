@@ -74,6 +74,17 @@ PROGRAMS = {
 # gives the outer merge FOUR entry paths, each with a different cset having
 # written the register, so the two-path statement this file is about does not
 # reach it.  It is listed here so the boundary is a test rather than a comment.
+#
+# **Its MODEL half is proved (2026-10-05) and its MACHINE half is not.**  The
+# `eval_eq_mojo` statement — the AST evaluator against the semantic model — used
+# to be left open for this shape on BOTH architectures, because `lib/ProofLib`
+# spells a nested `or` as a curried `¬a → ¬b → c` and the emitted split was on
+# the whole disjunction; `eval_split_conds` now also splits on the chain's
+# leaves, and `TestLeanModelBridge` below typechecks that theorem in isolation.
+# What still fails is the machine half: sixteen `counterexample`s on the `hcond`
+# statements in the universal theorem, and the kernel's memory ceiling on the
+# same file (which is why that theorem is checked apart from this one and not as
+# part of it).  So this entry is still a gap, for a narrower reason than it was.
 KNOWN_GAP = {
     "nested_or": ("def f(n):\n"
                   "    if n > 10 or n == 0 or n < -4:\n"
@@ -81,18 +92,52 @@ KNOWN_GAP = {
                   "    else:\n"
                   "        return 0\n",
                   "bugs/FORMAL_nested_short_circuit_chain_in_a_condition.md: "
-                  "the merge statement's right-hand side is a nested chain's "
-                  "VALUE, and `simp [h]` cannot split the `Or`, so the operand "
-                  "that did not write the register is unconstrained and "
-                  "`bv_decide` reports a counterexample. Measured 2026-10-03 on "
-                  "the emitted proofs: the `rw`/`simp only`/`mem_read_two_"
-                  "writes_adj_uint` lines are character-for-character the "
-                  "passing two-operand case's, and the RIGHT-nested spelling "
-                  "(`n > 10 or (n == 0 or n < -4)`) fails the same way, so it "
-                  "is the `Or` and not which side the sub-chain is on"),
+                  "the MACHINE half. The merge statement's right-hand side is a "
+                  "nested chain's VALUE, and `simp [h]` cannot split the `Or`, so "
+                  "the operand that did not write the register is unconstrained "
+                  "and `bv_decide` reports a counterexample. Measured 2026-10-03 "
+                  "on the emitted proofs: the `rw`/`simp only`/"
+                  "mem_read_two_writes_adj_uint` lines are character-for-character "
+                  "the passing two-operand case's, and the RIGHT-nested spelling "
+                  "(`n > 10 or (n == 0 or n < -4)`) fails the same way, so it is "
+                  "the `Or` and not which side the sub-chain is on. Re-measured "
+                  "2026-10-05: 16 counterexamples plus the kernel's memory "
+                  "ceiling, and the model half is now proved on both "
+                  "architectures"),
 }
 
 EXAMPLE_STEMS = ("either", "both")
+
+
+def _model_only(proof_path):
+    """The generated file truncated to just `eval_eq_mojo`, or None.
+
+    `eval_eq_mojo` is the AST-evaluator-against-the-semantic-model statement,
+    and it is INDEPENDENT of the universal theorem that follows it: nothing in
+    the model bridge names anything the machine half defines.  So the honest way
+    to check it for a program whose machine half does not typecheck (which
+    `nested_or` does not, and `either`/`both` do not either — Lean's kernel
+    refuses them, see `bugs/FORMAL_a_generated_proof_over_leans_memory_ceiling_is_
+    rejected.md`) is to cut the file at the next top-level declaration after the
+    theorem and check that.
+
+    Which is a real check and not a weakened one: a truncation that cut a
+    `theorem` in half is a SYNTAX error and Lean says so rather than passing,
+    and the same `formal/lean.py::run_lean` bounds, the same `lib/` and the same
+    kernel apply to what is left.
+    """
+    lines = open(proof_path).read().split("\n")
+    try:
+        start = next(i for i, l in enumerate(lines)
+                     if l.startswith("theorem eval_eq_mojo "))
+    except StopIteration:
+        return None
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if lines[i].startswith(("/--", "theorem ", "def ", "abbrev ")):
+            end = i
+            break
+    return "\n".join(lines[:end]) + "\n"
 
 
 def _lean():
@@ -157,6 +202,16 @@ class TestGeneratorSource(unittest.TestCase):
         The two are paired with CFG blocks BY POSITION, so a disagreement
         between them is not a weaker proof but a proof about the wrong
         condition, which is exactly what the short-circuit bug was.
+
+        **Both sides walk in the SAME environment, and the walk used to be
+        handed an EMPTY one** — `_cond_nodes(fn, p, {}, {}, None)` — while the
+        renderer was handed `{p: p}`.  `_cond_nodes`' third argument is `env`
+        and `None` is what means "bind `param` to itself", so `{}` means "bind
+        nothing", and rendering a condition that reads `n` in it raises
+        `model: 'n' is read here and this generator binds it to nothing`.  So
+        this test could not pass on ANY tree: it was an ERROR, not a failure,
+        for as long as it existed, and it is the test that guards the pairing
+        the whole file is about.  The two environments are now the same object.
         """
         import formal.arm64_proof_gen as G
         from formal.build import parse_module
@@ -168,9 +223,12 @@ class TestGeneratorSource(unittest.TestCase):
             for fn in [f for f in parse_module(src)
                        if isinstance(f, F.FunctionDef) and f.params]:
                 p = fn.params[0][0]
-                rendered = G._collect_conds(fn, p, {p: p}, {}, {})
-                walked = [G._norm_uint(G._cmp_go(node, p, env, {}, {}, None))
-                          for node, env in G._cond_nodes(fn, p, {}, {}, None)]
+                env = {p: p}
+                rendered = G._collect_conds(fn, p, env, {}, {})
+                walked = [G._norm_uint(G._cmp_go(node, p, node_env, {}, {},
+                                                 None))
+                          for node, node_env in G._cond_nodes(fn, p, env, {},
+                                                             {}, None)]
                 self.assertEqual(rendered, walked,
                                  f"{stem}.{fn.name}: the condition walk and "
                                  f"its renderer disagree, so a condition is "
@@ -225,6 +283,61 @@ class TestGeneratorSource(unittest.TestCase):
                       "the CBNZ step-result lemma does not split on "
                       "`= 0`; the model's `if` is normalised to that sense "
                       "and the lemma cannot close")
+
+    def test_a_nested_chain_splits_on_its_leaves(self):
+        """`eval_eq_mojo`'s split list must reach INSIDE a chain.
+
+        `lib/ProofLib`'s `evalExpr` spells a binary `or` as `¬x → y`, so
+        `((a or b) or c)` nests that to `¬a → ¬b → c` — which is not the
+        disjunction the emitted hypothesis carries.  One `by_cases` on the
+        whole condition leaves `case pos` with `h0 : (A ∨ B) ∨ C ⊢ ¬(¬A →
+        ¬B → C)`, which is TRUE and is not retirable without knowing whether
+        `B` holds.  Measured on the program this file's `KNOWN_GAP` names:
+        arm64 and x86-64 both left that goal open before `eval_split_conds`.
+        """
+        import formal.arm64_proof_gen as G
+        from formal.build import parse_module
+        import fire_compiler as F
+        src = KNOWN_GAP["nested_or"][0]
+        fn = [f for f in parse_module(src)
+              if isinstance(f, F.FunctionDef) and f.params][-1]
+        p = fn.params[0][0]
+        split = G.eval_split_conds(fn, p, G._entry_env(fn, 1))
+        self.assertEqual(len(split), 3,
+                         f"a three-operand nested chain must split on the "
+                         f"whole condition and on each of its two leaves, got "
+                         f"{len(split)}")
+        for leaf in ("(n = 0)", "(if ((n ^^^ (0x8000000000000000 : UInt64)) "
+                     "> (10 ^^^ (0x8000000000000000 : UInt64))) then"):
+            self.assertTrue(
+                any(leaf in t for t in split),
+                f"the split list has no proposition naming {leaf!r}, so the "
+                f"case that needs it has nothing to close it with")
+
+    def test_a_flat_chain_still_splits_on_nothing_extra(self):
+        """The GUARD for the row above, and the reason it costs nothing.
+
+        A chain that is NOT nested has no `and`/`or` descendant, so the extra
+        propositions do not exist and the emitted text is character-for-character
+        what it was — which is the standard a proof-generator change has to meet
+        (`CLAUDE.md`: byte-identical generated output on a large succeeding
+        case).  Measured: ten `formal/examples/` stems x two architectures, 40
+        generated proofs, all 40 byte-identical before and after.
+        """
+        import formal.arm64_proof_gen as G
+        from formal.build import parse_module
+        import fire_compiler as F
+        for stem in EXAMPLE_STEMS:
+            src = open(os.path.join(HERE, "formal", "examples",
+                                    stem + ".mojo")).read()
+            for fn in [f for f in parse_module(src)
+                       if isinstance(f, F.FunctionDef) and f.params]:
+                p = fn.params[0][0]
+                self.assertEqual(
+                    G.eval_split_conds(fn, p, G._entry_env(fn, 1)),
+                    G._collect_conds(fn, p, G._entry_env(fn, 1)),
+                    f"{stem}.{fn.name}: a flat chain gained a proposition, so "
+                    f"its emitted proof grew goals it did not need")
 
 
 class TestShortCircuitProofs(unittest.TestCase):
@@ -409,6 +522,62 @@ class TestLean(unittest.TestCase):
                 self.assertTrue(ok, f"{name}: {detail}")
                 self.assertEqual(n, 0,
                                  f"{name}: the proof admits {n} `sorry`")
+
+
+class TestLeanModelBridge(unittest.TestCase):
+    """`eval_eq_mojo` ALONE, on both architectures, for a NESTED chain.
+
+    Separate from `TestLean` for the reason `_model_only` gives: the machine
+    half of every short-circuit proof is currently over Lean's memory ceiling
+    (`bugs/FORMAL_a_generated_proof_over_leans_memory_ceiling_is_rejected.md`,
+    measured 2026-10-05 at 13.6 GB peak for `either`), so a `TestLean` row for
+    the nested chain would be reporting the ceiling and not the construct.  The
+    model bridge does not depend on any of it, so it is checked on its own and
+    the failure it would report is about the AST bridge.
+
+    This is the test the 2026-10-05 fix is measured by: before
+    `eval_split_conds`, both architectures left `eval_eq_mojo` open with
+    `h0 : (A ∨ B) ∨ C ⊢ ¬(¬A → ¬B → C)` on the table; after it, `rc 0`.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        lean = _lean()
+        if not lean or not os.path.isfile(
+                os.path.join(HERE, "lib", "ProofLib.olean")):
+            raise unittest.SkipTest(
+                "no Lean / no lib/ProofLib.olean: skipping the typecheck. "
+                "Run `make prooflib` (or `python3 tools/suite.py prooflib`) "
+                "first -- every assertion below is about Lean accepting the "
+                "generated file, and none of it runs without it.")
+        cls.tmp = tempfile.mkdtemp(prefix="a2-sc-model-")
+        cls.results = {}
+        for arch in ("arm64", "x86_64"):
+            src, _why = KNOWN_GAP["nested_or"]
+            p, err = _generate(cls.tmp, src, "nested_or_" + arch,
+                               arch=arch)
+            if err:
+                cls.results[arch] = (False, err, 0)
+                continue
+            cut = os.path.join(cls.tmp, "model_" + arch + ".lean")
+            with open(cut, "w") as f:
+                f.write(_model_only(p))
+            cls.results[arch] = _check_proof(cut)
+
+    @classmethod
+    def tearDownClass(cls):
+        if hasattr(cls, "tmp"):
+            shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_a_nested_chains_model_bridge_typechecks_on_both_architectures(self):
+        for arch, (ok, detail, n) in sorted(self.results.items()):
+            with self.subTest(arch=arch):
+                self.assertTrue(
+                    ok, f"{arch}: the AST bridge for a chain nested in a chain "
+                        f"does not typecheck: {detail}")
+                self.assertEqual(n, 0,
+                                 f"{arch}: the model bridge admits {n} "
+                                 f"`sorry`")
 
 
 if __name__ == "__main__":

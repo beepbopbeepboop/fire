@@ -916,6 +916,79 @@ def _collect_conds(fn, param: str, env: dict, vtypes: dict = None,
                                               scope)]
 
 
+def eval_split_conds(fn, param: str, env: dict, vtypes: dict = None,
+                     call_types: dict = None, scope=None) -> list:
+    """The propositions `eval_eq_mojo` splits on: source conditions FIRST.
+
+    `_collect_conds` is the source-level list, and for a condition that is not a
+    short-circuit chain it is the whole of what this returns — the flat `if a:`
+    case, and `if a or b:` / `if a and b:`, whose `(A ∨ B)` rendering
+    `simp_all` retires on its own.
+
+    **A chain NESTED inside a chain is the one shape that needs more, and the
+    reason is the model's own spelling of `or`.** `lib/ProofLib.lean`'s
+    `evalExpr` renders a binary `or` as `¬X → Y` (which is `X ∨ Y`), so
+    `((a or b) or c)` nests that: `¬(a ∨ b) → c`, which curries to
+    `¬a → (¬b → c)` and is NOT the disjunction the hypothesis carries. The
+    emitted split is on `((a ≠ 0 ∨ b ≠ 0) ∨ c ≠ 0)`, so the `case pos` goal is
+
+        h0 : (A ∨ B) ∨ C   ⊢   ¬(¬A → ¬B → C)
+
+    — true, and not something `by_cases h0` alone can retire: from `A ∨ B` the
+    goal needs `¬B → C`, so it has to know whether `B` holds. Measured on
+    `def f(n): if n > 10 or n == 0 or n < -4:` — arm64 and x86-64, both
+    generators — the `eval_eq_mojo` goal is left open with exactly that
+    hypothesis in scope, and the machine half fails on the same program for the
+    same reason (`bugs/FORMAL_nested_short_circuit_chain_in_a_condition.md`).
+
+    So a chain's own OPERANDS and SUB-CHAINS are appended after the source
+    conditions, rendered the way `_truth_go` renders an operand of a chain (a
+    comparison stays a comparison at its own signedness; anything else is a
+    test against zero, which is Python's truthiness rule). `simp_all` then has
+    `B` and `¬B` available in the case that needs them, and one `by_cases` per
+    extra proposition is a proof obligation rather than an assumption, so this
+    cannot make the theorem false — the risk it carries is GOAL COUNT, which is
+    why the extras are emitted only when a chain is genuinely NESTED: a flat
+    chain has no `and`/`or` descendant, so every program that proves today emits
+    exactly the text it emitted yesterday.
+
+    Both generators ask this, not `_collect_conds`, so the two architectures
+    cannot split on different sets of propositions — which is the whole of
+    `eval_eq_mojo`'s claim.
+    """
+    vtypes = vtypes or {}
+    call_types = call_types or {}
+    out: list = []
+    seen: set = set()
+
+    def add(term):
+        if term not in seen:
+            seen.add(term)
+            out.append(term)
+
+    def nested(node, node_env, top):
+        for child in (getattr(node, "left", None),
+                      getattr(node, "right", None)):
+            if child is None:
+                continue
+            if isinstance(child, BinOp) and child.op in ("and", "or"):
+                if not top:
+                    add(_norm_uint(_cmp_go(child, param, node_env, vtypes,
+                                           call_types, scope)))
+                nested(child, node_env, False)
+            elif not top:
+                add(_norm_uint(_truth_go(child, param, node_env, vtypes,
+                                         call_types, scope)))
+
+    for node, node_env in _cond_nodes(fn, param, env, vtypes, call_types,
+                                      scope):
+        add(_norm_uint(_cmp_go(node, param, node_env, vtypes, call_types,
+                               scope)))
+        if isinstance(node, BinOp) and node.op in ("and", "or"):
+            nested(node, node_env, True)
+    return out
+
+
 def _pow_model(l: str, r: str, e) -> str:
     """Model for `base ** exp` (Lean UInt64 term), mirroring codegen.
 
@@ -9668,7 +9741,10 @@ def generate_arm64_proof(prog, code, info) -> str:
     elif (not _is_recursive(fn) and not _has_while(fn.body)):
         param = fn.params[0][0] if fn.params else "n"
         env = _entry_env(fn, arity)
-        conds = _collect_conds(fn, param, env)
+        # `eval_split_conds`, not `_collect_conds`: the extra propositions it
+        # appends for a chain NESTED inside a chain are what closes this
+        # theorem for that shape, and its own docstring carries the measurement.
+        conds = eval_split_conds(fn, param, env)
         by_cases = " ".join(f"by_cases h{i} : {c} <;>" for i, c in enumerate(conds))
         hs = ", ".join(f"h{i}" for i in range(len(conds)))
         # `sKey` is ProofLib's sign-flip, i.e. how `evalExpr` renders a signed
