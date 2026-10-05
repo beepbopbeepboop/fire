@@ -40,6 +40,18 @@ nothing.  The refusal cases are the other half: a declared type is a PROMISE,
 and a call site that hands the parameter something else must be refused rather
 than read through — `model.frame_declared_parameter_refusal`.
 
+The last six cases are the LOCAL half of the same evidence: a declared type
+settles a PARAMETER, and a member read of a field declared as a framed struct
+settles a LOCAL that copies it (`var t = self.inner` then `t.v`), which is the
+same program as the chain spelling and was refused while the chain built.  What
+separates them from the rows above is not a weaker kind of evidence — the slot's
+declared type is as much a promise as a parameter's is — but a second lifetime
+question the parameter rows do not have: a field a METHOD of its own struct
+assigns holds a frame belonging to whichever function ran that assignment
+(`_typed_nested_frame`'s `_REASSIGNED`), and a name the body ALSO binds by some
+other form (`for t in …`) holds a word this pass cannot account for.  Both are
+refused, for opposite reasons, and both refusals are cases here.
+
     python3 test_formal_method_param_field.py [-v] [case ...]
 """
 
@@ -1175,6 +1187,273 @@ CASES = [
      "import sys\n"
      "sys.stdout.write(\"g=%d\" % Box(mk(4)).get())\n",
      0, "g=41", None),
+    # ── A LOCAL BOUND TO THE FIELD, which is the same program spelled twice ──
+    #
+    # The row above answers `self.inner.v` through the field.  These four are
+    # the four readings of THAT program the doc's table lists, and the fifth is
+    # the one that was refused: naming the same address in a local first
+    # (`var t = self.inner` then `t.v`) reached the emitter with `t`
+    # unclassified, because the binding never mentions the holder the address
+    # came from.  All four build and answer CPython's 41 on BOTH backends, so a
+    # fix that answered the copy spelling by making `t` a holder of something
+    # else would fail the three controls rather than pass one row.
+    #
+    # The chain case is two copies deep on purpose: `var i = m.deep` asks about
+    # a base (`m`) that is ITSELF a copy, so one pass over the bindings cannot
+    # answer it and the seeding has to settle a name before it reads the next.
+    ("local_copy_of_a_nested_frame_field_reads_through_the_name",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var pad: Int\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def get(out self) -> Int:\n"
+     "        var t = self.inner\n"
+     "        return t.v * 10 + t.has\n"
+     "\n"
+     "def mk(n: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    b.inner = mk(4)\n"
+     "    printf(\"g=%d\", b.get())\n"
+     "    return 0\n",
+     "class Opt:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.has = 0\n"
+     "class Box:\n"
+     "    def __init__(self):\n"
+     "        self.pad = 0\n"
+     "        self.inner = Opt()\n"
+     "    def get(self):\n"
+     "        t = self.inner\n"
+     "        return t.v * 10 + t.has\n"
+     "def mk(n):\n"
+     "    o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "import sys\n"
+     "b = Box()\n"
+     "b.inner = mk(4)\n"
+     "sys.stdout.write(\"g=%d\" % b.get())\n",
+     0, "g=41", None),
+    # The chain through the field alone, in `main`, which is the table's third
+    # row and the control for the first case: same layout, same slot, reached
+    # without a local in between.
+    ("the_same_slot_read_through_the_field_in_the_caller",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var pad: Int\n"
+     "    var inner: Opt\n"
+     "\n"
+     "def mk(n: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    b.inner = mk(4)\n"
+     "    printf(\"g=%d\", b.inner.v * 10 + b.inner.has)\n"
+     "    return 0\n",
+     "class Opt:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.has = 0\n"
+     "class Box:\n"
+     "    def __init__(self):\n"
+     "        self.pad = 0\n"
+     "        self.inner = Opt()\n"
+     "def mk(n):\n"
+     "    o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "import sys\n"
+     "b = Box()\n"
+     "b.inner = mk(4)\n"
+     "sys.stdout.write(\"g=%d\" % (b.inner.v * 10 + b.inner.has))\n",
+     0, "g=41", None),
+    # Two copies deep, and the second one reads a field of the frame the first
+    # copy addresses — the shape that needs the seeding to settle `m` before it
+    # can ask about `m.deep`.
+    ("a_chain_of_two_local_copies_of_nested_frames",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "struct Mid:\n"
+     "    var pad: Int\n"
+     "    var deep: Inner\n"
+     "\n"
+     "struct Outer:\n"
+     "    var pad: Int\n"
+     "    var mid: Mid\n"
+     "\n"
+     "    def get(out self) -> Int:\n"
+     "        var m = self.mid\n"
+     "        var i = m.deep\n"
+     "        return i.a * 10 + i.b\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var o = Outer()\n"
+     "    o.mid.deep.a = 4\n"
+     "    o.mid.deep.b = 1\n"
+     "    printf(\"g=%d\", o.get())\n"
+     "    return 0\n",
+     "class Inner:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "class Mid:\n"
+     "    def __init__(self):\n"
+     "        self.pad = 0\n"
+     "        self.deep = Inner()\n"
+     "class Outer:\n"
+     "    def __init__(self):\n"
+     "        self.pad = 0\n"
+     "        self.mid = Mid()\n"
+     "    def get(self):\n"
+     "        m = self.mid\n"
+     "        i = m.deep\n"
+     "        return i.a * 10 + i.b\n"
+     "import sys\n"
+     "o = Outer()\n"
+     "o.mid.deep.a = 4\n"
+     "o.mid.deep.b = 1\n"
+     "sys.stdout.write(\"g=%d\" % o.get())\n",
+     0, "g=41", None),
+    # …and the DELEGATING field copied to a local, which is the fourth row of
+    # the table and the one the delegating case above does NOT cover: that one
+    # reads through the field, and the slot here holds the CALLER's frame rather
+    # than a placed one, so it is a different answer from `_typed_nested_frame`.
+    ("a_delegating_field_copied_to_a_local_still_reads_through_the_name",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var pad: Int\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def __init__(out self, o: Opt):\n"
+     "        self.inner = o\n"
+     "\n"
+     "    def get(out self) -> Int:\n"
+     "        var t = self.inner\n"
+     "        return t.v * 10 + t.has\n"
+     "\n"
+     "def mk(n: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box(mk(4))\n"
+     "    printf(\"g=%d\", b.get())\n"
+     "    return 0\n",
+     "class Opt:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.has = 0\n"
+     "class Box:\n"
+     "    def __init__(self, o):\n"
+     "        self.pad = 0\n"
+     "        self.inner = o\n"
+     "    def get(self):\n"
+     "        t = self.inner\n"
+     "        return t.v * 10 + t.has\n"
+     "def mk(n):\n"
+     "    o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "import sys\n"
+     "sys.stdout.write(\"g=%d\" % Box(mk(4)).get())\n",
+     0, "g=41", None),
+    # ── THE TWO REFUSALS, and they are refusals for OPPOSITE reasons ────────
+    #
+    # The copy of a field a METHOD assigns: the word in the slot IS an address
+    # and the frame behind it belongs to whichever function ran that assignment,
+    # so there is nothing to place.  The needle is the lifetime clause and not
+    # the emitter's "this path has no way to say what 't' holds" — that one is
+    # true and names a type inference rather than the question that is actually
+    # there, and the two spellings of this refusal (the chain, and the copy) now
+    # raise ONE text, which is what makes this needle the right thing to assert.
+    ("a_local_copy_of_a_field_a_method_reassigns_names_the_lifetime",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var pad: Int\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def set(out self, o: Opt):\n"
+     "        self.inner = o\n"
+     "\n"
+     "    def get(out self) -> Int:\n"
+     "        var t = self.inner\n"
+     "        return t.v * 10 + t.has\n"
+     "\n"
+     "def mk(n: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    b.set(mk(4))\n"
+     "    printf(\"g=%d\", b.get())\n"
+     "    return 0\n",
+     None, None, None,
+     "a frame belonging to whichever function ran the assignment"),
+    # …and the name the loop also binds.  `t` is bound twice — once to the
+    # slot's address and once by the loop — so after the loop it holds the
+    # LOOP's word and not the address, and a seeding that classified it from the
+    # first binding builds an image that reads `[7 + 8·slot]`.  Measured on both
+    # backends as a SIGSEGV, which is `FORMAL_one_field_holder_of_a_frame_is_not
+    # _a_holder` wearing a different name; the needle is the generic
+    # unclassifiable-base sentence because THAT is what this program must still
+    # get, and a build is the failure this case exists to catch.
+    ("a_loop_target_shadowing_a_local_copy_is_still_not_a_holder",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var pad: Int\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def get(out self) -> Int:\n"
+     "        var t = self.inner\n"
+     "        for t in [7]:\n"
+     "            t = t + 1\n"
+     "        return t.v * 10 + t.has\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    b.inner.v = 4\n"
+     "    b.inner.has = 1\n"
+     "    printf(\"g=%d\", b.get())\n"
+     "    return 0\n",
+     None, None, None,
+     "this path has no way to say what 't' holds"),
 ]
 
 

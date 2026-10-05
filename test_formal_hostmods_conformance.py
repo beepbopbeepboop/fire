@@ -51,7 +51,7 @@ Three things are deliberately NOT harvested, and the count of each is printed:
 
   * a call with an argument the harvester cannot resolve (`+12`),
   * a `bytes` argument — CPython's tests deliberately run every path case twice,
-    once as `str` and once as `bytes`, and the `bytes` half is the half a model
+once as `str` and once as `bytes`, and the `bytes` half is the half a model
     cannot answer: `bytearray` builds a blob of ONE-BYTE elements
     (`formal/hostmods/struct.mojo`'s value-model section, `BYTE_BLOB_CTORS` and
     `model.blob_elem_stride`), but `bytes(n)` has to build a region whose SIZE

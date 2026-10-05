@@ -40,6 +40,79 @@ The full program and the reduced program are both in
 
 ---
 
+## 0c. §0a's NUMBER was wrong, and the correction unblocks the decision §2
+## refused to make (2026-10-04, `tools/formal_returnless_census.py`)
+
+**§0a's 510 candidate sites were 456 phantom rows from one `and`.** The census's
+rule is the doc's own: a candidate is a site whose callee has **neither** a
+value-returning `return` **nor** a declared return type, so either half keeps it
+out, and `_declares_a_return`'s docstring says so in those words. The reader was
+a conjunction:
+
+```python
+decided = {name: defs[0][2] and defs[0][3] for name, defs in index.items() …}
+```
+
+A function that RETURNS a value without DECLARING one is the commonest shape in
+this corpus, so it needed both halves false at once and that never happened for
+an undeclared function. `formal/hostmods/argparse.mojo`'s `_fld`, `_cp`,
+`_alpha_index` and `_name_ptr` each end in `return p` / `return u + n` /
+`return k` and none of them declares a type — and `collect()` had all four right
+(`returns_a_value=True`), so the conjunction was the only thing wrong. Same
+command, before and after:
+
+```console
+$ python3 tools/memslot.py --gb 8 --label rlc -- \
+      python3 tools/formal_returnless_census.py
+                                     before      after
+   same-file candidate sites          507         17
+   files with one                     22           7
+   formal/hostmods/argparse.mojo      456           0
+   callee returns something         7998        8491
+```
+
+**And the 17 are all in the stdlib**, which is the whole of what §2 and §4 step
+1 needed and did not have: `math.mojo` 6, `simd.mojo` 1, `sys/_libc_errno.mojo`
+2, `itertools.mojo` 2, `builtin/_format_float.mojo` 3, `python/python.mojo` 1,
+`runtime/_asyncrt.mojo` 2, split 8 `returned` / 3 `MemberExpr` / 2
+`argument of a call` / 2 `assigned` / 2 `a subscript index`. Every one of them is
+an `out`-PARAMETER helper — `def _sqrt_nvvm(x: SIMD, out res: …)` and
+`def _errno_ptr(out result: Pointer[…])` — which is a real return-nothing
+function and not a second phantom.
+
+**What this changes, and it is the doc's decision rather than its diagnosis.**
+§2 rejected direction (a) — "refuse where the value is OBSERVED", extended to
+every consuming position — on the measurement "with 510 candidate sites, 456 of
+them in one host module that builds today, direction (a) as §2 states it is
+predicted to regress the build, and §4 step 4 would answer (b)". **The
+prediction rested on the 456, and there are none.** A refusal asked at every
+consuming position costs **zero** builds in this repository and **zero** in
+`formal/hostmods/`, which is every file
+`test_formal_hostmods_census.py` (72/72 rows) and `test_formal_argparse.py`
+(PASS=9) build. What is left is the one measurement §2 named and that a light
+worker cannot take: `build_stdlib_dylib.py`'s `skip <module>:` count, over at
+most those seven modules — and §0b's own measurement says most of the stdlib is
+already past the gate for other reasons
+(`FORMAL_a_bare_call_to_a_template_…`'s 163-file row), so the marginal increase
+may well be 0 as well.
+
+**And §4 step 0 — "re-do §0's census keyed on the resolved DEFINITION" — is now
+answered by a census that is right.** Its `name_defs` join, its UNDECIDED bucket
+(98 names, `__abs__`, `__await__`, `__enter__` and the rest of the operator
+table) and its generator/coroutine exclusion were all correct; the only wrong
+thing was the conjunction above, and it was wrong in the direction that invents
+rows. §4 step 0's ~~strikethrough~~ can stay: the work landed, and this is what
+it landed *to*.
+
+**Two halves of the rule now have a case each**, and that is why the `and`
+survived: the one case for the declared half spelled a function that returns AND
+declares, so every copy of the comprehension (`tools/formal_returnless_census.py`,
+its own `main()`, and `test_formal_returnless_census.py`'s helper — three) agreed
+on every case the tests had. There is one reader now (`decided_names`) and two
+new cases ask each half alone; both fail on the old conjunction
+(`test_a_return_with_no_declared_type_is_not_a_candidate`,
+`test_a_declared_type_with_no_return_is_not_a_candidate_either`).
+
 ## 0b. What landed (2026-10-04): the observation, refused — and the measurement §4 step 1 was waiting for
 
 **The refusal, on BOTH architectures, for both shapes.**
@@ -239,6 +312,10 @@ whose own imprecision is this large is not a tool, it is a measurement with a
 footnote.
 
 ## 0a. §0's census, redone the way §4 asked for it: 510 candidate sites, not 48
+##
+## **SUPERSEDED IN ITS NUMBER by §0c — the 510 is 17, and the 456 are phantom.
+## Read §0c first; this section is kept because its per-position counts are
+## what §0c's 17 are read against.**
 
 `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
 §4 step 0 asks for the census keyed on the resolved DEFINITION, including calls
@@ -279,8 +356,11 @@ Three numbers, and they change §2's recommendation:
 | …passed as another call's argument (§0's shape) | 48 | **78** |
 | …used as an operand (`==`, `<`, `>`, `+`, …) | — | **142** |
 
-**The direction (a) refusal is not free, and §2's "a NEW refusal, and ordinary
-Python" is right for a reason nobody had measured.** 456 of the 510 are in ONE
+**§0c supersedes the number below — the 510 is 17 and the 456 are phantom — and
+the conclusion this section draws from it does not survive.**
+
+~~**The direction (a) refusal is not free, and §2's "a NEW refusal, and ordinary
+Python" is right for a reason nobody had measured.**~~ 456 of the 510 are in ONE
 file — `formal/hostmods/argparse.mojo`, whose `_fld`, `_cp`, `_alpha_index` and
 `_name_ptr` are helpers that mutate and return nothing, and whose
 `x = _fld(rec, 1)` / `return _cp(src)` shapes are exactly the case. That file is
@@ -305,11 +385,13 @@ census got wrong. 99 of 3030 names are undecided here, and `add`, `chain`,
 `gcd`, `count`, `__enter__` and `__exit__` are among them: a refusal cannot be
 asked about those at all without resolving the name first.
 
-So the census answers §4 step 0 and it makes step 1 (the two gate counts) the
-decisive measurement rather than a formality: **with 510 candidate sites, 456 of
-them in one host module that builds today, direction (a) as §2 states it is
-predicted to regress the build, and §4 step 4 would answer (b).** Which is the
-same conclusion §2 reached by argument and can now reach by number.
+So the census answered §4 step 0, and §0c is the correction to its arithmetic:
+**the 510 is 17, the 456 in `argparse.mojo` are phantom, and every one of the 17
+is in the stdlib.** The conclusion this section drew — that direction (a) is
+predicted to regress the build and §4 step 4 would answer (b) — does not follow
+from the corrected number: a refusal at every consuming position costs nothing in
+this repository. What it now needs is only §4 step 1's stdlib half, over at most
+seven modules, which is the integrator's `build_stdlib_dylib.py`.
 
 ## 1. What is wrong
 
@@ -401,6 +483,10 @@ a project rather than a patch.
 The recommendation is (a) with the counts measured first, because it is the
 direction this path already takes everywhere else it cannot tell what a word
 holds, and because a refusal is a sentence a reader can act on where `0` is not.
+
+**§0c has now measured them, and the objection above is answered in (a)'s
+favour**: the repository half is 0 candidate sites and the stdlib half is 17
+sites in 7 modules, so the counts no longer stand between (a) and the code.
 
 ## 3. What this is NOT
 
