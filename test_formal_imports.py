@@ -2108,6 +2108,10 @@ def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
         ("binascii", "unclassified",
          "CPython ships it, no source here, no tier: the queue "
          "`FORMAL_stdlib_module_names_are_not_classified.md` carries"),
+        ("this", "not-code",
+         "CPython ships it AND its content is a module-level string — the "
+         "answer whose sentence is 'not code', not the one whose sentence is "
+         "'CPython does not ship it', which is false of this name"),
         ("definitely_not_a_real_module_9f3a", "not-a-module",
          "nothing here provides it and CPython does not ship it — a typo, or a "
          "gap in this repository, which `tools/formal_sweep.py` classes as "
@@ -2155,9 +2159,9 @@ def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
                   "and answered at once — remove the stale entry or the source")
     for answer in tally:
         check(answer in ("front-end", "written", "admitted", "modelled",
-                         "unreachable", "unclassified"),
-              f"the verdict {answer!r} is not one of the six answers, so a "
-              "report reading it has a seventh case nobody documented")
+                         "unreachable", "unclassified", "not-code"),
+              f"the verdict {answer!r} is not one of the seven answers, so a "
+              "report reading it has an eighth case nobody documented")
     check(tally.get("unclassified", 0) > 100,
           f"precondition: only {tally.get('unclassified', 0)} CPython "
           "standard-library names are unclassified, so this row is about the "
@@ -4274,6 +4278,64 @@ def _a_real_wall_name(W):
     return None
 
 
+def test_a_module_whose_content_is_not_code_is_still_a_wall(tmpdir, _shared):
+    """`not-code` counts, and the BUILD is the measurement rather than a rule.
+
+    `this`, `antigravity` and `turtledemo` are CPython modules whose content is
+    not code — a module-level string, a side effect, a directory of example
+    programs — and `HOST_NOT_A_MODULE` is the set that says so. The build refuses
+    an import of each one, so a file naming one does not build and the name is a
+    wall by the only test that matters.
+
+    It was not counted, and the way it showed was the `alone` column: with
+    `antigravity` invisible, a file importing `abc` AND `antigravity` read as
+    though `abc` were its ONLY wall, which is the statement that column exists
+    to make true and was false. So the two halves are pinned separately, because
+    either alone would pass with the other broken:
+
+    * `host_module_verdict` answers `not-code` and NOT `not-a-module` — the
+      latter's sentence is "CPython does not ship it", which is false of all
+      three, and `sys.stdlib_module_names` is the oracle for it;
+    * the instrument's own predicate counts it, measured by building a file that
+      imports one and reading the refusal off it.
+    """
+    W = _wall_module()
+    names = [n for n in sorted(I.HOST_NOT_A_MODULE)
+             if n in sys.stdlib_module_names]
+    check(names,
+          "HOST_NOT_A_MODULE holds no CPython module, so this row has nothing "
+          "to be about")
+    for name in names:
+        answer, detail = I.host_module_verdict(name)
+        check(answer == "not-code" and detail == "",
+              f"{name} is a HOST_NOT_A_MODULE member and answers {answer!r}, "
+              "not 'not-code' — 'not-a-module' asserts CPython does not ship "
+              f"it, and `sys.stdlib_module_names` says it does (detail {detail!r})")
+        check(W._is_wall(name),
+              f"{name} is not counted as a wall by "
+              f"`tools/formal_host_import_wall.py::_is_wall`, so a file that "
+              "imports it is reported as one wall lighter than it is")
+    # And the build itself, so "is a wall" is measured rather than argued: the
+    # instrument's rule is that a name the build REFUSES is a wall, and the
+    # refusal for each of these is its own sentence naming no content.
+    root = os.path.join(str(tmpdir), "notcode")
+    os.makedirs(root)
+    name = names[0]
+    write_tree(root, {"prog.mojo": "import %s\ndef main() -> Int:\n    return 0\n"
+                      % name})
+    fresh_cas()
+    # `expect_ok=False`: the refusal IS the measurement, so a successful build
+    # would be the failure rather than a happy accident.
+    res, _out = build(root, "prog.aout", expect_ok=False)
+    err = res.stderr or res.stdout
+    check(res.returncode != 0 and "no content to compile" in err,
+          f"a program importing `{name}` should be refused with the "
+          f"no-content sentence; it exited {res.returncode} with {err[-300:]!r}")
+    check(not I.is_cpython_stdlib("definitely_not_a_real_module_9f3a"),
+          "precondition: the typo's name is not a CPython module, so the two "
+          "answers cannot be told apart by the table alone")
+
+
 def test_the_wall_instrument_separates_reach_from_alone(tmpdir, _shared):
     """`reach` and `alone` are different questions and the tool answers both.
 
@@ -4549,6 +4611,8 @@ TESTS = [
      test_the_wall_instrument_uses_the_backends_own_readers),
     ("the wall instrument separates reach from alone",
      test_the_wall_instrument_separates_reach_from_alone),
+    ("a module whose content is not code is still a wall",
+     test_a_module_whose_content_is_not_code_is_still_a_wall),
     ("the wall instrument measures a delta on one tree",
      test_the_wall_instrument_measures_a_delta_on_one_tree),
     ("the wall instrument reads the sweep column with its own peel",

@@ -6,9 +6,78 @@ and the wording of `unresolvable_import_error`). **Status: the FALSE SENTENCE is
 fixed for all 223, §"The next step"'s THIRD-ANSWER bullet is LANDED with an
 oracle and two corrections (§0.3, 2026-10-05), and the rest of the per-name
 judgements are still to do — with the coverage question answered, and the answer
-is ZERO.**
+is ZERO. §0.4 closes the LAST of §0.3's list: `not-code` is a seventh VERDICT, so
+the tier's fourth answer no longer shares a string with the typo answer, and the
+two RED tests on master that measured the consequence are green (2026-10-05).**
 
 Found while fixing that one name, 2026-10-02, on `work/formal8-10`.
+
+## 0.4 `not-code`: the fourth tier's answer stopped sharing a string with the
+## typo answer, and two red tests on `master` are the measurement
+
+**§0.3 closed the tier. It left one STRING meaning two things, and two checks on
+`master` were red because of it.** `HOST_NOT_A_MODULE` is a fourth TIER and
+`host_module_tier` answers `'not-a-module'` for its members — meaning "this
+module's content is not code". `host_module_verdict`'s `'not-a-module'` means
+"nothing here provides it **and CPython does not ship it** — a typo or a gap in
+this repository". For `this`, `antigravity` and `turtledemo` the second sentence
+is **false**: CPython ships all three, `sys.stdlib_module_names` says so, and
+`importlib.util.find_spec` finds each on this host (`test_formal_link_accounting.py`'s
+ledger, and §0.3's own measurement). So a name CPython ships was reported with
+the answer whose sentence is the typo sentence, and both consumers of the verdict
+acted on it:
+
+```
+$ python3 test_formal_imports.py -v          # on master, before this section
+FAIL  every name has one named verdict, and no answer is an absence
+        CPython ships this, so no verdict can say nothing here provides it —
+        that answer is the TYPO sentence's, and it is false of a standard-library module
+FAIL  the wall instrument separates reach from alone
+        alone for `abc` was 2: it is the only wall on one of the two files that name it
+```
+
+The second failure is the one that says what it cost. `tools/formal_host_import_wall.py::
+_is_wall` takes its wall set from the verdict and its whitelist was
+`(modelled, unreachable, admitted, unclassified)`, so the three names were
+invisible to it — and `alone` is computed over the names the predicate
+recognises, so a file importing `abc` **and** `antigravity` read as though `abc`
+were its ONLY wall. That is the statement the `alone` column exists to make true.
+
+**The fix is a seventh answer, `'not-code'`, and nothing else moves.**
+`host_module_verdict` gives `HOST_NOT_A_MODULE` members `'not-code'` — "CPython
+ships it and its content is not code" — and `'not-a-module'` keeps its own
+sentence, which is now true of every name that gets it. `host_module_tier` is
+UNCHANGED (its fourth answer is about CONTENT, and its string names the SET
+rather than the verdict), so `test_formal_link_accounting.py`'s ledger of the
+eleven names §0.3 settled still reads as it was written. `_is_wall` gains
+`'not-code'`, because **the BUILD refuses an import of each one** and that is the
+measurement rather than a judgement — one build per name, each with its own
+sentence:
+
+```
+build: w.mojo imports 'this', which is a CPython standard-library module with no
+content to compile — it is documentation or a demonstration, not an API — so there
+is nothing here to implement and nothing for the link step to provide
+```
+
+same for `antigravity` and `turtledemo`, and `unresolvable_import_error`'s arm for
+them is unchanged. `test_formal_imports.py` 80 → **83 checks, 0 failed**
+(`test_a_module_whose_content_is_not_code_is_still_a_wall` is new, and it pins
+both halves — the verdict's answer and the instrument's predicate — plus a build,
+because either half alone would pass with the other broken);
+`test_formal_link_accounting.py` 289/289, `test_refusal_taxonomy.py` 347/347,
+`test_formal_sweep_truth.py` OK, `test_suite.py` 335/335.
+`tools/formal_sweep_causes.py`'s legend paragraph, which described the OLD
+string by the tier's meaning, now names both.
+
+**What this section does not do, and it is §0.1's measurement again.** No
+repository or stdlib file imports any of the three (re-measured over
+`tools/formal_host_import_wall.py`'s own 749-file walk: none appears in the
+table), so the ranking's NUMBERS are unchanged and this fix is the honesty of one
+answer plus the correctness of an instrument, not a moved row. The 102 public
+names still in no tier are still in no tier, and §0.1's reason is unchanged: with
+nothing importing them there is no measurement to tell a right entry from a
+plausible one.
 
 ## 0. What landed, 2026-10-03 (`work/formal10-4`)
 
@@ -382,7 +451,14 @@ that are not obvious:
   (`msvcrt`, `winreg`, `nt*`, `posix`, `genericpath`, `nturl2path`). Those
   want a third answer or an explicit exclusion list, which is a decision
   about the table rather than a classification — and it should be recorded as
-  one, not left to look like an oversight.
+  one, not left to look like an oversight. **DECIDED, in §0.3 and §0.4:**
+  `this` / `antigravity` / `turtledemo` are the fourth TIER (`HOST_NOT_A_MODULE`)
+  and answer `not-code`; `idlelib` is deliberately in no tier at all and answers
+  `unclassified` (`test_formal_imports.py` asserts both, and why: an interactive
+  editor is not "nothing to implement"); `msvcrt` / `winreg` / `winsound` / `nt`
+  are `unreachable` under the rule at the top of `formal/imports.py` — CPython
+  cannot `find_spec` them on this host either, so the object is missing from the
+  target rather than the module being unwritten.
 
 **Which of the 120 a swept file actually imports** is the number that decides
 how much of this is worth doing, and it is cheap: the sweep's per-file import

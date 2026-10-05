@@ -1794,9 +1794,11 @@ def print_host_table(table, minimum, lines=0, files_all=0):
     print("`tier` is read from formal/imports.py::host_module_tier and `model` "
           "from formal/hostmods/;\nneither is copied here. 'unreachable' is a "
           "fact about the target, 'modelled' is a gap\nwith an owner, "
-          "'admitted' is a module that answers under a declared contract, and "
-          "'not-a-module'\nasserts nothing about reachability — it is a name "
-          "with nothing to implement, so\nneither WORK nor a permanent fact.")
+          "'admitted' is a module that answers under a declared contract, "
+          "'not-code'\nasserts nothing about reachability — CPython ships it and "
+          "its content is not code,\nso neither WORK nor a permanent fact — and "
+          "'not-a-module' is a typo or a gap in this\nrepository rather than a "
+          "statement about the target at all.")
     print("`UNTIERED` quotes formal/imports.py::unresolvable_import_error rather "
           "than the build's wording\nwritten out here, so the clause under a "
           "row is the one that file was given.")
