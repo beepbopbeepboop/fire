@@ -10841,6 +10841,19 @@ CONSTRUCTION_CASES = [
     # now that refusal, on the same program: the construction is still accepted
     # (`constr_an_exception_carries_its_message_without_a_try` is the row that
     # pins THAT), and what is refused is the handler that could never run.
+    #
+    # **The needle is `has no exception unwinder` and was `this image has no
+    # unwinder`**, because the refusal was REWORDED after these three rows were
+    # written (2026-10-04, the change that made a `try` whose guarded region can
+    # end the process a refusal at all) and the reword did not carry the needle
+    # with it — so all three rows went red on a sentence that had only gained
+    # detail. The new needle is the clause the old one was reaching for: the new
+    # message says why the edge is refused (`formal` has no exception unwinder,
+    # so no edge runs from a raise site into an arm) and then spends a paragraph
+    # on the consequence and the two ways to write the program instead, so the
+    # stable part to pin is the first of those, not the advice after it. An arm
+    # of `pass`, `raise`, `continue` or `break` is still not refused for its
+    # body, which is the row below and the one this reword must not have broken.
     ("constr_a_try_whose_guard_can_raise_is_refused",
      "struct Plain5(Exception):\n"
      "    \"\"\"no fields at all\"\"\"\n"
@@ -10854,7 +10867,7 @@ CONSTRUCTION_CASES = [
      "    except:\n"
      "        pass\n"
      "    return 0\n",
-     "refuse:this image has no unwinder", None),
+     "refuse:has no exception unwinder", None),
     # The construction half, which is what this group was about and which the
     # refusal above would otherwise take with it: the same class, the same
     # `raise`, and NO `try` — so nothing claims to catch it, the exit status is 1
@@ -12417,7 +12430,7 @@ CONSTRUCTION_REFUSALS = [
      "        pass\n"
      "    print(\"caught\")\n"
      "    return 0\n",
-     "refuse:this image has no unwinder", None),
+     "refuse:has no exception unwinder", None),
     ("constr_a_try_with_a_declared_exception_base_is_refused_too",
      "class MyBase:\n"
      "    var msg: String\n"
@@ -12435,7 +12448,7 @@ CONSTRUCTION_REFUSALS = [
      "        pass\n"
      "    print(\"caught\")\n"
      "    return 0\n",
-     "refuse:this image has no unwinder", None),
+     "refuse:has no exception unwinder", None),
     # And the half that must KEEP working, because the refusal reads
     # `stmt.handlers` and nothing else. `try:`/`finally:` is a cleanup scope
     # rather than an exception scope: `finally` needs no runtime, and
