@@ -36,8 +36,8 @@ Verified non-vacuous, all three ways, by driving the tables in a scratch
 interpreter rather than by editing them in the tree: dropping
 `encode_smulh_xd_xn_xm` from `BACKLOG` fails the first test with
 `[('encode_smulh_xd_xn_xm', ['lean'])]`; adding an entry for a row that is not
-missing anything fails the anti-rot test; pointing an entry at `bugs/NOPE.md`
-fails the doc test. A check that cannot fail is a comment.
+missing anything fails the anti-rot test; pointing an entry at a path under
+`bugs/` that is not in the tree fails the doc test. A check that cannot fail is a comment.
 
 Run: python3 test_formal_isa_census.py [-v]
 """
