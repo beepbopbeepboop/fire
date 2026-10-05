@@ -3698,6 +3698,52 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                         hstruct[_fn_key(fn)][target] = \
                             list(hstruct[_fn_key(fn)][value.name])
                         changed = grew = True
+                    # A copy of a NESTED FRAME out of a field, which is the
+                    # same edge one step along: the base is a holder, the field
+                    # holds the ADDRESS of a frame of its own, and naming that
+                    # word in a local has to carry the address with it.
+                    #
+                    # **It is asked through `_typed_nested_frame` and not
+                    # through `struct_is_framed` on the field's annotation,
+                    # and that is the whole difference between this arm and a
+                    # copy of the parameter arm above.** A parameter's declared
+                    # type settles the layout at EVERY call site, so a framed
+                    # struct there is a frame whoever ran the call. A member
+                    # read's lifetime depends on WHICH function wrote the slot,
+                    # and `_typed_nested_frame`'s `_REASSIGNED` answer is exactly
+                    # that question: the declared type is a framed struct of
+                    # this unit AND some executed method assigns the field, so
+                    # the word in the slot is a frame belonging to whichever
+                    # function ran the assignment. Seeding a holder on the
+                    # annotation alone would then put a frame address where a
+                    # plain word can be, which is the SIGSEGV
+                    # `FORMAL_one_field_holder_of_a_frame_is_not_a_holder`
+                    # records for the analogous receiver-seeding mistake.
+                    # Routing the binding through the existing decision is
+                    # therefore "ask the question that already has an answer",
+                    # not "add a cheaper rule".
+                    #
+                    # Depth 1 only, and `_root_ident` is what decides that: it
+                    # returns `None` for a chain that reaches its base through
+                    # anything but `.member` hops, so `h[i].f` and `f(h).g` are
+                    # not mistaken for `h.f`. A deeper chain is `h.a.b`, whose
+                    # last field is a field OF a frame rather than a field of
+                    # the holder, and `_nested_frame_levels` is the reader for
+                    # that walk — so this arm stays the one-level question it
+                    # can answer and the refusal for a deeper chain is the
+                    # emitter's, unchanged.
+                    if target and isinstance(value, F.MemberExpr) \
+                            and target not in hs:
+                        _r = _root_ident(value)
+                        if _r is not None and _r[1] == 1 and _r[0] in hs:
+                            _cands = hstruct[_fn_key(fn)].get(_r[0]) or ()
+                            _nested = _typed_nested_frame(
+                                _r[0], value.member, _cands,
+                                structs_by_name, None)
+                            if isinstance(_nested, F.StructDef):
+                                hs.add(target)
+                                hstruct[_fn_key(fn)][target] = [_nested]
+                                changed = grew = True
                     # A call to a function that RETURNS A FRAME binds a frame
                     # address, and this is the edge that makes the returned-frame
                     # convention a whole-image property rather than a per-file one:

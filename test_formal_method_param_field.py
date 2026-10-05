@@ -40,6 +40,18 @@ nothing.  The refusal cases are the other half: a declared type is a PROMISE,
 and a call site that hands the parameter something else must be refused rather
 than read through — `model.frame_declared_parameter_refusal`.
 
+The same DECLARED-TYPE evidence answers for a name bound to a member read rather
+than named in a parameter list, and the last four cases are that: `var t =
+self.inner` carries `inner`'s declared type just as `o: Self` carries
+`other.start`'s, so `_frame_receivers` asks `_typed_nested_frame` — the same
+agree-or-refuse decision the field-slot readers make, so the two cannot answer
+differently — and `t` becomes a frame holder.  Its three answers are three
+cases, and the third is the one that keeps the arm honest: `_REASSIGNED`, where
+the declared type IS a frame of this unit and some executed method WRITES the
+field, so the word in the slot belongs to whichever function ran the assignment.
+A seeding that skipped that check would put a frame address where a plain word
+can be.
+
     python3 test_formal_method_param_field.py [-v] [case ...]
 """
 
@@ -1174,6 +1186,200 @@ CASES = [
      "    return o\n"
      "import sys\n"
      "sys.stdout.write(\"g=%d\" % Box(mk(4)).get())\n",
+     0, "g=41", None),
+
+    # ── A LOCAL BOUND TO A NESTED FRAME FIELD READ ─────────────────────────
+    #
+    # The two rows above agree on one thing and it is worth stating: they read
+    # `self.inner.v` THROUGH the field.  Naming the same value in a local first
+    # — `var t = self.inner; return t.v * 10 + t.has` — was REFUSED on both
+    # architectures with `field_access_refusal`, "'t.v' is a field access
+    # through 't', and this path has no way to say what 't' holds", while every
+    # other reading of the same program built and answered `g=41`.  The
+    # binding is a member read whose declared type is a framed struct of this
+    # module, and `_frame_receivers` had no arm that turns such a read into a
+    # holder: the parameter arm above and the constructor arm both seed from a
+    # CONSTRUCTION or a DECLARATION, and a member read is neither.
+    #
+    # So the arm is seeded beside the name-copy edge in `_frame_receivers`'s
+    # fixpoint and it is asked ONE question — `_typed_nested_frame` — which is
+    # what makes it the same decision the field-slot readers already make rather
+    # than a second rule that could answer differently.  Three answers, three
+    # cases, and the three rows here are exactly the three:
+    #
+    #   * a PLACED nested frame (`struct_nested_frame_fields`) — the first row;
+    #   * a DELEGATING field (`init_stores_a_parameter_struct`), the second,
+    #     which is the exemption that keeps a caller's frame readable and the
+    #     reason this arm cannot be a blind copy of the parameter one;
+    #   * `_REASSIGNED` — the third, and the answer that says the declared type
+    #     is a frame of this unit AND some executed method writes the field, so
+    #     the word in the slot is a frame belonging to whichever function ran
+    #     the assignment.  Skipping it is the SIGSEGV
+    #     `FORMAL_one_field_holder_of_a_frame_is_not_a_holder` records for the
+    #     analogous receiver-seeding mistake.
+    #
+    # The refusal row's writer stores a WORD into a frame-typed slot, and that
+    # is deliberate rather than a type error: a writer that stores a FRAME there
+    # is refused earlier and correctly by `FORMAL_wide_receiver_by_reference`'s
+    # rule, which preempts this arm entirely.  The word is the one writer shape
+    # that REACHES it, so the row is the pin that the seeding declines — which
+    # is the property, rather than the fact that some refusal fires.
+    ("a_local_bound_to_a_nested_frame_field_read_builds_and_answers",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var pad: Int\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def get(out self) -> Int:\n"
+     "        var t = self.inner\n"
+     "        return t.v * 10 + t.has\n"
+     "\n"
+     "def mk(n: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    b.inner = mk(4)\n"
+     '    printf("g=%d", b.get())\n'
+     "    return 0\n",
+     "class Opt:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.has = 0\n"
+     "class Box:\n"
+     "    def __init__(self):\n"
+     "        self.pad = 0\n"
+     "        self.inner = None\n"
+     "    def get(self):\n"
+     "        t = self.inner\n"
+     "        return t.v * 10 + t.has\n"
+     "def mk(n):\n"
+     "    o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "import sys\n"
+     "b = Box()\n"
+     "b.inner = mk(4)\n"
+     'sys.stdout.write("g=%d" % b.get())\n',
+     0, "g=41", None),
+    ("a_local_bound_to_a_delegating_nested_frame_field_answers_too",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var pad: Int\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def __init__(out self, o: Opt):\n"
+     "        self.inner = o\n"
+     "\n"
+     "    def get(out self) -> Int:\n"
+     "        var t = self.inner\n"
+     "        return t.v * 10 + t.has\n"
+     "\n"
+     "def mk(n: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box(mk(4))\n"
+     '    printf("g=%d", b.get())\n'
+     "    return 0\n",
+     "class Opt:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.has = 0\n"
+     "class Box:\n"
+     "    def __init__(self, o):\n"
+     "        self.pad = 0\n"
+     "        self.inner = o\n"
+     "    def get(self):\n"
+     "        t = self.inner\n"
+     "        return t.v * 10 + t.has\n"
+     "def mk(n):\n"
+     "    o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "import sys\n"
+     'sys.stdout.write("g=%d" % Box(mk(4)).get())\n',
+     0, "g=41", None),
+    ("a_local_bound_to_a_field_a_method_reassigns_is_still_refused",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var pad: Int\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def get(out self) -> Int:\n"
+     "        var t = self.inner\n"
+     "        return t.v * 10 + t.has\n"
+     "\n"
+     "    def blank(out self, k: Int) -> Int:\n"
+     "        self.inner = k\n"
+     "        return 0\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     '    printf("g=%d", b.get())\n'
+     "    return 0\n",
+     None, None, None,
+     "'t.v' is a field access through 't'"),
+    # The DIRECT spelling of the first row, in a FREE FUNCTION rather than a
+    # method, so the local holder is a local bound to a construction rather than
+    # a receiver.  It is the control that says the first row is answered by the
+    # nested-frame machinery and not by anything about a method: without this
+    # case, a fix that answered `t.v` in a method and left `b.inner.v` in a free
+    # function alone would look like the same fix.
+    ("a_nested_frame_field_read_through_a_local_holder_answers_directly",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var pad: Int\n"
+     "    var inner: Opt\n"
+     "\n"
+     "def mk(n: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    b.inner = mk(4)\n"
+     '    printf("g=%d", b.inner.v * 10 + b.inner.has)\n'
+     "    return 0\n",
+     "class Opt:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.has = 0\n"
+     "class Box:\n"
+     "    def __init__(self):\n"
+     "        self.pad = 0\n"
+     "        self.inner = None\n"
+     "def mk(n):\n"
+     "    o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "import sys\n"
+     "b = Box()\n"
+     "b.inner = mk(4)\n"
+     'sys.stdout.write("g=%d" % (b.inner.v * 10 + b.inner.has))\n',
      0, "g=41", None),
 ]
 
