@@ -181,9 +181,10 @@ every group red and `test_suite.py`'s `UNREGISTERED` entry could call the file
 "green" on the strength of that exit code. Both are fixed on that branch (the
 file returns 1 and prints the count; the entry says RED and why), so the six are
 now a red an exit status carries rather than six lines in a log nobody tallies.
-`bugs/FORMAL_re_the_scoped_inline_flag_form_is_refused.md` §1 already names the
 `re` group as its own separate defect, so `re` is two problems wearing one
-group.
+group. That second defect — `re`'s scoped inline flag form `(?x: … )`, which
+answered `STATUS_UNSUPPORTED` — is FIXED (`formal/hostmods/re.mojo`'s
+`_p_flaggroup`), so `re` is now one problem wearing one group.
 
 ## The next step, and what NOT to do
 
