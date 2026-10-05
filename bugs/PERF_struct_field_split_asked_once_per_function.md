@@ -15,6 +15,25 @@ types, but it wants a corpus differential test before it lands because the
 failure mode is a field set missing a store), and `struct_is_one_field`, still
 asked once per function.**
 
+**2026-10-05 (`work/bugs7-4`): the fourth per-function asker is closed.**
+`struct_sole_field_name` — the `_one_word_sole_field_chain` read this doc's
+sibling measures as a per-function slope — is now `model.sole_field_names`'s
+table, threaded beside `one_field` through the eight helpers that ask, and
+`test_formal_per_struct_asks.py`'s third case is a strict equality instead of a
+slope: **33 asks at 20 functions and 33 at 40**, against 64 and 84 before.
+208 artifacts (every `formal/examples/*.mojo`, both backends, the emitter text)
+byte-identical. See `bugs/PERF_struct_field_names_is_still_asked_once_per_
+function.md`, which is where the numbers and the byte comparison are, and whose
+four steps this closed. What this doc's own §6 names as still open is unchanged:
+`struct_is_one_field` and the statement-position walk.
+
+**This doc's step 1 — the memo — was NOT taken and is still not needed**, and the
+new table is the reason that reads differently than it did on 2026-10-02: a
+memo's whole difficulty is invalidation, and a table published once per module
+has no window to invalidate inside. The measurement §"Why a memo is NOT the
+obvious fix" gives is what makes it safe; a fourth table keyed the same way is
+the same argument applied to the same question.
+
 **The 2026-10-02 measurement this doc records, and its `tool`-class framing:**
 The 361 files with no verdict were ALL timeouts at `-t 30` (not one a memory
 kill, not one a driver error — measured by parsing the sweep log: 361

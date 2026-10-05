@@ -63,11 +63,13 @@ import formal.model as M                                # noqa: E402
 # so its ask count is a function of the module's STRUCTS and must not move when
 # the FUNCTION count does.
 PREDICATES = ('struct_is_framed', 'struct_fits_one_word', 'struct_is_one_field')
-# …and the one that is NOT, with its per-function slope pinned. See
-# `test_the_field_set_residue_is_pinned` for which asker it is and why it is
-# still there. It is COUNTED rather than listed in `PREDICATES` because it is
-# wrapped for the same reason the others are — a count nothing collects is a
-# count nothing can assert on.
+# …and the one that is NOT one of the partition's three, COUNTED rather than
+# listed in `PREDICATES` because it is wrapped for the same reason the others
+# are — a count nothing collects is a count nothing can assert on — and
+# asserted on by its own case rather than by the loop above. It grew by one per
+# added FUNCTION until `model.sole_field_names` joined the other two tables; see
+# `test_the_field_set_does_not_grow_with_the_function_count` for the asker and
+# the numbers.
 COUNTED = PREDICATES + ('struct_field_names',)
 FIELD_SET = 'struct_field_names'
 RESULTS = []
@@ -151,30 +153,35 @@ def test_the_asks_do_not_grow_with_the_function_count():
               'the per-struct tables answer this without a walk')
 
 
-def test_the_field_set_residue_is_pinned():
-    """`struct_field_names` still grows with the FUNCTION count — by ONE per
-    function, and this pins that slope rather than pretending it is zero.
+def test_the_field_set_does_not_grow_with_the_function_count():
+    """`struct_field_names` is asked a FIXED number of times, and the number is
+    a function of the module's STRUCTS.
 
-    The asker is `_one_word_sole_field_chain`'s `_sole_field_name(st)`, which
-    asks `model.struct_sole_field_name` for the struct whose single field IS the
-    word, once per function that holds or owns one. The fix is the shape this
-    file's docstring describes for the other two — publish `{name: field}` per
-    struct beside `one_field_struct_names` and thread it — and it is written up
-    rather than done because it is six call sites in `formal/build.py`, which
-    owes the gate.
+    It used to grow by ONE per function, and this pinned that slope rather than
+    pretending it was zero: the asker was
+    `_one_word_sole_field_chain`'s `_sole_field_name(st)`, which asks
+    `model.struct_sole_field_name` for the struct whose single field IS the word,
+    once per function that holds or owns one — 64 asks at 20 functions, 84 at 40.
 
-    So the residue is a MEASURED number with a named asker and a slope, not a
-    `known` note: adding a second per-function asker of the field set doubles the
-    slope and fails here, and the failure says which predicate moved.
+    The fix is the shape this file's docstring describes for the other two:
+    `model.sole_field_names` publishes `{name: field}` per struct beside
+    `one_field_struct_names`, derived with `struct_sole_field_name` so the two
+    tables cannot disagree about which structs have one field, and
+    `formal/build.py` threads it beside `one_field` through the eight helpers that
+    ask. Measured after: **33 asks at 20 functions and 33 at 40** — and 33 rather
+    than 1 because a struct's field set is still derived once per FUNCTION for
+    the handful of predicates that were never in the table, which is the same
+    bargain `framed` and `one_field` made.
+
+    So the assertion is a STRICT EQUALITY now, and that is the point: a second
+    per-function asker of the field set doubles the count and fails here, and
+    the failure names which predicate moved rather than reporting a slope.
     """
     small = ask_counts(module_with(20))
     large = ask_counts(module_with(40))
-    added = 20
-    slope = (large[FIELD_SET] - small[FIELD_SET]) / added
-    check(slope <= 1.0,
-          f'{FIELD_SET}: grows by {slope:.2f} per added function, not more',
-          f'{small[FIELD_SET]} at 20 functions, {large[FIELD_SET]} at 40; the '
-          "known asker is _one_word_sole_field_chain's _sole_field_name")
+    check(large[FIELD_SET] == small[FIELD_SET],
+          f'{FIELD_SET}: 40 functions ask it as often as 20 do',
+          f'{small[FIELD_SET]} then {large[FIELD_SET]}')
 
 
 def test_the_count_is_not_the_fallback_walking():
@@ -206,7 +213,7 @@ def main():
     ap.add_argument('-v', '--verbose', action='store_true')
     ap.parse_args()
     test_the_asks_do_not_grow_with_the_function_count()
-    test_the_field_set_residue_is_pinned()
+    test_the_field_set_does_not_grow_with_the_function_count()
     test_the_count_is_not_the_fallback_walking()
     npass = sum(1 for ok, _w in RESULTS if ok)
     nfail = len(RESULTS) - npass

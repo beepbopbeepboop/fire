@@ -30611,6 +30611,66 @@ def one_field_struct_names(structs) -> dict:
     return {st.name: st for st in structs if struct_is_one_field(st)}
 
 
+def sole_field_names(structs) -> dict:
+    """`{name: the one field's NAME}` for every struct that is exactly ONE field.
+
+    **The FIELD NAME beside `one_field_struct_names`' STRUCT**, and the two are
+    published together because they are the same derivation read two ways: this
+    one derives every entry with `struct_sole_field_name`, so the two tables
+    cannot disagree about which structs have one field — which is the failure a
+    second derivation of the same predicate invites, and the failure that would
+    show up as a field name read off a struct the width pass thought was wider.
+
+    The asker is `_one_word_sole_field_chain`'s `_sole_field_name`, which asks
+    `struct_sole_field_name` — a whole-struct walk, because
+    `struct_sole_field_name` is `struct_field_names(st)[0] if len(...) == 1`.
+    Measured on `test_formal_per_struct_asks.py`'s synthetic module (a struct
+    with 12 methods, then N functions holding it): `struct_field_names` is asked
+    64 times at 20 functions and 84 at 40, growing by exactly one per added
+    function, and every one of those is this read. The other three predicates in
+    that test are flat (2, 3, 1), so this row is the residue the framed and
+    one-field tables left.
+
+    **Sound by the measurement the framed table's threading was sound by**, and
+    `formal/build_cost_2026-10-03.md` §3.1 measured it for the whole family: 146
+    779 asks over 7 788 (question, struct) pairs across 14 files with NOT ONE
+    pair changing its answer between two asks inside one `_prepare_functions`
+    call. A table published at the wrong point would be a stale field set — a
+    frame laid out one slot short, which builds and computes the wrong answer —
+    so this belongs at the same point `one_field` is derived and not somewhere
+    new.
+
+    And it is not a cache: nothing is remembered across a mutation. A caller
+    with no module context keeps asking `struct_sole_field_name`, which is the
+    same answer at the cost of one walk, so a test reading one function's answer
+    is unaffected.
+    """
+    return {st.name: name for st in structs
+            for name in (struct_sole_field_name(st),) if name is not None}
+
+
+def sole_field_answer(struct_def, sole_field=None):
+    """`struct_sole_field_name(struct_def)`, read off `sole_field_names` when
+    the caller has one.
+
+    The threaded form, and a FUNCTION rather than a `.get()` at each call site
+    because the table is OPTIONAL, for the reason `one_field_answer` gives: a
+    caller with no module context — a test, a tool reading one function's answer,
+    any of the model functions `formal/build.py` calls before it has a module
+    table — keeps asking the predicate, which is the same answer at the cost of
+    one whole-struct walk rather than none.
+
+    `None` in, the predicate out, INCLUDING for `struct_def is None`: a
+    `dict.get` cannot be told apart from "the table does not have this struct"
+    and "the struct has no one field", and a caller that conflated the two would
+    silently stop refusing a struct whose field binds no name — which is what
+    `_sole_field_name`'s own refusal exists to catch.
+    """
+    if sole_field is None:
+        return struct_sole_field_name(struct_def)
+    return sole_field.get(getattr(struct_def, "name", None))
+
+
 def one_field_answer(struct_def, one_field=None) -> bool:
     """`struct_is_one_field(struct_def)`, read off `one_field_struct_names`'
     table when the caller has one.

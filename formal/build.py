@@ -3288,7 +3288,8 @@ def _holder_state(holders: dict, hstruct: dict, returns_frame: dict) -> tuple:
 def _frame_receivers(functions: list, structs_by_name: dict,
                      dc_classes: dict = None, imported: dict = None,
                      star_imports: tuple = (),
-                     enum_structs=None, one_field=None) -> None:
+                     enum_structs=None, one_field=None,
+                     sole_field=None) -> None:
     """Annotate every function with its frame-pointer receivers and field slots.
 
     Writes `fn._frame_holders` (the names holding a frame address) and
@@ -3355,6 +3356,19 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # 7 788 (question, struct) pairs changed its answer inside one call.
     if one_field is None:
         one_field = M.one_field_struct_names(structs)
+    # …and the FIELD NAME of each of those, which is the fourth per-function
+    # asker and the residue of the three above: `struct_sole_field_name` is
+    # `struct_field_names(st)[0] if len(...) == 1`, so reading it walks the
+    # struct's whole field set, and `_one_word_sole_field_chain` reads it once
+    # per function that holds a one-word struct.
+    # `test_formal_per_struct_asks.py` measures the residue: 64 asks at 20
+    # functions, 84 at 40, growing by one per added function, against 2 / 3 / 1
+    # for the three predicates that ARE threaded. Derived here for the same
+    # reason they are, on the same measurement, and published beside
+    # `one_field_struct_names` with `struct_sole_field_name` as its only
+    # derivation so the two cannot disagree about which structs have one field.
+    if sole_field is None:
+        sole_field = M.sole_field_names(structs)
     if not framed:
         # A module with no framed struct has no frame anywhere in it, which is a
         # DEFINITE answer about every parameter — each is an ordinary word —
@@ -4295,7 +4309,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                                                                structs_by_name)
                             if one is None:
                                 continue
-                            sole = M.struct_sole_field_name(one)
+                            sole = M.sole_field_answer(one, sole_field)
                             if sole is None:
                                 raise CodegenError(
                                     M.one_word_nested_sole_field_refusal(
@@ -4426,7 +4440,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                         # members of whatever that value is, and the ordinary
                         # value lowering owns it.
                         continue
-                    sole = M.struct_sole_field_name(one)
+                    sole = M.sole_field_answer(one, sole_field)
                     if sole is None or sole != fields[-1]:
                         # A one-field struct whose one field binds no name has
                         # no word to call, so there is nothing this chain could
@@ -4694,7 +4708,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # domain because the rewrites that put a receiver in argument position 0 run
     # here.
     _collect_one_word_frame_receivers(functions, structs_by_name,
-                                      by_name_returns_frame, one_field)
+                                      by_name_returns_frame, one_field,
+                                      sole_field)
     _park_construction_mismatches(functions, framed)
 
 
@@ -4919,7 +4934,8 @@ def _value_may_be_a_frame(value, structs_by_name, holders, alias=None,
 
 
 def _collect_one_field_receiver_rebinds(fn, owner, structs_by_name,
-                                       one_field=None, fns=()) -> None:
+                                       one_field=None, fns=(),
+                                       sole_field=None) -> None:
     """PARK a ONE-FIELD struct's mutator that rebinds its receiver, two ways.
 
     **This runs BEFORE `_rewrite_self_fields`, and that is the whole design.**
@@ -5001,7 +5017,7 @@ def _collect_one_field_receiver_rebinds(fn, owner, structs_by_name,
     # answered by two different derivations of "the receiver's own storage", and
     # an owner with no sole field to name contributes no dotted spelling at all
     # rather than one with `None` in it.
-    sole = M.struct_sole_field_name(owner)
+    sole = M.sole_field_answer(owner, sole_field)
     dotted = ({f"{r}.{sole}" for r in receivers} if sole is not None
               else frozenset())
     frame_rebinds = []
@@ -8476,7 +8492,8 @@ def check_one_word_frame_receivers(functions) -> None:
 
 
 def _collect_one_word_frame_receivers(functions, structs_by_name,
-                                      returns_frame, one_field=None) -> None:
+                                      returns_frame, one_field=None,
+                                      sole_field=None) -> None:
     """PARK the calls `check_one_word_frame_receivers` will refuse.
 
     Parked rather than raised, and the reason is the same one
@@ -8495,11 +8512,13 @@ def _collect_one_word_frame_receivers(functions, structs_by_name,
     owners = M.method_owner_names(structs_by_name.values())
     for fn in functions:
         _park_one_word_frame_receivers(fn, owners, structs_by_name,
-                                       returns_frame, one_field)
+                                       returns_frame, one_field,
+                                       sole_field)
 
 
 def _park_one_word_frame_receivers(fn, owners, structs_by_name,
-                                   returns_frame, one_field=None) -> None:
+                                   returns_frame, one_field=None,
+                                   sole_field=None) -> None:
     for node in M.iter_nodes(getattr(fn, "body", None)):
         if not isinstance(node, F.CallExpr) or not node.args:
             continue
@@ -8514,7 +8533,7 @@ def _park_one_word_frame_receivers(fn, owners, structs_by_name,
         recv = node.args[0]
         if not isinstance(recv, F.IdentExpr):
             continue
-        sole = M.struct_sole_field_name(st)
+        sole = M.sole_field_answer(st, sole_field)
         method = node.func.name[len(st.name) + 1:] \
             if node.func.name.startswith(st.name + "_") else node.func.name
         if recv.name not in _local_names(fn):
@@ -9316,7 +9335,7 @@ def _refuse_holder_use(fn, node, holders, by_name, why, reason=None) -> None:
 
 
 def _one_word_sole_field_chain(st, structs_by_name: dict,
-                               one_field=None) -> tuple:
+                               one_field=None, sole_field=None) -> tuple:
     """`("inner", "v")` for a one-word struct whose field is another's, etc.
 
     The chain of field names a word is stored under, as far as the DECLARED
@@ -9343,7 +9362,7 @@ def _one_word_sole_field_chain(st, structs_by_name: dict,
     while st is not None and st.name not in seen \
             and M.one_field_answer(st, one_field):
         seen.add(st.name)
-        field = _sole_field_name(st)
+        field = _sole_field_name(st, sole_field)
         chain.append(field)
         # `model.one_word_field_struct`, NOT `model.struct_field_type`: this walk
         # asks whether the chain CONTINUES, and the two readers differ on
@@ -9409,7 +9428,7 @@ def _one_word_field_map(fn, structs_by_name: dict, owner=None,
     return mapping
 
 
-def _sole_field_name(st) -> str:
+def _sole_field_name(st, sole_field=None) -> str:
     """The name of a struct's only field — the word the whole struct is.
 
     Refused rather than guessed when that field binds no name. This value is
@@ -9421,8 +9440,16 @@ def _sole_field_name(st) -> str:
     The name comes from the DERIVED field set (formal.model), which is what
     makes this work for a class that declares nothing and assigns its one field
     in `__init__` — the shape most of this repo's own source uses, and the one
-    a reader of `StructDef.fields` would have measured as an empty struct."""
-    name = M.struct_sole_field_name(st)
+    a reader of `StructDef.fields` would have measured as an empty struct.
+
+    `sole_field` is `model.sole_field_names`'s table, threaded beside `one_field`
+    for the reason `one_field_answer` gives: `None` asks the predicate, which is
+    this function's whole behaviour, so a caller with no module context is
+    unaffected. The table removes a whole-struct walk per call, and this is the
+    only site that walked: `_one_word_sole_field_chain` runs once per function
+    that holds a one-word struct, and `struct_sole_field_name` derives the
+    struct's WHOLE field set to answer it."""
+    name = M.sole_field_answer(st, sole_field)
     if name is None:
         raise CodegenError(
             f"{st.name} has exactly one field but that field binds no name, "
@@ -9533,7 +9560,7 @@ def _plan_receiver_call_sites(fn, writebacks: dict) -> None:
 
 
 def _rewrite_self_fields(fn, one_word: dict, structs_by_name: dict,
-                        one_field=None) -> None:
+                        one_field=None, sole_field=None) -> None:
     """`x.f[.g…]` -> `x` when every field read is a sole field, replacing the
     node itself.
 
@@ -9620,7 +9647,7 @@ def _rewrite_self_fields(fn, one_word: dict, structs_by_name: dict,
     # read, so there is still one recognition of "this name is a one-word
     # struct's word".
     mapping = {name: _one_word_sole_field_chain(one, structs_by_name,
-                                                one_field)
+                                                one_field, sole_field)
                for name, one in one_word.items()}
     call_recv = _call_receivers(fn)
 
@@ -9800,7 +9827,8 @@ def _rewrite_list_element_sole_field(node, elems: dict, chains: dict):
 def _rewrite_one_word_field_method_calls(node, one_word: dict,
                                          structs_by_name: dict,
                                          receiverless=(), bound=None,
-                                         one_field=None) -> None:
+                                         one_field=None,
+                                         sole_field=None) -> None:
     """`recv.f.m(x)` -> `F_m(recv.f, x)`, where `recv.f` is a ONE-WORD field.
 
     **This runs before `_rewrite_self_fields`, and it has to.** That rewrite is
@@ -9877,13 +9905,13 @@ def _rewrite_one_word_field_method_calls(node, one_word: dict,
                            and isinstance(n.func, F.MemberExpr)
                            and _lift_one_word_field_method(
                                n, one_word, structs_by_name, receiverless,
-                               bound, one_field))
+                               bound, one_field, sole_field))
         else n)
 
 
 def _lift_one_word_field_method(call, one_word: dict, structs_by_name: dict,
                                 receiverless, bound=None,
-                                one_field=None) -> bool:
+                                one_field=None, sole_field=None) -> bool:
     """The one call `_rewrite_one_word_field_method_calls` lifts. True if it did.
 
     Split out so the walk above stays a walk: the conditions are five facts about
@@ -9961,7 +9989,8 @@ def _lift_one_word_field_method(call, one_word: dict, structs_by_name: dict,
     chain = _member_chain(obj)
     if chain == root:
         return False                      # `recv.m(x)`, `_rewrite_method_calls`'s
-    sole = _one_word_sole_field_chain(st, structs_by_name, one_field)
+    sole = _one_word_sole_field_chain(st, structs_by_name, one_field,
+                                     sole_field)
     _, _, path = chain.partition(".")
     if not _is_sole_field_prefix(path, sole):
         return False
@@ -15414,6 +15443,12 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # struct) pairs changing their answer inside one call, `struct_is_one_field`
     # one of the four it covered.
     one_field = M.one_field_struct_names(structs_by_name.values())
+    # …and each one's FIELD NAME, beside it and by the same derivation, for
+    # `_prepare_functions`' reason above: the four direct
+    # `struct_sole_field_name` reads below and `_one_word_sole_field_chain` are
+    # per-function askers of a predicate whose own derivation is a whole-struct
+    # walk.
+    sole_field = M.sole_field_names(structs_by_name.values())
     # Re-attach the census to the structs THIS FILE declares, so that a
     # consumer of the same file's declarations cannot narrow one of them behind
     # this build's back: the two would then measure the same class differently
@@ -15577,7 +15612,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # construction` asks about, and it is already computed above this loop.
         _collect_one_field_receiver_rebinds(fn, method_owners.get(fn.name),
                                             structs_by_name, one_field,
-                                            _image_function_names)
+                                            _image_function_names,
+                                            sole_field)
         # …and its sibling: a one-field method that stores its own field through
         # a receiver no write-back will hand back, so the store is computed and
         # dropped. Asked at the same point for the same reason — after
@@ -15618,7 +15654,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         elems = M.list_element_structs(fn, structs_by_name, structs_by_name,
                                        st)
         elem_chains = {name: _one_word_sole_field_chain(one, structs_by_name,
-                                                        one_field)
+                                                        one_field, sole_field)
                        for name, one in elems.items()}
         _rewrite_method_calls(fn.body, dispatch_owners, wide, receiverless,
                               fn.name,
@@ -15652,12 +15688,13 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
             fn.body, one_word, structs_by_name, receiverless,
             _bound_receiver_structs(fn, framed, _image_function_names, st,
                                     one_field),
-            one_field)
+            one_field, sole_field)
         # `mapping` is derived inside `_rewrite_self_fields` now, because the
         # rewrite is handed the table it derives the chain from — it needs the
         # struct as well as the chain, for the refusal a call through one of
         # those fields gets. So neither the chain nor the table is built twice.
-        _rewrite_self_fields(fn, one_word, structs_by_name, one_field)
+        _rewrite_self_fields(fn, one_word, structs_by_name, one_field,
+                             sole_field)
         # …and the same identity through a SUBSCRIPT receiver. After the lift
         # above, so a method call has already become `Box_get(bs[0], …)` and only
         # field reads and writes are left; after `_rewrite_self_fields`, so both
