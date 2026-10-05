@@ -89,6 +89,13 @@ FAMILIES = (
     "ldrsh", "ldrb", "ldrh", "strb", "strh", "b", "cbz", "cbnz", "tbz", "tbnz",
     "br",
     "bl", "ret", "svc", "mov", "movz", "movk", "movn", "mvn", "nop", "add",
+    # `adds` is `add` with the S bit, the same class `subs` and `negs` are
+    # already named for, and it is the instruction the integer-overflow check's
+    # `+` arm is built from (`formal/model.py::int_overflow_traps`): A64 has no
+    # overflow flag on `ADD`, and `ADDS` is the add that sets V for `B.vs` to
+    # read. Its absence made `encode_adds_xd_xn_xm` report as an uncovered
+    # mnemonic — a gap in a list that already had both of its siblings.
+    "adds",
     "sub", "subs", "adc", "sbc", "mul", "madd", "msub", "smull", "umull",
     "smulh", "umulh", "neg", "negs", "cmp", "cmn", "tst", "ccmp", "ccmn",
     "csel", "cset", "csinc", "csinv", "csneg", "cinc", "csinv", "and", "orr",
