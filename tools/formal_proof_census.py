@@ -258,6 +258,12 @@ STATUS_RANK = {
 #: wherever they appear, and never counted as "proved at all".
 NOT_A_VERDICT = {"too-large", "bound-exceeded"}
 
+#: Lean's own memory ceiling, in its own words on the pinned 4.32.2. Matched on
+#: the captured run's output rather than on `compile_formal`'s exception text,
+#: because the run IS the thing that said it. `maximum memory has been reached`
+#: is the shape the same ceiling takes when it fires from a different place.
+_LEAN_MEMORY_RE = re.compile(
+    r"excessive memory consumption detected|maximum memory has been reached")
 
 #: Lean's first diagnostic line, `file:line:col: error: …`, searched for
 #: ANYWHERE in the text rather than at the start of a line: a replayed
@@ -536,24 +542,19 @@ def _classify_failure(runs, detail):
       the verdict cache for exactly this reason), so it is its own class.
     * Lean's own memory ceiling — also not a verdict, and a different fact: the
       proof was too big for the checker, which is a property of the machine's
-      `-M` and of the proof's size. **Asked of
-      `formal.lean.lean_refused_on_its_own_memory_ceiling`, not of a regex
-      here**, because `formal/lean.py` is what SETS that `-M` and a second copy
-      of the sentence is a second answer to "is this a verdict or an absence" —
-      which is the disagreement this classification exists to end
-      (`bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_
-      declared.md`).
+      `-M` and of the proof's size.
     * anything else — Lean elaborated the file and said no. That IS a verdict,
       and Lean's own message is the finding.
     """
-    from formal.lean import lean_refused_on_its_own_memory_ceiling
     if runs and runs[-1].exceeded:
         return "bound-exceeded", runs[-1].exceeded
     blob = (runs[-1].stderr or "") + (runs[-1].stdout or "") if runs else \
         str(detail or "")
-    ceiling = lean_refused_on_its_own_memory_ceiling(blob)
-    if ceiling:
-        return ("too-large", " ".join(ceiling.split()))
+    if _LEAN_MEMORY_RE.search(blob):
+        first = next((ln.strip() for ln in blob.splitlines()
+                      if _LEAN_MEMORY_RE.search(ln)), "")
+        return ("too-large", " ".join((first or "lean refused the proof on "
+                                       "its own memory ceiling").split()))
     return "lean-rejected", first_diagnostic(detail)
 
 
@@ -636,18 +637,8 @@ def measure_example(stem: str, arch: str = "arm64", test_input: int = 10) -> Rec
                 total = sum(sites.values())
                 n_sorries = _cached_hole_count(proof_path)
             else:
-                # A refusal with no proof beside it is the BUILD's or the
-                # GENERATOR's, and the phase says which. The generator's own
-                # refusal reaches this arm — `formal/build.py` re-wraps its
-                # `NotImplementedError` so `fire.py` prints one line instead of
-                # a traceback — so the phase is asked of the exception through
-                # `FB.proof_refused` rather than left reading `build` for a
-                # refusal that happened after codegen succeeded. One reader of
-                # that flag: `tools/formal_proof_breadth.py` and
-                # `tools/formal_proof_fuzz.py` classify the same shape through
-                # it.
                 status, reason, phase = "refused", first_diagnostic(message), \
-                    ("generate" if FB.proof_refused(e) else "build")
+                    "build"
         except NotImplementedError as e:
             # The proof generator's own refusal. Every raise site in
             # `formal/arm64_proof_gen.py` is deliberate and names its reason

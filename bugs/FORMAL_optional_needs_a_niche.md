@@ -1,73 +1,14 @@
 # `Optional[T]` has a representation now, and the payloads it cannot answer are exactly the ones with no word left
 
-**Status 2026-10-05 (`formal25-4`): §4 is FIXED, and it was a WRONG ANSWER on
-both architectures rather than the limitation §4 called it — the gap was
-writable the moment the link line existed, and what it wrote was `Some(0)`
-where the program said `None`.** Read this before §4, whose "the next step is
-for `formal/imports.py`'s per-module function tables to carry parameter
-annotations, which is a project and not a patch" is the plan as it was written.
-
-**What was wrong, measured on both architectures, byte-identical:**
-
-    lib3.mojo   def tb(z: Optional[Bool]) -> int:
-                    if z is None: return 100
-                    return 1 if z else 2
-    main3.mojo  from lib3 import tb
-                printf("%d", tb(None))          ->  1
-                                             CPython: 100
-
-`optional_none_word` puts `None` at 2 for an `Optional[Bool]` payload and at
-`1 << w` for a narrow integer, while `None` folds to `NONE_WORD` = 0 — which is
-a payload VALUE. So the callee compared 0 against its own niche of 2 and took
-the "has a value" arm, from a program that built green and exited 0.
-`Optional[String]` was right, by accident: its niche IS 0.
-
-**Why the identical program with the callee in the SAME file answers 100** is
-what makes this a boundary defect rather than a question about `Optional`: the
-two pipelines this tree runs must not answer one construct differently because
-of where the callee was compiled. §4's own framing was right about the cause
-and wrong about the severity — `apply_optional_none_representation` resolves a
-callee's parameter annotations through `_callee_defs(functions)`, which is the
-functions of THIS module, and it runs inside `_prepare_functions`, which runs
-BEFORE `_resolve_imports`. So the imported declaration was not in hand. That is
-why the gap existed, and it is exactly why it did not need guessing to close.
-
-**What landed.** `model.imported_optional_param_annotations` is the PARAMETER
-half of the reader `imported_callee_kind` already was for the RETURN, keyed by
-ARGUMENT index with the receiver offset applied in the reader — a method's
-receiver travels by pointer (`doc/ABI.md`, "The formal backend's receiver
-convention") and is not argument 0, so numbering it as parameter 0 would
-substitute the niche for the RECEIVER, whose declared type names no `Optional`,
-so the substitution would never fire and the shape would read as answered while
-doing nothing. `build.substitute_none_into_an_imported_optional` is the pass,
-asked from `_run_late_checks` beside the other published-declaration consumers
-because that is where `link_line` exists; it reads `external_declarations` (the
-callee's own source, so the parameter list cannot disagree with the library on
-disk) and reuses `_replace_none_with_niche`, so the niche word is asked of the
-ONE table the in-unit pass asks. **The callee's DECLARATION names the payload,
-never the call** — which is why `Optional[String]` is unchanged and correct.
-
-`test_formal_module_attr.py` is 35/34: three payloads (`Bool`'s niche 2,
-`Int8`'s 256, `String`'s 0) through `agrees_with_cpython`, three SPELLINGS (a
-free function, `or_else`, and a method whose receiver is not an argument), and
-the reader asked with no build at all for the case a build cannot show — an
-argument index that is not an `Optional` one. The new row REDS without the fix.
-
-**What is left is §2 (the two-word value, for `Int`) and §3 (an unstated
-payload).** §3's own reasoning is unchanged and still correct: closing it needs
-the same inference `FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_
-inferrable`'s neighbour provides, which is not this row's claim.
-
 **Claim** `project21:optional` on `work/formal21-optional`. **PARTIALLY
 FIXED**, and the remainder is one payload family rather than the 43-file row the
 sweep map names — measured, below, and the measurement is the most useful thing
 in this document. **§5 is FIXED as of 2026-10-04** (`work/formal29-3`): the
 register-passable sibling is out of the table and refused by name, because read
 from the stdlib's own source its storage is a PAIR and the table's own argument is
-about a word. **§4 is FIXED as of 2026-10-05** (`formal25-4`), and it was a wrong
-answer rather than the limitation §4 recorded — see the Status above. What is
-left is §2 (the two-word value, for `Int`) and §3 (an unstated payload) — each
-written below with its own next step.
+about a word. What is left is §2 (the two-word value, for `Int`), §3 (an unstated
+payload) and §4 (an imported callee's `Optional` parameter) — each written below
+with its own next step.
 
 ## What landed, and what it is
 
@@ -139,7 +80,7 @@ succeeds is the failure), and the table's five properties as failures.
 
 **The row's terminal cause is `FormatStruct`, which is `formal21-1`'s claim.**
 Measured on four of the row's 41 files (`-9` counted 43; this tree's list is 41
-— the `b10` round of `bugs/FORMAL_sweep_work_map.md` §2.4 says the row went 43 → 0
+— `bugs/FORMAL_sweep_work_map_2026-10-04_b10.md` §2.4 says the row went 43 → 0
 and every file moved one layer out), arm64, on this branch:
 
 ```console
@@ -232,29 +173,18 @@ from a call's return type — and that inference is
 `FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable`'s
 neighbour. **Not this row's claim.**
 
-### 4. A `None` ARGUMENT to an IMPORTED function's `Optional` parameter —
-### FIXED 2026-10-05 (`formal25-4`), and it was a WRONG ANSWER
-
-The paragraph below is the diagnosis as it stood, and the DIAGNOSIS was right
-while the severity was not: it said the folded 0 "keeps" and measured it as a
-limitation, where the measurement is that the callee then takes the "has a
-value" arm and answers as though it had been handed `Some(0)`. Read the Status
-at the head of this file for the numbers, the two architectures, and what
-landed. Kept as the statement of what was believed, which is what made it
-actionable: the paragraph says the alternative is guessing a parameter's type
-from the call, and the fix is the one thing that is NOT a guess — the callee's
-own declaration, read through `formal/imports.py`'s `external_declarations`,
-which the emitters already read for exactly this class of question.
+### 4. A `None` ARGUMENT to an IMPORTED function's `Optional` parameter is not
+### substituted
 
 `apply_optional_none_representation` resolves a callee's parameter annotations
 through `_callee_defs(functions)` — the functions of **this** module, because a
 build compiles each module nested and an imported signature is not in hand. So
 `h.put(None)` where `put` is declared here works, and `h.put(None)` where `put`
-comes from another module kept the folded 0. **What is missing was never the
-DECLARATION** — `external_declarations` has carried it since a defaulted
-parameter arriving as a stack address was measured — but the LINK LINE, and the
-one pass that reads it runs after `_prepare_functions`, which is where the
-substitution has to happen because it rewrites the `None` NAME before it folds.
+comes from another module keeps the folded 0. Measured, and the same limitation
+`function_value_argument_refusal` states; the alternative is guessing a
+parameter's type from the call, which is how a payload is built with the wrong
+width. **The next step** is for `formal/imports.py`'s per-module function tables
+to carry parameter annotations, which is a project and not a patch.
 
 ### 5. `OptionalReg` was in `OPTIONAL_TYPE_NAMES` on the strength of the
 ### spelling alone — FIXED 2026-10-04, and the second half of the fix was the
@@ -365,5 +295,5 @@ be launched from a test.
 * `FORMAL_builtin_slice_optional_field_is_a_frame_holder.md` — unchanged and
   still accurate; it is the `struct`-typed-field question, which this
   representation does not touch.
-* the `b10` round of `bugs/FORMAL_sweep_work_map.md` §2.4 — the row it names is not
+* `bugs/FORMAL_sweep_work_map_2026-10-04_b10.md` §2.4 — the row it names is not
   blocked on this any more, and was not (§1 above).

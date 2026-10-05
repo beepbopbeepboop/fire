@@ -151,6 +151,17 @@ Three model defects, none of which a hand-picked corpus was reaching:
   * `re.mojo` refused `(?x) a` while answering "matched" for the same pattern
     with `re.VERBOSE()`, which is the same feature twice and one of the two
     spellings refused.
+  * `re.mojo` then refused the third spelling too: `(?x: a) c` -- the SCOPED
+    form, where the flag applies to one group -- was `STATUS_UNSUPPORTED` for a
+    pattern CPython compiles, because the flag word was one the matcher read
+    once at entry and a scoped flag changes it mid-program. It is
+    `_p_scoped`/`OP_FLAGS` now (the bug doc that named the boundary is deleted
+    with the fix, as a fixed bug's is), and this harvest is what measured it:
+    **119 → 107 of CPython's own 184 `re` cases refused, 97 → 87 distinct
+    `(function, pattern)` pairs, and the same 184 agreeing on both
+    architectures** -- so the twelve are cases that moved from "refused, a
+    documented limit" to "agrees with CPython", which is the only direction
+    this count can move without something else being broken.
 """
 import argparse
 import ast

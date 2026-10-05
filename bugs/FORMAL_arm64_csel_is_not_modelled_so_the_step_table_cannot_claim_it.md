@@ -105,21 +105,13 @@ refuse, and the loud failure is much better than the quiet version.
 
 ## 3. Why the row was removed rather than the model extended
 
-Modelling CSEL is the real fix and `work/formal13-3` measured what it costs:
-the three-line `arm64_step` branch *builds*, and adding it turns row 3 of
-`bugs/FORMAL_a_conditional_value_in_a_dylib_export.md` §2.1's table into a Lean
-**"excessive memory consumption"** failure out of `_gen_run_cert`. That is a
-Lean-side research problem, not a merge decision, and a light merge worker is not
-permitted to run Lean at all.
-
-**One correction to the sentence this section carried until 2026-10-05**: the
-failure is NOT out of the composed-state **`hx30`** proof. All 32 `hx30` goals
-are inside a 23.1 s / 2.5 GB check; the cost is the **`hprior_*`** value-flow
-facts, 48/144/384/960 at two/three/four/five conditional branches. Both
-measurements, and the `hprior` sharing that has since landed, are in
-`bugs/FORMAL_a_conditional_value_in_a_dylib_export.md` §2.3–§2.4; the cost
-centre and the fix belong to
-`FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`.
+Modelling CSEL is the real fix and `work/formal13-3` measured what it costs,
+in `bugs/FORMAL_csel_in_the_model_costs_a_ternary_export_its_whole_proof.md`:
+the three-line `arm64_step` branch *builds*, and adding it turns row 3 of that
+document's table into a Lean **"excessive memory consumption"** failure out of
+`_gen_run_cert`'s composed-state `hx30` proof. That is a Lean-side research
+problem, not a merge decision, and a light merge worker is not permitted to run
+Lean at all.
 
 Removing the row restores the status quo the model states: CSEL is unmodelled on
 BOTH sides, so `_step_branch_index` returns `None` and the generator's "the

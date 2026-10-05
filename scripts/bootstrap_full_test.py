@@ -12,7 +12,7 @@ Executes all stages of bootstrap verification:
 import subprocess
 import sys
 from pathlib import Path
-from time import time
+from datetime import datetime
 
 def run_command(cmd, description):
     """Run a command and return success/failure."""
@@ -35,14 +35,7 @@ def main():
     print("║" + " " * 16 + "MOJO BOOTSTRAP - FULL INTEGRATION TEST" + " " * 24 + "║")
     print("╚" + "═" * 78 + "╝")
     print()
-    # `time.time()` and not `datetime.now().isoformat()`: this line is a
-    # report header that identifies a run, and `datetime` was a
-    # `HOST_MODELLED` row this file was ALONE in and cannot answer -- a
-    # `datetime` is a six-field record and `.isoformat()` is a formatted one
-    # (`bugs/FORMAL_time_struct_shaped_answers.md`). `time` is a module this
-    # tree HAS. `run_stdlib_tests.py` says the same thing about the same
-    # substitution, and `fault_tolerance.py:254` is the third site.
-    print(f"Timestamp: {time()}")
+    print(f"Timestamp: {datetime.now().isoformat()}")
     print()
 
     tests = [

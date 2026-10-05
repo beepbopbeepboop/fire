@@ -62,7 +62,7 @@ three controls that must keep REFUSING plus a check of their own
 see: that a diagnostic BELOW such a literal still names the line the source
 wrote. The bug was that this front end refused a PEP 701 f-string whose
 replacement field spans lines — `unterminated string literal` for a program
-CPython runs — and the `b12` round of `bugs/FORMAL_sweep_work_map.md` §4.2 is where
+CPython runs — and `bugs/FORMAL_sweep_work_map_2026-10-04_b12.md` §4.2 is where
 the sweep recorded it and its next step.
 
 The third family is the one that generalizes. Every pre-pass that rewrites a
@@ -214,7 +214,7 @@ LITERALS = [
     # and the corpus's ONLY disagreement with CPython about whether a file is a
     # program (measured over all 738 swept files, which is why the number of files
     # it was worth is not the number of reasons to fix it — see
-    # `bugs/FORMAL_sweep_work_map.md` §5).
+    # `bugs/FORMAL_sweep_work_map_2026-10-05_b13.md` §5).
     #
     # `ours` is the byte-exact content, and for an f-string that is the whole
     # source token including its prefix and delimiters — the contract FLAG_ROWS

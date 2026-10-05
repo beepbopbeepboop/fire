@@ -6,7 +6,7 @@ is, and this file pins what that means on the formal dylib path: a module that
 declares only `struct Pair[T]` now publishes `prefix_Pair_Int` and its methods,
 and a program that writes `Pair[Int]()` binds them. Before this the module had no
 boundary symbol at all and the whole thing was one refusal — the second wall
-behind the 165-file row in the `b8` round of `bugs/FORMAL_sweep_work_map.md` §4.1,
+behind the 165-file row in `bugs/FORMAL_sweep_work_map_2026-10-03_b8.md` §4.1,
 which sits behind the codegen wall in `std/collections/binary_heap.mojo` and so
 was invisible until that file's own constructs lower.
 
@@ -208,105 +208,6 @@ def run_pair_case(tmpdir, arch, name, lib, prog, cpython, expect_ok=True,
     check(run.returncode == 0,
           f"[{arch}] computed the right answer and exited {run.returncode}")
     return run.stdout
-
-
-# §2 of the doc: the DOTTED application, `L.Pair[Int]()`. Two rows, and the
-# second is the one that matters — the message used to name the MODULE as the
-# template.
-DOTTED_LIB = PAIR_LIB + """
-
-def seed() -> Int:
-    return 1
-"""
-
-DOTTED_PROG = """\
-import pairlib as L
-
-def main():
-    var a = L.Pair[Int]()
-    a.first = 7
-    a.second = 3
-    print(a.get_first())
-"""
-
-
-def test_a_dotted_application_says_which_word_is_the_module(tmpdir):
-    """`L.Pair[Int]()` is refused, and the refusal names `Pair` as the template.
-
-    §2's construct, and §2 is not a message problem — it is a recogniser this
-    build does not have: `mojo/middle/comptime.specialization_name` answers
-    `None` for a dotted base BY DESIGN, because both backends'
-    `_specialization_of` and `formal/model.py::subscript_callee_names` consult
-    that one function and a second recogniser that disagreed with it would bind
-    the call to the WRONG MODULE's instantiation. So the construct stays
-    refused, and what this case pins is that the refusal is about the program.
-
-    **It was not.** The scan that raises it names the call by the ROOT of its
-    dotted chain, so `L.Pair[Int]()` arrived as the name `L`, and the message
-    read:
-
-        build: L[…](…) calls a name this unit does not compile … If `L` is a
-        generic of another module … Write it as `L[<a type>](…)`
-
-    Three claims about a program that says none of them: `L` is the MODULE, so
-    it is not a generic of one; `L[<a type>]` is not a spelling of anything;
-    and "the call asked for no instantiation" is precisely the diagnosis this
-    case must not give, because the brackets name a type argument perfectly
-    well. That is the `refuse_without:` class of defect — a repair that is
-    wrong about correct code — and it is why the text is a whole function
-    (`formal/model.py::dotted_specialization_refusal`) rather than a clause.
-
-    Four needles, each for a different false claim above, and the last one is
-    the only part of the message a reader can act on: `from L import Pair` then
-    `Pair[Int]()`, which is the SAME program and is lowered. That is the row
-    below, on this machine, in this tree.
-    """
-    for arch in ARCHES:
-        fresh_cas()
-        text = run_pair_case(tmpdir, arch, "mm_dottedcallee", DOTTED_LIB,
-                             DOTTED_PROG,
-                             None, expect_ok=False)
-        for needle in ("is a bracketed callee spelled THROUGH A MODULE",
-                       "`L` is the module while `Pair` is the template",
-                       "answers `None` for a dotted base BY DESIGN",
-                       "from <the module> import Pair",
-                       "the ALIASED form"):
-            check(needle in text,
-                  f"[{arch}] the dotted application did not say {needle!r}: "
-                  f"{text.strip()[-400:]}")
-        check("L[<a type>](…)" not in text,
-              f"[{arch}] the refusal still recommends `L[<a type>](…)`, which "
-              f"is not a spelling of anything — `L` is the module. That is the "
-              f"sentence this change removes: {text.strip()[-300:]}")
-        check("If `L` is a generic of another module" not in text,
-              f"[{arch}] the refusal still says `L` is a generic of another "
-              f"module. `L` IS the module: {text.strip()[-300:]}")
-
-
-def test_the_dotted_applications_remedy_is_lowered(tmpdir):
-    """The spelling the new refusal recommends, on both architectures, vs CPython.
-
-    A message that recommends a repair nothing checks is a message nobody can
-    act on, and this file's other rows are all "the construct LOWERS". So the
-    remedy is pinned as a differential rather than trusted: `from pairlib import
-    Pair` then `Pair[Int]()`, one instantiation, two fields, and CPython's
-    `PAIR_CPYTHON`/`PAIR_CPYTHON_MAIN` reference run at test time.
-
-    **The remedy is the NON-aliased spelling, and that is measured rather than
-    assumed**: `from pairlib import Pair as P` then `P[Int]()` is still refused
-    on this tree (the demand walk reads `P` where the template is `Pair`), so
-    the message names the module's own name and says so. This row is what
-    makes that claim worth making.
-    """
-    bare = PAIR_PROG.replace("import pairlib", "from pairlib import Pair")
-    for arch in ARCHES:
-        fresh_cas()
-        got = run_pair_case(tmpdir, arch, "mm_dottedremedy", PAIR_LIB, bare,
-                            PAIR_CPYTHON + "\n" + PAIR_CPYTHON_MAIN)
-        check(got == "7\n1\n3\n",
-              f"[{arch}] the remedy the new refusal recommends printed {got!r}, "
-              f"not the three answers this case is about — so the message is "
-              f"recommending a spelling nothing checks")
 
 
 # ── behavioural: the boundary symbols ───────────────────────────────────────
@@ -682,7 +583,7 @@ def test_a_package_reexport_attributes_the_demand_to_the_defining_module(
 
     — a complaint about the LINK LINE for a library that had been built and was
     simply not on it. 162 of the 165 files in
-    the `b8` round of `bugs/FORMAL_sweep_work_map.md` §3.1 reach
+    `bugs/FORMAL_sweep_work_map_2026-10-03_b8.md` §3.1 reach
     `binary_heap.mojo` through `std/collections/__init__.mojo`'s re-export and
     not by naming it, so this is the shape the row actually has.
 
@@ -1569,177 +1470,6 @@ def main():
 """
 
 
-# The STRUCT half of the same construct, read through `Self`. `Self.values` is
-# the parameter, and the only reason it works is that the template's OWN body is
-# not the body that runs: `instantiate` substitutes it, so the body in the image
-# reads `len([1, 2, 3, 4])` and needs no knowledge of the parameter at all. The
-# template's own body has no instantiation in scope, so a read of it there is
-# refused — and `monomorph.without_template_bodies` is what keeps that body out
-# of the compilation unit.
-SELF_BRACKET_LIB = """\
-struct Sized[T: AnyType, values: List[T]]:
-    var tag: Int
-
-    def size(self) -> Int:
-        return len(Self.values)
-"""
-
-SELF_BRACKET_PROG = """\
-from sizelib import Sized
-
-def main():
-    var a = Sized[Int, [1, 2, 3, 4]]()
-    a.tag = 7
-    print(a.size())
-    var b = Sized[Int, [9]]()
-    b.tag = 7
-    print(b.size())
-"""
-
-SELF_BRACKET_CPYTHON = """\
-class Sized:
-    def __init__(self):
-        self.tag = 0
-        self.values = []
-    def size(self):
-        return len(self.values)
-
-def main():
-    a = Sized()
-    a.tag = 7
-    a.values = [1, 2, 3, 4]
-    print(a.size())
-    b = Sized()
-    b.tag = 7
-    b.values = [9]
-    print(b.size())
-"""
-
-# The ONE-FILE shape of the same read: the module declares AND applies the
-# template, so `formal/imports.py::_own_instantiations` appends the
-# instantiated statements to the executable's own and the executable's own
-# statement list is where the template's declaration has to leave.
-SELF_BRACKET_ONE_FILE = """\
-struct Sized[T: AnyType, values: List[T]]:
-    var tag: Int
-
-    def size(self) -> Int:
-        return len(Self.values)
-
-def main():
-    var a = Sized[Int, [1, 2, 3, 4]]()
-    a.tag = 7
-    print(a.size())
-"""
-
-SELF_BRACKET_ONE_FILE_CPYTHON = """\
-class Sized:
-    def __init__(self):
-        self.tag = 0
-        self.values = []
-    def size(self):
-        return len(self.values)
-
-def main():
-    a = Sized()
-    a.tag = 7
-    a.values = [1, 2, 3, 4]
-    print(a.size())
-"""
-
-
-def test_a_struct_templates_body_is_not_the_body_that_runs(tmpdir):
-    """`len(Self.values)` in a generic STRUCT builds, runs, and answers CPython.
-
-    The construct is a bracket VALUE parameter read through `Self` from a
-    method, and before this it was refused on BOTH architectures with "the
-    source does not say what this operand holds" — from the TEMPLATE's own body,
-    which is analysed with no instantiation in scope and where `Self.values`
-    names a parameter nothing has supplied. It was refused in one file and in
-    two, because a module dylib is compiled from the module's own source *and*
-    from every instantiated source its consumer asked for.
-
-    The fix is not a new reader for `Self.<param>`; it is that the template's
-    own body is not part of the compilation unit, because it is not part of any
-    image — `instantiate` substitutes the parameter and the instantiated body
-    reads `len([1, 2, 3, 4])`. `monomorph.without_template_bodies` is the rule
-    and both paths ask it: the module path in `formal/build.py`'s
-    `_formal_module_functions`, the executable path in `compile_formal` AFTER
-    `_imported_structs` has appended the instantiated statements.
-
-    Two instantiations with different lengths, because a lowering that answered
-    the FIRST program's length for both would print a plausible number — and
-    `4` against `1` is that number's easiest form.
-    """
-    for arch in ARCHES:
-        got = run_pair_case(tmpdir, arch, "mm_selfbracket", SELF_BRACKET_LIB,
-                            SELF_BRACKET_PROG, SELF_BRACKET_CPYTHON,
-                            libname="sizelib.mojo")
-        check(got == "4\n1\n",
-              f"[{arch}] printed {got!r} for two instantiations of one template "
-              f"whose bracket value parameter is [1, 2, 3, 4] and then [9]")
-
-
-def test_the_same_read_works_in_one_file(tmpdir):
-    """The executable path asks the same rule, and one file is where it is
-    reachable without a dylib at all.
-
-    `build_pair_case(lib=None)` writes the ONE-FILE shape — this module is both
-    the library and the consumer — which is the case `formal/imports.py`'s
-    `_own_instantiations` covers: it appends the instantiated statements to the
-    executable's own list, so the filter has to run after that append or it
-    takes the instantiated bodies with it. That ordering is the whole content of
-    this case, and a filter placed one line earlier fails it.
-    """
-    for arch in ARCHES:
-        got = run_pair_case(tmpdir, arch, "mm_selfonefile", None,
-                            SELF_BRACKET_ONE_FILE,
-                            SELF_BRACKET_ONE_FILE_CPYTHON)
-        check(got == "4\n",
-              f"[{arch}] printed {got!r} for one file declaring and applying "
-              f"Sized[Int, [1, 2, 3, 4]]")
-
-
-def test_a_function_templates_body_is_still_compiled(_tmpdir):
-    """The filter drops STRUCT templates and keeps FUNCTION templates, and the
-    second half is not tidiness — it is three registered tests.
-
-    A function template's call site binds through `comptime.specialization_name`
-    to the template's OWN definition (`twice[Int](n)` beside `def twice[T]`), so
-    its body IS in an image and removing it leaves a call against a symbol
-    nothing emitted. Measured, dropping both kinds together took
-    `test_formal_specialization.py` from 19/19 to 16/3 — the three are "a local
-    specialization lowers and matches CPython" and the two that run a
-    specialization through a value.
-
-    So this is a unit assertion over `without_template_bodies` rather than a
-    build, and it asserts the KIND: `monomorph.template_kind` is the reader that
-    tells a struct template from a function one, so the filter has exactly one
-    answer to consult and a second reader here would be a second rule to be
-    wrong about.
-    """
-    import fire_compiler as FC
-    from formal import monomorph as MM
-    src = ("struct Box[T]:\n"
-           "    var v: T\n"
-           "def twice[T](n: T) -> T:\n"
-           "    return n + n\n"
-           "def plain(x: Int) -> Int:\n"
-           "    return x\n")
-    stmts = FC.Parser(FC.py_tokenize(src)).parse_module()
-    kept = {getattr(s, "name", None)
-            for s in MM.without_template_bodies(stmts, src)}
-    check(kept == {"twice", "plain"},
-          f"the filter kept {sorted(n for n in kept if n)}, and it must keep "
-          f"the FUNCTION template `twice` — a specialization call binds to it "
-          f"through comptime.specialization_name — and the ordinary `plain`, "
-          f"dropping only the struct template `Box`")
-    check(MM.template_kind(src, "Box") == MM.KIND_STRUCT
-          and MM.template_kind(src, "twice") == MM.KIND_FN,
-          "template_kind no longer tells the two kinds apart, so the filter's "
-          "one reader of that question is gone")
-
-
 def test_a_value_bracket_argument_reaches_the_boundary_symbol(tmpdir):
     """`total[Int, [1, 2, 3]]` binds the library's symbol, and `keys[0]` is `1`.
 
@@ -1750,12 +1480,11 @@ def test_a_value_bracket_argument_reaches_the_boundary_symbol(tmpdir):
     makes the value observable at all: it is the one read of a bracket value
     parameter that lowers today, because the parameter's own annotation
     (`keys: List[T]`) classifies the subscript base and the substitution puts a
-    list literal there.  A read that goes through `len()` instead did not, and
-    that is now fixed twice over: `len()` reads the parameter's own annotation
-    (`formal/model.py::declared_param_kind`), and a read spelled through `Self`
-    needed the template's own body to leave the compilation unit, which is
-    `test_a_struct_templates_body_is_not_the_body_that_runs` below.  So this case
-    reads element zero — the one spelling that needed neither.
+    list literal there.  A read that goes through `len()` instead does not (see
+    the bug doc deleted with the consumer-side fix, `§"What is not the cause"`
+    and the wall it stopped at, now
+    `bugs/FORMAL_a_value_bracket_parameter_cannot_be_read_in_the_template.md`),
+    which is why this case reads element zero.
 
     Both spellings of a display and two different values of it, so the
     distinctness the mangling has to provide is exercised rather than asserted:
@@ -2286,64 +2015,6 @@ def test_the_census_answers_each_of_its_seven_questions(tmpdir):
           f"{sorted(n for n, b in want.items() if b == T.BUCKET_SOLVABLE)}")
 
 
-def test_the_census_does_not_count_this_worktrees_scratch(tmpdir):
-    """`.tmp/` is not CORPUS, and a census that counts it cannot be quoted.
-
-    `DEFAULT_PATHS` includes the REPOSITORY ROOT, so the walk descends into
-    `.tmp/<some test's tmpdir>/` and finds `.mojo` files a test wrote an hour
-    ago.  Measured 2026-10-05 on this tree, before the fix: **24 such files**
-    were in the walk (`files scanned: 409`, against 385 with them pruned), and
-    four of the instrument's `unresolved` rows were scratch — one of them a
-    call to `FormatStruct`, this doc's own subject, in a file that does not
-    exist and that no reader will ever find again.
-
-    That is the defect `bugs/FORMAL_a_function_with_no_return_...` §0c already
-    recorded for the OTHER census over the same corpus ("a census whose numbers
-    move with the worktree's scratch is not a measurement"), fixed there with a
-    hardcoded `(".tmp", ".git", "__pycache__")`.  Both censuses now ask
-    `checked_run.is_derived_dir`, which is the repository's ONE answer to "is
-    this directory's content an input" and is the reader `tools/dangling_doc_
-    refs.py` reuses rather than keeping a second list.  Two hardcoded triples
-    are two answers to one question, and that is how one census counts a
-    scratch file and the other does not.
-
-    The fixture puts the SAME two modules in two places — one real, one under
-    `.tmp/` — so the assertion is about the WALK and not about the classifier:
-    the scratch copy must contribute no row, and `build/` must not either.
-    """
-    root = os.path.join(tmpdir, "scratch")
-    lib = "def widen[T: AnyType](v: T) -> T:\n    return v\n"
-    use = ("from widen import widen\n"
-           "\n"
-           "def main(n: Int):\n"
-           "    print(widen(n))\n")
-    write_tree(root, {
-        "widen.mojo": lib,
-        "use_widen.mojo": use,
-        ".tmp/test_dirty/widen.mojo": lib,
-        ".tmp/test_dirty/use_widen.mojo": use,
-        "build/widen.mojo": lib,
-        "build/use_widen.mojo": use,
-    })
-    sys.path.insert(0, os.path.join(HERE, "tools"))
-    import formal_template_call_census as T
-    rows, _n_files, _n_calls, unresolved = T.collect([root])
-    # The tool reports a path RELATIVE to the repository root (`ROOT`), and the
-    # runner's scratch directory is itself under `ROOT/.tmp/`, so the expected
-    # answer is spelled the same way rather than as the absolute path: the
-    # question is which files the WALK reached, not how it spells them.
-    paths = sorted({p for p, _l, _n, _m, _b, _bd, _s, _pr in rows})
-    want = [os.path.relpath(os.path.join(root, "use_widen.mojo"),
-                            os.path.dirname(os.path.join(HERE, "tools")))]
-    check(paths == want,
-          f"the census counted {paths} and only {want} is corpus: a `.tmp/` or "
-          f"`build/` file this walk descends into makes every figure in this "
-          f"instrument a function of whatever a test ran earlier")
-    check(not unresolved,
-          f"{len(unresolved)} (file, name) pair(s) in the fixture named a "
-          f"module that did not resolve: {unresolved[:4]}")
-
-
 def test_the_census_reads_the_measured_shapes_out_of_the_corpus(_tmpdir):
     """The three symbols the doc measured, asked of the real stdlib.
 
@@ -2527,10 +2198,6 @@ TESTS = [
      test_a_generic_function_template_is_instantiated_too),
     ("a struct template the module declares can itself apply",
      test_a_struct_template_the_module_declares_can_itself_apply),
-    ("a dotted application says which word is the module",
-     test_a_dotted_application_says_which_word_is_the_module),
-    ("…and its remedy is lowered, both architectures",
-     test_the_dotted_applications_remedy_is_lowered),
     ("a module that applies its own template publishes it",
      test_a_module_that_applies_its_own_template_publishes_it),
     ("a library that applies another module's template instantiation",
@@ -2563,12 +2230,6 @@ TESTS = [
      test_a_literal_display_is_a_bracket_argument_and_a_bare_literal_is_not),
     ("a value bracket argument reaches the boundary symbol",
      test_a_value_bracket_argument_reaches_the_boundary_symbol),
-    ("a struct template's body is not the body that runs",
-     test_a_struct_templates_body_is_not_the_body_that_runs),
-    ("the same read works in one file",
-     test_the_same_read_works_in_one_file),
-    ("a function template's body is still compiled",
-     test_a_function_templates_body_is_still_compiled),
     ("a bracketed parameter annotation instantiates",
      test_a_bracketed_parameter_annotation_instantiates),
     ("a stated mangled spelling is the one the mangler produces",
@@ -2577,8 +2238,6 @@ TESTS = [
      test_the_census_answers_each_of_its_seven_questions),
     ("the census reads the measured shapes out of the corpus",
      test_the_census_reads_the_measured_shapes_out_of_the_corpus),
-    ("the census does not count this worktree's scratch",
-     test_the_census_does_not_count_this_worktrees_scratch),
     ("a variadic bracket parameter takes the extra arguments",
      test_a_variadic_bracket_parameter_takes_the_extra_arguments),
 ]

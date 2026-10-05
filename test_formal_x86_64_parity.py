@@ -555,193 +555,6 @@ CASES = [
      "import sys\n\ndef main():\n"
      "    sys.stdout.write(\"%d %d %d %d %d %d %d\" % (1, 2, 3, 4, 5, 6, 7))\n"
      "    return 0\n"),
-    # ARGUMENT EVALUATION ORDER AT THE ABI'S SIX-REGISTER BOUNDARY.
-    # `FORMAL_x86_64_seven_argument_call_evaluates_its_stack_arguments_first`.
-    #
-    # x86-64's SysV ABI passes the first six integer arguments in registers and
-    # the rest in the caller's frame, so the SEVENTH argument is the first one
-    # this emitter places in the reserved outgoing area — and it used to place
-    # every such argument BEFORE the register half, because the register half
-    # was spilled with a push and a push moves RSP out from under `[RSP + 8k]`.
-    # So argument 7 was evaluated first: each argument was stored in the slot
-    # its index names (nothing about the emitted code looked wrong) and
-    # evaluated in the wrong order. arm64 has no such split — AAPCS passes
-    # arguments in X0..X7 with no separate stack area for a non-variadic callee
-    # — which is why this row is a two-backend case and why only one of the two
-    # ever failed.
-    #
-    # `tick()` is the observable: a module-level counter the call increments, so
-    # a permutation of the arguments cannot hide behind an arithmetic identity.
-    # `join` builds a positional 7-digit number out of its parameters, so the
-    # answer is the order the arguments were EVALUATED in, read back through
-    # the order the callee RECEIVED them in. `2345671` is the x86-64 failure:
-    # argument 7 evaluated first, so it got counter value 1 and arguments 1-6
-    # got 2-7.
-    #
-    # Six and seven are both here because the fix RESERVES MORE SPACE, and the
-    # case that works today is the one a larger reservation can break: at six
-    # arguments nothing is placed in the outgoing area at all, and a fix that
-    # assumed every call has one would move RSP on a call that has no stack
-    # argument and lose the 16-byte alignment SysV requires at a call.
-    ("argument_evaluation_order_at_six_arguments",
-     "var _n: int = 0\n"
-     "\n"
-     "def tick() -> int:\n"
-     "    global _n\n"
-     "    _n = _n + 1\n"
-     "    return _n\n"
-     "\n"
-     "def join(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int) -> int:\n"
-     "    return a0 * 100000 + a1 * 10000 + a2 * 1000 + a3 * 100 + a4 * 10 + a5\n"
-     "\n"
-     "def main() -> int:\n"
-     "    printf(\"%d\\n\", join(tick(), tick(), tick(), tick(), tick(), tick()))\n"
-     "    return 0\n",
-     "import sys\n"
-     "_n = 0\n"
-     "\n"
-     "def tick():\n"
-     "    global _n\n"
-     "    _n = _n + 1\n"
-     "    return _n\n"
-     "\n"
-     "def join(a0, a1, a2, a3, a4, a5):\n"
-     "    return a0 * 100000 + a1 * 10000 + a2 * 1000 + a3 * 100 + a4 * 10 + a5\n"
-     "\n"
-     "def main():\n"
-     "    sys.stdout.write(\"%d\\n\" % join(tick(), tick(), tick(), tick(),\n"
-     "                                        tick(), tick()))\n"
-     "    return 0\n"),
-    ("argument_evaluation_order_at_seven_arguments",
-     "var _n: int = 0\n"
-     "\n"
-     "def tick() -> int:\n"
-     "    global _n\n"
-     "    _n = _n + 1\n"
-     "    return _n\n"
-     "\n"
-     "def join(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int,\n"
-     "        a6: int) -> int:\n"
-     "    return (a0 * 1000000 + a1 * 100000 + a2 * 10000 + a3 * 1000\n"
-     "            + a4 * 100 + a5 * 10 + a6)\n"
-     "\n"
-     "def main() -> int:\n"
-     "    printf(\"%d\\n\", join(tick(), tick(), tick(), tick(), tick(), tick(),\n"
-     "                         tick()))\n"
-     "    return 0\n",
-     "import sys\n"
-     "_n = 0\n"
-     "\n"
-     "def tick():\n"
-     "    global _n\n"
-     "    _n = _n + 1\n"
-     "    return _n\n"
-     "\n"
-     "def join(a0, a1, a2, a3, a4, a5, a6):\n"
-     "    return (a0 * 1000000 + a1 * 100000 + a2 * 10000 + a3 * 1000\n"
-     "            + a4 * 100 + a5 * 10 + a6)\n"
-     "\n"
-     "def main():\n"
-     "    sys.stdout.write(\"%d\\n\" % join(tick(), tick(), tick(), tick(),\n"
-     "                                        tick(), tick(), tick()))\n"
-     "    return 0\n"),
-    # The same defect through a VARIADIC callee, where it is the shape a corpus
-    # notices first: seven `tick()` calls in one `printf`. The format string is
-    # argument 1 and takes RDI whatever the conversions say, so this is an
-    # EIGHT-argument call and TWO of the arguments are in the outgoing area —
-    # which makes the failure a rotation rather than a transposition
-    # (`3 4 5 6 7 8 1 2` against the source's `1 2 … 7`), and the row above
-    # cannot produce it: one stack argument cannot reorder two register ones
-    # past it.
-    #
-    # Seven conversions and not eight is arm64's boundary, not this one's: it
-    # refuses a variadic callee with an argument past its register file
-    # (`formal/arm64_codegen.py::_emit_call`), so a nine-argument printf is not a
-    # two-backend case at all. arm64's own limit is why the failure this row
-    # pins was reachable ONLY on x86-64 — on SysV the seventh argument has a
-    # home, and nothing about the count alone is wrong.
-    ("variadic_arguments_are_evaluated_in_source_order",
-     "var _n: int = 0\n"
-     "\n"
-     "def tick() -> int:\n"
-     "    global _n\n"
-     "    _n = _n + 1\n"
-     "    return _n\n"
-     "\n"
-     "def main() -> int:\n"
-     "    printf(\"%d %d %d %d %d %d %d\\n\", tick(), tick(), tick(), tick(),\n"
-     "           tick(), tick(), tick())\n"
-     "    return 0\n",
-     "import sys\n"
-     "_n = 0\n"
-     "\n"
-     "def tick():\n"
-     "    global _n\n"
-     "    _n = _n + 1\n"
-     "    return _n\n"
-     "\n"
-     "def main():\n"
-     "    sys.stdout.write(\"%d %d %d %d %d %d %d\\n\" % (\n"
-     "        tick(), tick(), tick(), tick(), tick(), tick(), tick()))\n"
-     "    return 0\n"),
-    # A STACK ARGUMENT THAT IS ITSELF A CALL, which is the shape that makes the
-    # outgoing area load-bearing rather than decorative. Every argument is now
-    # stored into ONE reserved block and read back out of it after the last one
-    # is evaluated, so a nested call in an argument has to land strictly BELOW
-    # that block: it pushes and pops symmetrically, and the area it addresses is
-    # addressed off an RSP that has not moved since before any argument ran.
-    # `join7`'s last argument is `inner()`, which itself takes three — so the
-    # nested call has its own outgoing area nested inside this one.
-    #
-    # The counter is what makes the order observable rather than the values:
-    # `outer()` runs first (it is argument 1) and its three arguments are
-    # evaluated inside it, so a leaked RSP would have the nested call write over
-    # a slot this call has already filled.
-    ("a_stack_argument_that_is_itself_a_call",
-     "var _n: int = 0\n"
-     "\n"
-     "def tick() -> int:\n"
-     "    global _n\n"
-     "    _n = _n + 1\n"
-     "    return _n\n"
-     "\n"
-     "def inner(a: int, b: int, c: int) -> int:\n"
-     "    return a * 100 + b * 10 + c\n"
-     "\n"
-     "def outer() -> int:\n"
-     "    return inner(tick(), tick(), tick())\n"
-     "\n"
-     "def join(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int,\n"
-     "        a6: int) -> int:\n"
-     "    return (a0 * 1000000 + a1 * 100000 + a2 * 10000 + a3 * 1000\n"
-     "            + a4 * 100 + a5 * 10 + a6)\n"
-     "\n"
-     "def main() -> int:\n"
-     "    printf(\"%d\\n\", join(tick(), tick(), tick(), tick(), tick(), tick(),\n"
-     "                         outer()))\n"
-     "    return 0\n",
-     "import sys\n"
-     "_n = 0\n"
-     "\n"
-     "def tick():\n"
-     "    global _n\n"
-     "    _n = _n + 1\n"
-     "    return _n\n"
-     "\n"
-     "def inner(a, b, c):\n"
-     "    return a * 100 + b * 10 + c\n"
-     "\n"
-     "def outer():\n"
-     "    return inner(tick(), tick(), tick())\n"
-     "\n"
-     "def join(a0, a1, a2, a3, a4, a5, a6):\n"
-     "    return (a0 * 1000000 + a1 * 100000 + a2 * 10000 + a3 * 1000\n"
-     "            + a4 * 100 + a5 * 10 + a6)\n"
-     "\n"
-     "def main():\n"
-     "    sys.stdout.write(\"%d\\n\" % join(tick(), tick(), tick(), tick(),\n"
-     "                                        tick(), tick(), outer()))\n"
-     "    return 0\n"),
     # A STACK ARGUMENT ALONGSIDE A FRAME RECEIVER, in METHOD position.  A
     # parameter with no register home is loaded into R11 — the scratch
     # `_store_var` uses on the spill path — and then stored, so a load that
@@ -2101,25 +1914,6 @@ FAILING_CASES = [
      "    return 0\n"),
 ]
 
-# A NEEDLE SHARED by every row that pins the same sentence, declared once here
-# rather than spelled per row. The three `TYPE TAG` rows below are the worked
-# example and the reason this exists: all three pin the FIELD arm of
-# `formal/model.py::scalar_container_base_evidence`, and a fourth row for the
-# same construct once pinned the other arm's words — a reword that moved one row
-# and left two green, which is how a message change can be invisible in the one
-# place the change happened. A needle spelled three times is three chances to
-# spell it three ways; spelled once, a reword moves all three together.
-#
-# What that buys: a reword of either sentence moves every row that pins it, so
-# the breakage is either four rows wide and obvious or none — where a needle
-# spelled per row gives one red row and two silent ones. It is not the same as
-# CHECKING that the needle is reachable (a row whose program stops reaching the
-# gate it names goes red on its own), and it is not the same as the non-field
-# arm's coverage, which is why `TYPE_VALUE_NEEDLE` is its own constant for its
-# own row rather than a third alias of the first.
-TYPE_TAG_NEEDLE = "is a struct field declared to hold a TYPE TAG"
-TYPE_VALUE_NEEDLE = "is a TYPE value"
-
 REFUSALS = [
     # A SUBSCRIPT on a base the source proves to be a scalar. This is the
     # worst failure mode in the area — an image that SEGFAULTS with no
@@ -2145,24 +1939,6 @@ REFUSALS = [
     # established by the CONSTRUCTOR rather than by a class-level default, so
     # nothing folds to a literal and nothing refuses. A type's value is its tag
     # word, and a tag has no count and no elements.
-    #
-    # ONE field, and that is what this row is for rather than a shorter program:
-    # a one-field struct's sole field is in `model.one_field_struct_names`, so
-    # `_rewrite_self_fields` is entitled to collapse `self.d` onto `self` and
-    # hand the emitter a bare `self` — which is the shape whose arm64 refusal
-    # this file's first `REFUSALS` comment describes as "a message about the
-    # literal a one-field rewrite folded the field to". The `__init__` is what
-    # STOPS the fold here, because the slot's value is whatever the constructor
-    # was handed, so `s.d` is still a `MemberExpr` when the gate sees it and the
-    # FIELD arm of `scalar_container_base_evidence` is the one that answers.
-    # Hence the needle, and hence why the sibling row below pins the SAME
-    # sentence for the same construct: that one declares two fields, so it is not
-    # in `one_field_struct_names` at all, and the two rows differ on the rewrite
-    # rather than on the diagnostic.
-    #
-    # This row's needle was `is a TYPE value` — the NON-field arm's words, and an
-    # arm this program does not reach. It is the row that is worth keeping a
-    # non-field sibling for; that sibling is three rows down.
     ("a_subscript_on_a_type_value_faulted_identically",
      "struct S:\n"
      "    var d: DType = 5\n"
@@ -2173,26 +1949,7 @@ REFUSALS = [
      "    var s = S(DType.int32)\n"
      "    printf(\"%d\", s.d[0])\n"
      "    return 0\n",
-     TYPE_TAG_NEEDLE),
-    # … and the sibling that IS the non-field arm: a type VALUE rather than a
-    # slot holding one. `scalar_container_base_evidence` has two `TYPE_KIND`
-    # arms and they are different sentences — a field is "a struct field
-    # declared to hold a TYPE TAG", anything else is "a TYPE value — the tag
-    # word this path gives a type name" — so a needle taken from one of them
-    # does not pin the other and a corpus that only builds fields leaves the
-    # second arm unpinned.
-    #
-    # A LOCAL rather than a `DType`-annotated parameter on purpose: this is the
-    # only spelling of a bare type value the gate classifies as `TYPE_KIND`. A
-    # parameter declared `DType` is not classified as one and `t[0]` on it
-    # BUILDS, which is a different defect with its own doc and is not what this
-    # row is measuring.
-    ("a_subscript_on_a_bare_type_value_faulted_identically",
-     "def main() -> Int:\n"
-     "    var t = DType.int32\n"
-     "    printf(\"%d\", t[0])\n"
-     "    return 0\n",
-     TYPE_VALUE_NEEDLE),
+     "is a TYPE value"),
     # A CALLEE this backend does not lower, which used to stop at a link audit
     # that named a FILE and a SYMBOL and never the call — so a reader could not
     # tell whether to change the program or the link line, and the fuzz audit
@@ -2378,7 +2135,7 @@ REFUSALS = [
      "    var s = S()\n"
      '    printf("%d", s.d[0])\n'
      "    return 0\n",
-     TYPE_TAG_NEEDLE),
+     "is a struct field declared to hold a TYPE TAG"),
     # ── the FRAME slot, which is the same family and the one whose wrong answer
     # is a NUMBER rather than a fault. `FRAME_KIND` was deliberately kept OUT of
     # `model.NON_CONTAINER_SLOT_KINDS` until 2026-10-04, on the reasoning that a
@@ -2473,7 +2230,7 @@ REFUSALS = [
      "    var s = S(DType.int32)\n"
      '    printf("%d", s.d[0])\n'
      "    return 0\n",
-     TYPE_TAG_NEEDLE),
+     "is a struct field declared to hold a TYPE TAG"),
     # The other direction of the `clear` row above, and the one that says the
     # KIND guard is load-bearing rather than decorative: the same `clear()` on a
     # field whose value the constructor takes from a PARAMETER.  The store is

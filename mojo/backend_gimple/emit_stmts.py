@@ -51,12 +51,6 @@ from mojo.middle.stmts_shared import (
 )
 from mojo.middle.types import _is_empty_container_literal
 from mojo.middle.calls_shared import _is_pointer_ctype
-# `ZipLongestFillRefusal` and nothing else from there: the class has to be the
-# SAME object `emit_loops.py` raises and this module's `zip_longest` arm
-# re-raises, and `emit_loops` cannot be imported here (it goes through
-# `gimple_codegen`, which imports this module). See the class's own docstring
-# for why the two arms treat it differently from a plain `ValueError`.
-from mojo.middle.loops_shared import ZipLongestFillRefusal
 
 
 def gen_stmt(gen, node):
@@ -3309,18 +3303,6 @@ def _gen_stmt_ForStmt(gen, node):
         try:
             gen._gen_for_zip_longest(node)
             return
-        except ZipLongestFillRefusal:
-            # NOT rolled back and NOT fallen back from. The generic path drops
-            # the loop and emits `mojo_unsupported_iter`, so a program prints
-            # nothing and exits 0 — a wrong answer with no diagnostic, which is
-            # what the shape this exception names used to produce: a padded
-            # `double` slot read `0.0` where CPython says `None`, and a
-            # `fillvalue` of the wrong type was stored in a slot of another and
-            # printed its own bits. The message is the answer for a shape this
-            # model cannot represent, so it reaches the build rather than a
-            # loop that never runs. Every OTHER failure still falls back: this
-            # one class is a decision, the rest are gaps in the narrowing.
-            raise
         except Exception as e:
             del gen.body_lines[body_mark:]
             del gen.decls[decls_mark:]

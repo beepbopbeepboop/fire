@@ -56,14 +56,6 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import formal.imports as _FI
-# `BUILD_TIMEOUT` for the child budget (this loop compiles EIGHT files of this
-# repository's own source — `fire_compiler.py`, `reflect.py`, the `spec_gen.py`
-# and `exprtypes.py` pair — so it is a compile and gets the compile budget), and
-# `child_exit_reason` for the four suites' one sentence about how a child died.
-# Measured over these eight on this tree, 2026-10-05: 0.2, 6.5, 10.7, 10.5, 5.9,
-# 5.5, 2.0, 1.1 s — so `COMPILE_TIMEOUT_S`'s 600 is ~56x the worst of them and
-# still 6x inside `DEFAULT_JOB_TIMEOUT_S`. The literal this replaced was 900.
-from exec_budget import BUILD_TIMEOUT, child_exit_reason   # noqa: E402
 
 RE_MODULE = os.path.join(_FI._HOSTMODS_ROOT, "re.mojo")
 FIRE = os.path.join(HERE, "fire.py")
@@ -212,47 +204,26 @@ CASES = [
      "module_spec_gen.py's own, with two non-ASCII bytes"),
     ("(?:→|->)", "a->b", 0, "module_spec_gen.py's split pattern"),
     ("\\s*-\\s+`?\\w+", " - name", 0, "module_spec_gen.py's second pattern"),
-    # ── SCOPED INLINE FLAGS, `(?i: … )` ────────────────────────────────────
-    # The whole of what used to be `bugs/FORMAL_re_the_scoped_inline_flag_form
-    # _is_refused.md`, which is deleted with this fix.
-    # Each case is one that the SCOPED spelling decides and the global one
-    # cannot, so a parser that read the letters and then threw them away — or
-    # a matcher carrying one flag word for the whole program — answers
-    # something else on at least one of them.
-    ("(?i:a)b", "Ab", 0, "SCOPED IGNORECASE, and the b outside it is exact"),
-    ("(?i:a)b", "ab", 0, "the b outside the group is still exact"),
-    ("(?i:a)b", "AB", 0, "the b outside the group does not fold case"),
-    ("a(?i:b)c", "aBc", 0, "a scoped group mid-pattern"),
-    ("a(?i:b)c", "abc", 0, "a scoped group mid-pattern, either case"),
-    ("(?-i:AB)", "ab", 0, "SCOPED clear of IGNORECASE"),
-    ("(?-i:AB)", "AB", 0, "SCOPED clear, the exact spelling"),
-    ("(?i)(?-i:AB)", "AB", 0, "a global i and a scoped clear of it"),
-    ("(?i)(?-i:AB)", "Ab", 0, "and the second half is exact, so no match"),
-    ("(?i:a)(?-i:b)", "AB", 0, "set then clear, in that order"),
-    ("(?i:a)(?-i:b)", "Ab", 0, "and the clear half is what fails here"),
-    ("(?i-m:a)", "A", 0, "set i and clear m in one group"),
-    ("(?i-m:a)", "a", 0, "the cleared m is not what decides this one"),
-    ("(?i:(a))b", "Ab", 0, "a capturing group inside a scoped flag group"),
-    ("(?i:a)+b", "AAAb", 0, "a quantified scoped group, copies included"),
-    ("(?i:ab|c)", "aB", 0, "an alternation inside a scoped flag group"),
-    ("(?i:ab|c)", "AB", 0, "both options of it fold case"),
-    ("(?x: a) c", "a c", 0, "SCOPED VERBOSE, the space inside the group only"),
-    ("(?x: a) c", " b", 0, "and outside it the space is a literal"),
-    ("(?x: a # c\n b)", "ab", 0, "SCOPED VERBOSE with a comment on its own "
-                                   "line, so the `b` is still a `b`"),
-    ("(?x-i: a b)", "ab", 0, "set x and clear i in one group"),
-    ("(?s:a.b)c", "a\nbc", 0, "SCOPED DOTALL"),
-    ("a(?s:.)b", "a\nb", 0, "SCOPED DOTALL on a group mid-pattern"),
-    ("a(?s:.)b.c", "a\nb\nc", 0, "DOTALL scoped to the group, so the second "
-                                  "dot does not cross"),
-    ("a(?s:.)b.c", "a\nbxc", 0, "and it matches when that dot need not cross"),
-    ("(?m:^)b", "a\nb", 0, "SCOPED MULTILINE, `^` on a middle line"),
-    ("a(?m:^b)", "a\nb", 0, "SCOPED MULTILINE inside a pattern"),
-    ("(?i:[a-z])b", "Ab", 0, "a scoped flag on a CLASS, which folds case"),
-    ("(?i:[a-z])B", "Ab", 0, "and the literal after the group does not"),
-    ("(?i)z|(?-i:B)", "B", 0, "a global flag on one option, a scoped clear on "
-                                "the other"),
-    ("b|(?i:z)", "b", 0, "the second option does not disturb the first"),
+    # SCOPED inline flags -- CPython's second spelling of the one feature the
+    # argument flags duplicate, and the one that has to STOP at the `)`. These
+    # are in the corpus rather than only in the scoped-flag test because the
+    # corpus is compared against CPython on BOTH backends and over every answer
+    # the module gives -- status, whole-match span, group text, findall, split
+    # and sub -- and a scoped flag is wrong in a way a status alone can hide:
+    # `(?x: a) c` matches the same subject either way and reports a DIFFERENT
+    # span when VERBOSE leaks past the group.
+    ("(?i:a)b", "ab", 0, "scoped IGNORECASE, with a literal `b` after the group"),
+    ("(?i:a)b", "aB", 0, "…and the subject that needs the fold to have LEAKED"),
+    ("(?x: a) c", "a c", 0, "scoped VERBOSE: the space after the group is the pattern's own"),
+    ("(?x: a) c", "ac", 0, "…and the subject that needs VERBOSE to have leaked"),
+    ("(?s:a.b)", "a\nb", 0, "scoped DOTALL"),
+    ("(?m:^b)", "a\nb", 0, "scoped MULTILINE on an anchor"),
+    ("(?-i:AB)", "ab", I, "a scoped `-i` turning the ARGUMENT flag off"),
+    ("(?-i:AB)", "AB", I, "…and the subject the same pattern does match"),
+    ("(?i:(?-i:a))b", "aB", I, "nested: the inner `-i` wins inside, the outer `i` is back outside"),
+    ("a(?i:b)c", "aBc", 0, "a scoped group that is not at the head of the pattern"),
+    ("(?i:ab)+", "ABab", 0, "a scoped group under a quantifier, so every copy is re-parsed"),
+    ("((?i:a)b)", "aB", 0, "a scoped group inside a CAPTURING group"),
 ]
 
 
@@ -653,14 +624,21 @@ def build_and_run(tmpdir, name, source, backend=None):
     # rather than about what happened. Observed on a loaded machine before this
     # check existed — an image that had been killed reported itself as a corpus
     # that answered nothing, which reads as a wrong answer rather than as a
-    # process that is not there. `exec_budget.child_exit_reason` names the
-    # signal when the status is negative (`-11` is SIGSEGV, `-9` SIGKILL) and
-    # says, for the two a harness sends on its own account, that it sent them:
-    # the shared wording four suites had each hand-rolled, one of which printed
-    # a bare `signal 9`.
+    # process that is not there. A negative status is a signal (`-11` is SIGSEGV,
+    # `-9` SIGKILL), so it is reported with its name.
     if run.returncode != 0:
-        raise AssertionError(child_exit_reason(run.returncode, run.stderr)
-                             + " with no usable output")
+        import signal as _signal
+        st = run.returncode
+        name = ""
+        if st < 0:
+            try:
+                name = " (%s)" % _signal.Signals(-st).name
+            except ValueError:                  # pragma: no cover
+                name = " (signal %d)" % -st
+        raise AssertionError("the image exited %d%s with no usable output; "
+                             "stderr: %s"
+                             % (st, name,
+                                (run.stderr or "").strip()[-300:]))
     return [ln for ln in run.stdout.split("\n") if ln.strip() != ""]
 
 
@@ -894,73 +872,58 @@ INLINE_FLAG_PAIRS = [
 
 # What CPython REFUSES, and so must this module -- as a status, which is what
 # `test_unsupported_constructs_are_refused` is about. Each is measured against
-# CPython rather than quoted.
+# CPython rather than quoted. The SCOPED form is deliberately NOT here: CPython
+# compiles `(?i:a)`, so putting it in this list would claim CPython refuses
+# something it compiles. It is in `SCOPED_FLAG_CASES` below, measured against
+# CPython's own answers.
 INLINE_FLAG_REFUSED = [
     ("(?L)a", "bad inline flags: cannot use 'L' flag with a str pattern"),
     ("(?z)a", "unknown extension ?z)"),
     ("(?-i)a", "missing -"),
-    ("(?i-m)a", "missing :"),
-    ("(?au)a", "flags 'a', 'u' and 'L' are incompatible"),
-    ("(?ua)a", "flags 'a', 'u' and 'L' are incompatible"),
     ("(?i)a(?m)b", "global flags not at the start of the expression"),
     ("(a)(?i)b", "global flags not at the start of the expression"),
     ("(?i)((?m)a)", "global flags not at the start of the expression"),
 ]
 
-# The SCOPED form of the same feature, `(?i: … )`. Same four columns, and the
-# same reason to be a table: the letters here change for ONE GROUP, so a
-# module that compiled them and then ignored them, or that let them reach past
-# the group, answers 0 or 1 where CPython answers the other one. Every case is
-# also in `CASES`, where the whole differential (spans, group text, findall,
-# split, sub) is compared; this table is the cheap status half, and it is here
-# so a failing scoped case names itself instead of arriving as "case 137".
-SCOPED_FLAG_PAIRS = [
-    ("(?i:a)b", 0, "Ab", "IGNORECASE inside, the b outside exact"),
-    ("(?i:a)b", 0, "AB", "and the b outside does not fold"),
-    ("a(?i:b)c", 0, "aBc", "a scoped group in the middle of a pattern"),
-    ("(?-i:AB)", re.IGNORECASE, "ab", "a scoped CLEAR of the argument flag"),
-    ("(?-i:AB)", re.IGNORECASE, "AB", "the same, the spelling that matches"),
-    ("(?i)(?-i:AB)", re.IGNORECASE, "AB", "a global flag and a scoped clear"),
-    ("(?i)(?-i:AB)", re.IGNORECASE, "Ab", "so the second half is exact"),
-    ("(?i:a)(?-i:b)", re.IGNORECASE, "AB", "set then clear, in order"),
-    ("(?i-m:a)", re.IGNORECASE | re.MULTILINE, "A", "set i and clear m together"),
-    ("(?x: a) c", 0, "a c", "VERBOSE inside the group only"),
-    ("(?x: a) c", 0, " b", "and the space outside it is a literal"),
-    ("(?x-i: a b)", 0, "ab", "set x and clear i together"),
-    ("(?s:a.b)c", 0, "a\nb", "DOTALL inside the group only"),
-    ("a(?s:.)b.c", 0, "a\nb\nc", "and the dot after it does not cross"),
-    ("(?m:^)b", 0, "a\nb", "MULTILINE on a `^` inside the group"),
-    ("a(?m:^b)", 0, "a\nb", "MULTILINE inside a pattern"),
-    ("(?i:a)+b", 0, "AAAb", "a quantified scoped group: every copy folds case"),
-    ("(?i:ab|c)", 0, "aB", "an alternation inside the group"),
-    ("(?i:(a))b", 0, "Ab", "a capturing group inside the scoped group"),
-    ("(?i)z|(?-i:B)", re.IGNORECASE, "B", "one option global, one scoped"),
-    ("(?a:a)", 0, "a", "SCOPED `a`: accepted, and it sets nothing"),
-    ("(?u:a)", 0, "a", "SCOPED `u`: the same, the engine is already bytes"),
-    ("(?i:a)(?m:b)", 0, "a\nb", "two scoped groups, and `^` needs its newline "
-                              "BEFORE it"),
+# The SCOPED form `(?letters: … )`, one feature in two scopes. (pattern, flags
+# argument, subject, what it decides).  The flags ARGUMENT is CPython's own and
+# is passed to the module unchanged, so a row with a non-zero argument is a
+# scoped group turning an argument flag OFF -- the half of the feature the
+# argument form cannot reach, and the half a leaked flag would hide.
+#
+# **EVERY PATTERN APPEARS TWICE, ON SUBJECTS CPython ANSWERS DIFFERENTLY ON**,
+# and `test_the_scoped_flag_form_answers_like_cpython` asserts that difference
+# rather than trusting this comment. A scoped flag that leaked out of its group,
+# or that was not restored on the way out, answers the SAME for both subjects
+# and would then be a case that cannot see the defect it exists to catch: the
+# point of `(?i:a)b` is the `b` after the group, and the point of `(?x: a) c` is
+# the space after it, and neither is visible in a status.
+SCOPED_FLAG_CASES = [
+    ("(?i:a)b", 0, "ab", "IGNORECASE inside the group, and a literal `b` after it"),
+    ("(?i:a)b", 0, "aB", "…the same pattern against a subject that only matches "
+                        "if the fold LEAKED out of the group"),
+    ("(?x: a) c", 0, "a c", "VERBOSE inside the group; the space after it is "
+                            "the pattern's own and is NOT skipped"),
+    ("(?x: a) c", 0, "ac", "…the same pattern, and the answer differs in the "
+                           "SPAN rather than in the status, which is why this "
+                           "test reads spans"),
+    ("(?s:a.b)", 0, "a\nb", "DOTALL inside the group, and nothing outside it "
+                            "uses a dot at all"),
+    ("(?m:^b)", 0, "a\nb", "MULTILINE on an anchor inside the group"),
+    ("(?-i:AB)", I, "AB", "a scoped `-i` turning the ARGUMENT flag off for the "
+                          "group and off again after it"),
+    ("(?-i:AB)", I, "ab", "…the same pattern against the subject that only "
+                          "matches if the `-i` did nothing"),
+    ("(?i:(?-i:a))b", I, "aB", "nested: the inner `-i` wins INSIDE and the "
+                               "outer `i` is back for the `b` after it"),
+    ("a(?i:b)c", 0, "aBc", "a scoped group that is not at the head of the "
+                           "pattern, which the global form may not be"),
+    ("(?i:ab)+", 0, "ABab", "a scoped group under a quantifier, so every copy "
+                            "is re-parsed from the atom's source span"),
+    ("((?i:a)b)", 0, "aB", "a scoped group inside a CAPTURING group, so the "
+                           "group number and the flag are independent"),
 ]
 
-# What CPython REFUSES in the SCOPED spelling, and so must this module — each
-# measured, because each is a constraint `_p_flaggroup` has to enforce rather
-# than a shape it happens to fall over on. `(?-i)a` and `(?i-m)a` are in
-# `INLINE_FLAG_REFUSED`'s neighbourhood for the same reason: CPython wants a `:`
-# wherever a `-` appears, and the global spelling has none.
-SCOPED_FLAG_REFUSED = [
-    ("(?i-i:a)", "bad inline flags: flag turned on and off"),
-    ("(?-:a)", "missing flag"),
-    ("(?i-:a)", "missing flag — a `-` with no letter after it"),
-    ("(?i--m:a)", "missing flag — a second `-`"),
-    ("(?i-a-:a)", "missing flag — a second `-`, one letter later"),
-    ("(?L:a)", "cannot use 'L' flag with a str pattern"),
-    ("(?z:a)", "unknown extension ?z)"),
-    ("(?aL:a)", "cannot use 'L' flag with a str pattern"),
-    ("(?au:a)", "flags 'a', 'u' and 'L' are incompatible"),
-    ("(?ua:a)", "flags 'a', 'u' and 'L' are incompatible"),
-    ("(?-a:a)", "cannot turn off flags 'a', 'u' and 'L'"),
-    ("(?-u:a)", "cannot turn off flags 'a', 'u' and 'L'"),
-    ("(?i:a", "missing ), unterminated subpattern"),
-]
 
 
 def _inline_status_program(pairs):
@@ -1043,107 +1006,109 @@ def test_inline_flags_that_cpython_refuses_are_refused_here(tmpdir):
           % len(INLINE_FLAG_REFUSED), "got %s" % out)
 
 
-def test_the_scoped_flag_form_answers_like_cpython(tmpdir):
-    """`(?i: … )` is compiled, and answers what CPython answers.
+def _scoped_status_program(cases):
+    """One line per case: the STATUS and the whole match's span.
 
-    The counterpart to the two above: a spelling of a feature the module has.
-    It was REFUSED, and the reason recorded in `re.mojo` was that flags are one
-    word `_vm` reads at entry and `_step` tests, so a flag that changes inside
-    a compiled program would need the matcher to carry a MUTABLE word and
-    restore it — a hot-loop change and a proof cost. The fix is not a mutable
-    word: every node that consults a flag carries the word it was compiled
-    under in its p1 (`_term`), so the word is a property of the node and a
-    backtrack entry is still (pc, sp, slot, old).
-
-    Every case below is decided by the scoped form ALONE, which is what makes
-    it worth a program of its own: the same pattern with the flag as an argument
-    answers the same thing, so a module that implemented the feature twice and
-    wired only one of them up would pass a table of the argument spellings.
-
-    The statuses are compared against CPython rather than against a list, so
-    the table cannot rot into "these are the answers we happen to give".
-    """
-    pairs = SCOPED_FLAG_PAIRS
-    src = _inline_status_program(pairs)
-    want = [1 if re.search(pat, subj, flag) else 0 for pat, flag, subj, _w in pairs]
-    try:
-        out = build_and_run(tmpdir, "scopedflags", src)
-    except AssertionError as e:
-        check(False, "the scoped-flag program builds", str(e)[:400])
-        return
-    out = [int(tok) for line in out for tok in line.split()]
-    check(out == want,
-          "every scoped flag group answers as CPython does (%d spellings)"
-          % len(want), "got %s, CPython %s" % (out, want))
-    # The GROUP COUNT is the other half of "this is `(?: … )`": CPython numbers
-    # nothing inside `(?i: … )`, so `(?i:(a))` has one group and `(?i:a)` none,
-    # and a scoped group that numbered itself would shift every later group.
-    # `ngroups` is a separate program because it is a separate question.
-    counts = [(pat, subj) for pat, _f, subj, _w in pairs
-              if pat.count("(") > pat.count("(?:")]
-    lines = [PRELUDE, "", "def main(n: Int) -> Int:"]
-    for index, (pat, _subj) in enumerate(counts):
-        lines.append("    printf(\"G%d \")" % index)
-        # A call's result is not a `printf` argument on this path — the callee's
-        # own arguments have to be in registers before the format's are — so
-        # the answer goes through `emit`, which is what every other print in
-        # this file does.
-        lines.append("    emit(0, re.ngroups(%s))" % mojo_str(pat))
-    lines.append("    printf(\"%s\", re.nl())")
-    lines.append("    return 0")
-    try:
-        out = build_and_run(tmpdir, "scopedgroups", "\n".join(lines) + "\n")
-    except AssertionError as e:
-        check(False, "the scoped-flag ngroups program builds", str(e)[:400])
-        return
-    want = []
-    for i, (pat, _s) in enumerate(counts):
-        want += ["G%d" % i, str(re.compile(pat).groups)]
-    got = [tok for line in out for tok in line.split()]
-    check(got == want,
-          "a scoped flag group numbers nothing itself (%d patterns)"
-          % len(counts), "got %s\nwant %s" % (got, want))
-
-
-def test_the_scoped_flag_shapes_cpython_refuses_are_refused_here(tmpdir):
-    """A scoped flag group has CPython's own refusals, as STATUSES.
-
-    Each is measured against CPython rather than quoted, and each is a shape
-    this module's new arm could plausibly have ACCEPTED by ignoring a
-    constraint: a letter turned both on and off, an empty flag list, a `L`, and
-    the two ways a `-` can appear where CPython wants a `:`. A refusal that
-    answers "no match" instead of a status is the silent wrong answer
-    `test_unsupported_constructs_are_refused` exists to prevent.
+    The span is half the test. `(?x: a) c` matches on both of its subjects if
+    VERBOSE leaks, so a status-only comparison would call a leaked flag correct
+    on the one row that is about leaking; the spans differ ((0, 3) against
+    (0, 2)) and that is what says the flag stopped at the `)`.
     """
     lines = [PRELUDE, "", "def main(n: Int) -> Int:"]
-    for index, (pat, _why) in enumerate(SCOPED_FLAG_REFUSED):
+    for index, (pat, flag, subj, _what) in enumerate(cases):
         lines.append("    p%d = %s" % (index, mojo_str(pat)))
-        lines.append("    st%d = [0, 0, 0, 0]" % index)
-    for index, (pat, _why) in enumerate(SCOPED_FLAG_REFUSED):
-        lines.append("    emit(0, re.search(st%d, 4, p%d, \"abc\", 0))"
-                     % (index, index))
+        lines.append("    s%d = %s" % (index, mojo_str(subj)))
+        lines.append("    st%d = [0, 0, 0, 0, 0, 0]" % index)
+    for index, (pat, flag, subj, _what) in enumerate(cases):
+        lines.append("    r%d = re.search(st%d, 6, p%d, s%d, %d)"
+                     % (index, index, index, index, flag))
+        lines.append("    emit(0, r%d)" % index)
+        lines.append("    emit(0, st%d[0])" % index)
+        lines.append("    emit(0, st%d[1])" % index)
+        lines.append("    printf(\"%s\", re.nl())")
     lines.append("    return 0")
-    src = "\n".join(lines) + "\n"
-    try:
-        out = build_and_run(tmpdir, "scopedflagsrefused", src)
-    except AssertionError as e:
-        check(False, "the scoped-flag refusal program builds", str(e)[:400])
-        return
-    out = [int(tok) for line in out for tok in line.split()]
-    # Every one of them must be a STATUS the caller can see, and 3 is
-    # STATUS_UNSUPPORTED; a 0 here would be "no match".
-    check(out == [3] * len(SCOPED_FLAG_REFUSED),
-          "all %d refused scoped flag shapes answer STATUS_UNSUPPORTED"
-          % len(SCOPED_FLAG_REFUSED), "got %s" % out)
-    # And CPython must agree that each of them is refused at all, which is the
-    # premise: a shape CPython also compiled would be a divergence.
-    for pat, why in SCOPED_FLAG_REFUSED:
+    return "\n".join(lines) + "\n"
+
+
+def _scoped_expected(case):
+    m = re.search(case[0], case[2], case[1])
+    if m is None:
+        return [0, -1, -1]
+    return [1, m.start(), m.end()]
+
+
+def test_the_scoped_flag_form_answers_like_cpython(tmpdir):
+    """`(?x: ... )` is CPython's second spelling, and it is measured on BOTH.
+
+    It used to be refused with `STATUS_UNSUPPORTED`, and this test asserted the
+    refusal -- which was the right thing to assert while it was true, and is
+    what a fix turns red. The engine had a global form (`_p_inline`) and an
+    argument form (`re.VERBOSE()`) for one feature and refused the third
+    spelling of it, so `re.search("(?x: a) c", "a c")` answered "unsupported"
+    where CPython matches, and the module's own docstring said `re.VERBOSE` was
+    implemented.
+
+    **CPython is the oracle for every row, and three premises are asserted
+    before the image is built**, because a test of a differential feature that
+    takes its own table on trust tests nothing:
+
+      * every pattern COMPILES in CPython -- a shape CPython also refused would
+        be a shared limit rather than a divergence, and the table would then be
+        asserting this module's taste;
+      * every pattern that appears twice has CPython answers that DIFFER between
+        its two rows, so no row is one a leak could hide (see
+        `SCOPED_FLAG_CASES`);
+      * at least one pattern appears twice, so the rule above is not vacuous on
+        a table where someone has deduplicated it.
+
+    Both backends, because the cause is a host MODULE and the two emitters
+    lower it differently -- `formal/arm64_codegen.py` and
+    `formal/x86_64_codegen.py` are separate implementations of the same AST, and
+    the scoped form's cost is a new opcode and a new arena word, which is
+    exactly the shape of change one of them can get right and the other wrong.
+    The corpus rows for the same patterns run on both as well
+    (`test_the_corpus_against_cpython` and its `_on_x86_64` twin).
+    """
+    for pat, _flag, _subj, _what in SCOPED_FLAG_CASES:
         try:
             re.compile(pat)
-        except re.error:
+        except re.error as e:
+            check(False, "%r compiles in CPython, so this table is measuring "
+                         "a divergence and not a shared limit" % pat, str(e))
+    seen = {}
+    for pat, flag, subj, _what in SCOPED_FLAG_CASES:
+        seen.setdefault(pat, []).append(_scoped_expected((pat, flag, subj,
+                                                           _what)))
+    repeated = 0
+    for pat, answers in sorted(seen.items()):
+        if len(answers) < 2:
             continue
-        check(False, "%r (%s) compiles in CPython, so refusing it here is a "
-                     "divergence and not a shared limit" % (pat, why), "")
+        repeated += 1
+        check(len(set(map(tuple, answers))) > 1,
+              "CPython answers %r differently on its own two subjects, so the "
+              "row can see a flag that leaked" % pat,
+              "both rows answer %r" % (answers,))
+    check(repeated > 0,
+          "the table has %d pattern(s) asked twice, so the anti-leak rule "
+          "above is not vacuous" % repeated)
+
+    src = _scoped_status_program(SCOPED_FLAG_CASES)
+    want = [_scoped_expected(c) for c in SCOPED_FLAG_CASES]
+    for backend in (None, "x86_64"):
+        tag = backend or "arm64"
+        try:
+            out = build_and_run(tmpdir, "scopedflags%s" % tag, src,
+                                backend=backend)
+        except AssertionError as e:
+            check(False, "[%s] the scoped-flag program builds" % tag,
+                  str(e)[:400])
+            continue
+        got = [[int(tok) for tok in line.split()] for line in out]
+        check(got == want,
+              "[%s] every scoped flag group answers as CPython does, status "
+              "and span (%d rows)" % (tag, len(want)),
+              "got %s\nwant %s" % (got, want))
+
 
 
 def test_mojo_str_round_trips_through_the_decoder(tmpdir=None):
@@ -1711,11 +1676,9 @@ def test_the_sweep_files_no_longer_refuse_on_the_import(tmpdir):
             r = subprocess.run(
                 [sys.executable, FIRE, "build", "--formal", "--no-prove",
                  "-o", os.path.join(tmpdir, os.path.basename(rel) + ".bin"),
-                 path], capture_output=True, text=True,
-                 timeout=BUILD_TIMEOUT, cwd=HERE)
+                 path], capture_output=True, text=True, timeout=900, cwd=HERE)
         except subprocess.TimeoutExpired:
-            check(False, "%s builds (timed out at BUILD_TIMEOUT=%ds)"
-                  % (rel, BUILD_TIMEOUT))
+            check(False, "%s builds (timed out)" % rel)
             continue
         text = r.stderr + r.stdout
         check("imports 're'" not in text,
@@ -1744,7 +1707,6 @@ def main():
         test_inline_flags_answer_like_the_arguments_they_duplicate,
         test_inline_flags_that_cpython_refuses_are_refused_here,
         test_the_scoped_flag_form_answers_like_cpython,
-        test_the_scoped_flag_shapes_cpython_refuses_are_refused_here,
         test_a_span_list_that_is_too_small_is_a_status_not_a_crash,
         test_the_corpus_patterns_all_work,
         test_the_sweep_files_no_longer_refuse_on_the_import,

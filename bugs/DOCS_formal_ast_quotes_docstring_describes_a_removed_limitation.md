@@ -1,0 +1,116 @@
+# DOCS: `formal/hostmods/ast.mojo`'s `_quotes()` still explains a limitation
+# that was removed
+
+**Status: two of the three sites are DONE; the third is `platform.mojo` and it
+is another worker's claim, so it is left with the next step written down
+(2026-10-04, branch `work/bugs5-1`).**
+
+| site | state |
+|---|---|
+| `formal/hostmods/ast.mojo` `_quotes()` | **DONE** — `06ec0529` ("formal: a string literal is decoded inside a MODULE too, so the corpora written around the old rule can say what is true") returned the literal `"\"'"` and replaced the premise with the measurement, exactly as this doc's "Next step" describes. Its two remaining mentions of the old rule (`:163`, `:344`) are the corrected form and are correct. |
+| `formal/hostmods/argparse.mojo` `_ws_set` | **DONE here.** It returned `str_alloc(8)` plus seven `memset`s on the false premise, and now returns the one literal `" \t\n\v\f\r"`, with the old claim quoted and refuted in the docstring and the CURRENT reason recorded (a module-level name has no storage on this path, so it stays a function; all three callers only READ the set, so handing them the constant pool's bytes cannot be written through). |
+| `formal/hostmods/platform.mojo:336` `_int_is_space` | **REMAINING, not mine.** `hostmods-platform` holds `module:platform+fnmatch+collections-rest` (checked with `tools/control.py claims`), so the edit is not made from here. |
+
+What landed with the `argparse.mojo` change, and how it was checked:
+
+* `python3 test_formal_argparse.py` — PASS=9 FAIL=0, 69 parses in 15 parsers each
+  built as an arm64 image and diffed against CPython's own argparse, before and
+  after, so the byte set is measured rather than asserted. 3m00s, peak 0.4 GB.
+* `python3 test_formal_sys.py` — `test_a_literal_inside_a_module_is_decoded_too`
+  gained a fourth case, `\v\f` inside a MODULE on both architectures, because
+  that is the escape pair no other case in the suite reaches and `_ws_set` now
+  depends on both of them: a decoder that handled `\n` and `\t` and passed the
+  rest through would have left the other three greens intact and turned this
+  set into backslash-v-backslash-f. (`"m\v\fn"` decodes to FOUR bytes and
+  `sys.write_stderr` returns 4; the source's six characters are what a
+  non-decoding path would report.)
+* The comment above `BUF_CAP` in the same file was already correct and is left
+  alone: the `memset` separators there are single bytes written at a computed
+  OFFSET, which is a different reason from a SET, and `_ws_set`'s new docstring
+  says so rather than implying the whole file could be literals.
+
+The rest of this doc is the original report and is kept as the record of how
+the three sites were found.
+
+## What it says
+
+`formal/hostmods/ast.mojo`, `_quotes()`, docstring:
+
+> BUILT, and not written as a literal, for a measured reason: a string literal
+> on this path is interned VERBATIM and its escapes are not unescaped, so
+> there is no spelling of a two-byte set holding both quotes. `"\""` emits a
+> backslash and a quote (the escape is not interpreted, so the set would also
+> match every backslash in the source) …
+
+None of that is true any more. 9023031b ("formal: a string literal's escapes
+are decoded, on this path too") moved the decoder into
+`fire_compiler.decode_c_escapes` and gave the formal backends the one every
+other engine already used; `FORMAL_string_literal_escape_is_not_decoded`
+went with it, and `formal/hostmods/sys.mojo`'s matching note and
+`test_formal_sys.py`'s two assertions were updated with it. This one was missed,
+because nothing fails on it: the function still builds the set a byte at a time,
+which is still correct, just no longer necessary.
+
+## Why it matters anyway
+
+It is the reason a reader would give for NOT simplifying the function, and the
+stated reason is false. The two spellings it rules out now work:
+`"\""` is a one-character string containing a quote, and `'"'` is a one-character
+string containing a quote — the second spelling is what the comment says "looks
+right" and then rejects. Anyone who reads this before touching the function
+concludes the byte-by-byte construction is load-bearing.
+
+## What I ran
+
+`grep -rn "escapes are NOT\|escapes are not decoded\|interned verbatim" formal/ test_formal_*.py doc/*.md`
+on the merge of `work/formal14-hostmods-more2` (2026-10-03).
+
+**This doc's own census was wrong, and that merge is what made it wrong.** It
+said `ast.mojo` was "the only remaining place in `formal/`" describing a string
+literal's escapes as undecoded, and named the two places it meant to exempt —
+both of them `formal/arm64_codegen.py`. There were three HOSTMOD sites, plus three
+more since fixed:
+
+| site | state |
+|---|---|
+| `formal/hostmods/ast.mojo` `_quotes()` | **this doc's subject** — still to do |
+| `formal/hostmods/argparse.mojo:1761` (`_ws_set`'s own docstring) | **still to do**, and the cheapest: see below |
+| `formal/hostmods/platform.mojo:336` (`_int_is_space`'s docstring) | **still to do** — and `formal/hostmods/platform.mojo` is claimed by `hostmods-platform` (`module:platform+fnmatch+collections-rest`), so it is not the merger of `formal14-hostmods-more2`'s to edit |
+| `formal/hostmods/textwrap.mojo` module docstring | FIXED on that merge; it carried the same false claim and cited the deleted doc |
+| `test_formal_html.py` header | FIXED on that merge, same |
+| `test_formal_textwrap.py`'s `mask` comment | FIXED on that merge, same |
+
+`argparse.mojo` contradicts ITSELF, which is what makes it the cheapest of the
+three: the comment at `argparse.mojo:317-327` already carries the corrected
+reason ("That reason is CURRENT. The reason this file used to give ... is NOT,
+and had stopped being true at `9023031b`"), while `_ws_set`'s docstring fourteen
+hundred lines below still states the false premise. The replacement text is
+already in the file; the fix is to move it.
+
+The emitters already record the fix and cite the deleted doc AS DELETED
+(`formal/arm64_codegen.py:3480`, `:9769`, `formal/x86_64_codegen.py:3873`), and
+`formal/hostmods/re.mojo:2430` says so in prose — those are the two this doc's
+census meant to name, and it named one of them twice.
+
+Not changed here: `formal/**` is the busiest area in the tree, and these are
+comments in host modules that go into real formal images. Each is a two-line edit
+for whoever is in there.
+
+## Next step
+
+Replace the "interned VERBATIM and its escapes are not unescaped" premise with
+the one that holds (escapes are decoded by `fire_compiler.decode_c_escapes`, as
+CPython does), and either keep the byte-by-byte construction with that reason
+or simplify it to a literal and say why the measurement was dropped.
+`test_formal_sys.py`'s `string escapes are interpreted as CPython does` is the
+test that keeps the underlying behaviour pinned either way.
+
+Three sites, and the reason each still matters is the same: it is the reason a
+reader would give for NOT simplifying a construction that is no longer
+necessary, and a stated reason that is false sends them the wrong way. The
+wording to use is already in the tree twice — `formal/hostmods/argparse.mojo:317-327`
+and, as of the `formal14-hostmods-more2` merge, `formal/hostmods/textwrap.mojo`'s
+"THE BYTE SETS ARE BUILT WITH `memset`, and here is the CURRENT reason" section,
+which also records why the `memset` idiom SURVIVES the fix: these separators are
+written at a computed offset, and one of them is a NUL-terminated `strspn`
+accept-set at a length a literal cannot spell.

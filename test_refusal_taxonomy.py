@@ -28,9 +28,8 @@ protecting, and they are not the same thing:
    sample attached to it.** The family "a module whose API is its top-level
    statements, imported by another" and its sample were removed on
    2026-10-03 with the dylib-module-body row it keyed on (§6 of
-   the `b7` round, indexed in `bugs/FORMAL_sweep_work_map.md` §3.1, whose
-   document was consolidated with the fix): both object writers emit a
-   load-time initializer, so the refusal
+   `bugs/FORMAL_sweep_work_map_2026-10-02_b7.md`, whose doc was deleted with
+   the fix): both object writers emit a load-time initializer, so the refusal
    that named it no longer exists and a sample of a message nothing produces is
    a sample that can only rot. A family is removed when its message stops being
    reachable, and the test that says so is this file's list — the absence of a
@@ -70,7 +69,6 @@ import formal_sweep_parity as P  # noqa: E402
 import formal_sweep_rounds as R  # noqa: E402
 import formal.model as FM  # noqa: E402
 import fire_compiler as F  # noqa: E402
-from formal.model import dotted_specialization_refusal  # noqa: E402
 
 # ── the two samples that are BUILT rather than copied ──────────────────────
 # Every other sample in this file is a hand-copy of a message, which is what
@@ -283,130 +281,6 @@ def _try_around_raise_message():
 
 _TRY_AROUND_RAISE_REFUSAL = _try_around_raise_message()
 
-
-#: The program the sample below is built from, and the one construct the
-#: higher-order-builtin refusal exists for: `sorted` over a literal, which the
-#: emitter used to treat as an ordinary call to a C symbol and the link audit
-#: used to refuse four stages later from a message about SYMBOLS.
-_NOT_LOWERED_BUILTIN_SOURCE = """\
-def main(n):
-    return sorted([3, 1, 2])
-"""
-
-#: The family and the cause are spelled INDEPENDENTLY of the two tables for the
-#: reason `OWN_METHOD_CAUSE` is: the planner's tables are keyed on different
-#: things, and the pair of samples is what proves the two spellings still agree.
-NOT_LOWERED_BUILTIN_FAMILY = "a builtin this path does not lower"
-NOT_LOWERED_BUILTIN_CAUSE = "a builtin this path does not lower"
-
-
-def _not_lowered_builtin_message():
-    """The higher-order-builtin refusal, BUILT: parsed, walked, refused.
-
-    Built rather than copied for the reason the three above are, and for one
-    more that matters here specifically: the message QUOTES
-    `formal/model.py::NOT_LOWERED_BUILTINS`'s own sentence for the name, so a
-    hand-copy would be a sentence that stops matching the moment that table is
-    reworded — and a dead marker here empties a CAUSE row, which reads as a
-    cause that blocks nothing.
-    """
-    import formal.build as FB
-    stmts = FB.parse_module(_NOT_LOWERED_BUILTIN_SOURCE, filename="<taxonomy>")
-    fns = [n for n in FM.iter_nodes(stmts)
-           if type(n).__name__ == "FunctionDef"]
-    msg = FM.not_lowered_builtin_refusal(
-        fns, FM.collect_module_symbols(stmts))
-    if msg is None:
-        raise AssertionError(
-            "formal/model.py no longer refuses a call to a builtin it does not "
-            "lower: `not_lowered_builtin_refusal` answered None for a program "
-            "whose only statement is `sorted([3, 1, 2])`. Either the check was "
-            "removed — in which case `sorted` is an unbound C symbol again and "
-            "the link audit is the only thing saying so, four stages after the "
-            "whole closure was emitted — or it stopped seeing the call.")
-    return msg
-
-
-_NOT_LOWERED_BUILTIN_REFUSAL = _not_lowered_builtin_message()
-
-
-#: The family and the CAUSE for the export-rule refusal, spelled INDEPENDENTLY
-#: of both tables for the reason `STRING_COMPOSITION_CAUSE` is: the family is
-#: keyed on the shape of the message and the cause on what a fix would have to
-#: change, so a construct one of them can name and the other cannot is a
-#: construct a planner cannot prioritise — and the PAIR of samples below is what
-#: proves the two still agree. This is the corpus's largest codegen row (148
-#: files on the 2026-10-05 b13 sweep) and the cause has had a row since
-#: 2026-10-04; the FAMILY did not, so every one of those files was reported by
-#: the sweep's own by-family breakdown as `other refusal` — the bucket both
-#: tables define as "nobody has looked".
-EXPORT_RULE_FAMILY = "callee: the defining module does not export it"
-EXPORT_RULE_CAUSE = "a call to a name the defining module does not export"
-
-
-class _ImportingSymbol:
-    """The one thing `imported_callee_refusal` reads off its symbol: the module
-    the name is IMPORTED FROM, which is the module whose export set has to carry
-    it. A named stub rather than a parsed module for the reason the stub above
-    `refusing_module` is one: the function takes the symbol, and a symbol is
-    what the export audit passes it."""
-
-    module = "std.format._utils"
-
-
-def _export_rule_message():
-    """The export-rule refusal, BUILT rather than copied — the fifth built
-    sample, and the one with the most to lose from a hand-copy.
-
-    `formal/model.py::imported_callee_refusal` decides and words this refusal,
-    it is the largest codegen row in the corpus, and its message quotes its own
-    documentation of `doc/ABI.md`'s export rule — so a hand-copy is a sentence
-    that stops matching the moment anything below it is re-worded, and the
-    failure is SILENT in the most expensive direction available to this file: a
-    dead marker empties a 148-file row, and the sweep then reports those files
-    as `other refusal` again with nothing failing.
-
-    Built with `fn_name=""` because the leading `main: ` is not part of the
-    shape being classified; the export clause is in the middle of the sentence
-    and the marker does not depend on the prefix.
-    """
-    msg = FM.imported_callee_refusal("FormatStruct", _ImportingSymbol(), "")
-    if not msg:
-        raise AssertionError(
-            "formal/model.py no longer words the export-rule refusal "
-            "(`imported_callee_refusal`), so the family's marker and its "
-            "sample have nothing to match. A sample of a message the backend "
-            "cannot produce is a sample that can only rot — see this file's "
-            "docstring, point 3 — so the row goes with the refusal rather "
-            "than outliving it.")
-    return msg
-
-
-_EXPORT_RULE_REFUSAL = _export_rule_message()
-
-
-# The planner's spelling of the SAME cause as `OWN_METHOD_FAMILY` above, and it
-# is spelled here independently of `tools/formal_sweep_causes.py::CAUSES` for
-# the reason `STRING_COMPOSITION_CAUSE` is: the two tables are keyed on
-# different things, so the pair of samples is what proves the two spellings
-# still agree. A label that drifted would make `check_cause_table` report a
-# cause that matches nothing while reading as one that blocks nothing.
-OWN_METHOD_FAMILY = ("a method of this file's own struct was never emitted")
-OWN_METHOD_CAUSE = ("a method of this file's own struct was never emitted into "
-                    "the image")
-
-# The message both of those rows match, QUOTED from `tools/formal_sweep.py`'s
-# `_classify_terminal`. See the note on the family sample above for why this one
-# is not built from `formal/`: it is the sweep's own sentence, and the rule that
-# produces it is tested in `test_formal_sweep.py` where the build-side message
-# IS built.
-_OWN_METHOD_MESSAGE = (
-    "1 of the 2 unprovided symbol(s) are METHODS OF A STRUCT IN THIS FILE "
-    "(Bag_get), so the link line is not what is missing: those definitions "
-    "were never emitted into this image at all, which means a method call here "
-    "was not rewritten into a call on the lifted function. That is a fact "
-    "about this file's own lowering and not about the target")
-
 # (family, a real message, truncated only at a clause boundary)
 SAMPLES = [
     # The frame-address families. All one design defect, five costumes; the
@@ -618,27 +492,6 @@ SAMPLES = [
      "`f(x, b=2)` is a keyword argument in a call through a VALUE, and this "
      "path has no declaration to bind it by NAME: a callee reached through a "
      "word is read as taking the arguments the call site writes"),
-    # …and the fourth shape of the same family, which is not a missing
-    # DECLARATION but a word the SOURCE has already described: `apply(3, 17)`,
-    # which built, branched to the number 17 and died of SIGBUS on arm64 /
-    # SIGSEGV on x86-64. ONE sample for both ends (the passing end's `passed`
-    # clause is the only difference) because they share a message on purpose —
-    # `formal/model.py::not_a_code_address_refusal` — and a family keyed on a
-    # message cannot have two rows for one message.
-    # A bracketed callee spelled THROUGH A MODULE, and its bare sibling — two
-    # rows because `formal/model.py` grew a whole function for the dotted text
-    # rather than a clause of the bare one (`dotted_specialization_refusal`'s own
-    # paragraph is why), and a family keyed on a message cannot have two rows for
-    # one message. Both samples are the LIVE functions' output, so a reword
-    # leaves them behind and this fails instead of quietly emptying a row.
-    ("specialization spelled through a module",
-     dotted_specialization_refusal("L.Pair")),
-    ("specialization of a callee this unit does not compile",
-     FM.specialization_call_refusal("Box")),
-    ("value call: the word is not an address",
-     "`17` is called as a FUNCTION and the source says it holds an integer, "
-     "passed to `apply_arg()` as parameter `f`, which `apply_arg()` calls "
-     "through a value"),
     # The PASSING end rather than the calling end, and a different family
     # because the fix is in a different place: a value call's refusal is raised
     # by an emitter (there is no declaration to read at the call site), this one
@@ -666,41 +519,6 @@ SAMPLES = [
     # dead-marker failure this file exists for.
     (NON_ASCII_FAMILY, _NON_ASCII_ELEMENT_REFUSAL),
     (NON_ASCII_FAMILY, _NON_ASCII_QUANTITY_REFUSAL),
-    # A symbol this image BINDS and nothing provides, where the symbol is a
-    # METHOD OF A STRUCT IN THE FILE THAT REFUSED. Its own family because the
-    # fix is on this side of the boundary: the definition was never emitted into
-    # the image, so no link line could have provided it and adding one would not
-    # help.
-    #
-    # **QUOTED AND NOT BUILT, and that is the exception this file states once.**
-    # Every other sample here is a message `formal/` words, and it is built by
-    # calling the function that words it so a reword fails this row. This one is
-    # written by `tools/formal_sweep.py` ITSELF — it is the sweep's own
-    # classification, because `formal/build.py`'s bind audit cannot tell a
-    # missing method of this file from a missing libc name, and the sweep is the
-    # only layer that has both ends. There is therefore no `formal/` text to
-    # build it from, and the drift risk is real rather than theoretical: the
-    # classifier and this copy are two statements of the same clause. The RULE
-    # is exercised where it can be built, in `test_formal_sweep.py`'s
-    # `test_a_method_of_this_files_own_struct_is_a_codegen_finding`, which asks
-    # `formal/build.py::_unaccounted_report` for the message and then runs the
-    # classifier on it; this row pins the MARKER against a reword of the text
-    # above, which is what a sample of a sweep-written clause can do.
-    (OWN_METHOD_FAMILY, _OWN_METHOD_MESSAGE),
-    # The EXPORT RULE, from the BUILT message above, and the row this file's
-    # predecessor was missing: the corpus's largest codegen construct (148 files
-    # on the 2026-10-05 b13 sweep) had a CAUSE and no FAMILY, so the sweep's own
-    # by-family breakdown reported all of it as `other refusal` — the bucket
-    # both instruments define as "nobody has looked" — and the loud unclassified
-    # finding it raises fires on the row a planner is most likely to act on.
-    #
-    # **The marker is the clause that states the FACT** ("That module does not
-    # export it"), not the sentence of advice that used to follow it. A bare
-    # template call IS the spelling the stdlib uses, so `work/formal19-1`
-    # deletes "spell it as `name[<a type>](…)`" because it is wrong about
-    # correct Mojo — and a marker keyed on it would have taken 148 files
-    # silently back to `other refusal` the day that branch landed.
-    (EXPORT_RULE_FAMILY, _EXPORT_RULE_REFUSAL),
 ]
 
 # ── the SECOND table: `tools/formal_sweep_causes.py` ────────────────────────
@@ -726,7 +544,7 @@ SAMPLES = [
 # So: one real message per cause, abbreviated at clause boundaries exactly as
 # above, and every cause must be reached by at least one of them. Cut from the
 # 2026-09-30 r2 arm64 sweep (637 files, log in the worktree that produced
-# the `2026-09-30_r2` round of `bugs/FORMAL_sweep_work_map.md`).
+# `bugs/FORMAL_sweep_work_map_2026-09-30_r2.md`).
 CAUSE_SAMPLES = [
     ("MLIR dialect construct (__mlir_attr / __mlir_type / __mlir_op)",
      "the module-level comptime binding '_PLUGIN_COUNT' is initialized from an "
@@ -860,33 +678,39 @@ CAUSE_SAMPLES = [
      "debug_assert[…](…) calls a name this unit does not compile, so the "
      "brackets cannot be bound. A comptime specialization's brackets are the "
      "generic's comptime parameters"),
-    # …and its DOTTED sibling, built rather than copied for the same reason the
-    # string-composition pair above is: `dotted_specialization_refusal` is a
-    # whole function and a hand-copy is a sample that can only rot.
-    ("a bracketed specialization spelled through a module",
-     dotted_specialization_refusal("L.Pair")),
-    # The corpus's LARGEST row, and the one this file's family row now matches:
-    # 170 of the 710 files on the b10 sweep, 55% of every codegen finding in the
-    # tree, every one of them this one sentence. The ranking reported them as
+    # The corpus's LARGEST row, and it had no row at all until 2026-10-04: 170 of
+    # the 710 files on the b10 sweep, 55% of every codegen finding in the tree,
+    # every one of them this one sentence. The ranking reported them as
     # `other refusal` — the bucket `tools/formal_sweep_causes.py`'s own docstring
     # defines as "nobody has looked" — which is the defect §5 of
-    # the `b10` round of `bugs/FORMAL_sweep_work_map.md` is about.
+    # `bugs/FORMAL_sweep_work_map_2026-10-04_b10.md` is about.
     #
-    # **ONE sample, and BUILT, where there were two cut by hand until
-    # 2026-10-05.** The two ends of the row differ only in the names they name
-    # (`FormatStruct` through `std.format._utils`, `now()` through `time`), and
-    # both were hand-copies of `formal/model.py::imported_callee_refusal`'s
-    # f-string — so a reword of that f-string left them matching a stale marker
-    # with nothing failing, which is the rot this file exists to catch and which
-    # its docstring's point 3 names. The built sample goes with the family row
-    # above, and the marker deliberately is NOT the sentence that used to follow
-    # the two load-bearing clauses. "spell it as `name[<a type>](…)`" is ADVICE,
-    # and `work/formal19-1` deletes it because it is wrong about correct Mojo — a
-    # bare template call is the spelling the stdlib uses — so a marker keyed on
-    # it would have taken the row silently back to `other refusal` the day that
-    # branch landed. What is left is the FACT: the call has to bind a symbol the
-    # module does not export.
-    (EXPORT_RULE_CAUSE, _EXPORT_RULE_REFUSAL),
+    # TWO samples, not one, because `classify_message` sees only the message and
+    # one sample is one proof its marker matches. They are the row's two ends: the
+    # stdlib's own `FormatStruct(writer, "Allocation")` (111 of the 170) and a
+    # repository file's `now()` through `time`. Both are cut from
+    # `formal/model.py::imported_callee_refusal`'s f-string rather than from a
+    # sweep log, so a reword of that f-string has to be made here too rather than
+    # leaving a sample of a sentence nothing emits.
+    #
+    # The marker deliberately is NOT the sentence that used to follow these two
+    # clauses. "spell it as `name[<a type>](…)`" is ADVICE, and `work/formal19-1`
+    # deletes it because it is wrong about correct Mojo — a bare template call is
+    # the spelling the stdlib uses — so a marker keyed on it would have taken 170
+    # files silently back to `other refusal` the day that branch landed. What is
+    # left is the FACT: the call has to bind a symbol the module does not export.
+    ("a call to a name the defining module does not export",
+     "`FormatStruct` is called, and it is imported from `std.format._utils`, so "
+     "the call has to bind a symbol `std.format._utils` exports. That module does "
+     "not export it, and the reason is `doc/ABI.md`'s export rule rather than "
+     "anything about this call: a name with a leading `_` is private, a generic "
+     "template is not one symbol but one per instantiation"),
+    ("a call to a name the defining module does not export",
+     "main: `now` is called, and it is imported from `time`, so the call has to "
+     "bind a symbol `time` exports. That module does not export it, and the reason "
+     "is `doc/ABI.md`'s export rule rather than anything about this call: a name "
+     "with a leading `_` is private, a generic template is not one symbol but one "
+     "per instantiation"),
     ("a field of a field: a frame slot holds one word, not a struct",
      "self._dict._table._ctrl reads a field of a field through the receiver"),
     ("a field of a nested frame that the struct does not declare",
@@ -1167,14 +991,6 @@ CAUSE_SAMPLES = [
      "`func(x, b=2)` is a keyword argument in a call through a VALUE, and "
      "this path has no declaration to bind it by NAME: a callee reached "
      "through a word is read as taking the arguments the call site writes"),
-    # The same message as the family's fourth row above, in the PLANNER's table,
-    # which has its own markers and therefore its own rot — and the pairing is
-    # asserted by value below, because a build change that reached one table and
-    # not the other is a message the family claims and the cause does not.
-    ("a call through a word the source says is not an address",
-     "`17` is called as a FUNCTION and the source says it holds an integer, "
-     "passed to `apply_arg()` as parameter `f`, which `apply_arg()` calls "
-     "through a value"),
     # …and the passing end. Its marker has TWO clauses on purpose: "is passed
     # to" alone is the catch-all two rows below claim, and "read as a value"
     # alone would be matched by any other message that says it, so the pair is
@@ -1220,24 +1036,6 @@ CAUSE_SAMPLES = [
     # each other — and the built sample is what proves that, rather than a
     # reading of the two markers.
     (TRY_AROUND_RAISE_CAUSE, _TRY_AROUND_RAISE_REFUSAL),
-
-    # The higher-order builtin, in BOTH tables and from ONE built message: the
-    # family row asks which SHAPE the refusal is and the cause row what a fix
-    # would have to CHANGE, and this message is the same sentence for both, so
-    # one sample exercises two markers that are the same clause. That is the
-    # only pair of samples here that share a sample, and it is worth saying why
-    # it is safe: the two labels are spelled independently above, so a label
-    # that drifted in either table fails one of them rather than silently
-    # emptying the other's row.
-    (NOT_LOWERED_BUILTIN_FAMILY, _NOT_LOWERED_BUILTIN_REFUSAL),
-    (NOT_LOWERED_BUILTIN_CAUSE, _NOT_LOWERED_BUILTIN_REFUSAL),
-
-    # The SAME construct as the family row above, and a second table because the
-    # two are keyed on different things — the family on the shape of the
-    # message, the cause on what a fix would have to CHANGE. Quoted for the
-    # reason the sample above gives: this message is `tools/formal_sweep.py`'s
-    # own, and there is no `formal/` function that words it.
-    (OWN_METHOD_CAUSE, _OWN_METHOD_MESSAGE),
 ]
 
 # The causes no arm64 message above exercises. Each one is named here with WHY,
@@ -1380,11 +1178,7 @@ def _no_def_callee_arm_checks(failures):
     """EVERY arm of `frame_undefined_callee_refusal` keeps the clause, and every
     arm classifies as the one family in BOTH tables.
 
-    The row this rests on is the sweep's `callee has no definition on this
-    path` (the `2026-09-30` round of `bugs/FORMAL_sweep_work_map.md` §3.1,
-    row 8 — 12 files in the sweep's scope, 41 over all roots, and a ceiling
-    measured at 0 for both arms, which is why there is nothing left to fix
-    here and only the arms to keep honest): the
+    The row this rests on is `bugs/FORMAL_callee_no_def_ceiling_zero.md`: the
     fifth branch of `frame_receiver_escape_refusal` used to be one sentence over
     five different facts, four of them false of the program in front of the
     reader, and splitting it into one arm per fact meant the arms had to stay
@@ -1463,97 +1257,6 @@ def _no_def_callee_arm_checks(failures):
     return len(arms) * 3 + len(texts) - len(set(texts.values()))
 
 
-def _export_rule_precedence_checks(failures):
-    """The export-rule row against its three neighbours, in BOTH directions.
-
-    `_no_def_callee_arm_checks` above is the same shape of question for the
-    sibling row, and this row is its neighbour: both are about a CALLEE, both
-    are keyed on a clause in the middle of their own sentence, and both tables
-    (`_REFUSAL_FAMILIES` here, `formal_sweep_causes.py::CAUSES` there) claim by
-    first match. So the questions are the ones that decide whether a 148-file row
-    lands in a column of its own:
-
-      * does each table classify the export message to the export row?
-      * does the NEIGHBOUR row still classify to itself, in both tables? A new
-        marker added above a row cannot shadow it only if neither message carries
-        the other's clause — which is a fact about two strings, so it is
-        measured here rather than argued in a comment;
-      * does the new marker match NOTHING else in this file's sample tables? One
-        marker that swallowed a neighbour's samples would empty that row, and
-        every one of those rows is a row somebody plans work from.
-
-    The specialization pair is included in the middle question because those two
-    messages are about the same callee and sit in the same neighbourhood of both
-    tables.
-    """
-    export_marker = "does not export it"
-    # Built, not quoted, for the same reason the arm census below builds its six:
-    # a hand-copy of a message `formal/` words is a sentence that can stop being
-    # emitted while this check still passes. `FM` is the module-level import of
-    # `formal.model` at the top of this file.
-    #
-    # **A PAIR of labels per neighbour, because the two tables do not spell the
-    # same rows the same way** — `_REFUSAL_FAMILIES` drops the article ("a
-    # bracketed specialization …" is "specialization …") where `CAUSES` keeps it.
-    # One label for both tools would have been a check that fails for a
-    # difference in spelling rather than for a row being stolen, which is the
-    # kind of check a reader learns to ignore.
-    neighbours = [
-        (("callee has no definition on this path",
-          "callee has no definition on this path"),
-         FM.frame_undefined_callee_refusal("mojo_print", ["P"], {})),
-        (("specialization of a callee this unit does not compile",
-          "a bracketed specialization of a callee this unit does not compile"),
-         "debug_assert[…](…) calls a name this unit does not compile, so the "
-         "brackets cannot be bound"),
-        (("specialization spelled through a module",
-          "a bracketed specialization spelled through a module"),
-         "pkg.Widget[…] is a bracketed callee spelled THROUGH A MODULE"),
-    ]
-    checks = 0
-    # 1. the export message, in both tables.
-    for tool, got, want in (
-            ("formal_sweep", S._refusal_family(_EXPORT_RULE_REFUSAL),
-             EXPORT_RULE_FAMILY),
-            ("formal_sweep_causes", C.classify_message(_EXPORT_RULE_REFUSAL),
-             EXPORT_RULE_CAUSE)):
-        checks += 1
-        if got != want:
-            failures.append(
-                f"{tool} classifies the export-rule refusal as {got!r}, not "
-                f"{want!r} — the corpus's largest codegen row is in the bucket "
-                f"both tables call 'nobody has looked' again")
-    # 2. each neighbour keeps its own row, in both tables — and the export
-    # marker is not the reason any of them lost it.
-    for (want_family, want_cause), msg in neighbours:
-        if msg is None:
-            failures.append(
-                "formal/model.py no longer words one of the export row's "
-                "neighbours, so this precedence check cannot be asked; the "
-                "neighbour's own sample is the record that it is gone")
-            continue
-        for tool, got, want in (
-                ("formal_sweep", S._refusal_family(msg), want_family),
-                ("formal_sweep_causes", C.classify_message(msg), want_cause)):
-            checks += 1
-            if got != want:
-                failures.append(
-                    f"{tool} classifies {want!r}'s message as {got!r}, not "
-                    f"{want!r}; the export row and this one are neighbours in "
-                    f"both tables and one of them is being counted as the "
-                    f"other")
-    # 3. the new marker matches nothing else this file has a sample of. Counted
-    # as ONE check rather than one per sample, because it is one assertion about
-    # a set — and the file's tally rule is that every assertion is counted, not
-    # that every element of a set is.
-    for _family, msg in SAMPLES + CAUSE_SAMPLES:
-        if export_marker in msg and msg != _EXPORT_RULE_REFUSAL:
-            failures.append(
-                f"the export marker {export_marker!r} also matches another "
-                f"sample, which would empty that row: {msg[:120]}")
-    return checks + 1
-
-
 def main() -> int:
     failures = []
     checks = len(SAMPLES) + 3
@@ -1610,11 +1313,6 @@ def main() -> int:
     # …and the six-arm census of `frame_undefined_callee_refusal`, whose clause
     # both tables key on and which nothing tested.
     checks += _no_def_callee_arm_checks(failures)
-    # …and the export rule's row against its three neighbours, in both
-    # directions — the corpus's largest codegen construct had a cause and no
-    # family until 2026-10-05, and a row that lands next to its neighbours is
-    # the one thing a first-match table gets wrong silently.
-    checks += _export_rule_precedence_checks(failures)
     # …and the host-import row's rank audit: every host module ranked by which
     # sweep files actually import it, so the table cannot claim a reach the
     # corpus does not have.
@@ -2325,17 +2023,11 @@ def _host_rank_checks(failures):
 # hand-written where the point is that NOTHING classifies them — which is the
 # case under test and cannot be produced by a message the tables do name.
 
-# The corpus's biggest NAMELESS refusal, verbatim from the b12 arm64 log. It had
-# a row in `CAUSES` ("a call to a name the defining module does not export") and
-# none in `_REFUSAL_FAMILIES`, which is what made it the case that proved the two
-# tables are checked INDEPENDENTLY — one row in each, and a message missing from
-# both — and what made the loud unclassified finding fire on the row a planner is
-# most likely to act on. **`_REFUSAL_FAMILIES` grew the missing row on
-# 2026-10-05**, so this shape is now named by BOTH tables; it is kept because the
-# shape-reduction checks below need two wordings of one refusal, and because it is
-# the fixture that shows what the loud finding used to report. The fixtures the
-# loud finding needs now that it is named are `_NAMED_ONLY_IN_CAUSES` (one table)
-# and `_NAMELESS` (neither).
+# The corpus's biggest NAMELESS refusal, verbatim from the b12 arm64 log and
+# still unnamed in `_REFUSAL_FAMILIES` on this tree: it has a row in `CAUSES`
+# ("a call to a name the defining module does not export"), so it is the case
+# that proves the two tables are checked independently — one row in each, and a
+# message can be missing from both.
 _EXPORT_RULE = (
     "`FormatStruct` is called, and it is imported from `std.format._utils`, so "
     "the call has to bind a symbol `std.format._utils` exports. That module does "
@@ -2343,24 +2035,6 @@ _EXPORT_RULE = (
     "anything about this call: a name with a leading `_` is private")
 _EXPORT_RULE_OTHER = _EXPORT_RULE.replace("FormatStruct", "dealloc").replace(
     "std.format._utils", "std.memory.alloc")
-
-# A refusal ONE table names and the other does not — which is what the loud
-# finding's "the other ranking table calls this shape …" clause is for, and what
-# `_EXPORT_RULE` stopped being on 2026-10-05 when the family table grew its row.
-# Verbatim from a real message (`formal_sweep_causes.py`'s "a linked module
-# exports no such name", four files on the 2026-10-05 b13 sweep) so the check is
-# about the instruments and not about a sentence that never existed.
-_NAMED_ONLY_IN_CAUSES = (
-    "sys.exit(): `sys` is a linked module but it exports no `exit`, so the "
-    "call has nothing to bind: add the module to the link line, or import the "
-    "name from it")
-# Only the QUOTED names differ, which is the same rule `_EXPORT_RULE_OTHER`
-# follows and for the same reason: `unclassified_shape` elides a backquoted span
-# and does not elide the text before it, so a pair that differs in an UNquoted
-# callee would read as two shapes of one file each and the honesty bar would be
-# unreachable for the reason the check above it exists to catch.
-_NAMED_ONLY_IN_CAUSES_OTHER = _NAMED_ONLY_IN_CAUSES.replace(
-    "`sys`", "`stdio`").replace("`exit`", "`getpid`")
 
 # A message the SWEEP's family table names ("cannot be lowered") and `CAUSES`
 # does not — measured on the b12 log's `std/builtin/float_literal.mojo` row, and
@@ -2443,20 +2117,18 @@ def _unclassified_alarm_checks(failures):
 
     # ── the bar: a COUNT and a SHARE, and both of them tested on the side
     #    that must NOT fire as well as the side that must ──────────────────
-    pairs = [(f"m{i}.py", _NAMED_ONLY_IN_CAUSES)
-             for i in range(S.UNCLASSIFIED_MIN_FILES)]
+    pairs = [(f"m{i}.py", _EXPORT_RULE) for i in range(S.UNCLASSIFIED_MIN_FILES)]
     check(not report(pairs, 100000)[0],
           f"{S.UNCLASSIFIED_MIN_FILES} files of one shape in a 100000-file "
           f"corpus was reported LOUD; the count bound is 'over', not 'at or "
           f"over', and a bar that fires at the boundary fires on everything "
           f"above it too")
-    pairs.append((f"m{S.UNCLASSIFIED_MIN_FILES}.py", _NAMED_ONLY_IN_CAUSES))
+    pairs.append((f"m{S.UNCLASSIFIED_MIN_FILES}.py", _EXPORT_RULE))
     loud, text = report(pairs, 100000)
     check(loud,
           f"{S.UNCLASSIFIED_MIN_FILES + 1} files of one shape did not report "
           f"LOUD, so the file-count half of the bar is not wired up")
-    check("LOUD FINDING" in text and "m0.py" in text
-          and _NAMED_ONLY_IN_CAUSES[:40] in text,
+    check("LOUD FINDING" in text and "m0.py" in text and _EXPORT_RULE[:40] in text,
           "the loud block does not name the shape, its count and an example "
           f"file, which is the whole content of the finding:\n{text}")
     # The SHARE half, which is what catches a shape that is small in files and
@@ -2478,18 +2150,13 @@ def _unclassified_alarm_checks(failures):
           f"one:\n{text}")
 
     # ── the OTHER table's opinion, which is the actionable half ─────────────
-    # A shape this table cannot name but the OTHER one can is a one-row fix in
-    # one table, not a new construct, so the finding has to say so. `_EXPORT_RULE`
-    # was the fixture for that from 2026-10-04 to 2026-10-05 — the corpus's
-    # biggest shape, a row in `CAUSES` and none here — and it stopped being it
-    # when the row below was added to `_REFUSAL_FAMILIES`; `_NAMED_ONLY_IN_CAUSES`
-    # is the same situation with a smaller shape, and it is here so the property
-    # stays tested after the big instance of it stopped being true.
-    loud, text = report([(f"m{i}.py", _NAMED_ONLY_IN_CAUSES)
-                         for i in range(12)], 1000,
+    # On this corpus the biggest nameless shape has a row in CAUSES and none in
+    # _REFUSAL_FAMILIES, so the finding must say so: that is a one-row fix in
+    # one table, not a new construct.
+    loud, text = report([(f"m{i}.py", _EXPORT_RULE) for i in range(12)], 1000,
                         other_classify=C.classify_message,
                         other_name="formal_sweep_causes.py")
-    check(loud and "a linked module exports no such name" in text,
+    check(loud and "a call to a name the defining module does not export" in text,
           "the loud finding does not report what the other ranking table calls "
           "the shape, so the reader is told a hole exists and not which table "
           f"has it:\n{text}")
@@ -2500,8 +2167,7 @@ def _unclassified_alarm_checks(failures):
           "a shape NEITHER table names is not reported as such — which is the "
           "2026-10-04 b12 case, 236 files, and the one a reader's first "
           f"instinct assumes the other table has:\n{text}")
-    loud, text = report([(f"m{i}.py", _NAMED_ONLY_IN_CAUSES)
-                         for i in range(12)], 1000)
+    loud, text = report([(f"m{i}.py", _EXPORT_RULE) for i in range(12)], 1000)
     check(loud and "tools/formal_sweep_causes.py" in text,
           "the sweep's own finding does not point at the second table to check, "
           f"so 'nobody has looked' names one place instead of two:\n{text}")
@@ -2520,25 +2186,18 @@ def _unclassified_alarm_checks(failures):
         ("NOT-ANSWERABLE/HOST-IMPORT", "host.py",
          "host module (CPython standard library) 'os'"),
         ("CODEGEN", "named.py", _FSTRING_REFUSAL),
-        ("CODEGEN/DEPENDENCY", "export.py", _EXPORT_RULE),
+        ("CODEGEN/DEPENDENCY", "plain.py", _EXPORT_RULE),
     ], files=5, passed=1))
     arch, rows, _counts, swept, _pass = P.read_log(log)
     printed = [(path, row.cls, row.reason, row.reason)
                for path, row in rows.items()]
     unclassified = S.unclassified_rows(printed)
     got = sorted(p for p, _m in unclassified)
-    # `export.py` is the row this file's change ADDED, and it is the assertion:
-    # the corpus's largest codegen shape used to be one of the unclassified rows
-    # here, which is what the loud finding fired on and what `…_b12.md` §4.3
-    # called 148 files reading as "nobody has looked". It is named now, so the
-    # only unclassified codegen row left in this log is the one whose shape
-    # NEITHER table has.
-    check(got == ["deep.py"],
+    check(got == ["deep.py", "plain.py"],
           f"the rows this table cannot name are {got}, expected "
-          f"['deep.py']: a `not-answerable` row's own reason "
+          f"['deep.py', 'plain.py']: a `not-answerable` row's own reason "
           f"matches no family and is not a refusal, a chain must be peeled to "
-          f"its end, a named message must stay named, and the export-rule "
-          f"message must be NAMED — it is this file's own row")
+          f"its end, and a named message must stay named")
     check(unclassified and "no layout to give it" in unclassified[0][1],
           "the unclassified message is not the TERMINAL one, so the clause "
           "that would carry a marker is the one two refusals further out")

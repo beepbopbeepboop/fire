@@ -688,7 +688,7 @@ def test_the_x86_64_dylib_exports_its_module_api(tmpdir, shared):
 # nothing calls — the file builds, links, and does nothing at load time, which
 # is the silent no-op one level down from the executable path's own and cost 16
 # files of this repository (the dylib-module-body row, §6 of
-# the `b7` round of `bugs/FORMAL_sweep_work_map.md`). Each object writer therefore
+# `bugs/FORMAL_sweep_work_map_2026-10-02_b7.md`). Each object writer therefore
 # emits the loader's own mechanism for "call this when the image loads", and each
 # one is a DIFFERENT mechanism, so each is checked in its own container:
 #

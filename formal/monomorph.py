@@ -16,7 +16,7 @@ of any kind and was refused by the dylib export gate with
 `formal/build.py::no_public_api_reason`'s "a parametric type has no single
 boundary layout either".  That refusal is correct about the file and it is also
 the second wall behind the 165-file row in
-the `b8` round of `bugs/FORMAL_sweep_work_map.md` §4.1: past every codegen refusal
+`bugs/FORMAL_sweep_work_map_2026-10-03_b8.md` §4.1: past every codegen refusal
 in `binary_heap.mojo`, the module-dylib build still failed there.
 
 THE SHAPE OF THE ANSWER, and why it is a generated source file rather than a
@@ -199,57 +199,6 @@ def template_names(src: str) -> list:
     return list(_derived_from_source("template_names", src, lambda: tuple(sorted(
         name for name, why in reflect.export_exclusions(src).items()
         if why == reflect.EXCL_GENERIC))))
-
-
-def without_template_bodies(stmts: list, src: str, keep=()) -> list:
-    """`stmts` with this source's GENERIC TEMPLATE declarations removed.
-
-    **A template's own body is not in any image, so compiling it is work with no
-    consumer and a refusal waiting at the end of it.** The instantiated bodies
-    are: `instantiate_all` writes each one out (`publish_source`) and both paths
-    compile those instead — `formal/imports.py::_instantiated_sources` hands them
-    to `compile_formal_dylib` as extra sources, and its `_own_instantiations`
-    appends their statements to the executable's own. What is left over is the
-    declaration itself, and that is the thing this drops.
-
-    The measurable cost of not dropping it, and it is a REFUSAL rather than a
-    wasted pass: the template body is analysed with no instantiation in scope, so
-    a read of a bracket parameter has no value behind it. Measured on this tree,
-    both architectures, `struct Box[T: AnyType, keys: List[T]]` with
-    `def total(self) -> Int: return self.first + len(Self.keys)`:
-
-        build: len(Self.keys) — the source does not say what this operand holds,
-        and on this path the two things len() can answer are told apart by what
-        the operand IS …
-
-    — and `std/collections/type_dict.mojo`'s `comptime length = len(Self.values)`
-    is the same shape and is the reason this is not a two-line curiosity.
-
-    **The set of names comes from `template_names`, which is the EXPORT RULE's own
-    answer** (`reflect.EXCL_GENERIC`), not from a second reader of the source. So
-    "a template is not an API" is asked before the body is compiled rather than
-    after, which is the order the export table already implied: the name was never
-    going to be exported, and now its body is never going to be analysed either.
-
-    `keep` names to leave alone, and the one caller that has one is the module
-    path: a library's manifest records the instantiations it published, and that
-    is computed from the source rather than from this list, so nothing here needs
-    an escape hatch today. It exists so a future caller that DOES have one says
-    which name rather than reaching around this function.
-
-    A fresh list, never the caller's, for the reason `_rewritten_own_statements`
-    gives about the memoised parse: these nodes are shared with every other reader
-    in the process, and a template removed from one build's view of them would be
-    gone from the next build's too.
-    """
-    import fire_compiler as F                        # lazy — the AST classes
-    drop = {n for n in template_names(src)
-            if template_kind(src, n) == KIND_STRUCT} - set(keep or ())
-    if not drop:
-        return stmts
-    return [s for s in stmts
-            if not (isinstance(s, F.StructDef)
-                    and getattr(s, "name", None) in drop)]
 
 
 def template_kind(src: str, name: str) -> str:

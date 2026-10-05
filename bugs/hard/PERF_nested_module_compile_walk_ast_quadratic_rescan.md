@@ -62,46 +62,6 @@ migration. It needs the existing `list` plus a check.
    `_walk_ast(node)` over a `MemberExpr` chain), so a weak reference to the
    node is required, not a bare id.
 
-### Step 3 landed 2026-10-05 (`work/bugs7-4`): the census is now a CHECK
-
-`test_gimple.py`'s `no_walk_ast_caller_mutates_what_it_is_handed`, beside
-`walk_ast_dataclass_cache_is_transparent`, walks every `.py` under `mojo/` and
-`formal/` with `ast`, finds every call of the shared `_walk_ast`, and reports
-any that MUTATES what it was handed — `.append`/`.extend`/`.sort`, an assignment
-to an index of it, `+=`, `del`. **67 call sites, none mutating** on this tree,
-against the 69 this doc's hand census counted (the closure has moved).
-
-Two things the executable form got right that a hand census cannot, both found
-by running it:
-
-* **A copy is not a handover.** The first version matched any assignment that
-  CONTAINED the call and reported three sites that do not exist:
-  `mojo/middle/coro.py`'s `_inner = {id(x) for x in _walk_ast(aw.value)}` is a
-  set LITERAL and `_inner.add(...)` mutates that set, not the walk's list — so
-  the assignment's value must BE the call, not merely contain it.
-* **A name is not a slot.** Two of the three were `_rets`, which is bound twice
-  in one 6 000-line `module_gen.py` function — once from a comprehension over the
-  walk and once as a dict — so a whole-function scan of every use of the name
-  conflated two different objects. The scan is therefore scoped from the
-  binding statement to the NEXT binding of the same name, which is the region
-  where a handed object is actually live under that name.
-
-A third came out of proving the check rather than running it: `_ast.AugAssign`
-was listed as a rebinding, which made the region end AT the `+=` line and the
-scan skip its own line — so `ns = _walk_ast(b); ns += [1]` reported clean. It is
-a HAZARD and not a rebinding, because `list.__iadd__` mutates in place and
-returns the same object, and it is now absent from the binding list on purpose.
-
-Verified not vacuous, and verified in both directions: 15 hand-written programs
-(one per shape, including all six mutators, the copy-by-display case, the
-rebound-before-use case and the `for`-target rebinding) classified correctly by
-the same code, and with a `.append` and then an `+=` injected into
-`mojo/middle/closures.py`'s `_local_defs` the check names that one site and the
-run goes 385/1; with the injection removed, 386/0.
-
-**This is the part of the fix that was worth landing on its own whether or not
-the memo ever is**, and it is now in the everyday gate.
-
 ### The exact next step
 
 1. A generation counter bumped by every AST-mutating site — the 20 above, plus

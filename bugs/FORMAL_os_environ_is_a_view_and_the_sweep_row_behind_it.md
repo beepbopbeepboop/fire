@@ -10,7 +10,7 @@ and the ceiling is measured rather than projected: rewriting the two in-file
 files by hand lands each on a DIFFERENT row's refusal. Read §2 before spending
 anything on this; the object is not the thing that is missing any more.**
 
-This is the row the `b8` round of `bugs/FORMAL_sweep_work_map.md` §4.2 measured as
+This is the row `bugs/FORMAL_sweep_work_map_2026-10-03_b8.md` §4.2 measured as
 "the next wall behind the module-slot row", and it was the largest unowned
 codegen row's next step. Here is what it was worth, measured.
 
@@ -327,7 +327,7 @@ python3 tools/memslot.py --gb 8 --label dt -- python3 fire.py build --formal --n
 ```
 
 The two sweep rows behind the rewrite table in §2 are re-measured on
-the `b8` round of `bugs/FORMAL_sweep_work_map.md`; a re-sweep belongs to whoever
+`bugs/FORMAL_sweep_work_map_2026-10-03_b8.md`; a re-sweep belongs to whoever
 runs the gate. `test_formal_os_backing.py` is 58/58 on this tree (three
 consecutive full runs) and `test_formal_os.py` is 5/5 groups.
 
