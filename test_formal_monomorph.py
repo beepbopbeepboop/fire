@@ -944,6 +944,147 @@ def test_a_template_is_located_once_per_source_and_name(tmpdir):
           f"against a source that later declares the name")
 
 
+def test_the_re_export_closure_is_walked_once_for_a_consumers_whole_dep_set(tmpdir):
+    """`module_templates_by_path` walked the whole closure once per DEPENDENCY.
+
+    `imported_instantiations` loops over a consumer's imports and asks
+    `instantiation_demands` once per `dep`, and each ask walked that dep's whole
+    re-export closure with a `visited` set private to the call. The per-module
+    ANSWER was already memoised (`formal/monomorph.py`'s `_derived_from_source`),
+    so what was left was the walk, and the walk was a product: measured on
+    `std/math/math.mojo` (2026-10-04) at **16 walks, 1.56 s of a 4.6 s build, 34%**
+    — the largest single residue in
+    `bugs/PERF_formal_import_asks_are_products_of_the_closure.md`.
+
+    Two halves, and the second is the one a count cannot see:
+
+      * `template_closure(paths)` walks the whole SET once with one `visited`,
+        and `instantiation_demands(..., closure=…)` takes a reachability slice
+        instead of walking. Counted below by wrapping `template_closure` itself.
+      * the slice must EQUAL the standalone walk — every key, and the ORDER. The
+        order is not cosmetic: `imported_instantiations`'s
+        `demap.setdefault((base, args), mangled)` keeps the FIRST owner's body
+        for a name two owners declare, so a slice assembled in a different order
+        instantiates a different module's body under the same symbol, builds,
+        and answers differently. That is why `_closure_template_slice` is an
+        explicit depth-first walk of the recorded edges rather than a filter over
+        the table's insertion order, and why this case compares `list(items())`.
+    """
+    from formal import imports as FI
+    import formal.build as FB
+    import os
+
+    pkg = os.path.join(tmpdir, "rexp")
+    os.makedirs(pkg)
+    # A package whose `__init__` re-exports a template from a sibling, plus a
+    # second package, plus a bare `import` — the bare import is the shape that
+    # is NOT in the closure of `__init__`, so it is what makes the slice have to
+    # be reachability and not a prefix.
+    with open(os.path.join(pkg, "leaf.mojo"), "w") as f:
+        f.write("struct Pair[T]:\n"
+                "    var a: T\n"
+                "    var b: T\n"
+                "def widen[T](v: T) -> T:\n"
+                "    return v\n")
+    with open(os.path.join(pkg, "__init__.mojo"), "w") as f:
+        f.write("from .leaf import Pair\nfrom .leaf import widen\n")
+    with open(os.path.join(pkg, "other.mojo"), "w") as f:
+        f.write("def twice[T](v: T) -> T:\n    return v\n")
+    with open(os.path.join(pkg, "consumer.mojo"), "w") as f:
+        f.write("from . import Pair\n"
+                "from . import widen\n"
+                "from .other import twice\n"
+                "def main():\n"
+                "    var p = Pair[Int]()\n"
+                "    print(widen[Int](1))\n"
+                "    print(times[Int](2))\n")
+
+    source_path = os.path.join(pkg, "consumer.mojo")
+    consumer = FI.module_source_text(source_path)
+    stmts = FB.parse_module(consumer, source_path)
+    paths = []
+    for mod in FI.imported_modules(stmts):
+        dep = FI.resolve_module_path(mod, relative_to=source_path,
+                                     project_root=source_path)
+        if dep:
+            paths.append(dep)
+    check(len(paths) >= 2,
+          f"the fixture resolved {paths} as imports of the consumer, expected "
+          f"the package and `.other` — a consumer whose `from . import Pair` and "
+          f"`from . import widen` both land on the package is the shape that "
+          f"makes the dep set and the closure different sets")
+
+    walks = {"n": 0}
+    real_closure = FI.template_closure
+
+    def counted(roots, project_root=None):
+        walks["n"] += 1
+        return real_closure(roots, project_root=project_root)
+
+    # The SLICED loop is the production shape and is counted; the standalone
+    # loop below it is this case's REFERENCE and is counted separately, so the
+    # two numbers cannot be confused.
+    FI.template_closure = counted
+    try:
+        closure = counted(paths, project_root=source_path)
+        sliced = [list(FI.instantiation_demands(
+            dep, consumer, project_root=source_path, closure=closure).items())
+            for dep in paths]
+        sliced_walks = walks["n"]
+        walks["n"] = 0
+        standalones = [list(FI.instantiation_demands(
+            dep, consumer, project_root=source_path).items())
+            for dep in paths]
+        standalone_walks = walks["n"]
+    finally:
+        FI.template_closure = real_closure
+
+    check(sliced_walks == 1,
+          f"a consumer with {len(paths)} imports walked the re-export closure "
+          f"{sliced_walks} times on the path that has the table; it is one "
+          f"walk of the dep SET, and every slice is a reachability question "
+          f"inside it")
+    check(standalone_walks == len(paths),
+          f"the reference loop walked {standalone_walks} times for "
+          f"{len(paths)} deps; if this is not one walk per dep then the "
+          f"comparison below is not the comparison it claims to be")
+    check(any(sliced),
+          f"no dep of the fixture asked for any template, so the slice is "
+          f"compared against nothing: {sliced}")
+    check(sliced == standalones,
+          f"a slice of the shared closure differs from the standalone walk "
+          f"(keys or ORDER — both are load-bearing): sliced={sliced} "
+          f"standalone={standalones}")
+    # And the slice is genuinely a SLICE, not the whole table: `.other` is in
+    # the shared table because it is one of the ROOTS, and it is in NO other
+    # root's slice because the package does not re-export it. That is the
+    # property a "just hand everyone the whole table" shortcut would lose, and
+    # it is a correctness property rather than a tidiness one:
+    # `instantiation_demands` attributes a demand to the module that DECLARES
+    # it, so a slice that over-reaches would demand an instantiation in a
+    # module the consumer cannot reach.
+    other = os.path.join(pkg, "other.mojo")
+    leaf = os.path.join(pkg, "leaf.mojo")
+    # The PACKAGE's module is its `__init__.mojo`, which is what `paths` carries
+    # — slicing by the directory would be a root the walk never saw.
+    pkg_module = os.path.join(pkg, "__init__.mojo")
+    other_key, leaf_key = os.path.abspath(other), os.path.abspath(leaf)
+    check(other_key in closure[0],
+          f"`.other` declares the generic `twice` and is a root of the shared "
+          f"walk, so it must be in the table: {sorted(closure[0])}")
+    pkg_slice = FI._closure_template_slice(closure[0], closure[1], pkg_module)
+    check(other_key not in pkg_slice,
+          f"the package's slice names `.other`, which it does not re-export: "
+          f"{sorted(pkg_slice)}")
+    check(leaf_key in pkg_slice,
+          f"the package's slice does not name `.leaf`, which it re-exports "
+          f"from: {sorted(pkg_slice)}")
+    check("twice" not in pkg_slice.get(pkg_module, []) and
+          "Pair" in (pkg_slice.get(leaf_key) or []),
+          f"the slice's own contents do not separate the two modules' "
+          f"templates: {pkg_slice}")
+
+
 def test_an_instantiation_substitutes_the_parameter_and_keeps_the_self_spelling(tmpdir):
     """`Self.T` is `T`, and the shared substitution would otherwise break it.
 
@@ -1942,6 +2083,8 @@ TESTS = [
      test_a_source_derived_answer_is_made_once_per_source_and_never_shared),
     ("a template is located once per source and name",
      test_a_template_is_located_once_per_source_and_name),
+    ("the re-export closure is walked once for a consumer's whole dep set",
+     test_the_re_export_closure_is_walked_once_for_a_consumers_whole_dep_set),
     ("an instantiation substitutes the parameter and keeps the Self spelling",
      test_an_instantiation_substitutes_the_parameter_and_keeps_the_self_spelling),
     ("a type argument that is computed is not a demand",

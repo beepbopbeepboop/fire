@@ -7936,6 +7936,93 @@ main()
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable():
+        """Six `static` repr helpers, into every module, whatever the module can
+        reach — and the gate that withdrew them.
+
+        `_mojo_dispatch_repr`, `_mojo_generic_elem_repr`, `_mojo_repr_list`,
+        `_mojo_repr_dict`, `_mojo_repr_pair` and `_mojo_repr_set` were appended
+        into EVERY module: `module_gen.py`'s forward declarations, again in
+        `gen_module_impl`'s ungated four, and the definitions themselves. Nothing
+        outside the translation unit can name them (`static`), nothing registers
+        one by address (there is no repr-function-pointer table), and the only
+        references are mutual inside the cluster plus the per-struct shims and
+        `emit_infra.py`'s `_mojo_repr_set` call sites. Hand-deleting them from a
+        small client compiled and linked with no undefined reference at 5208
+        bytes against 8760; measured on `test_module_cache.py`'s two clients the
+        gate is 8264 -> 4080 and 10432 -> 6296.
+
+        So `module_gen.py::_drop_unreachable_repr_cluster` withdraws the cluster
+        from any module whose own EMITTED text names none of the six — counted
+        after emission, on the parts already built, because that is the only
+        question a source-text heuristic cannot answer: a struct stored in a
+        container reaches `_mojo_generic_elem_repr` through the struct's own
+        `__repr__`, and the module that never spells "list" is the one that
+        needs it.
+
+        Both directions are asserted, because the gate's two failure modes are
+        opposite and one of them is silent. Withdrawing what IS reachable is a
+        LINK error the suite would catch anywhere. Withdrawing what is NOT
+        reachable is invisible: the module still builds and still answers
+        correctly, having simply never carried the helpers. The counter-test is
+        the second program — it asserts the cluster is PRESENT for a module that
+        needs it, so a gate that degenerated into "always drop" fails here
+        rather than passing every other case in the tree.
+        """
+        global _PASS, _FAIL
+        name = "the_generic_repr_cluster_is_emitted_only_where_it_is_reachable"
+        # Neither program mentions a container: one is arithmetic, one holds a
+        # struct whose OWN `__repr__` is what routes a container into
+        # `_mojo_generic_elem_repr`.
+        plain = '''\
+def main():
+    var x = 1
+    x = x + 2
+    print(x)
+main()
+'''
+        needs = '''\
+struct P:
+    var x: Int
+    def __init__(out self):
+        self.x = 7
+    def __repr__(self) -> String:
+        return "P<" + str(self.x) + ">"
+def main():
+    print([P()])
+main()
+'''
+        for src, want_cluster, label in ((plain, False, 'plain'),
+                                         (needs, True, 'struct-in-list')):
+            try:
+                c_src = gimple_codegen._run_pipeline(
+                    src, filename=f'{label}.mojo',
+                    **{'do_imports': True})[0]
+            except Exception as e:
+                print(f"FAIL  {name} [{label}]: codegen raised {e!r}")
+                _FAIL += 1
+                return
+            has_defs = 'static char * _mojo_repr_list (MojoList *lst) {' in c_src
+            has_fwd = 'static char * _mojo_repr_list (MojoList *);' in c_src
+            if has_defs != want_cluster or has_fwd != want_cluster:
+                print(f"FAIL  {name} [{label}]: definitions present={has_defs}, "
+                      f"forward declaration present={has_fwd}; the cluster is "
+                      f"{'kept' if want_cluster else 'withdrawn'} for this "
+                      f"module")
+                _FAIL += 1
+                return
+            # A half-gated cluster — a declaration without its definition or the
+            # reverse — is the link error the gate's own docstring names, and it
+            # is invisible to a string count. Both halves must move together.
+            if has_defs != has_fwd:
+                print(f"FAIL  {name} [{label}]: the gate dropped one half of the "
+                      f"cluster (definitions={has_defs}, decl={has_fwd}) — that "
+                      f"is a link error waiting to happen")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_print_of_a_function_value_is_not_a_decimal_address():
         """`print(f)` on a function object is a `str()` spelling, and it used
         to be undefined behaviour.
@@ -11116,6 +11203,7 @@ print(run('x/y.txt'))
     test_ctor_of_a_container_reaches_the_comprehension()
     test_a_returned_heterogeneous_list_keeps_its_slot_kinds()
     test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not()
+    test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable()
     test_print_of_a_function_value_is_not_a_decimal_address()
 
     print()

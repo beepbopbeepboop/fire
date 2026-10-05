@@ -424,8 +424,9 @@ one level down, which is why it is written down rather than guessed at.
     one slot, which is the outcome `struct_field_names`' own docstring calls
 worse than a refusal. **So it wants a differential test over the same
     516-file corpus comparing the two walks' assignment SETS, per struct, before
-    it lands** — the shape this doc's §3.1 harness already has. This is
-    `bugs/PERF_struct_field_split_asked_once_per_function.md`'s step 2, and it is
+    it lands** — the shape this doc's §3.1 harness already has. This is the
+    2026-10-02 perf filing's step 2 (`struct_field_names` asked once per
+    FUNCTION, deleted with its fix), and it is
     the right SECOND half of §3: §3 made the question rare, this would make it
     cheap, and together they mean a future asker cannot put the cost back.
     **LANDED 2026-10-03** — `model.iter_statement_nodes`, with the differential
@@ -550,13 +551,16 @@ table changed the answer" as a question about which path ran.
 
 ## 7. What this doc supersedes
 
-Two 2026-10-02 docs described this same redundancy with the same two candidate
-fixes and the same warning that a memo across `_prepare_functions` needs an
-invalidation argument. Both were deleted with their fixes — the first with §3
-and §6.1 here, the second with `model.iter_statement_nodes` — and the shape they
-measured is still visible in
+Two 2026-10-02 docs described this same redundancy — a per-struct census
+recomputed on every ask, and the `struct_field_names` ask once per FUNCTION —
+with the same two candidate fixes and the same warning that a memo across
+`_prepare_functions` needs an invalidation argument. Both were deleted with
+their fixes, since this doc and §6.1 are what they were waiting for: the first
+with §3 and §6.1 here, the second with `model.iter_statement_nodes`. The shape
+they measured is still visible in
 `bugs/PERF_struct_field_names_is_still_asked_once_per_function.md`, which is the
 one member of the family still open.
+
 **Both candidate fixes in those docs are now measured and rejected in favour of
 threading:** the per-struct field set does not drift (§3.1, 0 of 7 788), so the
 invalidated memo is not needed — but the cheaper still needs the loop's

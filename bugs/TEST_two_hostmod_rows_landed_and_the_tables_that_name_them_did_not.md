@@ -84,9 +84,12 @@ Editing `formal/hostmods/` is outside this merge's claim.
     python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_sweep_truth.py
 
 Neither file is registered in `tools/suite.py`, so nothing in a gate catches
-either today; `bugs/TEST_estate_check_red_on_five_hostmod_test_files.md` is the
-doc that says so for its own five, and `test_suite.py`'s `UNREGISTERED` table is
-where a name is excused.
+either today, and `test_suite.py`'s `UNREGISTERED` table is where a name is
+excused. The same shape was found and fixed for five OTHER host-module files
+(`test_formal_admitted/fcntl/math/shutil/stat.py`: unregistered and unexcused,
+which is `suite-self-test`'s UNREGISTERED row going red) — that doc was deleted
+with the fix, which is the right outcome, so this row is the one that has to
+carry the claim now.
 
 ## Reproducing the "not this merge's" half
 

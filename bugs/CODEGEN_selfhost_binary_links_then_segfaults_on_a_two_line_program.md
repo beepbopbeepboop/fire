@@ -9,15 +9,21 @@ regression".
 ## Why this doc exists when eight `CODEGEN_selfhost_*` docs already do
 
 Every one of those describes the SAME job failing in the GCC era, and that
-shape is GONE. `bugs/CODEGEN_selfhost_build_is_red_on_the_branch_base.md` and
-`CODEGEN_selfhost_red_on_the_merged_tree_149_gcc_errors.md` are about "157
-distinct gcc errors" and `CODEGEN_selfhost_closure_still_fails_gcc.md` says 13
-remain; there is no doc anywhere in `bugs/` whose subject is the state the job is
+shape is GONE. The three this doc cited by name — the one about the job being
+red on the branch base, the "red on the merged tree, 149 gcc errors" one, and
+the one whose last measurement was "13 errors remain" — were DELETED with their
+fixes, because their gcc-error counts reached zero; what is left in `bugs/` with
+this prefix is the post-GCC generation (`CODEGEN_selfhost_binary_links…` is this
+one, `CODEGEN_selfhost_closure_compiles_and_the_binary_segfaults`,
+`CODEGEN_selfhost_actual_types_identifier_field_key`,
+`CODEGEN_selfhost_dumpfull_ends_in_attributeerror_platform`,
+`CODEGEN_selfhost_tokenize_region_eq_quadratic`, and the module-level
+`CODEGEN_cas_py_never_compiles…` / `CODEGEN_module_toplevel_undefined_in_selfhost`).
+There is no doc anywhere in `bugs/` whose subject is the state the job is
 in NOW, which is that the generated C compiles, links, and produces a binary
 that **crashes on the first program it is given**. A reader who runs the job and
 sees a SIGSEGV has no document that describes it, which is the whole reason
-this one is filed — and the eight stale ones are named below as the thing to
-reconcile rather than left to contradict it.
+this one is filed.
 
 ## What I ran, and what I saw
 
@@ -84,11 +90,13 @@ the crash is in.
    two-line program" — and `test_selfhost.py` already builds a named artifact,
    so a bisect harness over its own output is cheaper than a commit bisect over
    a 522-second job.
-2. **While in there, reconcile the eight `CODEGEN_selfhost_*` docs.** Each
-   states a gcc-error count that no longer holds. Per CLAUDE.md a doc for a
-   fully-fixed bug is DELETED rather than left to rot, so the ones whose error
-   count is now zero should go with their fix, and the one that survives should
-   carry the shape above. `tools/dangling_doc_refs.py --ratchet` is the check
+2. **Then reconcile the remaining `CODEGEN_selfhost_*` docs against each
+   other.** The three this one used to name by path are gone (deleted with their
+   fixes, which is the right outcome), but each doc still states a gcc-error or
+   symptom count measured on a different day, and this doc's own heading still
+   says "eight … already do" where the count is now seven. Per CLAUDE.md a doc
+   for a fully-fixed bug is DELETED rather than left to rot, so a stale count is
+   either re-measured or goes with the fix that made it stale. `tools/dangling_doc_refs.py --ratchet` is the check
    for the citations they leave behind.
 3. **Then decide the registration.** A `selfhost` that cannot run its own
    output is either `expect=`'d with the reason this doc gives (cheap — 0.2 GB

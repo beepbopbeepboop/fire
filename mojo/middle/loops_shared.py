@@ -308,6 +308,60 @@ def _emit_starred_slot_from_value(gen, name: str, value_ctype: str,
                        [('MojoList *', _dst), ('int64_t', _iv)])
 
 
+def _emit_starred_slot_from_cstr(gen, name: str, cstr: str, start, stop) -> None:
+    """`name = [cstr[i] for i in range(start, stop)]` — the starred slot of a
+    for target whose item is a C STRING, one 1-character string per element.
+
+    The shape is `for k, *rest in <dict>` and `for k, *rest in d.items()`'s
+    sibling over a string item: CPython unpacks the item, a key is a `str`, and
+    indexing a `str` yields a 1-character `str`, so the remainder is a list of
+    1-character STRINGS — `for k, *rest in {"abc": 1}` gives `rest == ['b',
+    'c']`, not `rest == "bc"` and not a list of ints. `mojo_cstr_slice(s, i,
+    i + 1)` is therefore both the element producer and the reason this is a
+    counted loop rather than one call: GIMPLE has no comprehension and no slice
+    expression.
+
+    This is the third member of one family and the shape of the first two, so it
+    is written as the same three steps they are: declare `name` as a
+    `MojoList *` and record its element type (the body must be able to print and
+    len it as the list Python bound — that is the whole point of the star), make
+    a fresh list, then append one element per index from `start` up to `stop`.
+    `start`/`stop` are already-emitted int64_t operand NAMES rather than
+    literals, for the reason `starred_slot_index` gives: a starred slot's bounds
+    depend on the item's RUNTIME length, and the slots after the star are counted
+    from its end.
+
+    `cstr` is the item as a C string. It is `const char *` on the dict-key path
+    (`mojo_dict_iter_key`), and `mojo_cstr_slice` takes `char *`, so the
+    const is cast away here rather than at the call site.
+    """
+    _nm = _as_str(name)
+    gen._declare_var(_nm, 'MojoList *')
+    gen._elem_types[_nm] = 'char *'
+    _dst = gen._cname(_nm)
+    _lst = gen._new_temp('MojoList *')
+    gen._emit(f"  {_lst} = mojo_list_new ();")
+    gen._emit(f"  {_dst} = {_lst};")
+    _src = gen._new_val('char *', f"(char *){_as_str(cstr)}")
+    _i = gen._new_val('int64_t', _as_str(start))
+    _cond = gen._new_bb(); _body = gen._new_bb(); _after = gen._new_bb()
+    gen._emit(f"  goto {_cond};")
+    gen._emit_label(_cond)
+    _c = gen._new_val('_Bool', f"{_i} < {_as_str(stop)}")
+    gen._emit(f"  if ({_c}) goto {_body}; else goto {_after};")
+    gen._emit_label(_body)
+    _one = gen._new_val('int64_t', "1LL")
+    _next = gen._new_val('int64_t', f"{_i} + {_one}")
+    _stop = gen._new_val('int64_t', f"{_next}")
+    _chr = gen._new_val('char *', f"mojo_cstr_slice ({_as_str(_src)}, {_i}, "
+                                  f"{_as_str(_stop)})")
+    gen._void_call('mojo_list_append_str',
+                   [('MojoList *', _dst), ('char *', _as_str(_chr))])
+    gen._emit(f"  {_i} = {_next};")
+    gen._emit(f"  goto {_cond};")
+    gen._emit_label(_after)
+
+
 def _gfl_declare_target_name(gen, shadow_name, vn: str, se: str) -> None:
     """Hoisted out of `_gen_for_list` (recursive nested closure) — the
     lifted-closure-env determinism fix; `gen`/`shadow_name` threaded."""

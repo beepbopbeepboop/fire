@@ -1070,11 +1070,42 @@ def run_census_case(case, tmpdir, verbose):
     import formal.model as M
 
     name, source, want = case
-    stmts = FB.parse_module(source, name + ".mojo")
+    # THE CENSUS IS COUNTED WHERE IT IS MADE, which is `parse_module` and not
+    # the read below.  `FB.parse_module` attaches the unit's field evidence and
+    # then resolves inheritance (`attach_inherited_fields` → `_merged_field_names`
+    # → `_own_field_names` → `_split_declaration` → `struct_receiver_stores`), and
+    # that is the ONE derivation.  `struct_field_names` answers from what that
+    # published (`struct_merged_field_names`) and so asks nothing at all — measured,
+    # and it is why an ask counter wrapped around a second `struct_field_names`
+    # sees zero rather than one.
+    #
+    # So the two halves of the claim are asserted at the two places it can break:
+    # the number of derivations is 1 for a struct of ANY number of methods (a
+    # per-function asker reading this file back would make it n_methods, and a
+    # naive memo would make it 0), and every read after it is 0 (a regression
+    # that stopped publishing the merge, or stopped threading the table, would
+    # make this n_methods again).
+    calls = []
+    real = M.struct_receiver_stores
+
+    def counted(struct_def, receivers_arg):
+        calls.append(getattr(struct_def, "name", None))
+        return real(struct_def, receivers_arg)
+
+    M.struct_receiver_stores = counted
+    try:
+        stmts = FB.parse_module(source, name + ".mojo")
+    finally:
+        M.struct_receiver_stores = real
     structs = [s for s in stmts if isinstance(s, F.StructDef)]
     if len(structs) != 1:
         return False, f"the case declares {len(structs)} structs, expected 1"
     st = structs[0]
+    if calls != [st.name]:
+        return False, (f"attaching this unit's field evidence asked "
+                       f"struct_receiver_stores {len(calls)} times for its one "
+                       f"struct {calls!r}; the store census is a property of the "
+                       f"STRUCT, so it is made once")
     got = M.struct_field_names(st)
     if got != want:
         return False, f"struct_field_names == {got}, expected {want}"
@@ -1095,23 +1126,24 @@ def run_census_case(case, tmpdir, verbose):
                            f"the old per-method formula "
                            f"{sorted(spelled - demoted)}")
 
-    calls = []
-    real = M.struct_receiver_stores
-
-    def counted(struct_def, receivers_arg):
-        calls.append(1)
-        return real(struct_def, receivers_arg)
-
     M.struct_receiver_stores = counted
     try:
+        for _ in range(3):
+            M.struct_field_names(st)
+            M.struct_field_count(st)
+        del calls[:]
+        n_methods = len(M.struct_methods(st))
         M.struct_field_names(st)
+        M.struct_field_count(st)
+        M.struct_sole_field_name(st)
+        M.struct_fits_one_word(st)
+        reads = list(calls)
     finally:
         M.struct_receiver_stores = real
-    n_methods = len(M.struct_methods(st))
-    if len(calls) != 1:
-        return False, (f"deriving the field set of a {n_methods}-method struct "
-                       f"asked struct_receiver_stores {len(calls)} times; it is "
-                       f"a property of the STRUCT, so it is asked once")
+    if reads:
+        return False, (f"reading the field set of a {n_methods}-method struct "
+                       f"asked struct_receiver_stores {len(reads)} times; the "
+                       f"merge published by parse_module answers it")
     if verbose:
         print(f"      field set {got}; {n_methods} methods, 1 census")
     return True, ""

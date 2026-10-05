@@ -488,7 +488,7 @@ MEASURED_PEAK_GB = {
     'formal-specialization':  (0.07, 'measured'),   # 1 s, 6 cases
     'formal-method-param-field': (0.07, 'measured'),  # 9 s, 14 cases
     'formal-external-call':   (0.08, 'measured'),   # 3 s, 29 cases
-    'formal-receiver-position': (0.07, 'measured'),  # 2 s, 12 cases
+    'formal-receiver-position': (0.07, 'measured'),  # 16 s, 38 cases (was "2 s, 12 cases")
     'formal-value-model':     (0.07, 'measured'),   # 9 s, 19 cases
     'formal-x86-dylib':       (0.09, 'measured'),   # 2 s, 9 cases
     # The x86-64 MACHINE MODEL against the hardware, which had never been run
@@ -544,6 +544,13 @@ MEASURED_PEAK_GB = {
     # that measures it.
     'formal-read-before-store': (0.08, 'measured'),  # 8.5 s, 61 cases, no builds
     'formal-receiver-spelling': (0.08, 'measured'),  # 2.8 s, 3 differential cases
+    # …and `formal-bracketed-method-field-set`, registered 2026-10-04 off the
+    # same measurement (`/usr/bin/time -l`, 3.73 s real, 52 559 872 B maximum
+    # RSS): 26 rows of a struct's field set, both backends for the last two, no
+    # Lean. It was in `test_suite.py`'s UNREGISTERED under the reason for the
+    # per-construct suites that build and run for MINUTES, which is not a
+    # measurement of this file.
+    'formal-bracketed-method-field-set': (0.05, 'measured'),  # 3.7 s, 26 rows
     # …and `formal-field-walk`, the third file the estate check named, measured
     # 2026-10-04 the day it was registered. `/usr/bin/time -l` rather than
     # memcap's own poll, because the run is 0.08 s long and a poll with a 0.5 s
@@ -2702,32 +2709,22 @@ test('formal-method-param-field', [PY, 'test_formal_method_param_field.py'],
 # `f[T](r)` — which is not a method call at all, so none of the receiver-handoff
 # family covers it.
 #
-# RED, and registered red rather than excused. 2 of 12, and BOTH are the same
-# direction: a construct with no representation now BUILDS instead of being
-# refused, once on the return side and once on a value-only callee reached
-# through a specialization. A built image here is a wrong program (measured: the
-# return case exits 0 where the source's answer is 7, and the callee case exits
-# 8, which is a frame address read as an integer), so this is a real gap and not
-# a stale expectation; see
-# bugs/FORMAL_a_specialization_defeats_the_frame_escape_refusals.md.
+# GREEN, and it was carried as `expect=` for a count that stopped being true in
+# KIND rather than in number. The marker forgave three cases of
+# bugs/FORMAL_a_specialization_defeats_the_frame_escape_refusals.md — all three
+# of which assert a REFUSAL — and all three refuse again, with the sentences
+# their rows pin, so the marker had nothing left to forgive. Since an expect-marked
+# job that PASSES is reported as a FAILURE whose text is "it PASSES — drop the
+# marker", every `proofs` run was reporting this job red for the right reason and
+# nobody runs `proofs`. The marker is gone (2026-10-04) and the job is in `check`
+# below, so the next red is visible in the everyday gate; that placement is the
+# half of the fix that keeps it from rotting back.
+#
+# 38 cases, 16 s, 0.05 GB, no Lean (`build --formal --no-prove`), which is the
+# cost shape `formal-shlex` (40 s) and `formal-receiver-spelling` (2.8 s) are in
+# `check` for.
 test('formal-receiver-position', [PY, 'test_formal_receiver_position.py'],
      mem='tiny', deps=['preflight'],
-     expect='bugs/FORMAL_a_specialization_defeats_the_frame_escape_refusals.md '
-            '— 3 of 14: TWO of them are that doc — a specialized call with a '
-            'frame address at an argument position bypasses both the '
-            'returned-frame and the value-only-callee refusals and builds — '
-            'and the THIRD is a different defect wearing this test: '
-            '`refuse_a_dotted_specialized_callee_names_it` stops at a '
-            'module-state refusal (`Box` has no home) before reaching the '
-            'specialization refusal its needle wants, so it belongs to the row '
-            'in bugs/FORMAL_module_state_no_storage.md. The leading number is '
-            'the TOTAL and it is checked against the run, because a marker '
-            'that forgives FAIL wholesale absorbs a new failure silently. '
-            'Measured 2026-10-01; the marker said "2 of 12" until then and '
-            'nothing could see the difference until 2026-10-01, when the '
-            'stated count in an `expect=` reason became checkable against the '
-            'run (`_apply_expectations` in this file, and its checks in '
-            'test_suite.py).',
      extra=['test_formal_receiver_position.py', 'formal/build.py',
             'formal/model.py'] + FORMAL_BUILD_INPUTS,
      desc='a frame address at a specialization\'s argument position, refused')
@@ -2836,6 +2833,32 @@ test('formal-read-before-store', [PY, 'test_formal_read_before_store.py'],
 # read of the second returns the first's word. No image, no Lean, no sweep: a
 # parse and two walks, 0.08 s. The registration is further down, beside
 # `formal-glob`, which arrived with it.
+
+# The field set of a struct, and the ONE store census it is derived from. Four of
+# this file's rows are the only place in the tree that asserts the ask COUNT, and
+# they were red on all four for a year and a half: they wrapped
+# `struct_receiver_stores` around a second `struct_field_names`, which for a
+# `parse_module`-prepared struct reads the PUBLISHED merge and asks nothing, so
+# the counter saw 0 where it wanted 1. They now count where the derivation runs
+# (inside `parse_module`, one per struct whatever the method count) and separately
+# assert that every read after it asks nothing — both halves verified to fail when
+# the merge stops being published and when the derivation happens twice.
+#
+# Registered rather than excused, which is `test_suite.py`'s UNREGISTERED row for
+# this file getting `_FORMAL_SUITE_REASON` — a reason written for a file that
+# builds and RUNS images for minutes per group, and this one does that for its
+# last two rows only. 3.7 s and 0.05 GB measured (26 rows, both backends, no
+# Lean), which is `formal-read-before-store`'s and `formal-receiver-spelling`'s
+# cost shape and the reason both are registered rather than excused. What it
+# protects is a frame laid out one slot short: `struct_receiver_stores` missing an
+# assignment demotes a real field name, and every read of that slot returns
+# another field's word.
+test('formal-bracketed-method-field-set',
+     [PY, 'test_formal_bracketed_method_field_set.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_bracketed_method_field_set.py', 'formal/model.py',
+            'formal/build.py'] + FORMAL_BUILD_INPUTS,
+     desc='a struct\'s field set, and the one store census it is derived from')
 # Every case is DIFFERENTIAL and each `this` case has a `self` twin that has
 # to compute the same thing, which is what stops the file from passing for the
 # wrong reason (a build that stopped taking ANY receiver would satisfy "the
@@ -3279,7 +3302,28 @@ BUCKETS = {
               # slot, so this is a coverage hole and not a stale entry — which
               # is the distinction `test_suite.py` draws between registering a
               # file and excusing one. Also in `proofs`, like the two above it.
-              'formal-field-walk'],
+              'formal-field-walk',
+              # …and `formal-receiver-position`, 38 cases on both backends at
+              # 16 s and 0.05 GB with no Lean. It is here because of what
+              # happened to it rather than what it is: it carried an `expect=`
+              # whose three forgiven cases stopped failing, so `proofs` — the
+              # only bucket that ran it, and a bucket nobody runs — reported it
+              # red as "marked expect=… but it PASSES". A marker nobody can
+              # observe rotting out is not a marker, so the job joined the
+              # everyday gate with the marker removed and the reasons for both
+              # written at its registration. `formal-read-before-store` (8.5 s)
+              # and `formal-receiver-spelling` (2.8 s) are the two beside it on
+              # cost; the subject — a frame address at an argument position of a
+              # specialization — is the reason it is not merely another row here.
+              'formal-receiver-position',
+              # …and `formal-bracketed-method-field-set`, 26 rows at 3.7 s and
+              # 0.05 GB. It is here for the same reason as the row above and one
+              # more: its four ask-COUNT rows were red on all four, in no bucket,
+              # and so nothing in the everyday gate ever saw that the store
+              # census a struct's field set is derived from could have become a
+              # per-method-squared one. `formal-field-walk` is its subject-mate
+              # and its neighbour — the statement walk that census reads through.
+              'formal-bracketed-method-field-set'],
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps
@@ -3433,10 +3477,15 @@ BUCKETS = {
                 # where the whole formal picture is.
                 'formal-optional',
                 # …and `formal-field-walk`, named in `check` above and here for
-                # `formal-read-before-store`'s reason: `proofs` is where the
-                # whole formal picture is, and expansion schedules a test once
-                # per run, so the second bucket costs nothing.
-                'formal-field-walk'],
+               # `formal-read-before-store`'s reason: `proofs` is where the
+               # whole formal picture is, and expansion schedules a test once
+               # per run, so the second bucket costs nothing.
+                'formal-field-walk',
+                # …and `formal-bracketed-method-field-set`, the same shape and
+                # the same two reasons: in `check` above because 3.7 s is what
+                # that bucket costs for a field-set table, and here because
+                # `proofs` is the whole formal picture.
+                'formal-bracketed-method-field-set'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model',
             'formal-x86-machine-model',
             # The decoder, which is x86-64 coverage with no image in it: half a

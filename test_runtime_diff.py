@@ -497,6 +497,31 @@ BUILTIN_PROGRAMS = {
             for si, *srest in enumerate("ab"):
                 print(si, srest)
     """),
+    # A starred for-target over a DICT, whose item is the KEY — and a key is a
+    # `str`, so the target unpacks the key STRING: CPython gives `k == 'a'` and
+    # `vs == ['b', 'c']`. Three engines disagreed here, and the middle one is
+    # why this case had to wait for the other two: the interpreter bound the
+    # WHOLE key ("abc" and an empty `vs`) because `_bind_comprehension_target`
+    # exempted `str`/`bytes` from the unpack, and the compiled path REFUSED the
+    # shape outright (`_emit_unsupported_iter`) because lowering CPython's
+    # reading while the interpreter disagreed would have made the two engines
+    # differ on the one comparison this file is. Both are fixed (2026-10-04,
+    # with the filing deleted).
+    #
+    # All three positions the star can be in, because each is a different piece
+    # of arithmetic and the slots after the star are counted from the END of the
+    # key. Distinct target names per loop, for the first-decl-wins reason
+    # `for_target_starred_rest` states.
+    "for_target_starred_rest_over_a_dict": textwrap.dedent("""\
+        def main():
+            d = {"abc": 1, "de": 2, "fgh": 3}
+            for k1, *vs1 in d:
+                print(k1, vs1, len(vs1))
+            for k2, *mid2, w2 in d:
+                print(k2, mid2, w2)
+            for *only3, in d:
+                print(only3)
+    """),
     "dict_ops": textwrap.dedent("""\
         def main():
             var d = {"a": 1, "b": 2}
@@ -1331,6 +1356,12 @@ CPYTHON_COMPARABLE = {
     "for_target_one_tuple_vs_paren_name",
     "for_target_one_tuple_dict_and_nested",
     "for_target_starred_rest",
+    # …and the dict-KEY shape above it: the compiled path used to REFUSE it
+    # rather than disagree with the interpreter, and a refusal here scores
+    # JIT-COMPILE-FAILED, which the summary counts and does NOT fail on — so
+    # without CPython in the comparison the case could have stayed a green
+    # non-check.
+    "for_target_starred_rest_over_a_dict",
     "comprehension_starred_rest",
     "comprehension_target_shadows_an_enclosing_local",
     "comprehension_result_elem_type_across_a_branch",

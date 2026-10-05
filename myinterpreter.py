@@ -5880,8 +5880,20 @@ class Interpreter:
             t = inner
         names = N.target_slots(t)
         if names:
-            values = (list(value) if hasattr(value, '__iter__')
-                      and not isinstance(value, (str, bytes)) else [value])
+            # CPython's UNPACK_EX: an item that is a SEQUENCE is unpacked into
+            # its elements, whatever it is made of — a list, a tuple, and a
+            # `str` (into 1-character strings) or `bytes` (into ints, because
+            # that is what indexing a bytes yields).
+            #
+            # The `str`/`bytes` exemption that used to be here made the whole
+            # dict-key family wrong: iterating a dict yields its KEYS, a key is
+            # a `str`, and `for k, *vs in {"abc": 1}` therefore binds the WHOLE
+            # key "abc" to `k` and hands `vs` an empty list, where CPython
+            # gives `k == 'a'` and `vs == ['b', 'c']`. The compiled path
+            # refused the shape rather than disagree with this (see
+            # mojo/backend_gimple/emit_loops.py's `_gen_for_dict`, which now
+            # lowers it) so the two engines could be compared at all.
+            values = list(value) if hasattr(value, '__iter__') else [value]
             # Plain loop, not next()+genexpr: this file is itself compiled by
             # this project's self-hosting gimple_codegen.py, which has no
             # runtime `next()` builtin -- that emitted an undefined-symbol
@@ -5893,6 +5905,20 @@ class Interpreter:
                     star_idx = i
                     break
             if star_idx is None:
+                if len(values) != len(names):
+                    # CPython raises here, and raising is the only honest
+                    # answer once a `str`/`bytes` item unpacks: `for k, v in
+                    # {"abc": 1}` is "too many values to unpack (expected 2)",
+                    # because the key "abc" is three values. `zip` alone would
+                    # bind `k = 'a'`, `v = 'b'` and DROP the rest — a program
+                    # CPython refuses that here builds, runs and prints the
+                    # wrong thing, which is the failure mode this project
+                    # treats as worse than a refusal. Before the `str` split
+                    # the same program bound `k = 'abc'` and left `v` undefined,
+                    # so it failed too — just later, with a NameError.
+                    raise ValueError(
+                        f"Cannot unpack {len(values)} values into "
+                        f"{len(names)} targets")
                 for n, v in zip(names, values):
                     # A NESTED group slot — `for (i, (j,)) in pairs` — is
                     # itself a pattern, not a variable name, so it recurses

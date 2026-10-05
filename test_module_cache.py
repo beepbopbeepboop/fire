@@ -182,30 +182,21 @@ def test_stage2_3_dylib_and_cas(wd):
         # keeps its teeth; what it is guarding is unchanged, because the growth
         # is a CALL into the runtime registry and not a body in the client.
         #
-        # The real fix for this budget is not another bump: all five
-        # always-emitted generic-repr helpers are `static` and never
-        # address-registered, and deleting them from this client by hand
-        # compiled and linked with no undefined reference at 5208 bytes — 3552
-        # of pure per-module dead weight. Gating the cluster on "this module can
-        # reach it" is measured and filed as
-        # bugs/PERF_generic_repr_helpers_emitted_into_every_module.md.
+        # 10240 -> 6144 (2026-10-04): the gate the four entries above were
+        # asking for LANDED, so this budget comes back DOWN rather than up.
+        # `module_gen.py`'s `REPR_CLUSTER_*` + `_drop_unreachable_repr_cluster`
+        # withdraw the six `static` generic-repr helpers — and their forward
+        # declarations — from any module whose own emitted text names none of
+        # them, which is this client. Measured on this exact client: 8264 ->
+        # **4080**, i.e. the cluster was 48% of the object.
         #
-        # 9216 -> 10240 (2026-10-03, merging the ten bugs4 branches): 9216 ->
-        # 9416 on this exact client, +200. The growth is the dict repr's own
-        # per-module material, from `bugs4-6`'s one-store-of-every-value-kind
-        # work, and it is the same KIND of thing the three entries above record
-        # rather than bodies landing in the client: two new `static` helpers in
-        # the always-emitted preamble (`_mojo_dict_val_repr`, which asks the
-        # dict's recorded repr for a struct slot, and `_mojo_repr_none`), plus
-        # three rows in `_mojo_repr_dict`'s value-kind chain (the `kind == 4`
-        # None row, the untagged-zero row, and the `kind == 5` struct row, which
-        # `_mojo_cat_dict_val` became). Read off the generated C by diffing the
-        # emitted `static` set against master's: exactly those two names are
-        # new. Bumped by two 1024 increments rather than one, because the rule
-        # this ladder follows is "clear the number and keep the teeth": 9416
-        # would clear 10240 with 824 to spare, which is the same margin the
-        # 11264 entry above was written for.
-        check("stage2: client object is tiny (<9KB)", sz < 10240, f"{sz} bytes")
+        # Two 1024 increments above the measurement, the same "clear the number
+        # and keep the teeth" rule the bumps above followed: 6144 leaves 2064
+        # bytes for the growth those four entries each recorded (+120, +200,
+        # +104 — so a dozen of them), against 10240's 6176. What this guards is
+        # unchanged and still the real bug: a client that is NOT tiny means
+        # BODIES are landing in it instead of the dylib.
+        check("stage2: client object is tiny (<6KB)", sz < 6144, f"{sz} bytes")
     finally:
         os.remove(os.path.join(RUNTIME, 's2lib.mojo'))
 
@@ -747,24 +738,27 @@ def test_reflected_struct_import(wd):
         # code is a few hundred bytes.
         #
         # The look also found the actual fix for the budget, and it is not a
-        # bump: all five always-emitted helpers are `static`, mutually
+        # bump: all six always-emitted helpers are `static`, mutually
         # referenced and never address-registered, and hand-deleting them from
         # this client compiled and linked with no undefined reference at 5208
-        # bytes. Filed as bugs/PERF_generic_repr_helpers_emitted_into_every_
-        # module.md; not landed with the merge because its failure mode is a
-        # link error on the self-host closure, which only `make bootstrap` can
-        # clear.
+        # bytes.
         #
-        # 11264 -> 12288 (2026-10-03, merging the ten bugs4 branches), for
-        # stage2's reason and by the same two increments: this client carries
-        # the dict-repr additions too plus the per-struct
-        # `_mojo_elem_repr_<Sn>` shims `reflect_emitted` names, and 11600 needs
-        # a ceiling above it that still has teeth (11264 would not clear it at
-        # all). The invariant is unchanged: what grew is the always-emitted
-        # generic-repr preamble, which is CALLS into the runtime plus the small
-        # walkers above it, not bodies belonging to this client.
+        # 12288 -> 8192 (2026-10-04): the gate that fix asked for LANDED, so
+        # this budget comes back DOWN. `module_gen.py`'s `REPR_CLUSTER_*` +
+        # `_drop_unreachable_repr_cluster` withdraw the six `static` helpers and
+        # their forward declarations from any module whose own emitted text names
+        # none of them, which is this client. Measured on this exact client:
+        # 10432 -> **6296**. Two 1024 increments above it, same rule: 8192
+        # leaves 1896 bytes against 12288's 5992.
+        #
+        # What is left in the object is what should be: the dispatch
+        # entrypoints, this client's own code, and the per-struct
+        # `_mojo_elem_repr_<Sn>` shims `reflect_emitted` names — CALLS into the
+        # runtime, not bodies belonging to this client. That is the invariant
+        # this guard exists for, and a client that is NOT tiny now means bodies
+        # are landing in it.
         check("reflect: client object is tiny — bodies live in the dylib",
-              sz < 12288, f"{sz} bytes")
+              sz < 8192, f"{sz} bytes")
     finally:
         os.remove(libpath)
 

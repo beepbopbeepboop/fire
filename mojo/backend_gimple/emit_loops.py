@@ -45,7 +45,8 @@ import mojo.backend_gimple.emit_calls as ggc
 from mojo.middle.loops_shared import *  # noqa: F401,F403
 from mojo.middle.loops_shared import (
     _as_str, _gfl_declare_target_name, _pair_key, _try_const_fold_int, _tuple_elem_value, _tuple_unpack_slot_elems,
-    _emit_starred_slot_from_value, _emit_starred_slot_list, starred_slot_index, starred_slot_name,
+    _emit_starred_slot_from_cstr, _emit_starred_slot_from_value, _emit_starred_slot_list, starred_slot_index,
+    starred_slot_name,
 )
 
 def _gen_for_range(gen, node: gimple_ctypes.ForStmt):
@@ -2448,34 +2449,44 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         inner = var[1:-1].strip()
         var_names = gen._split_top_level_comma(inner)
         # `for k, *rest in <dict>` unpacks the KEY STRING — Python says
-        # `for a, *b in {"xy": 1}` gives `a == 'x'`, `b == ['y']` — and the
-        # slots of a dict loop here are not slots of a shared row at all
-        # (slot 0 is the key; every later slot is the literal 0, this
-        # lowering's stand-in for a pair's value). There is no row to slice a
-        # remainder out of, so this REFUSES at runtime through the standard
-        # mechanism (`_emit_unsupported_iter`: loud, and not a silently
-        # dropped body) rather than emitting the store through a pointer
-        # named `*rest` — which is a write through an UNINITIALISED pointer,
-        # i.e. a wild store that happens to be mapped.
+        # `for a, *b in {"xy": 1}` gives `a == 'x'`, `b == ['y']`, because
+        # iterating a dict yields its keys and a key is a `str` — so the slots
+        # of this loop are CHARACTERS of one C string, not slots of a shared
+        # row (slot 0 is the key; every later slot is the literal 0, the
+        # starless lowering's stand-in for a pair's value). What the star adds
+        # is the before/after arithmetic `starred_slot_index` describes: every
+        # slot before the star is measured from the front of the string, every
+        # slot after it from its END, and the star takes what is left between
+        # them (`a, *mid, z` over "abcd" gives `mid == ['b', 'c']`).
         #
-        # A refusal and not a lowering, because the two engines disagree on
-        # this shape already and only one of them can be moved here: the
-        # interpreter binds the WHOLE key (`for k, *vs in d` prints
-        # `abc []` where CPython prints `a ['b', 'c']` — see
-        # bugs/RUNTIME_starred_for_target_over_a_dict_key_is_not_unpacked.md),
-        # so implementing CPython's reading here would make the compiled path
-        # disagree with the interpreter it falls back to, which is the one
-        # comparison this project can actually check.
-        if starred_slot_index(var_names) >= 0:
-            _emit_unsupported_iter(gen, 'dict')
-            return
+        # This USED TO REFUSE, through `_emit_unsupported_iter`, because the
+        # interpreter bound the whole key (`for k, *vs in d` printed `abc []`
+        # where CPython prints `a ['b', 'c']`) and only one of the two engines
+        # could be moved inside a merge. Both are fixed now — the interpreter
+        # splits a `str` item in `_bind_comprehension_target`, this is the
+        # lowering — and a refusal here is what kept the comparison that checks
+        # them from existing at all.
+        #
+        # An INT-keyed dict still refuses, and that is not the same shape being
+        # put off: CPython's answer there is a `TypeError` ("cannot unpack
+        # non-iterable int object"), because an int has no characters to take
+        # one at a time. Refusing at compile time is the honest answer for a
+        # construct whose runtime error message this lowering does not carry.
         # Flatten any nested tuple target the same way _gen_for_list does
         # (a naive split turned `(k, (a, b))` into the bogus fragments
-        # `(a` / `b)`, declared verbatim — hard C syntax errors).
+        # `(a` / `b)`, declared verbatim — hard C syntax errors). BEFORE the
+        # star is located, because the star's POSITION is what every index
+        # below is measured from and a flatten that ran after it would leave
+        # `_n_after` counting slots that are no longer there.
         _flat = []
         for vn in var_names:
             _gfd_flatten_target(gen, vn, _flat)
         var_names = _flat
+        star_idx = starred_slot_index(var_names)
+        if star_idx >= 0 and int_keys:
+            _emit_unsupported_iter(gen, 'dict with integer keys')
+            return
+        _n_after = 0 if star_idx < 0 else len(var_names) - star_idx - 1
         # First var is the KEY (char*); the rest are value slots, always
         # 0/NULL in this runtime's dict-key iteration. Declare the value
         # slots int64_t (not char*) so a sibling list-iteration branch over
@@ -2496,7 +2507,25 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # `for vname, vtype in ci.captures:`).
         _slot_ctypes = []
         for i, vn in enumerate(var_names):
-            _want = ('int64_t' if int_keys else 'char *') if i == 0 else 'int64_t'
+            if i == star_idx:
+                # A starred slot holds a LIST of the remaining CHARACTERS of the
+                # key, so that is what it is declared as — and its element type
+                # is recorded, because `print(rest)` must print `['b', 'c']`
+                # and not the list's pointer. `_emit_starred_slot_from_cstr`
+                # declares it too, but this site's pre-pass is where the C
+                # declaration is emitted (before the loop opens) and
+                # `_declare_var` is first-decl-wins, so the call below only
+                # fills in the entry when nothing has declared it yet.
+                _gfl_declare_target_name(gen, shadow_name,
+                                         starred_slot_name(vn), 'MojoList *')
+                gen._elem_types[starred_slot_name(vn)] = 'char *'
+                _slot_ctypes.append('MojoList *')
+                continue
+            # With a star, every slot is a CHARACTER of the key, so `char *` —
+            # including the ones after the star, which the starless lowering
+            # declares `int64_t` and stores a literal 0 into.
+            _want = ('int64_t' if int_keys else 'char *') if (i == 0 or star_idx >= 0) \
+                else 'int64_t'
             _retype = (int_keys and i == 0 and gen.var_types.get(vn, _want) != _want) \
                 or (not int_keys and i == 0 and vn in gen._int_key_loop_vars)
             gen._declare_var(vn, _want, force=(vn == shadow_name) or _retype)
@@ -2563,29 +2592,85 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     if int_keys:
         pass    # the integer key was stored above
     elif is_tuple:
-        # Assign key to first name, NULL (zero) to remaining names
-        vn0 = var_names[0]
-        cvn0 = gen._cname(vn0)
-        # `_slot_ctypes`, not a fresh `var_types.get(..., 'char *')`: the
-        # store must use the type the slot was actually DECLARED with (see
-        # where _slot_ctypes is built).
-        vt0 = _slot_ctypes[0]
-        if vt0 in ('int64_t', 'int', 'int32_t'):
-            vp = gen._new_val('void *', f'(void *){key_tmp}')
-            box = gen._new_val('int64_t', f'(int64_t){vp}')
-            gen._emit(f"  {cvn0} = {box};")
+        if star_idx >= 0:
+            # The star's half: every slot of this target is a CHARACTER of the
+            # key, at a position that depends on the key's RUNTIME length, so
+            # the length is read once and the slots after the star are counted
+            # from its END (`a, *mid, z` over "abcd" -> `mid == ['b', 'c']`).
+            # `starred_slot_index` is the model for the arithmetic.
+            _klen = gen._new_val('int64_t', f"mojo_strlen ((char *) {key_tmp})")
+            _n = gen._new_val('int64_t', f"{_n_after}LL")
+            # CPython raises ValueError when a starred target's non-starred
+            # slots outnumber the item's elements ("not enough values to unpack
+            # (expected at least 2, got 1)"), and the positions below are then
+            # NEGATIVE — `mojo_cstr_slice` resolves a negative index against the
+            # length, so without this the loop would quietly bind a slot to ""
+            # and keep going, which is a program that builds, runs and answers
+            # wrongly. The interpreter raises the same class
+            # (`_bind_comprehension_target`); this is the compiled half of that
+            # rule. Emitted only when there IS a slot after the star, because
+            # that is the only way an index can go negative — `for k, *rest in d`
+            # over any key is well-defined.
+            if _n_after:
+                _req = gen._new_val('int64_t', f"{star_idx + _n_after}LL")
+                _short = gen._new_val('_Bool', f"{_as_str(_klen)} < {_req}")
+                _bb = gen._new_bb(); _bo = gen._new_bb()
+                gen._emit(f'  if ({_short}) goto {_bb}; else goto {_bo};')
+                gen._emit_label(_bb)
+                gen._emit_call('void', '', 'mojo_raise_value_error',
+                               [('char *', gen._intern_string(
+                                   'not enough values to unpack (expected at '
+                                   f'least {star_idx + _n_after}, got a shorter '
+                                   'string)'))])
+                gen._emit(f'  goto {_bo};')
+                gen._emit_label(_bo)
+            for _si, _svn in enumerate(var_names):
+                if _si == star_idx:
+                    _stop = _klen
+                    if _n_after:
+                        _stop = gen._new_val('int64_t', f"{_as_str(_klen)} - {_n}")
+                    _from = gen._new_val('int64_t', f"{_si}LL")
+                    _emit_starred_slot_from_cstr(
+                        gen, starred_slot_name(_as_str(_svn)), key_tmp,
+                        _from, _stop)
+                    continue
+                # Front of the key for a slot before the star, END for one after:
+                # slot `_si` sits `_si - star_idx - 1` places from the end.
+                if _si < star_idx:
+                    _pos = gen._new_val('int64_t', f"{_si}LL")
+                else:
+                    _off = gen._new_val('int64_t', f"{_si - star_idx - 1}LL")
+                    _from_end = gen._new_val('int64_t', f"{_as_str(_n)} - {_off}")
+                    _pos = gen._new_val('int64_t', f"{_as_str(_klen)} - {_from_end}")
+                _plus = gen._new_val('int64_t', f"{_as_str(_pos)} + 1LL")
+                _chr = gen._new_val('char *',
+                                    f"mojo_cstr_slice ((char *) {key_tmp}, "
+                                    f"{_as_str(_pos)}, {_as_str(_plus)})")
+                gen._emit(f"  {gen._cname(_svn)} = {_chr};")
         else:
-            gen._emit(f"  {cvn0} = (char *) {key_tmp};")
-        for _vi in range(1, len(var_names)):
-            vn = var_names[_vi]
-            cvn = gen._cname(vn)
-            vt = _slot_ctypes[_vi]
-            if vt in ('int64_t', 'int', 'int32_t'):
-                gen._emit(f"  {cvn} = (int64_t)0;")
-            elif vt.endswith(' *'):
-                gen._emit(f"  {cvn} = ({vt})0;")
+            # Assign key to first name, NULL (zero) to remaining names
+            vn0 = var_names[0]
+            cvn0 = gen._cname(vn0)
+            # `_slot_ctypes`, not a fresh `var_types.get(..., 'char *')`: the
+            # store must use the type the slot was actually DECLARED with (see
+            # where _slot_ctypes is built).
+            vt0 = _slot_ctypes[0]
+            if vt0 in ('int64_t', 'int', 'int32_t'):
+                vp = gen._new_val('void *', f'(void *){key_tmp}')
+                box = gen._new_val('int64_t', f'(int64_t){vp}')
+                gen._emit(f"  {cvn0} = {box};")
             else:
-                gen._emit(f"  {cvn} = (char *)0;")
+                gen._emit(f"  {cvn0} = (char *) {key_tmp};")
+            for _vi in range(1, len(var_names)):
+                vn = var_names[_vi]
+                cvn = gen._cname(vn)
+                vt = _slot_ctypes[_vi]
+                if vt in ('int64_t', 'int', 'int32_t'):
+                    gen._emit(f"  {cvn} = (int64_t)0;")
+                elif vt.endswith(' *'):
+                    gen._emit(f"  {cvn} = ({vt})0;")
+                else:
+                    gen._emit(f"  {cvn} = (char *)0;")
     else:
         cvar = gen._cname(var)
         vt = gen.var_types.get(var, 'char *')
