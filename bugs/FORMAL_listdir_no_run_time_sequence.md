@@ -178,12 +178,8 @@ gone.
    returned, which has no static size to `malloc`.~~ **CORRECTED 2026-10-04: a
    container returned by a function in THIS image is frame-resident too, so this
    item was not a missing capability but a wrong answer, and it is now refused
-   at the read on both architectures — see the section above, and note that the
-   caller-side copy landed after that section was written: a container of WORDS
-   whose blob has a known size is now copied into the caller's own frame right
-   after the call (`model.returned_container_blob_bytes`), so this item's
-   remaining remainder is the run-time-length half below and not the
-   frame-residency half.**
+   at the read on both architectures — see the section above and
+   `bugs/FORMAL_a_returned_container_read_after_a_call_is_a_frame_reuse.md`.**
 4. ~~A `for` over it, and `len`.~~ **DONE**, above.
 
 That is Phase 6's tagged-value convergence arriving from the `os` side, and it
@@ -234,13 +230,11 @@ refusing the return took that module out (measured: the hostmods census went
 
 **The capability that would make it right is unchanged in substance and better
 specified than this document had it**: a `malloc`'d blob whose length is only
-known at run time (item 2) is what a copy has to copy. The COPY half of that
-landed 2026-10-05 for a blob whose length IS a compile-time constant —
-`formal/model.py`'s `returned_container_blob_bytes` sizes it and
-`container_returned_blob_sites` gives the caller the block it is copied into —
-and what is left here is exactly item 2: a blob sized by a LOOP has no constant
-to size the copy with, so it is the `malloc` that has to come first. That is the
-one piece of work this item still needs.
+known at run time (item 2) is what a copy has to copy, and the copy is the
+struct-frame convention applied to a blob. That is one piece of work for items 2
+and 3 together, and it is written down where the three pieces of it are:
+
+`bugs/FORMAL_a_returned_container_read_after_a_call_is_a_frame_reuse.md`.
 
 **Item 1 is unaffected** — a blob another IMAGE `malloc`s (`os.listdir`,
 `os.walk`) crosses the boundary and is read by subscript today, which is the
@@ -298,99 +292,3 @@ is what the `-> List[String]` declaration bought: `len(names)`, `names[i]` and
 `for x in names`. The three accessors are still there and still the honest
 spelling for a caller who frees the result, because a Python list on this path
 has no `free`.
-
-## 2026-10-05 (`work/formal19-3-r2`): items 2 and 3 are ONE piece and it is two
-## instructions' worth — measured on arm64, and x86-64 is the only thing left
-
-**Items 2 and 3 are implementable together and do NOT need the caller-side block
-this document's §"What is still missing" specifies.** The measurement is
-`formal/model.py`'s `returned_container_blob_bytes` sizing and its
-`container_returned_blob_sites` ask, which carry the whole of it; this section
-records what it means for the two items as stated here, because this document is
-where they are written down and the answer changes their shape. The doc that
-first recorded the measurement is DELETED — the bug closed, because the blob is
-copied into the caller's own frame right after the call, or refused, and
-`7aaf56b0` re-pointed every citation at those two symbols.
-
-* **Item 2 ("a `list` LITERAL's frame reserve cannot be a run-time value, so
-  `xs = []` followed by `n` appends has nowhere to put them … With (1) that
-  becomes a `malloc`") — the `malloc` half is DONE and measured on arm64.** The
-  length is word 0 of the blob, so it is a run-time count and no build-time size
-  is needed anywhere: `malloc((count+1)*8)` at the return, `memmove` of the blob,
-  and the caller holds a heap pointer. `return [11, 22, 33]` read after a second
-  call answers `11 22 33` on arm64, where it answered `7 8 9` before the refusal
-  existed.
-* **Item 3 ("a function returning a container … a frame address is not a value a
-  caller can use after the callee returns") — the SAME `malloc`.** This document
-  treats items 2 and 3 as one project and it is right, and it is also right that
-  the two together are the run-time-length blob. What it does not say is that the
-  caller-side block that doc's §"The exact next step" specified was unnecessary,
-  and the block it specified is what `container_returned_blob_sites` and the
-  `returned_container_blob_bytes` copy replaced: a callee that `malloc`s its own
-  copy needs no block from the caller, which is the difference between this being
-  an ABI change and it being two pieces in the callee.
-* **What is still open is x86-64 and nothing else.** The arm64 copy is correct;
-  the x86-64 copy is a correct instruction stream that loses the tail of the
-  blob, and the three candidates were each tested (length register, source
-  completeness, symbol). That measurement, and the three encoder traps it turned
-  up on the way, are in that document's section — a next attempt starts there and
-  not at the design.
-
-**The refusal stays on both architectures until then**, which is worth saying
-because it is the one decision in that section a reader might otherwise expect to
-have been made the other way: arm64 could have shipped alone, and
-`formal/model.py::returned_container_refusal`'s text is written so that a
-container is refused on both machines with the SAME sentence. A fix on one backend
-would make `formal/x86_64_codegen.py` and `formal/arm64_codegen.py` answer one
-construct differently, which is the outcome every "one recogniser, two backends"
-argument in this repository is about.
-
-**Item 2's OTHER half is unchanged and is not this.** A list built by a loop in
-the SAME frame (`xs = []` then `xs.append(…)` inside a `while`) still has nowhere
-to put the elements, because the frame reserve is the number of append SITES and
-the loud overflow of step 1 is what says so. A returned blob is copied at the
-return; a blob that grows inside the callee needs a heap blob that grows, which is
-a different piece of work and is not implied by the copy.
-
-**2026-10-05 (`formal25-4`): the capability is still the open item, and the
-MESSAGE that reports it was naming a repair that does not work — which is this
-document's own subject one layer out, and it is measured on both architectures.**
-
-`model.list_append_overflow_message` ended with "…or move the appends into a
-function of their own so the capacity each one sees is its own", and the
-capacity IS counted per function, so moving the appends moves the loop with
-them:
-
-    def fill() -> List[Int]:
-        var ys = []
-        var i = 0
-        while i < 3:
-            ys.append(i)      # overflows HERE; the capacity is still 1
-            i = i + 1
-        return ys
-
-A reader who followed the sentence reached the identical message with a
-different function's name on it — the outcome a loud run-time stop exists to
-prevent, and the same one `formal/model.py`'s `refuse_none_comparisons` calls
-out for a fold that cannot observe the difference. It now names the two
-spellings that compute the same list, both measured on both architectures:
-
-  * **SITES rather than EXECUTIONS.** `xs.append(1); xs.append(2); xs.append(3)`
-    outside any loop is capacity 3; one site in a `while i < 3` is capacity 1.
-    Same three elements, same `[1, 2, 3]`.
-  * **`for i in range(3)`, whose compile-time trip count is COUNTED**
-    (`model.walk_stmt_trips`), so the loop is the ANSWER rather than the cause
-    — which is worth naming because it is the shape a reader reaches for first,
-    and a `while` with the same literal bound differs for a reason that is a
-    property of the language (`range` has a length this path can read).
-
-Two rows in `test_formal_run.py`: one asserts the message says this and REDS
-without the change, one BUILDS AND RUNS both repairs and requires
-`sites=1 counted=1|` — a message naming two repairs where one silently did not
-work is a promise a reader cannot check, and this is the check.
-
-**What this does NOT close.** Item 2 stands exactly as the paragraph above says
-it does: the list whose length is only known at run time is still refused, and
-the two spellings above are the honest workarounds rather than the capability. A
-`malloc`'d blob that GROWS is still the missing piece, and a message that says
-which two spellings fit today is not that piece.

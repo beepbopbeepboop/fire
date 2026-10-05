@@ -369,51 +369,6 @@ def encode_mul_xd_xn_xm(xd: int, xn: int, xm: int) -> bytes:
     return struct.pack('<I', insn)
 
 
-def encode_smulh_xd_xn_xm(xd: int, xn: int, xm: int) -> bytes:
-    """SMULH Xd, Xn, Xm — the SIGNED HIGH half of Rn * Xm.
-
-    The overflow half of a signed multiply, and the only instruction on this
-    target that computes it. `MUL` alone cannot answer "did `a * b` fit in 64
-    signed bits", because a wrapping `MUL` and a fitting one produce the same
-    word; the pair does not. `formal/model.py::int_overflow_traps` is the
-    decision and this is the instruction its arm64 emitter asks for.
-
-    `SMULH` is `MUL`'s shifted-register word with bit 22 set — the S bit, which
-    on this class means "the HIGH half" rather than "and set the flags", so
-    unlike `ADDS`/`SUBS` it writes no flag. Verified against `as`:
-    `smulh x2, x0, x1` assembles to `0x9b417c02`, and this formula is
-    `0x9b407c00 | (1 << 16) | (0 << 5) | 2`.
-    """
-    assert 0 <= xd <= 31
-    assert 0 <= xn <= 31
-    assert 0 <= xm <= 31
-    insn = 0x9b407c00 | (xm << 16) | (xn << 5) | xd
-    return struct.pack('<I', insn)
-
-
-def encode_adds_xd_xn_xm(xd: int, xn: int, xm: int) -> bytes:
-    """ADDS Xd, Xn, Xm — add AND set the flags.
-
-    The signed-overflow test for `+` in one instruction: `ADD` cannot report
-    overflow at all, and `ADDS` reports it in V, which `B.vs` branches on. So
-    `formal/model.py::int_overflow_traps`'s `+` arm is this word plus a
-    conditional branch, where the alternative (`ADD`, `SUBS`, `B.vs`) is three.
-
-    It is `ADD`'s shifted-register word with bit 21 set (S = 1), and with
-    `Rd == 31` it is `CMN` — the add with no result, which
-    `encode_cmn_xn_xm` already emitted and nothing on this path modelled.
-    One class covers both spellings, and `arm64_step`'s branch for
-    `0xab000000` writes `Rd`, so a `CMN` (`Rd = 31`) writes `XZR` and leaves
-    the state otherwise alone. Verified against `as`:
-    `adds x0, x0, x1` assembles to `0xab010000`.
-    """
-    assert 0 <= xd <= 31
-    assert 0 <= xn <= 31
-    assert 0 <= xm <= 31
-    insn = 0xab000000 | (xm << 16) | (xn << 5) | xd
-    return struct.pack('<I', insn)
-
-
 def encode_neg_xd_xn(xd: int, xn: int) -> bytes:
     """NEG Rd, Rn. Rd = -Rn (two's complement).
     Verified encoding: 0xcb0003e0 | (xn << 16) | xd
@@ -466,40 +421,20 @@ def encode_bl(offset: int) -> bytes:
 def encode_cbz_xn(offset: int, xn: int) -> bytes:
     """CBZ Xn, #offset. Branch if Xn is zero.
     Verified: 0xb4000000 | ((offset // 4) << 5) | xn
-
-    `offset` is in BYTES (imm19 counts instructions, so it is divided by four),
-    and it is SIGNED: the field is masked with 0x7ffff the way every other
-    branch encoder here masks its displacement. **It was not**, and
-    `(offset // 4) << 5` on a negative offset is a negative Python int, so
-    `0xb4000000 | negative` is negative and `struct.pack('<I', …)` raised
-    `struct.error` — a backward conditional branch, which is what every loop
-    exit is, could not be encoded at all even though the assertion two lines
-    above it (`-2**18 <= offset < 2**18`) says it is in range. Every call site
-    in `formal/arm64_codegen.py` passes a placeholder that `Assembler.resolve`
-    patches afterwards, so no image carried it; the byte differential in
-    `test_arm64_encoders.py` found it instead, on the negative row of the CBZ
-    sweep. Found by `tools/formal_isa_census.py`'s encoder column.
-
-    The bound is also the FIELD's and not a byte count: imm19 reaches
-    2**18 instructions either way, so the assertion is over instructions and the
-    byte range is four times that. It is written in instructions to match.
     """
     assert 0 <= xn <= 31
-    assert -2**18 <= offset // 4 < 2**18, offset
-    insn = 0xb4000000 | (((offset // 4) & 0x7ffff) << 5) | xn
+    assert -2**18 <= offset < 2**18
+    insn = 0xb4000000 | ((offset // 4) << 5) | xn
     return struct.pack('<I', insn)
 
 
 def encode_cbnz_xn(offset: int, xn: int) -> bytes:
     """CBNZ Xn, #offset. Branch if Xn is non-zero.
     Verified: 0xb5000000 | ((offset // 4) << 5) | xn
-
-    The negative-offset mask and the byte/instruction bound are
-    `encode_cbz_xn`'s; see there for why the mask is there at all.
     """
     assert 0 <= xn <= 31
-    assert -2**18 <= offset // 4 < 2**18, offset
-    insn = 0xb5000000 | (((offset // 4) & 0x7ffff) << 5) | xn
+    assert -2**18 <= offset < 2**18
+    insn = 0xb5000000 | ((offset // 4) << 5) | xn
     return struct.pack('<I', insn)
 
 

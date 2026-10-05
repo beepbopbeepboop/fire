@@ -133,14 +133,6 @@ ADMITTED_COUNTS = {
     # measurement about why each name is a `def`.
     "posixpath": 0,
     "platform": 0,
-    # `random` is CPython's Mersenne Twister, written out: the state is 624
-    # 32-bit words this module computes (`seed` is the init_by_array schedule,
-    # `random`/`getrandbits`/`randrange` are the tempering and the rejection
-    # loop), so there is no host fact left over to admit. The zero is measured
-    # the way `test_formal_random.py` measures the rest — name by name against
-    # CPython's live `random` on both backends, including the seeded sequences
-    # that fix the state schedule.
-    "random": 0,
     "re": 0,
     # `quote` is a scan over bytes a string already is plus a substitution, and
     # every one of the 1142 answers `test_formal_shlex.py` compares with
@@ -396,7 +388,7 @@ SCOPE_PROBES = (
     # `_EXPLANATORY` had no row, so removing any of them was a no-op and the
     # table could not tell a live connective from a dead one — which is the
     # defect `tools/formal_sweep_causes.py` was fixed for in
-    # the `b10` round of `bugs/FORMAL_sweep_work_map.md` §5.1, and the reason that
+    # `bugs/FORMAL_sweep_work_map_2026-10-04_b10.md` §5.1, and the reason that
     # map's `check_cause_table` asserts every label is reachable from a sample.
     # Generated, a connective added to `_EXPLANATORY` brings its row with it and
     # the row fails if the connective does not fire.
@@ -1186,14 +1178,12 @@ def _exit_status_claims():
 # `decide` discharges in microseconds and the KERNEL checks; `native_decide` was
 # compiling a decision procedure to C and asserting the result, which on this
 # toolchain means a generated axiom per use rather than `Lean.ofReduceBool`.
-# **What is left is 1518 in `ProofLib`, 3 in `X86` (the `∀ w, …`
-# bit-pattern lemmas, which is the right tool), 19 in `IEEE754` and none in
-# `Contracts`/`Refine`/`work` — per-module figures, all `native_decide`/
-# `bv_decide` together** — **1540, not the 749 this table pinned until
-# 2026-10-04.** The 22 `native_decide` that evaluate a ground binary64 value are
-# inside the 19 `IEEE754` sites plus the three named ones in `NATIVE_DECIDE_ALLOWED`.
+# **What is left is 1518 `bv_decide` in `ProofLib`, 10 in `X86` (the `∀ w, …`
+# bit-pattern lemmas, which is the right tool), 9 in `IEEE754` and one each in
+# `Contracts`/`Refine`/`work`, and 22 `native_decide` that evaluate a ground
+# binary64 value** — **1540, not the 749 this table pinned until 2026-10-04.**
 #
-# TWO upward movements, and they are not the same kind of movement, which is the
+# Two upward movements, and they are not the same kind of movement, which is the
 # reason both are written down rather than just the total:
 #
 #   * **+2, the instrument got better** (2026-10-04). The census's own scanner
@@ -1210,7 +1200,7 @@ def _exit_status_claims():
 #
 # The second is the one this ledger exists to make visible, and the branch that
 # landed it did not move the total: the pay-down identity
-# `total - remaining == replaced` still holds (1540 + 67 = 1607), but only
+# `total - remaining == replaced` still holds (1540 - 67 = 1473), but only
 # because the arrivals are counted in `total`. A ledger that recorded the
 # arrivals as new debt is what makes the number trustworthy; one that let the
 # ceiling sit at 685 while the tree carried 1518 is what this row is. The
@@ -1260,24 +1250,6 @@ LIBRARY_TRUST = {
     # of this module is the finding, and it is why the arithmetic's cost is
     # bounded while the comparisons' is zero.
     "IEEE754": (0, 0, 19, 19),
-    # `lib/Peephole.lean`, added 2026-10-05: the three peephole rules
-    # `formal/peephole.py` may perform, each proved against the machine
-    # model with its side conditions stated. `0` in the axiom column is
-    # the point of the module — the rules reason about `Arm64State`
-    # with `omega` and `bv_decide` and reach no axiom, so a rewrite the
-    # pass performs is one whose soundness does not rest on a decision
-    # procedure's fidelity. Nine `bv_decide` sites, no `sorry`.
-    "Peephole": (0, 0, 9, 9),
-    # `lib/Specs.lean`, added 2026-10-05: the INDEPENDENT specification layer
-    # (reference definitions for the classic example programs, written by hand
-    # in `Nat`/`Int`/`List`).  Zero at 0 and zero at 1, and the zero at column 2
-    # is a MEASUREMENT rather than an absence of measurement: every theorem in
-    # it is closed under `decide`/`omega`/`rfl`, which is what a specification
-    # layer can afford to be — a spec whose own proof needed a reflection axiom
-    # would be resting on the same unverified evaluation the layer exists to
-    # check.  `AXIOM_CLOSURE`'s row below is what decided that, read out of a
-    # real `#print axioms` run over all 55 declarations.
-    "Specs": (0, 0, 0, 0),
 }
 
 #: What the CLOSURE census measured, per module: how many theorems were asked,
@@ -1371,37 +1343,6 @@ AXIOM_CLOSURE = {
     # the mirror defect, carrying its own declaration-head pattern with no `@[...]`
     # prefix, so 98 attributed declarations were never asked about at all.
     "IEEE754": (24, 19, 5, 0, 0, 0),
-    # All 66 declarations of `lib/Specs.lean` answered, none reaching a decide
-    # axiom, none dropped as `private`, and no `of_reduce_bool`.  Read out of
-    # `formal/admitted.py::theorem_axiom_census(..., modules=['Specs'])` on the
-    # pinned toolchain — which is the same instrument the five rows above were
-    # read out of, so the comparison is like for like.  **Re-pinned 2026-10-05
-    # from 55 to 66**: the row was pinned when `lib/Specs.lean` declared 55
-    # askable names and the layer has grown since, all of them specification
-    # theorems over the same closed `Nat`/`Int`/`List` vocabulary — so `asked`
-    # and `clean` rise together and `reaches` stays 0, which is the shape that
-    # says the ARRIVAL is specifications and not new trusted evaluation.
-    # Measured on the merged tree, and it was the only row of the eight that
-    # disagreed; the other seven were re-measured in the same run and are
-    # unchanged.  See `bugs/TEST_the_axiom_closure_table_is_stale_for_five_of_its_six_modules.md`.
-    "Specs": (66, 0, 66, 0, 0, 0),
-    # `lib/Peephole.lean` (added 2026-10-05 with `formal/peephole.py`), measured
-    # the same way on the same run.  Twelve askable declarations, of which EIGHT
-    # are kernel-checked and ONE reaches a decide axiom; the three
-    # `closure_only` are theorems that reach no axiom themselves but rest on one
-    # through another declaration in the module, which is the only module in
-    # `lib/` besides `ProofLib` where that column is non-zero.
-    #
-    # **The one `reaches` is the finding, not a rounding error**, and it is the
-    # honest counterpart of `LIBRARY_TRUST`'s nine `bv_decide` SITES for this
-    # module: nine sites spread over twelve declarations, so most declarations
-    # carry none, one carries the site's axiom and three inherit it.  The site
-    # census (`LIBRARY_TRUST`) and this one are correctly different numbers —
-    # sites versus declarations — and the module's value is that the rewrites it
-    # licenses are proved about `Arm64State` with `omega`, so 8 of 12 are checked
-    # by the kernel and the pass's soundness does not rest on a single decision
-    # procedure call.
-    "Peephole": (12, 1, 8, 0, 3, 0),
 }
 
 

@@ -31,9 +31,7 @@ what is asserted here is:
      are built, the second is BUILT AS AN ARM64 IMAGE AND RUN, and their stdout,
      their stderr and their exit status must be identical. Every case in the
      table is either a value, a usage line, an error message or an exit code
-     that this module has to reproduce exactly. The oracle is asked in
-     `cpython_env()` and not in this process's environment, for the reason the
-     closing paragraph gives;
+     that this module has to reproduce exactly;
   5. the refusals are refusals — `type=float` is declined with a reason rather
      than truncated to an integer, because a value on this path is one 64-bit
      integer word (measured: `2.5` is the integer 2, `atof("3.5")` is 1);
@@ -44,16 +42,7 @@ what is asserted here is:
 
 The comparison is against CPython's OWN answers rather than against a table of
 expected strings, so a change in either implementation that is wrong in the
-same way in both would have to be wrong in CPython to pass. That is worth
-something only if the oracle is asked the same way twice, and it was not: the
-child used to inherit this process's environment, and CPython 3.14's `argparse`
-colourises its usage line and its help listing whenever
-`_colorize.can_colorize()` is true — which it reads `FORCE_COLOR`,
-`PYTHON_COLORS`, `NO_COLOR` and `TERM` to decide, BEFORE it asks whether the
-stream is a terminal, which a pipe is not. Measured with `FORCE_COLOR=3` and
-`TERM=xterm-color` in the environment: 31 of the 69 cases differed, and every
-one of them differed only by ANSI escapes. So the verdict belonged to the shell
-that ran the test, and `cpython_env()` is what gives it back to the module.
+same way in both would have to be wrong in CPython to pass.
 
 Invoked directly:
     python3 test_formal_argparse.py [-v]
@@ -66,15 +55,6 @@ import platform
 import subprocess
 import sys
 import tempfile
-
-# One COMPILE budget and five RUN budgets, by argv: the `fire.py build --formal`
-# that produces each case's image, and then the image itself or the CPython
-# oracle beside it. The compile was 900 s and is `COMPILE_TIMEOUT_S`'s 600 —
-# a narrowing, and the only one in this batch, so it is stated here rather than
-# left to be discovered: the seven builds this file makes per case are one
-# `formal/build.py` over a source with no import closure, and `exec_budget`'s
-# 600 is ~50x the observed worst `gcc -fgimple` it was derived from.
-from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRE = os.path.join(HERE, "fire.py")
@@ -749,63 +729,22 @@ def run_mojo(root, parser, case_index, worker=0):
     built = subprocess.run(
         [sys.executable, FIRE, "build", "--formal", "--no-prove",
          "-n", str(case_index), "-o", out, src],
-        cwd=root, capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S, env=env)
+        cwd=root, capture_output=True, text=True, timeout=900, env=env)
     check(built.returncode == 0,
           f"{parser['name']} case {case_index}: build failed: "
           f"{(built.stderr or built.stdout).strip()[-600:]}")
     check(os.path.isfile(out), f"{parser['name']}: no executable at {out}")
-    ran = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+    ran = subprocess.run([out], capture_output=True, text=True, timeout=60)
     return ran
 
 
-# The four variables `_colorize.can_colorize` reads, and nothing else.
-#
-# CPython 3.14's `argparse` colourises its usage line and its help listing
-# whenever `can_colorize()` says the terminal can, and that function reads the
-# ENVIRONMENT before it reads `isatty`: `FORCE_COLOR` forces colour on, and
-# `PYTHON_COLORS=0` refuses it, both ahead of the terminal question. The
-# differential below reads the oracle through a PIPE, so the oracle's colour is
-# therefore whatever the shell that launched the test exported — measured with
-# `FORCE_COLOR=3` and `TERM=xterm-color` in the environment, 31 of the 69 cases
-# differed and every one of them differed ONLY by ANSI escapes; with the oracle
-# pinned as below, 0 of 69 differ. A registered gate job whose verdict depends
-# on the environment of whoever ran it is not a test of the module.
-CPYTHON_COLOUR_ENV = ("PYTHON_COLORS", "FORCE_COLOR", "NO_COLOR", "TERM")
-
-
-def cpython_env():
-    """The environment the CPython oracle is asked in.
-
-    `PYTHON_COLORS=0` is CPython's own answer — `_colorize.can_colorize`
-    returns False on it before any of the other three are read — and the other
-    three are DROPPED rather than merely overridden so that the pin survives
-    `python3 -E`: `-E` sets `sys.flags.ignore_environment`, which makes
-    `can_colorize` skip the `PYTHON_COLORS` branch entirely and read the
-    environment it was supposed to be isolated from. Dropping them costs nothing
-    when the pin is honoured and is the difference between a hermetic oracle and
-    a hermetic-looking one under that flag.
-    """
-    env = dict(os.environ)
-    for name in CPYTHON_COLOUR_ENV:
-        env.pop(name, None)
-    env["PYTHON_COLORS"] = "0"
-    return env
-
-
 def run_cpython(root, parser, case_index):
-    """CPython's own `argparse` on the same declaration and command line.
-
-    Asked in `cpython_env()`, not in this process's environment: see
-    `CPYTHON_COLOUR_ENV` for the measurement, and
-    `test_the_oracle_is_asked_in_an_environment_it_cannot_colourise` for the
-    assertion that keeps the two in step.
-    """
+    """CPython's own `argparse` on the same declaration and command line."""
     src = os.path.join(root, parser["name"] + "_py.py")
     with open(src, "w") as f:
         f.write(py_source(parser))
     return subprocess.run([sys.executable, src, str(case_index)],
-                          capture_output=True, text=True, timeout=RUN_TIMEOUT_S,
-                          env=cpython_env())
+                          capture_output=True, text=True, timeout=60)
 
 
 def compare(case_label, want, got):
@@ -1053,7 +992,7 @@ def test_a_refused_spec_is_refused_with_a_reason(tmp, _shared):
         check(built.returncode == 0,
               f"{label}: the program did not build: "
               f"{(built.stderr or built.stdout).strip()[-400:]}")
-        ran = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+        ran = subprocess.run([out], capture_output=True, text=True, timeout=60)
         check("rc=3" in ran.stdout,
               f"{label}: parse returned {ran.stdout.splitlines()[:1]}, "
               f"expected the refusal status 3. stdout: {ran.stdout!r}")
@@ -1098,7 +1037,7 @@ def test_an_underscore_in_an_int_is_refused(tmp, _shared):
                      cwd=root)
     check(built.returncode == 0,
           f"build failed: {(built.stderr or built.stdout).strip()[-400:]}")
-    ran = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+    ran = subprocess.run([out], capture_output=True, text=True, timeout=60)
     check("rc=2" in ran.stdout,
           f"`--n 1_0` returned {ran.stdout.splitlines()[:1]}, expected the "
           f"error status 2: {ran.stdout!r}")
@@ -1141,7 +1080,7 @@ def test_prog_is_the_basename_of_argv0(tmp, _shared):
                      cwd=root)
     check(built.returncode == 0,
           f"build failed: {(built.stderr or built.stdout).strip()[-400:]}")
-    ran = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+    ran = subprocess.run([out], capture_output=True, text=True, timeout=60)
     check(ran.stderr.startswith("usage: tool [-h] [-v]"),
           f"the usage line is {ran.stderr.splitlines()[:1]}, which does not "
           "name the program `tool`")
@@ -1267,63 +1206,6 @@ def test_every_field_of_every_spec_survives_the_escaping(tmp, _shared):
               f"still a record separator")
 
 
-def test_the_oracle_is_asked_in_an_environment_it_cannot_colourise(tmp, _shared):
-    """`run_cpython`'s child cannot colourise its usage line, whatever this
-    process's environment says — and the CONTROL says that is the scrub's doing.
-
-    CPython 3.14's `argparse` colourises its usage line and help listing
-    whenever `_colorize.can_colorize()` is true, and that reads `FORCE_COLOR` and
-    friends BEFORE it asks the terminal. The differential reads the oracle
-    through a pipe, so with `FORCE_COLOR` exported the oracle is colourised and
-    this module's text is not: 31 of the 69 cases differed that way, every one
-    of them by ANSI escapes alone, which is the shape of an unhermetic oracle
-    rather than of a divergent module.
-
-    Both halves are needed and neither is decoration. The first half FAILS if
-    `env=` is dropped from `run_cpython`'s `subprocess.run` while this
-    environment still exports `FORCE_COLOR`, and the second fails if the colour
-    simply is not there — which is what a CPython without colour support, or one
-    answering under `TERM=dumb`, would look like — so a harness that pinned the
-    oracle by accident cannot pass this.
-    """
-    root = os.path.join(tmp, "colour")
-    os.makedirs(root, exist_ok=True)
-    # `demo[4]` is `["-v"]` with a required `--side` unset: the case whose stderr
-    # is the usage line plus the error message, which is the text CPython
-    # colourises.
-    parser = next(p for p in PARSERS if p["name"] == "demo")
-
-    saved = {name: os.environ.get(name) for name in CPYTHON_COLOUR_ENV}
-    for name in CPYTHON_COLOUR_ENV:
-        os.environ.pop(name, None)
-    os.environ["FORCE_COLOR"] = "1"
-    os.environ["TERM"] = "xterm-color"
-    try:
-        pinned = run_cpython(root, parser, 4)
-        check("\x1b[" not in pinned.stderr,
-              f"run_cpython's child colourised its usage line under "
-              f"FORCE_COLOR=1: {pinned.stderr[:200]!r} — the oracle is not "
-              "pinned and the differential's verdict is the shell's")
-
-        # The control, on the SAME source and the SAME command line: with this
-        # process's environment inherited rather than scrubbed, CPython does
-        # colourise, so the escapes above were removed by `cpython_env()` and not
-        # by the absence of colour.
-        src = os.path.join(root, "demo_py.py")
-        loose = subprocess.run([sys.executable, src, "4"], capture_output=True,
-                               text=True, timeout=RUN_TIMEOUT_S)
-        check("\x1b[" in loose.stderr,
-              "CPython printed no ANSI escapes with FORCE_COLOR=1 in the "
-              "environment, so the pin above is not being measured: this host's "
-              "CPython cannot colourise and the control cannot hold")
-    finally:
-        for name, value in saved.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
-
-
 TESTS = [
     ("`import argparse` resolves to the module source",
      test_argparse_resolves_to_the_module_source),
@@ -1332,8 +1214,6 @@ TESTS = [
      test_the_module_builds_on_its_own),
     ("the parse matches CPython, case for case",
      test_the_parse_matches_cpython),
-    ("the oracle is asked in an environment it cannot colourise",
-     test_the_oracle_is_asked_in_an_environment_it_cannot_colourise),
     ("every field of every spec survives the escaping",
      test_every_field_of_every_spec_survives_the_escaping),
     ("an unsupported spec is refused with a reason",

@@ -3,11 +3,9 @@
 **Area:** TEST — one row of `test_formal_x86_64_parity.py`. **Status: OPEN,
 measured 2026-10-05, PRE-EXISTING on `master` (`86af1b44`)** — not caused by any
 of the six branches that merge brought together. Its sibling in the same run
-(`a_subscript_on_a_type_value_faulted_identically`) had its own doc, which is now
-DELETED because its fix landed — that row pinned the non-field arm's words on a
-construct that reaches the FIELD arm, and it now asserts `TYPE_TAG_NEEDLE`. So
-this one has no doc naming it, which is why it is a separate file rather than a
-line in a deleted one.
+(`a_subscript_on_a_type_value_faulted_identically`) is already filed, at
+`bugs/TEST_stale_needle_on_the_type_value_subscript_refusal.md`; this one has no
+doc naming it, which is why it is a separate file rather than a line in that one.
 
 ## What I ran
 
@@ -64,9 +62,8 @@ Two lanes, neither of them this merge's:
 One edit, in the row that owns it. `test_formal_x86_64_parity.py`'s
 `printf_float_operand_read_from_an_xmm_register` should assert the refusal the
 tree ACTUALLY emits for this construct, the way its sibling
-`a_subscript_on_a_type_value_faulted_identically` now does — that row's needle
-was the non-field arm's words on a construct that reaches the field arm, and it
-asserts `TYPE_TAG_NEEDLE` after its own fix.
+`a_subscript_on_a_type_value_faulted_identically` will once
+`bugs/TEST_stale_needle_on_the_type_value_subscript_refusal.md` is taken.
 
 The interesting question for whoever does it is which of two rows is right,
 because they are opposite and only one can be:

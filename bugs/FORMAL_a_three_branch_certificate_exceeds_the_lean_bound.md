@@ -7,109 +7,6 @@ here, with the measurements; the blowup itself is NOT fixed.** Found while
 landing the bit-test proof arm (whose doc is deleted with it) and re-measured
 2026-10-03 on this tree, with the measurement the earlier rounds did not take.
 
-## 2026-10-05 (`work/formal31-2`): the boundary has MOVED to four branches, the
-## concrete theorem is NOT the cost, and `hprior` is 4% of the walk theorem
-
-**Three measurements, none of which re-verifies anything the sections below
-say, and all three of which change what the next step should be.** Every number
-below is on this tree; the program is §6's, generated with the proof check
-stubbed out so no Lean run is involved in producing the `.lean`, and the Lean
-runs are through `formal/lean.py::run_lean` under `tools/memslot.py --gb 8`.
-
-**1. The failure is at FOUR branches now, not three.** The same §6 program that
-§1 records as a kernel OOM at 6.1 GB in 202 s **checks at three branches**
-(`rc=0`, 5.26 GB peak, ~110 s), and the 2-branch case is 3.09 GB. The
-four-branch case **breaches an 8 GB ceiling and is killed by `memcap`** — which
-is the `RESOURCE` verdict `CLAUDE.md` describes, i.e. NOT a verdict on the
-proof: the process died for memory before it finished. So a reader who came
-here to reproduce §1 finds a program that passes, and the thing that reproduces
-is one branch further on. **That is worth knowing before anything else**, because
-the whole of §4's argument ("a program that proves at two branches stops
-building at three") is a statement about a threshold that moved.
-
-| conditional branches | proof lines | `..._compiles_correctly_universal` | its `have` lines | `hprior` | `hsid`/`hcert`/`hrun_ex`/`hexit`/`h_adv` | `hpc*` | Lean |
-|---:|---:|---:|---:|---:|---:|---:|---|
-| 2 | 4 129 | 1 752 | 582 | 24 (**4.1 %**) | 230 (39.5 %) | 91 | **rc=0, 3.09 GB** |
-| 3 | 6 452 | 3 616 | 1 198 | 48 (**4.0 %**) | 470 (39.2 %) | 187 | **rc=0, 5.26 GB** |
-| 4 | 10 671 | 7 376 | 2 430 | 96 (**4.0 %**) | 950 (39.1 %) | 379 | **killed at the 8 GB ceiling** |
-
-**2. The concrete theorem and its `native_decide` are NOT the cost.** §2's
-table makes the theorem sound like the place, and the plausible reading of it is
-that a 114 000-step `native_decide` is what fills the kernel. It is not:
-
-| what | result |
-|---|---|
-| the whole file | rc=0, **5.26 GB** |
-| the same file with the theorem's `114000` replaced by `11400` | rc=0, **5.21 GB** — a tenth of the fuel, the same memory |
-| the same file with the theorem's `native_decide` replaced by `sorry` | rc=0, **5.27 GB** |
-| everything up to `f_compiles_correctly_universal` | rc=0, **1.47 GB** |
-
-So the cost is neither the step count nor the theorem: it is the walk theorem,
-which is **3 616 of the file's 6 452 lines** and holds 1 198 of its 1 198
-`have`s. `arm64_exec_go`'s fuel is a bound and the generator hands it a generous
-one, which is why lowering it changes nothing — worth knowing, because
-"the fuel is too big" is the next thing a reader would try.
-
-**3. `hprior` is 4% here, not the ×3-per-branch family §3 measures, and the
-five per-VISIT families are 39%.** The Status above already says the
-duplicated-statement hypothesis is right and the scope is wrong; this is the
-same conclusion from the other side, on a program whose `hprior` count DOUBLES
-(24 → 48 → 96) where §3's table measured a tripling (48 → 144). **§3's "×3.0,
-×2.67, ×2.5" is a property of that program's condition shape** (`not (n & 4)`
-lowers to two instructions and two branches), not of the family. On this shape
-every row doubles, `hprior` included, and the 4%-share is flat across all three
-rows. So "hoist the `hprior` facts" removes 4% of the emission — §5 step 1's
-own number, now reproduced — and the thing that would have to change is the
-per-visit emission: `hsid`, `hcert`, `hrun_ex`, `hexit` and `h_adv` are 39% and
-`hpc*` is another 16%, and all six exist once per (PATH, BLOCK) visit.
-
-**And one structural reason the hoist cannot be a rename, which the code
-already records and §5 step 1 does not.** `s_{bi}` is introduced by
-`rcases hrun_ex_{bi} with ⟨s_{bi}, hrun_{bi}⟩` **inside each path's own tactic
-branch**, so the proposition `(s_4).x5 = n` on one path and on another are two
-different statements about two different bindings of the same name —
-`formal/arm64_proof_gen.py`'s `hprior_memo` comment says so ("a fact proved in
-ONE branch of the walk is not in scope in a sibling, because `s_{pb}` is
-REBOUND per path … that is the most that is sound without changing what
-`s_{pb}` is"). `tools/formal_hprior_census.py`'s duplicate column counts
-identical STATEMENT TEXT, so the 42-61% it reports is not shareable text: it is
-the same sentence about different locals. **Hoisting therefore needs `s_{bi}` to
-mean one thing per block rather than per visit**, and that is a change to what
-the walk emits, not to where it emits it.
-
-**What this does NOT change:** the blowup is still real, it is still
-exponential in the number of conditional branches, and §5's ordering still holds
-with `hprior` replaced by "the per-visit facts" as the subject. Nothing here is a
-fix.
-
-**The Lean harness that works, because §6's warning is right and the numbers
-differ.** §6 says `ensure_library` peaks at 7.82 GB and to build private oleans
-instead; measured here, that build peaks at **1.4 GB** (six `lean -o` calls,
-`LEAN_PATH` pointed at a scratch directory, ~40 s for `ProofLib.olean`'s 31 MB
-and the rest), and a proof run against those private oleans peaks at 3.1 GB
-(two branches) and 5.3 GB (three). `lean_flags(mb, heartbeats, threads)`'
-`mem_mb` is left unset, so Lean's own `maxMemory` is whatever the toolchain
-defaults to; the 8 GB ceiling is `tools/memslot.py --gb 8`, not Lean.
-
-    # private oleans, then a run — everything through run_lean, never `lean` direct
-    export PATH=/opt/homebrew/bin:$PATH
-    LEAN=$(python3 -c 'import sys;sys.path.insert(0,".");import formal.lean as L;print(L.find_lean())')
-    mkdir -p .tmp/lib
-    for m in ProofLib X86 work Refine Contracts IEEE754; do
-      python3 tools/memslot.py --gb 8 --label lib -- \
-        env LEAN_PATH=$PWD/.tmp/lib $LEAN -o .tmp/lib/$m.olean lib/$m.lean
-    done
-    python3 tools/memslot.py --gb 8 --label lean -- python3 .tmp/checklean.py \
-      .tmp/tb/b3_proof.lean .tmp/lib        # rc=, exceeded=, peak, output
-
-`checklean.py` is `formal/lean.py::run_lean` with `LEAN_PATH` =
-(`dirname(proof)`, the private lib dir), `cwd` = the proof's directory,
-`wall_s=1500 cpu_s=5400`; eleven lines, and scratch rather than committed for
-§6's reason. **One trap this pass cost an hour on**: `LeanRun`'s memory field
-is `peak_rss`, not `peak`, and the generated proof `import`s `work`, so a
-library build that skips `work.lean` fails with `unknown module prefix 'work'`
-rather than with anything about the proof.
-
 **Update 2026-10-04 (formal21-2): the DUPLICATE measurement §5 step 1 asked for
 is taken, with a committed instrument, and it CORRECTS the diagnosis above: the
 exponential is not one family's, so hoisting `hprior` alone would not have
@@ -177,11 +74,6 @@ consumer of a growth that is structural, and that the hoist is the fix.)
 
 ## 1. The failure, as it is now (2026-10-03, this tree)
 
-**SUPERSEDED by the 2026-10-05 Status above, which moves this boundary to FOUR
-branches: the three-branch program below now checks at 5.26 GB.** What is kept
-is the failure MODE — a kernel OOM rather than a wall-clock bound — because the
-four-branch case now dies the same way and at a higher ceiling.
-
 ```console
 $ python3 tools/memslot.py --gb 8 --label lean -- python3 .tmp/f19/leanrun.py 420 \
       python3 fire.py build --formal -o .tmp/three.out --backend=arm64 .tmp/three.mojo
@@ -210,9 +102,8 @@ generator was changed for any of them.
 
 So: **`hx30` is not the expensive thing.** All 32 of those goals — the whole
 chain `simp only […qS0, …qT23, arm64_reg, arm64_set_reg, Arm64State.init]`
-that `bugs/FORMAL_a_conditional_value_in_a_dylib_export.md` §2.3 records as
-the obvious suspect and would rewrite as per-step lemmas — are inside the 23
-seconds. And
+that `FORMAL_csel_in_the_model_costs_a_ternary_export_its_whole_proof.md`
+prescribes rewriting as per-step lemmas — are inside the 23 seconds. And
 `runProg`'s reduction, which the error POSITION (`6035:8`, the theorem's own
 header) points at, is inside the 22.
 
@@ -252,13 +143,6 @@ composed-state walk over one more pair of blocks", and "the `hx30` goal is the
 last place in this walk that still re-unfolds the whole chain" — describes the
 row that doubles.
 
-**The ×3 figures are this PROGRAM's, not the family's** — measured 2026-10-05:
-on §6's program with three `if`s whose conditions are all single comparisons,
-`hprior` is 24 / 48 / 96 at two / three / four branches, i.e. ×2, and its share
-of the walk theorem is a flat 4.0-4.1%. The difference is `not (n & 4)` above,
-which lowers to two instructions and therefore two branch blocks. The
-conclusion the Status draws from the flat share does not depend on which it is.
-
 The generating code is `formal/arm64_proof_gen.py:6143`:
 
 ```python
@@ -292,14 +176,6 @@ proving the shape is refusing it, and today a program that proves at two
 branches stops building at three with a message about the KERNEL's memory.
 
 ## 5. The exact next step
-
-**Read the 2026-10-05 Status before starting.** It does not reorder this list,
-and steps 1 and 2 are still not implementable as written — but it says which
-MEASUREMENT is the thing to beat (the per-visit facts in
-`..._compiles_correctly_universal`, `hprior` among them at 4%), that step 1's
-duplicate column counts identical statement text about DIFFERENT per-visit
-bindings of `s_{pb}` and so is not shareable, and that the boundary has moved to
-four branches.
 
 Not a bigger bound, and **not the `hx30` rewrite** — §2 measures that goal at
 inside 23 seconds, so landing it would be real work for no measurable change.

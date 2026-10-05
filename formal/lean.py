@@ -139,19 +139,7 @@ import time
 # is INFRASTRUCTURE, and it is in this tuple rather than unbuilt because the
 # hole census and the `.olean` currency check read the tuple — a module outside
 # it is a module nothing checks.
-# `Specs` is LAST and imports only `ProofLib`: it is the INDEPENDENT
-# specification layer — reference definitions for the classic example programs,
-# written by hand in Lean's own `Nat`/`Int`/`List` rather than derived from a
-# source file the same way `mojo` is.  It is last because no library module
-# imports it, and a generated proof imports it only when its source carries an
-# `@refines(...)` annotation.
-#
-# `Peephole` sits ahead of it and imports `ProofLib` and `X86` — the same pair
-# `work` does — because the peephole rules are stated over the machine model's
-# step functions (`arm64_step`, `x86_step`), so build order puts it after `X86`
-# and there is nothing in it that could import `Specs`.
-LIBRARY_MODULES = ("IEEE754", "ProofLib", "X86", "work", "Refine", "Contracts",
-                   "Peephole", "Specs")
+LIBRARY_MODULES = ("IEEE754", "ProofLib", "X86", "work", "Refine", "Contracts")
 VERDICT_EXT = ".leanverdict"
 # Where a library module's own hole census is stored, beside the .olean it was
 # measured from and under the same key — so a cas HIT on the .olean is a hit on
@@ -933,42 +921,21 @@ _DECL_NAME_RE = re.compile(r"^\s*(?:private\s+|protected\s+|noncomputable\s+)*"
 # `sorry`` and there is nothing to parse, so a caller that wants positions has to
 # ASK for them in the file it generates.
 #
-# **The label's module name is NOT delimited by the guillemets**, which is
-# the shape a first reader would parse it by: the label is a `Name`, and Lean
+# **The label's module name is NOT delimited by the guillemets**, which is the
+# shape a first reader would parse it by: the label is a `Name`, and Lean
 # parenthesises only the component that is not a bare identifier, so a module
 # under a directory prints as `«.tmp».tmpcmqrxbe0` — a balanced-looking pair
 # around the WRONG part. What is unambiguous is that the position is the
-# `:line:col` the message ENDS in, so that is what `_SORRY_LABEL_RE` below
-# reads, and it captures no module at all.
+# `:line:col` the message ENDS in, so that is what this reads, and the module is
+# not captured at all: nothing downstream wants it, because the caller has the
+# file it generated and matches on the line.
 #
 # The trace option a project reaches for first — `trace.Meta.Tactic.sorryAx` —
 # does not exist in the pinned 4.32.2 (`error: Unknown option`), which is why this
 # is a reader of the warning rather than a probe: no second elaboration, no
 # `run_cmd` block, no `import Lean.Elab.Command` in a generated file.
-
-#: **There is no end-of-line anchor here, and that is the fix rather than a
-#: simplification.** This used to end `\s*$`, and `$` under `re.M` matches at a
-#: `\n` or at the very end of the string but NOT in the middle of a line — while
-#: every caller concatenates the two streams (`p.stdout + p.stderr`), so a
-#: warning that is the LAST line of stdout and arrives without its trailing
-#: newline comes GLUED to the first line of a non-empty stderr and the anchor
-#: fails on a message that is perfectly well formed. Measured on this tree's own
-#: output: the patched `const2` proof's warning joined to a
-#: `libc++abi: terminating…` line gives `[]` where the unjoined stdout gives
-#: `[(363, 12)]`, so `_run_lean` reported "a hole fired and I cannot say where"
-#: and `test_lean_says_which_sorry_fired_and_the_report_names_it` failed with
-#: `None != "hstep7's side condition, line 363"` on an otherwise correct run.
-#:
-#: What replaces the anchor is `(?![0-9])`, and it is not the same claim: it says
-#: the digits END there rather than that the LINE does. That distinction is the
-#: point — the position is the `:line:col` the message ends in, so a `:363:12`
-#: followed by a backtick, by a space, or by the next stream's first character is
-#: all the same answer, while a `:363:129` must not read as `:363:12`. Measured:
-#: `x:363:129` gives `[(363, 129)]`, and a warning with no label at all
-#: (`declaration uses `sorry``) still gives `[]`, which is the answer that lets a
-#: caller tell "no position" from "a position".
 _SORRY_LABEL_RE = re.compile(
-    r"declaration uses\s+[`'‘]?sorry\b[^\n]*?:(\d+):(\d+)(?![0-9])",
+    r"declaration uses\s+[`'\u2018]?sorry\b[^\n]*?:(\d+):(\d+)[`'\u2018\u2019]?\s*$",
     re.M)
 
 
@@ -986,79 +953,9 @@ def sorry_source_positions(text: str) -> list:
     the warning once per declaration — measured on a three-theorem control, where
     the declaration with two `sorry`s reported one — so this is the first live
     hole in a file and not the census of them.
-
-    **A hole in an IMPORTED MODULE is not a position in this one, and this
-    function cannot tell them apart.** The label carries a module name
-    (`«lib».ProofLib`), and every caller throws that name away, so a warning
-    about a `.olean` we merely imported arrives here looking exactly like one
-    about the generated file — at the library's line, which is a line number in
-    a DIFFERENT file. Measured on `formal/examples/const2.mojo`'s emitted text (722
-    lines): a `«lib».X86:503:8` position resolves through `hole_at` to
-    `"hstep11's side condition, line 503"`, a confident and wrong answer, while
-    `«lib».ProofLib:4624:8` returns `None` only because 4624 is past the end of
-    the generated file. Neither is the truth. `sorry_source_labels` is the reader
-    that keeps the module; this one is the position-only reader its callers
-    already have, and a caller that has the generated file's own module name to
-    compare against should use that.
     """
     return [(int(m.group(1)), int(m.group(2)))
             for m in _SORRY_LABEL_RE.finditer(text or "")]
-
-
-#: The SAME warning with its module name kept, as `(module, line, col)`. This is
-#: the answer to "WHOSE hole", and it is separate from `sorry_source_positions`
-#: rather than a replacement for it because the two answer different questions
-#: and only one of them can be answered by the digits: a position without its
-#: module cannot be attributed to a file, which is the whole of the
-#: misattribution `sorry_source_positions`' own docstring names.
-#: The label as a whole — everything between the backtick that opens it and the
-#: `:line:col` that closes it — so that a module spelled with guillemets and one
-#: spelled bare are BOTH captured by one pattern rather than by two. Guillemet
-#: position is not the thing being read (see the note above): this keeps the
-#: label intact and `sorry_source_labels` takes the LAST dotted component, which
-#: is the one that names the file in either spelling.
-_SORRY_LABEL_TEXT_RE = re.compile(
-    r"declaration uses\s+[`'‘]?sorry\s+[`'‘]([^\n]*?)[»'’]?"
-    r":(\d+):(\d+)(?![0-9])",
-    re.M)
-
-
-def sorry_source_labels(text: str) -> list:
-    """`(module, line, col)` per `declaration uses` warning, module INCLUDED.
-
-    The module is what says the hole is in a file the caller generated rather
-    than in an `.olean` it imported, and that is a question no amount of reading
-    the digits can answer: `«lib».ProofLib:4624:8` and `<tmp>.lean:4624:8` are the
-    same three numbers and completely different facts.
-
-    **`module` is the LAST component of the label, and that is what identifies
-    the file.** Lean's own spelling is the awkward one this has to survive: the
-    guillemets wrap the component that is not a bare identifier, so a module
-    under a directory prints as `«.tmp».tmpcmqrxbe0` — the pair sits around the
-    WRONG part — and a top-level module prints with no guillemets at all. Reading
-    the last component of the dotted name gives `tmpcmqrxbe0` and `topmod`
-    respectively, which is the basename of the file in both cases, so a caller
-    can compare it against the file it generated. Measured on the three shapes
-    Lean actually emits on this tree:
-
-        «.tmp».tmpcmqrxbe0:363:12   ->  ('tmpcmqrxbe0', 363, 12)
-        «lib».ProofLib:4624:8        ->  ('ProofLib', 4624, 8)
-        topmod:10:2                  ->  ('topmod', 10, 2)
-
-    A warning with NO label — `declaration uses `sorry``, i.e. a file that did not
-    set `pp.sorrySource` — is absent from this list rather than present with an
-    empty module, because there is no position to attach a module to. That is the
-    distinction `sorry_source_positions` reports as `[]`, and a caller that has
-    both readers can say "a hole fired and I know whose file it is in" against "a
-    hole fired and I know nothing", which are different reports.
-    """
-    out = []
-    for m in _SORRY_LABEL_TEXT_RE.finditer(text or ""):
-        label = m.group(1).replace("«", "").replace("»", "").strip()
-        out.append((label.rsplit(".", 1)[-1], int(m.group(2)),
-                    int(m.group(3))))
-    return out
-
 
 
 def _declaration_at(lines, lineno: int) -> str:
@@ -1339,51 +1236,6 @@ AXIOM_FOUNDATION = frozenset({"propext", "Quot.sound", "Classical.choice"})
 # no test may pin an index).  The declaration group is GREEDY: a namespaced
 # declaration's axiom is `DylibExport.backward_branch_run_none._native.…` and a
 # lazy `.+` would hand `DylibExport` to `decl` and fail to match at all.
-#: Lean's OWN memory ceiling, in its own words on the pinned toolchain, and the
-#: second shape the same ceiling takes when it fires from a different place.
-#: **This lives here and not in a caller because this module is what SETS the
-#: ceiling** (`lean_flags`'s `-M LEAN_MEMORY_MB`), so it is the only layer that
-#: can say both halves of the claim: that the sentence is a bound firing and that
-#: the bound is ours. Two readers of one sentence is how a reworded ceiling ends
-#: up classified as a proof failure by one tool and as an absence by another —
-#: and that disagreement is exactly what
-#: `bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md`
-#: records for `both` and `either`, the two examples whose proof Lean's `-M`
-#: refuses rather than rejects.
-LEAN_MEMORY_REFUSAL_RE = re.compile(
-    r"excessive memory consumption detected|maximum memory has been reached")
-
-
-def lean_refused_on_its_own_memory_ceiling(text: str) -> str | None:
-    """The line on which Lean hit ITS OWN memory ceiling, or None.
-
-    **A ceiling firing is not a verdict on the proof, and the two must not be
-    counted as one.** `formal/lean.py`'s own comment on `LEAN_MEMORY_MB` says
-    why: the project's 4 GB line cannot be enforced by capping Lean, and
-    raising the cap is not tightening a policy, it is letting the work through —
-    so at some size a proof stops being CHECKED and the only true sentence is
-    "the checker ran out". A caller that files that as `lean-rejected` reports a
-    proof that may be fine as one Lean could not decide, and a caller that files
-    it as a pass has swapped one lie for another.
-
-    Matched on the RUN'S output rather than on `compile_formal`'s exception text,
-    because the run is the thing that said it, and a replayed verdict's stored
-    detail is that sentence followed by the diagnostics — so an anchored pattern
-    would find the header and produce a different string from the same failure
-    on the two paths.
-
-    The LINE is returned rather than a boolean, so a caller can print what Lean
-    said instead of paraphrasing it: the two forms are
-    `…:8: error: (kernel) excessive memory consumption detected` and
-    `maximum memory has been reached`, and a reader who has to guess which one
-    fired cannot tell a kernel allocation from an elaboration budget.
-    """
-    for line in (text or "").splitlines():
-        if LEAN_MEMORY_REFUSAL_RE.search(line):
-            return line.strip()
-    return None
-
-
 GENERATED_AXIOM_RE = re.compile(
     r"^(?P<decl>.+)\._native\.(?P<tactic>[A-Za-z_]\w*)\.ax_\d+_\d+$")
 
@@ -1695,94 +1547,10 @@ def lean_version(lean: str, timeout: float = 120.0) -> str:
 # v3 added the library census (`lib_sorries`, `lib_detail`) to the stored body,
 # so the key changes rather than a v2 entry being read as "the library has no
 # holes" — which is exactly the claim v2 could not make and did not check.
-#
-# v4 is the same argument about a fact the key never recorded at all: whether
-# the run FOUND the library. `_run_lean` handed `LEAN_PATH` the `lib_dir` it was
-# given, unresolved, while the process's cwd is the proof's own directory — so a
-# caller passing a relative `repo_root` (and `repo_root="."` is what a bug doc's
-# own reproduce command writes) got `error: unknown module prefix 'ProofLib'` at
-# `1:0`, before the theorem is read, and **that false verdict was published and
-# is content-addressed on inputs that do not change when the path is fixed**:
-# the proof's bytes and the library's `.olean` digests are identical either way,
-# so every later caller with the same file replayed it. `bugs/
-# FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`'s measurements were taken
-# through that entry point, which is why this bump and not a cache flush: a
-# flush cannot be done from a worktree (the CAS is machine-wide and shared), and
-# a version bump retires exactly the entries whose key cannot tell the two runs
-# apart.
-#
-# v5 is the same argument about the OTHER half of `LEAN_PATH`, which v4 left
-# out and which is now the whole of the search path `_run_lean` builds: the
-# proof's own DIRECTORY, which comes FIRST. `_run_lean` puts it there and runs
-# `lean` with `cwd` set to it, so a sibling `.lean`/`.olean` beside the proof can
-# satisfy an import and — first on the path — can even shadow `ProofLib` itself.
-# The key recorded the proof's bytes and the library's `.olean` digests and
-# neither of them says what else that directory held, so one directory's verdict
-# replayed for another's. Keyed on the directory's CONTENTS
-# (`_proof_search_digest`) rather than on its path: see that function for why
-# hashing the path would be worse than the hole.
-_VERDICT_VERSION = b"formal-proof-verdict-v5"
+_VERDICT_VERSION = b"formal-proof-verdict-v3"
 # -1 in the `lib_sorries` field, distinct from 0: "not measured" and "measured,
 # no holes" are different facts and the report prints them differently.
 _LIB_UNMEASURED = -1
-
-
-# What a file beside the proof can be to `lean`, and nothing else: an import is
-# resolved to a module name, and Lean looks for exactly these two suffixes.
-PROOF_SEARCH_SUFFIXES = (".lean", ".olean")
-
-
-def _proof_search_digest(proof_path: str) -> bytes:
-    """A digest of everything the proof's OWN DIRECTORY can supply to `lean`.
-
-    `_run_lean` hands `LEAN_PATH` the proof's own directory FIRST and runs the
-    elaborator with `cwd` there, so what that directory holds is part of what the
-    verdict MEANS and not part of where the file happens to sit. Two properties
-    make it load-bearing, and both are silent:
-
-      * a sibling module can satisfy an `import` the library cannot, so the same
-        proof bytes elaborate against different sources in two directories;
-      * because the directory comes FIRST, a sibling named `ProofLib.lean`
-        SHADOWS the library whose `.olean` digests this key does hash — so the
-        key could record the library and still be about a different `ProofLib`.
-
-    A key that cannot see any of this publishes one directory's answer under
-    every directory's name, and the loser is a red no edit to the proof can
-    clear, which is the shape `CLAUDE.md`'s `checked_run.py` rule exists to
-    prevent for the ordinary result cache.
-
-    **CONTENT, and never the directory's path.** `scratch_dir` above is
-    `mkdtemp`, and `formal/build.py` writes each proof beside its own output
-    into a per-run temporary directory — so hashing the path would give every run
-    a fresh key and retire the cache for every caller that uses one
-    (`tools/formal_proof_census.py` would re-elaborate all 52 examples from
-    scratch on every invocation). What can change the verdict is the SET of
-    modules this directory offers and what is in them, so that is what is
-    hashed: each name, plus the content of the file under it. The proof itself
-    is included, which is redundant with the bytes `proof_verdict_key` already
-    appends and is left in on purpose — the listing is "everything here", and an
-    exclusion is one more thing to keep in step.
-
-    An unreadable directory is a digest that says so, rather than an empty one:
-    "I could not see what was beside the proof" and "there was nothing beside the
-    proof" are different facts and only the second is a clean bill of health.
-    """
-    directory = os.path.dirname(os.path.abspath(proof_path))
-    try:
-        names = sorted(os.listdir(directory))
-    except OSError:
-        return b"\0unreadable:" + directory.encode("utf-8", "replace")
-    parts = []
-    for name in names:
-        if not name.endswith(PROOF_SEARCH_SUFFIXES):
-            continue
-        entry = os.path.join(directory, name)
-        try:
-            body = _digest(entry)
-        except OSError:
-            body = b"\0unreadable"
-        parts.append(name.encode("utf-8", "replace") + b"\0" + body)
-    return b"\0".join(parts) + b"\0"
 
 
 def proof_verdict_key(proof_path: str, lib_dir: str, lean: str) -> str:
@@ -1794,7 +1562,6 @@ def proof_verdict_key(proof_path: str, lib_dir: str, lean: str) -> str:
         parts.append(_digest(olean) if os.path.isfile(olean) else b"\0missing")
     with open(proof_path, "rb") as f:
         parts.append(f.read())
-    parts.append(_proof_search_digest(proof_path))
     return "proof/" + cas.hash_parts(*parts)
 
 
@@ -2168,31 +1935,8 @@ def _run_lean(proof_path: str, lib_dir: str, lean: str, wall_s: float,
     to render ("hole census not measured").
     """
     env = os.environ.copy()
-    # ABSOLUTE, for the reason `library_census` states at its own `LEAN_PATH`
-    # and which this site did not act on: the path is resolved against the
-    # elaborating process's cwd, and the cwd below is the PROOF'S OWN DIRECTORY.
-    # A caller that hands `proof_census` a relative `repo_root` — which is what
-    # `repo_root="."` is, and what a bug doc's own reproduce command writes —
-    # therefore resolved `lib` to `<proofdir>/lib`, and every import of
-    # ProofLib failed with
-    #
-    #     error: unknown module prefix 'ProofLib'
-    #     No directory 'ProofLib' or file 'ProofLib.olean' in the search path
-    #     entries: <proofdir>  ./lib  <toolchain>
-    #
-    # **which was a verdict about the PROOF and not about the program.** It is
-    # reported at `1:0`, before the theorem that was to be checked is read at
-    # all, so every measurement taken that way was a measurement of a broken
-    # search path. Two things about that are now closed and both are visible in
-    # the key: the entries published while this path was relative were retired by
-    # `_VERDICT_VERSION` v4 (the CAS is machine-wide, so a version bump and not a
-    # flush is the only way a worktree can retire them), and the OTHER half of
-    # this `LEAN_PATH` — the proof's own directory, which is FIRST and which
-    # `proof_verdict_key` could not see at all — is keyed on its CONTENTS by
-    # `_proof_search_digest`. The absolute path below is the half that fixes the
-    # run; the key is the half that stops the wrong answer from outliving it.
     env["LEAN_PATH"] = os.pathsep.join(
-        (os.path.dirname(os.path.abspath(proof_path)), os.path.abspath(lib_dir)))
+        (os.path.dirname(os.path.abspath(proof_path)), lib_dir))
     result = run_lean(lean, [os.path.basename(proof_path)], env=env,
                       wall_s=wall_s, cpu_s=cpu_s,
                       cwd=os.path.dirname(os.path.abspath(proof_path)))

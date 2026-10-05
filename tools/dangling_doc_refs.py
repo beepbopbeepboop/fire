@@ -86,11 +86,6 @@ SUFFIXES = ('.md', '.py')
 # worktrees at once, so any branch that fixes prose in a file another branch is
 # editing would move a number the ledger owns. Making it visible is the part
 # that pays; a verdict on it is a decision for whoever owns the tool.
-#
-# The number it printed was an OVER-COUNT until 2026-10-05 — 272 where the truth
-# was 208 — because the existence test was inverted for bug docs themselves; see
-# `bare_find`'s docstring. Read the census as 208 across 120 names on this tree,
-# and treat any larger figure quoted in a `bugs/` document as pre-fix.
 BARE_REF = re.compile(r'(?<![/\w.-])([A-Z][A-Za-z0-9_]{4,})\.md\b')
 
 # The ratchet's ledger. A `.py` and not a JSON so that the two entries which
@@ -182,35 +177,15 @@ def all_markdown_basenames():
 def bare_find(skip=()):
     """(by_doc, by_file) for every BARE reference to a doc that is nowhere.
 
-    Skip a candidate when the name is a bug doc that EXISTS, when a `.md` of
-    that name exists anywhere in the tree (`doc/`, the repo root, or beside the
-    citing file), and when the citing line already says the doc was deleted —
-    the three historical conventions `bugs/DOCS_deleted_bug_doc_still_cited_in_
-    three_places.md` §2 established, which are what keeps a sentence that is
-    *about* a deleted doc from being counted as one that *needs* it.
-
-    **The existence test was INVERTED for bug docs until 2026-10-05**, and it is
-    worth writing down because the number it produced was quoted as a census in
-    three places. It built one set — every `.md` basename in the tree MINUS the
-    bug docs' — and then reported a citation when the name was **not** in it. For
-    a name that is nowhere that is right, and for a name that is a live design
-    note under `doc/` that is right, but for a name that **is a bug doc** it is
-    exactly backwards: `bugs/<stem>.md` exists, the basename was subtracted out
-    of `names`, and every bare citation of a LIVE bug doc was reported as
-    dangling. Measured on this tree: **64 of the 272 reported citations were
-    names that are in `bugs/` right now**, 14 of them
-    `FORMAL_known_limits.md` — a document 38 files cite and
-    `test_suite.py` deliberately uses as the control for "a cited doc that
-    EXISTS is not reported". So the tool reported its own positive control as
-    broken, and a census built from it over-counted by 64 for as long as it
-    stood.
-
-    Two sets and two tests, because the question has two parts: is this name a
-    bug doc, and is it any markdown file at all.
+    Skip a candidate when the name exists in `bugs/`, when a `.md` of that name
+    exists anywhere in the tree (`doc/`, the repo root, or beside the citing
+    file), and when the citing line already says the doc was deleted — the three
+    historical conventions `bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md`
+    §2 established, which are what keeps a sentence that is *about* a deleted
+    doc from being counted as one that *needs* it.
     """
     have = existing_docs()
-    bug_names = {n.rsplit('/', 1)[-1] for n in have}
-    md_names = all_markdown_basenames()
+    names = all_markdown_basenames() - {n.rsplit('/', 1)[-1] for n in have}
     deleted_convention = re.compile(
         r'\b(deleted|git rm|now closed|no longer|used to (?:give|cite|carry))',
         re.I)
@@ -229,7 +204,7 @@ def bare_find(skip=()):
                 continue
             for stem in BARE_REF.findall(line):
                 name = stem + '.md'
-                if name in bug_names or name in md_names or os.path.exists(
+                if name in names or os.path.exists(
                         os.path.join(ROOT, os.path.dirname(rel), name)):
                     continue
                 by_doc.setdefault(name, []).append((rel, lineno))
@@ -335,76 +310,23 @@ def load_baseline():
     return {}
 
 
-def ledger_verdicts(by_file, baseline=None):
-    """{rel: (observed, ceiling)} for every file that still cites a deleted doc.
-
-    **THE floor, in one place, because two mechanisms need it and they had two
-    answers.** `ratchet_regressions` reads it to decide which files GAINED
-    citations; `test_suite.py`'s corpus check reads it to decide which citations
-    the ledger has already accounted for. Those are the same question asked twice
-    and implemented twice — one as a per-file ceiling and one as "zero, outside
-    this file's five deliberate fixtures" — and two floors over one corpus is how
-    a sanctioned `--write-baseline` raise came to leave `doc-refs` green and
-    `suite-self-test` red about a citation that was not new, was raised on
-    purpose, and had a document explaining it. The fix is the join, not deleting
-    either check: the strict one is a property of the SWEEP ("nothing outside
-    the controls that the ledger does not already account for", proved against a
-    guaranteed corpus so it cannot pass vacuously) and the ratchet is a property
-    of the WALK ("no ceiling rises without `--write-baseline`").
-
-    A file with no entry is allowed 0, which is the strict default and the one
-    that catches a brand-new file citing a deleted doc.
-    """
-    if baseline is None:
-        baseline = load_baseline()
-    return {rel: (len(cites), baseline.get(rel, 0))
-            for rel, cites in by_file.items()}
-
-
-def sanctioned(by_file, baseline=None):
-    """{rel} for every file whose citations the ledger already accounts for.
-
-    The other half of `ledger_verdicts`, and the reading a strict "the corpus is
-    empty outside the controls" check needs: a citation in one of these files is
-    inside the ceiling the ledger recorded, so it is a KNOWN leftover rather than
-    a regression, and subtracting it is what lets the sweep's property be stated
-    without denying a raise `CLAUDE.md` sanctions.
-    """
-    return {rel for rel, (observed, ceiling)
-            in ledger_verdicts(by_file, baseline).items()
-            if observed <= ceiling}
-
-
-def stale_baseline_entries(by_file, baseline=None):
-    """{rel: (observed, ceiling)} for ledger entries the corpus has outgrown.
-
-    The ledger is a CEILING, so a file that fixed its citations does not need an
-    entry change to stay green — which is what lets a worker fix a file and merge
-    without touching it. The cost is that a stale entry is invisible: the number
-    is a ceiling, not a measurement, so an entry left behind by a fix is
-    indistinguishable from one that is still needed. This is that distinction, and
-    a caller that wants the ledger to describe the corpus rather than bound it
-    reads it here.
-    """
-    return {rel: (observed, ceiling) for rel, (observed, ceiling)
-            in ledger_verdicts(by_file, baseline).items()
-            if observed < ceiling}
-
-
 def ratchet_regressions(by_file, baseline=None):
     """[(rel, observed, allowed)] for every file that GAINED citations.
 
-    A file whose observed count has fallen below its ceiling is not a regression
-    and not reported, which is what lets a worker fix a file and merge without
-    touching the ledger at all. The floor itself is `ledger_verdicts`, shared
-    with `sanctioned` so the two mechanisms cannot drift into disagreeing about
-    what the ledger records.
+    A file with no baseline entry is allowed 0, which is the strict default and
+    the one that catches a brand-new file citing a deleted doc. A file whose
+    observed count has fallen below its ceiling is not a regression and not
+    reported, which is what lets a worker fix a file and merge without touching
+    the ledger at all.
     """
-    return sorted(((rel, observed, ceiling)
-                   for rel, (observed, ceiling)
-                   in ledger_verdicts(by_file, baseline).items()
-                   if observed > ceiling),
-                  key=lambda t: (-t[1], t[0]))
+    if baseline is None:
+        baseline = load_baseline()
+    out = []
+    for rel, cites in by_file.items():
+        allowed = baseline.get(rel, 0)
+        if len(cites) > allowed:
+            out.append((rel, len(cites), allowed))
+    return sorted(out, key=lambda t: (-t[1], t[0]))
 
 
 def write_baseline(by_file, skip=(), baseline=None):

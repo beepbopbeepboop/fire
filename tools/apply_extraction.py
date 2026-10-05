@@ -11,6 +11,7 @@ aware spans), and appends delegating methods preserving decorators and
 Idempotent: names already delegating to the same alias are skipped.
 """
 import ast
+import copy
 import json
 import os
 import re

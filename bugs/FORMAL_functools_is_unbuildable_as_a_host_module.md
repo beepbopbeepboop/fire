@@ -122,61 +122,6 @@ capability, and whichever lands first unblocks this. Step 2 (decorator
 application) must land before any decorator is exported, and it is
 `bugs/COMPILE_FAIL_decorator_application_dropped.md`'s to own.
 
-## Status, 2026-10-05: the SECOND of the two small steps is DONE, and
-## `reduce` — the one name in this census a callable argument unblocked —
-## BUILDS AND ANSWERS CPYTHON on both architectures
-
-**This is why the doc stays, and it is a smaller remainder than the top of this
-file says.** The `len(seq)` step named in the 2026-10-04 note landed
-(`formal/model.py::parameter_kinds_by_call_site` — the unanimity table that
-already existed for a `char *` parameter, read for the container the call site's
-argument shape is), so the `reduce` this file measured as blocked is measured
-again:
-
-```console
-$ cat .tmp/reduce.mojo
-def reduce(func, xs, initial):
-    var acc = initial
-    var i = 0
-    while i < len(xs):
-        acc = func(acc, xs[i])
-        i = i + 1
-    return acc
-
-def add2(a, b):
-    return a + b
-
-def main():
-    printf("r=%d\n", reduce(add2, [1, 2, 3], 0))
-    return 0
-
-$ python3 fire.py build --formal --no-prove --backend=arm64 -o .tmp/red .tmp/reduce.mojo
-Built: .tmp/red  [arm64/macho]
-$ ./.tmp/red
-r=6
-$ python3 fire.py build --formal --no-prove --backend=x86_64 -o .tmp/red .tmp/reduce.mojo
-$ ./.tmp/red
-r=6
-```
-
-CPython's `reduce(add2, [1, 2, 3], 0)` is `6`, on both. Pinned by
-`test_formal_specialization.py`'s `functools.reduce's own shape runs, on both`
-— there rather than in a host-module suite precisely because no `functools`
-module exists, so without a row nothing would notice this capability regress.
-
-**What is left is exactly step 2, and it is not this file's to do.** Decorator
-application: `@tag` on a function is parsed and never applied
-(`bugs/COMPILE_FAIL_decorator_application_dropped.md` owns that), so the eight
-DECORATOR-row names and `lru_cache` must stay refused, and §"Why this is not
-write it anyway" still holds for them — a module named after a standard-library
-namespace whose most-used member it refuses is the judgement this file makes and
-the reason no name may be exported yet. The TYPE-OR-OBJECT row
-(`GenericAlias`, `itemgetter`, `MappingProxyType`, `RLock`, `Placeholder`) and
-`get_cache_token()` are untouched by either step and still need what they need.
-So: the CALLABLE row no longer blocks anything by itself, the DECORATOR row is
-the whole of the remaining blocker, and this document stays open because that
-row is a real defect in the compiler rather than a gap in a host module.
-
 ## What I ran
 
 With a stub `formal/hostmods/functools.mojo` on the search root, arm64, plus a

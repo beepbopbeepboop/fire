@@ -51,20 +51,6 @@ printed the same thing" is, and the lowering is a separate implementation
 (formal/arm64_codegen.py) from the evaluator. There are five of them now, one
 per family of literal this file covers.
 
-The family added last is a REPLACEMENT FIELD that spans LINES, and it is the
-only rule this front end has where "a single-quoted literal may not cross a line
-break" is right for an ordinary literal and wrong for an interpolated one — the
-field is code, and code may span lines. Its rows are grouped at the end of
-`LITERALS`, they are the only ones whose expressions are written to survive
-`eval` (this file's CPython oracle) as well as tokenizing, and they come with
-three controls that must keep REFUSING plus a check of their own
-(`check_multiline_fstring_line_numbers`) for the half no value assertion can
-see: that a diagnostic BELOW such a literal still names the line the source
-wrote. The bug was that this front end refused a PEP 701 f-string whose
-replacement field spans lines — `unterminated string literal` for a program
-CPython runs — and the `b12` round of `bugs/FORMAL_sweep_work_map.md` §4.2 is where
-the sweep recorded it and its next step.
-
 The third family is the one that generalizes. Every pre-pass that rewrites a
 line used to do it without asking where the literals are, and each wrote a
 character the source never wrote — a SPACE where a backslash-newline pair is
@@ -203,96 +189,6 @@ LITERALS = [
     ("tab_in_a_literal",     '"a\tb"',  "a\tb"),
     ("tab_in_a_single_quoted", "'a\tb'", "a\tb"),
     ("tab_in_a_triple",      '"""a\tb"""', "a\tb"),
-
-# ── a REPLACEMENT FIELD may span LINES (PEP 701) ────────────────────────
-    #
-    # The one rule above that is CPython's for an ordinary literal and NOT its
-    # rule for an interpolated one. In `f"..."` a `{` opens a replacement field,
-    # the field is CODE, and code may span lines — so `f"{1<nl>}"` is a complete
-    # literal and a scanner that stops at the line break reports "unterminated
-    # string literal" for a program CPython runs. That was one file in the corpus,
-    # and the corpus's ONLY disagreement with CPython about whether a file is a
-    # program (measured over all 738 swept files, which is why the number of files
-    # it was worth is not the number of reasons to fix it — see
-    # `bugs/FORMAL_sweep_work_map.md` §5).
-    #
-    # `ours` is the byte-exact content, and for an f-string that is the whole
-    # source token including its prefix and delimiters — the contract FLAG_ROWS
-    # pins for a single-line one, asserted here on the multi-line ones so the two
-    # cannot drift. The BOUNDARY assertion is the load-bearing half: exactly one
-    # STRING token spanning the literal is what "the collapse to a placeholder
-    # kept the whole thing" means, and it is the half a value-only check misses.
-    #
-    # Every field expression here is one that EVALUATES, because `cpython_verdict`
-    # is `eval` with the builtins stripped: a row whose field names an undefined
-    # variable raises NameError rather than answering the accept/refuse question
-    # this table is about. `q(n)`-shaped fields belong in PROGRAMS below, where
-    # the oracle is a build-and-run rather than an eval.
-    ("f_field_spans_lines",      'f"a {[n*2\n       for n in [1, 2]]} b"',
-     'f"a {[n*2\n       for n in [1, 2]]} b"'),
-    ("f_brace_closes_on_next_line", 'f"{1\n}"',       'f"{1\n}"'),
-    # The uppercase and t spellings: `_prefix_is_interpolated` is ONE predicate
-    # for all four, so a rule keyed on the lowercase `f` alone would pass the row
-    # above and go red here.
-    ("capital_F_field_spans_lines", 'F"a {1+1\n   } b"', 'F"a {1+1\n   } b"'),
-    ("t_field_spans_lines",      't"a {1+1\n   } b"',  't"a {1+1\n   } b"'),
-    # A `#` inside a field is CONTENT to a scanner that is only asking where the
-    # literal ends, and this is the shape from the bug doc. It is here because
-    # the first attempt at this fix gave `#` an arm — deciding when it starts a
-    # comment rather than being a character — and that arm broke `{v:#x}` (a
-    # format spec) and `{d['a#b']}` (a nested literal) across ten files on this
-    # tree. CPython is the oracle on all three rows, so an arm that guesses is
-    # red here rather than in the field.
-    ("f_comment_inside_a_field", 'f"{1 # note\n}"',
-     'f"{1 # note\n}"'),
-    ("f_format_spec_with_a_hash", 'f"a {255:#x} b"', 'f"a {255:#x} b"'),
-    ("f_hash_inside_a_nested_literal", 'f"{ {\'a#b\': 7}[\'a#b\'] } c"',
-     'f"{ {\'a#b\': 7}[\'a#b\'] } c"'),
-    # A nested field, so the depth counter has to be a COUNTER and not a flag.
-    ("f_nested_field_spans_lines", 'f"{ {1:\n   2}[1] } c"',
-     'f"{ {1:\n   2}[1] } c"'),
-    # CR and CRLF, because `_scan_string_end` and `_source_lines` have to agree
-    # about what a line end is. The lone-CR row is the one that produced NO
-    # STRING token at all when the collapse counted `'\n'` instead of asking
-    # `_LINE_TERMINATORS`: the literal was left as text, `_source_lines` split it
-    # at the CR, and the half-literal became ordinary code.
-    ("f_field_over_crlf",        'f"a {1\r\n  } b"',  'f"a {1\r\n  } b"'),
-    ("f_field_over_a_lone_cr",   'f"a {1\r  } b"',   'f"a {1\r  } b"'),
-    # PEP 701 same-quote reuse, WHICH MUST KEEP WORKING: its own doc is
-    # PARSE_FAIL_fstring_same_quote_reuse, and the bug doc for this area names it
-    # as the thing a brace counter that does not understand quoting would break.
-    # So the delimiter inside a field is a NESTED LITERAL, and the scan steps over
-    # it (recursively, triple run included) rather than reading it as this
-    # literal's own closing quote.
-    ("f_nested_same_quote",      'f"{ {"k": 9}["k"] }"', 'f"{ {"k": 9}["k"] }"'),
-    ("f_nested_same_quote_over_lines", 'f"{ {"k": 9}["k"]\n} c"',
-     'f"{ {"k": 9}["k"]\n} c"'),
-    ("f_nested_triple_in_a_field", 'f"{ """a\nb"""[0] } c"',
-     'f"{ """a\nb"""[0] } c"'),
-    ("f_nested_fstring_in_a_field", 'f"{f"{1\n}"} c"', 'f"{f"{1\n}"} c"'),
-    # A RAW f-string whose braces are an escaped pair — this codegen's own
-    # `test_gimple_runner.py:223` writes exactly `rf'...\{{'`. A backslash does
-    # not escape in a raw literal, so the PAIR is what escapes and the backslash
-    # is content; the first version let the backslash consume the brace, opened a
-    # field that never closed, and REFUSED a file on this tree.
-    ("rf_escaped_open_brace",    r'rf"^[^\n]*\b{1}_[0-9a-f]+ \{{"',
-     r'rf"^[^\n]*\b{1}_[0-9a-f]+ \{{"'),
-    ("rf_escaped_close_brace",   r'rf"a\}}b"', r'rf"a\}}b"'),
-    # ── the controls: every one is refused, and CPython refuses it too ───────
-    #
-    # The depth rule must not have turned "unterminated is a refusal" into "a
-    # line break inside braces is a refusal somewhere else". `f"a{b<nl>` has an
-    # unclosed field (CPython: "'{' was never closed"); `f"a{b<nl>"` reaches its
-    # closing quote with the field still open and is the same case; `f"a{{b<nl>"`
-    # has an ESCAPED brace pair, so the line break really is the end of the
-    # literal; and `f"a}b<nl>"` has a lone `}` as text followed by the end. A
-    # rule that tracked braces without the `{{`/`}}` escape accepts the third and
-    # refuses the first for the wrong reason.
-    ("f_unclosed_field_at_eof",  'f"a{b\n',       None),
-    ("f_unclosed_field_at_quote", 'f"a{b\n"',     None),
-    ("f_escaped_pair_then_eol",  'f"a{{b\n"',     None),
-    ("f_lone_close_brace_eol",   'f"a}b\n"',     None),
-    ("ordinary_braces_then_eol", '"a{b\n"',      None),
 ]
 
 
@@ -369,107 +265,7 @@ PROGRAMS = {
         "\tif x == 1:\n"
         "\t\treturn 7\n"
         "\treturn 0\n", ("main", 3)),
-    # A REPLACEMENT FIELD spanning lines, followed by more source. Same assertion
-    # as every other row here and for the same reason: the failure mode in this
-    # area has always been "the rest of the file went into the literal", and it
-    # is the STATEMENTS after the literal that show it. The shape is verbatim
-    # from `test_formal_libc_symbol.py:482-484`, the one corpus file the whole
-    # multi-line-f-string row is worth.
-    "multiline_fstring_then_code": (
-        'def main():\n'
-        '    fails.append(f"exactly one dylib on the {arch} link "\n'
-        '                 f"line, got {[os.path.basename(n)\n'
-        '                              for n in linked_dylibs(out)]}")\n'
-        '    return fails\n', ("main", 2)),
-    # The same shape with the field closing on a line of its own, which is the
-    # shortest one that has to be collapsed at all.
-    "multiline_fstring_brace_closes_on_next_line": (
-        'def main():\n'
-        '    var a = f"got {n\n'
-        '    }"\n'
-        '    print(a)\n'
-        '    return 0\n', ("main", 3)),
-    # And one where the literal's closing delimiter is followed by a postfix on
-    # the SAME physical line — the shape `pending_pad`'s flush rule exists for,
-    # since putting the owed newlines straight after the placeholder pushed the
-    # `.` onto an artificial blank line and the line-based tokenizer ended the
-    # statement there.
-    "multiline_fstring_with_a_postfix": (
-        'def main():\n'
-        '    var a = (f"got {n\n'
-        '    }").strip()\n'
-        '    return a\n', ("main", 2)),
 }
-
-
-def check_multiline_fstring_line_numbers(verbose):
-    r"""A diagnostic AFTER a multi-line f-string must name the line the source
-    wrote.
-
-    Collapsing a literal that spans lines to one physical line moves every
-    physical line number below it up by (that literal's line count − 1), so the
-    collapse owes the difference back — `pending_pad`, which
-    `replace_multiline_strings` flushes at the next real newline. "It parses" is
-    not the claim a caller depends on: a lexer that reports a real error four
-    lines down as being three lines down sends the reader to the wrong place, and
-    that is the bug triple-quoted literals already had (`fire.py`'s own
-    top-of-file docstring is what exposed it).
-
-    So the assertion is on the LINE A REFUSAL NAMES, taken from a deliberately
-    unterminated literal placed after the f-string. The refusal has to come out
-    of the TOKENIZER for this to be the test it claims to be — a parser refusal
-    would confound "which line did the collapse think this was on" with whatever
-    the parser does with a line number, and an unterminated string literal is the
-    one construct `check_refusal_message` above already pins as a tokenizer
-    refusal carrying `file:line:col`.
-
-    **The control in the other direction is the load-bearing half.** The two
-    sources differ by exactly the f-string's shape — one spanning two lines, one
-    spanning none — and the expected line differs by exactly one. A pad that
-    fires unconditionally, or not at all, is therefore visible HERE as a wrong
-    line number even when every value in the file is right, which is the same
-    regression `fire.py`'s docstring produced and the reason this check exists
-    rather than another value assertion.
-    """
-    MULTILINE = ('def main():\n'
-                 '    var a = f"got {n\n'
-                 '    }"\n')
-    ONELINE = 'def main():\n    var a = f"got {n}"\n'
-    BAD = '    var b = "x\n'          # unterminated, on the line after it
-
-    def named_line(src):
-        """(the line the refusal names, its message) or None if accepted."""
-        try:
-            F.py_tokenize_named(src, "some/file.mojo")
-            return None
-        except SyntaxError as e:
-            text = str(e)
-            marker = "some/file.mojo:"
-            if not text.startswith(marker):
-                return ("?", text)
-            rest = text[len(marker):]
-            return (int(rest.partition(":")[0]), text)
-
-    failures = []
-    for label, head, want in (("a 2-line f-string", MULTILINE, 4),
-                              ("a 1-line f-string", ONELINE, 3)):
-        got = named_line(head + BAD)
-        if got is None:
-            failures.append(f"{label}: a genuinely unterminated literal after it "
-                            f"was accepted, so there is no line number to check")
-        elif not isinstance(got[0], int):
-            failures.append(f"{label}: the refusal is {got[1]!r}, which does not "
-                            f"name a line number")
-        elif got[0] != want:
-            failures.append(
-                f"{label}: the refusal names line {got[0]}, expected {want} — "
-                f"the collapse owed a newline back and did not, or owed one too "
-                f"many, which misreports the line of every diagnostic below a "
-                f"multi-line literal")
-        elif verbose:
-            print(f"  line number  {label:34s} names line {got[0]}, as the "
-                  f"source writes it")
-    return (not failures), "; ".join(failures)
 
 # A backslash-newline pair inside a literal is a LINE CONTINUATION, and
 # CPython's tokenizer decides what it is worth before the parser ever sees the
@@ -1056,14 +852,11 @@ def main(argv):
     ok, why = check_interpolated_flag(verbose)
     if not ok:
         failures.append(why)
-    ok, why = check_multiline_fstring_line_numbers(verbose)
-    if not ok:
-        failures.append(why)
     ok, why = run_end_to_end(verbose)
     if not ok:
         failures.append(why)
 
-    total = len(LITERALS) + len(PROGRAMS) + len(CONTINUATIONS) + 6
+    total = len(LITERALS) + len(PROGRAMS) + len(CONTINUATIONS) + 5
     print()
     if failures:
         for f in failures:

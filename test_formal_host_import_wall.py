@@ -22,11 +22,7 @@ nothing when it went green.
     38-file row where the backend says 0;
   * **a file the backend cannot read is `None`, not `[]`** — "imports nothing"
     and "could not be read" are different answers, and the tool's own header
-    prints the count of the second. The corpus no longer contains such a file
-    (`cca2a17f` closed the one CPython read and this tokenizer did not), so the
-    `None` is pinned on a shape no Python accepts and the closed case is pinned
-    beside it as a regression row — a reader that answered `None` for a file it
-    reads perfectly well would report a coverage hole that does not exist;
+    prints the count of the second;
   * **`--unmodelled` is the before/after instrument** — a module landing
     UNMASKS the row behind it and never grows one, so a delta measured across
     two checkouts measures the merge. This is the one ability the promotion had
@@ -100,49 +96,20 @@ class TestTheReadersAreTheBackends(TempTree):
     def test_a_file_the_backend_cannot_read_is_none_and_not_empty(self):
         """The distinction the header prints a count for.
 
-        The shape is a MALFORMED file and nothing subtler: an `if` with no colon
-        and no body, which no version of the grammar accepts. An earlier version
-        of this row used a multi-line f-string replacement field instead, which
-        was this project's own standing example at the time — `cca2a17f` made a
-        replacement field span lines (CPython has accepted that since PEP 701,
-        and `fire_compiler.py`'s tokenizer now does too), so the example stopped
-        being unreadable and the row began passing for the wrong reason, on a
-        file whose answer really is `[]`. A `[]` here must mean "this walk read
-        the file and it names no wall"; it must not be reachable by giving the
-        walk something it cannot parse.
+        This is not a hypothetical shape: `test_formal_libc_symbol.py` is a file
+        in this repository whose own source this tokenizer refuses — an f-string
+        replacement field with a newline in it, which CPython has accepted since
+        PEP 701 and `fire_compiler.py`'s tokenizer does not. A `[]` here would
+        make that file contribute no walls and look like a file that imports
+        nothing.
         """
-        path = self.path("broken.py", "if True\n")
+        path = self.path("broken.py", "s = f\"a {1 +\n 2} b\"\n")
         self.assertIsNone(W.module_imports(path),
                           "an unreadable file must not read as 'imports "
                           "nothing' — that is the narrower answer wearing the "
                           "same word")
         ok = self.path("fine.py", "import pwd\n")
         self.assertEqual(W.module_imports(ok), ["pwd"])
-
-    def test_a_file_cpython_reads_and_this_backend_used_to_refuse_is_read_now(self):
-        """The PEP 701 case, as a REGRESSION row for the lexer fix that closed it.
-
-        It belongs beside the `None` case rather than inside it because it is a
-        different claim: that one says "a file the backend cannot read must not
-        read as `[]`", and this one says the class of files that answer is now
-        empty over this tree's own corpus. Without it, the case above would go
-        quietly untrue — a reader that answered `None` for a file the backend
-        reads perfectly well would pass it, which is a wall tool reporting a
-        coverage hole that does not exist.
-
-        The file is `test_formal_libc_symbol.py` itself, the one the corpus-wide
-        comparison in `cca2a17f` measured as the single disagreement: tokenized
-        as `(kind, value, line, col)` per token, and now reaching
-        `module_imports` rather than a refusal.
-        """
-        here = os.path.join(HERE, "test_formal_libc_symbol.py")
-        self.assertTrue(os.path.isfile(here), here)
-        self.assertIsNotNone(
-            W.module_imports(here),
-            "the multiline f-string replacement field this file spells is "
-            "accepted by CPython since PEP 701 and by this tokenizer since "
-            "cca2a17f; if this goes red the lexer regressed and the tool is "
-            "understating its own corpus again")
 
     def test_the_closure_is_transitive_because_the_build_links_it(self):
         """A file that never spells the wall is still refused on it.
