@@ -1,10 +1,66 @@
 # FORMAL_functools_is_unbuildable_as_a_host_module: every name in CPython's `functools` needs a capability this path lacks, and a module that exports nothing is refused
 
-**Area:** FORMAL (host modules / module classification). **Status: OPEN, measured,
-not started — and the measurement is the whole finding.** Found on
-`construct:sweep5:hostmods-core` (2026-10-02), whose brief was to add
-`functools` to `formal/hostmods/` alongside `collections`, `enum` and
-`contextlib`. `enum` and `contextlib` landed; this is the other two.
+**Area:** FORMAL (host modules / module classification). **Status: the census
+below is STALE, and the staleness is the finding — step 1 of "The exact next
+step" has LANDED.** Found on `construct:sweep5:hostmods-core` (2026-10-02), whose
+brief was to add `functools` to `formal/hostmods/` alongside `collections`,
+`enum` and `contextlib`. `enum` and `contextlib` landed; this is the other two.
+
+**Status 2026-10-04 (`work/formal29-3`): step 1 is DONE — a first-class function
+value is a CODE ADDRESS on this path — so §"What I saw" §2's headline measurement
+is inverted, and the blocker `reduce` hits is a different one entirely.** Read this
+before §2 and before the absence group in `test_formal_core_hostmods.py`, whose
+docstring repeats the same inverted sentence.
+
+    formal/build.py:13586 — "A function value is a CODE ADDRESS on this path now,
+    materialized by each backend's `_load_var` and branched through by its
+    `_emit_call`, so the name HAS a home and the pre-pass has no question left
+    to ask."
+
+Measured on this tree today, **both architectures**, every shape §2 says is
+refused:
+
+| program | §2 measured | measured now |
+|---|---|---|
+| `var g = dbl; return g(5)` | refused by `model.function_value_refusal` ("a function is a code address and a value here is one 64-bit word, so there is nothing for that word to hold") | **exit 10** — CPython 10 |
+| `call2(dbl, 5)`, both functions in the caller's file | "refused outright … so it is not a dylib-boundary problem" | **exit 10** — CPython 10 |
+| `call2(neg, 5)` and `call2(dbl, 5)` through the same parameter | — | **-5 and 10**, CPython's, so the word carries a CALL SITE and not one fixed target |
+| `f(a, b)` with **two** arguments through one parameter | — | works, which is what `reduce` needs |
+
+**What that changes in the census.** The "needs a first-class CALLABLE as an
+argument" row no longer blocks anything by itself. `reduce` is the one name in it
+whose remaining requirement is small, and it is blocked by something else
+entirely:
+
+```
+$ def fold(func, xs, initial): … while i < len(xs): acc = func(acc, xs[i]) …
+build: len(xs) is len() of a value classified as 'int', and an integer has no
+  length: …
+```
+
+A LIST PARAMETER, on both architectures, with `xs[i]` on the same parameter
+answering correctly. Filed as
+`bugs/FORMAL_len_of_a_list_parameter_is_refused_though_the_same_parameter_
+subscripts.md`, which measures the whole shape (annotation included: neither
+`List[Int]` nor `List[Cell]` helps, and a literal loop bound answers CPython's
+`10`, so the count field is reachable and one reader is asking the wrong
+question). **`reduce` is therefore two small steps from writable where §"The exact
+next step" says it is one big one.**
+
+**What has NOT moved, and is the rest of this document.** Step 2 — DECORATOR
+application — is unchanged and is `bugs/COMPILE_FAIL_decorator_application_dropped.md`'s
+to own: a decorator is still parsed and never applied, so the eight names in the
+DECORATOR row are still refused and must stay refused, and §"Why this is not
+write it anyway" still holds for them. `get_cache_token()` still has no constant
+answer. The TYPE-OR-OBJECT row (`GenericAlias`, `UnionType`, `itemgetter`,
+`MappingProxyType`, `RLock`, `Placeholder`) is untouched by the callable landing
+and still needs what it needs. And §4's point — that a module which exports
+nothing is refused, so `functools.mojo` cannot be written even as a stub — is
+STILL TRUE, which is why nothing here has landed as a module: a `functools` that
+exported only `reduce` would be an honest partial one, but it would still be a
+module named after a standard-library namespace whose most-used member
+(`lru_cache`) it refuses, and the doc's own rule ("until step 2, no `functools`
+name may be exported") is a judgement about that, not about the export gate.
 
 **Update 2026-10-02: the safeguard this document's last line leans on now
 exists.** It said "the test's `functools`-shaped absence group is what keeps that
