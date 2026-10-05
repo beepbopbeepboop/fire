@@ -24,16 +24,21 @@ Five things a reader should take away, in the order they matter:
   refuse every `s[i]`, `len(s)` and `printf("%<w>s", s)` in the module — and so in
   **229 files** whose import closure reaches it, including **106 files that were
   on a named row one round ago** (§3.2, §3.3).
-* **Zero files were fixed.** `to a pass` is **0**. Every one of the 244 files
-  that moved either entered the scope (27) or landed on a refusal somebody else's
-  edit put in front of it (217). This is the third round running to record that
-  shape, and the first where the wall is one edit old and one line wide.
+* **Zero files were fixed.** `to a pass` is **0**. All **244** files that moved
+  did one of five things: **13** entered the scope, **18** were hostmods that
+  **built at `-11`** and stopped building, **110** had a refusal land in front of
+  them, **101** crossed into a codegen class (**100 in `_syscalls.mojo`**) and
+  **6** crossed the other way. This is the third round running to record that
+  shape, and the first where the wall is one edit old and one predicate wide.
 * **The host-module work landed and it is real: 88 files left
-  `not-answerable/host-import`, and 98 of them became codegen findings** —
-  `importlib 90 → 28`, `collections 29 → 22`, `itertools 14 → 3`, `signal 7 → 0`,
-  `glob`/`re`/`shlex`/`stat`/`textwrap`/`struct`/`tempfile`/`html`/`signal`
-  models all landed (§2.3). Every one of them landed **on** the `_syscalls.mojo`
-  wall, which is why the coverage rate fell while the capability rose.
+  `not-answerable/host-import`, and 99 of them became codegen findings** —
+  `importlib 90 → 28`, `itertools 14 → 3`, `copy 13 → 5`, `signal 7 → 0`, and
+  `argparse`/`ast`/`fcntl`/`glob`/`html`/`platform`/`posixpath`/`re`/`shlex`/
+  `shutil`/`stat`/`struct`/`tempfile`/`textwrap` models all landed (§2.3).
+  **100 of the 101 files that crossed into a codegen class are on the
+  `_syscalls.mojo` wall**, which is why the coverage rate fell while the
+  capability rose — so §2 prints both, and §5 removes the wall they landed on.
+  **The capability and the regression are the same files** (§3.4).
 * **The two architectures are the same sweep, exactly, for the sixth round
   running.** All **604** classified paths have the same class on x86-64, there
   is no x86-64-only row, no arm64-only row, and **not one classified path has a
@@ -41,9 +46,12 @@ Five things a reader should take away, in the order they matter:
   one line, and it is which file the tool happened to print as a row's example.
 
 **§5 is the branch's own change, and it is measured**: the model no longer
-publishes a docstring as a non-ASCII string value, which clears **all 229** of
-the row's files, and the refusal that caused it has a row in **both** ranking
-instruments instead of being 236 files of `other refusal`.
+publishes a docstring as a non-ASCII string value, which **removes the wall
+behind all 229 of the row's files** rather than moving it — §5.3 measures 8 of
+them building, 4 landing on rows this map already names, and all 6 sampled of
+the 106 dark files returning to the row `-11` measured them on — and the refusal
+that built the wall has a row in **both** ranking instruments instead of being
+236 files of `other refusal`.
 
 ---
 
@@ -82,8 +90,9 @@ diagnosis rather than a wait.
 
 This worktree's own **483** `*.py`/`*.mojo` plus the **252** under
 `../new-modular/Mojo/stdlib/std`. The repository has grown from 470 to 483 since
-`-11`, and **all 13 new files are accounted for** (§2.4) — which matters more
-than usual this round, because one of them is the module the regression is in.
+`-11`, and **all 13 new files are accounted for** (§2.4). Nine of the 13 print a
+row and four pass; only 3 of the 9 are codegen findings, and all 3 are on the
+regression's wall — which is why a +13 scope is not what moved this round.
 
 ### 1.3 No `tool` row at all, for the third round running
 
@@ -114,18 +123,21 @@ Left column: `-11`'s summary block (`…_b11.md` §2.1). Right column: this run.
 | codegen findings (`codegen` + `codegen/dependency`) | 354 | **472** | +118 |
 | **codegen coverage** | 145/503 = **28.8 %** | 131/605 = **21.7 %** | **−7.2 pp** |
 
-**`codegen` fell 84 → 42 and that is not a fix either.** 42 of the files that
-were `codegen` — a refusal in the file itself — are now `codegen/dependency`,
-because a refusal landed in front of them in a module they import. The 27 new
-files account for 18 of the 42 (`formal/hostmods/**` and their tests, which
-refuse in `_syscalls.mojo`); the other 24 are files that moved backwards.
+**`codegen` fell 84 → 42, and that is not a fix either — it is the wall.** Of the
+42 files the sweep now calls `codegen`, **40 were `codegen` at `-11`**, one was
+`not-answerable/host-import` and one passed; so the class did not shrink by
+fixing anything, it shrank because a refusal landed in front of 42 files *in
+modules they import* and a refusal in a module you import is `codegen/dependency`
+by definition. §3.4's 100 class-crossings are the same event seen from the other
+side.
 
 **`built-with-admitted-contracts` fell 4 → 2, and that IS the host-module work
-landing**: `formal/hostmods/{concurrent/futures,ctypes,subprocess,threading}.mojo`
-built in `-11` on their declared contracts, and `subprocess` and `threading` now
-go through `os` → `_syscalls.mojo` and are refused there instead (§3.3). A
-module that built under an admission now does not build at all, which is a
-regression wearing the costume of a reclassification.
+landing — and losing two modules.** The four are
+`formal/hostmods/{concurrent/futures,ctypes,subprocess,threading}.mojo`, and
+`concurrent/futures` and `subprocess` still build on their declared contracts
+while **`ctypes` and `threading` are now `codegen/dependency`, both refused in
+`_syscalls.mojo`**. A module that built under an admission now does not build at
+all, which is a regression wearing the costume of a reclassification.
 
 ### 2.2 arm64 vs x86-64: **zero** architecture-dependent verdicts, and zero changed reasons
 
@@ -173,14 +185,22 @@ The reach split moves with it: **75 in reach / 128 not** at `-11` → **53 in re
 / 62 not** at `-12`. `formal/imports.py` owns that split and it is read, never
 copied, so this is a fact about the target computed at run time.
 
-**Every one of the 88 files that left this class became a codegen finding** — 98
-files crossed from a not-answerable class into one of the two codegen classes,
-which is 88 from host-import, 2 from unresolved-import, 1 into `codegen` and 2
-from `built-with-admitted-contracts`, plus the 5 files that moved the other way
-(§2.4). A file that stops being a fact about the target and becomes a finding is
-capability arriving; §3.2 is the bill for it.
+**Every file that left this class became a codegen finding, and 100 of the 101
+are on the regression's wall.** Measured per file rather than inferred from two
+class counts:
 
-### 2.4 The 13 new files, and the 19 hostmods that stopped passing
+| crossed INTO a codegen class | n | refused in |
+|---|---|---|
+| `not-answerable/host-import` → `codegen/dependency` | **98** | `_syscalls.mojo` |
+| `not-answerable/host-import` → `codegen` | **1** | (this file) |
+| `built-with-admitted-contracts` → `codegen/dependency` | **2** | `_syscalls.mojo` |
+| | **101** | **100 in `_syscalls.mojo`** |
+
+**and 6 crossed the other way**, which §2.4 lists. A file that stops being a fact
+about the target and becomes a finding is capability arriving; §3.4 is the bill
+for it, and the two are the same 99 files.
+
+### 2.4 The 13 new files, and the 19 hostmods that stopped building
 
 **The 13 new files** (`formal_sweep.py`'s own `find_source_files`, diffed
 against `git ls-tree 65b88dab`): `formal/examples/neg.mojo`,
@@ -190,26 +210,36 @@ against `git ls-tree 65b88dab`): `formal/examples/neg.mojo`,
 `test_formal_unicode.py`, `tools/formal_frame_slot_subscript_census.py`,
 `tools/formal_model_fuzz.py`, `tools/formal_untyped_param_deref_census.py`.
 483 = 470 + 13, which is the whole of the scope delta. **Nine of the 13 print a
-row and four pass.**
+row and four pass; 3 of the 9 are codegen findings and all 3 are on the wall.**
 
-**The other 14 of the 27 files that print a row now and printed none at `-11`
-were PASSES at `-11`.** A pass prints no line, so this is the only way a log can
-show it, and it is the sentence the whole round turns on:
+**Of the 27 files that print a row now and printed none at `-11`, 13 are the new
+files above and 14 were files that existed and are printed now.** A pass prints
+no line, so for 14 of them the only way a log can say what happened is that the
+row appeared; §3.4's partition is where those 14 are counted. And the same is
+true one layer out — **19 `formal/hostmods/**` files that existed at `65b88dab`
+build now and are refused now, and 18 of the 19 are refused in
+`_syscalls.mojo`**, the nineteenth being `_syscalls.mojo` itself:
 
-> **19 `formal/hostmods/**` files that existed at `65b88dab` are refused now, and
-> 18 of the 19 are refused in `_syscalls.mojo`** — the nineteenth being
-> `_syscalls.mojo` itself. That is `argparse`, `ast`, `ctypes`, `fcntl`, `glob`,
-> `html`, `os/__init__`, `os/_syscalls`, `os/path/__init__`, `platform`,
-> `posixpath`, `re`, `shlex`, `shutil`, `stat`, `struct`, `tempfile`, `textwrap`
-> and `threading`, checked by refusing module rather than by reading the class.
+| | n | at `-11` |
+|---|---|---|
+| refused in `_syscalls.mojo` now, that **passed** at `-11` | **16** | a pass, printed nothing |
+| refused in `_syscalls.mojo` now, that was `built-with-admitted-contracts` | **2** | `ctypes.mojo`, `threading.mojo` |
+| refused in itself | **1** | `_syscalls.mojo` |
 
-**And 5 files changed class the wrong way**, which no previous map recorded
+The 18 are `argparse`, `ast`, `ctypes`, `fcntl`, `glob`, `html`, `os/__init__`,
+`os/path/__init__`, `platform`, `posixpath`, `re`, `shlex`, `shutil`, `stat`,
+`struct`, `tempfile`, `textwrap`, `threading` — checked by **refusing module**,
+not by reading the class, because the class cannot tell "refused" from "refused
+somewhere further in".
+
+**And 6 files changed class the other way**, which no previous map recorded
 because no previous map had a tool that could print it: `codegen/dependency →
 not-answerable/host-import` ×2, `not-answerable/unresolved-import →
-not-answerable/host-import` ×2, and `codegen → not-answerable/host-import` ×1.
-Those are files a landed hostmod model made *answerable* in the sense that the
-refusal moved one layer further out — a reclassification, not a regression, and
-worth seeing in a table rather than inferred from two class counts.
+not-answerable/host-import` ×2, `codegen → not-answerable/host-import` ×1, and
+`not-answerable/host-import → not-answerable/unresolved-import` ×1. Those are
+files a landed hostmod model made *answerable* in the sense that the refusal
+moved one layer further out — a reclassification, not a regression, and worth
+seeing in a table rather than inferred from two class counts.
 
 ---
 
@@ -224,9 +254,10 @@ one sentence.
 | move | n | from → to |
 |---|---|---|
 | **a refusal landed IN FRONT of them** | **110** | string composition x106, module ATTRIBUTE x2, handler arm x1, `other refusal` x1 → **`other refusal`** (§3.2) |
-| **entered the scope** (13 files) | **13** | not in `-11` at all → a row in `-12` |
-| **a hostmod that PASSED at `-11` stopped building** | **18** | `formal/hostmods/**` → `_syscalls.mojo` (§2.4, §3.2) |
-| **the host-import wall came down and the file reached the wall behind it** | 98 | `not-answerable/*` / admitted → a codegen class (§2.3) |
+| **entered the scope** (13 files, 9 of which print) | **13** | not in `-11` at all → a row in `-12` |
+| **a hostmod that built at `-11` stopped building** | **18** | `formal/hostmods/**` → `_syscalls.mojo` (§2.4, §3.2) |
+| **crossed INTO a codegen class** | **101** | `host-import` x99, admitted x2; **100 in `_syscalls.mojo`** (§2.3) |
+| **crossed the other way** | **6** | into `not-answerable/*` (§2.4) |
 | **a file that got fixed** | **0** | — |
 
 ### 3.1 `other refusal` is 6 → 236, and **229 of the 236 are one module**
@@ -353,7 +384,7 @@ was re-wrapped by `platform.mojo`'s own refusal. **This is the answer to "which
 rows went dark rather than getting fixed" for round 12: one row, 109 files, one
 module.**
 
-### 3.4 The other direction: where the 236 came from
+### 3.4 The other direction: where the 236 came from, and 229 of them are one wall
 
 ```
 AND WHERE THEY CAME FROM, per cause that gained (a refusal landing in
@@ -365,11 +396,34 @@ front of a row moves files INTO the row in front):
           1 <- a handler arm with a body (no unwinder to emit it into)
 ```
 
-The remaining ~120 of the 236 arrived as `codegen/dependency` from a
-not-answerable class or from outside the scope — §2.3's 98 and §2.4's 27, less
-the 5 that went the other way. **Both halves are printed by one command**,
-because "a row fell" and "a row grew" are the same event read from two ends, and
-only one of them is visible in a counts table.
+**The other 126 did not change cause at all**, so the matrix above cannot see
+them — they arrived as a `codegen/dependency` from a class that is not a codegen
+class, or from outside the scope. Classified by refusing module, which is the
+half a cause table cannot give (the 236 as swept, against the `-11` log):
+
+| how it arrived | n | refused in |
+|---|---|---|
+| a refusal landed **in front of it** (§3.3) | **110** | `_syscalls.mojo` |
+| crossed a **class** into `codegen/dependency` | **100** | `_syscalls.mojo` |
+| existed at `65b88dab` and **passed at `-11`** | **16** | `_syscalls.mojo` |
+| genuinely **new in the scope** | **3** | `_syscalls.mojo` |
+| genuinely new in the scope | 1 | (this file) |
+| a refusal landed in front of it | 5 | (this file) |
+| crossed a class | 1 | (this file) |
+| | **236** | **229 in `_syscalls.mojo`**, 7 in-file |
+
+**So 229 of the 236 are one module refusing a file it refused nothing in at
+`-11`, and 7 are the six distinct in-file constructs of §4.2 plus
+`_syscalls.mojo`'s own.** The capability that landed this round (§2.3's 88
+host-import files, and §2.3's 100 class-crossings into a codegen class) and the
+regression that landed with it are **the same files seen from two ends** — which
+is the most useful sentence in this section, and invisible in a class table,
+where those 99 files read as "capability arrived" in one row and "passes fell"
+in the adjacent one.
+
+**Both halves are printed by one command**, because "a row fell" and "a row grew"
+are the same event read from two ends, and only one of them is visible in a
+counts table.
 
 ---
 
@@ -390,9 +444,9 @@ unchanged. §5 measures that bound for this round's largest row.
 | **6** | 6 | 1 | variadic call has no ABI | `tile.mojo` x5, (this file) x1 | `FORMAL_a_variadic_parameter_read_has_no_abi.md`, claimed (`formal28-2`). `-11` §4.4 measured that a variadic parameter's value is **not knowable** |
 | **6** | 115 | 5 | string composition: nothing to compose into | (this file) x5, `cas.py`, `module_loader.py`, … | **claimed** (`formal25-5`); §3.3 is what happened to its other 109 |
 | **4** | 4 | 3 | MLIR dialect construct | (this file) x3, `function.mojo` x1 | `FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md`, claimed (`formal29-2`) |
-| **2** | 4 | 2 | a module's ATTRIBUTE read as a value, across a dylib boundary | (this file) x2 (`sys.argv`, `sys.stdin`) | `FORMAL_module_state_no_storage.md`, claimed (`formal29-3`) — an ABI project (§(2)) |
+| **2** | 4 | 2 | a module's ATTRIBUTE read as a value, across a dylib boundary | (this file) x2 — `t_argv.mojo`, `unescape_c.py` | `FORMAL_module_state_no_storage.md`, claimed (`formal29-3`) — an ABI project (§(2)) |
 | 2 each | | | method call on a value receiver; `Optional unwrap` | | §4.1 |
-| 1 each | | | 6 further single-file causes | | §4.2 |
+| 1 each | | | **7** further single-file causes | | §4.2 |
 
 **Ownership is read from `tools/control.py claims`, not from the `-11` map**,
 because two rows the `-11` map recorded as unowned have since been claimed:
@@ -400,29 +454,59 @@ because two rows the `-11` map recorded as unowned have since been claimed:
 and module-ATTRIBUTE rows. **The only large unowned codegen cause in the corpus
 is §3.1's, and it is this branch's.**
 
+**One row lost 2 of its 4 files to the regression, which a counts table shows as
+`4 → 2` and nothing else:** the module-ATTRIBUTE row is 2 files here and was 4 at
+`-11`; `tools/detach.py` and `tools/gatewatch.py` left it for
+`_syscalls.mojo`, and **nothing joined it**. `t_argv.mojo` — the `sys.argv` file
+`-11` §4 singled out as the row's most interesting member — is still in it, and
+`unescape_c.py`'s `sys.stdin` joined it at some point in between.
+
+**And the two are not the same case, which is the useful part.** With the fix in,
+`tools/detach.py` is **back on this row** (its own `sys.argv` read). 
+`tools/gatewatch.py` is **still refused — on the encoding block, and now
+correctly**: it has a real non-ASCII string *value* of its own,
+`'STUCK (>60 min) — needs help'` (measured, after the fix:
+`non_ascii_strings_in` finds **1** for `gatewatch.py` and **0** for
+`_syscalls.mojo`, which had 31). So §5 does not put that file back and does not
+claim to: it moves it from a shrug to a named row with a real cause, which is the
+difference between "nobody has looked" and "here is what is in the way".
+
 ### 4.1 The two 2-file rows
 
-* **method call on a value receiver** (`std/collections/binary_heap.mojo`'s own
-  `self.clear()`, `std/builtin/float_literal.mojo`'s `write_repr_to`): one stdlib
-  file's own source each, and the stdlib is not editable from a repository
-  worktree. Same as `-11` §4.1.
-* **`Optional unwrap`**: `FORMAL_stdlib_optional_needs_a_representation.md` /
-  `FORMAL_optional_needs_a_niche.md`, the latter **claimed** (`formal29-3`).
+* **method call on a value receiver** — `std/collections/binary_heap.mojo`'s own
+  `self.clear()` and `std/format/repr.mojo`'s: one stdlib file's own source each,
+  and the stdlib is not editable from a repository worktree. (`-11` §4.1 named
+  `float_literal.mojo`'s `write_repr_to` as the second; it is not in this row now.)
+* **`Optional unwrap`** — `std/collections/set.mojo` and
+  `std/memory/owned_pointer.mojo`, **both refused in `builtin_slice.mojo`**, which
+  is the same two files `-11` §3.4 recorded as this row coming back.
+  `FORMAL_optional_needs_a_niche.md` is **claimed** (`formal29-3`).
 
-### 4.2 The single-file causes
+### 4.2 The seven single-file causes
 
-Six of them, one file's own source each, and each a distinct construct:
-`FloatLiteral.__int_literal__().__int__(…)` (a by-name literal method),
-a `comptime` class attribute read off a type PARAMETER, a `Span[…]` generic
-argument list read as a subscript, `p.unsafe_load()` (an ADD pointer read refused
-because the result is a bare address), `create_point` returning a frame address
-**as this image's ENTRY**, and — **new this round, and filed not fixed** —
-`test_formal_libc_symbol.py`'s parse error, which is `fire_compiler.py`'s
-tokenizer refusing a PEP 701 f-string whose replacement field spans **lines**
-(measured over six shapes: a nested same-quote f-string parses, a multi-line
-replacement field and a comment inside the braces do not). It is one file, it is
-a parser change rather than a formal one, and it is
-`bugs/PARSE_FAIL_fire_compiler_cannot_lex_a_multiline_f_string.md`.
+Seven rows of one file each, every one a distinct construct and every one in the
+file's own source:
+
+| file | construct |
+|---|---|
+| `std/benchmark/compiler.mojo` | `inlined_assembly['', NoneType, 'r,~{memory}', True]` — a subscript whose index is a TUPLE |
+| `std/builtin/len.mojo` | a `` `...` `` body standing where the lowering needs instructions |
+| `std/builtin/none.mojo` | `writer.write_string()` — a method on a multi-field struct where a descriptor is meant |
+| `std/math/polynomial.mojo` | `comptime num_coefficients = ...` does not fold to a constant |
+| `mojo/middle/metal_ops.py` | `c_ctype.rstrip()` returns a SHORTER string — `LENGTH_DEPENDENT_METHODS` names the fix's shape |
+| `t1.mojo` | `sys.exit()` — a call into a linked module that does not export the name, **deliberately not taken**, because `formal/hostmods/sys.mojo`'s own docstring and `test_formal_sys.py` both pin `doc/ABI.md`'s rule that a C library name like `exit` is provided by libSystem |
+| `test_llm/dumb_gemm.mojo` | `[FloatLiteral] * m * k` — a repetition whose count this path cannot read |
+
+**None is a shared-backend patch**, and none is in a claim. **A eighth is filed
+rather than listed here**, because it is not a refusal at all: §3.1's in-file
+`other refusal` set contains `test_formal_libc_symbol.py`, whose message is
+`parse error: …:483:23: unterminated string literal` — `fire_compiler.py`'s
+tokenizer refusing a PEP 701 f-string whose replacement field spans **lines**.
+Measured over six shapes: a nested same-quote f-string parses, a multi-line
+replacement field and a comment inside the braces do not. One file in the corpus,
+a parser change rather than a formal one, filed as
+`bugs/PARSE_FAIL_fire_compiler_cannot_lex_a_multiline_f_string.md` with its own
+reproduction and next step.
 
 ---
 
@@ -505,13 +589,15 @@ that emptied this row by deleting it would be reading a fix as a closure.
 
 ### 5.3 The ceiling, measured — and it removes the wall rather than moving it
 
-**8 of the 229 files built, one command each**, sampled across the row rather
-than taken from one corner:
+**15 of the 229 probed, one build command each**, sampled across the row rather
+than taken from one corner — and the point of the sample is the column on the
+right, not the number that pass:
 
 | file | what it lands on with the fix |
 |---|---|
 | `formal/hostmods/os/_syscalls.mojo` | **`pass`** |
 | `formal/hostmods/ast.mojo` | **`pass`** |
+| `tools/detach.py` | the module-ATTRIBUTE row — **back where `-11` had it** |
 | `_ab.py` | `not-answerable/host-import` — `atexit`, a fact about the target |
 | `std/builtin/float_literal.mojo` | its own in-file refusal (`__int_literal__().__int__(…)`) |
 | `std/collections/type_dict.mojo` | its own in-file refusal (`comptime` off a type parameter) |
@@ -523,10 +609,18 @@ than taken from one corner:
 the 106, all six landing on the f-string refusal `-11` measured them on:
 `cas.py` and `checked_run.py` and `comptime.py` on `cas.py:451`,
 `build_config.py` and `compile_stdlib.py` on `module_loader.py:108`,
-`build_stdlib_dylib.py` through `cas.py`. **Not one of the 12 sampled files lands
-on another encoding refusal**, which is the property that distinguishes removing
-a wall from moving it — and it is the check a reader should make before believing
-any row's count.
+`build_stdlib_dylib.py` through `cas.py`.
+
+**Not one of the 21 sampled files lands on another encoding refusal** — 15 from
+the table above plus these 6 — and that is the property that distinguishes
+REMOVING a wall from moving it. It is the check a reader should make before
+believing any row's count, and it is the one this map's own §3 exists to make
+automatic.
+
+**The one file of the 229 that stays on the encoding block after the fix is
+`tools/gatewatch.py`, and it is worth naming because it is the case that proves
+the exclusion is not a blanket amnesty** (§4). `_syscalls.mojo` itself goes from
+**31** non-ASCII literals to **0**, which is the whole fix in one number.
 
 ### 5.4 It repairs a registered gate job, which is a second measurement
 
@@ -583,12 +677,21 @@ files in-file  cause
 ### 5.6 What the fix does NOT claim
 
 **`FILES BLOCKED IS AN UPPER BOUND` and this is where that bites.** §5.3 measures
-8 files' worth of the 229, and says nothing about the other 221 — they move to
+15 files' worth of the 229 and says nothing about the other 214 — they move to
 whatever is behind the wall, which for most of them is a row this map already
 names. **The honest reading of §5.3 is "the wall is gone", not "229 files
-recovered"**: on the evidence, 8 build, 4 land on rows the map already lists, and
-the 106 that went dark go back to the row `-11` measured them on. **A re-sweep is
-the only way to price the rest**, and §6 gives the command.
+recovered"**: on the evidence, 2 build, 3 land on rows this map already lists, 1
+is a fact about the target, 3 are their own in-file refusals, and the 6 sampled
+of the 106 dark files go back to the row `-11` measured them on. **A re-sweep is
+the only way to price the other 214**, and §6 gives the command.
+
+**And one file of the 229 stays on the encoding block after the fix, on purpose.**
+`tools/gatewatch.py` has a non-ASCII string VALUE of its own —
+`'STUCK (>60 min) — needs help'` — so `non_ascii_strings_in` still finds one
+there while it now finds **0** in `_syscalls.mojo`, which had 31. That is the
+case that proves the exclusion is a reachability test and not a blanket amnesty,
+and it is why §4 records it separately: a file that stays refused for a real
+reason, on a row with a name, is the outcome the other 228 are owed.
 
 Also not claimed: the `s[i]` refusal's *other* half. `string_element_refusal`'s
 docstring is explicit that "an index a KNOWN TEXT makes answerable is still not
@@ -616,20 +719,24 @@ python3 tools/formal_sweep_rounds.py  bugs/sweeps/sweep-arm-11.txt \
                              bugs/sweeps/sweep-arm-12.txt                            # §3
 python3 test_refusal_taxonomy.py                                                       # §5
 python3 test_formal_sweep.py TestRoundOverRound                                       # §5
-python3 test_formal_unicode.py                                                        # §5
+python3 test_formal_sweep.py                # §5.4: 133 tests, and the 6 that now run
+python3 test_formal_unicode.py                                                        # §5.5
 ```
 
 **§2.1's class counts are not computed by a reader**: they are the
 `(classes sum to 735 = 735 files swept)` block each log ends with, which the
-sweep runner computes and checks against the file count. **§2.4's 27 and 5,
-§3.2's 31, §3.3's 106 and §3.4's 110 are `tools/formal_sweep_rounds.py`**, which
-is committed on this branch precisely so that they are printed rather than
+sweep runner computes and checks against the file count. **§2.4's 19 and 5,
+§3.3's 106 and §3.4's 110 are `tools/formal_sweep_rounds.py`**, which is
+committed on this branch precisely so that they are printed rather than
 re-derived: `…_b10.md` §6 and `…_b11.md` §6 each said in the same words that this
 comparison should have become a tool rather than a fourth description of one, and
-§5.4 is its test. **§2.4's 13 new files and §2.3's per-module host-import table
-are each log's own `by module:` lines.** **§3.2's 31 docstrings and the
-`ZZDOCSTRINGPROBEZZ` / `ZZFNDOCPROBEZZ` measurement are three commands**, in
-§3.2 and §5.
+`test_formal_sweep.py::TestRoundOverRound` is its test. **§2.4's 13 new files are
+`formal_sweep.py`'s own `find_source_files` diffed against `git ls-tree
+65b88dab`, and §2.3's per-module host-import table is each log's own `by module:`
+line.** **§3.2's 31 docstrings and the `ZZDOCSTRINGPROBEZZ` / `ZZFNDOCPROBEZZ`
+measurement are three commands**, in §3.2 and §5.1. **§4.2's parse error is
+`bugs/PARSE_FAIL_fire_compiler_cannot_lex_a_multiline_f_string.md`**, which has
+its own six-shape measurement.
 
 **≤ 36 minutes of wall for both arms together** at `-j 4` each, on a box at load
 16.3. The CAS is content-addressed and machine-wide, so a re-run with nothing
