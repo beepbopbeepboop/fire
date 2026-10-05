@@ -506,9 +506,9 @@ rather than listed here**, because it is not a refusal at all: §3.1's in-file
 tokenizer refusing a PEP 701 f-string whose replacement field spans **lines**.
 Measured over six shapes: a nested same-quote f-string parses, a multi-line
 replacement field and a comment inside the braces do not. One file in the corpus,
-a parser change rather than a formal one, filed that round under
-`PARSE_FAIL_fire_compiler_cannot_lex_a_multiline_f_string` with its own
-reproduction and next step. **FIXED 2026-10-05** on `work/formal32-sweep-b13`;
+a parser change rather than a formal one, filed that round under its own doc
+with its own reproduction and next step (that doc is deleted with its fix).
+**FIXED 2026-10-05** on `work/formal32-sweep-b13`;
 `bugs/FORMAL_sweep_work_map_2026-10-05_b13.md` §5 is the record and
 `test_string_literal_lexing.py`'s `LITERALS` block is the test.
 
