@@ -484,6 +484,98 @@ def test_the_survey_does_not_count_an_encoder_nothing_emits():
           "B.cond is emitted by every conditional branch and must stay covered")
 
 
+def test_a_reference_from_something_that_cannot_emit_is_not_a_caller():
+    """The survey's "is it emitted?" question must not be answerable by the
+    PROOF layer, and prose must not answer it either.
+
+    `tools/arm64_insn_audit.py`'s second exclusion is that an encoder no
+    lowering emits is not an instruction any image can contain. It was asking
+    the question over every `.py` in `formal/`, and two things in there are not
+    lowerings:
+
+    * **`formal/arm64_proof_gen.py`**, which renders Lean text about
+      instructions and emits none into any image. It references
+      `encode_cmn_xn_xm` and `encode_tst_xn_xm` because `lib/ProofLib.lean`'s
+      `arm64_step` needs a model arm for each, so 27,307 instructions of real
+      compiler output — `tst` 16,345 and `cmn` 10,603, plus the 359 `br` its
+      `br_xn` model arm names — were counted as COVERED for images that cannot
+      contain them. That is this survey's own sharpest lesson
+      (`bugs/FORMAL_arm64_instruction_coverage.md`: "an encoder with no CALLER
+      is that failure one step earlier") applied one level deeper than it was
+      written for: the caller has to be a lowering.
+
+    * **a DOCSTRING**, which is prose about an encoder rather than a use of one.
+      `encode_cmn_xn_xm` occurs in `formal/arm64.py` exactly once outside its
+      own definition, in the docstring of the encoder beside it, and that one
+      mention is enough to hold `cmn` out of the gap list on its own.
+
+    The assertions are DIRECTIONS, in the same style as the test above, because
+    naming an encoder here is the claim this survey has repeatedly got wrong:
+    `blr` was named until a lowering emitted it, and `tbz`/`tbnz`/`strh` were
+    named until theirs did.
+
+    * `tst` and `cmn` must be in the unwired set. This one DOES name two
+      encoders, deliberately: they are the two the proof layer's model arms
+      reference, and the whole defect is that a reference from
+      `arm64_proof_gen.py` used to count. An encoder named here is a claim that
+      no lowering emits it, and the way that claim goes stale — a lowering
+      landing — is a green run rather than a false one.
+    * Every mnemonic in `ASSEMBLER_EMITTED` must have an emitter that is NOT an
+      encoder call, because the entry's claim is precisely that. `adrp` is the
+      live one and it is 3.45% of every instruction a real compiler emits:
+      without it, scoping the search to the lowering files reports the single
+      largest gap in the survey for a mnemonic the assembler emits on every
+      relocation — the false gap being far more expensive than the false
+      coverage it replaced.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "arm64_insn_audit", os.path.join(HERE, "tools", "arm64_insn_audit.py"))
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    unwired = set(audit.unwired_encoders())
+    for name in ("encode_tst_xn_xm", "encode_cmn_xn_xm"):
+        check(name in unwired,
+              f"{name} is no longer reported as unemitted, so either a "
+              f"lowering emits it now — in which case this test's claim about "
+              f"it is stale and should be dropped, not worked around — or the "
+              f"search is reading a reference from somewhere that cannot emit an "
+              f"instruction again. Current unwired set: {sorted(unwired)}")
+    # The narrower search is the one that has to hold, and it is stated as a
+    # property of the FUNCTION rather than of the two names above, so a third
+    # proof-layer reference cannot slip in unnoticed.
+    check(set(audit.lowering_files()) and
+          all(os.path.basename(p) in ("arm64_codegen.py", "arm64.py")
+              for p in audit.lowering_files()),
+          f"the files the survey treats as lowerings are {audit.lowering_files()}"
+          f", which is not the set this test was written against: a file that "
+          f"renders Lean about instructions must not be one of them, or "
+          f"`cmn` and `tst` are covered again")
+    arm64_py = open(os.path.join(HERE, "formal", "arm64.py")).read()
+    # The CODE of `arm64.py`, by the tool's own rule: prose and `def` lines
+    # dropped. Asking "is `encode_adrp(` called?" of the raw text is answered by
+    # its own `def` line, which is how this assertion was wrong the first time
+    # it was written.
+    code_only = "\n".join(
+        line for i, line in enumerate(arm64_py.splitlines(), 1)
+        if i not in audit._prose_lines(arm64_py)
+        and not line.strip().startswith("def "))
+    for mn in audit.ASSEMBLER_EMITTED:
+        check(f"encode_{mn}(" not in code_only,
+              f"ASSEMBLER_EMITTED claims {mn} reaches an image without an "
+              f"encoder call, but formal/arm64.py CALLS encode_{mn} — so the "
+              f"entry explains a route the code no longer takes and should be "
+              f"deleted rather than left in place: an exclusion nobody can see "
+              f"is not one, and a stale one is worse")
+    check(audit.ASSEMBLER_EMITTED.get("adrp"),
+          "ASSEMBLER_EMITTED has lost its adrp entry, which is the one that "
+          "matters: `Assembler.emit_adrp_add` emits ADRP+ADD as raw words "
+          "because the two share one page relocation, so without the entry the "
+          "survey reports the single largest gap in it — 3.45% of every "
+          "instruction a real compiler emits — for a mnemonic this backend "
+          "emits on every relocation")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -519,7 +611,10 @@ def main():
                      ("every encoder names a base mnemonic",
                       test_a_base_mnemonic_is_either_wired_or_named),
                      ("the survey counts emitted encoders, not table entries",
-                      test_the_survey_does_not_count_an_encoder_nothing_emits)):
+                      test_the_survey_does_not_count_an_encoder_nothing_emits),
+                     ("a reference from something that cannot emit is not a "
+                      "caller",
+                      test_a_reference_from_something_that_cannot_emit_is_not_a_caller)):
         try:
             fn()
             passed += 1

@@ -2301,9 +2301,35 @@ dylib_exports: list = None, globals_base: int = None,
             if isinstance(stmt.target, F.MemberExpr):
                 slot = _member_slot_key(stmt.target)
                 if slot is None:
-                    raise CodegenError(
-                        "unsupported augmented assignment target on the "
-                        "formal arm64 path")
+                    # A base that is an EXPRESSION has no name to key on, and
+                    # that is a question about the BINDING of the base rather
+                    # than about the shape of the target — so it is the shared
+                    # `member_access_refusal`, the fourth of this backend's
+                    # sites to raise it, and the same one x86-64's
+                    # `_refuse_member_target` raises. This arm used to raise a
+                    # literal of its own ("unsupported augmented assignment
+                    # target on the formal arm64 path"), which is FALSE about
+                    # this file for the same reason x86-64's pre-fix sentence
+                    # was false about its own: a `MemberExpr` target IS lowered
+                    # here whenever the member is a frame slot, and `a.n += 1`
+                    # builds and answers on both machines. Two architectures
+                    # refusing one construct with two sentences is the class of
+                    # defect `FORMAL_the_two_backends_refuse_different_
+                    # constructs_in_the_same_function.md` is about, and its fix
+                    # landed for the store arm and for x86-64's — this arm was
+                    # the one that kept it alive.
+                    #
+                    # The base is EMITTED first, which is what makes the message
+                    # the SPECIFIC one rather than a generic field complaint:
+                    # `q.value().x += 5` has a pointer base, and emitting it says
+                    # so ("a load from the address the receiver holds, and the
+                    # load's width is the pointee's") where `member_access_
+                    # refusal` alone would blame an unclassifiable field. This is
+                    # the ordering `model.member_access_refusal`'s docstring calls
+                    # load-bearing, and the three other arm64 sites already do it.
+                    self._emit_expr(M.member_base_node(stmt.target))
+                    raise CodegenError(M.member_access_refusal(
+                        stmt.target, self.func_name, self._frame_holders))
                 name = slot
             elif isinstance(stmt.target, F.IdentExpr):
                 name = stmt.target.name
@@ -6716,6 +6742,105 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_movz_xd_imm(2, len(text)))    # X2 = length
         self.asm.emit(encode_movz_xd_imm(16, DARWIN_SYS_WRITE))
         self.asm.emit(encode_svc(0x80))
+
+    def _emit_blob_growth_guard(self, what: str, total_reg: int,
+                                capacity: int, tag: str) -> None:
+        """Stop the program LOUDLY when a blob-producing site's run-time element
+        total is past the reservation it made — the ONE guard for `a + b`,
+        `xs * n` and `a | b`, and the arm64 twin of
+        `formal/x86_64_codegen.py::_emit_blob_growth_guard`.
+
+        Emitted HERE, in front of the copy loops rather than as a branch to a
+        block at the end of the site, and that placement is a decision rather
+        than a convenience: the check has to be the last thing before anything
+        is written into the destination, and a forward branch to a trailing
+        block gets that wrong in the only way that matters — the label has to be
+        resolved before the loops are emitted, which means the loops sit INSIDE
+        the guarded region and the branch skips them instead of the store. This
+        form is a forward conditional branch OVER the diagnostic-and-exit, so
+        the not-taken path is the code that follows and the taken path never
+        returns. It is the shape `_emit_list_append` uses for the same bound on
+        the same backend, and the x86-64 twin is the same shape again.
+
+        **These three sites had no guard at all, and that is a silent frame
+        overrun rather than a wrong number.** Each one reserves a static
+        estimate (`_blob_site_growth`, clamped to the frame's remaining blob
+        area) and then copies a run-time element count into it — and the count
+        comes from the operands' own `[count]` header words, which no pass over
+        the source can read. So when the estimate is low the copy writes past
+        the reservation into whatever the frame placed next. Measured on this
+        backend before the change, the `for i in range(16000): s = s + [1]`
+        program: it built, ran, and printed `len=16001`, i.e. it wrote 16001
+        elements into a 65-element region and nothing said so. x86-64's `+` had
+        a guard and stopped with a silent `exit(1)`; `*` and `|` had none on
+        EITHER backend.
+
+        The stop is loud for the reason `list_append_overflow_message` gives: a
+        program whose only symptom is that it stopped, with nothing on either
+        stream, is the worst of the three answers this backend can give.
+        `model.blob_growth_overflow_message` is shared with x86-64 so the two
+        machines cannot name this limit differently — and it is a SIBLING of
+        the append message rather than that message, because the two bounds are
+        different facts (an append's capacity is the number of append SITES;
+        this one's is a static estimate of the element total).
+
+        Unsigned, which is right: both sides are element COUNTS read from count
+        words, so a negative one is not a case. The reservation is materialised
+        into X16 and the result lands in X17 rather than being a `cmp` immediate,
+        because the reservation can be any size the frame allows and `cmp`'s
+        immediate forms stop at 12 bits (shifted) — which would make the guard
+        silent for every reservation over 4095, i.e. exactly the programs whose
+        estimate is most likely to be low. `_emit_mov_imm` is the one
+        materialiser of a wide constant here. X16 and X17 are this backend's
+        spill scratch (see `_load_var`/`_store_var`) and neither is live across
+        a blob-producing site.
+
+        **The condition is `ls`, and the `cbnz` skips on it — so the
+        fall-through is the overflow.** Both halves of that are load-bearing and
+        both were wrong in the first version, in ways that build and run:
+
+        * `cset … hi` (the "exceeded" case) branched OVER the diagnostic, which
+          inverts the guard: every program whose estimate was ADEQUATE printed
+          "the run-time element total is larger", and every program that really
+          did overrun ran the copy loop into the frame. Measured on
+          `for i in range(3): s = s + [1]` — a reservation of 65 against a
+          run-time total of 2 — the inverted spelling stopped the program with a
+          sentence that is false about it, and nothing else in the suite
+          noticed because the program was never run.
+        * `encode_cbnz_xn(offset, xn)` branches on XN, and the register tested
+          has to be the one the `cset` wrote. Passing `0` — which is what the
+          copy loops in this file do, because THEIR cset target is X0 — reads
+          whatever the last `_emit_expr` left in X0, which is the RESULT
+          register of every one of these emitters. The guard was emitted with a
+          reservation of 65 for a program whose run-time total was 5001 and the
+          program printed `len=5001` having written 5001 elements into 65 words
+          of frame: the exact failure the guard exists to prevent, restored by
+          the guard being on the wrong register.
+
+        `test_formal_run.py`'s `check_blob_growth_guards` counts the
+        instructions each site contributes, which is what makes a stubbed-out
+        guard body fail rather than pass.
+
+        `total_reg` holds the element total the caller computed — `nL + nR` for
+        a concatenation and a union, `nL * count` for a repetition — and the
+        caller computes it into the register named rather than into X0, because
+        X0 is the RESULT register of all three of these emitters.
+
+        `tag` is per-SITE (`cat`/`rep`/`uni`) rather than a bare counter so a
+        program with two concatenations gets two distinct labels and a reader
+        disassembling it can tell which site a diagnostic came from.
+        """
+        self._emit_mov_imm("X16", capacity)
+        self.asm.emit(encode_cmp_xn_xm(total_reg, 16))
+        self.asm.emit(encode_cset_xd_cond(17, "ls"))       # total <= capacity
+        self._while_counter += 1
+        ok = f"{self.func_name}_{tag}ok{self._while_counter}"
+        self.asm.emit(encode_cbnz_xn(0, 17))
+        self.asm.emit_label_rel(ok, here_offset=-4)        # fits → skip the block
+        self._emit_overflow_diagnostic(
+            M.blob_growth_overflow_message(what, capacity))
+        self._emit_exit(1)
+        self.asm.label(ok)
 
     def _conversion_operand_is_text(self, operand) -> object:
         """True / False / None: does this conversion's operand hold text.
@@ -11703,6 +11828,12 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_ldr_xt_xn_imm(2, 7, 0))    # nL
         self.asm.emit(encode_ldr_xt_xn_imm(3, 8, 0))    # nR
         self.asm.emit(encode_add_xd_xn_xm(4, 2, 3))     # n
+        # The guard, BEFORE anything is written into the destination.  X4 is
+        # the element total and `cap` is the reservation, and there was no
+        # comparison between them anywhere on this path — measured, this is the
+        # backend that printed `len=16001` after writing 16001 elements into a
+        # 65-element reservation.  See `_emit_blob_growth_guard`.
+        self._emit_blob_growth_guard("a list concatenation", 4, cap, "cat")
         self._emit_list_base(offset)
         self.asm.emit(encode_str_xt_xn_imm(4, 9, 0))
         # copy left elements
@@ -11809,6 +11940,15 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_ldp_sp_post(0, 31))         # drop count
         self.asm.emit(encode_ldp_sp_post(0, 31))         # drop blob
         self.asm.emit(encode_ldr_xt_xn_imm(2, 7, 0))     # nL
+        # The guard, BEFORE the loops and before anything is written into the
+        # destination.  The total is `nL * count`, computed here into X0 (a
+        # register both loops overwrite as they go, which is why the test is
+        # here rather than after them): `nL` is the SOURCE's run-time length,
+        # read from its own count word, and the reservation is a static
+        # estimate of `blob_est(blob) * count`.  There was no comparison
+        # between them anywhere on this path.  See `_emit_blob_growth_guard`.
+        self.asm.emit(encode_mul_xd_xn_xm(0, 2, 8))
+        self._emit_blob_growth_guard("a list repetition", 0, cap, "rep")
         self._emit_list_base(offset)                     # X9 = result base
         self.asm.emit(encode_movz_wd_imm(5, 0))           # k = 0
         self.asm.emit(encode_movz_wd_imm(10, 0))          # k*nL = 0
@@ -11907,7 +12047,17 @@ ctor_field_value=self._ctor_field_value_for(name),
         #
         # `once` above stays the sum, because it is a RESERVATION: nL + nR is
         # how many words the result can need, and the reservation is what keeps
-        # the append loop's `result[count]` store inside the blob.
+        # the append loop's `result[count]` store inside the blob.  **And it is
+        # a reservation with no run-time check against it**, which is the third
+        # site this guard closes: the append loop below writes one element per
+        # right-hand element that is not already present, so its worst case is
+        # nL + nR — and `nL`/`nR` are the operands' own run-time count words,
+        # read two instructions above, which the static estimate cannot see.
+        # The guard is emitted here, before the copy loops and before anything
+        # is stored, with the sum in X4 exactly as a concatenation computes it.
+        # See `_emit_blob_growth_guard`.
+        self.asm.emit(encode_add_xd_xn_xm(4, 2, 3))        # nL + nR (reservation)
+        self._emit_blob_growth_guard("a set union", 4, cap, "uni")
         self.asm.emit(encode_mov_zr_xn(4, 2))            # n = nL (elements present)
         self._emit_list_base(offset)
         self.asm.emit(encode_str_xt_xn_imm(4, 9, 0))

@@ -12031,6 +12031,54 @@ def list_append_overflow_message(name: str, capacity: int) -> str:
             f"one sees is its own.")
 
 
+def blob_growth_overflow_message(what: str, capacity: int) -> str:
+    """The ONE text a blob-producing SITE writes to fd 2 when the run-time
+    element total exceeds the reservation it made — for BOTH backends, and for
+    all three of the sites that make one (`a + b`, `xs * n`, `a | b`).
+
+    **A sibling of `list_append_overflow_message`, not a reuse of it**, and the
+    distinction is the fact each one is about. An append's capacity is the
+    number of append SITES in the function that built the list; a concatenation,
+    a repetition and a union all make a DIFFERENT kind of reservation — a
+    static estimate of the element total, multiplied by the loop the site sits
+    in (`blob_loop_growth`) and then clamped to the frame's remaining blob
+    area. So the sentence has to say THAT, because the reader who is told "the
+    number of append SITES" for a `+` has been told a fact about a construct
+    that is not the one in front of them, and the advice that follows it
+    ("move the appends into a function of their own") does not apply to a `+`
+    at all.
+
+    Why a run-time message rather than a compile-time refusal: the reservation
+    is an ESTIMATE and the total is read from the two operands' count words, so
+    nothing over the source can say they disagree — which is the same reason
+    `list_append_overflow_message` exists and is written the same way. Both of
+    them used to be a bare `exit(1)`, and both of those were the same defect:
+    a program whose only symptom is that it stopped, with no output on either
+    stream. Every other bounded container operation on this path makes the same
+    bargain and every other one says which bound it hit.
+
+    `what` is the site's own noun phrase — "a list concatenation", "a list
+    repetition", "a set union" — which is the word the emitters already pass to
+    `frame_blob_refusal` for the COMPILE-time half of the same limit, so the
+    two halves of one bound are named the same way. `capacity` is the
+    reservation in ELEMENTS, which is the unit the run-time total is counted
+    in, so the two numbers in the message are comparable without a conversion
+    in the reader's head.
+    """
+    return (
+        f"formal: {what} overflowed its reservation: it reserved room for "
+        f"{capacity} element(s) and the run-time element total is larger. "
+        f"A blob here is a fixed block of the frame — there is no heap, so "
+        f"there is nothing to grow into — and the reservation is an ESTIMATE "
+        f"made before anything runs (the operands' lengths are read at run "
+        f"time), so it is the estimate that is wrong, not the copy loop. The "
+        f"estimate is multiplied by the loop the site sits in, because the "
+        f"emitted code is one copy however many times it runs. Build the "
+        f"result with its elements known at construction time, or move the "
+        f"growth into a function of its own so each one reserves what it "
+        f"sees.")
+
+
 def string_binary_refusal(op: str, left_kind, right_kind,
                           spelled_op: str | None = None,
                           left=None, right=None, fn=None,
