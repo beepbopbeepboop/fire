@@ -502,17 +502,82 @@ BUILTIN_PROGRAMS = {
             # enumerate and zip yield a PAIR per iteration, so the starred
             # remainder is a ONE-ELEMENT list there — a different lowering
             # again (`_emit_starred_slot_from_value`, not a slice of a row).
-            # Distinct target names per loop: a loop TARGET is a rebinding,
-            # and `_declare_var` is first-decl-wins per function (see
-            # `_gen_for_list`'s note), so reusing `i` across an int and a
-            # double sequence is a separate pre-existing bug
-            # (bugs/CODEGEN_zip_loop_target_keeps_the_first_loops_type.md).
+            # Distinct target names per loop: the REBINDING case — the same
+            # target name over an int sequence and then a string one — is
+            # `for_target_zip_and_enumerate_rebind` below, which is where it is
+            # pinned for every family at once.
             for ei, *erest in enumerate([7, 8]):
                 print(ei, erest)
             for zi, *zrest in zip([1, 2], ["u", "v"]):
                 print(zi, zrest)
             for si, *srest in enumerate("ab"):
                 print(si, srest)
+    """),
+    # A loop TARGET is a REBINDING, and every family here used to keep the
+    # FIRST loop's declaration for the whole function: `_declare_var` is
+    # first-decl-wins, which is right for a name a loop READS and wrong for one
+    # it BINDS. The failure is not one shape but two. Where the two loops'
+    # element types coerce to the SAME C type, the second loop stores through
+    # the wrong accessor and compiles clean: `zip([1.5], [9])` into an int64_t
+    # `i` printed `1`, and reading `v` out of a string-typed slot then killed
+    # the image (a SIGBUS, not a wrong number). Where they do not, gcc rejects
+    # the store outright and the whole program fails to compile.
+    #
+    # So the names are REUSED across every pair here, deliberately: distinct
+    # names per loop (what the case above used to do) cannot see this at all,
+    # because the bug is about what the SECOND loop inherits. Each family that
+    # had its own copy of the missing rule is here — zip, enumerate, str, set,
+    # dict, list — plus the nested-tuple and starred zip slots, which declare
+    # their own leaves.
+    #
+    # `zip_longest` is NOT here and `bytes` is not either, and both omissions
+    # are a fact about the OTHER engines rather than about this one: a padded
+    # `double` slot fills with `0.0` where CPython fills with `None` (this
+    # model's documented 0-is-None scalar fill, filed as
+    # bugs/FORMAL_zip_longest_double_slot_fills_with_zero_not_none.md), and
+    # `for x in b"ab"` iterates CHARACTERS on the interpreter, so a program
+    # containing one cannot be compared against CPython at all (filed as
+    # bugs/INTERP_for_over_a_bytes_literal_yields_characters.md). The compiled
+    # path is right about both, and the compiled-only cases for them are
+    # `gimple_bytes_and_str_loop_targets_rebind` in `test_gimple_runner.py`.
+    "for_target_zip_and_enumerate_rebind": textwrap.dedent("""\
+        def main():
+            for i, v in zip([1, 2], ["a", "b"]):
+                print(i, v)
+            for i, v in zip([1.5], [9]):
+                print(i, v)
+            for i, v in enumerate([3, 4]):
+                print(i, v)
+            for i, v in enumerate(["x", "y", "z"]):
+                print(i, v)
+            for i, v in enumerate("ab"):
+                print(i, v)
+            for i, v in enumerate([7, 8]):
+                print(i, v)
+            for a, b in zip([1, 2], ["p", "q"]):
+                print(a, b)
+            for a, b in zip([1.5, 2.5], ["r"]):
+                print(a, b)
+            for (a, b), c in zip([(1, 2)], ["z"]):
+                print(a, b, c)
+            for (a, b), c in zip([(1.5, 2.5)], ["z"]):
+                print(a, b, c)
+            for a, *rest in zip([1, 2], ["u", "v"]):
+                print(a, rest)
+            for a, *rest in zip([1.5], ["q"]):
+                print(a, rest)
+            for x in ['p', 'q']:
+                print(x)
+            for x in {1, 2}:
+                print(x)
+            for x in "cd":
+                print(x)
+            for x in ['m', 'n']:
+                print(x)
+            for k in {"a": 1}:
+                print(k)
+            for k in [5]:
+                print(k)
     """),
     "dict_ops": textwrap.dedent("""\
         def main():
@@ -1355,6 +1420,7 @@ CPYTHON_COMPARABLE = {
     "getattr_default_on_a_miss",
     "dict_update_preserves_insertion_order",
     "string_body_that_starts_with_a_prefix",
+    "for_target_zip_and_enumerate_rebind",
 }
 
 
