@@ -361,6 +361,40 @@ def test_the_mojo_printer_emits_MOJO_and_not_LEAN(tmpdir=None):
 
 # ── 3. the verdicts, and never a silent pass ─────────────────────────────────
 
+def test_the_ladder_is_generated_from_the_list_it_reports(tmpdir=None):
+    """`LADDER` is not documentation.  It is written into the emitted `first |
+    … | … | …` AND printed back in every PROVED verdict's reason, so the two
+    reading it have to be one list.
+
+    They were two, once: `LADDER` named four rungs and the emitted script had
+    three, so a PROVED verdict told the reader a contract was closed with a
+    tactic the proof never ran.  That is the failure this file exists to
+    prevent, committed inside the module that exists to prevent it, which is
+    why it is a row rather than something to notice by reading."""
+    from formal import contracts as CT
+    script = CT._ladder_script("h0, m_go, sKey")
+    check("the_script_mentions_every_rung",
+          all(r in script for r in CT.LADDER), f"{CT.LADDER} vs\n{script}")
+    for rung in CT.LADDER:
+        check(f"the_script_spellings_one_{rung}",
+              script.count(rung) == 1, script)
+    check("the_script_names_no_unlisted_tactic",
+          "bv_decide" not in script, script)
+    src = ("@requires(n >= 0)\n@ensures(result <= 3)\n"
+           "def cl(n):\n"
+           "    if n < 0:\n        return 0\n"
+           "    else:\n        if n > 3:\n            return 3\n"
+           "        else:\n            return n\n")
+    fn = functions(parse(src))[0]
+    e = CT.contract_theorems(contract_of(fn, "cl.mojo", src), ["n"], fn=fn)
+    body = e.lean.split(":= by")[-1]
+    check("the_EMITTED_theorem_uses_the_listed_rungs",
+          all(r in body for r in CT.LADDER), body)
+    check("the_emitted_theorem_invents_no_rung", "bv_decide" not in body, body)
+    v = CT.classify(e, lean_ok=True)
+    check("the_PROVED_reason_names_the_rungs_that_ran",
+          all(r in v.why for r in CT.LADDER), v.why)
+
 def test_a_false_contract_is_REFUTED_with_the_input(tmpdir=None):
     """The load-bearing row.  `@ensures(result >= 0)` on `n + n` under
     `@requires(n >= 0)` is TRUE for small `n` and FALSE at `n = 2^63 - 1`,
@@ -779,6 +813,7 @@ ALL = [
     test_the_lean_printer_and_the_evaluator_agree_on_the_corpus,
     test_a_comparison_is_SIGNED_in_both_printers,
     test_the_mojo_printer_emits_MOJO_and_not_LEAN,
+    test_the_ladder_is_generated_from_the_list_it_reports,
     test_a_false_contract_is_REFUTED_with_the_input,
     test_a_true_contract_is_NOT_reported_as_REFUTED,
     test_UNKNOWN_is_reachable_and_is_not_a_pass,

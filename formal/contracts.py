@@ -769,26 +769,58 @@ _MASK = (1 << 64) - 1
 
 # ── the theorem ──────────────────────────────────────────────────────────────
 
-# The tactic ladder, in order.  Each rung is a complete proof of the same
-# goal, tried left to right, and the FIRST one that closes it wins; if none
-# does, the theorem is emitted UNPROVED and the verdict is UNKNOWN, which is
-# reported rather than swallowed.
+# THE TACTIC LADDER, and it is the SAME list the emitted script uses.
 #
-# The order is measurement, not taste:
-#   * `omega` is the cheapest and closes the linear-arithmetic clauses -- the
-#     `abs`, `clamp`, `min`/`max` shapes, and every precondition that is a
-#     comparison between two words.  It needs the goal SPLIT over the model's
-#     `if`s first, which is what the `by_cases` prelude does.
-#   * `simp +decide` is what closes a clause over a selection the ladder can
-#     evaluate, and it is what `eval_eq_mojo` uses for the same shapes, so a
-#     contract and the AST bridge are closed by the same machinery.
-#   * `decide` is the fallback for a fully concrete goal.
-#   * `bv_decide` is last: it works on `BitVec` goals, and a clause over
-#     `UInt64` (`Lean.UInt64`, a `Fin`) is a STRUCTURE, not a bitvector, so
-#     it is a category error rather than a weaker tactic here.  It is kept
-#     because the ladder is the place a future clause over `BitVec` belongs,
-#     and dropping it would mean re-deriving where to put it.
-LADDER = ("omega", "simp +decide", "decide", "bv_decide")
+# These four names are not documentation: `contract_theorems` writes them into
+# the `first | … | … | …` it emits, and `Verdict.why` prints them back to a
+# reader.  They were briefly five, with `bv_decide` listed but NOT emitted, so
+# every PROVED verdict claimed a rung the proof never ran -- which is the one
+# kind of statement this module exists to stop making.  If a rung is not in the
+# script it does not go in this tuple.
+#
+# The order is measurement:
+#   * `simp_all` first: it closes a clause whose model the simplifier can
+#     evaluate under the `by_cases` split, which is the common case and the one
+#     `eval_eq_mojo` closes for the same shapes.
+#   * `omega` second: it closes the linear-arithmetic clauses the simplifier
+#     cannot, and it is where a genuinely unprovable contract says so.
+#   * `decide` third: a fully concrete goal.
+#
+# `bv_decide` is DELIBERATELY absent.  It decides `BitVec` goals; `UInt64` is
+# `Lean.UInt64`, a `Fin (2^64)`, which is a STRUCTURE and not a bitvector, so on
+# a goal in this module it is a category error rather than a weaker tactic --
+# the same mistake `bugs/FORMAL_contract_work_handoff.md` §3 records as having
+# produced a spurious counterexample on `arm64_reg`.  If a clause over `BitVec`
+# is ever wanted, THIS is where it goes, and the note travels with it.
+#
+# What is NOT here is anything that can leave the goal silently open.  `first`
+# takes the first rung that CLOSES it; the last rung is `omega`, whose failure
+# is an error, so the script either proves the contract or fails with the
+# theorem named.
+LADDER = ("simp_all", "omega", "decide")
+
+# How each rung is SPELLED, one place.  `simp_all` is the only one that needs
+# the lemma set, and `simp_all` is also the only one whose spelling differs
+# from its name (it is `simp_all [...]`, not `simp_all`).  A rung with no entry
+# here is written bare, which is right for the other two and would be wrong for
+# anything needing a simp set -- so a new rung that needs one has to be added
+# here rather than to the `first` block.
+_LADDER_LEMMAS = {"simp_all"}
+
+
+def _ladder_script(simp: str) -> str:
+    """The `first | … | … | …` block, generated from `LADDER`.
+
+    Exists so `LADDER` and the emitted script cannot disagree, which they did
+    once: `LADDER` named `bv_decide`, the script did not contain it, and every
+    PROVED verdict therefore quoted a tactic the proof never ran.
+    """
+    lines = ["first"]
+    for rung in LADDER:
+        text = f"{rung} [{simp}]" if rung in _LADDER_LEMMAS else rung
+        lines.append(f"    | {text}" if rung not in _LADDER_LEMMAS
+                     else f"    | ({text})")
+    return "\n".join(lines)
 
 
 def _result_term(model_name, params) -> str:
@@ -926,25 +958,20 @@ def contract_theorems(contract, params, model_name=None, fn=None,
     simp = (", ".join(hs + pre_names + [model, "sKey",
                                         "u64_lt_iff_false_of_le",
                                         "u64_le_iff_false_of_lt"]))
-    # The ladder, as a `first | … | … | …`.  `first` tries each rung and takes
-    # the first that CLOSES the goal; a rung that merely leaves the goal open
-    # (which is what `simp_all` and `decide` do when they cannot) falls
-    # through, and the LAST rung is `omega`, whose failure is an error and
-    # therefore the theorem's own failure.  So the script either proves the
-    # contract or fails loudly with the theorem named -- there is no rung that
-    # can leave it silently open, which is the whole requirement.
+    # The ladder, BUILT FROM `LADDER` rather than written out beside it.  It
+    # was written out beside it, and then `LADDER` and the script disagreed --
+    # `LADDER` listed four rungs and the script had three -- so `Verdict.why`
+    # told a reader a contract was closed with a tactic that never ran.  That
+    # is the whole failure this module exists to prevent, committed inside the
+    # module that exists to prevent it.
     #
-    # The rung order is measurement.  `simp_all +decide` closes a clause whose
-    # model the simplifier can evaluate under the split, which is the common
-    # case; `omega` closes the linear-arithmetic ones the simplifier cannot;
-    # `decide` is the last resort for a fully concrete goal.  `bv_decide` is
-    # NOT here and `LADDER` says why: it decides `BitVec` goals and `UInt64`
-    # is a `Fin`, so on this goal it is a category error rather than a weaker
-    # tactic.
-    rung = (f"first\n"
-            f"    | (simp_all [{simp}])\n"
-            f"    | omega\n"
-            f"    | decide")
+    # `first` tries each rung and takes the first that CLOSES the goal; a rung
+    # that merely leaves the goal open (which is what `simp_all` and `decide`
+    # do when they cannot) falls through.  So the script either proves the
+    # contract or leaves the goal open for Lean to report with the theorem
+    # named -- there is no rung that can swallow a failure, which is the whole
+    # requirement.
+    rung = _ladder_script(simp)
     lines = [f"theorem {contract.name}_contract {binders} :",
              f"    {goal} := by"] + hypo
     if not posts:
