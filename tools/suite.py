@@ -2376,6 +2376,24 @@ test('formal-dylib', [PY, 'test_formal_dylib.py'],
 test('formal-imports', [PY, 'test_formal_imports.py'],
      deps=['preflight', 'prooflib'],
      desc='formal import surface')
+# The formal dylib boundary seen by a CONSUMER, which is the half
+# `formal-dylib` above cannot see from the inside: that one checks the emitted
+# library and this one BINDS it, from a real C program and from `ctypes`, on each
+# architecture, with the declarations generated from the library's manifest. It is
+# a separate job because the failures are a different class — a boundary that
+# LINKS and answers wrong is not a library that fails to emit.
+#
+# `deps=['prooflib']` because it builds the library through `formal/build.py`,
+# and `mem='tiny'` from the 0.1 GB peak its own branch measured; the 1800 s
+# timeout is the `formal-dylib` sibling's, for the same reason (a Lean-backed
+# build on a loaded machine).
+test('formal-interop', [PY, 'test_formal_interop.py'],
+     deps=['preflight', 'prooflib'],
+     mem='tiny', timeout=1800,
+     extra=['test_formal_interop.py', 'formal/model.py', 'formal/build.py',
+            'formal/macho_linker.py', 'reflect.py', 'exec_budget.py',
+            'doc/ABI.md'],
+     desc='the formal dylib boundary, bound and called on both architectures')
 # The hostmod claim: `ast` left HOST_MODELLED, and this is what says the module
 # behind it is CPython's tokenizer rather than a plausible one — every case run
 # through the built arm64 image AND through this process's `tokenize`, with the
@@ -3601,6 +3619,11 @@ BUCKETS = {
 
     'proofs': ['formal', 'formal-call-proofgen',
                'formal-run', 'formal-globals', 'formal-dylib', 'formal-imports',
+               # The same container from the OUTSIDE: `formal-dylib` checks the
+               # emitted library, this one binds it and calls it. Beside it rather
+               # than after it, because a boundary that LINKS and answers wrong is
+               # a failure neither of the other two can see.
+               'formal-interop',
                'formal-sweep', 'formal-sweep-truth',
                'formal-link-accounting', 'formal-re', 'formal-runtime-link',
                'refusal-taxonomy', 'comptime-parity',
