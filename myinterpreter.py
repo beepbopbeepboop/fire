@@ -4422,7 +4422,7 @@ class Interpreter:
             # value, matching Python's own semantics and mirroring
             # _bind_comprehension_target's identical before/star/after
             # split for the for-loop-target case.
-            values = list(value) if hasattr(value, '__iter__') and not isinstance(value, (str, bytes)) else [value]
+            values = self._unpack_source(value)
             elements = target.elements
             star_idx = None
             for i, e in enumerate(elements):
@@ -4430,8 +4430,7 @@ class Interpreter:
                     star_idx = i
                     break
             if star_idx is None:
-                if len(values) != len(elements):
-                    raise ValueError(f"{self._loc(target)}Cannot unpack {len(values)} values into {len(elements)} targets")
+                self._check_exact_arity(values, elements, value)
                 for t, v in zip(elements, values):
                     self._assign_target(t, v)
             else:
@@ -5889,8 +5888,7 @@ class Interpreter:
             t = inner
         names = N.target_slots(t)
         if names:
-            values = (list(value) if hasattr(value, '__iter__')
-                      and not isinstance(value, (str, bytes)) else [value])
+            values = self._unpack_source(value)
             # Plain loop, not next()+genexpr: this file is itself compiled by
             # this project's self-hosting gimple_codegen.py, which has no
             # runtime `next()` builtin -- that emitted an undefined-symbol
@@ -5902,6 +5900,7 @@ class Interpreter:
                     star_idx = i
                     break
             if star_idx is None:
+                self._check_exact_arity(values, names, value)
                 for n, v in zip(names, values):
                     # A NESTED group slot — `for (i, (j,)) in pairs` — is
                     # itself a pattern, not a variable name, so it recurses
@@ -5929,6 +5928,86 @@ class Interpreter:
                 self.scope.define(star_name, values[n_before:len(values) - n_after])
                 for n, v in zip(after, values[len(values) - n_after:]):
                     self._bind_single_target(n, v)
+
+    def _unpack_source(self, value):
+        """`value` as the list a SEQUENCE target unpacks, or CPython's refusal.
+
+        **The whole of `UNPACK_SEQUENCE` for this path, and the reason it is one
+        function rather than a comprehension at two call sites.** Three facts,
+        each measured against CPython 3.14 rather than argued:
+
+        * **A `str` IS unpacked, into one-character strings.** Iterating a
+          `dict` yields its KEYS, so `for k, *vs in {"abc": 1}` gives the target
+          the key `"abc"` and CPython prints `a ['b', 'c']`. This function used
+          to exempt `str` (and `bytes`) and hand the target the whole key, so
+          the interpreter printed `abc []` — a wrong answer on the shape this
+          project's own dict iteration produces, and a SILENT one: the program
+          ran and printed something plausible. Same for `for k, v in {"ab": 1}`,
+          which binds `('a', 'b')` in CPython and used to bind `k` alone and
+          leave `v` undefined.
+        * **A non-iterable item is a `TypeError`, not a one-element list.**
+          `for a, b in [1, 2, 3]` is `cannot unpack non-iterable int object` in
+          CPython; the `[value]` fallback printed `1 2`, `2 2`, `3 2` — three
+          wrong answers from one loop.
+        * **`bytes` is left alone deliberately, and CPython is why.** It is an
+          ordinary iterable of INTS here, so `for a, b in b'ab'` is
+          `cannot unpack non-iterable int object` in CPython, which falls out
+          of the previous bullet rather than needing a `bytes` case: the item is
+          `97`, which is not iterable, so the refusal is the same refusal.
+
+        `hasattr(value, '__iter__')` and not `isinstance(value, (list, tuple))`,
+        because a `MojoInstance` is iterable and a `range` is iterable and both
+        are ordinary sequences to this rule.
+        """
+        if isinstance(value, str):
+            return list(value)
+        if hasattr(value, '__iter__'):
+            return list(value)
+        kind = type(value).__name__
+        if isinstance(value, MojoInstance):
+            kind = value._mojo_class.name
+        raise TypeError(f"cannot unpack non-iterable {kind} object")
+
+    def _check_exact_arity(self, values, names, item=None) -> None:
+        """Refuse a sequence target whose arity is not the item's length.
+
+        **CPython's `UNPACK_SEQUENCE`, and the reason it is here rather than
+        left to `zip`.** `zip` truncates to the shorter of the two, which turns
+        both arity errors into something the program does not notice:
+
+          * too MANY — `for a, b in [(1, 2, 3)]` is `ValueError: too many
+            values to unpack (expected 2, got 3)` in CPython and `1 2` here;
+          * too FEW — `for a, b in [(1,)]` is `ValueError: not enough values to
+            unpack (expected 2, got 1)`, and the old reading bound `a` and left
+            `b` unbound, so the program died later with `NameError: b` at the
+            USE SITE. That is the worse of the two shapes by this project's own
+            ordering: the diagnostic names a name, not the statement that failed
+            to bind it.
+
+        A crash here is a behaviour CHANGE on a program that used to print
+        something wrong, which is the trade this codebase makes explicitly and
+        which CPython already made.
+
+        `item` is the value the slots are being unpacked OUT of, and it is what
+        makes the "too many" wording CPython's for every kind: measured, a
+        sequence says `(expected 2, got 3)` and a `str` says `(expected 2)` with
+        no count at all — `for a, b in {"abc": 1}` and `for (a,) in {"ab": 1}`
+        both omit it, while `for (a,) in [(1, 2)]` includes it. The "not enough"
+        arm always carries the count, `for a, b in "ab"` being
+        `(expected 2, got 1)`. Passing the item's KIND rather than the value is
+        enough; `item=None` (a caller that has only the derived list) states the
+        sequence form.
+        """
+        got = len(values)
+        want = len(names)
+        if got == want:
+            return
+        counted = "" if isinstance(item, str) else f", got {got}"
+        if got > want:
+            raise ValueError(f"too many values to unpack (expected {want}"
+                             f"{counted})")
+        raise ValueError(f"not enough values to unpack (expected {want}, "
+                         f"got {got})")
 
     def _bind_single_target(self, name, value):
         """Bind one non-starred element of a for-loop/comprehension target
