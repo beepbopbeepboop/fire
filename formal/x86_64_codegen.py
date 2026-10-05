@@ -4907,7 +4907,20 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         The `end == s` comparison is 64-bit and through a REGISTER: two pointers
         four bytes apart compare equal as bytes, so a byte-width test would call
         `int("4x1")` … fine and `int("xy")` … not, which is not a rule.
+
+        `model.int_parse_overflow_refusal` is asked before anything is emitted,
+        and it is the THIRD thing this parse gets wrong that `strtoll` cannot
+        report: a string whose value does not fit comes back CLAMPED to
+        `LLONG_MAX` with `errno = ERANGE`, the endptr is at the end of the
+        string, and both of the checks below therefore pass — so the clamped
+        word is the answer. Measured: `int("9223372036854775808")` printed
+        `-1`, exit 0, nothing on stderr, on BOTH backends. The decision and the
+        message are `model.py`'s so this backend cannot word it differently.
         """
+        reason = M.int_parse_overflow_refusal(
+            M.fold_literal_expr(text_expr), base)
+        if reason:
+            raise CodegenError(reason)
         self._while_counter += 1
         trap = f"{self.func_name}_ip{self._while_counter}_trap"
         endl = f"{self.func_name}_ip{self._while_counter}_end"
@@ -6805,12 +6818,25 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # the dereference that reads the result cannot disagree. A one-byte
             # pointee is the identity scale and emits nothing, so every `char *`
             # program is byte-identical to what it was.
+            scale = (M.pointer_offset_scale(self._cur_fn, e)
+                     if op in ("+", "-") else None)
+            # The build-time half of `model.int_overflow_traps`, asked here for
+            # the same reason and with the same shared predicate arm64's ALU arm
+            # asks it with: a `+`, `-` or `*` whose operands the build can FOLD
+            # is decided now, and a refusal carrying the exact CPython value is
+            # a better answer than a wrapped number or a status code. The
+            # run-time half over a value the build cannot know is
+            # `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
+            result_t = common_type(self._ttype(e.left), self._ttype(e.right))
+            if M.int_overflow_traps(op, result_t, pointer_arith=bool(scale)):
+                reason = M.fold_overflow(op, e.left, e.right, result_t,
+                                         pointer_arith=bool(scale))
+                if reason:
+                    raise CodegenError(reason)
             self._emit_two_sided(e.left, e.right, _ALU_RR[op], Reg.R11,
-                                 scale=M.pointer_offset_scale(self._cur_fn, e)
-                                 if op in ("+", "-") else None)
+                                 scale=scale)
             if op in ("+", "-", "*"):
-                self._emit_trunc(common_type(self._ttype(e.left),
-                                             self._ttype(e.right)))
+                self._emit_trunc(result_t)
             return
 
         if op in ("/", "//", "%"):
@@ -7217,6 +7243,14 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         it is turned into exit(1) — the same signal the arm64 backend uses
         for its own divide-by-zero path.
 
+        `model.division_overflow_refusal` is asked before anything is emitted
+        and it is asked HERE, at the top, because on THIS backend the failing
+        case is not a wrong number but a CRASH: `INT64_MIN // -1` raises `#DE`
+        and the image dies on SIGFPE (measured, exit -8, while arm64 answered
+        the dividend — one source, two architectures, one wrong number and one
+        signal). The decision and the message are `model.py`'s so the two
+        backends cannot word it differently.
+
         `/` TRUNCATES toward zero here: there is no float on this path, so `/`
         is the documented int-only truncation, and formal's default integer type
         is unsigned, which truncates and floors alike.  `//` and `%` on a
@@ -7228,6 +7262,11 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         Python's integer division."""
         signed = cmp_signed(common_type(self._ttype(e.left),
                                         self._ttype(e.right)))
+        reason = M.division_overflow_refusal(
+            M.fold_literal_expr(e.left), M.fold_literal_expr(e.right),
+            op if op != "/" else "//", [e.left, e.right])
+        if reason:
+            raise CodegenError(reason)
         self._if_counter += 1
         cid = self._if_counter
         fn = self.func_name
@@ -7356,6 +7395,20 @@ preference.
         """`<<` `>>`. A literal count in 0..63 uses the immediate form;
         anything else moves the count into CL (the only register form)."""
         result_t = common_type(self._ttype(e.left), self._ttype(e.right))
+        # `model.shift_overflow_refusal` is asked FIRST, before the immediate
+        # form's range test and before the saturation arm, for the same reason
+        # arm64 asks it in the same place with the same shared decision: the
+        # saturation rule is CPython's for `>>` and a FABRICATION for `<<`
+        # (`8 >> 64` is 0; `1 << 64` is 18446744073709551616 and the saturating
+        # arm answered 0), and an amount in range can still overflow the RESULT
+        # (`1 << 63`), so the `0..63` test is not a safety test. The variable
+        # base is `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.
+        # md`.
+        reason = M.shift_overflow_refusal(
+            op, M.fold_literal_expr(e.right), M.fold_literal_expr(e.left),
+            [e.left, e.right])
+        if reason:
+            raise CodegenError(reason)
         # The signedness that picks `sar` over `shr` is the LEFT operand's own,
         # not the promotion's — a shift's right operand is a COUNT, and how
         # far to move says nothing about what to move in. `result_t` is still
@@ -7496,6 +7549,18 @@ preference.
         needs scratch the register allocator does not hand out, so the base
         and the accumulator live on the stack for the duration."""
         result_t = common_type(self._ttype(e.left), self._ttype(e.right))
+        # `model.power_overflow_refusal` is asked before anything is emitted and
+        # it is the whole of the three defects `**` had here, in one place:
+        # `2 ** 64` overflows the unroller (measured 0), `2 ** -1` is `0.5` in
+        # CPython — a FLOAT, which this path has no division to compute — and
+        # the negative arm answered a materialised `0`. The decision and the
+        # message are `model.py`'s so the two backends cannot word it
+        # differently; the variable base is the bug doc's subject.
+        reason = M.power_overflow_refusal(
+            M.fold_literal_expr(e.left), M.fold_literal_expr(e.right),
+            [e.left, e.right])
+        if reason:
+            raise CodegenError(reason)
         lit = self._static_int(e.right)
         if lit is not None and 0 <= lit <= 8:
             if lit == 0:
