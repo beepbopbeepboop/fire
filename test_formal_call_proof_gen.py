@@ -2866,6 +2866,108 @@ class TestStructFieldHasNoValueInTheModel(unittest.TestCase):
                                 "gap: %s" % (arch, err))
 
 
+class TestAModelRefusalIsABuildRefusalNotATraceback(unittest.TestCase):
+    """A refusal the generator already names must arrive as a REFUSAL.
+
+    `NotImplementedError` is both generators' uniform "I will not write a model
+    I do not have" signal — `formal/x86_64_proof_gen.py` catches it internally
+    and falls back to a disclaimed placeholder, which is what
+    `TestAPlaceholderModelClaimsNothing` above pins. Nothing turned it into a
+    build error, so on the backend that REFUSES rather than stubbing, the
+    refusal escaped `fire.py build --formal` as a Python traceback: exit 1, forty
+    frames of generator internals, and the sentence that names the construct at
+    the bottom of it.
+
+    The reproducer is the one
+    `bugs/FORMAL_float_step_functions.md` §"What was run" quotes, because it is
+    a program that BUILDS, RUNS and answers CPython with `--no-prove` — a
+    float literal in a source the machine model describes perfectly well and the
+    semantic model has no domain for. The gap is real and is that document's
+    subject; what is a defect here is the DIAGNOSTIC.
+
+    Four rows, and they are four different ways this could come back:
+
+      1. the refusal is a `FormalBuildError`, so `fire.py`'s own arm prints
+         `build: <message>` and there is no traceback;
+      2. the message carries the generator's OWN sentence, so the reader is sent
+         to the construct rather than to the generator;
+      3. the message says `--no-prove` builds the same bytes, because that is
+         the fact that distinguishes a model gap from a lowering one and it is
+         what a reader of a refusal needs first;
+      4. **the machine half is still fine**, both backends, `prove=False` —
+         which is what makes row 3 a true statement rather than a reassurance.
+    """
+
+    #: `float_step.mojo`'s own text: three float locals, an FADD-shaped
+    #: comparison, and a `main` that returns 0 or 1.
+    FLOAT_PROGRAM = (
+        "def main(n: Int) -> Int:\n"
+        "    var a = 1.5\n"
+        "    var b = 2.25\n"
+        "    var c = a + b\n"
+        "    if c > 2.0:\n"
+        "        return 1\n"
+        "    return 0\n")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="a2-modelrefusal-")
+        cls.proof, cls.error = _generate(cls.tmp, cls.FLOAT_PROGRAM,
+                                         "float_step")
+        cls.built = {}
+        import formal.build as fb
+        for arch in ("arm64", "x86_64"):
+            src = os.path.join(cls.tmp, "machine-%s.mojo" % arch)
+            with open(src, "w") as f:
+                f.write(cls.FLOAT_PROGRAM)
+            try:
+                fb.compile_formal(src, arch=arch, output=os.path.join(
+                    cls.tmp, "machine-%s.aout" % arch), prove=False, check=False)
+                cls.built[arch] = None
+            except Exception as e:            # noqa: BLE001
+                cls.built[arch] = f"{type(e).__name__}: {e}"
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_the_refusal_is_a_build_error_not_a_bare_exception(self):
+        import formal.build as fb
+        self.assertIsNone(self.proof,
+                          "the arm64 generator produced a proof for a program "
+                          "whose source it cannot model, so the semantic model "
+                          "has grown a float domain")
+        self.assertIsNotNone(self.error, "no proof and no error: the build "
+                           "neither proved nor refused the program")
+        self.assertTrue(self.error.startswith("FormalBuildError"),
+                        "the refusal is not a BUILD refusal, so `fire.py` "
+                        "prints a traceback for a construct the generator "
+                        "names: %s" % self.error)
+        self.assertNotIn("NotImplementedError", self.error.split(":")[0],
+                         "the refusal is still a bare NotImplementedError: %s"
+                         % self.error)
+        self.assertTrue(issubclass(fb.FormalBuildError, Exception))
+
+    def test_the_message_carries_the_generators_own_sentence(self):
+        self.assertIn("a FloatLiteral has no value in the semantic model",
+                      self.error or "",
+                      "the refusal lost the sentence that names the "
+                      "construct, so a reader is sent to the generator instead "
+                      "of to the float literal: %s" % self.error)
+
+    def test_the_message_says_the_image_is_not_what_refused(self):
+        self.assertIn("--no-prove", self.error or "",
+                      "the refusal does not say that the image builds and "
+                      "runs, which is the one fact that separates a model gap "
+                      "from a lowering one: %s" % self.error)
+
+    def test_the_machine_half_builds_on_both_backends(self):
+        for arch, err in sorted(self.built.items()):
+            self.assertIsNone(err, "%s does not build this program, so the "
+                                "refusal above is not purely a model-domain "
+                                "gap: %s" % (arch, err))
+
+
 class TestTheReturnFrameReadsX30ThroughAMaterialisedAddress(unittest.TestCase):
     """`count` and `pow2`, declared rather than discovered, with the address
     named.

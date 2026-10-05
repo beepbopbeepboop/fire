@@ -1882,7 +1882,36 @@ def compile_formal(source_path: str, output: str = None,
                                admitted=result["admitted"],
                                admitted_calls=_admitted_calls(
                                    source_path, result["admitted"]))
-        proof = generate_proof(prog, code, info)
+        try:
+            proof = generate_proof(prog, code, info)
+        except NotImplementedError as e:
+            # `NotImplementedError` is how BOTH generators REFUSE — it is their
+            # uniform "I will not write a model I do not have" signal, which is
+            # why `formal/x86_64_proof_gen.py` catches it internally and falls
+            # back to a disclaimed placeholder model. Nothing converted it into
+            # a build error, so a refusal escaped `fire.py build --formal` as a
+            # Python TRACEBACK: exit 1 with forty frames of generator internals
+            # and the actual sentence — "a FloatLiteral has no value in the
+            # semantic model; refusing rather than modelling it as 0, which
+            # would be a false statement about the source" — at the bottom of
+            # it. That is the wrong diagnostic for a construct the refusal
+            # NAMES, and `fire.py`'s own `except FormalBuildError` arm already
+            # exists to print `build: <message>` for it.
+            #
+            # The IMAGE is not what refused, and the message says so: the
+            # machine model above already describes this program, and
+            # `--no-prove` builds and runs the same bytes. What is missing is
+            # the translation of the SOURCE into the semantic model, so the
+            # fix is a domain in that model and not a change to the emitter.
+            raise FormalBuildError(
+                f"no proof was generated: the semantic model has no value for "
+                f"something in this program, and refusing is what it does "
+                f"rather than state something false about the source. The "
+                f"IMAGE is not what refused — `--no-prove` builds and runs the "
+                f"same bytes — and what is missing is a domain in "
+                f"`formal/arm64_proof_gen.py`'s model of the source, which is "
+                f"a function of the entry argument alone. The generator's own "
+                f"word for it: {e}") from e
         proof_path = os.path.splitext(output)[0] + "_proof.lean"
         if os.path.exists(proof_path):
             os.chmod(proof_path, 0o644)  # u+w so overwrite works
