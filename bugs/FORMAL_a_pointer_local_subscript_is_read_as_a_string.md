@@ -4,8 +4,10 @@
 `declared_type_kind` / `ValueKinds`) meeting the non-ASCII string refusal
 (`model.string_index_refusal`), on both backends. **Found 2026-10-05 on
 `work/formal28-6-r2`** while re-measuring
-`bugs/FORMAL_trust_audit_2026-10-04.md`'s instrument. **Pre-existing**, and not
-on that branch's own changes: it reproduces on this task's base commit
+`test_formal_admitted.py`'s `truth` group — the instrument the 2026-10-04
+admitted-contract audit wrote, and the only reason a false contract is a
+finding rather than a sentence. **Pre-existing**, and not on that branch's
+own changes: it reproduces on this task's base commit
 (`77b24183`) with identical output, and `non_ascii_strings` landed in `8de63388`
 ("a string's length, position and element count CODE POINTS, not bytes"), which
 is on `master`.
