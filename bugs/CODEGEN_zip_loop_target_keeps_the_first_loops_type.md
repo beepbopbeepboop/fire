@@ -1,9 +1,14 @@
 # CODEGEN: a `zip`/`enumerate` loop target keeps the FIRST loop's declared type
 
-Found 2026-10-02 while fixing
-`bugs/CODEGEN_starred_rest_in_a_for_target_is_a_slot_named_star.md` (fixed
-and deleted). It is a different defect in the same declaration machinery, and
-it was found by writing the fix's own regression case.
+Found 2026-10-02 while fixing the `*rest` element in a `for` target that was
+lowered as a C slot literally named `*rest` (fixed and deleted; the mechanism
+is `mojo/middle/loops_shared.py`'s `starred_slot_index` /
+`starred_slot_name` / `_emit_starred_slot_list`, consumed by
+`emit_loops.py::_gen_for_list` and `_emit_starred_slot_from_value` in the
+enumerate/zip paths, with `for_target_starred_rest` and
+`comprehension_starred_rest` in `test_runtime_diff.py` as the regressions).
+It is a different defect in the same declaration machinery, and it was found by
+writing that fix's own regression case.
 
 ## What I ran
 
