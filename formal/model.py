@@ -23843,10 +23843,50 @@ STRING_TYPE_CTORS = ("String", "str", "StringLiteral", "StringSlice")
 # `empty_blob_constructor` (the routing), never from this tuple.
 BYTE_BLOB_TYPE_CTORS = ("bytearray", "bytes")
 
+#: The IEEE float formats NARROWER than binary64, the fourth of the language's
+#: four float type names, and the 128-bit unsigned integer — a CLOSED list, and
+#: not a shape rule.
+#:
+#: It is closed because two tables are derived from it and one of them
+#: (`type_value_name_space`, via `TYPE_VALUE_NAMES`) has to stay FINITE for
+#: `type_value_tags_are_distinct` to be a proof over every pair rather than a
+#: bound on a probability.  A rule that admitted any `float<width>_<format>`
+#: would make that set unbounded, which is the whole of the condition.
+#:
+#: Measured over this repository and the stdlib checkout, these are every
+#: float-format and 128-bit member either of them writes — `DType.float8_e4m3fn`
+#: 26, `float8_e5m2fnuz` 21, `float8_e4m3fnuz` 20, `float8_e5m2` 19,
+#: `float8_e8m0fnu` 14, `float6_e3m2fn` 11, `float6_e2m3fn` 11, `float4_e2m1fn`
+#: 10, `uint128` 8, `float8_e3m4` 7 — so the list is the corpus rather than a
+#: guess at the language's shape.  A tag for a format this path cannot HOLD is
+#: not a lie: it is a word two programs comparing dtypes agree on, which is all a
+#: dtype VALUE is on this path.  A member outside the list is still refused with
+#: its own name (`_dtype_member_type` returns None), so the boundary is drawn
+#: once, explicitly, and every member outside it keeps a refusal that says what
+#: the admitted ones are.
+#:
+#: **This list is also where the CONSTRUCTOR half of `POINTEES_REFUSED` comes
+#: from.**  `POINTEES_REFUSED` refuses `Float16`, `Float32` and `Float64` BY
+#: NAME at a dereference, and the constructor `Float32(1.0)` had no name to be
+#: refused by — it took `type_constructor_kind`'s documented `None` ("not a type
+#: constructor at all"), emitted a `BL Float32`, and failed at the LINK AUDIT
+#: with a message about a SYMBOL about a fact that is a TYPE's.
+#: `NARROW_FLOAT_TYPE_CTORS` below derives from THIS list for that reason, and
+#: `TYPE_VALUE_NAMES` derives from it too, so the two cannot disagree about
+#: which formats exist.
+NARROW_FLOAT_TYPE_NAMES = (
+    "BFloat16",
+    "Float16", "Float32",
+    "Float4_e2m1fn", "Float6_e2m3fn", "Float6_e3m2fn",
+    "Float8_e3m4", "Float8_e4m3fn", "Float8_e4m3fnuz", "Float8_e5m2",
+    "Float8_e5m2fnuz", "Float8_e8m0fnu",
+    "UInt128",
+)
+
 UNREPRESENTABLE_TYPE_CTORS = (
     "Span", "Error", "SIMD", "SIMDVector", "List", "Dict", "Set", "Tuple",
     "Optional", "StringRef", "DType", "InlineArray", "Array", "StaticTuple",
-) + BYTE_BLOB_TYPE_CTORS
+) + BYTE_BLOB_TYPE_CTORS + NARROW_FLOAT_TYPE_NAMES
 
 
 def unrepresentable_type_ctor_refusal(callee_name: str) -> str:
@@ -23871,6 +23911,19 @@ def unrepresentable_type_ctor_refusal(callee_name: str) -> str:
     `bytes` is refused for what it actually needs. Saying THAT is what a reader
     can act on, and it names the answer that exists rather than the two that
     were open when this text was written.
+
+    **A third, for the narrow float formats, and the generic text is FALSE of
+    them.**  It says "this image has no declaration of X to construct", which is
+    true of `Span` (nothing in hand declares one) and false of `Float32` — a
+    `Float32` is a real type with a fixed 32-bit layout, and the image knows
+    about it: `POINTEES_REFUSED` refuses it BY NAME at a dereference.  A reader
+    who is told to go and declare the type finds nothing to declare, which is
+    the failure mode this family documents itself as existing to prevent.  So
+    the narrow formats get the fact that is actually true of them, and the text
+    is shared with the one reader that already knows the format: the reason in
+    `POINTEES_REFUSED` is about the LOAD's context and this one is about the
+    VALUE, so they say the same half in different words rather than repeating
+    it (see `narrow_float_ctor_refusal`).
     """
     if callee_name in BYTE_BLOB_TYPE_CTORS:
         return (
@@ -23892,6 +23945,8 @@ def unrepresentable_type_ctor_refusal(callee_name: str) -> str:
             f"not the alternative — that reached the bind audit as a dangling "
             f"extern and failed with a message about a SYMBOL rather than "
             f"about the type.)")
+    if callee_name in NARROW_FLOAT_TYPE_NAMES:
+        return narrow_float_ctor_refusal(callee_name)
     return (
         f"constructing {callee_name} has no representation on this path: this "
         f"image has no declaration of {callee_name} to construct — it is not a "
@@ -23902,6 +23957,66 @@ def unrepresentable_type_ctor_refusal(callee_name: str) -> str:
         f"constructs. (Emitting a call to a symbol named {callee_name!r} that "
         f"nothing defines is not the alternative — that built and then failed "
         f"to load.)")
+
+
+def narrow_float_ctor_refusal(callee_name: str) -> str:
+    """Why a CONSTRUCTOR of a narrow float format has no value here.
+
+    The sibling of `POINTEES_REFUSED`'s narrow-float rows, and not a copy of
+    them.  That table answers a question about a LOAD — what a pointer
+    dereference yields, and its kind being decided by the context it lands in —
+    and its rows are read at the dereference.  This one answers a question about
+    the VALUE: there is no word to put a `Float32`'s bits in, whatever the
+    context does with it afterwards.  The shared half is that these formats are
+    NOT a re-encoding of binary64, so "just widen it" is not available; the rest
+    is a different sentence and repeating the table's would send the reader to a
+    dereference they are not writing.
+
+    **`Float64` is not in this table and that is the fact it states**: it is the
+    one float kind `FLOAT_TYPE_CTORS` carries, `FLOAT_TYPE_NAMES` is its two
+    spellings, and `FLOAT_KIND` is it.  Everything here is narrower than it or
+    wider than one word, which is the whole of the boundary this document owns —
+    `bugs/FORMAL_float_binary64_only.md`.
+    """
+    if callee_name == "UInt128":
+        what = ("128 bits, and a formal value is one 64-bit word — so it is "
+                "not a case of the wrong BITS IN one word but of two words")
+        tail = ("`UInt128` is in this table for the WORD COUNT rather than for "
+                "the float width: `UInt64(x)` is the conversion that lowers, "
+                "and it is a different program — a `UInt128` product overflows "
+                "where a `UInt64` one wraps.")
+    elif callee_name.startswith("BFloat"):
+        what = ("two bytes of bfloat16, the same exponent range as binary32 "
+                "with a 7-bit significand, and this path's one float kind is "
+                "binary64 — whose exponent bias and 52-bit significand are not "
+                "a superset of that, so a word holding bfloat16 bits read as a "
+                "double is a different number rather than an approximation")
+        tail = (f"`{callee_name}(x)` is not an approximation of `Float64(x)` "
+                f"that could be waved through: it rounds, which is the one "
+                f"thing a wrong answer here would silently not do.")
+    else:
+        what = ("narrower than the IEEE binary64 this path's only float kind "
+                "is, and the two are not re-encodings of one another: the "
+                "exponent bias and the significand width both differ, so a "
+                "64-bit word holding one format's bits read as the other is a "
+                "different number rather than an approximation — which is why "
+                "the honest answer here is a refusal and not a widening")
+        tail = (f"`{callee_name}(x)` is not an approximation of `Float64(x)` "
+                f"that could be waved through: it rounds, which is the one "
+                f"thing a wrong answer here would silently not do.")
+    return (
+        f"constructing {callee_name} has no representation on this path, and "
+        f"the reason is a fact about the FORMAT rather than about a symbol: "
+        f"{what}. `FLOAT_KIND` is IEEE binary64 and the arithmetic both "
+        f"backends lower is the SCALAR DOUBLE set (`FADD`/`FSUB`/`FMUL`/`FDIV`, "
+        f"`ADDSD`/`SUBSD`/`MULSD`/`DIVSD`), so `float(x)`, `Float64(x)` and "
+        f"`float64(x)` all lower and this does not. Naming the type as a VALUE "
+        f"is a different question and is answered: the `DType` member spelling "
+        f"of a narrow format is a tag, and a tag this path can hold is a word "
+        f"two programs comparing dtypes agree on — so a dtype comparison over "
+        f"these formats works today and a VALUE of one does not. The same fact "
+        f"refuses a `Pointer[{callee_name}]` dereference, for the load's half "
+        f"rather than this one. {tail}")
 
 
 def string_conversion_refusal(callee_name: str, operand, operand_kind) -> str:
@@ -24299,6 +24414,14 @@ def subscript_callee_names(call) -> list:
 # as "not a type", which reads as a fact about the language and is a fact
 # about a table. The two names that are in NO table are named here, with the
 # reason each is not in one.
+#
+# `UNREPRESENTABLE_TYPE_CTORS` is in the union BELOW and it already carries
+# `NARROW_FLOAT_TYPE_NAMES` (the narrow float formats, `BFloat16` and
+# `UInt128`), so that list is not re-spelled here: a second copy of a closed
+# list is a second thing to forget, and this one had already been spelled twice
+# — once in `POINTEES_REFUSED` for the dereference and once in the union below
+# for the tag — which is how the CONSTRUCTOR of one of them came to be refused
+# at the LINK AUDIT instead of by name.
 TYPE_VALUE_NAMES = frozenset(
     POINTEE_WIDTHS                                   # a width, for a pointee
 ) | frozenset(POINTEES_REFUSED) | frozenset(
@@ -24306,44 +24429,19 @@ TYPE_VALUE_NAMES = frozenset(
     IDENTITY_TYPE_CTORS) | frozenset(
     UNREPRESENTABLE_TYPE_CTORS) | frozenset(
     POINTER_TYPE_CTORS) | frozenset(
-    # `BFloat16` is the fourth of the language's four float type names and the
-    # only one no table here lists (`POINTEES_REFUSED` has the other three) —
-    # `myinterpreter.py`'s `_FLOAT_TYPE_NAMES` is where the language's four are
-    # written down, and the corpus writes `DType.bfloat16` 94 times. A tag does
-    # not need a float to be representable, only nameable, so its absence from
-    # a table about float BITS costs nothing here.
-    ("BFloat16",
-     # `Self` is in no table because every table here answers a question about
-     # a type this path can REPRESENT, and `Self` is the one name whose type
-     # is the enclosing declaration — which is a fact about the read, not about
-     # the name. It is still a type, and `t == Self` is a question a program
-     # can ask, so it gets a tag like every other.
-     "Self",
+    # `Self` is in no table because every table here answers a question about
+    # a type this path can REPRESENT, and `Self` is the one name whose type
+    # is the enclosing declaration — which is a fact about the read, not about
+    # the name. It is still a type, and `t == Self` is a question a program
+    # can ask, so it gets a tag like every other.
+    ("Self",
      # `bool` beside `Bool`; `Int` and `UInt` are already in POINTEE_WIDTHS.
      # `bool` is the SPELLING Python and CPython use for the same type, so a
      # program written in the shared subset (`f(bool)`) has to have an answer
      # here as well as in the interpreter — which binds `bool` to Python's own
      # `bool`, so both agree that `f(bool)` is handed the same object.
-     "bool",
-    # The NARROW float formats and the 128-bit unsigned integer, which are in
-    # no table here for the same reason `BFloat16` is: those tables answer a
-    # question about BITS (how wide a pointee load is, which formats this path
-    # can represent) and a tag asks only whether a type can be NAMED. They are
-    # a CLOSED list and not a shape rule, which is the whole of the condition:
-    # `type_value_name_space()` stays finite, so `type_value_tags_are_distinct`
-    # stays a proof over every pair rather than a hope, and a member outside
-    # this list is still refused with its own name. Measured over this
-    # repository and the stdlib checkout, these are every float-format and
-    # 128-bit member either of them writes — `DType.float8_e4m3fn` 26,
-    # `float8_e5m2fnuz` 21, `float8_e4m3fnuz` 20, `float8_e5m2` 19,
-    # `float8_e8m0fnu` 14, `float6_e3m2fn` 11, `float6_e2m3fn` 11,
-    # `float4_e2m1fn` 10, `uint128` 8, `float8_e3m4` 7 — so the list is the
-    # corpus rather than a guess at the language's shape. A tag for a format
-    # this path cannot hold is not a lie: it is a word two programs comparing
-    # dtypes agree on, which is all a dtype VALUE is on this path.
-    "Float8_e4m3fn", "Float8_e5m2", "Float8_e4m3fnuz", "Float8_e5m2fnuz",
-    "Float8_e8m0fnu", "Float8_e3m4", "Float6_e3m2fn", "Float6_e2m3fn",
-    "Float4_e2m1fn", "UInt128"))
+     "bool"),
+)
 
 
 # A `DType` member whose name is not its type's name. `DType.int` is the 64-bit

@@ -16824,11 +16824,81 @@ FLOAT_REFUSALS = [
     # two directions the rule must NOT refuse, and `Int(x)` is the conversion
     # the refusal message names — so a rule that broke the conversion while
     # refusing the mismatch would still pass the three rows above.
-    ("float_an_integer_conversion_of_an_integer_still_prints",
+("float_an_integer_conversion_of_an_integer_still_prints",
      "def main() -> Int:\n"
      "    var a = 7\n"
      "    printf(\"[%d %d]\", a, Int(2.5))\n"
      "    return 0\n", 0, "[7 2]"),
+    # A NARROW float format's CONSTRUCTOR, which used to reach the LINK AUDIT:
+    # `Float32` was in `POINTEES_REFUSED` (so a `Pointer[Float32]` LOAd is
+    # refused BY NAME) but in no constructor table, so `type_constructor_kind`
+    # answered its documented `None` — "not a type constructor at all (a genuine
+    # function call)" — emitted `BL Float32`, and the build failed at the bind
+    # audit with a message about a SYMBOL ("the image would bind 1 symbol(s)
+    # that nothing provides: Float32") about a fact that is a TYPE's. Measured
+    # on both architectures before the fix, for all thirteen names in
+    # `NARROW_FLOAT_TYPE_NAMES`.
+    #
+    # The needle is the FORMAT clause rather than the phrase "no
+    # representation", because the GENERIC text is false of these names: it
+    # says "this image has no declaration of Float32 to construct", and a
+    # `Float32` is a real type with a fixed 32-bit layout. A reader sent to
+    # declare it finds nothing to declare.
+    ("float_refuse_constructing_a_narrow_format_by_its_name",
+     "def main() -> Int:\n"
+     "    var a = Float32(1)\n"
+     "    return 0\n",
+     "refuse:a fact about the FORMAT rather than about a symbol", None),
+    # `BFloat16` is the fourth of the language's four float type names and was in
+    # NO table at all, so it took the same link-audit exit. A separate row
+    # because its reason is a different sentence: bfloat16 shares binary32's
+    # exponent RANGE with a 7-bit significand, which is not what the
+    # binary32 row above says.
+    ("float_refuse_constructing_bfloat16_by_its_name",
+     "def main() -> Int:\n"
+     "    var a = BFloat16(1)\n"
+     "    return 0\n",
+     "refuse:two bytes of bfloat16, the same exponent range as binary32", None),
+    # `UInt128` is in the same table for a different fact again — 128 bits is
+    # TWO words, not the wrong bits in one — so its row pins the tail that says
+    # so rather than the float clause, which would be false of it.
+    ("float_refuse_constructing_a_128_bit_integer_by_its_name",
+     "def main() -> Int:\n"
+     "    var a = UInt128(1)\n"
+     "    return 0\n",
+     "refuse:128 bits, and a formal value is one 64-bit word", None),
+    # The CONTROL, and the reason the table is not "refuse anything float-ish":
+    # `Float64` is the one float kind this path holds, so its constructor lowers
+    # on both backends and prints CPython's answer. A rule that took the set
+    # from the name's spelling rather than from what the path can REPRESENT
+    # would refuse this row and be wrong.
+    #
+    # The value goes out through an ANNOTATED parameter rather than a local,
+    # because `printf`'s kind evidence (`model.printf_arg_float_evidence`) needs
+    # positive evidence that the word is a double and a local bound by a
+    # `Float64(…)` call is not evidence it has — that is this file's own
+    # `FLOAT_REFUSALS` rule, and reusing it here would make the control a test
+    # of that rule rather than of the constructor.
+    ("float_a_binary64_conversion_still_lowers",
+     "def show(a: Float64) -> Int:\n"
+     "    printf(\"[%.1f]\", a)\n"
+     "    return 0\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    return show(Float64(7))\n", 0, "[7.0]"),
+    # The other control, and it is the half the refusal message points a reader
+    # at: NAMING a narrow format as a dtype tag is a different question and is
+    # answered. `DType.float32` is a word two programs comparing dtypes agree
+    # on, so the row above's refusal ("a VALUE of one does not") is true while
+    # this builds — and the two being different facts is the whole content of
+    # the message.
+    ("float_a_narrow_format_is_still_nameable_as_a_dtype_tag",
+     "def main() -> Int:\n"
+     "    var a = DType.float32\n"
+     "    var b = DType.bfloat16\n"
+     "    if a == b:\n"
+     "        return 1\n"
+     "    return 2\n", 2, None),
 ]
 
 
@@ -21706,6 +21776,39 @@ if _TYPE_VALUE_TAG_COLLISIONS:
     raise AssertionError(
         f"two type names share a tag, so `t == A` would answer for `t == B`: "
         f"{_TYPE_VALUE_TAG_COLLISIONS}")
+
+# ── the narrow-float table is CLOSED and one list ──────────────────────────
+#
+# `model.NARROW_FLOAT_TYPE_NAMES` is read by two tables — the one that decides
+# a CONSTRUCTOR's verdict and the one that decides a dtype tag — so the two
+# facts below are what make the consolidation safe rather than a refactor that
+# happens to agree today.
+#
+#   * every member is refused as a constructor. This is the fix: a name absent
+#     from the constructor table took `type_constructor_kind`'s documented
+#     `None`, emitted `BL Float32`, and failed at the LINK AUDIT with a message
+#     about a SYMBOL. It is asked of the MODEL here because the model is where
+#     the routing decision is made, and an emitter-level copy of it is a second
+#     answer to a question this one already answers.
+#   * and `Float64` is in NEITHER — the one float kind this path holds, which is
+#     the whole boundary the scope document owns. A table derived from the
+#     name's spelling rather than from what the path can REPRESENT would take
+#     this row with it.
+_NARROW = _TYPE_VALUE_MODEL.NARROW_FLOAT_TYPE_NAMES
+assert all(
+    _TYPE_VALUE_MODEL.type_constructor_kind(n) == ("unsupported", None)
+    for n in _NARROW), (
+    f"a narrow float format is not routed to a refusal, so its constructor "
+    f"reaches the extern path and the build fails at the bind audit with a "
+    f"message about a SYMBOL: "
+    f"{[n for n in _NARROW if _TYPE_VALUE_MODEL.type_constructor_kind(n) != ('unsupported', None)]}")
+assert not set(_NARROW) & set(_TYPE_VALUE_MODEL.FLOAT_TYPE_CTORS), (
+    f"a name this path CAN construct is in the table that refuses one: "
+    f"{sorted(set(_NARROW) & set(_TYPE_VALUE_MODEL.FLOAT_TYPE_CTORS))}")
+assert set(_NARROW) <= _TYPE_VALUE_MODEL.type_value_name_space(), (
+    f"a name in the narrow-format table has no dtype tag, so naming it as a "
+    f"type would be refused by `_dtype_member_type` instead of answered: "
+    f"{sorted(set(_NARROW) - _TYPE_VALUE_MODEL.type_value_name_space())}")
 
 
 # The other direction, and it is here because a kind nothing reads as a NUMBER
