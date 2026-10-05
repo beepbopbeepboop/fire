@@ -26421,7 +26421,16 @@ def integer_literal_value(e) -> int | None:
     return None
 
 
-def raise_exit_status(exc_name: str, value=None) -> int:
+#: How many bits of a `SystemExit` status survive into the process's exit
+#: status. CPython's is `exit()`'s, which keeps the low BYTE, and both backends
+#: read the same number from here so a computed status cannot be masked on one
+#: machine and not the other — the asymmetry is invisible in the answer and is
+#: exactly what `test_formal_exceptions.py`'s negative and out-of-range rows are
+#: for.
+EXIT_STATUS_BITS = 8
+
+
+def raise_exit_status(exc_name: str, value=None) -> int | None:
     """The status an uncaught `raise` of `exc_name` leaves behind.
 
     1 for the whole hierarchy, and that is CPython's rule rather than this
@@ -26438,6 +26447,7 @@ def raise_exit_status(exc_name: str, value=None) -> int:
         raise SystemExit(3)     -> 3
         raise SystemExit(-1)    -> 255   (the C library masks to a byte)
         raise SystemExit("msg") -> 1, and `msg` on stderr
+        raise SystemExit(f())   -> f()   (computed; see below)
 
     Measured on the interpreter this compiler runs on, all five. The two
     cases that are not a plain small non-negative integer are the reason the
@@ -26449,21 +26459,44 @@ def raise_exit_status(exc_name: str, value=None) -> int:
 
     Only an integer LITERAL is read, a NEGATED one included: `raise
     SystemExit(-1)` is 255 and not "computed", because `-1` is in the text (see
-    `integer_literal_value`). `raise SystemExit(n)` for a value the build cannot
-    see is not a different program, so it must not be a different answer, and the
-    honest way to keep the two apart is to leave that case at 1 rather than to
-    claim a status the build cannot see — which is what a caller reading a wrong
-    number cannot detect. That case is written down in
-    `bugs/FORMAL_a_computed_systemexit_status_is_not_the_programs_own.md`."""
+    `integer_literal_value`).
+
+    **`None` means COMPUTED, and it is the whole of the API change.** A
+    `SystemExit` argument that is not a literal — `raise SystemExit(code())`, the
+    ordinary spelling of `sys.exit(n)` — is a word the program computes, and a
+    word is a value this path has: it evaluates expressions. So both emitters
+    evaluate it, carry it across the finally flush and the stream flush, and
+    hand it to the exit as a REGISTER. `None` rather than a number because the
+    number 1 was the wrong answer nobody could detect: it is the status of the
+    overwhelming majority of real failures, so a caller checking `!= 0` was
+    right and a caller checking `== 3` was wrong, which is the definition of a
+    silent fault.
+
+    Before this, `None` was the wrong answer too — it was 1 — and the reason it
+    survived so long is that a literal is a literal: nothing in the corpus
+    computed one. It is not a different program, so it must not be a different
+    answer.
+
+    A NON-INTEGER argument (`raise SystemExit("msg")`) is CPython's "print the
+    object and exit 1" form, and it stays 1 — so it is **not** `None`: the
+    emitter must not evaluate a string where a number belongs, and
+    `string_literal_value` is the reader that tells the two apart. The two
+    computed cases are distinguished here rather than in either emitter, for the
+    same reason the literal case is.
+    """
     if exc_name != "SystemExit":
         return 1
     args = raise_arg_exprs(value) if value is not None else []
     if not args:
         return 0
     status = integer_literal_value(args[0])
-    # A non-integer argument is CPython's "print the object and exit 1" form.
-    # The exit status is 1 either way, so this needs no further reading.
-    return 1 if status is None else status & 0xFF
+    if status is not None:
+        return status & ((1 << EXIT_STATUS_BITS) - 1)
+    if string_literal_text(args[0]) is not None:
+        # The "print the object and exit 1" form. Not computed: a string is not
+        # a status, and this emitter has no way to print it and leave.
+        return 1
+    return None
 
 
 def raise_declared_class_name(value, structs: dict | None = None) -> str | None:

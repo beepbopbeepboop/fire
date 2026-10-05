@@ -2639,6 +2639,20 @@ dylib_exports: list = None, globals_base: int = None,
         """Leave the machine with `status`: flush every open stream, then the
         raw Darwin trap.  Never returns, and nothing is emitted after it.
 
+        `status` is an `int` to materialise as an immediate, or **`None` to mean
+        the word is at `[sp]`** — pushed there by `_emit_diverge` before the
+        finally flush so that it survives it, which is the reason the parameter
+        is allowed to be a `None` rather than a register number: the stack is the
+        only storage that is not the C library's to reuse, and the exit is the
+        one place this emitter cannot know what a call did to a scratch
+        register.
+
+        The computed form masks to `M.EXIT_STATUS_BITS`, which the literal form
+        gets from `raise_exit_status` instead — so both deliver the same byte and
+        the raw `svc` (which does **not** truncate the way `exit(3)` does, which
+        is the measured reason `raise SystemExit(-1)` is 255 and not 1) cannot
+        leave a status only one of the two machines agrees with.
+
         **The flush is the whole reason this is one method.**  The trap itself is
         `movz x0, #status ; movz x16, #1 ; svc #0x80` — a raw `SYS_exit`, which
         does not touch stdio, so everything the program printed is still in
@@ -2686,11 +2700,15 @@ dylib_exports: list = None, globals_base: int = None,
         """
         self._emit_call(F.CallExpr(func=F.IdentExpr(name="fflush"),
                                    args=[F.IntLiteral(0)]))
-        self.asm.emit(encode_movz_wd_imm(0, status))
+        if status is None:
+            self.asm.emit(encode_ldp_sp_post(0, 31))
+            self.asm.emit(encode_and_xd_xn_imm(0, 0, M.EXIT_STATUS_BITS))
+        else:
+            self.asm.emit(encode_movz_wd_imm(0, status))
         self.asm.emit(encode_movz_wd_imm(16, 1))
         self.asm.emit(encode_svc(0x80))
 
-    def _emit_diverge(self, status: int = 1) -> None:
+    def _emit_diverge(self, status: int | None = 1) -> None:
         """Leave the machine: run every enclosing finally, then `exit(status)`.
 
         The ONE way control stops on this path, and both of its callers share
@@ -2705,9 +2723,50 @@ dylib_exports: list = None, globals_base: int = None,
         `raise SystemExit(3)` is CPython's way of saying "exit 3", and
         `model.raise_exit_status` is where that is decided. Every other caller
         passes nothing and gets the 1 the whole hierarchy leaves behind.
+
+        **`None` is the COMPUTED status and the caller has already pushed the
+        word**, which is what `_emit_exit` pops. The push is here rather than in
+        `_emit_raise` because the finally flush is here: it is SP-balanced
+        (`stp`/`ldp` around the bodies), so a word pushed before it survives, and
+        a word held in a register would not be guaranteed to.
         """
         self._flush_pending_finally()
         self._emit_exit(status)
+
+    def _emit_diverge_computed(self, value) -> None:
+        """`raise SystemExit(<computed>)`: evaluate it, then leave with it.
+
+        The status is `M.raise_exit_status`'s `None`, and this is the only place
+        that answer reaches code. Three things have to happen in this order and
+        the order is the whole of it:
+
+        1. the argument is EVALUATED into X0, which is this backend's value
+           register, and PUSHED before anything else can run — the arguments
+           after it (CPython evaluates left to right, and `raise SystemExit(a,
+           b())` is a `TypeError` at run time rather than something this path has
+           to reproduce, so `b()` is evaluated for its effects and its word
+           discarded) and the finally flush would both overwrite X0;
+        2. the remaining arguments run for their effects, in source order;
+        3. `_emit_diverge(None)`, which flushes the finallys and pops the word
+           back into X0 for the trap.
+
+        **`_flush_pending_finally` cannot lose the word and that is the reason the
+        stack is used.** It brackets the finally bodies in `stp x0, xzr, [sp,
+        #-16]!` / `ldp x0, xzr, [sp], #16`, so SP is the same before and after and
+        the word this pushed is the word that comes back — measured on both
+        architectures by `test_formal_exceptions.py`'s `systemexit_*` rows, which
+        put a `print` in a `finally` and a `code()` call in the status so the two
+        would have to come apart to disagree.
+        """
+        args = M.raise_arg_exprs(value)
+        if not args:
+            self._emit_diverge(0)
+            return
+        self._emit_expr(args[0])
+        self.asm.emit(encode_stp_sp_pre(0, 31))
+        for arg in args[1:]:
+            self._emit_expr(arg)
+        self._emit_diverge(None)
 
     def _emit_raise(self, stmt: F.RaiseStmt) -> None:
         """`raise <expr>` — run the expression's effects, then leave the process.
@@ -2757,9 +2816,15 @@ dylib_exports: list = None, globals_base: int = None,
                 self._emit_expr(value)
             self._emit_diverge()
             return
+        status = M.raise_exit_status(exc_name, value)
+        if status is None:
+            # A COMPUTED status: the argument is the status, so it is evaluated
+            # once and carried, not evaluated for its effects and then discarded.
+            self._emit_diverge_computed(value)
+            return
         for arg in M.raise_arg_exprs(value):
             self._emit_expr(arg)
-        self._emit_diverge(M.raise_exit_status(exc_name, value))
+        self._emit_diverge(status)
 
     def _emit_try(self, stmt: F.TryStmt) -> None:
         """try/except/else/finally without an exception runtime.

@@ -313,6 +313,97 @@ CASES = [
      "def main(n):\n"
      "    print('before')\n"
      "    raise SystemExit('a message')\n", 3),
+    # ── a COMPUTED status ───────────────────────────────────────────────────
+    # `sys.exit(n)` with a computed `n` is the ORDINARY spelling, and it is the
+    # case this table could not express: `model.raise_exit_status` answered 1
+    # for every argument that is not a literal, and 1 is the status of the
+    # overwhelming majority of real failures — so a caller checking `!= 0` was
+    # right and a caller checking `== 3` was wrong, which is the definition of a
+    # fault nobody can detect from the program itself.  Both backends now emit
+    # the argument and hand it to the exit as a register.
+    #
+    # Five rows, and the split is the point: the status at 3 (the case that was
+    # silently 1), at 0 (a computed 0 must exit 0 and a mask applied on one
+    # machine only would not), negative (the byte truncation `exit(3)` performs
+    # — the reason the row above it exists), out of range (300 -> 44, which is
+    # the only one of the five that distinguishes a mask from an implicit
+    # 32-bit truncation), and inside a `try` (the status word has to survive the
+    # finally flush, which is the one instruction the change actually adds on
+    # arm64 and the one pop it adds on x86-64).
+    #
+    # The last one also says the argument expression RUNS before the exit,
+    # which a lowering that computed the status somewhere else would lose.
+    ("systemexit_with_a_computed_status",
+     "def code():\n"
+     "    return 3\n"
+     "\n"
+     "def main(n):\n"
+     "    print('before')\n"
+     "    raise SystemExit(code())\n",
+     "def code():\n"
+     "    return 3\n"
+     "\n"
+     "def main(n):\n"
+     "    print('before')\n"
+     "    raise SystemExit(code())\n", 3),
+    ("systemexit_with_a_computed_zero_status",
+     "def code():\n"
+     "    print('arg')\n"
+     "    return 0\n"
+     "\n"
+     "def main(n):\n"
+     "    raise SystemExit(code())\n",
+     "def code():\n"
+     "    print('arg')\n"
+     "    return 0\n"
+     "\n"
+     "def main(n):\n"
+     "    raise SystemExit(code())\n", 3),
+    ("systemexit_with_a_computed_negative_status_is_truncated_to_a_byte",
+     "def code():\n"
+     "    return -1\n"
+     "\n"
+     "def main(n):\n"
+     "    print('before')\n"
+     "    raise SystemExit(code())\n",
+     "def code():\n"
+     "    return -1\n"
+     "\n"
+     "def main(n):\n"
+     "    print('before')\n"
+     "    raise SystemExit(code())\n", 3),
+    ("systemexit_with_a_computed_out_of_range_status_is_truncated_to_a_byte",
+     "def code():\n"
+     "    return 300\n"
+     "\n"
+     "def main(n):\n"
+     "    print('before')\n"
+     "    raise SystemExit(code())\n",
+     "def code():\n"
+     "    return 300\n"
+     "\n"
+     "def main(n):\n"
+     "    print('before')\n"
+     "    raise SystemExit(code())\n", 3),
+    ("systemexit_with_a_computed_status_survives_a_finally",
+     "def code():\n"
+     "    return 7\n"
+     "\n"
+     "def main(n):\n"
+     "    try:\n"
+     "        print('t')\n"
+     "        raise SystemExit(code())\n"
+     "    finally:\n"
+     "        print('f')\n",
+     "def code():\n"
+     "    return 7\n"
+     "\n"
+     "def main(n):\n"
+     "    try:\n"
+     "        print('t')\n"
+     "        raise SystemExit(code())\n"
+     "    finally:\n"
+     "        print('f')\n", 3),
     # ── ZeroDivisionError from a builtin operation ───────────────────────────
     # The INTEGER divide already guarded itself; these pin it against CPython
     # rather than against a constant, and `uncaught_zd_*` is the pair that says

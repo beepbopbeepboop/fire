@@ -2530,7 +2530,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self.asm.emit_extern_call(name)
         return self.asm.extern_refs[-1][1]
 
-    def _emit_call_exit(self, status: int) -> int:
+    def _emit_call_exit(self, status) -> int:
         """Call the C library's `exit(status)`.
 
         The extern path (a stub the loader binds) rather than a raw syscall,
@@ -2538,27 +2538,83 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         and the formal x86-64 path emits the same code for both — the binary
         format, not the instruction stream, is what differs per platform.
 
+        `status` is an `int` to materialise as an immediate, or **`None` to mean
+        the word is at `[rsp]`** — pushed there by `_emit_diverge` before the
+        finally flush. The stack is the only storage the C library cannot reuse,
+        and this is the one place the emitter cannot know what the `exit` call
+        itself did to a scratch register. Symmetry with arm64's `_emit_exit` is
+        the point: the two machines deliver a status through different
+        instructions and the only thing that may differ between them is how the
+        word got to it.
+
         Returns the call site's address; see `_emit_extern_call`.  Every caller
         must decide for ITSELF whether that call is reachable — the difference
         is the whole of `info["compiler_traps"]`, and `_emit_diverge` (a
-        `raise`, which the program really does reach) must never claim one."""
-        self._emit_mov_imm(Reg.RDI, status)
+        `raise`, which the program really does reach) must never claim one.
+
+        **The mask is on both paths and it is on this side for a reason.** The
+        C library's `exit` is what truncates CPython's status to a byte, and
+        that is the rule (`M.EXIT_STATUS_BITS`) rather than an accident of this
+        library; arm64's raw `svc` does not truncate, so arm64 masks explicitly
+        in `_emit_exit`. Emitting it here as well is what makes the two agree by
+        construction rather than by one of them happening to.
+        """
+        if status is None:
+            # SysV's first integer argument register is written LAST, so the
+            # value has to be in RDI after everything else has run. `imm32` and
+            # not `imm8`: the mask is 0xFF, which does not fit a sign-extended
+            # byte field.
+            self._pop_slot(Reg.RDI)
+            self.asm.emit(encode_and_r64_imm32(Reg.RDI,
+                                                (1 << M.EXIT_STATUS_BITS) - 1))
+        else:
+            self._emit_mov_imm(Reg.RDI, status)
         self._emit_mov_imm(Reg.RAX, 0)   # AL = 0 vector registers (varargs)
         return self._emit_extern_call("exit")
 
-    def _emit_diverge(self) -> None:
+    def _emit_diverge(self, status: int | None = 1) -> None:
         """Leave the machine: run every enclosing finally, then `exit(1)`.
 
         The ONE way control stops on this path, and both of its callers share
-        it rather than spelling the call each: a `raise`, which has no unwinder
+        it rather than spelling the exit each: a `raise`, which has no unwinder
         to route to, and a dialect trap used as a statement
         (`model.mlir_effect_diverge_call`), which has no result and so leaves
         nothing else to emit. The finally flush is the part that is easy to
-        drop — a `raise` inside a `try` must still run the `finally` on its
-        way out — so it lives with the exit rather than at each call site.
+        drop — a `raise` inside a `try` must still run the `finally` on its way
+        out — so it lives with the exit rather than at each call site.
+
+        **`None` is the COMPUTED status and the caller has already pushed the
+        word**, which `_emit_call_exit` pops. The push is here rather than in
+        `_emit_raise` because the finally flush is here, and the flush is
+        SP-balanced (`_push_slot`/`_pop_slot` around the bodies), so a word
+        pushed before it survives it.
         """
         self._flush_pending_finally()
-        self._emit_call_exit(1)
+        self._emit_call_exit(status)
+
+    def _emit_diverge_computed(self, value) -> None:
+        """`raise SystemExit(<computed>)`: evaluate it, then leave with it.
+
+        The status is `M.raise_exit_status`'s `None`, and this is the only place
+        that answer reaches code. The argument is evaluated into RAX — this
+        backend's value register, the one `_flush_pending_finally` itself names
+        as "the return value being built" — PUSHED before the remaining
+        arguments and the finally flush can overwrite it, and popped by
+        `_emit_call_exit` straight into RDI. CPython evaluates the arguments
+        left to right, so the arguments after the status run after it — and
+        `raise SystemExit(a, b())` is a `TypeError` at run time rather than
+        something this path reproduces, so `b()` is evaluated for its effects and
+        its word discarded.
+        """
+        args = M.raise_arg_exprs(value)
+        if not args:
+            self._emit_diverge(0)
+            return
+        self._emit_expr(args[0])
+        self._push_slot(Reg.RAX)
+        for arg in args[1:]:
+            self._emit_expr(arg)
+        self._emit_diverge(None)
 
     def _emit_raise(self, stmt: F.RaiseStmt) -> None:
         """`raise <expr>` — run the expression's effects, then leave the process.
@@ -2603,10 +2659,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._flush_pending_finally()
             self._emit_call_exit(1)
             return
+        status = M.raise_exit_status(exc_name, value)
+        if status is None:
+            # A COMPUTED status: the argument is the status, so it is evaluated
+            # once and carried, not evaluated for its effects and then discarded.
+            self._emit_diverge_computed(value)
+            return
         for arg in M.raise_arg_exprs(value):
             self._emit_expr(arg)
         self._flush_pending_finally()
-        self._emit_call_exit(M.raise_exit_status(exc_name, value))
+        self._emit_call_exit(status)
 
     def _frame_member_slot(self, node):
         """The frame slot `node` names, or None having refused the access.
