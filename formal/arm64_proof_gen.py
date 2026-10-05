@@ -2815,10 +2815,6 @@ _STEP_CONDS = [
     # `formal/arm64.py` can produce.
     (0xffe00000, 0xab000000),  # 66 CMN Xn, Xm (SUBS XZR, Xn, Xm with the add flag)
     (0xffe00000, 0xea000000),  # 67 TST Xn, Xm (ANDS XZR, Xn, Xm)
-    # 68 SMULH Xd, Xn, Xm, the other half of `formal/model.py::int_overflow_traps`'s
-    # `*` arm: `MUL`'s class with bit 22 set, so the mask is `MUL`'s `0xffe07c00`
-    # and the two cannot be confused.
-    (0xffe07c00, 0x9b407c00),
     # CSEL is EMITTED and UNMODELLED, and saying so here is the point of this
     # comment: `arm64_codegen.py` calls `encode_csel_xd_xm_cond` at six sites
     # (6394, 6396, 6410, 6412, 8998, 9008 — a ternary is a CSEL), so a reader of
@@ -3496,12 +3492,6 @@ _WORK_STEP = [
     (65, "work_step_stur", [(0xffe00c00, 0xf8000000)]),
     (66, "work_step_cmn", [(0xffe00000, 0xab000000)]),
     (67, "work_step_tst", [(0xffe00000, 0xea000000)]),
-    # …and `SMULH`, the other half of the same overflow check: a signed
-    # multiply overflows iff its high half is not the sign extension of its
-    # low half, and `MUL` writes no flag. `formal/model.py::int_overflow_traps`
-    # needs it, and the mask is `MUL`'s with bit 22 set (`0x9b407c00` against
-    # `0xffe07c00`) so the two classes cannot be confused.
-    (68, "work_step_smulh", [(0xffe07c00, 0x9b407c00)]),
 ]
 
 _WORK_STEP_BY_IDX = {idx: (lemma, tests) for idx, lemma, tests in _WORK_STEP}

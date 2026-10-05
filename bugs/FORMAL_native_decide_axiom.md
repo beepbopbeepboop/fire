@@ -214,36 +214,6 @@ toolchain**, and one of them was false of the tree:
      `[propext, Quot.sound]`, so the declarations are real and the scanner was
      wrong about them.
 
-## Status 2026-10-05 (`work/formal33-int-semantics`): +54 more ARRIVED, and
-## one duplicate lemma the merge did NOT keep
-
-`work/formal33-int-semantics` modelled one more `arm64_step` arm — `SMULH Xd,
-Xn, Xm`, the other half of `formal/model.py::int_overflow_traps`'s `*` arm
-(`MUL` writes no flag, and a signed product fits iff its high half is the sign
-extension of its low half) — and the price is the shape every one of these arms
-costs: a `work_step_*` lemma proved by `bv_decide` over a quantified word.
-**54 sites arrived**; `NATIVE_DECIDE_REPLACED` is still 67 and
-`REPLACEABLE_THEOREMS` is still 0, so the pay-down moved in nobody's favour
-again.
-
-The interesting half is what the merge REMOVED. That branch also carried its own
-lemma for the `ADDS`/`CMN` word, `work_step_adds`, at 53 sites, stating the
-`Rd` write and an SP-aware `Rn`. `arm64_step`'s arm for `0xffe00000/0xab000000`
-on this tree is the `CMN` one — it writes no register, because
-`arm64_set_reg 31` is the identity — so `work_step_adds` is a lemma about a
-model that is not this one, and `work_step_cmn` already states the same word
-against the arm the tree actually has. Keeping both would have made the ledger
-record **107** arrivals for **one** new instruction, and a ledger that
-double-counts is worse than one that is stale, because it stops being a
-measurement of anything.
-
-So: `ProofLib` 1518 -> **1572**, `lib/` remaining 1540 -> **1594**, total
-1607 -> **1661**, arrivals 856 -> **910**, and `total - replaced == remaining`
-holds at 1661 - 67 = 1594 against the census. The ceiling moved in
-`test_formal_admitted.py`'s `LIBRARY_TRUST` and the same figures moved in
-`FORMAL.md` §7 row 10, which is the four-places-agreement check that would
-otherwise have gone red.
-
 ## The measurement, which is the point
 
 **SUPERSEDED — every number in this section was measured on an instrument that

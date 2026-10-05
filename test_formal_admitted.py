@@ -1186,15 +1186,15 @@ def _exit_status_claims():
 # `decide` discharges in microseconds and the KERNEL checks; `native_decide` was
 # compiling a decision procedure to C and asserting the result, which on this
 # toolchain means a generated axiom per use rather than `Lean.ofReduceBool`.
-# **What is left is 1572 in `ProofLib`, 3 in `X86` (the `∀ w, …` bit-pattern
-# lemmas, which is the right tool), 19 in `IEEE754` and none in
+# **What is left is 1518 in `ProofLib`, 3 in `X86` (the `∀ w, …`
+# bit-pattern lemmas, which is the right tool), 19 in `IEEE754` and none in
 # `Contracts`/`Refine`/`work` — per-module figures, all `native_decide`/
-# `bv_decide` together** — **1594, not the 749 this table pinned until
+# `bv_decide` together** — **1540, not the 749 this table pinned until
 # 2026-10-04.** The 22 `native_decide` that evaluate a ground binary64 value are
 # inside the 19 `IEEE754` sites plus the three named ones in `NATIVE_DECIDE_ALLOWED`.
 #
-# THREE upward movements, and they are not the same kind of movement, which is
-# the reason all of them are written down rather than just the total:
+# TWO upward movements, and they are not the same kind of movement, which is the
+# reason both are written down rather than just the total:
 #
 #   * **+2, the instrument got better** (2026-10-04). The census's own scanner
 #     mis-read an identifier's apostrophe as a character literal and hid two
@@ -1207,21 +1207,10 @@ def _exit_status_claims():
 #     is the right tool for that shape and still an axiom in the closure of
 #     every theorem proved with it. `lib/ProofLib.lean` went from 697 lines
 #     mentioning a decide tactic to 1545.
-#   * **+54, real debt ARRIVED** (2026-10-05, `work/formal33-int-semantics`). One
-#     more `arm64_step` arm — `SMULH Xd, Xn, Xm`, the other half of
-#     `formal/model.py::int_overflow_traps`'s `*` arm — and its `work_step_*`
-#     lemma, which is the same shape and the same price. That branch also carried
-#     its OWN lemma for the `ADDS`/`CMN` word (`work_step_adds`, 53 sites), which
-#     the merge does NOT keep: `arm64_step`'s arm for `0xffe00000/0xab000000` is
-#     the `CMN` one that writes no register, so `work_step_adds` — which states
-#     the `Rd` write and an SP-aware `Rn` — is a lemma about a model that is not
-#     this one, and `work_step_cmn` already states this word against the arm the
-#     tree has. 54 is what the ledger records, and 107 is what the merge would
-#     have recorded had the duplicate stayed.
 #
-# The second and third are the ones this ledger exists to make visible, and the
-# branches that landed them did not move the total: the pay-down identity
-# `total - remaining == replaced` still holds (1594 + 67 = 1661), but only
+# The second is the one this ledger exists to make visible, and the branch that
+# landed it did not move the total: the pay-down identity
+# `total - remaining == replaced` still holds (1540 + 67 = 1607), but only
 # because the arrivals are counted in `total`. A ledger that recorded the
 # arrivals as new debt is what makes the number trustworthy; one that let the
 # ceiling sit at 685 while the tree carried 1518 is what this row is. The
@@ -1243,7 +1232,7 @@ LIBRARY_TRUST = {
     # What is pinned here is the figure AFTER the 63 replacements, so `Contracts`
     # is 0 rather than the 1 this table held while its single site was still a
     # `native_decide`.
-    "ProofLib": (0, 0, 1572, 1572),
+    "ProofLib": (0, 0, 1518, 1518),
     "Refine": (0, 0, 0, 0),
     # **3, and it was 3 before this commit read 7**: four `native_decide` sites
     # landed here (`@[simp] theorem x86_mask_{one,two,four,eight}`, all four on

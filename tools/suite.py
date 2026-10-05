@@ -1688,8 +1688,9 @@ test('x86-containers', [PY, 'test_x86_64_containers.py'], mem='tiny',
             "batch-1 tree (the rule and its call site are byte-identical to "
             "b13a01b2), and NOT this job's construct — the nested-comprehension "
             "cluster this marker originally named is closed and its doc "
-            "deleted. See bugs/FORMAL_a_local_read_before_its_first_"
-            "assignment.md",
+            "deleted. c8ae1555 is the commit that made the read-before-store "
+            "rule GENERAL and deleted that doc, so this names the commit rather "
+            "than the path",
      desc='`with ... as` is refused by the read-before-store rule')
 test('mutable-async-capture', [PY, 'test_mutable_async_capture.py'], mem='tiny',
      deps=['preflight'],
