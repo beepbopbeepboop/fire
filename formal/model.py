@@ -20646,6 +20646,90 @@ def signature_return_type(signature: str) -> str:
     return parts[0].strip() if len(parts) == 2 else head
 
 
+# A scalar that crosses a FORMAL boundary as one 64-bit word. Every name here is
+# a C type reflect._c_signature can emit for a value the formal backends pass or
+# return in a general-purpose register; `int64_t`/`uint64_t` are already the
+# word type and so are deliberately absent.
+_FORMAL_WORD_TYPES = (
+    r"int8_t|int16_t|int32_t|uint8_t|uint16_t|uint32_t"
+    r"|__fp16|float|double|_Bool|bool"
+)
+_FORMAL_WORD_RE = re.compile(
+    r"\b(?:" + _FORMAL_WORD_TYPES + r")\b(?!\s*\*)")
+
+
+def formal_boundary_signature(signature: str) -> str:
+    """The C declaration a FORMAL dylib export actually has.
+
+    `double fadd (double, double)` → `int64_t fadd (int64_t, int64_t)`.
+
+    **A formal value is one 64-bit word, and that is the whole of this
+    function.** The `doc/ABI.md` scalar table is the COMPILED (GIMPLE) path's
+    declaration — there a `Float64` really is a C++ `double` and clang puts it
+    in the platform's FP register file — and the formal backends were
+    publishing it unchanged, so a client that generated its declaration from
+    the manifest got a declaration the library does not implement. Measured on
+    both architectures, on a library whose whole source is three lines
+    (`def fadd(a: Float64, b: Float64) -> Float64: return a + b`), called from
+    a C program and from `ctypes`:
+
+      * `double fadd (double, double)` — the client puts 1.5 and 2.25 in the FP
+        argument registers and reads the answer out of the FP return register.
+        The callee reads the GENERAL-PURPOSE argument registers and returns in
+        the general-purpose one, so the client read `2.14e-314` on arm64 and
+        `6.42e-314` on x86-64, where CPython says `3.75`. The callee's own code
+        is not wrong about the arithmetic — `llvm-objdump` shows
+        `fmov d0, x0; fmov d1, x1; fadd d0, d0, d1; fmov x0, d0`, so the FP
+        registers are an INTERNAL detail of the float operations and the
+        boundary is a word at both ends.
+      * `int64_t fadd (int64_t, int64_t)` with the two IEEE-754 bit patterns —
+        `3.75`, both architectures, from C and from `ctypes`.
+
+    On arm64 the register classes being disjoint is not a subtlety of the
+    caller: `D0` and `X0` are separate storage, measured by handing one callee
+    `bits(1.5)` in `d0` and watching it read `X0`, and by `fmov d1, x2`
+    leaving `x1` at its previous value. A client cannot rely on the aliasing it
+    would need to make the two conventions interchangeable, and neither can the
+    declaration.
+
+    **What is deliberately NOT rewritten.** A POINTER keeps its spelling, and
+    that is not a gap in the table above: a `char *`, a `MojoList *` and the
+    `int64_t *` a frame receiver arrives in are all already words, and the
+    pointee is information a client needs (`formal/model.py`'s
+    `dylib_export_pointer_pointee` reads it to tell a subscriptable buffer from
+    an opaque blob, and `uint8_t *` is the case that reaches it). `void` is not
+    a value and is not in the list. `int64_t`/`uint64_t` are already the word
+    type.
+
+    **A narrow integer is still narrow; only the WORD it rides in is spelled
+    wide.** `sxtw x19, w19` on an `Int32` parameter and `and x19, x19,
+    #0xffffffff` on a `UInt32` one are the measured entry code, so the callee
+    reads the low `w` bits and sign- or zero-extends them: passing the value in
+    the low bits of one word is exactly what the platform ABI does with a
+    `w`-bit integer in a register, and this function's spelling says so
+    without claiming a width the callee does not use. The reason the word
+    matters is the one case where a narrow type in the register is NOT enough:
+    an `Optional[Int32]` is empty at the word `1 << 32`
+    (`optional_none_word`), which is 33 bits, so a declaration that reads `w0`
+    returns `0` where the empty case is `4294967296` — `Some(0)` and `None` are
+    one value again, which is the exact defect the niche was introduced to
+    remove.
+
+    Applied to the METHOD rows too, and it is a no-op there
+    (`_formal_exports` publishes `Struct.method` for those, which
+    `formal/imports.py`'s `linked_struct_owners` reads the struct name out of),
+    so the two cannot drift: one function, both spellings.
+
+    Read by `formal/build.py`'s `_formal_exports` — the ONE place a formal
+    dylib's manifest signature is written — and checked end to end by
+    `test_formal_interop.py`, which generates a C declaration from the manifest,
+    compiles it, and requires the library to compute what CPython computes.
+    """
+    if not signature:
+        return signature
+    return _FORMAL_WORD_RE.sub("int64_t", signature)
+
+
 def dylib_export_return_kind(entry) -> str | None:
     """`STR_KIND` when a manifest export returns a string, else None.
 

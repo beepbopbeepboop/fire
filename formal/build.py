@@ -18981,7 +18981,16 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
                 # passes it, so the arity recorded is the whole signature.
                 "arity": len(fn.params),
                 "call": M.export_call_contract(fn),
-                "signature": signature,
+                # `Struct.method` for today, so this is a no-op — but it is
+                # applied here rather than left off, because the free-function
+                # row below and this one are the SAME published field and a
+                # declaration that is true for one kind of export and false for
+                # the other is the failure this whole boundary is for. See
+                # `model.formal_boundary_signature`, and
+                # `formal/imports.py::linked_struct_owners` for why the method
+                # rows are not a C declaration yet (filed in
+                # `bugs/FORMAL_a_method_export_publishes_no_c_declaration.md`).
+                "signature": M.formal_boundary_signature(signature),
                 "kind": "method",
                 "frame_params": _export_frame_contract(fn),
                 "owned_blob": _export_owned_blob(module, fn.name),
@@ -18998,7 +19007,13 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
             "entry": info["labels"][fn.name],
             "arity": len(fn.params),
             "call": M.export_call_contract(fn),
-            "signature": entry.get("signature", ""),
+            # What a client binds AGAINST, so it has to be what the callee
+            # implements: `model.formal_boundary_signature` is the one reader
+            # of the two (the compiled path's spelling and the formal
+            # backends' word convention differ, and this manifest is read by a
+            # C client that has no way to know which backend produced it).
+            "signature": M.formal_boundary_signature(
+                entry.get("signature", "")),
             "kind": entry.get("kind"),
             "frame_params": _export_frame_contract(fn),
             "owned_blob": _export_owned_blob(prefix, fn.name),

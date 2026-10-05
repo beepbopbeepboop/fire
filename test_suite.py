@@ -3947,6 +3947,34 @@ UNREGISTERED = {
     'test_formal_fnmatch.py': _FORMAL_SUITE_REASON,
     'test_formal_frame_return_overloads.py': _FORMAL_SUITE_REASON,
     'test_formal_libc_symbol.py': _FORMAL_SUITE_REASON,
+    # The formal backend's only test that looks at a dylib from OUTSIDE. It
+    # builds one real `.dylib` per architecture, then binds it from a C program
+    # (linked with `cc`, run natively and under Rosetta) and from `ctypes` (in
+    # process, and in an x86-64 interpreter under `arch -x86_64`), with the
+    # declarations generated from the library's own manifest — which is why it
+    # is not `_FORMAL_SUITE_REASON`: that sentence says "builds and RUNS images
+    # on both architectures against CPython, one table entry per construct", and
+    # this one builds LIBRARIES and runs CONSUMERS of them, so the cost and the
+    # thing being protected are both different.
+    #
+    # Declared rather than registered because this branch's task says not to
+    # touch the registry, not because it is expensive — measured 2026-10-05 at
+    # ~9 s wall and 0.1 GB peak for both architectures, so by CLAUDE.md's cost
+    # rule it wants a registration. Exact next step:
+    # `test('formal-interop', [PY, 'test_formal_interop.py'], mem='tiny',
+    #        timeout=1800, extra=['test_formal_interop.py', 'formal/model.py',
+    #        'formal/build.py', 'formal/macho_linker.py', 'reflect.py',
+    #        'exec_budget.py', 'doc/ABI.md'])` in the `proofs` bucket beside
+    # `formal-dylib`, which covers the same container from the inside.
+    'test_formal_interop.py':
+        'The formal dylib boundary seen by a CONSUMER: a real `.dylib` per '
+        'architecture, bound from a C program and from `ctypes` on each, with '
+        'the declarations generated from the library\'s manifest and the '
+        'expected answers derived from the library\'s own source by CPython. '
+        'Declared rather than registered because this branch\'s task says not '
+        'to touch the registry; ~9 s wall and 0.1 GB peak measured '
+        '2026-10-05, so CLAUDE.md\'s cost rule wants it registered. See the '
+        'entry above for the exact next step.',
     # CHEAP and wants a REGISTRATION rather than an excuse, by CLAUDE.md's cost
     # rule: `python3 test_formal_chain_probe.py` is 12 cases, no builds and no
     # Lean, and 0.29 s measured 2026-10-04 (its only cost is two `copytree` calls

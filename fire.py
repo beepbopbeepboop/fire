@@ -1216,7 +1216,23 @@ def main():
         # would get an arm64 answer and conclude "the same argument applies",
         # which is precisely the hypothesis the document says must not be
         # assumed.  So refuse it, and name what is missing.
-        if backend not in ('gimple', 'arm64'):
+        #
+        # The `--formal` in the condition is what makes the sentence below TRUE.
+        # This guard used to fire on the `--backend` value alone, so it also fired
+        # for `dylib --no-prove --backend=x86_64` — and its own diagnostic ends
+        # "For a x86_64 library without a contract, drop --formal: `dylib
+        # --no-prove` is that", which is the command already running. Measured on
+        # `master` at `77b24183`:
+        #
+        #   $ fire.py dylib --no-prove --backend=x86_64 -o zz.dylib m.mojo
+        #   fire dylib --formal: x86_64 has no per-export contract ... drop
+        #   --formal: `dylib --no-prove` is that.                      [exit 2]
+        #
+        # and the second guard took `--no-prove --backend=arm64` too, so there
+        # was NO command line that produced an x86-64 formal library at all, only
+        # the python call behind one (`formal.build.compile_formal_dylib`). A
+        # consumer of a dylib is exactly who cannot use that.
+        if formal and backend not in ('gimple', 'arm64'):
             print(f"{_tool_name()} dylib --formal: {backend} has no per-export "
                   f"contract, so there is nothing --formal could prove. Two "
                   f"separate things, and keeping them apart is the point: the "
@@ -1234,30 +1250,30 @@ def main():
                   f"`build --formal --backend=x86_64`.",
                   file=sys.stderr)
             sys.exit(2)
-        if not formal and backend != 'gimple':
-            # The gimple path has no formal backend to select: it compiles
-            # through gcc for the HOST's architecture.  So `--backend=arm64`
-            # here is right by coincidence on an arm64 host and silently wrong
-            # on any other -- which is the same defect as the branch above,
-            # from the other side, and the same reason it has to be refused
-            # rather than ignored.  Measured: on this (arm64) host
-            # `dylib --backend=arm64` builds an arm64 image, so nothing fails
-            # here; on an x86-64 host the same command would build an x86-64
-            # image and say nothing.
-            print(f"{_tool_name()} dylib: this command has no "
-                  f"--backend. Without --formal it is the gimple/C path, which "
-                  f"compiles through gcc for this machine's architecture "
-                  f"({platform.machine()}), and the formal backends belong to "
-                  f"`build`. For an arm64 dylib WITH a per-export contract, "
-                  f"ask for `dylib --formal`, which is arm64-only and says so "
-                  f"if --backend names anything else.",
-                  file=sys.stderr)
-            sys.exit(2)
-        if formal:
+        # A `--backend` on this command names a FORMAL library's architecture,
+        # and there is nothing else it could mean: without `--formal` this
+        # command is the gimple/C path, which compiles through gcc for the
+        # HOST's architecture and has no `--backend` at all. So the refusal that
+        # used to sit here -- "`--backend=arm64` without `--formal` is refused,
+        # because 'the gimple path for arm64' is right by coincidence on an arm64
+        # host and silently wrong on any other" -- was refusing the one reading
+        # of the flag that was left, and it fired for `--backend=x86_64` too, so
+        # no command line produced an x86-64 formal library at all. Measured on
+        # `master` at `77b24183`, both exits 2 with a message contradicting the
+        # flag that was passed:
+        #
+        #   $ fire.py dylib --no-prove --backend=x86_64 -o zz.dylib m.mojo
+        #   fire dylib --formal: x86_64 has no per-export contract ... For a
+        #   x86_64 library without a contract, drop --formal: `dylib
+        #   --no-prove` is that.                                    <-- the command
+        #
+        # The branch above is what that sentence promises, and it now delivers.
+        dylib_arch = 'arm64' if backend == 'gimple' else backend
+        if formal or backend != 'gimple':
             _fb = _load_formal_build()
             try:
                 result = _fb.compile_formal_dylib(
-                    dylib_inputs, output=dylib_output,
+                    dylib_inputs, output=dylib_output, arch=dylib_arch,
                     prove=prove, check=prove)
             except Exception as e:
                 print(f"formal dylib: {e}", file=sys.stderr)

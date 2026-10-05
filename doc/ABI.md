@@ -175,6 +175,99 @@ formal backends alike. A client that sends text as an escape spelling rather tha
 as UTF-8 bytes crosses this boundary with the wrong bytes. Measured, and filed:
 `bugs/LEXER_unicode_escapes_are_not_decoded.md`.
 
+### A formal boundary is one 64-bit WORD: `Float64` is not a `double`, and a narrow integer is not a narrow register
+
+**Revised 2026-10-05** (`work/formal30-interop`), for the whole **Scalar types**
+section above — the table there is the COMPILED (GIMPLE) path's, where a
+`Float64` really is a C++ `double` and clang puts it in the platform's FP
+register file. This section is the formal backends' row for the same values, and
+before it was written the formal backends published the table above UNCHANGED, so
+a client that generated its declaration from a formal dylib's own manifest got
+one the library does not implement.
+
+| on the formal backends | what it is at the boundary | agrees with the table above? |
+|---|---|---|
+| `Int`, `Int64`, `UInt`, `UInt64` | one 64-bit word in a general-purpose register | **yes** |
+| `Int8/16/32`, `UInt8/16/32` | one 64-bit word whose low `w` bits carry the value; the callee SIGN-extends a signed one (`sxtw x19, w19`) and ZERO-extends an unsigned one (`and x19, x19, #0xffffffff`) | **yes** — the platform ABI's own rule for a `w`-bit integer in a register is to use its low `w` bits |
+| `Bool` | one word holding 0 or 1 | **yes** |
+| `String` / `str` | `char *` | **yes** |
+| `Float64` | **one 64-bit word holding the IEEE-754 bit pattern, in a GENERAL-PURPOSE register** — not a `double` in an FP register | **NO.** This is the row that was false. |
+| `Float32`, `Float16` | a word, by the same rule; the rewrite in `formal_boundary_signature` is uniform over the C float types | no — and neither is there a `Float32` to measure yet (`bugs/FORMAL_float_binary64_only.md`) |
+
+**So a client sends and receives a `Float64` as a word and converts it itself**
+(`memcpy` to and from a `double`, or a union), and the manifest now says so:
+`formal/model.py`'s `formal_boundary_signature` rewrites the published
+declaration, and `double fadd (double, double)` became
+`int64_t fadd (int64_t, int64_t)`.
+
+**Measured, both architectures, on a library whose whole source is three lines**
+(`def fadd(a: Float64, b: Float64) -> Float64: return a + b`), called from a C
+program linked against it and from `ctypes`:
+
+| | arm64 | x86-64 |
+|---|---|---|
+| declared `double fadd (double, double)`, args in the FP registers | `2.14e-314` | `6.42e-314` |
+| declared `int64_t fadd (int64_t, int64_t)`, args as bit patterns | `3.75` | `3.75` |
+| what CPython says | `3.75` | `3.75` |
+
+**The callee is not wrong about the arithmetic, and the disassembly says exactly
+where the word becomes a float** — inside the callee, and not at the boundary:
+
+```console
+$ otool -tv lib.dylib            # _p2_fadd_17720c, arm64
+1000002c4:  add  x19, x0          # argument 0 arrives in a GENERAL register
+1000002c8:  add  x20, x1          # argument 1 too
+1000002e4:  fmov d0, x0           # …and only now becomes an FP register
+1000002e8:  fmov d1, x1
+1000002ec:  fadd d0, d0, d1
+1000002f0:  fmov x0, d0           # and the answer goes back to a GENERAL one
+100000300:  ret
+```
+
+**On arm64 the two register classes are not interchangeable, which is why a
+client cannot make the two conventions work by relying on the aliasing it would
+need.** Measured directly, on this host: a callee handed `bits(1.5)` in `d0` and
+`bits(2.25)` in `d1` read `x0` and `x1` and got the numbers the PREVIOUS call left
+there, and `fmov d1, x2` left `x1` at its old value while `d1` changed. So `D0`
+and `X0` are separate storage, and `fmov` between them is a move rather than a
+reinterpretation — which is why this is a contract row and not a caveat.
+
+**What is deliberately NOT rewritten, and each exclusion is a reason:**
+
+* **A POINTER keeps its spelling.** A pointer is already a word, and its pointee
+  is information a client needs: `uint8_t *` is what
+  `formal/model.py::dylib_export_pointer_pointee` reads to know that a result is
+  a subscriptable buffer rather than an opaque blob, so `Pointer[UInt8]`
+  publishing `int64_t *` would have thrown that away.
+* **`void` is not a value.** It is also how an unannotated function's "returns
+  nothing" is spelled (`reflect._c_signature`), and both backends' emitters read
+  it (`formal/arm64_codegen.py`'s and `formal/x86_64_codegen.py`'s
+  `_callee_returns_nothing`), so it has to survive the rewrite.
+* **A METHOD's `signature` is a lookup key, not a declaration** — it is
+  `Struct.method`, and `formal/imports.py::linked_struct_owners` reads the struct
+  name out of it. Writing a real C declaration there is a separate change with a
+  named next step; see
+  `bugs/FORMAL_a_method_export_publishes_no_c_declaration.md`. The method ROW
+  itself — `R Struct_method (Struct *self, args…)` — is real for the compiled
+  path and needs the receiver convention below on a formal one.
+
+**Why a narrow integer's word matters even though the low bits are all the
+callee reads.** `sxtw`/`and` means a `w`-bit argument can be passed in a `w`-bit
+register field exactly as the platform ABI passes it, so a plain `Int32` works
+under either declaration. The case that cannot is an **`Optional[Int32]`**: its
+empty word is `1 << 32` (below), which is 33 bits, so a declaration that reads
+`w0` returns `0` where the empty case is `4294967296` — and `Some(0)` and `None`
+are one value again, which is the exact defect the niche word was introduced to
+remove. That is why the manifest's word is 64 bits wide rather than the type's.
+
+**Checked by `test_formal_interop.py`**, which builds a real dylib per
+architecture, generates its C declarations from the manifest, and calls every
+export from a C program and from `ctypes` against CPython's answer. The
+`Optional` word table below is asked of `formal/model.py::optional_none_word` by
+`test_the_optional_niches_are_the_documented_words`, and the receiver table in
+"the formal backend's receiver convention" is re-derived from `reflect`'s own
+method signature and from the emitter's own receiver rule.
+
 ### `Optional[T]` on the formal backends: the payload word, and a NICHE for `None`
 
 **A formal value is one 64-bit word, so an `Optional[T]` is one word: the
