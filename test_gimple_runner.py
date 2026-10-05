@@ -10258,6 +10258,79 @@ def main():
         'fgk_a.py': "from fgk_b import N as J\n\ndef main():\n    print(J)\nmain()\n",
     }, 'fgk_a.py')
 
+    # A parameter whose ONLY use is to be forwarded takes the callee's container
+    # kind, not a guess from its own name. `_infer_param_types` reads a parameter
+    # type from how the body USES it, and a pure forwarder has no use — so the
+    # name-based container guess ran, and it guessed a KIND it has no evidence
+    # for: `void middle (MojoList * d)` where `MojoDict *` was meant. The wrong
+    # pointer survives the C compiler silently and `leaf` reads a `DictSlot` out
+    # of a `MojoList` header and answers `None` where CPython answers `1`.
+    #
+    # FOUR shapes, and each is a different thing that had to be true:
+    #
+    #  * `fwd_callee_first` / `fwd_forwarder_first` — the SAME program with the
+    #    two definitions in either order. It printed `1` in one order and `None`
+    #    in the other before the fix, for no reason anyone designed (the callee's
+    #    conclusion has to be in place when the forwarder's is read), which is
+    #    exactly what makes this bug survivable: a test written in the lucky
+    #    order passes and the unlucky one never runs.
+    #  * `fwd_forward_as_a_statement` — `leaf(d)` with no `return`, so it is
+    #    not return-type inference but the parameter's own type.
+    #  * `fwd_two_hop_chain` — `mid1 -> mid2 -> leaf`. Two hops needs TWO extra
+    #    rounds of the dict-value collection, and it did exactly one; see
+    #    `_gmi_apply_forwarded_param_evidence` and the fixpoint beside it.
+    test_gimple_matches_cpython("fwd_forwarder_before_callee", """\
+def leaf(d):
+    print(d["x"])
+
+def middle(d):
+    return leaf(d)
+
+def main():
+    middle({"x": "1"})
+    return 0
+main()
+""")
+    test_gimple_matches_cpython("fwd_callee_before_forwarder", """\
+def middle(d):
+    return leaf(d)
+
+def leaf(d):
+    print(d["x"])
+
+def main():
+    middle({"x": "1"})
+    return 0
+main()
+""")
+    test_gimple_matches_cpython("fwd_forward_as_a_statement", """\
+def leaf(d):
+    print(d["x"])
+
+def middle(d):
+    leaf(d)
+
+def main():
+    middle({"x": "1"})
+    return 0
+main()
+""")
+    test_gimple_matches_cpython("fwd_two_hop_chain", """\
+def leaf(d):
+    print(d["x"])
+
+def mid2(d):
+    return leaf(d)
+
+def mid1(d):
+    return mid2(d)
+
+def main():
+    mid1({"x": "1"})
+    return 0
+main()
+""")
+
     # The two rows that must NOT be re-routed, i.e. the gates
     # `_gmi_scan_imported_global_homes` exists to enforce. A module-level
     # `N = ...` rebinds the name in THIS module's namespace (Python

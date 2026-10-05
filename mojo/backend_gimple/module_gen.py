@@ -255,8 +255,7 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
         # a different, already-correct path), so only containers are kept.
         if call_type in containers:
             kinds = gen._container_param_kinds.setdefault(fname, {})
-            kinds[pname] = ('list' if call_type == 'MojoList *' else
-                            'set' if call_type == 'MojoSet *' else 'dict')
+            kinds[pname] = _GMI_PARAM_KIND_OF_CTYPE[call_type]
         if cur == call_type:
             continue
         # A parameter with NO use-derived evidence at all (`cur is None` —
@@ -322,6 +321,147 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
             # ambiguity this pass exists to settle. Leave it alone.
             continue
         ipt.setdefault(fname, {})[pname] = call_type
+
+
+# The container KIND a `_container_param_kinds` entry carries for each ctype.
+# One table because `_gmi_apply_call_site_param_evidence` and
+# `_gmi_apply_forwarded_param_evidence` are the two writers and a second copy
+# of a three-way mapping is a second thing to forget an arm of.
+_GMI_PARAM_KIND_OF_CTYPE = {'MojoList *': 'list', 'MojoSet *': 'set',
+                            'MojoDict *': 'dict'}
+
+
+def _gmi_apply_forwarded_param_evidence(gen, all_functions) -> None:
+    """A parameter whose only use is to be FORWARDED takes the CALLEE's
+    container kind, not a guess from its own name.
+
+    `_infer_param_types` reads a parameter's type from how the body USES it,
+    which is the right default and has no answer at all for a pure forwarder.
+    Then the name-based container guess runs, and it guesses a KIND it has no
+    evidence for. Measured, six lines of ordinary Python:
+
+        def leaf(d):
+            print(d["x"])
+
+        def middle(d):
+            return leaf(d)
+
+        middle({"x": "1"})
+
+    `void middle (MojoList * d)`, where `MojoDict *` is meant. The wrong
+    pointer survives the C compiler silently and `leaf` reads a `DictSlot` out
+    of a `MojoList` header, finds nothing and answers `None` where CPython
+    answers `1`. So this is not a missing type, it is a confidently wrong one.
+
+    The evidence is the callee's own concluded parameter kind, at a call the
+    existing `_gmi_iter_calls` walk already sees — the same place the scalar and
+    struct-pointer observers read theirs, which is why this is a second pass
+    over the same table rather than a new analysis.
+
+    **A FIXED POINT, and that is load-bearing rather than tidiness.** The
+    evidence is a conclusion, so a chain resolves in definition order only if
+    every link is already in place — the same program with `middle` defined
+    BEFORE `leaf` printed `1`, correctly and for no reason anyone designed.
+    Iterating to a fixed point makes the answer independent of definition order,
+    which is the only version of this that can be tested.
+
+    Two limits, both about not answering a question this pass cannot:
+
+    * **Only a CONTAINER kind is read across.** A callee's `char *` parameter
+      does not make the forwarded name a string — `str` is iterable, an
+      iterable-consuming builtin cannot tell `str` from `list`, and
+      `_gmi_apply_call_site_param_evidence` refuses exactly that question for
+      the same reason. So this adds a container axis and leaves the scalar one
+      to that pass.
+    * **A parameter whose body already typed it as a SCALAR, or that carries
+      an annotation, is left alone.** A use-derived `double` is a fact about
+      the body; an annotation outranks every inference in this table. Both are
+      the same two exclusions `_gmi_apply_call_site_param_evidence` applies, for
+      the same reasons, and reusing them is why a forward cannot quietly retype
+      a `def f(x: float): sink(x)`.
+    """
+    ipt = gen._inferred_param_types
+    if not ipt:
+        return
+    names = getattr(gen, '_func_param_names', {}) or {}
+    containers = tuple(_GMI_PARAM_KIND_OF_CTYPE)
+    # (func, param) -> the (callee, callee param) pairs it is forwarded to.
+    # The CALLEE'S NAME and not its concluded kind, because the conclusion is
+    # what this pass is computing: recording the kind here would freeze a
+    # snapshot taken before the first round, and a CHAIN would then resolve one
+    # hop and stop (`mid1` -> `mid2` -> `leaf` left `mid1` on the name-based
+    # guess, measured, and printed `0` where CPython prints `1`).
+    fwd: dict = {}
+    for s in all_functions:
+        if not isinstance(s, gimple_ctypes.FunctionDef):
+            continue
+        fname = _as_str(s.name)
+        params = names.get(fname)
+        if not params:
+            continue
+        for call in _gmi_iter_calls(s.body):
+            if not isinstance(call.func, gimple_ctypes.IdentExpr):
+                continue
+            callee = _as_str(call.func.name)
+            cparams = names.get(callee)
+            if not cparams:
+                continue
+            args = call.args or []
+            # Arity mismatch means positional alignment cannot be trusted
+            # (an optional or defaulted parameter, a `*args` call) — the same
+            # refusal, and for the same reason, as the call-site pass.
+            if len(args) != len(params) or len(args) != len(cparams):
+                continue
+            for _i in range(len(args)):
+                arg = args[_i]
+                if not isinstance(arg, gimple_ctypes.IdentExpr):
+                    continue
+                if _as_str(arg.name) != _as_str(params[_i]):
+                    continue
+                fwd.setdefault((fname, _as_str(params[_i])), set()).add(
+                    (callee, _as_str(cparams[_i])))
+    if not fwd:
+        return
+    ann = getattr(gen, '_annotated_params', {}) or {}
+    changed = True
+    while changed:
+        changed = False
+        for _key in fwd:
+            _fname = _key[0]
+            _pname = _key[1]
+            # The callees' CURRENT conclusions, re-read every round — which is
+            # what lets a chain resolve from its real end backwards. A set, so
+            # two forwards disagreeing leave the parameter exactly as it was,
+            # which is the same rule as everywhere else in this file.
+            _cts = set()
+            for _hop in fwd[_key]:
+                _ct = (ipt.get(_hop[0]) or {}).get(_hop[1])
+                if _ct in containers:
+                    _cts.add(_ct)
+            if len(_cts) != 1:
+                continue
+            # `list(...)[0]`, NOT `next(iter(...))`: this function is inside
+            # the self-host closure and `next` is not a symbol the compiled
+            # path links (see the identical note in
+            # `_gmi_apply_call_site_param_evidence`).
+            _want = list(_cts)[0]
+            _cur = (ipt.get(_fname) or {}).get(_pname)
+            if _cur is not None and _cur not in containers:
+                continue
+            if (ann.get(_fname) or {}).get(_pname):
+                continue
+            if _cur == _want:
+                continue
+            ipt.setdefault(_fname, {})[_pname] = _want
+            # The KIND the callee concluded, recorded for the `==`/`!=`
+            # lowering exactly as the call-site pass records it — otherwise a
+            # forwarded container reaches `mojo_value_eq` as a bare pointer
+            # comparison, which is the same class of answer the pass that
+            # records it was added to stop giving.
+            _pk = gen._container_param_kinds.setdefault(_fname, {})
+            _pk[_pname] = _GMI_PARAM_KIND_OF_CTYPE[_want]
+            changed = True
+
 
 
 def _free_func_param_ctypes(self, s) -> list:
@@ -6569,6 +6709,13 @@ def gen_module_impl(self, stmts):
     # two disagree and a call site is unambiguous. See
     # `_gmi_apply_call_site_param_evidence`.
     _gmi_apply_call_site_param_evidence(self, stmts)
+    # ...and then in what a FORWARDED parameter's callee concluded, which
+    # `_infer_param_types` cannot see (the body of a pure forwarder says
+    # nothing) and the literal call sites cannot see either (the argument IS
+    # the name whose type is in question). Fixed point, so definition order
+    # does not decide the answer. See
+    # `_gmi_apply_forwarded_param_evidence`.
+    _gmi_apply_forwarded_param_evidence(self, all_functions)
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
             s = _as_structdef_node(s)
@@ -7819,31 +7966,58 @@ def gen_module_impl(self, stmts):
                     _record_param_dict_val(_mcallee, _mpn[_mi], _mdv)
 
     # ...and resolve the collected dict-value observations into the contract
-    # codegen reads, then re-run the collection once so a FORWARDING chain
-    # (`def g(d): return f(d)`) resolves through the hop this pass just
-    # settled. One extra round, not a loop to a fixpoint: `g` can only forward
-    # a dict value type that some call site of `g`'s already proved, so a
-    # second pass settles every chain that exists and a third would add
-    # nothing. `_calls_in_stmts` is memoized, so the repeat is cheap.
+    # codegen reads, then RE-COLLECT and resolve again, to a FIXED POINT and
+    # not once. The repeat is what settles a FORWARDING chain
+    # (`def g(d): return f(d)`), because `_static_arg_dict_val`'s
+    # `caller_name` arm reads the contract this loop has already written — so a
+    # chain of N links needs N rounds, and one extra round settles only a
+    # chain of TWO. That was the bug, and it was the comment below that hid
+    # it: it said "one extra round, not a loop to a fixpoint: `g` can only
+    # forward a dict value type that some call site of `g`'s already proved, so
+    # a second pass settles every chain that exists and a third would add
+    # nothing". The premise is true and the conclusion does not follow —
+    # `mid1(d) -> mid2(d) -> leaf(d)` called as `mid1({'x': '1'})` is a chain
+    # of two hops, and after one round `mid2.d` was settled while `leaf.d` was
+    # not, so `leaf` still read its value with `mojo_dict_get_int` and printed
+    # the pointer decimal where CPython prints the string. The premise is also
+    # why the bound below is the number of functions: each round can only
+    # settle a link whose far end some call site proved, and every such link is
+    # a hop in a chain over this module's functions.
+    #
+    # `_calls_in_stmts` is memoized and `_scan_container_elems` is a pure
+    # function of a body, so a round after the first is cheap; the loop exits
+    # as soon as a round settles nothing.
+    _dv_rounds = 0
+    _dv_limit = len(_caller_bodies) + 1
     _resolve_param_dict_vals()
-    for caller_name, body in _caller_bodies:
-        elem, nested, dval = self._scan_container_elems(body)
-        calls = []
-        self._calls_in_stmts(body, calls)
-        for call in calls:
-            if not isinstance(call.func, IdentExpr):
-                continue
-            callee = _as_str(call.func.name)
-            pnames = _free_params.get(callee)
-            if not pnames:
-                continue
-            for i, a in enumerate(call.args):
-                if i >= len(pnames):
-                    break
-                _dv = _static_arg_dict_val(a, dval, caller_name)
-                if _dv is not None:
-                    _record_param_dict_val(callee, pnames[i], _dv)
-    _resolve_param_dict_vals()
+    while _dv_rounds < _dv_limit:
+        _dv_rounds += 1
+        _dv_before = len(self._param_dict_val_obs)
+        for caller_name, body in _caller_bodies:
+            elem, nested, dval = self._scan_container_elems(body)
+            calls = []
+            self._calls_in_stmts(body, calls)
+            for call in calls:
+                if not isinstance(call.func, IdentExpr):
+                    continue
+                callee = _as_str(call.func.name)
+                pnames = _free_params.get(callee)
+                if not pnames:
+                    continue
+                for i, a in enumerate(call.args):
+                    if i >= len(pnames):
+                        break
+                    _dv = _static_arg_dict_val(a, dval, caller_name)
+                    if _dv is not None:
+                        _record_param_dict_val(callee, pnames[i], _dv)
+        _resolve_param_dict_vals()
+        if len(self._param_dict_val_obs) == _dv_before:
+            # No new (callee, param) slot was reached this round, so the next
+            # one cannot reach one either — the collection is monotone and the
+            # fixed point is here. Cheaper and more obvious than comparing the
+            # resolved table, and it cannot be fooled by a re-write of an
+            # existing slot with the same value.
+            break
 
 
     # A container param whose ELEMENTS the callee `isinstance()`-checks
