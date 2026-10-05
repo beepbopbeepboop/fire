@@ -488,7 +488,7 @@ MEASURED_PEAK_GB = {
     'formal-specialization':  (0.07, 'measured'),   # 1 s, 6 cases
     'formal-method-param-field': (0.07, 'measured'),  # 9 s, 14 cases
     'formal-external-call':   (0.08, 'measured'),   # 3 s, 29 cases
-    'formal-receiver-position': (0.07, 'measured'),  # 2 s, 12 cases
+    'formal-receiver-position': (0.07, 'measured'),  # 15 s, 38 cases
     'formal-value-model':     (0.07, 'measured'),   # 9 s, 19 cases
     'formal-x86-dylib':       (0.09, 'measured'),   # 2 s, 9 cases
     # The x86-64 MACHINE MODEL against the hardware, which had never been run
@@ -2673,32 +2673,53 @@ test('formal-method-param-field', [PY, 'test_formal_method_param_field.py'],
 # `f[T](r)` — which is not a method call at all, so none of the receiver-handoff
 # family covers it.
 #
-# RED, and registered red rather than excused. 2 of 12, and BOTH are the same
-# direction: a construct with no representation now BUILDS instead of being
-# refused, once on the return side and once on a value-only callee reached
-# through a specialization. A built image here is a wrong program (measured: the
-# return case exits 0 where the source's answer is 7, and the callee case exits
-# 8, which is a frame address read as an integer), so this is a real gap and not
-# a stale expectation; see
-# bugs/FORMAL_a_specialization_defeats_the_frame_escape_refusals.md.
+# **The `expect=` this registration carried is GONE, and it is the anti-rot rule
+# that removed it: an `expect`-marked test that PASSES is reported as a
+# FAILURE.** All three cases it forgave are answered on this tree, each by a
+# case that asserts something TRUE rather than by the case being dropped, and
+# the file is 38/38 green — measured here, both backends, three runs at
+# 14.8-17.4 s:
+#
+#     $ python3 tools/memslot.py --gb 8 --label rp -- \
+#           python3 test_formal_receiver_position.py
+#     formal receiver position: PASS=38 FAIL=0
+#
+#   * a specialized call that hands a RECEIVED frame address back now BUILDS,
+#     because the creator of a returned holder is an ancestor of the CALLER —
+#     every channel that would let it outlive the creator is still refused, and
+#     the case moved to `test_formal_returned_frame.py` as
+#     `received_frame_handed_back_through_a_specialized_parameter` (a
+#     differential against CPython, both backends, 46/46 green here) because
+#     what it adds there is new: a comptime parameter SHIFTS the argument
+#     positions, so the hidden trailing word the convention adds has to land
+#     after the last of them;
+#   * the value-only-callee case stopped being about `origin_of` — that became
+#     `FRAME_IDENTITY_CALLS` and `_rewrite_identity_intrinsic_calls` erases it
+#     to its operand, so there is no value-only callee in the program and what
+#     it does is hand a received frame out of the ENTRY. It is
+#     `refuse_a_received_frame_returned_out_of_the_entry`, and the needle is
+#     that sentence rather than an edit — which is what §6 item 1 of the doc
+#     that recorded the defect asked for;
+#   * the dotted specialization stopped at a module-state refusal before
+#     reaching the specialization check its needle wanted, which was the
+#     "stopped at the wrong check" half. `refuse_a_method_with_parameters_and_
+#     no_receiver` and `refuse_a_method_call_on_a_subscripted_receiver` are the
+#     two shapes it now answers, and the argument-binding off-by-one that made
+#     the first report a false refusal (`Box_run(bx, 0, r)` passes the literal
+#     0, which it does not) is fixed in `model.method_declares_receiver`.
+#
+# None of the three ROWS is in the file any more, so a reader who goes looking
+# for them finds the replacements the bullets name. That is also why the doc
+# that recorded the defect is deleted rather than left with a Status: a fixed
+# bug still listed is indistinguishable from an open one.
+#
+# What the marker was FOR, and why its absence is not a hole: the defect it
+# named was that a construct with no representation BUILDS instead of being
+# refused, and the measured symptom of that is a case in this file going from a
+# refusal to a differential that disagrees with CPython. `run_diff_case` is what
+# catches that, and it is in the file.
 test('formal-receiver-position', [PY, 'test_formal_receiver_position.py'],
      mem='tiny', deps=['preflight'],
-     expect='bugs/FORMAL_a_specialization_defeats_the_frame_escape_refusals.md '
-            '— 3 of 14: TWO of them are that doc — a specialized call with a '
-            'frame address at an argument position bypasses both the '
-            'returned-frame and the value-only-callee refusals and builds — '
-            'and the THIRD is a different defect wearing this test: '
-            '`refuse_a_dotted_specialized_callee_names_it` stops at a '
-            'module-state refusal (`Box` has no home) before reaching the '
-            'specialization refusal its needle wants, so it belongs to the row '
-            'in bugs/FORMAL_module_state_no_storage.md. The leading number is '
-            'the TOTAL and it is checked against the run, because a marker '
-            'that forgives FAIL wholesale absorbs a new failure silently. '
-            'Measured 2026-10-01; the marker said "2 of 12" until then and '
-            'nothing could see the difference until 2026-10-01, when the '
-            'stated count in an `expect=` reason became checkable against the '
-            'run (`_apply_expectations` in this file, and its checks in '
-            'test_suite.py).',
      extra=['test_formal_receiver_position.py', 'formal/build.py',
             'formal/model.py'] + FORMAL_BUILD_INPUTS,
      desc='a frame address at a specialization\'s argument position, refused')

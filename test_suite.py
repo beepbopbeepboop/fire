@@ -1156,9 +1156,16 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # it was watching), so a census that still states them fails on the
     # registry's own state — which is the check working, not the entry being
     # wrong. `formal-x86-machine-model` is theirs and is real: it is the count
-    # for the job they registered.
+    # for the job they registered. `formal-receiver-position` is the FOURTH
+    # drop, and it is the one this table's own history is about: the check
+    # below was BUILT because that marker's count understated what its file
+    # reported, and the marker then outlived even the correction — the job went
+    # 38/38 green (measured on this tree) and an `expect=` on a passing test is
+    # reported as a FAILURE ("marked expect=… but it PASSES"). The marker is
+    # gone, which is why its entry is gone here, and this is the same "a census
+    # that still states them fails on the registry's own state" the two above
+    # name.
                      'coro-future-await': 17,
-                     'formal-receiver-position': 3,
                      'formal-x86-machine-model': 1,
                      'gimple-async-runner': 36,
                      'gimplerunner': 4,

@@ -11552,9 +11552,11 @@ CONSTRUCTION_REFUSALS = [
     # …and THE SAME CALL SPECIALIZED, which is the row above's twin and the
     # reason it is here. `mklist[1]()` names the same function as `mklist()` —
     # `formal/model.py::call_callee_name` is the tree's one reader of exactly
-    # that, and `bugs/FORMAL_a_specialization_defeats_the_frame_escape_refusals.md`
-    # is the general statement of it — so the two spellings of one argument must
-    # get one answer.
+    # that, and it is one reader because a specialization is a frame escape in
+    # general: `f[T](r)` put a frame address at an ARGUMENT position and
+    # bypassed both the returned-frame and the value-only-callee refusals,
+    # which is what made one reader for the subscript callee worth having — so
+    # the two spellings of one argument must get one answer.
     #
     # They did not, and they got it in the PERMISSIVE direction, which is the
     # expensive one: `model._callee_container_evidence` read the callee with
