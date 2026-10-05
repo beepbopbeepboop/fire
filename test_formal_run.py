@@ -4103,6 +4103,21 @@ BYREF_REFUSALS = [
      "    p.b = 4\n"
      "    return type_of(p)\n",
      "refuse:type_of` is a Python BUILTIN", None),
+    # **The name here used to be a LITERAL** — this row read
+    # `return getattr(p, "a")` and asserted the refusal, and it was RIGHT about
+    # the message and wrong about the program: `getattr(p, "a")` is `p.a`, which
+    # this backend has always lowered, so `model.UNIMPLEMENTED_BUILTINS`'s "the
+    # attribute it names is a STRING at run time" was false of it.
+    # `model.LITERAL_ATTRIBUTE_READ_CALLS` now erases that spelling before any of
+    # this is asked (see `getattr_of_a_literal_name_is_the_field_read` in
+    # `BYREF_CASES`), so the row had to move to the shape the message is actually
+    # about rather than be deleted: the builtin clause it pins is load-bearing
+    # for two taxonomies, and dropping the row would drop the pin with it.
+    #
+    # The name is the `n` PARAMETER, so it is a plain word holding whatever the
+    # harness passed — the most ordinary way a name becomes dynamic, and a
+    # different shape from the row below (a value read out of a container), so
+    # the two are not the same program with two needles.
     ("byref_refuse_getattr_names_the_builtin",
      "struct P:\n"
      "    var a: Int\n"
@@ -4111,7 +4126,7 @@ BYREF_REFUSALS = [
      "    var p = P()\n"
      "    p.a = 3\n"
      "    p.b = 4\n"
-     "    return getattr(p, \"a\")\n",
+     "    return getattr(p, n)\n",
      "refuse:getattr` is a Python BUILTIN", None),
     # ── wave 3 (C5) ──
     #

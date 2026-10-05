@@ -288,3 +288,15 @@ is what makes the rewrite a rewrite and not a hole:
 | `getattr_defined_here_is_not_erased_to_a_field_read` | a module that DEFINES `getattr` keeps its own function (7, not 4) — the gate `_shadowing_attribute_read_names` exists for |
 | `byref_refuse_getattr_of_a_computed_name` | `getattr(p, names[0])` still refuses, needle **"A LITERAL name is not this case"** — so a reword that dropped the clause fails here rather than leaving the right program refused with the wrong sentence |
 | `byref_refuse_getattr_of_a_name_that_is_not_a_field` | `getattr(p, "zz")` is refused by the FIELD refusal (quoting `Pt`'s two real fields), not by a `getattr` message — which is the accurate answer about a name that is not in the layout |
+| `byref_refuse_getattr_names_the_builtin` | **this row's program was `getattr(p, "a")` and it asserted the refusal**, so it went red and had to be re-pointed at `getattr(p, n)` — a plain word — rather than deleted, because the builtin clause it pins is load-bearing for `tools/formal_sweep.py`'s `_FRAME_ESCAPES` and for `tools/formal_sweep_causes.py` |
+
+**The last row is the one worth reading.** An existing green test said, in
+effect, "`getattr` with a literal name is a builtin this path does not
+implement", and it was right about the message and wrong about the program. The
+full `test_formal_run.py` run is what found it — a rewrite in
+`_prepare_functions` touches every build, so it owes the whole corpus rather
+than the five rows above — and the right response was to move the row to the
+shape the message is about, not to delete it. A deleted test is a hole; a
+re-pointed one is the anti-rot working, and the two are now different programs
+(a plain word, and a value read out of a container) rather than one program with
+two needles.
