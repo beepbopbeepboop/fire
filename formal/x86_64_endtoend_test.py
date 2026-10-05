@@ -179,8 +179,8 @@ def ensure_lean_ready():
     that reason.  What happened here instead is the reason the three have it:
     `formal/x86_64_endtoend_test.py` runs fine when the suite's `prooflib` step
     got there first (`formal-x86-endtoend` deps on it), so the omission was
-    invisible until something else called `_run_lean` — `test_formal_sweep_
-    truth.py`'s end-to-end case, which is in `check`, a bucket that does NOT
+    invisible until something else called `_run_lean` — the end-to-end case in
+    `test_formal_sweep_truth.py`, which is in `check`, a bucket that does NOT
     run `prooflib`.  Lean then said
 
         <tmp>.lean:1:0: error: unknown module prefix 'X86'
