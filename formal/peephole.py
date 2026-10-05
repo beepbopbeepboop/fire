@@ -399,17 +399,39 @@ def _ctx_dead(ctx, reg: int, after: int) -> bool:
 def _a_mov_self(window, ctx):
     """`mov xa, xa` — a copy of a register into itself. Nothing to do.
 
-    Peephole's arm64/mov_self. The condition is that the two register fields
-    NAME the same register, which `decode_arm64` has already refused to
-    produce for a word naming 31 on either side.
+    Peephole's arm64/mov_self, and the rule that carries the pass's most
+    important side condition — which is NOT a register condition:
+
+      **The instruction must not be the low half of a PC-relative address
+      pair.** `formal/arm64.py`'s `emit_adrp_add` emits `ADRP Xd, #page` and
+      then `ADD Xd, Xd, #off` as ONE resolved pair: `Assembler.resolve`
+      back-patches the ADRP's page delta and the ADD's within-page offset
+      together, out of a single relocation recorded at the ADRP. When the
+      label is page-aligned the offset is `#0`, so the pair's second
+      instruction is byte for byte what this rule matches — and removing it
+      leaves the program holding a PAGE where it wanted an ADDRESS.
+
+      Measured, arm64, `tools/formal_fuzz.py --seed peephole-diff -n 30`:
+      with the condition absent, generated program 11 printed
+      `d 29 1 1 / d 0 0 0 / d` where CPython printed
+      `29 1 1 0 29 / 0 0 0 29 5 / -21 -21`, and the two firings were
+      `add x0, x0, #0` immediately after an `ADRP`. The Lean theorem is
+      happy either way, because the model agrees the ADD is a no-op; what it
+      does not know is that the ADRP above it was PATCHED to a page. So the
+      condition lives here, beside the patch, and not in the theorem.
+
+    The other conditions are the register ones: `imm == 0` (see `ArmInsn`'s
+    docstring) and the two field names being equal, which `decode_arm64` has
+    already refused to produce for a word naming 31 on either side.
     """
     if len(window) < 1:
         return None
     a = window[0].dec
-    # `imm == 0` is load-bearing, not a shortcut: see `ArmInsn`'s docstring.
     if a is None or a.form != "add_imm":
         return None
     if a.rd != a.rn or a.imm != 0:
+        return None
+    if ctx.after_adrp_add(window[0]):
         return None
     return b"", 1
 
@@ -797,6 +819,23 @@ class _Ctx:
                     break
             self._live_after = table
         return self._live_after[index]
+
+    def after_adrp_add(self, entry) -> bool:
+        """Is this instruction the `ADD` half of a resolved ADRP+ADD pair?
+
+        `emit_adrp_add` records ONE relocation at the ADRP and
+        `Assembler.resolve` writes two instructions from it, so the pair is
+        only recognisable by position — which is why this needs the entry's
+        index rather than the word alone.
+        """
+        i = entry.index
+        if i == 0:
+            return False
+        prev = self.entries[i - 1]
+        if len(prev.raw) != 4:
+            return False
+        word = struct.unpack_from("<I", prev.raw, 0)[0]
+        return (word & 0x9F000000) == 0x90000000
 
     def word(self, entry) -> int:
         """The entry's 32-bit word, as it stands AFTER any rewrite so far.

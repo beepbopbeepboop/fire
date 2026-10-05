@@ -42,9 +42,7 @@ ROOT = HERE
 sys.path.insert(0, ROOT)
 
 import formal.peephole as P                                    # noqa: E402
-from formal.arm64 import (encode_add_xd_xn_imm, encode_ret,   # noqa: E402
-                          encode_b, encode_movz_xd_imm, encode_str_xt_xn_imm,
-                          encode_ldr_xt_xn_imm)
+from formal.arm64 import encode_add_xd_xn_imm, encode_ret     # noqa: E402
 from formal.arm64_codegen import ARM64Codegen                  # noqa: E402
 from formal.build import compile_formal                        # noqa: E402
 
@@ -215,6 +213,23 @@ class TestRules(unittest.TestCase):
         asm, removed = self._run_words(words)
         self.assertEqual(0, removed)
         self.assertEqual(words, asm.words())
+
+    def test_mov_self_declines_the_low_half_of_an_adrp_add_pair(self):
+        # `emit_adrp_add` emits ADRP + ADD as ONE resolved pair, and a
+        # page-aligned label makes the ADD `#0` — byte for byte a self-copy.
+        # tools/formal_fuzz.py --seed peephole-diff -n 30 found this: generated
+        # program 11 printed `d 29 1 1 / d 0 0 0 / d` against CPython's
+        # `29 1 1 0 29 / 0 0 0 29 5 / -21 -21`.
+        words = _w(struct.pack("<I", 0xB0000000), encode_add_xd_xn_imm(0, 0, 0),
+                   encode_ret())
+        asm, removed = self._run_words(words)
+        self.assertEqual(0, removed,
+                         "the ADD half of a resolved ADRP+ADD pair is not a "
+                         "self-copy: the ADRP above it holds a PAGE")
+        # …and the SAME word with a different predecessor is removed.
+        asm, removed = self._run_words(
+            _w(encode_ret(), encode_add_xd_xn_imm(0, 0, 0), encode_ret()))
+        self.assertEqual(1, removed)
 
     def test_copy_chain_is_proved_but_not_fired(self):
         # The rule is in `PENDING_RULES`, not `RULES`: its theorem is proved and

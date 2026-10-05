@@ -27,16 +27,19 @@ again. `formal/peephole.py`'s `_Ctx.live_after` is a backward dataflow over
 the whole image, with a relaxation pass over backward branch edges.
 
 **Measured 2026-10-05**, over all 52 `formal/examples/*.mojo`, arm64, built
-with `--opt` and run against the unoptimised build:
+with `--opt` and run against the unoptimised build. (These numbers are from
+before the two matcher bugs in `mov_self` were fixed; they are what the
+differential fuzzer and the end-to-end test caught, and the shipped
+configuration — `mov_self` and `add_imm_fuse` only — is clean.)
 
 | rule | fires | result |
 |---|---|---|
 | `arm64/mov_self` | 20 | 13 of 52 examples crashed (`SIGSEGV`, exit −11) |
 | `arm64/copy_chain` | 44 | `sqsum.mojo` answered **109** for **129**; `sum_range.mojo` **never terminated** |
 
-Both of those were the `consumed`/window bug in §3 below as well, so they are
-what the end-to-end differential test caught rather than the first symptom.
-With that fixed and only `copy_chain` enabled, **2 of 52 still disagree**:
+Both of those were the `consumed`/window bug as well, so they are what the
+end-to-end differential test caught rather than the first symptom. With that
+fixed and only `copy_chain` enabled, **2 of 52 still disagree**:
 
 ```
 sqsum.mojo      exit 129 unoptimised  →  109 optimised
@@ -76,6 +79,31 @@ the corpus was built for: 499 of the 633 `ADD (immediate)` instructions
 `formal/arm64_codegen.py` emits add **zero**, because `encode_mov_zr_xn` spells
 a register copy as `ADD Xd, Xn, #0`. That is 20% of the arm64 code the emitter
 produces.
+
+## 1a. The side condition `peephole_arm64_mov_self` cannot express
+
+Fixed here, recorded because it is the shape of thing this pass will keep
+meeting and because a reader of the theorem deserves to know what it does NOT
+say.
+
+`peephole_arm64_mov_self` says that `add xd, xd, #0` leaves the machine model
+unchanged. It is right. It is also, on this compiler's output, not enough —
+because `formal/arm64.py`'s `emit_adrp_add` emits an `ADRP Xd, #page` and an
+`ADD Xd, Xd, #off` as ONE pair that `Assembler.resolve` back-patches from a
+single relocation, and when the label is page-aligned that `ADD` is `#0`. The
+ADD is a genuine no-op on the register; what it carries is the within-page
+half of an address the ADRP was patched to a PAGE for.
+
+`tools/formal_fuzz.py --seed peephole-diff -n 30 --opt` found it in generated
+program 11: `d 29 1 1 / d 0 0 0 / d` where CPython said
+`29 1 1 0 29 / 0 0 0 29 5 / -21 -21`. The condition is now
+`_Ctx.after_adrp_add`, and `TestRules.test_mov_self_declines_the_low_half_of_an_adrp_add_pair`
+pins both directions of it.
+
+The general lesson, which is the reason this is written down rather than left
+in the code: **a machine-model theorem bounds what the MODEL can see, and a
+compiler's address arithmetic is not the model.** Any rule over a class a
+relocation writes into needs a condition about the relocation.
 
 ## 2. `arm64/store_load`, `arm64/mem_pair`, `arm64/movz_pair` — no theorem
 
@@ -149,7 +177,7 @@ program with `a += 1; a += 2` would exercise it; `formal/examples` has none.
 ## Reproducing
 
     export PATH=/opt/homebrew/bin:$PATH
-    python3 test_formal_peephole.py                    # 24 tests, the licence and the remap
+    python3 test_formal_peephole.py                    # 25 tests, the licence and the remap
     python3 tools/formal_bench.py                      # per-example instruction counts
     python3 tools/formal_bench.py --opt                # the same, through the pass
 

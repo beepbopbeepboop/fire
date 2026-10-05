@@ -370,6 +370,14 @@ FRAME_BLOB_REFUSAL_HEAD = "does not fit in the frame: it needs "
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIRE = os.path.join(HERE, "fire.py")
 
+#: Module-level `--opt`, read by `run_on`. A global rather than a parameter
+#: because `run_on` is called from four places in the reporting paths and every
+#: one of them is "build this program on this backend" — threading the flag
+#: through all four is four chances to pass it inconsistently, and a run where
+#: some programs went through the peephole and some did not would report
+#: differences that are not differences.
+OPT = False
+
 # The compiler's own frame budgets, so this corpus is sized by the tree rather
 # than by a number typed here: `formal/model.py::CONTAINER_BUDGET` is the
 # smaller of the two and the one a program has to fit to build on both machines.
@@ -594,7 +602,8 @@ PRELUDE = (
 
 # ── the harness ────────────────────────────────────────────────────────────
 
-def build(src, out, backend, timeout=BUILD_TIMEOUT, test_input=None):
+def build(src, out, backend, timeout=BUILD_TIMEOUT, test_input=None,
+          opt=False):
     """Compile `src` for `backend`; (rc, diagnostic).
 
     The diagnostic is stderr or stdout, whichever carries text — a refusal is
@@ -613,6 +622,8 @@ def build(src, out, backend, timeout=BUILD_TIMEOUT, test_input=None):
     """
     cmd = [sys.executable, FIRE, "build", "--formal", "--no-prove",
            f"--backend={backend}", "-o", out]
+    if opt:
+        cmd.append("--opt")
     if test_input is not None:
         cmd += ["-n", str(test_input)]
     cmd.append(src)
@@ -1053,7 +1064,7 @@ def run_on(backend, text, tmpdir, name):
     out = os.path.join(tmpdir, f"{name}.{backend}")
     with open(src, "w") as f:
         f.write(text)
-    rc, diag = build(src, out, backend)
+    rc, diag = build(src, out, backend, opt=OPT)
     if rc != 0:
         # THREE shapes of build failure, and only the first two are the same
         # thing.  A crash is a traceback or a signal; a refusal is a sentence;
@@ -5509,6 +5520,7 @@ def audit_program(text, args):
 
 
 def main():
+    global OPT
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-n", "--count", type=int, default=50,
@@ -5528,6 +5540,14 @@ def main():
     ap.add_argument("--print-program", type=int, default=None, metavar="INDEX",
                     help="print one generated program's source and exit")
     ap.add_argument("-j", "--jobs", type=int, default=4)
+    ap.add_argument("--opt", action="store_true",
+                    help="build through formal/peephole.py, so a run with it "
+                         "and a run without it are the SAME PROGRAMS and the "
+                         "difference is the pass and nothing else. Every "
+                         "rewrite the pass performs is licensed by a theorem "
+                         "in lib/Peephole.lean; this flag is how that claim is "
+                         "checked against generated programs rather than "
+                         "against formal/examples")
     ap.add_argument("--backends", default="x86_64,arm64",
                     help="comma list; both, to check the two images against "
                          "each other as well as against CPython")
@@ -5555,6 +5575,7 @@ def main():
     ap.add_argument("--max-min-steps", type=int, default=400)
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
+    OPT = args.opt
     if args.arch:
         # `--arch` is the one-backend statement of `--backends`, and it wins
         # over it rather than adding to it: the two say the same thing in
