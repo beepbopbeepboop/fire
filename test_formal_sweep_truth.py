@@ -511,6 +511,19 @@ class TestCensusReport(unittest.TestCase):
 # is nothing but dead imports is a row of work that is not work.
 
 # The three, and the census of what is left, printed rather than asserted.
+# `traceback` was in this tuple and LEFT IT on 2026-10-05, by being WRITTEN:
+# `formal/hostmods/traceback.mojo` answers CPython's own text for the one state
+# this target can be in (no exception in flight), which `test_formal_traceback.py`
+# checks against CPython. Its own wave note records that it moved NO sweep row —
+# the 38 files an `ast`-based walk attributed to it were all `import traceback`
+# inside `if`/`try` blocks, which `imported_modules` does not descend into — so
+# the row it was here for is the one row the landing did not move.
+#
+# It is named rather than quietly dropped because this tuple is a PREMISE and the
+# test that reads it says so in its own failure message: a name that gains a
+# model stops being this test's subject, which is a reason to be told.
+# `bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md` §0/§2 is where that
+# wave and its measurement are written down.
 _DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig")
 # Modules with no readable names that STILL have users, so their rows are real:
 # `itertools` (>=3 files spell it), `builtins` (>=2), `atexit` (1, through
@@ -577,9 +590,9 @@ class TestHostImportRowsAreNotDeadImports(unittest.TestCase):
         own wording rather than trusted, and it is asked for every name in the
         list at once because a name that gains a `formal/hostmods/` model stops
         being this test's subject — which is a reason to be told, not a reason
-        to be quiet.  `traceback` was told about that way on 2026-10-05 and left
-        the list; see `_DEAD_ROW_MODULES`'s own comment for why, and for the
-        build measurement behind it.
+        to be quiet.  `traceback` was told about that way and left the list; see
+        `_DEAD_ROW_MODULES`'s own comment for why, and for the build
+        measurement behind it.
         """
         import formal.imports as I
         for name in _DEAD_ROW_MODULES:
@@ -628,7 +641,7 @@ class TestHostImportRowsAreNotDeadImports(unittest.TestCase):
     def test_the_other_rows_still_have_users(self):
         """The rows NOT in this section still have files that read the module.
 
-        A check over the `_DEAD_ROW_MODULES` names cannot see a fifth, and the
+        A check over the `_DEAD_ROW_MODULES` names cannot see a fourth, and the
         way it gets extended by accident is by widening the list. So the rows
         that share their shape and are NOT dead imports are asserted to have
         users — which is the statement that keeps them out.
@@ -2029,18 +2042,22 @@ class TestOleanCurrency(unittest.TestCase):
     Every case here is pure file-content arithmetic, so none of it runs Lean.
     """
 
-    # The real graph's SHAPE, which is the part that matters: TWO roots that
-    # import nothing from the set (`IEEE754` and `ProofLib` — `IEEE754` was
-    # added to the library and `LIBRARY_MODULES` with it, and it imports
-    # nothing at all, which is what `formal/lean.py`'s own comment says), a
-    # middle module, and two leaves that reach a root by different routes. Two
-    # modules importing `X86` is the case the defect was measured on — three
-    # modules rebuilt from one edit — and one importing only the root is what
-    # says the fix does not over-invalidate. `IEEE754` was MISSING here while
-    # `LIBRARY_MODULES` named it, which is the whole of the failure
-    # `test_the_fixtures_are_the_real_graph` was written to catch: a fixture
-    # missing a module exercises nothing about it, and the digest's walk is
-    # scoped to `LIBRARY_MODULES` so a name outside that tuple is invisible.
+# The real graph's SHAPE, which is the part that matters: TWO roots that
+    # import nothing from the set (`IEEE754` and `ProofLib` — `IEEE754` is
+    # FIRST in `LIBRARY_MODULES` precisely because it imports nothing at all,
+    # which is what `formal/lean.py`'s own comment says, and `ProofLib`'s
+    # `import Lean` is the version half of the key's business, deliberately
+    # outside the tuple), a middle module, and two leaves that reach a root by
+    # different routes. Two modules importing `X86` is the case the defect was
+    # measured on — three modules rebuilt from one edit — and one importing only
+    # the root is what says the fix does not over-invalidate.
+    #
+    # `IEEE754` was MISSING here while `LIBRARY_MODULES` named it, which is what
+    # `test_the_fixtures_are_the_real_graph` was written to catch: it asserts
+    # the two sets are EQUAL, so a library module with no fixture fails the
+    # check whose subject is that a fixture outside the set exercises nothing,
+    # and the digest's walk is scoped to `LIBRARY_MODULES` so a name outside
+    # that tuple is invisible. `d9269a0f` added the module and not the line.
     SOURCES = {
         "IEEE754": "",
         "ProofLib": "import Lean\n",
@@ -2147,8 +2164,19 @@ class TestOleanCurrency(unittest.TestCase):
 
         Editing `X86` — the case the defect was found on — rebuilds `work` and
         leaves `ProofLib` (27MB, ~80s) and the two modules that never import it
-        alone. Editing `ProofLib` rebuilds everything, because every other
-        module imports it, directly or through one hop.
+        alone. Editing `ProofLib` rebuilds everything that imports it, directly
+        or through one hop.
+
+        The second set is the five names that are not `IEEE754`, and saying so
+        is the point: `IEEE754` is FIRST in `LIBRARY_MODULES` because it imports
+        NOTHING, so editing the root leaves it exactly where it was. A reader who
+        expects six has imported `IEEE754`'s position in the library for its
+        place in the graph — which is the hazard this case states, and why the
+        assertion is written out rather than read off the fixture. The
+        fixture-set case is the same one with the sign flipped: when the fixture
+        was five and the library six, `test_the_fixtures_are_the_real_graph`
+        failed, because a fixture missing a module makes both answers a fact
+        about the fixture instead of about the library.
         """
         before = self._digests()
         self._edit("X86")

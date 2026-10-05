@@ -1158,26 +1158,27 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # wrong. `formal-x86-machine-model` is theirs and is real: it is the count
     # for the job they registered. `formal-receiver-position` is the FOURTH
     # drop, and it is the one this table's own history is about: the check
-    # below was BUILT because that marker's count ("2 of 12") understated what
-    # its file reported, and the marker outlived even that correction — the job
-    # went 33/33 green and an `expect=` on a passing test is reported as a
-    # FAILURE ("marked expect=… but it PASSES"). The marker is gone (with
-    # `bugs/TEST_formal_receiver_position_expect_marker_outlived_its_three_
-    # cases.md`, which said so), which is why its entry is gone here, and this
-    # is the same "a census that still states them fails on the registry's own
-    # state" the two above name.
+    # below was BUILT because that marker's count understated what its file
+    # reported, and the marker then outlived even the correction — the job went
+    # 38/38 green (measured on this tree) and an `expect=` on a passing test is
+    # reported as a FAILURE ("marked expect=… but it PASSES"). The marker is
+    # gone, which is why its entry is gone here, and this is the same "a census
+    # that still states them fails on the registry's own state" the two above
+    # name.
                      'coro-future-await': 17,
                      'formal-x86-machine-model': 1,
                      'gimple-async-runner': 36,
-                     'gimplerunner': 4,
+                     'gimplerunner': 3,
                      'mutable-async-capture': 2, 'nested-async-generic': 2,
                      'taskgroup': 3, 'transitive-closure-capture': 2,
                      'x86-containers': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '
-          f'is for. `gimplerunner` is the merge worker\u0027s 4 of 376 \u2014 the '
+          f'is for. `gimplerunner` is the merge worker\u0027s 3 of 376 — the '
           f'compile-and-execute rows that are interactions between the ten '
-          f'branches rather than a bug in any one of them (the census had to '
+          f'branches rather than a bug in any one of them; the count was 4 '
+          f'until 2026-10-04, when the dict-value-kind row it named was '
+          f'fixed (the census had to '
           f'learn it here too: adding a marker without adding its entry is '
           f'exactly the drift this check names). `formal-toplevel`, '
           f'`formal-module-attr` and '
@@ -1938,8 +1939,10 @@ def test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root():
 # It is a per-file list rather than a regex over `timeout=[0-9]+` because the
 # question at a site is which KIND of child it is — a COMPILE, a LINK, a RUN, a
 # sweep, or none of the four — and that is not decidable from the text. Measured
-# 2026-10-04 with python3 3.14: 205 sites over 57 files, after this tree's
-# `test_formal_sweep.py` (7) and `test_formal_libc_symbol.py` (1) were converted.
+# 2026-10-04 with python3 3.14: 206 sites over 58 files, after this tree's
+# `test_formal_sweep.py` (7) and `test_formal_libc_symbol.py` (1) were converted
+# and `test_formal_call_proof_gen.py` (1) joined the census — a `subprocess.run`
+# of an image the div0-guard case builds, added by `work/formal27-1`.
 # That is this predicate's census — a `timeout=` KEYWORD read off the AST, over
 # `is_test_file_name`, which is EITHER spelling and so also holds the two
 # `formal/*_test.py` and the one `scripts/*_test.py` — and it is smaller than
@@ -1969,6 +1972,7 @@ STALE_PER_CHILD_BUDGETS = {
     'test_dict_tuple_key.py': 3,
     'test_formal_admitted.py': 7,
     'test_formal_argparse.py': 6,
+    'test_formal_call_proof_gen.py': 1,
     'test_formal_cross_module.py': 2,
     'test_formal_dylib.py': 2,
     'test_formal_external_call.py': 1,
@@ -3993,19 +3997,32 @@ UNREGISTERED = {
     # -- python3 test_formal_hostmods_conformance.py`: **59 s wall, 0.1 GB
     # peak, 7 modules x 2 backends, 348 cases** -- cheap by the cost rule in
     # CLAUDE.md, so it wants a REGISTRATION rather than this excuse, and
-    # the row belongs to whoever registers it. Exact next step: `test(
+    # the row belongs to whoever registers it. **AND RED: an earlier version
+    # of this entry called it green, which was a lie with a mechanism.**
+    # `main()` fell off its end, so `sys.exit(main())` exited 0 with six of
+    # the seven groups printing `FAILED` -- nothing in the file could report
+    # a failure. Measured 2026-10-05 on work/merge-formal27a-r2, `1 of 7
+    # groups ok; FAILED: posixpath, textwrap, struct, shlex, re, html`, and
+    # all six report the SAME refusal (the encoding guard asked of a byte
+    # buffer, `bugs/FORMAL_the_encoding_refusal_is_asked_of_a_byte_buffer.md`),
+    # so it is six instances of one defect rather than six. `main()` returns
+    # 1 now, which is what makes the six visible to anything that reads an
+    # exit status. Exact next step: `test(
     # 'formal-hostmods-conformance', [PY,
     # 'test_formal_hostmods_conformance.py'], mem='tiny', deps=['preflight'],
     # extra=['test_formal_hostmods_conformance.py', 'formal'] +
     # FORMAL_BUILD_INPUTS, desc='every host module against CPython\'s OWN
-    # regression tests, the case table generated from them')`.
+    # regression tests, the case table generated from them')` -- and note
+    # that registering it as it stands turns a hidden red into a gate red,
+    # so the byte-buffer fix comes first.
     'test_formal_hostmods_conformance.py': 'The host-module CONFORMANCE '
         'table: every module in `formal/hostmods` whose CPython counterpart '
         'ships a regression suite, driven over the cases GENERATED from '
         'that suite rather than a hand-picked corpus, with CPython in this '
         'process as the oracle and both backends compared against each '
-        'other first. Cheap (59 s, 0.1 GB measured) and green, so it wants '
-        'registering rather than listing; the row is spelled out above.',
+        'other first. Cheap (59 s, 0.1 GB measured) and RED — 1 of 7 groups '
+        'ok, all six failures the same byte-buffer encoding refusal — so it '
+        'wants the fix before the registration; the row is spelled out above.',
     'test_formal_hostmods_census.py': 'The host-module census: every '
         '`formal/hostmods` module built as a program on BOTH backends, asserting '
         'that x86-64 is a SUBSET of arm64 — the one divergence a per-backend '

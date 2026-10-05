@@ -486,9 +486,9 @@ MEASURED_PEAK_GB = {
     'formal-target-queries':  (0.08, 'measured'),   # 5 s, 25 cases
     'formal-small-hosts':     (0.08, 'measured'),   # 5 s, 4 groups
     'formal-specialization':  (0.07, 'measured'),   # 1 s, 6 cases
-    'formal-method-param-field': (0.07, 'measured'),  # 9 s, 14 cases
+    'formal-method-param-field': (0.07, 'measured'),  # 21.5 s, 35 cases
     'formal-external-call':   (0.08, 'measured'),   # 3 s, 29 cases
-    'formal-receiver-position': (0.07, 'measured'),  # 2 s, 33 cases
+    'formal-receiver-position': (0.07, 'measured'),  # 15 s, 38 cases
     'formal-value-model':     (0.07, 'measured'),   # 9 s, 19 cases
     'formal-x86-dylib':       (0.09, 'measured'),   # 2 s, 9 cases
     # The x86-64 MACHINE MODEL against the hardware, which had never been run
@@ -552,6 +552,20 @@ MEASURED_PEAK_GB = {
     # RSS of the tree), measured by the kernel instead of by a sampler, and
     # three runs agreed to within 2 MB: 30.4, 29.8, 30.3.
     'formal-field-walk': (0.03, 'measured'),  # 0.08 s, 3 cases, no builds
+    # …and `formal-host-import-wall`, the fourth file the estate check named
+    # (2026-10-04, with `work/formal27-6`'s tool), measured the same way:
+    # three runs, `/usr/bin/time -l` because 0.46 s is shorter than memcap's
+    # own poll interval. 0.46-0.47 s wall and 48.3-50.1 MB maximum RSS —
+    # `tiny` by 80x over its 4 GB ceiling.
+    'formal-host-import-wall': (0.05, 'measured'),  # 0.46 s, 17 cases
+    # …and `formal-per-struct-asks`, named by the same estate check on the same
+    # day and for the same reason — a test in NO bucket and NO `UNREGISTERED`,
+    # so seven assertions about a per-FUNCTION ask of a per-STRUCT table were
+    # red in nobody's tally. Measured the same way: 0.95-0.98 s and 42.1-42.5 MB
+    # maximum RSS over three runs, `tiny` by 95x, no build and no Lean (it
+    # measures `formal/model.py`'s own predicates with the per-struct tables
+    # stubbed).
+    'formal-per-struct-asks': (0.04, 'measured'),  # 0.96 s, 7 checks
     # `formal-glob` is the other file the same estate check named on 2026-10-04,
     # measured the same way (three runs, two instruments): 40.7 s wall and
     # 65.6 MB maximum RSS, which memcap's own poll rounds to the 0.1 GB its
@@ -1318,11 +1332,22 @@ test('comptime-parity', [PY, 'test_comptime_parity.py'],
 test('returned-frame-layout', [PY, 'test_returned_frame_layout.py'],
      deps=['preflight'],
      desc="a frame that outlives its creator has a place to live, or is refused by name")
+# `formal/model.py`, `bugs/FORMAL_known_limits.md` and
+# `build_stdlib_dylib.py` are in `extra` because the check READS them, not
+# because the scanner does: `test_runtime_header_scan.py`'s census check
+# compares the figures those three quote in prose with `runtime_abi()`, and an
+# edit to any of them can make it red (it went red four ways on 2026-10-04 that
+# way). Without them in the key, `cache=True` would replay a recorded PASS over
+# exactly the edits that break it — the failure mode `extra` exists for, and one
+# the `cache key: cached spec X hashes its own test` check cannot see, because
+# that check only asks whether the spec hashes ITS OWN test.
 test('rthdrscan', [PY, 'test_runtime_header_scan.py'], cache=True,
      extra=['test_runtime_header_scan.py', 'reflect.py', RUNTIME_SRC,
             RUNTIME_HDR, 'runtime/fire_sqlite3.h', 'runtime/fire_zlib.h',
             'runtime/fire_ssl.h', 'runtime/fire_ncurses.h',
-            'runtime/fire_python.h'],
+            'runtime/fire_python.h',
+            'formal/model.py', 'bugs/FORMAL_known_limits.md',
+            'build_stdlib_dylib.py'],
      desc='runtime header export scan sees every declaration')
 # `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
 # the ratchet, and the reason it needed a measurement to be safe.
@@ -1461,28 +1486,39 @@ test('nonlocal', [PY, 'test_nonlocal.py'], cache=True,
 # the same `small`-workload shape `test_gimple.py` is, and a cap on a job
 # that never loads the whole closure buys nothing (see the MEMCLASS note).
 # Marked `expect=` rather than `disabled=`, and the reason is what the two
-# markers are FOR: this job's answer is not known, only four of its cases are
+# markers are FOR: this job's answer is not known, only three of its cases are
 # (the TOTAL moves as cases are added — 378 when this was written, 380 after the
 # merge of work/bugs-segfaults-r2 — which is why it is prose and not the
-# count the runner CHECKS, which is the 4), and it is the only instrument in the
+# count the runner CHECKS, which is the 3), and it is the only instrument in the
 # tree that compiles a real Mojo program and EXECUTES it. `disabled=` would stop
-# every case for the sake of the 4, trading ~376 passing rows of signal for a
+# every case for the sake of the 3, trading ~380 passing rows of signal for a
 # tidier screen — which is the
 # coverage hole the marker exists to prevent, not create. Cost is not the
 # blocker `disabled=` is for either: 0.2 GB and 270 s is not a machine-sized
 # reservation being spent on a known answer.
 #
-# The 4 are not bugs in the branch that added them — each passes there — but
+# The 3 are not bugs in the branch that added them — each passes there — but
 # interactions the merge of ten branches exposed, so the marker is a count-
-# CHECKED claim: a 5th failure, or a fix that leaves 3, is a FAILURE rather
-# than silently absorbed, and a run where all 4 are fixed reports "marked
+# CHECKED claim: a 4th failure, or a fix that leaves 2, is a FAILURE rather
+# than silently absorbed, and a run where all 3 are fixed reports "marked
 # expect= … but it PASSES". Each has its reproduction and next step in
 # bugs/MERGE_bugs4_gimplerunner_four_remaining.md.
+#
+# The count was 4 until 2026-10-04 (`work/bugs7-1`). The fourth,
+# `gimple_dict_repr_kinds_agree_with_cpython`, was the last line of an otherwise
+# passing program: `'%s' % d` lowered its dict operand to an `int64_t` and
+# emitted it straight into a `MojoDict *` parameter — "passing argument 2 of
+# 'mojo_str_format_dict' makes pointer from integer without a cast", which is a
+# build failure and so took out the three correct lines above it. Both halves of
+# that are now right (the operand is coerced to the parameter type, the way the
+# LHS already was; and an unkeyed spec renders the mapping, because CPython's
+# rule for `'%s' % d` is `str(d)` — the doc's "CPython TypeError" claim was
+# measured false), and the row is green. The doc's §3 records what landed.
 test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True,
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
-     expect='4 failing: compile-and-execute rows the merge of ten branches '
+     expect='3 failing: compile-and-execute rows the merge of ten branches '
             'left red — none fails on the branch that added it; see '
             'bugs/MERGE_bugs4_gimplerunner_four_remaining.md',
      desc='compile-and-execute: plain programs, structs, closures, stdlib calls')
@@ -2683,37 +2719,47 @@ test('formal-method-param-field', [PY, 'test_formal_method_param_field.py'],
 # that removed it: an `expect`-marked test that PASSES is reported as a
 # FAILURE.** All three cases it forgave are answered on this tree, each by a
 # case that asserts something TRUE rather than by the case being dropped, and
-# the file is 33/33 green (measured, both backends, `python3
-# test_formal_receiver_position.py`):
+# the file is 38/38 green — measured here, both backends, three runs at
+# 14.8-17.4 s:
+#
+#     $ python3 tools/memslot.py --gb 8 --label rp -- \
+#           python3 test_formal_receiver_position.py
+#     formal receiver position: PASS=38 FAIL=0
 #
 #   * a specialized call that hands a RECEIVED frame address back now BUILDS,
 #     because the creator of a returned holder is an ancestor of the CALLER —
 #     every channel that would let it outlive the creator is still refused, and
 #     the case moved to `test_formal_returned_frame.py` as
 #     `received_frame_handed_back_through_a_specialized_parameter` (a
-#     differential against CPython, both backends) because what it adds is new
-#     there: a comptime parameter SHIFTS the argument positions, so the hidden
-#     trailing word has to land after the last of them;
+#     differential against CPython, both backends, 46/46 green here) because
+#     what it adds there is new: a comptime parameter SHIFTS the argument
+#     positions, so the hidden trailing word the convention adds has to land
+#     after the last of them;
 #   * the value-only-callee case stopped being about `origin_of` — that became
 #     `FRAME_IDENTITY_CALLS` and `_rewrite_identity_intrinsic_calls` erases it
 #     to its operand, so there is no value-only callee in the program and what
 #     it does is hand a received frame out of the ENTRY. It is
 #     `refuse_a_received_frame_returned_out_of_the_entry`, and the needle is
-#     that sentence rather than an edit;
+#     that sentence rather than an edit — which is what §6 item 1 of the doc
+#     that recorded the defect asked for;
 #   * the dotted specialization stopped at a module-state refusal before
 #     reaching the specialization check its needle wanted, which was the
 #     "stopped at the wrong check" half. `refuse_a_method_with_parameters_and_
 #     no_receiver` and `refuse_a_method_call_on_a_subscripted_receiver` are the
 #     two shapes it now answers, and the argument-binding off-by-one that made
-#     the first of them report a false refusal (`Box_run(bx, 0, r)` passes the
-#     literal 0, which it does not) is fixed in
-#     `model.method_declares_receiver`.
+#     the first report a false refusal (`Box_run(bx, 0, r)` passes the literal
+#     0, which it does not) is fixed in `model.method_declares_receiver`.
+#
+# None of the three ROWS is in the file any more, so a reader who goes looking
+# for them finds the replacements the bullets name. That is also why the doc
+# that recorded the defect is deleted rather than left with a Status: a fixed
+# bug still listed is indistinguishable from an open one.
 #
 # What the marker was FOR, and why its absence is not a hole: the defect it
 # named was that a construct with no representation BUILDS instead of being
 # refused, and the measured symptom of that is a case in this file going from a
 # refusal to a differential that disagrees with CPython. `run_diff_case` is what
-# catches it, and it is in the file.
+# catches that, and it is in the file.
 test('formal-receiver-position', [PY, 'test_formal_receiver_position.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_formal_receiver_position.py', 'formal/build.py',
@@ -3079,6 +3125,47 @@ test('formal-field-walk', [PY, 'test_formal_field_walk.py'], mem='tiny',
             'formal/imports.py', 'formal/build.py',
             'tools/formal_field_walk_differential.py'] + FORMAL_BUILD_INPUTS,
      desc='iter_statement_nodes against the full walk, 61 statement shapes')
+# The host-import WALL's READERS, not its numbers. `tools/formal_host_import_wall.py`
+# was promoted out of scratch by `work/formal27-6` and three bug docs had already
+# described it in prose, which is the shape a measurement's readers drift in: an
+# `ast`-based walk calls `traceback` a 38-file row where the backend says 0, and
+# a "could not be read" that returns `[]` reads as "imports nothing". So what is
+# pinned is the SET OF READERS — `imported_modules` really wants the node classes,
+# an unreadable file is `None`, `--unmodelled` is the before/after instrument,
+# `alone` means the only wall and not the first found. The numbers themselves are
+# deliberately NOT pinned; a snapshot of one is red within a week and means
+# nothing when it goes green.
+#
+# Registered rather than excused: 17 cases, 0.36 s, peak 0.0 GB, no build and no
+# Lean (`test_formal_host_import_wall.py`'s own docstring says so), so it is in
+# `check` for the `formal-field-walk` reason — at this price an excuse is the
+# wrong answer — and in `proofs` so the formal bucket is the whole picture.
+test('formal-host-import-wall', [PY, 'test_formal_host_import_wall.py'],
+     mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_host_import_wall.py', 'formal/imports.py',
+            'tools/formal_host_import_wall.py',
+            'tools/formal_sweep_causes.py'] + FORMAL_BUILD_INPUTS,
+     desc='the host-import wall tool: which readers it asks, not its numbers')
+# The other file the same estate check named on the same day, registered on
+# the same reasoning rather than excused: seven assertions that a per-STRUCT
+# predicate (`struct_is_framed`, `struct_is_one_field`, `struct_field_names`) is
+# not asked once per FUNCTION — the shape 43 508 redundant derivations on
+# `myinterpreter.py` measured, and the two surviving per-function askers the fix
+# left behind are what this pins. 0.96 s, no build, no Lean, so `check`.
+#
+# `cache=True` is right HERE and wrong for most of the formal suite: this job
+# has no build, no Lean and no artifact, so its inputs are its `extra` list and
+# nothing else, and at 0.96 s re-running it every gate buys nothing. The `extra`
+# names the two modules whose tables are under test plus the parser inputs,
+# because the check counts asks made BY `formal/build.py` while it parses
+# `myinterpreter.py` — an edit to any of them must not replay a recorded PASS.
+test('formal-per-struct-asks', [PY, 'test_formal_per_struct_asks.py'],
+     mem='tiny', cache=True,
+     deps=['preflight'],
+     extra=['test_formal_per_struct_asks.py', 'formal/model.py',
+            'formal/build.py'] + FORMAL_BUILD_INPUTS,
+     desc='a per-struct predicate is asked once per struct, not once per function')
 # `glob`, differential against CPython's own. Registered rather than excused
 # twice over: this name was registered by two commits that each registered two
 # test files nobody had registered before (5b2e62c3 and 574d9135), and because
@@ -3243,6 +3330,15 @@ BUCKETS = {
               # loop; `formal-glob` is deliberately NOT here (31.8 s, two
               # machines per group).
               'formal-field-walk',
+              # The host-import WALL's readers. 17 cases, 0.36 s, no build and
+              # no Lean, so the `formal-field-walk` rule puts it in the everyday
+              # loop; it arrived with `work/formal27-6` in NO bucket and NO
+              # `UNREGISTERED`, which is what the estate check named.
+              'formal-host-import-wall',
+              # …and `formal-per-struct-asks`, named by the estate check on the
+              # same day for the same reason: in NO bucket and NO
+              # `UNREGISTERED`. 7 checks, 0.96 s, no build, no Lean.
+              'formal-per-struct-asks',
               # The suite tests ITSELF, and so does the inventory of what runs.
               # Both were in `smoke`, which is in no bucket, so `make gate`
               # never executed either — and `suite-self-test` is where the
@@ -3416,6 +3512,18 @@ BUCKETS = {
                # difference between an absent value and a value, and a wrong one
                # is a program that runs and answers the wrong thing.
                'formal-optional',
+               # …and `formal-host-import-wall`, which arrived with
+               # `work/formal27-6`'s tool in neither a bucket nor
+               # `UNREGISTERED`. It pins WHICH READERS
+               # `tools/formal_host_import_wall.py` asks and not the numbers it
+               # prints, and it is in `check` rather than only here for the
+               # `formal-field-walk` reason: no build, no Lean, 0.36 s.
+               'formal-host-import-wall',
+               # …and `formal-per-struct-asks`, in both buckets for the
+               # `formal-field-walk` reason — the estate check named it in NO
+               # bucket and NO `UNREGISTERED`, and at 0.96 s with no build an
+               # excuse is the wrong answer.
+               'formal-per-struct-asks',
                # …and the two that arrived with the formal3 batch and were in
                # NO bucket and NO `UNREGISTERED`, which is what the estate check
                # in `suite-self-test` was reporting — and it is a FAIL on a test

@@ -2659,6 +2659,37 @@ CASES = [
      "    printf(\"[%s]\\n\", f\"n={k}\")\n"
      "    return 0\n",
      "refuse:an f-string literal", None),
+    # THE ADVICE, and it is here because the refusal NAMES a rewrite and a
+    # rewrite nobody has run is a guess. The message used to say "print the
+    # parts as separate operands, or build the text with `+`", and both halves
+    # are wrong about this path: `print("n=", n)` inserts a SPACE between its
+    # operands, so it prints `n= 7` where the f-string printed `n=7` — a
+    # wrong-but-exit-0 answer, which is the one failure this suite exists to
+    # catch and the worst thing a refusal can advise — and `+` on two strings
+    # is refused by `str_concat_refused` for the same missing buffer, so it is
+    # not a way round it.
+    #
+    # What the message says instead is `printf("n=%d", n)`, and THIS is that
+    # case: the advice, spelled as the program it names, required to build and
+    # to print CPython's text on both architectures. If a future change makes
+    # `printf` with a composed-looking format stop being the same text, this
+    # fails rather than the advice quietly becoming a lie.
+    ("fstring_the_advice_works_printf_takes_the_value_as_an_argument",
+     "def main(n):\n"
+     "    k = 7\n"
+     "    printf(\"n=%d\\n\", k)\n"
+     "    return 0\n", 0, "n=7\n"),
+    # …and the anti-rot half, in the same program: the advice says `print` is
+    # NOT the rewrite, and this is what it does instead. `n= 7` against CPython's
+    # `n= 7` — same, because CPython's `print` inserts the same space, which is
+    # the point: the two languages AGREE here and neither is the f-string's
+    # text. A reader who followed the old advice got a different answer from
+    # CPython; a reader who follows this one does not.
+    ("fstring_print_of_two_operands_is_not_the_rewrite",
+     "def main(n):\n"
+     "    k = 7\n"
+     "    print(\"n=\", k, end=\"\")\n"
+     "    return 0\n", 0, "n= 7"),
     # The t-string, which is the OTHER prefix that keeps its token and the same
     # reader: one case each, because the two are different literals with
     # different messages and a rule that caught only `f` would leave `t` printing
@@ -7010,7 +7041,8 @@ BOTH_ARCH_CASES = [
     # only one of them was a build crash:
     #
     #   * `100000` does not fit MOVZ's 16-bit unsigned field, and the arm64
-    #     emitter reached for `encode_movz_xn_imm` directly instead of this
+    #     emitter reached for the immediate MOVZ (`encode_movz_wd_imm`, called
+    #     `encode_movz_xd_imm` at the time) directly instead of this
     #     backend's own `_emit_mov_imm`, so it died on `assert 0 <= imm16 <=
     #     0xffff`. x86-64 was fine — its three twins all call `_emit_mov_imm`.
     #     A wide default has been buildable on one architecture and not the
@@ -10709,6 +10741,15 @@ CONSTRUCTION_CASES = [
     # enclosing `finally` clauses and exits). What this row pins is that the
     # BUILD accepts the construction at all — before the merge this was a
     # refusal on both architectures, byte for byte.
+    #
+    # The `try`/`except` this used to carry is gone for the same measured
+    # reason as (3)'s: an arm that cannot be entered is now refused before
+    # anything is emitted, and this row's subject is where the MESSAGE goes
+    # (`Plain5(Exception)` inherits `args`, so `Plain5("m")` carries it) rather
+    # than what an unreachable arm does with it. `want_stdout=None` because a
+    # raise prints nothing here and CPython's traceback goes to stderr, which
+    # this suite does not compare: the claim is the exit status, which is 1 in
+    # both languages for an exception nothing catches.
     ("constr_an_exception_carries_its_message",
      "struct Plain5(Exception):\n"
      "    \"\"\"no fields at all\"\"\"\n"
@@ -10717,10 +10758,7 @@ CONSTRUCTION_CASES = [
      "    raise Plain5(\"the message\")\n"
      "\n"
      "def main(n):\n"
-     "    try:\n"
-     "        boom5()\n"
-     "    except:\n"
-     "        pass\n"
+     "    boom5()\n"
      "    return 0\n", 1, None),
     # The same with a field of its own, which is the boundary the doc measured:
     # `args` is inherited FIRST, so the message goes where CPython puts it and
@@ -11845,9 +11883,13 @@ CONSTRUCTION_REFUSALS = [
     # …and THE SAME CALL SPECIALIZED, which is the row above's twin and the
     # reason it is here. `mklist[1]()` names the same function as `mklist()` —
     # `formal/model.py::call_callee_name` is the tree's one reader of exactly
-    # that — `formal/model.py::call_callee_name` and the four readers it was
-    # extracted for are the tree's one statement of it, and the two spellings of
-    # one argument have to get one answer.
+    # that, and it is one reader because a specialization is a frame escape in
+    # general: `f[T](r)` put a frame address at an ARGUMENT position and
+    # bypassed both the returned-frame and the value-only-callee refusals,
+    # which is what made one reader for the subscript callee worth having.
+    # `call_callee_name` and the four readers it was extracted for are the tree's
+    # one statement of it, so the two spellings of one argument have to get one
+    # answer.
     #
     # They did not, and they got it in the PERMISSIVE direction, which is the
     # expensive one: `model._callee_container_evidence` read the callee with
@@ -12130,7 +12172,40 @@ CONSTRUCTION_REFUSALS = [
     # about a class whose missing fields are not the problem: it INHERITS them.
     # The needle is the base's NAME, because that is what the reader has to go
     # and look for.
+    #
+    # The `try`/`except` this program used to carry is GONE, and that is a
+    # measured consequence rather than tidying: `formal/build.py` refuses a
+    # `try` that can reach a raise BEFORE anything is emitted (the same place,
+    # and for the same reason, as the handler-arm refusal beside it), while the
+    # construction arity is decided per call site during code generation — so
+    # the arm's sentence used to arrive first and this row stopped testing the
+    # base clause it exists for. `constr_the_arm_refusal_precedes_the_base_clause`
+    # below is that ordering, pinned; this row keeps the base clause's coverage.
     ("constr_refuse_an_undeclared_base_by_name",
+     "class MyErr(Widget):\n"
+     "    \"\"\"no fields at all\"\"\"\n"
+     "\n"
+     "def boom():\n"
+     "    raise MyErr(\"the message\")\n"
+     "\n"
+     "def main(n):\n"
+     "    boom()\n"
+     "    return 0\n",
+     "refuse:derives from 'Widget', which this image does not declare", None),
+    # The ORDERING, and it is a decision rather than an accident of where two
+    # checks happen to sit. This program is (3) with the `try` left in, and it
+    # was (3)'s row until the arm refusal landed and took it: the class still
+    # cannot be constructed, and a reader who is told about the arm first has to
+    # read a second message to learn that. Both sentences are TRUE of the
+    # program, and the more useful one is the one that names the class.
+    #
+    # So the arm's refusal is asked FIRST — it is a fact about CONTROL FLOW that
+    # holds whatever the callee is, while the arity is a fact about one call
+    # site — and the base clause keeps its own row for the program that has no
+    # `try` in it. Reordering the two checks would put the base sentence first
+    # here and cost the arm refusal its pre-emption over every OTHER
+    # construct-time refusal, which is the same trade with a worse direction.
+    ("constr_the_arm_refusal_precedes_the_base_clause",
      "class MyErr(Widget):\n"
      "    \"\"\"no fields at all\"\"\"\n"
      "\n"
@@ -12143,7 +12218,7 @@ CONSTRUCTION_REFUSALS = [
      "    except:\n"
      "        pass\n"
      "    return 0\n",
-     "refuse:derives from 'Widget', which this image does not declare", None),
+     "refuse:cannot catch it, so the `try` is refused", None),
     # (3a) The NEGATIVE half of (3), and it is what keeps (3) from being a
     # blanket rule. `ValueError` is an UNRESOLVED base by exactly the test that
     # makes `Widget` one — nothing in this image declares it — and it must still
@@ -12160,8 +12235,9 @@ CONSTRUCTION_REFUSALS = [
     # directly, which is the point twice over: the two differ by one name and
     # must not come to the same verdict, and what is pinned here is the ARITY
     # path (the subject of (3)) rather than what a raised exception does at run
-    # time — `bugs/FORMAL_an_exception_subclass_of_a_builtin_base_builds_and_
-    # then_dies.md` is that separate subject, measured.
+    # time. That separate subject was measured and is (3b) below: a RAISED
+    # `MyErr(ValueError)` is not a construction question at all, and the answer
+    # it needed was about a control-flow edge rather than about the base.
     ("constr_an_unresolved_BUILTIN_base_still_constructs",
      "class MyErr(ValueError):\n"
      "    \"\"\"no fields at all\"\"\"\n"
@@ -12170,6 +12246,96 @@ CONSTRUCTION_REFUSALS = [
      "    var e = MyErr(\"the message\")\n"
      "    print(\"built\")\n"
      "    return 0\n", 0, "built"),
+    # (3b) What a RAISED exception does at run time, which (3a) deliberately does
+    # not pin. The program is (3)'s, and it BUILT and then died: `exit=1`, no
+    # output, the arm never entered, against CPython's `caught` / 0. The arm is
+    # `except: pass`, so `refuse_dropped_handler_arm` does not fire on it (there
+    # is nothing in the arm to drop) and the `try` was emitted with its arms
+    # skipped — the two halves of that are each defensible alone and together
+    # they are a `try` that catches nothing and a program that stops where
+    # CPython does not.
+    #
+    # The subject is the MISSING EDGE and not the base: `raise` is
+    # `_emit_diverge` — flush the pending `finally` clauses, `exit(1)` — from
+    # whatever function holds it, so no frame anywhere can catch one, and the
+    # statements after the `try` are simply not in the image. The refusal is
+    # asked through the module's own call graph, because the `raise` is in
+    # `boom` and `try: boom()` contains no `raise` at all.
+    #
+    # (3c) is the half that says so: the same program with the base DECLARED
+    # here, which is the shape `MyErr(Widget)` above is refused for and which
+    # used to be the natural suspect. It answers identically, so the cause is
+    # not the base's visibility and no `struct_unresolved_bases` clause belongs
+    # in the message.
+    ("constr_refuse_a_raise_a_try_arm_cannot_catch",
+     "class MyErr(ValueError):\n"
+     "    \"\"\"no fields at all\"\"\"\n"
+     "\n"
+     "def boom():\n"
+     "    raise MyErr(\"the message\")\n"
+     "\n"
+     "def main(n):\n"
+     "    try:\n"
+     "        boom()\n"
+     "    except:\n"
+     "        pass\n"
+     "    print(\"caught\")\n"
+     "    return 0\n",
+     "refuse:cannot catch it, so the `try` is refused", None),
+    ("constr_refuse_a_raise_a_try_arm_cannot_catch_with_a_declared_base",
+     "class Base:\n"
+     "    var msg: String\n"
+     "\n"
+     "class MyErr(Base):\n"
+     "    var code: Int\n"
+     "\n"
+     "def boom():\n"
+     "    raise MyErr(\"the message\", 7)\n"
+     "\n"
+     "def main(n):\n"
+     "    try:\n"
+     "        boom()\n"
+     "    except:\n"
+     "        pass\n"
+     "    print(\"caught\")\n"
+     "    return 0\n",
+     "refuse:cannot catch it, so the `try` is refused", None),
+    # (3d) The NEGATIVE half of (3b), and the reason (3b) is a refusal about a
+    # CONTROL-FLOW EDGE rather than about exceptions: with no arm in the picture
+    # `exit(1)` IS what CPython does, and this program agrees with it exactly —
+    # no output, status 1, on both backends, against the same text run by
+    # CPython (which writes its traceback to stderr, which this suite does not
+    # compare; stdout and the status are the whole of the claim).
+    #
+    # A fix that refused every `raise` would pass (3b) and fail this one, and
+    # would take every `raise` in the corpus with it.
+    ("constr_an_uncaught_raise_outside_a_try_is_status_1",
+     "class MyErr(ValueError):\n"
+     "    \"\"\"no fields at all\"\"\"\n"
+     "\n"
+     "def boom():\n"
+     "    raise MyErr(\"the message\")\n"
+     "\n"
+     "def main(n):\n"
+     "    boom()\n"
+     "    printf(\"v=%d\", n)\n"
+     "    return 0\n", 1, ""),
+    # (3e) And the other negative: an arm around a call that CANNOT raise is
+    # still emitted, arms and all, because there is nothing to catch and nothing
+    # to lose. Without this row the refusal above reads as "a `try` with an arm
+    # is refused", which is a different and much larger rule — `except OSError:`
+    # around I/O is the commonest shape in the corpus.
+    ("constr_a_try_arm_around_a_call_that_cannot_raise_still_builds",
+     "def helper(n):\n"
+     "    return n * 2\n"
+     "\n"
+     "def main(n):\n"
+     "    try:\n"
+     "        printf(\"v=%d\", helper(n))\n"
+     "    except:\n"
+     "        pass\n"
+     "    print(\"after\")\n"
+     "    return 0\n", 0, "v=20after"),
     # (4) What the merge CANNOT do, and the reason this is a refusal and not a
     # gap in the merge: a method is compiled against the layout of the class
     # that DECLARES it, and a call site carries no receiver type to check with,
@@ -14261,20 +14427,28 @@ POINTER_DEREF_CASES = [
      "    if read_back(mid, 1) != 5208208757389214273:      # …b'ABCDEFGH'\n"
      "        return 2\n"
      "    return 0\n", 0, None),
-]
 
-POINTER_DEREF_REFUSALS = [
-    # A STRUCT pointee.  The derivation is RIGHT — a struct's value on this path
-    # is a frame address, so the receiver already is the pointee, the same
-    # identity `Pointer()` gives — and it is refused because nothing recognises
-    # a name bound through a pointer as a frame holder, so `q.b` off the result
-    # reads a word of nothing.  Measured with the identity emitted: 0 on both
-    # architectures where the source says 22.  This is the frame-lifetime trap:
-    # a `Pointer[SomeStruct]` IS a frame address, so letting one be dereferenced
-    # without the holder analysis is a use-after-free wearing a pointer's
-    # clothes.  The refusal says all of that, and the next step is one line in
-    # `formal/build.py`'s holder fixpoint rather than a value-model change.
-    ("deref_refuse_struct_pointee",
+    # ── a STRUCT pointee, which is the IDENTITY rather than a load ─────────
+    #
+    # Six cases for one decision, and the reason there are six is that a frame
+    # has FIVE ways of being touched and this is the first path on which all of
+    # them work.  `p.value()` on a `Pointer[SomeStruct]` used to be REFUSED with
+    # a message that named its own reason exactly: nothing recognised a name
+    # bound through a pointer as a frame holder, so `q.b` off the result read a
+    # word of nothing — measured, 0 on both architectures where the source says
+    # 22.  `model.pointer_frame_pointee` is the recognition, and it has three
+    # consumers which between them cover the five touches: `_frame_receivers`
+    # seeds the name (`pointer_frame_bindings`), `_frame_return_status` counts a
+    # `return` of one as returning a FRAME, and both backends emit the receiver
+    # and nothing else.
+    #
+    # The direct spelling `p.value().b` comes first because it is the shape the
+    # refusal's own reproducer used, and it is the one that needs no name: the
+    # field read is one `LDR`/`mov` at `[address, 8*slot]` straight after the
+    # receiver is evaluated.  22, not 0 and not `a` — a load at the frame's
+    # FIRST slot would answer `a`, which is 0 here, so this case cannot tell a
+    # right answer from a right-looking one and the next one is what does.
+    ("deref_struct_pointee_is_the_receiver",
      "struct P3:\n"
      "    var a: Int64\n"
      "    var b: Int64\n"
@@ -14284,11 +14458,225 @@ POINTER_DEREF_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    var t = P3()\n"
      "    t.b = 22\n"
-     "    return read_field(t)\n",
-     "refuse:a STRUCT, and a struct's value on this path is a frame ADDRESS", None),
-    # A BINARY32 pointee.  "no float kind distinct from an int" is TRUE of it and
-    # only of it: `FLOAT_KIND` is binary64, and a `Float32`'s four bytes are not
-    # a double's eight, so a word holding one still has no kind here.
+     "    return read_field(t)\n", 22, None),
+    # The NAMED spelling, which is the recognition the refusal asked for and the
+    # one every later case is built on: `q` is a frame holder, so `q.b` is a
+    # frame slot and the whole existing machinery — layouts, escapes, nested
+    # frames — applies to it unchanged.  The two are separate cases because they
+    # are two lowerings (an emitter arm and a holder-table entry), and a
+    # one-sided fix here is the shape that reads as finished.
+    ("deref_struct_pointee_through_a_name_is_a_holder",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "def read_field(p: Pointer[P3]) -> Int:\n"
+     "    var q = p.value()\n"
+     "    return Int(q.b)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    t.b = 22\n"
+     "    return read_field(t)\n", 22, None),
+    # A STORE through the named holder, and the part of it worth pinning is the
+    # SECOND assertion inside the program: `bump` writes `t.b` in the CALLER's
+    # frame, so the value has to be visible there.  A store through a pointer
+    # that landed in the callee's own scratch would answer 41 and leave `t.b`
+    # at 0, which is a wrong answer with no diagnostic — so the program returns
+    # 90+41 in that case and 41 when it is right.
+    ("deref_struct_pointee_store_through_a_name_reaches_the_caller",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "def bump(p: Pointer[P3]) -> Int:\n"
+     "    var q = p.value()\n"
+     "    q.b = 41\n"
+     "    return Int(q.b)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    var got = bump(t)\n"
+     "    if t.b != 41:\n"
+     "        return 90 + got\n"
+     "    return got\n", 41, None),
+    # The same store spelled directly, `p.value().b = 41`.  It exists because
+    # the READ being answerable makes the store's old refusal FALSE: that
+    # sentence said "this path has no way to say what 'p.value(...)' holds", and
+    # after the read arm it plainly can.  A diagnostic that is false about the
+    # program is worse than a missing one, so the store arm is not optional
+    # tidiness — it is what keeps the message true.
+    ("deref_struct_pointee_store_directly_is_one_slot_store",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "def bump(p: Pointer[P3]) -> Int:\n"
+     "    p.value().b = 41\n"
+     "    return Int(p.value().b)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    var got = bump(t)\n"
+     "    if t.b != 41:\n"
+     "        return 90 + got\n"
+     "    return got\n", 41, None),
+    # `+=` through the named holder, which goes through no new code at all: the
+    # name is in `_frame_slots`, so `_load_var`/`_store_var` resolve
+    # `q.b += 5` as the load/op/store they always were.  It is here because it
+    # is the cheapest possible evidence that the recognition went into the
+    # EXISTING tables rather than beside them — a name special-cased in the
+    # emitter would answer this and nothing else.
+    ("deref_struct_pointee_augmented_through_a_name",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "def bump(p: Pointer[P3]) -> Int:\n"
+     "    var q = p.value()\n"
+     "    q.b += 5\n"
+     "    return Int(q.b)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    var got = bump(t)\n"
+     "    if t.b != 5:\n"
+     "        return 90 + got\n"
+     "    return got\n", 5, None),
+    # `return p.value()` — the frame-LIFETIME half, and the case that says why
+    # the answer above is safe rather than merely reachable.  Without
+    # `_frame_return_status` recognising it, `give` was classified
+    # `_RETURN_WORD`: no caller reserved a block, the callee copied into a
+    # register it was handed by accident, and the address of the CALLER's frame
+    # came back as a plain word.  With it, the block is in the caller's scratch
+    # and the frame is COPIED into it — which is why `u.b` is 7 here and would
+    # be reclaimed stack if the convention did not apply.
+    ("deref_struct_pointee_returned_is_copied_into_the_callers_block",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "def give(p: Pointer[P3]) -> P3:\n"
+     "    return p.value()\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    t.b = 7\n"
+     "    var u = give(t)\n"
+     "    return Int(u.b)\n", 7, None),
+]
+
+POINTER_DEREF_REFUSALS = [
+    # A ONE-FIELD STRUCT pointee, which is the half of the struct-pointee
+    # question that stays refused, and it is a DIFFERENT fact rather than a
+    # half-answer: a struct of one field has no frame — its value IS its own
+    # field — so there is nothing at the address, and the identity would be
+    # wrong rather than right.  `struct_is_framed` is the one test for the two,
+    # as everywhere else on this path.  It is pinned here because the
+    # multi-field case is now ANSWERED (`deref_struct_pointee_is_the_receiver`
+    # and its five siblings), so without this row nothing would say where the
+    # answer stops.
+    ("deref_refuse_one_field_struct_pointee",
+     "struct One:\n"
+     "    var v: Int64\n"
+     "def read_one(p: Pointer[One]) -> Int:\n"
+     "    return Int(p.value().v)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    return read_one(s)\n",
+     "refuse:a one-field struct whose value on this path is the word itself",
+     None),
+    # The frame-LIFETIME half of the same question, and the one that says the
+    # answered case above is safe rather than merely reachable: a name bound
+    # from `p.value()` is a frame HOLDER, and every channel that would carry a
+    # frame address past its creator is already refused for a holder.  This is
+    # that channel — a store into another object's field, where the slot outlives
+    # the frame by however long the object lives.  Without the recognition this
+    # program built and `o.held` held the address of `main`'s own frame.
+    ("deref_refuse_a_pointer_frame_stored_in_a_field",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "struct Box:\n"
+     "    var inner: Int64\n"
+     "    var held: Pointer[P3]\n"
+     "def park(p: Pointer[P3], o: Box) -> Int:\n"
+     "    var q = p.value()\n"
+     "    o.held = q\n"
+     "    return Int(q.b)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    var o = Box()\n"
+     "    return park(t, o)\n",
+     "refuse:is stored in the field 'o.held'", None),
+    # A field the pointee's struct does NOT declare, in both the read and the
+    # store spelling.  They are here for the SENTENCE rather than the refusal:
+    # both backends raise these from `model.pointer_frame_member_refusal` /
+    # `…_store_refusal`, one function each for the same reason
+    # `model.member_access_refusal` is one function — a construct the two
+    # machines newly answer has to refuse with the same WORDS, and a message
+    # written out at four sites (two machines × read and store) is four texts
+    # that agree until one of them is edited.
+    ("deref_refuse_a_field_the_struct_pointee_does_not_declare",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "def read_bad(p: Pointer[P3]) -> Int:\n"
+     "    return Int(p.value().zz)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    return read_bad(t)\n",
+     "refuse:reads 'zz' out of a P3 this pointer points at, and that struct's",
+     None),
+    ("deref_refuse_a_store_into_a_field_the_struct_pointee_does_not_declare",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "def store_bad(p: Pointer[P3]) -> Int:\n"
+     "    p.value().zz = 5\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    return store_bad(t)\n",
+     "refuse:stores into 'zz' of a P3 this pointer points at, and that struct's",
+     None),
+    # `p.value().b += 5` — the ONE shape of this family that is still refused,
+    # and it is pinned so it is a recorded limit rather than a surprise.  The
+    # augmented-assignment arm works from a NAME (`_load_var`/`_store_var` on a
+    # `_frame_slots` key), and a base that is an EXPRESSION has no name to key
+    # on, so the two backends refuse it from their own augmented arms.  Their
+    # WORDS differ, which is a pre-existing divergence in that diagnostic and not
+    # one of the pointer model's — hence `refuse_either:` with both needles
+    # rather than one, which is the honest encoding of "refused on both, and the
+    # two disagree about how they say so".  The named spelling is answered:
+    # `deref_struct_pointee_augmented_through_a_name`.
+    #
+    # **x86-64's half of `refuse_either:` is master's WORDS, not the ones this
+    # row was written against.**  It used to say "augmented assignment target
+    # must be a plain name on the formal x86-64 path", which is FALSE about the
+    # file: a `MemberExpr` target IS lowered when the member is a frame slot, so
+    # the real premise is the BINDING OF THE BASE — and that is what the shared
+    # `model.member_access_refusal` says, which is what the arm now raises
+    # (`_refuse_member_target`).  arm64 has not caught up and still refuses from
+    # its own augmented arm, which is the divergence this encoding records.  The
+    # needle is the clause that names the BASE rather than the whole sentence,
+    # for the reason every other needle in this file is a clause: the sentence
+    # is one function's and the clause is the fact.
+    ("deref_refuse_augmented_through_a_pointer_frame",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "def bump(p: Pointer[P3]) -> Int:\n"
+     "    p.value().b += 5\n"
+     "    return Int(p.value().b)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    return bump(t)\n",
+     "refuse_either:unsupported augmented assignment target on the formal arm64"
+     " path|is a field access through 'p.value(...)'", None),
+    # A FLOAT pointee.  A formal value has no float kind distinct from an int
+    # (the same absence that refuses `__mlir_bool__`), so a 4-byte float load
+    # would put IEEE binary32 bits in a register the program then treats as an
+    # integer — a wrong answer, not an approximation.
     ("deref_refuse_float_pointee",
      "def read_f(p: Pointer[Float32]) -> Int:\n"
      "    return Int(p.value())\n"
@@ -21931,7 +22319,9 @@ def main():
     # that made that worth stating: three of its five rows are refusals and
     # two are answered.
     both_arch_names = ({c[0] for c in BOTH_ARCH_CASES}
-                      | {c[0] for c in PRINT_KWARG_CASES}) - {
+                      | {c[0] for c in PRINT_KWARG_CASES}
+                      | {c[0] for c in POINTER_DEREF_CASES
+                         if c[0].startswith("deref_struct_pointee")}) - {
         c[0] for c in PRINT_KWARG_CASES
         if isinstance(c[2], str) and c[2].startswith('refuse:')}
     selected = [c for c in everything

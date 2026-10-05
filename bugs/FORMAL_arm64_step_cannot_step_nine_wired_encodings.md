@@ -8,6 +8,21 @@ compares the state. It is the **second** class of finding that tool produces
 (`WRONG` is the first), and it is the worse one: a wrong answer is a false
 theorem about the instruction, while a refusal is a proof about NOTHING.
 
+**RE-MEASURED 2026-10-05 on `work/formal27-2`: still open, and the headline
+count is wrong in this tree's favour — it is SEVEN reachable encodings, not
+nine.** `encode_cmn_xn_xm` and `encode_tst_xn_xm` are in `tools/arm64_insn_
+audit.py`'s unwired list, so no image this backend produces can contain a `CMN`
+or a `TST`, and by this doc's own distinguishing test (§2: "an encoder no
+lowering in `formal/` references cannot occur in an image") their NOSTEPs cost
+nothing and are not work. §2's claim that "**every** encoder in the table above
+is wired" is false for those two, and §3's `CMN`/`TST` entries ("`formal/
+arm64_codegen.py` emits it") are false with them. Everything else reproduces
+exactly — see "What was re-measured" at the end. NOT fixed: every arm here is a
+`lib/ProofLib.lean` change, and that build cannot be run inside a bounded
+worker's memory ceiling (measured: 8.0 GB breach at `-j 1`), so landing one
+without checking it would put a broken library in a tree whose Lean gate is
+disabled.
+
 Every case below is `NOSTEP`: `arm64_step` answered `none`, the CPU ran the
 instruction, and the two disagreed in the only way a step function can disagree
 with a machine that has an instruction.
@@ -163,3 +178,85 @@ python3 -c "import importlib.util as u; s=u.spec_from_file_location('a',
     'tools/arm64_insn_audit.py'); m=u.module_from_spec(s); s.loader.exec_module(m);
     print(m.unwired_encoders())"
 ```
+
+## What was re-measured 2026-10-05 (`work/formal27-2`)
+
+**The per-mix table of §1 reproduces exactly**, which is worth saying because it
+is the doc's own evidence and a stale table would have made everything below
+unreadable:
+
+```console
+$ for M in memreg mem select flags; do python3 tools/memslot.py --gb 4 --label fm -- \
+      python3 tools/formal_model_fuzz.py --cases 60 --seed ledgerA --mix $M; done
+memreg   NOSTEP 60                (of 60)
+mem      AGREE 11  WRONG 4  NOSTEP 45   (of 60)
+select   AGREE 18            NOSTEP 42   (of 60)
+flags    AGREE 35            NOSTEP 25   (of 60)
+```
+
+§1's four rows were `0/0/60`, `11/4/45`, `18/0/42`, `35/0/25`. Same numbers, so
+the model has not moved under this doc.
+
+**And the reachability split, which is the correction.** `tools/arm64_insn_
+audit.py::unwired_encoders`, asked about the seventeen encoders this doc's §1
+and §2 name:
+
+```
+UNWIRED (cannot occur in an image): ['encode_cmn_xn_xm', 'encode_tst_xn_xm']
+WIRED   (a real gap):               ['encode_csel_xd_xm_cond', 'encode_ldrb_wd_wn',
+                                     'encode_strb_wd_wn', 'encode_ldrh_wt_wn_imm',
+                                     'encode_strh_wt_wn_imm', 'encode_ldrsb_xt_xn_imm',
+                                     'encode_ldrsh_xt_xn_imm', 'encode_ldrsw_xt_xn_imm',
+                                     'encode_ldr_xt_xn_xm', 'encode_str_xt_xn_xm',
+                                     'encode_ldur_xt_xn_imm', 'encode_stur_xt_xn_imm',
+                                     'encode_ldr_wt_wn_imm', 'encode_str_wt_wn_imm',
+                                     'encode_blr_xn']
+```
+
+So the work is **seven** encodings — `csel`, the eight narrow/unscaled memory
+forms, the two register-offset forms and `blr` are wired and are real gaps;
+`cmn` and `tst` are not. That also reorders §4: step 2's "`CMN` (2 arms) and
+`TST` (1 arm), one-line changes to an existing arm's shape" is the CHEAPEST work
+in the doc and it is work on instructions no image contains, which is why it has
+not been done and why doing it would have been a waste.
+
+**What blocks the seven, and it is not the table or the arms.** Every one of them
+is a `lib/ProofLib.lean` change: a `work_step_*` lemma per encoding, a
+`_STEP_CONDS` row, and `mem_read_u32`/`mem_write_u32`/`u8`/`u16` beside
+`mem_read_u64`. The `ProofLib.olean` build on this tree does not fit a bounded
+worker:
+
+```console
+$ python3 tools/memslot.py --gb 8 --label prooflib -- python3 .tmp/buildlib.py .tmp/lib5 ProofLib
+memcap: BREACH  8.0 GB > 8.0 GB ceiling (100%), 2 procs -- killing prooflib
+memcap: peak observed before the kill: 8.0 GB
+```
+
+That is `formal/lean.py::run_lean` with `-j 1` (the library bounds, the library
+memory cap) against the tree's own measured 7.82 GB for the same build at
+`-j 4`, so the margin is gone before the parallelism is: a one-thread build of
+this library needs more than 8 GB, and the doc's §5 step 1 ("Build
+`lib/ProofLib.olean` (7.7 GB, ~100 s)") reads as a routine step because it was
+written by a worker that could afford it. A `sorry`-shaped hole is the failure
+mode here rather than a red test: the `work_step_*` lemmas and the generator's
+`_step_rhs` rows have to move together, and a mismatch between them is a
+generated proof that fails to elaborate — with the eight Lean-checking formal
+gate tests disabled, nothing in the gate would catch it.
+
+**So the order for whoever takes this, with the reachability correction folded
+in:**
+
+1. Get a `ProofLib.olean` build that fits (raise `MEMLIMIT_GB` for the `prooflib`
+   job, or run it as a non-light worker). Everything below is gated on that, and
+   the measurement above is why: this is the step, not the arms.
+2. The width helpers (`mem_read_u32`, `mem_write_u32`, `u8`, `u16`) — needed by
+   six of the seven AND by the `STR Wt` width defect already landed in the model
+   (`bugs/FORMAL_arm64_ldr_str_unsigned_offset_reads_register_31_as_zero.md`
+   §1), so they are shared work rather than this doc's alone.
+3. The eight memory arms, one encoding at a time, each with its `_STEP_CONDS`
+   row, its `work_step_*` lemma and its `_step_rhs` row in the SAME commit.
+4. `CSEL` and `BLR` last, behind their own docs' blockers
+   (`FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it`,
+   `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value`).
+5. Drop `CMN` and `TST` from the list, or wire them and then add the arms — the
+   honest state today is "no image contains them".

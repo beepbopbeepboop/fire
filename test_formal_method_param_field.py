@@ -40,19 +40,30 @@ nothing.  The refusal cases are the other half: a declared type is a PROMISE,
 and a call site that hands the parameter something else must be refused rather
 than read through — `model.frame_declared_parameter_refusal`.
 
-The same DECLARED-TYPE evidence answers for a name bound to a member read rather
-than named in a parameter list, and the last four cases are that: `var t =
-self.inner` carries `inner`'s declared type just as `o: Self` carries
-`other.start`'s, so `_frame_receivers` asks `_typed_nested_frame` — the same
+The last seven cases are the LOCAL half of the same evidence: a declared type
+settles a PARAMETER, and a member read of a field declared as a framed struct
+settles a LOCAL that copies it (`var t = self.inner` then `t.v`), which is the
+same program as the chain spelling and was refused while the chain built.  So
+`_frame_receivers` asks `_typed_nested_frame` for that read too — the same
 agree-or-refuse decision the field-slot readers make, so the two cannot answer
-differently — and `t` becomes a frame holder.  Its three answers are three
-cases, and the third is the one that keeps the arm honest: `_REASSIGNED`, where
-the declared type IS a frame of this unit and some executed method WRITES the
-field, so the word in the slot belongs to whichever function ran the assignment.
-A seeding that skipped that check would put a frame address where a plain word
-can be.
+differently — and `t` becomes a frame holder.  What separates these rows from
+the parameter rows above is not a weaker kind of evidence, the slot's declared
+type is as much a promise as a parameter's is, but a SECOND LIFETIME question
+the parameter rows do not have: a field a METHOD of its own struct assigns
+holds a frame belonging to whichever function ran that assignment
+(`_typed_nested_frame`'s `_REASSIGNED`), and a name the body ALSO binds by some
+other form (`for t in …`) holds a word this pass cannot account for.  Both are
+refused, for opposite reasons, and both refusals are cases here — as is the
+seeding's own limit, the two-copies-deep chain where a name has to be settled
+before the next one is read.
 
-    python3 test_formal_method_param_field.py [-v] [case ...]
+The seven are: the three answers of `_typed_nested_frame` for a PLACED nested
+frame, for a DELEGATING field (the exemption that keeps a caller's frame
+readable, and the reason this arm cannot be a blind copy of the parameter one)
+and for `_REASSIGNED`; the direct spelling in a FREE FUNCTION rather than a
+method, so the local holder is a local bound to a construction and the first row
+is answered by the nested-frame machinery rather than by anything about a method;
+the two-copies-deep chain; and the two refusals.    python3 test_formal_method_param_field.py [-v] [case ...]
 """
 
 import argparse
@@ -1219,11 +1230,25 @@ CASES = [
     #     analogous receiver-seeding mistake.
     #
     # The refusal row's writer stores a WORD into a frame-typed slot, and that
-    # is deliberate rather than a type error: a writer that stores a FRAME there
-    # is refused earlier and correctly by `FORMAL_wide_receiver_by_reference`'s
-    # rule, which preempts this arm entirely.  The word is the one writer shape
-    # that REACHES it, so the row is the pin that the seeding declines — which
-    # is the property, rather than the fact that some refusal fires.
+    # is deliberate rather than a type error: no frame ever enters the slot, so
+    # this is the writer shape that reaches the arm on the strength of the
+    # READER's evidence alone.  It is the pin that the seeding declines — which
+    # is the property, rather than the fact that some refusal fires — and it is
+    # a different program from the frame-storing writer two rows below, which is
+    # what `FORMAL_wide_receiver_by_reference` refuses on its own account.
+    #
+    # The NEEDLE is `DELEGATING_FIELD_ADVICE` rather than the emitter's
+    # "'t.v' is a field access through 't'", and that is a merge, not a
+    # preference.  `formal/build.py`'s `_nested_frame_bindings` (new on
+    # `work/merge-formal27a-r2`) reports this program as `reassigned` and hands
+    # the reader the real reason; its own docstring says why, and it is the same
+    # sentence: the emitter's text "is true and names a type inference rather
+    # than the lifetime question that is actually there".  So the row keeps its
+    # program and its property and its needle moves to the message the tree now
+    # emits — which is the same clause
+    # `a_local_copy_of_a_field_a_method_reassigns_names_the_lifetime` pins,
+    # because `_REASSIGNED` is ONE refusal and these are two programs that
+    # reach it.
     ("a_local_bound_to_a_nested_frame_field_read_builds_and_answers",
      "struct Opt:\n"
      "    var v: Int\n"
@@ -1336,7 +1361,7 @@ CASES = [
      '    printf("g=%d", b.get())\n'
      "    return 0\n",
      None, None, None,
-     "'t.v' is a field access through 't'"),
+     "a frame belonging to whichever function ran the assignment"),
     # The DIRECT spelling of the first row, in a FREE FUNCTION rather than a
     # method, so the local holder is a local bound to a construction rather than
     # a receiver.  It is the control that says the first row is answered by the
@@ -1381,6 +1406,152 @@ CASES = [
      "b.inner = mk(4)\n"
      'sys.stdout.write("g=%d" % (b.inner.v * 10 + b.inner.has))\n',
      0, "g=41", None),
+    # ── AND THE THREE ROWS THIS BLOCK GREW ──────────────────────────────────
+    #
+    # `work/merge-formal27a-r2` added six rows here for the same arm, three of
+    # which are the SAME PROGRAM as the first, second and fourth rows above
+    # under other names — `local_copy_of_a_nested_frame_field_reads_through_the_
+    # name`, `the_same_slot_read_through_the_field_in_the_caller` and
+    # `a_delegating_field_copied_to_a_local_still_reads_through_the_name`. One
+    # row per program is the whole point of a case list, so those three are not
+    # duplicated here and their role is stated where the rows live: the first is
+    # the COPY spelling whose refusal the row above records, the second is the
+    # control that says the answer comes from the nested-frame machinery and not
+    # from anything about a method, and the third is the DELEGATING exemption.
+    # The other three are programs of their own and are kept.
+    #
+    # Two copies deep, and the second one reads a field of the frame the first
+    # copy addresses — the shape that needs the seeding to settle `m` before it
+    # can ask about `m.deep`.
+    ("a_chain_of_two_local_copies_of_nested_frames",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "struct Mid:\n"
+     "    var pad: Int\n"
+     "    var deep: Inner\n"
+     "\n"
+     "struct Outer:\n"
+     "    var pad: Int\n"
+     "    var mid: Mid\n"
+     "\n"
+     "    def get(out self) -> Int:\n"
+     "        var m = self.mid\n"
+     "        var i = m.deep\n"
+     "        return i.a * 10 + i.b\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var o = Outer()\n"
+     "    o.mid.deep.a = 4\n"
+     "    o.mid.deep.b = 1\n"
+     "    printf(\"g=%d\", o.get())\n"
+     "    return 0\n",
+     "class Inner:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "class Mid:\n"
+     "    def __init__(self):\n"
+     "        self.pad = 0\n"
+     "        self.deep = Inner()\n"
+     "class Outer:\n"
+     "    def __init__(self):\n"
+     "        self.pad = 0\n"
+     "        self.mid = Mid()\n"
+     "    def get(self):\n"
+     "        m = self.mid\n"
+     "        i = m.deep\n"
+     "        return i.a * 10 + i.b\n"
+     "import sys\n"
+     "o = Outer()\n"
+     "o.mid.deep.a = 4\n"
+     "o.mid.deep.b = 1\n"
+     "sys.stdout.write(\"g=%d\" % o.get())\n",
+     0, "g=41", None),
+    # ── THE TWO REFUSALS, and they are refusals for OPPOSITE reasons ────────
+    #
+    # The copy of a field a METHOD assigns: the word in the slot IS an address
+    # and the frame behind it belongs to whichever function ran that assignment,
+    # so there is nothing to place.  The needle is the lifetime clause and not
+    # the emitter's "this path has no way to say what 't' holds" — that one is
+    # true and names a type inference rather than the question that is actually
+    # there, and the two spellings of this refusal (the chain, and the copy) now
+    # raise ONE text, which is what makes this needle the right thing to assert.
+    ("a_local_copy_of_a_field_a_method_reassigns_names_the_lifetime",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var pad: Int\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def set(out self, o: Opt):\n"
+     "        self.inner = o\n"
+     "\n"
+     "    def get(out self) -> Int:\n"
+     "        var t = self.inner\n"
+     "        return t.v * 10 + t.has\n"
+     "\n"
+     "def mk(n: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    b.set(mk(4))\n"
+     "    printf(\"g=%d\", b.get())\n"
+     "    return 0\n",
+     None, None, None,
+     "a frame belonging to whichever function ran the assignment"),
+    # …and the name the loop also binds.  `t` is bound twice — once to the
+    # slot's address and once by the loop — so after the loop it holds the
+    # LOOP's word and not the address, and a seeding that classified it from the
+    # first binding builds an image that reads `[7 + 8·slot]`.  Measured on both
+    # backends as a SIGSEGV, which is `FORMAL_one_field_holder_of_a_frame_is_not
+    # _a_holder` wearing a different name; the needle is the REBIND sentence
+    # because THAT is what this program must still get, and a build is the
+    # failure this case exists to catch.
+    #
+    # The needle moved on the merged tree, and the move is what the merge is for.
+    # `formal/build.py`'s `_nested_frame_bindings` (new on
+    # `work/merge-formal27a-r2`) does not claim a name whose bindings are MIXED,
+    # so this row is not `reassigned` and never reaches the lifetime refusal; it
+    # reaches `formal/model.py`'s rebind refusal instead, whose own subject is
+    # exactly this program — "`t` also holds the address of an `Opt` frame … and
+    # this path has no way to say that a later binding changes what the name is"
+    # — and which then names the three assignments that would be sound, none of
+    # which a `for` target is.  The old needle was the emitter's "this path has
+    # no way to say what 't' holds", which the merged tree still spells only in a
+    # `formal/build.py` COMMENT saying it names a type inference rather than the
+    # question that is actually there.
+    ("a_loop_target_shadowing_a_local_copy_is_still_not_a_holder",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var pad: Int\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def get(out self) -> Int:\n"
+     "        var t = self.inner\n"
+     "        for t in [7]:\n"
+     "            t = t + 1\n"
+     "        return t.v * 10 + t.has\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    b.inner.v = 4\n"
+     "    b.inner.has = 1\n"
+     "    printf(\"g=%d\", b.get())\n"
+     "    return 0\n",
+     None, None, None,
+     "this path has no way to say that a later binding changes what the "
+     "name is"),
 ]
 
 

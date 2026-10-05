@@ -97,7 +97,42 @@ list depends on ordering.
 
 ---
 
-## 3. `gimple_dict_repr_kinds_agree_with_cpython` — a hard gcc error
+## 3. `gimple_dict_repr_kinds_agree_with_cpython` — FIXED 2026-10-04 (`work/bugs7-1`)
+
+**Status: green.** `test_gimple_runner.py` is 385 passed / 3 failed, and this
+row is one of the three that is no longer failing. `tools/suite.py`'s
+`gimplerunner` marker moved from `'4 failing:'` to `'3 failing:'` in the same
+commit, which is the count-checked half of the change: a marker that still said
+4 would have reported a FAILURE for a suite that improved.
+
+What landed, in the order the two faults were:
+
+1. **The operand's kind** — exactly the diagnosis below, and the fix is the
+   mirror of what the LHS arm already did. `_lower_percent_dict` coerced the
+   template to `char *` and left the mapping as whatever `lower_expr` typed it,
+   which for every container global is a boxed `int64_t`. Both operands are now
+   coerced to the parameter types the callee declares.
+2. **What an unkeyed spec MEANS** — the note below said "decide which" and
+   added that the honest end state is not "make it compile". Measured on
+   CPython 3.14.7, this doc's "CPython **TypeError**" claim was **wrong**:
+   `'%s' % d` prints the dict, because a non-tuple right operand is consumed by
+   one spec. The TypeError is `'%s %s' % d` ("not enough arguments for format
+   string"). So `mojo_str_format_dict` grew a third parameter — the generated
+   per-TU `_mojo_repr_dict` — which is how the unkeyed arm renders the mapping.
+   It travels in rather than being re-derived in the runtime because the runtime
+   cannot render a dict: each slot's kind and the recorded `val_repr` are only in
+   the generated block. That is the same bargain `MojoDict.val_repr` and
+   `mojo_list_set_elem_repr` already make, and the reason there is still one
+   implementation of "what a dict looks like". A NULL third argument degrades to
+   the old copy-the-spec-through behaviour, so a TU with no reflection block is
+   not made worse, and a SECOND unkeyed spec raises the real TypeError instead of
+   printing `%s` — it used to print the spec through, which was the
+   silent-wrong-answer shape.
+
+The original text follows, unchanged, because the reproduction and the narrowing
+are what a reader needs and both were right about the cause.
+
+### — original report —
 
 Reproduction, all four lines correct against CPython today:
 

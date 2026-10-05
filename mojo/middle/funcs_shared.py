@@ -670,8 +670,10 @@ def register_imported_symbol(gen, name: str, info: dict,
     present in the other is exactly the half-registered state this function
     exists to prevent, and there are TWO import spellings that can produce
     one: `_register_link_imports`' `from X import Y` and the bare-`import`
-    module-qualified call site in `emit_methods._lower_method_call` (see
-    bugs/CODEGEN_bare_import_module_qualified_call_answers_zero.md).
+    module-qualified call site in `emit_methods._lower_method_call`.
+    Both spellings' gaps were closed 2026-10-02; the regression is
+    `test_link_mode.py`'s
+    `test_bare_import_sibling_function_call_through_module`.
 
     `write_param_types=False` keeps `func_param_types` untouched while still
     recording the entry. That is `_register_sym`'s rule for a module whose

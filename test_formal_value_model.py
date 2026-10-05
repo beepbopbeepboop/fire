@@ -405,6 +405,138 @@ CASES = [
      "    print(\"v:\", a, b)\n"
      "    return 0\n",
      "v: 5 6\n"),
+    # ── the OTHER TWO walks that yield one thing per count ──
+    #
+    # The `for`-in walk and the membership needle both ask
+    # `model.walk_stride` whether the container is a dict pair blob, and both
+    # were fixed together when `for k in d` read `k0, v0, k1` (the
+    # `FIXED_CASES` group "walking a DICT, which is not walking a list").  A
+    # comprehension generator and a `*` splice yield one thing per count in
+    # exactly the same way and were hardcoded to the ELEMENT stride on both
+    # backends, so they read the same `k0, v0, k1` and exited 0.
+    #
+    # **These are ORACLE rows and the reason is the measurement.**  The count of
+    # the result was RIGHT: three PAIRS and three WORDS are the same number, so
+    # `len([k for k in d])` answered 3 and agreed with CPython on the buggy
+    # program.  What disagreed was the CONTENT, and a suite that measured only
+    # the count — which is what `tools/formal_fuzz.py`'s `dict_comp_count`
+    # family did, over 100-program sweeps — cannot see a content defect at all.
+    # So the observations below are `for` loops over the RESULT, not its `len`.
+    #
+    # Keys and values differ by magnitude in every table, so a value cannot pass
+    # for a key: the buggy walk printed `1` in the second column.
+    ("comprehension_over_a_dict_yields_keys_not_values",
+     "def main(n):\n"
+     "    var d = {10: 100, 20: 200, 30: 300}\n"
+     "    var ks = [k for k in d]\n"
+     "    for k in ks:\n"
+     "        print(\"k:\", k)\n"
+     "    return 0\n",
+     "k: 10\nk: 20\nk: 30\n"),
+    # The same walk ACCUMULATED, which is the shape that turns a read value
+    # into a wrong number rather than a wrong line.
+    ("comprehension_over_a_dict_sums_the_keys",
+     "def main(n):\n"
+     "    var d = {10: 100, 20: 200, 30: 300}\n"
+     "    var s = 0\n"
+     "    var ks = [k for k in d]\n"
+     "    for k in ks:\n"
+     "        s = s + k\n"
+     "    printf(\"s=%d\", s)\n"
+     "    return 0\n",
+     "s=60"),
+    # A CONDITION on the generator, which is where the wrong stride is not even
+    # a wrong ANSWER to the count: it filters a word sequence that alternates
+    # keys and values, so the rejection decision is made about values too and
+    # the result can be short by more than one.  Measured before the fix on both
+    # architectures: `2` where CPython prints `2` is the lucky case, and
+    # `{10: 1, 20: 2, 30: 3}` with `k > 15` answered `len` 1 and iterated
+    # `[20]` — one of the two keys it should have kept.
+    ("comprehension_over_a_dict_with_a_condition_keeps_every_key",
+     "def main(n):\n"
+     "    var d = {10: 100, 20: 200, 30: 300}\n"
+     "    var ks = [k for k in d if k > 15]\n"
+     "    var s = 0\n"
+     "    for k in ks:\n"
+     "        s = s + k\n"
+     "    printf(\"n=%d s=%d\", len(ks), s)\n"
+     "    return 0\n",
+     "n=2 s=50"),
+    # A DICT comprehension over the same iterable: the generator walk is the
+    # same code and the result is a pair blob, so a fix that taught only the
+    # LIST comprehension's arm would leave this one reading values.
+    ("dict_comprehension_over_a_dict_yields_every_key",
+     "def main(n):\n"
+     "    var d = {10: 100, 20: 200, 30: 300}\n"
+     "    var e = {k: 1 for k in d}\n"
+     "    for k in e:\n"
+     "        print(\"k:\", k)\n"
+     "    return 0\n",
+     "k: 10\nk: 20\nk: 30\n"),
+    # The `*` splice, whose loop is a different emitter entirely
+    # (`_emit_star_splice`) with the same one-thing-per-count contract.
+    ("star_splice_of_a_dict_yields_keys_not_values",
+     "def main(n):\n"
+     "    var d = {10: 100, 20: 200, 30: 300}\n"
+     "    var xs = [*d]\n"
+     "    var s = 0\n"
+     "    for x in xs:\n"
+     "        s = s + x\n"
+     "    printf(\"n=%d s=%d\", len(xs), s)\n"
+     "    return 0\n",
+     "n=3 s=60"),
+    # A dict that arrives as an ANNOTATED PARAMETER, where the pair-ness is
+    # stated by the signature and not by any binding statement in the function
+    # that walks it — the shape `_is_dict_subscript`'s `ValueKinds` arm exists
+    # for, and the one where a fix that only taught the literal case would pass
+    # every row above.
+    ("comprehension_over_a_dict_parameter_yields_every_key",
+     "def keys(d: dict):\n"
+     "    var ks = [k for k in d]\n"
+     "    var s = 0\n"
+     "    for k in ks:\n"
+     "        s = s + k\n"
+     "    return s\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"s=%d\", keys({10: 100, 20: 200, 30: 300}))\n"
+     "    return 0\n",
+     "s=60"),
+    # A STRING-keyed dict is NOT here, and the reason is worth more than the
+    # case would be.  `for k in {"ab": 1, "cde": 2}` binds a STRING target
+    # (`model.iterable_dict_key_kind` reads the keys out of the literal) but a
+    # comprehension's target does not go through that walk, so `[k for k in
+    # d]` over string keys classifies its target as an int and `len(k)` is
+    # refused — on BOTH architectures, with a message that is true about the
+    # classification and false about the source, which is the property a
+    # REFUSALS row is for.  It is a row in `REFUSALS` rather than here because
+    # it measures a KIND rule and not the stride this group is about, and it is
+    # filed as `FORMAL_a_comprehension_target_over_a_string_keyed_dict_is_an_int`
+    # so the gap is a queue entry rather than a footnote.
+    # A LIST is the control for all three walks, and it is what a fix that moved
+    # the stride unconditionally to the pair would break: the walk over a
+    # one-word-per-count blob steps one word, and at the pair stride this reads
+    # past the end of the table into whatever the frame holds next.
+    ("comprehension_over_a_list_still_steps_one_word",
+     "def main(n):\n"
+     "    var xs = [10, 20, 30]\n"
+     "    var ks = [k for k in xs]\n"
+     "    var s = 0\n"
+     "    for k in ks:\n"
+     "        s = s + k\n"
+     "    printf(\"n=%d s=%d\", len(ks), s)\n"
+     "    return 0\n",
+     "n=3 s=60"),
+    ("star_splice_of_a_list_still_steps_one_word",
+     "def main(n):\n"
+     "    var xs = [10, 20, 30]\n"
+     "    var ys = [*xs]\n"
+     "    var s = 0\n"
+     "    for y in ys:\n"
+     "        s = s + y\n"
+     "    printf(\"n=%d s=%d\", len(ys), s)\n"
+     "    return 0\n",
+     "n=3 s=60"),
     # The CONSERVATIVE DIRECTION of the return-less refusal, and the row that
     # says the evidence is about a NAME and not about a function: `v` is bound to
     # a call that produces no value and then to a number, so it holds the number
@@ -1630,7 +1762,26 @@ REFUSALS = [
      "    print(\"v:\", a)\n"
      "    return 0\n",
      "cannot tell whether IdentExpr"),
-    # A CALL THAT PRODUCES NO VALUE, printed. CPython evaluates `g(1, 2)` to
+    # A COMPREHENSION'S TARGET over a dict is classified as an integer where the
+    # `for`-in walk over the same dict binds a string, and the message says
+    # `len()` of an integer where the source wrote a string key.  The stride is
+    # right here (`walk_stride` reads the pair-ness of the iterable, and the
+    # `comprehension_over_a_dict_*` rows in `CASES` are about that), so what is
+    # missing is the KIND: `model.iterable_dict_key_kind` is asked when a `for`
+    # target is bound and a comprehension's target store does not ask it.
+    #
+    # A row rather than nothing, because the alternative is a construct that is
+    # refused with a false sentence about the reader's own source and no test
+    # says so.  Filed as
+    # `FORMAL_a_comprehension_target_over_a_string_keyed_dict_is_an_int`.
+    ("a_comprehension_target_over_a_string_keyed_dict_is_an_int",
+     "def main(n):\n"
+     "    var d = {\"ab\": 100, \"cde\": 200}\n"
+     "    var ks = [k for k in d]\n"
+     "    for k in ks:\n"
+     "        print(\"n:\", len(k))\n"
+     "    return 0\n",
+     "an integer has no length"),    # A CALL THAT PRODUCES NO VALUE, printed. CPython evaluates `g(1, 2)` to
     # `None` and prints `None`; a value on this path is one 64-bit word and the
     # epilogue writes no return register, so the image printed `0` — measured on
     # BOTH architectures from this same text, and `0` is not even stable: a call
@@ -1737,7 +1888,6 @@ BUILTIN_CASES = [
      "    return 0\n",
      "v: 4\n"),
 ]
-
 
 
 def run_cpython(source, tmpdir, verbose):

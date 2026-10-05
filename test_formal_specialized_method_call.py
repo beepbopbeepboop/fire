@@ -750,6 +750,70 @@ DIFF_CASES = [
      "    return 0\n"
      "\n"
      "main()\n"),
+
+    # THE SHAPE THE INHERITED-LAYOUT REFUSAL RECOMMENDS, which is the sibling
+    # `refuse_a_field_receiver_whose_declared_type_has_a_derived_override`
+    # below has no room for: `FancySlice` DERIVES from `Slice` and adds no
+    # field of its own, so the two are the same shape, a receiver is the same
+    # word in both, and the base's method — INHERITED, so dispatched by name
+    # against the one declaration that has it — reads the right slot.
+    #
+    # It is a differential case rather than another refusal because the message
+    # tells the reader to make this change, and a remedy that has never been
+    # run is a guess.  Measured on both architectures: 8000 = 7 * 1000 + 1000,
+    # where `b.go(0)` is `Slice.emit_slice` reading `start` through a field
+    # declared `Slice` that holds a `FancySlice`, and `f.tag()` is the child's
+    # own method on the child's own value.  The weights are what make it a pin
+    # rather than a smoke test: a hand-off that passed the frame ADDRESS where
+    # the base's method expects the field answers with a stack address instead
+    # of 7 and this case fails on the number, on both machines.
+    ("a_subclass_that_adds_no_field_inherits_the_layout_exactly",
+     "struct Slice:\n"
+     "    var start: Int\n"
+     "    def emit_slice(self, mut writer: Int) -> Int:\n"
+     "        return self.start\n"
+     "\n"
+     "struct FancySlice(Slice):\n"
+     "    def tag(self) -> Int:\n"
+     "        return 1000\n"
+     "\n"
+     "struct Box:\n"
+     "    var _inner: Slice\n"
+     "    def go(self, mut writer: Int) -> Int:\n"
+     "        return self._inner.emit_slice(writer)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var f = FancySlice()\n"
+     "    f.start = 7\n"
+     "    var b = Box()\n"
+     "    b._inner = f\n"
+     '    printf("v=%d", b.go(0) * 1000 + f.tag())\n'
+     "    return 0\n",
+     "class Slice:\n"
+     "    def __init__(self, start):\n"
+     "        self.start = start\n"
+     "\n"
+     "    def emit_slice(self, writer):\n"
+     "        return self.start\n"
+     "\n"
+     "class FancySlice(Slice):\n"
+     "    def tag(self):\n"
+     "        return 1000\n"
+     "\n"
+     "class Box:\n"
+     "    def __init__(self, inner):\n"
+     "        self._inner = inner\n"
+     "\n"
+     "    def go(self, writer):\n"
+     "        return self._inner.emit_slice(writer)\n"
+     "\n"
+     "def main():\n"
+     "    f = FancySlice(7)\n"
+     "    b = Box(f)\n"
+     '    print("v=%d" % (b.go(0) * 1000 + f.tag()), end="")\n'
+     "    return 0\n"
+     "\n"
+     "main()\n"),
 ]
 
 # ── the refusals, which are the point of the two remaining families ─────────
@@ -779,12 +843,29 @@ REFUSALS = [
     # BUILD by `a_derived_type_that_adds_no_field_inherits_the_layout` in
     # DIFF_CASES.
     #
-    # The refusal is the pre-existing one and that is deliberate: withholding
+    # The refusal is a pre-existing one and that is deliberate: withholding
     # the entry puts the call back on the name-based path, where `emit_slice` is
-    # a name two structs declare and so has no owner to lift to.  The needle is
-    # therefore the EXISTING diagnosis rather than a new message, which is the
-    # honest outcome — this is a limit, and the fix's job was to stop it firing
-    # on programs it is not about.
+    # a name two structs declare and so has no owner to lift to.  What the
+    # refusal NOW says is a DIFFERENT pre-existing one, and the needle moved
+    # with it.  While the construct below was open this row expected
+    # `self.emit_slice() is a method call on a value`, which was true of the
+    # program then and false of it now: `formal/model.py`'s
+    # `inherited_layout_refusal` answers first, and it is the MORE SPECIFIC
+    # fact — the receiver is a frame ADDRESS where the base's method expects
+    # the field, which is the harm; "a method call on a value" is the symptom
+    # further along.  So the needle is the layout clause and the diagnosis did
+    # not weaken by moving, which is why this is a one-string repair and not a
+    # reordering of the two refusals (a reorder would move a corpus file
+    # between two rows of `tools/formal_sweep_causes.py` and would be worse for
+    # every OTHER program that reaches the layout refusal with no method call
+    # in it at all).
+    #
+    # `a_subclass_that_adds_no_field_inherits_the_layout_exactly` below is the
+    # SIBLING this row never had: the shape the message's own remedy spells out
+    # ("a subclass that adds no field of its own inherits the layout exactly"),
+    # required to build and to agree with CPython.  A refusal that recommends a
+    # rewrite is only a diagnosis until the rewrite is known to work, and this
+    # message names a concrete one.
     ("refuse_a_field_receiver_whose_declared_type_has_a_derived_override",
      "struct Slice:\n"
      "    var start: Int\n"

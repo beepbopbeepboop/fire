@@ -255,8 +255,7 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
         # a different, already-correct path), so only containers are kept.
         if call_type in containers:
             kinds = gen._container_param_kinds.setdefault(fname, {})
-            kinds[pname] = ('list' if call_type == 'MojoList *' else
-                            'set' if call_type == 'MojoSet *' else 'dict')
+            kinds[pname] = _GMI_PARAM_KIND_OF_CTYPE[call_type]
         if cur == call_type:
             continue
         # A parameter with NO use-derived evidence at all (`cur is None` —
@@ -322,6 +321,147 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
             # ambiguity this pass exists to settle. Leave it alone.
             continue
         ipt.setdefault(fname, {})[pname] = call_type
+
+
+# The container KIND a `_container_param_kinds` entry carries for each ctype.
+# One table because `_gmi_apply_call_site_param_evidence` and
+# `_gmi_apply_forwarded_param_evidence` are the two writers and a second copy
+# of a three-way mapping is a second thing to forget an arm of.
+_GMI_PARAM_KIND_OF_CTYPE = {'MojoList *': 'list', 'MojoSet *': 'set',
+                            'MojoDict *': 'dict'}
+
+
+def _gmi_apply_forwarded_param_evidence(gen, all_functions) -> None:
+    """A parameter whose only use is to be FORWARDED takes the CALLEE's
+    container kind, not a guess from its own name.
+
+    `_infer_param_types` reads a parameter's type from how the body USES it,
+    which is the right default and has no answer at all for a pure forwarder.
+    Then the name-based container guess runs, and it guesses a KIND it has no
+    evidence for. Measured, six lines of ordinary Python:
+
+        def leaf(d):
+            print(d["x"])
+
+        def middle(d):
+            return leaf(d)
+
+        middle({"x": "1"})
+
+    `void middle (MojoList * d)`, where `MojoDict *` is meant. The wrong
+    pointer survives the C compiler silently and `leaf` reads a `DictSlot` out
+    of a `MojoList` header, finds nothing and answers `None` where CPython
+    answers `1`. So this is not a missing type, it is a confidently wrong one.
+
+    The evidence is the callee's own concluded parameter kind, at a call the
+    existing `_gmi_iter_calls` walk already sees — the same place the scalar and
+    struct-pointer observers read theirs, which is why this is a second pass
+    over the same table rather than a new analysis.
+
+    **A FIXED POINT, and that is load-bearing rather than tidiness.** The
+    evidence is a conclusion, so a chain resolves in definition order only if
+    every link is already in place — the same program with `middle` defined
+    BEFORE `leaf` printed `1`, correctly and for no reason anyone designed.
+    Iterating to a fixed point makes the answer independent of definition order,
+    which is the only version of this that can be tested.
+
+    Two limits, both about not answering a question this pass cannot:
+
+    * **Only a CONTAINER kind is read across.** A callee's `char *` parameter
+      does not make the forwarded name a string — `str` is iterable, an
+      iterable-consuming builtin cannot tell `str` from `list`, and
+      `_gmi_apply_call_site_param_evidence` refuses exactly that question for
+      the same reason. So this adds a container axis and leaves the scalar one
+      to that pass.
+    * **A parameter whose body already typed it as a SCALAR, or that carries
+      an annotation, is left alone.** A use-derived `double` is a fact about
+      the body; an annotation outranks every inference in this table. Both are
+      the same two exclusions `_gmi_apply_call_site_param_evidence` applies, for
+      the same reasons, and reusing them is why a forward cannot quietly retype
+      a `def f(x: float): sink(x)`.
+    """
+    ipt = gen._inferred_param_types
+    if not ipt:
+        return
+    names = getattr(gen, '_func_param_names', {}) or {}
+    containers = tuple(_GMI_PARAM_KIND_OF_CTYPE)
+    # (func, param) -> the (callee, callee param) pairs it is forwarded to.
+    # The CALLEE'S NAME and not its concluded kind, because the conclusion is
+    # what this pass is computing: recording the kind here would freeze a
+    # snapshot taken before the first round, and a CHAIN would then resolve one
+    # hop and stop (`mid1` -> `mid2` -> `leaf` left `mid1` on the name-based
+    # guess, measured, and printed `0` where CPython prints `1`).
+    fwd: dict = {}
+    for s in all_functions:
+        if not isinstance(s, gimple_ctypes.FunctionDef):
+            continue
+        fname = _as_str(s.name)
+        params = names.get(fname)
+        if not params:
+            continue
+        for call in _gmi_iter_calls(s.body):
+            if not isinstance(call.func, gimple_ctypes.IdentExpr):
+                continue
+            callee = _as_str(call.func.name)
+            cparams = names.get(callee)
+            if not cparams:
+                continue
+            args = call.args or []
+            # Arity mismatch means positional alignment cannot be trusted
+            # (an optional or defaulted parameter, a `*args` call) — the same
+            # refusal, and for the same reason, as the call-site pass.
+            if len(args) != len(params) or len(args) != len(cparams):
+                continue
+            for _i in range(len(args)):
+                arg = args[_i]
+                if not isinstance(arg, gimple_ctypes.IdentExpr):
+                    continue
+                if _as_str(arg.name) != _as_str(params[_i]):
+                    continue
+                fwd.setdefault((fname, _as_str(params[_i])), set()).add(
+                    (callee, _as_str(cparams[_i])))
+    if not fwd:
+        return
+    ann = getattr(gen, '_annotated_params', {}) or {}
+    changed = True
+    while changed:
+        changed = False
+        for _key in fwd:
+            _fname = _key[0]
+            _pname = _key[1]
+            # The callees' CURRENT conclusions, re-read every round — which is
+            # what lets a chain resolve from its real end backwards. A set, so
+            # two forwards disagreeing leave the parameter exactly as it was,
+            # which is the same rule as everywhere else in this file.
+            _cts = set()
+            for _hop in fwd[_key]:
+                _ct = (ipt.get(_hop[0]) or {}).get(_hop[1])
+                if _ct in containers:
+                    _cts.add(_ct)
+            if len(_cts) != 1:
+                continue
+            # `list(...)[0]`, NOT `next(iter(...))`: this function is inside
+            # the self-host closure and `next` is not a symbol the compiled
+            # path links (see the identical note in
+            # `_gmi_apply_call_site_param_evidence`).
+            _want = list(_cts)[0]
+            _cur = (ipt.get(_fname) or {}).get(_pname)
+            if _cur is not None and _cur not in containers:
+                continue
+            if (ann.get(_fname) or {}).get(_pname):
+                continue
+            if _cur == _want:
+                continue
+            ipt.setdefault(_fname, {})[_pname] = _want
+            # The KIND the callee concluded, recorded for the `==`/`!=`
+            # lowering exactly as the call-site pass records it — otherwise a
+            # forwarded container reaches `mojo_value_eq` as a bare pointer
+            # comparison, which is the same class of answer the pass that
+            # records it was added to stop giving.
+            _pk = gen._container_param_kinds.setdefault(_fname, {})
+            _pk[_pname] = _GMI_PARAM_KIND_OF_CTYPE[_want]
+            changed = True
+
 
 
 def _free_func_param_ctypes(self, s) -> list:
@@ -1582,11 +1722,29 @@ def _emit_reflection_dispatch(self, parts):
                "       unchanged. */\n"
                "    char *_re = mojo_list_repr_elem(lst, _e);\n"
                "    if (_re) { _buf = mojo_str_cat_free(_buf, _re); free(_re); continue; }\n"
-               "    /* A registered 2-element element is a runtime-built PAIR\n"
-               "       (zip / dict.items() / enumerate) and prints through the\n"
-               "       pair walker, which gets slot 0 right where the generic\n"
-               "       element repr cannot (see _mojo_repr_pair's own comment). */\n"
+               "    /* A registered, MARKED, 2-element element is a runtime-built PAIR\n"
+               "     * (zip / dict.items() / enumerate) and prints through the pair\n"
+               "     * walker, which gets slot 0 right where the generic element repr\n"
+               "     * cannot (see _mojo_repr_pair's own comment).\n"
+               "     *\n"
+               "     * The MARK is the predicate, and it is load-bearing rather than a\n"
+               "     * nicety: `mojo_mark_as_tuple` is called at every real pair site\n"
+               "     * (`mojo_dict_items`, `mojo_zip`, `mojo_list_repeat`,\n"
+               "     * `mojo_list_concat`), and `mojo_is_tuple` reads it back. Without\n"
+               "     * it the test was LENGTH alone, and an ordinary two-element LIST is\n"
+               "     * the same length: `x = [1, 2]; print([x])` printed `[(1, 2)]` where\n"
+               "     * CPython prints `[[1, 2]]`, and `print([(1, 2), [3, 4]])` printed\n"
+               "     * `[(1, 2), (3, 4)]`. It was invisible while a two-element list and a\n"
+               "     * pair were the same thing in this value model; the marker is what\n"
+               "     * makes them different, and the same fact already reaches\n"
+               "     * `mojo_require_mutable_list`.\n"
+               "     *\n"
+               "     * `> 65536` stays: `mojo_is_tuple` takes the address, and the small\n"
+               "     * words are the int/bool/None slots that must never be read as a\n"
+               "     * struct at all. The marked test is the load-bearing one; this is\n"
+               "     * the cheap guard in front of it. */\n"
                "    char *_es = (_e > 65536 && mojo_is_registered_list(_e)\n"
+               "       && mojo_is_tuple((MojoList *)(intptr_t)_e)\n"
                "       && mojo_list_len((MojoList *)(intptr_t)_e) == 2)\n"
                "        ? _mojo_repr_pair((MojoList *)(intptr_t)_e)\n"
                "        : _mojo_generic_elem_repr(_e);\n"
@@ -1609,6 +1767,10 @@ def _emit_reflection_dispatch(self, parts):
                "   `[(None, 2), (1, 3)]`. A first slot that IS a string (a dict\n"
                "   key) or a container still goes through the generic reader. */\n"
                "static char * _mojo_repr_pair (MojoList *p) {\n"
+                "  /* The pair's own per-slot kinds row, or NULL. Read once, outside\n"
+                "   * the loop, and NULL-safe where it is used: a pair nobody recorded\n"
+                "   * kinds for (every zip/enumerate pair) must walk as it always did. */\n"
+                "  const char *pk = p ? mojo_list_get_kinds(p) : NULL;\n"
                "  if (!p) return strdup(\"()\");\n"
                "  int64_t _n = mojo_list_len(p);\n"
                "  char *_b = strdup(\"(\" );\n"
@@ -1625,8 +1787,25 @@ def _emit_reflection_dispatch(self, parts):
                 "    char *_pr = NULL;\n"
                 "    if (_i == 1) _pr = mojo_list_repr_elem(p, _v);\n"
                 "    if (_pr) { char *_o = mojo_str_cat_free(_b, _pr); free(_pr); _b = _o; continue; }\n"
-                "    char *_s = (_i == 0 && !(_v > 65536))\n"
-                "      ? mojo_repr_int(_v) : _mojo_generic_elem_repr(_v);\n"
+                "    /* THIS pair's own per-slot kinds, when something recorded them.\n"
+                "     * `mojo_dict_items`/`mojo_dict_items_int` do, off the dict\n"
+                "     * slot's `_DictSlot.kind`, and they are the only producers: a\n"
+                "     * pair slot is a raw int64_t, so a 0/None/bool/float value is\n"
+                "     * unreadable from the word alone. Without the row this walker\n"
+                "     * sent slot 1 to the generic reader, which answers \"None\" for a\n"
+                "     * zero word (right for a null pointer, wrong for the integer 0:\n"
+                "     * `sorted({'mid': 0}.items())` printed `[('mid', None)]`) and\n"
+                "     * handed a float's IEEE-754 bits to the runtime type-tag\n"
+                "     * reader, which dereferences them — so `print(d.items())` on a\n"
+                "     * dict holding 1.5 was a SIGSEGV with no output at all. A\n"
+                "     * zip/enumerate pair carries no row and walks exactly as it\n"
+                "     * did before. The renderer is the runtime's ONE\n"
+                "     * `mojo_repr_slot_kind` (see fire_runtime.h), which answers NULL\n"
+                "     * for a kind it does not own and lands on the int path below. */\n"
+                "    char *_sk = mojo_repr_slot_kind(pk ? pk[_i] : 0, _v);\n"
+                "    char *_s = _sk ? _sk\n"
+                "      : ((_i == 0 && !(_v > 65536))\n"
+                "         ? mojo_repr_int(_v) : _mojo_generic_elem_repr(_v));\n"
                 "    _b = mojo_str_cat_free(_b, _s);\n"
                 "    free(_s);\n"
                "  }\n"
@@ -1672,74 +1851,42 @@ def _emit_reflection_dispatch(self, parts):
                 "    _buf = mojo_str_cat_free(_buf, _k);\n"
                 "    free(_k);\n"
                 "    _buf = mojo_str_cat_free(_buf, \": \");\n"
-                "    char *_s;\n"
-                "    if (d->slots[_i].kind == 3)\n"
-                "      /* A Python bool value (mojo_dict_set_bool): the same 0/1\n"
-                "       * int64_t a real int stores, so only this per-SLOT tag\n"
-                "       * separates them. The tag was once a whole-DICT flag,\n"
-                "       * which meant one bool value reformatted every OTHER\n"
-                "       * value too — `{'name': p.name, 'ok': p.ok}` printed\n"
-                "       * `{'name': True, 'ok': True}`. A literal, so `_s` is not\n"
-                "       * owned and must not be freed. */\n"
-                "      _s = d->slots[_i].val ? \"True\" : \"False\";\n"
-                  "    else if (d->slots[_i].kind == 2)\n"
-                  "      /* A str value stored via mojo_dict_set_str carries its\n"
-                  "       * pointer in `val` with kind==2; `_mojo_generic_elem_repr`\n"
-                  "       * would read that pointer as an int64_t, so a dict LITERAL's\n"
-                  "       * string values printed as garbage/0 (the `param_convs=`\n"
-                  "       * / `comptime_aliases=` / `_CONST_NAME` .ast divergence).\n"
-                  "       * Emit the real quoted string instead. */\n"
-                  "      _s = mojo_repr_str((char *)(intptr_t)d->slots[_i].val);\n"
-                  "    else if (d->slots[_i].kind == 1)\n"
-                  "      /* A double value stores its IEEE-754 BITS in `val` with\n"
-                  "       * kind==1, and those bits are a pointer-shaped word: 1.5 is\n"
-                  "       * 0x3FF8000000000000 and 3.5 is 0x400C000000000000, which\n"
-                  "       * `_mojo_generic_elem_repr` sends to\n"
-                  "       * `mojo_read_type_tag_safe`, and that dereferences it (its\n"
-                  "       * own guard only rejects words below 2 GiB). So\n"
-                  "       * `print({'x': 1.5})` SEGFAULTED (rc -11, no output, no\n"
-                  "       * diagnostic). The slot's own kind says what the word is;\n"
-                  "       * read it that way, through the runtime's bits->double helper\n"
-                  "       * rather than a C cast (a cast is not a legal gimple\n"
-                  "       * operand). */\n"
-                  "      _s = mojo_repr_float(mojo_double_from_bits(d->slots[_i].val));\n"
-                  "    else if (d->slots[_i].kind == 4)\n"
-                  "      /* A `None` value is int64_t 0 with kind==4 (see\n"
-                  "       * mojo_dict_set_none): the same word a plain `0` stores,\n"
-                  "       * and only this tag tells them apart. The generic value\n"
-                  "       * repr below DOES answer \"None\" for a zero word -- it has\n"
-                  "       * to, for a NULL pointer slot -- so every plain zero in\n"
-                  "       * every dict printed as None until the store learned to\n"
-                  "       * tag itself. */\n"
-                  "      _s = strdup(\"None\");\n"
-                  "    else if (d->slots[_i].val == 0)\n"
-                  "      /* A kind-0 slot holding the word 0 is the INTEGER 0:\n"
-                  "       * `None` now has kind 4 and a pointer slot is non-zero.\n"
-                  "       * The generic value repr below cannot say so -- its\n"
-                  "       * `val == 0` arm answers \"None\", correctly for the NULL\n"
-                  "       * pointer it was written for -- so `{'z': 0}`,\n"
-                  "       * `{'i': 0}` and `{k: 0 for k in ks}` all printed\n"
-                  "       * `None`. A zero word with no tag says 0. */\n"
-                  "      _s = strdup(\"0\");\n"
-                  "    else if (d->slots[_i].kind == 5)\n"
-                  "      /* A STRUCT value (mojo_dict_set_struct): the boxed pointer,\n"
-                  "       * tagged so the walker asks the dict's own recorded repr\n"
-                  "       * instead of dispatching on a runtime type tag -- which a\n"
-                  "       * stack-allocated struct does not carry, its first word being\n"
-                  "       * its first field. That is why this row printed the generated\n"
-                  "       * field dump `P(x='a')` where CPython prints the user's\n"
-                  "       * `__repr__` (`R<a>`), and why a LIST of the same struct needed\n"
-                  "       * `mojo_list_set_elem_repr` for the same reason. Asked BEFORE\n"
-                  "       * the `val == 0` arm above, which is about kind-0 slots: a NULL\n"
-                  "       * struct pointer is `None`, which is what the recorded shim\n"
-                  "       * says for it. */\n"
-                  "      _s = _mojo_dict_val_repr(d, d->slots[_i].val);\n"
-                  "    else\n"
-                  "      _s = _mojo_generic_elem_repr(d->slots[_i].val);\n"
-                  "    _buf = mojo_str_cat_free(_buf, _s);\n"
-                  "    /* Only the kind==3 branch is a LITERAL; every other row is a\n"
-                  "       * repr helper's heap return and is ours to release. */\n"
-                  "    if (d->slots[_i].kind != 3) free(_s);\n"
+               "    /* ONE call for every kind the runtime can answer alone, through the\n"
+               "     * runtime's `mojo_dict_kind_byte` (which translates this slot's\n"
+               "     * `_DictSlot.kind` — \"which setter ran\" — into the MOJO_KIND_*\n"
+               "     * alphabet — \"what is in the word\") and then its\n"
+               "     * `mojo_repr_slot_kind` renderer. This chain used to spell out five\n"
+               "     * arms inline, and `mojo_repr_list_kinds` and `_mojo_repr_pair`\n"
+               "     * spelled out their own copies of the same answers; three copies of\n"
+               "     * one rule is how they drifted, which is how\n"
+               "     * `sorted({'mid': 0}.items())` came to print `[('mid', None)]` while\n"
+               "     * `print({'mid': 0})` printed `0`.\n"
+               "     *\n"
+               "     * The two arms left below are the ones the renderer CANNOT own, and\n"
+               "     * they are left for one reason each rather than by oversight:\n"
+               "     *   * kind 5 (a struct) is rendered by the DICT's recorded\n"
+               "     *     `val_repr`, so `mojo_dict_kind_byte` declines it — which struct a\n"
+               "     *     slot holds is not something the slot's kind can answer;\n"
+               "     *   * kind 0 with a NON-zero word may be a boxed container or a\n"
+               "     *     tagged struct, and telling those apart needs the generated\n"
+               "     *     dispatch, which the runtime cannot call. A kind-0 ZERO word does\n"
+               "     *     not reach either arm: the renderer answers \"0\" for it, which\n"
+               "     *     is the rule the old `val == 0` arm spelled out inline and is\n"
+               "     *     now one implementation of that rule instead of two.\n"
+               "     *\n"
+               "     * Every arm OWNS its string, including the bool — which used to be a\n"
+               "     * literal, with a matching `if (kind != 3) free` guard below it. That\n"
+               "     * was one special case in the ownership rule for the sake of one\n"
+               "     * arm, and `mojo_repr_slot_kind` copies instead so every arm is the\n"
+               "     * same shape. */\n"
+               "    char *_s = mojo_repr_slot_kind(mojo_dict_kind_byte(d->slots[_i].kind),\n"
+               "                                d->slots[_i].val);\n"
+               "    if (!_s && d->slots[_i].kind == 5)\n"
+               "      _s = _mojo_dict_val_repr(d, d->slots[_i].val);\n"
+               "    if (!_s)\n"
+               "      _s = _mojo_generic_elem_repr(d->slots[_i].val);\n"
+               "    _buf = mojo_str_cat_free(_buf, _s);\n"
+               "    free(_s);\n"
                "  }\n"
                "  free(_order);\n"
                "  return mojo_str_cat_free(_buf, \"}\");\n"
@@ -6580,6 +6727,13 @@ def gen_module_impl(self, stmts):
     # two disagree and a call site is unambiguous. See
     # `_gmi_apply_call_site_param_evidence`.
     _gmi_apply_call_site_param_evidence(self, stmts)
+    # ...and then in what a FORWARDED parameter's callee concluded, which
+    # `_infer_param_types` cannot see (the body of a pure forwarder says
+    # nothing) and the literal call sites cannot see either (the argument IS
+    # the name whose type is in question). Fixed point, so definition order
+    # does not decide the answer. See
+    # `_gmi_apply_forwarded_param_evidence`.
+    _gmi_apply_forwarded_param_evidence(self, all_functions)
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
             s = _as_structdef_node(s)
@@ -8058,59 +8212,74 @@ def gen_module_impl(self, stmts):
                 if _mdv is not None:
                     _record_param_dict_val(_mcallee, _mpn[_mi], _mdv)
 
-    # ...and resolve the collected dict-value observations into the contract
-    # codegen reads, then re-run the collection once so a FORWARDING chain
-    # (`def g(d): return f(d)`) resolves through the hop this pass just
-    # settled. One extra round, not a loop to a fixpoint: `g` can only forward
-    # a dict value type that some call site of `g`'s already proved, so a
-    # second pass settles every chain that exists and a third would add
-    # nothing. `_calls_in_stmts` is memoized, so the repeat is cheap.
+    # ...and resolve the collected dict-value AND container-kind observations
+    # into the contracts codegen reads, then RE-COLLECT and resolve again, to a
+    # FIXED POINT and not once. The repeat is what settles a FORWARDING chain
+    # (`def g(d): return f(d)`), because `_static_arg_dict_val`'s and
+    # `_static_arg_container`'s `caller_name` arms each read the contract this
+    # loop has already written — so a chain of N links needs N rounds, and one
+    # extra round settles only a chain of TWO. That was the bug, and it was the
+    # comment below that hid it: it said "one extra round, not a loop to a
+    # fixpoint: `g` can only forward a dict value type that some call site of
+    # `g`'s already proved, so a second pass settles every chain that exists and
+    # a third would add nothing". The premise is true and the conclusion does
+    # not follow — `mid1(d) -> mid2(d) -> leaf(d)` called as `mid1({'x': '1'})`
+    # is a chain of two hops, and after one round `mid2.d` was settled while
+    # `leaf.d` was not, so `leaf` still read its value with `mojo_dict_get_int`
+    # and printed the pointer decimal where CPython prints the string. The
+    # premise is also why the bound below is the number of functions: each
+    # round can only settle a link whose far end some call site proved, and
+    # every such link is a hop in a chain over this module's functions.
+    #
+    # ONE loop for BOTH contracts, not one each: they are settled by the same
+    # forward-propagation rule and each one's `caller_name` arm reads the table
+    # the other's previous round wrote, so a chain that mixes the two kinds
+    # (`def g(b): return f(b)` where `b`'s KIND is what makes `f`'s value
+    # readable) needs the rounds interleaved. Two loops would settle them in
+    # whichever order they are written, and that order is not a fixed point of
+    # the propagation — the one thing this loop exists to be.
+    #
+    # `_calls_in_stmts` is memoized and `_scan_container_elems` is a pure
+    # function of a body, so a round after the first is cheap; the loop exits
+    # as soon as a round settles nothing.
+    _contract_rounds = 0
+    _contract_limit = len(_caller_bodies) + 1
     _resolve_param_dict_vals()
-    for caller_name, body in _caller_bodies:
-        elem, nested, dval = self._scan_container_elems(body)
-        calls = []
-        self._calls_in_stmts(body, calls)
-        for call in calls:
-            if not isinstance(call.func, IdentExpr):
-                continue
-            callee = _as_str(call.func.name)
-            pnames = _free_params.get(callee)
-            if not pnames:
-                continue
-            for i, a in enumerate(call.args):
-                if i >= len(pnames):
-                    break
-                _dv = _static_arg_dict_val(a, dval, caller_name)
-                if _dv is not None:
-                    _record_param_dict_val(callee, pnames[i], _dv)
-                _pc = _static_arg_container(a, caller_name)
-                if _pc is not None:
-                    _record_param_container(callee, pnames[i], _pc)
-    _resolve_param_dict_vals()
-    # The container-kind contract, resolved and re-collected in the same two
-    # rounds as the dict-value one above and for the same reason: `g` can only
-    # forward a container kind that some call site of `g`'s already proved, so
-    # one extra pass settles every chain and a third would add nothing. Both
-    # resolutions run AFTER both collectors, so the second round of either sees
-    # the first round of the other.
     _resolve_param_containers()
-    for caller_name, body in _caller_bodies:
-        _pcalls = []
-        self._calls_in_stmts(body, _pcalls)
-        for _pcall in _pcalls:
-            if not isinstance(_pcall.func, IdentExpr):
-                continue
-            _pcallee = _as_str(_pcall.func.name)
-            _ppnames = _free_params.get(_pcallee)
-            if not _ppnames:
-                continue
-            for _pi, _pa in enumerate(_pcall.args):
-                if _pi >= len(_ppnames):
-                    break
-                _pc2 = _static_arg_container(_pa, caller_name)
-                if _pc2 is not None:
-                    _record_param_container(_pcallee, _ppnames[_pi], _pc2)
-    _resolve_param_containers()
+    while _contract_rounds < _contract_limit:
+        _contract_rounds += 1
+        _dv_before = len(self._param_dict_val_obs)
+        _pc_before = len(self._param_container_obs)
+        for caller_name, body in _caller_bodies:
+            elem, nested, dval = self._scan_container_elems(body)
+            calls = []
+            self._calls_in_stmts(body, calls)
+            for call in calls:
+                if not isinstance(call.func, IdentExpr):
+                    continue
+                callee = _as_str(call.func.name)
+                pnames = _free_params.get(callee)
+                if not pnames:
+                    continue
+                for i, a in enumerate(call.args):
+                    if i >= len(pnames):
+                        break
+                    _dv = _static_arg_dict_val(a, dval, caller_name)
+                    if _dv is not None:
+                        _record_param_dict_val(callee, pnames[i], _dv)
+                    _pc = _static_arg_container(a, caller_name)
+                    if _pc is not None:
+                        _record_param_container(callee, pnames[i], _pc)
+        _resolve_param_dict_vals()
+        _resolve_param_containers()
+        if (len(self._param_dict_val_obs) == _dv_before
+                and len(self._param_container_obs) == _pc_before):
+            # No new (callee, param) slot was reached this round, in EITHER
+            # table, so the next one cannot reach one either — both collections
+            # are monotone and the fixed point is here. Cheaper and more obvious
+            # than comparing the resolved tables, and it cannot be fooled by a
+            # re-write of an existing slot with the same value.
+            break
 
 
     # A container param whose ELEMENTS the callee `isinstance()`-checks

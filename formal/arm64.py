@@ -166,13 +166,23 @@ def encode_svc(imm8: int) -> bytes:
     return struct.pack('<I', insn)
 
 
-def encode_movz_xn_imm(xn: int, imm16: int) -> bytes:
-    """MOVZ Xn, #imm16. Move zeroing with 16-bit immediate.
-    Encoding: 110100 0 0 imm16(16) 00000 Rn
+def encode_movz_xd_imm(xd: int, imm16: int) -> bytes:
+    """MOVZ Xd, #imm16 — the 64-BIT form, `sf = 1`.
+
+    Encoding: 1101 0010 0 imm16(16) 00000 Rd, base 0xd2800000.
+
+    **The register bound is 30, not 31.** MOVZ's destination is written, and
+    register 31 in the destination field is XZR, which is not writable: `as`
+    rejects `movz x31, #1` outright. The bound used to be 31 (it read as "any
+    general register") and an encoder that accepts a word the assembler will not
+    produce is a defect waiting for its first caller — see
+    `encode_movz_wd_imm` beside it, which is the 32-bit form and which this
+    used to be called, with the two names swapped relative to the width each
+    one encodes.
     """
-    assert 0 <= xn <= 31
+    assert 0 <= xd <= 30
     assert 0 <= imm16 <= 0xffff
-    insn = 0xd2800000 | (imm16 << 5) | xn
+    insn = 0xd2800000 | (imm16 << 5) | xd
     return struct.pack('<I', insn)
 
 
@@ -191,13 +201,29 @@ def encode_mov_zr_xn(xd: int, xn: int) -> bytes:
     return struct.pack('<I', insn)
 
 
-def encode_movz_xd_imm(xd: int, imm16: int) -> bytes:
-    """MOVZ Xd/Wd, #imm16. Sets lower 16 bits to imm16, clears upper bits.
-    Encoding: 100101 opec 00 00000 imm16 xd (sf/opc choose 32 vs 64-bit)
+def encode_movz_wd_imm(wd: int, imm16: int) -> bytes:
+    """MOVZ Wd, #imm16 — the 32-BIT form, `sf = 0`, base 0x52800000.
+
+    **This function used to be called `encode_movz_xd_imm` and named the
+    64-bit form while emitting the 32-bit one.** The base opcode above has
+    `sf = 0` in bit 31, so what it assembles to is `movz wD`, and every one of
+    its 103 callers in `formal/arm64_codegen.py` spells an `X` register and
+    means a 64-bit one. Nothing miscompiled, because a MOVZ with an immediate
+    under 2^16 writes the same value either way and writing a W register zeroes
+    bits 63:32 — but the trap was that the name and the encoding disagreed, so
+    a caller that wanted a genuine 64-bit MOVZ with a large immediate had no way
+    to tell that the one it reached for was the 32-bit instruction, and
+    `encode_movk_xd_imm` — the other half of the same idiom, `sf = 1` — was the
+    only `_xd_` name in the file that meant what it said.
+
+    So the two are named after the width they ENCODE, which is the only naming
+    that cannot be wrong: `encode_movz_xd_imm` above is `0xd2800000`, this is
+    `0x52800000`, and the `as -arch arm64` sweep in `test_arm64_encoders.py`
+    checks both against the assembler for every register and immediate.
     """
-    assert 0 <= xd <= 30
+    assert 0 <= wd <= 30
     assert 0 <= imm16 <= 0xffff
-    insn = 0x52800000 | (imm16 << 5) | xd
+    insn = 0x52800000 | (imm16 << 5) | wd
     return struct.pack('<I', insn)
 
 
@@ -214,13 +240,18 @@ def encode_movk_xd_imm(xd: int, imm16: int, pos: int) -> bytes:
     return struct.pack('<I', insn)
 
 
-def encode_movn_xd_imm(xd: int, imm16: int) -> bytes:
-    """MOVN Xd, #imm16. Sets lower 16 bits to ~imm16, clears upper 48 bits.
-    Encoding: 100101 0 00 00001 imm16 xd
+def encode_movn_wd_imm(wd: int, imm16: int) -> bytes:
+    """MOVN Wd, #imm16 — the 32-BIT form, base 0x12800000 (`sf = 0`).
+
+    Named after the width it encodes for the reason `encode_movz_wd_imm`
+    gives: it used to be `encode_movn_xd_imm` and emitted the W form. There is
+    no `MOVN Xd` encoder here, and adding one is not the fix for the name
+    having been wrong — an unused encoder is a table entry, not an instruction
+    (`test_arm64_encoders.py`'s survey test says so in its own docstring).
     """
-    assert 0 <= xd <= 30
+    assert 0 <= wd <= 30
     assert 0 <= imm16 <= 0xffff
-    insn = 0x12800000 | (imm16 << 5) | xd
+    insn = 0x12800000 | (imm16 << 5) | wd
     return struct.pack('<I', insn)
 
 
@@ -376,9 +407,12 @@ def encode_stp_sp_pre(rt1: int, rt2: int, b: int = 16) -> bytes:
 
     clang-canonical: `stp x0, x1, [sp, #-16]!` = 0xA9BF07E0.
     imm7 (bits[21:15]) is the signed byte offset in units of 8.
+
+    Bounded for the reason `encode_ldp_sp_post` gives, and to the other end of
+    the same signed imm7 field: -512..-8 bytes, so `b` is 8..512.
     """
     assert 0 <= rt1 <= 30 and 0 <= rt2 <= 31
-    assert b > 0 and b % 8 == 0
+    assert b > 0 and b % 8 == 0 and b <= 512
     imm7 = (-(b // 8)) & 0x7F
     insn = (0x2A6 << 22) | (imm7 << 15) | (rt2 << 10) | (0x1F << 5) | rt1
     return struct.pack('<I', insn)
@@ -389,9 +423,41 @@ def encode_ldp_sp_post(rt1: int, rt2: int, b: int = 16) -> bytes:
 
     clang-canonical: `ldp x0, x1, [sp], #16` = 0xA8C107E0.
     imm7 (bits[21:15]) is the unsigned byte offset in units of 8.
+
+    **`b` is bounded, and the bound is the architecture's.** imm7 is a SIGNED
+    7-bit field scaled by 8, so the representable offsets are -512..504 bytes;
+    the old `assert b > 0 and b % 8 == 0` let 512 through, `b // 8` = 64
+    masked into the field as 0b1000000, and the hardware reads that back as
+    -64 — a load pair 1024 bytes below where the caller asked, silently and
+    with an exit status of 0. A frame wider than 504 bytes needs the offsets
+    spelled as two instructions, and that is a change to the emitter rather
+    than a bound to widen here. Measured against `as`, which says the same
+    thing: "index must be a multiple of 8 in range [-512, 504]".
+
+    **The SP pair load this backend emits, and the ONLY one, which is a
+    decision and not an oversight.** The non-writeback form
+    `LDP Xt1, Xt2, [SP, #imm]` (signed offset, base 0xa9400000, so a different
+    instruction from this one) had an encoder here called `encode_ldp_xn_xt_sp`,
+    and it emitted the wrong thing: it never set `Rn` to 31, so the "SP" in its
+    name was a register BASE it then overwrote with its first argument, its
+    first argument was really `Rt2`, and its `imm12` was in EIGHTIES while every
+    other offset in this file takes bytes. `arm64_step` models 0xa9400000
+    correctly, so the next caller would have got a proof about one instruction
+    and an image containing another — the failure mode a byte-exact test in
+    `test_arm64_encoders.py` exists to catch, in a file that had no `ldp` case
+    at all.
+
+    So it is deleted rather than repaired: a correct encoder that no lowering
+    calls is a table entry and not an instruction any image can contain, which
+    is what `tools/arm64_insn_audit.py`'s unwired list and
+    `test_arm64_encoders.py`'s survey test are both about. Nothing wants it —
+    frame traffic is this writeback form (`encode_stp_sp_pre` /
+    `encode_ldp_sp_post`) and a single SP-relative word is
+    `encode_ldr_xt_sp_imm` — and a spelling it would buy is two instructions
+    that already assemble.
     """
     assert 0 <= rt1 <= 30 and 0 <= rt2 <= 31
-    assert b > 0 and b % 8 == 0
+    assert b > 0 and b % 8 == 0 and b <= 504
     imm7 = (b // 8) & 0x7F
     insn = (0x2A3 << 22) | (imm7 << 15) | (rt2 << 10) | (0x1F << 5) | rt1
     return struct.pack('<I', insn)
@@ -430,18 +496,6 @@ def encode_ldr_xt_sp_imm(xt: int, imm12: int) -> bytes:
     assert 0 <= xt <= 30
     assert 0 <= imm12 <= 0xfff
     insn = 0xF9400000 | (imm12 << 10) | (31 << 5) | xt
-    return struct.pack('<I', insn)
-
-
-def encode_ldp_xn_xt_sp(xn: int, xt: int, imm12: int) -> bytes:
-    """LDP Xt, Xn, [SP], #imm. Loads two 64-bit registers from the stack.
-    Encoding: 10110 1 1 00000 1 imm12 Rn Rt Rs
-    """
-    assert 0 <= xn <= 31
-    assert 0 <= xt <= 30
-    assert 0 <= imm12 <= 0xfff
-    # Encoding: 0xA9400000 | (imm12 << 10) | (xn << 5) | xt
-    insn = 0xA9400000 | (imm12 << 10) | (xn << 5) | xt
     return struct.pack('<I', insn)
 
 

@@ -6812,7 +6812,11 @@ def outer():
     # pipeline actually produces, and its own docstring spelled a third prefix.
     # It is now the intersection of the two artifacts' own symbol names, which
     # is what makes it un-rot-able: a rename on the emitting side moves both
-    # halves together.
+    # halves together. Fixed in 5f131392 ("_refuse_dropped_companion asks the
+    # two artifacts which symbols they share"), which also closed the guard
+    # doc — it existed to record that this condition could never fire, and it
+    # does now, so the doc went with the fix rather than leaving a citation
+    # pointing at nothing.
     test_raises(
         "nested_generator_needing_the_cpp_companion_is_refused_by_name",
         """\
@@ -7341,69 +7345,6 @@ def main():
             return
         print(f"PASS  {name}")
         _PASS += 1
-
-    def test_no_name_is_defined_twice_in_a_codegen_class():
-        """No class in the codegen tiers defines the same name twice.
-
-        `GimpleGen` is the aggregator every backend module's body hangs off as
-        a one-line delegation, so it is where a merge collision lands: the
-        conflict is resolved FILE BY FILE, one side keeps `gimple_codegen.py`
-        whole and the other keeps `mojo/backend_gimple/emit_stmts.py` whole,
-        and the two copies of the shared file end up contributing the SAME
-        delegation at two different places in the class body.
-
-        Python does not complain. The second definition silently replaces the
-        first, so the duplicate is invisible to every test that exercises the
-        method — and to a reader, because the two bodies are identical and
-        there is nothing to disagree about. What it costs is the ledger: a name
-        that appears twice cannot be counted, so the "one delegate per
-        extracted helper" rule stops being checkable, and the next edit to
-        either copy is a coin flip about which one it changed.
-
-        This parses the SOURCE with `ast` rather than reflecting on the class,
-        because the class object is exactly where the evidence is gone: one
-        name, one function, no trace of the loser. Reading it back off
-        `gimple_codegen.GimpleGen.__dict__` would pass on the tree that has the
-        bug.
-        """
-        global _PASS, _FAIL
-        name = "no_name_is_defined_twice_in_a_codegen_class"
-        import ast
-        import glob as _glob
-        import os as _os
-
-        here = _os.path.dirname(_os.path.abspath(__file__))
-        paths = [_os.path.join(here, 'gimple_codegen.py')]
-        for pat in ('mojo/middle/*.py', 'mojo/backend_gimple/*.py'):
-            paths += sorted(_glob.glob(_os.path.join(here, pat)))
-
-        problems = []
-        for p in paths:
-            with open(p, encoding='utf-8') as f:
-                tree = ast.parse(f.read(), filename=p)
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.ClassDef):
-                    continue
-                first = {}
-                for stmt in node.body:
-                    if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        continue
-                    if stmt.name in first:
-                        problems.append(
-                            f"{_os.path.relpath(p, here)}:{node.name}."
-                            f"{stmt.name} is defined twice, at lines "
-                            f"{first[stmt.name]} and {stmt.lineno} — the "
-                            f"second silently replaces the first")
-                    else:
-                        first[stmt.name] = stmt.lineno
-        if problems:
-            print(f"FAIL  {name}")
-            for pr in problems:
-                print(f"      {pr}")
-            _FAIL += 1
-        else:
-            print(f"PASS  {name}  ({len(paths)} modules)")
-            _PASS += 1
 
     def test_every_funcptr_initializer_has_a_definition():
         """Every `_funcptr_X = (void *)X` initializer in the output must have a
@@ -10297,11 +10238,17 @@ print({'p': 1} | {'q': 2})
         `_reset_func` uses), and a spread that overwrites a literal key.
         Returns are inline for the same reason as the test above, and the
         one literal value is `7` rather than `0` because a ZERO integer read
-        back out of a dict prints `None` on this backend — a separate,
-        pre-existing defect with no spread anywhere in it (verified against
-        `HEAD~4`), filed as
-        bugs/CODEGEN_dict_int_value_zero_reads_back_as_none.md, and pinning it
-        here would make this test red for the wrong reason."""
+        # back out of a dict USED TO print `None` on this backend — a separate
+        # defect with no spread anywhere in it, which made this case red for the
+        # wrong reason and so had to be written around. It is FIXED: the
+        # runtime's one `mojo_repr_slot_kind` renderer answers a zero word under a
+        # stated int kind with `0`, and `mojo_dict_items` records that kind on the
+        # pairs it builds. This case is therefore STRONGER than its comment used
+        # to claim it could be — the zero and the pair kinds are pinned by
+        # `gimple_dict_items_pairs_keep_the_slot_kind` and
+        # `dict_items_reads_each_slot_kind` — so leaving it on `7` keeps a second,
+        # unrelated red out of a spread test rather than adding coverage of a
+        # shape two other cases already own."""
         global _PASS, _FAIL
         name = "dict_literal_star_star_pair_merges_instead_of_storing"
         src = '''\
@@ -11170,7 +11117,6 @@ print(run('x/y.txt'))
     test_dotted_import_two_hop_attribute_call()
     test_dedup_variadic_externs_cache_is_a_faithful_parse()
     test_handwritten_selfhost_signature_tables_match_the_source()
-    test_no_name_is_defined_twice_in_a_codegen_class()
     test_every_funcptr_initializer_has_a_definition()
     test_ast_walk_reaches_every_name_in_a_lambda_body()
     test_callable_return_type_survives_its_carrier()

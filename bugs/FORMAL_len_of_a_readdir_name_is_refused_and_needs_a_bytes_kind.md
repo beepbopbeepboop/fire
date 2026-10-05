@@ -124,6 +124,11 @@ It is a change to the value model on both backends and it owes a full
   prevalence in this corpus is 0 of 743 files, and
   `test_formal_unicode.py`'s `byte_pointer_over_text_is_the_residual_and_reads_
   its_byte` is the row a reader can measure it with.
-* The published axiom-closure table, which is `formal29-1`'s
-  (`bugs/FORMAL_axiom_closure_table_is_stale_so_the_census_gate_job_is_red.md`)
-  and is the one remaining failure in `formal-sweep-truth`.
+* The published axiom-closure table (`test_formal_admitted.py`'s `AXIOM_CLOSURE`),
+  which is stale for five of `lib/`'s six modules and has `reaches` and
+  `text_only` swapped for one of them. It is measured, pre-existing on `master`
+  and independent of this document's subject, and it is the one remaining failure
+  in `formal-sweep-truth`. Filed as
+  `bugs/TEST_the_axiom_closure_table_is_stale_for_five_of_its_six_modules.md`;
+  the census half of it (a namespace-qualified `decide` axiom was invisible to
+  `AXIOM_SITE_RE`) was FIXED on 2026-10-04 in `formal/admitted.py`.

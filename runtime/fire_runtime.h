@@ -697,12 +697,22 @@ char *mojo_list_repr_elem(MojoList *l, int64_t v);
  * own element-type inference knows; the constants are here so the generated
  * C reads `mojo_list_sort (l, MOJO_KIND_STR, 0, 0)` instead of a bare
  * `'p'`, and so a new kind has one definition. */
-#define MOJO_KIND_INT     'i'   /* int64_t (and bool, and None) */
+#define MOJO_KIND_INT     'i'   /* int64_t. NOT bool and NOT None: both are
+                                 * also int64_t, and a slot only says which
+                                 * one it is if the byte says so. */
 #define MOJO_KIND_DOUBLE  'd'
 #define MOJO_KIND_BYTES   's'
 #define MOJO_KIND_STR     'p'
 #define MOJO_KIND_LIST    'l'   /* nested container: not totally ordered */
 #define MOJO_KIND_NONE    'n'
+#define MOJO_KIND_BOOL    'b'   /* a Python bool, 0/1 — the SAME
+                                 * int64_t as MOJO_KIND_INT, so only the byte
+                                 * separates them. Neither `TypeLattice.
+                                 * slot_kind_byte` (which never sees a bool) nor
+                                 * any hand-written list literal produces it:
+                                 * `mojo_dict_items` is what records it, off
+                                 * `_DictSlot.kind == 3`, and it is the only
+                                 * producer. See mojo_repr_slot_kind. */
 /* A read whose slot index is not known at compile time (`for x in
  * struct.unpack('<if', buf)`, `t[i]`) has to land in ONE C type, and for a
  * heterogeneous list no single accessor is right for every slot. This
@@ -1395,7 +1405,7 @@ void        mojo_raise_not_implemented(char *detail);
 void        mojo_module_not_compiled(char *module, char *member);
 /* Runtime %-style string formatting with a DYNAMIC (non-literal) template:
  *
- *   char *out = mojo_str_format_dict("usage: %(prog)s v%(ver)d", d);
+ *   char *out = mojo_str_format_dict("usage: %(prog)s v%(ver)d", d, _mojo_repr_dict);
  *
  * `fmt` may mix literal text, '%%', and %(key)[flags][width][.prec]conv
  * specs; each spec's value is looked up in `vals` by key at RUNTIME and
@@ -1407,7 +1417,20 @@ void        mojo_module_not_compiled(char *module, char *member);
  * fires when the template is a string LITERAL in the source; this covers
  * the real-world remainder — templates read from data/parameters
  * (`text % dict(prog=...)`, `readme % textvars`). */
-char       *mojo_str_format_dict(char *fmt, MojoDict *vals);
+char       *mojo_str_format_dict(char *fmt, MojoDict *vals,
+                                    char *(*dict_str)(MojoDict *));
+/* `dict_str` is how an UNKEYED spec renders the mapping. CPython's rule is
+ * that a non-tuple right operand is consumed by ONE spec, so `'%s' % d` is
+ * `str(d)` -- measured on CPython 3.14.7, which prints the dict and does NOT
+ * raise (the TypeError is `'%s %s' % d`, "not enough arguments for format
+ * string"). A dict's own repr is GENERATED per TU (`_mojo_repr_dict`, which
+ * knows every slot's kind and the recorded `val_repr`), so the function
+ * travels IN rather than being re-derived here: the same bargain
+ * `MojoDict.val_repr` and `mojo_list_set_elem_repr` make, and the reason
+ * there is still ONE implementation of "what a dict looks like". NULL is
+ * tolerated and degrades to copying the spec through, which is what this
+ * function did for every unkeyed spec before and what a caller in a TU with
+ * no generated reflection block must get. */
 void        mojo_unsupported_iter(const char *type_name);
 
 /* Real `hash(x)` builtin -- see fire_runtime.c's docstring above their
@@ -1640,6 +1663,33 @@ char *mojo_repr_list_bytes(MojoList *l);
    result for a format mixing int/float/bytes fields. `kinds` is one byte per
    slot: 'i' int, 'd' double, 's' bytes (see mojo_repr_list_kinds). */
 char *mojo_repr_list_kinds(MojoList *l, const char *kinds);
+/* THE renderer for "a slot of kind `kind` holds the word `v` — what
+   does that look like?". One function for every caller that has a kind byte and
+   a raw slot, because there were three copies of the answer and they had
+   already drifted: `mojo_repr_list_kinds`' own kind switch, the generated
+   `_mojo_repr_pair` walker, and the generated `_mojo_repr_dict` value chain.
+   Each is now a call, so a seventh value kind is one arm here instead of three.
+ *
+   `kind` is a MOJO_KIND_* byte. Returns NULL for `kind` values this function
+   does not own — MOJO_KIND_INT and anything unrecognised — and
+   the caller keeps whatever it did for an int: that is NOT a shrug, it is the
+   documented division of labour. A raw int64_t slot can hold a boxed pointer
+   (a container, a tagged struct), and telling those apart needs the generated
+   dispatch (`_mojo_generic_elem_repr` / `mojo_list_repr_elem`), which lives in
+   the generated TU and cannot be called from here.
+ *
+ * OWNERS its return on every arm, including the two that could be literals
+ * (`None`, `True`/`False`): one ownership rule is worth more than two saved
+ * allocations on a debug print, and it is why the callers can `free` without
+ * having to ask which arm they came from. */
+char *mojo_repr_slot_kind(char kind, int64_t v);
+/* The MOJO_KIND_* byte for one `_DictSlot.kind`, or 0 when that value kind is
+   not one this renderer owns (a plain int, or either struct kind — the
+   latter because "how to render it" is the dict's recorded `val_repr`, not the
+   slot's kind). The two tag vocabularies exist because they answer different
+   questions, `_DictSlot.kind` being "which setter ran" and the alphabet being
+   "what is in the word"; this is the one place the two meet. */
+char mojo_dict_kind_byte(int64_t dict_kind);
 /* Lists of 2-element PAIR lists (enumerate/zip): `[(0, 7), (1, 8)]`. The
    second slot's type is fixed at codegen time, hence one wrapper per
    kind — the raw slot cannot tell an int from a double. */
