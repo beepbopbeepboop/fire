@@ -486,7 +486,7 @@ MEASURED_PEAK_GB = {
     'formal-target-queries':  (0.08, 'measured'),   # 5 s, 25 cases
     'formal-small-hosts':     (0.08, 'measured'),   # 5 s, 4 groups
     'formal-specialization':  (0.07, 'measured'),   # 1 s, 6 cases
-    'formal-method-param-field': (0.07, 'measured'),  # 9 s, 14 cases
+    'formal-method-param-field': (0.07, 'measured'),  # 21.5 s, 35 cases
     'formal-external-call':   (0.08, 'measured'),   # 3 s, 29 cases
     'formal-receiver-position': (0.07, 'measured'),  # 15 s, 38 cases
     'formal-value-model':     (0.07, 'measured'),   # 9 s, 19 cases

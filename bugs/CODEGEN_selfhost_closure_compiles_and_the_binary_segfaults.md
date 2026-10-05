@@ -1,4 +1,10 @@
-# `selfhost`: the self-host closure COMPILES AND LINKS; the produced binary segfaults on a two-line program
+# `selfhost`: the self-host closure COMPILES AND LINKS; the produced binary cannot compile a two-line program
+
+(The file name says `segfaults`, and did when this was filed: the produced
+binary died of `exit=-11`. That is fixed — see the Status section below, which
+measures `exit=1` and names the fault that replaced it. The name stays because
+two docs cite it and a rename that breaks its own citations is not worth the
+tidiness; the TITLE is the subject, and the subject is now "cannot compile".)
 
 **State: OPEN, measured 2026-10-04, and it REPLACES six docs** — all six of
 which described a failure this job no longer has. They were written on
@@ -10,6 +16,101 @@ from integer`) no longer reproduce at all. Keeping six docs that each cost the
 next reader a four-minute measurement to re-derive a conclusion that is now
 false is the failure mode `bugs/` is supposed to prevent, so they are deleted
 and this one carries the measured state.
+
+## Status (2026-10-05, `work/merge-gate28`, on the merged tree): the FIRST fault is closed, and the next one is named
+
+Step 1 of the section below was run — `python3 tools/suite.py selfhost
+--no-cache`, 530 s, peak 4.4 GB, on the tree with `work/gatefix10`,
+`work/bugs7-1` and `work/merge-formal27a-r2` merged into it. **The SIGSEGV is
+gone and the binary now runs to a clean error exit:**
+
+```
+  self-host closure: 62 modules, every generator/async lowered in place or its module refused whole: True
+  dylib module path refuses an unlinkable generated_cpp: True
+  self-host closure: 1563 functions, 1 of them declared in fire_runtime.h under a pinned C name; every such declaration matches its definition: True
+Built: /Users/mrs/net/chatgpt/claude/work-451/.tmp/tmp5g2h5e4g/mojo_selfhost
+  self-hosted compiler on a two-line program: exit=1 ci_bytes=0 stub_hits=0
+  ✗ the self-hosted binary did not exit 0
+```
+
+`exit=-11` became `exit=1`. `ci_bytes=0` and `stub_hits=0` are unchanged, so
+nothing about the shape moved except the fault itself, and the reading the
+previous section asked for is the one that holds: **the type-tag fix closed the
+FIRST fault, not the last.** The job is still red and still undeclared-red, and
+this doc stays open.
+
+### The next fault, and its message
+
+The binary was kept (the two-line recipe in "The exact next step" item 1 below,
+run by hand into `.tmp/shkeep/`), so this cost one build and not three:
+
+```console
+$ cd .tmp/shkeep && printf 'x = 1\nprint(x)\n' > probe.mojo
+$ ./mojo_selfhost --dump-full probe.mojo ; echo "EXIT $?"
+Error generating --dump-full: TypeError: unhashable type: 'list'
+Unhandled exception: NotImplementedError: traceback.print_exc: module 'traceback' is not compiled into this binary
+EXIT 1
+```
+
+So the compiled compiler gets as far as the dump and is refused a dict key by
+the runtime's own content-key rule: `mojo_dict_key_for` (`runtime/fire_runtime.c`
+line 10567) raises exactly this text for a `MojoList *` that is **not** marked by
+`mojo_mark_as_tuple`, which is right for CPython and wrong here, because the
+value IS a tuple.
+
+`lldb` names the frame (a breakpoint rather than `-k bt`, because the error is
+caught, so there is no stop to catch):
+
+```console
+$ lldb -b -o "breakpoint set -n mojo_dict_key_for" -o run -o "bt 30" -o quit -- \
+      ./mojo_selfhost --dump-full probe.mojo
+* frame #0: mojo_selfhost`mojo_dict_key_for
+  frame #1: mojo_selfhost`mojo_dict_set_str_kw + 112
+  frame #2: mojo_selfhost`_mojo_middle_types_toplevel.part.0 + 6676
+  frame #3: mojo_selfhost`main + 300
+```
+
+**`mojo/middle/types.py`'s MODULE-LEVEL code** builds a dict whose key is a
+value the runtime says is an unmarked list. One candidate, and it is the only
+one of its shape in that module — an AST walk of `types.py`'s module-level
+statements finds exactly one dict literal with a non-constant key:
+
+```
+L1286 non-constant key: ('os', 'environ')
+```
+
+which is `_MODULE_ATTR_CTYPES: dict = {('os', 'environ'): 'MojoDict *'}`, and
+the instruction after the failing call in that frame is a `bl mojo_set_new`,
+which is where `_FORCE_RENAME_RESERVED = frozenset({...})` (line 1327) builds
+its set. That is a HYPOTHESIS built from adjacency in generated code and from
+the key's shape — it is not measured, and the mark is a process-wide ADDRESS set
+(`_reg_tuple`), so the two ways it can be wrong are different bugs: the tuple
+literal never got `mojo_mark_as_tuple`, or it got it on a different `MojoList`
+than the one handed to the dict.
+
+### The exact next step (three lldb commands, no rebuild)
+
+The binary is at `.tmp/shkeep/mojo_selfhost` on the worktree that measured this,
+and `.tmp` does not survive a reboot, so this is worth doing in one sitting:
+
+1. `breakpoint set -n mojo_mark_as_tuple` and `breakpoint set -n
+   mojo_dict_key_for`, `continue` to the second. If the pointer `x0` at the
+   `mojo_dict_key_for` stop was never an argument at a `mojo_mark_as_tuple`
+   stop, the dict-literal key path builds a COPY and the fix is there. If it
+   was, then `mojo_mark_as_tuple` ran and the registry lost it, and the fix is
+   in `_reg_tuple`'s lifetime.
+2. For the first, read `_lower_tuple_literal`'s `mojo_mark_as_tuple` call
+   (`mojo/backend_gimple/emit_exprs.py`, at the end of the function, AFTER the
+   elements are in — the placement is load-bearing and its comment says why) and
+   ask whether a dict literal's KEY is lowered through it at all, or through a
+   path that builds the same two-element list without the mark.
+3. **Fix the traceback path while you are in there.** The second line of the
+   output above is its own defect and it is why this section needed lldb at
+   all: the self-hosted binary cannot print the traceback of its own
+   unhandled error, because `traceback` is not compiled into it. Every future
+   instance of this class — a compiled compiler that raises instead of
+   segfaulting — will be reported as one line with no frames. Whichever module
+   list excludes `traceback` is the one to look at.
 
 ## Status (2026-10-05, `work/gatefix10`): the crash is ROOT-CAUSED and the runtime half is FIXED; the binary is not rebuilt yet
 

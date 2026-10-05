@@ -1230,11 +1230,25 @@ CASES = [
     #     analogous receiver-seeding mistake.
     #
     # The refusal row's writer stores a WORD into a frame-typed slot, and that
-    # is deliberate rather than a type error: a writer that stores a FRAME there
-    # is refused earlier and correctly by `FORMAL_wide_receiver_by_reference`'s
-    # rule, which preempts this arm entirely.  The word is the one writer shape
-    # that REACHES it, so the row is the pin that the seeding declines — which
-    # is the property, rather than the fact that some refusal fires.
+    # is deliberate rather than a type error: no frame ever enters the slot, so
+    # this is the writer shape that reaches the arm on the strength of the
+    # READER's evidence alone.  It is the pin that the seeding declines — which
+    # is the property, rather than the fact that some refusal fires — and it is
+    # a different program from the frame-storing writer two rows below, which is
+    # what `FORMAL_wide_receiver_by_reference` refuses on its own account.
+    #
+    # The NEEDLE is `DELEGATING_FIELD_ADVICE` rather than the emitter's
+    # "'t.v' is a field access through 't'", and that is a merge, not a
+    # preference.  `formal/build.py`'s `_nested_frame_bindings` (new on
+    # `work/merge-formal27a-r2`) reports this program as `reassigned` and hands
+    # the reader the real reason; its own docstring says why, and it is the same
+    # sentence: the emitter's text "is true and names a type inference rather
+    # than the lifetime question that is actually there".  So the row keeps its
+    # program and its property and its needle moves to the message the tree now
+    # emits — which is the same clause
+    # `a_local_copy_of_a_field_a_method_reassigns_names_the_lifetime` pins,
+    # because `_REASSIGNED` is ONE refusal and these are two programs that
+    # reach it.
     ("a_local_bound_to_a_nested_frame_field_read_builds_and_answers",
      "struct Opt:\n"
      "    var v: Int\n"
@@ -1347,7 +1361,7 @@ CASES = [
      '    printf("g=%d", b.get())\n'
      "    return 0\n",
      None, None, None,
-     "'t.v' is a field access through 't'"),
+     "a frame belonging to whichever function ran the assignment"),
     # The DIRECT spelling of the first row, in a FREE FUNCTION rather than a
     # method, so the local holder is a local bound to a construction rather than
     # a receiver.  It is the control that says the first row is answered by the
@@ -1498,9 +1512,22 @@ CASES = [
     # LOOP's word and not the address, and a seeding that classified it from the
     # first binding builds an image that reads `[7 + 8·slot]`.  Measured on both
     # backends as a SIGSEGV, which is `FORMAL_one_field_holder_of_a_frame_is_not
-    # _a_holder` wearing a different name; the needle is the generic
-    # unclassifiable-base sentence because THAT is what this program must still
-    # get, and a build is the failure this case exists to catch.
+    # _a_holder` wearing a different name; the needle is the REBIND sentence
+    # because THAT is what this program must still get, and a build is the
+    # failure this case exists to catch.
+    #
+    # The needle moved on the merged tree, and the move is what the merge is for.
+    # `formal/build.py`'s `_nested_frame_bindings` (new on
+    # `work/merge-formal27a-r2`) does not claim a name whose bindings are MIXED,
+    # so this row is not `reassigned` and never reaches the lifetime refusal; it
+    # reaches `formal/model.py`'s rebind refusal instead, whose own subject is
+    # exactly this program — "`t` also holds the address of an `Opt` frame … and
+    # this path has no way to say that a later binding changes what the name is"
+    # — and which then names the three assignments that would be sound, none of
+    # which a `for` target is.  The old needle was the emitter's "this path has
+    # no way to say what 't' holds", which the merged tree still spells only in a
+    # `formal/build.py` COMMENT saying it names a type inference rather than the
+    # question that is actually there.
     ("a_loop_target_shadowing_a_local_copy_is_still_not_a_holder",
      "struct Opt:\n"
      "    var v: Int\n"
@@ -1523,7 +1550,8 @@ CASES = [
      "    printf(\"g=%d\", b.get())\n"
      "    return 0\n",
      None, None, None,
-     "this path has no way to say what 't' holds"),
+     "this path has no way to say that a later binding changes what the "
+     "name is"),
 ]
 
 
