@@ -215,3 +215,72 @@ PY
 # external_syms/extern_calls carry the fflush; every label matches a tree without it.
 $ grep -c "all_goals (first | done | sorry)" <the generated proof>   # 0 here, 8 without the flush
 ```
+## Item 2 LANDED (2026-10-05, `formal37-2`): the one-call case now announces the
+## substitution, and the note it announced in was factually wrong
+
+Item 1 is untouched — it is a decision about what one opaque call SHOULD say, it
+belongs to `formal28-2`'s capability gap, and nothing here pretends to have made
+it. **Item 2 is done, and it turned out to be a smaller and a harder claim than
+"say more".**
+
+**The note was false, and it was false in the direction that matters.** It read:
+
+> `The universal theorem above proves the part that IS decidable: the run reaches
+> the call, for every input.`
+
+There is no universal theorem **above** it. `concrete_test` is emitted at line
+1548 of the generated proof and the substituted `q_reaches_call_at_0x100000474`
+is at line **2967** — 1400 lines BELOW, inside the CFG section. So "above" sent
+the reader to the concrete theorem that is *not* emitted. A note whose only
+sentence is a backwards cross-reference teaches the reader nothing, which is the
+doc's own complaint about having to diff the file.
+
+**And the proposition is not `True`.** The doc says "it silently replaces the
+universal theorem with `prop := True`", and `prop := True` is what
+`_gen_universal_e2e_cfg` receives (`_ukw["prop"]`) — but the theorem actually
+emitted is
+
+```lean
+theorem q_reaches_call_at_0x100000474 (n : UInt64) (n1 : UInt64)
+    (hn : …) : (match arm64_exec_go_exit { … } q_code 4294968436 ((200000 + 48 * n.toNat)) with
+     | some s => True
+     | none => False) := by
+```
+
+`True` in the `some` branch — "the run ENDS at the call" — which is how a value
+flow is declined, not a literal `True`. **I got this wrong first and wrote it
+into the note**, and `test_it_does_not_claim_the_return_value_is_proved` caught
+it by asserting the proposition is a `match` on `arm64_exec_go_exit` carrying no
+`x0`. So the note now says what is emitted rather than what the flag said.
+
+The note now names **both** theorems — `q_compiles_correctly_universal` and the
+`q_reaches_call_at_…` that replaced it — says which is missing and why, says
+outright that nothing below states the return value, and says why TWO such calls
+are refused by name instead of substituted. That is the whole of item 2: a
+caller learns the substitution by reading, not by diffing.
+
+**Pinned** by `test_formal_call_proof_gen.py::TestTheOneOpaqueCallIsAnnounced`,
+4 rows, all Lean-free (`check=False`; the claim is about emitted TEXT):
+
+| row | pins |
+|---|---|
+| `the_value_theorem_is_absent_and_the_note_says_so` | names the absent theorem AND the one in its place. Naming it and saying it is missing are two different announcements |
+| `it_does_not_claim_the_return_value_is_proved` | no `x0 = mojo` asserted, the "nothing below says what `q` returns" sentence is present, and the emitted proposition really is a valueless `arm64_exec_go_exit` match |
+| `the_note_points_forward_not_back` | no "theorem above", and the reachability theorem still comes AFTER the note (so "above" would be right again if the order changed) |
+| `a_run_without_an_opaque_call_is_unaffected` | **a note announcing a substitution is trivially writable so it always fires.** `def plain(a, b): return a + b` has no out-of-image call, keeps `plain_compiles_correctly`, and carries no note |
+
+Revert-tested: restoring the old note fails 3 of 4; making the `if _opaque is
+not None` guard `if True` fails the fourth (every proof in the corpus would
+claim a substitution). Two assertions were **wrong when written** and measuring
+fixed them rather than the code — one forbade the string `` `0 = mojo 10, 0` ``,
+which the note legitimately QUOTES inside the "would pass for the wrong reason"
+clause that withdraws it, and one matched `:= True` across a newline, when the
+note is a wrapped comment and the proposition spans three lines.
+
+**What is still open, unchanged:** item 1 (what one opaque call should say —
+option 2, "stop claiming a value on a block that cannot return", is still the one
+to argue first) and item 3 (re-run the div0 measurement, which needs item 1).
+The three rows in `TestTheZeroDivisorGuardAgainstLean` stay RED and unmarked:
+they fail with messages that say what stopped happening, and item 2 does not
+change what they measure. `formal/arm64_proof_gen.py` is gate-owing; this is a
+comment string only, no emitted Lean changed.

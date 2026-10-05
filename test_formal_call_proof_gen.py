@@ -4475,5 +4475,195 @@ def _generate_dir(tmp, src_path, name, out):
                              prove=True, check=False)
 
 
+
+
+class TestTheOneOpaqueCallIsAnnounced(unittest.TestCase):
+    """One out-of-image call must SAY that it replaced the theorem it owed.
+
+    `bugs/FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md`'s
+    item 2, and it is the half of that gap which is silent. Two out-of-image
+    calls are REFUSED by name (`_cfg_decomposition_refusal`), because the walk
+    halts at one address and a program with two of them has a path reaching the
+    second without passing the first. ONE does not raise: the walk is given
+    `exit_at=<that pc>`, and it discharges the terminal predicate by halting
+    there. What comes out is a theorem named
+    `<fn>_reaches_call_at_<pc>` whose proposition is `True`, in place of
+    `<fn>_compiles_correctly_universal`, whose proposition is about `x0`.
+
+    So the caller asked for a statement about the return value and got one about
+    reaching an address, and the only trace was a note saying "the universal
+    theorem above proves the part that IS decidable" — which was **false**, the
+    theorem is emitted 1400 lines BELOW the note, and it said nothing at all
+    about the value theorem being absent. Nothing here needs Lean: the claim is
+    about the shape of the emitted TEXT, which is where the substitution is
+    visible or invisible.
+    """
+
+    PROGRAM = ("def q(a, b):\n"
+               "    return a // b\n")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="a2-one-opaque-")
+        # `_generate_dir` rather than `_generate`: the source is already on
+        # disk (it is a class attribute, written once, so the class docstring
+        # can quote it), and `_generate` would want a name where this wants an
+        # arch. `check=False` is what keeps the class Lean-free — every
+        # assertion is about the emitted TEXT.
+        path = os.path.join(cls.tmp, "q.mojo")
+        with open(path, "w") as f:
+            f.write(cls.PROGRAM)
+        try:
+            import formal.build as fb
+            r = fb.compile_formal(path, arch="arm64",
+                                  output=os.path.join(cls.tmp, "q.aout"),
+                                  prove=True, check=False)
+            cls.err = None
+            cls.proof = r.get("proof_path")
+        except Exception as e:        # noqa: BLE001 -- report it, do not hide it
+            cls.proof, cls.err = None, f"{type(e).__name__}: {e}"
+        cls.text = ""
+        if cls.proof and os.path.exists(cls.proof):
+            with open(cls.proof, encoding="utf-8", errors="replace") as f:
+                cls.text = f.read()
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def setUp(self):
+        if self.err:
+            self.skipTest(f"proof generation refused, so there is no text to "
+                          f"read: {self.err}")
+        if not self.text:
+            self.skipTest("no proof text emitted")
+
+    def test_the_value_theorem_is_absent_and_the_note_says_so(self):
+        """The note names BOTH theorems and says which one is missing.
+
+        This is the whole of item 2: a caller must be able to learn the
+        substitution by READING, not by diffing the emitted file against what it
+        expected. Naming the absent theorem is what makes it learnable — the
+        old note described the call boundary and said nothing about `x0`, so a
+        reader who wanted the return value had to notice the name was different.
+        """
+        self.assertIn("q_compiles_correctly_universal", self.text,
+                      "the note no longer names the theorem the caller asked "
+                      "for, so the substitution is invisible again")
+        self.assertIn("is NOT emitted", self.text,
+                      "the note names the value theorem but does not say it "
+                      "is absent — naming it and saying it is missing are two "
+                      "different announcements")
+        self.assertIn("q_reaches_call_at_", self.text,
+                      "the note does not name the reachability theorem that "
+                      "was emitted in its place")
+
+    def test_it_does_not_claim_the_return_value_is_proved(self):
+        """`prop := True` is the substitution, so no `x0` may be in the claim.
+
+        The substituted theorem's proposition is literally `True` — the halt
+        discharges it by itself, and there is no value flow in it at all. So the
+        note's job is to stop a reader concluding that anything about `q`'s
+        return was proved. It must not say the value IS decided, and it must not
+        point at a theorem that talks about `x0`.
+        """
+        # The substituted theorem itself, and what it says.
+        m = re.search(r"theorem q_reaches_call_at_(\S+?)[\s(]", self.text)
+        self.assertIsNotNone(m, f"no `q_reaches_call_at_` theorem was emitted: "
+                                f"the note announces a substitution that did "
+                                f"not happen")
+        note = self.text[:m.start()]
+
+        # **Quoting the withdrawn claim is not making it.** The note says a run
+        # test "would compare the machine against `0 = mojo 10, 0` and pass for
+        # the wrong reason" — so the string IS in the note, and an assertion that
+        # it is absent would be asserting the note be vaguer about what it
+        # declined. What must not be present is the note ASSERTING it: `==`/`=`
+        # between the machine's `x0` and `mojo`, outside the "would"/"wrong
+        # reason" clause that withdraws it.
+        self.assertNotIn("x0 = mojo", note,
+                         "the note states an `x0 = mojo` equation as something "
+                         "proved; the substituted theorem's proposition is a "
+                         "reachability match, which is precisely the claim "
+                         "being withdrawn")
+        # The note is a WRAPPED comment (the emitter breaks lines to a fixed
+        # width), so a sentence can straddle a newline — matching the raw text
+        # for it is asserting a line break that is not part of the claim.
+        flat = " ".join(note.split())
+        self.assertIn("Nothing below says what q returns", flat,
+                      "the note no longer says outright that nothing below "
+                      "states the return value, which is the claim a reader "
+                      "needs and the one this substitution makes false")
+
+        # And the proposition really carries no value flow — it is a reachability
+        # `match` whose `some` branch is `True`. If a future emitter gave it a
+        # real terminal predicate, this note's central sentence would be stale
+        # and the class would be measuring something that no longer happens.
+        tail = self.text[m.start():]
+        mprop = re.search(
+            r"theorem q_reaches_call_at_\S+.*?:=\s*(by)?", tail, re.S)
+        self.assertIsNotNone(mprop, "could not find the proposition")
+        prop = tail[mprop.start():mprop.end()]
+        self.assertNotIn("x0", prop,
+                         f"the substituted theorem's proposition now mentions "
+                         f"x0, so it is no longer the valueless reachability "
+                         f"claim this note describes: {prop[-300:]!r}")
+        self.assertIn("arm64_exec_go_exit", prop,
+                      f"the substituted theorem is no longer a reachability "
+                      f"claim about where the run ends, so the note's "
+                      f"description of it is stale: {prop[-300:]!r}")
+
+    def test_the_note_points_forward_not_back(self):
+        """The old note's "the universal theorem above" was simply wrong.
+
+        The substituted theorem is emitted AFTER the note, so "above" sent the
+        reader to the concrete theorem that is NOT emitted instead of the
+        reachability one that is. The note now names the theorem it refers to,
+        which is what makes the reference checkable at all.
+        """
+        i = self.text.find("NO CONCRETE RUN TEST")
+        self.assertGreater(i, 0, "the opaque-call note is gone entirely")
+        j = self.text.find("theorem q_reaches_call_at_")
+        self.assertGreater(j, i, "the reachability theorem is no longer emitted "
+                                 "after the note, so the old 'above' would "
+                                 "happen to be right again — re-measure before "
+                                 "reading this test as a pin")
+        note = self.text[i:j]
+        self.assertNotIn("theorem above", note,
+                         "the note still says 'the universal theorem above', "
+                         "which points at the concrete theorem that is NOT "
+                         "emitted")
+
+    def test_a_run_without_an_opaque_call_is_unaffected(self):
+        """The other branch of the same `if` must still emit its value theorem.
+
+        A note that announces a substitution is easy to write so that it always
+        fires, and then every proof in the corpus claims to be a substitution.
+        This program has no out-of-image call, so it keeps
+        `compiles_correctly` and carries no such note.
+        """
+        tmp = tempfile.mkdtemp(prefix="a2-no-opaque-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        src = "def plain(a, b):\n    return a + b\n"
+        path = os.path.join(tmp, "plain.mojo")
+        with open(path, "w") as f:
+            f.write(src)
+        import formal.build as fb
+        r = fb.compile_formal(path, arch="arm64",
+                              output=os.path.join(tmp, "plain.aout"),
+                              prove=True, check=False)
+        text = ""
+        pp = r.get("proof_path")
+        if pp and os.path.exists(pp):
+            with open(pp, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        self.assertIn("plain_compiles_correctly", text,
+                      "a program with no out-of-image call no longer emits its "
+                      "value theorem")
+        self.assertNotIn("is NOT emitted", text,
+                         "the substitution note fired on a program that has no "
+                         "out-of-image call — it is keyed on the wrong condition")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
