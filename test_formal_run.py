@@ -2063,9 +2063,21 @@ CASES = [
     # x86-64 says what its own ABI says the ninth one is. Same verdict, and the
     # shared-text rule cannot apply because the two limits are genuinely
     # different facts about two ABIs.
+    #
+    # **The operands are doubles now, and that is what this row is FOR.**  They
+    # were `4607182418800017409` — integers — so every `%f` read an integer as a
+    # double, which is a fact about the SOURCE, and
+    # `model.printf_kind_conversion_refusal` refuses it first with a message
+    # about the class. That is the more useful refusal (it is fixable in the
+    # source, and the placement limit is still there afterwards), but it means
+    # the row stopped testing what it was written to test: a big integer made
+    # the printed value distinctive, and it made it a different program. The
+    # limit under test is about PLACEMENT, so the operands have to agree with
+    # the conversions, and the needles below are then reached on both backends
+    # as they were before.
     ("limit_a_ninth_floating_printf_operand",
      "def main(n: Int) -> Int:\n"
-     "    var a = 4607182418800017409\n"
+     "    var a = 2.5\n"
      "    printf(\"%f %f %f %f %f %f %f %f %f\",\n"
      "           a, a, a, a, a, a, a, a, a)\n"
      "    return 0\n",

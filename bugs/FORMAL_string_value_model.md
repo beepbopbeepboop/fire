@@ -1149,3 +1149,48 @@ is its own text, so `len("日本")` written in the imported module is 2 — the 
 that stops a "refuse anything non-ASCII in the closure" fix from taking it), and
 an all-ASCII image that must not see any of it (the condition is "a non-ASCII
 literal exists somewhere", not "there are imports").
+
+## Measured 2026-10-05 (`formal29-2-r2`, while working the float value model):
+## the compiler's OWN host modules carry non-ASCII literals, so four registered
+## suites are red on master for this reason and nothing says so
+
+The condition above is "this IMAGE holds a non-ASCII string literal"
+(`publish_non_ascii_strings`), and the image includes every imported module's
+docstrings — so a non-ASCII literal in **this repository's own host modules**
+refuses every file that imports one of them. `formal/hostmods/os/_syscalls.mojo`
+is written with em-dashes (`—`) throughout its prose and quotes `len("日本")` by
+name, both of which are string literals in its docstrings:
+
+```
+$ python3 -c "print([ (i, l) for i, l in enumerate(
+      open('formal/hostmods/os/_syscalls.mojo', encoding='utf-8').read().splitlines(), 1)
+      if any(ord(c) > 127 for c in l) ][:3])"
+[(9, '  platform.mojo` needs the string primitives below for its own reasons — a'), …]
+```
+
+Every one of those images is refused at `d[i]`, and the suites that build them
+are red for that one reason:
+
+| suite | measured | the reason, on every failing group |
+|---|---|---|
+| `python3 test_formal_os.py` | **1/7** | `d[i] is refused on a string whose text is not ASCII` |
+| `python3 test_formal_math.py` | **7/8** | the same, from `math`'s `os.path` import |
+| `python3 test_formal_time.py` | **3/5** | the same |
+| `python3 test_struct_formal.py` | **28/191** | the same, from `from struct import calcsize` |
+
+**This is pre-existing and not attributable to any change of mine** —
+`formal/hostmods/os/_syscalls.mojo` is byte-identical to `master`
+(`git diff --quiet master -- formal/hostmods/os/_syscalls.mojo`), and the
+refusal text is the `s[i]` bullet above, quoted with its own advice
+("keep the text ASCII, which is what every other answer here assumes"). It is
+recorded here because nothing ELSE records it: four red suite jobs, each with a
+`build failed: …` line that ends mid-sentence in the middle of the message, and
+no marker on any of the four, so a reader re-running them spends the time
+rediscovering that it is one fact and not 174.
+
+**Two directions, and they are not the same size.** The one that is a repair:
+ASCII-fold the prose in that module (the em-dashes are punctuation in
+docstrings, not text any test reads), which unblocks every group above with no
+change to the string value model at all. The one that is a project: the
+`d[i]` refusal itself, which is this document's subject and is what the em-dash
+removal only avoids.
