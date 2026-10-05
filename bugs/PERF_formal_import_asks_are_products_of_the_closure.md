@@ -298,21 +298,53 @@ which is the obvious "make the hot loop cheaper" move, is **not** faster —
 is not the cost; the per-node Python work is. So a future pass should look for
 fewer NODES, not a faster descent.
 
-### d. `_bracket_depth_by_line` is a whole-module scan inside `elaborate.py`
+### d. `_bracket_depth_by_line` is a whole-module scan inside `elaborate.py` — FIXED 2026-10-05 (`work/bugs7-4`)
 
-§3 fixed the CALL SITE; the root is that `elaborate.extract_struct_source`,
-`extract_fn_source`, `extract_overloads` and `type_param_names` each recompute
-it. A memo there would fix every caller at once, including
-`formal/comptime_runner.py:96` and `tools/elab_fail_census.py`.
+§3 fixed the CALL SITE; the root is that three readers in `elaborate.py`
+recompute it about the same module — `extract_fn_source` (`:129`),
+`extract_overloads` (`:159`) and `extract_struct_source` (`:432`).
+**`type_param_names` is not one of them**: it takes `template_src` and goes
+through `mm.head_match` alone, so this doc's list of four readers was three.
 
-**Not taken here because of where it is:** `elaborate.py` is in the self-host
-closure (`cas.selfhost_inputs()` lists it, `formal/*` does not), so a change
-there owes `make gate`'s `mojoc`/`stage*` steps and `stdlib-dylib`'s skip count
-— this pass's changes are all in `formal/monomorph.py`, which is not
-self-hosted, so they owe nothing beyond the formal steps the integrator runs
-anyway. The win after §3 is one call per instantiation on the TEMPLATE's own
-text rather than the module's, so it is small until something else starts
-asking more of these.
+The memo is now there, and the two decisions in it are the whole of it:
+
+* **A TUPLE, not a list.** The memo hands every reader the SAME object, and a
+  reader that mutated it would corrupt every later one — the hazard this same
+  doc's own "the memo's hazards" section states for a shared list. A tuple
+  removes it structurally rather than by a check a future caller could forget:
+  `_find_block_end` only READS it, so nothing has to be migrated.
+* **Keyed by the source TEXT, bounded to 8 entries in an insertion-order LIST
+  beside the dict.** Keyed by the text rather than by `id()` because an address
+  can be handed to a different object once the first is freed (this doc's
+  hazard 2), and hashing the text costs far less than the scan it stands in
+  for. The ORDER is a list and not `next(iter(the_dict))` — which is the
+  spelling `formal/monomorph.py::_derived_from_source` uses and which this file
+  may NOT, because `elaborate.py` is inside the self-host closure
+  (`cas.selfhost_inputs()` lists it, `formal/*` does not) and `next()` over a
+  container is one of the constructs the self-hosted codegen does not lower.
+  Measured, not argued: with `next(iter(...))` the self-hosted compile fails
+  with a GCC error; with the list it compiles and `test_selfhost.py`'s failure is
+  the pre-existing `exit=-11` one.
+
+Measured on this tree, which has no stdlib checkout beside it, so the largest
+sources available stand in for `std/simd.mojo`:
+
+| source | bytes | cold | warm |
+|---|---|---|---|
+| `formal/model.py` | 2 111 422 | 85.8 ms | 0.001 ms |
+| `formal/build.py` | 1 097 043 | 46.8 ms | 0.022 ms |
+
+and 12 interleaved sources asked three times each: 0 wrong answers, cache 8,
+order 8, at the cap. `d[0] = 999` on a returned value raises `TypeError`, which
+is the point.
+
+Equivalence evidence: **208 artifacts byte-identical** (every
+`formal/examples/*.mojo`, both backends, `compile_formal`'s emitter text),
+`test_formal_monomorph.py` 23/0, `test_comptime_parity.py` 9/9,
+`test_x86_64_examples.py` 52/52, and `test_selfhost.py`'s failure is the
+pre-existing `exit=-11` with and without the diff. Still owed by the integrator:
+`make bootstrap`'s three stage trees and `stdlib-dylib`'s skip count, which no
+light worker may run.
 
 ### e. The proof path was NOT measured, and why
 
