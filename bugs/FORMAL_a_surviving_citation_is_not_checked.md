@@ -1,11 +1,19 @@
 # Two documents that own no code still cite the deleted narrow-parameter doc
 
-**Area:** documentation only. Found 2026-10-05 while deleting
-`bugs/FORMAL_arm64_a_narrow_typed_parameter_makes_the_universal_contract_false.md`
-with its fix.
+**Area:** documentation only. Found 2026-10-05 while deleting the narrow-typed
+parameter's document (`FORMAL_arm64_a_narrow_typed_parameter_makes_the_universal_
+contract_false`, named **without** its `bugs/` prefix on purpose — see the last
+paragraph) with its fix.
 
-**Status: OPEN. The `bugs/`-prefixed dangling count is back to a deliberate
-floor of ONE (was zero), and that one is recorded here.**
+**And the file this one is ABOUT is flagged by its own subject.** The ratchet
+below went red on *this* document the moment it was written, because naming the
+deleted path with a `bugs/` prefix is itself a citation of a deleted document —
+the tool is right and the fix is the spelling, not the deletion. That is also the
+cleanest possible demonstration of the gap: the mechanism that catches a stale
+citation caught the document explaining stale citations.
+
+**Status: OPEN. The `bugs/`-prefixed dangling count is a deliberate floor of
+ONE (was zero), and that one is recorded here.**
 `tools/dangling_doc_refs.py --ratchet --write-baseline` raised
 `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md: 0 → 1` so the gate stays
 green, because that file is another worker's and the project rule is explicit
