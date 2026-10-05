@@ -6,6 +6,18 @@ scope's files** — that is the finding, and it is the answer to the question th
 sweep cannot answer. What is left open is the per-file refusal table, the chain
 underneath it, and an owner per link.
 
+**Status (2026-10-04, `work/formal25-5`): §6 item 3 is CLOSED — the stub step no
+longer stops the walk, and it was the stub step, not the chain.** The document's
+own reading of why was wrong by half and right by half: the shape it named (an
+import that is the *only statement* of an indented block) is **not** a parse
+error in this dialect, and the shape it did not name (a parenthesised import
+spanning lines) is. One repair covers both, and with it the walk measured **five
+links nobody had measured** instead of three (§0.2). §6 items 1 and 2 are
+unchanged and item 4 was filed by its own branch
+(`FORMAL_a_dotted_import_resolves_to_a_nearer_leaf`, `formal21-1`), so the two
+features §2 names are still `formal19-1`'s and `formal16-2`'s and the per-file
+table is still §2's. §0.2 is what changed, and §0.1 (item 1) before it.
+
 **Status (2026-10-04, `work/formal21-6`): §6 item 1 is CLOSED — the instrument
 can now rank this scope's causes, and the table it prints is measured rather
 than 21 rows of `NOT MEASURED`.** §6 items 2 and 3 are unchanged and item 4 was
@@ -145,10 +157,10 @@ limit stops it. Verbatim from `.tmp/probe3_arm64.txt`:
 
 ```
 === round 0: 3 built, 8 refusing module(s)
-   19  std/format/_utils.mojo        4  _io.mojo
-   11  std/memory/alloc.mojo         3  std/_gpu/_utils.mojo      <- §6.4, MISATTRIBUTED
-    2  constants.mojo                2  std/math/__init__.mojo
-    1  std/bit/mask.mojo             1  std/os/fstat.mojo
+    19  std/format/_utils.mojo        4  _io.mojo
+    11  std/memory/alloc.mojo         3  std/_gpu/_utils.mojo      <- §6.4, MISATTRIBUTED
+     2  constants.mojo                2  std/math/__init__.mojo
+     1  std/bit/mask.mojo             1  std/os/fstat.mojo
   stubbed _io.mojo (1 file(s)) and dropped import lines from 5 file(s)
 
 === round 1: 3 built, 8 refusing module(s)      _io.mojo -> arg.mojo (4)
@@ -156,12 +168,16 @@ limit stops it. Verbatim from `.tmp/probe3_arm64.txt`:
 === round 3: 3 built, 0 refusing module(s), 43 unmeasurable (the stub step left the copy unparseable)
 ```
 
+**Round 3's last line was the walk measuring its own edit, and §0.2 is what fixed
+it and what measured the five links behind it.** It read here as "this tool's
+limit"; it was one deleted line of a parenthesised import.
+
 | link | files | refusing module | the refusal |
 |---|---|---|---|
 | 1 | 34 | `std/format/_utils.mojo` (19), `std/memory/alloc.mojo` (11), `std/math/__init__.mojo` (2), `std/bit/mask.mojo` (1), `std/os/fstat.mojo` (1) | a bare call to a generic template (§2's first five rows) |
 | 2 | 4 | `std/sys/arg.mojo`, behind `std/sys/_io.mojo` | `Span[StaticString, ImmStaticOrigin] is a compile-time explicit-parameter list on a generic, not a subscript` |
 | 3 | 2 | `std/math/constants.mojo` | exports nothing under `doc/ABI.md`'s rules |
-| — | 43 | — | the walk's own stub step emptied an indented block and the copy stopped parsing |
+| — | 43 | — | the walk's own stub step dropped the head of a parenthesised import and the copy stopped parsing — **§0.2 closed this, and the five links behind it are measured there** |
 
 ```sh
 python3 tools/memslot.py --gb 12 --label probe -- \
@@ -302,6 +318,94 @@ relative spelling stays unmeasured.
 largest site 13) is unchanged by this — which is what a reader should take from
 it: the queue can now PRIORITISE the corpus's largest construct.
 
+## 0.2 §6 item 3 is CLOSED: the walk stopped because of its own EDIT, and five
+## links nobody had measured were behind it (`work/formal25-5`)
+
+**The premise was half wrong and the half that was wrong is the half that
+mattered.** §6 item 3 said the limit was "removing an import line whose only use
+was the only statement in an indented block … a stub that also removed the block
+would extend it". **An emptied block is not a parse error in this dialect:**
+`fire_compiler.py::_parse_block` substitutes a `PassStmt` for an empty suite
+rather than refusing it (*"Empty block: comment-only body produces DEDENT with no
+INDENT"*), measured over a module-level `if`, a `try` arm, a function body, a
+`struct` body, a `while`, a `for` and a `with`. So deleting such an import costs
+nothing, and no fix was owed there.
+
+**What actually stopped the walk is a shape §6 item 3 did not name: a
+parenthesised import spanning lines.** `from .constants import (` is ONE line the
+walk's pattern matches and the names under it are on the lines after it, so
+deleting the matched line leaves them at an indentation no header introduces. On
+this scope, round 2 stubbed `constants.mojo`, and the file that broke is
+`std/collections/string/_parsing_numbers/parsing_floats.mojo`:
+
+```
+30  from std.builtin.globals import global_constant
+31
+32      CONTAINER_SIZE,          <- the head, `from .constants import (`, is gone
+33      MANTISSA_EXPLICIT_BITS,
+...
+37  )
+```
+
+which is `build: 32:0: Unexpected INDENT('')` — reported by **43 of the scope's 46
+files**, because every one of them imports that module. Re-measured on today's
+master, unchanged:
+
+```
+=== round 3: 3 built, 0 refusing module(s), 43 unmeasurable (the stub step left
+             the copy unparseable)
+```
+
+**The fix is in the EDIT, not in the parser**, and it is one mechanism for both
+shapes: `tools/formal_chain_probe.py::stubbed_import_edit` REPLACES each matched
+logical import — the whole logical line, continuation lines included, tracked by
+bracket depth — with `pass` (`NEUTRALISED`). `pass` is this dialect's own answer
+for a statement that is not there any more (it is literally what `_parse_block`
+inserts), so it parses at every scope, lowers to nothing on both backends, and
+cannot introduce a construct the tree does not already answer for.
+`mangled_copy` stays, because a real parse error must stay LOUD.
+
+**Measured, both architectures, same scope, `-j 4`, 8 rounds** — the before is
+this tree before the change and the after is the same tree after it:
+
+| | before | after |
+|---|---|---|
+| rounds walked | **3** (round 3 is the stop) | **8 and still going** |
+| links measured | 3 (`_io.mojo`, `arg.mojo`, `constants.mojo`) | **8** — §0.2's table below |
+| files reported by the walk's own damage | **43 of 46** | **0** |
+| files BUILDING at the last round | 3 | **4** |
+
+The two arms are identical round for round, group for group, count for count; the
+only difference in the whole log is where the 300-character truncation lands in
+one message that carries a mangled dylib's own name (`.arm64.dylib` vs
+`.x86_64.dylib`), which is the same caveat `…_b11.md` §2.2 records.
+
+### The five links that were behind the stop, and who owns each
+
+Nothing below is claimed by this document; these are the rows a reader of §2 was
+never given, measured on both architectures:
+
+| link | files | the refusing module | the refusal | owner |
+|---|---|---|---|---|
+| 4 | 1 | `std/bit/mask.mojo` | `is_negative` on a `SIMD[dtype, _]` — the bare-call row again, one link down | `FORMAL_a_bare_call_to_a_template_…` (`formal19-1`) |
+| 5 | 29 | `builtin_slice.mojo` | `Optional[Int]`, and this target has no word to spell `None` as | `FORMAL_stdlib_optional_needs_a_representation` (`formal16-7`) |
+| 6 | 10 | `std/base64/_fnv1a.mojo` | `data[…](…)` calls a name this unit does not compile, so the brackets cannot be bound | the bracketed-specialisation row; `formal19-1`'s neighbourhood |
+| 7 | 9 | `std/hashlib/hasher.mojo` | the dylib re-exports `Span` from `std.collections`, and no module it imports exports that name | a re-export gap in a stdlib module — the export rule, one level on from §2's row 2 |
+| — | 32 | `std/memory/alloc.mojo` | `dealloc` — §2's second row, which **grows 12 → 13 → 32** as the two features in front of it clear | `formal19-1` |
+
+**What this does NOT do**, so the reading is the honest one: it does not move a
+single file to `pass`, and it was not expected to — §2 is unchanged and its two
+features are still `formal19-1`'s and `formal16-2`'s. It fixes an INSTRUMENT
+that was reporting its own damage as the end of the chain, and it hands over five
+links that had never been measured. The `hasher.mojo` row is the only one of the
+five with no claim behind it, and it is worth one line of a doc when someone
+wants it.
+
+Verified: `python3 test_formal_chain_probe.py` **20/20**, seven of them new and
+all of them asked of `fire_compiler`'s parser rather than of a build — including
+the one that pins the DELETION still failing to parse (so the substitution cannot
+be judged unnecessary) and the one that pins the emptied-block correction above.
+
 ## 6. What is left
 
 1. ~~**The cause-ranking instrument cannot rank this scope's causes.**~~ **CLOSED
@@ -314,10 +418,12 @@ it: the queue can now PRIORITISE the corpus's largest construct.
    add"**, which is not true — the backend could inline them, which is
    `formal16-2`'s feature. Worth a doc edit when that lands, because the sentence
    is a dead end for whoever reads the 6 files first.
-3. **The chain walk stops at link 4 and cannot be pushed further by this tool.**
-   Removing an import line whose only use was the only statement in an indented
-   block is the limit; a stub that also removed the block would extend it. Not
-   worth building until someone needs a fifth link.
+3. ~~**The chain walk stops at link 4 and cannot be pushed further by this
+   tool.**~~ **CLOSED — §0.2, and the premise was wrong as well as the tool.**
+   The stop was never the tool's limit: it was one deleted line of a
+   parenthesised import, and §0.2 names the file, the line and the error. The
+   walk now measures 8 links on this scope where it measured 3, on both
+   architectures, with 0 files reporting its own damage.
 4. **`formal.imports.resolve_module_path` is wrong for one importer in this
    scope**, and it is filed: `FORMAL_a_dotted_import_resolves_to_a_nearer_leaf.md`
    — `std/_gpu/_utils.mojo` importing `std.format._utils` resolves to ITSELF,
@@ -326,6 +432,11 @@ it: the queue can now PRIORITISE the corpus's largest construct.
    not only by direct call. It surfaced here because the probe now resolves the
    module a refusal names with that same function, and it put three files of one
    round under a group keyed on the IMPORTER.
+5. **One link of §0.2's new table has no claim and no doc**: `hasher.mojo`
+   re-exports `Span` from `std.collections` and no module it imports exports the
+   name, so 9 files of this scope sit behind it. That is an export-rule question
+   rather than a codegen one, and it is the only thing §0.2 found that nobody
+   holds.
 
 ## 7. Reproducing
 
@@ -335,3 +446,21 @@ for file. The four commits on `work/formal20-std-os-io-2` are the three probe
 fixes of §4 and this document; the two sweep logs §1 quotes are
 `.tmp/sweep_arm64.txt` and `.tmp/sweep_x86_64.txt` in that worktree, and the
 chain walk's is `.tmp/probe3_arm64.txt`.
+
+§0.2's before and after, on this scope, with the commit that made the difference
+(the walk is `-j 4` internally and `--no-prove` per build, so no Lean and no
+`formal_sweep`):
+
+```sh
+export PATH=/opt/homebrew/bin:$PATH
+S=../new-modular/Mojo/stdlib/std
+F=$(for d in os io pathlib hashlib base64 ffi python _gpu; do
+      find $S/$d -name '*.mojo'; done | sort)
+
+python3 tools/memslot.py --gb 8 --label chain -- \
+  python3 -u tools/formal_chain_probe.py 8 arm64 $F
+python3 tools/memslot.py --gb 8 --label chainx -- \
+  python3 -u tools/formal_chain_probe.py 8 x86_64 $F
+
+python3 test_formal_chain_probe.py          # the substitution, asked of the parser
+```
