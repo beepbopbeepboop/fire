@@ -1,9 +1,39 @@
 # A keyword-only parameter defaulting to an IMPORTED function compiles to a
 # NULL call, and now answers `0` instead of crashing
 
-## Status
+## Status (2026-10-04 — step 1 LANDED: the ordinary path refuses. Step 2 is still open.)
 
-OPEN, and NEW — found 2026-10-02 while re-measuring
+`mojo_unavailable_callable` now **raises a catchable `NotImplementedError`**
+naming the callable instead of printing a line and returning 0. `probe('/r')`
+therefore prints nothing and exits non-zero, or prints whatever the program's
+own `except NotImplementedError` arm prints — instead of `0`, which was
+indistinguishable from a real 0 the function could have returned.
+
+Measured, both halves, after the change (`gimple_imported_callable_default_
+raises` and `gimple_imported_callable_default_raise_is_catchable`):
+
+| program | before | after |
+|---|---|---|
+| `print(probe('/r'))` | `0`, exit 0 | exit != 0, stderr `NotImplementedError: os.walk is a callable that is not available in compiled mode` |
+| the same wrapped in `except NotImplementedError` | `0` | `NotImplementedError`, and `str(e)` contains `os.walk` |
+| a callee that never CALLS the parameter | correct | **unchanged** — the raise is inside the stub, so it fires on a call and not on a padding |
+
+Raising is the same decision `mojo_module_not_compiled` already makes for a
+method call on a bare-imported module this compile did not include, which is
+this situation one level out. The stub had been following
+`mojo_unsupported_iter`'s loud-but-continuing convention, and the difference is
+the whole of the bug: that helper answers a question about the program's own
+data, where nothing downstream treats the result as a value the program
+computed, while **this is the return value of a call the program made**.
+
+**Step 2 — resolving the imported case for real — is NOT done.** Nothing here
+compiles `_walk_tree` / `glob_tree`: a module whose default names an imported
+callable still falls back to source interpretation at run time by raising, and
+the two `Tools/c-analyzer/c_common/fsutil.py` blockers that rest on this shape
+still stand. The next step is unchanged and is repeated verbatim at the bottom
+of this doc so it does not have to be re-derived.
+
+**OPEN originally**, found 2026-10-02 while re-measuring
 `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`, which pointed here
 for this shape and whose doc is **deleted**, i.e. the crash was considered fixed.
 
