@@ -1,9 +1,11 @@
 # FORMAL: a `calcsize` image hangs for 60 s about once in six suite runs, and is clean 10/10 standalone
 
-**Status: not reproduced, and the instrumentation is now EXCLUDED BY MEASUREMENT
+**Status: not reproduced; the instrumentation is now EXCLUDED BY MEASUREMENT
 rather than by argument; the format question this document left open is closed
-by exhaustion; a THIRD candidate for the neighbourhood was found and filed.**
-The hang itself is unexplained and this document stays open for it.
+by exhaustion; a THIRD candidate for the neighbourhood was found and filed; and
+as of 2026-10-05 the one thing the "What is left" section said the next
+recurrence NEEDS — the image, kept — is what the harness now does. The hang
+itself is still unexplained and this document stays open for it.**
 
 Found 2026-10-01 while re-running `test_struct_formal.py` to settle
 `“CODEGEN_test_struct_formal: the struct suite is FLAKY”`. **NOT MINE and NOT FIXED** —
@@ -12,6 +14,77 @@ another worker's area; the harness that observes it is mine and is fixed
 separately. Filed because `formal-struct` is a registered `proofs` job, a hang is
 indistinguishable from a slow machine in a green-bucket report, and the symptom is
 a formal image that runs forever.
+
+## 0. What landed 2026-10-05: the image is KEPT, and the message says which of the two readings it is
+
+The "What is left" section's last sentence was the whole of what the next
+recurrence needed and the whole of what was missing:
+
+> If it recurs, the image must be KEPT — `build_and_run`'s timeout message now
+> names the path, but `tmpdir` is a `TemporaryDirectory` — and the interesting
+> question is which of the two it was … **this document's remaining content is a
+> two-way branch for whoever sees it next, and the branch is worth taking only
+> with the image in hand.**
+
+So: `test_struct_formal.py::_preserve_a_hung_image` copies the image **and the
+source that produced it** to `build/hang-artifacts/<case>/` — `build/` is
+git-ignored and is already where `build/suite.log` goes, so the directory needs
+no new ignore rule and is where a reader looks — and the timeout message names
+that path rather than the doomed one. A copy that fails is reported as a failure
+to preserve, not raised: losing a diagnostic must not turn a reported hang into
+an `IOError`.
+
+**`SIGKILL` is deliberately not preserved, and the reason is the measurement this
+document already made.** Step 1 settled the `-9` as a fact about the MACHINE —
+0.04 GB against a 1 GB ceiling, 25x of headroom, so nothing inside this build
+sent it — and a machine's memory pressure needs no image. A timeout is the
+opposite: it is the one outcome where the harness holds **no evidence at all**
+beyond "it did not finish", which is why it is this one that is kept.
+
+**The message now states BOTH readings, and that is the other half.** "A process
+that never got SCHEDULED is the machine (look at `build/suite.log`'s measured
+peak and at how many jobs ran at once), while a process SPINNING is the image."
+One of the two is the image's fault and the other is not, so a message that
+offered only the `gdbtool.py` route would send the next reader to the wrong one
+— which is what the previous wording did.
+
+Pinned in `test_struct_formal.py`'s own self-test
+(`test_the_harness_records_a_case_even_when_it_cannot_pass`), which is where the
+harness's reporting defects are pinned and not in a suite that would need the
+bug to happen:
+
+* **a REAL image that never finishes** (`while True: i = i + 1`), with
+  `RUN_TIMEOUT` lowered to 3 s so the probe costs three seconds rather than a
+  minute. It asks the two questions that matter: is the path in the message a
+  directory that EXISTS, and does it hold the image. **Verified to fail without
+  the fix** — `192/193 checks passed` with `_preserve_a_hung_image` stubbed to
+  return `None`, against `193/193` with it;
+* **both readings appear in the message**, because a message that offers one
+  sends the reader to the wrong fault.
+
+A third change came with it, and it is a **false statement in the report** rather
+than a missing one: `expect_lines`' second check said `not reached: the program
+did not build` for every raised case, and the outcome that `build_and_run`
+raises besides a build failure is an image that never finishes — which BUILDS.
+It now reads the first check's message and says which of the two happened, so a
+report can no longer claim the compiler refused a program the compiler built.
+
+```
+$ python3 tools/memslot.py --gb 8 --label sf -- python3 test_struct_formal.py
+193/193 checks passed
+memcap: done, peak 0.2 GB across up to 2 procs (ceiling 8.0 GB), child exit 0
+```
+
+**What this does NOT do, and the reason it is a Status and not a deletion: the
+hang is still unexplained.** Everything the section below measures is still
+measured, none of it moved, and the two-way branch is now *answerable* rather
+than *answerable-if-somebody-happens-to-have-kept-the-image*. A document whose
+only remaining content is a diagnostic instruction is worth deleting; this one's
+remaining content is an unexplained fault that has not recurred since 2026-10-01
+and whose one candidate reading (machine pressure) is a property of the box, not
+of the image. **If it recurs, the next reader starts at the preserved directory
+and `tools/gdbtool.py` on a live process, and the question to answer is the two
+above.**
 
 ## The original report, unchanged
 
