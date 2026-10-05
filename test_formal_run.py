@@ -10534,12 +10534,19 @@ CONSTRUCTION_CASES = [
     # is the fix: a base from that table contributes `args`, base first, so the
     # message lands in the slot CPython puts it in.
     #
-    # The exit status is 1 and the output empty, and both are what this path
-    # documents for a `raise` (`formal`'s has no unwinder: a raise flushes the
-    # enclosing `finally` clauses and exits). What this row pins is that the
-    # BUILD accepts the construction at all — before the merge this was a
-    # refusal on both architectures, byte for byte.
-    ("constr_an_exception_carries_its_message",
+    # …and what happens to the `try` AROUND it, which is a REFUSAL and was not
+    # one until 2026-10-04. This row used to expect exit 1 and no output, which
+    # is what this path does with a `raise` that nothing catches — and it was
+    # pinning the WORST half of the story while looking like a passing program:
+    # CPython enters the handler and exits 0, and this image exits 1 having
+    # printed nothing, with no refusal anywhere. There is no unwinder on this
+    # path (`formal/arm64_codegen.py::_emit_try` says so), so a handler is
+    # unreachable, so a `try` whose guarded region can raise is a program that
+    # is not the program written and is refused rather than emitted. The row is
+    # now that refusal, on the same program: the construction is still accepted
+    # (`constr_an_exception_carries_its_message_without_a_try` is the row that
+    # pins THAT), and what is refused is the handler that could never run.
+    ("constr_a_try_whose_guard_can_raise_is_refused",
      "struct Plain5(Exception):\n"
      "    \"\"\"no fields at all\"\"\"\n"
      "\n"
@@ -10551,6 +10558,24 @@ CONSTRUCTION_CASES = [
      "        boom5()\n"
      "    except:\n"
      "        pass\n"
+     "    return 0\n",
+     "refuse:this image has no unwinder", None),
+    # The construction half, which is what this group was about and which the
+    # refusal above would otherwise take with it: the same class, the same
+    # `raise`, and NO `try` — so nothing claims to catch it, the exit status is 1
+    # and CPython's is 1 as well (it also prints a traceback to stderr, which
+    # this path has no way to produce). That is the documented limit of a path
+    # with no unwinder rather than a wrong answer about a value, and it is why
+    # the refusal reads `handlers` and not `raise`.
+    ("constr_an_exception_carries_its_message_without_a_try",
+     "struct Plain5(Exception):\n"
+     "    \"\"\"no fields at all\"\"\"\n"
+     "\n"
+     "def boom5():\n"
+     "    raise Plain5(\"the message\")\n"
+     "\n"
+     "def main(n):\n"
+     "    boom5()\n"
      "    return 0\n", 1, None),
     # The same with a field of its own, which is the boundary the doc measured:
     # `args` is inherited FIRST, so the message goes where CPython puts it and
