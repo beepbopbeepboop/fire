@@ -543,7 +543,11 @@ def _x_imm_zero(window, ctx):
     dropping the instruction is only sound when nothing downstream reads a
     flag. `add_zero_no_flag_read` proves the rewrite for the registers and
     memory, and the pass discharges the flag condition here — see
-    `bugs/FORMAL_peephole_the_flag_liveness_condition_is_undecided.md`.
+    The x86-64 model DOES carry the flags (`X86State.zf/sf/cf/of_`), so the
+    theorem for this rule has to state them the way
+    `peephole_arm64_mov_self` states them; the flag condition is the side
+    condition, and where that theorem is written down is §3 of
+    `bugs/FORMAL_peephole_rules_without_proofs.md`.
     """
     if len(window) < 1:
         return None
