@@ -17744,22 +17744,43 @@ def gimple_runtime_refusal(name: str) -> str:
         # Reached only when the library is NOT on this image's link line, which
         # is now a much narrower condition than it was: the linker puts the
         # runtime library on the line for exactly this case. So the two reasons
-        # left are an image that cannot carry a library at all (an ELF target —
-        # `build_elf` has one `lib_name` and no dependency list) and a name the
-        # library does not export, of which `py_tokenize` is the standing
-        # example: fire_runtime.h declares it, the dylib does not define it, and
-        # `build_stdlib_dylib.runtime_export_entries` already reports that as
-        # UNDEFINED. The message says so rather than implying the mechanism is
-        # broken, because on this tree it is not.
+        # left are both facts about the LINK LINE rather than about the call,
+        # and the sentence below used to name a third one that does not exist:
+        # "an image that cannot carry a library at all (an ELF target —
+        # `build_elf` has one `lib_name` and no dependency list)". `build_elf`
+        # has taken a `deps` list and written one `DT_NEEDED` per entry since
+        # the ELF emitter landed — that is how an ELF image imports a module
+        # library today — so a reader sent looking for the link line's capacity
+        # was sent to look for a parameter that has been there all along. What
+        # is actually true for a non-Mach-O image is the CONTAINER:
+        # `build_stdlib_dylib.runtime_dylib` builds a Mach-O dylib and there is
+        # no ELF build of `runtime/` beside it, and
+        # `formal/build.py::_audit_link_line_containers` is what refuses to
+        # write a line whose libraries are in the wrong one. The other real
+        # reason is a name the library does not export, of which `py_tokenize`
+        # is the standing example: fire_runtime.h declares it, the dylib does
+        # not define it, and `build_stdlib_dylib.runtime_export_entries` already
+        # reports that as UNDEFINED. Both are named, and neither pretends the
+        # mechanism is broken, because on this tree it is not.
         return (
             f"{lead} This one is the reachable half: every argument and the "
             f"return value is a single word — `{entry['signature']}` — and a "
             f"single word is exactly what a value is on this path, so a formal "
             f"image could make the call. Nothing about the CALL stops it. What "
             f"is missing is the library, and only that: nothing on this image's "
-            f"link line defines {name}, so this image is either one that cannot "
-            f"carry a library or one whose library does not export this name."
-            f"{tail}")
+            f"link line defines {name}. There are two ways that is so and "
+            f"neither is a fact about the call. The library "
+            f"`formal/build.py` puts on the line for exactly this case is a "
+            f"Mach-O dylib, one per architecture, and an image in the other "
+            f"container cannot be given it at all — "
+            f"`formal/build.py::_audit_link_line_containers` is what refuses to "
+            f"write such a line, from four bytes of magic per file, because "
+            f"the loader would be told to open a file it cannot open. Or the "
+            f"library is on the line and does not export this name, which is a "
+            f"different fact: fire_runtime.h declares `py_tokenize` and the "
+            f"dylib does not define it, and "
+            f"`build_stdlib_dylib.runtime_export_entries` reports that as "
+            f"UNDEFINED.{tail}")
     why = ' and '.join(_box_why(*b) for b in entry['boxes'])
     return (
         f"{lead} It could not be answered by linking that library either: "

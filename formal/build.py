@@ -17912,10 +17912,16 @@ def dylib_export_lists(dylibs: list) -> list:
 #     failure this would have been the other way round: a refusal for a call
 #     that should have compiled.
 #
-#   * An ELF image gets nothing. `build_elf` carries one `lib_name` and no
-#     dependency list, and `formal/elf.py` is not this file's to grow. A
-#     `mojo_*` call on an ELF target is still refused, by the same shared rule
-#     and the same words, and the refusal now says why.
+#   * An ELF image gets nothing, and the reason is the CONTAINER rather than the
+#     link line. `build_elf` takes a `deps` list and writes one `DT_NEEDED` per
+#     entry — that is how an ELF image imports a module library — so this bullet
+#     used to say `build_elf` "carries one `lib_name` and no dependency list",
+#     which stopped being true when the ELF emitter landed and sent the next
+#     reader to a limitation that is not there. What is missing is an ELF build
+#     of `runtime/` beside `build_stdlib_dylib.runtime_dylib`, which is a Mach-O
+#     dylib. A `mojo_*` call on an ELF target is still refused, by the same
+#     shared rule and the same words, and the refusal now says the container
+#     rather than the link line.
 
 
 _MH_MAGIC_64 = 0xFEEDFACF
@@ -18140,12 +18146,21 @@ def runtime_library(arch: str, fmt: str):
     downstream can tell the runtime from an imported module, and nothing
     downstream has to know.
 
-    `fmt != "macho"` returns None. That is not a shrug: `build_elf` carries one
-    `lib_name` and no dependency list, so an ELF image genuinely cannot name a
-    second library, and the caller falls back to the shared refusal, which says
-    so. Returning None and letting the refusal speak is the honest failure; the
-    alternative — silently linking nothing and reporting a successful build —
-    is the failure class this whole programme exists to remove.
+    `fmt != "macho"` returns None, and the reason is the CONTAINER rather than
+    the link line's capacity. `build_elf` takes a `deps` list and writes one
+    `DT_NEEDED` per entry, which is how an ELF image imports a module library
+    today, so "an ELF image cannot name a second library" was never true and
+    the docstring said it for as long as this function existed. What does not
+    exist is an ELF BUILD of `runtime/`: `build_stdlib_dylib.runtime_dylib`
+    builds a Mach-O dylib — its own `_arch_or_die` checks the Mach-O that came
+    out — and there is no ELF counterpart beside it. So the manifest this
+    function would hand back names a file an ELF loader cannot open, which is
+    exactly what `_audit_link_line_containers` exists to refuse, four bytes of
+    magic from each file; the caller falls back to the shared refusal, which
+    names the container rather than the link line. Returning None and letting
+    the refusal speak is the honest failure; the alternative — silently linking
+    nothing and reporting a successful build — is the failure class this whole
+    programme exists to remove.
 
     A Mach-O target that cannot BUILD the library is an error rather than a
     None. `runtime_dylib` needs a working host toolchain, and on a host without

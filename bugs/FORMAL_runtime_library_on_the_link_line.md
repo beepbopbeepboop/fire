@@ -1,5 +1,69 @@
 # FORMAL_runtime_library_on_the_link_line: the phase-2 payoff is landed and the header gap is CLOSED; two measured ceilings are open
 
+**Status 2026-10-05 (`work/formal27-5`): the ELF HALF of this document's closing
+claim was FALSE and is now corrected, and the two ceilings are re-measured on
+this tree. Neither ceiling moved; the surface they are measured against grew.**
+
+The claim was in three places — this document's last bullet,
+`formal/build.py::runtime_library`'s own docstring, and the comment above the
+export-trie reader in the same file — and all three said an ELF image "carries
+one `lib_name` and no dependency list" and therefore "cannot carry a library at
+all". **`build_elf` has taken a `deps` list and written one `DT_NEEDED` per
+entry since the ELF emitter landed** — that is how an ELF image imports a module
+library today — so a reader sent to look for the link line's capacity was sent
+to look for a parameter that has been there all along, and the real reason went
+unnamed. What is missing is an ELF **build** of `runtime/`:
+`build_stdlib_dylib.runtime_dylib` builds a Mach-O dylib (its own
+`_arch_or_die` checks the Mach-O that came out) and there is no ELF counterpart
+beside it, so the manifest `runtime_library` would hand back names a file an ELF
+loader cannot open — which is precisely what
+`formal/build.py::_audit_link_line_containers` exists to refuse, from four bytes
+of magic per file. The refusal the user sees (`formal/model.py`'s
+`gimple_runtime_refusal`, the one function both backends read) no longer offers
+"an image that cannot carry a library" as a reason; it names the container and
+the other real reason, a name the library does not export. Pinned three ways in
+`test_formal_runtime_link.py::test_elf_is_refused_for_the_container_and_not_for_
+the_link_line`, which measures the `DT_NEEDED` pair out of a built ELF image's
+own `.dynamic` rather than taking this paragraph's word for it.
+
+**The ceilings, re-measured on this tree, both architectures byte-identical**
+(the tool is a `Counter` over the export trie and `model.runtime_abi()`; the
+script is §"Reproducing"):
+
+| | this doc's §0.3 (2026-10-03) | now |
+|---|---:|---:|
+| word-shaped, on a formal image's link line | 258 | **272** |
+| …of those, exported by the runtime library | 202 | **216** |
+| …needing no heap handle | 163 | **176** |
+| …needing a `void *` handle the path cannot produce | 39 | **40** |
+| **ceiling 1**, word-shaped but not linked | 56 | **56**, same six families: `ncurses` 16, `sqlite3` 16, `ssl` 11, `python` 6, `metal` 5, `zlib` 2 |
+| **ceiling 2**, exported and declared by no header | 4 | **4**, the same four non-`mojo_` names nothing refuses |
+
+**So the phase-2 payoff GREW by 14 and closed nothing**, which is the same shape
+as every previous re-measurement in this document and is worth saying once more
+rather than leaving to be re-derived: a bigger linked surface is a bigger
+surface to need a handle on, so ceiling 3 grows with the payoff rather than
+being closed by it. **The 13 new names that need no handle are the whole of what
+this round's re-measurement found**, and no `mojo_*` call that used to compile
+stopped: the delta is additive in both directions of the same set.
+
+**What is still open is unchanged and is not this document's to close:** ceiling
+1 is a variant of `runtime_dylib` in `build_stdlib_dylib.py` keyed per optional
+unit set, with `fire_ssl.c`'s missing OpenSSL headers deciding what it may link;
+ceiling 3 is `FORMAL.md` phase 6. **Both are also blocked for a light worker in
+a way worth recording**: closing either means building a `runtime_dylib`
+variant, and `build_stdlib_dylib.py` is on this project's do-not-run list, so
+the measurement that would justify either change cannot be taken here.
+
+**`FORMAL.md` §2.2/§6's published figures are behind the tree** — it publishes
+206 exported / 166 reachable where the same census measures 216 / 176, and
+`test_formal_doc_truth.py` and `test_formal_runtime_link.py` are both red on
+exactly that. Pre-existing, measured on this document's base, and filed as
+`bugs/FORMAL_the_published_surface_figures_are_behind_the_tree.md` rather than
+fixed here: `FORMAL.md`'s figure sweep is another branch's project
+(`1dd68a48`/`ca50560f`, "DOCS vs REALITY"), and seven of its eight stale figures
+have nothing to do with the link line.
+
 **Re-measured 2026-10-04 (`work/formal19-4`): the "what this does not do" bullet
 about proofs was STALE, and its replacement is a different doc's subject — so the
 two ceilings this document names are still the two ceilings, and the honest next
@@ -584,7 +648,44 @@ change and not a separate cleanup. 219 → 207.
   takes `(code, info)` and no dependency list, so the emitted proof is the same
   modulo the moved entry offset whether or not the library is there.
   `generate_dylib_proof` is used for module dylibs only.
-- **ELF is unchanged.** `build_elf` carries one `lib_name` and no dependency
-  list, so an ELF image cannot name a second library; `runtime_library` returns
-  `None` rather than pretending, and the shared refusal says the link line is
-  what is missing. `formal/elf.py` is not this file's to grow.
+- **ELF is unchanged in what it can LINK, and the reason it cannot link the
+  runtime is the container.** `build_elf` takes a `deps` list and writes one
+  `DT_NEEDED` per entry, so an ELF image can name a second library — measured,
+  not read off a signature: `test_formal_runtime_link.py` builds an ELF image
+  with two and reads both names out of its `.dynamic`. What does not exist is an
+  ELF build of `runtime/`, so `runtime_library` returns `None` rather than
+  handing back a manifest naming a Mach-O dylib, and the shared refusal says so
+  (the Status at the head of this file is the whole account; the sentence this
+  bullet used to carry — "one `lib_name` and no dependency list" — was false and
+  is deleted with the fix). `formal/elf.py` grew an emitter and a `deps` list on
+  another branch's work, which is what made the old sentence wrong.
+
+
+## Reproducing
+
+Everything in the 2026-10-05 Status is one pure-Python census — the export trie
+and `model.runtime_abi()`, no build and no Lean — plus the one test that pins
+the ELF half. Both architectures are in the same loop because the numbers are
+identical and a reader should be able to see that rather than take it:
+
+```sh
+export PATH=/opt/homebrew/bin:$PATH
+python3 tools/memslot.py --gb 8 --label ceil -- python3 .tmp/ceilings.py
+python3 tools/memslot.py --gb 8 --label t -- \
+    python3 test_formal_runtime_link.py            # 159 passed, 4 failed
+python3 tools/memslot.py --gb 8 --label t -- \
+    python3 -c "import test_formal_runtime_link as T; \
+        T.test_elf_is_refused_for_the_container_and_not_for_the_link_line()"
+```
+
+`test_formal_runtime_link.py`'s **4 failures are pre-existing and are not this
+document's**: they compare the live count against `FORMAL.md` §6 phase 2's
+published `206`/`166`, which the tree has outgrown (`1dd68a48` published them on
+2026-10-04; `runtime/` and `build_stdlib_dylib.py` have changed since, and this
+branch touches neither). `test_formal_doc_truth.py` is red on the same drift
+(8 checks, 7 of them the same figures). `.tmp/ceilings.py` is scratch and is not
+committed — `.tmp/` is git-ignored — and the loop is five lines: `word` from
+`model.runtime_abi()`, `exported` from `runtime_library(arch, "macho")["map"]`,
+`ceiling 1` as the difference, `ceiling 2` as
+`macho_dylib_exports(runtime_dylib(arch=arch))` minus the ABI table, and the
+`void *` parameter test `test_formal_runtime_link.py` already owns.

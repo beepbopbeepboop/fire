@@ -359,23 +359,92 @@ def test_word_shaped_but_not_exported_links_nothing():
     check(B._runtime_library_for([], 'arm64', 'macho')[0] is None,
           'a program naming no runtime call at all links nothing')
     msg = build_expecting_refusal(src2, 'sqlonly2')
-    check('one whose library does not export this name' in msg,
+    check('is on the line and does not export this name' in msg,
           'and a word-shaped name the library does not export is refused as '
           'such, naming the situation rather than blaming the mechanism',
           msg[:400])
 
 
-def test_elf_is_still_refused():
-    # `build_elf` carries one `lib_name` and no dependency list, so an ELF
-    # image genuinely cannot name a second library. The refusal is the honest
-    # answer, and `runtime_library` says so by returning None rather than by
-    # pretending.
+def test_elf_is_refused_for_the_container_and_not_for_the_link_line():
+    """The reason is the CONTAINER, and the reason this test changed is that
+    the reason it used to give was false.
+
+    It said: "`build_elf` carries one `lib_name` and no dependency list, so an
+    ELF image genuinely cannot name a second library". `build_elf` has taken a
+    `deps` list and written one `DT_NEEDED` per entry since the ELF emitter
+    landed — that is how an ELF image imports a module library today — so the
+    comment, `formal/build.py::runtime_library`'s own docstring and the sweep
+    work map all pointed a reader at a limitation of the link line that is not
+    there. What is actually missing is an ELF BUILD of `runtime/`:
+    `build_stdlib_dylib.runtime_dylib` builds a Mach-O dylib, and there is no
+    ELF counterpart beside it, so the manifest `runtime_library` would hand back
+    names a file an ELF loader cannot open. That is the same thing
+    `_audit_link_line_containers` refuses to write, and this test pins all three
+    halves separately, because "the ELF answer did not change" is the one thing
+    it cannot say on its own:
+
+      * the link line is NOT the limitation, measured off a built ELF image's
+        own `.dynamic` — a second `DT_NEEDED` really is written;
+      * the container audit really does refuse a Mach-O library for an ELF
+        image, which is the mechanism that makes handing back the manifest
+        wrong rather than merely unbuilt;
+      * and the refusal the user sees names the container, not a dependency
+        list the emitter has had for years.
+    """
+    from formal import elf
+
     check(B.runtime_library('arm64', 'elf') is None,
-          'runtime_library declines to invent an ELF dependency')
+          'runtime_library declines to name a library on an ELF link line')
+
+    # (1) the ELF link line carries a DEPENDENCY LIST. Built here rather than
+    # through `compile_formal` because on a Mach-O host a module library is
+    # built in the HOST's container, so the end-to-end route is refused by
+    # (2) — which is the honest answer, and not a way to observe (1).
+    image = elf.build_elf(b"\x90" * 16, external_syms=["mojo_strlen"],
+                          deps=["libone.so", "libtwo.so"])
+    with open(WORK + '/twodeps.elf', 'wb') as f:
+        f.write(image)
+    with open(WORK + '/twodeps.elf', 'rb') as f:
+        data = f.read()
+    head = elf._read_header(data, WORK + '/twodeps.elf')
+    dyn = elf._dyn_entries(data, head)
+    strs = elf._at_vaddr(data, head, elf.dyn_tag(dyn, elf.DT_STRTAB),
+                         elf.dyn_tag(dyn, elf.DT_STRSZ))
+    names = [elf._st_name(strs, off)
+             for t, off in dyn if t == elf.DT_NEEDED]
+    check('libone.so' in names and 'libtwo.so' in names,
+          'an ELF image writes one DT_NEEDED per entry of its dependency list, '
+          'so the link line is not what stops a second library',
+          str(names))
+
+    # (2) …and the container audit is what stops THIS library, because it is a
+    # Mach-O dylib. Read out of the real artifact, not a fixture with a
+    # hand-written magic number.
+    dylib = B.runtime_library('arm64', 'macho')['path']
+    try:
+        B._audit_link_line_containers([{'path': dylib}], 'elf', 'image',
+                                      'arm64')
+    except B.FormalBuildError as e:
+        msg = str(e)
+        check('elf' in msg and 'macho' in msg,
+              'a Mach-O library on an ELF image is refused by container, naming '
+              'both', msg[:300])
+    else:
+        check(False, 'a Mach-O library on an ELF image was accepted',
+              os.path.basename(dylib))
+
+    # (3) the refusal itself.
     msg = build_expecting_refusal(STR_CALL, 'elf', fmt='elf')
     check(msg != '', 'a mojo_* call on an ELF image is still refused')
     check('nothing on this image\'s link line' in msg,
-          'and the refusal says the link line is what is missing', msg[:400])
+          'and the refusal still says what is missing', msg[:400])
+    check('an image in the other container cannot be given it at all' in msg,
+          'and it names the CONTAINER as the reason, rather than a link line '
+          'that has carried a dependency list since the ELF emitter landed',
+          msg[:600])
+    check('cannot carry a library' not in msg,
+          'and it no longer offers "an image that cannot carry a library" as a '
+          'reason, which is false of both containers here', msg[:600])
 
 
 # ── 4. the link line is the dylib's OWN table ───────────────────────────────
@@ -795,7 +864,7 @@ def main():
     test_both_architectures_agree()
     test_a_program_naming_nothing_links_nothing()
     test_word_shaped_but_not_exported_links_nothing()
-    test_elf_is_still_refused()
+    test_elf_is_refused_for_the_container_and_not_for_the_link_line()
     test_link_line_is_the_dylibs_exports()
     test_manifest_round_trips()
     test_bind_audit_not_weakened()
