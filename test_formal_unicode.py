@@ -783,14 +783,21 @@ CROSS_MODULE_CASES = [
     # refused over.  This is the row for the one refinement in the rule: the
     # encoding block's condition is "no READABLE string literal in this image is
     # non-ASCII", and a docstring is a literal in the one position no program can
-    # read it from — `f.__doc__` and `__doc__` are both refused on this path
-    # (`formal/model.py::docstring_literal_ids` quotes both).  75 of the 339
-    # units in this repository and the stdlib carried a non-ASCII literal in
-    # NOTHING BUT documentation position, and every one of them refused an
-    # ordinary ASCII string operation because of its own prose —
+    # read it from — nothing binds it, and `__doc__` is on
+    # `_UNRESOLVED_NAME_ALLOWED`, so a read of `f.__doc__` is materialised from
+    # that table rather than from the literal
+    # (`formal/model.py::is_docstring_statement` is the predicate and the
+    # argument).  75 of the 339 units in this repository and the stdlib carried a
+    # non-ASCII literal in NOTHING BUT documentation position, and every one of
+    # them refused an ordinary ASCII string operation because of its own prose —
     # `formal/hostmods/os/_syscalls.mojo` among them, which is in the closure of
     # every image that imports `os`, and which is what made `import shlex` red
     # in three rows of `test_formal_imports.py`.
+    #
+    # `is_docstring_statement` is asked of the SCAN, so this row is the end of
+    # the same question: the two positions are reachable through a build, and a
+    # predicate that only ever answered for the scan would be a second answer
+    # rather than a shared one.
     # ANSWERED against CPython rather than REFUSED, because that is the whole
     # claim: the build must now answer, and match.
     ("a_function_docstring_with_an_em_dash_leaves_an_ascii_image_ascii",

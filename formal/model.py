@@ -6949,70 +6949,38 @@ def _non_ascii_examples(texts) -> str:
     return ", ".join(shown) + tail
 
 
-def docstring_literal_ids(stmts: list) -> set:
-    """`id()` of every string literal that is a DOCSTRING under `stmts`.
+def is_docstring_statement(node) -> bool:
+    """True for a bare string `ExprStmt` — a docstring, and not a VALUE.
 
-    Two positions, and they are the two this dialect writes:
+    **The one answer to "is a bare string statement a value on this path", and
+    it is asked from two places that would otherwise each decide it.**
+    `module_body` already acts on it (a bare string `ExprStmt` at file level is
+    not body: Python stores it in `__doc__` and runs nothing), and the TEXT
+    ENCODING scan below now acts on it too, because until it did the two
+    disagreed and the disagreement cost this repository 229 files.
 
-    * the FIRST statement of a function, a method, a struct or a trait body —
-      the position Python stores in `__doc__` and runs nothing;
-    * a module-level bare string `ExprStmt` WHEREVER it appears, because that is
-      how this stdlib documents a `comptime` constant (`std/math/constants.mojo`
-      is nine binding/string pairs) and `module_body`'s own classifier already
-      skips every one of them, not only the first: "a module DOCSTRING — a bare
-      string `ExprStmt` — is not body … there is nothing to execute and nothing
-      to lose".
+    The reason a docstring is not a value is not that it is dropped: measured,
+    a FUNCTION docstring's bytes DO reach the image (`ZZFNDOCPROBEZZ` appears
+    once in a built image whose module docstring's `ZZDOCSTRINGPROBEZZ` appears
+    zero times, on this tree). It is that **nothing can name it.** `__doc__` is
+    on `_UNRESOLVED_NAME_ALLOWED`, so a read of `f.__doc__` is materialised
+    from that table rather than read out of the literal, and there is no other
+    spelling: no name binds the statement, so no parameter, no return value and
+    no container can carry a pointer to it. A string VALUE in this image is
+    reachable by construction — `publish_non_ascii_strings`'s own argument is
+    that "a string one module interns is a value another module can hold" — and
+    a docstring is not one.
 
-    **Why the encoding block needs this, measured on this tree.** A docstring's
-    bytes ARE interned into the image — `grep` finds a marker string from a
-    function docstring in the emitted Mach-O — so the pool argument alone does
-    not exclude them. What excludes them is that a docstring is not REACHABLE as
-    a string value on this path, and both spellings of a read are refused:
-
-        f.__doc__   'f.__doc__' is a field access through 'f', and this path has
-                    no way to say what 'f' holds
-        __doc__     '__doc__' has no home: the register allocator collected no
-                    home for it
-
-    So a program cannot name the address of a docstring, cannot copy its bytes,
-    and cannot subscript it — which is the only way a non-ASCII character gets
-    into a string this path would then read a position out of. Without this,
-    `formal/hostmods/os/_syscalls.mojo`'s 82 docstrings (every one carrying an
-    em-dash, an ellipsis or a section sign) refuse a `Pointer[UInt8]` subscript
-    in every image that includes the module — which is every image that imports
-    `os`, and therefore `shlex`, and three rows of `test_formal_imports.py`.
-    Over this repository and the stdlib the pool argument was **65 units too
-    strong**: 75 of 339 units held a non-ASCII literal in nothing but
-    documentation position, and 4 hold one a program can really print.
-
-    **What it does not do**, because the direction matters more than the size:
-    a literal in any other position is still counted, so a program that really
-    does hold a non-ASCII string is still refused by name.
+    So the distinction that matters for the encoding block is reachability, and
+    this is the predicate for it. It is deliberately the WIDE test (any bare
+    string statement, not only a body's first) because it is the one that is
+    true: a bare string expression statement is discarded on every path, so
+    there is no spelling in which it holds a value, and a narrow "first
+    statement of a body" rule would be a second answer with a case the wide one
+    does not cover.
     """
-    out: set = set()
-
-    def _add(body) -> None:
-        if (isinstance(body, (list, tuple)) and body
-                and isinstance(body[0], F.ExprStmt)
-                and isinstance(getattr(body[0], "value", None),
-                               F.StringLiteral)):
-            out.add(id(body[0].value))
-
-    # A module-level bare string `ExprStmt` is DOCUMENTATION wherever it appears,
-    # and this tree's own module-body classifier already decided that: it skips
-    # every `ExprStmt` whose value is a `StringLiteral`, not only the first one,
-    # because `std/math/constants.mojo` documents each of its `comptime`
-    # constants that way — the binding, then a string under it. Python's own
-    # "first statement only" rule would leave every constant's prose in the pool.
-    for st in (stmts or []):
-        if (isinstance(st, F.ExprStmt)
-                and isinstance(getattr(st, "value", None), F.StringLiteral)):
-            out.add(id(st.value))
-        _add(getattr(st, "body", None))
-        for attr in ("methods", "fields"):
-            for member in (getattr(st, attr, None) or []):
-                _add(getattr(member, "body", None))
-    return out
+    return (isinstance(node, F.ExprStmt)
+            and isinstance(getattr(node, "value", None), F.StringLiteral))
 
 
 def non_ascii_strings_in(stmts: list, limit: int = 32) -> list:
@@ -7026,20 +6994,6 @@ def non_ascii_strings_in(stmts: list, limit: int = 32) -> list:
     the soundness argument in the block comment above: interning is by content
     from these statements and nothing else can put a byte in the string pool.
 
-    **A DOCSTRING IS NOT ONE OF THE BYTES A STRING CAN HOLD**, and that is the
-    one refinement: the pool argument counts interned bytes, and a docstring's
-    bytes ARE interned, but no program can reach them (`docstring_literal_ids`
-    quotes the two refusals that make that measured), so they cannot reach a
-    string this path would read a character position out of. **75 of the 339
-    units in this repository and the stdlib carried a non-ASCII literal in
-    NOTHING but documentation position, and every one of them refused an
-    ordinary ASCII string operation because of its own prose** — 71 of the 75
-    after this, the four that remain holding a glyph a program can really print
-    (`benchmark/_progress.mojo`'s `▇`, `collections/interval.mojo`'s `└─ `,
-    `collections/string/string.mojo`'s U+FFFD, and a sentence in
-    `python/numpy.mojo`). `formal/hostmods/os/_syscalls.mojo` was one of the 71,
-    and it is in the closure of every image that imports `os`.
-
     **The DECODED TEXT and not the node**, because this list exists to be quoted
     in a diagnostic: `repr()` of the dataclass is a line and a half of field
     assignments, and a reader who is being told which string in their file is
@@ -7051,25 +7005,45 @@ def non_ascii_strings_in(stmts: list, limit: int = 32) -> list:
     element is ONE byte (`model.blob_elem_stride`, commit 37056734) — and a raw
     string's backslashes are content, so decoding it would invent the escapes it
     deliberately did not ask for.
+
+    **A DOCSTRING is not one of these either, and that is the third exclusion
+    with a measured reason rather than a typing one.** See
+    `is_docstring_statement`, which is the predicate and the argument: a
+    function docstring's bytes do reach the image, but no name binds them, so
+    they are not a string a subscript, a `strlen` or a `%<width>s` can be taken
+    of. Before this exclusion the scan counted them, and because the encoding
+    block's answers are conditioned on "does this IMAGE hold a non-ASCII
+    literal" rather than on the operand, one em-dash in a docstring refused
+    every string operation in the module — the conservative direction, taken on
+    a fact that is not there.
     """
     out: list = []
     stack = list(stmts or [])
     visited = set()
     texts = set()
-    # A DOCSTRING is a string literal in the one position no program can read it
-    # from, so it is not a byte any string in this image can hold — see
-    # `docstring_literal_ids` for the two measured refusals that make that a
-    # fact about this path rather than an assumption.  Computed from the SAME
-    # `stmts` the walk starts from, so a caller that walks one unit cannot get
-    # the other's answer.
-    skip = docstring_literal_ids(stmts)
     while stack:
         node = stack.pop()
         if id(node) in visited:
             continue
         visited.add(id(node))
+        if is_docstring_statement(node):
+            # NOT descended into, and this is the whole fix. A docstring's bytes
+            # are in the image and nothing can name them
+            # (`is_docstring_statement`), so publishing them made the encoding
+            # block refuse every `s[i]`, `len(s)` and `printf("%<w>s", s)` in a
+            # module whose only non-ASCII text was PROSE. Measured on
+            # `formal/hostmods/os/_syscalls.mojo`, whose 31 non-ASCII literals
+            # are 31 docstrings and not one value: `d[i]` came back as "this
+            # image holds a string literal that is not ASCII", on both
+            # architectures, and the refusal was asked over a file that holds
+            # no non-ASCII string at all.
+            #
+            # `continue` rather than "skip the value and descend": an
+            # `ExprStmt`'s only field IS its value (`value`, `line`, `col`), so
+            # there is nothing else in it, and one branch here is one rule
+            # rather than a shape to keep in step with the dataclass.
+            continue
         if (isinstance(node, F.StringLiteral)
-                and id(node) not in skip
                 and not getattr(node, "is_raw", False)
                 and not getattr(node, "is_bytes", False)):
             text = F.decoded_literal(node)
