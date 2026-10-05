@@ -3128,10 +3128,19 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         decisions = re.findall(r"have (hdec\d+) : (x86_cond \d+ s\d+) = (true|false)"
                                r" := by\n[ ]*simp \[([^\]]*)\][^\n]*\n[ ]*<;> decide",
                                text)
-        self.assertEqual(len(decisions), 4,
-                         "two per guarded prologue — the branch that parks the "
-                         "floor word and the one that checks it — and this chain "
-                         "crosses a frame, so two prologues: four. "
+        # ONE per guarded prologue now, not two. The second one used to be the
+        # `test floor / jne done` that skipped the once-per-process
+        # `getrlimit`; that read moved out of the prologue into the startup stub
+        # (`x86_64_codegen.py::_emit_stack_floor_init`), because a `call` inside
+        # a prologue ends that function's path tree at the call and cost the
+        # corpus two thirds of its leaves. The floor word is still read once and
+        # still cached, so the prologue is a load and a compare and the only
+        # branch left in it is the one that checks the floor — which is the one
+        # this test is actually about.
+        self.assertEqual(len(decisions), 2,
+                         "one per guarded prologue — the branch that checks the "
+                         "floor — and this chain crosses a frame, so two "
+                         "prologues: two. "
                          f"Got {decisions}")
         for name, cond, value, simp in decisions:
             # The decision's OWN proof, which is the two lines after its `have`:
@@ -3349,15 +3358,15 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
     #: — which is the whole change, and the reason `ret42` (one function) and
     #: `wide_recv` (five) are both 1 here where they were 4 and 94. `bittest` is
     #: the one with a conditional of its own, so it is 4.
-    TREES = (("formal/examples/ret42.mojo", 1, 16),
-             ("formal/examples/bittest.mojo", 4, 220),
-             ("formal/examples/wide_recv.mojo", 1, 150))
+    TREES = (("formal/examples/ret42.mojo", 1, 11),
+             ("formal/examples/bittest.mojo", 4, 200),
+             ("formal/examples/wide_recv.mojo", 1, 137))
 
     #: …and the corpus TOTAL, which is the doc's after-table's own row ("corpus
     #: leaves / step equations … 69 / 2 718"). A per-example table cannot see a
     #: program that gained a branch, so the total is the row that does, and it
     #: is the number the doc quotes.
-    TOTAL = (69, 2718)
+    TOTAL = (69, 2366)
 
     def _corpus(self):
         return sorted(glob.glob(os.path.join(HERE, "formal", "examples",

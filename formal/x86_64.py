@@ -505,9 +505,84 @@ def encode_and_r64_r64(dst: Reg, src: Reg) -> bytes:
     return _alu_rr(0x21, dst, src)
 
 
-def encode_sub_r64_r64(dst: Reg, src: Reg) -> bytes:
-    """sub dst, src  (dst -= src)"""
-    return _alu_rr(0x29, dst, src)
+def encode_sub_r64_r64(dst: Reg, src: Reg, minuend: Reg = None) -> bytes:
+    """`sub dst, src` — or `sub dst, minuend, src` in the three-operand form.
+
+    The two-operand form is the destination-subtracts-source one every existing
+    caller means. The three-operand form computes `dst = minuend - src` and is
+    what the stack-floor guard's budget needs, where the value being reduced is
+    not the one being written (the limit is read into one register and the
+    margin subtracted from it into another) — a two-operand `sub` would have to
+    destroy the limit to compute it.
+    """
+    if minuend is None:
+        return _alu_rr(0x29, dst, src)
+    return _alu_rrr(0x29, dst, src, minuend)
+
+
+def encode_cmov_r64_r64(dst: Reg, src: Reg, when_below: bool) -> bytes:
+    """`CMOVcc dst, src` — Intel semantics: **dst = src if cc holds**, else dst.
+
+    `when_below` picks the unsigned pair off the preceding
+    `encode_cmp_r64_r64(a, b)`, which computes `a - b` and so sets carry when
+    `a < b`:
+
+        when_below=True   -> CMOVB  (CF=1): dst = src  when a <  b
+        when_below=False  -> CMOVAE (CF=0): dst = src  when a >= b
+
+    So a MIN and a MAX off one compare are:
+
+        dst = min(a, b):   cmp a, b ; cmovb  dst, a   -- no.
+                             cmp dst, src ; cmovae dst, src   (dst = src when dst >= src)
+
+    **and getting the direction backwards is silent**, because a wrong CMOV is
+    still a well-formed instruction: measured here as `def main(): printf("hi")`
+    exiting with the stack-trap STATUS on every run, having computed a floor above
+    the stack pointer. The two spellings that were tried and rejected are in the
+    git history of `_emit_stack_floor_guard`; the surviving call sites each carry
+    the arithmetic they implement in a comment.
+
+    **Why a CMOV rather than a branch.** The two callers are the stack-floor
+    guard's budget clamps (`formal/x86_64_codegen.py::_emit_stack_floor_guard`),
+    and they are on the once-per-process path, so a branch would be affordable
+    either way. The reason to prefer this one is that a conditional EXPRESSION
+    should not become a branch: two values and a choice is one instruction here
+    and a label, two jumps and a pipeline flush otherwise. It is the same
+    argument `formal/arm64.py::encode_csel_xd_xm_cond` makes for arm64's CSEL,
+    and the two are the same decision on the two machines — which is what keeps
+    the guards' budgets equal rather than merely similar.
+
+    REX.W with both extensions, because `dst` and `src` are full 64-bit registers
+    and either may be R8-R15 (the guard uses R9 and R10).
+    """
+    # Intel's `CMOVcc r64, r/m64` puts the FIRST operand (the destination) in the
+    # modrm REG field and the second (the source) in r/m — the opposite of the
+    # `_alu_rr` direction every other encoder here uses, which is for the
+    # `opcode r/m, reg` forms (ADD/SUB/CMP). Encoding it the `_alu_rr` way round
+    # produces a well-formed instruction that assigns the OTHER way, so the
+    # destination keeps its old value and the clamp silently does nothing.
+    # Measured as `def main(): printf("hi")` exiting with the stack-trap STATUS
+    # on every run: the budget never reached R10, the floor was computed from
+    # whatever R10 held, and no reading of the emitted text caught it — the
+    # disassembly says `cmovaeq %r10, %r9`, which is R9 = R10, and that is the
+    # line to read when this ever breaks again.
+    cc = COND_B if when_below else COND_AE
+    rex = _rex(w=1, r=1 if dst.value >= 8 else 0,
+               b=1 if src.value >= 8 else 0)
+    return bytes([rex, 0x0F, 0x40 + cc, _modrm(3, dst.value & 7, src.value & 7)])
+
+
+def _alu_rrr(opcode: int, dst: Reg, src: Reg, r2: Reg) -> bytes:
+    """`opcode r, r/m, r2` — the `dst = r2 <op> src` direction, Intel's `sub`.
+
+    Distinct from `_alu_rr`, which is `dst = dst <op> src` and encodes
+    `dst` in the r/m field. Here `src` is in the r/m field and `r2` in the reg
+    field, which is why the operand order at the call site reads
+    `encode_sub_r64_r64(dst, src, minuend)`.
+    """
+    rex = _rex(w=1, r=1 if r2.value >= 8 else 0,
+               b=1 if src.value >= 8 else 0)
+    return bytes([rex, opcode, _modrm(3, r2.value & 7, src.value & 7)])
 
 
 def encode_xor_r64_r64(dst: Reg, src: Reg) -> bytes:

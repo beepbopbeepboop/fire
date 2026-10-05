@@ -692,10 +692,33 @@ def _program_externs(info: dict) -> list:
     predates the key — is read as having none, which is the conservative
     direction: its run tests stay suppressed rather than being restored on a
     call that may be reachable.
+
+    **And a call BELOW the entry function is not the program's either.** The
+    startup stub runs before `main` is called and reads `RLIMIT_STACK` once
+    (`formal/x86_64_codegen.py::_emit_stack_floor_init`), so its `call
+    getrlimit` is in the image, in `extern_calls`, and on NO path the run tests
+    walk: they start at `info["func_offset"]`, by which time the stub has
+    finished. Counting it as a program call suppressed every run test on this
+    backend for every program — the same failure `compiler_traps` was introduced
+    to fix, arriving through the front door instead, and `getrlimit` is not a
+    trap at all (it returns, and the floor the guard compares against is
+    whatever it left in `__DATA`).
+
+    The subtraction is by ADDRESS against `func_offset` rather than by symbol,
+    for the same reason as above: a program can call `getrlimit` itself, and
+    dropping the symbol would drop that call too.
     """
     traps = set(info.get("compiler_traps") or ())
-    return [e.get("sym") for e in (info.get("extern_calls") or ())
-            if e.get("addr") not in traps]
+    entry = info.get("func_offset")
+    out = []
+    for e in (info.get("extern_calls") or ()):
+        addr = e.get("addr")
+        if addr in traps:
+            continue
+        if entry is not None and addr is not None and addr < entry:
+            continue
+        out.append(e.get("sym"))
+    return out
 
 
 def generate_x86_64_proof(prog, code, info) -> str:

@@ -1709,6 +1709,8 @@ dylib_exports: list = None, globals_base: int = None,
         ret_label = f"{fn}_sf{sid}_ret"
         trap_label = f"{fn}_sf{sid}_trap"
         ok_label = f"{fn}_sf{sid}_ok"
+        clamp_lo_label = f"{fn}_sf{sid}_cl"
+        clamp_hi_label = f"{fn}_sf{sid}_ch"
         floor = M.stack_floor_address(self._globals_base)
         limit_word = M.stack_limit_address(self._globals_base)
         scratch = M.stack_scratch_address(self._globals_base)
@@ -1835,16 +1837,34 @@ dylib_exports: list = None, globals_base: int = None,
         # budget = min(STACK_FLOOR_BUDGET_BYTES, max(limit - MARGIN, MIN)).
         # X16 = the limit in, X15 = the budget out.
         _emit_sub_imm(self.asm, 15, 16, M.STACK_FLOOR_MARGIN_BYTES + _SCRATCH)
-        # The lower clamp, as a CMOV rather than a branch: this is on the
-        # once-per-process path so a branch would be affordable, but a
-        # conditional-select keeps the basic-block structure the proof layer
-        # walks identical to what it was when this was one subtraction.
+        # The two clamps, as BRANCHES rather than CSEL, and this is the same
+        # lesson the x86-64 half learned from `formal/x86_64_proof_gen.py`, which
+        # has no `cmov` arm either: `arm64_step` has no `csel` branch and
+        # `formal/arm64_proof_gen.py`'s CFG decomposition builds a block's runs
+        # certificate out of branches, so a block with none cannot be certified
+        # and a `csel` in the GUARD refuses proof generation for every program in
+        # the corpus. Measured: `test_formal_call_proof_gen.py` goes from 21
+        # failures to 42 failures and 15 errors the moment this clamp is a
+        # `csel`, and the message names the guard's own instruction ("CFG
+        # decomposition unsupported ... it is CSEL (0x9a8f31cf), which has no
+        # branch in `arm64_step`"). The bug doc that message points at
+        # (`bugs/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`)
+        # is about the EMITTER's `a if c else b`; this was the compiler using
+        # the same unmodelled word for its own arithmetic, which the doc does not
+        # cover.
+        #
+        # `cmp x15, x14` computes `x15 - x14`, so carry is set exactly when
+        # `x15 < x14` and `b.hs` is its complement.
         self._emit_mov_imm("X14", M.STACK_FLOOR_MIN_BUDGET_BYTES)
         self.asm.emit(encode_cmp_xn_xm(15, 14))
-        self.asm.emit(encode_csel_xd_xm_cond(15, 14, 15, "lo"))
+        self._emit_b_cond_to("hs", clamp_lo_label)
+        self._emit_mov_imm("X15", M.STACK_FLOOR_MIN_BUDGET_BYTES)
+        self.asm.label(clamp_lo_label)
         self._emit_mov_imm("X14", M.STACK_FLOOR_BUDGET_BYTES)
         self.asm.emit(encode_cmp_xn_xm(15, 14))
-        self.asm.emit(encode_csel_xd_xm_cond(15, 14, 15, "hi"))
+        self._emit_b_cond_to("lo", clamp_hi_label)
+        self._emit_mov_imm("X15", M.STACK_FLOOR_BUDGET_BYTES)
+        self.asm.label(clamp_hi_label)
         # floor = SP - CHARGE, where CHARGE is
         # `model.stack_floor_charge(budget, _SCRATCH)` — the budget LESS this
         # function's own frame, because the guard is emitted after the `stp` that

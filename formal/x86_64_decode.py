@@ -306,6 +306,22 @@ def decode_one(code: bytes, off: int) -> Insn:
             if mod != 3:
                 raise DecodeError("imul with a memory operand is not emitted")
             return insn(length, "imul_r64_r64", mod=mod, reg=reg, rm=rm)
+        # CMOVcc r64, r/m64, `0F 40..4F`. `reg` is the DESTINATION and `rm` the
+        # source — the opposite of the `_ALU_RR` / `alu_rr` direction above,
+        # because `0F 40 /r` is `CMOVcc r, r/m` and not `opcode r/m, reg`. The
+        # stack floor's budget clamp is the only emitter of these, and it was
+        # written before this case existed, so the walker's first sight of a
+        # guarded function was `undecodable byte 0x0f`.
+        #
+        # Recorded the same way the sibling forms are: `mod`, `reg` and `rm`,
+        # which is all `_shapes` needs to name the step lemma. `w` is required
+        # because the encoder only ever emits the REX.W 64-bit form.
+        if 0x40 <= op2 <= 0x4F and w:
+            mod, reg, rm, extra, base, disp, length = modrm_at(2)
+            if mod != 3:
+                raise DecodeError("cmov with a memory operand is not emitted")
+            return insn(length, "cmov_r64_r64", mod=mod, reg=reg, rm=rm,
+                        cc=op2 - 0x40)
 
     # ── ALU and shifts, REX.W ──────────────────────────────────────
     if w and (alu := _ALU_RR.get(op)) is not None:

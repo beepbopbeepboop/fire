@@ -3303,13 +3303,28 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
         self.assertIn("printf", text,
                       "the suppression must name the symbol that caused it")
 
+    #: The symbols a COMPILER may publish in `info["compiler_traps"]`.
+    #:
+    #: `exit` is the trap itself. `write` is the message the trap prints before
+    #: it exits (`model.stack_trap_message`, emitted by
+    #: `x86_64_codegen.py::_emit_overflow_diagnostic_call`) — it is the
+    #: compiler's own call for the same reason `exit` is, and publishing it is
+    #: what keeps the run tests coming back on a program that traps, because an
+    #: unrecorded `write` reads as a call the PROGRAM makes.
+    #:
+    #: The list is named rather than loosened to "any extern call": the point of
+    #: the test is that `_program_externs` subtracts a KNOWN set, and a test that
+    #: accepted whatever the emitter published would pass for an emitter that
+    #: published `printf`.
+    _COMPILER_TRAP_SYMS = frozenset({"exit", "write"})
+
     def test_the_trap_is_published_as_a_compiler_call(self):
         """`info["compiler_traps"]` is the emitter's own list, and it is right.
 
-        Every entry must be the address of an `exit` in `extern_calls` — the
-        trap is a real call and must stay accounted for on the link line — and
-        no entry may be any other symbol's, or the subtraction would silence a
-        program call.
+        Every entry must be the address of a COMPILER call in `extern_calls` —
+        the trap is a real call and must stay accounted for on the link line —
+        and no entry may be any other symbol's, or the subtraction would silence
+        a program call.
         """
         for name in ("plain", "string", "prints"):
             info = self._info("x86_64", name)
@@ -3325,9 +3340,34 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
                     self.assertIn(addr, by_addr,
                                   f"{addr} is published as a trap but is not "
                                   f"an extern call at all")
-                    self.assertEqual(by_addr[addr], "exit",
-                                     f"the trap at {addr} is a "
-                                     f"{by_addr[addr]!r} call")
+                    self.assertIn(
+                        by_addr[addr], self._COMPILER_TRAP_SYMS,
+                        f"the trap at {addr} is a {by_addr[addr]!r} call, which "
+                        f"is not one of {sorted(self._COMPILER_TRAP_SYMS)}; "
+                        f"publishing it would subtract a call the PROGRAM makes")
+
+    def test_the_traps_are_all_below_the_entry_or_the_exit_itself(self):
+        """A published trap is reached from a guard, so it is a `write` or an `exit`.
+
+        Nothing else: `getrlimit` returns and is NOT a trap (it is subtracted by
+        address against `func_offset` instead, because it runs in the startup
+        stub before the entry point and so is on no walked path), and `printf` is
+        the program's. This pins the boundary from the other side of
+        `test_the_subtraction_is_by_address_not_by_symbol`.
+        """
+        for name in ("plain", "string", "prints"):
+            info = self._info("x86_64", name)
+            by_addr = {e["addr"]: e["sym"]
+                       for e in (info.get("extern_calls") or [])}
+            entry = info.get("func_offset")
+            for addr in (info.get("compiler_traps") or ()):
+                with self.subTest(program=name, addr=hex(addr)):
+                    self.assertGreaterEqual(
+                        addr, entry,
+                        "a compiler trap below the entry point is in the "
+                        "startup stub, which no run test walks; publishing it "
+                        "claims a path the model never takes")
+                    self.assertIn(by_addr[addr], self._COMPILER_TRAP_SYMS)
 
     def test_the_subtraction_is_by_address_not_by_symbol(self):
         """Two `exit` calls, one the compiler's: the program's must survive.

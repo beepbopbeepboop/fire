@@ -35960,6 +35960,7 @@ class GlobalDataImage:
         """
         return self.init_flag_offset + 3 * GLOBAL_SLOT_BYTES
 
+
     def __bool__(self):
         return bool(self.blob)
 
@@ -36019,6 +36020,20 @@ STACK_FLOOR_BUDGET_BYTES = 7 * 1024 * 1024 + 512 * 1024
 # the DIFFERENCE stays flat. A margin written as a fraction of the limit would
 # be wrong at one end or the other, and this constant is what says so.
 STACK_FLOOR_MARGIN_BYTES = 256 * 1024
+
+
+# `RLIMIT_STACK`, the `getrlimit(2)` SELECTOR whose soft limit is how much stack
+# the process may use. It is 3 on Darwin (`sys/resource.h`) and on Linux
+# (`RLIMIT_STACK` in `bits/resource.h`), and those are the two targets this path
+# emits for; a third would need its own value here rather than a silent reuse of
+# this one.
+#
+# **In the model, not in either backend**, because both backends' guards now read
+# the limit and a literal in each file is two copies of one answer — which is how
+# they came to disagree about the arm64 threshold once already (see
+# `stack_floor_guarded_names` for the rule that is genuinely per-backend, which is
+# a different thing: WHICH prologues carry the guard, not what they compare).
+RLIMIT_STACK = 3
 
 
 # THE SMALLEST BUDGET THE GUARD WILL USE, and why the arithmetic above needs one.
@@ -36279,6 +36294,7 @@ def stack_scratch_address(base: int, table: dict = None) -> int:
     """
     return base + build_data_image(
         module_slots() if table is None else table, base).stack_scratch_offset
+
 
 
 def call_graph_edges(functions, structs: dict = None) -> dict:

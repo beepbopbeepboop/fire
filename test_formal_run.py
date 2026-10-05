@@ -13984,6 +13984,124 @@ def run_case(name, source, want_exit, want_stdout, tmpdir, verbose):
     return True, ""
 
 
+#: The stack-floor contract under a REDUCED stack limit, which is the half of
+#: "the threshold is derived from the running process's real stack limit" that a
+#: default-ulimit row cannot see.
+#:
+#: `STACK_FLOOR_BUDGET_BYTES` is a CAP, so at the default `ulimit -s` a program
+#: past the floor is refused whether or not the limit was read — the budget alone
+#: is enough to keep the process alive. Lower the limit below the budget and only
+#: a threshold that actually READS `RLIMIT_STACK` refuses, and it must refuse at a
+#: depth that moves with the limit. Measured on this tree, before the fix, every
+#: reduced limit gave SIGSEGV (exit 139) at every depth from 100 upwards: a guard
+#: whose budget exceeds the process's real stack never fires, and the process
+#: runs off the end of it.
+_REDUCED_STACK_SOURCES = (
+    # name, program, the depth that must still ANSWER, the depth that must refuse
+    ("reduced_stack_a_shallow_recursion_still_answers",
+     "def deep(n: Int) -> Int:\n"
+     "    if n <= 0:\n"
+     "        return 0\n"
+     "    return deep(n - 1) + 1\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"%d\\n\", deep(100))\n"
+     "    return 0\n", 100),
+    ("reduced_stack_a_deep_recursion_is_refused_not_a_crash",
+     "def deep(n: Int) -> Int:\n"
+     "    if n <= 0:\n"
+     "        return 0\n"
+     "    return deep(n - 1) + 1\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return deep(5000)\n", 5000),
+)
+
+
+#: Architectures this group does NOT yet cover, and why — a DECLARED per-arch
+#: gap, not a skip, and per architecture rather than per row because the whole
+#: group is one defect.
+#:
+#: arm64 reads `RLIMIT_STACK` in the GUARD'S OWN PROLOGUE (x86-64 reads it once
+#: in the startup stub, `x86_64_codegen.py::_emit_stack_floor_init`), and a
+#: `call getrlimit` there is exactly what
+#: `formal/arm64_proof_gen.py` refuses run tests over, so the read cannot be
+#: moved without first fixing the extern-stub layout: an extern call emitted
+#: from the startup stub lands its `bl` past the end of `__TEXT`, because the
+#: `__TEXT,__stubs` region is sized before that point. Measured on this tree:
+#: `def main(): printf("hi")` writing 187 MB of "hi" and still running.
+#:
+#: Until that is fixed arm64 keeps a compile-time budget, and a budget larger
+#: than the process's real stack never fires — so under a reduced `ulimit -s` it
+#: SIGSEGVs where x86-64 refuses. The bug doc carries the reproduction and the
+#: next step.
+_REDUCED_STACK_DEFERRED = {
+    "arm64": "bugs/FORMAL_arm64_startup_stub_extern_call_lands_past_text.md",
+}
+
+
+def reduced_stack_cases(tmpdir, verbose=False):
+    """The reduced-`ulimit -s` rows, run on whatever this host can execute.
+
+    `ulimit -s` is lowered in a SHELL that then execs the binary, so the limit is
+    inherited by the child and nothing in this process is changed — a `resource`
+    call here would lower it for the whole test session, which is why it is not
+    written that way.
+    """
+    out_rows = []
+    for name, src, depth in _REDUCED_STACK_SOURCES:
+        path = os.path.join(tmpdir, name + ".mojo")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(src + "\n")
+        for arch in ("x86_64", "arm64"):
+            if arch in _REDUCED_STACK_DEFERRED:
+                out_rows.append((
+                    name, arch, None,
+                    "DEFERRED on %s — see %s"
+                    % (arch, _REDUCED_STACK_DEFERRED[arch])))
+                continue
+            out = os.path.join(tmpdir, "%s_%s" % (name, arch))
+            rc, text = build_formal(path, out, backend=arch)
+            if rc != 0 or not os.path.isfile(out):
+                out_rows.append((name, arch, False,
+                                 "build failed: " + text.strip()[-200:]))
+                continue
+            # 2 MiB: below this backend's 7.5 MiB budget on x86-64 and its
+            # 128 KiB frame on arm64 leaves room for the shallow case and not for
+            # the deep one, so a threshold that reads the limit and one that does
+            # not are told apart by these two rows together.
+            run = subprocess.run(
+                ["/bin/sh", "-c", "ulimit -s 2048; exec \"$0\"", out],
+                capture_output=True, text=True, timeout=RUN_TIMEOUT)
+            want = 2 if depth >= 5000 else 0
+            if run.returncode != want:
+                out_rows.append((
+                    name, arch, False,
+                    "under `ulimit -s 2048` depth %d exited %d, want %d%s"
+                    % (depth, run.returncode, want,
+                       ("; stderr: " + run.stderr.strip()[:160])
+                       if run.stderr.strip() else "")))
+            elif want == 2:
+                # And it must SAY which bound it hit: the trap is the only
+                # bounded stop on this path and a bare status is what this
+                # replaced.
+                msg = run.stderr
+                if "RecursionError" not in msg or "stack budget" not in msg:
+                    out_rows.append((
+                        name, arch, False,
+                        "refused with status 2 but stderr does not name the "
+                        "bound: %r" % msg.strip()[:160]))
+                else:
+                    out_rows.append((name, arch, True, ""))
+            else:
+                if "100" not in run.stdout:
+                    out_rows.append((name, arch, False,
+                                     "stdout %r does not answer" % run.stdout[:80]))
+                else:
+                    out_rows.append((name, arch, True, ""))
+    return out_rows
+
+
 def run_both_arch_case(name, source, want_exit, want_stdout, tmpdir, verbose):
     """Build and RUN on BOTH backends, and require the same answer from each.
 
@@ -21937,14 +22055,25 @@ def main():
     selected = [c for c in everything
                 if c[0] not in pair_names
                 and (not args.cases or c[0] in args.cases)]
-    known = {c[0] for c in everything} | pair_names
-    if args.cases and len(selected) + len(wanted_pairs) != len(args.cases):
+    # The reduced-`ulimit -s` group is a THIRD shape again (it is not a table of
+    # columns at all: the depth and the ulimit are the parameters, and the whole
+    # point is that both backends are built and run under a limit this process
+    # does not adopt), so it is a list of names and dispatched by its own runner
+    # rather than forced into the four-column table.
+    reduced_names = {c[0] for c in _REDUCED_STACK_SOURCES}
+    known = {c[0] for c in everything} | pair_names | reduced_names
+    if args.cases and (len(selected) + len(wanted_pairs)
+                       + len(reduced_names & set(args.cases))
+                       != len(args.cases)):
         missing = set(args.cases) - known
         print(f"ERROR: unknown case(s): {sorted(missing)}", file=sys.stderr)
         return 2
     off_names = {c[0] for c in WIDE_OFF_CASES}
     module_names = {c[0] for c in CROSS_MODULE_CASES}
     stderr_names = {c[0] for c in STDERR_CASES}
+
+
+
 
     passed = failed = 0
     # Before the builds, because it is the only group here that needs no
@@ -21972,6 +22101,20 @@ def main():
     passed += sf_passed
     failed += len(sf_failures)
     with tempfile.TemporaryDirectory() as tmpdir:
+        if not args.cases or (reduced_names & set(args.cases)):
+            for rname, rarch, rok, rdetail in reduced_stack_cases(
+                    tmpdir, args.verbose):
+                if rok is None:
+                    # Reported, not counted: a declared gap printed as a PASS
+                    # would be a silenced test, and printed as a FAIL would be a
+                    # test this branch is not claiming to have fixed.
+                    print(f"  DEFERRED  {rname} [{rarch}]: {rdetail}")
+                elif rok:
+                    passed += 1
+                    print(f"  PASS  {rname} [{rarch}, ulimit -s 2048]")
+                else:
+                    failed += 1
+                    print(f"  FAIL  {rname} [{rarch}, ulimit -s 2048]: {rdetail}")
         for name, source, cpython_source in wanted_pairs:
             src = os.path.join(tmpdir, name + ".mojo")
             with open(src, "w") as f:
@@ -22038,6 +22181,8 @@ def main():
             else:
                 failed += 1
                 print(f"  FAIL  {name}: {detail}")
+
+
 
     print(f"\nformal run: PASS={passed} FAIL={failed}")
     return 1 if failed else 0

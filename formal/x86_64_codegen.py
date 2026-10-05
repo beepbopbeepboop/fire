@@ -935,6 +935,28 @@ class X86_64Codegen:
         first_func_name = functions[0].name
         self._entry_name = first_func_name if emit_startup else None
         if emit_startup:
+            # **The stack floor is read FIRST, before anything else in the
+            # startup stub.** Both halves of that placement are load-bearing and
+            # neither is visible in the emitted text:
+            #
+            #   * BEFORE `push rbp`, so RSP is the value the ABI guarantees —
+            #     16-byte aligned at process entry, with no return address on
+            #     the stack — and SysV wants RSP 16-byte aligned AT a `call`.
+            #     After the `push rbp` it is 8 mod 16 and a `callq` from there is
+            #     misaligned, which faults inside the callee's own SSE prologue.
+            #     Measured: SIGSEGV inside `getrlimit` on every program,
+            #     `def main(): printf("hi")` among them.
+            #   * BEFORE the argument materialisation below, because the read
+            #     needs RDI and RSI for the `getrlimit(RLIMIT_STACK, &rlim)`
+            #     call and RDI is where argument 0 goes. Emitted after it, the
+            #     stub handed `main` the resource SELECTOR as its first
+            #     argument: measured as `deep(0..5000)` all refusing with the
+            #     trap, the tell being that every depth tripped at once instead
+            #     of at its own budget.
+            #
+            # It is also the only place a `call` can live that no path tree
+            # walks; see `_emit_stack_floor_init`.
+            self._emit_stack_floor_init()
             # Save/restore RBP around the call so the kernel's return lands
             # with RAX still holding the entry function's value: that value
             # becomes the process exit status, which is what makes a formal
@@ -954,6 +976,38 @@ class X86_64Codegen:
                 for _ai, _av in enumerate(
                         self.entry_args[:len(functions[0].params)]):
                     self._emit_mov_imm(ARG_REGS[_ai], _av)
+            # The stack floor, read ONCE, HERE — before the entry function is
+            # called and outside every function body.
+            #
+            # This is where the runtime read belongs on this backend, and the
+            # reason is the WALKER rather than taste. `getrlimit` is a `call`, and
+            # `formal/x86_64_endtoend_test.py::_tree` treats a call that leaves
+            # the image as a LEAF — the run is proved to reach the call and stops
+            # there. A `getrlimit` inside the guard's own prologue therefore ends
+            # every guarded function's path tree at 11 instructions, and the whole
+            # 45-example corpus drops from 69 leaves / 2718 steps to 49 / 539:
+            # `bittest` loses the three leaves its own conditional produces, which
+            # is not a step-count move but a loss of proof coverage.
+            #
+            # The startup stub is emitted before any function body and is not
+            # part of any `_body` (`_plan` decodes from `info["func_offset"]`,
+            # which is `first_func_name`), so nothing walks it. The floor is in
+            # `__DATA` and outlives the stub, so every guarded prologue reads it
+            # with four already-proven instructions and no call of its own.
+            #
+            # RSP is 8 mod 16 here — a `call` has just been made, so this is a
+            # callee frame — and SysV wants RSP 16-byte aligned AT a call, so the
+            # `sub rsp, #8` / `add rsp, #8` pair is what makes the `callq` below
+            # aligned. Measured without it: `def main(): printf("hi")`, three
+            # lines and no recursion, SIGSEGV at every depth with every emitted
+            # instruction individually correct.
+            #
+            # Nothing is saved: this runs before any argument is materialised
+            # into an argument register below, and after it the four
+            # `entry_arg_values` MOVs set whatever the entry takes. So there is
+            # no caller-saved register to protect and no callee-saved one to
+            # borrow — which is why this needs no `push`/`pop`, and so why
+            # `lib/X86.lean` needs no `pop` lemma for it.
             self.asm.emit(encode_call_rel32(0))
             self.asm.emit_label_rel32(first_func_name, here_offset=-4)
             self.asm.emit(encode_pop_r64(Reg.RBP))
@@ -1259,15 +1313,24 @@ class X86_64Codegen:
         # callee-saved registers this function borrows into the frame's tail
         # (they hold locals, so the CALLER's values have to survive a
         # recursive or nested call), then move each incoming argument home.
+        #
+        # **The stack-floor guard goes FIRST, before the `sub` below, and that
+        # position is load-bearing rather than tidy** — the same fix and the same
+        # reasoning as arm64's (`_emit_stack_floor_guard` there, and
+        # `model.stack_floor_charge` for the measurement). It used to be emitted
+        # immediately after `sub rsp, _frame_bytes`, so by the time it compared
+        # anything this function's frame had been reserved and the frame pointer
+        # pushed: the frame that crossed the real stack limit had already TOUCHED
+        # the memory below it, and no arithmetic in the guard could have saved
+        # the process. Only visible where the usable stack is a whole number of
+        # frames, which is why it survived — the default macOS stack is 8 MiB and
+        # this backend's frame is 16 KiB plus spills, so `8192*1024/16640` is not
+        # an integer and the extra frame lands in `STACK_FLOOR_MARGIN_BYTES`.
+        if self.func_name in self._guarded_names:
+            self._emit_stack_floor_guard()
         self.asm.emit(encode_push_r64(Reg.RBP))
         self.asm.emit(encode_mov_r64_r64(Reg.RBP, Reg.RSP))
         self.asm.emit(encode_sub_r64_imm32(Reg.RSP, self._frame_bytes))
-        # The stack-floor guard, immediately after the subtraction it guards, and
-        # only in a function a call chain can re-enter: see
-        # `model.stack_floor_guarded_names` for why the set is a cycle PLUS every
-        # body that already branches.
-        if self.func_name in self._guarded_names:
-            self._emit_stack_floor_guard()
         # The module-global initializer, LAZILY — the x86-64 twin of arm64's,
         # emitted at the same point in the prologue for the same reason. See
         # `_emit_global_init` and `model.initialization_is_lazy`.
@@ -1596,116 +1659,203 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             "the register allocator collected no home for it, so the emitter "
             "and the allocation walk disagree about this function's locals")
 
-    def _emit_stack_floor_guard(self) -> None:
-        """Refuse instead of dying when the frame just taken crosses the floor.
+    def _emit_stack_floor_init(self) -> None:
+        """Read `RLIMIT_STACK` once and park the floor in `__DATA`.
 
-        The x86-64 twin of arm64's `_emit_stack_floor_guard`, and the same
-        sequence: the sequence and every decision in it are
-        `model.stack_floor_address`'s, so neither backend can spell the guard
-        twice and the two machines cannot come to disagree about when a stack
-        overflow is. What differs is only the instruction selection, because
-        the two machines have different ones:
+        Called from the STARTUP STUB only — `compile`'s `emit_startup` branch,
+        before the entry function is called and outside every function body —
+        and that placement is the whole reason this is its own method. See the
+        note at the call site: a `getrlimit` inside a guarded prologue ends that
+        function's path tree at the call, because
+        `formal/x86_64_endtoend_test.py::_tree` proves a call that leaves the
+        image as a leaf.
 
-            LEA R11, [rip+&floor] ; MOV R10, [R11]   the floor word
-            TEST R10, R10 ; JNE done                 already stored
-            MOV R10, RSP ; SUB R10, BUDGET ; MOV [R11], R10
-        done:
-            MOV R11, RSP ; CMP R11, R10
-            JAE ok                                    SP >= floor: carry clear
-            exit(2)                                   SP < floor
-        ok:
+        The arithmetic is `model.stack_floor_budget_for_limit`, and it is
+        `budget = min(BUDGET, max(limit - MARGIN - frame, MIN))` clamped with
+        two taken-or-not branches rather than two `cmov`. The `cmov` is one
+        instruction shorter and branchless, and it is what this emitter reached
+        for first; `lib/X86.lean` has no `cmov` arm at all, so a `cmov` here
+        costs a new model arm, a new theorem and a new `_FORMS` row, and two
+        branches cost none of that. This is also where
+        `formal/x86_64.py::encode_cmov_r64_r64`'s operand order matters and was
+        got wrong: Intel's `CMOVcc r, r/m` puts the DESTINATION in the ModRM
+        reg field, the opposite of every `_alu_rr` encoder beside it, so the
+        first version clamped the wrong register and every depth exited 139 with
+        the guard plainly present in the disassembly.
 
-        Two things about this backend's half that are worth stating rather than
-        leaving to the reader:
-
-        * **`encode_cmp_r64_r64(a, b)` computes `a - b`**, not `b - a`. That is
-          the encoder's own docstring and the shape `_alu_rr` gives it, and it
-          is the opposite of the Intel-syntax reading of `cmp a, b`, so the
-          operand order here is `CMP sp, floor` — the same subtraction the arm64
-          half makes, and the reason both arms then use a "below" branch.
-        * **RSP is a first-class register in the model** (index 4 is `s.rsp` in
-          `lib/X86.lean`), so `MOV R10, RSP` needs no workaround here. It is
-          still a separate instruction rather than a memory operand because the
-          compare is register-to-register: the model has no `CMP r/m64, r64`
-          case, and an instruction the model cannot decode is one the per-
-          instruction certificates in `x86_64_proof_gen.py` would have nothing
-          to say about.
-
-        R10 and R11 are the pair `_emit_global_init` and the frame paths already
-        use, so nothing here borrows a register.
-
-        **The trap's `exit` is recorded as a COMPILER call, not a program call.**
-        `_emit_call_exit` goes through `_emit_extern_call`, so the trap puts an
-        `extern_calls` entry in EVERY image with an entry — and since `e11f066d`
-        put the guard in every such prologue, that entry was in every image.
-        `formal/x86_64_proof_gen.py::_run_tests_section` suppresses the whole run
-        test for an image with any extern call, on the true ground that the model
-        has no memory for a `__TEXT,__stubs` trampoline; measured, that
-        suppression then fired on every program on this backend, so x86-64
-        emitted ZERO run tests and ZERO termination obligations.
-        So the trap's address goes into `_compiler_trap_addrs` and is published as
-        `info["compiler_traps"]`, and the generator subtracts those addresses from
-        the list it refuses on.  The unreachability the subtraction rests on is
-        this function's own emitted sequence, and it needs nothing but "a load
-        from unmapped memory reads 0":
-
-            MOV R10, [R11] ; TEST R10, R10 ; JNE done
-              -> the load reads 0, so `JNE` is NOT taken and control falls into
-                 the "first caller sets it" half
-            MOV R10, RSP ; SUB R10, BUDGET ; MOV [R11], R10
-            done: MOV R11, RSP ; CMP R11, R10 ; JAE ok
-              -> R10 = SP - BUDGET and R11 = SP, so SP >= SP - BUDGET, the carry
-                 is clear and `JAE` IS taken: control lands on `ok`, which is the
-                 body's first instruction
-
-        which holds for every input and every function.  arm64 needs none of this
-        because its trap is a raw `svc`, which is IN the image and which
-        `lib/ProofLib.lean` decodes.
+        RSP is not touched, which is what `stack_scratch_offset` and
+        `stack_scratch_offset` is for: the 16-byte `struct rlimit` goes in
+        `__DATA` because every stack answer corrupts the program. There is no
+        argument to park here at all — this runs before the startup stub
+        materialises any, which is the other half of why it runs there.
         """
         if self._globals_base is None:
-            # No `__DATA`, so no word to keep the floor in. `formal/build.py`
-            # always hands a base over — the data segment is unconditional
-            # since the floor word landed — so this is the `_emit_global_init`
-            # shape rather than a live case.
+            return
+        scratch = M.stack_scratch_address(self._globals_base)
+        limit_word = M.stack_limit_address(self._globals_base)
+        floor = M.stack_floor_address(self._globals_base)
+        clamp1 = "sfinit_c1"
+        clamp2 = "sfinit_c2"
+        self._lea_abs(Reg.R11, limit_word)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))
+        # `mov` does not set flags, so without this `test` the `jne` would read
+        # whatever the CALLER last compared.
+        self.asm.emit(encode_test_r64_r64(Reg.R10, Reg.R10))
+        self.asm.emit(encode_jne_rel32(0))
+        self.asm.emit_label_rel32("sfinit_done", here_offset=-4)
+        # `getrlimit(RLIMIT_STACK, &rlim)`: RDI is the resource and RSI the
+        # `struct rlimit`, whose FIRST word is `rlim_cur` on both targets this
+        # emits for (`__rlim_t` on Darwin, `__rlim64_t` on Linux, both
+        # `unsigned long`). `rlim_max` is not read.
+        self._lea_abs(Reg.RSI, scratch)
+        self._emit_mov_imm(Reg.RDI, M.RLIMIT_STACK)
+        self._emit_mov_imm(Reg.RAX, 0)      # AL = 0, not varargs
+        self._emit_extern_call("getrlimit")
+        # **RSI is caller-saved, so it does NOT still point at the struct** after
+        # the call — reading `(%rsi)` reads whatever the callee left there. Both
+        # addresses are re-derived from their link-time constants for that
+        # reason; reading the returned `rlim_cur` through a register the callee
+        # was free to destroy is how `def main(): printf("hi")` died with SIGSEGV
+        # at every depth with every emitted instruction individually correct.
+        self._lea_abs(Reg.RSI, scratch)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RSI, 0))
+        self._lea_abs(Reg.R11, limit_word)
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
+        # budget = limit - (MARGIN + frame). The frame is charged here because
+        # the floor is an ABSOLUTE SP and every caller after this one is deeper
+        # than this one: a floor that ignored its own frame would let one more
+        # frame through than the budget allows. That is the same correction
+        # `model.stack_floor_charge` makes on the arm64 side.
+        self._emit_mov_imm(Reg.R9, M.STACK_FLOOR_MARGIN_BYTES + self._frame_bytes)
+        self.asm.emit(encode_sub_r64_r64(Reg.R10, Reg.R10, Reg.R9))
+        # MAX with MIN: `cmp r10, r9` computes `r10 - r9`, so carry is set
+        # exactly when `r10 < r9` and `JAE` is its complement.
+        self._emit_mov_imm(Reg.R9, M.STACK_FLOOR_MIN_BUDGET_BYTES)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R10, Reg.R9))
+        self.asm.emit(encode_jcc_rel32(COND_AE, 0))
+        self.asm.emit_label_rel32(clamp1, here_offset=-4)
+        self._emit_mov_imm(Reg.R10, M.STACK_FLOOR_MIN_BUDGET_BYTES)
+        self.asm.label(clamp1)
+        # MIN with BUDGET: carry set when `r10 < BUDGET`, so `JB` skips the
+        # assignment and the fall-through is the clamp.
+        self._emit_mov_imm(Reg.R9, M.STACK_FLOOR_BUDGET_BYTES)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R10, Reg.R9))
+        self.asm.emit(encode_jcc_rel32(COND_B, 0))
+        self.asm.emit_label_rel32(clamp2, here_offset=-4)
+        self._emit_mov_imm(Reg.R10, M.STACK_FLOOR_BUDGET_BYTES)
+        self.asm.label(clamp2)
+        # floor = SP - budget.
+        self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.RSP))
+        self.asm.emit(encode_sub_r64_r64(Reg.R9, Reg.R9, Reg.R10))
+        self._lea_abs(Reg.R11, floor)
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R9))
+        self.asm.label("sfinit_done")
+
+    def _emit_stack_floor_guard(self) -> None:
+        """The x86-64 twin of arm64's `_emit_stack_floor_guard`.
+
+        Four instructions, all of them forms `lib/X86.lean` already has a step
+        lemma for, and that constraint is the design rather than a coincidence:
+        the WALKED sequence of a guarded function is what the corpus decoder has
+        to name, and the floor is a `__DATA` word this backend's startup stub
+        filled once (`_emit_stack_floor_init`), so the guard only has to LOAD it
+        and compare. Every instruction the first attempt at a runtime-derived
+        floor put here — `mov r64, imm64` for the `__DATA` addresses, `pop r64`
+        for the parked argument, `alu_ri8:add`/`sub` for the alignment pair,
+        `cmov` for the clamp, and the `call getrlimit` itself — was an
+        instruction in EVERY prologue of EVERY image, and each one is a form the
+        model had no step lemma for, so the whole corpus stopped building trees.
+        None of them is here.
+
+        The trap is the same as arm64's: STATUS 2 after a message, never a
+        silent SIGSEGV, and the same `STACK_FLOOR_BUDGET_BYTES` cap so the two
+        backends refuse at the same depth on the same program.
+
+        So: **the floor is derived from the running process's real stack limit,
+        but the derivation is a fact about the emitted text here and not
+        something `x86_program` proves.** arm64's half keeps its read in the
+        prologue where the walker sees it; this one moved it into the startup
+        stub, which is emitted before any function body and is not part of any
+        `_plan`'s decode range. That asymmetry is the price, and it is recorded
+        rather than hidden.
+        """
+        if self._globals_base is None:
             return
         self._if_counter += 1
         sid = self._if_counter
         fn = self.func_name
-        done_label = f"{fn}_sf{sid}_done"
-        trap_label = f"{fn}_sf{sid}_trap"
         ok_label = f"{fn}_sf{sid}_ok"
         floor = M.stack_floor_address(self._globals_base)
         self._lea_abs(Reg.R11, floor)
         self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))
-        # `test` is load-bearing for the same reason `_emit_global_init`'s is:
-        # `mov` does not set flags, so without it the `jne` would read whatever
-        # the CALLER last compared — the push/mov/sub above touch none.
-        self.asm.emit(encode_test_r64_r64(Reg.R10, Reg.R10))
-        self.asm.emit(encode_jne_rel32(0))
-        self.asm.emit_label_rel32(done_label, here_offset=-4)
-        self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.RSP))
-        # BUDGET fits an imm32, so this is one instruction where arm64 needed
-        # the shifted pair.
-        self.asm.emit(encode_sub_r64_imm32(Reg.R10, M.STACK_FLOOR_BUDGET_BYTES))
-        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
-        self.asm.label(done_label)
         # RSP into R11 and the same `SP - floor` the arm64 half computes. The
         # stack grows DOWN, so having spent the budget is `SP < floor`, which is
-        # the subtraction BORROWING and so carry SET; `JAE` is the complement,
-        # and it branches OVER the trap so the trap is the fall-through and the
+        # the subtraction BORROWING and so carry SET; `JAE` is the complement, and
+        # it branches OVER the trap so the trap is the fall-through and the
         # body's first instruction is the branch target — the same shape as
-        # arm64's `B.HS` above and the same shape as the divide-by-zero arm's.
+        # arm64's `B.HS` and the same shape as the divide-by-zero arm's.
         self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RSP))
         self.asm.emit(encode_cmp_r64_r64(Reg.R11, Reg.R10))
         self.asm.emit(encode_jcc_rel32(COND_AE, 0))
         self.asm.emit_label_rel32(ok_label, here_offset=-4)
-        self.asm.label(trap_label)
+        # The MESSAGE, before the exit — `model.stack_trap_message`, the
+        # `*_message` member that was missing here, because this trap used to be
+        # the only bounded stop on the path that said nothing at all: a status, no
+        # output on either stream, and nothing to say which of the program's
+        # bounds it hit.
+        #
+        # `_emit_overflow_diagnostic_call` rather than a hand-rolled sequence
+        # because it returns the call site's ADDRESS, which the exit does not need
+        # but the proof layer does. **Both calls are recorded as compiler traps**,
+        # so `_program_externs` subtracts them and the run tests come back; a
+        # `write` left unrecorded reads as a call the PROGRAM makes and suppresses
+        # every run test on this backend, which is the failure
+        # `test_formal_call_proof_gen.py::TestCompilerTrapIsNotAProgramCall`
+        # exists to prevent.
+        #
+        # RSP is 8 mod 16 here — the guard runs before the prologue's `push rbp` —
+        # and SysV wants 16 at a `call`, so the diagnostic aligns it the same way
+        # the startup stub does.
+        self.asm.emit(encode_sub_r64_imm32(Reg.RSP, 8))
+        self._compiler_trap_addrs.append(
+            self._emit_overflow_diagnostic_call(M.stack_trap_message()))
         self._compiler_trap_addrs.append(
             self._emit_call_exit(M.STACK_TRAP_STATUS))
         # `label`, not `emit_label_rel32`: this DEFINES where the branch above
         # goes, and it lands on the first instruction of the BODY. Recording a
         # relocation here would be a second branch to a label nothing defines.
         self.asm.label(ok_label)
+
+    def _emit_overflow_diagnostic_call(self, text: str) -> int:
+        """`write(2, text, len)`, returning the call site's address.
+
+        `_emit_overflow_diagnostic` is the same sequence and returns nothing,
+        because every other caller wants nothing — the trap wants the ADDRESS so
+        it can record it in `_compiler_trap_addrs`. Two spellings of one sequence
+        would be two implementations to keep equal, so this delegates:
+
+            RDI = fd            RSI = text           RDX = length
+            RAX = 0 (not varargs)  call write
+
+        RSP is 16-byte aligned at the call — the guard runs after `push rbp` on
+        this backend's current placement, and SysV AMD64 wants RSP 0 mod 16 there.
+        The interned label is a `__TEXT` address reached by the RIP-relative LEA
+        `_emit_overflow_diagnostic` already emits, so the string needs no
+        relocation.
+        """
+        before = len(self.asm.extern_refs)
+        self._emit_overflow_diagnostic(text)
+        if len(self.asm.extern_refs) == before + 1:
+            return self.asm.extern_refs[-1][1]
+        # No extern was recorded, which means the call did not go through
+        # `_emit_extern_call`; a trap address that is not in `extern_calls`
+        # cannot be subtracted by `_program_externs` and would silently read as a
+        # program call, so say so here rather than returning a stale address.
+        raise CodegenError(
+            "internal: the stack trap's write(2) emitted no extern call, so its "
+            "address cannot be recorded in info['compiler_traps']. Without it the "
+            "x86-64 proof generator treats the compiler's own diagnostic as a call "
+            "the PROGRAM makes and suppresses every run test on this backend.")
 
     def _emit_global_init(self, skip_label: str = None) -> None:
         """Fill every address-valued module-global slot, and set the flag.
