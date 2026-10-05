@@ -149,6 +149,42 @@ POSITION_NOTES = {
 }
 
 
+def position_file_table(rows, same_file_only: bool = True, limit: int = 6):
+    """`[(position, [(file, sites), …], (n_files, n_sites))]` for the report.
+
+    Each row is `(same_file, path, position)` and nothing else, deliberately: the
+    report's own rows are seven-tuples, and a helper that indexed a seventh
+    element would be a helper whose contract is a line of someone else's loop.
+
+    **The position count alone does not decide anything and this table is what
+    does.** A `None` refusal is one decision asked at one POSITION, and what it
+    costs is decided by which files it lands in: the `returned` bucket is 76
+    sites over 19 files on this corpus, and 62 of them are in one host module the
+    gate compiles — so the same 76 is a decision in one file or in nineteen, and
+    only the second reading is the one a reader can act on. `bugs/
+    FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
+    §"What is still not fixed" asks for a liveness pass before any of these
+    positions can be asked at; this is what it costs to learn that for one of
+    them, and it costs one walk of rows already collected.
+
+    A bucket spread over fewer than `limit` files is reported whole, so the
+    spread line is only ever printed when there is something it is summarising,
+    and a single-file bucket reads as the single line a decision is made from.
+    """
+    out = []
+    def _keep(row):
+        return row[0] == same_file_only or not same_file_only
+
+    positions = collections.Counter(r[2] for r in rows if _keep(r))
+    for pos, total in positions.most_common():
+        here = collections.Counter(r[1] for r in rows
+                                   if r[2] == pos and _keep(r))
+        top = here.most_common(limit)
+        out.append((pos, top,
+                    (len(here) - len(top), total - sum(n for _p, n in top))))
+    return out
+
+
 def _position(parent) -> str:
     """The parent position a consumed call sits in, for the report."""
     p = parent
@@ -189,9 +225,17 @@ def collect(paths):
         if os.path.isfile(base):
             files.append(base)
             continue
-        for dirpath, _dirs, names in os.walk(base):
+        for dirpath, dirs, names in os.walk(base):
             if "/build/" in dirpath or dirpath.endswith("/build"):
                 continue
+            # `.tmp` and `.git` are not CORPUS, they are this worktree's
+            # scratch and its history, and a census whose numbers move with
+            # whatever a scratch build left behind cannot be quoted in a bug
+            # doc \u2014 which is the only reason this instrument exists.  It is
+            # pruned in place because `DEFAULT_PATHS` includes the repository
+            # root, so the walk descends into `.tmp/<test tmpdir>/` and finds
+            # `.mojo` files a test wrote an hour ago.
+            dirs[:] = [d for d in dirs if d not in (".tmp", ".git", "__pycache__")]
             files += [os.path.join(dirpath, n) for n in sorted(names)
                       if n.endswith(".mojo")]
     seen = set()
@@ -317,6 +361,26 @@ def main(argv=None):
           "claim:")
     for pos, n in by_position.most_common():
         print(f"   {pos:24s} {n:5d}  {POSITION_NOTES.get(pos, '')}")
+    print("…and each bucket by FILE, because the position count alone decides "
+          "nothing\n   and the file list is what a decision is made from. A "
+          "bucket is printed when it is\n   spread over more than one file, "
+          "when it is large, or when it is `returned`\n   \u2014 the last "
+          "because that is the one with no other\n   observable escape (see "
+          "`position_file_table`).")
+    for pos, top, (n_files, n_sites) in position_file_table(
+            [(r[0], r[1], r[5]) for r in rows]):
+        total = sum(n for _p, n in top) + n_sites
+        if pos != "returned" and n_files == 0 and total < 20:
+            continue
+        print()
+        print(f"the `{pos}` sites, by file \u2014 what a refusal asked HERE "
+              f"would reach:")
+        for path, k in top:
+            print(f"   {k:5d}  {path}")
+        if n_files:
+            print(f"   {'':5s}  {n_files} further file(s), {n_sites} sites, "
+                  f"one or two each")
+        print()
     print()
     print(f"files with at least one same-file candidate: {len(per_file)}   "
           f"candidate sites: {n_same}")

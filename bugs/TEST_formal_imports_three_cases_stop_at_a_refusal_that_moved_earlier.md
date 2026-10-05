@@ -92,9 +92,13 @@ whose imports stay out of `os`.
 2. Then re-point whatever needle remains stale — which is the ordinary half of
    this job and is one string per case.
 3. Do NOT add an `expect=`: three cases in a `proofs`-bucket job would be an
-   invisible red for the same reason `formal-receiver-position`'s was
-   (`bugs/TEST_formal_receiver_position_expect_marker_outlived_its_three_cases.md`,
-   since fixed), and this one is in `proofs` only.
+   invisible red for the same reason `formal-receiver-position`'s was.  That one
+   had its own doc and it was deleted with its fix (`b7b249ac`, which dropped
+   the marker, the pinned count in `test_suite.py` and the stale `MEMCLASS`
+   comment), so the shape to recognise is the runner's own arm —
+   `_apply_expectations`'s `elif status == PASS: state[name] = FAIL`, whose text
+   is "marked expect=… but it PASSES — drop the marker and fix whatever it was
+   waiting for".  This job is in `proofs` only, which is the same blind spot.
 
 ## Reproducing
 

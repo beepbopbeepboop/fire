@@ -20,6 +20,86 @@ the rule is asked at is.
 OBSERVES the value (an operand, an argument, a returned, an assigned-then-never-
 read local), which need either a liveness pass or direction (b) below.**
 
+## 0c. What is left, measured per POSITION (2026-10-04, `work/formal28-1`) —
+## and the one bucket that decides nothing is 62 sites in one file the gate
+## compiles
+
+§0b landed the OBSERVATION position and §"What is still not fixed" item 1 names
+the rest as one question: *"the positions where nothing observes the value — an
+operand, an argument, a `return`, an assigned-and-never-read local — each of
+which needs a liveness pass this path does not have."* That is one bucket count
+(`assigned 203`, `operand 142`, `returned 81`, `argument of a call 78`) standing
+in for four SEPARATE decisions, and a position count does not decide anything:
+what a refusal asked at a position costs is decided by which files it lands in.
+
+**So `tools/formal_returnless_census.py` now reports the cross-tab**
+(`position_file_table`, over rows of `(same_file, path, position)` and nothing
+else), and it answers the `returned` bucket:
+
+```console
+$ python3 tools/memslot.py --gb 8 --label rlc -- \
+      python3 tools/formal_returnless_census.py --rows 0
+the same-file candidates by where the value goes, which is not one claim:
+   assigned                   201  WEAKEST: …
+   operand of `==`             83
+   argument of a call          77  the doc's §0 shape (one argument too deep)
+   returned                    76  the callee's own result is None — the clearest divergence, and CPython's
+   …
+the `returned` sites, by file — what a refusal asked HERE would reach:
+      62  formal/hostmods/argparse.mojo
+       5  ../new-modular/Mojo/stdlib/std/simd.mojo
+       3  ../new-modular/Mojo/stdlib/std/builtin/_format_float.mojo
+       3  ../new-modular/Mojo/stdlib/std/math/math.mojo
+       2  formal/hostmods/posixpath.mojo
+       1  ../new-modular/Mojo/stdlib/std/python/python.mojo
+```
+
+**62 of the 76 are in `formal/hostmods/argparse.mojo`**, whose `_err`, `_toobig`,
+`_putset`, `_nl` and `_wrap*` helpers print and return nothing, and whose
+`return _err(msg)` shape is ordinary Python. That file is a HOST MODULE the gate
+compiles — `test_formal_argparse.py` PASS=9 and `test_formal_hostmods_census.py`
+64/64 rows build — so a `None` refusal asked at the `returned` position refuses
+it. That is this document's own standard applied to its own best candidate
+(§0a's "a refusal that fires on 57 files without the full suite behind it is a
+worse risk than the wrong answer it replaces"), and it is why §0b's measured-zero
+at the OBSERVATION position and this one are different answers rather than the
+same answer measured twice.
+
+**The other three buckets are the same shape and cheaper:** `argument of a call`
+is 75 of 77 in `argparse.mojo`, `operand of ==` is 82 of 83, `assigned` is 186 of
+201. So of the four positions item 1 names, **none is affordable**, and the
+liveness pass item 1 asks for would not change that — it can only shrink
+`assigned`, which is the one bucket already marked WEAKEST, and the two largest
+buckets are `==` and `argument of a call`, where CPython raises `TypeError` rather
+than answering (so a refusal there replaces a silent wrong answer with a refusal
+of a program CPython also refuses, which item 1 already calls "a decision about
+what a wrong-but-computable operand should say, not a patch").
+
+**What this leaves, and it is item 2 and nothing else.** Direction (b),
+representing `None`, is the only direction that makes all four positions correct
+rather than only the observed one, and it remains a change to the value model,
+both emitters' return paths and `lib/ProofLib.lean` at once. Item 3 (a
+deterministic epilogue word) still alters every proof generator's step lemma for
+the epilogue and is still not CPython's answer.
+
+**And one correction to the instrument, because a census whose numbers move with
+the worktree's scratch is not a measurement.** §0a and this section both quoted
+the census over `DEFAULT_PATHS`, which includes the repository ROOT — so the walk
+descended into `.tmp/<some test's tmpdir>/` and counted `.mojo` files a test had
+written an hour earlier. `.tmp`, `.git` and `__pycache__` are now pruned in
+place. Measured, same command: definitions 5 586 → **5 340**, candidate sites 510
+(§0a) / 503 (2026-10-04 pre-fix) → **502**, files with a candidate 22 → **18**.
+§0a's numbers are therefore an OVERCOUNT of that much, and the `returned` bucket's
+62-of-76 share is the same figure either way — `argparse.mojo` is a tracked
+source file, not scratch.
+
+**The tests.** `test_formal_returnless_census.py`'s
+`a_bucket_is_reported_BY_FILE_and_that_is_what_decides_it` is the cross-tab on
+two sources small enough to read — two files, two positions, and each bucket
+names the file its sites are in — because a report whose headline is a
+cross-tab and whose unit test asserts only the row count is a report whose
+second half nothing checks. No Lean, no build.
+
 **Re-measured 2026-10-03 (`work/formal18-1`): §2's objection to direction (a) —
 "the blast radius is unmeasured" — is now measured, and it came out the other
 way. §0's census said "much narrower than §2 feared"; §0a says ten times wider,
@@ -450,11 +530,18 @@ holds, and because a refusal is a sentence a reader can act on where `0` is not.
 3. ~~**Ask it from BOTH backends' single choke point for a call's value**~~ **DONE**
    (§0b): both emitters' `_print_call`, over `model.returnless_value_refusal`.
 4. ~~**Re-run the two counts from step 1.**~~ **SUPERSEDED** by step 1 above.
-5. **What is next, and it is not a patch**: the positions §0b's list of what is
-   left names — an operand, an argument, a `return`, an assigned-and-never-read
-   local — each of which needs a liveness pass this path does not have, and
-   direction (b), which is a change to the value model, both emitters' return
-   paths and `lib/ProofLib.lean` at once.
+5. ~~**The positions §0b's list of what is left names** — an operand, an
+   argument, a `return`, an assigned-and-never-read local.~~ **MEASURED, per
+   position, 2026-10-04 (§0c): none of the four is affordable.** `returned` is
+   62 of 76 in `formal/hostmods/argparse.mojo`, `argument of a call` 75 of 77
+   there, `operand of ==` 82 of 83 — and `argparse.mojo` is a host module the
+   gate compiles, so a refusal at any of the three refuses it. The fourth,
+   `assigned`, is the bucket a liveness pass would shrink, so the pass this step
+   asked for does not change the answer.
+6. **What is next, and it is direction (b)**: representing `None`, which makes
+   every USE correct rather than only the observed one, and is a change to the
+   value model, both emitters' return paths and `lib/ProofLib.lean` at once.
+   Nothing else on this list is left that a build can decide.
 
 ## 5. A second thing this found, about the fuzzer itself
 

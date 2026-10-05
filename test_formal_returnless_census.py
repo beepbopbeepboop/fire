@@ -178,6 +178,64 @@ class TestWhatCounts(unittest.TestCase):
                       "the weakest position is the one whose note says why it "
                       "is weak")
 
+    def test_a_bucket_is_reported_BY_FILE_and_that_is_what_decides_it(self):
+        """A position count is not a decision; the file list is.
+
+        The `returned` bucket is the one the doc calls "the clearest
+        divergence, and CPython's" — a `return g()` whose callee returns nothing
+        answers `None` under CPython and a word here — and 76 of them is a
+        number that means nothing on its own. What decides whether the refusal
+        is affordable is WHERE they are: 62 of the 76 are in one host module the
+        gate compiles, which is the difference between one file's refusals and
+        nineteen's, and only the second is what a reader can act on.
+
+        So the cross-tab is the instrument's own, and this case is it on sources
+        small enough to read: two files, two positions, and each bucket names the
+        file its sites are in.  Both files declare `quiet` themselves, so every
+        row is same-file — which is the population a per-module refusal reaches,
+        as against `same_file_only=False`, which is the instrument's stated upper
+        bound over a corpus where a name may resolve elsewhere.
+        """
+        tmp = tempfile.mkdtemp(prefix="rlc-tab-")
+        try:
+            a = os.path.join(tmp, "a.mojo")
+            b = os.path.join(tmp, "b.mojo")
+            with open(a, "w") as f:
+                f.write("def quiet(n):\n"
+                        "    w = 1\n"
+                        "def main(n):\n"
+                        "    return quiet(n)\n")
+            with open(b, "w") as f:
+                f.write("def quiet(n):\n"
+                        "    w = 1\n"
+                        "def other(n):\n"
+                        "    return quiet(n)\n"
+                        "def helper(n):\n"
+                        "    x = quiet(n)\n"
+                        "    return 0\n")
+            _index, calls, _defs, _rl, _structs = C.collect([a, b])
+            # `(same_file, path, position)`, which is what
+            # `position_file_table` takes and all it takes.  Both files declare
+            # `quiet`, so both are same-file rows.
+            rows = [(True, os.path.relpath(p, C.ROOT), pos)
+                    for p, _ln, _n, _r, pos in calls]
+            table = {pos: top for pos, top, _rest
+                     in C.position_file_table(rows)}
+            self.assertIn("returned", table)
+            self.assertEqual(table["returned"],
+                             [(os.path.relpath(a, C.ROOT), 1),
+                              (os.path.relpath(b, C.ROOT), 1)],
+                             f"the `returned` bucket is not reported by file: "
+                             f"{table.get('returned')}")
+            self.assertEqual(dict(table["assigned"]),
+                             {os.path.relpath(b, C.ROOT): 1},
+                             f"the `assigned` bucket is not reported by file, "
+                             f"or has picked up a row from the other file: "
+                             f"{table.get('assigned')}")
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_a_call_through_a_receiver_is_seen(self):
         """The shape §0's census could not see, and a method value IS consumed.
 
