@@ -1,5 +1,19 @@
 # FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it: `os.environ` is modelled, and what the 4-file sweep row is actually worth
 
+**Status 2026-10-05 (`work/formal27-5`): §5a had a third case and the ALIAS was
+it. `from os import environ as e` then `e.get(k)` was getting the false sentence
+§5a deleted, and the reason is a one-field omission with a general shape — the
+question "does this module publish this name" was asked about the LOCAL spelling
+while the export table is keyed by the DEFINING one.** The fix is in the symbol
+table rather than in the message (`GlobalSymbol.defining`, which
+`formal/imports.py::import_bindings` has been reporting since it was written and
+nothing carried), so it is a fact about the table now rather than a special case
+in one diagnostic. The row's own verdict still does not move — 4 files off the
+`os.environ` refusal and 0 to `pass` — because these are the SPELLINGS a file
+has to be rewritten into, which is what §2 measured. What is left in §4 is
+unchanged and is three items that are all somebody else's project:
+`environb`, the exported slot and the bare value read.
+
 **Status (2026-10-03, `work/formal15-os-environ`): the MODEL LANDED and the row is
 re-measured. `formal/hostmods/os` has a real `os.environ` — a snapshot of the
 process environment in `malloc`'d memory, with `count`/`key`/`value`/`find`/
@@ -9,6 +23,7 @@ sweep row moves 4 files off the `os.environ` refusal and **0 files to `pass`**,
 and the ceiling is measured rather than projected: rewriting the two in-file
 files by hand lands each on a DIFFERENT row's refusal. Read §2 before spending
 anything on this; the object is not the thing that is missing any more.**
+
 
 This is the row `bugs/FORMAL_sweep_work_map_2026-10-03_b8.md` §4.2 measured as
 "the next wall behind the module-slot row", and it was the largest unowned
@@ -316,6 +331,71 @@ need is for the distinction to be observable, and on this path a `str` and a
 spelling of one blob, which is the kind of change that costs a reader more than
 it answers.
 
+## 5b. 2026-10-05 (`work/formal27-5`): the ALIAS is a third spelling, and the fix is a field rather than a message
+
+**§5a fixed the two spellings of "a published FUNCTION used as a value" and
+missed the third, which is four characters long.** `from os import environ` then
+`environ.get(k)` is answered by
+`model.imported_function_as_a_value_refusal`, which asks whether the imported
+name is one the module publishes as a FUNCTION, and answers with the operations
+read off the same export table. `from os import environ as e` then `e.get(k)` is
+the SAME program — and it was getting the sentence §5a deleted:
+
+```console
+$ cat d.mojo                       # before, both architectures
+  from os import environ as e
+  def main(n: Int) -> Int:
+      var v = e.get("HOME")
+      ...
+build: main: 'e' is imported from `os`, and it is a module-level name of another
+module. … So this name's value is a real global with nowhere to live …
+
+$ cat ee.mojo                      # the premise, and it still holds
+  from os import environ
+  def main(n: Int) -> Int:
+      printf("%d", environ_count(environ()))
+  Built: ee.bin  [arm64/macho]     # …and `e()` binds, measured the same way
+```
+
+**The cause is not in the message, and that is what makes it worth a table
+change.** The arm asks the export table "do you publish `e`?", and the table is
+keyed by `environ`, so the answer was NO — a true answer to a question nobody
+asked — and the generic arm won. `formal/imports.py::import_bindings` has
+reported `[(local, module, DEFINING)]` since it was written, and its own
+docstring says the third element "is the name the export table is keyed by"; the
+module symbol table (`model.GlobalSymbol`) kept the first two and dropped the
+third, so every diagnostic that had to ask the table a question about an
+imported name was asking it about the wrong string. **`GlobalSymbol.defining`
+is the field, and the fix is the reader asking about it** — the message still
+speaks the LOCAL name, because that is what the reader's own source says, and
+the REPAIR prefix is the DEFINING one, because `thing_` is the module's spelling
+of its own operations and `t_` would have produced an empty list and handed over
+a repair that does not exist. The one place that REBUILDS an imported symbol to
+add a folded literal (`formal/build.py`'s imported-constant site pass) carries
+it over, and the comment there says why, because that is the line a later edit
+would drop it on.
+
+**Why it is a table change and not an alias check in the message**: an alias is
+one spelling of a general fact — *the name in this unit is not the name in the
+export table* — and `import m as n` plus `from m import f as g` are two
+spellings of it. A check written for `as` in this one diagnostic would be a
+third reader of the same question. The dotted spelling is not reachable from
+here: `import os as o` binds `o`, and the module-alias case is refused much
+earlier (`'o' has no home: this module declares no module-level name by that
+spelling`), which is a different gap — a module alias is not resolvable at all
+on this path — and is not this row's.
+
+**Tests**: `test_formal_module_attr.py` **35/35** (was 34), both architectures,
+new `the ALIASED imported spelling says the same thing`, with three halves
+because each is a way the fix could be half done — the call through the alias
+still lowers and agrees with CPython (measured through a second imported
+function rather than by printing the pointer, which is a `%s`-of-NULL
+divergence about pointer spelling and would have tested the wrong thing), the
+refusal names both spellings and lists the operations under the module's own
+prefix, and the false sentence is asserted ABSENT. `test_formal_globals.py`
+56/56 and `test_formal_imports.py` 77/77, which are the two suites that own the
+table this field was added to.
+
 ## 6. Reproducing this
 
 ```sh
@@ -337,3 +417,18 @@ per architecture** against CPython rather than the 58 it had, the 19 new ones
 being the `update` rows of §4's second status block. `test_formal_os.py` is 6/6
 groups here rather than 5/5: its `blob` group is the sixth and is not a recent
 addition.
+**§5b's two programs**, both one `fire.py build --formal --no-prove`, no Lean:
+
+```sh
+export PATH=/opt/homebrew/bin:$PATH
+printf 'from os import environ as e\n\n\ndef main(n: Int) -> Int:\n    var v = e.get("HOME")\n    printf("%%s", v)\n    printf("\\n")\n    return 0\n' > .tmp/env/d.mojo
+python3 tools/memslot.py --gb 8 --label t -- \
+    python3 fire.py build --formal --no-prove -o .tmp/env/d.bin .tmp/env/d.mojo
+# "'e' is imported from `os` under the name `environ`, and it is one of that
+#  module's published FUNCTIONS …"
+
+printf 'from os import environ\n\n\ndef main(n: Int) -> Int:\n    printf("%%d", environ_count(environ()))\n    printf("\\n")\n    return 0\n' > .tmp/env/ee.mojo
+python3 tools/memslot.py --gb 8 --label t -- \
+    python3 fire.py build --formal --no-prove -o .tmp/env/ee.bin .tmp/env/ee.mojo
+# Built — which is what makes the refusal's claim true rather than a guess
+```

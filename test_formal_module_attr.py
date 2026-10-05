@@ -927,6 +927,86 @@ def test_the_imported_spelling_of_a_call_through_a_value_says_the_same(
               f"whose CALLING lowers: {text.strip()[-400:]}")
 
 
+def test_the_ALIASED_import_spelling_says_the_same_thing(
+        tmpdir, _shared, verbose):
+    """`from mylib import thing as t` — four characters, and it was a different
+    answer.
+
+    **The construct is one construct and the alias is not a new one**, so the
+    two messages above cannot come apart — and they did, because the arm that
+    answers "is this imported name one the module publishes as a FUNCTION?"
+    asked it about the LOCAL spelling. `from mylib import thing as t` binds `t`,
+    `mylib`'s export table is keyed by `thing`, so the question answered "no"
+    and the generic arm won with "this name's value is a real global with
+    nowhere to live" — the exact sentence the row above exists to delete, one
+    spelling along. It is a small hole with a large cost: the false sentence
+    sends a reader looking for a `__DATA` slot for the one name in the program
+    that needs none, and it is the message a reader of aliased imports gets
+    every time.
+
+    Three properties, and each is a different way the fix could be half done:
+
+      * the CALL through the alias still lowers (`t()` is `thing()`), which is
+        what makes the refusal's claim true rather than a guess — measured by
+        building the same program with the `.get` removed;
+      * the member call is refused with the aliased sentence, naming the
+        LOCAL name, the DEFINING name, and the operations — the repair prefix
+        has to be the module's own spelling (`thing_`), not the alias's, or the
+        list comes back empty and the message hands over a repair that does not
+        exist, which is the defect the row above this one is about;
+      * and the false sentence stays gone, which is the negative that fails if
+        somebody "fixes" this by reordering the two arms instead.
+
+    The dotted spelling is not reachable from here: `import mylib as m` binds
+    `m`, and the module-alias case is refused much earlier ('m' has no home),
+    which is a different gap and not this row's.
+    """
+    # The control passes the aliased CALL's result to a second imported
+    # function rather than printing it: `thing()` is a `Pointer[UInt8]`, and
+    # `printf("%s", <null pointer>)` is "(null)" in C where Python's `%s` of the
+    # same source is "0" — a divergence about a pointer's spelling that has
+    # nothing to do with the alias and would have made this control a test of
+    # the wrong thing.
+    called = ("from mylib import thing as t\n"
+              "from mylib import thing_len\n\n"
+              "def main():\n"
+              "  printf(\"%d@@\", thing_len(t()))\n"
+              "  return 0\n")
+    prog = ("from mylib import thing as t\n\n"
+            "def main():\n"
+            "  v = t()\n"
+            "  printf(\"[%s]@@\", t.get(v, \"k\"))\n"
+            "  return 0\n")
+    root = os.path.join(tmpdir, "value_member_aliased")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": THING, "prog.mojo": called})
+    for arch in ARCHES:
+        agrees_with_cpython(root, "prog",
+                            {"mylib.mojo": THING, "prog.mojo": called}, called,
+                            verbose)
+    root = os.path.join(tmpdir, "value_member_aliased_refused")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": THING, "prog.mojo": prog})
+    for arch in ARCHES:
+        text = build_expecting_refusal(root, "prog", arch)
+        check("under the name `thing`" in text,
+              f"{arch}: the refusal must say which name the module publishes, "
+              f"or a reader cannot tell a missing name from a renamed one: "
+              f"{text.strip()[-400:]}")
+        check("thing_get" in text and "thing_len" in text and "VALUE" in text,
+              f"{arch}: the operations must be listed under the module's OWN "
+              f"spelling — the alias has no `t_` prefix and listing by it "
+              f"would hand over a repair that does not exist: "
+              f"{text.strip()[-400:]}")
+        check("`t.get`" in text or "t.\u2026" in text or "t.…" in text,
+              f"{arch}: the refusal must speak the LOCAL name, which is what "
+              f"the reader's own source says: {text.strip()[-400:]}")
+        check("nowhere to live" not in text,
+              f"{arch}: the aliased spelling is back to claiming the name's "
+              f"value is a global with nowhere to live, and the CALL through "
+              f"that alias lowers: {text.strip()[-400:]}")
+
+
 def test_an_imported_function_with_no_published_operation_says_so(
         tmpdir, _shared, verbose):
     """`from mylib import thing` then `thing.get(t, k)` with no `thing_*`.
@@ -1733,6 +1813,8 @@ TESTS = [
      test_a_call_through_a_value_a_module_publishes_is_refused_by_name),
     ("the IMPORTED spelling of a call through a value says the same",
      test_the_imported_spelling_of_a_call_through_a_value_says_the_same),
+    ("the ALIASED imported spelling says the same thing",
+     test_the_ALIASED_import_spelling_says_the_same_thing),
     ("an imported function with no published operation is reported as having none",
      test_an_imported_function_with_no_published_operation_says_so),
     ("an imported name the module does not publish keeps the old arm",

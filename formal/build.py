@@ -11926,9 +11926,14 @@ def _with_imported_constants(symbols: dict, sites: dict) -> dict:
         if lit is None or getattr(sym, "site", None) != "imported":
             out[name] = sym
         else:
+            # `defining` is carried over rather than dropped: this rebuild adds
+            # a folded literal to an IMPORTED name, and a name whose defining
+            # spelling is lost here is a name no reader can ask the export
+            # table about (`imported_function_as_a_value_refusal`).
             out[name] = M.GlobalSymbol(name, lit, "imported",
                                        getattr(sym, "module", None),
-                                       getattr(sym, "line", 0) or 0)
+                                       getattr(sym, "line", 0) or 0,
+                                       defining=getattr(sym, "defining", None))
     return out
 
 
@@ -14572,10 +14577,19 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # question through the same published-name table before falling
                 # through to the generic arm, which is the honest report for a
                 # name the module does not publish at all.
+                # …and the name the question is asked about is the DEFINING
+                # one, which is a different string from `name` exactly when the
+                # import has an `as`. `from os import environ as e` binds `e`
+                # and `os`'s export table is keyed by `environ`, so asking it
+                # about the local spelling answers "no" and the generic arm
+                # below wins with the sentence this arm exists to replace. The
+                # message still speaks the LOCAL name, because that is what the
+                # reader's own source says.
                 _why = M.imported_function_as_a_value_refusal(
                     name, getattr(sym, "module", None) or "", fn.name,
                     _module_published_names(getattr(sym, "module", None),
-                                            link_line))
+                                            link_line),
+                    getattr(sym, "defining", None))
                 raise CodegenError(_why or M.module_global_refusal(
                     name, sym, fn.name,
                     *_published_shape(getattr(sym, "module", None), link_line)))

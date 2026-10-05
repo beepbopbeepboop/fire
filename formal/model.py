@@ -21356,7 +21356,7 @@ def _value_operations_repair(module: str, attr: str, published, leaf: str) -> st
 
 
 def imported_function_as_a_value_refusal(name: str, mod: str, fn_name: str,
-                                         published):
+                                         published, defining: str = None):
     """`from mod import name` then an operation on `name` — or None.
 
     **The FROM-IMPORT half of `dylib_value_member_refusal`, and it answers the
@@ -21376,22 +21376,37 @@ def imported_function_as_a_value_refusal(name: str, mod: str, fn_name: str,
     to it. None — and the caller falls through to the generic arm, which is the
     honest report — for a name the module does NOT publish, which is the case
     where the generic sentence is true.
+
+    **`defining` is the ALIAS, and it is the whole of the third case this
+    function had.** `from os import environ as e` binds `e`, and the export
+    table of `os` is keyed by `environ`, so asking it about `e` answers "no"
+    and the generic arm won with the false sentence again — the same defect one
+    spelling along, reached by adding four characters to the import. So the
+    question is asked about `defining` when there is one, the REPAIR prefix is
+    `defining_` (it is the module's own spelling of the operations), and the
+    message speaks the LOCAL name, because that is what the reader's own source
+    says. With no alias this function's wording is unchanged, which is what lets
+    the cases in `test_formal_module_attr.py` stay as they are.
     """
-    if not published or name not in published:
+    key = defining or name
+    if not published or key not in published:
         return None
     ops = set(published)
-    repair = _value_operations_repair(mod, name, ops, f"{name}.…")
+    repair = _value_operations_repair(mod, key, ops, f"{name}.…")
     who = f"{fn_name}: " if fn_name else ""
-    return (f"{who}{name!r} is imported from `{mod}`, and it is one of that "
-            f"module's published FUNCTIONS — importing it and CALLING it lowers "
-            f"today (`{mod}.{name}(...)` or `{name}(...)`), so the import is not "
-            f"what is refused. What is refused is an OPERATION on it: a function "
-            f"is not a value this path can place, so `{name}.…` is a call "
-            f"through a VALUE and there is no symbol for it to bind. A dylib publishes functions, not the objects "
-            f"they are called on, so an operation on a value a module hands back "
-            f"cannot be spelled as a member of it; {repair}. "
+    aliased = (f" under the name `{key}`" if key != name else "")
+    return (f"{who}{name!r} is imported from `{mod}`{aliased}, and it is one of "
+            f"that module's published FUNCTIONS — importing it and CALLING it "
+            f"lowers today (`{mod}.{key}(...)` or `{name}(...)`), so the import "
+            f"is not what is refused. What is refused is an OPERATION on it: a "
+            f"function is not a value this path can place, so `{name}.…` is a "
+            f"call through a VALUE and there is no symbol for it to bind. A "
+            f"dylib publishes functions, not the objects they are called on, so "
+            f"an operation on a value a module hands back cannot be spelled as a "
+            f"member of it; {repair}. "
             f"bugs/FORMAL_module_state_no_storage.md §(2) records why a value "
             f"cannot cross a dylib boundary at all")
+
 
 
 def module_spine_link_resolves(qualifier: str, by_module: dict,
@@ -34605,18 +34620,32 @@ class GlobalSymbol:
     time the node exists. It is kept here rather than re-derived at each use
     site because the one construct that can observe the difference is a
     comparison, and a comparison that answered "0 == 0 is True" for a `None`
-    would be a wrong answer rather than a refusal."""
+    would be a wrong answer rather than a refusal.
 
-    __slots__ = ("name", "literal", "site", "module", "line", "none_valued")
+    `defining` is the name the DEFINING module spells this one, and it is
+    different from `name` exactly when the import has an `as`. Both are needed
+    and neither is derivable from the other: every read and every call site in
+    this unit spells the LOCAL name, while the export table of the linked
+    library is keyed by the DEFINING one — so a reader that asks "does this
+    module publish that name" with the local spelling answers about a name
+    nobody publishes. `import_bindings` has reported both since it was written
+    ("the DEFINING name, which is only ever different from the local one when
+    there is an `as`, and which is the name the export table is keyed by"), and
+    this is the field that keeps that promise load-bearing for a diagnostic
+    rather than only for a call."""
+
+    __slots__ = ("name", "literal", "site", "module", "line", "none_valued",
+                 "defining")
 
     def __init__(self, name, literal=None, site="assigned", module=None,
-                 line=0, none_valued=False):
+                 line=0, none_valued=False, defining=None):
         self.name = name
         self.literal = literal
         self.site = site
         self.module = module
         self.line = line
         self.none_valued = none_valued
+        self.defining = defining
 
     def __repr__(self):
         return (f"GlobalSymbol({self.name!r}, literal="
@@ -35193,10 +35222,10 @@ def collect_module_symbols(stmts: list, source_path: str = None) -> dict:
     for stmt in (stmts or []):
         kind = type(stmt).__name__
         if kind in ("ImportStmt", "FromImportStmt"):
-            for name, module in _imported_names(stmt):
+            for name, module, defining in _imported_names(stmt):
                 table.setdefault(name, GlobalSymbol(
                     name, None, "imported", module,
-                    getattr(stmt, "line", 0) or 0))
+                    getattr(stmt, "line", 0) or 0, defining=defining))
             continue
         name = _module_binding_name(stmt)
         if name is None:
@@ -36177,8 +36206,15 @@ def import_bindings(stmt) -> list:
 
 
 def _imported_names(stmt) -> list:
-    """`[(bound name, module)]` for one module-level import statement."""
-    return [(bound, module) for bound, module, _defined in import_bindings(stmt)]
+    """`[(bound name, module, name defined there)]` for one module-level import.
+
+    The third element is `import_bindings`' own DEFINING name, kept rather than
+    dropped: it is the key the linked library's export table uses, so a
+    diagnostic that asks whether the module publishes this name has to ask it
+    about that one and not about the local spelling. `GlobalSymbol.defining`
+    says why that matters.
+    """
+    return list(import_bindings(stmt))
 
 
 # The dunders and module attributes a bare read may legitimately name. Small on
