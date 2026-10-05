@@ -491,11 +491,21 @@ CONTAINER_SIZE_ROWS = [
      "    var t = n + 1\n"
      "    return [t]\n",
      {}, {"f"}),
-    # A parameter declared with a STRUCT annotation is a frame at entry, so it
-    # is not a plain word — while `n: Int` is, and the two rows differ in one
-    # token so the vocabulary `_plain_word_names` reads is the thing under test.
-    ("a_blob_of_a_frame_annotated_parameter_is_not_sized",
+    # An annotation none of the five scalar/string vocabularies recognises is
+    # not a plain word, and a STRUCT annotation is the case that matters: the
+    # parameter is a FRAME at entry, so the address it contributes to the blob
+    # is one the copy does not move.  `n: Int` beside it is a word, so the two
+    # rows differ in a few tokens and the vocabulary `_plain_word_names` reads
+    # is the thing under test.  (The predicate has no struct table — it is a
+    # name list, not a layout — so `Point` is refused as unrecognised rather
+    # than as a struct, and the row is worded that way on purpose.)
+    ("a_blob_of_a_struct_annotated_parameter_is_not_sized",
      "def f(p: Point) -> List[Int]:\n    return [p.a]\n", {}, {"f"}),
+    # …and `Dict` is a BLOB, not a word, which is why `formal/types.py`'s
+    # `DICT_TYPE_NAMES` is deliberately not one of the five.  Same rule, a
+    # vocabulary that could plausibly have been included by accident.
+    ("a_blob_of_a_dict_annotated_parameter_is_not_sized",
+     "def f(d: Dict) -> List[Int]:\n    return [d]\n", {}, {"f"}),
     # A callee that does not return on every path leaves whatever the return
     # register held, and the copy reads `nbytes` from it.
     ("a_callee_that_does_not_always_return_is_not_sized",
