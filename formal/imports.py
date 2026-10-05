@@ -220,26 +220,6 @@ HOST_UNREACHABLE = frozenset((
     # `sysconfig.` appears anywhere in the file), so it is in this row for the
     # diagnostic it gets rather than for anything fixing it would reach.
     "sysconfig",
-    # ANOTHER OPERATING SYSTEM'S RUNTIME. The rule stated at the top of this
-    # section asks "does implementing it need an object a freestanding image that
-    # links libSystem and nothing else does not have", and for these three the
-    # answer is yes about a whole platform: the object is the Windows C runtime,
-    # the Windows registry, and the Windows sound API respectively, and libSystem
-    # carries none of them.
-    #
-    # **The measurement is CPython's own, not a remembered list**, and it is what
-    # puts these three here and keeps two other names out of the row. Asked of
-    # `importlib.util.find_spec` on the interpreter that runs this tree,
-    # `msvcrt`, `winreg` and `winsound` have NO SPEC AT ALL — CPython cannot
-    # find them on this host either, so a file importing one is importing
-    # something this target's own Python does not have. `ntpath`, `nturl2path`
-    # and `genericpath` all DO have a spec here, which is why they are not here
-    # (see `HOST_MODELLED`).
-    #
-    # `nt` is here for the same reason as the first three and is measured the
-    # same way (no spec): Windows' `os`, whose content is the registry, services
-    # and the Windows path model rather than an API this target could answer.
-    "msvcrt", "winreg", "winsound", "nt",
 ))
 
 # The reachable half: libSystem provides the facility, or the module is pure
@@ -330,32 +310,6 @@ HOST_MODELLED = frozenset((
     #     `ST_BIRTHTIME` / `ST_BLOCKS` / `ST_BLKSIZE` have no CPython name to
     #     be checked against.
     "errno", "select",
-    # PURE COMPUTATION over values a word already is, with nothing platform-
-    # specific to reach — and this row is a CORRECTION, because
-    # `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §"The next step"
-    # listed `posix`, `genericpath`, `ntpath` and `nturl2path` together with
-    # `msvcrt`/`winreg` as "a Windows-only / POSIX-only module that is not this
-    # host's". Three of those four are wrong for that reading and the measurement
-    # is CPython's own: `importlib.util.find_spec` finds `genericpath`, `ntpath`
-    # and `nturl2path` ON THIS HOST, because they are frozen/arithmetic-over-
-    # strings modules that CPython ships everywhere and only ever *uses* on
-    # Windows. A name is "not this host's" when the object it needs is missing
-    # from the target, and the object these three need is a string.
-    #
-    #   `genericpath` — the platform-INDEPENDENT base (`os.path` builds on it):
-    #     `_check_arg_types`, `_check_arg`, the slash joining. Pure.
-    #   `ntpath`      — the Windows path parser, which is still string
-    #     manipulation: split on `/` and `\`, drive letters, UNC prefixes. A
-    #     formal image could compute all of it and would be right; it is here
-    #     because the WORK is undone, which is what `modelled` means.
-    #   `nturl2path`  — `url2pathname`/`pathname2url`, string in, string out.
-    #   `posix`       — and this one is the load-bearing half of the correction,
-    #     because it is the POSIX low-level module and THIS is a POSIX target:
-    #     `os`, `stat`, `fcntl` and `select` all sit on libSystem calls that
-    #     `formal/hostmods/os/_syscalls.mojo` already makes, so nothing is
-    #     missing from the target and only the module is unwritten. Calling it
-    #     "not this host's" was true of `msvcrt` and false of `posix`.
-    "genericpath", "ntpath", "nturl2path", "posix",
     #   `pathlib`  — `formal/hostmods/pathlib.mojo`, in the pure half only,
     #     checked read for read against CPython's own `PurePosixPath` by
     #     `test_formal_pathlib.py`: `as_posix`, `name`, `stem`, `suffix`,
@@ -533,31 +487,7 @@ HOST_MODELLED = frozenset((
     #     (FORMAL.md phase 7).
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
-    #
-    #   `random`  — WRITTEN 2026-10-05, `formal/hostmods/random.mojo`: `seed`
-    #     and `randrange` only, a Mersenne Twister over a 624-word
-    #     module-level state, every answer checked against CPython's own
-    #     `random` by `test_formal_random.py` on BOTH backends: the two call
-    #     sites in this repository verbatim (forty draws of
-    #     `randrange(140, 5000)` after `seed(23)`, and a hundred and twenty
-    #     draws of `randrange(1, 4_000_000_000 * 10**9)` after `seed(17)`),
-    #     one case per branch of `getrandbits`, 700 draws so the 624-word
-    #     twist is inside the corpus, fifteen seeds of one, two and three key
-    #     words in both signs, and seven widths just under a power of two so
-    #     the rejection loop runs.
-    #
-    #     **It is 2 of the 8 files the row was worth, and the other six are not
-    #     a module.** Five of them spell `random.Random(seed)` — an OBJECT with
-    #     624 words of state behind a pointer, which is
-    #     `bugs/FORMAL_module_state_no_storage.md` and not something a `.mojo`
-    #     file changes; the sixth is closure. What made the module reachable at
-    #     all is that a module's OWN globals DO have storage: measured, both
-    #     architectures, a module-level `var` written through `global` by one
-    #     function and read by another survives across calls in one process,
-    #     which is what `module_attribute_refusal`'s own advice ("give it an
-    #     accessor … which reads the same slot and lowers today") already
-    #     assumed. That is worth knowing beside the row it contradicts.
-    "decimal", "fractions",
+    "random", "decimal", "fractions",
     #   `operator`  — LEFT on 2026-10-04 for `formal/hostmods/operator.mojo`:
     #     the 27 names that take two WORDS and answer a word, which is the whole
     #     of what a 64-bit value can compute. The three places CPython raises and
@@ -958,62 +888,7 @@ def _admitted_tier_conflicts() -> list:
 # fact worth keeping: **macOS's `flock` and `F_SETLK` SHARE a lock space**, the
 # opposite of Linux, so a reader who assumes Linux gets this backwards.
 
-# The FOURTH answer, and the only one that is not about implementing anything:
-# **a name CPython ships whose only content on any target is not code.**
-#
-# `HOST_UNREACHABLE` says "this needs an object this target does not have" and
-# `HOST_MODELLED` says "nothing is missing and the work is undone". Neither is
-# true of `this`, which is the Zen of Python as a module-level string, or of
-# `antigravity`, which opens a web browser to a joke, or of `turtledemo`, which
-# is a directory of demonstration scripts for a turtle-graphics package this
-# target cannot run anyway. There is nothing to implement and nothing missing,
-# so putting them in either tier states a falsehood and leaving them in NO tier
-# makes a coverage report count them as "no verdict" — which is the defect
-# `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §"The next step"
-# named and said "should be recorded as one, not left to look like an
-# oversight".
-#
-# **This is the FOURTH and not the third** because `HOST_ADMITTED` already took
-# that slot (a module that ANSWERS under a declared contract), and a reader
-# counting tiers off this file should not have to re-derive the numbering. The
-# value is `'not-a-module'` rather than `'inert'` because `INERT_MODULES` below
-# means something else and narrower: `__future__` is a compiler DIRECTIVE that
-# binds nothing and emits nothing, and it is excluded from `imported_modules`
-# entirely. A member of this set is a real module — `import this` really is an
-# import — it is the import that has nothing behind it.
-#
-# **`idlelib` is NOT here and that is a correction to the doc's own list.** It
-# appears in that list twice, once as "a documentation or test artefact" and once
-# under `unreachable`, and the second is right: IDLE is an interactive editor,
-# so it needs a terminal, and `HOST_UNREACHABLE`'s existing "A terminal" heading
-# is exactly that fact. A name goes here only when NOTHING about it needs an
-# object.
-#
-# **It changes no build outcome**, which is the same property the seven names of
-# 2026-10-03 had: `_is_host_module` consults the union, so a member is refused
-# by the tier-agnostic host-import refusal exactly as it was, and what changes is
-# the WORDING (`unresolvable_import_error`'s new arm) and the reach accounting
-# (`host_module_tier` stops answering `''` for a name that has an answer).
-HOST_NOT_A_MODULE = frozenset((
-    # The Zen of Python. One module-level string and nothing else — measured
-    # with `importlib.util.find_spec`, which finds a real `.py` and whose body
-    # is a single `s` assignment.
-    "this",
-    # The original April Fool's: importing it opens a browser window. Not a
-    # computation, not a capability — a side effect on a machine this target has
-    # no browser for, which is a terminal-class fact and still not `this` set's
-    # shape, because the thing missing is "nothing at all".
-    "antigravity",
-    # `turtle`'s demonstration scripts. `turtle` needs `tkinter` and so is a
-    # terminal (`HOST_UNREACHABLE`); `turtledemo` is the directory of example
-    # programs that drive it, so its own content is text a reader runs rather
-    # than an API anything can call.
-    "turtledemo",
-))
-
-
-HOST_MODULES = (HOST_UNREACHABLE | HOST_MODELLED | HOST_ADMITTED
-                | HOST_NOT_A_MODULE)
+HOST_MODULES = HOST_UNREACHABLE | HOST_MODELLED | HOST_ADMITTED
 
 
 # A module the formal FRONT END implements at COMPILE TIME, so the import is
@@ -1075,7 +950,7 @@ def is_frontend_provided(name: str) -> bool:
 
 
 def host_module_tier(name: str) -> str:
-    """`'modelled'`, `'admitted'`, `'unreachable'`, `'not-a-module'`, or `''`.
+    """`'modelled'`, `'admitted'`, `'unreachable'`, or `''` for no such name.
 
     The accessor that makes the split usable. A coverage report can then say
     "this file is out of reach because it needs a second process" — a fact
@@ -1090,16 +965,6 @@ def host_module_tier(name: str) -> str:
     tested after `unreachable` and before `modelled` because a name in two tiers
     is a bug the partition check reports, and the order only decides what such a
     bug looks like.
-
-    `'not-a-module'` is the fourth, for a name whose only content is not code at
-    all (`this`, `antigravity`, `turtledemo` — see `HOST_NOT_A_MODULE`). It is
-    tested LAST and deliberately so: it is the weakest claim of the four (it
-    asserts nothing about reachability), so a name that is in two tiers should
-    answer with the one that says something. `''` — no tier at all — remains the
-    answer for the CPython standard-library names nobody has judged, which is the
-    queue `bugs/FORMAL_stdlib_module_names_are_not_classified.md` is, and the
-    tripwire that keeps it honest is
-    `test_formal_imports.py::test_no_unclassified_stdlib_name_is_imported_by_anything`.
 
     `unreachable` is tested first, so a name in both tiers would resolve to the
     permanent answer; the partition is asserted to be disjoint by the test
@@ -1116,8 +981,6 @@ def host_module_tier(name: str) -> str:
         return "admitted"
     if top in HOST_MODELLED or name in HOST_MODELLED:
         return "modelled"
-    if top in HOST_NOT_A_MODULE or name in HOST_NOT_A_MODULE:
-        return "not-a-module"
     return ""
 
 
@@ -1127,14 +990,6 @@ def _host_tier_conflicts() -> list:
     Empty is correct. This exists so a name added to one tier and forgotten in the
     other is a visible failure rather than a silent change to a verdict
     nobody reads a diff for. The suite asserts on it, in three files.
-
-    **`HOST_NOT_A_MODULE` is checked here too, and it is the pair most worth
-    checking**: it is the tier that asserts the LEAST, so a name that is both
-    "nothing to implement" and "reachable in principle" or "needs a second
-    process" is a claim about the module that contradicts itself, and
-    `host_module_tier` would resolve the overlap by the order the tiers are
-    tested in rather than by anything true. The order puts `not-a-module` last
-    for the same reason — so the weaker claim never silently wins.
 
     **It does not report names in NEITHER tier, and that is not an omission.**
     An earlier version of this docstring said it did, and the sentence was false:
@@ -1150,9 +1005,7 @@ def _host_tier_conflicts() -> list:
     `test_formal_imports.py::test_no_unclassified_stdlib_name_is_imported_by_anything`.
     That test is where the question this sentence used to claim belongs.
     """
-    return sorted(HOST_UNREACHABLE & HOST_MODELLED) + \
-        sorted(HOST_NOT_A_MODULE & (HOST_UNREACHABLE | HOST_MODELLED
-                                    | HOST_ADMITTED))
+    return sorted(HOST_UNREACHABLE & HOST_MODELLED)
 
 
 
@@ -1161,7 +1014,7 @@ def host_module_verdict(name: str, relative_to: str = None,
     """`(answer, detail)` — the ONE classification of a name, with every
     outcome NAMED rather than encoded as an absence.
 
-    `answer` is one of EIGHT strings and there is no other answer:
+    `answer` is one of six strings and there is no other answer:
 
     | answer | meaning | detail |
     |---|---|---|
@@ -1171,26 +1024,7 @@ def host_module_verdict(name: str, relative_to: str = None,
     | `'modelled'` | reachable in principle, not implemented — a gap with an owner | `''` |
     | `'unreachable'` | a permanent fact about the target | `''` |
     | `'unclassified'` | CPython ships it and no tier says which of the two it is | `''` |
-    | `'not-code'` | CPython ships it and its content is not code — a module-level string, a demonstration, a directory of example programs — so there is nothing to implement and nothing missing from the target | `''` |
     | `'not-a-module'` | nothing here provides it and CPython does not ship it — a typo or a gap in this repository | `''` |
-
-    **`'not-code'` and `'not-a-module'` are two answers, and they used to be
-    one string carrying two meanings**, which is a defect rather than a naming
-    preference. `host_module_tier` answers `'not-a-module'` for a
-    `HOST_NOT_A_MODULE` name — "this module's content is not code" — while this
-    function's `'not-a-module'` says "CPython does not ship this", and for
-    `this`, `antigravity` and `turtledemo` the second is FALSE: CPython ships
-    all three, and `importlib.util.find_spec` finds each on this host
-    (`test_formal_link_accounting.py`'s ledger says so, and
-    `unresolvable_import_error`'s own arm for them says "a CPython
-    standard-library module with no content to compile"). So a name CPython
-    ships was reported with the answer whose sentence is the typo sentence, and
-    `tools/formal_host_import_wall.py` — which takes its wall set from this
-    function — dropped those three files out of its `reach` and `alone`
-    columns, which made a file importing `abc` AND `antigravity` read as if
-    `abc` were its only wall. `'not-code'` is what the tier's own docstring
-    always meant by its fourth answer, and `HOST_NOT_A_MODULE` keeps its name
-    because it names the SET, which is unchanged.
 
     **Why this exists, and what it is fixing.** `host_module_tier` answers a
     membership question — "is this name in a tier" — and its `''` is ambiguous
@@ -1232,13 +1066,10 @@ def host_module_verdict(name: str, relative_to: str = None,
     with a source is answered whatever a tier entry left behind says — a tier
     entry behind a written module is the bookkeeping state
     `test_formal_link_accounting.py::HOST_SET_ADDED_THEN_WRITTEN` tracks, and
-    reporting it as `modelled` would schedule work that is done; then the three
-    tier answers, where the tier's own fourth (`'not-code'`) is renamed on the
-    way out because the tier's string is about CONTENT and this one's would be
-    about SHIPPING; then `is_cpython_stdlib`, whose authority is the
-    interpreter's own table; and `'not-a-module'` last, because it is the only
-    answer that is a statement about THIS repository rather than about the
-    target.
+    reporting it as `modelled` would schedule work that is done; then the two
+    claim tiers; then `is_cpython_stdlib`, whose authority is the interpreter's
+    own table; and `'not-a-module'` last, because it is the only answer that is
+    a statement about THIS repository rather than about the target.
 
     `relative_to`/`project_root` go to `resolve_module_path` unchanged, so a
     caller that has the importing file in hand gets the resolver's own
@@ -1262,13 +1093,6 @@ def host_module_verdict(name: str, relative_to: str = None,
                                    project_root=project_root)
     if resolved:
         return ("written", resolved)
-    if tier == "not-a-module":
-        # The TIER's fourth answer, renamed on the way out: the tier means
-        # "this module's content is not code", and this function's
-        # `not-a-module` means "CPython does not ship it", which is false of
-        # every member of `HOST_NOT_A_MODULE`. One string, two meanings, and a
-        # report reading the wrong one.
-        return ("not-code", "")
     if tier:
         return (tier, "")
     if is_cpython_stdlib(name):
@@ -2013,7 +1837,7 @@ def module_templates_by_path(path: str, project_root: str = None) -> dict:
     the demand belongs to the module that owns the definition, not to the one
     whose name the importer happened to import. `std/collections/__init__.mojo`
     re-exporting `BinaryHeap` is the measured case, and it is 162 of the 165
-    files in the `b8` round of `bugs/FORMAL_sweep_work_map.md` §3.1.
+    files in `bugs/FORMAL_sweep_work_map_2026-10-03_b8.md` §3.1.
 
     Which declared names are templates is `formal/monomorph.py`'s question and is
     answered there by `reflect.export_exclusions` — the same rule the export
@@ -2584,19 +2408,6 @@ def unresolvable_import_error(source_path: str, module_name: str) -> str:
         kind = ("provided by this backend's front end as a compile-time "
                 "transform, so there is no source to compile and nothing for "
                 "the link step to provide")
-    elif host_module_tier(module_name) == "not-a-module":
-        # Tested BEFORE `_is_host_module`, and that order is the whole point of
-        # the tier: a member of `HOST_NOT_A_MODULE` is in the union, so the arm
-        # below would answer "a host module … which has no Mojo source", which
-        # is true and says the reader has a module to implement. There is
-        # nothing to implement — `this` is a string, `antigravity` opens a
-        # browser, `turtledemo` is a directory of example scripts — so the
-        # sentence has to name THAT, or a reader is sent to write a module for
-        # a module with no API.
-        kind = ("a CPython standard-library module with no content to compile — "
-                "it is documentation or a demonstration, not an API — so there "
-                "is nothing here to implement and nothing for the link step to "
-                "provide")
     elif _is_host_module(module_name):
         kind = ("a host module (CPython standard library), which has no Mojo "
                 "source for this backend to compile")
@@ -2613,8 +2424,8 @@ def unresolvable_import_error(source_path: str, module_name: str) -> str:
         # owner and a next step (`host_module_advice` below, and
         # `host_module_tier` for a coverage report), and a name in NO tier has
         # neither — `bugs/FORMAL_stdlib_module_names_are_not_classified.md` is
-        # the queue for the rest, and it records that ZERO of them is imported
-        # by any file in this repository or the stdlib, which is what makes the
+        # the queue for the 222, and it records that ZERO of them is imported by
+        # any file in this repository or the stdlib, which is what makes the
         # classification a bounded piece of work rather than a coverage
         # emergency. So this says what is true (it is the host's library, there
         # is no source here) and claims nothing about which tier it belongs to.
@@ -2790,17 +2601,25 @@ def _attach_declared_census(struct_def, declaring_path: str) -> None:
                             M.unit_field_evidence(stmts))
 
 
-#: How far `declared_kinds` follows a forwarding chain. A package `__init__`
-#: re-exporting a name its own submodule defines is ONE hop and is the shape
-#: this exists for; four covers `pkg/__init__` → `pkg/a.mojo` → `pkg/b.mojo`.
-#: A bound rather than "until it stops" because the walk also carries a `seen`
-#: set, and one of the two is a fact (a cycle cannot be followed) while the other
-#: is a policy about how far a claim is worth chasing.
-_KIND_HOPS = 4
+def declared_kinds(path: str) -> dict:
+    """{name: "function"|"type"} for what `path` declares at top level.
 
+    Read from the module's OWN source — the same file the dylib is built from,
+    so the two cannot disagree about what the module contains. A name the
+    source does not declare at all is simply absent, which is how a re-export
+    of something that does not exist gets caught rather than forwarded.
 
-def _own_declared_kinds(path: str) -> dict:
-    """{name: "function"|"type"} for what ONE file declares at top level."""
+    **A `TraitDef` is filed as a TYPE.** It was not, and the omission refused
+    every package that re-exports a trait: `std/traits/__init__.mojo` is five
+    `from .sub import Name` statements over four submodules whose whole content
+    is traits, and an absent name reaches `compile_formal_dylib` with kind
+    `"unknown"` — which is not `"type"`, so it lands in the re-exported-FUNCTION
+    set that must be *provided as a symbol*. A trait has no symbol, so the
+    check refused `std/traits` with "re-exports AnyType from .anytype, but no
+    module it imports exports that name", which is the message for a missing
+    FUNCTION DEFINITION and is false about a name that is declared two files
+    away. Filing it as the kind it is also keeps it out of that set for the
+    same reason a re-exported struct is: a type is not a missing symbol."""
     out: dict = {}
     for st in module_statements(path):
         name = getattr(st, "name", None)
@@ -2810,100 +2629,6 @@ def _own_declared_kinds(path: str) -> dict:
             out.setdefault(name, "function")
         elif isinstance(st, (F.StructDef, F.TraitDef)):
             out.setdefault(name, "type")
-    return out
-
-
-def _forwarded_kind(name: str, module: str, path: str, memo: dict, hops: int,
-                    seen: frozenset):
-    """The kind `name` has in the module spelled `module`, or None.
-
-    `path` is the file that wrote the import, so a RELATIVE spelling resolves
-    against the right directory — the build's own `resolve_module_path`, not a
-    second spelling rule here, for the reason
-    `formal_chain_probe.py::_resolve_module` states: one resolver, or two
-    answers to "where does `.sub` live".
-
-    `memo` holds each module's FULL table (its own declarations plus whatever it
-    forwards) so a package with thirty re-exports reads each submodule once
-    rather than thirty times, and `seen` is what stops `a` re-exporting from `b`
-    re-exporting from `a` being a recursion.
-    """
-    if not name or hops >= _KIND_HOPS:
-        return None
-    target = resolve_module_path(module, relative_to=path)
-    if not target:
-        return None
-    try:
-        real = os.path.realpath(target)
-    except OSError:
-        return None
-    if real in seen:
-        return None
-    table = memo.get(real)
-    if table is None:
-        table = _own_declared_kinds(target)
-        memo[real] = table
-        _fill_forwarded_kinds(target, table, memo, hops + 1,
-                              seen | {real})
-    return table.get(name)
-
-
-def _fill_forwarded_kinds(path: str, out: dict, memo: dict, hops: int,
-                          seen: frozenset) -> None:
-    for _bound, name, module in _from_import_bindings(module_statements(path)):
-        if (not name or name in out or name.startswith("_")
-                or _is_inert_module(name)):
-            continue
-        kind = _forwarded_kind(name, module, path, memo, hops, seen)
-        if kind:
-            out.setdefault(name, kind)
-
-
-def declared_kinds(path: str) -> dict:
-    """{name: "function"|"type"} for what `path` declares — or FORWARDS.
-
-    Read from the module's OWN source — the same file the dylib is built from,
-    so the two cannot disagree about what the module contains. A name the
-    source does not declare at all is simply absent, which is how a re-export
-    of something that does not exist gets caught rather than forwarded.
-
-    **A `TraitDef` is filed as a TYPE.** It was not, and the omission refused
-    every package that re-exporting a trait: `std/traits/__init__.mojo` is five
-    `from .sub import Name` statements over four submodules whose whole content
-    is traits, and an absent name reaches `compile_formal_dylib` with kind
-    `"unknown"` — which is not `"type"`, so it lands in the re-exported-FUNCTION
-    set that must be *provided as a symbol*. A trait has no symbol, so the
-    check refused `std/traits` with "re-exports AnyType from .anytype, but no
-    module it imports exports that name", which is the message for a missing
-    FUNCTION DEFINITION and is false about a name that is declared two files
-    away. Filing it as the kind it is also keeps it out of that set for the
-    same reason a re-exported struct is: a type is not a missing symbol.
-
-    **AND A FORWARDED NAME IS FILED BY WHAT DEFINES IT**, which is the same
-    refusal one hop further out and it took the same shape it took then:
-    `std/hashlib/hasher.mojo` writes `from std.collections import Span`, and
-    `Span` is declared in `std/collections/span.mojo` and re-exported by
-    `std/collections/__init__.mojo`. The only file read here is the `__init__`,
-    whose top-level statements are five `from .sub import …` lines and no
-    declaration at all — so `Span` was absent, `unknown` again, and
-    `formal/build.py::_namespace_library` demanded a SYMBOL for a struct
-    template, refusing the module with "re-exports Span from std.collections,
-    but no module it imports exports that name … This is a real gap in that
-    module's public API — a private, generic or overloaded definition". Every
-    clause of that is false: `Span` is public, and it is a TYPE, and a type has
-    no symbol to be missing. Reproduced on six lines in
-    `test_formal_dylib.py::TestAPackageForwardedTypeIsNotAMissingSymbol`.
-
-    So a name this file does not declare but FORWARDS is looked up in the module
-    its own `from … import …` names, resolved with the build's own resolver, and
-    filed with the kind it has THERE. The direction is load-bearing: this can
-    only turn `"unknown"` into a real kind, and the only kind that leaves the
-    "must be provided as a symbol" set is `"type"`, so it can remove a refusal
-    and cannot add one. A name nothing resolves, or that a cycle hides, stays
-    absent — which is the pre-existing behaviour and the one that still catches
-    a re-export of something that does not exist."""
-    out = _own_declared_kinds(path)
-    _fill_forwarded_kinds(path, out, {}, 0, frozenset({os.path.realpath(path)}))
     return out
 
 
@@ -3128,7 +2853,7 @@ def library_free_edges(importer_path: str, stmts: list,
     `binary_heap.mojo` exports. Before this, that one edge's non-symbol cost 163
     swept files their build, because `build_module_dylib` refused the library
     whether or not the importing chain wanted it
-    (the `b9` round of `bugs/FORMAL_sweep_work_map.md` §4.1).
+    (`bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §4.1).
 
     **Which names are templates is read from `reflect.export_exclusions`**, by
     `formal/monomorph.py::template_names`, which is the SAME rule

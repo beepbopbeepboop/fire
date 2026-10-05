@@ -443,22 +443,6 @@ PROVIDED_NEVER_A_HOST_MODULE = {
     # does NOT have (`split`, `join`, the `shlex` reader) is refused there by
     # name, which is what keeps a one-file row from reading as a whole module.
     "shlex": "test_formal_shlex.py",
-    # `random` left `HOST_MODELLED` on 2026-10-05 the same way and for the same
-    # reason, with one thing the others did not need: its module-level STATE is
-    # what the algorithm is made of (624 words, advanced by every draw), so the
-    # premise that made it reachable — a module's OWN `global` has storage and
-    # survives across calls in one process, measured on both architectures — is
-    # half of what its test checks. Its test is `test_formal_random.py`, which
-    # checks `seed` + `randrange` against CPython's own `random` over the two
-    # call sites in this repository verbatim, one case per branch of
-    # `getrandbits`, 700 draws so the 624-word twist is inside the corpus,
-    # fifteen seeds of one to three key words in both signs, seven widths just
-    # under a power of two so the rejection loop runs, and the two ranges
-    # CPython raises on as the -1 statuses they are here. What the module does
-    # NOT have — `Random`, `getrandbits`, `random`, `randint` — is refused there
-    # by name, which is what keeps a 2-of-8-files row from reading as a whole
-    # module.
-    "random": "test_formal_random.py",
     # `traceback` and `signal` left `HOST_UNREACHABLE` on 2026-10-04 the way
     # `shutil` and `tempfile` did, and for the same half of the reason: the
     # OBJECT half of their entries is still true — there is no unwinder for
@@ -588,67 +572,24 @@ HOST_SET_ADDED_TIERS = {
     "datetime": "modelled",
     # `getrusage(2)` is libSystem and `struct rusage` is a fixed layout.
     "resource": "modelled",
-    # ── 2026-10-05, `HOST_NOT_A_MODULE` and the eleven names it settled ──
-    #
-    # The fourth answer, for a name whose only content is not code.  Neither
-    # claim tier is true of these: "unreachable" says an object is missing from
-    # the target and "modelled" says nothing is missing and the work is undone,
-    # and `this` is the Zen of Python as a module-level string, so there is
-    # nothing to implement AND nothing missing.  It asserts the LEAST of the
-    # four, which is why `host_module_tier` tests it last.
-    "this": "not-a-module",
-    "antigravity": "not-a-module",
-    "turtledemo": "not-a-module",
-    # ── and the two CORRECTIONS the same pass made, which are the reason the
-    # measurement below is CPython's `find_spec` and not a remembered list ──
-    #
-    # `importlib.util.find_spec` on the interpreter that runs this tree returns
-    # NO SPEC for each of these four: CPython cannot find them on this host
-    # either, so the object (the Windows C runtime, the Windows registry, the
-    # Windows sound API, and `nt`'s Windows `os`) is missing from the target and
-    # the EXISTING `unreachable` row is the rule at the top of `formal/
-    # imports.py` applied -- not a fifth category invented to hold them.
-    "msvcrt": "unreachable",
-    "winreg": "unreachable",
-    "winsound": "unreachable",
-    "nt": "unreachable",
-    # …and these four are the OPPOSITE reading, which is why they are in the
-    # table at all: `find_spec` DOES find every one of them here, because they
-    # are frozen or arithmetic-over-strings modules CPython ships everywhere and
-    # only ever USES on Windows.  `ntpath`/`nturl2path`/`genericpath` need a
-    # string, and `posix` needs the libSystem calls
-    # `formal/hostmods/os/_syscalls.mojo` already makes -- THIS is a POSIX
-    # target.  So nothing is missing and only the module is unwritten, which is
-    # `modelled`.  `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §"The
-    # next step" listed all four with `msvcrt` as "not this host's", and for
-    # `posix` that was false outright.
-    "posix": "modelled",
-    "genericpath": "modelled",
-    "ntpath": "modelled",
-    "nturl2path": "modelled",
 }
 
 
 def test_host_tiers():
     check(I._host_tier_conflicts() == [],
           'no host module is in both tiers', str(I._host_tier_conflicts()))
-    # FOUR tiers, and the third one is not a bookkeeping convenience.  A name
+    # THREE tiers, and the third one is not a bookkeeping convenience.  A name
     # with a Mojo source used to have exactly two fates: it LEFT the host set
     # entirely (tier ''), or it was 'modelled'.  2026-10-02 added the third:
     # `subprocess`, `ctypes`, `concurrent`, `concurrent.futures` and
     # `threading` have a source AND cannot be computed here, so they answer under
     # DECLARED CONTRACTS and sit in `HOST_ADMITTED` — still host modules (the
     # predicate `HOST_MODULES` backs must cover them), but neither 'modelled'
-    # (nothing left to write) nor 'unreachable' (they build).  The fourth is
-    # `HOST_NOT_A_MODULE`, for a name with nothing to implement at all, and it
-    # is in the union for the same reason the other three are: `_is_host_module`
-    # consults the union, so a member is refused by the tier-agnostic
-    # host-import refusal exactly as before and only the WORDING and the reach
-    # accounting change.
+    # (nothing left to write) nor 'unreachable' (they build).
     union = (set(I.HOST_UNREACHABLE) | set(I.HOST_MODELLED)
-             | set(I.HOST_ADMITTED) | set(I.HOST_NOT_A_MODULE))
+             | set(I.HOST_ADMITTED))
     check(union == set(I.HOST_MODULES),
-          'HOST_MODULES is exactly the union of the four tiers',
+          'HOST_MODULES is exactly the union of the three tiers',
           f"sym-diff {sorted(union ^ set(I.HOST_MODULES))}")
     orig = _original_host_modules()
     if orig is not None:
@@ -708,8 +649,7 @@ def test_host_tiers():
                   f'{name} was added to the host set as {tier!r} and is still '
                   f'there; a name that has been written leaves both claim tiers',
                   f'now {I.host_module_tier(name)!r}')
-            check(bool(tier in ('modelled', 'unreachable', 'admitted',
-                                'not-a-module')),
+            check(bool(tier in ('modelled', 'unreachable', 'admitted')),
                   f'{name} names a real tier, so the row above is a claim and '
                   f'not a free-text excuse', f'tier {tier!r}')
         # Everything provided that is not an admitted name left the set, so the

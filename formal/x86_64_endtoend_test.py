@@ -161,15 +161,6 @@ import formal.lean as L           # noqa: E402
 LEAN_BIN = L.find_lean(ROOT)
 LIB = os.path.join(ROOT, "lib")
 
-#: The `LEAN_PATH` every `lean` run in this file gets, in the order Lean searches
-#: it. One list, because it is an INPUT to two answers that must not drift:
-#: `LEAN_PATH` itself, and the module name `_module_of` derives from it — a
-#: generated file that is under the first entry is named by its basename and one
-#: that is under none is named `_stdin`, so deriving against a different list is
-#: the same bug with a different argument (see `_module_of`).
-SEARCH_PATHS = (ROOT, LIB)
-LEAN_PATH = ":".join(SEARCH_PATHS)
-
 #: Has `ensure_lean_ready` run in this process?  `_run_lean` is called once per
 #: theorem per example (86 times over the corpus) and `ensure_library` is not
 #: free even when it builds nothing — it digests each `lib/*.lean` together with
@@ -3687,7 +3678,7 @@ def _probe_input_independent(path):
         tmp = f.name
     try:
         ensure_lean_ready()
-        env = dict(os.environ, LEAN_PATH=LEAN_PATH)
+        env = dict(os.environ, LEAN_PATH="%s:%s" % (ROOT, LIB))
         p = L.run_lean(LEAN_BIN, [tmp], env=env, wall_s=PROOF_WALL_S,
                        cpu_s=PROOF_CPU_S)
         if p.exceeded:
@@ -3954,71 +3945,18 @@ def hole_at(text, line):
     return None
 
 
-#: What Lean names a source file it cannot derive a module name for, measured on
-#: the pinned toolchain: `…/tmp1qomz6pi.lean` elaborated from outside every
-#: `LEAN_PATH` entry reports ``declaration uses `sorry `«_stdin:363:12»`` — the
-#: whole file is one anonymous declaration, so its holes are attributed to
-#: `_stdin` rather than to the file. It is a module name like any other to
-#: `sorry_source_labels`, which is exactly why `_module_of` has to produce it.
-_STDIN_MODULE = "_stdin"
-
-
-def _module_of(path, search_paths):
-    """The module name Lean will print for `path`, given the search paths it ran with.
-
-    Lean's module name for a source file is its path RELATIVE TO A SEARCH PATH,
-    with `/` becoming `.` — so the `«…».name:line:col` label ends in the last
-    component of that, which is the basename. It is derived rather than passed in
-    so that the caller cannot get it subtly wrong: a caller that spelled the
-    module by hand would silently disable the library-hole filter the moment it
-    disagreed with Lean's spelling, which is the failure that filter exists to
-    prevent.
-
-    **A file outside every search path has no module name, and Lean says so with
-    `_stdin`.** This used to answer `basename` unconditionally, which is right for
-    a file under a search path and wrong for every other one — and the other ones
-    are the DEFAULT, because where `_run_lean`'s temporary file lands is
-    `TMPDIR`'s business. Measured on this tree's own end-to-end case, with
-    `TMPDIR` at the system default so the temp file is not inside the checkout:
-
-        TMPDIR=<checkout>/.tmp   label `«.tmp».tmp1qomz6pi:363:12`  module tmp1qomz6pi
-        TMPDIR unset             label `«_stdin:363:12»`             module _stdin
-
-    Under the second, `live_hole_phrase`'s library filter compared `tmp1qomz6pi`
-    with `_stdin`, refused OUR OWN hole as if it were an imported `.olean`'s, and
-    `live` came back `None` — so `_run_lean` fell back to "N admitted candidate
-    (…)" on a proof it had just proved had one identified hole. That is the
-    fallback `live_hole_phrase` exists to avoid, reached by the filter that
-    exists to avoid a worse one, and it made
-    `test_lean_says_which_sorry_fired_and_the_report_names_it` fail on any machine
-    whose `TMPDIR` is not inside the checkout — which is why the suite job's
-    verdict depended on the runner's environment rather than on the tree.
-
-    So the derivation implements Lean's rule instead of assuming it: the first
-    search path that contains the file, then the basename; `_stdin` when there is
-    none. `search_paths` is the same list that went into `LEAN_PATH`, because a
-    name derived against a DIFFERENT search path is the bug again.
-    """
-    real = os.path.abspath(path)
-    for root in search_paths:
-        root = os.path.abspath(root)
-        if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
-            return os.path.splitext(os.path.basename(real))[0]
-    return _STDIN_MODULE
-
-
-def live_hole_phrase(text, out, module=None):
+def live_hole_phrase(text, out):
     """`"hstep7's side condition, line 362"` for the hole Lean says fired, or `None`.
 
     The question this answers is "WHICH `sorry`", and it is asked of Lean's own
     output rather than of the text: `_header` puts `set_option pp.sorrySource true`
     in every generated file, so a `declaration uses `sorry`` warning carries the
     fired `sorry`'s own `line:col`
-    (`formal/lean.py::sorry_source_labels`), and `hole_at` resolves that line
+    (`formal/lean.py::sorry_source_positions`), and `hole_at` resolves that line
     to the fact it belongs to. Measured end to end on this tree's own output: with
     `formal/examples/const2.mojo`'s first guard on `hstep7` made unsatisfiable,
-    Lean prints ``uses `sorry `«.tmp».tmpcmqrxbe0:363:12»`` `` and this returns
-    `"hstep7's side condition, line 363"` — the `all_goals sorry` on that line,
+    Lean prints ``uses `sorry `«…:362:12»`` `` and this returns
+    `"hstep7's side condition, line 362"` — the `all_goals sorry` on that line,
     attributed to the step whose hypothesis argument it is.
 
     **One hole, and it is the first.** Lean emits the warning once per
@@ -4026,43 +3964,13 @@ def live_hole_phrase(text, out, module=None):
     holes names one of them and the summary line's counts are what say how many
     emissions could have fired. `None` when the run named no position, and the
     caller then falls back to the candidate list rather than inventing one.
-
-    **`module` is the generated file's own module name, and passing it is what
-    makes a LIBRARY hole refusable instead of misattributed.** Lean's label says
-    which file the fired `sorry` is in, and this used to read only the line: so a
-    hole in an imported `.olean` arrived here as a bare line number in a file
-    this function had never seen, and `hole_at` matched it against the GENERATED
-    text. Measured on `const2.mojo`'s emitted text (722 lines): a
-    `«lib».X86:503:8` position resolved to `"hstep11's side condition, line
-    503"` — a confident, specific and completely wrong answer, because 503 is a
-    line in `lib/X86.lean` and a `sorry` of ours happens to sit on 503 of the
-    generated file. It returned `None` for `«lib».ProofLib:4624:8` only because
-    4624 is past the end of the generated file, which is luck and not a rule.
-
-    A hole this emitter did not write has no emitter fact to name, so it is
-    skipped exactly as an unresolvable position always was — but now for the
-    stated reason rather than by coincidence. `module` is what `_module_of`
-    derives for the generated file, which is the BASENAME when the file is under
-    a search path and `_stdin` when it is under none (both measured; see
-    `_module_of`, and see the failure this corrected — a caller that passed the
-    basename while Lean printed `_stdin` had its OWN hole refused as a library
-    one, and `None` is a fallback, so the identification was silently lost on
-    every machine whose `TMPDIR` is not inside the checkout). `sorry_source_labels`
-    reports the same string whatever Lean spells it with (its own docstring has
-    the three spellings); `None` means "do not filter", which is the pre-existing
-    behaviour and is what a caller with no generated file in hand passes.
     """
-    for name_in_file, line, _col in L.sorry_source_labels(out):
-        if module is not None and name_in_file != module:
-            # A hole in an IMPORTED module. There is no fact of ours to attribute
-            # it to, and resolving its line against our text would invent one.
-            continue
+    for line, _col in L.sorry_source_positions(out):
         at = hole_at(text, line)
         if at is None:
-            # A position in no `sorry` of ours: a `sorry` written by something
-            # other than this emitter, which `_run_lean` reports in its own
-            # words. Naming nothing here is right — there is no emitter fact to
-            # name.
+            # A position in no `sorry` of ours: a library hole leaked into the
+            # file, which `_run_lean` reports in its own words. Naming nothing
+            # here is right — there is no emitter fact to name.
             continue
         name, kind = at
         what = "own admission" if kind == "admitted" else "side condition"
@@ -4140,7 +4048,7 @@ def _run_lean(text):
             # directly. `ensure_library` carries the build's own diagnostic.
             return (False, 0, False, "lib/*.olean is not current: %s" % exc,
                     None)
-        env = dict(os.environ, LEAN_PATH=LEAN_PATH)
+        env = dict(os.environ, LEAN_PATH="%s:%s" % (ROOT, LIB))
         p = L.run_lean(LEAN_BIN, [tmp], env=env, wall_s=PROOF_WALL_S,
                        cpu_s=PROOF_CPU_S)
         if p.exceeded:
@@ -4183,15 +4091,8 @@ def _run_lean(text):
                 "Lean reports this declaration as using `sorry` and the "
                 "generated file contains no `sorry` at all: a library hole has "
                 "leaked into it, and reporting it as clean would be worse")
-        # The module name is what makes the identification an identification: it
-        # is the name Lean gives the file this process just wrote — the basename
-        # under a search path, `_stdin` outside every one of them, which is what
-        # `_module_of` derives from `SEARCH_PATHS` — and it is what lets
-        # `live_hole_phrase` refuse a hole that fired in an IMPORTED module
-        # rather than resolving that module's line against this file's text.
         return ((not errs), sorries, fired, (errs[0] if errs else ""),
-                live_hole_phrase(text, out, _module_of(tmp, SEARCH_PATHS))
-                if fired else None)
+                live_hole_phrase(text, out) if fired else None)
     finally:
         os.unlink(tmp)
 

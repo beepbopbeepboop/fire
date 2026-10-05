@@ -65,17 +65,11 @@ that stayed refusals:
   (`q = p.value()` in one branch, `q = o` — a callee's holder — in another)
   then kept only the pointer's layout, because the copy edge skips a name that
   is already a holder. The edge appends its candidate instead, so the two-layout
-case is a candidate list of two. **The copy edge did not MERGE, and that was
-   the same hole one step back — a constructor binding with no pointer anywhere
-   near it: `var q = Three(); q = o` built on both architectures and answered 0
-   and 208. FIXED 2026-10-05 (`work/formal35-2`): the copy edge now appends its
-   candidate instead of skipping a name that is already a holder, so the
-   pre-seeded `q` sees `o`'s layout too and `model.struct_frame_slot_candidates`
-   refuses the disagreement — the same fixpoint edge this section describes for
-   the pointer, applied to the arm that was already there.
-   `test_formal_run.py`'s `byref_a_rebind_from_another_holder_keeps_both_
-   layouts` (refused, both architectures) and `byref_a_rebind_whose_two_layouts_
-   agree_still_answers` (still builds and answers CPython) pin both directions.
+  case is a candidate list of two. **The copy edge not MERGING is pre-existing
+  and is filed, not fixed here:** `var q = Three(); q = o` on a two-field struct
+  builds on both architectures and answers 0 and 208
+  (`bugs/FORMAL_a_name_rebound_from_another_holder_keeps_its_first_layout.md`),
+  and the pointer shape inherits that hole rather than adding one.
 * **A ONE-FIELD struct pointee is still REFUSED**, and it is a different fact
   rather than a half-answer: its value is its own field, so there is nothing at
   the address and the identity would be wrong rather than right
@@ -130,7 +124,7 @@ Three of those BUILD, and the artifacts are the stronger check:
 `tools/formal_sweep.py` over all 710 files, and the Lean half. The twelve above
 are a sample chosen for size and for the fact that three of them build at all;
 they are not a census, and the doc that would settle the question is
-the `b10` round of `bugs/FORMAL_sweep_work_map.md`'s next round.
+`bugs/FORMAL_sweep_work_map_2026-10-04_b10.md`'s next round.
 
 **What it costs: 0.10 s on `formal/model.py`, 3 runs each, best of three.**
 1.86 s before, 1.96 s after — about 5 %, and it is one extra body walk per
@@ -1114,16 +1108,12 @@ the `("frame", …)` branch of §4 and is refused for a different reason.
   three consumers, and `p.value()` on a `Pointer[SomeStruct]` answers 22 where it
   used to answer 0 and refuse. The "next step" paragraph below is the record of
   what was asked for; the section at the head of this file is what landed.
-- **A name bound from a POINTER FRAME and rebound from another holder used to
-  keep the pointer's layout**, which was the copy edge's hole and not this
-  document's item — the pointer shape inherited it, and so did a constructor
-  binding with no pointer anywhere near it. **CLOSED 2026-10-05
-  (`work/formal35-2`)**: the copy edge MERGES its candidate into a name that
-  already has one, so `struct_frame_slot_candidates` refuses the two-layout case
-  for the pointer shape and for the constructor shape alike.
-  `test_formal_run.py`'s `byref_a_rebind_from_another_holder_keeps_both_layouts`
-  is the reproducer as a refusal and
-  `byref_a_rebind_whose_two_layouts_agree_still_answers` is the guard.
+- **A name bound from a POINTER FRAME and rebound from another holder keeps the
+  pointer's layout**, which is the copy edge's pre-existing hole and is not this
+  document's item — the pointer shape inherits it, and so does a constructor
+  binding with no pointer anywhere near it. Filed, with the reproducer that
+  builds on both architectures and answers two different numbers:
+  `bugs/FORMAL_a_name_rebound_from_another_holder_keeps_its_first_layout.md`.
 - **A concurrent-wave collision, reported not resolved.** `formal/build.py` gained
   ~465 lines during this wave from another agent, and its new refusal ("'h' is
   bound here as a parameter, so none of the three is established, and a store to

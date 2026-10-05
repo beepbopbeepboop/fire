@@ -611,23 +611,12 @@ def proof_verdict(arch, work, timeout, check=True):
                                    test_input=_JOB.input, prove=True,
                                    check=False, arch=arch)
     except (FB.CodegenError, FB.FormalBuildError) as e:
-        # The generator's own refusal RE-WRAPS into this arm — `formal/build.py`
-        # catches the `NotImplementedError` and re-raises it as a
-        # `FormalBuildError`, so `fire.py` prints `build: <message>` rather than
-        # a traceback — and it was therefore filed as a CODE GENERATOR refusal
-        # here as well as in `tools/formal_proof_breadth.py`. Both tools now ask
-        # `formal.build.proof_refused`, which is the one reader of the flag and
-        # documents why it cannot be a `NotImplementedError` again.
-        if FB.proof_refused(e):
-            return out("proof-refused", e)
         return out("refused-import" if _refused_import(str(e)) else
                    "codegen-refused", e)
     except NotImplementedError as e:
         # Only the proof generators raise this — the x86-64 one CATCHES it and
         # emits its documented placeholder — so which frame it came out of is
-        # what separates `proof-refused` from a build crash. Unreachable for the
-        # generators `compile_formal` calls itself (they are re-wrapped above);
-        # it stays because a caller may hand `decide` one directly.
+        # what separates `proof-refused` from a build crash.
         return out("proof-refused" if getattr(_PHASE, "generate_entered", False)
                    else "build-crash", e)
     except Exception as e:                      # noqa: BLE001 — a class here

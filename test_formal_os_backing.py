@@ -47,24 +47,15 @@ import argparse
 import os
 import platform
 import re
+import signal
 import subprocess
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from exec_budget import (BUILD_TIMEOUT, RUN_TIMEOUT, TIMEOUT_RC,   # noqa: E402
-                         EXTERNAL_SIGNAL_NAMES, child_exit_reason,
-                         died_by_external_signal)
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRE = os.path.join(HERE, "fire.py")
-# `BUILD_TIMEOUT` and `RUN_TIMEOUT` are `exec_budget`'s, not this file's own
-# numbers. They were `300` and `60` here, which is the shape of literal
-# `tools/suite.py`'s `doc-refs` ratchet exists to stop: a reader cannot tell a
-# deliberate budget from a stale one, and this file's `stat_*` cases build and
-# execute two images each, so the pair IS this file's cost. `COMPILE_TIMEOUT_S`
-# and `RUN_TIMEOUT_S` are both 600 and 120 against a whole-file measurement of a
-# few minutes.
+BUILD_TIMEOUT = 300
+RUN_TIMEOUT = 60
 
 # The record terminator, for the reason `test_formal_os.py` gives: a separator
 # this suite can read back without asking whether the image decoded a literal,
@@ -369,39 +360,25 @@ def main(n):
 #     names[i]          the element, as the element KIND the annotation gives
 #     for x in names    a loop whose target is that element kind
 #
-# `n`, `bytes` and `first` are the aggregate answers and `len`-through-the-
+# `n`, `chars` and `first` are the aggregate answers and `len`-through-the-
 # accessor is the CONTROL: the same count read both ways, in one image, so a
 # difference between them is a difference in how the kind was used rather than
 # in what the filesystem said. The oracle is CPython's `os.listdir` of the same
 # fixture, and its ORDER is the filesystem's `readdir` order, which is what
 # both sides walk.
-#
-# **`bytes` and not `chars`, and the change is the subject of
-# `FOREIGN_BYTES_KIND`.** This row's aggregate used to be
-# `chars = chars + len(x)`, which answered 11 where CPython answers 10 for a
-# directory holding `plain` and `héllo` — a `strlen` in a sum presented as a
-# character count, green build, exit 0, nothing on stderr, on BOTH
-# architectures. `len(x)` is now REFUSED by name (see
-# `len_of_a_directory_entry_is_refused` below, which is where that construct is
-# pinned), so the aggregate is spelled `os.str_len(x)` — the same `strlen`,
-# asked for as BYTES on purpose — and the oracle sums `len(os.fsencode(x))`,
-# which is the only CPython answer a byte count can be equal to. Every other
-# answer in this row is unchanged and is the control that says the kind was
-# seeded at the element and nowhere else: `len(names)` is still the count field,
-# `names[i]` is still the element, and a loop over the blob still walks it.
 CASES.append(Case(
     "listdir_is_a_python_level_list",
     '''\
-from os import listdir, listdir_len, listdir_free, str_len
+from os import listdir, listdir_len, listdir_free
 
 def show(tag, p):
     names = listdir(p)
     printf("%s_n=%d@@", tag, len(names))
     printf("%s_acc=%d@@", tag, listdir_len(names))
-    bytes = 0
+    chars = 0
     for x in names:
-        bytes = bytes + str_len(x)
-    printf("%s_bytes=%d@@", tag, bytes)
+        chars = chars + len(x)
+    printf("%s_chars=%d@@", tag, chars)
     printf("%s_first=[%s]@@", tag, names[0])
     printf("%s_last=[%s]@@", tag, names[len(names) - 1])
     listdir_free(names)
@@ -422,17 +399,9 @@ def _listdir_as_list_oracle():
     """CPython's answers for `listdir_is_a_python_level_list`.
 
     Computed against the SAME fixture the image walked, which is what makes the
-    three aggregate answers comparable rather than merely equal: `bytes` is the
-    sum of `len(os.fsencode(x))` over the same names, so a wrong element KIND
-    shows up as a wrong sum rather than as a crash.
-
-    **`os.fsencode` and not `len(x)`**, and the reason is the refusal this row's
-    comment names: `len(x)` counts CHARACTERS and the image's `str_len(x)` counts
-    BYTES, so the oracle has to be the same question CPython was asked. It is
-    still a real oracle rather than a copy of the image: `os.fsencode` is the
-    round trip through the same filesystem encoding `readdir(3)` produced, so a
-    name the kernel handed over as five characters and six bytes is six here and
-    would be five through `len(x)`.
+    three aggregate answers comparable rather than merely equal: `chars` is the
+    sum of `len(x)` over the same names, so a wrong element KIND shows up as a
+    wrong sum rather than as a crash.
 
     **Only directories that EXIST**, and the reason is in the module rather than
     here: a missing path makes `listdir` answer the WORD 0 rather than a blob,
@@ -446,175 +415,13 @@ def _listdir_as_list_oracle():
         names = os.listdir(path)
         out[f"{tag}_n"] = str(len(names))
         out[f"{tag}_acc"] = str(len(names))
-        out[f"{tag}_bytes"] = str(sum(len(os.fsencode(x)) for x in names))
+        out[f"{tag}_chars"] = str(sum(len(x) for x in names))
         # The brackets are part of the RECORD, not of the value: the program
         # prints `[%s]` so an empty listing is visible as `[]` rather than as a
         # missing field, and the oracle strips them back off for the comparison.
         out[f"{tag}_first"] = f"[{names[0]}]"
         out[f"{tag}_last"] = f"[{names[-1]}]"
     return out
-
-
-# ── 2c. BYTES THE KERNEL SUPPLIED, and what `len` cannot answer about them ──
-#
-# `os.listdir`'s names, `os.getenv`'s values and `os.getcwd`'s path are bytes the
-# KERNEL wrote, not bytes this image interned, and that is the only difference
-# that matters to `len`: `strlen` counts BYTES and CPython counts CHARACTERS, the
-# two agree for every ASCII name and disagree for every other one, and nothing in
-# the SOURCE says which it is holding. Measured before the kind existed, both
-# architectures, over `plain` + `héllo`: the image answered 11 where CPython
-# answers 10. Green build, exit 0, nothing on stderr.
-#
-# So the cases below are three things, and the third is the one that says the
-# kind was seeded correctly rather than over-seeded.
-CASES.append(Case(
-    "len_of_a_directory_entry_is_refused",
-    '''\
-from os import listdir, listdir_free
-
-def main(n):
-    names = listdir("@@UTF8@@")
-    for x in names:
-        printf("%d@@", len(x))
-    listdir_free(names)
-    return 0
-''',
-    refusal="is len() of bytes the KERNEL supplied",
-))
-
-# THE CONTROL, and it is the row that carries the claim. `printf("%s", …)` over a
-# kernel-supplied name is a property of the BYTES and CPython agrees on it —
-# `os.listdir` decodes with `surrogateescape` and writes the same bytes back out
-# — so this must still build, still run and still print `héllo` rather than a
-# refused message or a number. `str_len` is the deliberate byte count, and the
-# oracle is `os.fsencode`, so all three answers are compared against the same
-# filesystem rather than against a table.
-CASES.append(Case(
-    "a_directory_entry_prints_and_measures_as_bytes",
-    '''\
-from os import listdir, listdir_free, str_len
-
-def main(n):
-    names = listdir("@@UTF8@@")
-    printf("n=%d@@", len(names))
-    total = 0
-    i = 0
-    for x in names:
-        printf("name%d=[%s]@@", i, x)
-        printf("bytes%d=%d@@", i, str_len(x))
-        total = total + str_len(x)
-        i = i + 1
-    printf("total=%d@@", total)
-    listdir_free(names)
-    return 0
-''',
-    None,
-    oracle=lambda: _utf8_bytes_oracle(),
-))
-
-
-def _utf8_bytes_oracle():
-    """CPython's answers for `a_directory_entry_prints_and_measures_as_bytes`.
-
-    `bytes` is `len(os.fsencode(name))` and never `len(name)`: the image is
-    measuring BYTES, and the character count is the number
-    `len_of_a_directory_entry_is_refused` is about. The fixture's non-ASCII
-    entry is the whole point of it — APFS hands it back NFD-normalised, so it is
-    five characters and six bytes whichever spelling created it, and an oracle
-    written from the directory rather than from the source is what makes the row
-    survive a filesystem that normalises differently.
-    """
-    names = os.listdir(_UTF8[0])
-    out = {"n": str(len(names)), "total": str(sum(len(os.fsencode(x))
-                                                  for x in names))}
-    for i, x in enumerate(names):
-        out[f"name{i}"] = f"[{x}]"
-        out[f"bytes{i}"] = str(len(os.fsencode(x)))
-    return out
-
-
-# The value the two `getenv` rows hand to the image, and it is a CONSTANT rather
-# than something read out of `os.environ`, for the `env` contract: that dict is
-# the IMAGE's environment, not this process's, so an oracle reading
-# `os.environ[...]` would raise `KeyError` on a machine where the variable is
-# unset. One constant used by both rows makes them agree by construction, and it
-# makes the expected byte count (5 characters, 6 bytes) a claim about the source
-# rather than about whatever a shell did to the environment.
-_NONASCII_VALUE = "héllo"
-
-# A `getenv` value is the other half of the same kind and it is a DIFFERENT
-# kernel call, so it is its own row rather than a comment on the listdir one: a
-# seed that had covered only `readdir(3)` would leave this silent.
-CASES.append(Case(
-    "len_of_an_environment_value_is_refused",
-    '''\
-from os import getenv, getenv_or
-
-def main(n):
-    printf("%d@@", len(getenv("GMOJO_TESTS_NONASCII")))
-    printf("%d@@", len(getenv_or("GMOJO_TESTS_ABSENT", "fallback")))
-    return 0
-''',
-    env={"GMOJO_TESTS_NONASCII": _NONASCII_VALUE,
-         "GMOJO_TESTS_ABSENT": ""},
-    refusal="is len() of bytes the KERNEL supplied",
-))
-
-# …and the same value is fine to PRINT, which is what makes the refusal a
-# statement about `len` rather than about the value. Without this row a rule that
-# simply made every kernel string unprintable would pass the three above.
-CASES.append(Case(
-    "an_environment_value_prints",
-    '''\
-from os import getenv, str_len
-
-def main(n):
-    v = getenv("GMOJO_TESTS_NONASCII")
-    printf("value=[%s]@@", v)
-    printf("bytes=%d@@", str_len(v))
-    return 0
-''',
-    env={"GMOJO_TESTS_NONASCII": _NONASCII_VALUE},
-    expect={"value": f"[{_NONASCII_VALUE}]",
-            "bytes": str(len(_NONASCII_VALUE.encode()))},
-))
-
-# `getcwd` is `getcwd(3)` and not `environ`, so it is its own row for the same
-# reason: it is the third kernel source the seed names.
-CASES.append(Case(
-    "len_of_the_working_directory_is_refused",
-    '''\
-from os import getcwd, str_len
-
-def main(n):
-    printf("%d@@", len(getcwd()))
-    printf("%d@@", str_len(getcwd()))
-    return 0
-''',
-    refusal="is len() of bytes the KERNEL supplied",
-))
-
-# The seed is not one module's fix, and this is the row that says so: `glob`
-# reaches the same kinds through a DIFFERENT dylib and a different walk, and
-# `platform.node` through `uname(2)`. A seed that had covered only `os` would
-# leave both of these building, and it would leave them building the way the
-# `os` rows used to — exit 0 and a byte count.
-CASES.append(Case(
-    "len_of_a_globbed_name_is_refused",
-    '''\
-from glob import glob, glob_free
-from platform import node
-
-def main(n):
-    paths = glob("@@UTF8@@/*")
-    for p in paths:
-        printf("%d@@", len(p))
-    glob_free(paths)
-    printf("%d@@", len(node()))
-    return 0
-''',
-    refusal="is len() of bytes the KERNEL supplied",
-))
 
 
 # ── 3. The refusals ───────────────────────────────────────────────────────
@@ -1568,62 +1375,88 @@ CASES.append(Case("environ_view_empty", ENV_VIEW_EMPTY_PROGRAM, None,
 # under load on four of six runs, and passed 6/6 alone; the report said the `os`
 # module was broken, twice, for a reason that was not about the `os` module.
 #
-# So the outcome is a THREE-valued status (`_image_status`) rather than a
-# boolean, and it is still a FAILURE and still fails the run: a killed case
-# obtained no answer, and no answer is not a pass. What it must not be is
-# indistinguishable from the `os` module answering wrongly. The wording, the
-# signal's name, and the sentence about what this harness does not send are all
-# `exec_budget`'s, because four suites hand-rolled them with four different
-# wordings.
+# So a signal is reported the way the TIMEOUT already is — as the shell's
+# `128 + signum`, with the signal's name in the text — and `signalled` says
+# whether it was a kill, so the caller can tag the report. It is still a FAILURE
+# and still fails the run: a killed case obtained no answer, and no answer is not
+# a pass. What it must not be is indistinguishable from the `os` module answering
+# wrongly.
+KILLED_TAG = "[KILLED]"
+# …and the distinction that makes the tag honest. These three are the signals a
+# program cannot raise on itself: SIGKILL is the kernel's (nothing catches or
+# ignores it), SIGTERM the supervisor's, SIGINT the terminal's. A FAULT —
+# SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT — is the image's own doing, which is
+# exactly what this file exists to catch ("every case EXECUTES, because a
+# lowering that builds a plausible wrong image is precisely what this suite is
+# for"), so a fault stays an ordinary failure of the case. Tagging a SIGSEGV
+# `[KILLED]` would excuse the one death this suite must never excuse.
+EXTERNAL_SIGNALS = frozenset(
+    getattr(signal, n) for n in ("SIGKILL", "SIGTERM", "SIGINT")
+    if hasattr(signal, n))
+EXTERNAL_SIGNALS_TEXT = "/".join(sorted(s.name for s in EXTERNAL_SIGNALS))
+
+
+def exit_status(rc, text):
+    """`(rc, detail, killed)` — a child's outcome, with a SIGNAL death named.
+
+    `killed` is True only for a death by one of `EXTERNAL_SIGNALS`, which is what
+    the caller reads to decide between "the module answered wrongly" and
+    "nothing answered". Both a kill and a fault are reported as `128 + signum`
+    with the signal named, so neither prints as a code a program chose.
+    """
+    if rc >= 0:
+        return rc, text, False
+    try:
+        name = signal.Signals(-rc).name
+    except ValueError:                       # a signal this Python does not know
+        name = f"signal {-rc}"
+    if -rc in EXTERNAL_SIGNALS:
+        return (128 - rc,
+                f"killed by {name}; nothing in this suite sends a signal", True)
+    return 128 - rc, f"died on {name}", False
+
+
+def killed_detail(what, rc, detail):
+    """The report line for a child the machine killed: tagged, and explained."""
+    return (f"{KILLED_TAG} {what} was killed ({detail}), reported as exit {rc}. "
+            f"No verdict was obtained, which is NOT the same as a wrong one — "
+            f"re-run this case alone before reading anything into it")
 
 
 def build(src, out, arch):
-    """`(rc, detail)` for one compile.
+    """`(rc, detail, killed)` for one compile. A killed compile is a kill.
 
-    `rc` is `subprocess`'s own negative-for-a-signal value, because the caller
-    classifies it with `_image_status` rather than reading a number here: a
-    `fire.py build` the machine kills mid-flight used to reach the caller as
-    `build failed: ` with an empty message, which is a report with no content at
-    all.
+    The build goes through `exit_status` for the reason above: a `fire.py build`
+    the machine kills mid-flight used to reach the caller as `build failed: `
+    with an empty message, which is a report with no content at all.
     """
     cmd = [sys.executable, FIRE, "build", "--formal", "--no-prove",
            "--backend=" + arch, "-o", out, src]
     p = subprocess.run(cmd, capture_output=True, text=True,
                        timeout=BUILD_TIMEOUT, cwd=HERE)
-    return p.returncode, p.stderr or p.stdout or ""
+    return exit_status(p.returncode, p.stderr or p.stdout or "")
 
 
 def run(out, arch, env=None):
-    """`(rc, stdout, stderr)` for one image, a HANG and a KILLING both
+    """`(rc, stdout, detail, killed)` for one image, a HANG and a KILLING both
     reported rather than raised.
 
     A timeout is a FAILURE of the case, not of the suite: a formal image that
     never terminates is one of the wrong answers this file exists to catch, and
     the way it showed up before was `subprocess.TimeoutExpired` escaping `main`
     and taking the remaining twenty-odd cases with it — so the one case that
-    hangs is reported and every other case still runs. `rc` is `exec_budget`'s
-    `TIMEOUT_RC` (the shell's timeout convention, 124, which is a status no
-    compiled program of ours returns and is deliberately not a signal) and
-    stderr names the timeout, so the caller sees a case that failed with a
-    reason rather than a case that vanished.
+    hangs is reported and every other case still runs. `rc` is the shell's
+    timeout convention (124) and the detail names the timeout, so the caller
+    sees a case that failed with a reason rather than a case that vanished.
 
-    **A SIGNAL is not that, and the caller is told which signal it is.** `rc` is
-    negative when the kernel ended the child rather than the child exiting, and
-    this file's own history is the reason this is stated rather than assumed: two
-    of six full runs were 56/58 and both times the same pair of `stat_*` cases
-    reported `exit -9, stderr ''` and nothing else — which reads as a defect in
-    the `os` module, and is a machine that killed a build (memcap's ceiling, the
-    OOM killer, or another process; nothing here signals a child it launched).
-    `run_case` turns that into its own `KILLED` status, so "the machine killed it"
-    and "the module answered wrongly" cannot both print `FAIL`.
-
-    **and only SOME signals are that.** A FAULT — SIGSEGV, SIGBUS, SIGFPE,
-    SIGILL, SIGABRT — is the image's own doing, which is exactly what this suite
-    exists to catch ("every case EXECUTES, because a lowering that builds a
-    plausible wrong image is precisely what this suite is for"), so a fault stays
-    an ordinary `FAIL`. Tagging a SIGSEGV `KILLED` would excuse the one death
-    this suite must never excuse, so the split is `exec_budget`'s
-    `died_by_external_signal`, not "any signal".
+    A death by signal is reported the same way, by the shared `exit_status`
+    above: 128+signum with the signal named, and `killed` True for the signals a
+    program cannot raise on itself. The two are kept apart because they are
+    different claims — a hang is this module's image
+    failing to terminate, a signal is this machine failing to let it run — and
+    that difference is the whole of what the two `stat_*` cases that died this
+    way under load (2026-10-04, deleted with this fix) could not conclude while
+    both printed `FAIL <case>` with an empty stderr.
 
     `env` replaces the environment the image starts with; `None` inherits this
     process's, which is what every case but `environ_view` wants. It is the
@@ -1637,9 +1470,10 @@ def run(out, arch, env=None):
         p = subprocess.run(argv, capture_output=True, text=True,
                            timeout=RUN_TIMEOUT, env=env)
     except subprocess.TimeoutExpired:
-        return (TIMEOUT_RC, "",
-                f"the image did not finish within {RUN_TIMEOUT}s")
-    return p.returncode, p.stdout, p.stderr
+        return (124, "", f"the image did not finish within {RUN_TIMEOUT}s",
+                False)
+    rc, detail, killed = exit_status(p.returncode, p.stderr)
+    return rc, p.stdout, detail, killed
 
 
 def parse_listdir(text):
@@ -1706,52 +1540,29 @@ def rosetta():
 
 # ── the runner ────────────────────────────────────────────────────────────
 
-# The three statuses a case can end in, and the reason a SIGNAL is one of them
-# rather than a flavour of FAIL. `KILLED` is what `died_by_external_signal`
-# fires on, and it exists because this file's `stat_*` cases were twice observed dying
-# with `exit -9, stderr ''` on a machine carrying a dozen other builds — a fact
-# about the machine that printed the same line a wrong `os` module would print.
-# A reader who cannot tell those apart will attribute a resource death to the
-# module, and `bugs/OPEN_WORK.md` §C2 records that this area has been
-# misdiagnosed twice already by doing so.
-PASS = "PASS"
-FAIL = "FAIL"
-KILLED = "KILLED"
-# …and the distinction that makes `KILLED` honest. These three are the signals a
-# program cannot raise on itself — SIGKILL is the kernel's (nothing catches or
-# ignores it), SIGTERM the supervisor's, SIGINT the terminal's — so a death by one
-# of them is the machine's and not the module's. The SET lives in `exec_budget`
-# beside the wording that uses it, because both are about the same fact, and the
-# text is what `main`'s summary names. A FAULT is the image's own doing and stays
-# an ordinary `FAIL`; see `run()` for why that is the one line this suite must
-# not blur.
-EXTERNAL_SIGNALS_TEXT = "/".join(sorted(EXTERNAL_SIGNAL_NAMES))
-
-
-def _image_status(rc, stderr, what):
-    """`(status, detail)` for an image that did not exit 0.
-
-    The three answers a caller has to be able to tell apart, and each needs a
-    different next step: `FAIL` is the module's, `KILLED` is the machine's, and
-    a build budget is neither. The wording is `exec_budget`'s, shared with the
-    three other suites that had their own copy.
-    """
-    reason = child_exit_reason(rc, stderr, subject=what)
-    return (KILLED if died_by_external_signal(rc) else FAIL), reason
-
-
 def run_listdir_case(arch, tmpdir, fixture, verbose):
-    """(status, detail) for the `listdir`/`walk` program on one architecture."""
+    """(ok, detail, killed) for the `listdir`/`walk` program on one architecture.
+
+    `killed` is the case's OWN verdict: True means the machine killed the build or
+    the image and nothing was measured, False means the case ran and this is its
+    answer. `main` counts the two separately, because "no answer" and "the wrong
+    answer" are different claims about the `os` module and a reader told only the
+    total cannot tell them apart.
+    """
     src = os.path.join(tmpdir, "os_listdir.mojo")
     with open(src, "w") as f:
         f.write(LISTDIR_PROGRAM.replace("@@ROOT@@", fixture))
     out = os.path.join(tmpdir, "os_listdir." + arch)
-    rc, text = build(src, out, arch)
+    rc, text, killed = build(src, out, arch)
     if rc != 0:
-        return _image_status(rc, text, "the build")
-    rc, stdout, stderr = run(out, arch)
+        if killed:
+            return False, killed_detail("the build", rc, text), True
+        return False, f"build failed: {text.strip()[-400:]}", False
+    rc, stdout, stderr, killed = run(out, arch)
     if rc != 0:
-        return _image_status(rc, stderr, "the image")
+        if killed:
+            return False, killed_detail("the image", rc, stderr), True
+        return False, f"exit {rc}, stderr {stderr.strip()[:200]!r}", False
     want = {(k.split()[0], k.split()[1] if len(k.split()) > 1 else "",
             k.split()[2] if len(k.split()) > 2 else ""): v
             for k, v in _listdir_oracle(fixture).items()}
@@ -1759,12 +1570,12 @@ def run_listdir_case(arch, tmpdir, fixture, verbose):
     bad = [f"{k}: the image says {got.get(k)!r}, os.listdir says {v!r}"
            for k, v in sorted(want.items()) if got.get(k) != v]
     if bad:
-        return FAIL, ("%d of %d answers differ from CPython's:\n      %s"
-                      % (len(bad), len(want), "\n      ".join(bad[:20])))
+        return False, ("%d of %d answers differ from CPython's:\n      %s"
+                       % (len(bad), len(want), "\n      ".join(bad[:20]))), False
     if verbose:
         print(f"      {len(want)} listing answers identical to os.listdir/"
               f"os.walk")
-    return PASS, ""
+    return True, "", False
 
 
 # The fixture root, for the oracle of a case whose program names `@@ROOT@@`.
@@ -1772,36 +1583,9 @@ def run_listdir_case(arch, tmpdir, fixture, verbose):
 # contract) and the fixture only exists inside `main`'s `TemporaryDirectory`.
 _FIXTURE = [""]
 
-# The NON-ASCII fixture, and it is a SEPARATE directory rather than two more
-# entries in `_FIXTURE` for a measured reason: `listdir_and_walk` walks
-# `@@ROOT@@` recursively against a CPython oracle, and adding a subdirectory to
-# that tree changes every one of its 49 answers for a change that has nothing to
-# do with them. A fixture whose only consumer is the byte-count rows keeps every
-# other row's numbers exactly as they were, which is what makes "the seed did
-# not change anything else" checkable rather than asserted.
-_UTF8 = [""]
-
-
-def make_utf8_fixture(root):
-    """A directory whose names make the BYTE/CHARACTER question visible.
-
-    Two entries, one ASCII and one not, because the whole defect is invisible on
-    an all-ASCII directory: `strlen` and `len()` are the same number for every
-    ASCII name, so a fixture of ASCII names cannot tell a correct byte answer
-    from a wrong one. The non-ASCII entry is written from its source spelling and
-    the ORACLE reads it back through `os.listdir` + `os.fsencode`, so a
-    filesystem that normalises the name to NFD (APFS does) is answered correctly
-    rather than compared against a hard-coded byte count.
-    """
-    os.makedirs(root)
-    for name in ("plain", "héllo"):
-        with open(os.path.join(root, name), "w") as f:
-            f.write("x")
-    return root
-
 
 def run_case(case, arch, tmpdir, verbose, fixture=None):
-    """(status, detail) for one case on one architecture.
+    """(ok, detail, killed) for one case on one architecture.
 
     `@@ROOT@@` is the fixture directory every case's source may name, so a case
     can ask a question about a directory whose contents it did not write. The
@@ -1809,58 +1593,54 @@ def run_case(case, arch, tmpdir, verbose, fixture=None):
     not mention the marker is unaffected, and one that does gets the same
     `run_listdir_case` does.
 
-    `status` is `PASS` / `FAIL` / `KILLED` and the last is its own value rather
-    than a flavour of `FAIL`, for `run_listdir_case`'s reason: the `stat_*`
-    cases are the ones a resource death lands on, and a `KILLED` line says so in
-    the one column a reader scans. A FAULT stays `FAIL` — see `run`.
-
-    `@@UTF8@@` is the second marker, for the same reason with a narrower scope:
-    it names the non-ASCII fixture, which is a different directory because only
-    the byte-count rows should see it.
+    `killed` means the machine killed the build or the image and the case's
+    subject was never measured — see `run_listdir_case`, which says the same and
+    is the other half of this one.
     """
     src = os.path.join(tmpdir, case.name + ".mojo")
     with open(src, "w") as f:
-        text = case.source
-        if fixture:
-            text = text.replace("@@ROOT@@", fixture)
-        f.write(text.replace("@@UTF8@@", _UTF8[0]))
+        f.write(case.source.replace("@@ROOT@@", fixture)
+                if fixture else case.source)
     out = os.path.join(tmpdir, case.name + "." + arch)
-    rc, text = build(src, out, arch)
+    rc, text, killed = build(src, out, arch)
+    if killed:
+        # Checked BEFORE the refusal branch, because a build the machine killed
+        # refused nothing: reporting it as "refused, but the message does not
+        # name ..." would read as a fact about the construct the case covers.
+        return False, killed_detail("the build", rc, text), True
     if case.refusal:
         if rc == 0:
-            return FAIL, ("it BUILT. A base whose pointee is not established "
-                          "must be refused: the blob path bounds-checks "
-                          "against the byte at offset 0 of the pointer and "
-                          "returns a number assembled out of it")
+            return False, ("it BUILT. A base whose pointee is not established "
+                           "must be refused: the blob path bounds-checks "
+                           "against the byte at offset 0 of the pointer and "
+                           "returns a number assembled out of it"), False
         if case.refusal not in text:
-            return FAIL, (f"refused, but the message does not name "
-                          f"{case.refusal!r}: {text.strip()[-300:]}")
+            return False, (f"refused, but the message does not name "
+                           f"{case.refusal!r}: {text.strip()[-300:]}"), False
         if verbose:
             print(f"      refused with: {text.strip()[-160:]}")
-        return PASS, ""
+        return True, "", False
     if rc != 0:
-        # A build the machine killed is the same shape as a run it killed, and
-        # it is the one this file's `stat_*` cases were twice observed dying in:
-        # `fire.py build` is the biggest child here, so it is the first thing a
-        # memory ceiling reaches.
-        return _image_status(rc, text, "the build")
-    rc, stdout, stderr = run(out, arch, case.env)
+        return False, f"build failed: {text.strip()[-400:]}", False
+    rc, stdout, stderr, killed = run(out, arch, case.env)
     if rc != 0:
-        return _image_status(rc, stderr, "the image")
+        if killed:
+            return False, killed_detail("the image", rc, stderr), True
+        return False, f"exit {rc}, stderr {stderr.strip()[:200]!r}", False
     got = parse(stdout)
     want = case.expect
     if want is None and case.oracle is not None:
         want = case.oracle()
     if want is None:
-        return FAIL, "the case has neither `expect` nor an `oracle`"
+        return False, "the case has neither `expect` nor an `oracle`", False
     bad = [f"{k}: the image says {got.get(k)!r}, the expected answer is {v!r}"
            for k, v in want.items() if got.get(k) != v]
     if bad:
-        return FAIL, ("%d of %d answers wrong:\n      %s"
-                      % (len(bad), len(want), "\n      ".join(bad)))
+        return False, ("%d of %d answers wrong:\n      %s"
+                       % (len(bad), len(want), "\n      ".join(bad))), False
     if verbose:
         print(f"      {len(want)} answers correct")
-    return PASS, ""
+    return True, "", False
 
 
 def build_stat_case(path, tmpdir):
@@ -1871,20 +1651,6 @@ def build_stat_case(path, tmpdir):
                                path.replace("\\", "\\\\").replace('"', '\\"'))
     return Case("stat_" + os.path.basename(path).replace(".", "_"),
                 src, None, oracle=lambda: _stat_oracle(path))
-
-
-def _line(status, name, arch, detail):
-    """One screen line, and the status is the FIRST thing on it."""
-    pad = " " * (max(len(PASS), len(FAIL), len(KILLED)) - len(status))
-    return (f"{status}{pad}  {name} [{arch}]"
-            + (("  " + detail) if detail else ""))
-
-
-def _tally(status, name, arch, failed, killed):
-    """Book a result. `KILLED` is its own list, so neither tally hides it."""
-    if status == PASS:
-        return
-    (killed if status == KILLED else failed).append(f"{name}[{arch}]")
 
 
 def main():
@@ -1915,8 +1681,6 @@ def main():
         os.makedirs(fixture)
         _FIXTURE[0] = fixture
         paths = make_shapes(fixture)
-        _UTF8[0] = make_utf8_fixture(
-            os.path.join(tmpdir, "utf8"))
         cases = list(CASES)
         for shape, p in sorted(paths.items()):
             cases.append(build_stat_case(p, tmpdir))
@@ -1940,31 +1704,37 @@ def main():
                         print(f"SKIP {n} [{arch}]  ({case.archs_reason})")
                         continue
                     total += 1
-                    status, detail = run_listdir_case(arch, tmpdir, fixture,
-                                                      args.verbose)
-                    print(_line(status, n, arch, detail))
-                    _tally(status, n, arch, failed, killed)
+                    ok, detail, was_killed = run_listdir_case(
+                        arch, tmpdir, fixture, args.verbose)
+                    print(("PASS " if ok else "FAIL ") + f"{n} [{arch}]" +
+                          (("  " + detail) if detail else ""))
+                    if not ok:
+                        failed.append(f"{n}[{arch}]")
+                        if was_killed:
+                            killed.append(f"{n}[{arch}]")
                 continue
             for arch in archs:
                 if case.archs is not None and arch not in case.archs:
                     print(f"SKIP {n} [{arch}]  ({case.archs_reason})")
                     continue
                 total += 1
-                status, detail = run_case(case, arch, tmpdir, args.verbose,
-                                          fixture)
-                print(_line(status, n, arch, detail))
-                _tally(status, n, arch, failed, killed)
-    # Three numbers rather than two, and the split is the point: a `KILLED` case
-    # is not a wrong answer and is not counted as one, because the machine
-    # killed it on one of `EXTERNAL_SIGNALS_TEXT` — a signal this suite never
-    # sends. Before this file could say so, `exit -9, stderr ''` printed
-    # `FAIL stat_fifo [arm64]`, which is the same line a defect in `os` prints —
-    # and `bugs/OPEN_WORK.md` §C2 says this area has already been misdiagnosed
-    # twice that way.
-    print(f"\n{total - len(failed) - len(killed)}/{total} passed"
-          + (f", {len(killed)} obtained NO verdict because the machine killed "
-             f"them on {EXTERNAL_SIGNALS_TEXT}, which is not a wrong answer: "
-             f"{', '.join(killed)}" if killed else ""))
+                ok, detail, was_killed = run_case(case, arch, tmpdir,
+                                                  args.verbose, fixture)
+                print(("PASS " if ok else "FAIL ") + f"{n} [{arch}]" +
+                      (("  " + detail) if detail else ""))
+                if not ok:
+                    failed.append(f"{n}[{arch}]")
+                    if was_killed:
+                        killed.append(f"{n}[{arch}]")
+    print(f"\n{total - len(failed)}/{total} passed")
+    if killed:
+        # Named here rather than only in the per-case lines, because the per-case
+        # line is the thing a reader scrolls past: this is the sentence that stops
+        # `stat_dangle` and `stat_fifo` from being read as a broken `os` module.
+        print(f"{len(killed)} case(s) obtained NO verdict because the machine "
+              f"killed them on a signal this suite does not send "
+              f"({EXTERNAL_SIGNALS_TEXT}), which is not a wrong answer: "
+              f"{', '.join(killed)}")
     return 1 if failed else 0
 
 

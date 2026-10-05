@@ -2,20 +2,6 @@
 
 ## Status
 
-**`CMN` and `TST` are WIRED as of 2026-10-05, so this file's own reachability
-correction is now stale in the one direction that mattered.** `encode_cmn_xn_xm`
-and `encode_tst_xn_xm` are no longer in
-`tools/arm64_insn_audit.py::unwired_encoders` — `formal/arm64_codegen.py`'s
-`_emit_branch_unless_sum_zero` and `_emit_branch_unless_and_test` emit them for
-`(x + y) == 0` and `if x & y:` — so §2's claim that "**every** encoder in the
-table above is wired" is now TRUE for all seventeen, and §3's "`encode_cmn_xn_xm`
-is emitted by `formal/arm64_codegen.py`" is no longer the false claim the
-2026-10-05 re-measurement said it was. What the re-measurement got right and
-still stands: the two model arms were worth landing regardless, because
-`tools/formal_model_fuzz.py` builds its pool from the ENCODER TABLE rather than
-from images, so an unwired encoder showed up there as a `NOSTEP` and the model
-had to be complete for everything `formal/arm64.py` can produce.
-
 **Fourteen of the sixteen counterexamples are LANDED (2026-10-04, `formal28-2`),
 and the number that says so is the fuzzer's own tally, not this file.** Twelve
 memory forms and two flag-setting compares now have model arms, `work_step_*`
@@ -47,14 +33,13 @@ What landed, in the order §4 gives:
    proof rewrites every earlier condition with an `hne_` of its own, and putting
    these in the architectural position would have meant editing all 34 existing
    lemmas. Appending leaves every existing rewrite chain untouched, and the price
-   — that no earlier arm may claim these words — is paid by the twelve new
+   — that no earlier branch may claim these words — is paid by the twelve new
    lemmas themselves, each of which states the `¬` fact for all the arms before it
    as a `bv_decide` over 2^32 words. They would not typecheck if an earlier arm
    claimed one of these encodings.
 3. **`CMN` and `TST`**, also appended, with `arm64_adds_flags` and
-   `arm64_logic_flags`. **BOTH EMITTED as of 2026-10-05** (see the Status
-   above), so §"the reason is a SECOND consumer of the model" is now history
-   rather than the reason.
+   `arm64_logic_flags`. See the correction below: **both of their encoders are
+   UNWIRED**, so this is not for the images.
 4. `test_formal_call_proof_gen.py::TestUnsignedOffsetAccess` runs all eighteen
    of these on the CPU and compares `arm64_step`'s final state against it — about
    two seconds, and the reason three of the mistakes below were caught rather

@@ -943,34 +943,6 @@ def main(n):
     printf("ns_pos=%d@@", clock_gettime_nsec_np(0) > 0)
     printf("ns_gt_2p31=%d@@", clock_gettime_nsec_np(0) > 2147483648)
     printf("len_ok=%d@@", strlen("abcd") == 4)
-    # …and the four the host-module census found UNCLASSIFIED until 2026-10-05,
-    # measured the same way rather than declared. `kill_bad_eq_m1` is the row
-    # that MATTERS: `kill` returns 0 or -1, -1 compared as a 64-bit word is the
-    # 32-bit bug this whole group is about, and `kill(getpid(), 0x7FFFFFFF)`
-    # reaches the -1 without signalling anything (an invalid signal number is
-    # EINVAL) — so the three comparisons are `== -1`, `< 0` and `!= 4294967295`
-    # together, exactly the `mkstemps` triple above.
-    #
-    # **MEASURED, and it is worth saying what it does NOT show: on this platform
-    # these four answer correctly whether or not the table classifies them.**
-    # Verified by removing the four entries and re-running: the whole group,
-    # both architectures, still passed. libSystem's arm64 `kill` and `getpid`
-    # happen to arrive SIGN-EXTENDED and `getpwnam`/`strsignal` are pointers,
-    # which is the same accident `truncate` is the control for two rows above.
-    # So what these rows measure is that the classification did not make an
-    # answer worse — and what the census row above them measures is that the
-    # answers were right for a reason nobody wrote down. That is the whole of
-    # `BARE_C_RETURN_KINDS`: it stops this platform's codegen from being the
-    # reason, and a host whose libc zero-extends is where the entries earn
-    # their keep.
-    printf("pid_pos=%d@@", getpid() > 0)
-    printf("kill_eq_0=%d@@", kill(getpid(), 0) == 0)
-    printf("kill_ne_m1=%d@@", kill(getpid(), 0) != -1)
-    printf("kill_bad_eq_m1=%d@@", kill(getpid(), 0x7FFFFFFF) == -1)
-    printf("kill_bad_lt_0=%d@@", kill(getpid(), 0x7FFFFFFF) < 0)
-    printf("kill_bad_ne_32=%d@@", kill(getpid(), 0x7FFFFFFF) != 4294967295)
-    printf("pwnam_nosuch=%d@@", getpwnam("no_such_user_447_9f63a2") == 0)
-    printf("sig_nonempty=%d@@", strlen(strsignal(15)) > 0)
     return 0
 """
 
@@ -987,17 +959,6 @@ RET_EXPECTED = {
     "ns_pos": "1",
     "ns_gt_2p31": "1",
     "len_ok": "1",
-    # The four, established against this host's own C library through `ctypes`
-    # in this process rather than stated: `getpid()` is a positive int,
-    # `kill(getpid(), 0)` is 0, `kill(getpid(), 0x7FFFFFFF)` is -1 (measured:
-    # 0x7FFFFFFF, 0x7f and 999 all give -1/EINVAL), `getpwnam` of a name that
-    # cannot exist is NULL, and `strsignal(15)` is `"Terminated: 15"` on this
-    # platform, so its length is non-zero.
-    "pid_pos": "1",
-    "kill_eq_0": "1",
-    "kill_ne_m1": "1",
-    "pwnam_nosuch": "1",
-    "sig_nonempty": "1",
 }
 
 

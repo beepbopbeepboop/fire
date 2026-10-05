@@ -1,7 +1,7 @@
 # FORMAL_sweep12_singles_a: the §3.2 single-file causes, first half — what landed on 2026-10-03 and what is left
 
 **Claim** `sweep12:ctor-self-and-singles-a`. This is the state of ONE HALF of
-the `b7` round of `bugs/FORMAL_sweep_work_map.md` §3.2's single-file causes, plus the
+`bugs/FORMAL_sweep_work_map_2026-10-02_b7.md` §3.2's single-file causes, plus the
 two rows that map names separately. It is a STATUS document, not a queue entry:
 every cause below is either fixed here, fixed by somebody else, blocked on a
 cause another claim holds, or not makeable from a repository worktree — and the
@@ -38,37 +38,7 @@ mine, because it is the one standing between my assigned file and a build. If
 that owner lands the `LaunchError` half, the two are one rule and the docstring
 in each should say so.
 
-## 2a. RE-MEASURED 2026-10-05: EVERY ROW IN §3 HAS MOVED (`work/formal29-5`)
-
-One build each, `tools/formal_sweep.py -j 2 -t 120 --no-stdlib`, arm64 — and
-**not one of the four files is stopped by what this section names**, which is the
-same failure this section is about, one round later:
-
-| file | §3's terminal cause | what it says NOW |
-|---|---|---|
-| `determinism_trace.py` | `os.environ` reads `'environ'` out of the imported module (`FORMAL_module_state_no_storage`) | an **f-string literal at line 96** — the same missing buffer `std/sys/info.mojo` and `builtin_slice.mojo` now stop on |
-| `module_spec_gen.py` | an `except` arm: no unwinder | an **f-string literal at line 36** — so the `except` arm is no longer the FIRST refusal a walk reaches |
-| `mojo/backend_gimple/spec_gen.py` | the same | an **f-string literal at line 53** |
-| `formal/x86_64.py` | `base.value` on a `Reg` parameter (filed as `FORMAL_an_enum_typed_parameters_field_has_no_layout`) | `x86_64.py imports 'formal.model', which cannot be built either: model.py imports 'collections'` — a HOST IMPORT, which is a different row and a bigger one |
-
-**Two things follow, and the first is why this section exists.** The string-kind
-row underneath `determinism_trace.py`'s `_v == '1'` is no longer reachable from
-that file (the f-string comes first), so §3's careful paragraph about the
-recorded next step is now a note for a different file — it is still the right
-next step for the gap, and `formal/model.py` is still where the fix goes, but
-nothing in this claim's slice measures it any more. And **the doc this section
-filed, `FORMAL_an_enum_typed_parameters_field_has_no_layout.md`, does not exist
-in this tree** (§5 cites it): either its fix landed with its doc or the doc was
-deleted without one, and in either case §5's citation is dead. `formal/x86_64.py`
-itself is now behind `collections`, which is a CLAIMED row, so re-measuring that
-row is not this claim's.
-
 ## 3. The file's TERMINAL cause is another claim's, so fixing my cause moves no number
-
-**Every cell in this table is stale; §2a has today's.** It is kept because the
-pattern it records — a cause you fixed is not the cause the file stops at — is
-what §2a is a second instance of, and because a reader who wants the 2026-10-03
-state should not have to reconstruct it.
 
 This is the single most important thing in this document, and it is why two of my
 rows produced no coverage.
@@ -114,15 +84,10 @@ reader should not have to re-derive it.
   **kw)`, found by clearing §4 of §2 above. Not in any list; the refusal is
   correct and the doc carries the minimal reproduction, both architectures, and
   the two ways out.
-- ~~`FORMAL_an_enum_typed_parameters_field_has_no_layout`~~ — `base.value`
-  on a `base: Reg` parameter, which was my §3.2 row for `formal/x86_64.py`.
+- `FORMAL_an_enum_typed_parameters_field_has_no_layout` — `base.value`
+  on a `base: Reg` parameter, which is my §3.2 row for `formal/x86_64.py`.
   Measured at **1 file in 668**, with the four-step design written out, because
   the design is the deliverable and the sizing is what a reader needs first.
-  **THE DOC IS NOT IN THIS TREE** (measured 2026-10-05, §2a) and the file no
-  longer reaches that refusal anyway, so this citation names a bug that is
-  either fixed or unrecorded: a reader who wants it should grep
-  `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` and the
-  `Reg` rows of `formal/x86_64_decode.py`'s own docstring rather than this line.
 
 ## 6. Not attempted, and why
 

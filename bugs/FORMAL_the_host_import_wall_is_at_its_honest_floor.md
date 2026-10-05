@@ -142,48 +142,6 @@ write; it is `abc` (165 reach, 0 alone) wearing a different name, and the
 the same reason the field bug was: it was the first thing that looked like a
 blocker, and it was fixed, and the row did not move.
 
-## 0.1 Re-measured with §5's own tool (2026-10-05, `work/formal37-3`): TWO ROWS LEFT THE TABLE, and the corpus's one unreadable file is readable
-
-`python3 tools/formal_host_import_wall.py --json`, over **768** files (this
-document's §0 walked 735), reading `bugs/sweeps/sweep-arm-13.txt` for the
-`sweep` column and attributing **220 of 220** host-import lines. **Three things
-moved, and each is a closure rather than a correction.**
-
-**1. `itertools` and `random` are no longer walls at all.** §3's table has them
-at 21/1/14 and 8/2/5; neither is in the tool's output today.
-
-| row | what closed it |
-|---|---|
-| `itertools` | **a classification, not a module.** `formal/imports.py`'s `HOST_UNREACHABLE` names it, so the two files that reach it (`test_gimple.py`, `test_gimple_runner.py`) are told the target cannot have it rather than being queued for a capability. §3's "a lazy sequence … `combinations` is a generator of tuples; neither half is representable" is the same fact, now decided |
-| `random` | **a module.** `formal/hostmods/random.mojo` landed 2026-10-05 (`5f8ba760`) — a real Mersenne Twister over 624 words of module-level state, with the measurement that module state *does* persist across calls inside one image. **It is 2 of the 8 files, and the module's own docstring says so**: the five `Random(...)` callers want an object whose whole state is 624 words behind a pointer, which is `FORMAL_module_state_no_storage.md`'s missing thing and is not reachable by writing a `.mojo` file |
-
-**2. The corpus's one file the backend could not read is readable.** §0 and §5
-both record it: `test_formal_libc_symbol.py`, because an f-string replacement
-field containing a newline is PEP 701 and this repository's tokenizer predated
-it. **The tool now reports `unreadable: 0` of 768**, and the lexer that learned
-the rule is `fire_compiler.py::_scan_string_end`. A document that told a reader
-to discount a file from its own measurements no longer needs the caveat.
-
-**3. The `alone` column — the only one that survives a corpus change — moved, and
-the two directions are both explained.** `collections` **12 → 8** (a claimed lane
-landing, `hostmods-platform`), `unittest` **7 → 9**, `copy` **1 → 0** and
-`datetime` **2 → 0** (those files reach something else now), `fractions`
-**0 → 1** (`test_formal_time.py`, new since §0 wrote the table). `reach` moved
-with the corpus — `importlib` 236 → 253, `abc` 236 → 253 — which §0 already says
-is a bigger corpus and not a bigger wall.
-
-**Three rows are new** and none of them is a claim: `multiprocessing` (1 reach,
-`unclassified`), `pickle` (1, modelled) and `unittest.mock` as its OWN row
-(1 reach / 1 sweep, unreachable) — §3 counts `unittest.mock` as a *spelling*
-inside the `unittest` row, and the tool now classifies it separately.
-
-**What this does to the document's own conclusion.** "A queue of six missing
-capabilities with 20 names on them" is now **22 names on the same six**, and two
-of the six have lost their rows to a module and a classification respectively.
-The queue is shorter; the capabilities are unchanged, which is the finding this
-document opened with and the reason the next person should read §3's "what it
-needs" column rather than its numbers.
-
 ## 1. How the ranking was measured, and the correction it forced
 
 Two instruments, and the first one was wrong in a way worth writing down.

@@ -13,13 +13,12 @@ function: `#functions × #methods × body size` instead of
 `#structs × #methods × body size`.
 
 That is the shape the 2026-10-02 per-struct census measured (its doc is
-deleted with the fix; this file and
-`bugs/PERF_struct_field_names_is_still_asked_once_per_function.md` are what
-is left of the family) (43 508 redundant derivations on `myinterpreter.py`, 33 s of a 97 s
-build) and its fix is the module-level tables `formal/build.py` derives once and
-threads: `framed_struct_names`, `one_field_struct_names`, the `wide` table. Two
-per-function askers survived that, both found by the measurement in
-`bugs/FORMAL_build_cost_2026-10-03.md` §6 and fixed 2026-10-04:
+deleted with the fix, as is `bugs/PERF_struct_field_names_is_still_asked_once_per_function.md`,
+which was the last member of the family and is deleted with the fix that
+retired its asker) (43 508 redundant derivations on `myinterpreter.py`, 33 s of a
+97 s build) and its fix is the module-level tables `formal/build.py` derives once
+and threads: `framed_struct_names`, `one_field_struct_names`, the `wide` table.
+Three per-function askers survived that, and all three are fixed:
 
   * `_seed_one_word_bindings` read `struct_is_framed(pst)` OR
     `not one_field_answer(pst, one_field)` — and the first operand is DEAD,
@@ -30,9 +29,16 @@ per-function askers survived that, both found by the measurement in
   * `_bound_receiver_structs`' owner fallback asked `struct_is_framed(owner)` for
     an owner `framed` does not cover, which is every ONE-field struct — and a
     one-field struct is absent from `framed` for the same reason it is not
-    framed, so the table answers by ABSENCE.
+    framed, so the table answers by ABSENCE;
+  * `_one_word_sole_field_chain` asked `_sole_field_name(st)`, and
+    `_sole_field_name` asked `model.struct_sole_field_name` — a SECOND
+    derivation of the field set the partition's own table had already paid for.
+    `one_field_struct_names` now publishes the field's NAME as its value, so
+    `model.sole_field_answer` reads it off that table and no reader re-derives
+    the field set. One table over one partition, rather than two that could
+    disagree about which structs have one field.
 
-**What this file pins is the property, not those two lines.** It doubles the
+**What this file pins is the property, not those three lines.** It doubles the
 number of FUNCTIONS in a module whose struct has many methods and asserts the
 ask counts do not move. A regression that puts a per-function asker back makes
 the counts grow with the function count and this fails; a regression that
@@ -57,19 +63,15 @@ sys.path.insert(0, HERE)
 import formal.build as B                                # noqa: E402
 import formal.model as M                                # noqa: E402
 
-# The four predicates of the partition, and the two per-struct tables they are
-# read off. Named here so a table that loses a reader is visible in the diff.
 # The three predicates of the partition. Each is read off a module-level table,
 # so its ask count is a function of the module's STRUCTS and must not move when
 # the FUNCTION count does.
 PREDICATES = ('struct_is_framed', 'struct_fits_one_word', 'struct_is_one_field')
-# …and the one that is NOT one of the partition's three, COUNTED rather than
-# listed in `PREDICATES` because it is wrapped for the same reason the others
-# are — a count nothing collects is a count nothing can assert on — and
-# asserted on by its own case rather than by the loop above. It grew by one per
-# added FUNCTION until `model.sole_field_names` joined the other two tables; see
-# `test_the_field_set_does_not_grow_with_the_function_count` for the asker and
-# the numbers.
+# …and the derivation they are all made of, which is now flat in the function
+# count for the same reason. It is COUNTED rather than listed in `PREDICATES`
+# because it is wrapped for the same reason the others are — a count nothing
+# collects is a count nothing can assert on — and because it is the one a
+# second reader of the field set would put the slope back on.
 COUNTED = PREDICATES + ('struct_field_names',)
 FIELD_SET = 'struct_field_names'
 RESULTS = []
@@ -153,35 +155,38 @@ def test_the_asks_do_not_grow_with_the_function_count():
               'the per-struct tables answer this without a walk')
 
 
-def test_the_field_set_does_not_grow_with_the_function_count():
-    """`struct_field_names` is asked a FIXED number of times, and the number is
-    a function of the module's STRUCTS.
+def test_the_field_set_ask_is_flat_in_the_function_count():
+    """`struct_field_names` is asked once per STRUCT, and once per struct only.
 
-    It used to grow by ONE per function, and this pinned that slope rather than
-    pretending it was zero: the asker was
-    `_one_word_sole_field_chain`'s `_sole_field_name(st)`, which asks
-    `model.struct_sole_field_name` for the struct whose single field IS the word,
-    once per function that holds or owns one — 64 asks at 20 functions, 84 at 40.
+    This was the last asker of the field set that scaled with the FUNCTION
+    count: `_one_word_sole_field_chain` asked `_sole_field_name(st)` for the
+    struct whose single field IS the word, once per function that held or owned
+    a one-word struct, and `_sole_field_name` asked `model.struct_sole_field_name`
+    — a SECOND derivation of the field set the partition's own table had already
+    paid for. So the slope was exactly +1 per function.
 
-    The fix is the shape this file's docstring describes for the other two:
-    `model.sole_field_names` publishes `{name: field}` per struct beside
-    `one_field_struct_names`, derived with `struct_sole_field_name` so the two
-    tables cannot disagree about which structs have one field, and
-    `formal/build.py` threads it beside `one_field` through the eight helpers that
-    ask. Measured after: **33 asks at 20 functions and 33 at 40** — and 33 rather
-    than 1 because a struct's field set is still derived once per FUNCTION for
-    the handful of predicates that were never in the table, which is the same
-    bargain `framed` and `one_field` made.
+    The fix is the shape this file's docstring describes for the other three, and
+    it is ONE table rather than two: `one_field_struct_names` publishes the
+    field's NAME as its value, so `model.sole_field_answer` reads the name off
+    the partition and no reader re-derives the field set. Two tables over one
+    partition would have been free to disagree about which structs have one
+    field; there is only one table, so they cannot.
 
-    So the assertion is a STRICT EQUALITY now, and that is the point: a second
-    per-function asker of the field set doubles the count and fails here, and
-    the failure names which predicate moved rather than reporting a slope.
+    The assertion is a STRICT EQUALITY rather than a bounded slope, because the
+    slope's floor was 1.0 and a bound of 1.0 cannot tell "one derivation per
+    struct" from "one derivation per function on a module where they happen to
+    be equal". The count is now a function of the module's structs alone, and
+    40 functions asking no more than 20 do is the whole claim.
     """
     small = ask_counts(module_with(20))
     large = ask_counts(module_with(40))
     check(large[FIELD_SET] == small[FIELD_SET],
           f'{FIELD_SET}: 40 functions ask it as often as 20 do',
           f'{small[FIELD_SET]} then {large[FIELD_SET]}')
+    check(large[FIELD_SET] <= 8,
+          f'{FIELD_SET}: asked {large[FIELD_SET]} times for ONE struct',
+          'the one-field table derives it once per struct and every reader '
+          'reads the name off that table')
 
 
 def test_the_count_is_not_the_fallback_walking():
@@ -213,7 +218,7 @@ def main():
     ap.add_argument('-v', '--verbose', action='store_true')
     ap.parse_args()
     test_the_asks_do_not_grow_with_the_function_count()
-    test_the_field_set_does_not_grow_with_the_function_count()
+    test_the_field_set_ask_is_flat_in_the_function_count()
     test_the_count_is_not_the_fallback_walking()
     npass = sum(1 for ok, _w in RESULTS if ok)
     nfail = len(RESULTS) - npass
