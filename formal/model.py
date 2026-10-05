@@ -1769,8 +1769,10 @@ def _op_target_has_feature(args: list, tgt: Target):
     So the whole operation refuses, with the one fact the reader can act on: it
     is a per-CPU question, and this build has no per-CPU input. It is
     `std/sys/info.mojo`'s `_has_feature`, and it is the reason that module does
-    not build even with every field query answered — see
-    bugs/FORMAL_target_query_evaluator.md."""
+    not build even with every field query answered — one of the TWO permanent
+    refusals in that module, the other being `current_target` read as a value;
+    both are tabulated in FORMAL_known_limits.md §2.0, which is where that
+    module's residue is recorded."""
     if not isinstance(args[0], Target) or not isinstance(args[1], str):
         return _unanswered(
                 "a CPU feature is a property of a CPU, and this build names "

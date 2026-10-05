@@ -15216,9 +15216,11 @@ def _apply_constant_sites(node, sites: dict, disputed: dict = None,
                 # value is a 64-bit literal the evaluator hands over, and the
                 # program below builds and answers on arm64 and on x86-64. That is
                 # the same defect the default-parameter-value position had
-                # (`bugs/FORMAL_target_query_evaluator.md` §4): one position
-                # falling through to a DIFFERENT rule, so the diagnostic a reader
-                # got depended on where in the source they wrote the query.
+                # (fixed in the same shape one commit earlier, `417b9833`, which
+                # extended `_fold_target_queries` to `fn.param_defaults`): one
+                # position falling through to a DIFFERENT rule, so the
+                # diagnostic a reader got depended on where in the source they
+                # wrote the query.
                 folded = [0]
                 if _fold_a_class_level_default(st, default, folded):
                     literal, default = _constant_literal(st, node.member,

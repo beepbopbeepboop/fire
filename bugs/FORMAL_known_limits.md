@@ -624,9 +624,13 @@ What it refuses, and why, is the half that was right:
 
 **Measured effect on the sweep: no file moved.** `std/sys/info.mojo` is still a
 direct finding, now on its `_TargetType` **type** binding rather than on an
-attribute — the same module, one message corrected. The next terminal behind it
-is a different construct entirely and is filed as
-**`FORMAL_target_query_evaluator.md`**, with the measurement.
+attribute — the same module, one message corrected. **The residue behind it is
+this table's own last three rows and nothing else**: `_TargetType`'s type
+binding, `current_target` as a value, and `target_has_feature` — the first a
+type where this path has no value, the second a target description read as a
+64-bit word, the third a per-CPU question with no per-CPU input. All three are
+permanent by the arguments given above, so a reader planning `info.mojo` should
+plan against them rather than look for a fourth.
 
 Two builds of the two spellings and the two nesting positions a query reaches
 (`formal/build.py:_fold_target_queries`, `model.fold_module_value`) are the
@@ -863,8 +867,9 @@ behind it are refused on it. **That is the correct end state for them, not a
 gap.** The module's entire purpose is inline assembly, there is no MLIR in a
 freestanding image for an MLIR operation to become, and nothing about the
 `_get_kgen_string` import it also fails on can change that: the body is fatal
-whether or not the import resolves. See `FORMAL_target_query_evaluator.md`
-Blocker 2 for the cycle that is behind that import. The diagnostic it produces
+whether or not the import resolves. The cycle behind that import is
+`string_slice.mojo` → `std.sys` → `_assembly.mojo` → `string_slice.mojo`, and
+`formal/imports.py`'s dylib build resolves it by refusing the second visit. The diagnostic it produces
 is `model.imported_callee_refusal`, which **now also covers the BARE spelling**
 — the defect was that an imported generic reached the LINK AUDIT when called as
 `widen(5)` rather than `widen[Int](5)`, because the bare callee was exempt from
@@ -1314,7 +1319,7 @@ transferable lesson:
 | **3** | `Slice.__init__` — run a declared `__init__` / field-filling construction | 20 | **days**, self-contained | The cheapest *capability* in the residue, and the message that describes it is already exact. Nothing about it needs a new value model |
 | **4** | ~~`env.mojo`'s message, rewritten to name a template application~~ | ~~0~~ **55** | **done 2026-09-29** | The reword was never needed: the message was replaced by a **lowering** (§6.2.1). Listed here struck through because a ranking that still carries it would send the next reader to edit text that no longer exists |
 | **5** | the 19 singleton direct causes (§3) | 19 | one sitting each | Already audited in §3; several are weak messages rather than capabilities, and §3's own guidance applies: **prefer fixing a wrong message to adding a capability** |
-| — | MLIR attribute templates | 41 | **nothing — permanent** for the dialect attributes (§2.1); the `#kgen.param.expr<…>` target queries ARE answered (§2.0) | §2 for the attributes; `FORMAL_target_query_evaluator.md` for what the query half still does not reach |
+| — | MLIR attribute templates | 41 | **nothing — permanent** for the dialect attributes (§2.1); the `#kgen.param.expr<…>` target queries ARE answered (§2.0) | §2 for both halves; the query half's residue is §2.0's own last three rows, not a separate list |
 | — | host-import | 166 (160 in reach) | sized, see below | not a limit at all |
 
 **So: the biggest remaining lever is Stage 5 monomorphization, and the numbers

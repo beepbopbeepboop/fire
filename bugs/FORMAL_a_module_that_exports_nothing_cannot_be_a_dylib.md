@@ -47,8 +47,10 @@ Status gave:
 * and the working repair for the table is still an accessor, which is a source
   change to an external stdlib that no repository worktree can make.
 
-Found by sweeping `std/collections` for `sweep14:std-collections`; see
-`FORMAL_sweep14_std_collections.md` §5.1.
+Found by sweeping `std/collections` (`std/collections` 33 files: 3 pass, 2
+refused in themselves, 28 behind one of six walls — this export gate, the
+`binary_heap.mojo` `pop()` receiver, `builtin_slice.mojo`'s `self = other`, the
+bracketed-specialization rule, and one call through a function VALUE).
 
 ---
 
