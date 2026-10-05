@@ -223,7 +223,7 @@ _NON_ASCII_ELEMENT_REFUSAL, _NON_ASCII_QUANTITY_REFUSAL = _non_ascii_messages()
 # that blocks nothing.
 FRAME_SLOT_CAUSE = "container operation on a frame slot"
 
-# The planner's spelling of the SAME cause as `_OWN_METHOD_FAMILY` above, and it
+# The planner's spelling of the SAME cause as `OWN_METHOD_FAMILY` above, and it
 # is spelled here independently of `tools/formal_sweep_causes.py::CAUSES` for
 # the reason `STRING_COMPOSITION_CAUSE` is: the two tables are keyed on
 # different things, so the pair of samples is what proves the two spellings
