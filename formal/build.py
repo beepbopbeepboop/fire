@@ -15499,6 +15499,25 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         found = M.unemitted_handler_arm(fn)
         if found is not None:
             raise CodegenError(M.refuse_dropped_handler_arm(fn, found))
+    # A GENERATOR FUNCTION, refused here for the same three reasons as the
+    # handler arm above, and it is the sharpest instance of them. Both emitters
+    # lowered a `yield` to its value evaluated in place and dropped it, so the
+    # body ran to completion at the CALL: `printf("%d", gen())` printed `5`
+    # where CPython cannot print a number at all, and `for v in gen():` read
+    # that word as a container header and died on SIGSEGV with empty stdout on
+    # BOTH backends. Nothing upstream of an emitter could have caught it: the
+    # `yield` reached the emitter as an ordinary expression statement, and each
+    # emitter had its own "Generator lowered as a plain function" comment
+    # agreeing with the other about a lowering neither could honour.
+    #
+    # HERE, in the one pipeline both front ends go through, so the executable
+    # and dylib paths cannot answer differently about one source file and the
+    # sentence comes from `formal/model.py` (`generator_function_refusal`)
+    # rather than being written twice. Before `_flatten_closures`, so the
+    # `yield`'s own function is named by the spelling the reader wrote.
+    why_generator = M.generator_function_refusal(functions)
+    if why_generator is not None:
+        raise CodegenError(why_generator)
     # NAMED for what it holds, because the two tables in this function have the
     # same SUBJECTS and incompatible SHAPES and were interchanged once already
     # (`FORMAL_frame_receivers_is_handed_the_method_name_table`):

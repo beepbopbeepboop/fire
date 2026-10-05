@@ -35061,6 +35061,107 @@ def module_body_refusal(stmt):
     return None
 
 
+def yield_bearing_functions(functions) -> list:
+    """Every function in `functions` whose OWN body holds a `yield`.
+
+    A list rather than a yes/no because the reader's question is "which
+    function", and a message that named only the first would leave the same
+    file refused for the second the moment the first was fixed.
+
+    The SCOPE question is not re-answered here: it is `FunctionDef.is_generator`
+    as the front end set it (`fire_compiler.py`'s `_scan_yield_bearing`, which
+    stops at a nested `def`, a lambda and a comprehension because those are
+    Python's own scope boundaries). A second walk with a second rule would be a
+    second answer to "whose `yield` is this", and the two would disagree on
+    exactly the case that is hardest to see — a `yield` inside an inner `def`
+    belonging to the outer one.
+
+    Nested definitions are included, each reported as the function that OWNS its
+    `yield`, which is the front end's answer for the same reason. Asked before
+    `formal/build.py`'s `_flatten_closures` renames a nested `def` to its lifted
+    symbol, so the name in a refusal is the name the reader wrote.
+
+    A generator EXPRESSION is not here and never can be: the parser represents
+    `(x for x in xs)` as a `Comprehension` with `kind == "generator"`, not as a
+    function, and it lowers (`formal/build.py` builds `fire_compiler.py`'s
+    `genexp_body` statement list for it). Only a `def` that says `yield` is a
+    generator function, and only that is refused.
+    """
+    out: list = []
+    for fn in (functions or []):
+        if getattr(fn, "is_generator", False):
+            out.append(fn)
+        for node in iter_nodes(getattr(fn, "body", None)):
+            if (isinstance(node, F.FunctionDef)
+                    and getattr(node, "is_generator", False)):
+                out.append(node)
+    return out
+
+
+def generator_function_refusal(functions) -> str:
+    """Why a generator function is not in the image, or None when there is none.
+
+    `None` is the answer for every unit without one, which is the answer for the
+    overwhelming majority — this is a scan over the module's own functions, not
+    a per-function flag threaded through two emitters.
+
+    THE ALTERNATIVE WAS THE WORST FAILURE ON THIS PATH, and it is measured
+    rather than argued. Both emitters lowered a `yield` to its value evaluated
+    in place and dropped it (`formal/arm64_codegen.py` and
+    `formal/x86_64_codegen.py`, "Generator lowered as a plain function: yield e
+    leaves e in X0 / RAX"), so a generator function became an ordinary function
+    whose body runs to completion at the CALL and returns whatever its last
+    statement computed:
+
+        def gen():                     CPython            this path
+            yield 1                     <generator>        runs the body
+            return 5                    object             returns 5
+        printf("%d", gen())             TypeError-ish      "5"
+
+    and iterating one read the returned word as a container header:
+
+        for v in gen():                1, then a          SIGSEGV
+            ...                         StopIteration      (measured, both
+                                                            backends)
+
+    A wrong-but-exit-0 artifact is what CLAUDE.md calls the failure every other
+    check is structurally blind to, and this one faulted instead: two of three
+    shapes below died on SIGSEGV with empty stdout and no diagnostic on either
+    stream, and the third printed a number CPython cannot print.
+
+    So the refusal names the construct, says what CPython does, says what this
+    path would have done instead, and names a spelling that works — because a
+    reader told only "not supported" has no next edit. A generator EXPRESSION is
+    that spelling and it really does lower here, so the sentence offers it; the
+    list-and-append rewrite is the other, for when the laziness is the point.
+    """
+    gens = yield_bearing_functions(functions)
+    if not gens:
+        return None
+    names = ", ".join(f"`{g.name}`" for g in gens[:4])
+    if len(gens) > 4:
+        names += f" and {len(gens) - 4} more"
+    where = ""
+    line = getattr(gens[0], "line", 0) or 0
+    if line:
+        where = f"line {line}: "
+    head = names if len(gens) > 1 else f"`{gens[0].name}`"
+    return (
+        f"{where}{head} {'are' if len(gens) > 1 else 'is'} a GENERATOR FUNCTION "
+        f"— a `def` whose body holds a `yield`. CPython makes calling it produce "
+        f"a generator object and runs NONE of the body until something iterates "
+        f"that object, one value per `next()`. This path has no value to hold a "
+        f"generator and no way to resume a body part-way through, so a `yield` "
+        f"lowers to its value evaluated in place and discarded: calling "
+        f"`{gens[0].name}(…)` runs the whole body at once and returns whatever "
+        f"its last statement computed, and a `for x in {gens[0].name}(…)` then "
+        f"reads that word as a container header — measured, the program died on "
+        f"SIGSEGV on both backends. Build the values into a list instead "
+        f"(`xs = []` and `xs.append(…)` in a loop, then iterate `xs`), or use a "
+        f"generator EXPRESSION — `(x * 2 for x in xs)` — which is a different "
+        f"construct, is not a `def`, and does lower here.")
+
+
 def folded_literal_node(folded, template):
     """An AST literal node carrying `folded`, keeping the ORIGINAL's spelling.
 
