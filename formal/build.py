@@ -18141,10 +18141,18 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
         "constants": dict(constants or {}),
         "variables": sorted(variables or ()),
         "containers": sorted(containers or ()),
+        # `declaration` is the C DECLARATION a client writes, beside `signature`
+        # rather than in place of it: `signature` is the lookup key
+        # `formal/imports.py::linked_struct_owners` derives a struct name from
+        # (`Struct.method`), and a free function's is already a declaration.
+        # Absent (None) for an export with no receiver convention to state,
+        # which is what `model.method_boundary_declaration` answers when the
+        # receiver cannot be resolved — a client falls back to `signature`.
         "exports": [{"module": e["module"], "name": e["name"],
                      "symbol": e["symbol"], "arity": e.get("arity"),
                      "call": e.get("call"),
                      "signature": e.get("signature", ""),
+                     "declaration": e.get("declaration"),
                      "kind": e.get("kind"),
                      "frame_params": e.get("frame_params") or [],
                      "owned_blob": e.get("owned_blob") or None}
@@ -19349,6 +19357,26 @@ def _method_exports(source_paths: list, structs_by_file: dict,
     return out
 
 
+def _reflected_method_signature(exported: dict, lookup_key: str) -> str:
+    """`reflect`'s own C signature for the method this lookup key names, or ''.
+
+    The `_export_entries` table is keyed by the reflection entry's `name`, and
+    for a method that name is `Struct.method` — the same string
+    `_method_exports` publishes as the method row's `signature`. So the
+    declaration is built from reflect's OWN prototype (`int64_t
+    corpus_Point_sum (Point *)`) rather than from anything re-derived here,
+    which is what makes the manifest's method rows and the gimple dylib's
+    reflection table one table rather than two spellings of it.
+
+    '' when the table has no such entry, which is the honest absent answer: a
+    method `reflect` did not publish has no prototype to publish, and
+    `model.method_boundary_declaration` returns None for an empty one rather
+    than inventing a parameter list.
+    """
+    entry = (exported or {}).get(lookup_key)
+    return ((entry[1] or {}).get("signature") or "") if entry else ""
+
+
 def _formal_exports(source_paths: list, ordered: list, info: dict,
                     prefixes: dict = None, methods: dict = None) -> list:
     """The library's export table, per doc/ABI.md's boundary contract.
@@ -19424,16 +19452,31 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
                 # passes it, so the arity recorded is the whole signature.
                 "arity": len(fn.params),
                 "call": M.export_call_contract(fn),
-                # `Struct.method` for today, so this is a no-op — but it is
-                # applied here rather than left off, because the free-function
-                # row below and this one are the SAME published field and a
-                # declaration that is true for one kind of export and false for
-                # the other is the failure this whole boundary is for. See
-                # `model.formal_boundary_signature`, and
-                # `formal/imports.py::linked_struct_owners` for why the method
-                # rows are not a C declaration yet (filed in
-                # `bugs/FORMAL_a_method_export_publishes_no_c_declaration.md`).
+                # `Struct.method`, and it STAYS that string: it is the lookup
+                # key `formal/imports.py::linked_struct_owners` derives the
+                # struct name from, and a build-pass refusal
+                # (`check_construction_shapes`'s
+                # `undeclared_linked_struct_refusal` arm) needs to learn which
+                # structs a linked library provides from a manifest with no
+                # source in hand. Changing it to a declaration would make that
+                # reader return nothing.
                 "signature": M.formal_boundary_signature(signature),
+                # The C DECLARATION, ADDITIVE and beside the lookup key rather
+                # than in place of it — so a client reads this when it is there
+                # and `signature` when it is not, and `linked_struct_owners`
+                # keeps working with no edit. `None` for a method whose
+                # receiver convention cannot be resolved, which is the honest
+                # absent answer and a fall back rather than a gap.
+                #
+                # `fn` is the compiled method, so it carries `_owner_struct`
+                # (annotated in `_prepare_functions`) and its own `param_convs`
+                # — the two facts `model.method_boundary_declaration` reads the
+                # receiver convention from, and the same two both emitters ask.
+                "declaration": M.method_boundary_declaration(
+                    _reflected_method_signature(exported, signature),
+                    symbol,
+                    getattr(fn, "_owner_struct", None),
+                    fn),
                 "kind": "method",
                 "frame_params": _export_frame_contract(fn),
                 "owned_blob": _export_owned_blob(module, fn.name),

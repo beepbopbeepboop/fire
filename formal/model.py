@@ -22479,6 +22479,203 @@ def formal_boundary_signature(signature: str) -> str:
     return _FORMAL_WORD_RE.sub("int64_t", signature)
 
 
+def split_c_declaration(signature: str) -> tuple | None:
+    """`(return type, name, (parameter types…))` out of a C declaration.
+
+    `int64_t add (int64_t, int64_t)` → `("int64_t", "add", ("int64_t",
+    "int64_t"))`; `char * name (void)` → `("char *", "name", ())`.
+
+    **None for a declaration this reader cannot take apart**, and that is the
+    answer rather than a guess: a head with no name in it (`int64_t` alone), a
+    `...` in the argument list (the arity is not in the declaration), or a
+    function-pointer parameter (a declaration in its own right, which no rule
+    here reads). All three shapes exist — the last two in
+    `mojo/backend_gimple/emit_resolve.py`'s own prototype reader — and each of
+    them is a place where a caller that invented a parameter list would
+    publish a declaration the callee does not implement.
+
+    ONE reader because three callers need it and they must not answer
+    differently: `formal_boundary_signature`'s consumers, `method_boundary_
+    declaration` below, and the C client in `test_formal_interop.py`, which had
+    its own copy of this split before and could therefore disagree with the
+    manifest about what a declaration says.
+    """
+    if not signature or "(" not in signature:
+        return None
+    head, _, rest = signature.partition("(")
+    parts = head.strip().rsplit(None, 1)
+    if len(parts) != 2:
+        return None
+    params = _split_params(rest.rsplit(")", 1)[0].strip())
+    if params is None:
+        return None
+    return parts[0].strip(), parts[1], tuple(params)
+
+
+def method_boundary_declaration(signature: str, symbol: str,
+                                owner=None, method=None) -> str | None:
+    """The C DECLARATION a formal method export publishes, or None.
+
+    `int64_t Point_sum (Point *)` → `int64_t corpus_Point_sum (struct Point *)`.
+
+    **The receiver is the only part that changes, and the reason is the
+    convention, not this function.** `reflect` spells a method's receiver
+    `Struct *`, which is the COMPILED path's declaration (a real C++
+    `Struct *self`) and is wrong for a formal boundary in one measurable case: a
+    one-field struct's plain `self`, which both formal backends pass BY VALUE.
+    Measured, arm64, `Cell.get`:
+
+        0x100000678:  add x19, x0        # the receiver IS argument 0
+        0x10000068c:  add x0, x19
+        0x100000690:  add sp, sp, #0x20, lsl #12
+        0x10000069c:  ret
+
+    and from C, `corpus_Cell_get(10)` is 10 while `corpus_Cell_get(&c)` is
+    6126726256 — a pointer read as an integer. The rule is
+    `struct_is_one_field(owner) or receiver_writeback_name(method)`: an address
+    unless the struct is one field AND the method does not hand its receiver
+    back, which is doc/ABI.md's receiver table read off the two functions both
+    emitters ask about a receiver. `owner`/`method` of None (a declaration whose
+    struct could not be resolved) is the CONSERVATIVE answer — an address — for
+    the reason `declared_receiver_writeback` gives: a name resolved to nothing
+    must not be guessed into a value.
+
+    **`symbol`, not the name inside `signature`.** The declaration a client
+    writes names the BOUNDARY symbol — the trie entry dyld resolves — and
+    reflect's own name inside the signature is the same string today
+    (`export_csym` reads it out of there), so this is the one place that could
+    drift and does not: the symbol is passed in from the manifest row that
+    publishes it.
+
+    **The word convention is `formal_boundary_signature`'s, applied to the
+    return type and to every non-receiver parameter**, so a `Float64` return is
+    the `int64_t` word it crosses as and a `-> List[String]` is the
+    `MojoList *` its signature already says. Applying it to the WHOLE string
+    would also rewrite the receiver, and `struct Point *` is not a word type so
+    that happens to be a no-op — which is a coincidence, not a reason, so the
+    receiver is excluded explicitly and the exclusion is what a reader can
+    check.
+
+    None rather than a guess when `signature` cannot be split
+    (`split_c_declaration`), when there is no receiver to replace
+    (`method_receiver_name`), or when `owner` is a struct whose declared field
+    the receiver is: a one-field struct's by-value receiver IS that field, so
+    its C type is the FIELD's, and a field with no declared type (a class that
+    assigns `self.n` in `__init__`) has no C spelling to publish. A method
+    whose receiver cannot be resolved therefore publishes no declaration, and a
+    client falls back to `signature` — which is what every client did before
+    this field existed.
+    """
+    parts = split_c_declaration(signature)
+    if parts is None:
+        return None
+    ret, _name, params = parts
+    if owner is None or method is None:
+        # A declaration whose STRUCT could not be resolved has no receiver
+        # convention to state, and publishing reflect's parameter list would
+        # publish one anyway — so the absent answer is the answer, and a client
+        # falls back to `signature` as it did before this field existed. That
+        # is the same direction `declared_receiver_writeback` takes for the
+        # same reason: a name resolved to nothing must not be guessed into a
+        # convention.
+        return None
+    if method_receiver_name(method) is None:
+        # reflect writes a `Struct *` as argument 0 of EVERY method, including
+        # one that declares no receiver (`@staticmethod`, or a first parameter
+        # that is not a receiver — `method_declares_receiver`'s question). That
+        # parameter is not one the callee takes, so a declaration carrying it
+        # is a declaration the callee does not implement — the same defect this
+        # whole field exists to remove, one shape further on. There is nothing
+        # to publish and nothing to correct, so nothing is published.
+        return None
+    by_address = ((not struct_is_one_field(owner))
+                  or receiver_writeback_name(method) is not None)
+    if by_address:
+        receiver = f"struct {owner.name} *"
+    else:
+        field = struct_sole_field_name(owner)
+        _base, ann, _why, declared = (
+            struct_field_declared_type(owner, field) if field
+            else (None, None, None, False))
+        if not declared:
+            return None
+        receiver = formal_boundary_signature(_declared_field_ctype(ann))
+        if receiver is None:
+            return None
+    rest = tuple(formal_boundary_signature(p) for p in params[1:])
+    spelled = ", ".join((receiver,) + rest) or receiver
+    return (f"{formal_boundary_signature(ret)} {symbol} ({spelled})")
+
+
+# The C type a declared FIELD crosses a formal boundary as, for the one shape
+# that needs one: a one-field struct's by-value receiver, whose word IS the
+# field's value. Everything here is the WORD, because that is what a formal
+# value is and `formal_boundary_signature` is what says so — which is also why
+# an `Int32` field spells `int64_t` here and an `Optional[Int32]`'s empty word
+# survives. A POINTER keeps its pointee, which is the one row the word
+# convention must not sweep up with the value (`dylib_export_pointer_pointee`
+# reads it to know a returned buffer is subscriptable).
+#
+# `None` for an annotation this table has no C spelling for — a struct of this
+# module as the field's type, a container, a type parameter — which sends
+# `method_boundary_declaration` down its absent-answer path rather than
+# publishing a type this table has never heard of. That is the conservative
+# direction, and it is the one `struct_field_declared_type` takes when a field
+# is declared twice with two different types.
+_DECLARED_FIELD_CTYPES = {
+    "int": "int64_t", "Int": "int64_t", "Int8": "int64_t", "Int16": "int64_t",
+    "Int32": "int64_t", "Int64": "int64_t",
+    "uint": "int64_t", "UInt": "int64_t", "UInt8": "int64_t",
+    "UInt16": "int64_t", "UInt32": "int64_t", "UInt64": "int64_t",
+    "bool": "int64_t", "Bool": "int64_t",
+    "float": "int64_t", "float16": "int64_t", "float32": "int64_t",
+    "float64": "int64_t", "double": "int64_t",
+    "Float16": "int64_t", "Float32": "int64_t", "Float64": "int64_t",
+    "String": "char *", "str": "char *",
+}
+
+# The same table for a POINTER's ELEMENT, and it is deliberately NOT the same:
+# the word convention widens the VALUE a boundary carries, and a pointer's
+# pointee is not the value — it is the type of what the address names, which is
+# exactly why `formal_boundary_signature` leaves a pointer's spelling alone and
+# why `dylib_export_pointer_pointee` reads it. `Pointer[UInt8]` is therefore
+# `uint8_t *`, and a client that knows its buffer is one byte wide needs that to
+# be true.
+_DECLARED_POINTEE_CTYPES = {
+    "int": "int64_t", "Int": "int64_t", "Int8": "int8_t", "Int16": "int16_t",
+    "Int32": "int32_t", "Int64": "int64_t",
+    "uint": "uint64_t", "UInt": "uint64_t", "UInt8": "uint8_t",
+    "UInt16": "uint16_t", "UInt32": "uint32_t", "UInt64": "uint64_t",
+    "bool": "int64_t", "Bool": "int64_t",
+    "float": "int64_t", "float16": "int64_t", "float32": "int64_t",
+    "float64": "int64_t", "double": "int64_t",
+    "Float16": "int64_t", "Float32": "int64_t", "Float64": "int64_t",
+    "String": "char *", "str": "char *",
+}
+
+
+def _declared_field_ctype(ann) -> str | None:
+    """The C type a field's DECLARED annotation crosses a formal boundary as.
+
+    A `Pointer[T]` is spelled `<T> *` and everything else is looked up by its
+    bare base name, which is `annotation_base_name`'s reduction — the ONE reader
+    of what a declared type names, so the struct that reduction decides a
+    layout for and the pointee this decides a width for are the same two
+    decisions every other reader of a field declaration makes.
+    """
+    if not isinstance(ann, str) or not ann.strip():
+        return None
+    base = annotation_base_name(ann)
+    if base is None:
+        return None
+    if base in POINTER_TYPE_CTORS:
+        inner = ann[ann.find("[") + 1:ann.rfind("]")] if "[" in ann else ""
+        pointee = annotation_base_name(inner) if inner else None
+        elem = (_DECLARED_POINTEE_CTYPES.get(pointee) if pointee else None)
+        return f"{elem} *" if elem else None
+    return _DECLARED_FIELD_CTYPES.get(base)
+
+
 def dylib_export_return_kind(entry) -> str | None:
     """`STR_KIND` when a manifest export returns a string, else None.
 

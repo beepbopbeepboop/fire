@@ -218,13 +218,19 @@ def opt_bool(v: Bool, present: Bool) -> Optional[Bool]:
 # receiver crosses a boundary by POINTER for a struct of two or more fields and
 # for a mutating method (whose one-word cell the callee writes through), and BY
 # VALUE for a plain `self` on a one-field struct. The POINTER is spelled
-# `struct Struct *` because that is what `reflect` publishes for a method (with
-# the tag a C declaration needs) and because a client can then declare the
-# struct itself — the frame is 8-byte slots, one per
-# field, in declaration order, so `struct Point { int64_t x; int64_t y; }` IS
-# the frame. These are the declarations this file's clients bind the four
-# methods through, because the manifest publishes `Struct.method` where a
-# declaration belongs (`bugs/FORMAL_a_method_export_publishes_no_c_declaration.md`).
+# `struct Struct *` because that is what a C declaration needs — the tag, so a
+# client can declare the struct itself, and the frame is 8-byte slots, one per
+# field, in declaration order, so `struct Point { int64_t x; int64_t y; }` IS the
+# frame.
+#
+# **This table is no longer what the clients bind through.** The manifest
+# publishes a method's declaration as its own `declaration` field, and
+# `build_cases` generates the clients' declarations from THAT — so the manifest
+# is the thing under test for a method exactly as it already was for a free
+# function. The table stays as this file's independent transcription of the
+# documented row, and `test_the_receiver_rule_is_the_documented_one` requires
+# the published declaration to equal it, so it cannot rot into agreement by
+# being unused: a change to either side without the other is a red.
 METHOD_DECLARATIONS = {
     # Two fields: the address of a frame of 8-byte slots, one per field.
     "Point.sum": "int64_t (struct Point *)",
@@ -678,14 +684,21 @@ def split_signature(signature):
     `int64_t add (int64_t, int64_t)` → `('int64_t', 'add', ('int64_t',
     'int64_t'))`; `char * platform_name (void)` → `('char *', 'platform_name',
     ())`.
+
+    **The MODEL's reader, and not a second copy of the split.** This file had
+    its own, and a client that splits a declaration one way while the manifest
+    that produced it splits it another way is the disagreement this suite
+    exists to catch — so it asks `formal/model.py::split_c_declaration`, which
+    is the one that built the declarations under test. The one difference the
+    model's reader has and this one did not is the absent answer: it returns
+    None for a declaration it cannot take apart, where this raised, and that is
+    raised here as well so a bad prototype is a failure rather than a `None`
+    that silently compares equal to nothing.
     """
-    head, _, rest = signature.partition("(")
-    params = rest.rsplit(")", 1)[0].strip()
-    parts = head.strip().rsplit(None, 1)
-    if len(parts) != 2:
+    parts = formal_model().split_c_declaration(signature)
+    if parts is None:
         raise TestFailure(f"cannot read a declaration out of {signature!r}")
-    return parts[0], parts[1], tuple(
-        p.strip() for p in params.split(",") if p.strip() and p != "void")
+    return parts
 
 
 def declaration_for(entry):
@@ -1141,11 +1154,21 @@ def build_cases(manifest):
     """`[Bound]` — what each case is, bound to this library's own symbols.
 
     A FREE FUNCTION's declaration is generated: the manifest's own signature
-    with its name token replaced by the exported symbol. A METHOD's is not,
-    because the manifest publishes `Struct.method` where a declaration belongs,
-    so the documented declaration from `METHOD_DECLARATIONS` is used and the
-    missing one is asserted by `test_the_receiver_rule_is_the_documented_one`
-    rather than worked around quietly.
+    with its name token replaced by the exported symbol. A METHOD's is
+    generated from the manifest's `declaration` field, which
+    `formal/build.py::_formal_exports` publishes beside the `Struct.method`
+    lookup key — additively, so `formal/imports.py::linked_struct_owners` still
+    reads the struct name out of `signature` and a build-pass refusal still
+    learns which structs a linked library provides.
+
+    The `declaration` is the library's OWN statement of what the boundary looks
+    like, so generating the client's declaration from it is what makes the
+    manifest the thing under test for a method exactly as it already was for a
+    free function. `METHOD_DECLARATIONS` stays as this file's transcription of
+    doc/ABI.md's receiver table and is COMPARED against what the library
+    published by `test_the_receiver_rule_is_the_documented_one` — so the
+    documented contract cannot rot without a red, and the client no longer
+    needs it to compile at all.
     """
     by_name = exports_by_name(manifest)
     bound = []
@@ -1164,15 +1187,19 @@ def build_cases(manifest):
               f"case {name} (has {sorted(by_name)})")
         label = f"{name}#{index}"
         if entry.get("kind") == "method":
-            struct_name, method = name.split(".", 1)
-            documented = METHOD_DECLARATIONS.get(name)
-            check(documented is not None,
-                  f"{name} is a method with no entry in this file's copy of "
-                  f"doc/ABI.md's receiver table")
-            ret, params = documented.split(" (", 1)
-            decl = (f"extern {ret.strip()} {entry['symbol']}"
-                    f"({params.rstrip(')')});")
-            ret = ret.strip()
+            published = entry.get("declaration")
+            check(published is not None,
+                  f"{name}: the manifest publishes no `declaration` for a "
+                  f"method export, so a client has nothing to write and this "
+                  f"file's copy of doc/ABI.md's receiver table is all there "
+                  f"is (entry: {entry})")
+            ret, _decl_name, params = split_signature(published)
+            decl = f"extern {ret} {entry['symbol']}({', '.join(params)});"
+            check(_decl_name == entry["symbol"],
+                  f"{name}: the declaration names {_decl_name!r} and the "
+                  f"boundary symbol is {entry['symbol']!r} — a client writing "
+                  f"that declaration would bind a symbol the library does not "
+                  f"define")
         else:
             decl, ret, _ = declaration_for(entry)
         bound.append(Bound(label, case, entry["symbol"], ret, decl))
@@ -1329,14 +1356,135 @@ def test_the_manifest_publishes_what_the_callee_implements(tmpdir, shared):
               f"doc/ABI.md's word convention says {want!r}")
 
 
+# The shapes `model.method_boundary_declaration` has to answer, one per answer
+# it can give. The corpus above reaches four of them through a real library; the
+# rest are here because a method declaration nobody calls is a declaration
+# nobody notices is wrong, and every row below is a shape where "publish
+# something plausible" and "publish nothing" are both defensible — so which one
+# it does is a decision, and a decision needs a test.
+#
+# `(source, method, expected declaration or None)`. The declaration is computed
+# from `reflect`'s OWN prototype for that source (the same table
+# `formal/build.py::_export_entries` reads), so a row cannot pass because this
+# file and the model agree on a spelling neither got from the compiler.
+_DECLARATION_CASES = [
+    # A two-field struct's plain `self`: the address of a frame. The `struct`
+    # TAG is the point — reflect spells it `P *`, which is not a C declaration
+    # a client can write without a typedef it has no reason to have.
+    ("struct P:\n    var a: Int\n    var b: Int\n\n"
+     "    def total(self) -> Int:\n        return self.a + self.b\n",
+     "total", "int64_t m_P_total (struct P *)"),
+    # …and its mutator: still an address, plus the declared parameter.
+    ("struct P:\n    var a: Int\n    var b: Int\n\n"
+     "    def bump(mut self, by: Int) -> Int:\n"
+     "        self.a = self.a + by\n        return self.a\n",
+     "bump", "int64_t m_P_bump (struct P *, int64_t)"),
+    # A one-field struct's plain `self` IS the field, in a register. `Int` is
+    # the word, so `int64_t` — the shape `METHOD_DECLARATIONS` records for
+    # `Cell.get` and the one the measured pointer-as-integer answer came from.
+    ("struct C:\n    var n: Int\n\n"
+     "    def get(self) -> Int:\n        return self.n\n",
+     "get", "int64_t m_C_get (int64_t)"),
+    # A NARROW field is still the WORD: `formal_boundary_signature` widens a
+    # narrow integer's spelling deliberately ("a narrow integer is still
+    # narrow; only the WORD it rides in is spelled wide"), because the value in
+    # the register is a word and the one thing a narrow spelling would cost is
+    # the `Optional[Int32]` niche. The receiver is a value like any other on
+    # this boundary, so it takes the same rule rather than a second one.
+    ("struct C:\n    var n: Int32\n\n"
+     "    def get(self) -> Int32:\n        return self.n\n",
+     "get", "int64_t m_C_get (int64_t)"),
+    # …and a FLOAT field is the WORD, not a `double`: a formal value is one
+    # 64-bit word and the return is a word for the same reason.
+    ("struct C:\n    var x: Float64\n\n"
+     "    def get(self) -> Float64:\n        return self.x\n",
+     "get", "int64_t m_C_get (int64_t)"),
+    # A POINTER field keeps its pointee, which is the case
+    # `formal_boundary_signature`'s own docstring says must not be swept up with
+    # the value: `dylib_export_pointer_pointee` reads it to know a returned
+    # buffer is subscriptable.
+    ("struct C:\n    var p: Pointer[UInt8]\n\n"
+     "    def first(self) -> UInt8:\n        return self.p[0]\n",
+     "first", "int64_t m_C_first (uint8_t *)"),
+    # A one-field struct's MUTATOR is still an address: the cell is the
+    # caller's storage and a by-value receiver would be a copy, so the write
+    # would never reach the caller.
+    ("struct C:\n    var n: Int\n\n"
+     "    def bump(mut self, by: Int) -> Int:\n"
+     "        self.n = self.n + by\n        return self.n\n",
+     "bump", "int64_t m_C_bump (struct C *, int64_t)"),
+    # A `@staticmethod` declares NO receiver, and reflect still writes a
+    # `Struct *` as argument 0. Publishing that would be a declaration the
+    # callee does not implement, which is the defect this whole field exists to
+    # remove — so nothing is published and a client falls back to `signature`.
+    ("struct C:\n    var n: Int\n\n"
+     "    @staticmethod\n    def make(v: Int) -> Int:\n        return v\n",
+     "make", None),
+    # A one-field struct whose field is NOT DECLARED (a class-level assignment,
+    # or only `self.n` in `__init__`) has no C spelling for its receiver's
+    # value: the word is whatever the constructor put there. Absent answer, not
+    # a guess — and the same direction `struct_field_declared_type` takes when a
+    # field is declared twice with two different types.
+    ("class C:\n    __slots__ = ('n',)\n\n"
+     "    def __init__(self):\n        self.n = 1\n\n"
+     "    def get(self) -> Int:\n        return self.n\n",
+     "get", None),
+]
+
+
+def test_a_method_declaration_says_what_the_emitter_does(tmpdir, shared):
+    """`model.method_boundary_declaration`, row by row, off reflect's prototype.
+
+    The library-level row above checks the four shapes the corpus reaches; this
+    one checks the reader itself, including the shapes a corpus cannot reach —
+    a `@staticmethod` and an undeclared field — where publishing a plausible
+    declaration is the failure mode rather than publishing nothing.
+    """
+    sys.path.insert(0, HERE)
+    M = formal_model()
+    import fire_compiler as F                                   # noqa: PLC0415
+    import reflect                                             # noqa: PLC0415
+
+    for source, method, want in _DECLARATION_CASES:
+        mod = F.Parser(F.py_tokenize(source)).parse_module()
+        struct = next(s for s in mod if isinstance(s, F.StructDef))
+        meth = next(m for m in M.struct_methods(struct)
+                    if m.name == method)
+        entry = reflect.collect_exports_src(source, "m")
+        reflected = next((e for e in entry
+                          if e["name"] == f"{struct.name}.{method}"), None)
+        check(reflected is not None,
+              f"{struct.name}.{method}: reflect publishes no method entry for "
+              f"this source at all")
+        got = M.method_boundary_declaration(
+            reflected["signature"], reflected["signature"].split("(", 1)[0]
+            .strip().split()[-1], struct, meth)
+        check(got == want,
+              f"{struct.name}.{method}: the declaration is {got!r} and the "
+              f"rule says {want!r} (reflect's own prototype is "
+              f"{reflected['signature']!r})")
+    # …and the two absences that are not about a method at all: a prototype
+    # this reader cannot take apart, and a struct nobody resolved. Both publish
+    # nothing, because both would otherwise publish a declaration invented here.
+    check(M.method_boundary_declaration("int64_t", "m_f") is None,
+          "a prototype with no parameter list produced a declaration")
+    check(M.method_boundary_declaration("int64_t m_f (...)", "m_f") is None,
+          "a `...` parameter list — the arity is not in the declaration — "
+          "produced one")
+    check(M.method_boundary_declaration("int64_t m_f (int64_t)", "m_f") is None,
+          "a declaration with no owning struct produced a declaration, and "
+          "`declared_receiver_writeback` takes the same absent answer for the "
+          "same reason")
+
+
 def test_the_receiver_rule_is_the_documented_one(tmpdir, shared):
     """`doc/ABI.md`'s receiver table, derived two more ways and compared.
 
-    The C client cannot generate a method's declaration from the manifest (it
-    publishes `Struct.method`), so this file's copy of the table is the only
-    thing telling both clients where the receiver goes. That is exactly the kind
-    of claim that rots, so each row is derived from two INDEPENDENT sources and
-    compared:
+    The manifest publishes each method's declaration as its own `declaration`
+    field, and the clients generate from that — so the table below is this
+    file's INDEPENDENT transcription of the documented row rather than what the
+    library says. That is exactly the kind of claim that rots, so each row is
+    derived from two further INDEPENDENT sources and compared:
 
       * `reflect`'s own method signature — the reader every method export on
         every backend is named by — which fixes the return type and the
@@ -1348,7 +1496,8 @@ def test_the_receiver_rule_is_the_documented_one(tmpdir, shared):
 
     The rule being checked is doc/ABI.md's: a receiver is an ADDRESS unless the
     struct is one field and the method is not a mutator, in which case it is the
-    value in a register.
+    value in a register. And the published declaration must equal the
+    transcription, which is what keeps the transcription live.
     """
     sys.path.insert(0, HERE)
     M = formal_model()
@@ -1397,17 +1546,31 @@ def test_the_receiver_rule_is_the_documented_one(tmpdir, shared):
             # is right for the compiled path (a real C++ `Struct *self`) and
             # wrong for a formal boundary in one measurable case — a one-field
             # struct's plain `self`, which the formal backends pass BY VALUE,
-            # so `Cell.get` really is `int64_t (int64_t)`. That divergence is
-            # why the manifest publishes no method declaration at all
-            # (`bugs/FORMAL_a_method_export_publishes_no_c_declaration.md`); it
-            # is checked against the emitter's own rule instead.
+            # so `Cell.get` really is `int64_t (int64_t)`. The declaration the
+            # manifest publishes applies exactly that rule
+            # (`model.method_boundary_declaration`), and this is the row that
+            # says the published declaration agrees with BOTH doc/ABI.md's
+            # table and the emitter's own reader of it.
             check(want_params[0].endswith("*") == by_address,
                   f"{where}: this file's own copy of doc/ABI.md's table says "
                   f"the receiver is {want_params[0]!r} and the emitter's rule "
                   f"says {'an address' if by_address else 'the value'}")
+            published = entry.get("declaration")
+            check(published is not None,
+                  f"{where}: the manifest publishes no `declaration` for a "
+                  f"method export, so a client has nothing to write and the "
+                  f"row above cannot be checked against anything")
+            check(published == (f"{want_ret.strip()} {entry['symbol']} ("
+                                f"{', '.join(want_params)})"),
+                  f"{where}: doc/ABI.md's row says this method is "
+                  f"`{want_ret.strip()} {entry['symbol']} "
+                  f"({', '.join(want_params)})` and the library published "
+                  f"{published!r}")
             # The entry the manifest DOES publish for a method keeps the struct
             # name where formal/imports.py reads it: that string is how a
-            # build-pass refusal learns which structs a linked library provides.
+            # build-pass refusal learns which structs a linked library provides,
+            # and it is why `declaration` is a NEW field beside `signature`
+            # rather than a replacement for it.
             check(entry["signature"] == f"{struct_name}.{method}",
                   f"[{arch}] {name}: the manifest publishes "
                   f"{entry['signature']!r} and imports.linked_struct_owners "
@@ -1464,6 +1627,8 @@ TESTS = [
      test_the_optional_niches_are_the_documented_words),
     ("the manifest publishes what the callee implements",
      test_the_manifest_publishes_what_the_callee_implements),
+    ("a method declaration says what the emitter does",
+     test_a_method_declaration_says_what_the_emitter_does),
     ("the receiver rule is the documented one",
      test_the_receiver_rule_is_the_documented_one),
     ("a C client computes what CPython computes",
