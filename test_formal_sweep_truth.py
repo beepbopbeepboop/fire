@@ -1822,6 +1822,54 @@ class TestLeanLaunchEstate(unittest.TestCase):
                          "a shell recipe that starts Lean bypasses every bound "
                          "in formal/lean.py: " + "; ".join(offenders))
 
+    def test_an_emitter_that_runs_a_generated_proof_ensures_the_library(self):
+        """The x86-64 emitter family is FOUR files and all four ask.
+
+        The rule is the second half of the one above, and it is about the
+        ARTIFACT rather than the process: every proof these files generate opens
+        with `import X86`, so every run reads `lib/X86.olean`, and reading a
+        `.olean` is only meaningful if something established it is there.
+
+        `formal/x86_64_endtoend_test.py` did not, and nothing caught it for as
+        long as it existed, because the suite's `prooflib` step builds the
+        library and the one registered job that runs this emitter
+        (`formal-x86-endtoend`) deps on it. The first caller that did NOT go
+        through that dep — `test_formal_sweep_truth.py`'s end-to-end case, which
+        is in `check`, a bucket that does not run `prooflib` — got
+
+            <tmp>.lean:1:0: error: unknown module prefix 'X86'
+
+        and exit 1, i.e. a missing artifact reported as a proof that would not
+        elaborate. That is the shape this whole class exists to prevent (a
+        launch site outside the launcher), one level down: the launch was
+        through the launcher and the PRECONDITION was the unguarded thing.
+
+        So the rule is stated over the family rather than over the file, which
+        is the only way it stays true: `ensure_library` is cheap when it is
+        current (a digest per module), takes the build lock and re-checks inside
+        it, and serves the content-addressed store on a hit, so the emitter that
+        was relying on somebody else's build stops depending on the order.
+        """
+        import glob
+        ran, missing = [], []
+        for path in sorted(glob.glob(os.path.join(HERE, "formal",
+                                                  "x86_64_*.py"))):
+            with open(path, encoding="utf-8", errors="replace") as f:
+                source = f.read()
+            if "run_lean(" not in source:
+                continue
+            rel = os.path.relpath(path, HERE)
+            ran.append(rel)
+            if "ensure_library(" not in source:
+                missing.append(rel)
+        self.assertEqual(missing, [],
+                         "a generated proof imports lib/X86, so a run that "
+                         "does not ensure it is reading a .olean nobody built: "
+                         + repr(missing))
+        self.assertGreaterEqual(len(ran), 4,
+                                f"only {len(ran)} x86-64 file(s) run Lean "
+                                f"({ran}), so this rule is not being exercised")
+
 
 # ── the .olean currency check, and the IMPORTS it used to ignore ─────────────
 #
@@ -3143,6 +3191,88 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         self.assertFalse(fired,
                          "the unpatched file elaborates with no load-bearing "
                          "`sorry`: every one of its emissions closed")
+
+    def test_a_failed_elaboration_says_what_lean_said(self):
+        """The reason half of `_run_lean`'s non-zero exit, which used to be a lie.
+
+        This file's case above reported
+
+            AssertionError: the patched file must still elaborate:
+            'lean exited 1: no error message'
+
+        on a worktree with no `lib/*.olean`, and that sentence was the whole
+        cost of the underlying defect: Lean had printed 316 bytes naming the
+        missing module and the search path it looked in, and `_run_lean` threw
+        them away because the only thing it searched for was
+        `memory_exception`/`libc++abi` — right for the one failure that search
+        was written for (`lean::memory_exception` aborts rather than reports, so
+        its own line is the only place the cause appears) and wrong for every
+        other, including the one where "no error message" described output that
+        was 90% a search path.
+
+        Lean writes diagnostics to STDOUT, so the half that was dropped is the
+        half it uses. The shape below is verbatim from that run, and the
+        position, the module name and the search path are all of what a reader
+        needed.
+        """
+        import formal.x86_64_endtoend_test as E
+        out = ("/tmp/tmp4o5z6yun.lean:1:0: error: unknown module prefix 'X86'\n"
+               "\n"
+               "No directory 'X86' or file 'X86.olean' in the search path "
+               "entries:\n"
+               "/repo\n"
+               "/repo/lib\n")
+        reason = E.lean_failure_reason(out)
+        self.assertIn("unknown module prefix 'X86'", reason,
+                      "the module Lean could not find, which is the cause")
+        self.assertIn("No directory 'X86'", reason,
+                      "and the search path it looked in, which is on the NEXT "
+                      "line: one line is a symptom and two are a diagnosis")
+        self.assertNotIn("tmp4o5z6yun", reason,
+                         "the temp path is noise here, and `_ERR` is what "
+                         "strips it everywhere else in this module")
+        self.assertNotIn("no error", reason,
+                         "the claim this replaces was about the OUTPUT, and it "
+                         "was false whenever Lean wrote any")
+
+        # The abort keeps its own line, and keeps it FIRST: `lean::
+        # memory_exception` aborts rather than reports, so that line is the only
+        # place the cause appears, and it is the reason this search exists.
+        self.assertEqual(
+            E.lean_failure_reason(
+                "libc++abi: terminating due to uncaught exception of type\n"
+                "  lean::memory_exception: excessive memory consumption "
+                "detected at 'interpreter'\n"),
+            "libc++abi: terminating due to uncaught exception of type",
+            "the memory_exception search is the older one and is not narrowed: "
+            "a change here would move a measurement that was taken with it")
+
+        # …and an output that is empty is a different statement from one that
+        # was never read, which is the distinction the old fallback erased.
+        self.assertIn("nothing", E.lean_failure_reason(""),
+                      "no stdout and no stderr is its own fact, and it is not "
+                      "the same one as a failure whose text was discarded")
+
+        # Bounded, because a non-zero exit is also what a runaway produces and a
+        # report is not a log.
+        flood = "".join("line %d\n" % i for i in range(5000))
+        self.assertLessEqual(len(E.lean_failure_reason(flood)), 401,
+                             "a report carries the head of the output, not all "
+                             "of it")
+
+        # …and the wiring, which is the half a unit test of a helper cannot see:
+        # one real elaboration that fails, end to end through `_run_lean`, and
+        # the diagnostic is in the string its caller prints. Lean-free below
+        # this line; the file's own rule is that a case which runs Lean says so.
+        if not E.LEAN_BIN:
+            self.skipTest("the pinned lean is not installed")
+        ok, _n, _fired, err, live = E._run_lean("theorem t : True := by\n"
+                                                "  exact 1\n")
+        self.assertFalse(ok, "a type error is not an elaboration")
+        self.assertIn("lean exited 1:", err)
+        self.assertIn("expected type is a proposition", err,
+                      "Lean's own words, not a summary of them: %r" % (err,))
+        self.assertIsNone(live)
 
     def test_the_report_says_the_hole_it_can_identify_and_hedges_only_when_it_cannot(self):
         """One wording for both theorems, and the word is the claim.

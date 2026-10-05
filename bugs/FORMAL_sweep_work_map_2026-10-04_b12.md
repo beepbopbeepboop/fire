@@ -506,9 +506,11 @@ rather than listed here**, because it is not a refusal at all: §3.1's in-file
 tokenizer refusing a PEP 701 f-string whose replacement field spans **lines**.
 Measured over six shapes: a nested same-quote f-string parses, a multi-line
 replacement field and a comment inside the braces do not. One file in the corpus,
-a parser change rather than a formal one, filed as
-`bugs/PARSE_FAIL_fire_compiler_cannot_lex_a_multiline_f_string.md` with its own
-reproduction and next step.
+a parser change rather than a formal one, filed that round under
+`PARSE_FAIL_fire_compiler_cannot_lex_a_multiline_f_string` with its own
+reproduction and next step. **FIXED 2026-10-05** on `work/formal32-sweep-b13`;
+`bugs/FORMAL_sweep_work_map_2026-10-05_b13.md` §5 is the record and
+`test_string_literal_lexing.py`'s `LITERALS` block is the test.
 
 ---
 
@@ -737,8 +739,10 @@ comparison should have become a tool rather than a fourth description of one, an
 65b88dab`, and §2.3's per-module host-import table is each log's own `by module:`
 line.** **§3.2's 31 docstrings and the `ZZDOCSTRINGPROBEZZ` / `ZZFNDOCPROBEZZ`
 measurement are three commands**, in §3.2 and §5.1. **§4.2's parse error is
-`bugs/PARSE_FAIL_fire_compiler_cannot_lex_a_multiline_f_string.md`**, which has
-its own six-shape measurement.
+the multiline-f-string lexing hole** — this front end refusing a PEP 701 f-string
+whose replacement field spans lines — which had its own six-shape measurement
+that round and is fixed; see
+`bugs/FORMAL_sweep_work_map_2026-10-05_b13.md` §5.
 
 **`master` HAS MOVED 8 COMMITS SINCE, so a re-run differs — and here is where.**
 `git diff 77b24183..master` over the files this sweep sweeps:

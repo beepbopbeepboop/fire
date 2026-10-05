@@ -78,9 +78,11 @@ LINE_RE = CAUSES.LINE_RE
 # The summary line: `[x86_64] 668 files: PASS=125 not-pass=543`. Read for the
 # architecture the log is about and for the two counts, so a report that says
 # "one file differs" can be checked against the totals it was derived from.
-SUMMARY_RE = re.compile(
-    r"^\[(?P<arch>[a-z0-9_]+)\] (?P<files>\d+) files: PASS=(?P<pass>\d+) "
-    r"not-pass=(?P<notpass>\d+)\s*$")
+# TAKEN FROM `formal_sweep.py`, which prints the line, rather than written out
+# here as it was: the second reader of a format needs the format's owner, and a
+# rewritten summary line is exactly the way one tool keeps matching a log while
+# another does not.
+SUMMARY_RE = FS.SUMMARY_RE
 
 # An architecture NAME in a message, folded out — but only where the name is a
 # LABEL for a machine rather than part of a file name. `x86_64` in "on the

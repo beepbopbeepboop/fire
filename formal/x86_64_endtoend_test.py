@@ -161,6 +161,53 @@ import formal.lean as L           # noqa: E402
 LEAN_BIN = L.find_lean(ROOT)
 LIB = os.path.join(ROOT, "lib")
 
+#: Has `ensure_lean_ready` run in this process?  `_run_lean` is called once per
+#: theorem per example (86 times over the corpus) and `ensure_library` is not
+#: free even when it builds nothing — it digests each `lib/*.lean` together with
+#: the modules that one's `import` lines name — so the answer is taken once.
+_LIBRARY_READY = False
+
+
+def ensure_lean_ready():
+    """Make every `lib/*.olean` a generated proof here IMPORTS current.
+
+    **This file was the one emitter of the four that did not do this**, and the
+    cost was a check that reported a proof failure for a missing artifact.
+    `_header` emits `import X86`, so every run below reads `lib/X86.olean`, and
+    `formal/x86_64_model_test.py`, `formal/x86_64_model_coverage_test.py` and
+    `formal/x86_64_model_fuzz.py` each open with `L.ensure_library` for exactly
+    that reason.  What happened here instead is the reason the three have it:
+    `formal/x86_64_endtoend_test.py` runs fine when the suite's `prooflib` step
+    got there first (`formal-x86-endtoend` deps on it), so the omission was
+    invisible until something else called `_run_lean` — the end-to-end case in
+    `test_formal_sweep_truth.py`, which is in `check`, a bucket that does NOT
+    run `prooflib`.  Lean then said
+
+        <tmp>.lean:1:0: error: unknown module prefix 'X86'
+
+    and exited 1, which `_run_lean` reported as ``lean exited 1: no error
+    message`` — a broken library read as an elaboration that refused to
+    elaborate.  The guard is the fix for both halves: the library is current
+    before the first run, and a `lib/*.lean` that does not elaborate stops here
+    (`ensure_library` raises with the build's own diagnostic) instead of turning
+    all 86 runs into the same unexplained exit.
+
+    Cheap by design, which is why this is affordable in an everyday check:
+    `ensure_library` takes the build lock, re-checks currency inside it, serves
+    the content-addressed store on a hit and writes through a private temp, so
+    sixteen concurrent callers queue and exactly one builds.  On a warm store
+    this is a few hundred milliseconds and no memory.
+    """
+    global _LIBRARY_READY
+    if _LIBRARY_READY:
+        return
+    if LEAN_BIN:
+        L.ensure_library(LEAN_BIN, LIB)
+    # Set either way: with no toolchain there is nothing to build, and the
+    # `run_lean` call every path reaches afterwards already reports the absence
+    # in its own words rather than as a TypeError from `Popen`.
+    _LIBRARY_READY = True
+
 #: Bounds for the per-example Lean runs below. Each is ONE generated theorem
 #: over one example, so the policy's proof bounds apply; the numbers are passed
 #: explicitly because this file makes dozens of Lean runs and its own two call
@@ -3630,6 +3677,7 @@ def _probe_input_independent(path):
         f.write(text)
         tmp = f.name
     try:
+        ensure_lean_ready()
         env = dict(os.environ, LEAN_PATH="%s:%s" % (ROOT, LIB))
         p = L.run_lean(LEAN_BIN, [tmp], env=env, wall_s=PROOF_WALL_S,
                        cpu_s=PROOF_CPU_S)
@@ -3676,6 +3724,55 @@ def _has_loop(path):
 
 
 _ERR = re.compile(r"^\S*\.lean:\d+:\d+: ")
+
+#: How much of a failed `lean`'s own output a report may carry. Three lines is
+#: not an arbitrary number: `unknown module prefix 'X86'` is followed by the
+#: search path Lean looked in, so the first line alone names a symptom and the
+#: second is where the cause is.
+_REASON_LINES = 3
+_REASON_CHARS = 400
+
+
+def lean_failure_reason(out):
+    """What a non-zero `lean` exit put in the report, in its OWN words.
+
+    The fallback used to be the literal string `no error message`, and it was a
+    claim about the output that was not true.  Lean prints its diagnostics on
+    **stdout**, and the one that matters for a generated proof is an
+    elaboration that never started:
+
+        <tmp>.lean:1:0: error: unknown module prefix 'X86'
+
+        No directory 'X86' or file 'X86.olean' in the search path entries:
+        /repo
+        /repo/lib
+
+    Six lines, 316 bytes, and `_run_lean` printed `lean exited 1: no error
+    message` — because the search was for `memory_exception`/`libc++abi`, which
+    is right for the ONE failure it was written for (`lean::memory_exception`
+    aborts rather than reports, so its own line is the only place the cause
+    appears) and wrong for every other.  A missing library is the worst thing to
+    report that way: it is a broken BUILD read as a proof that would not
+    elaborate, and the sentence that said so was the sentence the reader had.
+
+    So the C++ runtime's line still wins where it is there, and everything else
+    is Lean's output with the temp path stripped — bounded, because a
+    non-zero exit is also what a runaway produces and a report is not a log.
+    """
+    lines = [_ERR.sub("", l).strip() for l in out.splitlines()]
+    lines = [l for l in lines if l]
+    # Unchanged from the search this replaced, and in the same order: the first
+    # line naming either is the C++ runtime's own, because
+    # `lean::memory_exception` aborts rather than reports and that line is the
+    # only place the cause appears.
+    hit = next((l for l in lines
+                if "memory_exception" in l or "libc++abi" in l), None)
+    if hit:
+        return hit
+    if not lines:
+        return "lean wrote nothing at all (no stdout, no stderr)"
+    reason = " | ".join(lines[:_REASON_LINES])
+    return reason if len(reason) <= _REASON_CHARS else reason[:_REASON_CHARS] + "…"
 
 
 #: A NAMED fact whose proof this emitter ADMITTED rather than closed:
@@ -3942,6 +4039,15 @@ def _run_lean(text):
         f.write(text)
         tmp = f.name
     try:
+        try:
+            ensure_lean_ready()
+        except RuntimeError as exc:
+            # The five-tuple is how this function reports EVERY reason a file
+            # did not elaborate, so a library that would not build is one of them
+            # rather than a traceback out of the one caller that asks this
+            # directly. `ensure_library` carries the build's own diagnostic.
+            return (False, 0, False, "lib/*.olean is not current: %s" % exc,
+                    None)
         env = dict(os.environ, LEAN_PATH="%s:%s" % (ROOT, LIB))
         p = L.run_lean(LEAN_BIN, [tmp], env=env, wall_s=PROOF_WALL_S,
                        cpu_s=PROOF_CPU_S)
@@ -3971,15 +4077,9 @@ def _run_lean(text):
             # them. This is the doc's own sentence about a check that is worse
             # than no check, arrived at from the other end: the guard was not
             # reporting a false proof, it was reporting no proof.
-            #
-            # The reason is the C++ runtime's own line where there is one,
-            # because `lean::memory_exception` aborts rather than reports and
-            # "exited -6" alone names the symptom rather than the cause.
-            reason = next((l for l in out.splitlines()
-                           if "memory_exception" in l or "libc++abi" in l), "")
             return (False, 0, False,
-                    "lean exited %s: %s" % (p.returncode, reason
-                                           or "no error message"), None)
+                    "lean exited %s: %s" % (p.returncode,
+                                           lean_failure_reason(out)), None)
         # Drop the temp path and the line:col, which would otherwise eat the
         # whole message under the `[:60]` slice below and print as a filename.
         errs = [_ERR.sub("", l) for l in out.splitlines() if ": error" in l]
@@ -4033,6 +4133,16 @@ def main(argv):
         # when the pinned toolchain is not installed, and 43 examples × two
         # theorems is 86 identical failures instead of one line.
         print("lean not found (see ./lean-toolchain)")
+        return 1
+    try:
+        ensure_lean_ready()
+    except RuntimeError as exc:
+        # The same reason, once. Every generated proof below imports `X86`, so a
+        # `lib/*.lean` that will not elaborate would otherwise be 86 identical
+        # unexplained exits — and this one carries the build's own diagnostic,
+        # which is the whole reason to build the library up front rather than
+        # discovering the problem inside the first proof.
+        print("lib/*.olean is not current: %s" % exc)
         return 1
     val_ok = val_gap = term_ok = term_gap = 0
     val_holes = []

@@ -8,6 +8,18 @@ them: none of the five touches `lib/` or `formal/admitted.py` (`git diff
 master..HEAD -- lib/ formal/admitted.py` is empty), and the pinned numbers do
 not describe master's own library.
 
+**2026-10-05 (`work/gatefix12`): still open, one module this time, and the
+arrival is now MEASURED — read "Addendum" at the end before re-pinning.** The
+table was re-derived since this was filed (its `ProofLib` row is 297 where this
+file's table says 255, and `IEEE754` reads the way this file measured it), and
+today the loop stops on `ProofLib` alone. The cause is not a new bug but the
+growth the model work brought: `lib/ProofLib.lean` has gained ~833
+`bv_decide`/`native_decide` SITES since these ceilings were derived, in a
+handful of very large step-lemma declarations, so the SITE pins are ~833 behind
+while the THEOREM pins are 14 behind. Both are the same fact and they are
+correctly different numbers; §"Addendum" has the measurements and what it means
+for each pin.
+
 **It is invisible until the library is BUILT**, which is why it has survived: the
 class `skipTest`s without `lib/ProofLib.olean`, and the gate normally builds that
 behind the `prooflib` dep — so a worktree that has never run a Lean-backed test
@@ -110,4 +122,121 @@ not describe it.
 $ export PATH=/opt/homebrew/bin:$PATH
 $ python3 tools/memslot.py --gb 8 --label pb -- python3 tools/suite.py prooflib
 $ python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_sweep_truth.py
+```
+---
+
+## Addendum 2026-10-05 (`work/gatefix12`, at 0487369a): ONE row stale, and the arrival measured
+
+Reached from the `formal-sweep-truth` gate failure in
+`bugs/`-terms: that job's `TestAxiomClosureCensus` SKIPs on a worktree with no
+`lib/ProofLib.olean`, so this row only speaks on a tree that has run something
+Lean-backed. It has, and the class is red again:
+
+```console
+$ export PATH=/opt/homebrew/bin:$PATH
+$ python3 tools/memslot.py --gb 8 --label pb -- python3 tools/suite.py prooflib
+$ python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_sweep_truth.py
+FAIL: test_the_closure_census_says_what_the_text_census_cannot
+AssertionError: Tuples differ:
+- (311, 60, 243, 0, 8, 0)
++ (297, 46, 243, 0, 8, 0)
+ : ProofLib: the closure census moved. asked/reaches/clean/text_only/
+   closure_only/ofReduceBool = (311, 60, 243, 0, 8, 0), the table says
+   (297, 46, 243, 0, 8, 0).
+```
+
+So the table was re-derived after this doc was filed — `IEEE754` now reads the
+way this doc MEASURED it, and `ProofLib`'s pinned `asked` is 297 where the table
+here shows 255 — and **one** row is behind: `asked` 297 → **311** and `reaches`
+46 → **60**, with `clean` (243), `text_only` (0), `closure_only` (8) and
+`of_reduce_bool` (0) all unmoved. The partition still holds exactly
+(60 + 243 + 0 + 8 = 311), which is this doc's own test that a moved row is a
+mis-classification or a mis-source rather than a lost theorem.
+
+**`asked` is a declaration count, and 14 is all that moved there.** Measured
+Lean-free, straight off the source:
+
+```python
+>>> from formal import admitted as A
+>>> lib = A.lean_dir('.')
+>>> rows = A.library_theorems(lib)['ProofLib']
+>>> sum(1 for q, r in rows.items() if r.get('public', True))
+311
+```
+
+(312 declarations, of which `ifUpdate_congr` is the one `private` the census
+does not ask about.) So `lib/ProofLib.lean` gained 14 public declarations since
+2026-10-04, and every one of them reaches a decide axiom.
+
+### The SITE pins are ~833 behind the same arrival, and that is not a contradiction
+
+`test_formal_admitted.py truth` is red on the same fact, at the site level:
+
+```
+FAIL  the Lean library's trust counts are pinned
+      ProofLib: 1518 native_decide/bv_decide site(s), the ceiling is 685 (+833)
+FAIL  the replaced native_decide count is what it claims
+      FORMAL.md §7 row 10 publishes 707 site(s) remaining and lib/ has 1540
+```
+
+`rg -c 'bv_decide|native_decide' lib/ProofLib.lean` says 1545, so `library_trust`
+is counting sites, not over-counting them, and the ceiling is simply behind. The
+gap between "+833 sites" and "+14 theorems" is the finding, not a mystery: the
+sites arrived inside a few very large step-lemma declarations — the same file
+prints "1540 site(s) over 81 theorem(s)", with `work_step_stur` at 66 sites,
+`work_step_tst` at 65 and `work_step_cmn` at 64 — so **a site is not a theorem
+and the two pins are not supposed to move together**. `AXIOM_CLOSURE` counts
+declarations by what their closure reaches; `LIBRARY_TRUST` counts tactic sites
+in the text. `FORMAL.md` §7's `remaining 707` is the third copy of the same
+number, and `test_formal_admitted.py` already checks that all the copies agree
+("the axiom-carrying tactic count is in four places and they disagree").
+
+### What this does NOT change about the fix
+
+Still not "paste the numbers in", for the reason the section above gives, now
+with a second one:
+
+1. **`AXIOM_CLOSURE["ProofLib"]`**: +14 asked and +14 reaches with `clean` pinned
+   is the shape "the library grew", and re-pinning it is a transcription — but
+   it is a transcription of a number this doc has just watched go stale twice,
+   so it wants the arrival named (`lib/ProofLib.lean` +14 public declarations,
+   2026-10-05) in the row's comment the way `IEEE754`'s already is.
+2. **`LIBRARY_TRUST["ProofLib"]`'s ceiling and `FORMAL.md` §7's total are a
+   PAY-DOWN decision, not a transcription.** +833 sites is not drift, it is a
+   debt that arrived with the model work, and `bugs/FORMAL_native_decide_axiom.md`
+   §3 "Keep the ceiling honest" is where that decision is written down: a
+   ceiling that goes up is a statement that the debt is accepted, and the
+   `native_decide` → `decide` replacements in that doc's ledger are how it is
+   paid. That doc's 2026-10-04 status says `test_formal_admitted.py` was green;
+   it is not, and the two rows above are the reason.
+3. Do not widen either assertion. Both tables are measurements, and both tests
+   are the only things that notice when they stop being one.
+
+### This doc's step 4 is now answered, and the answer is not a `prooflib` dep
+
+Step 4 asked whether `formal-sweep-truth` should `deps` on `prooflib`, on the
+grounds that the class SKIPs in every worktree that has not built the library.
+It should not, and the class's skip is unchanged by the 2026-10-05 fix:
+
+* `formal/x86_64_endtoend_test.py` now establishes the library itself
+  (`ensure_lean_ready` → `formal/lean.py::ensure_library`, locked and
+  content-addressed), because it is the one emitter of four that generated
+  `import X86` proofs without asking — its one caller with no `prooflib` dep is
+  `formal-sweep-truth`, and that is what the gate failure was.
+* `TestAxiomClosureCensus` runs BEFORE that (classes run alphabetically), so in
+  a cold worktree it still skips, exactly as before, and in a warm one it runs
+  and says what this addendum says. The registration keeps `deps=['preflight']`
+  and takes `mem='module'`, so `check` still does not pay for the 27 MB build.
+* The consequence to keep in mind: **building the library in a worktree is what
+  turns this row from invisible into red.** That is not a reason to stop
+  building it — it is the reason this table needs a re-derive rather than
+  another worktree that never runs Lean.
+
+### Reproducing (2026-10-05 figures)
+
+```console
+$ export PATH=/opt/homebrew/bin:$PATH
+$ python3 tools/memslot.py --gb 8 --label pb -- python3 tools/suite.py prooflib
+$ python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_sweep_truth.py
+$ python3 test_formal_admitted.py truth        # the two SITE rows above
 ```

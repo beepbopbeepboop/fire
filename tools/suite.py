@@ -2415,10 +2415,38 @@ test('formal-sweep', [PY, 'test_formal_sweep.py'],
 # The two suites that pin the reach claims and the bind audit.  Unregistered
 # until now, and the second is the one standing between a real backend defect
 # and a `codegen` misclassification on the executable path, so its absence
-# from the gate was the gap worth closing.  Neither needs `prooflib` to do
-# anything: the one case that wants a library census SKIPs loudly without it.
+# from the gate was the gap worth closing.
+#
+# `formal-sweep-truth` DOES reach Lean, through the one case that elaborates a
+# generated proof (`formal/x86_64_endtoend_test.py`'s end-to-end `sorry`
+# attribution), so the sentence that used to sit here — "Neither needs
+# `prooflib` to do anything" — was a claim about the file as it was then, and
+# it stopped being true when that case landed in it.  It was not visible
+# because the registered job that runs THAT emitter (`formal-x86-endtoend`)
+# deps on `prooflib`, and this one does not: `make check` does not pay for the
+# library build, so on a tree with no `lib/*.olean` the case ran anyway and
+# reported `unknown module prefix 'X86'` as `lean exited 1: no error message`.
+# The library is a PRECONDITION of a generated proof, so it is established
+# where the proof is elaborated — `ensure_lean_ready` →
+# `formal/lean.py::ensure_library`, the lock + content-addressed-store path the
+# other three x86-64 emitters already open with — and not by a bucket's
+# dependency list.  `deps=['prooflib']` is therefore still wrong here, and
+# adding it would put an 80 s / 27 MB build in the everyday loop.
+#
+# `mem='module'` follows from that, and is the same argument `prooflib`'s own
+# registration makes: the guard is free on a warm store (measured 0.3 s, and
+# 1.4 GB peak for the whole job WITH the library, on 2026-10-05) and is one
+# ~80 s / 7.8 GB `lib/ProofLib.lean` build on a cold one, so the class is sized
+# for the build this job can now start rather than for the warm case.  An 8 GB
+# ceiling over a 7.8 GB build is a RESOURCE verdict, and `expect=` forgives
+# neither that nor a skipped dep.
 test('formal-sweep-truth', [PY, 'test_formal_sweep_truth.py'],
-     deps=['preflight'],
+     deps=['preflight'], mem='module',
+     memwhy='may reach Lean\'s 27 MB lib/*.olean build through '
+            'formal/lean.py::ensure_library (measured 1.4 GB warm, 7.8 GB on a '
+            'cold store), so it is capped like the `prooflib` step whose work '
+            'it can now do itself rather than like the pure-python check it '
+            'mostly is. See ' + MEM_DEBT_DOC,
      desc='the sweep, measured against the interpreter: no invented coverage')
 test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
      deps=['preflight'],
@@ -4808,10 +4836,12 @@ def observed_failures(output: str):
 def observed_fanout_failures(spec, results):
     """The failing-case count a FANOUT produced: its own per-item verdicts.
 
-    A fanout is N independent processes (`bootstrap-stage2-dumps` is 46
-    `./mojo --dump` runs), so it has no harness, no summary line and nothing
-    for `observed_failures` to read — and feeding it the LONGEST item's output
-    would be reading one file's compiler diagnostic as a count of the sweep.
+    A fanout is N independent processes (`bootstrap-stage2-dumps` is 46 runs of
+    the stage2 binary — its argv is `['./mojo', '--dump', '../{file}']` with
+    `cwd='stage2'`, so the name in it is the compiled stage, not this tool),
+    so it has no harness, no summary line and nothing for `observed_failures` to
+    read — and feeding it the LONGEST item's output would be reading one file's
+    compiler diagnostic as a count of the sweep.
     The number a fanout's marker can be checked against is the one this runner
     already decided per item: how many items came back FAIL or ERROR, the two
     verdicts `expect=` forgives. A RESOURCE or TIMEOUT item is not counted,

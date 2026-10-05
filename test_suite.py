@@ -1136,13 +1136,15 @@ def test_an_expect_marker_count_is_checked_against_the_run():
           'of cases, and inventing a number for them would be a fiction')
 
     # …and the FANOUT shape, which is the one count in the registry that has
-    # no summary line to read: `bootstrap-stage2-dumps` is 46 `./mojo --dump`
-    # processes, and its marker's count is checked against the per-item
-    # verdicts. Before this the count was read out of the LONGEST item's
-    # output — one file's compiler diagnostic, which has no "N passed, M
-    # failed" line in it — so a count-checked marker on a fanout reported
-    # UNCHECKED and therefore FAILED, which is the marker being unusable
-    # rather than the rule being strict.
+    # no summary line to read: `bootstrap-stage2-dumps` is 46 per-file dumps of
+    # the stage2 binary — the registry spells that fanout's argv
+    # `['./mojo', '--dump', '../{file}']` and runs it with `cwd='stage2'`, so
+    # the name there is the compiled stage binary and not the tool — and its
+    # marker's count is checked against the per-item verdicts. Before this the
+    # count was read out of the LONGEST item's output — one file's compiler
+    # diagnostic, which has no "N passed, M failed" line in it — so a
+    # count-checked marker on a fanout reported UNCHECKED and therefore FAILED,
+    # which is the marker being unusable rather than the rule being strict.
     ITEMS = ['a', 'b', 'c', 'd', 'e']
 
     def fanout_verdict(expect, statuses):
