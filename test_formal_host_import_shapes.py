@@ -47,7 +47,7 @@ import formal_host_import_shapes as S     # noqa: E402
 # having decided what it MEANS, since the whole reading of the table is which
 # shapes stand between a row and a module.
 SHAPES = {"WORD", "FIELD", "SUBSCRIPT", "CONCAT", "FSTRING", "BARE",
-          "DECORATOR", "STAR", "DEAD"}
+          "DECORATOR", "MODULE", "STAR", "DEAD"}
 
 
 def write(directory, name, source):
@@ -151,6 +151,55 @@ class TestTheThreeBindings(unittest.TestCase):
     def test_an_alias_is_followed(self):
         got = self.shapes("import zlib as _z\n\n_z.crc32(1)\n")
         self.assertEqual(got, {"zlib.crc32": {"WORD"}})
+
+    def test_a_dotted_import_binds_the_TOP_name(self):
+        """`import a.b` binds `a`, not `a.b`. Reading it the other way made
+        every `import importlib.util` in the corpus read as a DEAD import —
+        which is the one answer this tool must never give about a live file,
+        and it took a reader that had been written to catch exactly that class
+        of mistake."""
+        got = self.shapes("import zlib.util\n\nzlib.util.crc32(1)\n",
+                          module="zlib.util")
+        self.assertEqual(got, {"zlib.util.crc32": {"FIELD", "WORD"}})
+        # And a row keyed on the TOP name is a row this file is in, because
+        # `import a.b` imports `a`. A row that quietly omits a file reads as a
+        # row that shrank.
+        top = self.shapes("import zlib.util\n\nzlib.util.crc32(1)\n",
+                          module="zlib")
+        self.assertEqual(top, {"zlib.util.crc32": {"FIELD", "WORD"}})
+
+    def test_a_dotted_imports_name_is_spelled_relative_to_the_MODULE(self):
+        """`importlib.util.spec_from_file_location` is a name out of
+        `importlib.util`, so the row keyed on `importlib.util` reports that
+        name — not one with `util` on the end of it, which is what appending
+        the attribute to the module's own spelling gives."""
+        got = self.shapes("import importlib.util\n\n"
+                          "importlib.util.find_spec('x')\n",
+                          module="importlib.util")
+        # `FIELD` as well, and it is right: `importlib.util.find_spec` reads a
+        # module-level name (`util`) out of a module, and on this path a
+        # module-level name is not a word. The real corpus agrees —
+        # `test_arm64_encoders.py` and `tools/formal_sweep_causes.py` both read
+        # as `FIELD,WORD` for exactly this reason.
+        self.assertEqual(got, {"importlib.util.find_spec": {"FIELD", "WORD"}})
+
+    def test_the_module_object_as_a_value_is_its_own_shape(self):
+        """`dir(builtins)` is not a name out of `builtins`, and calling it a
+        dead import would be as wrong as calling it a word: two whole rows
+        (`builtins`, `importlib.util`) want the MODULE, and the refusal is its
+        own — "a module is not a value this path can place: there is no
+        register, frame slot or `__DATA` word for it"."""
+        self.assertEqual(self.shapes("import builtins\n\ndir(builtins)\n",
+                                     module="builtins"),
+                         {"builtins": {"MODULE"}})
+
+    def test_reaching_through_a_module_is_NOT_using_it_as_a_value(self):
+        """`zlib.crc32` does not also read `zlib` as a value. Counting the Name
+        that is an Attribute's base would put a `MODULE` on every row in the
+        table, which is the same class of bug as the one above: a shape that
+        looks plausible and is not there."""
+        self.assertEqual(self.shapes("import zlib\n\nzlib.crc32(1)\n"),
+                         {"zlib.crc32": {"WORD"}})
 
     def test_a_star_import_is_reported_and_NOT_resolved(self):
         """Any name in the file could have come from `M`, so guessing which is
@@ -265,23 +314,45 @@ class TestAgainstTheRealCorpus(unittest.TestCase):
                              f"that this test and the tool's docstring do not "
                              f"define")
 
-    def test_a_row_whose_names_are_all_dead_reads_as_dead(self):
-        """`live` counts the files that still spell the module, so a row can
-        read `live=0` and mean it. Two rows in the current corpus read that way
-        for a reason a module cannot fix, and they are the shape this test is
-        for: `importlib.util` and `builtins` are blocked because the files want
-        the MODULE'S NAMESPACE (`spec_from_file_location`, `dir(builtins)`),
-        which is not a name out of the module at all."""
-        for name in ("importlib.util", "builtins"):
-            row = next((r for r in self.rows if r["name"] == name), None)
-            if row is None:
-                continue
-            self.assertTrue(row["live"] > 0,
-                            f"{name} has left the corpus; delete this case")
-            shapes = {s for v in row["names"].values() for s in v}
-            self.assertEqual(shapes, {"DEAD"},
-                             f"{name} is blocked on something that is not a "
-                             f"dead import any more: {row['names']}")
+    def test_a_row_that_wants_the_MODULE_reads_as_such(self):
+        """Two rows are blocked because the files want the module ITSELF rather
+        than a name out of it, and a column that only counts names calls both
+        of them something they are not.
+
+        `builtins` is the clearer one: `dir(builtins)` passes the MODULE as a
+        value, which reads as `MODULE` and is the refusal `os.sep`'s message
+        spells — "a module is not a value this path can place: there is no
+        register, frame slot or `__DATA` word for it".
+
+        `importlib.util` is the same capability reached one step in:
+        `importlib.util.spec_from_file_location(path)` and
+        `module_from_spec(spec)` load a module BY PATH, so the row is a
+        `FIELD` read of a module-level name rather than a `DEAD` one. An
+        earlier version of this test asserted `DEAD` for both and was wrong,
+        because the reader it was checking had `import a.b` binding `a.b` — a
+        false `DEAD` about a live file, which is the one answer this tool must
+        never give.
+        """
+        builtins = next((r for r in self.rows if r["name"] == "builtins"), None)
+        if builtins is None:
+            self.skipTest("the builtins row has left the corpus")
+        self.assertEqual({s for v in builtins["names"].values() for s in v},
+                         {"MODULE"},
+                         f"`builtins` is blocked on something that is not the "
+                         f"module itself any more: {builtins['names']}")
+        loader = next((r for r in self.rows if r["name"] == "importlib.util"),
+                      None)
+        if loader is None:
+            self.skipTest("the importlib.util row has left the corpus")
+        self.assertTrue(loader["live"] > 0,
+                        "importlib.util has left the corpus; delete this case")
+        self.assertEqual(sorted(loader["names"]),
+                         ["importlib.util.module_from_spec",
+                          "importlib.util.spec_from_file_location"],
+                         "the importlib.util row is blocked on two names, and "
+                         "they are the two that load a module by PATH — an "
+                         "embedded CPython, which is why the row is tiered "
+                         "`unreachable` and not `modelled`")
 
     # ── the three ratchets, whose going RED is the point ────────────────────
     #

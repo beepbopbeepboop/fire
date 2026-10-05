@@ -87,6 +87,12 @@ Each is measured, not guessed, from the parent chain of the `mod.name` node:
             for this reason** (`formal/hostmods/os/__init__.mojo`), so every
             `BARE` here is a caller that has to be re-spelled rather than a
             module that has to be written.
+  `MODULE` the MODULE OBJECT used as a value — `dir(builtins)`,
+            `importlib.util.find_spec(name)`. Measured refusal: "a module is not
+            a value this path can place: there is no register, frame slot or
+            `__DATA` word for it". It is the shape two whole rows need
+            (`builtins`, `importlib.util`), and it is NOT a dead import however
+            it reads in a column of counts.
   `STAR`   `from M import *`. Any name in the file could have come from `M`,
             so the row is reported unresolved rather than guessed at.
   `DECORATOR` the bound name is the decorator of a `def`/`class`. Measured on
@@ -233,6 +239,25 @@ def _shapes_from(node, parent):
     return shapes
 
 
+def _attr_path(node, parent):
+    """`node.attr` plus every attribute above it, in SOURCE order.
+
+    `node` is the innermost (`a.b` in `a.b.c`) and the walk goes outward, so
+    appending is already the source order — `a.b.c` gives `["b", "c"]`, which is
+    what "consume the dotted tail of `import a.b`" compares against. Reversing it
+    is the bug that reads `importlib.util.spec_from_file_location` as a name
+    called `spec_from_file_location.util`.
+    """
+    parts, cur = [node.attr], node
+    while True:
+        p = parent.get(cur)
+        if isinstance(p, ast.Attribute) and p.value is cur:
+            parts.append(p.attr)
+            cur = p
+            continue
+        return parts
+
+
 def uses_in(path, module):
     """`{spelled_name: {shape, …}}` for one file's uses of `module`, or `None`.
 
@@ -241,12 +266,15 @@ def uses_in(path, module):
     sweep log names paths relative to the tree it ran in, and a file that has
     moved is not a file that stopped importing the module.
 
-    Three bindings are followed, because CPython has three and reading only one
+    Four spellings are followed, because CPython has four and reading only some
     of them is how a row looks busy when it is not:
 
-      * `import M`        then `M.f(...)`  — the attribute is the use;
-      * `import M as A`   then `A.f(...)`  — the same, through the ALIAS;
-      * `from M import f` then `f(...)`    — the bound NAME is the use, and a
+      * `import M`         then `M.f(...)`   — the attribute is the use;
+      * `import M as A`    then `A.f(...)`   — the same, through the ALIAS;
+      * `import a.b`       then `a.b.f(...)` — binds `a`, not `a.b`, and the name
+        is spelled relative to the MODULE, so `importlib.util.find_spec` is a
+        name out of `importlib.util` and not out of `importlib`;
+      * `from M import f`  then `f(...)`     — the bound NAME is the use, and a
         reader that only looks for `M.something` reports `f` as unused.
 
     A name bound and never read is `DEAD`, which is the reading
@@ -268,41 +296,68 @@ def uses_in(path, module):
     def note(name, shapes):
         out.setdefault(name, set()).update(shapes)
 
-    bindings, star = [], False
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            if node.module == module:
-                if any(a.name == "*" for a in node.names):
-                    star = True
-                for alias in node.names:
-                    if alias.name == "*":
-                        continue
-                    bindings.append(((alias.asname or alias.name),
-                                     "%s.%s" % (module, alias.name)))
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == module:
-                    bindings.append(((alias.asname or alias.name), module))
-
     loads = [n for n in ast.walk(tree)
              if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)]
     attrs = [n for n in ast.walk(tree)
              if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)]
 
-    for local, spelled in bindings:
+    # `(local, spelled, is_module, dotted_tail)` per binding.
+    bindings, star = [], False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.module == module:
+                for alias in node.names:
+                    if alias.name == "*":
+                        star = True
+                        continue
+                    bindings.append((alias.asname or alias.name,
+                                     "%s.%s" % (module, alias.name), False, []))
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                # `import a.b` imports `a` too, so a row keyed on `a` is a row
+                # this file is in. Matching only `alias.name == module` would
+                # miss it — and a row that quietly omits a file reads as a row
+                # that shrank.
+                if alias.name != module and not alias.name.startswith(
+                        module + "."):
+                    continue
+                # The dotted tail is consumed only when the ROW is that exact
+                # dotted module, because only then is the tail part of the
+                # module's own path rather than a path THROUGH it. For row
+                # `importlib.util` the file's `import importlib.util` makes
+                # `find_spec` a name out of the module; for row `zlib` the same
+                # line is a path through `zlib.util`, and `zlib.util.crc32` is
+                # what the file spells.
+                dotted = alias.name.split(".")
+                bindings.append((alias.asname or dotted[0], module, True,
+                                 dotted[1:] if module == alias.name else []))
+
+    # A Name that is the `.value` of an Attribute is the module being REACHED
+    # THROUGH, not used: `zlib.crc32` does not also read `zlib` as a value, and
+    # counting it would put a `MODULE` on every row in the table.
+    attr_bases = {a.value for a in attrs if isinstance(a.value, ast.Name)}
+    for local, spelled, is_module, tail in bindings:
         read = False
         for attr in attrs:
             if attr.value.id != local:
                 continue
             read = True
-            note("%s.%s" % (spelled, attr.attr),
-                 _shapes_from(attr, parent))
-        if spelled != module:
-            # A `from`-bound or aliased name, used directly.
-            for name in loads:
-                if name.id != local:
-                    continue
-                read = True
+            path = _attr_path(attr, parent)
+            if tail and path[:len(tail)] == tail:
+                path = path[len(tail):]
+            note(".".join([spelled] + path), _shapes_from(attr, parent))
+        for name in loads:
+            if name.id != local or name in attr_bases:
+                continue
+            read = True
+            if is_module:
+                # `dir(builtins)`, the module `importlib.util.find_spec` is
+                # reached through: the MODULE OBJECT as a value, which is its
+                # own shape and the one two whole rows need. Measured refusal,
+                # for `os.sep`: "a module is not a value this path can place:
+                # there is no register, frame slot or `__DATA` word for it".
+                note(spelled, {"MODULE"})
+            else:
                 note(spelled, _shapes_from(name, parent))
         if not read:
             note(spelled, {"DEAD"})
@@ -310,7 +365,7 @@ def uses_in(path, module):
     # Decorator position, for every name this file binds or reads out of the
     # module. A dropped decorator is a program that builds and enforces nothing,
     # so it is its own shape even where the same name is also called.
-    local_to_spelled = {local: spelled for local, spelled in bindings}
+    local_to_spelled = {local: spelled for local, spelled, _, _ in bindings}
     for node in ast.walk(tree):
         for attr in ("decorator_list", "decorators"):
             for dec in getattr(node, attr, None) or []:
@@ -319,11 +374,11 @@ def uses_in(path, module):
                     spelled = local_to_spelled.get(target.id)
                     if spelled:
                         note(spelled, {"DECORATOR"})
-                elif isinstance(target, ast.Attribute):
-                    if isinstance(target.value, ast.Name):
-                        spelled = local_to_spelled.get(target.value.id)
-                        if spelled:
-                            note("%s.%s" % (spelled, target.attr), {"DECORATOR"})
+                elif (isinstance(target, ast.Attribute)
+                      and isinstance(target.value, ast.Name)):
+                    spelled = local_to_spelled.get(target.value.id)
+                    if spelled:
+                        note("%s.%s" % (spelled, target.attr), {"DECORATOR"})
     if star:
         note("%s.*" % module, {"STAR"})
     return {k: (v or {"DEAD"}) for k, v in out.items()}

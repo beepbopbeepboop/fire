@@ -19,25 +19,36 @@ arithmetic and §5 is the next step.
 attributed). `files` is the sweep's count, `live` is how many of those files
 **still spell the module in this tree**, `needs` is the shape of the use, and
 the shapes are defined in the tool's docstring and pinned by
-`test_formal_host_import_shapes.py`:
+`test_formal_host_import_shapes.py` (`WORD` `FIELD` `SUBSCRIPT` `CONCAT`
+`FSTRING` `BARE` `DECORATOR` `MODULE` `STAR` `DEAD`):
 
 | module | tier | files | live | needs | what the files spell |
 |---|---|---:|---:|---|---|
 | `importlib` | unreachable | 94 | 5 | `WORD` | `import_module` |
-| `collections` | modelled | 39 | 23 | `BARE` `FIELD` `WORD` `DEAD` | `Counter`, `defaultdict`, `OrderedDict`, `namedtuple` |
+| `collections` | modelled | 39 | 19 | `BARE` `FIELD` `WORD` `DEAD` | `Counter`, `defaultdict`, `OrderedDict`, `namedtuple` |
 | `unittest` | unreachable | 18 | 18 | `BARE` `DECORATOR` `FIELD` `WORD` | `TestCase`, `main`, `SkipTest`, `skipUnless` |
 | `itertools` | modelled | 14 | **0** | — | **CLOSED** |
 | `copy` | modelled | 13 | 4 | `WORD` | `copy.copy`, `copy.deepcopy` |
 | `random` | unclassified, model written | 8 | 8 | `WORD` | `Random`, `randrange`, `seed` |
-| `types` | modelled | 6 | 5 | `BARE` `WORD` | `ModuleType`, `SimpleNamespace` |
-| `importlib.util` | unreachable | 5 | 5 | `DEAD` | the module's NAMESPACE |
+| `types` | modelled | 6 | 5 | `BARE` `MODULE` `WORD` | `ModuleType`, `SimpleNamespace` |
+| `importlib.util` | unreachable | 5 | 5 | `FIELD` `WORD` | `spec_from_file_location`, `module_from_spec` — load a module BY PATH |
 | `inspect` | modelled | 5 | 5 | `FIELD` `WORD` | `getsource`, `getsourcelines`, `signature` |
-| `builtins` | unreachable | 3 | 3 | `DEAD` | `dir(builtins)` — the NAMESPACE |
+| `builtins` | unreachable | 3 | 3 | `MODULE` | `dir(builtins)` — the module AS A VALUE |
 | `datetime` | modelled | 2 | **0** | — | **CLOSED** |
 | `socket` | unreachable | 2 | 2 | `BARE` `WORD` | `socket`, `socketpair`, `AF_UNIX` |
 | `tokenize` | **unclassified** | 2 | 2 | `BARE` `WORD` | 7 kind codes, `TokenError`, `generate_tokens` |
 | `asyncio`, `atexit`, `functools`, `plistlib`, `pwd`, `resource`, `sqlite3`, `unittest.mock`, `uuid` | mixed | 1 each | 0-1 | see the tool | one name each |
 | `abc` `importlib` `types` `resource` `inspect` `pickle` `html.parser` `multiprocessing` `token` | — | closure only | 0 `alone` | — | nothing reachable |
+
+Two shapes in that table are the ones the older ranking cannot express at all.
+**`MODULE` is the module OBJECT used as a value** — `dir(builtins)` — and it is
+its own refusal ("a module is not a value this path can place: there is no
+register, frame slot or `__DATA` word for it"), not a dead import and not a
+word. **`BARE` is a module-level name with no call on its chain**, which is a
+fact about the CALLER rather than about the module, because a constant in a host
+module is a zero-argument function for exactly this reason
+(`formal/hostmods/os/__init__.mojo`; `test_formal_stat.py::group_absent` says the
+same about why its refusals are calls).
 
 `tokenize`'s seven kind codes are `BARE` — a module-level name with no call on
 its chain — which is a fact about the CALLER, not about the module: a constant
@@ -118,6 +129,15 @@ answered:
 | `itertools` | 14 (19 of closure) | **two** import statements in the whole repository: `test_formal_dylib.py:434` `itertools.combinations(sorted(segs), 2)` and a function-local `import itertools as _it` in `test_module_cache.py` | two index loops, verified `==` to `itertools` including the order |
 | `datetime` | 2 | `datetime.now().isoformat()` in two report headers | `time.time()`, which `fault_tolerance.py:254` has always used for a field with the same name |
 | `copy` | 1 of 13 (`alone`) | `tools/apply_extraction.py` imported `copy` and read nothing through it | deleted the import |
+| `collections` | 4 of 39, **2 of them `alone`** | four files imported it and read nothing through it: `consolidate_string_pool.py` (`from collections import OrderedDict`), `formal/admitted.py`, `tools/formal_chain_probe.py`, `tools/formal_field_walk_differential.py` | deleted the imports; `collections`'s `alone` count went **10 → 8** |
+
+The `collections` half is the same shape of finding as the `copy` half and was
+found by the same instrument: **`DEAD` is a column, not an absence.** Neither
+`formal_sweep_causes.py` nor the wall tool prints it, because both ask whether a
+file NAMES a module and a dead import does name one. Four of the row's 39 files
+answered "yes" and meant nothing by it, and two of them were the row's
+`alone` files — a file for which `collections` is the ONLY wall, so the delete
+moves it rather than merely reclassifying it.
 
 `test_formal_dylib.py` and `test_module_cache.py` were both on the row for
 `itertools`, and `test_formal_dylib.py` is imported by a dozen other formal test
@@ -137,11 +157,13 @@ still runs either way.
 Twenty-two rows. Against them:
 
 * **8 are a fact about the target**, correctly tiered `unreachable` and with the
-  object named: `importlib` and `importlib.util` (an embedded CPython, and the
-  files want its NAMESPACE), `builtins` (`dir(builtins)` — the namespace, not a
-  name out of it), `socket` (a socket), `unittest` and `unittest.mock`
-  (process-wide reporting machinery), `asyncio` (a thread), `atexit` (a
-  shutdown path).
+  object named: `importlib` and `importlib.util` (an embedded CPython — the five
+  files load a module BY PATH with `spec_from_file_location` +
+  `module_from_spec`), `builtins` (the module as a VALUE: `dir(builtins)` asks
+  the interpreter to enumerate its own namespace, which is the one question on
+  that page with no answer here), `socket` (a socket), `unittest` and
+  `unittest.mock` (process-wide reporting machinery), `asyncio` (a thread),
+  `atexit` (a shutdown path).
 * **1 is closure and written**: `random`, 8 files of which 5 spell
   `random.Random(seed)` — an object with 624 words of state behind a pointer.
 * **5 need a type**: `collections.namedtuple`, `collections.Counter`,
