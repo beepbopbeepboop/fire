@@ -567,6 +567,48 @@ DIFF_CASES = [
      '    sys.stdout.write("v=%d" % b.get())\n'
      "    return 0\n\n"
      "main()\n"),
+    # THE LIFT, and it is the row the refusal below replaced: `Box().get()` on a
+    # CONSTRUCTION receiver, where the struct is named by the callee and the
+    # nested frame is brought up at the construction site before the method
+    # reads it.  The STEP it needed — the nested frame at a construction site —
+    # landed 2026-10-03 in `4af77b16`, and the lift with it on 2026-10-04; the
+    # doc both steps were filed in is deleted with them, and the bug it left
+    # behind is `bugs/FORMAL_a_construction_does_not_run_a_nested_structs_
+    # constructor.md`.
+    #
+    # **A WRITE THROUGH IT, because a read cannot establish this.**  `get()`
+    # alone would answer 0 on a program that handed the callee a null pointer and
+    # on one that handed it a real frame, so it would pass whether the lift
+    # worked or whether it read address 0.  `set_get(41)` stores 41 through the
+    # receiver and reads it back, so the answer is 41 only if the frame is at a
+    # real address AND writable — which is the whole claim.
+    ("a_method_call_on_a_construction_receiver",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n\n"
+     "struct Box:\n"
+     "    var inner: Opt\n\n"
+     "    def set_get(self, x: Int) -> Int:\n"
+     "        self.inner.v = x\n"
+     "        return self.inner.v\n\n"
+     "def main() -> int:\n"
+     '    printf("v=%d", Box().set_get(41))\n'
+     "    return 0\n",
+     "import sys\n\n"
+     "class Opt:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.has = 0\n\n"
+     "class Box:\n"
+     "    def __init__(self):\n"
+     "        self.inner = Opt()\n"
+     "    def set_get(self, x):\n"
+     "        self.inner.v = x\n"
+     "        return self.inner.v\n\n"
+     "def main():\n"
+     '    sys.stdout.write("v=%d" % Box().set_get(41))\n'
+     "    return 0\n\n"
+     "main()\n"),
 ]
 
 # ── the refusals ────────────────────────────────────────────────────────────
@@ -1021,43 +1063,41 @@ REFUSALS = [
      "    l.k = 5\n"
      "    return l.make().take()\n",
      "is a `Widget`, and that IS established"),
-    # …and the OTHER call-result receiver, which is a different spelling with a
-    # different reason to be refused and was reaching the LINK AUDIT instead.
-    # `Box()` is a CONSTRUCTION of a struct this module declares, so its type is
-    # not in question at all — the declaration settles it — and what the lift
-    # still cannot do is name a RECEIVER, because the call carries none.  Before
-    # this was refused at the construct, `Box().get()` built and died at the link
-    # with "the image would bind 1 symbol(s) that nothing provides: get", which
-    # is the sentence `formal/model.py`'s `subscript_receiver_method_refusal`
-    # calls worse than a wrong number because it is silent: a symbol spelled after
-    # the METHOD can collide with a real one and the image then computes a
-    # plausible wrong answer with nothing reporting a failure.
+    # …and the THIRD receiver spelling, which used to be refused here and now
+    # is refused ONE ROW DOWN with a different reason, because the reason it was
+    # refused for turned out to be FALSE.  `Box()` is a CONSTRUCTION of a struct
+    # this module declares, so its type was never in question; the refusal said
+    # the construction "in an argument position never builds" the frame a
+    # one-word struct's receiver IS, and since 2026-10-03 it does: both backends'
+    # `_emit_fresh_one_word` bring the nested frame up at a site the prologue
+    # reserved and hand back its address (`model.struct_construction_yields_frame_
+    # address` is the one reader of that, and
+    # `model.construction_bringup_is_complete` is what decides whether the
+    # bring-up wrote every slot it reserved).  The differential row
+    # `a_method_call_on_a_construction_receiver` is the lift, and this is the
+    # case where lifting it would read a frame of zeros.
     #
-    # `Box` is a ONE-FIELD struct here on purpose, because that is the shape the
-    # refusal's ADVICE runs into: it tells the reader to bind the receiver to a
-    # local of a declared struct type, and whether that advice answers this
-    # program is a separate question with its own answer
-    # (`bugs/FORMAL_method_call_on_a_construction_is_not_rewritten.md`). A
-    # two-field receiver builds and computes, so this row is not the only place
-    # the two shapes could have been confused.
-    #
-    # The NEEDLE is the representation sentence rather than the "cannot be
-    # lowered" one, and it moved with `_call_receiver_target` (2026-10-04): the
-    # call result's type is now read off the callee's `-> T`, so the type half of
-    # the sentence is no longer true of this row and what remains wrong with the
-    # receiver is the one thing row (1) names.  One row per concern, so this is
-    # the only spelling of the construction receiver in the file.
-    ("refuse_a_method_call_on_a_construction_receiver",
+    # What is refused is not the construction but the CONSTRUCTOR: a nested
+    # struct with a declared `__init__` is not run by a bring-up, which writes
+    # each field's class-level default.  Measured with the stores in `Opt`:
+    # `var b = Box(); b.get()` answers 0 where CPython answers 41, so lifting
+    # the call would move a wrong answer rather than create one — and a
+    # construction receiver is not the place to fix it
+    # (`bugs/FORMAL_a_construction_does_not_run_a_nested_structs_constructor.md`).
+    ("refuse_a_method_call_on_a_construction_whose_nested_constructor_is_not_run",
      "struct Opt:\n"
      "    var v: Int\n"
      "    var has: Int\n\n"
+     "    def __init__(out self):\n"
+     "        self.v = 41\n"
+     "        self.has = 1\n\n"
      "struct Box:\n"
      "    var inner: Opt\n\n"
      "    def get(self) -> Int:\n"
      "        return self.inner.v\n\n"
      "def main() -> int:\n"
      "    return Box().get()\n",
-     "`Box()` is a `Box`, and that IS established"),
+     "does not run a constructor"),
 ]
 
 # ── the comptime ABI, now on BOTH architectures ────────────────────────────

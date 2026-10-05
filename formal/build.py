@@ -16082,33 +16082,64 @@ def _call_receiver_verdict(call, elems: dict, structs_by_name: dict,
     `recv` holds".
 
     **A CONSTRUCTION is refused here even though its type is known**, which is
-    the one answer this function gives that `model.receiver_struct` would not:
-    `Box()` names `Box`, and `Box().get()` still cannot be lifted, because a
-    one-word struct's fields live in a FRAME (`model.one_word_sole_field_frame`
-    makes that storage an address) and a construction in argument position
-    builds no frame — measured on both architectures, `Box().get()` through the
-    lift reads at address 0 and answers 0, which is a number no source wrote.
-    `bugs/FORMAL_method_call_on_a_construction_is_not_rewritten.md` is the doc
-    and `test_formal_receiver_position.py`'s
-    `refuse_a_method_call_on_a_construction_receiver` is the pin.
+    the one answer this function gives that `model.receiver_struct` would not,
+    and the reason it gives has MOVED twice. `Box()` names `Box`, so its type was
+    never in question. It was refused because a construction in argument
+    position "builds no frame" — measured on both architectures as `Box().get()`
+    through the lift reading at address 0 — and that stopped being true on
+    2026-10-03, when `4af77b16` made a construction bring the nested frame up at
+    a site the prologue reserved (`model.struct_construction_yields_frame_address`
+    is the one reader). So the construction now LIFTS, and what is left to refuse
+    is the case where the bring-up did not write every slot it reserved: a
+    nested struct with a declared `__init__` is not CALLED by a bring-up, which
+    writes field defaults, and lifting over it would read a frame of zeros where
+    the source wrote stores.
+    `test_formal_receiver_position.py` holds both halves —
+    `a_method_call_on_a_construction_receiver` (the lift, and it STORES through
+    the frame, because a read cannot tell a real address from address 0) and
+    `refuse_a_method_call_on_a_construction_whose_nested_constructor_is_not_run`.
+    The wrong answer the second one holds back is its own bug doc.
     """
     func = call.func
     if not (isinstance(func, F.MemberExpr) and isinstance(func.obj,
                                                            F.CallExpr)):
         return None, None
     inner = func.obj
+    established = None
     # A construction, before any type question: the struct is named by the
     # callee spelling and that is the whole of what is established, and it is
     # not enough (the `why` above).
     if isinstance(inner.func, F.IdentExpr) \
             and inner.func.name in (structs_by_name or {}):
-        return structs_by_name[inner.func.name], "construction"
+        _st0 = structs_by_name[inner.func.name]
+        # A CONSTRUCTION is refused here even though its type is known, because a
+        # one-word struct's fields live in a FRAME and this used to hand the
+        # callee a construction that built none.  It no longer does:
+        # `model.struct_construction_yields_frame_address` says a construction
+        # puts a FRAME ADDRESS in the name — for a struct with a frame of its
+        # own and for a one-field struct whose sole field holds a placed nested
+        # frame — and both backends' `_emit_fresh_one_word` bring that frame up
+        # before they hand back its address, at a site the prologue reserved.
+        # So what is left to check is whether the bring-up writes every slot it
+        # reserves, which is `model.construction_bringup_is_complete`: a nested
+        # struct with a declared `__init__` is NOT run by a bring-up, and lifting
+        # over it would answer a frame of zeros where the source wrote stores.
+        if not M.struct_construction_yields_frame_address(
+                _st0, structs_by_name):
+            return _st0, "construction"
+        ok, why_incomplete = M.construction_bringup_is_complete(
+            _st0, structs_by_name)
+        if not ok:
+            return (_st0, "construction_frame",
+                    getattr(_st0, "name", str(_st0)), why_incomplete)
+        established = _st0
     # `one_field=False`: the gate is applied HERE rather than inside the
     # predicate, because a multi-field answer is a refusal this message has to
     # be able to NAME.  A receiver declared `Wide` says which struct it is, and
     # "what is missing is the receiver's TYPE" would be false about it.
-    st = M.receiver_struct(inner, fn, structs_by_name, owner, bound, elems,
-                           functions or {}, one_field=False)
+    st = established if established is not None else M.receiver_struct(
+        inner, fn, structs_by_name, owner, bound, elems,
+        functions or {}, one_field=False)
     if st is None:
         # Not a struct of THIS module.  That is the answer for a receiver whose
         # type nothing establishes, and a DIFFERENT one for a call whose
@@ -16123,6 +16154,8 @@ def _call_receiver_verdict(call, elems: dict, structs_by_name: dict,
         return (None, "other module", base) if base and base not in (
             structs_by_name or {}) else (None, None)
     if not M.struct_is_one_field(st):
+        if established is not None and M.struct_width_cost(st) == "":
+            pass
         return st, "frame"
     named = [m for m in M.struct_methods(st) if m.name == func.member]
     if not named:

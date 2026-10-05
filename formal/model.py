@@ -30917,6 +30917,83 @@ def struct_construction_yields_frame_address(struct_def, decls: dict) -> bool:
             or one_word_sole_field_frame(struct_def, decls or {}) is not None)
 
 
+def construction_bringup_is_complete(struct_def, decls: dict, depth=None,
+                                      _seen=None) -> tuple:
+    """`(ok, why)` — does constructing this struct write EVERY slot it reserves?
+
+    The question the construction emitter cannot answer for itself, and it asks
+    it about the frames rather than about the struct: a construction brings a
+    nested frame up by writing each field's class-level DEFAULT
+    (`struct_default_word`'s `("nested_frame", …)` arm, then
+    `_emit_frame_defaults`, then `_emit_frame_nested_addresses` for the frames
+    inside it), and **a declared `__init__` is not part of a bring-up** — in
+    Mojo `T(...)` CALLS it, and nothing here calls it.
+
+    Measured, both architectures, on the shape this predicate exists for:
+
+        struct Opt:
+            var v: Int
+            var has: Int
+            def __init__(out self):
+                self.v = 41          # CPython: Opt().v == 41
+                self.has = 1
+
+        struct Box:
+            var inner: Opt
+            def get(self) -> Int:
+                return self.inner.v
+
+        Box().get()      # prints 0 on both architectures
+
+    `var o = Opt()` answers 41, so the stores are inlined for a construction of
+    `Opt` ITSELF (`model.init_body_stores`) and lost for one that happens inside
+    another's frame — the difference being that the frame bring-up is the
+    emitter's own placement walk and not a constructor call. So the answer is
+    "no struct in the subtree declares an `__init__`", recursively, and `why`
+    names the struct that broke it so a refusal can send a reader to the
+    declaration rather than to the shape.
+
+    `depth` is the recursion bound and it is `MAX_NESTED_FRAME_DEPTH` for the
+    same reason `struct_nested_frame_fields` bounds itself: a chain longer than
+    the layout supports is a refusal rather than a truncated answer, and
+    truncating here would report a subtree the bring-up does not write.
+    """
+    depth = MAX_NESTED_FRAME_DEPTH if depth is None else depth
+    if depth <= 0 or struct_def is None:
+        return (False, "nested frame deeper than the layout places")
+    # The visited set is the PATH, not everything seen: a struct reachable by
+    # two different fields is two branches of the same tree and each is walked,
+    # while a struct that reaches ITSELF is a cycle and is reported. A plain
+    # "already seen" set reported the second visit of a sibling as a cycle, and
+    # `struct Box: var inner: Opt` reaches `Opt` twice — once through
+    # `struct_nested_frame_fields` and once through
+    # `one_word_sole_field_frame` — so it refused the shape it exists for.
+    path = set() if _seen is None else _seen
+    key = getattr(struct_def, "name", None) or id(struct_def)
+    if key in path:
+        return (False, f"{key} nests inside itself")
+    path.add(key)
+    try:
+        if any(m.name == "__init__" for m in struct_methods(struct_def)):
+            return (False, f"{key} declares an `__init__`, and a frame bring-up "
+                            f"writes field DEFAULTS rather than calling it")
+        for _fname, _slot, child in struct_nested_frame_fields(
+                struct_def, decls, depth):
+            ok, why = construction_bringup_is_complete(child, decls, depth - 1,
+                                                       path)
+            if not ok:
+                return (False, why)
+        nested = one_word_sole_field_frame(struct_def, decls or {})
+        if nested is not None:
+            ok, why = construction_bringup_is_complete(nested, decls,
+                                                       depth - 1, path)
+            if not ok:
+                return (False, why)
+    finally:
+        path.discard(key)
+    return (True, None)
+
+
 def struct_constructor_site_bytes(struct_def, decls: dict) -> int:
     """Bytes ONE construction site of this struct reserves in the prologue.
 
@@ -37341,9 +37418,19 @@ def receiver_shape_text(expr) -> str:
 CALL_RECEIVER_WHY = {
     "construction":
         "a CONSTRUCTION is not a value this path can pass as a receiver: the "
-        "struct is named, and a one-word struct's fields live in a frame that "
-        "the construction in an argument position never builds — so the word "
+        "struct is named, and the fields a one-word struct's receiver IS live "
+        "in a frame, which only a construction that PLACES one brings up — a "
+        "struct of plain words has no frame to take the address of, so the word "
         "the callee would read is not a number the source wrote",
+    "construction_frame":
+        "a construction IS placed and its frame is brought up before the "
+        "method reads it, but the bring-up writes each field's class-level "
+        "DEFAULT and does not run a constructor: {reason}. So the frame the "
+        "callee "
+        "would read holds zeros where the source wrote stores, which is the one "
+        "outcome this path may not produce. Assign the field after binding the "
+        "construction to a local, which is the same program with the stores "
+        "written where they are written",
     "frame":
         "a struct of {n} fields has its receiver as the ADDRESS of a frame "
         "rather than as a word, and this call site has no frame to take the "
@@ -37450,9 +37537,16 @@ def subscript_receiver_method_refusal(member: str, receiver_text: str,
         why = established[1]
         named = (established[2] if len(established) > 2
                  else getattr(established[0], "name", str(established[0])))
+        # `reason` is the FOURTH element and only the `construction_frame` row
+        # uses it: that refusal has to name WHICH fact about the bring-up is
+        # incomplete (a nested struct's `__init__`, a chain deeper than the
+        # layout places) while the sentence above it still has to say the
+        # struct's own NAME, which is the third. Two slots, two facts, and
+        # neither is spelled twice.
         detail = CALL_RECEIVER_WHY[why].format(
             n=struct_field_count(established[0]) if why == "frame" else 0,
-            base=named)
+            base=named,
+            reason=established[3] if len(established) > 3 else "").rstrip()
         return (f"{who}`{receiver_text}.{member}(…)` cannot be lowered: "
                 f"`{receiver_text}` is a `{named}`, and that IS established — "
                 f"this is not a missing-type refusal. What this path cannot do "
