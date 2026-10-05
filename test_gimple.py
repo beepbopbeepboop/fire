@@ -10235,11 +10235,17 @@ print({'p': 1} | {'q': 2})
         `_reset_func` uses), and a spread that overwrites a literal key.
         Returns are inline for the same reason as the test above, and the
         one literal value is `7` rather than `0` because a ZERO integer read
-        back out of a dict prints `None` on this backend — a separate,
-        pre-existing defect with no spread anywhere in it (verified against
-        `HEAD~4`), filed as
-        bugs/CODEGEN_dict_int_value_zero_reads_back_as_none.md, and pinning it
-        here would make this test red for the wrong reason."""
+        # back out of a dict USED TO print `None` on this backend — a separate
+        # defect with no spread anywhere in it, which made this case red for the
+        # wrong reason and so had to be written around. It is FIXED: the
+        # runtime's one `mojo_repr_slot_kind` renderer answers a zero word under a
+        # stated int kind with `0`, and `mojo_dict_items` records that kind on the
+        # pairs it builds. This case is therefore STRONGER than its comment used
+        # to claim it could be — the zero and the pair kinds are pinned by
+        # `gimple_dict_items_pairs_keep_the_slot_kind` and
+        # `dict_items_reads_each_slot_kind` — so leaving it on `7` keeps a second,
+        # unrelated red out of a spread test rather than adding coverage of a
+        # shape two other cases already own."""
         global _PASS, _FAIL
         name = "dict_literal_star_star_pair_merges_instead_of_storing"
         src = '''\

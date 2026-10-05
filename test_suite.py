@@ -1161,15 +1161,17 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      'formal-receiver-position': 3,
                      'formal-x86-machine-model': 1,
                      'gimple-async-runner': 36,
-                     'gimplerunner': 4,
+                     'gimplerunner': 3,
                      'mutable-async-capture': 2, 'nested-async-generic': 2,
                      'taskgroup': 3, 'transitive-closure-capture': 2,
                      'x86-containers': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '
-          f'is for. `gimplerunner` is the merge worker\u0027s 4 of 376 \u2014 the '
+          f'is for. `gimplerunner` is the merge worker\u0027s 3 of 376 — the '
           f'compile-and-execute rows that are interactions between the ten '
-          f'branches rather than a bug in any one of them (the census had to '
+          f'branches rather than a bug in any one of them; the count was 4 '
+          f'until 2026-10-04, when the dict-value-kind row it named was '
+          f'fixed (the census had to '
           f'learn it here too: adding a marker without adding its entry is '
           f'exactly the drift this check names). `formal-toplevel`, '
           f'`formal-module-attr` and '
