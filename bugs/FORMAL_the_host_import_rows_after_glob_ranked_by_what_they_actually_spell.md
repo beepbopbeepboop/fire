@@ -1,12 +1,41 @@
 # FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell: what is left, which of it is reachable, and why four of the next six are not this wave's
 
-**Status 2026-10-04 (a second pass): §5 item 1, `shlex`, is DONE** —
-`formal/hostmods/shlex.mojo` and `test_formal_shlex.py`, 1 file moved, 0 passes,
-which is the number every host-import row in this project predicts. §5 items 2-5
-remain and each is named below with why it is not this wave's.
+**Status 2026-10-05 (`work/formal31-5`): §5 item 2, `random`, is DONE —
+`formal/hostmods/random.mojo` and `test_formal_random.py`.** Three names
+(`seed`, `getrandbits`, `randrange`), **1452 answers per backend**, every one
+of them computed by **CPython's own `random`** and compared rather than typed
+here: 7 seeds x all 64 `getrandbits` widths, 9 `randrange` ranges x 10 draws x
+3 seeds, 8 seeds x 4 draws, and **700 consecutive draws of one seed, so the
+index walk crosses the 624-word regeneration** — the one case a plausible
+transcription gets wrong and four draws cannot see. Both backends, and
+`random` left `HOST_MODELLED` by being written.
+
+**THE HALF THAT DID NOT MOVE IS MEASURED, not asserted:** a `random.Random(n)`
+INSTANCE is an object with 624 words behind a pointer, so `test_gimple.py`'s
+`rng = random.Random(20260930)` and `tools/formal_fuzz.py`'s stop on the
+INSTANCE rather than on the import, exactly as §2.1 predicted.
+`Random`, `random`, `shuffle`, `choice`, `randint` and `uniform` are each
+refused NAMING THEMSELVES (the `absent` group). **2 of the row's 4 files move
+and 2 stop one level out** — the same honest number §2.1 gave, now with a test
+on both halves.
+
+**And one measurement §2.1 did not have, because it was the load-bearing
+question and nobody had asked it: a module-level LIST, read and written by
+several functions of the module that declares it, crosses the dylib boundary
+and comes back correct on BOTH architectures.** That is what makes the 624-word
+state possible at all, and it is what §2.1's "only the two module-level
+spellings are in reach" rests on —
+`bugs/FORMAL_module_state_no_storage.md` says the same about a module global
+(one writer, in the module that declares it, is storage that exists), and a
+three-slot scratch module built through `fire.py build --formal` answered
+36/39/12 on arm64 and on x86-64 where the arithmetic says 36/39/12.
+
+**§5 item 1, `shlex`, was DONE 2026-10-04** and is struck through in §5 for
+that reason. §5 items 3-5 remain and each is named below with why it is not
+this wave's.
 
 **Status 2026-10-04 (`work/formal25-6`): §5 item 2, `random`, is REACHABLE —
-measured, both architectures — and is a real module-sized job, not an afternoon.
+measured, both architectures.** The measurement the module was then built on:
 The three pieces a Mersenne Twister needs were each measured on this path and
 all three are correct:**
 
@@ -258,11 +287,12 @@ no lean invocation, no gate.
    example of a module in NO tier; `test_formal_link_accounting.py` accounts for
    it beside `html`, `posixpath` and `glob`).
 1. ~~**`shlex`, 1 file.**~~ Done, above.
-2. **`random`, 2 of 4 files.** `arc4random_buf` is in libSystem and a Mersenne
-   Twister is integer arithmetic; the two module-level callers
-   (`test_formal_hashlib.py`, `test_formal_time.py`) already compare against
-   CPython's own. The two `Random(seed)` callers need an object with 624 words of
-   state and are behind `FORMAL_module_state_no_storage`.
+2. ~~**`random`, 2 of 4 files.**~~ **DONE 2026-10-05**, at the top of this
+   document. The two `Random(seed)` callers still need an object with 624 words
+   of state and are behind `FORMAL_module_state_no_storage` /
+   `FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`; that is the
+   half this row could not move, and `test_formal_random.py`'s `absent` group
+   is what keeps it honest.
 3. **`zlib`, 27 files.** A project, not a patch, and the entry in
    `formal/imports.py` says so with the argument. Whoever takes it should read
    `bugs/FORMAL_subprocess_row_measured_b7.md` §5 item 1 first.

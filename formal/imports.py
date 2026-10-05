@@ -485,9 +485,26 @@ HOST_MODELLED = frozenset((
     #     coefficient or a factorial above 64 bits is -1 rather than a wrapped
     #     number, which is a status because there are no exceptions here
     #     (FORMAL.md phase 7).
+    #   `random`  — LEFT 2026-10-05 for `formal/hostmods/random.mojo`, and it is
+    #     the row the `--host` ranking measured as REACHABLE rather than
+    #     unreachable (`arc4random_buf` is already in `tempfile.mojo`, and
+    #     CPython's `Random` is a Mersenne Twister, which is integer arithmetic
+    #     over a 624-word state). Three names — `seed`, `getrandbits`,
+    #     `randrange` — checked against CPython's own `random` by
+    #     `test_formal_random.py` on both backends, over the two callers' own
+    #     seeds and ranges (`test_formal_time.py`'s 62-bit
+    #     `randrange(1, 4e18)` is the widest, and it is why `getrandbits` is
+    #     here rather than private).
+    #
+    #     WHAT THE MODULE DOES NOT MOVE is the other half of the row: a
+    #     `random.Random(n)` INSTANCE is an object with 624 words behind a
+    #     pointer, which is `formal/hostmods/random.mojo`'s own top section and
+    #     `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`.
+    #     Two of the row's four files move and two stop on the instance rather
+    #     than on the import, which is the honest number.
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
-    "random", "decimal", "fractions",
+    "decimal", "fractions",
     #   `operator`  — LEFT on 2026-10-04 for `formal/hostmods/operator.mojo`:
     #     the 27 names that take two WORDS and answer a word, which is the whole
     #     of what a 64-bit value can compute. The three places CPython raises and
