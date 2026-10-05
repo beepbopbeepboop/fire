@@ -2335,6 +2335,22 @@ def _baseline_alarm_checks(failures):
           f"regression in some direction, which is the one thing it must not "
           f"do:\n{text}")
 
+    # Two scopes are not two states of one corpus: a sweep of a subset shares
+    # almost no file with the 738-file baseline, and a delta table over that
+    # prints `pass 131 -> 0` as though the tree had lost everything.
+    loud, text = compare(prev, {"a.py": S.CLASS_CODEGEN},
+                         [("a.py", S.CLASS_CODEGEN, "", _FSTRING_REFUSAL)], 1)
+    check("two scopes are not two states of one corpus" in text
+          and "class counts are NOT printed" in text
+          and "codegen coverage" not in text
+          and "-> +" not in text,
+          f"a one-file sweep against a 738-file baseline printed a class-count "
+          f"and a coverage-rate delta, which reads as a catastrophe and is "
+          f"arithmetic:\n{text}")
+    check("REGRESSION" in text and "a.py" in text,
+          f"the per-file check was dropped along with the table, and it is the "
+          f"one half that is still true over a different scope:\n{text}")
+
     loud, text = compare(None, {"a.py": S.CLASS_PASS}, [], 1)
     check(not loud and "none at b.json" in text,
           f"a run with no baseline does not say so:\n{text}")

@@ -3591,6 +3591,20 @@ def baseline_path(arch: str) -> str:
     return os.path.join(BASELINE_DIR, f"{stem}.baseline.json")
 
 
+def _repo_relative(path: str) -> str:
+    """`path` with this repository's own prefix dropped, for PRINTING.
+
+    The baseline is a COMMITTED file, so the line that names it belongs in a log
+    as the path a reader can open rather than as one that happens to be right on
+    the machine that wrote it — and every other committed path this tool prints
+    (`bugs/sweeps/…`, the `doc/ABI.md` it quotes) is already repo-relative.
+    """
+    try:
+        return os.path.relpath(path, REPO)
+    except ValueError:                       # a different drive, on Windows
+        return path
+
+
 def load_baseline(path: str):
     """The baseline at `path`, or None when there is no file there.
 
@@ -3749,16 +3763,33 @@ def report_baseline(path, prev, verdicts: dict, rows, total, unnamed_now=(),
             f"`tools/formal_sweep_rounds.py --write-baseline` records one from "
             f"a log already on disk")
         return False
-    say(f"  committed baseline: {path} — banked {prev.get('when', '?')}, "
-        f"[{prev.get('arch', '?')}], {prev.get('total', '?')} file(s)"
+    say(f"  committed baseline: {_repo_relative(path)} — banked "
+        f"{prev.get('when', '?')}, [{prev.get('arch', '?')}], "
+        f"{prev.get('total', '?')} file(s)"
         + (f", from {prev['source']}" if prev.get("source") else ""))
 
     old = prev.get("verdicts", {})
+    # Two scopes are not two states of one corpus. A sweep of a subset — a
+    # worker checking one directory, a test sweeping a fixture — shares almost
+    # no file with the 738-file baseline, and a delta table over that prints
+    # `pass 131 -> 0` next to `codegen/dependency 430 -> 0`, which reads as a
+    # catastrophe and is arithmetic. The per-file check below is still correct,
+    # because it only ever compares files both sides name; the TABLE is what
+    # needs the scope, so the table is what the scope gates.
+    shared = len(set(verdicts) & set(old))
+    comparable = (shared >= total / 2 and shared >= len(old) / 2) if total else False
+    if not comparable:
+        say(f"    NOTE: this run swept {total} file(s) and the baseline records "
+            f"{len(old)}, and {shared} of them are the same file. The class "
+            f"counts are NOT printed: two scopes are not two states of one "
+            f"corpus, and a delta over them reads as a catastrophe. The "
+            f"per-file check below still holds — it compares only files both "
+            f"sides name. Re-sweep the same roots, or bank a fresh baseline "
+            f"with --write-baseline")
     was, now = prev.get("classes", {}), collections.Counter(verdicts.values())
     was_pass = (was.get(CLASS_PASS, 0) if was.get(CLASS_PASS)
                 else prev.get("summary_pass"))
-    say("    class counts, baseline -> this run:")
-    for cls in CLASS_ORDER + (BASELINE_UNNAMED_PASS,):
+    for cls in (CLASS_ORDER + (BASELINE_UNNAMED_PASS,)) if comparable else ():
         a, b = was.get(cls, 0), now.get(cls, 0)
         note = ""
         if cls == CLASS_PASS and was_pass is not None and not was.get(cls):
@@ -3786,12 +3817,13 @@ def report_baseline(path, prev, verdicts: dict, rows, total, unnamed_now=(),
     # direction its reader came for.
     was_ans = sum(was.get(c, 0) for c in ANSWERABLE) + (was_pass or 0)
     now_ans = sum(now.get(c, 0) for c in ANSWERABLE)
-    was_pct = 100.0 * (was_pass or 0) / was_ans if was_ans else 0.0
-    now_pct = 100.0 * now.get(CLASS_PASS, 0) / now_ans if now_ans else 0.0
-    say(f"    codegen coverage {was_pct:.1f}% -> {now_pct:.1f}% "
-        f"({now_pct - was_pct:+.1f} pp), over {was_ans} -> {now_ans} answerable "
-        f"file(s) — the sweep's own headline, and the two figures a class count "
-        f"cannot give")
+    if comparable:
+        was_pct = 100.0 * (was_pass or 0) / was_ans if was_ans else 0.0
+        now_pct = 100.0 * now.get(CLASS_PASS, 0) / now_ans if now_ans else 0.0
+        say(f"    codegen coverage {was_pct:.1f}% -> {now_pct:.1f}% "
+            f"({now_pct - was_pct:+.1f} pp), over {was_ans} -> {now_ans} "
+            f"answerable file(s) — the sweep's own headline, and the two "
+            f"figures a class count cannot give")
     entered = left = unknown = 0
     for path_, cls in verdicts.items():
         before = old.get(path_)
@@ -3802,7 +3834,7 @@ def report_baseline(path, prev, verdicts: dict, rows, total, unnamed_now=(),
         was_in, is_in = before in ANSWERABLE, cls in ANSWERABLE
         entered += 1 if is_in and not was_in else 0
         left += 1 if was_in and not is_in else 0
-    if entered or left or unknown:
+    if comparable and (entered or left or unknown):
         say(f"      of which: {entered} file(s) ENTERED the answerable "
             f"denominator (a not-answerable class into a codegen one) and "
             f"{left} left it; {unknown} more are in a class this baseline does "
@@ -4610,10 +4642,14 @@ def main():
               f"{write_baseline(baseline_file, arch, verdicts, unnamed=[p for p, _m in unclassified])}"
               f" ({len(verdicts)} file(s))")
     if regressed or loud:
-        print("  (the two blocks above are the reason this run's numbers "
-              "cannot be read as a census: one is a regression against a "
-              "committed record and one is a refusal class with no row in "
-              "either ranking table)")
+        why = [w for w in ("a regression against a committed record"
+                           if regressed else None,
+                           "a refusal shape with no row in either ranking "
+                           "table" if loud else None) if w]
+        print(f"  (this run's counts are not a census of causes: "
+              f"{' and '.join(why)}. Both are facts about the INSTRUMENT, and "
+              f"neither is cleared by changing a file under formal/ — one is "
+              f"adding a row, the other is the edit that moved those files)")
 
     # WHY each unanswerable file is unanswerable. "170 files" is a number
     # without a cause; "170 files, 60 of them because of `os`" is the fact a
