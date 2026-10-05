@@ -3153,8 +3153,15 @@ test('formal-host-import-wall', [PY, 'test_formal_host_import_wall.py'],
 # not asked once per FUNCTION — the shape 43 508 redundant derivations on
 # `myinterpreter.py` measured, and the two surviving per-function askers the fix
 # left behind are what this pins. 0.96 s, no build, no Lean, so `check`.
+#
+# `cache=True` is right HERE and wrong for most of the formal suite: this job
+# has no build, no Lean and no artifact, so its inputs are its `extra` list and
+# nothing else, and at 0.96 s re-running it every gate buys nothing. The `extra`
+# names the two modules whose tables are under test plus the parser inputs,
+# because the check counts asks made BY `formal/build.py` while it parses
+# `myinterpreter.py` — an edit to any of them must not replay a recorded PASS.
 test('formal-per-struct-asks', [PY, 'test_formal_per_struct_asks.py'],
-     mem='tiny',
+     mem='tiny', cache=True,
      deps=['preflight'],
      extra=['test_formal_per_struct_asks.py', 'formal/model.py',
             'formal/build.py'] + FORMAL_BUILD_INPUTS,

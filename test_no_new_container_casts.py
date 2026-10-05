@@ -257,7 +257,37 @@ def strip_prose(src: str) -> str:
 # docstring cannot reach the generated C. Both prior entries stay in this
 # ledger because the 34 -> 17 one is what established that the metric may be
 # lowered at all, and this one is what it costs to keep counting.
-BASELINE_COUNT = 17
+#
+# 17 -> 19 (2026-10-05, the merge of work/bugs7-1).  These two ARE casts, which
+# is what separates them from the two entries above, and both are the same
+# deliberate shape as a neighbour that was already in the baseline:
+#
+#   * `emit_exprs.py`'s `_lower_percent_dict`: the RHS of `<template> % <dict>`
+#     coerced to the `MojoDict *` its callee declares, as `gen._new_val(
+#     'MojoDict *', f"(MojoDict *){rv}")`. It is the TWIN of the LHS line above
+#     it, `(char *){lv}`, which has been a baseline site since the 34 -> 17
+#     entry counted real casts -- same call, same parameter position, one
+#     operand typed correctly and one not. It cannot go through
+#     `_coerce_to_type`: that helper emits a temp through `_safe_coerce_emit`,
+#     and the function's own docstring records that the inline-in-argument
+#     form is the one GIMPLE has been shown to ACCEPT at this position while
+#     the temp form was not. Emitting the boxed word straight through was a
+#     build failure ("passing argument 2 of 'mojo_str_format_dict' makes
+#     pointer from integer without a cast"), and the chokepoint is not what
+#     stands between that and a correct build here.
+#   * `module_gen.py`'s generated `_mojo_repr_list`: the pair predicate gained
+#     `mojo_is_tuple((MojoList *)(intptr_t)_e)` beside the
+#     `mojo_list_len((MojoList *)(intptr_t)_e)` and
+#     `_mojo_repr_pair((MojoList *)(intptr_t)_e)` already there. Three sites of
+#     one expression in one generated-C template; splitting the count to keep
+#     the number down would be the metric lying. There is no `gen` in scope at
+#     all -- this is C the GENERATED PROGRAM executes, in a template string,
+#     which is the class the scanner's own note says it counts deliberately.
+#
+# So: 19 is again a mix, and again recorded rather than pretended away. The
+# difference from the 19 above is the mix's composition -- nothing here is
+# PROSE, so `strip_prose` is not what these two survived.
+BASELINE_COUNT = 19
 
 
 def count_casts() -> int:

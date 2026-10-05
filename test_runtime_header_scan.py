@@ -416,7 +416,23 @@ def test_every_declaration_is_seen():
     # behaviour; a decimal address on this target). One name: the codegen half
     # is a `print` dispatch arm, which adds no runtime entry point. bugs4-8
     # counted from its own base's 543 and wrote `544`.
-    for header, want in (('fire_runtime.h', 571),
+    for header, want in (('fire_runtime.h', 573),
+    # 571 -> 573 (2026-10-04, `work/bugs7-1`), TWO names, and both are the
+    # consolidation this file exists to make possible:
+    #   +1  `mojo_repr_slot_kind`, THE renderer for "a slot of kind `kind` holds
+    #       the word `v` -- what does that look like?". There were THREE copies
+    #       of that answer -- `mojo_repr_list_kinds`' kind switch, the generated
+    #       `_mojo_repr_pair` walker and the generated `_mojo_repr_dict` value
+    #       chain -- and they had already drifted. One arm here now serves all
+    #       three callers, and it OWNS its return on every arm so a caller can
+    #       `free` without asking which one it got.
+    #   +1  `mojo_dict_kind_byte`, the MOJO_KIND_* byte for one `_DictSlot.kind`.
+    #       The two tag vocabularies exist because they answer different
+    #       questions -- `_DictSlot.kind` is "which setter ran", the alphabet is
+    #       "what is in the word" -- and this is the one place they meet.
+    # Neither adds behaviour to a program, which is why the census figures that
+    # follow are a pure renumbering: `--fix` wrote 573, 676, 269 and 503 into
+    # every sentence that quotes them, from this scan and not from arithmetic.
     # 570 -> 571: `mojo_len_of_word`, the LENGTH discriminator the `len()`
     # lowering asks when the operand's slot is type-erased and no single kind
     # was recorded for it -- `bugs/CODEGEN_len_of_a_param_called_with_both_a_
