@@ -14,10 +14,28 @@ row, same words) — so it survives the fuzz-5 session's backend changes too, an
 supersedes: its two proposed fixes are the two below, and the first is the one
 this file's "exact next step" already names.
 
-`test_formal_x86_64_parity.py` is not in `tools/suite.py`'s registry and is not in
-`test_suite.py`'s `UNREGISTERED` — it is named by bug docs as the place a
-refusal gets pinned per architecture and run by hand, so this red is invisible to
-every gate.
+Re-measured a third time on the five-branch merge (`work/merge-formal27a-r2`):
+`PASS=77 FAIL=1 (78 cases)`, the same single row and the same words, and
+**proved pre-existing on a pristine `git archive master` run of the row alone**
+(`PASS=0 FAIL=1 (1 case)`) rather than by reasoning about the diff. A third doc
+covers this row — `work/formal25-1`'s, which is the one that names the MECHANISM
+(why the one-field rewrite used to fold `s.d` onto its receiver, and the
+`__init__` that stops the fold, which is why the base reaching the gate is a
+`MemberExpr` and not a bare name) and warns against answering it with an
+`expect=`. Three docs for one red is two too many; this one is kept because it is
+the only one of the three that shows the family table and so says whether the
+row is still a distinct case at all.
+
+`test_formal_x86_64_parity.py` is not in `tools/suite.py`'s registry — there is
+no job naming it — but it IS declared in `test_suite.py`'s `UNREGISTERED` as
+`test_formal_x86_64_parity.py: _FORMAL_SUITE_REASON`, so the estate check counts
+it. **This file's earlier claim that it was in neither was wrong**, and the
+correction matters rather than being bookkeeping: an entry in `UNREGISTERED` is a
+statement that the file is red today and no gate reports it, which is exactly
+what this row is, and the count in that block is a re-run of every entry rather
+than a reading of a doc. What is still true is the consequence — a declared red
+in a bucket nobody runs is invisible to every gate, so nothing observes this row
+going green, and nothing observes it going red a second time.
 
 ## What I ran
 
