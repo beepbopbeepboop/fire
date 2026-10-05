@@ -4,11 +4,14 @@
 and `_emit_set_union` (the three blob-producing sites that reserve their
 destination and then copy into it at run time). **Found 2026-10-04 on
 `work/formal28-6`** while fixing
-`bugs/FORMAL_x86_64_a_list_grown_in_a_loop_answers_nothing_past_65_elements.md`.
-**NOT fixed** — it is a different root cause from that doc's, and it is filed
-because the fix there makes arm64 and x86-64 agree about the RESERVATION while
-leaving them disagree about what happens when the reservation is wrong.
-Pre-existing and independent: it reproduces with that fix reverted.
+`formal/model.py`'s `blob_loop_growth` — the companion fix, landed in
+commit `1ec3467d`, which is the change that made a list grown in a loop
+reserve for its last iteration.
+**NOT fixed** — it is a different root cause from the loop-growth fix this
+was found beside (commit `1ec3467d`), and it is filed because that fix makes
+arm64 and x86-64 agree about the RESERVATION while leaving them disagree about
+what happens when the reservation is wrong. Pre-existing and independent: it
+reproduces with that fix reverted.
 
 ## The finding, in one sentence
 

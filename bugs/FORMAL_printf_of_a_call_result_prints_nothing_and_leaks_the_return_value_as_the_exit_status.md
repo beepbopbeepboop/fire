@@ -3,7 +3,9 @@
 **Area:** both formal backends' `printf` argument lowering
 (`formal/arm64_codegen.py` and `formal/x86_64_codegen.py`'s `printf` rewrite).
 **Found 2026-10-04 on `work/formal28-6`** while fixing
-`bugs/FORMAL_x86_64_a_list_grown_in_a_loop_answers_nothing_past_65_elements.md`.
+`formal/model.py`'s `blob_loop_growth` — the companion fix, landed in
+commit `1ec3467d`, which is the change that made a list grown in a loop
+reserve for its last iteration.
 **NOT fixed** — filed, measured on BOTH architectures, with the exact next step.
 Pre-existing: it reproduces with the four production files of that fix reverted.
 

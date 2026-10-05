@@ -7,6 +7,74 @@ This is the wave note for three modules written (`formal/hostmods/{traceback,
 signal,operator}.mojo`) and it is the queue for everything the wave could not
 write, which is most of what is left.
 
+**Status 2026-10-04 (`work/formal28-6`): the walk is a TOOL — §5 is DONE — and
+§3 has been re-measured on this tree by it. The queue itself is unchanged: 20
+names, six capabilities, and every one of them still a project rather than a
+module.** `tools/formal_host_import_walls.py` is the instrument §5 asked for,
+it reads the backend's own readers, and it keeps `--pretend-unmodelled`, which
+§5 names as the only way to measure a delta on one tree. Four Lean-free cases in
+`test_formal_imports.py` pin the three properties that make the ranking a
+measurement rather than a fourth description to drift: that it reads
+`fire_compiler`'s tree and not `ast`'s, that `reach` and `alone` are different
+questions, and that the delta flag moves `clean` in one direction only.
+
+**The re-measure, over the whole repository (484 `.mojo`/`.py` files) rather than
+§3's 203 `not-answerable/host-import` files, so the two columns are NOT
+comparable** — a file whose only wall is a host import is in both corpora, and
+one whose wall is anything else is in neither. What is comparable is the
+`sweep` column, which is read out of the same log and which agrees with §3 row
+for row on the rows §3 lists (`importlib` 90, `copy` 13, `abc` 0, `collections`
+29, `types` 6, `resource` 0, `itertools` 14, `unittest` 16, `builtins` 2,
+`inspect` 4, `random` 5, `socket` 2, `atexit` 1, `uuid` 1, `asyncio` 1,
+`functools` 1) — which is the check that the tool ranks what §3 ranked.
+
+    $ python3 tools/formal_host_import_walls.py --sweep bugs/sweeps/sweep-arm-11.txt
+    484 files, 23 host module(s) named, 204 with no unmodelled host module left
+
+    module                  reach  alone  sweep  tier
+    collections               141     12     29  modelled
+    unittest                   17      9     16  unreachable
+    builtins                   29      2      2  unreachable
+    random                      8      2      5  modelled
+    datetime                    3      2      2  modelled
+    copy                      237      1     13  modelled
+    itertools                  21      1     14  modelled
+    socket                      2      1      2  unreachable
+    tokenize                    2      1      2  unclassified
+    functools                   1      1      1  modelled
+    pwd                         1      1      0  unclassified
+    abc                       236      0      0  modelled
+    importlib                 236      0     90  unreachable
+    types                     107      0      6  modelled
+    resource                   34      0      0  modelled
+    inspect                     8      0      4  modelled
+    atexit                      2      0      1  unreachable
+    uuid                        2      0      1  modelled
+    asyncio                     1      0      1  unreachable
+    fractions                   1      0      0  modelled
+    plistlib                    1      0      1  unclassified
+    sqlite3                     1      0      1  unclassified
+    token                       1      0      0  unclassified
+
+**§6's `unittest` re-measure is DONE and it moves that row UP, not down: 9
+`alone`, not the 7 §3 recorded.** §3's own warning was right — the cause named
+there (a subclass dropping its base's fields) was FIXED in `5cf72641`, so the 7
+were a before-measurement — and two more files have since become `unittest`-only.
+`collections` is now the largest `alone` row at 12 and is CLAIMED
+(`hostmods-platform`); `unittest` at 9 is the largest unclaimed one, and
+`datetime`/`random` at 2 are the two smallest rows that are neither
+`HOST_UNREACHABLE` nor claimed.
+
+**Two names are in this table and not in §3's, and both are why the table cannot
+be read as "what §3 measured":** `pwd` and `token`. §3's corpus is the sweep's
+`host-import` class; this tool measures every file's closure whatever the sweep
+called it, and a file whose wall is `pwd` is not in the former.
+
+**§6's item 1 (`token`/`tokenize`'s constants) is still not done**, for §3's
+reason, which §5's tool does not change: `ast.mojo` already holds the numbers, a
+second table would be a duplicate, and the two files that want them also want
+`generate_tokens`, which moves 0 either way.
+
 **The finding, in one sentence: after this wave, every remaining name on the row
 needs an object a freestanding image that links libSystem and nothing else does
 not have, so the row is not a queue of small modules any more — it is a queue of
@@ -150,11 +218,21 @@ re-measurement). It reads:
 * `formal.imports.host_module_tier` and `sys.stdlib_module_names -
   formal.imports.INERT_MODULES` to decide whether a name is a WALL.
 
-**It should become a tool rather than a fourth document**, and the three
-documents that describe it should read it instead of restating it. What it must
-keep is the ability to pretend a module is unmodelled, because that is the only
-way to measure a delta on one tree — a before/after across two checkouts is a
-measurement of the merge, not of the change.
+**IT IS A TOOL: `tools/formal_host_import_walls.py`.** The three documents that
+describe it should read it instead of restating it, and the ability to pretend a
+module is unmodelled is kept, because that is the only way to measure a delta on
+one tree — a before/after across two checkouts is a measurement of the merge, not
+of the change. It also keeps two things this section did not ask for and that
+turned out to matter:
+
+* **it is fast enough to run over the whole repository** (484 files, 25 s), by
+  caching `imported_modules` per file. The uncached version re-parsed
+  `fire_compiler.py` once per importer — 170 times — and did not finish in ten
+  minutes. A measurement that only runs on a sample is a measurement of the
+  sample;
+* **it reports a file it cannot parse AS ITSELF**, rather than as a file with no
+  walls. One file in this corpus (`test_formal_libc_symbol.py`) is such a case,
+  and counting it as clean would have ranked it as the easiest thing here.
 
 `§3`'s `sweep` column is read out of `bugs/sweeps/sweep-arm-11.txt` with the
 same peel `tools/formal_sweep_causes.py::rank` does (the LAST `imports '…'` in
@@ -169,11 +247,14 @@ own files.
   and because the two files that want them also want `generate_tokens`, which
   moves 0 either way. It is the one piece of §3 this wave could have written and
   chose not to.
-* **`unittest` is the largest honestly-modellable-looking row** (7 alone, 16
-  sweep). It was written as blocked on a claimed bug — a subclass dropping its
-  base's fields — and that is FIXED (commit `5cf72641`), so the blocker named
-  here is gone and the row needs a re-measure rather than a re-read. Nothing
-  here should touch it either way; whoever picks it up starts from the numbers.
-* **The walk itself** — see §5. Promoting it is a separate, small piece of work
-  and it is what would make the next wave's numbers a reading rather than a
-  re-derivation.
+* ~~**The walk itself** — see §5. Promoting it is a separate, small piece of
+  work and it is what would make the next wave's numbers a reading rather than a
+  re-derivation.~~ **DONE 2026-10-04** (`work/formal28-6`):
+  `tools/formal_host_import_walls.py`, with four Lean-free pins in
+  `test_formal_imports.py`.
+* **The `alone` column is a lower bound on what writing a module would move, and
+  not an upper one.** It counts files for which a name is the ONLY wall in the
+  closure — the files "writing this module makes this file build" is a true
+  statement about — and says nothing about a file that names two walls and would
+  move on the second. So the 20 names below are not 20 independent decisions, and
+  `collections` at 12 `alone` is not the whole of what it is worth.
