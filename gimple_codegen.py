@@ -6022,8 +6022,8 @@ def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "
 
 def _refuse_dropped_companion(code: str, gen) -> None:
     """Raise if `compile_to_gimple` is about to return a `.ci` that
-    references `__mojogen_*` symbols whose ONLY definitions live in the
-    companion `.cpp` this entry point has just discarded.
+    references generator symbols whose ONLY definitions live in the companion
+    `.cpp` this entry point has just discarded.
 
     The pipeline always builds the companion when it compiles a generator on
     the C++20 path (`_gen_cpp_generator_unit` runs inside `gen_module`); the
@@ -6046,20 +6046,36 @@ def _refuse_dropped_companion(code: str, gen) -> None:
     generator that caused it.
 
     Refusing HERE, at the one place that knows both halves, turns that into a
-    message naming the actual problem, and it cannot rot: the check is on the
-    generated text (`__mojogen_`), not on a hand-maintained list of which
-    shapes take which backend. `_verify_desugared_genexps` already guards the
-    sibling failure mode (a synthesized generator expression claimed by
-    NEITHER path) for the same reason."""
+    message naming the actual problem, and it cannot rot: **the question is
+    asked of the two artifacts themselves** — which symbols does the `.ci`
+    NAME, and which of those does the companion DEFINE — so the emitter is free
+    to rename its prefix and the check follows it. The version this replaced
+    tested a hard-coded `__mojogen_` on the `.ci` side only, and the emitters
+    emit `_mojogen_` (ONE underscore), so the guard has been unreachable for as
+    long as both spellings have coexisted and never once fired — the docstring
+    above it even spelled a third (`_mojo_gen_`). A check that cannot go stale
+    is worth more than a check that fires today; that is the whole reason this
+    is an intersection rather than a prefix.
+    `_verify_desugared_genexps` already guards the sibling failure mode (a
+    synthesized generator expression claimed by NEITHER path) for the same
+    reason."""
     cpp = getattr(gen, 'generated_cpp', '') or ''
-    if not cpp or '__mojogen_' not in code:
+    if not cpp:
         return
-    _syms = sorted(set(re.findall(
-        r'__mojogen_[A-Za-z0-9_]+_(?:start|resume|value|destroy)\b', code)))
+    # `_*mojogen_…`: the emitters' own prefix may gain or lose a leading
+    # underscore (C++ name mangling does, per translation unit), so the
+    # pattern asks for "one or more" rather than spelling either answer.
+    _sym = r'_*mojogen_[A-Za-z0-9_]+_(?:start|resume|value|destroy)\b'
+    defined = set(re.findall(_sym, cpp))
+    if not defined:
+        return
+    missing = sorted(set(re.findall(_sym, code)) & defined)
+    if not missing:
+        return
     raise RuntimeError(
         "cannot compile this module to a single .ci: it uses "
-        f"{len(_syms)} C++20-coroutine generator symbol(s) "
-        f"({', '.join(_syms[:6])}{'...' if len(_syms) > 6 else ''}) whose "
+        f"{len(missing)} C++20-coroutine generator symbol(s) "
+        f"({', '.join(missing[:6])}{'...' if len(missing) > 6 else ''}) whose "
         "definitions are in a companion .cpp that compile_to_gimple cannot "
         "return. Use compile_to_gimple_with_cpp (which returns and links that "
         "companion), or make the generator stack-switch-eligible so it needs "

@@ -1,5 +1,67 @@
 # CODEGEN: `print(x)` never frees the repr string it asked a walker for
 
+## Status: `print(<container>)` FIXED 2026-10-04 — and the doc is KEPT for the consumers that are not
+
+The `print` path is fixed and measured; four other consumers of the same
+walker are not, and they are named below with what each one needs.
+
+**What was wrong.** Not the free — that part already existed, and the `sprintf`
+arm four lines below the leaking one had always done `free (t);`. What was
+missing was knowing WHICH repr helpers a caller may free at all, and nothing
+recorded it. Three of them return a string LITERAL on some arm
+(`mojo_repr_bool`: `b ? "True" : "False"`; `mojo_bool_to_str`: `b ? t : f`;
+`mojo_repr_float`: `"nan"`/`"inf"`/`"-inf"` on three of its four), and
+`mojo_repr_boxed` inherits the third through its `'d'` arm. `free`ing a
+literal is heap corruption rather than a leak, which is why this was not a
+one-line change and why the doc says a wrong free here is a use-after-free.
+
+**What landed.** `_OWNED_REPR_FNS` in
+`mojo/backend_gimple/emit_infra.py`: a table of the helpers whose return the
+caller owns on EVERY path, every name read body by body, with the five excluded
+ones named beside it and the arm that excludes each. `_gen_print` routes all
+nine repr-producing arms through `_own_repr`, which defers the release until
+after the last `print_fn` call — the separator and newline prints read the
+buffer in between, which is why the existing `_cstr_held` deferral beside it
+exists.
+
+**Measured, this tree, `/usr/bin/time -l` peak RSS:**
+
+| loop count | before | after |
+|---|---|---|
+| 50 000 | 2.52 MB | 1.69 MB |
+| 200 000 | 4.92 MB | 1.69 MB |
+
+Flat at 16.4 B/iteration before, flat at nothing after. The existing
+`gimple_printed_container_does_not_grow` (six shapes, 60 000 iterations)
+drops from **10.9 MB to 1.7 MB**. New case
+`gimple_printed_container_repr_is_released`: one shape, 200 000 iterations, a
+3 MB ceiling chosen to sit between the two answers (1.6 MB with the free, ~5 MB
+without — ~1.8x headroom each way), 0.7 s. That ceiling is the point of the
+case: the existing one has 40 MB against ~9.6 MB of leaked buffers, which is why
+this leak survived a test written to catch it.
+
+## What is NOT fixed: the four consumers that do not consume at the call
+
+`_stringify_value` is the ONE place that picks the walker for `print`, `str`,
+`%s` and the f-string interpolation — which is why the doc says the fix has to
+land where the two cannot disagree, and it does. But `_stringify_value`
+*returns* its value to a caller that may keep it, so the release cannot live
+there; it belongs at each consumer, and only `print` has one. Still leaking,
+each for the same reason and each with the same one-line shape once its
+consumer is identified:
+
+| consumer | where | why it is not `print`'s fix |
+|---|---|---|
+| `f"{xs}"` | `emit_calls.py`'s f-string interpolation, beside `_stringify_value`'s other three callers | builds a concatenation, so the release is owed when the CONCATENATION is consumed |
+| `'%s' % xs` | the `%`-formatting arm | same: `mojo_sprintf` copies out, but the walker result is one of its arguments |
+| `str(xs)` | `_lower_builtin_str` | hands the value straight to the caller, which may store it — `s = str(xs)` is legal, so this needs the `note_fresh_result`/`is_fresh_container_operand` chokepoint `emit_infra.py` already has rather than an unconditional free |
+| `repr(xs)` | the `repr` builtin | same as `str`, and the doc notes `x = print(xs)` does not exist but `s = repr(xs)` does |
+
+`str` and `repr` are the two that cannot be an unconditional free, which is
+exactly what the doc's "this needs the ownership chokepoint" said; the
+chokepoint is `note_fresh_result` / `is_fresh_container_operand` /
+`owned_free_fn_for`, and it is already used by the container-literal paths.
+
 **Found 2026-10-02** while finishing the per-field remainder of
 `PERF_printed_container_repr_leaks_its_cat_buffers.md` (whose Status now
 records this as the residual that fix's own memory case still shows). Measured

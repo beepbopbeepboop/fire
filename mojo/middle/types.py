@@ -95,6 +95,25 @@ def _param_names_stripped(params: list) -> list:
         out.append(pn.lstrip('*'))
     return out
 
+def is_star_spread(node) -> bool:
+    """True for a `*expr` element of a list/tuple/set display.
+
+    The one discriminator for "this element EXTENDS the container instead of
+    being APPENDED to it", shared by every site that has to know: the list and
+    tuple lowerings in `mojo/backend_gimple/emit_exprs.py` (which emit the
+    extend), and `_infer_list_elem_type` in `mojo/middle/resolve_shared.py`
+    (which must not let a spread's operand type into the literal's element-type
+    join — see that function's own note).
+
+    `op == '*'` and not `op in ('*', '**')`: `**x` inside a list or tuple
+    display is not a spread in Python, and this codegen does not extend for
+    one, so a `**` element really does occupy exactly one slot and its kind
+    byte belongs in the kinds string. Spelling the test as `'*'` only is what
+    keeps those two facts the same fact at all four sites.
+    """
+    return isinstance(node, UnaryOp) and node.op == '*'
+
+
 class TypeLattice:
     """Numeric type promotion lattice for Mojo → C lowering.
 

@@ -955,6 +955,109 @@ def main():
     print(f(1, 2, z=3))
 """, "8\n203\n")
 
+    # A lambda's DECLARED defaults, on both paths they used to get wrong, plus
+    # every shape that was already right — because a fix for "the default
+    # overrides an argument the call site passed" and one for "the argument the
+    # call site omitted is never supplied" are two edits to the same mechanism
+    # and either alone leaves the other silent.
+    #
+    # Both were exit 0 with a plausible integer:
+    #   lambda x=n, *a: x + a[0]   e(0, 5)   CPython 5   compiled 8   (n + n)
+    #   lambda x, y=n, z=10: ...    e(4)      CPython 17  compiled 135
+    #
+    # The root cause was one thing: `_lower_LambdaExpr` captures a declared
+    # default into the lifted function's ENV under the parameter's OWN name,
+    # and `_gen_lifted_closure` resolves a captured name to `_env-><name>` —
+    # so the default and an argument at the call site name the same C slot and
+    # the env read wins. Fixed at both ends: a parameter a call site SUPPLIES
+    # is never captured (`lambdareduce.params_supplied_at_calls`, which leaves
+    # the `lambda e, self=self:` idiom alone because that parameter is never
+    # supplied — that is what the idiom means), and an omitted argument is
+    # padded from the lambda's own declaration
+    # (`emit_calls._pad_lambda_defaults`).
+    #
+    # Against CPython rather than a fixed expectation, because `8` and `135`
+    # are values a hand-written expectation could have been written to match
+    # after the fact.
+    test_gimple_matches_cpython("gimple_lambda_declared_defaults_reach_the_call", """\
+def add(a, b):
+    return a + b
+
+def add3(a, b, c):
+    return a + b + c
+
+def addall(a):
+    return a[0] + a[1] + a[2]
+
+def r_dup_first(n):
+    e = lambda x=n, *a: add(x, a[0])
+    return e(0, 5)
+
+def r_dup(n):
+    e = lambda x, y=n, z=10: add3(x, y, z)
+    return e(4)
+
+def r_dup_all(n):
+    e = lambda x=n, y=2, z=3: add3(x, y, z)
+    return e()
+
+def r_tkinter(n):
+    e = lambda ev, self=n: add(self, 1)
+    return e(0)
+
+def r_varargs(n):
+    e = lambda *args, **kwargs: add(n, args[0])
+    return e(7)
+
+def r_one_lead(n):
+    e = lambda f, *a: add(f, a[0])
+    return e(4, 5)
+
+def r_kwonly(n):
+    e = lambda **k: add(k["a"], 1)
+    return e(a=6)
+
+def r_var_then_kw(n):
+    e = lambda *a, k=n: add(a[0], k)
+    return e(4)
+
+def r_bare_kwonly(n):
+    e = lambda *, x=n: x + 1
+    return e()
+
+def r_one_default(n):
+    e = lambda x=n: x + 1
+    return e()
+
+def r_second_default(n):
+    e = lambda x, y=n: add(x, y)
+    return e(4)
+
+def r_kw_and_default(n):
+    e = lambda x, *, k=n: add(x, k)
+    return e(4)
+
+def r_var(n):
+    e = lambda *a: add(a[0], a[1])
+    return e(4, 5)
+
+def main():
+    print(r_dup_first(3))
+    print(r_dup(3))
+    print(r_dup_all(3))
+    print(r_tkinter(3))
+    print(r_varargs(3))
+    print(r_one_lead(3))
+    print(r_kwonly(0))
+    print(r_var_then_kw(3))
+    print(r_bare_kwonly(3))
+    print(r_one_default(3))
+    print(r_second_default(3))
+    print(r_kw_and_default(3))
+    print(r_var(3))
+main()
+""")
+
     # Keyword arguments at the call site reach a `**kwargs` callee, packed
     # into the MojoDict the lifted body reads. A call with none must still
     # hand the callee a real (empty) dict, never NULL: `len(k)` and `k['x']`
@@ -1071,6 +1174,89 @@ def main():
     print(m(1, 2, 3))
     print(both(1, 2, z=3))
 """, "3\n201\n200\n3\n201\n")
+
+    # A `*seq` element of a list or tuple DISPLAY extends the container
+    # instead of occupying one slot, and it is the one place where a runtime
+    # slot COUNT meets a compile-time kinds string. Three separate mechanisms
+    # had to agree and none of them did, so `[0, *a, 9]` and `(0, *a)` both
+    # SIGSEGVed (exit -11, no output) on shapes ordinary Python writes:
+    #
+    #   * the per-slot KIND string counted the spread as one slot carrying the
+    #     OPERAND's kind — `'l'`, the nested-list slot — so `[0, *a, 9]`
+    #     recorded `"ili"` for a FOUR-slot list and slot 1 (the integer 1
+    #     inside `a`) was rendered through the nested-list arm as
+    #     `(MojoList *)1`, which reads a list header out of address 1;
+    #   * the element-type join did the same, so the literal looked
+    #     heterogeneous, no uniform repr reader was picked, and the generic
+    #     walker's "a zero slot is a boxed None" heuristic printed
+    #     `[None, 1, 2, 9]`;
+    #   * the operand of a `char *` spread was lowered through the
+    #     `UnaryOp` wrapper, which `_lower_UnaryOp` reads as a POINTER
+    #     DEREFERENCE (`_t2 = *a;` — the operand's first character), so
+    #     `(0, *"ab")` extended the tuple with `(MojoList *)'a'`.
+    #
+    # Asserted against CPython on BOTH pipeline modes, and the list case
+    # carries a string spread because that is the only shape whose element
+    # type is provable: iterating a `str` yields one-character strings.
+    test_gimple_matches_cpython("gimple_star_spread_in_a_list_display_extends", """\
+def mid(a: list) -> list:
+    return [0, *a, 9]
+
+def only(a: list) -> list:
+    return [*a]
+
+def literal(a: list) -> list:
+    return [0, *[1, 2], 9]
+
+def from_string(s: str) -> list:
+    return [*s]
+
+def main():
+    print(mid([1, 2]))
+    print(only(['x', 'y']))
+    print(literal([5]))
+    print(from_string('ab'))
+main()
+""")
+
+    test_gimple_matches_cpython("gimple_star_spread_in_a_tuple_display_extends", """\
+def mid(a: list) -> tuple:
+    return (0, *a)
+
+def only(a: list) -> tuple:
+    return (*a,)
+
+def main():
+    print(mid([1, 2]))
+    print(only(['x', 'y']))
+main()
+""")
+
+    # The third shape the same bug doc named: a `*args` CALL argument. There
+    # is no spread in the SOURCE here, so the loose arguments are packed once
+    # by `_emit_call`'s `'...'` sentinel arm, and the bug doc's evidence that
+    # they were "packed once as a tuple and then collected again" no longer
+    # holds on this tree — `a` really does hold `[1, 2]`. Asserted through
+    # `len(a)` and `sorted(a)` rather than through the printed tuple, because
+    # the tuple bracket itself comes from `_mojo_repr_pair`'s "any registered
+    # two-element list is a runtime-built pair" heuristic, which is a separate
+    # bug with its own cause (see bugs/CODEGEN_a_registered_two_element_list_
+    # is_not_always_a_pair.md) and must not be what pins the vararg packing.
+    # `fwd` forwards its own `*a`/`**k`, which is the other direction of the
+    # same contract, and `g()` with nothing is the empty-pack case.
+    test_gimple_matches_cpython("gimple_call_star_args_collects_loose_arguments_once", """\
+def g(*a, **k):
+    return len(a), sorted(a), len(k)
+
+def fwd(*a, **k):
+    return g(*a, **k)
+
+def main():
+    print(g(1, 2, x=3))
+    print(fwd(4, 5, y=6))
+    print(g())
+main()
+""")
 
     # 10a3. Heterogeneous stack drained with .pop(), each popped value
     # discriminated with `isinstance(top, tuple)`. `isinstance(x, tuple)`
@@ -4073,6 +4259,39 @@ def main():
         print(mix)
 main()
 """, _PRINTED * 60000, 40)
+
+    # …and the SAME leak at a size and a ceiling that can SEE it, which is the
+    # half the case above cannot be. Its own docstring says why: "size the loop
+    # so the leak, if present, is several times limit_mb", and 40 MB against
+    # ~9.6 MB of leaked repr buffers measures nothing.
+    #
+    # One shape, four times the iterations, and a ceiling that sits between the
+    # two answers. Measured on this tree (peak RSS, `/usr/bin/time -l`):
+    #
+    #     50 000 iterations    2.52 MB with the leak    1.69 MB without
+    #   200 000 iterations    4.92 MB with the leak    1.69 MB without
+    #
+    # i.e. 16.4 B per printed container, flat, exactly the size of the buffer
+    # `_mojo_repr_list` `strdup`s and nobody freed. 3 MB therefore passes with
+    # ~1.8x headroom and fails by ~1.65x if the free is ever removed, and the
+    # run takes 0.7 s.
+    #
+    # Which helpers may be released at all is `_OWNED_REPR_FNS` in
+    # `mojo/backend_gimple/emit_infra.py`, and it is a table rather than a
+    # convention because the ownership is not uniform: three helpers return a
+    # string LITERAL on some arm (`mojo_repr_bool`, `mojo_bool_to_str`, and
+    # `mojo_repr_float`'s nan/inf arms), where a `free` is heap corruption
+    # rather than a leak. `MallocScribble=1` is set by
+    # `test_gimple_bounded_memory`'s own probe, so a free of the wrong buffer
+    # shows up as a scrambled one rather than passing quietly.
+    # See bugs/CODEGEN_print_of_a_container_never_frees_the_repr_it_asked_for.md.
+    test_gimple_bounded_memory("gimple_printed_container_repr_is_released", """\
+def main():
+    xs = [1, 2, 3]
+    for i in range(200000):
+        print(xs)
+main()
+""", "[1, 2, 3]\n" * 200000, 3)
 
     # The text of every walker above, printed ONCE, against CPython. Separate
     # from the memory case because the memory case would still pass if a repr
@@ -8632,6 +8851,43 @@ def show(rows):
 def main():
     show([[1, 2], [3, 4]])
 """, "1\n2\n3\n4\n")
+
+    # A SET literal as the argument, which the cross-call element-type
+    # contract simply did not ask about: `_static_arg_elems` (the positional
+    # path) and `_literal_arg_elems` (the keyword path) both recognised
+    # `ListExpr` only, so an unannotated set PARAMETER stayed at the
+    # `int64_t` default and every reader of its elements used the int
+    # accessor.
+    #
+    # The damage was three wrong answers in one program, and the third is the
+    # reason this was worth fixing rather than filing. `{v for v in f({'r',
+    # 'q'})}` read each element as a boxed pointer DECIMAL, and the
+    # comprehension's own arm then STORED those decimals (`mojo_set_add_int`),
+    # so `sorted()` of the result ordered by address — which means the program's
+    # answer depended on where the string literals happened to be placed, and
+    # that depends on how many other programs the same compiler PROCESS
+    # compiled first. That is the intermittency this bug was filed for, and it
+    # is why the acceptance bar was five consecutive whole-file runs rather
+    # than one.
+    #
+    # `pick` is the comprehension half and `via_for` the plain-loop half; both
+    # are asserted against CPython so the order is pinned, not just the set.
+    test_gimple_matches_cpython("gimple_set_literal_param_keeps_its_element_type", """\
+def pick(box):
+    box = {v for v in box}
+    return sorted(box)
+
+def via_for(box):
+    out = []
+    for v in box:
+        out.append(v)
+    return sorted(out)
+
+def main():
+    print(pick({'r', 'q'}))
+    print(via_for({'r', 'q'}))
+main()
+""")
 
     # The STRING spelling of the line above, which is where the same program
     # was wrong. The OUTER loop already carried the nested element ctype

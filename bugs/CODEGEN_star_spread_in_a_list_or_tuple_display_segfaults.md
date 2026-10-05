@@ -1,10 +1,80 @@
 # A `*expr` spread in a LIST or TUPLE display SIGSEGVs; a `*args` call collects one tuple
 
-## Status: OPEN, filed 2026-10-03 on `work/merge-bugs3-r4` while fixing the
-## `**`-spread sibling in dict literals
-## (`bugs/` has no doc for it yet; that one is fixed and had none).
+## Status: FIXED 2026-10-04, and the doc is KEPT (partly fixed, residue written down)
 
-## What I ran
+All three shapes named below were re-measured on this tree and all three are
+right now, on BOTH pipeline modes:
+
+| shape | was | is |
+|---|---|---|
+| `[0, *a, 9]` | `rc=-11` (SIGSEGV) | `[0, 1, 2, 9]` |
+| `(0, *a)` | `rc=-11` (SIGSEGV) | `(0, 1, 2)` |
+| `g(1, 2, x=3)` on `def g(*a, **k)` | `((1, 2), [('x', 3)])` | `a` really is `[1, 2]`; the `(1, 2)` bracket is a different bug, see the residue below |
+
+Four mechanisms were changed, each because it was one of the four ways this
+one shape could be wrong:
+
+1. **`mojo/middle/types.py` gains `is_star_spread`**, the ONE predicate for
+   "this display element is EXTENDED, not appended". Three sites had been
+   re-deriving it and disagreeing; it lives beside the other AST-shape
+   questions so `mojo/middle/` and `mojo/backend_gimple/` can both ask it.
+2. **`_literal_slot_kinds` (`mojo/backend_gimple/emit_exprs.py`)** replaces two
+   `''.join(_list_literal_slot_kind(...))` sites, one in the list lowering and
+   one in the tuple lowering. It emits one byte per slot **up to the first
+   spread**, which is what restored the runtime's own invariant (`_KindRow.
+   kinds` is "one byte per slot") and removed the segfault: the spread used to
+   contribute one byte carrying the OPERAND's kind (`'l'`, the nested-list
+   slot), so `[0, *a, 9]` recorded `"ili"` for a four-slot list and slot 1 — the
+   integer `1` inside `a` — was rendered through the nested-list arm as
+   `(MojoList *)1`. Dropping just that byte is not enough and still crashes
+   (`"il"` moves the `'l'` onto `a`'s first element), so the answer has to
+   STOP at the spread.
+3. **`_emit_star_spread`** replaces the two `mojo_list_extend` emissions with
+   one, and fixes the two ways the operand could be wrong: a `char *` operand
+   is a STRING spread and was handed to a `MojoList *` parameter
+   (`mojo_str_chars` is the runtime's own answer to "what does iterating this
+   string yield", already used by `mojo_iter_boxed_list`), and a non-pointer
+   operand is coerced rather than passed at its own declared type.
+4. **Both lowerings lower a spread element's OPERAND, not the `UnaryOp`
+   wrapper.** `_lower_UnaryOp` reads `*x` as a POINTER DEREFERENCE for any
+   operand type outside its container whitelist, so `(0, *a)` over a `str`
+   emitted `_t2 = *a;` — the operand's first character — and extended the
+   tuple with `(MojoList *)'a'`. Inside a display a `*x` element never means a
+   dereference, and the display is the only place that knows that.
+5. **`_infer_list_elem_type` (`mojo/middle/resolve_shared.py`)** no longer lets
+   a spread's operand CONTAINER type into the element-type join (and does let
+   in the operand's ELEMENT type when it is the literal's only evidence, or
+   when the operand is a `str` and therefore provable). Measured: `[0, *a, 9]`
+   joined `int` with `MojoList *`, looked heterogeneous, got no uniform repr
+   reader, and the generic walker's "a zero slot is a boxed None" heuristic
+   printed `[None, 1, 2, 9]`.
+
+Regression tests, all through `test_gimple_matches_cpython` on both pipeline
+modes, in `test_gimple_runner.py`:
+`gimple_star_spread_in_a_list_display_extends`,
+`gimple_star_spread_in_a_tuple_display_extends`,
+`gimple_call_star_args_collects_loose_arguments_once`.
+
+### Why this doc is not deleted
+
+Two residues are real, measured, and each has its own doc rather than being
+folded in here:
+
+* `bugs/CODEGEN_a_registered_two_element_list_is_not_always_a_pair.md` — the
+  generated repr walker's "any registered two-element list is a runtime-built
+  pair" heuristic prints `[(1, 2)]` for an ordinary inner list `[1, 2]`, which
+  is where the third shape's `(1, 2)` bracket comes from. The vararg PACKING
+  that shape is really about is correct and is asserted through `len(a)` and
+  `sorted(a)`; a test that pinned it through the printed tuple would have been
+  pinning this other bug.
+* `bugs/CODEGEN_a_star_spread_of_a_string_beside_its_own_slots_prints_its_int_
+  zero_as_none.md` — `(0, *'ab')` prints `(None, 'a', 'b')` where CPython
+  prints `(0, 'a', 'b')`. `[*'ab']` alone is right. Making the mixed spelling
+  right needs a RUNTIME-LENGTH kinds string, which is a change to the runtime's
+  private kinds table (with `mojo_list_repeat` as the worked precedent) and
+  was deliberately not smuggled in behind a codegen fix.
+
+## What I ran (the original measurement)
 
 Each compiled with `test_gimple_runner.py`'s own
 `compile_mojo_to_gimple_exe`, run, and compared with CPython on the same text.

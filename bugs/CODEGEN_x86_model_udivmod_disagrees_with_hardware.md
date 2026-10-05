@@ -2,7 +2,99 @@
 
 ## Status
 
-OPEN, and NEW — found 2026-10-02 by running `formal/x86_64_model_test.py` for
+OPEN, and **not fixed** — re-read 2026-10-04, and one of its two suspects is
+now DISMISSED by inspection, which is a real result: the fix it proposes for
+that suspect would be a regression.
+
+**Why it is not fixed here.** `lib/X86.lean` is a Lean library whose
+correctness is established by RUNNING Lean, and this worker is not permitted to
+launch lean (`formal/x86_64_model_test.py` builds the model and runs every
+example through it). Editing `x86_idiv128` unverified would be exactly the
+"silence an error" shortcut the project's rules exist to end: a wrong
+128-bit divide model breaks every x86-64 proof, and the exit code a reviewer
+would see is unchanged. So the reading-level findings are recorded below and the
+experiment is left for whoever can run it.
+
+## Suspect 1 is WRONG, and its proposed fix is a regression
+
+The doc observes that `x86_idiv128` is handed `x86_signed s.rax` for the low
+word and proposes changing it to the raw `s.rax.toNat`. Reading the definitions
+on this tree shows that would break the model rather than fix it, because the
+TWO sign-extensions cancel:
+
+```lean
+def x86_idiv128 (hi lo d : Int) : Option (Int × Int) :=
+  if d = 0 then none
+  else
+    let n := hi * (x86_two64 : Int) + lo
+    some (Int.tdiv n d, Int.tmod n d)
+```
+
+with, at the only call site (`lib/X86.lean`, the group-3 handler's `idiv r/m64`
+arm):
+
+```lean
+match x86_idiv128 (x86_signed s.rdx) (x86_signed s.rax) (x86_signed a) with
+```
+
+For a NEGATIVE two's-complement dividend RDX:RAX, RAX's top bit is set, and so
+is RDX's (they are the two halves of one 128-bit value). So with both halves
+signed:
+
+    (rdx_raw - 2^64) * 2^64 + (rax_raw - 2^64)
+      = rdx_raw * 2^64 + rax_raw - 2^128
+
+which is EXACTLY the two's-complement value of RDX:RAX. For a POSITIVE
+dividend neither `x86_signed` fires and `n` is `rdx_raw * 2^64 + rax_raw`,
+also exact. So the `lo` argument is correct on both signs, and replacing it
+with `s.rax.toNat` would make `n` non-negative for a negative dividend — a real
+regression, invisible for every non-negative dividend, which is precisely why
+it would survive a casual test.
+
+This is also why the note above `x86_div128`/`x86_idiv128` ("All 43 examples
+agree, … the dividing ones (which is what pins the 128-bit group-3 results)")
+is not evidence against the finding: `div` is unsigned and `idiv` is the signed
+one, and the negative-dividend case is the one nothing in `formal/examples/`
+exercises.
+
+**So the two hypotheses left are:** (a) the QUOTIENT-OVERFLOW check the doc's
+suspect 2 names — `x86_idiv128` returns the quotient of an arbitrary-precision
+`Int` with no range check, where the hardware raises `#DE` — and (b) something
+after the divide, in the remainder path (`add rax, r11` at `4c 01 d8`) or in how
+`formal/x86_64_model_test.py` reads RAX. Note that the observed value is the
+EXIT STATUS, read after `add rax, r11`, so the model's `q + 7` is 186 and `q`
+is 179 (mod 256): the defect is a value 179 where the hardware has 4, not an
+off-by-a-small-amount, which is a poor fit for the remainder arm and a good one
+for a quotient computed from a wrong dividend.
+
+## The exact next step, unchanged in shape and now cheaper
+
+1. Single-step `udivmod`'s image and print `(rip, rax, rdx, rcx, r11)` at each
+   boundary across the `cqo`/`idiv` pair. That is the measurement this doc was
+   written for and it is a Lean run, so it belongs to whoever can do one. RAX
+   `0x6db6db6db6db6d`-ish across the pair says the quotient came from the wrong
+   dividend; RAX and RDX correct across it and wrong after says the fault is in
+   `add rax, r11` or in the harness.
+2. If and only if that says the dividend is wrong, the fix is in the CANDIDATE
+   set, not in `x86_idiv128`'s signature — check `x86_split128`'s handling of a
+   NEGATIVE product (`let lo := p % x86_two64`, which is non-negative for
+   negative `p` in Lean, and `(p - lo) / x86_two64`, which floors) against what
+   `imul`'s RDX:RAX actually holds. `cqo`'s own encoding is
+   `if x86_msb v then 0xffffffffffffffff else 0`, i.e. an all-ones sign
+   extension, so a negative dividend reaching `idiv` has `rdx` all ones — and
+   `x86_signed` of that is `-1`, which is right.
+3. Add the `#DE` range check to `x86_idiv128` as its OWN step, separately: it
+   is a refusal, `x86_step`'s contract already returns `none` for anything it
+   cannot model, and folding it into the same commit would make it impossible to
+   tell which of two changes moved the 44/45 count.
+4. `formal-x86-machine-model`'s `expect=` marker states `1 of 45 WRONG:
+   udivmod`, so a change that does not move that count is reported as a
+   FAILURE rather than absorbed — which means the experiment is self-checking
+   and cannot be "done" by inspection.
+
+## Original report
+
+Found 2026-10-02 by running `formal/x86_64_model_test.py` for
 the first time in its life. That file is spelled `*_test.py`, the estate
 check's walk counted only `test_*.py`, and it was in no spec and in no
 `UNREGISTERED`, so it ran by nothing. It is now registered as

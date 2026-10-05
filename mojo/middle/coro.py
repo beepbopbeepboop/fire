@@ -724,82 +724,69 @@ def _yield_from_ok(fn: N.FunctionDef) -> bool:
 
 def _lambda_shape_ok(lam: N.LambdaExpr) -> bool:
     """Is this `lambda`'s parameter shape one the shared call lowering gets
-    RIGHT? The measured answer, one clause per shape, all compiled + linked +
-    run against CPython inside a compiled generator body:
+    RIGHT? Every shape measured so far is, so this admits all of them; the
+    table below is the EVIDENCE for that, kept here rather than deleted
+    because it is the measurement this module's guards are made of.
+
+    Compiled + linked + run against CPython inside a compiled GENERATOR body
+    (the A3 stack-switch path, `compile_to_gimple_with_cpp`), on this tree:
 
     | shape | compiled | CPython |
     |---|---|---|
     | `lambda *a: add(a[0], a[1])`, called `e(4, 5)` | `9` | `9` |
     | `lambda *a: addall(a)`, called `e(1, 2, 3)` | `6` | `6` |
-    | `lambda *args, **kwargs: add(n, args[0])`, capturing `n` | `13` | `13` |
-    | a variadic lambda ESCAPING as a call argument | `13` | `13` |
-    | a variadic lambda RETURNED out of the generator and called after | `3` | `3` |
-    | a variadic lambda behind an ordinary local, called there | right | right |
+    | `lambda *args, **kwargs: add(n, args[0])`, capturing `n` | `10` | `10` |
+    | `lambda *a, k=n: add(a[0], k)`, called `e(4)` | `7` | `7` |
+    | `lambda f, *a: add(f, a[0])`, called `e(4, 5)` | `9` | `9` |
+    | `lambda **k: add(k["a"], 1)`, called `e(a=6)` | `7` | `7` |
     | `lambda x=n: x + 1` / `lambda x, y=n: x + y` / `lambda x, *, k=n:` | right | right |
     | `lambda *, x=n: x + 1` | right | right |
-    | `lambda x=n, *a: x + a[0]`, called `e(0, 5)` | **`8`** | **`5`** |
-    | `lambda x, y=n, z=10: x + y + z`, called `e(4)` | **`135`** | **`17`** |
+    | `lambda x=n, *a: x + a[0]`, called `e(0, 5)` | `5` | `5` |
+    | `lambda x, y=n, z=10: x + y + z`, called `e(4)` | `17` | `17` |
 
-    So the two clauses are the two wrong rows and nothing else: a DEFAULTED
-    parameter that a `*`/`**` parameter FOLLOWS, and two or more defaulted
-    parameters. Everything else -- including every `*args`/`**kwargs` shape,
-    which is what this guard used to refuse wholesale -- is correct.
-
-    The refusals stay because the failure they prevent is SILENT: both wrong
-    rows exit 0 with a plausible-looking integer, which is the worst verdict
-    a check can produce and the reason the guard is a refusal rather than a
-    warning. Their root cause is not this file's: a lambda's defaults are
-    stripped from the lifted signature (`_lower_LambdaExpr`'s `syn_params`,
-    which keeps only `(pname, None)`), so they are applied somewhere on the
-    call side, and both wrong rows are a call-site packing of more than one
-    substituted argument around a variadic tail. Filed as
-    `bugs/CODEGEN_two_lambda_defaults_are_mis_packed.md`.
+    The last two rows are what this function used to REFUSE, and they were
+    the whole of its refusal logic: a defaulted parameter that a `*`/`**`
+    parameter FOLLOWS, and two or more defaulted parameters. Both were silent
+    wrong answers — exit 0 with a plausible integer, `8` where CPython says
+    `5` and `135` where it says `17` — and both had the same root cause, in
+    `_lower_LambdaExpr`'s env construction: a lambda's declared default was
+    captured into the lifted function's ENV under the parameter's own name,
+    so it and an argument at the call site named the same C slot and the env
+    read won. That is fixed at both ends now — a parameter a call site SUPPLIES
+    is never captured (`lambdareduce.params_supplied_at_calls`, so the
+    `lambda e, self=self:` idiom is untouched), and an argument the call site
+    OMITS is padded from the lambda's own declaration
+    (`emit_calls._pad_lambda_defaults`). Neither half could be verified here
+    alone: the env half is also wrong for a keyword-only parameter, which only
+    the ENV can carry, so the two halves had to land together. Their doc was
+    the commit whose subject line is "A lambda's declared defaults reach the
+    call, and the two refusals are gone"; the measurement table is the one
+    above and the reasoning is in the commit message.
 
     One reading of the parameter list is load-bearing here. The parser DROPS a
     bare `*` (the keyword-only marker), so `lambda *, x=n: ...` reaches this
     function as `('x', <default>)` and is indistinguishable from
-    `lambda x=n: ...` — which is why the "a `*`/`**` parameter FOLLOWS" test
-    below is an index comparison against the first starred parameter rather
-    than a flag, and why that row is measured correct while
-    `lambda x=n, *a: ...` is not: the star is gone in one and present in the
-    other.
+    `lambda x=n: ...`.
 
-    Variadic lambdas are no longer refused because they are no longer
-    miscompiled. `MojoVarargFn` (`runtime/fire_runtime.h`, "Variadic
-    callables") carries the callee, the env, the count of ordinary leading
-    parameters and which of the three variadic shapes it has, and
-    `mojo_fnptr_call_N` dispatches on it -- so the packing happens in the
-    runtime, at the one place that knows both the call's arity and the
-    callee's real parameter list. The forward-declaration bug that used to
-    make this a hard "conflicting types" error went with it. That was
-    measured on the ordinary path in 2026-09-26 and had never been
-    re-checked on the GENERATOR path, where this guard is what stands
-    between the shape and the A3 stack-switch lowering; so the rows above are
-    the re-check.
+    Variadic lambdas were refused wholesale until 2026-09-26 and no longer
+    are, because they are no longer miscompiled. `MojoVarargFn`
+    (`runtime/fire_runtime.h`, "Variadic callables") carries the callee, the
+    env, the count of ordinary leading parameters and which of the three
+    variadic shapes it has, and `mojo_fnptr_call_N` dispatches on it -- so
+    the packing happens in the runtime, at the one place that knows both the
+    call's arity and the callee's real parameter list.
     """
-    first_star = next((i for i, (pname, _d) in enumerate(lam.params)
-                       if pname.startswith('*')), None)
-    defaulted = 0
-    for i, (pname, pdefault) in enumerate(lam.params):
-        if pname.startswith('*'):
-            continue
-        if pdefault is None:
-            continue
-        defaulted += 1
-        if first_star is not None and i < first_star:
-            # A defaulted parameter BEFORE the variadic tail: measured `8`
-            # where CPython says `5`.
-            return False
-    return defaulted < 2
+    return True
 
 
 def _lambdas_ok(fn: N.FunctionDef) -> bool:
     """A `lambda` literal in a generator body is fine -- the desugared body is
     ordinary code and the ordinary codegen path lifts it to a top-level C
-    function -- EXCEPT for the parameter shapes that path gets wrong, which
-    `_lambda_shape_ok` above enumerates by measurement. Refuse those so the
-    module falls through to the cpp path's own honest refusal instead of
-    emitting broken/wrong C. (bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md)"""
+    function -- and every parameter shape measured is right, so
+    `_lambda_shape_ok` above now admits all of them. The walk stays as the
+    chokepoint that measurement is attached to: the next shape to be measured
+    belongs in that table, and this is where a refusal for it would live.
+    (bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md)"""
     for n in _walk(fn):
         if isinstance(n, N.LambdaExpr):
             if not _lambda_shape_ok(n):
@@ -3394,14 +3381,23 @@ def _scan_callsite_param_kinds(stmts: list) -> None:
     gen_names: set = set()
     plain_names: set = set()
 
+    # The FunctionDef itself, next to its param list: `_visit_call` needs the
+    # callee's OWN `kwonly` names to know how many of its parameters a
+    # positional `*spread` can reach, and the param list alone cannot say
+    # (there is no per-parameter position marker on it).
+    gen_fdefs: dict = {}
+    plain_fdefs: dict = {}
+
     def _record(fd, drop_self):
         ps = fd.params[1:] if drop_self else fd.params
         gen_params.setdefault(fd.name, list(ps))
+        gen_fdefs.setdefault(fd.name, fd)
         gen_names.add(fd.name)
 
     def _record_plain(fd, drop_self):
         ps = fd.params[1:] if drop_self else fd.params
         plain_params.setdefault(fd.name, list(ps))
+        plain_fdefs.setdefault(fd.name, fd)
         plain_names.add(fd.name)
 
     for s in stmts:
@@ -3447,28 +3443,83 @@ def _scan_callsite_param_kinds(stmts: list) -> None:
         fn = node.func
         gname = fn.name if isinstance(fn, N.IdentExpr) else \
             (fn.member if isinstance(fn, N.MemberExpr) else None)
+        fd = None
         pinfo = None
         if gname in gen_names:
             pinfo = gen_params[gname]
+            fd = gen_fdefs.get(gname)
         elif gname in plain_names:
             pinfo = plain_params[gname]
+            fd = plain_fdefs.get(gname)
         if pinfo is None:
             return
         cenv = caller_env
         slot = seen[gname]
+        # A `*expr` / `**expr` call argument is a UnaryOp (fire_compiler.py's
+        # UnaryOp(op='*') / op='**') sitting in the SAME `args`/`kwargs` lists
+        # as every other argument, so mapping `node.args` onto the callee's
+        # parameters BY INDEX records one observation for the unpack and none
+        # at all for every parameter the unpack could also have supplied.
+        # Measured: `gen(*args)` against `def gen(a, b): yield b` charged the
+        # hole to `a` (parameter 0) and left `b` neither resolved nor
+        # conflicted, so `_ambiguous_yielded_params` — which reads only
+        # `_CALLSITE_PARAM_CONFLICTS` — let the generator through and `b`'s
+        # yield slot took the `int64_t` default. The string came out as the
+        # integer 0 at exit 0. The refusal was right by accident for the wrong
+        # reason, and `b` was invisible to both halves of the rule.
+        #
+        # The two halves, which are NOT the same shape:
+        #   * `*expr` at positional index `i` can supply parameters `i` through
+        #     the last POSITIONAL one \u2014 it swallows the rest of the call's
+        #     positional arguments \u2014 and cannot supply a keyword-only one.
+        #   * `**expr` can supply ANY parameter by name, positional-or-keyword
+        #     and keyword-only alike, so every unannotated parameter not
+        #     already bound by an explicit keyword at this call site is a hole.
+        #     `Tools/c-analyzer/c_common/scriptutil.py`'s
+        #     `iter_marks(groups=groups, **mark_kwargs)` is this case, and it
+        #     is why the explicit-keyword observations must be KEPT below:
+        #     they are real evidence for the parameters they bind.
+        _n_positional = len(pinfo)
+        if fd is not None:
+            _n_positional = len(pinfo) - len(getattr(fd, 'kwonly', []) or [])
+        _kw_names = set()
+        for _p, _a in getattr(node, 'kwargs', []) or []:
+            _kw_names.add(_p)
+        _star_i = None
+        _has_kwargs_spread = False
         for i, a in enumerate(node.args):
             if i >= len(pinfo):
                 break
             pname, pann = pinfo[i]
             if not _unannotated(pann):
                 continue
+            if isinstance(a, N.UnaryOp) and a.op in ('*', '**'):
+                if a.op == '*':
+                    _star_i = i
+                else:
+                    _has_kwargs_spread = True
+                continue
             slot.setdefault(pname, set()).add(_argkind(a, cenv))
+        if _star_i is not None:
+            # From the spread's own index to the end of the POSITIONAL
+            # parameters, every one is now untypable.
+            for _j in range(_star_i, _n_positional):
+                if _j >= len(pinfo):
+                    break
+                _pn, _pa = pinfo[_j]
+                if _unannotated(_pa):
+                    slot.setdefault(_pn, set()).add(None)
         kw = {p: a for p, a in getattr(node, 'kwargs', []) or []}
         by_name = {p: pa for p, pa in pinfo}
         for pname, a in kw.items():
             if pname not in by_name or not _unannotated(by_name[pname]):
                 continue
             slot.setdefault(pname, set()).add(_argkind(a, cenv))
+        if _has_kwargs_spread:
+            for _pn, _pa in pinfo:
+                if not _unannotated(_pa) or _pn in _kw_names:
+                    continue
+                slot.setdefault(_pn, set()).add(None)
 
     # per callee: param name -> set of kinds seen (a None poisons the slot)
     seen: dict = {}

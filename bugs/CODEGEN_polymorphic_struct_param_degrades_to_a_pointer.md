@@ -3,7 +3,67 @@
 
 ## Status
 
-OPEN, and NEW — measured 2026-10-02 while fixing the struct-pointer
+OPEN, and **still exactly as reported** — re-measured 2026-10-04 on this tree,
+unchanged, in both pipeline modes:
+
+```
+CPython   5
+          6
+compiled  4319041936          <- a T *
+          4339833232          <- a U *, sixteen bytes on, ASLR-dependent
+```
+
+Not fixed, deliberately, and this Status records why rather than leaving the
+doc to be re-derived. The two options the doc offers are still the two options,
+and the choice between them is the doc's own: a decision, not a search. What
+has changed since 2026-10-02 is that the CHEAPER one is now measurable before
+it is chosen, which is what made the measurement worth repeating.
+
+**The blocker for option (2), "refuse loudly at the call site".** Option (2) is
+a `raise` in `mojo/backend_gimple/module_gen.py`'s struct-evidence application
+loop, at the `if len(types) != 1: continue` the doc cites — when the slot is
+non-unanimous AND the parameter is used as a method receiver. The refusal is
+CORRECT (there is no one C signature for two structs) and the module falls back
+to interpreting from source, so the answer becomes right. What cannot be
+answered without a heavy run is its BLAST RADIUS, and that is exactly what the
+doc itself warns about:
+
+> "a blanket refusal of a shape real central stdlib modules use is not a good
+> trade"
+
+and `CLAUDE.md` names the measurement that would show it:
+`stdlib-dylib`'s `skip <module>:` count must not increase. A worker must not
+run `compile_stdlib.py` or `build_stdlib_dylib.py` (tens of minutes, tens of
+GB), so **the count before and after this `raise` is the integrator's to
+measure**, and until it is measured landing the refusal trades a silent wrong
+answer in one fixture for an unknown number of stdlib modules falling out of
+the compiled path. That is a worse trade than the bug, which is why it is not
+taken blind.
+
+The cheapest way to make it safe, if the integrator wants option (2):
+
+1. Raise only for a slot that is non-unanimous AND is used as a receiver AND
+   whose types are all STRUCT pointers (`_sole` non-empty and every member
+   ending in `' *'` with its base in `struct_field_types`). A `{'T *', 'int'}`
+   disagreement is already handled — `_struct_obs`'s `None` entry is what the
+   `_tagged_dyn_` machinery is built for — and must not start refusing.
+2. Name the parameter, the callee and the structs in the message, as every
+   other refusal in this file does, so the fallback is debuggable from the
+   error alone.
+3. Then run `stdlib-dylib` and compare the `skip <module>:` count. An increase
+   means the shape is too central and option (1) is the answer after all.
+
+**Option (1), a runtime-tagged struct parameter**, is unchanged and still
+feature-sized: the value model already has `_mojo_dispatch_getattr` /
+`mojo_read_type_tag_safe` and a type tag in every struct's first word, and
+`_cpp_expr`'s opaque-local path in `cpp_core.py` already reads a member through
+that dispatch. `_CPP_CALLABLE_CTYPE` is the precedent for what a new value
+category costs. Note that it is a strict improvement over the status quo in
+one respect the refusal cannot reach: it makes the polymorphism *representable*
+rather than merely detectable, so a program with one call site would compile
+instead of falling back.
+
+**Original report.** Measured 2026-10-02 while fixing the struct-pointer
 forwarding chain in `bugs/hard/CODEGEN_param_used_only_as_method_receiver.md`.
 Found by writing the test for that fix's VETO and finding the veto has no
 cleanly assertable observable, because the shape it protects is already wrong.
