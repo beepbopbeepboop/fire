@@ -25475,7 +25475,8 @@ def struct_dunder_dispatch_candidates(left_structs, right_structs, op: str):
     return (None, None, False, (False, [(st.name, False) for st in structs]))
 
 
-def eq_dispatch_candidates_disagree(spelled: str, struct_names, rows) -> str:
+def eq_dispatch_candidates_disagree(spelled: str, struct_names, rows,
+                                    left_count=None, right_count=None) -> str:
     """Why `a == b` has no single dunder to call, when the candidates disagree.
 
     The agree-or-refuse refusal for the comparison half, and a different message
@@ -25486,21 +25487,76 @@ def eq_dispatch_candidates_disagree(spelled: str, struct_names, rows) -> str:
     `struct_dunder_dispatch_candidates` and the refusal names every row, for
     the reason its sibling gives: "they disagree" without saying which is which
     sends the reader to look at the wrong declaration.
+
+    ## TWO DISAGREEMENTS AND TWO MESSAGES, and the second one is why
+
+    `struct_dunder_dispatch_candidates` returns `disagree` for two different
+    facts, and until 2026-10-05 they shared one message whose tail was FALSE
+    about half of them. `left_count`/`right_count` are the sizes of the two
+    per-side candidate lists, and they are what tells the two apart:
+
+    * **A NAME IS NOT PINNED** (either side has more than one candidate). The
+      existing text is exactly right: which struct is live at this comparison
+      depends on the path, this analysis has no path sensitivity, and giving each
+      name one binding does settle it.
+    * **EACH SIDE IS PINNED AND THEY ARE DIFFERENT STRUCTS** — `A() == B()` with
+      one `A` and one `B` in the whole function. There is no path to be
+      insensitive to, the two names each hold exactly one frame, and the old
+      text was not merely beside the point: **its advice cannot work.**
+      "Give every candidate the same `__eq__`" makes `owners` hold two names,
+      which is the `len(owners) > 1` arm of the very decision that refused — so
+      a reader who follows the message is refused again with the same message,
+      and "give each name one binding" is impossible when each already has one.
+
+      The real reason is CPython's REFLECTED dispatch, and it is a value-model
+      gap rather than an analysis one: `A.__eq__(a, b)` is handed a `B`, which
+      in Mojo is not even a well-typed call, and CPython's answer for that is
+      `NotImplemented` — which asks the other operand's `__eq__`, and falls back
+      to identity when that is missing too. **This path has no representation
+      for `NotImplemented` as a dunder's return value**, so the three-way answer
+      a reflected `__eq__` needs cannot be lowered at all.
+
+      So the message says that, names what a program CAN do instead (compare the
+      fields, or give the two sides the same struct — which makes the comparison
+      homogeneous and the dispatch unambiguous), and says plainly that this is
+      not something an edit to the bindings will fix. That is the difference
+      between a refusal that names its own cause and one that sends the next
+      reader after a non-bug, which `formal/model.py`'s own note on
+      `FRAME_KIND` calls the expensive direction and which
+      `test_refusal_taxonomy.py` is the standing check for.
     """
     who = ", ".join(struct_names) if struct_names else "this struct"
-    return (
+    declared = "; ".join(f"{sn} declares one" if has else f"{sn} declares none"
+                         for sn, has in rows)
+    lead = (
         f"{spelled} compares two FRAME ADDRESSES, so the answer is the frame's "
         f"own struct's `__eq__` — which means WHICH struct is the whole of the "
-        f"question, and {who} does not settle it: "
-        + "; ".join(f"{sn} declares one"
-                    if has else f"{sn} declares none"
-                    for sn, has in rows)
-        + ". Each name holds a different frame on each path that binds it, and "
-          "this analysis has no path sensitivity to say which one is live at "
-          "this comparison, so the call this would lower to is one of two and "
-          "the program would build, run, and answer with whichever struct's "
-          "`__eq__` the other path would have called. Give each name one "
-          "binding, or give every candidate the same `__eq__`")
+        f"question, and {who} does not settle it: {declared}. ")
+    if left_count is not None and right_count is not None \
+            and left_count == 1 and right_count == 1:
+        return lead + (
+            "This one is not a question about which frame is live at this "
+            "comparison: each name is bound once and to a single struct, so "
+            "there is no path for a different struct to be the live one. It is "
+            "CPython's REFLECTED dispatch, and it is not answerable here: "
+            "`A.__eq__(a, b)` is handed a `B`, which is not a well-typed call "
+            "in Mojo, and CPython's answer for it is `NotImplemented` — which "
+            "asks the OTHER operand's `__eq__`, and falls back to identity when "
+            "there is none. This path has no representation for "
+            "`NotImplemented` as a dunder's return value, so the three-way "
+            "answer a reflected `__eq__` needs cannot be lowered at all. "
+            "Changing which frame a name holds will NOT fix this, and giving "
+            "both structs a `__eq__` will not either: two owners is the case "
+            "that refuses. Compare the fields, or make the two sides the same "
+            "struct so the comparison names one `__eq__` — "
+            "bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md")
+    return lead + (
+        "Each name holds a different frame on each path that binds it, and "
+        "this analysis has no path sensitivity to say which one is live at "
+        "this comparison, so the call this would lower to is one of two and "
+        "the program would build, run, and answer with whichever struct's "
+        "`__eq__` the other path would have called. Give each name one "
+        "binding, or give every candidate the same `__eq__`")
 
 
 def frame_len_candidates_disagree(spelled: str, struct_names, rows) -> str:

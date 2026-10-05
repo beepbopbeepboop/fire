@@ -6274,7 +6274,15 @@ def _eq_dispatch_decide(node, op: str, left, right, cands_l, cands_r):
         raise CodegenError(M.eq_dispatch_candidates_disagree(
             f"{getattr(left, 'name', left)} {op} "
             f"{getattr(right, 'name', right)}",
-            sorted({st.name for st in cands}), rows))
+            sorted({st.name for st in cands}), rows,
+            # The two per-side SIZES, and they are what lets the refusal tell
+            # "a name is not pinned" from "each name is pinned and they are
+            # different structs". The second is not a path-sensitivity question
+            # at all and the first message's advice cannot fix it, so passing
+            # them is what stops the refusal being right for the wrong reason —
+            # `eq_dispatch_candidates_disagree`'s own docstring says what the
+            # false reason was.
+            left_count=len(cands_l), right_count=len(cands_r)))
     if owner is None:
         return None
     call = F.CallExpr(
