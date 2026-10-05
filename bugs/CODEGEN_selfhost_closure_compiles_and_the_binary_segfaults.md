@@ -11,6 +11,120 @@ next reader a four-minute measurement to re-derive a conclusion that is now
 false is the failure mode `bugs/` is supposed to prevent, so they are deleted
 and this one carries the measured state.
 
+## Status (2026-10-05, `work/gatefix10`): the crash is ROOT-CAUSED and the runtime half is FIXED; the binary is not rebuilt yet
+
+The step-2 next step below ("run it under lldb, take the backtrace") has been
+done, and the backtrace names the mechanism in one frame. **What is fixed is
+`runtime/fire_runtime.c`'s type-tag reader; what is NOT yet measured is whether
+the self-hosted binary survives after that**, because rebuilding it is a
+whole-closure compile and this session is not allowed to run one. So this doc
+stays open, and the exact jobs to re-run are in "The exact next step".
+
+### The backtrace
+
+Kept, per that step's own advice — `test_selfhost.py` deletes its binary, but
+`stage2/mojo` is the same artifact of the same closure and survives in the
+worktree:
+
+```console
+$ cd stage2 && MOJO_HOME=.. PYTHONPATH=.. lldb -b -o "run --dump ../hello.mojo" -k "bt 40" ./mojo
+* thread #1, stop reason: EXC_BAD_ACCESS (code=1, address=0x746e697270)
+   * frame #0: mojo`_canon_int + 48
+     frame #1: mojo`_dict_lookup_k + 108
+     frame #2: mojo`_dict_lookup + 32
+     frame #3: mojo`mojo_dict_get_int + 28
+     frame #4: mojo`mojo_dict_get_int_kw + 72
+     frame #5: mojo`mojo_middle_exprtypes__walk_ast_into_37bd8e + 1964
+     ...
+    frame #13: mojo`mojo_backend_gimple_module_gen_gen_module_impl_7e9a9f + 244180
+```
+
+`0x746e697270` is not an address: it is the five ASCII bytes `'p','r','i','n','t'`
+followed by three NULs, read as a little-endian word. So a **`char *` was passed
+where a `MojoStr *`-shaped header was expected, and its TEXT was read as the
+struct's `__mojo_type_id`.**
+
+### The chain, from the generated C
+
+`stage1/fire.ci`, at the `#line` the backtrace points to
+(`mojo/middle/exprtypes.py:73`, inside `_walk_ast_into`):
+
+```c
+_t64 = mojo_read_type_tag_safe (_t63);        /* type(node)      */
+_nc  = _t64;                                   /* = 0x746e697270  */
+_t68 = (MojoDict *)_..._globals._WALK_DATACLASS_CACHE;
+_t71 = mojo_dict_get_int_kw (_t68, _nc);       /* _WALK_DATACLASS_CACHE.get(type(node)) */
+```
+
+1. `type(x)` is lowered to `mojo_read_type_tag_safe((int64_t)x)`
+   (`mojo/backend_gimple/emit_calls.py`, the `fname_raw == 'type'` arm).
+2. `_walk_ast_into` asks for `type(node)` for EVERY node **before** its
+   `isinstance(node, str)` early-return — deliberately, for the reason its own
+   comment gives (the scalar test lowers to a non-NULL test and mistakes a
+   boxed pointer for an int). So on a `str` node, `type()` is evaluated.
+3. `mojo_read_type_tag_safe` validated the ADDRESS (`_mojo_tagged_addr_ok`) but
+   never the WORD: a heap `char *` is 8-byte aligned and `malloc_size` says it
+   is >= 8 bytes for any string of 5+ characters, so all three address checks
+   passed and the string's own bytes came back as an identity.
+4. That identity is >= 2 GiB, so `mojo_boxed_is_str` classified it as a boxed
+   string on the next hop, `mojo_dict_get_int_kw` took its `_KW_STR` arm, and
+   `_canon_int` dereferenced it.
+
+Step 3 is the defect: **the predicate's own domain is inverted.** `CRASH.md`'s
+fix made a 31-bit TAG stop looking like a pointer; this is a POINTER that was
+allowed to produce a tag, and CRASH.md could not see it because its faulting
+value was small.
+
+### What landed
+
+`runtime/fire_runtime.c`: `mojo_read_type_tag` and `mojo_read_type_tag_safe` now
+share one `_mojo_struct_type_tag`, which validates the word it read as well as
+the address it read it from — a tag is always in `[0, 0x7fffffff]` (every
+producer masks: `_struct_type_id`'s `& 2147483647`, the exception ids'
+`& 0x7fffffff`), so anything else is "not a registered struct", which is the
+answer both readers already return for every other shape. The invariant is
+disjointness in both directions: **a tag is never pointer-shaped, and a
+pointer-shaped value never produces a tag**, so no consumer of either reader can
+reach `_canon_int` from a string again.
+
+`runtime/test_fire_coro_gen.c` carries `test_type_tag_reads_reject_a_boxed_string`,
+which links the real `fire_runtime.c` and covers: the measured case (a 5-char
+heap string reads 0), the bounded residual (a 4-char string's word is inside the
+tag range and no predicate on the word can exclude it, so what is asserted is
+the bound, not a zero), the positive case (a heap tagged struct reads its own tag
+back exactly), and the crash chain end to end —
+`mojo_dict_get_int_kw(d, mojo_read_type_tag_safe("print"))`, which SEGFAULTS if
+the range check is removed. Verified both ways:
+
+```console
+$ python3 test_coro_runtime.py          # with the check:    20/20 passed
+$ # ...with the range check deleted:    FAIL layer1-shim (all four builds), no CHECK line — a crash
+```
+
+`mojo_hash` is fixed as a side effect and it was a real divergence: it asks the
+same reader to tell "struct or string?", so a 5+ character string used to hash
+by IDENTITY where CPython hashes by CONTENT (`{s: 1}` lookups, set membership).
+
+### The exact next step
+
+1. **Rebuild and re-run `selfhost`** — `python3 tools/suite.py selfhost
+   --no-cache` — which needs a whole-closure compile and so was out of scope
+   for the session that landed this. It is the only thing that can say whether
+   this was the FIRST crash or the first of several: a fix that removes a
+   segfault usually exposes the next one, and the honest reading of this
+   section is "the first fault is closed", not "the binary works".
+2. **`bootstrap-stage2-dumps`** is the cheap witness for the same question
+   (per-file `--dump` on `stage2/mojo`, 46 items) and needs only
+   `bootstrap-stage2-cc` first. Its shape on this tree: `fire.py` and
+   `myinterpreter.py` `exit 1`, `module_loader.py` and `generated_dispatch.py`
+   `exit 245`, most `.mojo` items `exit 245`/`246`/`250`, and the rest die on
+   signals (-6/-10/-11) — measured here, not quoted from the gate.
+3. If a next crash appears, the same recipe applies and is now cheap: the
+   stage trees persist in the worktree, so `lldb -b -o run -k "bt 40"` on the
+   existing `stage2/mojo` answers in seconds instead of after a 15-minute
+   rebuild. Do NOT re-run the doc's step 1 (copying the binary out of
+   `test_selfhost.py`'s tempdir) first: `stage2/mojo` is the same artifact.
+
 ## What I ran
 
 ```sh

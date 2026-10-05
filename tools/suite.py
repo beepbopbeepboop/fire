@@ -1318,11 +1318,22 @@ test('comptime-parity', [PY, 'test_comptime_parity.py'],
 test('returned-frame-layout', [PY, 'test_returned_frame_layout.py'],
      deps=['preflight'],
      desc="a frame that outlives its creator has a place to live, or is refused by name")
+# `formal/model.py`, `bugs/FORMAL_known_limits.md` and
+# `build_stdlib_dylib.py` are in `extra` because the check READS them, not
+# because the scanner does: `test_runtime_header_scan.py`'s census check
+# compares the figures those three quote in prose with `runtime_abi()`, and an
+# edit to any of them can make it red (it went red four ways on 2026-10-04 that
+# way). Without them in the key, `cache=True` would replay a recorded PASS over
+# exactly the edits that break it — the failure mode `extra` exists for, and one
+# the `cache key: cached spec X hashes its own test` check cannot see, because
+# that check only asks whether the spec hashes ITS OWN test.
 test('rthdrscan', [PY, 'test_runtime_header_scan.py'], cache=True,
      extra=['test_runtime_header_scan.py', 'reflect.py', RUNTIME_SRC,
             RUNTIME_HDR, 'runtime/fire_sqlite3.h', 'runtime/fire_zlib.h',
             'runtime/fire_ssl.h', 'runtime/fire_ncurses.h',
-            'runtime/fire_python.h'],
+            'runtime/fire_python.h',
+            'formal/model.py', 'bugs/FORMAL_known_limits.md',
+            'build_stdlib_dylib.py'],
      desc='runtime header export scan sees every declaration')
 # `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
 # the ratchet, and the reason it needed a measurement to be safe.
