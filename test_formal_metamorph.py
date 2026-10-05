@@ -42,7 +42,9 @@ import random
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -59,10 +61,40 @@ from exec_budget import RUN_TIMEOUT_S  # noqa: E402
 EXAMPLES = os.path.join(HERE, "formal", "examples")
 
 
-def answer(text, tmpdir, name):
-    """`(exit, stdout)` from CPython, or None when it produced no answer."""
-    ref, _err = F.cpython_answer(text, tmpdir, name)
+#: `formal_fuzz.run_on`'s two shapes, as the verdict helpers the tool reads them.
+#: They are spelled once here because three classes below decide verdicts from
+#: them and a second copy of "an `ok` is `{"verdict": "ok", …}`" is a third thing
+#: to keep in step with the tool.
+def ok(stdout, rc=0):
+    return {"verdict": "ok", "rc": rc, "stdout": stdout}
+
+
+def refused(diag):
+    return {"verdict": "refusal", "rc": 1, "diag": diag}
+
+
+#: The one attribute `_normalisation` reads off the run's arguments.  A
+#: stand-in rather than an `argparse.Namespace`, so the coupling stays visible.
+def _ARGS(backends):
+    return types.SimpleNamespace(backends=backends)
+
+
+def answer(text, tmpdir, name, args=""):
+    """`(exit, stdout)` from CPython, or None when it produced no answer.
+
+    `args` is what the driver calls `main` with, and it is a parameter for the
+    same reason it is one in `formal_fuzz.cpython_answer`: an example whose own
+    entry point takes arguments cannot be answered without it, and a corpus that
+    quietly dropped those examples would be a corpus with a coverage hole in
+    exactly the place the metamorphic tool was extended to reach.
+    """
+    ref, _err = F.cpython_answer(text, tmpdir, name, args)
     return (ref[0], ref[1]) if F.has_oracle(ref) else None
+
+
+def by_label(programs):
+    """`{label: text}` for the corpus — the `MUST_APPLY` table is by name."""
+    return {label: text for label, text, _args in programs}
 
 
 def twin(text, index, tname, seed="t"):
@@ -205,26 +237,32 @@ FUZZ_INDEXES = range(6)
 
 
 def fuzz_corpus():
-    """`(label, text)` for every mix and `FUZZ_INDEXES`."""
+    """`(label, text, args)` for every mix and `FUZZ_INDEXES`.
+
+    The generated corpus is every `main()` — `formal_fuzz.make_program`'s own
+    convention — so `args` is empty for all of them, and it is carried anyway so
+    the two halves of the corpus have one shape.
+    """
     out = []
     for mix in sorted(F.MIXES):
         for i in FUZZ_INDEXES:
             out.append((f"{mix}:{i}",
-                        F.make_program("t-metamorph", i, mix, (8, 14))))
+                        F.make_program("t-metamorph", i, mix, (8, 14)), ""))
     return out
 
 
 def example_corpus():
-    """`(label, text)` for every `formal/examples/*.mojo` this file can drive."""
+    """`(label, text, args)` for every `formal/examples/*.mojo` this file can
+    drive."""
     out = []
     if not os.path.isdir(EXAMPLES):
         return out
     for stem in sorted(f[:-5] for f in os.listdir(EXAMPLES)
                        if f.endswith(".mojo")):
         with open(os.path.join(EXAMPLES, stem + ".mojo")) as f:
-            text, why = M.example_main(f.read())
-        if why is None:
-            out.append((stem, text))
+            prog = M.example_program(f.read())
+        if prog["text"] is not None:
+            out.append((stem, prog["text"], prog["driver_args"]))
     return out
 
 
@@ -239,11 +277,11 @@ class TransformSoundness(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmpdir = tempfile.mkdtemp(prefix="t_formal_metamorph.")
-        cls.programs = ([(n, t) for n, t in PROGRAMS]
+        cls.programs = ([(n, t, "") for n, t in PROGRAMS]
                         + fuzz_corpus() + example_corpus())
         cls.answers = {}
-        for label, text in cls.programs:
-            cls.answers[label] = answer(text, cls.tmpdir, f"o{label}")
+        for label, text, args in cls.programs:
+            cls.answers[label] = answer(text, cls.tmpdir, f"o{label}", args)
 
     @classmethod
     def tearDownClass(cls):
@@ -253,7 +291,7 @@ class TransformSoundness(unittest.TestCase):
     def test_every_transform_preserves_the_meaning(self):
         checked = 0
         bad = []
-        for label, text in self.programs:
+        for label, text, args in self.programs:
             want = self.answers[label]
             if want is None:
                 continue
@@ -261,7 +299,7 @@ class TransformSoundness(unittest.TestCase):
                 ttext = twin(text, label, tname)
                 if ttext is None:
                     continue
-                got = answer(ttext, self.tmpdir, f"t{label}_{tname}")
+                got = answer(ttext, self.tmpdir, f"t{label}_{tname}", args)
                 if got is None:
                     bad.append(f"{label}/{tname}: CPython could not run the "
                                f"twin, so the transform produced a program that "
@@ -284,7 +322,7 @@ class TransformSoundness(unittest.TestCase):
     def test_every_transform_applies_somewhere(self):
         for tname, rows in MUST_APPLY.items():
             for label, _index in rows:
-                text = dict(self.programs)[label]
+                text = by_label(self.programs)[label]
                 with self.subTest(transform=tname, program=label):
                     self.assertIsNotNone(
                         twin(text, label, tname),
@@ -302,7 +340,7 @@ class TransformSoundness(unittest.TestCase):
         self.assertEqual(sorted(M.TRANSFORM_WHY), sorted(M.TRANSFORM_NAMES))
 
     def test_the_pair_is_a_pure_function_of_its_seed(self):
-        text = dict(self.programs)["chain_of_bindings"]
+        text = by_label(self.programs)["chain_of_bindings"]
         for tname in M.TRANSFORM_NAMES:
             a = twin(text, "chain_of_bindings", tname)
             b = twin(text, "chain_of_bindings", tname)
@@ -432,15 +470,9 @@ class TheDriver(unittest.TestCase):
         self.assertLess(M.SEVERITY.index("METAMORPH-X86"),
                         M.SEVERITY.index("DIVERGENCE-X86"))
 
-    def _ok(self, stdout, rc=0):
-        return {"verdict": "ok", "rc": rc, "stdout": stdout}
-
-    def _refused(self, diag):
-        return {"verdict": "refusal", "rc": 1, "diag": diag}
-
     def test_two_images_that_disagree_are_metamorphic(self):
         want = (0, "1\n")
-        got = M._compare_one("x86_64", self._ok("1\n"), self._ok("2\n"), want)
+        got = M._compare_one("x86_64", ok("1\n"), ok("2\n"), want)
         # BOTH verdicts, and both are true: the two builds of one meaning
         # disagree (no oracle needed), and the twin is also the wrong answer
         # (which is how the metamorphic violation is usually LOCALISED — the
@@ -449,8 +481,8 @@ class TheDriver(unittest.TestCase):
         self.assertEqual(got, ["METAMORPH-X86", "MISMATCH-X86"])
 
     def test_one_side_building_and_the_other_refusing_is_a_twin_divergence(self):
-        got = M._compare_one("arm64", self._ok("1\n"),
-                             self._refused("no such construct"), (0, "1\n"))
+        got = M._compare_one("arm64", ok("1\n"),
+                             refused("no such construct"), (0, "1\n"))
         self.assertEqual(got, ["TWIN-DIVERGES-ARM"])
 
     def test_a_disagreement_the_original_also_has_is_a_divergence(self):
@@ -459,7 +491,7 @@ class TheDriver(unittest.TestCase):
         # `MISMATCH` says which side is.  `test_one_verdict_is_not_reported_twice`
         # below is the row that says the same disagreement is not reported as a
         # finding under either token.
-        got = M._compare_one("arm64", self._ok("9\n"), self._ok("9\n"),
+        got = M._compare_one("arm64", ok("9\n"), ok("9\n"),
                              (0, "1\n"))
         self.assertEqual(got, ["DIVERGENCE-ARM"])
 
@@ -472,7 +504,7 @@ class TheDriver(unittest.TestCase):
         programs arrived as `MISMATCH-X86`.  The localisation is not lost —
         `METAMORPH` above says the two sides differ.
         """
-        got = M._compare_one("arm64", self._ok("9\n"), self._ok("8\n"),
+        got = M._compare_one("arm64", ok("9\n"), ok("8\n"),
                              (0, "1\n"))
         self.assertEqual(got, ["METAMORPH-ARM", "DIVERGENCE-ARM"])
 
@@ -486,8 +518,8 @@ class TheDriver(unittest.TestCase):
         """
         got = M._compare_one(
             "x86_64",
-            self._refused("on the formal x86-64 path: `x` has no home"),
-            self._refused("on the formal arm64 path: `x` has no home"),
+            refused("on the formal x86-64 path: `x` has no home"),
+            refused("on the formal arm64 path: `x` has no home"),
             (0, "1\n"))
         self.assertEqual(got, [])
 
@@ -497,9 +529,9 @@ class TheDriver(unittest.TestCase):
         # not change the program must not change the sentence either.
         got = M._compare_one(
             "x86_64",
-            self._refused("`x` has no home: the register allocator collected no "
+            refused("`x` has no home: the register allocator collected no "
                          "home for it"),
-            self._refused("`x` cannot be represented on this target"),
+            refused("`x` cannot be represented on this target"),
             (0, "1\n"))
         self.assertEqual(got, ["REFUSAL-DIVERGES-X86"])
 
@@ -510,61 +542,303 @@ class TheDriver(unittest.TestCase):
         disagreement printed as `MISMATCH-X86+MISMATCH-X86+MISMATCH-ARM+
         MISMATCH-ARM` and a tally that counted tokens was counting four.
         """
-        got = M._compare_one("x86_64", self._ok("9\n"), self._ok("9\n"),
+        got = M._compare_one("x86_64", ok("9\n"), ok("9\n"),
                              (0, "1\n"))
         self.assertEqual(len(got), len(set(got)))
         self.assertEqual(got, ["DIVERGENCE-X86"])
 
-    def test_example_main_drives_an_example_with_no_entry_point(self):
-        text, why = M.example_main("def f(n):\n    return n + 1\n")
-        self.assertIsNone(why)
-        self.assertIn("def main() -> Int32:", text)
-        self.assertIn("print(f(0))", text)
 
-    def test_example_main_leaves_a_zero_argument_entry_point_alone(self):
+class ExamplePrograms(unittest.TestCase):
+    """`example_program` — the driver, and what it refuses to invent one for."""
+
+    def test_example_program_drives_an_example_with_no_entry_point(self):
+        prog = M.example_program("def f(n):\n    return n + 1\n")
+        self.assertIsNone(prog["reason"])
+        self.assertIn("def main() -> Int:", prog["text"])
+        self.assertIn("print(f(0))", prog["text"])
+        # And the driver is the LAST thing in the file, so `def_order` can
+        # permute it along with everything else — a driver that could not be
+        # permuted would make half the transformations untested on this corpus.
+        self.assertTrue(prog["text"].rstrip().endswith("return 0"))
+
+    def test_example_program_leaves_a_zero_argument_entry_point_alone(self):
         src = "def main() -> Int32:\n    printf(\"hi\")\n    return 0\n"
-        text, why = M.example_main(src)
+        prog = M.example_program(src)
+        self.assertIsNone(prog["reason"])
+        self.assertEqual(prog["text"], src, "a synthesised driver shadowed the "
+                                            "example's own entry point")
+
+    def test_example_program_drives_an_entry_point_that_takes_arguments(self):
+        """`twoparams.mojo`, and it is measured rather than reported.
+
+        Synthesising a driver for `def main(n: Int, m: Int)` calls `main` with
+        the wrong arity and recurses forever: measured, and the symptom was a
+        `not-answerable` with nothing to say why.  The first version of this tool
+        reported both such examples as undrivable with a comment saying it needed
+        the shared harness threaded with an input; the input is threaded now, so
+        the file is measured — and the two numbers have to be the SAME list,
+        because the input is baked into the image and the oracle calls `main` with
+        it.  A record that carried one without the other would compare two
+        different programs and report the difference as a backend bug.
+        """
+        prog = M.example_program("def main(n, m):\n    return n + m\n")
+        self.assertIsNone(prog["reason"])
+        self.assertEqual(prog["driver_args"], "10, 0")
+        self.assertEqual(prog["test_input"], "10,0")
+        self.assertEqual([int(v) for v in prog["driver_args"].split(", ")],
+                         [int(v) for v in prog["test_input"].split(",")],
+                         "the image's baked input and the oracle's arguments "
+                         "are different programs")
+        self.assertEqual(prog["text"], "def main(n, m):\n    return n + m\n",
+                         "an example that has its own entry point is used "
+                         "verbatim, driver and all")
+
+    def test_example_program_reports_an_entry_point_it_cannot_supply(self):
+        """`*args`, `**kwargs`, keyword-only and defaulted: said, not guessed.
+
+        Each of them would need a synthesised argument, and the value that went in
+        would have to be one the image also baked in — so rather than a driver
+        that measures one shape of a call and calls it the file, the file is
+        reported.  `twoparams.mojo`'s comment calls the un-threaded behaviour a
+        program with no PROOF, which is the same complaint.
+        """
+        for src in ("def main(*a):\n    return len(a)\n",
+                    "def main(**k):\n    return len(k)\n",
+                    "def main(n=1):\n    return n\n",
+                    "def main(*, n=1):\n    return n\n"):
+            with self.subTest(src=src):
+                prog = M.example_program(src)
+                self.assertIsNone(prog["text"])
+                self.assertIn("main", prog["reason"])
+
+
+class Normalising(unittest.TestCase):
+    """`normalise_mojo` — the rules, and the gate the oracle cannot supply.
+
+    The rules are the one place in this file where a mistake would be invisible:
+    normalisation moves P and T together, so the per-pair CPython oracle would
+    happily agree with itself about a program whose meaning a rule had changed.
+    The gate for that is `_normalisation`'s, and both halves of it are below —
+    the rules, and the machine that has to agree with the file as written.
+    """
+
+    #: `(source, gone, kept)` per rule.  The negatives are the point: a rule that
+    #: fired on a file it was not written for is a rule that will eventually fire
+    #: on prose.
+    RULES = (
+        ("@spec(f_spec; f_spec 0 = 1)\n@require(n >= 0)\ndef f(n):\n"
+         "    return n\n",
+         ("@spec", "@require"), ()),
+        ("@spec(\n    f_spec; f_spec 0 = 1)\ndef f(n):\n    return n\n",
+         ("@spec",), ()),
+        ("def f(n):\n    var a = 1\n    return a + n\n",
+         ("var ",), ("a = 1",)),
+        ("fn g(n):\n    return n\n", ("fn ",), ("def g(n):",)),
+        # One rule firing is not enough to make a file parseable, and the file is
+        # still REPORTED rather than half-rewritten: the `struct` case is the
+        # reason this tool cannot measure `wide_recv.mojo`, so it is a row here
+        # rather than a sentence in a docstring.
+        ("struct Point:\n    var x: Int\n", ("var ",), ("struct Point:",)),
+    )
+
+    def test_each_rule_removes_only_its_own_spelling(self):
+        for src, gone, kept in self.RULES:
+            with self.subTest(src=src.splitlines()[0]):
+                text, notes, why = M.normalise_mojo(src)
+                if text is None:
+                    self.assertTrue(why, "a refusal with no reason")
+                    self.assertTrue(notes, "a rule fired and said nothing")
+                    for token in gone:
+                        self.assertNotIn(token, text or "", "a rule was applied "
+                                                            "to a file it could "
+                                                            "not rescue")
+                    continue
+                self.assertIsNone(why)
+                for token in gone:
+                    self.assertNotIn(token, text)
+                for token in kept:
+                    self.assertIn(token, text)
+                self.assertTrue(notes, "a rule fired and said nothing")
+
+    def test_a_wrapped_decorator_argument_is_consumed_too(self):
+        """`@spec(` opens a paren, so the removal cannot stop at the line end.
+
+        A rule that deleted only the first line would leave the rest of the
+        arguments to be parsed as code, and the file would come back with a
+        SyntaxError that says nothing about the decorator.
+        """
+        src = ("@spec(\n    f_spec;\n    f_spec 0 = 1)\n"
+               "@ensure(result >= 0)\ndef f(n):\n    return n\n")
+        text, notes, why = M.normalise_mojo(src)
         self.assertIsNone(why)
-        self.assertEqual(text, src, "a synthesised driver shadowed the "
-                                   "example's own entry point")
+        ast.parse(text)
+        self.assertNotIn("f_spec", text)
+        self.assertNotIn("ensure", text)
+        self.assertEqual(text, "def f(n):\n    return n\n")
 
-    def test_example_main_reports_an_entry_point_that_takes_arguments(self):
-        # Synthesising a driver for `def main(n: Int, m: Int)` calls `main` with
-        # the wrong arity and recurses forever. Measured: the twin was a
-        # `not-answerable` with nothing to say why.
-        text, why = M.example_main("def main(n, m):\n    return n + m\n")
-        self.assertIsNone(text)
-        self.assertIn("main", why)
+    def test_a_file_that_already_parses_is_returned_unchanged(self):
+        """The generated corpus, and the property that makes the rules safe.
 
-    def test_example_main_reports_mojo_only_syntax(self):
-        text, why = M.example_main("def f(n):\n    var a = 1\n    return 2\n")
+        `formal_fuzz.make_program` emits none of these spellings — that
+        intersection is what this tool's whole choice of CPython's `ast` rests on
+        — and a rule that ran over a file with nothing to remove is one more way
+        to damage a corpus the rules were not written for.  So the common case is
+        a parse and an early return, and `notes` is empty so the summary cannot
+        print a rule that did not fire.
+        """
+        for mix in sorted(F.MIXES):
+            with self.subTest(mix=mix):
+                src = F.make_program("t-metamorph", 0, mix, (8, 14))
+                text, notes, why = M.normalise_mojo(src)
+                self.assertIsNone(why)
+                self.assertEqual(text, src)
+                self.assertEqual(notes, ())
+
+    def test_a_comment_that_mentions_a_keyword_is_not_a_declaration(self):
+        """`vardecl.mojo`'s own first line is a comment whose text is
+        "`var a = 1` is a `VarDecl`".  A rule that rewrote inside a comment would
+        turn prose into code, and CPython — which would have to execute the result
+        — would be the only thing that noticed."""
+        src = ("# `var a = 1` is a `VarDecl`, and `fn g(x)` is a function.\n"
+               "def f(n):\n    return n\n")
+        text, notes, why = M.normalise_mojo(src)
+        self.assertIsNone(why)
+        self.assertEqual(text, src)
+        self.assertEqual(notes, ())
+
+    def test_a_rule_that_cannot_finish_names_the_construct(self):
+        text, notes, why = M.normalise_mojo("struct Point:\n    var x: Int\n")
         self.assertIsNone(text)
-        self.assertIn("parser", why)
+        self.assertIn("struct", why)
+        self.assertIn("var declaration x1", notes,
+                      "the rule that DID fire was not reported, so the reason "
+                      "reads as though nothing was tried")
+
+    # ── the gate ──
+    #
+    # `args` here is the one attribute `_normalisation` reads, so a two-field
+    # stand-in rather than an argparse.Namespace keeps the coupling visible.
+
+    def _normalisation(self, verbatim, base, tmpdir, run_on):
+        with mock.patch.object(M.F, "run_on", run_on):
+            return M._normalisation(
+                {"text": "normalised", "verbatim": verbatim,
+                 "test_input": "10,0"},
+                base, _ARGS(("arm64",)), 0, tmpdir)
+
+    def test_a_normalised_file_is_re_run_on_the_machine_as_written(self):
+        """The gate.  Both answers come from the SAME backend, so this is the
+        metamorphic invariant applied to the rewriting rather than to a transform:
+        the file as written and the file this tool rewrote must answer alike."""
+        asked = []
+
+        def run_on(backend, text, tmpdir, name, test_input=None):
+            asked.append((text, test_input))
+            return ok("1\n")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            got = self._normalisation("as written", {"arm64": ok("1\n")},
+                                      tmp, run_on)
+        self.assertEqual(got, [])
+        self.assertEqual(asked, [("as written", "10,0")],
+                         "the file as written is not the thing the gate checked, "
+                         "or the input was not threaded into it")
+
+    def test_a_rewrite_that_changes_the_answer_is_a_finding(self):
+        """A finding that INVALIDATES the row rather than describing it: if the
+        normalised file and the file as written disagree, nothing measured about
+        it — including every `match` — is a statement about the file a reader has
+        open.  So it outranks `METAMORPH` in the screen order."""
+        with tempfile.TemporaryDirectory() as tmp:
+            got = self._normalisation(
+                "as written", {"arm64": ok("1\n")}, tmp,
+                lambda *a, **k: ok("2\n"))
+        self.assertEqual(got, ["NORMALISES-DIFFERLY-ARM"])
+        self.assertIn("NORMALISES-DIFFERLY-ARM", M.FINDING_VERDICTS)
+        self.assertLess(M.SEVERITY.index("NORMALISES-DIFFERLY-ARM"),
+                        M.SEVERITY.index("METAMORPH-ARM"))
+
+    def test_a_rewrite_whose_original_will_not_build_is_reported_not_skipped(self):
+        """A hole, not a property of the program.
+
+        The file could only be measured by removing syntax, and the removed
+        spelling would not build — so nothing established that the removal
+        preserved anything.  Reporting that as "does not apply" would report a
+        coverage loss as though it were a file with nothing to do.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            got = self._normalisation(
+                "as written", {"arm64": ok("1\n")}, tmp,
+                lambda *a, **k: refused("no such construct"))
+        self.assertEqual(got, ["NORMALISES-UNCOMPARABLE"])
+        self.assertIn("NORMALISES-UNCOMPARABLE", M.FINDING_VERDICTS)
+
+    def test_a_file_no_rule_fired_on_is_not_built_twice(self):
+        """The whole generated corpus, and 45 of the 52 examples on this tree.
+
+        A gate that built a second image per program would double the sweep to
+        check nothing, so the common case must cost no build at all — asserted by
+        a `run_on` that raises rather than by reading the code.
+        """
+
+        def boom(*a, **k):
+            raise AssertionError("the no-rule path built something")
+
+        self.assertEqual(self._normalisation(None, {"arm64": ok("1\n")},
+                                             "/nonexistent", boom), [])
 
     def test_every_example_is_either_driven_or_reported(self):
         """No example is dropped silently.
 
         An example that cannot be driven is a coverage hole, and the tool's own
-        docstring says a corpus that stops producing a construct reports the
-        same clean tally as one that never produced it — so the reason has to be
-        on the screen.
+        docstring says a corpus that stops producing a construct reports the same
+        clean tally as one that never produced it — so the reason has to be on the
+        screen.
         """
         if not os.path.isdir(EXAMPLES):
             self.skipTest("formal/examples is not present")
         stems = sorted(f[:-5] for f in os.listdir(EXAMPLES)
                        if f.endswith(".mojo"))
-        self.assertEqual(len(stems), len(
-            os.listdir(EXAMPLES)) - 0 if False else len(stems))
-        reported = []
+        reported, notes = [], []
         for stem in stems:
             with open(os.path.join(EXAMPLES, stem + ".mojo")) as f:
-                _text, why = M.example_main(f.read())
-            if why:
-                reported.append(stem)
+                prog = M.example_program(f.read())
+            if prog["reason"]:
+                reported.append((stem, prog["reason"]))
+            notes += [(stem, n) for n in prog["notes"]]
         self.assertEqual(sorted(stems),
-                         sorted([s for s in stems if s not in reported]
-                                + reported),
+                         sorted([s for s, _ in reported]
+                                + [s for s in stems if s not in
+                                   {r for r, _ in reported}]),
                          "an example was neither driven nor reported")
+        # A rewrite is a SMALLER claim than a measurement, so the notes are part
+        # of what this file checks: a normaliser that starts rewriting files
+        # nobody recorded is a coverage report that no longer describes the tree.
+        self.assertTrue(notes, "no example exercised a normalising rule, so the "
+                               "rules are measured by nothing")
+        for stem, why in reported:
+            self.assertTrue(why.strip(), f"{stem} is unreported and unexplained")
+
+    def test_the_examples_corpus_is_mostly_measured(self):
+        """The coverage number this file exists to keep honest.
+
+        41 of 52 was the state this normaliser was written for, and the 11 that
+        were not measured were all refused for a spelling rather than for a
+        semantics.  Asserting a floor rather than 52 keeps the assertion honest
+        when a future example adds a construct — the point is that the tool
+        measures the corpus, not that it measures every file in it.
+        """
+        if not os.path.isdir(EXAMPLES):
+            self.skipTest("formal/examples is not present")
+        stems = [f for f in os.listdir(EXAMPLES) if f.endswith(".mojo")]
+        driven = 0
+        for stem in stems:
+            with open(os.path.join(EXAMPLES, stem)) as f:
+                if M.example_program(f.read())["text"] is not None:
+                    driven += 1
+        self.assertGreaterEqual(driven, len(stems) - 1,
+                                f"{len(stems) - driven} of {len(stems)} examples "
+                                f"are not measured")
 
     def test_list_transforms_names_every_transformation(self):
         proc = subprocess.run(

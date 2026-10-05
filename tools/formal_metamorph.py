@@ -1757,10 +1757,6 @@ def _is_plain_arg(node):
     return isinstance(node, ast.Name) or _is_int_literal(node)
 
 
-def _ret_expr_of(fn):
-    return fn.body[0].value
-
-
 def _is_recursive(fn):
     return any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                and n.func.id == fn.name for n in ast.walk(fn))
@@ -1842,7 +1838,7 @@ TRANSFORM_WHY = {
 # the ones a backend is most likely to get wrong, and there is no generator here
 # that would produce them.
 #
-# The examples carry no `main`, so `example_main` synthesises one: a fixed
+# The examples carry no `main`, so `example_program` synthesises one: a fixed
 # argument tuple per positional parameter, drawn from a fixed table, and the
 # results printed.  It is generated ONCE per example and appended to the text
 # BEFORE any transformation, so it is not itself a metamorphic variable — a
@@ -1850,97 +1846,316 @@ TRANSFORM_WHY = {
 # meaningless.  It is appended BEFORE `def_order` runs too, so the driver can be
 # permuted along with everything else and a divergence is still a divergence.
 
-#: The argument tuples `example_main` calls with, in order.  Small, positive and
-#: fixed, because the driver is an OBSERVATION and not a generator: its only job
-#: is to make the example's function produce visible output.
+# ── Mojo source → a source CPython's parser accepts ─────────────────────────
+#
+# The transforms rewrite CPython's `ast`, so a file that spells Mojo-only syntax
+# cannot be transformed at all, and 11 of `formal/examples`' 52 files arrived at
+# the sweep as `examples NOT measured` for exactly that reason.  That is a
+# coverage hole in the ONE corpus whose programs a person wrote, and it is the
+# corpus this tool's whole argument rests on ("their shapes are the ones a
+# backend is most likely to get wrong").
+#
+# So a file CPython's parser declines is NORMALISED first: a textual, one-way
+# rewrite of the spellings that carry nothing a run can observe, and of nothing
+# else.  It is deliberately NOT a second implementation of the ten
+# transformations — it never looks at a tree, it runs before a tree exists, and
+# it is applied to the ORIGINAL, so P and T are written in the same dialect and
+# the pair is still one program.  It also does NOT touch the generated corpus:
+# `formal_fuzz.make_program` emits none of these spellings (see this file's
+# "WHY CPYTHON'S OWN PARSER"), which is the property that made the choice of
+# `ast` sound, and `normalise_mojo` returns its input unchanged when the input
+# already parses, so the corpus provably goes through untouched.
+#
+# THE GATE THE CPYTHON ORACLE CANNOT SUPPLY, and why it is needed.  The
+# per-pair oracle checks CPython(P) == CPython(T), which is what makes a
+# transformation trustworthy — but normalisation moves BOTH sides together, so a
+# rule that changed the meaning would be invisible to it.  The rewriting is
+# therefore checked against the file it claims to be the same as, by the machine
+# that has to be right about both: `check_pair` re-runs the VERBATIM file on
+# every backend whenever a rule fired and requires the same answer
+# (`NORMALISES-DIFFERLY-<arch>`), and refuses to measure an example whose
+# verbatim spelling will not run at all.
+#
+# Each rule, and why removing it changes nothing a run can observe:
+#
+#   PROOF_DECORATORS  `@spec(…)`, `@require(…)`, `@ensure(…)` are read by the
+#                     PROOF layer; the run-time path never sees them.  They have
+#                     to be REMOVED rather than merely made parseable, because
+#                     CPython would execute them and raise NameError on
+#                     `spec`/`require`/`ensure` — so keeping them would trade a
+#                     coverage hole for an oracle that cannot answer.  Measured:
+#                     `count.mojo` built VERBATIM answers `0` on both backends,
+#                     and so does the same file with its three annotation lines
+#                     gone.
+#   VAR_DECL          `var x = e` and `x = e` are one construct on this path.
+#                     `formal/examples/vardecl.mojo` exists BECAUSE the two
+#                     spellings behave identically here: its own comment calls
+#                     the bare-assignment file its twin, and `threevar.mojo`
+#                     passed where this one failed.
+#   FN_DECL           `fn f(…)` and `def f(…)` are one function form here — there
+#                     is no overload set, no `-> None` discipline and no
+#                     ownership on this path.  Measured: `wide_recv.mojo` spells
+#                     all four of its methods `fn` and builds and answers `4` on
+#                     both backends, while 41 of the 52 examples spell `def`.
+#
+# NOT here, and said rather than guessed: `struct Point:`.  A Python `class`
+# body of bare annotations has no attributes, so `p.get_y()` reads a name that
+# was never assigned while the struct's field reads `0` — a real disagreement
+# with CPython, produced by the translation rather than found by it.  Giving
+# each field an initialiser is a judgement about what the struct's fields are
+# worth, which is not a removal of syntax, so `wide_recv.mojo` stays unmeasured
+# and `example_program` names the construct it could not remove.
+
+#: `(name, pattern)`, applied in this order.  `re.MULTILINE` and a leading
+#: `^[ \t]*` rather than a word-boundary match, because the point is to match a
+#: STATEMENT and a comment may contain the word: `vardecl.mojo`'s own first line
+#: is a comment whose text is "`var a = 1` is a `VarDecl`", and a rule that
+#: rewrote inside it would corrupt prose into code.
+PROOF_DECORATOR_RE = re.compile(r"^[ \t]*@(spec|require|ensure)\s*\(")
+VAR_DECL_RE = re.compile(r"^([ \t]*)var[ \t]+", re.MULTILINE)
+FN_DECL_RE = re.compile(r"^([ \t]*)fn[ \t]+", re.MULTILINE)
+
+#: A decorator's arguments can wrap, and a rule that deleted only the first line
+#: would leave the rest of it to be parsed as code.  So the removal is driven by
+#: parenthesis depth: `@spec(` opens one, and the line ends at the one that
+#: closes it — whichever line that is.
+def _drop_proof_decorators(lines):
+    """`lines` without the `@spec`/`@require`/`@ensure` lines; `(kept, count)`."""
+    kept, depth, n = [], 0, 0
+    for line in lines:
+        if depth == 0 and PROOF_DECORATOR_RE.match(line):
+            n += 1
+            depth = line.count("(") - line.count(")")
+            if depth <= 0:
+                depth = 0
+            continue
+        if depth:
+            # Inside a decorator's arguments: consume until they balance.  A
+            # `)` inside a string in the arguments would confuse the count, and
+            # the arity of that bug is a file CPython then declines — reported,
+            # not shipped.
+            depth += line.count("(") - line.count(")")
+            depth = max(depth, 0)
+            continue
+        kept.append(line)
+    return kept, n
+
+
+#: Mojo's statement keywords, so a file the rules could not fix says WHICH one
+#: stopped it.  CPython's own message for `struct Point:` is
+#: "invalid syntax (<unknown>, line 1)" — true, and useless to the reader who
+#: has to decide whether to teach this tool the construct.  A keyword this table
+#: has already been taught to remove (and did not) is itself worth naming, so the
+#: scan runs on the NORMALISED text rather than the original.
+MOJO_STATEMENT_KEYWORDS = ("struct", "trait", "alias", "comptime", "raises",
+                           "inout", "borrowed", "owned", "let", "var", "fn")
+
+_STATEMENT_START_RE = re.compile(r"^([ \t]*)([A-Za-z_]\w*)", re.MULTILINE)
+
+
+def _blocking_keyword(text):
+    """The first Mojo statement keyword left in `text`, or `""`."""
+    for m in _STATEMENT_START_RE.finditer(text):
+        if m.group(2) in MOJO_STATEMENT_KEYWORDS:
+            return m.group(2)
+    return ""
+
+
+def normalise_mojo(source):
+    """`(text, notes, why)` for `source` in a dialect CPython's parser accepts.
+
+    `text` is `None` when the rules were not enough, and then `why` names the
+    construct — the keyword scan over the NORMALISED text first (`struct
+    Point:`), because CPython's own message for it is "invalid syntax
+    (<unknown>, line 1)", which is true and useless to whoever has to decide
+    whether to teach this tool the construct; its SyntaxError text is the
+    fallback.  `notes` names every rule that FIRED, and is empty for a file that
+    already parsed — which is the generated corpus, always.  A caller that
+    reports nothing when a note fired is a caller whose coverage number is a lie
+    about a file it did not measure as written.
+
+    The first `ast.parse` is what keeps this cheap and total: a file that parses
+    is already in the dialect, so it is returned UNCHANGED rather than run
+    through rules that have nothing to do, which is both faster and one fewer
+    way for a rule to damage a file it was not written for.  The second one is
+    the check that the rules were enough.
+    """
+    try:
+        ast.parse(source)
+    except (SyntaxError, ValueError):
+        pass
+    else:
+        return source, (), None
+    lines, notes = source.splitlines(keepends=True), []
+    lines, n = _drop_proof_decorators(lines)
+    if n:
+        notes.append(f"proof decorators x{n}")
+    text = "".join(lines)
+    for name, rx in (("var declaration", VAR_DECL_RE),
+                     ("fn declaration", FN_DECL_RE)):
+        text, k = rx.subn(r"\1", text)
+        if k:
+            notes.append(f"{name} x{k}")
+    try:
+        ast.parse(text)
+    except (SyntaxError, ValueError) as e:
+        kw = _blocking_keyword(text)
+        return None, tuple(notes), (
+            f"Mojo-only syntax this normaliser does not remove: {kw!r}"
+            if kw else f"CPython still declines it: {e}")
+    return text, tuple(notes), None
+
+
+#: The argument tuples the synthesised driver calls with, in order.  Small,
+#: positive and fixed, because the driver is an OBSERVATION and not a generator:
+#: its only job is to make the example's function produce visible output.
 EXAMPLE_ARGS = (0, 1, 2, 3, 7, 11)
 
 #: How many top-level functions an example's driver calls.  Bounded so a
 #: twenty-function example does not become a twenty-hundred-line driver.
 EXAMPLE_MAX_CALLS = 4
 
+#: The input an example's own `main` is measured at.  `10` is the value
+#: `test_x86_64_examples.py::DEFAULT_INPUT` already builds every example with, so
+#: this is the image the rest of the suite builds rather than a new convention;
+#: `EXAMPLE_INPUT_PAD` is `formal/model.py::entry_arg_values`'s own padding —
+#: the unused argument registers read `0` at `_start` — so the CPython driver and
+#: the binary agree on the parameters past the first without either of them
+#: inventing a value.
+EXAMPLE_INPUT = 10
+EXAMPLE_INPUT_PAD = 0
 
-def example_main(source):
-    """`source` with a `main()` that exercises it, or `(text, reason)`.
 
-    Three shapes, and the third is the reason this returns a REASON rather than
-    a text or a bare None:
+def example_program(source):
+    """Everything this run needs to measure one `formal/examples` file.
+
+    A dict, because the record has more than a text and a reason to carry and a
+    tuple of three would make every caller index it blind:
+
+      `text`         what CPython and both backends are asked to run.  `None` when
+                     the file is not measured at all, and then `reason` says why.
+      `verbatim`     the source the normalisation did NOT touch, with the same
+                     driver appended — the text `NORMALISES-DIFFERLY` compares
+                     against, and `None` when no rule fired (which is every file
+                     of the generated corpus and 41 of the 52 examples).
+      `driver_args`  the argument list the CPython driver calls `main` with.
+                     `""` for the ordinary `main()`, and `"10, 0"` for a
+                     two-parameter entry point.
+      `test_input`   the `-n` the image bakes in, or `None` to leave the image
+                     the default one.  The input is BAKED (`formal/build.py`'s
+                     `test_input`), so the two must be the same list or the
+                     comparison is between two different programs.
+      `notes`        what `normalise_mojo` rewrote; empty when it rewrote
+                     nothing.
+      `reason`       why this file is not measured, when it is not.
+
+    Three shapes of entry point, and the third is why this returns a REASON
+    rather than a text or a bare None:
 
       * the example already has a `main` taking no parameters — used VERBATIM.
         Synthesising a driver for it would either shadow the entry point or, for
         `formal/examples/twoparams.mojo`'s `def main(n: Int, m: Int)`, call it
         with the wrong arity and recurse forever: measured, and the symptom was
         a twin CPython could not run with no indication why;
-      * the example has a `main` that takes ARGUMENTS — reported as undrivable
-        with that reason.  The harness calls `main()` with none, and the build
-        bakes its input into the image (`formal/build.py`'s `test_input`), so
-        measuring it properly means threading an input through the shared
-        `formal_fuzz` harness rather than writing a second one here;
+      * the example's `main` takes ARGUMENTS — MEASURED, by giving the image the
+        input its `main` will receive and the CPython driver the same values.
+        The first version of this reported those two files as undrivable with a
+        comment saying it needed the shared `formal_fuzz` harness threaded;
+        `formal_fuzz.run_on` now takes the `test_input` its own `build` and its
+        proof-layer sibling already took, and this is that thread;
       * the example has no `main` — one is synthesised from its top-level
         functions and the fixed argument table.
 
-    None is returned for a file whose syntax this file's parser does not accept
-    (`var`, `fn` — 9 of the 52 examples on this tree), and the caller REPORTS
-    that rather than dropping it.
+    A file no rule can make parseable comes back with `reason` naming the
+    construct it could not remove (`normalise_mojo` passes the SyntaxError
+    through), so `wide_recv.mojo`'s `struct` is reported rather than dropped.
     """
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError):
-        return None, "syntax this file's parser does not accept"
+    text, notes, why = normalise_mojo(source)
+    if text is None:
+        return {"text": None, "verbatim": None, "driver_args": "",
+                "test_input": None, "notes": notes, "reason": why}
+    tree = ast.parse(text)
     mains = [n for n in tree.body
              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
              and n.name == "main"]
     if mains:
-        args = mains[0].args
-        if not (args.posonlyargs or args.args or args.vararg or args.kwarg
-                or args.kwonlyargs):
-            return source, None
-        return None, "its own main takes arguments"
-    lines = []
-    calls = 0
-    for node in tree.body:
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if calls >= EXAMPLE_MAX_CALLS:
-            break
-        args = node.args
-        npos = len(args.posonlyargs) + len(args.args)
-        if npos == 0 or args.vararg or args.kwarg or args.kwonlyargs:
-            continue
-        if any(d is not None for d in args.defaults):
-            continue
-        if not calls:
-            lines.append("def main() -> Int32:")
+        spec = mains[0].args
+        npos = len(spec.posonlyargs) + len(spec.args)
+        shape = (spec.vararg, spec.kwarg, spec.kwonlyargs,
+                 [d for d in spec.defaults if d is not None])
+        if not (npos or any(shape)):
+            return {"text": text, "verbatim": source if notes else None,
+                    "driver_args": "", "test_input": None, "notes": notes,
+                    "reason": None}
+        if any(shape):
+            return {"text": None, "verbatim": None, "driver_args": "",
+                    "test_input": None, "notes": notes,
+                    "reason": "its own main takes *args, **kwargs, keyword-only "
+                              "or defaulted arguments"}
+        values = [EXAMPLE_INPUT] + [EXAMPLE_INPUT_PAD] * (npos - 1)
+        return {"text": text, "verbatim": source if notes else None,
+                "driver_args": ", ".join(str(v) for v in values),
+                "test_input": ",".join(str(v) for v in values),
+                "notes": notes, "reason": None}
+    # No `main`.  A driver is synthesised from the top-level functions, and
+    # parameterised ones come FIRST: a zero-parameter function is only called
+    # when the file has none, because `print(f())` of a function returning
+    # `None` prints the word `None` while the image has no such word, and
+    # admitting it everywhere would manufacture a divergence in every example
+    # that happens to own a nullary helper.  As a FALLBACK it costs exactly one
+    # example on this tree (`ret42.mojo`, the only file whose every top-level
+    # function is nullary).
+    fns = [n for n in tree.body
+           if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    simple = [n for n in fns
+              if not (n.args.vararg or n.args.kwarg or n.args.kwonlyargs)
+              and not any(d is not None for d in n.args.defaults)]
+    withp = [n for n in simple if len(n.args.posonlyargs) + len(n.args.args)]
+    chosen = (withp or simple)[:EXAMPLE_MAX_CALLS]
+    if not chosen:
+        return {"text": None, "verbatim": None, "driver_args": "",
+                "test_input": None, "notes": notes,
+                "reason": "no top-level function the fixed argument table fits"}
+    driver = _driver(chosen)
+    return {"text": text.rstrip("\n") + "\n" + driver,
+            "verbatim": (source.rstrip("\n") + "\n" + driver) if notes else None,
+            "driver_args": "", "test_input": None,
+            "notes": notes, "reason": None}
+
+
+def _driver(chosen):
+    """The synthesised `main()` for `chosen`, as text.
+
+    One function because it is built twice — once onto the normalised text and,
+    when a normalising rule fired, once onto the verbatim text — and the whole
+    value of that comparison is that the two drivers are the SAME calls.
+    """
+    lines = ["def main() -> Int:"]
+    for node in chosen:
+        npos = len(node.args.posonlyargs) + len(node.args.args)
         lines.append("    print({}({}))".format(
             node.name,
             ", ".join(str(EXAMPLE_ARGS[i % len(EXAMPLE_ARGS)])
                       for i in range(npos))))
-        calls += 1
-    if not calls:
-        return None, "no top-level function the fixed argument table fits"
     lines.append("    return 0")
-    return source.rstrip("\n") + "\n" + "\n".join(lines) + "\n", None
+    return "\n".join(lines) + "\n"
 
 
 def program_texts(args):
-    """The `(label, text)` pairs this run measures, or `(label, None)` for one
-    that cannot be driven."""
+    """The program records this run measures, in the order it prints them."""
     out = []
-    undrivable = {}
     if args.examples:
         stems = sorted(f[:-5] for f in os.listdir(args.examples)
                        if f.endswith(".mojo"))
         for stem in stems:
             with open(os.path.join(args.examples, stem + ".mojo")) as f:
-                text, why = example_main(f.read())
-            if why:
-                undrivable[stem] = why
-            out.append((stem, text))
+                out.append((stem, example_program(f.read())))
     for i in range(args.start, args.start + args.count):
+        text = F.make_program(args.seed, i, args.mix, tuple(args.stmts))
         out.append((f"{args.seed}:{i}:{args.mix}",
-                    F.make_program(args.seed, i, args.mix,
-                                   tuple(args.stmts))))
-    return out, undrivable
+                    {"text": text, "verbatim": None, "driver_args": "",
+                     "test_input": None, "notes": (), "reason": None}))
+    return out
 
 
 # ── one pair ────────────────────────────────────────────────────────────────
@@ -2030,13 +2245,21 @@ def _compare_one(backend, base, twin, want):
 #: match wins, so `METAMORPH` outranks `MISMATCH` (the metamorphic violation is
 #: the one this tool exists to find and the one that needs no oracle) and both
 #: outrank the boring ones.
+#:
+#: `NORMALISES-*` sits above every backend verdict on purpose.  It is the one
+#: finding that invalidates the row it is printed on rather than describing it: if
+#: the normalised file and the file as written do not answer alike, nothing
+#: measured about that file — including every `match` — is a statement about the
+#: file a reader has open.  So a reader meets it first.
 SEVERITY = (
+    "NORMALISES-DIFFERLY-X86", "NORMALISES-DIFFERLY-ARM",
     "METAMORPH-X86", "METAMORPH-ARM",
     "TWIN-DIVERGES-X86", "TWIN-DIVERGES-ARM",
     "MISMATCH-X86", "MISMATCH-ARM",
     "REFUSAL-DIVERGES-X86", "REFUSAL-DIVERGES-ARM",
     "CODEGEN-CRASH", "CODEGEN-INTERNAL",
     "transform-invalid", "transform-crash",
+    "NORMALISES-UNCOMPARABLE",
     "DIVERGENCE-X86", "DIVERGENCE-ARM",
     "TIMEOUT", "trapped", "not-answerable", "match",
 )
@@ -2050,13 +2273,22 @@ SEVERITY = (
 #: `DIVERGENCE-*` is deliberately absent: a disagreement the ORIGINAL already has
 #: is `formal_fuzz.py`'s to attribute and this tool's to count.  See
 #: `_compare_one`.
+#:
+#: `NORMALISES-UNCOMPARABLE` IS here, and the reason it is not a skip is that it
+#: is a hole rather than a property of the program: the file could be measured
+#: only by removing syntax, the removed spelling would not build, so nothing
+#: established that the removal preserved anything.  A run that reported it as
+#: "not applicable" would report a coverage loss as though it were a file with
+#: nothing to do.
 FINDING_VERDICTS = (
+    "NORMALISES-DIFFERLY-X86", "NORMALISES-DIFFERLY-ARM",
     "METAMORPH-X86", "METAMORPH-ARM",
     "TWIN-DIVERGES-X86", "TWIN-DIVERGES-ARM",
     "MISMATCH-X86", "MISMATCH-ARM",
     "REFUSAL-DIVERGES-X86", "REFUSAL-DIVERGES-ARM",
     "CODEGEN-CRASH", "CODEGEN-INTERNAL",
     "transform-invalid", "transform-crash",
+    "NORMALISES-UNCOMPARABLE",
 )
 
 
@@ -2068,11 +2300,19 @@ def _worst(verdicts):
     return verdicts[0] if verdicts else "match"
 
 
-def check_pair(label, text, index, args, tmpdir):
+def check_pair(label, prog, index, args, tmpdir):
     """One program: build it, transform it, and compare every engine's answers.
+
+    `prog` is the record `program_texts` built — the text to run, the driver
+    arguments the CPython oracle calls `main` with, the `-n` baked into the
+    image, and (when a normalising rule fired) the file as it was written.
 
     The ORDER is the tool's soundness argument, and it is not negotiable:
 
+      0. if a rule fired, the VERBATIM file is built and run on every backend and
+         must answer what the normalised one answers (`_normalisation`), because
+         normalisation moves both sides of every later comparison together and
+         no oracle downstream of it can see a mistake in it;
       1. parse, and analyse;
       2. CPython answers P.  If it cannot, the pair says nothing;
       3. for each transform, CPython answers T.  If CPython answers P and T
@@ -2086,20 +2326,25 @@ def check_pair(label, text, index, args, tmpdir):
     that P and T are the same PROGRAM.
     """
     rec = {"label": label, "index": index, "verdict": "match", "transforms": {},
-           "diverge": []}
+           "diverge": [], "notes": prog.get("notes", ()),
+           "driver_args": prog["driver_args"]}
+    text = prog["text"]
+    argv = prog["driver_args"]
+    tin = prog["test_input"]
     try:
         tree = ast.parse(text)
     except (SyntaxError, ValueError) as e:
         rec["verdict"] = "skip:unparsable"
         rec["detail"] = str(e)[:160]
         return rec
-    ref, perr = F.cpython_answer(text, tmpdir, f"m{index}p")
+    ref, perr = F.cpython_answer(text, tmpdir, f"m{index}p", argv)
     if not F.has_oracle(ref):
         rec["verdict"] = "not-answerable"
         rec["detail"] = perr or "CPython produced no answer"
         return rec
     want = (ref[0], ref[1])
-    base = {b: F.run_on(b, text, tmpdir, f"m{index}p") for b in args.backends}
+    base = {b: F.run_on(b, text, tmpdir, f"m{index}p", test_input=tin)
+            for b in args.backends}
     # The ORIGINAL's own disagreement with CPython, once per program rather than
     # once per transform: every twin inherits its parent's answer, so counting it
     # per twin would report one disagreement ten times.  It is `DIVERGENCE-*` and
@@ -2111,9 +2356,20 @@ def check_pair(label, text, index, args, tmpdir):
         if ans is not None and (ans[0] != want[0] or ans[1] != want[1]):
             rec["diverge"].append("DIVERGENCE-"
                                   + ("X86" if b == "x86_64" else "ARM"))
+    # STEP 0, before any transform: did the NORMALISATION preserve the program?
+    # It is here rather than inside `normalise_mojo` because only a build can
+    # answer it, and because a tool that quietly measured a rewritten file and
+    # reported the file's name would be claiming coverage it does not have.
+    bad = _normalisation(prog, base, args, index, tmpdir)
+    if bad:
+        rec["verdict"] = _worst(bad)
+        rec["detail"] = ("the normalised file answers differently from the file "
+                         "as written: " + "; ".join(bad))
+        rec["text"] = text
+        return rec
     for tname in wanted_transforms(args):
         entry = _one_transform(rec, label, text, index, tname, want, args,
-                               tmpdir, base)
+                               tmpdir, base, tin)
         rec["transforms"][tname] = entry
     verdicts = []
     for entry in rec["transforms"].values():
@@ -2132,7 +2388,50 @@ def check_pair(label, text, index, args, tmpdir):
     return rec
 
 
-def _one_transform(rec, label, text, index, tname, want, args, tmpdir, base):
+def _normalisation(prog, base, args, index, tmpdir):
+    """Verdicts for the file `normalise_mojo` rewrote; `[]` when it rewrote none.
+
+    The per-pair CPython oracle cannot supply this one, and the reason is
+    structural rather than a gap: normalisation moves P and T together, so a rule
+    that changed the meaning would leave the oracle comparing a program with
+    itself.  So the rewriting is checked against the file it claims to be the
+    same as, BY THE MACHINE — the verbatim build, on every backend, against the
+    normalised build's answer.
+
+    Three shapes, and the third is why this returns a verdict rather than a
+    bool:
+
+      * nothing fired — the whole generated corpus, and 41 of the 52 examples.
+        `[]`, with no build: the rule that the common case costs nothing is
+        itself worth having, because a gate that built a second image per program
+        would double the sweep to check nothing.
+      * the verbatim file does not run — `NORMALISES-UNCOMPARABLE`.  A
+        normalisation whose original cannot be built cannot be shown to preserve
+        anything, so the program is not measured and says so, rather than
+        contributing a coverage number nobody checked;
+      * the two disagree — `NORMALISES-DIFFERLY-<arch>`.  The finding is in the
+        NORMALISER or in the backend's treatment of the syntax the normaliser
+        removed, and either way the file is not measured until it is explained.
+    """
+    verbatim = prog.get("verbatim")
+    if not verbatim:
+        return []
+    out = []
+    for b in args.backends:
+        got = F.run_on(b, verbatim, tmpdir, f"m{index}v_{b}",
+                       test_input=prog["test_input"])
+        if _answer(got) is None:
+            out.append("NORMALISES-UNCOMPARABLE")
+            continue
+        ans = _answer(base[b])
+        if ans is not None and ans != _answer(got):
+            out.append("NORMALISES-DIFFERLY-"
+                       + ("X86" if b == "x86_64" else "ARM"))
+    return out
+
+
+def _one_transform(rec, label, text, index, tname, want, args, tmpdir, base,
+                   test_input=None):
     """Apply one transform, check it against CPython, then against the images.
 
     A FRESH deep copy of the tree and a FRESH `Analysis` per transform: four of
@@ -2158,7 +2457,8 @@ def _one_transform(rec, label, text, index, tname, want, args, tmpdir, base):
     if not isinstance(new, ast.Module) or not ttext.strip():
         skip["detail"] = "produced an empty module"
         return skip
-    tref, terr = F.cpython_answer(ttext, tmpdir, f"m{index}_{tname}")
+    tref, terr = F.cpython_answer(ttext, tmpdir, f"m{index}_{tname}",
+                                  rec.get("driver_args", ""))
     if not F.has_oracle(tref):
         return {"verdict": "not-answerable",
                 "detail": terr or "CPython produced no answer for the twin",
@@ -2171,7 +2471,8 @@ def _one_transform(rec, label, text, index, tname, want, args, tmpdir, base):
     verdicts = []
     twins = {}
     for b in args.backends:
-        twins[b] = F.run_on(b, ttext, tmpdir, f"m{index}_{tname}_{b}")
+        twins[b] = F.run_on(b, ttext, tmpdir, f"m{index}_{tname}_{b}",
+                            test_input=test_input)
         verdicts += _compare_one(b, base[b], twins[b], want)
     entry = {"verdict": "+".join(verdicts) or "match"}
     if entry["verdict"] != "match":
@@ -2286,18 +2587,21 @@ def main():
     os.makedirs(args.work, exist_ok=True)
     wanted_transforms(args)          # refuse a misspelt name before any build
 
-    pairs, undrivable = program_texts(args)
+    progs = program_texts(args)
+    undrivable = {label: prog["reason"] for label, prog in progs
+                  if prog["text"] is None}
     started = time.time()
     counts = {}
     per_transform = {t: collections.Counter() for t in TRANSFORM_NAMES}
     findings = []
-    live = [(lbl, txt) for lbl, txt in pairs if txt is not None]
+    normalised = {}
+    live = [(lbl, p) for lbl, p in progs if p["text"] is not None]
     tmpdir = tempfile.mkdtemp(prefix="metamorph.", dir=args.work)
     try:
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
             recs = list(pool.map(
                 lambda kv: check_pair(kv[0], kv[1], kv[2], args, tmpdir),
-                [(lbl, txt, i) for i, (lbl, txt) in enumerate(live)]))
+                [(lbl, p, i) for i, (lbl, p) in enumerate(live)]))
         for rec in recs:
             counts[rec["verdict"]] = counts.get(rec["verdict"], 0) + 1
             for tname, entry in rec["transforms"].items():
@@ -2305,6 +2609,8 @@ def main():
                     entry["verdict"].split(":")[0]] += 1
             for v in rec.get("diverge", []):
                 counts[v] = counts.get(v, 0) + 1
+            if rec.get("notes"):
+                normalised[rec["label"]] = list(rec["notes"])
             line = report(rec)
             if line:
                 print(line, flush=True)
@@ -2317,7 +2623,8 @@ def main():
     with open(os.path.join(args.work, "findings.json"), "w") as f:
         json.dump({"args": vars(args), "counts": counts,
                    "per_transform": {t: dict(c) for t, c in per_transform.items()},
-                   "undrivable": undrivable, "findings": findings},
+                   "undrivable": undrivable, "normalised": normalised,
+                   "findings": findings},
                   f, indent=1)
     if findings:
         outdir = os.path.join(args.work, "findings")
@@ -2360,6 +2667,21 @@ def main():
                          in by_reason.most_common())))
         print("    " + ", ".join(sorted(undrivable)[:10])
               + (" ..." if len(undrivable) > 10 else ""))
+    if normalised:
+        # WHICH FILES were measured in a dialect this tool rewrote, and what it
+        # rewrote.  Printed because "51 of 52 examples measured" reads as a fact
+        # about the DIRECTORY, and 10 of those 51 were measured after a rule
+        # fired — which is a smaller claim, and the reader is entitled to know
+        # which ten.  Each of them was additionally checked against the file as
+        # written (`NORMALISES-*`), so this is where the price of the rewrite is
+        # stated rather than assumed.
+        rules = collections.Counter(r for v in normalised.values() for r in v)
+        print(f"  normalising rules fired on {len(normalised)} program"
+              f"{'' if len(normalised) == 1 else 's'}; each was re-run on the "
+              f"backends as written (`NORMALISES-*`):")
+        for rule, n in sorted(rules.items()):
+            print(f"    {rule} x{n}")
+        print("    " + ", ".join(sorted(normalised)))
     print(f"findings written to {args.work}/findings.json "
           f"({len(findings)} program{'s' if len(findings) != 1 else ''})")
     return 1 if findings else 0

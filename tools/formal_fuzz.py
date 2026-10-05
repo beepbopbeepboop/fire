@@ -891,19 +891,28 @@ def fold_arch(text):
     return _SWEEP_PARITY.fold_arch(text)
 
 
-def run_on(backend, text, tmpdir, name):
+def run_on(backend, text, tmpdir, name, test_input=None):
     """Everything ONE backend says about `text`: built? ran? printed what?
 
     Returns a dict whose `verdict` is one of `ok`, `refusal`, `codegen-internal`,
     `crash`, `timeout`; `ok` carries the exit status and stdout that the
     comparison needs, and every verdict carries enough text to reproduce the
     report line.
+
+    `test_input` is `build`'s, passed straight through, and it is a PARAMETER
+    rather than a second function because the input is baked into the image: a
+    caller that measures a program whose entry takes arguments must build it with
+    the input its oracle was given, and a wrapper would have to re-spell the build
+    command and the refusal classification below to do it — the two things
+    `tools/formal_proof_fuzz.py`'s docstring exists to prevent.  `None` is the
+    default and means "the image the CLI builds by default", which is what every
+    caller here measured before the parameter existed.
     """
     src = os.path.join(tmpdir, f"{name}.mojo")
     out = os.path.join(tmpdir, f"{name}.{backend}")
     with open(src, "w") as f:
         f.write(text)
-    rc, diag = build(src, out, backend)
+    rc, diag = build(src, out, backend, test_input=test_input)
     if rc != 0:
         # THREE shapes of build failure, and only the first two are the same
         # thing.  A crash is a traceback or a signal; a refusal is a sentence;
