@@ -33,8 +33,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 MOJO = os.path.join(HERE, 'fire.py')
 TIMEOUT = 120
 
-# name -> source. Valid Mojo AND valid Python; `main()` is appended by the
-# runner, so the programs must define it and must not call it themselves.
+# name -> source, or name -> {stem: source} for a case that needs SIBLING
+# MODULES. Both spellings are the same promise: valid Mojo AND valid Python,
+# `main()` appended by the runner, so the program defines `main` and does not
+# call it itself. A dict case is written out under BOTH extensions for every
+# stem (`i_lib` becomes `i_lib.py` and `i_lib.mojo`) and the program is the
+# stem `prog` — one text, two engines, and `import i_lib` resolves to
+# `i_lib.py` under CPython and to `i_lib.mojo` under `fire.py run`, which is
+# the only reason the dict form can exist at all. The sources are therefore
+# annotation-free: `def f(v):` is a Mojo parameter list and a Python one.
 CORPUS = {
     # `@classmethod` binds the CLASS. The interpreter had no classmethod
     # support at all: `Paths.who()` returned the raw unbound function, so the
@@ -231,6 +238,108 @@ def main():
     print(kw(a=1, b=2))
     print(sorted([1, 2, 3], key=Callable(10)))
 ''',
+    # A list/set/dict comprehension is its OWN SCOPE in Python 3: its `for`
+    # target binds nothing in the enclosing body, so the trailing `G` in
+    # `shadowed` is still the module's 5 and the answer is 6.
+    # `eval_Comprehension` evaluated those in the CURRENT scope — its own
+    # docstring called it a "known minor fidelity gap" — so this printed 3,
+    # and it was the only engine that did: both formal images print 6
+    # (`test_formal_globals.py`), which is the direction that matters, because
+    # the interpreter is the engine every other parity test treats as the
+    # reference.
+    #
+    # This is in the ORACLE and not in `test_runtime_diff.py` on purpose. The
+    # compiled path has the same defect by a different mechanism — it allocates
+    # the comprehension's target as a plain local of the enclosing function, so
+    # that local shadows the module global for the rest of the body — and it
+    # prints 3 there too, so an engine-vs-engine case would sit red until that
+    # half is fixed. Filed as
+    # `bugs/CODEGEN_a_comprehension_target_is_a_local_of_the_enclosing_function.md`,
+    # which quotes the generated C.
+    #
+    # The last arm is the control in the direction that matters: a plain `for`
+    # loop's target DOES bind in the enclosing scope (Python has no loop
+    # scope), so `execute_ForStmt`'s simplification is correct and must not be
+    # "fixed" along with the comprehension.
+    "a_comprehension_does_not_shadow_a_module_constant": '''\
+G = 5
+
+def shadowed(rows):
+    out = [G for G in rows]
+    return G + out[0]
+
+def shadowed_set(rows):
+    out = {k for k in rows}
+    return len(out)
+
+def shadowed_dict(rows):
+    out = {k: k for k in rows}
+    return len(out)
+
+def shadowed_local():
+    t = "outer"
+    lst = [t for t in ["c", "d"]]
+    return t + str(lst)
+
+def loop_target_still_binds():
+    m = 3
+    acc = []
+    for m in [1, 2]:
+        acc = acc + [m]
+    return acc + [m]
+
+def main():
+    print(shadowed([1, 2]))
+    print(shadowed_set([1, 2, 2]))
+    print(shadowed_dict(["a"]))
+    print(shadowed_local())
+    print(loop_target_still_binds())
+''',
+    # A module object is a LIVE VIEW of the module's scope, and it used to be a
+    # `SimpleNamespace` SNAPSHOT of it taken when the module body finished. So a
+    # name the module's own code assigns had two homes: `i_lib.get_it()` read
+    # the live scope and answered 9, while `i_lib.G` read the copy and answered
+    # the value from before `setg` ran — two reads of one module disagreeing
+    # inside one program, with no error and no diagnostic, and `G = v` looking
+    # like it had done nothing. CPython answers 9 and 9.
+    #
+    # This is the shape `test_runtime_diff.py` structurally CANNOT see, which is
+    # why it is here: that suite compares the two ENGINES, and the compiled
+    # path had this bug too (a module global a module writes was published as
+    # a constant, `bugs/FORMAL_module_state_no_storage.md` §(2)) — so a
+    # diff between them was clean while both were wrong. This case is the third
+    # opinion.
+    #
+    # The last two lines are the directions that had no home at all: an
+    # assignment THROUGH the module object (`i_lib.G = 21`, CPython's rule) used
+    # to create a fourth home — an attribute on the snapshot that no function
+    # ever read — and `hasattr` on a name the module does not have must still be
+    # a `False` and not an auto-stubbed 0.
+    "module_object_is_a_live_view_of_the_module_scope": {
+        'i_lib': '''\
+G = 5
+
+def setg(v):
+    global G
+    G = v
+
+def get_it():
+    global G
+    return G
+''',
+        'prog': '''\
+import i_lib
+
+def main():
+    print(i_lib.get_it())
+    i_lib.setg(9)
+    print(i_lib.get_it())
+    print(i_lib.G)
+    i_lib.G = 21
+    print(i_lib.get_it())
+    print(hasattr(i_lib, "nope"))
+''',
+    },
 }
 
 # Shapes CPython CANNOT EXPRESS, so the corpus above cannot hold them: a
@@ -317,6 +426,56 @@ def h[T, U]():
 def main():
     print(h[T=Int]())
 ''', 'TypeError'),
+    # A call that does not supply a REQUIRED parameter is an arity error, and
+    # it used to be a body run with that parameter bound to `None`: the
+    # interpreter's own error here was `unsupported operand type(s) for +:
+    # 'int' and 'NoneType'`, raised from inside `add`'s body, one call away
+    # from the mistake. CPython raises `add() missing 1 required positional
+    # argument: 'b'` for the identical text, which is why the interpreter's
+    # wording is CPython's (see `MojoFunction._invoke`).
+    #
+    # There is no bracket in this program on purpose: the bracket was never
+    # the defect. It is how the defect was FOUND
+    # (`add[2, 5](x)` on a non-generic `add`), and the two cases below are
+    # the two halves of it — this one is the root cause, the next is the
+    # bracket on top.
+    "missing_required_argument_is_an_arity_error": ('''\
+def add(a: Int, b: Int) -> Int:
+    return a + b
+
+def main():
+    print(add(10))
+''', 'TypeError'),
+    # A specialization item with no declared comptime parameter to bind it is
+    # refused rather than dropped. `dict(zip(comptime_params, values))` stops
+    # at the shorter side, so both items were discarded, the call went on as
+    # `add(x)`, and the root cause above produced the `NoneType` crash. A
+    # specialization is a type-level claim, so an item the declaration cannot
+    # hold is a program whose own signature refutes it — and CPython refuses
+    # the same subscript outright ('function' object is not subscriptable).
+    "a_bracket_item_with_no_parameter_to_bind_is_refused": ('''\
+def add(a: Int, b: Int) -> Int:
+    return a + b
+
+def main():
+    print(add[2, 5](10))
+''', 'TypeError: add[...] supplies 2 specialization argument'),
+    # …and the refusal must not fire on a bracket that DOES fit, including
+    # through a function VALUE, which is the shape
+    # `std/algorithm/backend/tile.mojo`'s `workgroup_function[size](x, y)`
+    # reaches the interpreter by: a builtin holding the callable invokes it
+    # directly, so this is the same binding with no call site to lean on.
+    "a_bracket_that_fits_still_binds_through_a_function_value": ('''\
+def widen[x: Int](a: Int, b: Int) -> Int:
+    return a * 100 + b + x
+
+def call_it(f, a: Int, b: Int) -> Int:
+    return f(a, b)
+
+def main():
+    print(widen[3](5, 7))
+    print(call_it(widen[3], 5, 7))
+''', '510\n510\n'),
 }
 
 
@@ -330,16 +489,30 @@ def _run(argv, cwd):
 
 
 def check(name, source):
-    """Run one program through both engines; return (ok, detail)."""
+    """Run one program through both engines; return (ok, detail).
+
+    `source` is either the program's text or a `{stem: text}` dict of a
+    program plus its imported siblings. `prog` is the program either way.
+    """
+    files = {'prog': source} if isinstance(source, str) else dict(source)
     with tempfile.TemporaryDirectory(prefix='mojo_oracle_') as wd:
-        body = source if source.rstrip().endswith('main()') else source + '\nmain()\n'
-        # The SAME text is both the Mojo source and the Python source: the
-        # whole point is that this subset means the same thing to both.
+        for stem, text in files.items():
+            # Only the PROGRAM gets the appended `main()` call: a library that
+            # defines no `main` must not grow one, and one that does would have
+            # its entry point invoked by the sibling-module loader.
+            body = text
+            if stem == 'prog' and not text.rstrip().endswith('main()'):
+                body = text + '\nmain()\n'
+            # The SAME text is both the Mojo source and the Python source: the
+            # whole point is that this subset means the same thing to both.
+            with open(os.path.join(wd, stem + '.py'), 'w') as f:
+                f.write(body)
+            with open(os.path.join(wd, stem + '.mojo'), 'w') as f:
+                f.write(body)
         path = os.path.join(wd, 'prog.py')
-        with open(path, 'w') as f:
-            f.write(body)
         cpy_out, cpy_rc, cpy_err = _run([sys.executable, path], wd)
-        mojo_out, mojo_rc, mojo_err = _run([sys.executable, MOJO, 'run', path], HERE)
+        mojo_out, mojo_rc, mojo_err = _run(
+            [sys.executable, MOJO, 'run', os.path.join(wd, 'prog.mojo')], HERE)
     if cpy_out is None or mojo_out is None:
         return False, f'{"cpython" if cpy_out is None else "interp"} timed out'
     if cpy_rc != 0:
@@ -396,7 +569,12 @@ def main():
     print('=' * 68)
     npass = nfail = 0
     for name, source in CORPUS.items():
-        ok, detail = check(name, textwrap.dedent(source))
+        if isinstance(source, str):
+            source = textwrap.dedent(source)
+        else:
+            source = {stem: textwrap.dedent(text)
+                      for stem, text in source.items()}
+        ok, detail = check(name, source)
         print(f'{"PASS" if ok else "FAIL"}  {name}: {detail}')
         if ok:
             npass += 1

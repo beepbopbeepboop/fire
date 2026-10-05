@@ -1444,9 +1444,9 @@ def test_a_zero_argument_construction_of_a_constructor_that_needs_arguments(
 # of `Nones`, so `[]` was `_export_frame_contract`'s "this compilation could not
 # classify it" and `resolve_frame_parameter_contract` read `position 0 >=
 # len([])` as "not-exported" — a refusal naming a missing EXPORT about a
-# function the manifest lists with an arity. The filing was
-# `FORMAL_cross_image_frame_contract_is_not_published_for_a_free_function`,
-# and it is deleted: fixed, with these cases as the proof.
+# function the manifest lists with an arity. The filing named a free function
+# whose frame contract was never published; it is deleted now, fixed, with
+# these cases as the proof.
 #
 # The module is one framed struct plus a function that holds nothing, which is
 # the ordinary shape of a module with a data class and some helpers, and the

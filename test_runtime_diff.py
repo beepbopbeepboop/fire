@@ -186,6 +186,31 @@ BUILTIN_PROGRAMS = {
         def main():
             print(42)
     """),
+    # `def main(n):` is this repository's own entry-point convention and it is
+    # the shape the compiled path's C wrapper exists for: `emit_funcs.py`
+    # renames `main` to `_gimple_main` and calls it as `_gimple_main(0, 0,
+    # ...)`, one boxed zero per declared parameter, because a bare `main()`
+    # cannot satisfy a signature that declares one. `fire.py run` had no such
+    # wrapper — it invoked `main()` with nothing at all — and `n` came out as
+    # `None`, which was invisible while `_invoke` bound an unsupplied
+    # parameter to `None` and became an arity error (not a silent 0) the
+    # moment that was fixed. It is not in CPYTHON_COMPARABLE: CPython has no
+    # auto-invoked entry point, so there is no third opinion to ask.
+    #
+    # The program READS `n`, so a `None` cannot hide behind an unused
+    # parameter, and it calls a function with a DECLARED DEFAULT as well: the
+    # wrapper passes 0 for every parameter of `main` unconditionally because
+    # it cannot spell a default expression in a C call site, while a call
+    # inside a body gets its default on both paths. Those are two different
+    # rules and one case that reads both.
+    "main_takes_a_parameter": textwrap.dedent("""\
+        def with_default(a: Int = 3) -> Int:
+            return a
+
+        def main(n):
+            print(n)
+            print(with_default())
+    """),
     "arithmetic": textwrap.dedent("""\
         def main():
             var x: Int = 10

@@ -1758,20 +1758,31 @@ USAGE_PREFIX = "usage: "
 def _ws_set():
     """The bytes `\s` matches in ASCII, as a set `strspn` can be given.
 
-    A literal cannot spell them: a string literal's escapes are NOT unescaped on
-    this path, so `\t` here would be a backslash and a `t`. Every separator in
-    this module is a `memset` byte for that reason, and this is the one place a
-    SET of them is wanted rather than a single value.
+    A LITERAL now, and the set is the six ASCII whitespace bytes CPython's `\\s`
+    matches: 0x20, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, NUL-terminated by the literal
+    itself, which is the one thing `strspn` reads. It is still a FUNCTION rather
+    than a module constant because a module-level name has no storage on this
+    path (`formal/hostmods/textwrap.mojo` says so at its own byte sets), and all
+    three callers only READ the set — `strspn` is its only use — so handing them
+    the constant pool's bytes instead of a fresh `str_alloc` cannot be written
+    through.
+
+    This function used to `str_alloc(8)` and `memset` the seven bytes one at a
+    time, on a claim that was FALSE from `9023031b` onwards: "a string literal's
+    escapes are NOT unescaped on this path, so `\\t` here would be a backslash and
+    a `t`". A literal IS decoded, inside a module as well as inside a program, on
+    both architectures — `fire_compiler.py`'s `decode_c_escapes`, which every
+    engine shares, pinned by
+    `test_formal_sys.py::test_a_literal_inside_a_module_is_decoded_too` and
+    spelled live in `formal/hostmods/ast.mojo`'s `_quotes`. The byte set is
+    unchanged, which is what the 69 parses in `test_formal_argparse.py` measure:
+    every one of them is diffed against CPython's own argparse.
+
+    The other `memset` separators in this module are NOT this case and keep the
+    idiom for the reason the section above `BUF_CAP` gives: they are single bytes
+    written at a computed OFFSET, and a byte value is not a string.
     """
-    s = str_alloc(8)
-    memset(s, 32, 1)          # space
-    memset(s + 1, 9, 1)       # tab
-    memset(s + 2, 10, 1)      # newline
-    memset(s + 3, 11, 1)      # vertical tab
-    memset(s + 4, 12, 1)      # form feed
-    memset(s + 5, 13, 1)      # carriage return
-    memset(s + 6, 0, 1)
-    return s
+    return " \t\n\v\f\r"
 
 
 def _cat3(a, b, c):

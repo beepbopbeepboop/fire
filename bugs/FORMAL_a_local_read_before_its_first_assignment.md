@@ -283,12 +283,20 @@ subtree, which is what makes `[G for G in rows]` mean the loop variable and
 difference is entirely in the target. Both are cases in
 `test_formal_globals.py` now, in both directions.
 
-**The interpreter has the same bug and is filed separately**, because it is a
-different file and a different risk:
-`bugs/INTERP_comprehension_has_no_scope_of_its_own.md`. `fire.py run` answers 3
-where CPython answers 6, and its `eval_Comprehension` docstring calls it "a
-known minor fidelity gap" — a `known` with no reproducer is the kind of note that
-outlives its reason.
+**The interpreter had the same bug and is filed separately**, because it is a
+different file and a different risk. `fire.py run` answered 3 where CPython
+answers 6: `eval_Comprehension` evaluated a list/set/dict comprehension in the
+ENCLOSING scope, so the comprehension's target leaked out and shadowed the
+module global. Its own docstring called that "a known minor fidelity gap" — a
+`known` with no reproducer is the kind of note that outlives its reason. Fixed
+2026-10-04 (`eval_Comprehension` now pushes a child scope for the walk, the
+shape `_generator_expression` already used); pinned by
+`test_interp_oracle.py`'s
+`a_comprehension_does_not_shadow_a_module_constant`, and this file's own case
+below got its third engine back when it did. The compiled path has the same
+defect by a different mechanism — the comprehension's target becomes a plain
+local of the enclosing function — and that half is
+`bugs/CODEGEN_a_comprehension_target_is_a_local_of_the_enclosing_function.md`.
 
 ### The two candidates this section named, measured
 

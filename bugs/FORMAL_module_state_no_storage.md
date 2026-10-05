@@ -248,14 +248,19 @@ was already a flat list of (word, target) pairs and a nested blob is one more
 entry — which is why "both architectures" is a statement about one code path and
 not about two agreeing by luck.
 
-**Filed, not fixed, and it is the reason this bug survived as long as it did:**
-`bugs/INTERP_module_object_is_a_snapshot_so_a_module_s_own_global_write_is_invisible.md`.
-The interpreter has the SAME wrong answer, because `import mod` binds a
-`SimpleNamespace` COPY of the module's scope taken when the module body finishes,
-so a module's own `global` write never reaches the object another module reads
-through. Both engines said 5, so every test comparing them to each other saw
-agreement. The root cause is one line in `myinterpreter.py::_load_mojo_sibling_module`
-and the exact next step is in that doc; it is not this claim's file.
+**The interpreter had the SAME wrong answer, which is why this bug survived as
+long as it did, and it is FIXED (2026-10-04).** `import mod` used to bind a
+`SimpleNamespace` COPY of the module's scope, taken when the module body
+finished, so a module's own `global` write never reached the object another
+module reads through — `i_lib.get_it()` answered 9 and `i_lib.G` answered 5 in
+one program. Both engines said 5, so every test comparing them to each other saw
+agreement, which is the general shape worth keeping: wherever a module's state
+has two homes, the engines have to agree about WHICH home is the truth or their
+agreement proves nothing. The fix is `myinterpreter.py`'s `_MojoModuleObject`, a
+live view over the module interpreter's `scope.vars` installed in the cycle-guard
+slot before the body runs, pinned by `test_interp_oracle.py`'s
+`module_object_is_a_live_view_of_the_module_scope` — the ORACLE suite, because a
+bug two engines SHARE is exactly what an engine-vs-engine diff cannot see.
 
 **Status (2026-10-02, the `sweep6:module-state` round): the MODULE-BODY WRITER
 landed, and §(1)'s row below is CORRECTED — it is no longer "three unrelated

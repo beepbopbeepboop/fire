@@ -1,6 +1,37 @@
 # DOCS: `formal/hostmods/ast.mojo`'s `_quotes()` still explains a limitation
 # that was removed
 
+**Status: two of the three sites are DONE; the third is `platform.mojo` and it
+is another worker's claim, so it is left with the next step written down
+(2026-10-04, branch `work/bugs5-1`).**
+
+| site | state |
+|---|---|
+| `formal/hostmods/ast.mojo` `_quotes()` | **DONE** — `06ec0529` ("formal: a string literal is decoded inside a MODULE too, so the corpora written around the old rule can say what is true") returned the literal `"\"'"` and replaced the premise with the measurement, exactly as this doc's "Next step" describes. Its two remaining mentions of the old rule (`:163`, `:344`) are the corrected form and are correct. |
+| `formal/hostmods/argparse.mojo` `_ws_set` | **DONE here.** It returned `str_alloc(8)` plus seven `memset`s on the false premise, and now returns the one literal `" \t\n\v\f\r"`, with the old claim quoted and refuted in the docstring and the CURRENT reason recorded (a module-level name has no storage on this path, so it stays a function; all three callers only READ the set, so handing them the constant pool's bytes cannot be written through). |
+| `formal/hostmods/platform.mojo:336` `_int_is_space` | **REMAINING, not mine.** `hostmods-platform` holds `module:platform+fnmatch+collections-rest` (checked with `tools/control.py claims`), so the edit is not made from here. |
+
+What landed with the `argparse.mojo` change, and how it was checked:
+
+* `python3 test_formal_argparse.py` — PASS=9 FAIL=0, 69 parses in 15 parsers each
+  built as an arm64 image and diffed against CPython's own argparse, before and
+  after, so the byte set is measured rather than asserted. 3m00s, peak 0.4 GB.
+* `python3 test_formal_sys.py` — `test_a_literal_inside_a_module_is_decoded_too`
+  gained a fourth case, `\v\f` inside a MODULE on both architectures, because
+  that is the escape pair no other case in the suite reaches and `_ws_set` now
+  depends on both of them: a decoder that handled `\n` and `\t` and passed the
+  rest through would have left the other three greens intact and turned this
+  set into backslash-v-backslash-f. (`"m\v\fn"` decodes to FOUR bytes and
+  `sys.write_stderr` returns 4; the source's six characters are what a
+  non-decoding path would report.)
+* The comment above `BUF_CAP` in the same file was already correct and is left
+  alone: the `memset` separators there are single bytes written at a computed
+  OFFSET, which is a different reason from a SET, and `_ws_set`'s new docstring
+  says so rather than implying the whole file could be literals.
+
+The rest of this doc is the original report and is kept as the record of how
+the three sites were found.
+
 ## What it says
 
 `formal/hostmods/ast.mojo`, `_quotes()`, docstring:

@@ -796,6 +796,45 @@ def check_table(tmpdir, verbose):
                 failures.append(f"{payload}: the refusal does not name "
                                 f"{needle!r}")
 
+    # (3b) The refusal says WHY, and there are THREE whys, so a check that
+    #      only asserted "it refused" let a float be told it was a struct. The
+    #      last branch of `optional_none_word` used to be `base[:1].isupper()`,
+    #      a SPELLING test standing in for a fact about the type, and both
+    #      `Float32` and `DType` matched it — so a user who wrote a float was
+    #      told this build had not read the fields of a struct it has no reason
+    #      to read. The verdict was never wrong (`doc/ABI.md`'s niche table and
+    #      `bugs/FORMAL_optional_needs_a_niche.md` both list these two as
+    #      refused, which is why nothing went red); only the sentence, which is
+    #      the part a user reads.
+    #
+    #      Each row is checked in BOTH directions, and the last one is the
+    #      positive control: without it, "never claim a struct" would pass by
+    #      deleting the one reason that is true for a real struct of another
+    #      module, which is a strictly worse message than a mislabelled one.
+    STRUCT_REASON = "struct whose fields this build does not compile"
+    for payload in ("Int", "Int64", "UInt", "UInt64", "Float64", "DType"):
+        _w, why = M.optional_none_word(payload, {})
+        if STRUCT_REASON in why:
+            failures.append(
+                f"{payload}: every 64-bit word is a value of it, and the "
+                f"refusal says {STRUCT_REASON!r} instead")
+        if "every word is a value of" not in why:
+            failures.append(f"{payload}: the refusal does not say that every "
+                            f"word is a value of it")
+    _w, why = M.optional_none_word("Float32", {})
+    if STRUCT_REASON in why:
+        failures.append(f"Float32: refused as a struct, but it is a SCALAR "
+                        f"this target cannot represent at all")
+    if "no representation" not in why:
+        failures.append("Float32: the refusal does not say that this target "
+                        "has no representation for it")
+    for payload in ("SomeOtherModule", "Widget"):
+        _w, why = M.optional_none_word(payload, {})
+        if STRUCT_REASON not in why:
+            failures.append(f"{payload}: a name this module's declarations do "
+                            f"not carry and no scalar table claims, and the "
+                            f"refusal does not say {STRUCT_REASON!r}")
+
     # (4) The four `Optional` method names are all in ONE table, every name in it
     #     has a lowering, and none of them answers a payload with no niche. A
     #     method added here without a lowering is a refusal the emitter never

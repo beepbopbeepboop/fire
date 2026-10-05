@@ -908,7 +908,7 @@ a NUL-terminated `char *`, so the interned `""` is the answer and `len` of it is
 `model.gimple_runtime_callable(name, provided)` is the whole rule: every type
 crossing the call boundary is one 64-bit word, AND the symbol is on the link
 line. `GIMPLE_LIST_PREFIX` is **gone** — it was a hand-kept list of prefixes
-standing in for a shape, and the shape answers the same question for all 546
+standing in for a shape, and the shape answers the same question for all 668
 entry points instead of the 40-odd names one prefix covered.
 
 The two halves are independent and both are needed, which is what the prefix
@@ -917,15 +917,23 @@ answer, so it is refused *even when a dylib provides the symbol* — the old cod
 let that through. And `mojo_print`, whose every type is a word, is refused only
 because nothing provides it.
 
-| | measured over all 10 headers in `runtime/` |
+| | measured over all 11 headers in `runtime/` |
 |---|---|
-| entry points declared | 546 |
-| every type crossing the boundary is one word | **223** |
-| a box in an argument or the return | 323 |
-| of the 223, refused only for want of a linked library | 223 |
+| entry points declared | 668 |
+| every type crossing the boundary is one word | **262** |
+| a box in an argument or the return | 406 |
+| of the 262, refused only for want of a linked library | 262 |
 
-**223 of 546 is what a link line converts into working code with no backend
-change at all.** For `mojo_sqlite3_*` it is **18 of 22**.
+**262 of 668 is what a link line converts into working code with no backend
+change at all.** For `mojo_sqlite3_*` it is **16 of 22**.
+
+(Re-measured 2026-10-04 on this tree with `formal.model.runtime_abi()`, which
+is the authority and reads the headers rather than repeating this table: 668
+entry points, 262 word-shaped, 406 with a box. The figures above were right for
+the tree this section was written on and had been drifting since, which is what
+`test_runtime_header_scan.py`'s census check now prevents — it reads each of
+these numbers out of the file and compares it with the live table, so a comment
+cannot be the second copy of a count.)
 
 ### Two numbers from the round-1 brief that the headers do not support
 
@@ -934,7 +942,7 @@ heap box" and "for sqlite, **20 of 22** … the only two that are not are
 `mojo_sqlite3_query` and `_query_dict`". Measured, both are off, and the reason
 is worth recording because it is a rule, not a typo:
 
-1. **455 / 352 / 101.** I measure 546 / 406 / 140 by return type alone, and 223
+1. **455 / 352 / 101.** I measure 668 / 414 / 254 by return type alone, and 262
    once the ARGUMENTS are counted too. Neither matches 455/352/101. The
    scanner those numbers were taken with recorded `char *f` as returning `char`
    (see below), so every pointer-returning function was scored as a scalar —
@@ -946,11 +954,14 @@ is worth recording because it is a rule, not a typo:
    `_prepare`, and nothing in the *declaration* distinguishes a `void *` a
    program only passes on from a `void *` it iterates — the distinction is in a
    comment. Any rule producing 20/22 is hand-kept, which is the rot phase 2
-   exists to remove. The machine-derivable rule refuses all four
-   (`_open`, `_prepare`, `_query`, `_query_dict`) and calls the other 18
-   word-shaped, and `test_formal_run.py`'s pre-existing
+   exists to remove. The machine-derivable rule refuses SIX — the four that
+   RETURN a `void *` (`_open`, `_prepare`, `_query`, `_query_dict`) plus
+   `_bind_double` and `_column_double`, whose first parameter is the same
+   `void *stmt` — and calls the other 16 word-shaped, which is the 16 the
+   measured table above states. `test_formal_run.py`'s pre-existing
    `gimple_runtime_sqlite_refused` case — which calls `_open` and `_close` — is
-   pinned on that, so 18 is also the number the suite already believed.
+   pinned on the rule rather than on the count, so the count was free to move
+   when the scanner got better at seeing pointer arguments.
 
 ### The scanner this rests on was itself wrong, twice
 

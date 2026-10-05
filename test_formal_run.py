@@ -5888,9 +5888,10 @@ ASSIGNED_TYPE_CASES = [
 # refuses and the other BUILDS-and-lies is not caught by it either, since the
 # refusal half fails; and a positive row runs one, so x86-64 refusing what arm64
 # lowers is a green run.  That combination is exactly what
-# `“FORMAL_x86_64_tuple_assignment_member_target: arm64 lowers `self.a”` measured: arm64 lowered
+# the x86-64 tuple-assignment member-target divergence measured: arm64 lowered
 # a member tuple target, x86-64 refused it by name, and nothing in the suite
-# noticed for the whole life of the divergence.
+# noticed for the whole life of the divergence.  (Its doc is deleted with the
+# fix; this comment is the record.)
 BOTH_ARCH_CASES = [
     # …and the eq-dispatch case that is in this group for the reason the group's
     # docstring gives, read for this construct: the two backends' HOLDER
@@ -9055,8 +9056,8 @@ INIT_FIELD_TYPE_REFUSALS = [
 #
 # Filed as "the two passes disagree about `struct_is_framed`", with an offer to
 # stop the demotion that produced the one-field struct as its semantically honest
-# repair; the filing was `FORMAL_class_level_default_flips_a_nested_frames_width`
-# and it is deleted, its defect fixed. The trigger is not the demotion: the same
+# repair; that filing is deleted and its defect fixed. The trigger is not the
+# demotion: the same
 # refusal, byte-identical, comes out of a `struct Inner` that declares exactly ONE
 # field and no class-level default at all — which is why the second case below is
 # that spelling and not the defaulted one. What was missing was the lowering, for
@@ -9872,7 +9873,7 @@ CONSTRUCTION_CASES = [
     # (2a-ter) A PARTIAL fill: `Pd(1)` on three fields, the two it leaves out
     # having class-level defaults. This is CPython's generated `__init__` and the
     # language's rule for a `@dataclass` field default, and it is the shape
-    # `FORMAL_dataclass_partial_construction` measured.
+    # the (now deleted) partial-construction doc measured.
     #
     # The DEFAULT is what makes it a program, and the case says so by reading
     # the unfilled field back: a `0` there would be a value the source never

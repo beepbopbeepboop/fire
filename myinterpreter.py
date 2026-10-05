@@ -246,7 +246,45 @@ class MojoFunction:
         return self._invoke(interp, {}, args, kwargs)
 
     def __getitem__(self, item):
+        """`f[...]` at a call site: bind the bracket items to the declared
+        comptime parameters BY POSITION (`_parse_generic_params_capture`'s
+        docstring is the rule this implements) and answer a callable that
+        still takes the call-time arguments.
+
+        **An item with no parameter to bind it is REFUSED, and it used to be
+        dropped.** `dict(zip(...))` stops at the shorter of the two, so
+        `add[2, 5](x)` on a two-parameter `add` that declares no comptime
+        parameter at all bound nothing, discarded both items, and went on to
+        call `add(x)` — one argument for two parameters, which
+        `_invoke` then bound as `a=x, b=None` and the body duly computed
+        `x + None`. That is the whole reported symptom — "`add[2, 5](10)`
+        answers None and then dies on `int + None`", the doc for which was
+        deleted with the fix (`test_interp_oracle.py`'s
+        `a_bracket_item_with_no_parameter_to_bind_is_refused` and
+        `missing_required_argument_is_an_arity_error` pin both halves) — and
+        the wrong answer is worse than the error the program deserves: a
+        specialization is a type-level claim, so an item the declaration has
+        nowhere to put is a program whose own signature refutes it, and this
+        engine already refuses that claim on the other two paths —
+        `formal/model.py`'s `value_call_bracket_reading` refuses a tuple index
+        when it has the callee's declaration, and CPython refuses the subscript
+        outright (`'function' object is not subscriptable`).
+
+        The refusal names the function, how many items the bracket supplied and
+        how many comptime parameters it declares, because "too many" is a
+        different mistake from "too few" and the caller can only fix it if it
+        is told which.
+        """
         values = item if isinstance(item, tuple) else (item,)
+        declared = len(self.comptime_params)
+        if len(values) > declared:
+            names = ', '.join(self.comptime_params)
+            if not names:
+                names = 'none'
+            raise TypeError(
+                f"{self.name}[...] supplies {len(values)} specialization "
+                f"argument(s) but {self.name} declares {declared} comptime "
+                f"parameter(s): {names}")
         bindings = dict(zip(self.comptime_params, values))
         return _MojoBoundComptimeFunction(self, bindings)
 
@@ -315,8 +353,38 @@ class MojoFunction:
                         if _k == param:
                             func_scope.define(param, interpreter.eval_expr(_v))
                             _found = True; break
+                # A parameter with NO value and NO declared default is an
+                # ARITY ERROR, and it used to be a silent `None` here. That was
+                # the root cause under the specialization-bracket bug, not the
+                # bracket that found it: `add[2, 5](x)` used to report
+                # "unsupported operand type(s) for +: 'int' and 'NoneType'", and
+                # so did a plain `add(x)` with no bracket at all — the bracket
+                # only supplied the missing argument. A body that runs with an
+                # unbound parameter is the worst of the three answers available
+                # (an error is recoverable, a wrong value is not), and CPython,
+                # which this engine is measured against by
+                # `test_interp_oracle.py`, raises here too.
+                #
+                # The message is CPython's own wording, because that suite
+                # compares the two engines and a reader comparing them should
+                # not have to learn two vocabularies for one mistake. A
+                # keyword-only parameter gets CPython's other phrasing, which
+                # is the same distinction Python draws: naming the parameter
+                # and the way it had to be passed are both in it.
+                #
+                # `test_interp_oracle.py`'s
+                # `missing_required_argument_is_an_arity_error` and
+                # `test_runtime_diff.py`'s `main_takes_a_parameter` pin both
+                # halves of this — the second one because making it an error
+                # is what exposed `fire.py run` invoking `def main(n):` with no
+                # argument at all, which is `_main_entry_args` there.
                 if not _found:
-                    func_scope.define(param, None)
+                    if _seen_star:
+                        raise TypeError(
+                            f"{self.name}() missing required keyword-only "
+                            f"argument: '{param}'")
+                    raise TypeError(
+                        f"{self.name}() missing required argument: '{param}'")
         # Leftover positionals -> `*rest`; leftover keywords -> `**kw`. Built
         # with plain loops rather than a slice/comprehension: this file is
         # itself self-hosted, and plain loops are what that compiler lowers
@@ -2855,6 +2923,103 @@ class _AutoStubValue(int):
         return 0
 
 
+class _MojoModuleObject(types.SimpleNamespace):
+    """A MODULE OBJECT that is a live view of an imported module's own scope,
+    rather than a `SimpleNamespace` snapshot of it taken the moment the module
+    body finished.
+
+    **The snapshot was a silent wrong answer, and it was wrong in the one place
+    that matters.** `types.SimpleNamespace(**mod_interp.scope.vars)` COPIED the
+    module's top-level bindings, while the module's own functions kept reading
+    and writing `mod_interp.scope.vars` — the live dict. So for any name the
+    module's own code assigns, there were two homes:
+
+        i_lib.mojo:  G = 5
+                     def setg(v): global G; G = v
+                     def get_it(): global G; return G
+        i_prog.mojo: import i_lib
+                     i_lib.setg(9)
+                     print(i_lib.get_it())   # 9 — the live scope
+                     print(i_lib.G)          # 5 — the snapshot
+
+    Two reads of the same module disagreeing inside one program, with no
+    diagnostic and no error: `G = v` visibly did nothing as far as any other
+    reader of `i_lib` was concerned. CPython answers 9 and 9, because a module
+    object's attribute IS its `__dict__` and the module's functions read that
+    same dict.
+
+    So this delegates instead of copying. Every direction Python has:
+
+      * `mod.X` reads `scope.vars['X']` — through the parent chain, so a name
+        the module never declared but inherited from its own enclosing scope
+        still resolves, exactly as `mod_interp.scope.get` would;
+      * `mod.X = v` writes `scope.vars['X']`, which is what the module's own
+        `global X` writes, so an assignment from outside is visible to the
+        module's functions immediately and in the other direction too. Before
+        this, such an assignment created a FOURTH home: an attribute on the
+        snapshot, which no function ever reads;
+      * `del mod.X` removes it from `scope.vars`;
+      * `dir(mod)` lists what the module currently has, so a REPL-ish
+        `dir(mod)` after a `global` write shows the write.
+
+    Subclasses `types.SimpleNamespace` rather than replacing it, for one
+    concrete reason: `_bind_dotted_import` walks a dotted import chain with
+    `isinstance(nxt, types.SimpleNamespace)`, and every other reader of a
+    module object in this file does the same. `SimpleNamespace.__init__` is NOT
+    called, so the instance `__dict__` stays empty, which is what makes
+    `__getattr__` fire for EVERY name instead of shadowing it — and `__setattr__`
+    is overridden so that an assignment cannot quietly land in that `__dict__`
+    and become the fourth home this class exists to remove.
+
+    Two attribute names are therefore NOT delegated, and both are dunder-shaped
+    (`__modvars__`, `__modname__`, trailing underscores so no name mangling
+    applies) because the alternative was worse: Python resolves an instance
+    attribute before it calls `__getattr__`, so any plain name held here would
+    shadow a module global of the same name, and `__slots__` does not help —
+    a subclass of `SimpleNamespace` inherits its `__dict__` regardless. They
+    are excluded from `__dir__` for the same reason. No Mojo source in this
+    repository defines either.
+
+    The reference keeps the module's `Interpreter` alive — the thing whose
+    scope the module's own functions read — which is what makes a write through
+    the module object and a write through `global` the same write.
+    """
+
+    def __init__(self, scope_vars, modname):
+        # Bypass SimpleNamespace.__init__ (which would populate __dict__) and
+        # write the two fields through object.__setattr__ so the overridden
+        # __setattr__ below — which needs __modvars__ to exist — is not
+        # re-entered.
+        object.__setattr__(self, '__modvars__', scope_vars)
+        object.__setattr__(self, '__modname__', modname)
+
+    def __getattr__(self, name):
+        # Only reached for a name NOT in the instance __dict__, which is every
+        # module name, because __init__ deliberately left it empty.
+        try:
+            return self.__modvars__[name]
+        except KeyError:
+            raise AttributeError(
+                f"module '{self.__modname__}' has no attribute '{name}'")
+
+    def __setattr__(self, name, value):
+        self.__modvars__[name] = value
+
+    def __delattr__(self, name):
+        try:
+            del self.__modvars__[name]
+        except KeyError:
+            raise AttributeError(
+                f"module '{self.__modname__}' has no attribute '{name}'")
+
+    def __dir__(self):
+        return sorted(set(self.__modvars__) | set(object.__dir__(self))
+                      - {'__modvars__', '__modname__'})
+
+    def __repr__(self):
+        return f"<module {self.__modname__}>"
+
+
 class _AutoStubNamespace:
     """Auto-stubbing namespace: any attribute access returns AutoStubValue(0)
     which behaves as integer 0 in arithmetic, is callable (returns 0), and
@@ -3110,7 +3275,6 @@ class Interpreter:
         # unshared cache and recurse forever instead of hitting a cache entry.
         if found in cache:
             return cache[found]
-        cache[found] = types.SimpleNamespace()
 
         with open(found) as f:
             src = f.read()
@@ -3119,10 +3283,18 @@ class Interpreter:
         mod_stmts = Parser(tokens).parse_module()
         mod_interp = Interpreter(filename=found, argv=self.argv)
         mod_interp._mojo_module_cache = cache  # shared, so cycles hit the guard above
+        # The CYCLE GUARD is installed before the body runs and it is the SAME
+        # object the import returns, not a placeholder that is replaced at the
+        # end. That is the fix as much as the copy was: a package that imports
+        # itself must terminate (which is why the slot is marked here at all),
+        # and a placeholder would make a cyclic importer see an empty module
+        # while every other importer saw the live one. Installing the view here
+        # means a cyclic importer sees the same half-built module, which is what
+        # CPython's partially-initialised module object does.
+        namespace = _MojoModuleObject(mod_interp.scope.vars, module_name)
+        cache[found] = namespace
         for stmt in mod_stmts:
             mod_interp.execute(stmt)
-        namespace = types.SimpleNamespace(**mod_interp.scope.vars)
-        cache[found] = namespace
         return namespace
 
     def _bind_dotted_import(self, module_name, mod):
@@ -5895,11 +6067,47 @@ class Interpreter:
         A 'generator' expression is a REAL lazy generator object (see
         `_generator_expression`), not a materialized list.
 
-        Real Python list/set/dict comprehensions get their own scope; this
-        interpreter evaluates those in the *current* scope instead (same
-        simplification execute_ForStmt already makes for a plain `for`
-        loop) — their loop variables leak into the enclosing scope, a known
-        minor fidelity gap.
+        A list/set/dict comprehension gets its OWN SCOPE, as CPython's does,
+        and it used to be evaluated in the current scope instead (the same
+        simplification `execute_ForStmt` still makes for a plain `for` loop) —
+        so its loop variables LEAKED into the enclosing function. The
+        measurement that made it a bug rather than a note: `G = 5` /
+        `[G for G in rows]` / `return G + out[0]` printed 3 where CPython
+        prints 6, and both formal images printed 6, so the interpreter — the
+        engine every other parity test uses as the reference — disagreed with
+        the compiled path on a program that is otherwise correct, with no
+        diagnostic. `test_interp_oracle.py`'s
+        `a_comprehension_does_not_shadow_a_module_constant` (interpreter vs
+        CPython) and `test_formal_globals.py`'s case of the same name (arm64,
+        x86_64 and the interpreter) pin it.
+
+        **The compiled path still has this defect, by a different mechanism** —
+        it allocates the comprehension's target as a plain local of the
+        enclosing function, under the target's own source name, so that local
+        shadows the module global for the rest of the body and `fire.py --jit`
+        prints 3 where this now prints 6:
+        `bugs/CODEGEN_a_comprehension_target_is_a_local_of_the_enclosing_function.md`
+        quotes the generated C. Two engines agreeing on a wrong answer is why
+        the case above lives in the oracle rather than in the engine-vs-engine
+        suite.
+
+        `_generator_expression` twenty lines below already did this, and the
+        shape is the same one it uses: a child scope for the whole walk, with
+        names the comprehension READS still live through the parent chain.
+        That is a real closure rather than a copy, so the enclosing function's
+        locals and the module's globals both resolve normally from inside —
+        which is why the common case is unchanged and only the BINDING of the
+        loop variable moves.
+
+        The outermost iterable is evaluated inside the child scope too, and
+        that is Python's rule rather than an accident of the placement: in
+        `[... for x in y for y in x]`, `y` is read before `y` is bound, and
+        with the child scope in place that is structural — the first `y` can
+        only resolve to the enclosing one — instead of depending on the order
+        two nested `run` calls happen to bind in.
+
+        Save/push/restore rather than a new `return`, because of the one-return
+        discipline the docstring below explains.
 
         For a dict comprehension, fire_compiler.py's parser stores the KEY
         expression in `.element` and the VALUE expression in `.key` (yes,
@@ -5935,7 +6143,12 @@ class Interpreter:
                     if all(self.eval_expr(cond) for cond in gen.conditions):
                         run(rest)
 
-            run(expr.generators)
+            saved = self.scope
+            self.scope = Scope(parent=saved)
+            try:
+                run(expr.generators)
+            finally:
+                self.scope = saved
             if expr.kind == 'set':
                 result = set(results)
             elif expr.kind == 'dict':

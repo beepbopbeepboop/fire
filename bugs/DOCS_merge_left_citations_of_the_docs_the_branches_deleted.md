@@ -1,7 +1,39 @@
 # DOCS: merging eight formal branches deleted 14 bug docs and left 12 citations of them in `.py` files
 
-**Status: NOT FIXED, inventoried with a measured split, and the one citation
-that was actively harmful is fixed. Found while merging `work/formal3-5`,
+**Status: steps 1 and 3 are DONE (2026-10-04, `work/bugs5-1`); step 2 was
+already filed as somebody else's bug and is not in this doc's hands. Kept rather
+than deleted because step 3 landed as an INSTRUMENT rather than as a clean
+census, and the residue it found is 289 sites a reader has to know about.**
+
+* **Step 1 — the eleven `.py` sites: DONE.** Every one now names the SYMPTOM and
+  the fix instead of a deleted doc, plus two this doc did not list
+  (`formal/dataclass_transform.py`, `formal/build.py`). Ten files, 15 citations,
+  commit `93d3c6ff`.
+* **Step 3 — the check: DONE, and it is the interesting half.** It could not be
+  the walk this doc describes, because the tool already existed
+  (`tools/dangling_doc_refs.py`, the registered `doc-refs` job) and was not
+  seeing ANY of these sites: its regex requires the `bugs/` prefix and **not one
+  of the eleven spells it** — they are bare stems, so the ratchet went green
+  through every deletion that created them. `BARE_REF`/`bare_find` resolve a bare
+  stem by EXISTENCE (`bugs/<stem>.md` absent AND no `.md` of that name anywhere in
+  the tree, which keeps `doc/ELABORATION.md` and `doc/MODULE_CACHE_DESIGN.md` out
+  of it) and skip a line that already says the doc was deleted. Measured on this
+  tree: **289 bare citations of 147 names that are nowhere, across 109 files.**
+  It is reported and deliberately NOT in the ratchet — see `BARE_REF`'s comment
+  for why, and for what a verdict on it would take.
+* **Step 2 — `test_formal_sweep.py:450`'s precondition: not this doc's.** It is
+  filed and claimed as `bug:TEST_formal_sweep_relative_import_precondition_is_stale`,
+  together with the fixture that cannot build
+  (`bug:TEST_formal_sweep_relative_import_fixture_cannot_build`), so editing that
+  file from here would be two branches claiming one line. **The sweep's skip
+  count and `stdlib-dylib`'s are the other measurement this doc's family wants
+  and neither is a light worker's.**
+
+The rest of this doc is the original report and is kept as the record of how the
+sites were found and why only one was fixed then.
+
+**Original status, for the record: NOT FIXED, inventoried with a measured split,
+and the one citation that was actively harmful is fixed. Found while merging `work/formal3-5`,
 `-3-10-r2`, `-3-8-r2`, `-3-3-r2`, `-3-2-r2-r2`, `work/formal4-sweep-{std-a,
 x86-a,repo-a-r2-r2}` into `work/merge-formal4` (2026-10-02).** This is the
 fourth instance of a shape `bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md`

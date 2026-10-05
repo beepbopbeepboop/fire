@@ -249,6 +249,9 @@ def tabbed() -> int:
 
 def quoted() -> int:
   return sys.write_stderr('y')
+
+def ctrlpair() -> int:
+  return sys.write_stderr("m\\v\\fn")
 """
 
 MODULE_CALLS_LITERAL = """\
@@ -259,6 +262,7 @@ def main():
   print(litmod.size())
   print(litmod.tabbed())
   print(litmod.quoted())
+  print(litmod.ctrlpair())
   return 0
 """
 
@@ -598,24 +602,30 @@ def test_a_literal_inside_a_module_is_decoded_too(tmp, _shared):
     suite stayed green: the program and the module are separate compilations,
     and a literal in one is not evidence about the other.
 
-    The three cases are the three spellings those corpora needed and could not
-    use: `\\n` (a control byte), `\\t` (a second one), and a single-quoted
+    The four cases are the four spellings those corpora needed and could not
+    use: `\\n` (a control byte), `\\t` (a second one), a single-quoted
     one-character literal (`ast.mojo` says `'x = 'y''` lexed its opening quote
     as a one-character OP, which is why it builds its two-byte quote set with
-    `str_alloc` + `memset`).
+    `str_alloc` + `memset`), and `\\v\\f` — the pair no `memset` corpus had a
+    reason to spell, and `argparse.mojo`'s `_ws_set` now does, since it is the
+    ASCII whitespace set as one literal. `\\v` and `\\f` are the two escapes no
+    other case here reaches, so a decoder that handled `\\n` and `\\t` and
+    dropped the rest would leave every one of these four greens except the
+    fourth.
     """
     root = workdir(tmp, "inmodule")
     for arch in ARCHES:
         with open(os.path.join(root, "litmod.mojo"), "w") as f:
             f.write(LITERAL_IN_MODULE)
         ran = build_and_run(root, "sys_inmodule", MODULE_CALLS_LITERAL)
-        check(ran.stderr == "a\nbp\tqy",
+        check(ran.stderr == "a\nbp\tqym\x0b\x0cn",
               f"[{arch}] stderr was {ran.stderr!r}: expected the module's "
-              f"literals decoded — a real newline, a real tab — the way CPython "
-              f"decodes them")
-        check(ran.stdout == "3\n3\n1\n",
+              f"literals decoded — a real newline, a real tab, a real vertical "
+              f"tab and form feed — the way CPython decodes them")
+        check(ran.stdout == "3\n3\n1\n4\n",
               f"[{arch}] stdout was {ran.stdout!r}: expected the DECODED byte "
-              f"counts 3, 3 and 1 across the dylib boundary; 5, 5 and 4 would "
+              f"counts 3, 3, 1 and 4 across the dylib boundary — the fourth is "
+              f"`m`, a vertical tab, a form feed and `n`; 5, 5, 4 and 6 would "
               f"be the source's characters")
 
 

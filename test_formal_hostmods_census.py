@@ -45,8 +45,8 @@ a check.
 ## Why a COLD CAS per row
 
 A module dylib is cached by content, so a verdict from a previous version of the
-file would answer the wrong question — which is the measurement in
-`FORMAL_cas_verdict_key_ignores_the_hostmod_sources_it_compiles`, and it
+file would answer the wrong question — which is the cold-CAS-verdict
+measurement this section used to cite by doc name (deleted with its fix), and it
 is the reason this file points `GMOJO_HOME` at a private directory per row
 rather than sharing one.  It is also why the build is not deduplicated across
 rows: `os/__init__.mojo` and `os/path/__init__.mojo` both import

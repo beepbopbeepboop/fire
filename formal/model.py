@@ -2239,7 +2239,8 @@ def type_position_nodes(root, structs_by_name=None, callee_defs=None) -> set:
     `_CPointer[UInt8, UntrackedOrigin[…]] is a compile-time explicit-parameter
     list on a generic, not a subscript`, for a program the backend lowers
     correctly the moment the walk stops asking about a type as a value
-    (`FORMAL_external_call_a_multiparameter_type_in_the_bracket`).
+    (the multi-parameter-type-in-the-bracket refusal, filed 2026-09 and closed;
+    `test_formal_external_call.py` still pins the refusal).
 
     **What it does not do.** It does not widen `_base_name`, and it does not
     exempt a subscript whose BASE is a value: `h.tag[Int, s]` is a genuine index
@@ -6242,9 +6243,9 @@ def list_clear_refusal(dotted: str, kind, shape: str) -> str:
 # ── Methods on a string ───────────────────────────────────────────────────
 #
 # A string on this path is a bare `char *` with no header and no length: see
-# the note on ValueKinds below, and FORMAL_x86_64_formal_backend_gaps
-# for why that also makes `len` of a *string* a real question rather than a
-# field load. That single fact SPLITS the string methods into two classes, and
+# the note on ValueKinds below, and the 2026-09 x86-64 backend-gap survey
+# (deleted with its fixes; `len` of a *string* is the case it named) for why
+# that also makes `len` of a string a real question rather than a field load. That single fact SPLITS the string methods into two classes, and
 # which side a method falls on decides whether it can be lowered at all:
 #
 #   POINTER-BOUNDED — the answer is a function of the bytes from the receiver
@@ -16486,7 +16487,7 @@ GIMPLE_RUNTIME_PREFIX = "mojo_"
 #
 # This is the generalisation of the `GIMPLE_LIST_PREFIX` special case that
 # stood here before, and that constant is gone: a hand-kept list of prefixes is
-# a list that rots, and the shape answers the same question for all 546 entry
+# a list that rots, and the shape answers the same question for all 668 entry
 # points the headers declare rather than for the 40-odd names one prefix
 # happened to cover.
 
@@ -16632,7 +16633,7 @@ def _parse_ctype(decl: str, is_param: bool = False) -> tuple:
     because it does in a parameter list and does not in a return type:
     `void *db` is a `void *` with a name, `void *` is not. Getting that backwards
     makes every parameter a type called `void db`, which nothing recognises as a
-    scalar — and a rule that refuses all 546 entry points for that reason looks
+    scalar — and a rule that refuses all 668 entry points for that reason looks
     exactly like a rule that has measured them all and found none reachable.
 
     The result is the RESOLVED type, which is what every reader of it wants:
@@ -20064,10 +20065,10 @@ def dylib_callee_export(by_name: dict, by_module: dict, forwarded: dict,
     unexamined: `pkg.f(1)` read the second parameter out of whatever the caller
     last left in that register (measured, 80905394 where the callee says 12) and
     `pkg.f(1, 2, 3)` dropped the third and returned the answer to `pkg.f(1, 2)`.
-    Both are the failure `FORMAL_cross_module_call_arity_is_never_checked`
-    records for the BARE spelling, which `bind_call_arguments` had already
-    closed — so the two spellings of one export disagreed about the same
-    contract, and only one of them was checked.
+    Both are the cross-module call-arity failure as it was filed for the BARE
+    spelling (that doc is deleted with its fix; `bind_call_arguments` had
+    already closed it) — so the two spellings of one export disagreed about the
+    same contract, and only one of them was checked.
 
     `None` means nothing on this link line publishes the name, which is the
     caller's cue to keep whatever answer it has for a callee it cannot resolve
@@ -26807,8 +26808,8 @@ def field_type_one_word_struct(structs, name, decls: dict):
     **Why the DEMOTION that produced the one-field struct is not in question.**
     This was filed as "the two passes disagree about `struct_is_framed`", with
     an offer to stop the demotion (its option B) as the semantically honest
-    repair; the filing was `FORMAL_class_level_default_flips_a_nested_frames_width`
-    and it is deleted, its defect fixed and measured. Measured here: the same
+    repair; that filing is deleted, its defect fixed and measured. Measured
+    here: the same
     refusal, byte-identical, with a `struct Inner` that declares exactly ONE
     field and no class-level default at all — so the demotion is not the
     trigger and there is no layout to un-cement. What was missing was the
@@ -29087,8 +29088,9 @@ def construction_arity_refusal(name: str, got: int, summary: str,
     default to fall back on, which is a different fact with a different
     repair: a field WITH a declared default is filled from it, so
     `Config(7)` on `width = 80, height = 24` is a program and this is not
-    that.  `FORMAL_dataclass_partial_construction` records the
-    measurement and why the two cannot share an answer.
+    that.  The partial-construction measurement is why the two cannot share an
+    answer (its doc is deleted with the fix; `test_dataclasses_formal.py` and
+    `test_formal_run.py` both carry rows for the prefix fill).
 
     `bases` is the bases this unit does not declare, and it is the clause that
     keeps the message honest about WHY the field list is short. A class with a
@@ -32055,6 +32057,36 @@ SCALAR_TYPE_WIDTHS = {
 }
 
 
+# The two payload types that are refused for a reason NEITHER the scalar row
+# above nor "a struct of another module" states, kept as names rather than
+# inferred.  `optional_none_word` used to end in `if base[:1].isupper()`, which
+# is a SPELLING test standing in for a fact about the type, and it sent both of
+# these down the struct-of-another-module branch: the refusal a user got for
+# `Optional[Float32]` and for `Optional[DType]` claimed this build had not read
+# a layout, which is a claim about a C struct and neither name is one.  The
+# verdict was right in both cases and the EXPLANATION was wrong, which is the
+# expensive kind: `doc/ABI.md`'s niche table and `bugs/FORMAL_optional_needs_a_niche.md`
+# both list these two as refused, so nothing went red.
+#
+# So there are THREE reasons a payload leaves no word for `None`, and each is
+# now stated by name rather than guessed from a capital letter:
+#
+#   * FULL WORD — every one of the 2^64 patterns is a value of the type, so
+#     there is nothing left over.  `Int`/`Int64`/`UInt`/`UInt64`/`Float64` are
+#     answered by `SCALAR_TYPE_WIDTHS`' width-64 row; `DType` is here because a
+#     type TAG is an index and 0 is a legal one, and there is no width to put
+#     in a table for an index.
+#   * NO REPRESENTATION — the target cannot hold the type at all, so there is
+#     no word for the payload to occupy and therefore none for `None` to be
+#     spelled as.  `Float32` is the only member, and it is a measurement (the
+#     comment above).
+#   * A STRUCT OF ANOTHER MODULE — the layout that would prove it is in a
+#     library this build does not compile.  Unchanged, and now reachable only
+#     by a name that is neither of the above.
+FULL_WORD_TYPE_NAMES = frozenset({'DType'})
+UNREPRESENTED_TYPE_NAMES = frozenset({'Float32'})
+
+
 def optional_none_word(payload, decls: dict = None):
     """`(niche_word, None)`, or `(None, why)` when `T` has no word left over.
 
@@ -32121,13 +32153,31 @@ def optional_none_word(payload, decls: dict = None):
         if width < 64:
             return (1 << width, None)              # 2^w is not a w-bit value
         return (None, optional_no_niche_refusal(payload))
-    # A base that is not one of this module's structs and not a scalar this
-    # target has a representation for is, in every case that reaches here, a
-    # STRUCT OF ANOTHER MODULE — and that is a different obstacle from a type
-    # that provably has no spare word, because the layout that would prove it
-    # is in a library this build does not compile.  Said as such rather than as
-    # "every word is a value of it", which is a claim about a type this
-    # function has not read.
+    # A base that is not one of this module's structs, not a scalar this target
+    # has a representation for, and not one of the two named rows below is, in
+    # every case that reaches here, a STRUCT OF ANOTHER MODULE — and that is a
+    # different obstacle from a type that provably has no spare word, because
+    # the layout that would prove it is in a library this build does not
+    # compile. Said as such rather than as "every word is a value of it", which
+    # is a claim about a type this function has not read.
+    #
+    # The `isupper()` test that used to stand here is a SPELLING test standing in
+    # for a fact about the type, and it caught the two rows as well — so a user
+    # who wrote a float was told this build had not read a C struct's layout.
+    # The verdict was never affected; only the sentence, which is user-facing.
+    # See `FULL_WORD_TYPE_NAMES` / `UNREPRESENTED_TYPE_NAMES` for the three
+    # reasons and why each is now named.
+    if base in UNREPRESENTED_TYPE_NAMES:
+        return (None, optional_no_niche_refusal(
+            payload, "this target has no representation for it at all — "
+                     "`Float32(1.5)` does not lower here — so there is no word "
+                     "for the payload to occupy, and therefore none for `None` "
+                     "to be spelled as"))
+    if base in FULL_WORD_TYPE_NAMES:
+        # The default sentence is the right one for this row and is the same
+        # one `Int` gets: every 64-bit word is a value of the type. A type TAG
+        # is an index, and 0 is a legal index.
+        return (None, optional_no_niche_refusal(payload))
     if decls is not None and base[:1].isupper():
         return (None, optional_no_niche_refusal(
             payload, "it is a struct whose fields this build does not compile, "

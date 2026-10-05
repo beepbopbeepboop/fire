@@ -1060,23 +1060,30 @@ CASES = [
     # needs) and `_function_locals` (what shadows a module binding) — and the
     # comprehension's target is in the first and not the second.
     #
-    # `printf`, and the reason is this file's own rule rather than a style
-    # choice: a case spelled with `printf` has no interpreter reference, because
-    # `printf` is not a name the interpreter resolves — and for THIS construct
-    # the interpreter has no correct answer to give. It evaluates a list/set/dict
-    # comprehension in the ENCLOSING scope, so the comprehension's target leaks
-    # out and the trailing `G` reads 2 rather than the module's 5:
+    # `print`, so this case has its THIRD engine again, and it is worth saying
+    # what that cost and what it bought. It used to be spelled with `printf`,
+    # which this file's own rule reads as "no interpreter reference" (`printf`
+    # is not a name the interpreter resolves), and the reason was that the
+    # interpreter had no correct answer to give: it evaluated a list/set/dict
+    # comprehension in the ENCLOSING scope, so the comprehension's target
+    # leaked out and the trailing `G` read 2 rather than the module's 5 —
     #
     #     $ python3 fire.py run .tmp/w/ci.py     # 3
     #     $ python3 -c "…same text…"             # 6
     #
-    # `myinterpreter.py::eval_Comprehension`'s own docstring calls this "a known
-    # minor fidelity gap", and the fix is filed as
-    # `bugs/INTERP_comprehension_has_no_scope_of_its_own.md`. Until then the two
-    # images are checked against CPython's 6 and the interpreter is not asked,
-    # which is strictly MORE than the three-engine contract usually gets here —
-    # an interpreter that disagreed would have been reported as a semantics bug,
-    # and one did.
+    # `eval_Comprehension` now pushes a child scope for the walk (the shape
+    # `_generator_expression` twenty lines below it already used), so the
+    # interpreter answers 6 and the case is a three-engine one again — which is
+    # the anti-rot this spelling change is for: a green two-engine case and a
+    # green three-engine case look identical from the outside, and only one of
+    # them can notice the interpreter drifting.
+    #
+    # The compiled path has the same leak by a different mechanism (the
+    # comprehension's target becomes a plain local of `f`, shadowing the
+    # module global), so the compiled half of this case is filed separately as
+    # `bugs/CODEGEN_a_comprehension_target_is_a_local_of_the_enclosing_function.md`.
+    # These two images are not affected by it: they are the formal backends,
+    # which desugar the comprehension rather than inlining it.
     ("a_comprehension_target_does_not_shadow_a_module_constant",
      "G = 5\n"
      "\n"
@@ -1085,7 +1092,7 @@ CASES = [
      "    return G + out[0]\n"
      "\n"
      "def main() -> int:\n"
-     "    printf(\"%d\", f([1, 2]))\n"
+     "    print(f([1, 2]))\n"
      "    return 0\n", "6"),
     # The same read with a DIFFERENT target, which is the control for the row
     # above in the direction that matters: nothing shadows `G` here, so the

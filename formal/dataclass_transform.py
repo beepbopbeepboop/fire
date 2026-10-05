@@ -1083,9 +1083,9 @@ def own_eq_refusal(name: str, comparison: str, why: str) -> str:
     * 2026-09-29: the class was refused, and the stated reason was measured —
       `==` did not dispatch by name at all on this path, so accepting the class
       would have meant building an image that runs the comparison as an address
-      compare. That reason was FIXED (the dispatch landed,
-      `FORMAL_eq_does_not_dispatch_to_a_user_dunder`), and a refusal
-      whose stated reason has been fixed is a refusal nobody looks at again.
+      compare. That reason was FIXED (the dispatch landed, and the doc that
+      recorded the measurement is deleted with it), and a refusal whose stated
+      reason has been fixed is a refusal nobody looks at again.
     * the transform's own half then became the stated reason: `rewrite_equality`
       DESUGARS `==` into a field-wise chain, which would silently replace the
       method the source wrote. That half needed no new analysis — it already

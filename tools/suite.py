@@ -2594,9 +2594,9 @@ test('formal-os-backing', [PY, 'test_formal_os_backing.py'], mem='tiny',
 # which brackets sit in a TYPE position instead of asking what they mean at
 # runtime. A marker on a passing test is reported as a FAILURE, so it had to go;
 # and the doc it cited was gone already, which is the other half of the same
-# signal (`FORMAL_external_call_a_multiparameter_type_in_the_bracket`
-# is not in the tree, and `suite-self-test`'s "every bug doc a registered
-# reason cites exists" is what said so).
+# signal (the doc it cited — a multi-parameter generic application refused as a
+# subscript — is not in the tree, and `suite-self-test`'s "every bug doc a
+# registered reason cites exists" is what said so).
 test('formal-external-call', [PY, 'test_formal_external_call.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_formal_external_call.py', 'formal/build.py',
