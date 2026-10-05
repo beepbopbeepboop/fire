@@ -1,38 +1,5 @@
 # The axiom is NOT `Lean.ofReduceBool`, and **67** of `lib/`'s **520** theorems is what the sites are
 
-**Status 2026-10-05 (`formal25-4`): every ITEM this document asks for is DONE,
-and nothing on this list is a task anybody can pick up — so the document is
-kept as the LEDGER it has become rather than as a queue entry.** Measured on
-this tree, nothing here moved and each row below says why that is the answer
-rather than a deferral.
-
-| what §"The exact next step" asks for | state |
-|---|---|
-| item 1, attribute the sites to theorems | **DONE** — `library_trust_by_declaration`, 67 of 520 |
-| item 2, measure the CLOSURE (a Lean run, not a text census) | **DONE** — `AXIOM_CLOSURE` over six modules, and the instrument was corrected twice on the way (the greedy `AXIOM_SITE_RE`, and `library_theorems` reading an ATTRIBUTED declaration) |
-| item 3, replace the cheap sites first | **DONE** — `REPLACEABLE_THEOREMS` is **0** and `NATIVE_DECIDE_REPLACED` is 67 |
-| item 4, keep the ceiling honest | **DONE** — `test_formal_admitted.py` pins `LIBRARY_TRUST` per module and per theorem, and the ledger identity `total − remaining == replaced` is enforced so a new `arm64_step` arm cannot arrive silently |
-
-Verified on this tree: `test_formal_admitted.py` **27 PASS / 0 FAIL** (19
-declared across 37 hostmod modules). The figures this document's own Status
-sections quote are the ones the test pins, which is why nothing here needed
-re-measuring — a pinned number does not go stale under a change that does not
-move it.
-
-**The three rows in "What is still open" below are the right answer to their own
-question, not work in progress.** The 1518 `bv_decide` sites are `∀ w, w &&& mask
-≠ value` over a free 32-bit word, and §5's measurement stands: `decide` would
-enumerate 2^32, so these are the RIGHT TOOL and replacing them would be a
-regression. The 19 `IEEE754` `native_decide` are ground binary64 facts over
-compiled primitives, named one by one in `NATIVE_DECIDE_ALLOWED` — a ratchet
-BY DECLARATION, which `LIBRARY_TRUST` cannot be (it counts sites per module, so
-685 new ones would have to appear before it noticed anything, and it cannot tell
-a closed bit-pattern fact from a ground `runExport`). A `native_decide` added
-anywhere else now fails by name. **A doc for a bug that is fully fixed is
-deleted, and what remains here is not a bug: it is a trust inventory whose
-numbers other documents cite.** `FORMAL.md` §7 row 10 is where a planner reads
-it, and this document is where the reasoning behind each row is.
-
 The `native_decide`/`bv_decide` sites put a GENERATED axiom in a theorem's
 closure — one per USE, named after the declaration that used it — and §7's
 inventory had no row for them at all.

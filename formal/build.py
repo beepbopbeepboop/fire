@@ -45,50 +45,7 @@ from formal import dataclass_transform as DC
 
 
 class FormalBuildError(Exception):
-    """A refusal the path states rather than guesses past, printed by callers.
-
-    `proof_refused` is False here and True only on the ONE raise that re-wraps
-    a proof generator's `NotImplementedError`, and it exists because that re-wrap
-    is right and still costs a reader its diagnosis: `fire.py build --formal`
-    should print `build: <message>` rather than forty frames of generator
-    internals, so the exception type cannot stay `NotImplementedError` — and a
-    caller that classifies build outcomes therefore cannot tell the generator's
-    deliberate "I will not write a model I do not have" from a codegen refusal
-    by type. The flag is the fact, asked of the exception rather than re-derived
-    from its prose, which is what `tools/formal_proof_breadth.py::run_item`
-    does: it files this shape as `proof-refused` (the proof layer refused) rather
-    than as `codegen-refused` (the code generator did), a distinction whose
-    direction matters because `codegen-refused` is the class the census's own
-    docstring says a reader must not UNDER-count.
-    """
-
-    proof_refused = False
-
-
-def proof_refused(exc) -> bool:
-    """Whether `exc` is the PROOF LAYER's refusal rather than a codegen refusal.
-
-    **ONE reader, because two tools classify a build outcome and both got this
-    wrong the same way**: `tools/formal_proof_breadth.py::run_item` and
-    `tools/formal_proof_fuzz.py`'s per-item verdict both catch
-    `(CodegenError, FormalBuildError)` first, and the generator's refusal arrives
-    there — see the `except NotImplementedError` around the `generate_proof`
-    call, which re-wraps it precisely so `fire.py build --formal` prints
-    `build: <message>` rather than a traceback. Both therefore filed "the
-    semantic model has no value for something in this program" as a CODE
-    GENERATOR refusal, for programs `--no-prove` builds and RUNS on the same
-    architecture.
-
-    The alternative each could reach for is to match the message's English, and
-    that is a second sentence to keep in step with the first: the wording exists
-    for a reader of `fire.py`'s output, not as a machine-readable tag. So the
-    tag travels on the exception and this function is the only place that asks.
-
-    `getattr` rather than an `isinstance`: `CodegenError` has no such
-    attribute, and a caller may hand this something that is not an exception at
-    all.
-    """
-    return bool(getattr(exc, "proof_refused", False))
+    pass
 
 
 class ImportBuildError(FormalBuildError):
@@ -173,67 +130,13 @@ def _publish_signed_image(output: str, binary: bytes) -> None:
 
 
 def _ad_hoc_sign(path: str) -> None:
-    """`codesign -s -` the image at `path`, under a CONTENT-DERIVED identifier.
-
-    The identifier is the point of this function, and it used to be whatever
-    `codesign` derives when no `-i` is given: the file's BASENAME, composed
-    with the image's LC_UUID (`codesign -dv` prints
-    `Identifier=fact-55554944000000…`, where `55554944` is the ASCII of "UUID"
-    followed by sixteen zero bytes because this backend left LC_UUID zeroed).
-    That put a spelling of the OUTPUT PATH into the signature bytes, and the
-    signature bytes are part of the artifact: measured on this tree,
-    `formal/examples/fact.mojo` built twice as `alpha.aout` and `zzz9.aout` —
-    every other byte equal — differed in 1 byte of the CodeDirectory, at
-    offset 49160, inside the LC_CODE_SIGNATURE that starts at 49152. The
-    unsigned image is a pure function of the source; the signed image was a
-    pure function of the source AND of what the caller happened to call the
-    output file, so "build this program twice and compare the bytes" was false
-    for any two names, and `cas.formal_build_key` — which correctly does not
-    carry the output path, because the path does not determine the image — had
-    no way to make it true.
-
-    `-i` is given a digest of the image itself, so the signature becomes a
-    function of the bytes being signed and of nothing else. The digest is taken
-    over the file as it is about to be signed (the staged, unsigned image), not
-    over `binary`, because the file is what `codesign` will read and the
-    invariant being asserted is the one that has to hold at that moment.
-
-    Nothing else about the signature changes: still ad-hoc, still `-s -`, still
-    the same page hashes and the same CDHash over the same image. An ad-hoc
-    signature's identity for Gatekeeper and `codesign -r` is its cdhash, not
-    its identifier, so the identifier is informational — `codesign -v` and
-    dyld are unaffected, and `formal/imports.py`'s own `codesign` probes
-    (`test_formal_imports.py`'s signature-window case) go through this same
-    function.
-    """
     if sys.platform != "darwin":
         return
-    result = subprocess.run(
-        ["codesign", "-s", "-", "-i", _signature_identity(path), path],
-        capture_output=True, text=True)
+    result = subprocess.run(["codesign", "-s", "-", path],
+                            capture_output=True, text=True)
     if result.returncode != 0:
         raise FormalBuildError(
             (result.stderr or result.stdout or "codesign failed").strip())
-
-
-def _signature_identity(path: str) -> str:
-    """The ad-hoc signing identifier for the image at `path`.
-
-    A SHA-256 of the image's own bytes, in the 8-4-4-4-12 shape of a UUID
-    because that is what a reader of `codesign -dv` expects to see there and
-    what every other Mach-O on the machine carries. The `gmojo-` prefix is a
-    constant, so it costs nothing: it distinguishes these images from a
-    third-party tool's in the one place a human reads the field.
-
-    There is no circularity to solve: the digest is over the UNSIGNED image,
-    which is complete before `codesign` runs, and the signature it goes into is
-    not part of its own input.
-    """
-    with open(path, "rb") as f:
-        import cas      # lazy, like `cas_dir` above: this is the only reason
-        digest = cas.hash_parts("gmojo-formal-adhoc-id-v1", f.read())
-    return "gmojo-" + "-".join((digest[:8], digest[8:12], digest[12:16],
-                                digest[16:20], digest[20:32]))
 
 
 def parse_module(source: str, filename: str = "<input>") -> list:
@@ -1516,26 +1419,6 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     return code, info, external_syms, binary
 
 
-def _without_own_template_bodies(source_path: str, stmts: list) -> list:
-    """`stmts` with THIS source's generic template declarations dropped.
-
-    One call, two call sites, and the reason it is a function rather than an
-    inline call is that the two paths reach it at different points and must reach
-    it with the same rule: `formal/imports.py::_formal_module_functions`'s caller
-    hands over a module's statements for a LIBRARY, and `compile_formal` above
-    does the same for an EXECUTABLE. `monomorph.without_template_bodies` is the
-    rule and this is the seam — the source text, which is the other half of its
-    question, is the same file both paths read.
-    """
-    from formal import monomorph as MM            # lazy — pulls the middle tier
-    try:
-        with open(source_path) as f:
-            source = f.read()
-    except OSError:
-        return stmts
-    return MM.without_template_bodies(stmts, source)
-
-
 def _imported_structs(source_path: str, stmts: list, arch: str,
                       linked: list = None) -> list:
     """Struct declarations from the modules this file imports, or [].
@@ -1872,16 +1755,6 @@ def compile_formal(source_path: str, output: str = None,
     # declarations reach this file at all.
     linked = load_dylib_manifests(link_dylibs)
     imported_structs = _imported_structs(source_path, stmts, arch, linked)
-    # …and the source's own GENERIC TEMPLATE bodies leave the statement list
-    # here, after `_imported_structs` has APPENDED the instantiated ones. The
-    # order is the whole content: an instantiated body is a top-level statement
-    # like any other and its name is the MANGLED one, so the filter below cannot
-    # reach it, while the declaration it came from is exactly what it drops. And
-    # the reason to drop it at all is `monomorph.without_template_bodies`'s own
-    # docstring: a template's body has no instantiation in scope when it is
-    # analysed, so a read of a bracket parameter is refused — with a message
-    # about `len(Self.keys)` — in a body that is in no image.
-    stmts = _without_own_template_bodies(source_path, stmts)
     # …and the target again, because the dylib builds above republished it as
     # the dylib's own Mach-O target. This is the one place the two genuinely
     # differ (an `--fmt=elf` build on a Mac asks for an ELF image and a Mach-O
@@ -2205,17 +2078,7 @@ def compile_formal(source_path: str, output: str = None,
             # `--no-prove` builds and runs the same bytes. What is missing is
             # the translation of the SOURCE into the semantic model, so the
             # fix is a domain in that model and not a change to the emitter.
-            #
-            # `proof_refused` is set on this raise and nowhere else, and it is
-            # the whole of the classification a reader of this path needs: the
-            # re-wrap above is correct (it is what turns a generator traceback
-            # into `build: <message>`), so the fact that the PROOF LAYER
-            # refused has to travel as an attribute rather than as the
-            # exception type. A prefix match on the prose above would be a
-            # second sentence to re-word; see `FormalBuildError`'s own
-            # docstring and `tools/formal_proof_breadth.py::run_item`, the one
-            # reader that classifies on it.
-            refused = FormalBuildError(
+            raise FormalBuildError(
                 f"no proof was generated: the semantic model has no value for "
                 f"something in this program, and refusing is what it does "
                 f"rather than state something false about the source. The "
@@ -2223,9 +2086,7 @@ def compile_formal(source_path: str, output: str = None,
                 f"same bytes — and what is missing is a domain in "
                 f"`formal/arm64_proof_gen.py`'s model of the source, which is "
                 f"a function of the entry argument alone. The generator's own "
-                f"word for it: {e}")
-            refused.proof_refused = True
-            raise refused from e
+                f"word for it: {e}") from e
 # The `f_contract` theorems, APPENDED here rather than emitted by
         # `generate_proof`.  Two reasons, and the second is the one that
         # matters:
@@ -2595,18 +2456,6 @@ def _formal_module_functions(source_path: str, link_dylibs: list = None,
             stmts = parse_module(source, filename=source_path)
         except SyntaxError as e:
             raise FormalBuildError(f"{source_path}: parse error: {e}")
-    # The module's own GENERIC TEMPLATE bodies leave here, and this is the
-    # module path's half of the same rule `compile_formal` applies to an
-    # executable: a template's own body is in no image, its instantiated bodies
-    # are compiled as this library's EXTRA sources, and analysing the
-    # declaration on its own refuses a read of a bracket parameter because no
-    # instantiation has supplied it. `monomorph.without_template_bodies` is the
-    # rule and `_without_own_template_bodies` is the seam; asked HERE so it
-    # covers a `statements=` override from `formal/imports.py` and a plain parse
-    # of the file with one line, rather than in the caller that has to know
-    # which of the two happened.
-    if stmts:
-        stmts = _without_own_template_bodies(source_path, stmts)
     # A module with no top-level functions is NOT an error here. binary_heap
     # and a third of std/ are struct-only, and they used to be rejected with
     # "no top-level functions" — which was not merely premature but wrong: the
@@ -2630,7 +2479,7 @@ def _formal_module_functions(source_path: str, link_dylibs: list = None,
     #
     # The body used to be REFUSED here, on the reasoning that a library has
     # nowhere to run it — which was the largest unowned row of the formal sweep
-    # (the `b7` round of `bugs/FORMAL_sweep_work_map.md` §6): 16 files in this
+    # (`bugs/FORMAL_sweep_work_map_2026-10-02_b7.md` §6): 16 files in this
     # repository refused for importing one of four modules, 15 of them for
     # nothing they used. The absence was the entry point and it now exists, so
     # the body is lowered here like any other function and the library carries a
@@ -2823,18 +2672,6 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     # word reads the local's own storage — a silent wrong answer, which is the
     # outcome this tree treats as worse than a refusal.
     check_subscript_through_an_unclassified_import(functions, link_line or [])
-    # …and the OTHER published declaration, asked about a construct rather than a
-    # layout: a `None` reaching an IMPORTED function's `Optional` parameter has to
-    # be the PAYLOAD's niche word, and `apply_optional_none_representation` could
-    # not do it because it resolves callees through this module's own functions
-    # and runs before the imports resolve. It is an ANSWER and not a check, which
-    # is why it is here and not in the group above: it needs `link_line` for the
-    # same reason `check_imported_frame_handoffs` does, and it rewrites the
-    # argument rather than raising. Measured wrong on both architectures before it
-    # — `tb(None)` for an `Optional[Bool]` parameter answered 1 where CPython
-    # says 100 — so it closes a wrong answer rather than adding a capability.
-    substitute_none_into_an_imported_optional(functions, link_line or [],
-                                              {st.name: st for st in structs})
     # A `@dataclass` option this backend cannot lower is a fact about the FILE
     # rather than about the image, so it belongs with this group rather than
     # with the construct checks that only an executable's codegen can answer.
@@ -9005,90 +8842,6 @@ def check_subscript_through_an_unclassified_import(functions, link_line) -> None
                 M.spelled(sub), sub.obj.name, callee, module, pointee))
 
 
-def substitute_none_into_an_imported_optional(functions, link_line,
-                                               structs_by_name) -> int:
-    """Put the niche word into a `None` ARGUMENT of a call ACROSS a boundary.
-
-    The cross-module half of `apply_optional_none_representation`, and it exists
-    because that pass's own docstring named the gap and called it a limitation:
-    it resolves a callee's parameter annotations through `_callee_defs`, which is
-    the functions of THIS module, so a `None` reaching an imported function's
-    `Optional` parameter kept folding to `NONE_WORD`.
-
-    **That is a WRONG ANSWER, not a missing feature, and it is measured on both
-    architectures.** `optional_none_word` puts `None` at 2 for an `Optional[Bool]`
-    payload and at `1 << w` for a narrow integer, while `None` folds to 0 — which
-    is a payload VALUE, so the callee compares 0 against 2 and takes the
-    "has a value" arm:
-
-        lib3.mojo   def tb(z: Optional[Bool]) -> int:
-                        if z is None: return 100
-                        return 1 if z else 2
-        main3.mojo  from lib3 import tb
-                    printf("%d", tb(None))       ->  1   on both architectures
-                                                  CPython: 100
-
-    and every `Optional[Bool]`/`Optional[IntN]` argument of every imported
-    function in the corpus is wrong the same way, while `Optional[String]` is
-    right by accident (its niche IS 0). The same-module spelling of the same
-    program answers 100, which is what makes this a boundary defect rather than a
-    question about `Optional`: the two engines of this pipeline must not answer
-    one construct differently because of where the callee was compiled.
-
-    **WHY IT IS HERE AND NOT IN `_prepare_functions`, and the reason is the same
-    one every other late check gives:** that pass runs BEFORE `_resolve_imports`,
-    so it has no `link_line`, and the declaration this needs is read off the
-    linked libraries' own sources (`external_declarations`). Asking it inside
-    would mean guessing a parameter's type from the call — which is how a payload
-    gets built with the wrong width — so the gap was left rather than papered over
-    until the link line existed. It exists now.
-
-    **It is idempotent and it fires only where the source says so.** A site the
-    in-unit pass already substituted holds an `IntLiteral`, which
-    `model.is_none_expr` does not recognise, so a second visit is a no-op; and the
-    callee's declaration — not the call — is what names the payload, so a callee
-    that declares no `Optional` contributes nothing rather than being guessed at.
-    Returns the number of sites substituted, which is what the test asserts on.
-    """
-    if not functions:
-        return 0
-    by_name, by_module, forwarded = M.dylib_export_tables(
-        dylib_export_lists(link_line))
-    if not (by_name or by_module or forwarded):
-        return 0
-    declarations = _external_declarations(link_line)
-    # `{export symbol: {arg index: annotation}}`, built once for the whole unit
-    # rather than per call site: the declaration is a property of the LIBRARY and
-    # two call sites of one export must not be able to disagree about its
-    # parameter's type.
-    params_of: dict = {}
-    for symbol, fdef in (declarations or {}).items():
-        anns = M.imported_optional_param_annotations(fdef)
-        if anns:
-            params_of[symbol] = anns
-    if not params_of:
-        return 0
-    done = 0
-    for fn in functions:
-        for node in M.iter_nodes(getattr(fn, "body", None) or []):
-            if not isinstance(node, F.CallExpr):
-                continue
-            name = M.subscript_callee_name(node) or M._flat_callee(node)
-            if name is None:
-                continue
-            entry = M.dylib_export_lookup(by_name, by_module, name, forwarded)
-            anns = params_of.get((entry or {}).get("symbol"))
-            if not anns:
-                continue
-            for i, arg in enumerate(node.args or []):
-                ann = anns.get(i)
-                if ann is None or not M.is_none_expr(arg):
-                    continue
-                _replace_none_with_niche(node, arg, ann, structs_by_name)
-                done += 1
-    return done
-
-
 def _check_returned_frame_budget(functions, returns_frame, params_of) -> None:
     """Refuse a frame-returning callee with no argument register left.
 
@@ -13071,155 +12824,6 @@ def _lower_dialect_select(functions: list) -> int:
     return done
 
 
-# The two CPython builtins whose ordinary call is a COMPARE AND A SELECT, and the
-# operator each one's left fold is. `formal/model.py::NOT_LOWERED_BUILTINS`
-# measured both of them on 2026-10-04 and wrote down what lowering each takes —
-# "a compare and a select; both emitters already have the select
-# (`MLIR_SELECT_OP`'s `TernaryExpr` is one `CSEL`)" — and this is that sentence
-# cashed, in the same place `MLIR_SELECT_OP` was cashed.
-BUILTIN_EXTREMA = {"max": ">", "min": "<"}
-
-
-def _lower_builtin_extremum(functions: list, module_names) -> int:
-    """Rewrite `max(a, b, …)` / `min(a, b, …)` to the select they mean.
-
-    Returns the number of sites rewritten.
-
-    A source-to-source rewrite in the SHARED pipeline, beside `_lower_dialect_
-    select` and for exactly its reasons: `max` is a construct both backends
-    would otherwise have to be taught separately, and the failure mode this
-    module's design exists to prevent is the two architectures answering one
-    question differently. What it becomes is a `T.TernaryExpr`, which arm64
-    emits as one `CSEL` when all three operands are pure and x86-64 as a branch,
-    so nothing downstream — either instruction selector, the comptime folder,
-    the contract inference, the proof layer's `TernaryExpr` model — has to learn
-    a new construct.
-
-    **The comparison is on the SECOND operand, and that is not a style choice.**
-    CPython's `max(a, b)` keeps the first as the largest and replaces it only
-    when `b > a`, so the left fold is `b > a ? b : a` and NOT `a < b ? b : a`.
-    The two agree on every total order over integers and disagree on a NaN: IEEE
-    `>` is false against NaN, so `max(nan, 1)` keeps `nan` and `max(1, nan)`
-    keeps `1`, which is what the first spelling says and what the second does
-    not. This path holds a `Double` as its bit pattern in an integer word, so a
-    NaN is a word it can be holding; the spelling that cannot tell the two cases
-    apart would be a wrong answer rather than a refusal, and this backend
-    treats those as worse than each other everywhere.
-
-**Both operands must be PURE, and that is what stops the duplication from
-    being observable.** A `T.TernaryExpr` names its operands twice — once in the
-    condition and once in the arm it selects — so an impure operand would be
-    evaluated twice, and CPython evaluates a call's arguments once each, left to
-    right. `model.is_pure_expression` is the same reader
-    `formal/arm64_codegen.py`'s CSEL decision uses, asked here for the same
-    reason: one allow-list, so the rewrite and the instruction that consumes it
-    cannot come to disagree about what "pure" is.
-
-    **AND AT LEAST ONE OPERAND MUST BE AN INTEGER LITERAL, which is what keeps
-    a container out of the comparison.** Purity is not enough, and the reason is
-    a measured wrong answer rather than a caution: a name is a word here, a
-    container is a frame-allocated blob whose value is its ADDRESS, and the
-    comparison this rewrite introduces is an integer comparison of whatever the
-    two words are. `a = [9]; b = [1]` then `max(a, b)` built, ran and answered 1
-    where CPython answers `[1]`, and the number is the ALLOCATION ORDER rather
-    than the elements — `a = [1, 2]; b = [3, 4]` happens to agree, because
-    `[3, 4]` is the later block. **That is the same wrong answer `b > a` on two
-    blobs gave before `model.container_relational_refusal` refused it, and this
-    rewrite could have reached it through a second door**, which is why the guard
-    is here and not only there. An integer literal on one
-    side closes the hole from the only direction available to a pass that cannot
-    classify names: CPython itself raises `TypeError` for `list > 0` and for
-    `list > list`, so a program in which one side is a literal and the other is a
-    container is not a correct program, and nothing that IS correct is refused
-    for want of this guard. It is also the shape the corpus writes: the one
-    two-argument `max` in the 768-file sweep scope is
-    `for i in range(max(rank - 2, 0))`, and a name beside a number is what a
-    clamp is spelled as.
-
-    **AND THE MODULE BODY IS NOT REWRITTEN, which is a measured wrong answer rather
-    than a caution.** `TOP = max(3, 9)` at file level became a `TernaryExpr` in a
-    module-level STORE, and a store of one is not lowered: measured on this tree,
-    `TOP = 9 if 1 else 3` — no `max` anywhere, the source's own conditional
-    expression — answers **0 on arm64 and 0 on x86-64** where CPython answers 9.
-    So the module body's store path drops a `TernaryExpr` to zero rather than
-    refusing it, and a rewrite that reached it would have turned a refusal into a
-    wrong number on both architectures at once. `M.module_body_functions` is the
-    one reader of "this wrapper is a module's top level", and the rewrite asks it
-    rather than matching `MODULE_BODY_NAME` — a library is compiled from SEVERAL
-    sources and each may have a body, so a name match would find one of N. The
-    underlying store bug is filed
-    (`bugs/FORMAL_a_module_level_store_of_a_conditional_expression_is_zero.md`).
-
-    **Two or more POSITIONAL arguments and no keyword**, which is the rest of
-    the shape question. One argument is `max(xs)` — a fold over a run-time
-    sequence, which is `FORMAL_listdir_no_run_time_sequence` and not a select —
-    and a keyword is `key=` (a call through a value per element) or `default=`
-    (a value the empty sequence takes). Those three shapes are left alone on
-    purpose, and the reason they are left alone rather than refused here is the
-    reason `pop.select` is: `model.not_lowered_builtin_refusal` runs AFTER this
-    pass, asks the same three questions about whether the name is the builtin,
-    and its sentence for `max`/`min` is the table row naming those three shapes.
-    Rewriting what can be rewritten and declining the rest is what lets one
-    table row be a NAME and a SHAPE at once
-    (`model.NOT_LOWERED_BUILTINS`'s own header says so).
-    """
-    at_module = set(module_names or ())
-    compiled = {f.name for f in functions}
-    # The module BODY is not a `def` and is not skipped: `MODULE_BODY_TAG` is the
-    # one reader of "this wrapper is a module's top level", and a library is
-    # compiled from SEVERAL sources each of which may have one, so matching the
-    # NAME would find one of N. See the next paragraph for why it is excluded
-    # from the rewrite.
-    bodies = set(id(f) for f in M.module_body_functions(functions))
-    done = 0
-    for fn in functions:
-        body = getattr(fn, "body", None)
-        if not isinstance(body, list) or id(fn) in bodies:
-            continue
-        count = [0]
-        _rewrite_dialect_in(
-            body,
-            lambda node: _extremum_replacement(node, fn, at_module, compiled),
-            count)
-        done += count[0]
-    return done
-
-
-def _extremum_replacement(node, fn, at_module: set, compiled: set):
-    """The `T.TernaryExpr` this call becomes, or None to leave it alone.
-
-    None is also the answer for a node that is not a call at all, so this is
-    asked of every node in the body and the shape checks below are the ones that
-    make it say something.
-    """
-    if not isinstance(node, F.CallExpr) or not isinstance(node.func, F.IdentExpr):
-        return None
-    op = BUILTIN_EXTREMA.get(node.func.name)
-    if op is None or not M.extremum_call_is_a_select(
-            node.func.name, len(node.args), len(node.kwargs)):
-        return None
-    # The same three questions `model.not_lowered_builtin_refusal` asks, through
-    # the same readers, so this pass and that one agree about which program
-    # spells its own `max`: a name this unit COMPILES is a function of it, a
-    # name it BINDS is the allocator's own walk, and a name bound at module
-    # level is in the symbol table.
-    if node.func.name in compiled \
-            or M.callee_is_a_bound_value(fn, node.func.name) \
-            or node.func.name in at_module:
-        return None
-    if not all(M.is_pure_expression(a) for a in node.args):
-        return None
-    if not any(isinstance(a, F.IntLiteral) for a in node.args):
-        return None
-    acc = node.args[0]
-    for nxt in node.args[1:]:
-        acc = F.TernaryExpr(
-            condition=F.BinaryOp(op=op, left=nxt, right=acc,
-                                  line=node.line, col=node.col),
-            then_val=nxt, else_val=acc, line=node.line, col=node.col)
-    return acc
-
-
 def _declared_annotations(fn) -> dict:
     """`{name: annotation or None}` for the names ONE function declares a type
     for — its parameters and its annotated locals.
@@ -13603,96 +13207,6 @@ def _srem_expression(a, b, line: int, col: int):
     def node(op, left, right):
         return F.BinaryOp(op=op, left=left, right=right, line=line, col=col)
     return node("-", a, node("*", node("/", a, b), b))
-
-
-def _lower_dialect_casts(functions: list, structs_by_name: dict = None) -> int:
-    """Rewrite the dialect CASTS that are the IDENTITY over a word.
-
-    Returns the number of sites rewritten.
-
-    **The third member of the dialect family, and the only one whose answer is
-    a single existing node rather than a new expression.**
-    `pop.cast_to_builtin[_type=__mlir_type.index](x)` converts one `index` to the
-    same `index` — pointer-sized, signed, one 64-bit word on this path — so the
-    rewrite is `x` and the pass adds no instruction selection at all. That is why
-    it is a separate function rather than a row in `MLIR_WORD_ARITH_OPS`: that
-    table's rows all build a `BinaryOp` (or a `UnaryOp`) over two operands, and
-    this is a unary identity, so sharing the walk would mean sharing a table whose
-    SHAPES differ. `_rewrite_dialect_in` is the walk and it is the same one.
-
-    It is in the shared pipeline rather than an emitter arm per architecture, so
-    "both architectures" here is a statement about ONE code path and not about
-    two implementations agreeing — the argument
-    `bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md` makes
-    for the whole family and the reason `_lower_dialect_select` is beside it.
-
-    **Three gates, and each is the same one the refusal asks about**, so the
-    message and the rewrite cannot disagree about which sites are in scope:
-
-      * the operation is in `model.MLIR_WORD_CAST_LOWERED` — keyed on the WHOLE
-        dialect name, so `pop.cast_to_builtin` is not `pop.cast`, and a NAME of
-        its own rather than a membership test over `model.MLIR_WORD_CAST_OPS`
-        because that table also carries the two casts this path DECLINES, and
-        rewriting one of those is the wrong answer its own row exists to
-        prevent;
-      * its bracket names a `_type=` this path reads as a WORD
-        (`model.mlir_bracket_result_type` + `model.mlir_type_kind`), because a
-        bracket carrying `pred=`/`bin_op=`/`mask=` is naming something else and
-        a `!kgen.simd<…>` result is N lanes rather than one word;
-      * its single operand is DECLARED a word by
-        `model.mlir_operand_declared_type`, read from a parameter annotation, a
-        local annotation or a field declaration through a receiver or a
-        name this unit declares as a struct. Anything else answers None and the
-        site keeps the refusal.
-
-    The third gate is the one the §Correction is about and it is not optional:
-    `pop.cast_to_builtin` over a vector is NOT the identity — it would extract a
-    lane — so a table keyed on the operation's NAME alone would be right at
-    `std/builtin/simd_length.mojo:76` and wrong at every vector site.
-    """
-    fields = _unit_field_annotations(structs_by_name)
-    struct_names = set(structs_by_name or {})
-    done = 0
-    for fn in functions:
-        body = getattr(fn, "body", None)
-        if not isinstance(body, list):
-            continue
-        ctx = _dialect_operand_types(fn, fields, struct_names)
-        count = [0]
-        _rewrite_dialect_in(body,
-                            lambda node: _dialect_cast_replacement(node, ctx),
-                            count)
-        done += count[0]
-    return done
-
-
-def _dialect_cast_replacement(node, ctx: dict):
-    """The node `node` becomes, or None when this pass does not answer it.
-
-    The identity replacement and nothing else: the returned node IS the call's
-    operand, which is why this is the only dialect rewrite whose replacement is an
-    existing subtree rather than a new node. That is also why the walk's
-    in-place rules cannot bite here the way a nested-list replacement could —
-    there is no list to mutate, and the operand is left exactly as the source
-    wrote it.
-    """
-    if not isinstance(node, F.CallExpr):
-        return None
-    op = M.mlir_dialect_op_name(node.func)
-    if op not in M.MLIR_WORD_CAST_LOWERED or node.kwargs:
-        return None
-    bracket = node.func if isinstance(node.func, F.SubscriptExpr) else None
-    if bracket is None or M.mlir_type_kind(
-            M.mlir_bracket_result_type(bracket)) != "word":
-        return None
-    args = node.args
-    if len(args) != 1:
-        return None
-    spelled = M.mlir_operand_declared_type(
-        args[0], ctx, ctx.get("__fields__", {}), ctx.get("__structs__", ()))
-    if M.mlir_type_kind(spelled) != "word":
-        return None
-    return args[0]
 
 
 def _dialect_select_replacement(node, bools: set):
@@ -14527,7 +14041,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             # is not in `callee_defs` at all, so no position here is checked.
             #
             # Guarded on the three shapes whose POSITION is not `args[i]`, each
-            # for the reason `parameter_kinds_by_call_site` gives for the same
+            # for the reason `string_parameters_by_call_site` gives for the same
             # one: a comptime SPECIALIZATION passes its brackets FIRST as leading
             # arguments, a `*args` spread shifts everything after it, and a
             # receiver is parameter 0 of the signature and is never bound by an
@@ -17273,22 +16787,6 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # a module-level `def`, an import, a constant — a program that defines its
     # own `sum` must still build, and a refusal that cannot tell those apart is
     # the false refusal this check exists beside.
-    # `max(a, b)` / `min(a, b)` — and any arity above two — is a compare and a
-    # select, and both are constructs this pipeline already has: it becomes the
-    # `T.TernaryExpr` that arm64 emits as one `CSEL` and x86-64 as a branch, so
-    # neither backend is taught a new shape and the two cannot answer one
-    # question differently. It is here, IMMEDIATELY before the check below and
-    # not beside the two dialect rewrites further down, because that check
-    # refuses `max` and `min` BY NAME and this is what makes the name mean
-    # something: a two-argument call this has already rewritten is never asked
-    # about, and the three shapes it declines (one argument — a run-time
-    # sequence to fold; `key=`; `default=`) are still refused, by the table row
-    # that names them.
-    #
-    # `symbols` goes in for the same reason it goes into the check below: a
-    # module-level `def max` is a function this unit compiles, and the rewrite
-    # and the refusal have to agree about which programs spell their own `max`.
-    _lower_builtin_extremum(functions, symbols)
     why_builtin = M.not_lowered_builtin_refusal(functions, symbols)
     if why_builtin is not None:
         raise CodegenError(why_builtin)
@@ -17913,18 +17411,6 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # the message it prints for the sites this one declined is the operand's own
     # spelling rather than a claim that it has no way to establish one.
     _lower_dialect_arith(functions, structs_by_name)
-    # …and a dialect CAST whose operand is DECLARED a word, which is the third
-    # member of this family and INDEPENDENT of the two above for the same
-    # reason: this one replaces `pop.cast_to_builtin[_type=__mlir_type.index](x)`
-    # with the OPERAND, which is a unary identity, while `_lower_dialect_arith`
-    # builds a `BinaryOp` and `_lower_dialect_select` a `TernaryExpr` — three
-    # different replacement node kinds over one walk, none of which walks into
-    # another's output. Ordered AFTER the arithmetic for the one dependency that
-    # exists: `check_module_symbols`' MLIR pre-pass below refuses whatever these
-    # three did not rewrite, and it reads the same declared type, so a site the
-    # cast pass declined reports the operand's own spelling rather than a claim
-    # that it cannot establish one.
-    _lower_dialect_casts(functions, structs_by_name)
     # LAST, on the FINAL function list: which local names hold a frame
     # address is a property of the code that survives every rewrite above, and
     # a lifted lambda or a flattened closure is a function with its own locals
@@ -18944,8 +18430,8 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
     of refusing it as unknowable: the callee module's own compilation says
     which of its parameters are frame addresses and of which struct, and that
     is a fact about a compilation the consumer did not perform and cannot
-    re-derive. `test_refusal_taxonomy.py::_no_def_callee_arm_checks` records
-    what publishing it is worth, per arm.
+    re-derive. `bugs/FORMAL_callee_no_def_ceiling_zero.md` records what it is
+    worth.
 
     `constants` is the module-level name → folded LITERAL table, and it is the
     one thing a dylib publishes that is not a symbol. It exists because a
@@ -19757,74 +19243,6 @@ def _export_entries(source_paths: list, prefixes: dict = None) -> dict:
     return exported
 
 
-def _declares_nothing_at_all(source_paths: list) -> bool:
-    """Every source declares no function, no type and no trait — public or private.
-
-    This is the condition the export gate's own refusal names ("declares no
-    function and no type at all"), read out of `_declared_api_shape`, which is
-    the same reader `no_public_api_reason` uses so the two cannot disagree about
-    it. Without it the branch that emits a symbol-less library swallowed three
-    refusals that are RIGHT: a package whose only public function is a GENERIC
-    template (`test_a_module_with_no_boundary_symbol_is_refused`'s
-    `mylib/__init__.mojo`), one whose only declaration is private, and one whose
-    names are all C library symbols. Each of those has a name a reader might
-    have wanted to bind and no legal way to bind it, which is a finding; a
-    docstring and a module-level constant have neither.
-
-    A module-level CONSTANT is not a declaration here and does not stop a
-    caller: a folded value needs no symbol, and `_namespace_library`'s
-    `constants` parameter is where the consumer reads it — which is the same
-    route `formal/hostmods/sys.mojo`'s `byteorder` already takes.
-
-    Split out of `_declares_nothing_but_a_package_body` so that the package
-    question and the constants question are two predicates over ONE reader. Two
-    copies of the `any(shape.values())` loop is two answers to "does this file
-    declare anything", and the second copy is the one that would go stale.
-    """
-    if not source_paths:
-        return False
-    for p in source_paths:
-        try:
-            with open(p) as f:
-                text = f.read()
-        except OSError:
-            return False
-        shape = _declared_api_shape(text)
-        # `any(shape.values())` rather than a list of buckets, so a bucket
-        # `_declared_api_shape` grows later is part of this question from the
-        # day it exists instead of from the day somebody remembers this line.
-        if any(shape.values()):
-            return False
-    return True
-
-
-def _publishable_constant_names(constants: dict) -> list:
-    """The module-level names `constants` a CONSUMER can actually read back.
-
-    The same filter `formal/model.py::dylib_module_constants` applies when it
-    reads a manifest, and it is asked here rather than left to that function for
-    the reason the two must agree: this is the question "does this module
-    publish anything at all", and a manifest full of names the consumer skips is
-    a manifest that publishes nothing. `fold_literal_expr` produces `int` and
-    `str` (and `bool`, which the reader excludes because `True` and `1` are one
-    word and only one of them can be published without the read changing
-    meaning), so anything else in the table is a value the build does not know
-    and stays refused.
-
-    `__file__` is dropped for a different reason and it is not cosmetic: it is
-    the path of the file THIS BUILD compiled, recorded in every module's table,
-    and a consumer reading it would get the DEFINING build's path rather than
-    its own. It is a fact about the build rather than about the module, so it is
-    not part of the module's API — and a `kind: "namespace"` manifest is read by
-    `dylib_module_constants`, so leaving it in would put a second checkout's
-    path into a program's constant table.
-    """
-    return sorted(n for n, v in (constants or {}).items()
-                  if not n.startswith("__")
-                  and not isinstance(v, bool)
-                  and isinstance(v, (int, str)))
-
-
 def _declares_nothing_but_a_package_body(source_paths: list) -> bool:
     """A package `__init__` that DECLARES nothing — a namespace package.
 
@@ -19838,62 +19256,39 @@ def _declares_nothing_but_a_package_body(source_paths: list) -> bool:
     `formal/hostmods` on it), and a module named `__init__.py` that is not a
     package does not exist in this resolver.
 
-    **It declares no function, no type and no trait — private or public.** That
-    is `_declares_nothing_at_all`, which is where the reader lives.
+    **It declares no function, no type and no trait — private or public.** This
+    is the condition the gate's own refusal names ("declares no function and no
+    type at all"), read out of `_declared_api_shape`, which is the same reader
+    `no_public_api_reason` uses so the two cannot disagree about it. Without it
+    the branch swallowed three refusals that are RIGHT: a package whose only
+    public function is a GENERIC template (`test_a_module_with_no_boundary_
+    symbol_is_refused`'s `mylib/__init__.mojo`), one whose only declaration is
+    private, and one whose names are all C library symbols. Each of those has a
+    name a reader might have wanted to bind and no legal way to bind it, which
+    is a finding; a docstring has neither.
 
-    The BASENAME condition is what this function adds, and it is the reason the
-    constants-only module of `std/math/constants.mojo` was NOT here until
-    2026-10-05: its API is a set of folded VALUES, which is as complete as a
-    re-export package's API, but it is not a package and so it fell past this
-    branch to the refusal. That gap is `_publishable_constant_values_module`
-    below, and the two are one rule with two spellings of "the module has an
-    API, and none of it is a symbol".
+    A module-level CONSTANT is not a declaration here and does not stop the
+    branch: a folded value needs no symbol, and `_namespace_library`'s
+    `constants` parameter is where the consumer reads it — which is the same
+    route `formal/hostmods/sys.mojo`'s `byteorder` already takes.
     """
     if not source_paths:
         return False
     for p in source_paths:
         if os.path.basename(p) not in ("__init__.py", "__init__.mojo"):
             return False
-    return _declares_nothing_at_all(source_paths)
-
-
-def _publishable_constant_values_module(source_paths: list, constants: dict) -> bool:
-    """A module whose whole API is folded module-level VALUES — no declarations.
-
-    The second half of the rule `_declares_nothing_but_a_package_body` states for
-    a package, and it is a SEPARATE predicate rather than a relaxation of that
-    one because the two answer different questions about the same file:
-
-      * a package `__init__` that re-exports has an API made of SYMBOLS it
-        forwards, and the symbols are not its own — they resolve through the
-        submodules already on its link line (`_namespace_library`'s own
-        docstring is the argument);
-      * a module whose every name is a folded literal has an API made of
-        VALUES, and `write_dylib_manifest`'s `constants` table is exactly where a
-        value crosses a boundary without a symbol — one value of a folded
-        module-level name in a whole program, so the importer materializes the
-        same one in its own image.
-
-    `std/math/constants.mojo` is the measured case: eight `comptime` constants
-    and no declaration at all, refused as "declares no function and no type at
-    all" and taking **33 of the 59 files** on the export-gate row with it
-    (the `b13` round of `bugs/FORMAL_sweep_work_map.md` §4 — the row is that
-    document's `module exports no public functions`, and the basename the map
-    could not resolve is this file). The refusal was CORRECT about the module —
-    there is no symbol to bind — and wrong about the consequence, because the
-    importer was asking for a VALUE.
-
-    **It requires at least one publishable name, and that is the difference
-    between this and simply dropping the refusal.** A module that declares
-    nothing AND publishes no value has no API whatsoever, and a library for it
-    is an empty file on a link line that helps nobody — which is what the
-    refusal is for, and what `_declares_nothing_but_a_package_body` gets away
-    with only because a package's API is its submodules, which exist whether or
-    not this file says so. So the one module shape that genuinely has nothing is
-    still refused, and the message still reaches it.
-    """
-    return bool(_publishable_constant_names(constants)) \
-        and _declares_nothing_at_all(source_paths)
+        try:
+            with open(p) as f:
+                text = f.read()
+        except OSError:
+            return False
+        shape = _declared_api_shape(text)
+        # `any(shape.values())` rather than a list of buckets, so a bucket
+        # `_declared_api_shape` grows later is part of this question from the
+        # day it exists instead of from the day somebody remembers this line.
+        if any(shape.values()):
+            return False
+    return True
 
 
 def _declared_traits(source_paths: list) -> list:
@@ -21209,21 +20604,6 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                 fn.name = f"{fn.name}__ov{n + 1}"
             ordered.append(fn)
 
-    # The ONE rule that splits a library's merged slot table three ways —
-    # CONSTANT (folded, and so in the manifest's `constants`), VARIABLE (a
-    # function or the module body WRITES it) and CONTAINER (a read-only blob
-    # with a home in `__DATA`). It is computed here, beside the table it reads
-    # and after the last slot is in it, because from 2026-10-05 there are TWO
-    # consumers of it in this function: the manifest of a library with code, and
-    # the manifest of a symbol-less one (`_namespace_library`, reached from the
-    # constants-only export gate below). Two `sorted(...)` expressions over one
-    # dict is two chances for the two manifests to disagree about what this
-    # module publishes, and a manifest missing a name its sibling lists makes
-    # the consumer's refusal name a name the module does not have.
-    library_variables = sorted(n for n, s in library_slots.items() if s.mutable)
-    library_containers = sorted(n for n, s in library_slots.items()
-                                if not s.mutable)
-
     # The gimple runtime's C library, on THIS library's link line, for the same
     # reason and under the same condition as on the executable path — and here it
     # is not tidiness. A module dylib that binds `mojo_strlen` has a symbol in
@@ -21302,64 +20682,23 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # exactly a table-less library). So the failure this gate prevents is still
     # a build error with a message; what goes away is the refusal of an
     # importer that never asked the package for anything.
-    #
-    # ── the same shape for a module that is NOT a package ──────────────────
-    #
-    # `_publishable_constant_values_module` is the second spelling of the rule
-    # above and it is the one that moves a row of the sweep. Measured
-    # 2026-10-05 on both architectures: `std/math/constants.mojo` declares eight
-    # `comptime` constants and nothing else, was refused here, and took **33 of
-    # the 59 files** on the `module exports no public functions` row with it
-    # (the `b13` round of `bugs/FORMAL_sweep_work_map.md` §4 — and the
-    # `constants.mojo` that row could not resolve by basename is this one, which
-    # is what
-    # made the row look unmeasurable). The module's API is four folded VALUES,
-    # `pi`/`e`/`tau`/`log2e`, and a value crosses a boundary through the
-    # manifest's `constants` table rather than through a symbol — which is the
-    # same route `sys.byteorder` and every package re-exported constant already
-    # takes. So the library it needs is a real one with an empty trie and a
-    # populated constants table, which is what `_namespace_library` emits, and
-    # the importer reads the value out of the manifest it wrote.
-    #
-    # It stays OFF for a module that declares nothing and publishes no value:
-    # such a module has no API at all, and the refusal is the honest answer
-    # (see `_publishable_constant_values_module`'s last paragraph).
     if not entries and not reexports and not traits \
-            and (_declares_nothing_but_a_package_body(source_paths)
-                 or _publishable_constant_values_module(source_paths,
-                                                        constants)):
+            and _declares_nothing_but_a_package_body(source_paths):
         if prove:
-            if _declares_nothing_but_a_package_body(source_paths):
-                what = ("it has no code of its own — its API is its submodules, "
-                        "each of which is a library in its own right")
-            else:
-                what = ("its API is the folded constants it publishes, which "
-                        "are values rather than code")
             raise FormalBuildError(
-                f"{os.path.basename(source_paths[0])} is a module whose whole "
-                f"API is what it forwards or publishes — no function, no type, "
-                f"no re-export — so it compiles to a library with no code, "
-                f"there is nothing to prove, and {what}.")
+                f"{os.path.basename(source_paths[0])} is a package whose body "
+                f"declares nothing — no function, no type, no re-export — so it "
+                f"compiles to a library with no code and there is nothing to "
+                f"prove. Its API is its submodules, each of which is a library "
+                f"in its own right.")
         return _namespace_library(
             output, install_name, arch, {}, dylib_syms, dep_install,
             linked, fmt=fmt,
             source=source_paths[0],
             module=(module_prefixes or {}).get(source_paths[0])
             or _module_prefix(source_paths[0]),
-            constants={n: constants[n]
-                       for n in _publishable_constant_names(constants)},
-            # The slot split is the SAME one the code path below writes, so a
-            # module whose API is values and a module whose API is functions
-            # publish the same names for the same reasons. A module in this
-            # branch can still HAVE a slot — `K = 7` beside `G = 5; G = 6` —
-            # and the slot is not a constant, so it is not published as one; it
-            # is listed under `variables`/`containers` so the consumer's
-            # refusal for a read of it names the module that declares it instead
-            # of saying the module provides no such name. It is not RESOLVABLE
-            # across this boundary, and that stays a refusal: a symbol-less
-            # library has no code, so it cannot be the writer of `G`.
-            variables=library_variables,
-            containers=library_containers,
+            constants=dict(constants),
+            variables=[],
             traits=[])
     if not entries and not reexports and not traits:
         raise FormalBuildError(no_public_api_reason(source_paths))
@@ -21710,8 +21049,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         module=(module_prefixes or {}).get(source_paths[0])
         or _module_prefix(source_paths[0]),
         constants=constants,
-        variables=library_variables,
-        containers=library_containers)
+        variables=sorted(n for n, s in library_slots.items() if s.mutable),
+        containers=sorted(n for n, s in library_slots.items() if not s.mutable))
     if linked:
         _record_link_deps(manifest_path, linked)
     # **The library has code AND forwards names, and both belong in its

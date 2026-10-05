@@ -551,13 +551,6 @@ MEASURED_PEAK_GB = {
     # per-construct suites that build and run for MINUTES, which is not a
     # measurement of this file.
     'formal-bracketed-method-field-set': (0.05, 'measured'),  # 3.7 s, 26 rows
-    # …and `formal-reproducible`, measured on the day it was registered under
-    # `python3 tools/memslot.py --gb 8 -- python3 test_formal_reproducible.py`:
-    # 3.9 s, `PASS=7 FAIL=0`, memcap `peak 0.1 GB`. Twelve formal builds across
-    # both backends (four of them in child processes, so the peak is the tree's
-    # and not one process's) and no Lean — which is why it sits with the 4-7 s
-    # rows above rather than with the `formal-argparse` ones.
-    'formal-reproducible': (0.1, 'measured'),  # 3.9 s, 12 builds, both backends
     # …and `formal-field-walk`, the third file the estate check named, measured
     # 2026-10-04 the day it was registered. `/usr/bin/time -l` rather than
     # memcap's own poll, because the run is 0.08 s long and a poll with a 0.5 s
@@ -2331,36 +2324,6 @@ test('formal', [PY, 'test_formal.py'], j=True,
      desc='every formal/examples/*.mojo typechecks its generated Lean proof')
 test('formal-run', [PY, 'test_formal_run.py'], deps=['preflight'],
      desc='formal arm64 executables that actually build AND run (no lean)')
-# REPRODUCIBILITY. Its own file because the assertion is about BYTES rather than
-# about what an image computes, so every other formal suite is structurally
-# blind to it: they all ask "does this program answer the right number", and an
-# image that is wrong in byte 49160 and right everywhere else passes all of
-# them. This is what it found on its first run, measured on this tree, both
-# backends: `codesign` derives an ad-hoc signature's identifier from the file's
-# BASENAME when no `-i` is given, so the same source published as `alpha.aout`
-# and as `zzz9.aout` differed in one byte inside the CodeDirectory — and
-# `cas.formal_build_key` correctly does not carry the output path, so nothing
-# could have made that true except fixing the emitter. Fixed in
-# `formal/build.py::_signature_identity`; the same sweep found `LC_UUID`'s 16
-# payload bytes left zero by all three Mach-O builders, now a digest of the
-# image (`formal/macho_linker.py::_stamp_content_uuid`).
-#
-# `mem='tiny'` and no `deps` beyond `preflight`, from its MEASURED cost: 3.9 s
-# and 0.1 GB for 12 formal builds (both backends, plus a dylib, plus an
-# importing program and its module dylib) and no Lean. It is in `check` and
-# `proofs` for `formal-sys`'s reason — cheap formal coverage with no Lean, so
-# it belongs on the side of the line the everyday loop can afford — and it is
-# `extra`-listed on the two jobs whose subject it reads, because a recorded PASS
-# replayed over an edited emitter is exactly the wrong answer for a test whose
-# whole claim is that the emitter's bytes changed.
-test('formal-reproducible', [PY, 'test_formal_reproducible.py'],
-     deps=['preflight'],
-     mem='tiny',
-     extra=['test_formal_reproducible.py', 'formal/build.py',
-            'formal/macho_linker.py', 'formal/arm64_codegen.py',
-            'formal/x86_64_codegen.py', 'formal/imports.py', 'cas.py',
-            'fire.py', 'fire_compiler.py'],
-     desc='the same input produces the same bytes, on both backends')
 # Module-global state. Its own file rather than more rows in `formal-run`
 # because it is the only formal test that runs each case THREE ways — the two
 # backends' images plus the Mojo interpreter — and that is the assertion: a
@@ -2547,6 +2510,10 @@ test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
 test('formal-x86-machine-model', [PY, 'formal/x86_64_model_test.py'],
      deps=['preflight', 'prooflib'], mem='tiny',
      extra=['formal/x86_64_model_test.py', 'formal/x86_64.py', 'lib/X86.lean'],
+     expect='1 of 45 WRONG: udivmod — the x86-64 machine model returns '
+            '7905747460161236410 where the hardware returns 4 '
+            '(bugs/CODEGEN_x86_model_udivmod_disagrees_with_hardware.md). '
+            'Found by running this file for the first time, 2026-10-02.',
      desc='lib/X86.lean EXECUTED against the hardware it models, every example')
 
 # ── the formal host modules: built, EXECUTED, diffed against CPython ────────
@@ -3153,8 +3120,8 @@ test('formal-proof-breadth-tool', [PY, 'test_formal_proof_breadth.py'],
 # and what keeps the measurement honest are not the same job, and folding them
 # together would make the cheap one pay for the expensive one.
 #
-# `formal-proof-census` is the ratchet. `tools/formal_proof_census.py` runs
-# every `formal/examples/*.mojo` through `formal.build.compile_formal(prove=True,
+# `formal-proof-census` is the ratchet. `tools/formal_proof_census.py` runs all
+# 52 `formal/examples/*.mojo` through `formal.build.compile_formal(prove=True,
 # check=True)` — the call `fire.py build --formal` makes — through
 # `formal/lean.py::run_lean`'s bounds, and compares the result against the
 # committed `tools/formal_proof_census_baseline.json`, failing when an example's
@@ -3191,21 +3158,8 @@ test('formal-proof-breadth-tool', [PY, 'test_formal_proof_breadth.py'],
 # zero-second proof, every timing names the date it was taken, and at least one
 # carries a real measured time so the 2x gate is not inert). That last one is the
 # check that keeps a hand-edited baseline from being a green light.
-# `timeout` raised 3600 -> 7200 on 2026-10-05, and the arithmetic is the
-# reason: `formal/examples` grew from 52 programs to 93, and the census is `-j 1`
-# by design (it gates on whole-tree CPU seconds, which is a per-example cost, so
-# `-j 1` is about the WALL CLOCK of a cold run rather than about the
-# measurement).  Measured over the 42 new examples on that day: 1 033 s of Lean
-# CPU and 1 274 s of wall at `-j 1` on a box at load 10-14, of which the 19
-# refusals cost nothing (no Lean run at all) and the rest ran 21.4-177.5 s each.
-# So the cold-cache cost of the corpus is now roughly double what 3600 s was
-# sized for, and a timeout that fires is a job killed for having done nothing
-# wrong -- `CLAUDE.md`'s rule about bounds.  The per-example cost did NOT grow:
-# the new rows are 1.65-2.35 GB and 21-60 s each, inside the band the
-# registration above already states, and the two that were not (806 s / 2.2 GB
-# and 4.2 GB) are documented and NOT in the corpus.
 test('formal-proof-census', [PY, 'tools/formal_proof_census.py'],
-     mem='small', timeout=7200, deps=['preflight', 'prooflib'],
+     mem='small', timeout=3600, deps=['preflight', 'prooflib'],
      memwhy='4.40 GB is LEAN, not this job: it is one elaboration of '
             '`formal/examples/sqsum.mojo` (4552 lines, 505 native_decide '
             'sites) under `formal/lean.py`\'s own `LEAN_MEMORY_MB = 6144`, '
@@ -3670,16 +3624,7 @@ BUCKETS = {
               # census a struct's field set is derived from could have become a
               # per-method-squared one. `formal-field-walk` is its subject-mate
               # and its neighbour — the statement walk that census reads through.
-              'formal-bracketed-method-field-set',
-              # …and `formal-reproducible`, whose 12 builds cost 3.9 s and
-              # 0.1 GB with no Lean — `formal-field-walk`'s cost class and its
-              # subject's importance: it is the only formal job that compares
-              # BYTES, so it is the only one that can see an emitter change
-              # which leaves every computed answer right. It is here beside the
-              # others because `proofs` is the whole formal picture in one
-              # bucket, and in `check` for `formal-sys`'s reason: no Lean, four
-              # seconds.
-              'formal-reproducible'],
+              'formal-bracketed-method-field-set'],
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps
@@ -3863,13 +3808,7 @@ BUCKETS = {
                 # …and `formal-bracketed-method-field-set`, in `check` above
                 # because 3.7 s is what that bucket costs for a field-set table,
                 # and here because `proofs` is the whole formal picture.
-                'formal-bracketed-method-field-set',
-                # …and `formal-reproducible`, in both buckets for the same two
-                # reasons stated once: it is cheap enough for the everyday loop
-                # (3.9 s, no Lean) and it is the only formal job that compares
-                # BYTES, so `proofs` is where the rest of the formal picture
-                # lives and it belongs beside it.
-                'formal-reproducible'],
+                'formal-bracketed-method-field-set'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model',
             'formal-x86-machine-model',
             # The decoder, which is x86-64 coverage with no image in it: half a

@@ -996,39 +996,7 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
             # `^` already uses and `UInt64.xor` is 64-bit, so the whole
             # complement is one term with no library helper.
             return f"({op} ^^^ 0xFFFFFFFFFFFFFFFF)"
-        if e.op == "+":
-            # Unary plus is the IDENTITY, and it used to be modelled as a
-            # LOGICAL NEGATION: this arm had three cases (`-`, `~`, and
-            # everything else), `not` was the only thing the third was for, and
-            # `+` fell into it. So
-            #
-            #     def up(n):
-            #         return +n
-            #
-            # was emitted as
-            #
-            #     def up_go (n : UInt64) : UInt64 := (if n = 0 then 1 else 0)
-            #
-            # which is `not n` — **a model of a program the source does not
-            # contain**. Measured on this tree: the IMAGE answers 10 for `+10`
-            # on both backends (it is the identity in the emitter too), and the
-            # x86-64 and arm64 run tests — `result n = mojo n`, decided by
-            # `native_decide` over the machine model — are what caught it, as a
-            # FALSE obligation. That is the run tests doing their job, and it
-            # is also the only reason this was ever a question: the corpus had
-            # no example with a unary `+` in it until
-            # `formal/examples/unary_ops.mojo`, whose proof Lean rejected at
-            # `unary_ops_proof.lean:81:2` with a spurious counterexample for a
-            # program whose only unusual operator is the one that was modelled
-            # wrongly.
-            return op
-        if e.op == "not":
-            return f"(if {op} = 0 then (1 : UInt64) else (0 : UInt64))"
-        raise NotImplementedError(
-            f"model: the unary operator `{e.op}` has no term in the semantic "
-            f"model, and answering the one below for an operator nobody "
-            f"wrote down is how `+` came to be modelled as `not`. Refusing "
-            f"rather than guessing: `{op}`")
+        return f"(if {op} = 0 then (1 : UInt64) else (0 : UInt64))"
     if isinstance(e, BinOp):
         l = _expr_go(e.left, param, env, vtypes, call_types, scope)
         r = _expr_go(e.right, param, env, vtypes, call_types, scope)
@@ -1208,93 +1176,11 @@ def _stmts_go(stmts, param: str, env: dict, fname: str, loop_counter: list,
         helper_env = dict(env)
         helper_env[param] = p
         cond = _cmp_go(st.condition, param, helper_env, vtypes, call_types, scope)
-        body_env = helper_env
-        # `_bind_one`, the one binder, for the reason its own docstring gives:
-        # the rule "an assignment binds this name to this term" was written out
-        # four times and the copies DIVERGED by being incomplete, so it is now
-        # defined once. This fold was the fifth copy and it was incomplete in
-        # exactly the way the other three were -- it recognised `Assign` and
-        # nothing else, so `total += i` and `var step: Int = i + 1` inside a
-        # `while` body bound nothing. What that cost is measured, not
-        # conjectured: `formal/examples/var_typed_loop.mojo` (a `var` with a
-        # type, declared and read inside a `while`) was REFUSED with
-        #
-        #     model: `step` is read here and this generator binds it to nothing
-        #     (the model's environment is ['i', 'n', 'total'])
-        #
-        # which is FALSE about the source -- `_stmts_go`'s own top-level arm
-        # binds the same statement three lines above -- and no earlier example
-        # could see it, because every loop in the 52-example corpus assigned
-        # with `=`.
+        body_env = dict(helper_env)
         for b in st.body:
-            body_env = _bind_one(body_env, b, param, _expr_go, vtypes,
-                                 call_types, scope)
-        # **The loop's state is ONE word, and this fold says so.** The helper
-        # below takes the recursion's single argument, so the only name whose
-        # value can cross an iteration is the one that argument carries. A body
-        # that changes any OTHER name has a loop the model cannot state: the
-        # update is dropped, so the term is not the source's arithmetic.
-        #
-        # What that used to cost is measured, and it is worse than a lost
-        # update. `formal/examples/accum_max.mojo`:
-        #
-        #     i = 0
-        #     best = 0
-        #     while i != n:
-        #         if i > best:
-        #             best = i
-        #         i = i + 1
-        #     return best
-        #
-        # has an induction variable (`i`) that is NOT the entry parameter, so
-        # `updated` was the parameter's own unchanged value and the emitted
-        # helper was
-        #
-        #     partial def accum_max_go_loop_0 (n_0 : UInt64) : UInt64 :=
-        #       (if ((UInt64.ofNat 1) ≠ n_0) then accum_max_go_loop_0 (n_0)
-        #        else (UInt64.ofNat 0))
-        #
-        # — a `partial def` that DIVERGES on every input that enters the loop,
-        # emitted as `mojo`. On arm64 that never reached a proof file (the
-        # `eval_eq_mojo` gate refuses the shape first). **On x86-64 it did**,
-        # because `x86_64_proof_gen` shares this fold, and the generator then
-        # emitted its run test over it:
-        #
-        #     theorem accum_max_runs_10 : accum_max_result 10 = mojo 10 := by
-        #       native_decide
-        #
-        # `mojo 10` diverges and `accum_max_result 10` is 9, so that obligation
-        # is FALSE, and `native_decide` does not report a false obligation — it
-        # runs the interpreter until the launcher's bound kills it. Measured on
-        # this tree: 7+ minutes with no verdict, against 25 s for the same
-        # proof's siblings.
-        #
-        # So the rule is the honest one: a loop whose state is not one word, or
-        # whose body is not a straight-line run of bindings, is REFUSED here
-        # rather than modelled as something that is not the program. On x86-64
-        # the refusal reaches the generator's own placeholder path
-        # (`_placeholder_model`), which emits the gap as a gap and omits the
-        # run tests instead of stating a false one — see
-        # `bugs/FORMAL_a_loop_that_is_neither_a_decrement_nor_a_range_loop_has_
-        # no_contract.md`.
-        dropped = sorted(name for name, term in body_env.items()
-                         if name != param and term != helper_env.get(name))
-        shaped = [type(b).__name__ for b in st.body
-                  if not isinstance(b, (Assign, AugAssign, VarDecl))]
-        if dropped or shaped:
-            raise NotImplementedError(
-                "model: this `while` loop's state is more than the one word "
-                "the model carries"
-                + (f" — the body changes {', '.join(dropped)}, and the loop "
-                   f"helper's single argument can carry only the induction "
-                   f"variable" if dropped else "")
-                + (f", and its body is not a straight-line run of bindings "
-                   f"({', '.join(shaped)})" if shaped else "")
-                + f", so the fold would emit a model that is not this "
-                f"program's arithmetic. Refusing rather than emitting one: "
-                f"`_dec_while_pattern` (a counter that IS the parameter) and "
-                f"`_range_loop_pattern` (a range loop with one accumulator) "
-                f"are the shapes the model can state today")
+            if isinstance(b, Assign):
+                body_env[_target_name(b)] = _expr_go(
+                    b.value, param, body_env, vtypes, call_types, scope)
         updated = body_env.get(param, p)
         rest_term = (_stmts_go(rest, param, helper_env, fname, loop_counter,
                                helpers, vtypes, call_types, scope)
@@ -1376,15 +1262,7 @@ def _expr_go_t(e, param: str, env: dict, vtypes: dict, call_types: dict,
             # how the narrow result is read back.
             return _t_wrap(
                 f"({op} ^^^ 0x{mask_of(resolve(t)):x})", t)
-        if e.op == "+":
-            # The typed twin of `_expr_go`'s identity arm, and the same defect:
-            # `+` fell through to the logical negation below. See that comment.
-            return _t_wrap(op, t)
-        if e.op == "not":
-            return f"(if {op} = 0 then (1 : UInt64) else (0 : UInt64))"
-        raise NotImplementedError(
-            f"typed model: the unary operator `{e.op}` has no term in the "
-            f"semantic model; refusing rather than guessing")
+        return f"(if {op} = 0 then (1 : UInt64) else (0 : UInt64))"
     if isinstance(e, BinOp):
         l = _expr_go_t(e.left, param, env, vtypes, call_types, scope)
         r = _expr_go_t(e.right, param, env, vtypes, call_types, scope)
@@ -2577,25 +2455,7 @@ def _expr_ast(e, scope=None) -> str:
         # itself wrong -- the bridge compared two renderings of `not` for a
         # program whose machine answer is MVN/NOT, and agreed about a different
         # program than the one that ran.
-        # `+` is the identity and `evalExpr`'s catch-all arm
-        # (`MojoExpr.unop _ operand => evalExpr … operand`) already evaluates it
-        # as one, so it needs no case in `lib/ProofLib.lean` — but it does need
-        # its own NAME here, because this mapping used to spell it `"not"`:
-        # `.get(e.op, "not")` is right for `not` and wrong for everything else,
-        # which is the same defect `_expr_go`'s unary arm had (see there). The
-        # two agreed with each other about `+` being a negation, so `simp`
-        # closed `eval_eq_mojo` over a program neither side had — and the run
-        # test caught it. An operator this table does not name is now refused
-        # rather than guessed.
-        if e.op == "not":
-            opname = "not"
-        elif e.op in ("-", "~", "+"):
-            opname = {"-": "neg", "~": "bnot", "+": "pos"}[e.op]
-        else:
-            raise NotImplementedError(
-                f"AST bridge: the unary operator `{e.op}` has no "
-                f"`MojoExpr.unop` name here, and the old table's catch-all "
-                f"(`\"not\"`) is how `+` came to be evaluated as a negation")
+        opname = {"-": "neg", "~": "bnot"}.get(e.op, "not")
         return f'(MojoExpr.unop "{opname}" ({_expr_ast(e.operand, scope)}))'
     if isinstance(e, BinOp):
         return (f'(MojoExpr.binop "{_lean_op(e.op)}" '
@@ -6141,100 +6001,6 @@ def _unfollowable_calls(code: bytes, base: int, func_entry: int,
     return out
 
 
-def _reached_without_a_condition(code: bytes, base: int, func_entry: int,
-                                 func_end: int, pc: int,
-                                 cond_branches=None) -> bool:
-    """Whether `pc` is reachable from `func_entry` on a path that crosses no
-    SOURCE conditional — i.e. on a path whose shape the run cannot decide
-    differently for a different entry value.
-
-    The question the universal theorem's own premise asks, asked of the CFG
-    instead of of Lean. `arm64_go_exit` is emitted with `exit_pc` = the first
-    `BL` out of the image, and the theorem's premise is that the run REACHES
-    that address; the emitted `have hpc : ({name}_pre_{i}).pc = {pc}` is
-    `native_decide`d against the concrete `init` state, so when the run does
-    not get there the premise is FALSE and the proof fails on its own belief:
-
-        error: Tactic `native_decide` evaluated that the proposition
-          main_pre_0.pc = 4294968416
-        is false
-
-    Measured on this tree before the check existed, and it is
-    `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s own
-    reproducer — `def main(n): if n > 100: printf("hi"); return 0` at test input
-    10 — which is `exit 1` and eleven Lean errors from a program with no integer
-    arithmetic in it at all. That is what makes this a limit of the WALK and not
-    of the trap that document's author wanted to add; it names the limit here.
-
-    **`cond_branches` is the filter, and it is the same one the `hcond`/`hsrc`
-    emission already uses** (`_gen_universal_e2e_cfg`'s `_cond_blocks`): the
-    emitter publishes the pcs of the branches that came from a source-level
-    `if`/`while`/range test, and everything else in the image that branches is
-    the emitter's own structure. Only the former is a fact about the DATA, so
-    only the former can make the run's path depend on the entry value. That
-    distinction is load-bearing rather than a convenience, and it is measurable:
-    `printf("hi"); return 0` — one call, no `if` — branches five times inside
-    the `printf` expansion, so blocking on every `cbz`-kinded block would refuse
-    a program that proves today (measured on this tree, exit 0, proof checked).
-
-    So a block on the path blocks only when it is `cbz`-kinded AND its branch pc
-    is in `cond_branches`; a `b` block is followed to its target, and a `seq`
-    block falls through to the next block by ADDRESS, which is what
-    `_cfg_blocks`' own ordering (`sorted(starts)`, and a `seq` block running to
-    the next start) means. A `cbz` that is not a source condition is followed
-    down its FALL-THROUGH, which is the conservative choice for the same
-    reason the follow is: the walk does not know which way an emitter-internal
-    branch goes, so it takes the edge a straight-line run would have taken.
-
-    An EMPTY `cond_branches` means the emitter recorded no source conditional
-    at all, and then nothing on the path is a fact about the data — so the
-    answer is permissive. That is deliberately NOT the fallback
-    `_gen_universal_e2e_cfg`'s `_cond_blocks` uses, and the difference is the
-    question: that one asks WHICH source condition a block carries (picking
-    wrongly there attributes a proof to the wrong expression), while this one
-    asks WHETHER a source condition is on the path at all. Measured on this tree:
-    `printf("hi"); return 0` has five `cbz`-kinded blocks and an empty
-    `cond_branches`, and it PROVES today — exit 0, proof checked — so treating
-    every conditional as a source one would refuse a working program.
-    """
-    words = {base + i: int.from_bytes(code[i:i + 4], "little")
-             for i in range(0, len(code) - len(code) % 4, 4)}
-    if func_entry not in words:
-        return True                    # nothing to decide: leave it to Lean
-    blocks = _cfg_blocks(words, func_entry, func_end)
-    order = [b["start"] for b in blocks]
-    seen = set()
-    reached = set()
-    queue = [func_entry]
-    while queue:
-        start = queue.pop()
-        if start in seen or start not in order:
-            continue
-        seen.add(start)
-        reached.add(start)
-        block = blocks[order.index(start)]
-        if block["kind"] == "b":
-            tgt = block["targets"][0]
-            if tgt is not None:
-                queue.append(tgt)
-        elif block["kind"] == "cbz":
-            if cond_branches and block["instrs"][-1] in cond_branches:
-                return False           # a SOURCE condition sits on the path
-            # BOTH edges of a branch that is not a source condition.  The walk
-            # cannot know which way an emitter-internal branch goes — `a // b`
-            # puts its `__div0` call on the TAKEN edge of the guard's own
-            # `CBZ Xb` — and following both is the over-approximating answer,
-            # which is the permissive direction for a question whose failure
-            # mode is a false refusal.
-            queue.extend(t for t in block["targets"] if t is not None)
-        elif block["kind"] == "seq":
-            i = order.index(start)
-            if i + 1 < len(order):
-                queue.append(order[i + 1])
-    return any(pc in b["instrs"] for b in blocks if b["start"] in reached)
-
-
-
 def _unmodelled_instruction(word: int):
     """`(name, why)` for an instruction word `arm64_step` has no branch for.
 
@@ -7676,23 +7442,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                 A(f"{IND}  all_goals try rfl")
                                 _hpriors.append(_hp)
                 if not _is_bit_test and (not _Xs or _fl is None):
-                    # `NotImplementedError`, not `ValueError`: this is the same
-                    # "I will not write a model I do not have" signal every
-                    # other refusal in this file raises, and the TYPE is what
-                    # two readers depend on.
-                    # `tools/formal_proof_census.py` classifies a
-                    # `NotImplementedError` as `refused` (rank 4, a statement
-                    # about the generator) and anything else that escapes as
-                    # `crash` (rank 5, "something was RAISED that is not a
-                    # refusal — a bug"), so the old spelling made
-                    # `formal/examples/dead_branch.mojo` — a program refused for
-                    # a reason stated in a sentence — read as the most alarming
-                    # class in the census. `test_formal.py` treats the two the
-                    # same way (a non-zero build), which is why nothing else
-                    # noticed.
-                    raise NotImplementedError(
-                        "unsupported: branch condition value flow "
-                        "(frame/flag unavailable)")
+                    raise ValueError("unsupported: branch condition value flow (frame/flag unavailable)")
 
                 def _rw_spills(tolerant, line_instrs, cur_instrs, state):
                     """The `rw` that resolves this path's spill reads, if any.
@@ -10362,48 +10112,6 @@ def generate_arm64_proof(prog, code, info) -> str:
             f"correct for all of them; what is missing is the machine half.  "
             f"Raised here rather than left to the walk, which reported this as "
             f"a recursion problem.")
-    if _opaque is not None and not _reached_without_a_condition(
-            code, base_addr, func_entry_addr, _opaque["func_end"], _opaque["pc"],
-            cond_branches=set(info.get("cond_branches") or ())):
-        # The ONE call on a path the test input does not take, which is the
-        # half of the neighbouring refusal that was not named and arrived as a
-        # crash: the theorem's premise is that the run REACHES the halt address,
-        # it is `native_decide`d against the concrete `init`, and when the run
-        # does not get there the premise is false and Lean fails on the
-        # generator's own belief about where the machine is.  A refusal is what
-        # this file owes the reader here, and `NotImplementedError` is the type
-        # every other limit in it raises.
-        #
-        # Measured on this tree before this check, both spellings, and the
-        # second is the same failure with no arithmetic in the program at all:
-        #
-        #     def main(n):
-        #         if n > 100:
-        #             printf("hi")
-        #         return 0
-        #   -> exit 1, eleven Lean errors ending in
-        #      "Tactic `native_decide` evaluated that the proposition
-        #         main_pre_0.pc = 4294968392 is false"
-        #
-        # which is `bugs/FORMAL_integer_overflow_at_run_time_is_still_
-        # trapped.md`'s measured obstacle, named there as PRE-EXISTING and as the
-        # thing standing in front of its own step 2.  What is still missing is
-        # the other half of that doc's step 2 — a trap BLOCK the walk treats as
-        # terminal — which is what would let a conditional path carry a call
-        # rather than refuse it.
-        raise NotImplementedError(
-            f"universal theorem: the call at {_opaque['pc']:#x} -> "
-            f"{_opaque['target']:#x} is the halt address, and it is behind a "
-            f"CONDITIONAL, so whether the run reaches it is a fact about the "
-            f"test input rather than about the CFG. The theorem's premise is "
-            f"that it does, and `native_decide` checks it against the concrete "
-            f"entry state: when the run does not get there the premise is false "
-            f"and the proof fails on the generator's own belief about where the "
-            f"machine is. Refused here rather than left to fail that way -- "
-            f"which is what it did, with eleven Lean errors, on "
-            f"`if n > 100: printf(\"hi\")` before this check. The semantic model "
-            f"is emitted and correct; what is missing is the machine half for a "
-            f"call on a path a condition selects.")
     # The AST bridge's own limit, asked AFTER the machine half's so that the
     # refusal a two-function program gets names the bigger of the two gaps: the
     # CFG walk cannot follow the call at all, where the bridge could be fixed

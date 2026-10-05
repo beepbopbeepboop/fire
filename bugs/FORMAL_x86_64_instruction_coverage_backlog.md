@@ -8,50 +8,6 @@ property of the harness) and `.BACKLOG` (twelve, each with its own doc). This
 file is the x86-64 answer, and it is **not** closed: 18 of the 85 emitted forms
 have no fuzz case, no model sample, or no decoder arm.
 
-**Status 2026-10-05 (`work/formal40-7`): SHAPE 3 is DONE and one row of SHAPE 2
-with it — 18 backlog rows are 13, and all five were closed by asking the CPU a
-question rather than by editing a table.** The two `BACKLOG` reasons this file
-recorded for three of them are FALSE of this harness and are worth stating,
-because "a tool defect that reads as `nothing to do here`" is the direction that
-costs:
-
-| row | closed by | measured |
-|---|---|---|
-| `encode_jcc_rel32`, `encode_jmp_rel32` | a `rel32 0` pool entry — a branch to the NEXT instruction, the same shape the rel8 entries already had | 4 initial states each, AGREE |
-| `encode_call_rel32` | a `call rel32 0` pool entry. **The recorded reason was "a call cannot run in the harness's straight-line stub without leaving it", and it does not leave**: the emulated region is ONE `MAP_FIXED` mapping that the terminator falls out of at its end, so a branch to the next instruction stays inside whatever the program already put there, and the pushed return address lands on the emulated stack — outside the compared memory window, which is `DATA_OFF` and not `STACK_OFF`, so it cannot be a false disagreement | 4 initial states, AGREE |
-| `encode_lea_r64_rip` | a pool entry. **The recorded reason was "the two engines' RIPs differ by the load slide", and here they do not**: the harness maps its region at a FIXED address and hands the model the same base, so a pc-relative RESULT is the same number in both halves. That reason fits arm64's `encode_adrp`, which keeps its `HARNESS_LIMITS` entry — this project does not map the arm64 harness's code at a fixed address, so only pc DELTAS are comparable there | 4 initial states, AGREE |
-| `encode_movq_xmm_rm64` | a `samples()` row. It has had a step-lemma row (`x86_step_movq_xmm_rm64`) since that lemma was written and no sample, so the one function that answers "can `x86_step` step it?" was never asked — and that sample list IS this census's LEAN column on x86-64 | `185 samples over 67 forms — all steppable` (was 183/66) |
-
-The census line moves with them:
-
-```
-$ python3 tools/formal_isa_census.py --arch x86_64 | tail -1
-   -- 0 form(s) with no LEAN/FUZZ/AS and no exemption; 18 exempt (5 harness, 13 backlog)
-```
-
-**What is left is 13 rows in two shapes, and both are bigger than a patch.**
-Shape 1 (nine SSE2 scalar binary64 encoders) needs a decoder arm, a model arm, a
-sample and a pool entry per form, and `ucomisd`'s unordered case is the one that
-decides whether the model can be trusted for the other eight. Shape 2's three
-decoder arms (`69 /r id`, `FF /2` with `mod=11`, and the byte-wise `and`/`or`)
-each need a model arm and a step lemma as well as the decoder, because
-`x86_step`'s group-3 handler and its REX.W-only ALU arm do not reach them today.
-
-**And a defect in the instrument itself, measured and NOT fixed here because the
-tool is another claim's write set** (`bug:FORMAL_arm64_instruction_coverage`):
-the EX column matches a form against an image by DISASSEMBLY MNEMONIC, so two
-encodings of one instruction are indistinguishable. Measured: this doc's own "8
-examples" for `encode_imul_r64_r64_imm` is a false attribution — those eight
-images contain only `0F AF` (`imulq %rax, %r11`), and the encoder this row is
-about emits `6B /r ib` (which the BACKLOG note below miscalls `69 /r id`). Both
-spellings print the same mnemonic, so the row claims a corpus that contains a
-form it does not, and the fix's motivation ("8 examples are blocked from being
-walked") is not what is happening: 39 of the 52 examples emit a `terminates`
-theorem today, five of them among the eight named. The fix is to key the column
-on (mnemonic, operand shape) and report `ambiguous` where that does not separate
-two encodings; it needs the `--examples` cache re-measured for both
-architectures, which is cheap (104 compiles, ~5 s).
-
 It is one document rather than eight because the gaps are not eight problems.
 They are three shapes, and the shapes are what a reader wants.
 
@@ -112,14 +68,7 @@ coverage test asks `x86_step` about it, and each with a `test_x86_64_decode.py`
 row. `encode_movq_xmm_rm64` is the fourth in this shape and is already decodable
 (`0x66 REX.W 0F 6E`); it only lacks a coverage sample and a pool entry.
 
-## Shape 3: runnable, and the pool does not draw them (5) — DONE 2026-10-05
-
-**All four of the runnable rows are in the pool and AGREE against the CPU** (the
-table at the top), and `encode_movq_xmm_rm64` — which this section called "the
-fourth in this shape" — is closed by a sample rather than by a pool entry. The
-text below is what the section said while the rows were open, and BOTH of the
-reasons it gives are recorded at the top because both are false of this harness.
-
+## Shape 3: runnable, and the pool does not draw them (5)
 
 `encode_jcc_rel32`, `encode_jmp_rel32` — the pool draws only the rel8 branch,
 while `formal/x86_64_codegen.py` emits the rel32 spelling past a 128-byte reach.

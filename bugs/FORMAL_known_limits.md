@@ -35,16 +35,10 @@ export probe dead on any module with a dataclass field carrying a default.
 ## Two open items in the arm64 per-export-contract work (agent [3])
 
 Not part of the sweep families above, and not re-measured by this audit. Both
-were **true** claims. **The first is FIXED** — `lib/Contracts.lean` compiles
-clean with 0 holes, `bodyCert`/`agrees_of_body`/`hreg` are emitted, and
-`bugs/FORMAL_a_conditional_value_in_a_dylib_export.md` §1 carries the
-measurement and what landed. **The second is `OPUS-4`** in
-`bugs/FORMAL_dylib_export_loops_and_frame_bounds.md`, which names the write set
-(`lib/ProofLib.lean`'s `exportFuel`, `formal/arm64_proof_gen.py`) and the two
-questions with no answer in the code (superclass matching, and what
-`except A as e` binds). The handoff document that used to sit between them —
-`FORMAL_contract_work_handoff.md`, deleted 2026-10-05 — was a finished task's
-notes, not a third owner.
+are **true** claims, both unfinished; the single home for their full state —
+every measurement, every trap hit on the way, and the exact next step — is:
+
+> **`FORMAL_contract_work_handoff.md`** — read §1 and §3 of it to start.
 
 | item | measured | is the claim true? | what closes it |
 |---|---|---|---|
@@ -328,7 +322,7 @@ other direction: the walk got FURTHER (the `List[Self.T]()` and then the
 `len(self._data)` refusals are both gone as of 2026-10-03,
 `work/formal12-binary-heap`) and the family is still this size, because the
 export gate is waiting behind both of them. The re-measurement is
-the `2026-09-30_r2` round of `bugs/FORMAL_sweep_work_map.md` §3.2, and it notes what is NOT
+`bugs/FORMAL_sweep_work_map_2026-09-30_r2.md` §3.2, and it notes what is NOT
 available: with the 35 files behind it, this family is now the largest single
 cause on the tree that nobody owns, and its ceiling is Stage 5 (§1.2), not a
 bug.

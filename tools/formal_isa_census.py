@@ -573,6 +573,11 @@ BACKLOG = {
     "encode_fcvtzs_xn_dn": ("bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
                             "as `encode_fadd_dd_dn_dm`"),
     # ── x86-64: the forms the harness cannot even NAME ───────────────────
+    "encode_movq_xmm_rm64": (
+        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
+        "the GPR-to-XMM move the floating `printf` path needs; `x86_step` "
+        "steps it but `formal/x86_64_model_coverage_test.py` has no sample, "
+        "so the model is never asked"),
     "encode_imul_r64_r64_imm": (
         "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
         "`69 /r id`: no decoder arm (only `0F AF` is decoded) and no pool or "
@@ -612,20 +617,23 @@ BACKLOG = {
         "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
         "as `encode_addsd_xmm`"),
     # ── x86-64: runnable, and the pool does not draw them ────────────────
-    # `encode_lea_r64_rip`, `encode_jcc_rel32`, `encode_jmp_rel32` and
-    # `encode_call_rel32` were here until 2026-10-05, with the reason "the two
-    # engines' RIPs differ by the load slide" for the `lea` and "a call cannot
-    # run in the harness's straight-line stub without leaving it" for the
-    # `call`.  Both reasons are FALSE of this harness and were worth measuring
-    # rather than repeating: the emulated region is ONE `MAP_FIXED` mapping and
-    # the model is handed the same base, so a pc-relative result is the same
-    # number in both halves; and a branch to the NEXT instruction stays inside
-    # whatever the program has already put there.  All four are in the pool now
-    # (`formal/x86_64_model_fuzz.py`), measured AGREE at four initial states
-    # each.  arm64's `encode_adrp` keeps its HARNESS_LIMITS entry, and that
-    # reason is the one that fits IT: this project does not map the arm64
-    # harness's code at a fixed address, so a pc-relative RESULT cannot be
-    # compared and only pc DELTAS are.
+    "encode_lea_r64_rip": (
+        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
+        "RIP-relative `lea`: the two engines' RIPs differ by the load slide, so "
+        "it belongs beside `encode_adrp` in HARNESS_LIMITS rather than in the "
+        "pool until the harness translates it"),
+    "encode_jcc_rel32": (
+        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
+        "the pool draws only the rel8 branch; the rel32 spelling is what "
+        "`formal/x86_64_codegen.py` emits past a 128-byte reach"),
+    "encode_jmp_rel32": (
+        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
+        "as `encode_jcc_rel32`"),
+    "encode_call_rel32": (
+        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
+        "a call cannot run in the harness's straight-line stub without leaving "
+        "it; the model-vs-hardware comparison needs a form the harness can "
+        "keep control of"),
 }
 
 
