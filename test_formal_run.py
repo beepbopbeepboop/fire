@@ -15692,12 +15692,23 @@ FLOAT_CASES = [
     # Overflow is an INFINITY, not a wrap. Probed by COMPARISON rather than
     # printed, because `%f` of an infinity renders "inf" on one libc and
     # something else on another and this is a test of the compiler.
+    #
+    # The infinity is reached by OVERFLOW (`1e308 * 1e308`) and not by
+    # `1.0 / 0.0`. That is not a stylistic choice and it is not new: CPython
+    # raises `ZeroDivisionError` for a zero divisor on doubles, so a program
+    # that got `+inf` that way was never the program CPython runs — and this
+    # path now agrees with CPython about that too, so `1.0 / 0.0` leaves the
+    # process with status 1. That observable is pinned against CPython in
+    # `test_formal_exceptions.py` (`float_divide_by_a_zero_divisor_leaves*`),
+    # which is where every row with a CPython oracle for the exit status of a
+    # failing check lives — the rows here are about the ARITHMETIC, and they
+    # reach the special values the way CPython itself reaches them.
+    # `bugs/FORMAL_float_zero_division.md` recorded the old divergence and is
+    # gone with its fix.
     ("float_multiply_overflows_to_an_infinity",
      "def is_inf() -> Int:\n"
-     "    var one = 1.0\n"
-     "    var zero = 0.0\n"
      "    var big = 1e308\n"
-     "    var inf = one / zero\n"
+     "    var inf = big * big\n"
      "    var r = big * inf\n"
      "    if r > big:\n"
      "        return 1\n"
@@ -15711,6 +15722,21 @@ FLOAT_CASES = [
      "\n"
      "def main():\n"
      "    print(\"%d\" % is_inf())\n"),
+    # The NEGATIVE half of that row, and the reason the zero divisor had to go
+    # rather than stay as the only route to a signed infinity: `0.0 - (1e308 *
+    # 1e308)` is `-inf` without dividing by anything, so the sign of an
+    # overflowed infinity is still observable.
+    ("float_overflow_carries_the_sign_of_its_operands",
+     "def main() -> Int:\n"
+     "    var big = 1e308\n"
+     "    var pinf = big * big\n"
+     "    var ninf = (0.0 - big) * big\n"
+     "    printf(\"%d %d\\n\", 1 if pinf > big else 0,\n"
+     "           1 if ninf < (0.0 - big) else 0)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    print(\"%d %d\" % (int(float('inf') > 1e308),\n"
+     "                     int(float('-inf') < -1e308)))\n"),
     # Underflow to a SUBNORMAL, which is where a double's exponent range
     # differs from a float's. Multiplying two tiny numbers is the only way to
     # reach it, and it is the case where a narrowing implementation that
@@ -15748,10 +15774,13 @@ FLOAT_CASES = [
     # `-0.0` from `+0.0`.
     # `%.17g` DOES distinguish the two zeros (`-0` from `0`), so the observable
     # needs no arithmetic — which matters, because the obvious one cannot be
-    # used: `1.0 / x` for the sign of a zero is `1.0 / 0.0`, and CPython RAISES
-    # `ZeroDivisionError` there where IEEE (and this path) produce an infinity.
-    # That divergence is real and is `bugs/FORMAL_float_zero_division.md`; a case
-    # whose oracle raises is not a case, so the rendering is the observable.
+    # used any more: the sign of a zero is read as `1.0 / x`, and for `x` a zero
+    # that is `1.0 / 0.0`, which CPython answers with a `ZeroDivisionError` and
+    # which this path answers the same way (`formal/model.py`'s
+    # `raise_float_divides_by_zero_is_an_exception` — the IEEE infinity this
+    # backend used to produce there is what `bugs/FORMAL_float_zero_division.md`
+    # recorded, and the doc is gone with its fix). A case whose oracle raises is
+    # not a case either way, so the rendering is the observable and always was.
     # The `-0.5` in the same program is the guard on the defect: a `NEG` on the
     # BIT PATTERN — which is what unary minus used to emit — answers a denormal
     # here, and `int(-0.5)` answered -8 where CPython answers 0.
@@ -15794,6 +15823,16 @@ FLOAT_CASES = [
      "                             is_negative(div_sign(-1.0, -3.0))))\n"),
 
     # ── infinities ─────────────────────────────────────────────────────────
+    #
+    # `inf_of` reaches `+inf` by OVERFLOW (`1e308 * 1e308`), not by
+    # `1.0 / 0.0`. CPython raises `ZeroDivisionError` for a zero divisor on
+    # doubles, so the old spelling was a program CPython refuses and this
+    # path used to answer anyway — the divergence
+    # `bugs/FORMAL_float_zero_division.md` recorded, which is gone with its
+    # fix (`formal/model.py::raise_float_divides_by_zero_is_an_exception`).
+    # Overflow is the route CPython itself takes, so the oracle below can
+    # spell the same values without the two halves disagreeing about what the
+    # program means.
     ("float_infinity_arithmetic",
      "def one_of() -> Float64:\n"
      "    return 1.0\n"
@@ -15802,9 +15841,8 @@ FLOAT_CASES = [
      "    return 2.0\n"
      "\n"
      "def inf_of() -> Float64:\n"
-     "    var one = 1.0\n"
-     "    var zero = 0.0\n"
-     "    return one / zero\n"
+     "    var big = 1e308\n"
+     "    return big * big\n"
      "\n"
      "def main() -> Int:\n"
      "    var big = 1e308\n"
@@ -15839,8 +15877,9 @@ FLOAT_CASES = [
     # NaN on both machines.
     ("float_nan_comparisons",
      "def nan_of() -> Float64:\n"
-     "    var zero = 0.0\n"
-     "    return zero / zero\n"
+     "    var big = 1e308\n"
+     "    var inf = big * big\n"
+     "    return inf - inf\n"
      "\n"
      "def main() -> Int:\n"
      "    var n = nan_of()\n"
@@ -15890,9 +15929,9 @@ FLOAT_CASES = [
      "    var one = 1.0\n"
      "    var two = 2.5\n"
      "    var half = 1.5\n"
-     "    var inf = one / zero\n"
+     "    var inf = 1e308 * 1e308\n"
      "    var ninf = zero - inf\n"
-     "    var nan = zero / zero\n"
+     "    var nan = inf - inf\n"
      "    var tiny = 1e-320\n"
      "    var big = 1e308\n"
      "    var mhalf = 0.0 - 1.5\n"
@@ -15957,13 +15996,13 @@ FLOAT_CASES = [
      "    return 0.0 - x\n"
      "\n"
      "def nan_of() -> Float64:\n"
-     "    var zero = 0.0\n"
-     "    return zero / zero\n"
+     "    var big = 1e308\n"
+     "    var inf = big * big\n"
+     "    return inf - inf\n"
      "\n"
      "def inf_of() -> Float64:\n"
-     "    var one = 1.0\n"
-     "    var zero = 0.0\n"
-     "    return one / zero\n"
+     "    var big = 1e308\n"
+     "    return big * big\n"
      "\n"
      "def main() -> Int:\n"
      "    var one = 1.0\n"

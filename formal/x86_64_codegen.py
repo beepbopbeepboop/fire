@@ -6603,8 +6603,54 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             "mulsd": encode_mulsd_xmm, "divsd": encode_divsd_xmm,
         }[M.FLOAT_BINARY_MNEMONICS[op][1]]
         self._emit_float_operands(l, r)
+        if op == "/" and M.raise_float_divides_by_zero_is_an_exception():
+            self._emit_float_divide_by_zero_guard()
         self.asm.emit(emit(0, 1))
         self.asm.emit(encode_movq_r64_xmm(Reg.RAX, 0))
+
+    def _emit_float_divide_by_zero_guard(self) -> None:
+        """Leave with status 1 when the DIVISOR in XMM1 is zero, around a DIVSD.
+
+        The mirror of `formal/arm64_codegen.py`'s method of the same name, and
+        `model.raise_float_divides_by_zero_is_an_exception` is what both ask so
+        that the two architectures cannot come to disagree about whether the
+        LANGUAGE raises here — IEEE-754 does not trap, so `DIVSD` by zero
+        answers `+inf` and the program runs on past a line CPython refuses.
+        Measured before the guard on both backends: `x = 1.0/0.0` printed `b`
+        and exited 0 where CPython prints `a` and exits 1.
+
+        **The test is on the BIT PATTERN, in the integer file, and it is arm64's
+        `LSL #1` written as an `ADD r,r`.** A double is zero iff its pattern is
+        `+0.0` (0) or `-0.0` (`1 << 63`), and `R11 + R11` is `2 * R11` modulo
+        2^64, which is 0 for exactly those two patterns and non-zero for every
+        other — including NaN, whose payload is non-zero, which is right:
+        `1.0/nan` is `nan` in CPython and raises nothing.
+
+        `_emit_float_operands` leaves the divisor's bits in R11 as well as in
+        XMM1 (it copied them there before the pop overwrote RAX with the left
+        operand), so the test costs one `ADD` and no second load. Testing in the
+        integer file rather than with `UCOMISD` against a zeroed XMM register is
+        the same reason arm64 tests in the integer file: `UCOMISD` sets PF on an
+        unordered compare, so an `EQ` branch on it needs the model to reason
+        about the NaN case, whereas a `TEST`+`JZ` is the shape the integer
+        divide-by-zero guard already emits.
+
+        Not `_record_cond_branch`: neither the integer guard nor this one has an
+        AST condition behind it, and recording it would claim a source-level
+        `if` the program never wrote."""
+        self._if_counter += 1
+        cid = self._if_counter
+        div0_label = f"{self.func_name}_fdv{cid}_z"
+        ok_label = f"{self.func_name}_fdv{cid}_ok"
+        self.asm.emit(encode_add_r64_r64(Reg.R11, Reg.R11))
+        self._emit_jcc_bool(Reg.R11, COND_E, div0_label)
+        self._emit_jmp(ok_label)
+        self.asm.label(div0_label)
+        # The C library's `exit(1)`, which is the shape every other failing
+        # check on this backend uses (`_emit_call_exit`), so "the program
+        # stopped here" has one shape and its output is flushed.
+        self._emit_call_exit(1)
+        self.asm.label(ok_label)
 
     def _emit_float_operands(self, l, r) -> None:
         """Two doubles into XMM0 (left) and XMM1 (right), both surviving a call.

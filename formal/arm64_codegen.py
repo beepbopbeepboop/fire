@@ -7222,8 +7222,60 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_cmp_operands(l, r)
         self.asm.emit(encode_fmov_gpr_to_v(0, 0))
         self.asm.emit(encode_fmov_gpr_to_v(1, 1))
+        if op == "/" and M.raise_float_divides_by_zero_is_an_exception():
+            self._emit_float_divide_by_zero_guard()
         self.asm.emit(emit(0, 0, 1))
         self.asm.emit(encode_fmov_v_to_gpr(0, 0))
+
+    def _emit_float_divide_by_zero_guard(self) -> None:
+        """Leave with status 1 when the DIVISOR in D1 is zero, around an FDIV.
+
+        CPython raises `ZeroDivisionError` for `x / 0.0` on doubles, and IEEE-754
+        does not: `FDIV` by a zero divisor answers `+inf` (or `-inf`, or NaN for
+        `0.0/0.0`) and keeps going. So without this guard the backend computed a
+        NUMBER for a program CPython refuses and then ran the lines after it —
+        measured on both backends, `x = 1.0/0.0` printed `b` and exited 0 where
+        CPython prints `a` and exits 1, which is the "wrong but exit 0" answer
+        nothing in this compiler can detect on its own.
+
+        **The test is on the BIT PATTERN, in the integer file, and it is the
+        integer test shifted left by one.** A double is zero iff its pattern is
+        `+0.0` (`0`) or `-0.0` (`1 << 63`), and `LSL #1` drops the sign bit and
+        shifts the rest up, so `LSL X2, X1, #1` is zero for exactly those two
+        patterns and non-zero for every other — including NaN, whose payload is
+        non-zero, which is right: `1.0/nan` is `nan` in CPython and does not
+        raise.
+
+        Testing it this way rather than with `FCMP D1, D31` is deliberate and is
+        about the proof layer, not the code: `FCMP` sets NZCV to `0011` for an
+        unordered compare, so an `EQ` branch on it needs the model to reason
+        about a case the integer rules already cover, whereas a `CBZ` on a
+        shifted register is the exact shape `_emit_div_shift_pow`'s integer
+        `div0` guard already emits, and the proof generators already treat a
+        codegen-internal `CBZ` with no source condition by closing the taken arm
+        as dead when the register holds a compile-time non-zero constant (which
+        is what `1.0 / 2.5` gives it). One shape for both divides is one shape
+        for the model to carry.
+
+        Not `_record_cond_branch`: neither the integer guard nor this one has an
+        AST condition behind it, and recording it would claim a source-level
+        `if` the program never wrote.
+        """
+        self._if_counter += 1
+        cid = self._if_counter
+        fn = self.func_name
+        div0_label = f"{fn}_fdv{cid}_z"
+        ok_label = f"{fn}_fdv{cid}_ok"
+        self.asm.emit(encode_lsl_xd_xn_imm(2, 1, 1))
+        self.asm.emit(encode_cbz_xn(0, 2))
+        self.asm.emit_label_rel(div0_label, here_offset=-4)
+        self._emit_b_to(ok_label)
+        self.asm.label(div0_label)
+        # The same `_emit_exit(1)` an integer divide-by-zero and a failed
+        # `assert` leave behind, so "the program stopped here" has one shape
+        # and the status one value on this path.
+        self._emit_exit(1)
+        self.asm.label(ok_label)
 
     def _cmp_spec(self, op: str, l, r):
         """`(left, right, unsigned_cond, signed_cond, float_reading)` for a compare.

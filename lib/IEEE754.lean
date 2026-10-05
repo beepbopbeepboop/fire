@@ -152,9 +152,21 @@ def fsubBits (a b : Bits) : Bits := Float.toBits (Float.ofBits a - Float.ofBits 
 /-- `a * b`. -/
 def fmulBits (a b : Bits) : Bits := Float.toBits (Float.ofBits a * Float.ofBits b)
 
-/-- `a / b`.  `0/0` is a NaN and `x/0` is a signed infinity, where CPython
-raises `ZeroDivisionError` — a divergence this path cannot avoid, because it
-has no exception to raise through; `bugs/FORMAL_float_zero_division.md`. -/
+/-- `a / b`.  `0/0` is a NaN and `x/0` is a signed infinity, in IEEE.
+
+CPython raises `ZeroDivisionError` for a zero divisor, and the EMITTED image now
+agrees with it: `formal/model.py::raise_float_divides_by_zero_is_an_exception`
+is the predicate both backends read, and each emits the same zero-divisor guard
+the integer divide already had, so a program that divides a double by zero
+leaves with status 1 instead of carrying on with an infinity.  The divergence
+this docstring used to name was `bugs/FORMAL_float_zero_division.md`; that doc
+is gone with the fix.
+
+So these two functions are the ARITHMETIC and not a description of what the
+image does on a zero divisor — a statement about the shape that reaches them is
+part of their meaning: no emitted `FDIV` ever has a zero divisor, which is why
+`zero_over_zero_is_a_nan` and `one_over_zero_is_an_infinity` below are true
+statements about the model that no program in the corpus exercises. -/
 def fdivBits (a b : Bits) : Bits := Float.toBits (Float.ofBits a / Float.ofBits b)
 
 /-- Unary `-`: the SIGN BIT flipped, which is the only way to get `-0.0` from
@@ -362,10 +374,14 @@ theorem a_tenth_plus_a_fifth_rounds :
     faddBits 0x3FB999999999999A 0x3FC999999999999A = 0x3FD3333333333334 := by
   native_decide
 
-/-- `0.0 / 0.0` is a NaN and `1.0 / 0.0` is `+inf`: IEEE, where CPython raises
-`ZeroDivisionError`.  The divergence is the subject of
-`bugs/FORMAL_float_zero_division.md` and it is stated here as a fact about the
-model rather than left for a reader to find. -/
+/-- `0.0 / 0.0` is a NaN and `1.0 / 0.0` is `+inf`: IEEE.
+
+CPython raises `ZeroDivisionError`, and the emitted image agrees with CPython —
+see `fdivBits`'s docstring for the guard — so these two theorems are about the
+ARITHMETIC and not about anything a program in this repository can observe.
+They are kept because they are the shape that pins the two results a reader
+would otherwise assume were untested, and because the overflow/subnormal
+theorems beside them are the same kind of statement. -/
 theorem zero_over_zero_is_a_nan :
     isNaN (fdivBits 0x0000000000000000 0x0000000000000000) = true := by
   native_decide
