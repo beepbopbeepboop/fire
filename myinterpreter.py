@@ -6090,15 +6090,19 @@ class Interpreter:
         CPython) and `test_formal_globals.py`'s case of the same name (arm64,
         x86_64 and the interpreter) pin it.
 
-        **The compiled path still has this defect, by a different mechanism** —
-        it allocates the comprehension's target as a plain local of the
-        enclosing function, under the target's own source name, so that local
-        shadows the module global for the rest of the body and `fire.py --jit`
-        prints 3 where this now prints 6:
-        `bugs/CODEGEN_a_comprehension_target_is_a_local_of_the_enclosing_function.md`
-        quotes the generated C. Two engines agreeing on a wrong answer is why
-        the case above lives in the oracle rather than in the engine-vs-engine
-        suite.
+        The compiled path had this defect by a different mechanism — it
+        allocated the comprehension's target as a plain local of the enclosing
+        function, under the target's own source name, so that local shadowed
+        the module global for the rest of the body and `fire.py --jit` printed 3
+        where this prints 6. It no longer does: `_compr_bind_target`'s shadow
+        predicate is `module_shared.bare_global_read_plan`, the very decision
+        `_lower_IdentExpr` makes about where a bare name lives, so a target
+        whose name a bare read resolves to a module constant gets its own C
+        variable and the enclosing binding is restored when the comprehension
+        ends. The compiled spelling is `test_runtime_diff.py`'s
+        `comprehension_target_does_not_shadow_a_module_constant`; the case above
+        lives in the oracle rather than in the engine-vs-engine suite because two
+        engines agreeing on a wrong answer is invisible to the latter.
 
         `_generator_expression` twenty lines below already did this, and the
         shape is the same one it uses: a child scope for the whole walk, with

@@ -1,5 +1,61 @@
 # A dict READ never carries the slot's kind, so `d['k']` cannot say `None`, `True` or `1.5`
 
+## Status 2026-10-04 (`work/bugs7-1`): the RENDER half is fixed, the READ half is not
+
+Landed, and each item says which half of this doc it was:
+
+* **`mojo_repr_slot_kind` is now the ONE renderer for "a slot of kind K holding
+  this word".** There were three copies of the answer —
+  `mojo_repr_list_kinds`'s own six-arm switch, the generated `_mojo_repr_dict`
+  value chain, and the generated `_mojo_repr_pair` walker — and they had
+  already drifted: `print({'mid': 0})` printed `0` (the dict chain's `val == 0`
+  arm) while `sorted({'mid': 0}.items())` printed `[('mid', None)]` (the pair
+  chain, which had no such arm). All three are now calls, so the next value kind
+  is one arm in one function.
+* **`mojo_dict_items` / `mojo_dict_items_int` record a per-slot kinds row on
+  each pair they build**, off `_DictSlot.kind`, which is the bargain
+  `mojo_list_set_kinds` and `MojoDict.val_repr` already make: a pair slot is a
+  raw `int64_t`, so the value's kind is unrecoverable from the word. This closed
+  a narrower doc that measured only this same defect through
+  `sorted({'mid': 0}.items())`, and removed a SIGSEGV:
+  `print(d.items())` on a dict holding a float handed 1.5's IEEE-754 bits to the
+  runtime type-tag reader, which dereferences them.
+* **`emit_dict_int_value_store` grew the `char *` setter arm** and the three
+  sites that hand-rolled it stopped doing so. It used to be documented as "the
+  one dict store of a NON-STRING VALUE", so a `d[k] = 'str'` reaching a dict
+  through an OPAQUE int-typed receiver (a container global reads back as the
+  boxed `int64_t`) had no arm at all and stored the pointer with `kind == 0`.
+  `'%(s)s' % d` then printed the pointer decimal where CPython prints the string
+  — and `print(d)` hid it, because a `kind == 0` word above 65536 goes to the
+  generic reader, which renders a pointer-shaped word as a string.
+
+**Still open, and it is the doc's own subject.** `d['k']` and
+`read({'x': True})` still return the bare `int64_t` word: `d['n']` gives `0`
+where CPython says `None`, `d['b']` gives `1` where CPython says `True`, and
+`d['f']` gives `4609434218613702656`. Nothing below has changed. Two measured
+confirmations that the fix above did not leak into the read side:
+
+* `for k, v in sorted(d.items()): print(k, v)` over a HETEROGENEOUS dict reads
+  every value with ONE accessor (`_dict_items_val_elems`, one value type per
+  dict), so a container prints as a pointer decimal and a float as its bits. The
+  kinds row fixes what a pair PRINTS with, not what a subscript loop READS with.
+* `'%(f)s' % d` is right, because the keyed formatter already switched on
+  `kind` (`_fmt_dict_val_str`) — which is why the `'%(s)s'` case above was a
+  STORE-side gap rather than a read-side one, and why the two have to be
+  diagnosed separately.
+
+This doc also used to name a narrower twin of itself — the same defect
+measured only as a `.items()` pair whose value was the integer 0 — which is
+deleted with the fix above, because it was this bug at a narrower width.
+
+Pinned on the render half by `test_gimple_runner.py`'s
+`gimple_dict_items_pairs_keep_the_slot_kind` and
+`test_runtime_diff.py`'s `dict_items_reads_each_slot_kind`; the read half has no
+test, deliberately, because a test asserting `0` for `d['n']` is a bug waiting
+to be written as a fix.
+
+---
+
 Found 2026-10-02 while fixing the dict store path (the six
 `emit_dict_int_value_store` call sites and the value-kind arms of the
 generated `_mojo_repr_dict`). **Not a key bug, and not a store bug**: the

@@ -69,6 +69,7 @@ from mojo.middle.infra_infer import (
 # f-string route (`_stringify_value`, below), so the two spellings of "ask
 # this object to describe itself" cannot disagree about which dunder wins.
 from mojo.middle.calls_shared import user_dunder_repr_call
+import mojo.middle.module_shared as msh
 import mojo.middle.itcursor as itc
 from mojo.middle.stmts_shared import _annotation_container_elem_type
 # The extended-unpacking (`*rest`) slot arithmetic, shared with the
@@ -4099,8 +4100,14 @@ def _maybe_lower_mlir_op(gen, node: gimple_ctypes.CallExpr):
 
 
 def _compr_range_loop(gen, node, gen0, res, res_type):
-    gen._declare_var(gen0.target, 'int64_t',
-                    force=_compr_target_is_shadowed(gen, gen0.target))
+    # `_compr_bind_target` (not a bare `_declare_var(..., force=...)`): the
+    # bind/restore PAIR is what makes the shadow last exactly as long as the
+    # comprehension. Every arm that only passed `force=` left the shadowed C
+    # variable reachable under the source name for the REST OF THE FUNCTION,
+    # so the comprehension's last element is what every later read of that
+    # name saw -- `x = 5; out = [x for x in range(n)]; return x` answered 3
+    # where CPython answers 5.
+    saved_target = _compr_bind_target(gen, _as_str(gen0.target), 'int64_t')
     args = gen0.iterable.args
     dynamic_step = False
     if len(args) == 1:
@@ -4197,6 +4204,11 @@ def _compr_range_loop(gen, node, gen0, res, res_type):
         if step_t != 'int64_t':
             step_v = gen._new_val('int64_t', f"(int64_t){step_v}")
     else:
+        # A `range()` of more than three arguments lowers nothing. Nothing
+        # downstream consumed the bind above, so undo it (a no-op for the
+        # common free-name case, which is the only one that allocates) and
+        # leave the enclosing function exactly as we found it.
+        _compr_restore_target(gen, _as_str(gen0.target), saved_target)
         return
 
     # Every emitted reference below must go through _cname: _declare_var
@@ -4241,6 +4253,9 @@ def _compr_range_loop(gen, node, gen0, res, res_type):
     gen._emit(f"  {tgt_c} = {st};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
+    # The comprehension is over: the enclosing function's own binding for this
+    # name is live again (see `_compr_restore_target`).
+    _compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
 def _compr_cursor_loop(gen, node, gen0, res, res_type, rec):
@@ -4622,22 +4637,27 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     # fire_compiler.py's "Unpacking-target representation").
     is_tuple_target = (gimple_ctypes.for_target_is_tuple(_target_str)
                        and tuple_slot_ctypes is not None)
+    # `[x for x, in gen()]` binds ONE name, and `gen0.target` is the literal
+    # string `'(x,)'` — `_single_loop_target_name` is the reader that knows the
+    # trailing comma is a spelling rather than a second slot. Declaring the raw
+    # string emitted `int64_t (x,);`, which is not a C declaration, so the
+    # comprehension did not compile. A multi-slot target over a generator whose
+    # yield arity was never recorded is the other mismatch and is filed
+    # (bugs/CODEGEN_generator_multi_slot_target_needs_the_yield_arity.md).
+    #
+    # Read once, above the branch, because BOTH arms need it: the non-tuple arm
+    # declares and binds it, and the `_compr_restore_target` call after the loop
+    # has to put the enclosing function's own binding back under the SAME name
+    # the loop shadowed — restoring under `gen0.target` would miss `(x,)` and
+    # leave the shadow standing for the rest of the function.
+    _one = _single_loop_target_name(_target_str)
+    _tgt = _one if _one is not None else gen0.target
+    saved_target = None
     if is_tuple_target:
         var_names = gimple_ctypes.target_slots(_inner_str)
     else:
         var_names = None
-        # `[x for x, in gen()]` binds ONE name, and `gen0.target` is the
-        # literal string `'(x,)'` — `_single_loop_target_name` is the reader
-        # that knows the trailing comma is a spelling rather than a second
-        # slot. Declaring the raw string emitted `int64_t (x,);`, which is not
-        # a C declaration, so the comprehension did not compile. A multi-slot
-        # target over a generator whose yield arity was never recorded is the
-        # other mismatch and is filed
-        # (bugs/CODEGEN_generator_multi_slot_target_needs_the_yield_arity.md).
-        _one = _single_loop_target_name(_target_str)
-        _tgt = _one if _one is not None else gen0.target
-        gen._declare_var(_tgt, vct,
-                        force=_compr_target_is_shadowed(gen, _tgt))
+        saved_target = _compr_bind_target(gen, _tgt, vct)
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._emit(f"  goto {bb_cond};")
@@ -4658,6 +4678,11 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit_label(bb_post)
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
+    # The comprehension is over: the enclosing function's own binding for this
+    # name is live again (see `_compr_restore_target`). A no-op for a free
+    # name and for the tuple-target arm, which binds its slots through
+    # `_gen_compr_append`'s own per-slot path.
+    _compr_restore_target(gen, _tgt, saved_target)
     # Deliberately NO `{base}_destroy` here. Consuming a generator does not
     # CLOSE it, in real Python or here: the handle belongs to whatever holds
     # it (usually a variable), and this loop may be run again over the same,
@@ -4673,8 +4698,7 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
 
 def _compr_dict_loop(gen, node, gen0, res, res_type, it_val):
     _iv = _as_str(it_val)   # see _compr_list_loop: keep the ptr a char* in the f-string
-    gen._declare_var(gen0.target, 'char *',
-                    force=_compr_target_is_shadowed(gen, gen0.target))
+    saved_target = _compr_bind_target(gen, _as_str(gen0.target), 'char *')
     iter_t = gen._new_temp('MojoDictIter *')
     more_t = gen._new_temp('int')
     gen._emit(f"  {iter_t} = mojo_dict_iter_new ({_iv});")
@@ -4702,6 +4726,9 @@ def _compr_dict_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
     gen._emit(f"  mojo_dict_iter_free ({iter_t});")
+    # The comprehension is over: the enclosing function's own binding for this
+    # name is live again (see `_compr_restore_target`).
+    _compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
 def _compr_target_is_shadowed(gen, target) -> bool:
@@ -4721,11 +4748,38 @@ def _compr_target_is_shadowed(gen, target) -> bool:
     `int64_t`, and `char * = mojo_set_iter_val_str(...)` would not
     gimplify -- one of the four errors that took out bootstrap-stage2-cc.
 
-    Only true when a variable of that name is already live, so the
-    single-comprehension case -- by far the common one -- is completely
-    unchanged.
+    "Already bound" is not only about LOCAL C variables. `_declare_var`
+    writes `var_types[name]` and `_c_names[name]`, and a bare read of a
+    module-scope name consults exactly that table: `_lower_IdentExpr`'s
+    module-global branch is gated on
+    `(name in _func_declared_globals or name not in var_types)`. So a
+    comprehension whose target happened to share a name with a MODULE
+    CONSTANT silently rebound that global for the rest of the enclosing
+    function, and every read after the comprehension went to the
+    comprehension's last element. Measured, six lines:
+
+        G = 5
+
+        def f(rows):
+            var out = [G for G in rows]
+            return G + out[0]
+
+    answered 3 where CPython answers 6 -- the local `G` shadowed the
+    module's 5 for `return G + out[0]`, and the read never even reached
+    `root__mojo_global_get_G()`. So the second question here is NOT a
+    weaker one ("is there a local?") but the SAME question the read asks:
+    `bare_global_read_plan` is that decision, extracted for exactly this
+    second reader (see its docstring), and asking it is what keeps the
+    write side and the read side from disagreeing about where a bare name
+    lives.
+
+    Only true when the name is already bound, so the single-comprehension
+    case -- by far the common one -- is completely unchanged.
     """
-    return _as_str(target) in gen.var_types
+    _n = _as_str(target)
+    if _n in gen.var_types:
+        return True
+    return msh.bare_global_read_plan(gen, _n)[0]
 
 
 def _compr_target_leaf_names(target_str: str) -> list:
@@ -4802,7 +4856,17 @@ def _compr_restore_target(gen, name, saved):
         gen._c_names.pop(_n, None)
     else:
         gen._c_names[_n] = prev_cname
-    gen.var_types[_n] = prev_type
+    # POP, not assign, when there was no `var_types` entry to restore: the
+    # shadow can now be taken by a name that was not a local of this function
+    # at all (see `_compr_target_is_shadowed` — a MODULE-scope binding counts),
+    # and `var_types[name] = None` is worse than useless, it is a live
+    # "declared with no type" entry that `_lower_IdentExpr`'s
+    # `name not in gen.var_types` gates read as "not a local, resolve me as a
+    # global" while every other consumer saw the key and read the None.
+    if prev_type is None:
+        gen.var_types.pop(_n, None)
+    else:
+        gen.var_types[_n] = prev_type
     if had_elem:
         gen._elem_types[_n] = prev_elem
     else:
@@ -4824,8 +4888,8 @@ def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
     # mojo_set_contains_str misses every element.
     _sv_elem = _as_str(gen._elem_of(_iv))
     _sv_is_str = (_sv_elem == 'char *')
-    gen._declare_var(gen0.target, 'char *' if _sv_is_str else 'int64_t',
-                    force=_compr_target_is_shadowed(gen, gen0.target))
+    saved_target = _compr_bind_target(gen, _as_str(gen0.target),
+                                    'char *' if _sv_is_str else 'int64_t')
     iter_t = gen._new_temp('MojoSetIter *')
     more_t = gen._new_temp('int')
     gen._emit(f"  {iter_t} = mojo_set_iter_new ({_iv});")
@@ -4847,6 +4911,9 @@ def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
     gen._emit(f"  mojo_set_iter_free ({iter_t});")
+    # The comprehension is over: the enclosing function's own binding for this
+    # name is live again (see `_compr_restore_target`).
+    _compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
 def note_container_callable_ret(gen, container_val: str, value_text: str,
@@ -4865,8 +4932,9 @@ def note_container_callable_ret(gen, container_val: str, value_text: str,
     caring which kind it is — so `_lower_list_literal`'s per-element append
     (a single chokepoint) records through this same function, and the honest
     name is the container-neutral one. It was `_dict_callable_ret` while only
-    dicts used it, and the doc that asked for the rename is
-    bugs/CODEGEN_call_through_subscript_callee_stubbed.md.
+    dicts used it; `gimple_call_through_subscript_callee` and
+    `gimple_call_through_a_list_subscript_callee` are the regressions that
+    hold both spellings, dict and list, to one answer.
 
     THREE sources, because a first-class callable has more than one
     representation here and every one of them has to reach the same
@@ -4969,7 +5037,7 @@ def elem_repr_operand(gen, shim: str) -> str:
 
 def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
                               val_ctype: str, val: str, val_node) -> None:
-    """The one dict store of a NON-STRING VALUE, shared by the dict literal
+    """The one dict store, for EVERY value kind, shared by the dict literal
     (`_emit_dict_pair_store`), the dict comprehension (`_gen_compr_append`), the
     subscript store `d[k] = v`, the same store under a bytes key, and the two
     `d[k] = v` shapes that reach a dict through an opaque int-typed receiver —
@@ -4978,8 +5046,9 @@ def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
     `mojo_mark_dict_bool_values`, and the sixth called a
     `gen._emit_dict_int_value_store` that was never a delegate.
 
-    Three value shapes, three setters, and each one is chosen from something
-    the store site can still see:
+    Value kinds and their setters, each chosen from something the store site
+    can still see (a `char *` first — see that arm's comment for why it is here
+    and not at the three sites that used to carry it):
 
     `key_ctype == 'MojoBytes *'` is its own key domain in the runtime (see
     `_DictSlot.keykind`), which is what the `bytes_` prefix below selects — so
@@ -5023,6 +5092,32 @@ def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
     that and hands the runtime `(char *)3` as a key to hash, which segfaults."""
     gen._note_container_callable_ret(dict_val, val, val_ctype, val_node)
     _bs = 'bytes_' if key_ctype == 'MojoBytes *' else ''
+    # A `char *` value, through `mojo_dict_set_str`, which tags the slot
+    # `kind == 2`. This arm is why the function is not named for the int case
+    # any more: it used to be documented as "the one dict store of a NON-STRING
+    # VALUE", and the three sites that had a `char *` value each hand-rolled
+    # that one line — so a FOURTH site, the one that reaches a dict through an
+    # OPAQUE int-typed receiver (a container global, which reads back as the
+    # boxed `int64_t`; `bare_global_read_plan` is the decision that types it),
+    # had no arm at all and stored the pointer through `mojo_dict_set_int`
+    # with `kind == 0`. The value was then indistinguishable from an integer,
+    # and every kind-aware consumer said so: `'%(s)s' % d` printed the pointer
+    # decimal where CPython prints the string. `print(d)` happened to survive,
+    # because a `kind == 0` word above 65536 goes to the generic reader, which
+    # renders a pointer-shaped word as a string — which is exactly why this hid
+    # behind a correct-looking dict repr.
+    #
+    # The `_slit_` load is the same one the hand-rolled arms did: a string
+    # LITERAL lowers to the bare name of a `static char *` pool entry, and the
+    # setter's parameter is read as a string, so the name goes through a real
+    # `char *` temp first.
+    if val_ctype == 'char *':
+        if val.startswith('_slit_'):
+            val = gen._new_val('char *', f"{val}")
+        gen._emit_call('void', '', 'mojo_dict_set_' + _bs + 'str',
+                       [('MojoDict *', dict_val), (key_ctype, key_val),
+                        ('char *', val)])
+        return
     if gen._is_none_literal(val_node):
         gen._emit_call('void', '', 'mojo_dict_set_' + _bs + 'none',
                        [('MojoDict *', dict_val), (key_ctype, key_val)])

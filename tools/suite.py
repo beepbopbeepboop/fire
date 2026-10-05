@@ -1472,28 +1472,39 @@ test('nonlocal', [PY, 'test_nonlocal.py'], cache=True,
 # the same `small`-workload shape `test_gimple.py` is, and a cap on a job
 # that never loads the whole closure buys nothing (see the MEMCLASS note).
 # Marked `expect=` rather than `disabled=`, and the reason is what the two
-# markers are FOR: this job's answer is not known, only four of its cases are
+# markers are FOR: this job's answer is not known, only three of its cases are
 # (the TOTAL moves as cases are added — 378 when this was written, 380 after the
 # merge of work/bugs-segfaults-r2 — which is why it is prose and not the
-# count the runner CHECKS, which is the 4), and it is the only instrument in the
+# count the runner CHECKS, which is the 3), and it is the only instrument in the
 # tree that compiles a real Mojo program and EXECUTES it. `disabled=` would stop
-# every case for the sake of the 4, trading ~376 passing rows of signal for a
+# every case for the sake of the 3, trading ~380 passing rows of signal for a
 # tidier screen — which is the
 # coverage hole the marker exists to prevent, not create. Cost is not the
 # blocker `disabled=` is for either: 0.2 GB and 270 s is not a machine-sized
 # reservation being spent on a known answer.
 #
-# The 4 are not bugs in the branch that added them — each passes there — but
+# The 3 are not bugs in the branch that added them — each passes there — but
 # interactions the merge of ten branches exposed, so the marker is a count-
-# CHECKED claim: a 5th failure, or a fix that leaves 3, is a FAILURE rather
-# than silently absorbed, and a run where all 4 are fixed reports "marked
+# CHECKED claim: a 4th failure, or a fix that leaves 2, is a FAILURE rather
+# than silently absorbed, and a run where all 3 are fixed reports "marked
 # expect= … but it PASSES". Each has its reproduction and next step in
 # bugs/MERGE_bugs4_gimplerunner_four_remaining.md.
+#
+# The count was 4 until 2026-10-04 (`work/bugs7-1`). The fourth,
+# `gimple_dict_repr_kinds_agree_with_cpython`, was the last line of an otherwise
+# passing program: `'%s' % d` lowered its dict operand to an `int64_t` and
+# emitted it straight into a `MojoDict *` parameter — "passing argument 2 of
+# 'mojo_str_format_dict' makes pointer from integer without a cast", which is a
+# build failure and so took out the three correct lines above it. Both halves of
+# that are now right (the operand is coerced to the parameter type, the way the
+# LHS already was; and an unkeyed spec renders the mapping, because CPython's
+# rule for `'%s' % d` is `str(d)` — the doc's "CPython TypeError" claim was
+# measured false), and the row is green. The doc's §3 records what landed.
 test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True,
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
-     expect='4 failing: compile-and-execute rows the merge of ten branches '
+     expect='3 failing: compile-and-execute rows the merge of ten branches '
             'left red — none fails on the branch that added it; see '
             'bugs/MERGE_bugs4_gimplerunner_four_remaining.md',
      desc='compile-and-execute: plain programs, structs, closures, stdlib calls')

@@ -341,9 +341,13 @@ def test_sibling_function_import_call_is_inlined() -> bool:
 
 def test_bare_import_sibling_function_call_through_module() -> bool:
     """`import SIBLING` + `SIBLING.free_fn(...)` — the FUNCTION reached
-    through a bare module marker, the shape
-    `bugs/CODEGEN_bare_import_module_qualified_call_answers_zero.md` is
-    about, and the sibling of the two struct cases above.
+    through a bare module marker — the sibling of the two struct cases
+    above. `import SIBLING` used to record `imported_symbols['SIBLING']` for
+    the MODULE and nothing for its members, so `_func_mangleable` answered
+    False for `SIBLING.fn`; the call now registers the member with the
+    DEFINING module's own parsed signature
+    (`funcs_shared.register_imported_symbol`, shared with
+    `_register_link_imports`' three inline table writes).
 
     The call used to reach the extern preamble's `weak` "unavailable in
     compiled mode" stub, printing `deep_fn: unavailable in compiled

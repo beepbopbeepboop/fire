@@ -1078,12 +1078,18 @@ CASES = [
     # green three-engine case look identical from the outside, and only one of
     # them can notice the interpreter drifting.
     #
-    # The compiled path has the same leak by a different mechanism (the
-    # comprehension's target becomes a plain local of `f`, shadowing the
-    # module global), so the compiled half of this case is filed separately as
-    # `bugs/CODEGEN_a_comprehension_target_is_a_local_of_the_enclosing_function.md`.
-    # These two images are not affected by it: they are the formal backends,
-    # which desugar the comprehension rather than inlining it.
+    # The compiled path had the same leak by a different mechanism (the
+    # comprehension's target became a plain local of `f`, shadowing the module
+    # global) and now does not: `_compr_bind_target`'s shadow predicate is
+    # `module_shared.bare_global_read_plan` — the same decision
+    # `_lower_IdentExpr` makes — so the target cannot take over a binding a
+    # bare read of that name resolves to. Pinned on the compiled path by
+    # `test_runtime_diff.py`'s
+    # `comprehension_target_does_not_shadow_a_module_constant` and
+    # `test_gimple_runner.py`'s
+    # `gimple_comprehension_target_binds_its_own_scope`. These two images were
+    # never affected: they are the formal backends, which desugar the
+    # comprehension rather than inlining it.
     ("a_comprehension_target_does_not_shadow_a_module_constant",
      "G = 5\n"
      "\n"

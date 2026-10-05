@@ -5375,11 +5375,18 @@ static char *_fmt_dict_val_str(int64_t v, int64_t kind, char *dblbuf, size_t dbl
     return mojo_str_from_int(v);
 }
 
-char *mojo_str_format_dict(char *fmt, MojoDict *vals)
+char *mojo_str_format_dict(char *fmt, MojoDict *vals,
+                           char *(*dict_str)(MojoDict *))
 {
     if (!fmt) return NULL;
     _FmtBuf out = {0};
     const char *p = fmt;
+    /* CPython gives a non-tuple right operand to exactly ONE spec (see the
+     * header): `'%s' % d` is `str(d)`, and a SECOND unkeyed spec has nothing
+     * left to consume and is a real TypeError — "'%s %s' % d" answers "not
+     * enough arguments for format string". One flag, because a keyed spec
+     * (`%(k)s`) draws from `vals` slot by slot and does not consume it. */
+    int whole_consumed = 0;
     while (*p) {
         if (*p != '%') {
             const char *start = p;
@@ -5391,15 +5398,46 @@ char *mojo_str_format_dict(char *fmt, MojoDict *vals)
         if (p[1] == '%') { _fmtbuf_putn(&out, "%", 1); p += 2; continue; }
         /* Dict-keyed form: %(key)[flags][width][.prec]conv */
         if (p[1] != '(') {
-            /* Not a keyed spec — a stray '%' in a dynamic template. Real
-             * Python would fail with "unsupported format character" /
-             * ValueError only when a conversion follows; a lone trailing
-             * '%' raises ValueError too. Copy verbatim and keep going:
-             * matches _lower_percent_format's established lenient
-             * degradation for templates that weren't really format
-             * strings, and never crashes. */
-            _fmtbuf_putn(&out, p, 1);
+            /* An UNKEYED spec, and the mapping itself is its operand — which is
+             * what `'%s' % d` is, and CPython's answer for it is `str(d)`. The
+             * dict's repr is the generated `_mojo_repr_dict`, handed in by the
+             * caller for exactly the reason `MojoDict.val_repr` travels on the
+             * value: this file cannot render a dict with its slot kinds and
+             * its recorded struct repr without becoming a second, drifting
+             * copy of that walker. */
+            /* `p++` FIRST: this scan starts AT the '%', so a scan written as
+             * `while (*p && *p != '%') p++;` would not advance at all and the
+             * loop would come back here with the mapping already consumed —
+             * which is how the first version of this arm raised "not enough
+             * arguments" on `'%s' % d`, the very case it was written for. */
+            const char *spec = p;
             p++;
+            while (*p && *p != '%') p++;
+            if (dict_str && !whole_consumed) {
+                char *_d = dict_str(vals);
+                if (_d) {
+                    _fmtbuf_puts(&out, _d);
+                    free(_d);
+                }
+                whole_consumed = 1;
+                continue;
+            }
+            if (whole_consumed) {
+                /* A second unkeyed spec with nothing left to consume. This used
+                 * to print the spec through, which is the silent-wrong-answer
+                 * shape: it prints `%s` where CPython raises, and a template
+                 * like this is far more often a bug in the caller than an
+                 * intentional passthrough. */
+                free(out.buf);
+                mojo_raise_type_error(
+                    (char *)"not enough arguments for format string");
+                return NULL;  /* unreached */
+            }
+            /* No renderer available (a caller in a TU with no generated
+             * reflection block): copy the spec through, which is the lenient
+             * degradation this function has always had for a template that
+             * wasn't really a format string. Never crashes. */
+            _fmtbuf_putn(&out, spec, (size_t)(p - spec));
             continue;
         }
         const char *key_start = p + 2;
@@ -7486,6 +7524,83 @@ char *mojo_repr_list_bytes(MojoList *l) {
     return mojo_str_cat_free(_buf, _is_tup ? ")" : "]");
 }
 
+/* ── One renderer for "a slot of this kind holding this word" ───────────────────────*/
+
+char *mojo_repr_slot_kind(char kind, int64_t v)
+{
+    /* See the header for why this exists and why it answers NULL rather than
+     * guessing for the kinds it does not own. The arms are the ones
+     * `mojo_repr_list_kinds` grew, plus 'b' — which no list literal produces and
+     * which is why it is here rather than there: a bool only ever reaches a
+     * walker through a dict slot, whose `_DictSlot.kind == 3` tag this
+     * function's sibling `mojo_dict_kind_byte` translates. */
+    switch (kind) {
+    case MOJO_KIND_NONE:
+        return strdup("None");
+    case MOJO_KIND_BOOL:
+        return strdup(v ? "True" : "False");
+    case MOJO_KIND_DOUBLE: {
+        double x;
+        memcpy(&x, &v, sizeof(x));
+        return mojo_repr_float(x);
+    }
+    case MOJO_KIND_STR:
+        return mojo_repr_str((char *)(intptr_t)v);
+    case MOJO_KIND_BYTES:
+        return mojo_bytes_repr((MojoBytes *)(intptr_t)v);
+    case MOJO_KIND_LIST:
+        /* The nested container's own kinds-aware repr, so a list inside a list
+         * describes ITS slots — `mojo_repr_list_kinds`'s own 'l' arm verbatim,
+         * because that is the answer, not a re-derivation of it. */
+        return mojo_repr_list_kinds((MojoList *)(intptr_t)v, NULL);
+    case MOJO_KIND_INT:
+        /* A ZERO word under a STATED int kind is the integer 0, and this is
+         * the whole reason the pair walkers were wrong: a slot that says it
+         * holds an int cannot be holding a null pointer, so the "None for a
+         * zero word" heuristic its callers fell back on does not apply to it.
+         * `mojo_dict_items` used to record no kinds at all for such a slot,
+         * which is why `sorted({'mid': 0}.items())` printed `[('mid', None)]`.
+         *
+         * A NON-zero word declines (NULL) rather than answering, because that
+         * one CAN be a boxed pointer and telling the two apart needs the
+         * generated dispatch this file cannot call. That asymmetry is the
+         * contract, not an oversight: the caller has to be able to tell "I am
+         * asked about a kind I do not own" from "the answer is nothing". */
+        return v ? NULL : mojo_repr_int(0);
+    default:
+        /* No stated kind (0, and anything unrecognised). The caller's own
+         * answer, which for a pair walker includes the None heuristic. */
+        return NULL;
+    }
+}
+
+char mojo_dict_kind_byte(int64_t dict_kind)
+{
+    /* `_DictSlot.kind` records WHICH SETTER RAN, not what is in the word; the
+     * MOJO_KIND_* alphabet records what is in the word. They overlap but are
+     * not the same vocabulary, and this is the one place they meet. `0` means
+     * "not one the renderer owns", which covers a plain int (the caller's own
+     * int path, which must keep dispatching for a boxed pointer) and both
+     * struct kinds — a struct value is rendered by the DICT's recorded
+     * `val_repr`, not by the slot's kind, so routing it through here would
+     * answer a decimal for a value the walker already knows how to print — and
+     * for an UNRECOGNISED kind, where declining is the only honest answer.
+     *
+     * `MOJO_KIND_INT` for kind 0 is not a formality: the renderer answers "0"
+     * for a zero word under a stated int kind, and that is what makes
+     * `print({'z': 0})` print `0` where it used to print `None`. Declining kind 0
+     * here would push the zero word to the generic reader, whose `val == 0` arm
+     * answers "None" for a null pointer. */
+    switch (dict_kind) {
+    case 0: return MOJO_KIND_INT;
+    case 1: return MOJO_KIND_DOUBLE;
+    case 2: return MOJO_KIND_STR;
+    case 3: return MOJO_KIND_BOOL;
+    case 4: return MOJO_KIND_NONE;
+    default: return 0;
+    }
+}
+
 char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
     /* repr for a MojoList * whose per-slot element kinds are known but NOT
      * uniform. The uniform helpers above each read every slot through one
@@ -7537,8 +7652,10 @@ char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
            also a dict KEY's renderer (`_container_key_str`), where it runs once
            per lookup in whatever loop the key is used in — which is exactly the
            shape that turned a tuple-keyed miss into gigabytes of live memory
-           (bugs/CODEGEN_tuple_dict_key_hashed_by_address.md). The one branch
-           that does not own a heap string is 'n' (None), a literal. */
+           (bugs/CODEGEN_tuple_dict_key_hashed_by_address.md). Every arm of the
+           chain below owns a heap string now — `mojo_repr_slot_kind` copies
+           'None' rather than handing back a literal — so one `free` covers all
+           of them and none of them can be missed. */
         char *_s;
         /* The list's own ELEMENT REPR wins over every kind byte below: it is
            the codegen saying what this list's elements actually ARE, which is
@@ -7550,25 +7667,16 @@ char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
             free(_re);
             continue;
         }
-        if (_k == 'd') {
-            _s = mojo_repr_float(mojo_list_get_double(l, _i));
-        } else if (_k == 's') {
-            MojoBytes *_b = (MojoBytes *)(uintptr_t)mojo_list_get_int(l, _i);
-            _s = mojo_bytes_repr(_b);
-        } else if (_k == 'p') {
-            char *_p = (char *)(intptr_t)mojo_list_get_int(l, _i);
-            _s = mojo_repr_str(_p);
-        } else if (_k == 'l') {
-            /* A nested list/tuple slot: recurse through the same kinds-aware
-             * repr, so `[[1, 2.5], 3]` describes its inner list too. */
-            MojoList *_in = (MojoList *)(intptr_t)mojo_list_get_int(l, _i);
-            _s = mojo_repr_list_kinds(_in, NULL);
-        } else if (_k == 'n') {
-            _buf = mojo_str_cat_free(_buf, "None");
-            continue;
-        } else {
-            _s = mojo_repr_int(mojo_list_get_int(l, _i));
-        }
+        /* ONE call, not this function's own six-arm switch: the renderer is
+         * `mojo_repr_slot_kind` (see the header for why it is one function),
+         * and it answers NULL for MOJO_KIND_INT — which is the ONLY arm left,
+         * and the one that cannot move, because a plain int slot can still hold
+         * a boxed pointer that only this file's callers can dispatch. It OWNS
+         * its return on every arm, including 'n', which is why the literal-None
+         * fast path this switch had is gone: the copy is on a debug print, and
+         * one ownership rule is worth more than two saved allocations. */
+        _s = mojo_repr_slot_kind(_k, mojo_list_get_int(l, _i));
+        if (!_s) _s = mojo_repr_int(mojo_list_get_int(l, _i));
         _buf = mojo_str_cat_free(_buf, _s);
         free(_s);
     }
@@ -8796,6 +8904,33 @@ MojoList *mojo_dict_items(MojoDict *d) {
          * value printed as a raw pointer decimal while the same value in the
          * dict itself printed `R<a>`. */
         if (d->val_repr) mojo_list_set_elem_repr(pair, (void *)d->val_repr);
+        /* The pair's PER-SLOT KINDS, for the same reason and the same
+         * bargain: the value's storage kind is on `_DictSlot.kind` and is
+         * unrecoverable once the pair exists, because a pair slot is a raw
+         * int64_t. Without this row `d.items()` on a dict with a 0/None/bool/
+         * float value printed the pair's slot 1 through the generic reader,
+         * which answers "None" for a zero word (right for a null pointer, wrong
+         * for the integer 0 — `sorted({'mid': 0}.items())` printed
+         * `[('mid', None)]`) and hands a float's IEEE-754 bits to the runtime
+         * type-tag reader, which DEREFERENCES them: `print(d.items())` on a dict
+         * holding 1.5 was a SIGSEGV with no output at all.
+         *
+         * Slot 0 is the key, appended as text just above, so it is MOJO_KIND_STR
+         * unconditionally — `mojo_dict_items_int` is the spelling that carries an
+         * integer key, and it records 'i' there instead. Two bytes, one
+         * `strdup` per pair: `mojo_list_set_kinds` stores the pointer, so a
+         * string literal would be handed to code that documents itself as
+         * freeing kinds rows (`_kinds_forget`), and a per-pair allocation on a
+         * method that already allocates a pair is not the cost anyone is
+         * protecting here. */
+        {
+            char pk[3];
+            pk[0] = MOJO_KIND_STR;
+            pk[1] = mojo_dict_kind_byte(d->slots[i].kind);
+            if (!pk[1]) pk[1] = MOJO_KIND_INT;
+            pk[2] = 0;
+            mojo_list_set_kinds(pair, strdup(pk));
+        }
         mojo_list_append_int(out, (int64_t)(intptr_t)pair);
     }
     free(order);
@@ -8817,6 +8952,19 @@ MojoList *mojo_dict_items_int(MojoDict *d) {
                              : (s->key ? (int64_t)strtoll(s->key, NULL, 10) : 0));
         mojo_list_append_int(pair, s->val);
         mojo_mark_as_tuple(pair);
+        /* The same per-slot kinds row `mojo_dict_items` records, and for the
+         * same reason (see its comment): the value's storage kind is on the
+         * dict slot and is unrecoverable from the pair. Slot 0 is MOJO_KIND_INT
+         * here rather than STR, because this is the spelling that carries an
+         * INTEGER key. */
+        {
+            char pk[3];
+            pk[0] = MOJO_KIND_INT;
+            pk[1] = mojo_dict_kind_byte(s->kind);
+            if (!pk[1]) pk[1] = MOJO_KIND_INT;
+            pk[2] = 0;
+            mojo_list_set_kinds(pair, strdup(pk));
+        }
         mojo_list_append_int(out, (int64_t)(intptr_t)pair);
     }
     free(order);

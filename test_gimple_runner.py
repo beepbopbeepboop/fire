@@ -855,6 +855,47 @@ main()
     # hop one level in (the factory's own `outer()()`) and passes.
     # `test_gimple_execution` is the honest assertion for that: it fails on a
     # gcc error, which is what this case is about.
+    # A CLOSURE VALUE stored at MODULE SCOPE. `_gen_stmt_AssignStmt` routes a
+    # module-scope assignment to this module's `_root_globals` struct, whose
+    # fields are minted by the Phase-1.7 global passes — and the inference for
+    # a name bound to a call's result (`outer(3)` -> a `MojoBoundMethod *`)
+    # was not one of them, so the file did not compile at all: `_root_globals`
+    # had no field `f`, and the diagnostic pointed at an `#include <stdio.h>`
+    # line three statements above the store that failed. Two shapes are pinned
+    # because the question that decided it was "is the gap specific to
+    # `MojoBoundMethod *`, or is it every global whose type comes from a call?"
+    # and the answer has to be visible from the test, not from a comment: a
+    # closure value, a dict literal, and a struct-returning call all route
+    # through the same struct with three different inferred types.
+    #
+    # `print(f)` is NOT part of this case: a `MojoBoundMethod *` read as a
+    # value has no `__repr__` lowering yet and prints its address decimal,
+    # which is a different defect with its own doc
+    # (bugs/CODEGEN_closure_value_repr_prints_its_address.md).
+    test_gimple_matches_cpython("gimple_module_scope_closure_value_is_declared", """\
+class Tok:
+    def __init__(self, k):
+        self.k = k
+    def show(self):
+        return 'Tok:' + self.k
+
+def outer(a):
+    def inner(x):
+        return x + a
+    return inner
+
+def mk():
+    return Tok('z')
+
+f = outer(3)
+print(f(10))
+D = {'k': 1}
+print(D['k'])
+t = mk()
+print(t.show())
+main_unused = 1
+""")
+
     test_gimple_execution("gimple_capturing_lambda_nested_def_ptr_kinds_build", """\
 def outer_str():
     t = 'x'
@@ -873,6 +914,120 @@ def main():
     return 0
 main()
 """, expected_return=0)
+
+    # A comprehension's `for` target is a fresh binding in the comprehension's
+    # OWN scope, so it must not take over an existing binding of that source
+    # name -- for the rest of the enclosing function, either. Two shapes, and
+    # they were two different defects, which is why both are here:
+    #
+    #  * against a MODULE CONSTANT. `_declare_var` writes `var_types[name]`,
+    #    and `_lower_IdentExpr`'s module-global branch is gated on
+    #    `(name in _func_declared_globals or name not in var_types)` — so the
+    #    target's declaration was all it took to route every later read of `G`
+    #    away from `root__mojo_global_get_G()` and onto the comprehension's
+    #    last element: 3, where CPython answers 6. The one decision both sides
+    #    now ask is `module_shared.bare_global_read_plan`.
+    #  * against an enclosing LOCAL, through an arm that DID take the shadow
+    #    (`force=True`) but never undid it. The list/set/cursor arms already
+    #    restored; the range arm did not, so `return x` read the loop's last
+    #    value: 3, where CPython answers 5.
+    #
+    # Every iterable shape is a separate `_compr_*_loop` arm with its own bind
+    # site, so one program per family: list (also the module-constant case),
+    # range, set, dict-key, enumerate, char* string, two nested clauses.
+    # `_mojo_repr_pair` is for a PAIR, and the walker used to decide "is a pair"
+    # from the element's LENGTH alone — which an ordinary two-element list also
+    # is. `mojo_mark_as_tuple` is called at every real pair site
+    # (`mojo_dict_items`, `mojo_zip`, `mojo_list_repeat`, `mojo_list_concat`)
+    # and `mojo_is_tuple` reads it back, so the marker is the predicate and the
+    # length is only a cheap guard in front of it. Measured before the fix:
+    # `x = [1, 2]; print([x])` printed `[(1, 2)]` where CPython prints
+    # `[[1, 2]]`.
+    #
+    # Every REAL pair is in this program, which is what makes tightening the
+    # predicate safe to land: a tuple display, a tuple inside a list beside a
+    # plain list, an `enumerate` pair, and a `dict.items()` pair. `zip` is NOT
+    # here — `list(zip([1, 2], [3, 4]))` prints decimals for a DIFFERENT reason
+    # (a `mojo_zip` result read as plain ints, the element-type half) and is
+    # filed as `bugs/CODEGEN_materialized_container_has_no_element_type.md`.
+    # The dict key here is a STRING on purpose: an INTEGER key is quoted by
+    # this repr (where CPython does not quote it) because a `keykind == 2`
+    # slot has to remember whether the source wrote `1` or `"1"` and does
+    # not — that is the absent arm `_mojo_repr_dict`'s own comment declines,
+    # and asking for it here would put a second, unrelated red in this case.
+    test_gimple_matches_cpython("gimple_two_element_list_is_not_a_pair", """\
+x = [1, 2]
+print([x])
+print([(1, 2)])
+print([sorted([1, 2])])
+print([(1, 2), [3, 4]])
+print([(1, 2), [3, 4], (5, 6)])
+print(list(enumerate([7, 8])))
+print(sorted({'k': 'a'}.items()))
+print([[1, 2], [3, 4]])
+""")
+
+    test_gimple_matches_cpython("gimple_comprehension_target_binds_its_own_scope", """\
+G = 5
+S = 'zz'
+D = {'k': 2}
+
+def a(rows):
+    x = 100
+    o1 = [x for x in rows]
+    return x + len(o1)
+
+def b(rows):
+    o2 = [G for G in rows]
+    return G + len(o2)
+
+def c():
+    S = 'local'
+    o3 = {S for S in ['p', 'q']}
+    return S + str(len(o3))
+
+def d():
+    o4 = [D for D in [7, 8, 9]]
+    return D['k'] + len(o4)
+
+def e(words):
+    i = 'pre'
+    w = 'W'
+    o5 = [q for q, w in enumerate(words)]
+    return i + w + str(len(o5))
+
+def f(names):
+    n = 'N'
+    o6 = [n for n in names]
+    return n + '/' + str(len(o6))
+
+def g(s):
+    c = 'C'
+    o7 = [c for c in s]
+    return c + '/' + str(len(o7))
+
+def h(n):
+    x = 5
+    o8 = [x for x in range(n)]
+    return x
+
+def i(rows):
+    o9 = [G for G in rows for G in G]
+    return str(G) + str(len(o9))
+
+def main():
+    print(a([1, 2, 3]))
+    print(b([1, 2]))
+    print(c())
+    print(d())
+    print(e(['x', 'y']))
+    print(f(['p', 'q']))
+    print(g('abc'))
+    print(h(3))
+    print(i([[1, 2], [3]]))
+    return 0
+main()
+""")
 
     # The same three capture kinds with the factory DEFINED INSIDE a function,
     # which is where the env was already right and the callable's RETURN TYPE
@@ -8893,6 +9048,81 @@ bytes_keyed()
     # `None`. `d['n']` still prints `0` where CPython says `None` — a READ
     # does not carry the slot kind anywhere — which is deliberately NOT pinned
     # here; see bugs/CODEGEN_dict_slot_read_loses_its_value_kind.md.
+    # A `(key, value)` pair built by `mojo_dict_items` has to carry the dict
+    # slot's kind, because a pair slot is a raw int64_t and the pair is built by
+    # the runtime with nothing from the dict slot travelling with it. Without it
+    # the dict's own repr and the pair's repr disagreed about the SAME value:
+    # `print({'mid': 0})` printed `0` and `sorted({'mid': 0}.items())` printed
+    # `[('mid', None)]` — and a float did not merely print wrong, it SEGFAULTED,
+    # because the pair walker handed the IEEE-754 bits to the runtime type-tag
+    # reader, which dereferences them. `print(d.items())` is in this program
+    # rather than `sorted(...)` because it is the SEGFAULT that made the missing
+    # kinds row impossible to miss.
+    #
+    # The mechanism is the same one `mojo_list_set_kinds` and `MojoDict.val_repr`
+    # already use — the static type is known where the value is built and is
+    # unrecoverable later — and the renderer is `mojo_repr_slot_kind`, now the ONE
+    # place any walker asks what a slot of a given kind looks like.
+    #
+    # `print(d.items())` is not here: CPython prints a `dict_items([...])` VIEW,
+    # which is a different spelling of the same pairs, so a CPython comparison
+    # cannot use it. `sorted(d.items())` is the shape that did SEGFAULT (the
+    # float value's bits reaching the runtime type-tag reader), so it carries the
+    # same evidence. `list(d.items())` is separately broken — it reads each pair
+    # pointer as an integer, which is the element-type half of
+    # `list(<a boxed container>)` and is filed as
+    # `bugs/CODEGEN_materialized_container_has_no_element_type.md`.
+    #
+    # `%(s)s` at the end is the SUBSCRIPT store's half: `d['s'] = 'q'` reached a
+    # dict through a container global, which reads back as a boxed `int64_t`, so
+    # it took the opaque-receiver store site — and that site had no `char *` arm,
+    # so the pointer went in through `mojo_dict_set_int` with `kind == 0` and
+    # `'%(s)s' % d` printed the pointer decimal. `print(d)` hid it: a `kind == 0`
+    # word above 65536 goes to the generic reader, which renders a pointer-shaped
+    # word as a string. The `char *` arm is now in `emit_dict_int_value_store`
+    # with the other four, so all four store sites agree.
+    test_gimple_matches_cpython("gimple_dict_items_pairs_keep_the_slot_kind", """\
+d = {}
+d['z'] = 0
+d['n'] = None
+d['b'] = True
+d['f'] = 1.5
+d['s'] = 'q'
+d['c'] = [1, 2]
+d['e'] = {}
+d['i'] = {'k': 1}
+print(d)
+print(sorted(d.items()))
+print('%s' % d)
+print('%(z)s %(n)s %(b)s %(f)s %(s)s' % d)
+""")
+
+    # The keyed spec of the same value kinds, and the unkeyed one, in one
+    # program. Two halves, and both were wrong in DIFFERENT ways:
+    #
+    #  * `'%s' % d` emitted the mapping as the bare `int64_t` a container global
+    #    reads back as, straight into a `MojoDict *` parameter — "passing
+    #    argument 2 of 'mojo_str_format_dict' makes pointer from integer
+    #    without a cast", a BUILD failure that took out the three correct lines
+    #    above it in `gimple_dict_repr_kinds_agree_with_cpython`. The LHS was
+    #    already coerced to `char *`; the RHS was not.
+    #  * an unkeyed spec against a mapping is `str(d)` in CPython (measured on
+    #    3.14.7: `'%s' % d` prints the dict; the TypeError is `'%s %s' % d`),
+    #    and the runtime copied the spec through and printed a bare `%s`. It
+    #    now takes the dict's own repr as a third argument rather than
+    #    re-deriving one, for the same reason `MojoDict.val_repr` travels on the
+    #    value: the runtime cannot render a dict.
+    test_gimple_matches_cpython("gimple_percent_of_a_dict_reads_the_mapping", """\
+d = {}
+d['z'] = 0
+d['n'] = None
+d['b'] = True
+d['f'] = 1.5
+d['s'] = 'v'
+print('%s' % d)
+print('%(z)s/%(n)s/%(b)s/%(f)s/%(s)s' % d)
+""")
+
     test_gimple_matches_cpython("gimple_dict_repr_kinds_agree_with_cpython", """\
 d = {}
 d['n'] = None
@@ -10558,6 +10788,79 @@ def main():
         'fgk_b.py': "N = 7\n",
         'fgk_a.py': "from fgk_b import N as J\n\ndef main():\n    print(J)\nmain()\n",
     }, 'fgk_a.py')
+
+    # A parameter whose ONLY use is to be forwarded takes the callee's container
+    # kind, not a guess from its own name. `_infer_param_types` reads a parameter
+    # type from how the body USES it, and a pure forwarder has no use — so the
+    # name-based container guess ran, and it guessed a KIND it has no evidence
+    # for: `void middle (MojoList * d)` where `MojoDict *` was meant. The wrong
+    # pointer survives the C compiler silently and `leaf` reads a `DictSlot` out
+    # of a `MojoList` header and answers `None` where CPython answers `1`.
+    #
+    # FOUR shapes, and each is a different thing that had to be true:
+    #
+    #  * `fwd_callee_first` / `fwd_forwarder_first` — the SAME program with the
+    #    two definitions in either order. It printed `1` in one order and `None`
+    #    in the other before the fix, for no reason anyone designed (the callee's
+    #    conclusion has to be in place when the forwarder's is read), which is
+    #    exactly what makes this bug survivable: a test written in the lucky
+    #    order passes and the unlucky one never runs.
+    #  * `fwd_forward_as_a_statement` — `leaf(d)` with no `return`, so it is
+    #    not return-type inference but the parameter's own type.
+    #  * `fwd_two_hop_chain` — `mid1 -> mid2 -> leaf`. Two hops needs TWO extra
+    #    rounds of the dict-value collection, and it did exactly one; see
+    #    `_gmi_apply_forwarded_param_evidence` and the fixpoint beside it.
+    test_gimple_matches_cpython("fwd_forwarder_before_callee", """\
+def leaf(d):
+    print(d["x"])
+
+def middle(d):
+    return leaf(d)
+
+def main():
+    middle({"x": "1"})
+    return 0
+main()
+""")
+    test_gimple_matches_cpython("fwd_callee_before_forwarder", """\
+def middle(d):
+    return leaf(d)
+
+def leaf(d):
+    print(d["x"])
+
+def main():
+    middle({"x": "1"})
+    return 0
+main()
+""")
+    test_gimple_matches_cpython("fwd_forward_as_a_statement", """\
+def leaf(d):
+    print(d["x"])
+
+def middle(d):
+    leaf(d)
+
+def main():
+    middle({"x": "1"})
+    return 0
+main()
+""")
+    test_gimple_matches_cpython("fwd_two_hop_chain", """\
+def leaf(d):
+    print(d["x"])
+
+def mid2(d):
+    return leaf(d)
+
+def mid1(d):
+    return mid2(d)
+
+def main():
+    mid1({"x": "1"})
+    return 0
+main()
+""")
 
     # The two rows that must NOT be re-routed, i.e. the gates
     # `_gmi_scan_imported_global_homes` exists to enforce. A module-level

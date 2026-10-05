@@ -249,13 +249,17 @@ def main():
     # reference.
     #
     # This is in the ORACLE and not in `test_runtime_diff.py` on purpose. The
-    # compiled path has the same defect by a different mechanism — it allocates
+    # compiled path had the same defect by a different mechanism — it allocated
     # the comprehension's target as a plain local of the enclosing function, so
-    # that local shadows the module global for the rest of the body — and it
-    # prints 3 there too, so an engine-vs-engine case would sit red until that
-    # half is fixed. Filed as
-    # `bugs/CODEGEN_a_comprehension_target_is_a_local_of_the_enclosing_function.md`,
-    # which quotes the generated C.
+    # that local shadowed the module global for the rest of the body, and it
+    # printed 3 too — which is why an engine-vs-engine case would have sat red
+    # here. That half is fixed now (`_compr_bind_target` asks
+    # `module_shared.bare_global_read_plan`, the decision `_lower_IdentExpr`
+    # makes, whether the target name is already bound) and the compiled spelling
+    # is `test_runtime_diff.py`'s
+    # `comprehension_target_does_not_shadow_a_module_constant`. This case stays
+    # in the oracle anyway: a third opinion is what catches a bug both engines
+    # share, and that is not a property of when the case was written.
     #
     # The last arm is the control in the direction that matters: a plain `for`
     # loop's target DOES bind in the enclosing scope (Python has no loop
