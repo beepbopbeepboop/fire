@@ -5,6 +5,7 @@
 #include <setjmp.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 extern int64_t __mojo_gen_new_0(int64_t body);
@@ -152,12 +153,115 @@ static void test_iscoroutine_answers_for_handles_and_non_handles(void)
           (int)__mojo_async_iscoroutine(g));
 }
 
+/* `mojo_read_type_tag` / `mojo_read_type_tag_safe` answer "which registered
+   struct is this boxed value?", and every producer of a `__mojo_type_id`
+   masks it to 31 bits. A BOXED STRING is the value that used to slip past
+   them: a heap `char *` is a real pointer, is 8-byte aligned, and
+   `malloc_size` says it holds at least eight bytes as soon as the text is
+   five characters or longer — so every ADDRESS check passed and the string's
+   own eight BYTES came back as a type identity. Measured on the self-hosted
+   binary: the text "print" read back as 0x746e697270, which is not a struct,
+   not a small value, and therefore not dereferenceable-by-accident either —
+   it was dereferenced anyway, by `mojo_dict_get_int_kw`'s `_kw_kind`, which
+   classified any pointer-shaped word as a boxed string.
+
+   The invariant these two now hold is DISJOINTNESS, in both directions, and
+   that is what the assertions below check rather than the value in isolation:
+
+     * a word outside [0, 0x7fffffff] is not a tag, so a boxed string never
+       produces one — a string of five characters or more always has a
+       nonzero fifth byte, so its word is always >= 2^32;
+     * a tag is always below 2 GiB, so `mojo_boxed_is_str` /
+       `_mojo_ptr_shaped` can never call one a pointer and dereference it
+       (that direction is CRASH.md's, and the reason the strict reader has a
+       2 GiB floor at all).
+
+   CRASH.md fixed the second and could not see the first, because in that
+   fault the tag was SMALL; here the value is a pointer-sized word, so every
+   range test passed. */
+struct fake_tagged { int64_t __mojo_type_id; int64_t payload; };
+
+#define NO_TAG ((int64_t)0x80000000LL)
+
+static void test_type_tag_reads_reject_a_boxed_string(void)
+{
+    extern int64_t mojo_read_type_tag(int64_t addr);
+    extern int64_t mojo_read_type_tag_safe(int64_t addr);
+
+    /* Heap strings rather than literals, so the address is unambiguously a
+       malloc block — the shape the crash arrived as, and the one the
+       size/alignment guards are written about. */
+    char *s = (char *)malloc(16);
+    memcpy(s, "print", 6);
+    CHECK(mojo_read_type_tag_safe((int64_t)(intptr_t)s) == 0,
+          "a boxed string is not a tagged struct (got 0x%llx)",
+          (unsigned long long)mojo_read_type_tag_safe((int64_t)(intptr_t)s));
+    CHECK(mojo_read_type_tag((int64_t)(intptr_t)s) == 0,
+          "the strict reader agrees (got 0x%llx)",
+          (unsigned long long)mojo_read_type_tag((int64_t)(intptr_t)s));
+
+    /* Four characters or fewer CAN read back as a plausible identity — the
+       bytes of "abcd" are 0x64636261, which is inside the 31-bit tag range
+       and no predicate on the word alone can tell it from a struct's, since
+       every 31-bit value is some struct name's hash. What must hold is the
+       bound: whatever comes back can never be pointer-shaped, so nothing can
+       dereference it. This is the residual the fix leaves, stated as a
+       property rather than left to be rediscovered. */
+    char *tiny = (char *)malloc(5);
+    memcpy(tiny, "abcd", 5);
+    int64_t t = mojo_read_type_tag_safe((int64_t)(intptr_t)tiny);
+    CHECK(t >= 0 && t < NO_TAG,
+          "a short string's word is bounded by the tag range (got 0x%llx)",
+          (unsigned long long)t);
+
+    /* The positive half: a heap-allocated tagged struct reads back its own
+       tag, exactly. Heap rather than automatic because the guard asks
+       `malloc_size` — an address that is not a live allocation is not a
+       tagged struct as far as this runtime is concerned, which is what keeps
+       the 8-byte read off a stack or rodata address. */
+    struct fake_tagged *st = (struct fake_tagged *)malloc(sizeof(*st));
+    st->__mojo_type_id = 1234567;   /* what a _struct_type_id hash looks like */
+    st->payload = 1;
+    CHECK(mojo_read_type_tag_safe((int64_t)(intptr_t)st) == 1234567,
+          "a real tagged struct reads back its tag (got 0x%llx)",
+          (unsigned long long)mojo_read_type_tag_safe((int64_t)(intptr_t)st));
+    CHECK(mojo_read_type_tag((int64_t)(intptr_t)st) == 1234567,
+          "the strict reader reads the same tag (got 0x%llx)",
+          (unsigned long long)mojo_read_type_tag((int64_t)(intptr_t)st));
+
+    /* And the chain the crash actually took, end to end: the tag of a boxed
+       string goes into the dict accessor that dereferences a pointer-shaped
+       key. With the fix the word is 0, `_kw_kind` answers "an integer key",
+       and the lookup misses; before it, the same call took the
+       `_KW_STR` arm on 0x746e697270 and faulted inside `_canon_int`. This is
+       the assertion that fails LOUDLY (a SIGSEGV, not a CHECK line) if the
+       range check is ever dropped, which is why it is here and not just the
+       reasoning above it. */
+    /* `void *`, not `MojoDict *`: this file declares the runtime's entry
+       points by hand rather than including fire_runtime.h, so the struct tag
+       is not in scope here (the same reason every other extern above is
+       spelled out). */
+    extern void *mojo_dict_new(void);
+    extern int64_t mojo_dict_get_int_kw(void *d, int64_t kw);
+    extern void mojo_dict_free(void *d);
+    void *d = mojo_dict_new();
+    CHECK(d != NULL, "the dict constructor answered");
+    CHECK(mojo_dict_get_int_kw(d, mojo_read_type_tag_safe((int64_t)(intptr_t)s)) == 0,
+          "a string's tag is a usable dict key (no fault above)");
+    mojo_dict_free(d);
+
+    free(st);
+    free(tiny);
+    free(s);
+}
+
 int main(void)
 {
     test_range();
     test_send();
     test_run_gen_rejects_non_handle();
     test_iscoroutine_answers_for_handles_and_non_handles();
+    test_type_tag_reads_reject_a_boxed_string();
     if (failures) { printf("%d failure(s)\n", failures); return 1; }
     printf("all Layer 1 shim (mojo_coro_gen) tests passed\n");
     return 0;

@@ -6934,6 +6934,47 @@ static int _mojo_tagged_addr_ok(int64_t addr)
     return 1;
 }
 
+/* The 8-byte read both exported readers below do, with the WORD it produced
+ * validated as a type id. `_mojo_tagged_addr_ok` answers a question about the
+ * ADDRESS ("may I read 8 bytes here?"); this answers the other one ("were
+ * those 8 bytes a type id?"), and a boxed string is the value that separates
+ * them.
+ *
+ * Every producer of a `__mojo_type_id` masks to 31 bits — `_struct_type_id`
+ * in mojo/middle/exprtypes.py is `h = h * 31 + c & 2147483647` and the
+ * exception ids are `(zlib.crc32(name) & 0x7fffffff) or 1` — so a word
+ * outside [0, 0x7fffffff] is not a type id at all; it is whatever bytes
+ * happened to sit at offset 0 of something that is not a registered struct,
+ * and handing those bytes back as an identity is a forged one.
+ *
+ * A heap `char *` string passes every address check there is: it is a real
+ * pointer, it is 8-byte aligned, and `malloc_size` says it is at least eight
+ * bytes long whenever the string is five characters or more. That is the whole
+ * of the measured crash in
+ * `bugs/CODEGEN_selfhost_closure_compiles_and_the_binary_segfaults.md`: a
+ * generic dataclass-field walker (`_walk_ast_into`, which reaches `type(node)`
+ * for a node BEFORE it reaches its `isinstance(node, str)` early-return)
+ * handed a `char *` whose text was "print", and the eight bytes at its address
+ * — 'p','r','i','n','t',0,0,0 — came back as the int64_t 0x746e697270. That
+ * is not a struct and not a small value, so `mojo_boxed_is_str` classified it
+ * as a boxed string on the way into the next hop and the next hop
+ * dereferenced it: `mojo_dict_get_int_kw(d, <tag>)` -> `_canon_int`,
+ * SIGSEGV. CRASH.md is the same predicate fixing the OPPOSITE direction (a
+ * 31-bit tag mistaken for a pointer); this is the direction it could not see,
+ * because there the tag is not small.
+ *
+ * 0 is the "not a tagged struct" answer both readers already return for
+ * everything else, and it cannot collide with a real tag: every real one is
+ * either a nonzero hash or already read as 0. */
+static int64_t _mojo_struct_type_tag(int64_t addr)
+{
+    int64_t tag;
+    if (!_mojo_tagged_addr_ok(addr)) return 0;
+    tag = *(int64_t *)(intptr_t)addr;
+    if (tag < 0 || tag > 0x7fffffffLL) return 0;
+    return tag;
+}
+
 int64_t mojo_read_type_tag(int64_t addr) {
     /* Was: `if (!addr) return 0; return *(int64_t*)addr;` — but once the
      * compiler's own generic AST walkers actually recurse (mojo_isinstance
@@ -6942,8 +6983,7 @@ int64_t mojo_read_type_tag(int64_t addr) {
      * type-tag, and the bare deref segfaulted. Same guard as
      * mojo_read_type_tag_safe: nothing legitimate lives below 2GiB on any
      * platform this runtime targets. */
-    if (!_mojo_tagged_addr_ok(addr)) return 0;
-    return *(int64_t *)(intptr_t)addr;
+    return _mojo_struct_type_tag(addr);
 }
 
 /* Like mojo_read_type_tag, but for callers that don't statically know
@@ -6955,7 +6995,15 @@ int64_t mojo_read_type_tag(int64_t addr) {
  * Dereferencing a small int as a pointer is UB; the same small-vs-real-
  * pointer heuristic mojo_str() already uses (a real heap/stack address is
  * never this small) turns that into a safe "not a tagged struct" instead
- * of a crash. */
+ * of a crash.
+ *
+ * The two are one function. They were separate only so the STRICT caller
+ * (mojo_isinstance, whose operand's static type is a struct) and the loose
+ * one (a boxed int64_t of unknown shape) could read differently, and the
+ * first crash of this shape was a divergence between them; the difference
+ * they document is a difference in what the CALLER knows, not in what is
+ * safe to read, and both are now answered from one predicate so the next
+ * hardening of it cannot reach one and miss the other. */
 int64_t mojo_read_type_tag_safe(int64_t addr) {
     /* < 64KiB: None / small ints / bools. Also reject the whole 31-bit
      * range the struct type-tags themselves occupy (`zlib.crc32(name) &
@@ -6964,8 +7012,7 @@ int64_t mojo_read_type_tag_safe(int64_t addr) {
      * here and dereference the tag as a pointer. On every platform this
      * runtime targets a genuine heap/stack/static address is far above
      * 2GiB, so nothing legitimate is lost. */
-    if (!_mojo_tagged_addr_ok(addr)) return 0;
-    return *(int64_t *)(intptr_t)addr;
+    return _mojo_struct_type_tag(addr);
 }
 
 char *mojo_str(void *obj) {
