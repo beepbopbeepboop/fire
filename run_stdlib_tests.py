@@ -18,7 +18,7 @@ import subprocess
 import argparse
 import json
 from pathlib import Path
-from datetime import datetime
+from time import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 HERE = Path(__file__).parent.resolve()
@@ -138,9 +138,30 @@ def load_previous_results():
 
 
 def save_results(results):
-    """Save test results to JSON file."""
+    """Save test results to JSON file.
+
+    The timestamp is `time.time()` and NOT `datetime.now().isoformat()`, for two
+    reasons and the first is the one that decides it.
+
+    The second is that two reports in this repository write a field with this
+    name, and they disagreed: `fault_tolerance.py:254` has always written
+    `time.time()` here, and this file wrote ISO-8601. Nothing reads either --
+    `grep '"timestamp"'` finds these two lines and no consumer -- so the
+    disagreement was invisible and a reader of both reports could not tell they
+    were the same kind of field.
+
+    The first is that `datetime` is a `HOST_MODELLED` row this file was ALONE
+    in, and the module cannot answer it: a `datetime` is a record of six
+    fields, which is the same limit that keeps `time.localtime` out of
+    `formal/hostmods/time.mojo` (`bugs/FORMAL_time_struct_shaped_answers.md`),
+    and `datetime.now().isoformat()` is a FORMATTED record on top of that. A
+    report's timestamp is not calendar arithmetic -- it identifies a run -- and
+    `time` is a module this tree HAS (`formal/hostmods/time.mojo`, checked
+    against CPython's own clocks by `test_formal_time.py`), so the row closes
+    on a name that answers rather than on an approximation of one that does not.
+    """
     data = {
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": time(),
         "results": results,
     }
     with open(RESULTS_FILE, "w") as f:

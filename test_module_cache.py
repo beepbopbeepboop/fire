@@ -1888,11 +1888,35 @@ def test_mangle_is_injective(wd):
 
     The corpus is generated, not hand-listed, so it covers the separator
     characters the old scheme collapsed on (`_`, space, `.`, `[`, `]`, `,`)
-    plus a digit that a length prefix has to be told apart from."""
-    import itertools as _it
+    plus a digit that a length prefix has to be told apart from.
+
+    FOUR NESTED LOOPS AND NOT `itertools.product`, and the two spellings are
+    the same SEQUENCE rather than the same set, which is the claim that makes
+    this a substitution. `itertools.product(alpha, repeat=n)` yields the
+    length-`n` tuples in INDEX order with the LAST position varying fastest —
+    which is a nest with the last index innermost — and the comprehension this
+    replaced walked `n` from 0 to 3, so level `n` came before level `n + 1`.
+    `mangle#1`'s corpus is therefore byte-for-byte the same 1752 instantiations,
+    and `check` below says so from the loop's OWN output rather than restating
+    it.
+
+    The import is the reason. `itertools` was the LAST name in this file's
+    import closure the formal sweep could not resolve, which filed the file
+    under `not-answerable/host-import` — a class the coverage denominator
+    excludes — and `test_formal_dylib.py` was the same, for thirteen more
+    files. `bugs/FORMAL_a_call_result_field_access_has_no_representation.md`
+    measures the row and why no `.mojo` module answers it (a generator of
+    tuples is not one 64-bit word); both files are now spelled without it."""
     _alpha = ['A', 'B', '_', ' ', '.', '[', ']', ',', '1']
-    _vals = [''.join(p) for n in range(0, 4)
-             for p in _it.product(_alpha, repeat=n)]
+    _tuples = [()]                                   # product(alpha, repeat=0)
+    _vals = ['']
+    for _n in range(3):                              # repeat = 1, 2, 3
+        _tuples = [t + (a,) for t in _tuples for a in _alpha]
+        _vals += [''.join(t) for t in _tuples]
+    check("mangle#0: the generated corpus is the product of the alphabet to "
+          f"depth 3 ({len(_vals)} values, {1 + 9 + 81 + 729} expected)",
+          len(_vals) == 1 + 9 + 81 + 729 and _vals[0] == ''
+          and _vals[1] == 'A' and _vals[-1] == '111')
     _targs = []
     for v in _vals:
         _targs += [{'T': v}, {'T': 'A', 'o': v}, {'T': v, 'o': 'B'},
