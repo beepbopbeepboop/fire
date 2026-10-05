@@ -84,6 +84,16 @@ def _usage_text() -> str:
   {tool} --formal [-n <int>] <file.mojo>
                                     Same, then run it (bare form = build and run)
   {tool} --no-prove <file> [...]     Formal backend only: skip proof generation/checking
+  {tool} --check-contracts <file>    Formal backend only: lower every @requires/@ensures
+                                    into a run-time check; on `build` it also emits
+                                    the f_contract theorems into the proof. A contract
+                                    found FALSE stops the build. Without the flag a
+                                    false contract is still REPORTED, with the input
+                                    that breaks it. On `dylib` the theorem half does
+                                    not apply -- that path's contract is derived from
+                                    the machine (lib/Contracts.lean), not from a
+                                    source model -- so the run-time check and the
+                                    reported verdicts are what you get.
   {tool} --backend=arm64 ...         Select the arm64 formal backend (no gimple) [same as --formal]
   {tool} --backend=gimple ...        Select the gimple backend (default)
   {tool} dylib <file.mojo> [...]     Compile library module(s) to a standalone .dylib/.so
@@ -219,15 +229,18 @@ def _extract_gpu_flags(args: list):
 def _extract_formal_flags(args: list):
     formal = False
     prove = True
+    check_contracts = False
     remaining = []
     for a in args:
         if a == '--formal':
             formal = True
         elif a in ('--no-prove', '--no-proof'):
             prove = False
+        elif a == '--check-contracts':
+            check_contracts = True
         else:
             remaining.append(a)
-    return formal, prove, remaining
+    return formal, prove, check_contracts, remaining
 
 
 def _pop_flag_value(argv: list, flag: str):
@@ -367,7 +380,8 @@ def _trust_note(result) -> str:
 
 
 def _formal_executable(input_file: str, output, test_input: int, prove: bool,
-                       run_it: bool, link_dylibs=None, arch: str = "arm64") -> int:
+                       run_it: bool, link_dylibs=None, arch: str = "arm64",
+                       check_contracts: bool = False) -> int:
     """The one formal executable path: `fire build --formal` and bare
     `fire --formal <file>` both land here, and nothing else builds one.
 
@@ -383,6 +397,7 @@ def _formal_executable(input_file: str, output, test_input: int, prove: bool,
                                     test_input=test_input,
                                     prove=prove, check=prove,
                                     arch=arch,
+                                    check_contracts=check_contracts,
                                     link_dylibs=list(link_dylibs or []))
     except _fb.FormalBuildError as e:
         print(f"build: {e}", file=sys.stderr)
@@ -396,6 +411,9 @@ def _formal_executable(input_file: str, output, test_input: int, prove: bool,
     trust = _trust_note(result)
     if trust:
         print(trust)
+    contracts = _contract_note(result, check_contracts)
+    if contracts:
+        print(contracts)
     if result.get("proof_path"):
         cached = " (verified from cache)" if result.get("proof_cached") else ""
         print(f"Proof: {result['proof_path']}{cached}{_sorry_note(result)}")
@@ -408,6 +426,55 @@ def _formal_executable(input_file: str, output, test_input: int, prove: bool,
         print(f"build: cannot run {result['path']}: {e}", file=sys.stderr)
         return 1
     return completed.returncode
+
+
+def _contract_note(result: dict, checked: bool) -> str:
+    """What this build's SOURCE-LANGUAGE CONTRACTS said, as one printed block.
+
+    Printed ALWAYS, including when the build did not check them, and that is
+    the point.  A contract in the source is a claim about the program; a build
+    that silently ignored it would be indistinguishable from a build of a file
+    that promised nothing, and this project has measured what that costs four
+    times over (a `sorry` over a false statement, a `Total` that was false for
+    every dylib, a `fun n => n` spec that typechecked for a function computing
+    `n * 3`).
+
+    A REFUTED verdict reaches this function in the default build (it is a
+    failure only under `--check-contracts`, where `_search_contracts` raises
+    first), so a REFUTED line here is a promise this build found FALSE and
+    named the input for. UNKNOWN is printed for the same reason and with the
+    same weight: an undecided contract is not a passing one.
+    """
+    entries = list(result.get("contracts") or [])
+    if not entries:
+        return ""
+    lines = []
+    for e in entries:
+        head = f"contract {e['name']}: {e['status'].upper()}"
+        extra = ""
+        if "counterexample_inputs" in e:
+            extra = f" at {e['counterexample_inputs']}"
+        lines.append(f"  {head}{extra} — {e['why']}")
+    # The mode line is DERIVED from the entries, not from the flag alone.  A
+    # flag says what was asked for and the entries say what was done, and on
+    # the library path the two differ -- `dylib --formal --check-contracts`
+    # checks at run time and emits no theorem -- so a line derived from the flag
+    # would claim "and in the proof" for a path that wrote none.
+    partial = any(e.get("status") == "not-applicable" for e in entries)
+    if not checked:
+        mode = ("NOT checked in the image; pass --check-contracts for that, "
+                "which also makes a REFUTED one fail the build. The search "
+                "below runs either way, so a false promise is reported on "
+                "every build")
+    elif partial:
+        mode = ("checked in the image; a REFUTED one fails the build. The "
+                "theorem half does not apply on this path -- the row below "
+                "says why")
+    else:
+        mode = ("checked in the image and in the proof; a REFUTED one fails "
+                "the build")
+    return (f"contracts: {len(entries)} declared ({mode}):\n"
+            + "\n".join(lines))
 
 
 def _formal_run_argv(path: str, arch: str) -> list:
@@ -1086,7 +1153,7 @@ def main():
     opt_flag, debug_flag, rest = _extract_codegen_flags(sys.argv[1:])
     backend_explicit = _backend_was_explicit(sys.argv[1:])
     backend, rest = _extract_backend(rest)
-    formal, prove, rest = _extract_formal_flags(rest)
+    formal, prove, check_contracts, rest = _extract_formal_flags(rest)
     # --no-gpu: turn off auto-offload of recognised parallel loop nests. Marked
     # @gpu/@kernel code is unaffected. Extracted here, alongside the other
     # flags, so it is stripped from argv before `program_args = sys.argv[2:]`
@@ -1274,11 +1341,15 @@ def main():
             try:
                 result = _fb.compile_formal_dylib(
                     dylib_inputs, output=dylib_output, arch=dylib_arch,
-                    prove=prove, check=prove)
+                    prove=prove, check=prove,
+                    check_contracts=check_contracts)
             except Exception as e:
                 print(f"formal dylib: {e}", file=sys.stderr)
                 sys.exit(1)
             print(f"Built: {result['path']}")
+            contracts = _contract_note(result, check_contracts)
+            if contracts:
+                print(contracts)
             if result.get("proof_path"):
                 cached = " (verified from cache)" if result.get("proof_cached") else ""
                 print(f"Proof: {result['proof_path']}{cached}{_sorry_note(result)}")
@@ -1359,7 +1430,7 @@ def main():
                 input_file, build_output,
                 10 if formal_test_input is None else formal_test_input,
                 prove, run_it=False, link_dylibs=build_link_dylibs,
-                arch=backend))
+                arch=backend, check_contracts=check_contracts))
         try:
             import driver
             rc = driver.compile_program(
@@ -1530,7 +1601,8 @@ def main():
             sys.exit(_formal_executable(
                 input_file, None,
                 10 if formal_test_input is None else formal_test_input,
-                prove, run_it=True, arch=backend))
+                prove, run_it=True, arch=backend,
+                check_contracts=check_contracts))
         try:
             import driver
             rc = driver.compile_program(
