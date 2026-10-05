@@ -13,6 +13,23 @@ what produced the attribution below. This doc is the *remainder* of that pass,
 not a duplicate of it: the step-OK layer is gone (`formal/examples/bitops.mojo`
 33.8 s -> ~18 s) and this is what is left.
 
+**Re-measured 2026-10-05 (`work/formal31-5`), two runs, and THE FLOOR IS
+UNCHANGED: 20.5 s / 20.1 s wall, 29.3 s / 28.7 s CPU, peak RSS 2.0 GB, `rc=0`,
+no warnings, on `master` at `7ac78995`.** The table below was measured on the
+`formal24-proof-speed` tree, so this is the statement that it still describes
+today's emitter: nothing in the five weeks since moved the number, and the
+attribution (83% in one declaration) is the thing a fix has to beat, not the
+total.
+
+**And the re-measurement found a TRAP that would have produced a fake timing,
+which is why it is written down at all: `fire.py build --formal` on an unchanged
+tree prints `Proof: … (verified from cache)` and runs NO Lean at all** — the
+verdict is content-addressed on the proof bytes, `lib/*.olean` and the
+toolchain, so the whole command takes ~1.1 s and its cost is not a proof time.
+Any timing taken from a `fire.py build --formal` line is a timing of the cache.
+The bytes have to change (or the check has to be made directly, as §"How to
+re-derive" now spells it) before Lean runs.
+
 ## The measurement
 
 `formal/examples/bitops.mojo`, arm64, one `lean` per file through
@@ -120,15 +137,55 @@ stale data.
 
 ## How to re-derive the table
 
-    python3 tools/memslot.py --gb 12 --label prooflib -- python3 -c "
-    import os,sys; sys.path.insert(0,os.getcwd())
-    from formal.lean import find_lean, ensure_library
-    ensure_library(find_lean(os.getcwd()), os.path.join(os.getcwd(),'lib'))"
+**Every command below was run on 2026-10-05 and is one a reader can paste. The
+first version of this section named `.tmp/genproof.py`, which was scratch on the
+`formal24-proof-speed` tree and does not exist here — and `.tmp/` is
+git-ignored, so nothing in the repository regenerates it. That is why the
+generation step is `fire.py build --formal --no-prove`, which writes the same
+`.lean` next to the image.**
 
-    # one proof, no Lean check during generation
-    python3 tools/memslot.py --gb 8 --label gen -- python3 .tmp/genproof.py \
-        formal/examples/bitops.mojo arm64 .tmp/out/bitops
+```sh
+export PATH=/opt/homebrew/bin:$PATH
 
-    # then the prefix sweep: split the generated file at its column-0
-    # declarations, write each prefix, and check each one through
-    # formal/lean.py::run_lean.  Never launch lean by hand.
+# 1. the library, if it is not current (one build, exclusive, ~27 MB of .olean)
+python3 tools/memslot.py --gb 12 --label prooflib -- python3 -c "
+import os,sys; sys.path.insert(0,os.getcwd())
+from formal.lean import find_lean, ensure_library
+ensure_library(find_lean(os.getcwd()), os.path.join(os.getcwd(),'lib'))"
+
+# 2. GENERATE the proof without checking it.  --no-prove is the whole point:
+#    without it this step may print "(verified from cache)" and check nothing.
+python3 tools/memslot.py --gb 8 --label gen -- python3 fire.py build --formal \
+    --no-prove --backend=arm64 -o .tmp/out/bitops formal/examples/bitops.mojo
+#    -> .tmp/out/bitops_proof.lean
+
+# 3. TIME a real check of those bytes.  This is `formal/lean.py::run_lean` and
+#    nothing else — never launch `lean` by hand; the guard is what bounds it.
+#    Copy the file first: `fire.py` writes it read-only.
+cp .tmp/out/bitops_proof.lean .tmp/z/proof.lean && chmod u+w .tmp/z/proof.lean
+python3 tools/memslot.py --gb 8 --label leanchk -- python3 -c "
+import os, sys
+sys.path.insert(0, os.getcwd())
+from formal.lean import find_lean, run_lean
+R = os.getcwd()
+lean = find_lean(R)
+env = dict(os.environ, LEAN_PATH='%s:%s' % (R, os.path.join(R, 'lib')))
+r = run_lean(lean, [sys.argv[1]], env=env)
+print('rc=%s exceeded=%r wall=%.1fs cpu=%.1fs peak_rss=%s'
+      % (r.returncode, r.exceeded, r.wall_s, r.cpu_s, r.peak_rss))
+print((r.stdout or '')[:300], (r.stderr or '')[:300])
+" .tmp/z/proof.lean
+```
+
+Measured on this tree, step 3 twice: `rc=0 exceeded=None wall=20.5s cpu=29.3s
+peak_rss=2132197376` and `wall=20.1s cpu=28.7s peak_rss=2129297408`. **The
+`--root=` flag is NOT what step 3 passes and must not be added**: the proof
+imports `ProofLib` and `work`, and what resolves them is `LEAN_PATH`, which is
+the same two-directory string `formal/x86_64_endtoend_test.py::_run_lean` builds.
+
+**The prefix sweep — the instrument the attribution actually comes from — is
+still scratch and is still not committed**: split the generated file at its
+column-0 declarations, write each prefix, and check each one through step 3's
+`run_lean`. A prefix is always a valid Lean file, which a "delete this group"
+variant is not — the file stops elaborating and the timing then measures Lean's
+error recovery.
