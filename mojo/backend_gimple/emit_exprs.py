@@ -5473,8 +5473,10 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
         # container table is already keyed by the container's lowered name
         # (`t`), so recording it is one call. A non-callable element is a
         # no-op inside the helper, so this is not on the hot path. See
-        # `ginf.note_container_callable_ret`; the dict half of the same
-        # problem is bugs/CODEGEN_call_through_subscript_callee_stubbed.md.
+        # `ginf.note_container_callable_ret` — the ONE helper for
+        # "a callable stored in a container, so a later `c[k](...)` can call
+        # it", dict or list or tuple. `gimple_call_through_subscript_callee`
+        # and `gimple_call_through_a_list_subscript_callee` pin it.
         ginf.note_container_callable_ret(gen, t, ev, et, el)
         # A list whose elements are TUPLES (`[(a, b), (c, d)]`) — record
         # the tuple's own element type so a later `for x, y in lst:`
@@ -5966,8 +5968,10 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
         # container table is already keyed by the container's lowered name
         # (`t`), so recording it is one call. A non-callable element is a
         # no-op inside the helper, so this is not on the hot path. See
-        # `ginf.note_container_callable_ret`; the dict half of the same
-        # problem is bugs/CODEGEN_call_through_subscript_callee_stubbed.md.
+        # `ginf.note_container_callable_ret` — the ONE helper for
+        # "a callable stored in a container, so a later `c[k](...)` can call
+        # it", dict or list or tuple. `gimple_call_through_subscript_callee`
+        # and `gimple_call_through_a_list_subscript_callee` pin it.
         ginf.note_container_callable_ret(gen, t, ev, et, _el)
         # A tuple whose elements are themselves LISTS (`([0, 7], [1, 8])`)
         # needs the same two maps `_lower_list_literal` records for

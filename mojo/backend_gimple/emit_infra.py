@@ -4899,8 +4899,9 @@ def note_container_callable_ret(gen, container_val: str, value_text: str,
     caring which kind it is — so `_lower_list_literal`'s per-element append
     (a single chokepoint) records through this same function, and the honest
     name is the container-neutral one. It was `_dict_callable_ret` while only
-    dicts used it, and the doc that asked for the rename is
-    bugs/CODEGEN_call_through_subscript_callee_stubbed.md.
+    dicts used it; `gimple_call_through_subscript_callee` and
+    `gimple_call_through_a_list_subscript_callee` are the regressions that
+    hold both spellings, dict and list, to one answer.
 
     THREE sources, because a first-class callable has more than one
     representation here and every one of them has to reach the same
