@@ -444,10 +444,27 @@ CASES = [
      "    if 1:\n        x = n + 1\n    return x\n", "ok"),
     ("if_negative_integer_literal_guard_is_not_a_branch_ok",
      "    if -1:\n        x = 5\n    return x\n", "ok"),
-    # …and the two directions the rule must NOT have bought, which is what keeps
-    # it a rule rather than a relaxation.  `if True:` is not dead code, so a read
-    # inside it is still unstored; and `if False:` really does store nothing, so
-    # the join loses the name and the read after it refuses.
+    # The same folded literal on the LOOP side, and this one is a refusal that
+    # was MISSING rather than one that was spurious — the other direction, and
+    # the reason the negation fold belongs in `_cfg_int_literal` rather than in
+    # the one caller that had it.  `_range_is_nonempty` could already fold
+    # `UnaryOp('-', IntLiteral(1))`; the preheader's literal table could not, so
+    # `k = -1` bound nothing and `range(k)` was undecidable, and an UNBOUND
+    # loop target read after the loop was licensed.  CPython raises
+    # `UnboundLocalError` for every value of `n` here (`range(-1)` is empty),
+    # so master's `ok` was a wrong answer waiting for a program that printed it.
+    ("for_range_bound_decided_negative_refused",
+     "    k = -1\n    for i in range(k):\n        sink(i)\n    return i\n",
+     "refuse",
+     "`range(-1)` is empty, and a decided bound is what says so"),
+    # …and the direction that keeps it from becoming a licence: the same table
+    # with a bound that provably yields items still binds the target.
+    ("for_range_bound_decided_positive_ok",
+     "    k = 3\n    for i in range(k):\n        sink(i)\n    return i\n", "ok"),
+    # …and the two directions the guard rule must NOT have bought, which is what
+    # keeps it a rule rather than a relaxation.  `if True:` is not dead code, so
+    # a read inside it is still unstored; and `if False:` really does store
+    # nothing, so the join loses the name and the read after it refuses.
     ("read_inside_a_true_guard_refused",
      "    if True:\n        sink(x)\n        x = 1\n    return 0\n",
      "refuse",

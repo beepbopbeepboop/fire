@@ -481,16 +481,37 @@ def _preorder(scope):
     return out
 
 
+#: The node types that open a BINDING SCOPE of their own since Python 3.  A
+#: comprehension's target is invisible to the function that holds it, and
+#: binding it there made `v` a local of `def f(t): return [v for v in xs]` —
+#: so `rename` renamed the enclosing `v` and the comprehension's `v` was left
+#: behind.  Found by the hand-written corpus in `test_formal_metamorph.py`.
+_NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
+                  ast.ClassDef, ast.ListComp, ast.SetComp, ast.DictComp,
+                  ast.GeneratorExp)
+
+
 def _walk_skipping_scopes(root):
-    """`ast.walk` that does not descend into a nested function/class/lambda."""
+    """`ast.walk` that does not descend into a nested binding scope.
+
+    With ONE exception, and the exception is PEP 572: a walrus inside a
+    comprehension binds in the ENCLOSING scope (`[y := f(x) for x in xs]` leaves
+    `y` bound in the function), so the comprehension's `NamedExpr` targets are
+    collected even though the rest of its subtree is not walked.  A reader that
+    skipped the whole subtree would call `y` free, and `rename` would then
+    rewrite a use of it while the walrus kept its spelling — the same
+    `NameError` class as every other half-renamed pair in this file.
+    """
     out = []
     stack = [root]
     while stack:
         node = stack.pop()
         out.append(node)
-        if node is not root and isinstance(
-                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
-                       ast.ClassDef)):
+        if node is not root and isinstance(node, _NESTED_SCOPES):
+            for n in ast.walk(node):
+                if isinstance(n, ast.NamedExpr) \
+                        and isinstance(n.target, ast.Name):
+                    out.append(n.target)
             continue
         stack.extend(ast.iter_child_nodes(node))
     return out
@@ -535,6 +556,7 @@ class Analysis:
             n.id for n in ast.walk(module)
             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))
         self.all_names = _all_names(module)
+        self.module_bindings = set(self.scopes[id(module)].bindings)
         self._int_params: set = set()
         self.int_only = self._int_only()
 
@@ -838,6 +860,14 @@ def _replace_child(parent, old, new):
 # it appears in.  The oracle is not a formality here; it is what makes "the two
 # builds disagree" mean "the backend is wrong".
 
+#: The names a receiver parameter is spelled with, read from the ONE table the
+#: backend keeps them in (`formal/model.py::RECEIVER_PARAMETER_SPELLINGS`, which
+#: `struct_receivers` and `method_declares_receiver` share — so the two cannot
+#: come apart).  A second copy here would be a second opinion about which
+#: spellings count as a receiver.
+_RECEIVER_SPELLINGS = set(F.M.RECEIVER_PARAMETER_SPELLINGS)
+
+
 class NotApplicable(Exception):
     """This transformation does not apply to this program."""
 
@@ -845,6 +875,46 @@ class NotApplicable(Exception):
 def _require(cond, why):
     if not cond:
         raise NotApplicable(why)
+
+
+def _is_constructor(an, fn):
+    """Whether `fn` is a class's `__init__`.
+
+    And why that is a question a transformation has to ask before it adds a
+    statement to a function body.
+
+    On this path `C(...)` with a user-defined constructor is NOT lowered as a
+    call: `formal/build.py` INLINES the constructor's body at the construction
+    site, storing each of its `self.<field> = …` assignments into the fresh
+    block there.  So the constructor's body is not a function body — it is the
+    representation of the construction, and its SHAPE is the construct.  A
+    constructor whose body contains an `if`, a loop, or a plain local store is
+    declined with a message naming exactly that:
+
+        constructing C with arguments is a call to a user-defined `__init__`
+        whose body this path does not inline: a `if` statement
+
+    Measured on both architectures, for `if_true`, `noop_loop` and `dead_local`
+    alike, so it is the SHAPE and not the transformation.
+
+    That refusal is CORRECT — the message says which construct and gives the
+    program that does have a representation — and it is not a backend finding.
+    It is a boundary the TRANSFORMATION must not cross, because a transform that
+    changes a construct's shape has not produced the same program on this
+    target, and a metamorphic pair built on that premise measures nothing.
+    """
+    if fn.name != "__init__":
+        return False
+    parent = an.parent_of(fn)
+    return isinstance(parent, ast.ClassDef)
+
+
+def _self_field_stores(node):
+    """Whether `node` is `self.<field> = <expr>` and nothing else."""
+    return (isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Attribute)
+            and isinstance(node.targets[0].value, ast.Name)
+            and node.targets[0].value.id == "self")
 
 
 def _pick_function(an, rng):
@@ -891,6 +961,15 @@ def t_rename(module, an, rng):
       * the name `main`, which the formal runtime's entry stub looks up BY NAME
         (`formal/build.py`), so renaming it yields an image with no entry point
         rather than a renamed one;
+      * a RECEIVER parameter's spelling — `formal/model.py`'s own
+        `RECEIVER_PARAMETER_SPELLINGS`, imported rather than re-spelled, because
+        a method's receiver is identified by the NAME its first parameter is
+        written with and a rename therefore deletes it.  Measured on the
+        `classes` mix: 20 of 30 twins came out `TWIN-DIVERGES` with
+        `C5.m15() is declared with parameters and no receiver: its first
+        parameter is an ordinary argument`.  The receiver is not a parameter
+        this path can rename, so it is the same class as `main`: a name the
+        target looks up rather than one it computes with;
       * nothing at all: a function whose every local is excluded is skipped and
         the next one is tried, rather than the transform claiming a rename it
         did not make.
@@ -901,7 +980,8 @@ def t_rename(module, an, rng):
         scope = an.scopes[id(fn)]
         if scope.kind != "function":
             continue
-        blocked = set(an.arg_keywords) | {"main"} | _interpolated_names(module)
+        blocked = (set(an.arg_keywords) | {"main"} | _interpolated_names(module)
+                   | _RECEIVER_SPELLINGS)
         for inner in an.functions:
             if inner is fn:
                 continue
@@ -956,6 +1036,10 @@ def t_dead_local(module, an, rng):
     stays off by one silently.
     """
     fn = _pick_function(an, rng)
+    if _is_constructor(an, fn):
+        raise NotApplicable("a constructor's body IS the construction this "
+                            "path inlines, so adding a statement changes the "
+                            "construct (see `_is_constructor`)")
     dead = an.fresh("d")
     stmts = ast.parse(f"{dead} = 0\n{dead} = 1\n").body
     ast.copy_location(stmts[0], fn)
@@ -1026,6 +1110,10 @@ def t_noop_loop(module, an, rng):
     before `main`'s body cannot change what the runtime looks up.
     """
     fn = _pick_function(an, rng)
+    if _is_constructor(an, fn):
+        raise NotApplicable("a constructor's body IS the construction this "
+                            "path inlines, so adding a loop changes the "
+                            "construct (see `_is_constructor`)")
     idx = an.fresh("l")
     loop = ast.parse(f"for {idx} in range(0, 0):\n    {idx} = {idx} + 1\n").body[0]
     ast.copy_location(loop, fn)
@@ -1059,6 +1147,9 @@ def t_if_true(module, an, rng):
     order = list(an.functions)
     rng.shuffle(order)
     for fn in order:
+        if _is_constructor(an, fn):
+            continue          # `_is_constructor`: the guard would change the
+                               # CONSTRUCT, not the program's shape
         cands = [i for i, s in enumerate(fn.body)
                  if not isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef,
                                        ast.ClassDef, ast.Return,
@@ -1123,8 +1214,9 @@ def t_extract(module, an, rng):
         word, and it is excluded rather than reasoned about;
       * every operand must be INVARIANT from the binding to the uses — see
         `_inv`, which is a positional condition and not "never assigned";
-      * `x` must not be stored at or after the binding (`_frozen_from`), and
-        must not be a keyword-argument name or `main`;
+      * `x` must not be stored at or after the binding (`_frozen_from`), must
+        not be a name a nested scope captures (`_captured_names`), and must not
+        be a keyword-argument name or `main`;
       * the assignment must be a DIRECT child of a function body, so `x` is
         bound unconditionally and every read of it is dominated by it.
 
@@ -1139,8 +1231,12 @@ def t_extract(module, an, rng):
     """
     cands = []
     for fn in an.functions:
+        if _is_constructor(an, fn):
+            continue          # `_is_constructor`: removing a statement from a
+                               # body this path inlines changes the construct
+        captured = _captured_names(fn)
         for i, stmt in enumerate(fn.body):
-            if _extractable(fn, stmt, an, i):
+            if _extractable(fn, stmt, an, i, captured):
                 cands.append((fn, i))
     if not cands:
         raise NotApplicable("no `x = a + b` whose operands never change")
@@ -1198,13 +1294,23 @@ def t_extract(module, an, rng):
 EXTRACT_OPS = (ast.Add, ast.Sub, ast.Mult, ast.BitAnd, ast.BitOr, ast.BitXor)
 
 
-def _extractable(fn, stmt, an, index):
+def _extractable(fn, stmt, an, index, captured=frozenset()):
     if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1):
         return False
     target = stmt.targets[0]
     if not isinstance(target, ast.Name):
         return False
     if target.id in an.arg_keywords or target.id == "main":
+        return False
+    if target.id in captured:
+        # A name a NESTED scope in this function captures is not a frame slot
+        # this transform may delete.  Two things go wrong at once: the binding
+        # disappears from the frame the closure was defined over, and the use
+        # INSIDE the closure — which `ast.walk` descends into — would be
+        # replaced by the expression, so the closure would read its operands at
+        # CALL time instead of the value it captured.  Measured on the
+        # `closures` mix, 7 of 20 programs, and the symptom was a printed
+        # number moving rather than a crash.
         return False
     if target.id in _interpolated_names(an.module):
         # A use inside an f-string or t-string is SOURCE TEXT: replacing the
@@ -1333,6 +1439,12 @@ def _info(node, out=None, in_block=False):
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
                          ast.ClassDef)):
         out.escapes |= _nested_names(node)
+        # Observable too, and for a reason that is not obvious from the node:
+        # a nested `def` whose body prints is an output channel, and whether the
+        # two statements around it can be exchanged depends on whether anything
+        # CALLS it between them.  Reading only the statement's own expression
+        # would call a definition pure.
+        out.effectful = True
         return out
     if isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom, ast.Raise,
                          ast.Await, ast.Global, ast.Nonlocal)):
@@ -1398,32 +1510,95 @@ def _nested_names(fn):
     return out
 
 
+def _captured_names(fn):
+    """The names a scope NESTED IN `fn` reads or writes.  `fn` excluded."""
+    out = set()
+    for n in ast.walk(fn):
+        if n is fn:
+            continue
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
+                          ast.ClassDef)):
+            out |= _nested_names(n)
+    return out
+
+
+def _reachable_by_a_call(an, fn):
+    """The names a CALL made from inside `fn` may read or write.
+
+    Two hazards, one predicate, and neither is visible in the two statements
+    being exchanged:
+
+      * a CLOSURE CELL — `c = 9` beside `print(cf(4))` where `cf`, defined
+        earlier, reads `c`.  Swapping them prints 5 instead of 13, because the
+        closure reads the cell and the cell now holds the old value.  Measured,
+        and caught by CPython as a `transform-invalid` before any build.  This is
+        the hazard `formal_fuzz.py`'s `closures` mix was written to find,
+        reached from the other direction;
+      * a GLOBAL — `G = 57` beside `print(bump(2))` where `bump` declares
+        `global G` and mutates it.  The two statements share no name, the call
+        does not mention `G`, and swapping them changes the printed value.
+        Measured on the `globals` mix, 2 of 30 programs, same verdict.
+
+    So the set is "every name a module-level binding can be reached by" — which
+    is every name bound in the MODULE scope, plus every name any scope nested in
+    this function captures — and the rule is that a statement writing one of them
+    is not exchanged with a statement that CALLS anything.  Coarser than the
+    truth (a call to a function that touches no global is harmless), and sound:
+    over-approximating reachability can only refuse a swap.
+    """
+    return set(an.module_bindings) | _captured_names(fn)
+
+
 def t_reorder(module, an, rng):
     """Swap two adjacent statements of a function body that cannot interact.
 
-    SOUNDNESS.  Two statements may be exchanged iff neither reads a name the
-    other writes, neither writes a name the other reads or writes, neither
-    escapes through a nested function over the other's writes or reads, neither
-    can leave the block (`return`, `yield`, `raise`, `await`, or a
-    `break`/`continue` not inside a loop or `try` of its own), and they are not
-    BOTH observable — two statements that each print cannot be exchanged,
-    because exchanging them exchanges two lines of output.  Every one of those
-    is a decidable predicate over the two nodes, and the CPython oracle then
-    checks the RESULT — but the predicate is the transform, and the oracle is
-    the net under it.  A predicate that were wrong would show up as
-    `transform-invalid`, which is reported as loudly as a backend bug, so the
-    two checks cannot be confused.  Measured: 13 programs whose adjacent pair was
-    two `print`s, all caught by the oracle before any build, which is the whole
-    reason the oracle runs first.
+    SOUNDNESS.  Two statements may be exchanged iff
+
+      * neither reads a name the other writes, and neither writes a name the
+        other reads or writes;
+      * neither escapes through a nested function over the other's writes or
+        reads;
+      * neither can leave the block (`return`, `yield`, `raise`, `await`, or a
+        `break`/`continue` not inside a loop or `try` of its own);
+      * they are not BOTH observable — two statements that each print cannot be
+        exchanged, because exchanging them exchanges two lines of output;
+      * a statement that WRITES a name a call from this function can reach
+        (`_reachable_by_a_call` — a module-level binding, or a name a nested
+        scope captures) is not exchanged with a statement that calls anything.
+        This is the rule no amount of looking at the two statements finds, and
+        it carries the closure-cell and the global hazards at once.
+
+    Every one of those is a decidable predicate, and the CPython oracle then
+    checks the RESULT — but the predicate is the transform, and the oracle is the
+    net under it.  A predicate that were wrong would show up as
+    `transform-invalid`, which is reported as loudly as a backend bug, so the two
+    checks cannot be confused.  Measured, all four of the rules above having been
+    wrong at least once: 13 programs whose adjacent pair was two `print`s, two
+    whose pair was `x = 0` beside `xs[0] = 1`, one closure program whose pair was
+    `c = 9` beside the call that reads the cell, and two `globals` programs whose
+    pair was `G = 57` beside a call that mutates `G` from another function.
     """
     pairs = []
     for fn in an.functions:
         infos = [_info(s) for s in fn.body]
+        reach = _reachable_by_a_call(an, fn)
         for i in range(len(fn.body) - 1):
             a, b = infos[i], infos[i + 1]
             if a.terminal or b.terminal:
                 continue
             if a.effectful and b.effectful:
+                continue
+            if a.writes & reach and b.effectful:
+                continue
+            if b.writes & reach and a.effectful:
+                continue
+            if _is_constructor(an, fn) and not (
+                    _self_field_stores(fn.body[i])
+                    and _self_field_stores(fn.body[i + 1])):
+                # A constructor body is inlined at the construction site, so the
+                # only reordering it survives is between two of the
+                # `self.<field> = …` assignments it is made of.  Measured: the
+                # refusal names the shape, and it fires for anything else.
                 continue
             if a.writes & (b.reads | b.writes):
                 continue
@@ -1817,10 +1992,21 @@ def _compare_one(backend, base, twin, want):
         # the program must not change the sentence.
         if F.fold_arch(base.get("diag", "")) != F.fold_arch(twin.get("diag", "")):
             out.append("REFUSAL-DIVERGES-" + arch)
+    # `MISMATCH` means the TRANSFORM INTRODUCED the disagreement: the original
+    # agreed with CPython and the twin does not.  A disagreement BOTH sides have
+    # is `DIVERGENCE` — the original's, and `formal_fuzz.py`'s to attribute —
+    # and reporting it as `MISMATCH` too made every documented divergence into a
+    # fresh finding on every run: measured on the `strings` mix, where
+    # `s[i]` is a byte rather than a one-character string
+    # (`formal_fuzz.KNOWN_DIVERGENCES`), 17 of 20 programs arrived as
+    # `MISMATCH-X86`.  With both sides wrong AND different the localisation is
+    # still there, because `METAMORPH` above already says they differ.
     base_bad = b_ans is not None and (b_ans[0] != want[0] or b_ans[1] != want[1])
     twin_bad = t_ans is not None and (t_ans[0] != want[0] or t_ans[1] != want[1])
-    if twin_bad:
-        out.append("DIVERGENCE-" + arch if base_bad else "MISMATCH-" + arch)
+    if base_bad:
+        out.append("DIVERGENCE-" + arch)
+    elif twin_bad:
+        out.append("MISMATCH-" + arch)
     return out
 
 
@@ -1921,14 +2107,17 @@ def check_pair(label, text, index, args, tmpdir):
     verdicts = []
     for entry in rec["transforms"].values():
         verdicts += entry["verdict"].split("+")
+    # The program's verdict is a FINDING or `match`, never a `DIVERGENCE-*`: a
+    # divergence is carried by `rec["diverge"]` and counted from there.  It used
+    # to be folded in as well, and the tally then counted it twice per program —
+    # once as the verdict and once as the divergence — which printed
+    # `DIVERGENCE-X86 34` for 17 programs.
     findings = [v for v in verdicts if v in FINDING_VERDICTS]
     if findings:
         rec["verdict"] = _worst(findings)
         bad = [f"{t}={e['verdict']}" for t, e in rec["transforms"].items()
                if e["verdict"] != "match"]
         rec["detail"] = "; ".join(bad) or rec["verdict"]
-    elif verdicts:
-        rec["verdict"] = _worst(verdicts)
     return rec
 
 
@@ -2005,20 +2194,28 @@ def report(rec):
     of noise and buried the one line that mattered.  The skip counts are in the
     summary table instead, where they are per transform rather than per program.
     """
+    # A transform entry that consists only of `DIVERGENCE-*` is carrying the
+    # ORIGINAL's disagreement, which the line already says once — printing it
+    # nine times said nothing the reader did not have and made a clean sweep of
+    # the `strings` mix 17 lines of the same sentence.
+    def _inherited(entry):
+        return all(v.startswith("DIVERGENCE-")
+                   for v in entry["verdict"].split("+"))
+
     parts = [f"{t}={e['verdict']}" for t, e in rec["transforms"].items()
-             if e["verdict"] != "match" and not e["verdict"].startswith("skip:")]
+             if e["verdict"] != "match" and not e["verdict"].startswith("skip:")
+             and not _inherited(e)]
     finding = any(v in FINDING_VERDICTS for v in rec["verdict"].split("+"))
     if not parts and not finding and not rec.get("diverge"):
         return ""
     tail = (" [" + "; ".join(parts) + "]") if parts else ""
-    note = ""
     if rec.get("diverge"):
-        # Printed even when the program has no finding of its own, and marked as
-        # `formal_fuzz`'s subject, because a reader who sees `0 findings` and a
-        # `DIVERGENCE` line below has to know which queue it is in.
-        note = "  (the ORIGINAL already disagreed with CPython: "
-        note += ", ".join(rec["diverge"]) + " — formal_fuzz's queue)"
-    return "{}: {}{}{}".format(rec["label"], rec["verdict"], tail, note)
+        # Printed even when the program has no finding of its own, and labelled
+        # with the queue it is in, because a reader who sees `0 findings` and a
+        # divergence line below has to know that it is not this tool's.
+        return "{}: DIVERGENCE ({}){}".format(
+            rec["label"], ", ".join(rec["diverge"]), tail)
+    return "{}: {}{}".format(rec["label"], rec["verdict"], tail)
 
 
 def main():
