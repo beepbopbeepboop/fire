@@ -1945,12 +1945,30 @@ class TestAxiomClosureCensus(unittest.TestCase):
                         f"nobody runs it and the table rots")
 
     def test_the_source_and_the_closure_disagree_in_both_directions(self):
-        """The join is the finding, so it is asserted as a finding.
+        """The join is the finding, so it is asserted as a finding — and ONE
+        direction of it is now pinned at ZERO, which is the opposite of what this
+        row asserted before 2026-10-04.
 
-        Both halves non-empty is the property. A census that only ever found one
-        direction would be indistinguishable from a text scan that happens to
-        agree with itself, and either direction going empty is a change in what
-        `lib/` proves rather than in how it is measured.
+        The two directions are `text_only` (the source names a decide tactic and
+        the closure has no such axiom — a LOSING tactic alternative is still
+        text, so the site census overcounts) and `closure_only` (the source names
+        none and the closure has one, because it is reached through another
+        theorem — the direction no text scan can see at all).
+
+        **`text_only` is 0, and it was 3 in `ProofLib` and 19 in `IEEE754` while
+        `AXIOM_SITE_RE`'s declaration group was `[^.]+`.** A false `clean` — an
+        axiom classified as "not one of ours" because its declaration's name is
+        dotted — lands a namespaced theorem carrying an axiom in `text_only`
+        instead of `reaches`, so the old non-empty `text_only` was not a finding
+        about `lib/` at all: it was the classifier's own bug, counted. With the
+        group greedy, every site in the text has its axiom in its own closure,
+        which says the SITE census is EXACT at theorem granularity — a stronger
+        statement than "both directions are non-empty", and the one worth
+        pinning. It stays an assertion rather than a comment because the same
+        bug in the other direction would put it back.
+
+        `closure_only` stays non-empty, because that is the property that says
+        the closure census is not a text scan with extra steps.
         """
         from formal import admitted as A
         lib = A.lean_dir(HERE)
@@ -1960,10 +1978,17 @@ class TestAxiomClosureCensus(unittest.TestCase):
                      if v["text_only"]}
         closure_only = {m: v["closure_only"] for m, v in summary.items()
                         if v["closure_only"]}
-        self.assertTrue(text_only, "no theorem has a site its closure does "
-                                   "not back, so the site census is exact at "
-                                   "theorem granularity — which the 751-site "
-                                   "table would then be measuring")
+        self.assertFalse(text_only,
+                         f"a theorem names a decide tactic in its own text and "
+                         f"reaches no axiom in its closure: "
+                         f"{ {m: v for m, v in text_only.items()} }. That was the "
+                         f"shape `AXIOM_SITE_RE`'s `[^.]+` declaration group "
+                         f"produced — a namespaced declaration's axiom read as "
+                         f"'not one of ours' — and 22 such rows (3 in "
+                         f"`ProofLib`, 19 in `IEEE754`) were the instrument's own "
+                         f"defect counted as a finding about `lib/`. With the "
+                         f"group greedy the site census is EXACT at theorem "
+                         f"granularity, which is what this row now asserts")
         self.assertTrue(closure_only, "no theorem reaches a decide axiom "
                                       "except through its own text, so the "
                                       "closure census adds nothing over "

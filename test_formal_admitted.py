@@ -1160,18 +1160,30 @@ def _exit_status_claims():
 # the direction that matters, and reports the figure on every run so the debt is
 # visible while it is being paid.
 #
-# **The figure fell from 751 to 688 on 2026-10-04**, and the 63 sites that went
-# are named in `NATIVE_DECIDE_REPLACED` below rather than only in a commit
-# message.  All 63 were CLOSED propositions over literals — `¬ (0xd65f03c0 &&
-# & 0xffe00000 = 0x2a00fa00)`, `(1 : UInt64).toNat = 1` — which `decide`
-# discharges in microseconds and the KERNEL checks; `native_decide` was
+# **The figure is 707 on this tree, and it is a LEDGER rather than a sum.**
+# `FORMAL.md` §7 row 10 publishes total **770**, replaced **63**, remaining
+# **707**: 751 sites when the pay-down started, 63 of them replaced, and **19
+# that arrived afterwards** with `lib/IEEE754.lean` — the binary64 arithmetic
+# theorems, which `NATIVE_DECIDE_ALLOWED` names with the measured reason that
+# `decide` cannot reduce `Float.ofBits`. A total that can only fall cannot
+# record new debt, and a ledger that cannot record new debt is a number nobody
+# can re-derive, which is what this test exists to stop. The four `X86` sites
+# this commit removed were four of the 707 rather than four of the 688 the row
+# used to publish, which is the whole difference between an honest ledger and a
+# stale one.
+#
+# **The 63 that went** are named in `NATIVE_DECIDE_REPLACED` below rather than
+# only in a commit message.  All 63 were CLOSED propositions over literals — `¬
+# (0xd65f03c0 && & 0xffe00000 = 0x2a00fa00)`, `(1 : UInt64).toNat = 1` — which
+# `decide` discharges in microseconds and the KERNEL checks; `native_decide` was
 # compiling a decision procedure to C and asserting the result, which on this
 # toolchain means a generated axiom per use rather than `Lean.ofReduceBool`.
-# What is left is 682 `bv_decide` in `ProofLib`, 3 in `X86`, and 3
-# `native_decide` that are genuinely MODEL EVALUATION
-# (`NATIVE_DECIDE_ALLOWED`).  **751, not the 749 this table pinned until
-# 2026-10-04**: the census's own scanner mis-read an identifier's apostrophe as
-# a character literal and hid two sites — see `lean_code_regions`.
+# **What is left is 682 `bv_decide` in `ProofLib`, 3 `bv_decide` in `X86` (the
+# `∀ w, …` bit-pattern lemmas, which is the right tool), and 19 `native_decide`
+# in `IEEE754` that evaluate a ground binary64 value.**  **751, not the 749 this
+# table pinned until 2026-10-04**: the census's own scanner mis-read an
+# identifier's apostrophe as a character literal and hid two sites — see
+# `lean_code_regions`.
 LIBRARY_TRUST = {
     # module    axiom  sorry  axiom_tactic ceiling (see the note above)
     "Contracts": (0, 0, 0, 0),
@@ -1190,6 +1202,14 @@ LIBRARY_TRUST = {
     # `native_decide`.
     "ProofLib": (0, 0, 685, 685),
     "Refine": (0, 0, 0, 0),
+    # **3, and it was 3 before this commit read 7**: four `native_decide` sites
+    # landed here (`@[simp] theorem x86_mask_{one,two,four,eight}`, all four on
+    # four lines at `lib/X86.lean:503..506`) without the ceiling moving, which is
+    # how a gate job goes red for a reason nobody wrote down.  All four were
+    # CLOSED facts over literals — `x86_mask 1 = 0xff` and its three siblings —
+    # and `decide` discharges them with the KERNEL checking the answer, so they
+    # are gone and this row is a measurement again.  The 3 that remain are the
+    # `bv_decide` bit-pattern lemmas at `:2946`, `:2948` and `:2970`.
     "X86": (0, 0, 3, 3),
     "work": (0, 0, 0, 0),
     # The binary64 semantics, added 2026-10-04 with `lib/IEEE754.lean`.  Zero
@@ -1214,20 +1234,34 @@ LIBRARY_TRUST = {
 #: how many reached a decide axiom, and the two disagreements with the text
 #: census. Read out of a real `#print axioms` run over all of `lib/` through
 #: `formal/admitted.py::theorem_axiom_census`, and pinned because the number §7
-#: publishes is this one and there was nothing measuring it. **All 375 answered**
-#: and the four columns partition each module exactly, which is asserted rather
-#: than hoped for: an unanswered theorem is counted in none of them.
+#: publishes is this one and there was nothing measuring it. **All 520 answered**
+#: but one — `ProofLib.ifUpdate_congr`, the `private theorem` at
+#: `lib/ProofLib.lean:7364`, whose name Lean mangles and which carries no tactic
+#: site (checked, not assumed) — and the four columns partition each module
+#: exactly, which is asserted rather than hoped for: an unanswered theorem is
+#: counted in none of them.
 #:
-#: `reaches` is the honest fact: of the 375 theorems in `lib/`, **53** rest on a
-#: decide axiom and **304** are kernel-checked. `text_only` are theorems whose
+#: `reaches` is the honest fact: of the 520 theorems in `lib/`, **67** rest on a
+#: decide axiom and **442** are kernel-checked. `text_only` are theorems whose
 #: source names one of the tactics and whose closure has none — a losing tactic
 #: alternative is still text, so the site census overcounts, and each row is a
 #: place where a replacement would have changed nothing. `closure_only` are
 #: theorems whose source names none and whose closure has one, because they
 #: reach it THROUGH another theorem: the site census cannot see these at all, and
 #: they are the argument for measuring the closure rather than the text. The
-#: clearest is `ProofLib.arm64_cset_{eq,le,ne}`, which carry
-#: `arm64_flag_eq._native.bv_decide.ax_1_7` through it and name no tactic.
+#: clearest is `ProofLib.arm64_cset_{eq,le,lt_s,ne}`, which carry
+#: `arm64_flag_eq._native.bv_decide.ax_1_N` through it and name no tactic.
+#:
+#: **Every figure in this table moved on 2026-10-04, and both instruments that
+#: produced it were wrong first.** `AXIOM_SITE_RE`'s declaration group was
+#: `[^.]+`, so a NAMESPACED declaration's axiom read as "not one of ours" and
+#: `IEEE754` measured `reaches 0 / text_only 19` — the opposite of the truth; and
+#: `library_theorems` carried its own declaration-head pattern with no `@[...]`
+#: prefix, so 98 attributed declarations were never asked about at all (31 in
+#: `ProofLib`, 66 in `X86`, 1 in `work`) and every one of them was filed as
+#: `clean`. The old numbers were `375 asked / 53 reaches` over five modules, and
+#: the module set was missing `IEEE754` entirely. See
+#: `bugs/FORMAL_native_decide_axiom.md`.
 #:
 #: `of_reduce_bool` is 0 everywhere, and is the row that corrects the name.
 #:
@@ -1239,20 +1273,12 @@ LIBRARY_TRUST = {
 #: rather than by a table, which is how a reader ends up comparing them.
 AXIOM_CLOSURE = {
     #            asked  reaches  clean  text_only  closure_only  ofReduceBool
-    "Contracts": (7, 0, 6, 1, 0, 0),
-    "ProofLib": (255, 51, 192, 3, 9, 0),
-    "Refine": (22, 0, 20, 0, 2, 0),
-    "X86": (73, 2, 69, 1, 1, 0),
-    "work": (18, 0, 17, 0, 1, 0),
-    # Read out of a real `#print axioms` run over all 24 declarations of
-    # `lib/IEEE754.lean`, on the pinned toolchain.  19 reach a decide axiom and
-    # 5 are kernel-checked, and the 5 are exactly the COMPARISON section — the
-    # half that is `UInt64`/`Bool` and therefore closed under `decide`.  Zero
-    # `text_only` and zero `closure_only` because every `native_decide` site is
-    # also in its own closure and no theorem reaches an axiom through another
-    # one, which is the opposite of `ProofLib`'s `arm64_cset_*` row and is
-    # recorded as a contrast rather than left for a reader to infer.
+    "Contracts": (7, 0, 7, 0, 0, 0),
     "IEEE754": (24, 19, 5, 0, 0, 0),
+    "ProofLib": (297, 46, 243, 0, 8, 0),
+    "Refine": (29, 0, 29, 0, 0, 0),
+    "X86": (144, 2, 141, 0, 1, 0),
+    "work": (19, 0, 17, 0, 2, 0),
 }
 
 
@@ -1336,7 +1362,7 @@ NATIVE_DECIDE_ALLOWED = {
 }
 
 
-# What the 63 replaced sites were, in ONE place, so the ceiling's fall is
+# What the 67 replaced sites were, in ONE place, so the ceiling's fall is
 # attributable rather than merely smaller.  A number with no list is the failure
 # mode `tools/suite.py`'s count-checked `expect=` markers were built against.
 #
@@ -1349,7 +1375,24 @@ NATIVE_DECIDE_REPLACED = {
     "ProofLib": 61,      # 34 `absurd h`, 17 `absurd t`, 3 `absurd h_opc`,
                          # 5 closed `have`s, 2 `.toNat` facts
     "Contracts": 1,      # `spec_triple_ne_identity`: `¬ (n * 3) 7 = 7`
-    "X86": 1,            # `lowMask_eight`: eight `|||`/`<<<` on `UInt64`
+    "X86": 5,            # `lowMask_eight`: eight `|||`/`<<<` on `UInt64`; and
+                         # `x86_mask_{one,two,four,eight}` (`lib/X86.lean:503..506`),
+                         # the four `native_decide` that landed here without the
+                         # ceiling moving and made this file red on 2026-10-04.
+                         # `x86_mask n` is `if n ≥ 8 then … else UInt64.ofNat
+                         # (2^(8n) - 1)` over a LITERAL argument, so `decide`
+                         # discharges all four and `#print axioms` answers "does
+                         # not depend on any axioms" for each — not even
+                         # `propext`/`Quot.sound`. They were worth FIVE theorems
+                         # and four sites: `x86_step_movsx_r64_r8` reached
+                         # `x86_mask_eight`'s axiom through it and is
+                         # kernel-checked now that the theorem is
+    # No `IEEE754` row, and the omission is the finding rather than an oversight:
+    # its 19 `native_decide` sites are ground binary64 facts over `Float.ofBits`
+    # / `Float.toBits`, which are COMPILED PRIMITIVES, so `decide` cannot reduce
+    # them (measured: "reduction got stuck"). They are debt that ARRIVED, named
+    # one by one in `NATIVE_DECIDE_ALLOWED`, and they are the reason §7 row 10's
+    # total is 770 rather than 751.
 }
 
 
@@ -1957,20 +2000,29 @@ def test_the_census_is_attributed_to_theorems_not_only_to_lines(tmpdir=None):
           f"WORK LIST — each of those is one site away from a kernel-checked "
           f"proof — so it moving DOWN is the outcome and moving UP means new "
           f"debt landed. Either way the ceiling and the commit move together.")
-    # …and the sharper one.  Of the 19, ten are the `arm64_flag_*` family, whose
+    # …and the sharper one.  Of the 36, ten are the `arm64_flag_*` family, whose
     # sites are `simp only […]; bv_decide` over bit patterns — the right tool
     # with no kernel-checked spelling short of writing the arithmetic out.  A
     # theorem whose ONLY site is a `native_decide` is the other kind: closed
     # `UInt64`/`Nat` arithmetic, which `decide`, `rfl`, `norm_num` or `omega`
-    # very often closes.  This is the list `bugs/FORMAL_native_decide_axiom.md`
-    # item 3 asks for by another name, and it is short enough to read.
+    # very often closes.  **A declaration `NATIVE_DECIDE_ALLOWED` already names
+    # with a reason is NOT on this list**, and that exclusion is what keeps it a
+    # work list: all 19 `IEEE754` arithmetic theorems and the three
+    # `DylibExport` ground-image theorems carry exactly one `native_decide` and
+    # every one of them has a measured reason `decide` cannot go, so counting
+    # them made the list report 22 items of which 22 were justified and the next
+    # reader would have had to re-derive that.  This is the list
+    # `bugs/FORMAL_native_decide_axiom.md` item 3 asks for by another name, and
+    # it is short enough to read — which is the point of a work list.
     replaceable = sorted(r[0] for mod, rows in by_decl.items() for r in rows
                          if r[2]["axiom_tactic"] == 1
-                         and r[2].get("native_decide", 0) == 1)
+                         and r[2].get("native_decide", 0) == 1
+                         and r[0] not in NATIVE_DECIDE_ALLOWED.get(mod, {}))
     check(len(replaceable) <= REPLACEABLE_THEOREMS,
           f"{len(replaceable)} theorems in lib/ carry exactly one site and that "
-          f"site is a `native_decide` ({', '.join(replaceable)}), and the "
-          f"ceiling says {REPLACEABLE_THEOREMS}. Those are the sites with a "
+          f"site is a `native_decide` that NATIVE_DECIDE_ALLOWED does not already "
+          f"justify ({', '.join(replaceable)}), and the ceiling says "
+          f"{REPLACEABLE_THEOREMS}. Those are the sites with a "
           f"kernel-checked spelling standing next to them, so the count "
           f"falling is the whole of item 3's first step.")
     hot = sorted(((r[2]["axiom_tactic"], r[0], mod)
@@ -1989,22 +2041,31 @@ def test_the_census_is_attributed_to_theorems_not_only_to_lines(tmpdir=None):
 # How many theorems in `lib/` may carry EXACTLY ONE axiom-carrying tactic site.
 # A ceiling, for the reason `LIBRARY_TRUST`'s note gives: each of those is one
 # site away from a kernel-checked proof, so the count moving DOWN is the outcome
-# and moving UP means new debt landed.  19 on this tree (16 in `ProofLib`, 2 in
-# `X86`, 1 in `Contracts`): 2.5% of the 749 sites, and 34% of the 56 theorems
-# that carry any.  `test_the_census_is_attributed_to_theorems_not_only_to_lines`
-# prints their names, and ten of them are the `arm64_flag_*` family.
-ONE_SITE_THEOREMS = 19
+# and moving UP means new debt landed.  **36 on this tree**, and the jump from the
+# 19 this table held is not new work: it is 19 declarations that were never in
+# the list because their site is in a file that arrived after the ceiling was
+# written (`lib/IEEE754.lean`, 19 one-site `native_decide` theorems) plus the
+# one-site rows the per-theorem attribution already counted and this ceiling had
+# not caught up with.  `test_the_census_is_attributed_to_theorems_not_only_to_lines`
+# prints their names; ten are the `arm64_flag_*` family and 19 are IEEE754's
+# arithmetic, which `NATIVE_DECIDE_ALLOWED` justifies by declaration.
+ONE_SITE_THEOREMS = 36
 
-# How many theorems may carry exactly one site AND that site be a
-# `native_decide`.  This is `bugs/FORMAL_native_decide_axiom.md` item 3's list
-# by another name, and it is the sharpest version: 8 on this tree
-# (`Semantics_refutable`, `backward_branch_in_image`,
-# `backward_branch_run_none`, `work_step_mov`, `toNat_sub_one`,
-# `toNat_sub_two` in `ProofLib`; `lowMask_eight` in `X86`; and
-# `spec_triple_ne_identity` in `Contracts`).  The other 11 of the 19 are
-# `bv_decide` over bit patterns, which is the right tool.  A ceiling, again: a
-# replacement lowers it, and the commit says which.
-REPLACEABLE_THEOREMS = 8
+# How many theorems may carry exactly one site AND that site be a `native_decide`
+# that `NATIVE_DECIDE_ALLOWED` does not already name with a reason.  This is
+# `bugs/FORMAL_native_decide_axiom.md` item 3's list by another name, and it is
+# the sharpest version.  **0 on this tree, and that is the outcome item 3 asked
+# for**: the last four were `@[simp] theorem x86_mask_{one,two,four,eight}` and
+# `decide` closed them, so every one-site `native_decide` in `lib/` is now either
+# kernel-checked or justified by name — `IEEE754`'s 19 ground binary64
+# arithmetic theorems (measured: `decide` cannot reduce `Float.ofBits`, which is
+# a compiled primitive) and `ProofLib`'s three `DylibExport` theorems over a
+# ground image.  The 11 of the 36 that are `bv_decide` over bit patterns are the
+# right tool and are not on this list at all.  A ceiling of **0** is the strongest
+# form of the ratchet `NATIVE_DECIDE_ALLOWED` already is: a new one-site
+# `native_decide` anywhere in `lib/` fails this row BY NAME, and a site in a
+# theorem that already had another is caught by that table instead.
+REPLACEABLE_THEOREMS = 0
 
 
 def test_the_source_half_of_the_closure_census_is_readable(tmpdir=None):
@@ -2051,21 +2112,86 @@ def test_the_source_half_of_the_closure_census_is_readable(tmpdir=None):
     # The qualified spelling is what makes `#print axioms <name>` work at all, so
     # check it structurally rather than against a copy of the tree: every name is
     # either bare (a file with no namespaces) or dotted, and a dotted one starts
-    # with a namespace the file actually opens.
+    # with a name the file either OPENS as a namespace or DECLARES as a type —
+    # because Lean lets a declaration introduce a namespace implicitly by a
+    # qualified name, and `lib/ProofLib.lean` does exactly that:
+    # `@[ext] theorem Arm64State.mem_pc` (`:3481`) puts `mem_pc` in
+    # `Arm64State`'s namespace without a `namespace Arm64State` anywhere, so a
+    # check that demanded the file to OPEN it reported a real, answerable name as
+    # one Lean would refuse.
     for mod, m in rows.items():
-        opens = set(re.findall(r"(?m)^namespace\s+([A-Za-z_][\w'.]*)",
-                               open(os.path.join(lib, mod + ".lean"),
-                                    encoding="utf-8").read()))
+        raw = open(os.path.join(lib, mod + ".lean"), encoding="utf-8").read()
+        opens = set(re.findall(r"(?m)^namespace\s+([A-Za-z_][\w'.]*)", raw))
+        types = set(re.findall(r"(?m)^\s*(?:@\[[^\]\n]*\]\s*)*(?:private\s+|"
+                               r"protected\s+)*(?:structure|class|inductive)\s+"
+                               r"([A-Za-z_][\w'.]*)", A.lean_code_regions(raw)))
         for q in m:
             if "." in q:
-                check(q.split(".")[0] in opens,
+                check(q.split(".")[0] in opens | types,
                       f"{mod}.{q} is namespaced under {q.split('.')[0]!r}, which "
-                      f"{mod}.lean does not open — Lean would answer "
-                      f"`Unknown constant` and this row would read as a theorem "
-                      f"that reaches no axiom")
+                      f"{mod}.lean neither opens as a namespace nor declares as a "
+                      f"type — Lean would answer `Unknown constant` and this row "
+                      f"would read as a theorem that reaches no axiom")
+    # **Every attributed THEOREM is one this census can ask about.**  The two
+    # used to be separate scanners with separate answers: this function's own
+    # `heads` pattern had no `@[...]` prefix, so 98 attributed declarations
+    # (`ProofLib` 31, `X86` 66, `work` 1 — four of the X86 ones being
+    # `@[simp] theorem x86_mask_*` on four lines side by side) were never asked
+    # about, and `axiom_census_summary` filed every one of them as a theorem
+    # that reaches no axiom: a clean row for a proof nobody asked Lean about.
+    #
+    # `def`/`abbrev`/`instance` are deliberately not required — they carry no
+    # proof, so `#print axioms` has nothing to ask about them — so the keyword is
+    # read off the declaration's OWN first line rather than assumed, and the
+    # attributed names are the ones the other scanner produced.
+    for mod in sorted(rows):
+        for name, line, _kinds in A.declaration_tally(lib).get(mod, []):
+            head = open(os.path.join(lib, mod + ".lean"),
+                        encoding="utf-8").read().splitlines()[line - 1]
+            kind = re.match(r"^[ \t]*(?:@\[[^\]\n]*\][ \t\n]*)*"
+                            r"(?:private\s+|protected\s+|noncomputable\s+|"
+                            r"nonrec\s+)*(theorem|lemma|def|abbrev|instance|"
+                            r"example)\s", head)
+            if kind and kind.group(1) in A.THEOREM_HEAD_KINDS:
+                check(name in rows[mod],
+                      f"{mod}.{name} is a theorem the attribution walk found at "
+                      f"line {line} ({head.strip()[:60]!r}) and the closure "
+                      f"census cannot see it, so `#print axioms` is never asked "
+                      f"about it and it reads as a proof that reaches no axiom")
+    # The four that started this, named rather than counted, because a count
+    # moves when the corpus grows and a NAME is what a reader goes and looks at.
+    for name in ("x86_mask_one", "x86_mask_two", "x86_mask_four",
+                 "x86_mask_eight"):
+        check(name in rows["X86"],
+              f"X86.{name} is invisible to the source half of the closure "
+              f"census. All four are written `@[simp] theorem …`, and the "
+              f"scanner's own declaration-head pattern had no `@[...]` prefix, "
+              f"so a `#print axioms` line was never emitted for any of them")
+    # **The declarations the census cannot ASK about are the ones with no site
+    # to hide**, and that is what makes the drop safe rather than a hole: a
+    # `private` theorem's name is mangled, so `theorem_axiom_census` leaves it
+    # out and REPORTS it, and a `bv_decide` inside one would be an axiom that
+    # exists and cannot be named — which is the arithmetic in
+    # `test_formal_axioms.py` being unable to close. `lib/` has exactly one such
+    # declaration (`ProofLib.ifUpdate_congr`) and it has no site. Checked here
+    # because this file is the one that runs without Lean.
+    private = {f"{mod}.{name}"
+               for mod, m in rows.items() for name, row in m.items()
+               if not row.get("public", True)}
+    holders = {f"{mod}.{name}"
+               for mod, rs in A.declaration_tally(lib).items()
+               for name, _line, kinds in rs if kinds["axiom_tactic"]}
+    check(not (private & holders),
+          f"a declaration the closure census cannot ask about carries an "
+          f"axiom-carrying site: {sorted(private & holders)}. Its name is "
+          f"mangled, so the axioms it introduces exist and cannot be named, and "
+          f"every count built on `#print axioms` would then be short by an "
+          f"amount nobody could point at")
     return True, (f"{sum(len(m) for m in rows.values())} top-level theorem(s) "
                   f"across {len(rows)} module(s), namespaced and located; "
-                  f"{len(primes)} of them end in a prime")
+                  f"{len(primes)} of them end in a prime; "
+                  f"{len(private)} unaskable (private) and none carries a site; "
+                  f"every attributed theorem is visible to the census")
 
 
 def test_the_axiom_names_are_classified_not_guessed(tmpdir=None):
@@ -2108,6 +2234,34 @@ def test_the_axiom_names_are_classified_not_guessed(tmpdir=None):
           "a `._native.` name for a tactic outside AXIOM_TACTICS is classified "
           "as ours; the test below asserts lib/ contains none, which is what "
           "keeps the limit from being a silent gap")
+    # **A NAMESPACED declaration's axiom, which is what `lib/` mostly prints.**
+    # `AXIOM_SITE_RE`'s declaration group was `[^.]+` — it cannot match a dotted
+    # name at all — while its only other spelling of this shape,
+    # `formal/lean.py::GENERATED_AXIOM_RE`, uses a greedy `.+` and carries a
+    # comment saying a lazy one "would hand `DylibExport` to `decl` and fail to
+    # match at all". Measured consequence: `axiom_census_summary` read every
+    # namespaced axiom as "this closure has no site", so `IEEE754` reported
+    # `reaches 0 / text_only 19` against a truth of `reaches 19 / text_only 0`,
+    # and `ProofLib` reported 43 where the answer is 46. A false `clean` is the
+    # one thing a trust census may not produce, and both names here are MEASURED
+    # output (`formal/lean.py::print_axioms`, 2026-10-04).
+    for measured_name, want in (
+            ("IEEE754.signed_zeros_are_equal._native.native_decide.ax_1_1",
+             "native_decide"),
+            ("DylibExport.backward_branch_run_none._native.bv_decide.ax_1_3",
+             "bv_decide"),
+            ("MF.fieldTag_inj'_one._native.bv_decide.ax_2_9", "bv_decide")):
+        check(A.axiom_site_tactic(measured_name) == want,
+              f"{measured_name!r} classifies to "
+              f"{A.axiom_site_tactic(measured_name)!r} rather than {want!r}. "
+              f"The declaration group must be GREEDY, for the reason "
+              f"`formal/lean.py::GENERATED_AXIOM_RE` gives: a namespaced "
+              f"declaration's axiom does not match at all otherwise, and the "
+              f"census then files a proof that reaches one as reaching none")
+    check(A.axiom_site_tactic("IEEE754.signed_zeros_are_equal._native.foo."
+                              "ax_1_1") is None,
+          "a namespaced name for a tactic outside AXIOM_TACTICS is classified "
+          "as ours; the limit is the same one the bare name has")
     measured = ("'x86_step_ret' depends on axioms: [propext, Quot.sound]\n"
                 "'nat64' does not depend on any axioms\n"
                 "'mem_read_bytes_write_same' depends on axioms: [propext, "
@@ -2128,8 +2282,8 @@ def test_the_axiom_names_are_classified_not_guessed(tmpdir=None):
           f"the measured X86 row's two per-site axioms classified to {sites!r}")
     check(A.axiom_site_tactic("") is None and A.parse_print_axioms("") == {},
           "empty input must not raise and must not invent a row")
-    return True, ("3 axiom-name shapes and 3 `#print axioms` output shapes, "
-                  "all from a measured run")
+    return True, ("6 axiom-name shapes (2 bare, 3 namespaced, 1 out-of-list) and 3 "
+                  "`#print axioms` output shapes, all from a measured run")
 
 
 def test_every_native_axiom_in_lib_is_one_this_file_knows(tmpdir=None):

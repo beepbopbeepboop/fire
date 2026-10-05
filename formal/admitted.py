@@ -1039,10 +1039,27 @@ def library_trust_lines(lean_dir: str) -> list:
 # name would produce a file full of `Unknown constant` errors and look like a
 # disagreement rather than a namespace.  `def`/`abbrev`/`instance`/`example` are
 # in the shape because a tactic can sit in any of them's bodies.
+#
+# **The KIND is a named group because `library_theorems` needs it**, and that
+# function used to carry its own copy of this pattern — one with no `@[...]`
+# prefix and so unable to see a single declaration the rest of this module
+# counts.  Measured: `@[simp] theorem x86_mask_one` (`lib/X86.lean:503`, one of
+# four side by side) is invisible to the closure census's source half and
+# visible to the attribution walk, so `#print axioms` was never asked about it
+# and `axiom_census_summary` filed it as a theorem that reaches no axiom — a
+# clean row for a proof nobody asked Lean about.  Two scanners of one file
+# disagreeing about which declarations exist is the defect
+# `test_formal_admitted.py` checks; this was the one direction it did not.
 _DECL_RE = re.compile(r"(?m)^[ \t]*(?:@\[[^\]\n]*\][ \t\n]*)*"
                       r"(?P<mods>(?:private\s+|protected\s+|noncomputable\s+)*)"
-                      r"(?:theorem|lemma|def|abbrev|instance|example)\s+"
+                      r"(?P<kind>theorem|lemma|def|abbrev|instance|example)\s+"
                       r"(?P<name>[A-Za-z_][\w'.]*)")
+#: The two of `_DECL_RE`'s keywords that name something a `#print axioms` line
+#: can SPELL.  `def`/`abbrev`/`instance` carry no proof and `example` is not a
+#: name anything else can refer to, so `library_theorems` asks about the other
+#: two — as a constant, because the filter is a fact about Lean and not a
+#: preference of this reader.
+THEOREM_HEAD_KINDS = ("theorem", "lemma")
 # Every construct that opens a LeAN SCOPE, in one regex, because a scope this
 # scanner does not know about is a scope it will attribute wrongly.
 #
@@ -1075,7 +1092,7 @@ UNATTRIBUTED = "<no declaration above the site>"
 
 
 def _declarations(code: str) -> list:
-    """`(line, qualified_name, is_public)` for every declaration in `code`.
+    """`(line, qualified_name, is_public, kind)` for every declaration.
 
     `code` is the comment-stripped text, so a `theorem` inside a docstring is
     not a declaration.  `is_public` is False for `private`, and it is reported
@@ -1084,6 +1101,12 @@ def _declarations(code: str) -> list:
     are sites), and `#print axioms` cannot NAME one — Lean mangles it, so
     `test_formal_axioms.py` can only ask about the public ones and has to
     assert that no `private` declaration carries a tactic site.
+
+    `kind` is the KEYWORD (`theorem`, `lemma`, `def`, …) and it is carried
+    rather than filtered here because the two consumers want different slices
+    of the same walk: the attribution counts a site under a `def` as readily as
+    under a `theorem`, while `library_theorems` asks only about the two that
+    can be `#print axioms`-ed by name.
 
     The scope stack holds one entry per open scope: a NAMESPACE by its name, and
     a `section`/`mutual` as `(None, keyword)`. Only namespaces contribute a name
@@ -1112,7 +1135,8 @@ def _declarations(code: str) -> list:
             out.append((code.count("\n", 0, m.start()) + 1,
                         ".".join([s[0] for s in stack if s[0]]
                                  + [m.group("name")]),
-                        "private" not in m.group("mods")))
+                        "private" not in m.group("mods"),
+                        m.group("kind")))
 
     for off, kind, kw, name in events:
         # Every declaration that STARTED before this event is emitted here and
@@ -1197,7 +1221,7 @@ def _attribution(lean_dir: str) -> dict:
         # with a POINTER rather than a fresh scan per site: the rule is "the last
         # declaration at or before this line", the sites arrive in order, and a
         # rescan per site is a census whose cost is the square of the corpus.
-        heads = [(dline, name) for dline, name, _public in decls]
+        heads = [(dline, name) for dline, name, _public, _kind in decls]
         per = {}
         for kind, (_count, sites) in kinds.items():
             at = 0          # each kind's own lines start at the top again
@@ -1369,8 +1393,24 @@ def lean_dir(root: str) -> str:
 #: reports it for none of them.  The constant is kept because "no theorem
 #: reaches it" is a MEASUREMENT and a reader needs something to compare against
 #: when the toolchain moves.
+#:
+#: **The declaration group is GREEDY, and it has to be** — the same reason
+#: `formal/lean.py::GENERATED_AXIOM_RE` gives, which is the only other place
+#: this shape is matched.  A NAMESPACED declaration's axiom is
+#: `DylibExport.backward_branch_run_none._native.bv_decide.ax_1_3` and
+#: `IEEE754.signed_zeros_are_equal._native.native_decide.ax_1_1`, and `[^.]+`
+#: cannot match either: the declaration group stops at the first dot, so
+#: **every namespaced declaration's axiom read as "not one of ours."**  Measured
+#: on this tree, with `[^.]+`: `IEEE754` reported `reaches 0 / text_only 19` —
+#: the opposite of the truth, since all nineteen of its sites DO reach an axiom —
+#: and `ProofLib` reported `reaches 43` against `46`.  `axiom_census_summary`
+#: reads the classifier's answer as "this closure has no site", so a false None
+#: becomes a false `clean`, which is the one outcome a trust census may not
+#: produce.  Two copies of one pattern with different greediness is how that
+#: happened; `test_the_axiom_names_are_classified_not_guessed` now pins a
+#: namespaced name so it cannot come back.
 AXIOM_SITE_RE = re.compile(
-    r"^(?P<decl>[^.]+)\._native\.(?P<tactic>" + "|".join(AXIOM_TACTICS)
+    r"^(?P<decl>.+)\._native\.(?P<tactic>" + "|".join(AXIOM_TACTICS)
     + r")\.ax_(?P<n>\d+)_(?P<m>\d+)$")
 
 #: The name §7 and `library_trust` used to publish, kept as a constant so the
@@ -1426,10 +1466,29 @@ def library_theorems(lean_dir: str) -> dict:
     identifier character is a prime rather than a character-literal opener, each
     was blanked from its name to its next quote. `test_formal_admitted.py` lists
     them, so a scanner that loses one again fails rather than under-reporting.
+
+    **THE DECLARATIONS COME FROM `_declarations`, the ONE walk**, filtered to
+    the two keywords a `#print axioms` line can name.  This function used to
+    carry its own `heads`/`opens`/`closes` triple, and the two disagree: its
+    `heads` had no `@[...]` prefix, so **every attributed declaration was
+    invisible to it** — 31 in `ProofLib`, 66 in `X86` (four of them the
+    `@[simp] theorem x86_mask_*` at `lib/X86.lean:503..506`) and 1 in `work`.
+    A declaration the census cannot see is a declaration it never asks Lean
+    about, and `axiom_census_summary` then files it as `clean`: the row said the
+    proof rests on nothing, having established nothing.  Sharing the walk is
+    what fixes it, and `test_the_source_half_of_the_closure_census_is_readable`
+    asserts the agreement in the direction that was missing.
+
+    **A `private` declaration is in this table and is NOT askable**, and each row
+    carries the `public` flag that says so.  Lean mangles a `private` name, so
+    `#print axioms <name>` is an `Unknown constant`; `theorem_axiom_census`
+    therefore asks only about the public rows and REPORTS the rest rather than
+    dropping them silently, because "Lean answered for 297 of 298" and "297 were
+    asked and one of them cannot be named" are different sentences and only the
+    second is true.  `lib/` has exactly one (`private theorem ifUpdate_congr`,
+    `lib/ProofLib.lean:7364`) and it carries no tactic site, which
+    `test_formal_admitted.py` checks rather than assumes.
     """
-    heads = re.compile(r"^(theorem|lemma)\s+([A-Za-z_][\w'.]*'?)")
-    opens = re.compile(r"^namespace\s+([A-Za-z_][\w'.]*)")
-    closes = re.compile(r"^end\s+([A-Za-z_][\w'.]*)")
     out = {}
     for name in sorted(os.listdir(lean_dir)):
         if not name.endswith(".lean"):
@@ -1441,23 +1500,15 @@ def library_theorems(lean_dir: str) -> dict:
             continue
         code = lean_code_regions(raw)
         raw_lines, code_lines = raw.splitlines(), code.splitlines()
-        starts, stack = [], []
-        for i, line in enumerate(code_lines):
-            m = opens.match(line)
-            if m:
-                stack.append(m.group(1))
-                continue
-            if closes.match(line) and stack:
-                stack.pop()
-                continue
-            m = heads.match(line)
-            if m:
-                starts.append((i, ".".join(stack + [m.group(2)])))
+        starts = [(line - 1, qualified, public)
+                  for line, qualified, public, kind in _declarations(code)
+                  if kind in THEOREM_HEAD_KINDS]
         rows = {}
-        for idx, (i, qualified) in enumerate(starts):
+        for idx, (i, qualified, public) in enumerate(starts):
             end = starts[idx + 1][0] if idx + 1 < len(starts) else len(code_lines)
             rows[qualified] = {
                 "line": i + 1,
+                "public": public,
                 "text": "\n".join(code_lines[i:end]),
                 "raw": "\n".join(raw_lines[i:end]),
             }
@@ -1517,9 +1568,18 @@ def theorem_axiom_census(lean, lib_dir: str, modules=None, wall_s=None,
 
     **The measurement no text scan can make**, and the one §7's inventory needed
     before it could say what a proof rests on. One `#print axioms` line per
-    theorem, ONE Lean run per module — 375 theorems over five modules is five
-    elaborations and about five seconds, against 375 process launches, which is
+    theorem, ONE Lean run per module — 520 theorems over six modules is six
+    elaborations and about six seconds, against 520 process launches, which is
     why this is affordable at all.
+
+    **A `private` declaration is NOT asked about, and `asked` reports it
+    separately.**  Lean mangles the name, so the command would answer
+    `Unknown constant` and `answered` would be one short of `asked` for a reason
+    that has nothing to do with the census — which is the shape of "a red about a
+    precondition, reported as a disagreement about the instrument".  So the
+    `public` flag `library_theorems` carries decides what is asked, and
+    `asked[mod]["dropped"]` names what was left out.  `lib/` has exactly one
+    (`ProofLib.ifUpdate_congr`, `private`, no tactic site).
 
     Every run goes through `formal/lean.py::run_lean` under the library bounds,
     for the reason every Lean run in this tree does: the launcher is where the
@@ -1545,7 +1605,10 @@ def theorem_axiom_census(lean, lib_dir: str, modules=None, wall_s=None,
     for mod in (available if modules is None else list(modules)):
         if mod not in available:
             continue
-        wanted = list(library_theorems(lib_dir).get(mod, {}))
+        rows = library_theorems(lib_dir).get(mod, {})
+        wanted = [q for q, row in rows.items() if row.get("public", True)]
+        dropped = sorted(q for q, row in rows.items()
+                         if not row.get("public", True))
         with tempfile.TemporaryDirectory(prefix="axiomcensus.") as tmp:
             src = os.path.join(tmp, "axioms.lean")
             with open(src, "w", encoding="utf-8") as f:
@@ -1561,7 +1624,7 @@ def theorem_axiom_census(lean, lib_dir: str, modules=None, wall_s=None,
         if run.exceeded:
             out[mod] = {}
             asked[mod] = {"exceeded": run.exceeded, "answered": 0,
-                          "asked": len(wanted)}
+                          "asked": len(wanted), "dropped": dropped}
             continue
         # STDOUT *and* stderr, because `#print axioms` writes its answer to
         # stdout and Lean's errors go to the same place a reader has to read —
@@ -1569,7 +1632,7 @@ def theorem_axiom_census(lean, lib_dir: str, modules=None, wall_s=None,
         # only stderr and reported zero holes on a file with two.
         out[mod] = parse_print_axioms((run.stdout or "") + (run.stderr or ""))
         asked[mod] = {"exceeded": None, "answered": len(out[mod]),
-                      "asked": len(wanted)}
+                      "asked": len(wanted), "dropped": dropped}
     return {"axioms": out, "asked": asked}
 
 
