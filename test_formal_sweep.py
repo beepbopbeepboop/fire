@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 import cas
 import formal_sweep as S
 import formal_sweep_parity as P
+import formal_sweep_rounds as R
 import procrun
 # The per-child wall clocks below are `exec_budget`'s, not literals: a literal
 # is how a budget sized for "much more than a tiny program needs" spread across
@@ -2908,6 +2909,297 @@ class TestLibSystemBindSpelling(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(S._exports(S._LIBSYSTEM, name)[0] == "exported",
                                  _is_libsystem(name))
+
+
+class TestRoundOverRound(unittest.TestCase):
+    """`tools/formal_sweep_rounds.py`: two rounds of ONE architecture.
+
+    The question this tool answers is the one a work map's §2 and §3 are made
+    of — which fixes moved the number, and which rows emptied because a refusal
+    landed in front of them instead. That comparison was a throwaway script in
+    every map in the series, and `…_b10.md` §6 and `…_b11.md` §6 each said it
+    should have been a tool; it is the part of a sweep's reading that a reader
+    cannot do by counting.
+
+    So the property under test is the one that makes it trustworthy over a class
+    table: **a cause that LOSES files has to say where they went.** `…_b11.md`
+    §3.2 recorded a row falling 30 → 1 and had to establish by hand, from a
+    scratch script nobody could run again, that all 29 of the lost files had
+    landed on one f-string refusal. A report that prints only the 30 → 1 reads
+    as 29 fixes.
+
+    No builds and no CAS: the unit under test reads two text files.
+    """
+
+    # Real messages, quoted from `bugs/sweeps/sweep-arm-11.txt`, so a cause
+    # label here is one the sweep actually produced rather than one this file
+    # invented. They are quoted rather than BUILT (which is what
+    # `test_refusal_taxonomy.py` does, and what its docstring says a hand-copy
+    # cannot do) because this test is not a marker test: the thing under test is
+    # the round comparison, and a message only has to be a live one. The
+    # property that a hand-copy loses is recovered by
+    # `test_each_fixture_is_still_a_live_message` below, which asks
+    # `classify_message` about each of them — so a reword of any of these four
+    # sentences turns THIS red and names the fixture, rather than quietly
+    # filing 29 files under `other refusal` in a matrix.
+    FSTRING = (
+        "an f-string literal on line 451 is refused on this path: its value is "
+        "its INTERPOLATED text, and this path has no buffer to compose one in. "
+        "The parser keeps the whole source token "
+        "(`f\"{platform.system()}/{platform.machine()}\"`) as the literal's "
+        "value, so what this build would have printed is the spelling: with "
+        "`n = 7`, `print(f\"n={n}\")` printed `f\"n={n}\"` and exited 0 where "
+        "CPython prints `n=7`. A string here is a bare `char *` interned into "
+        "read+execute __TEXT, so `\"n=\" + decimal(n)` has nowhere to be laid "
+        "down at compile time (the field may be a runtime value) or at run time "
+        "(there is no heap); this is the same missing buffer that keeps string "
+        "concatenation and the length-dependent methods refused (see "
+        "`string_concat_refusal` and LENGTH_DEPENDENT_METHODS). Print the parts "
+        "as separate operands, or build the text with `+` once that is lowered.")
+    HANDLER = (
+        "line 44: `subprocess.TimeoutExpired` is a handler arm with a body this "
+        "path cannot put in the image, so it is refused rather than dropped: "
+        "`formal` has no exception unwinder, so no edge runs from a raise site "
+        "into an arm — a `raise` flushes the enclosing `finally` clauses and "
+        "exits the process — and every statement in this arm (`ReturnStmt`) "
+        "would be absent from the program that runs. Its effects would be "
+        "silently missing: the image would build, exit 0, and not be the program "
+        "you wrote, which is the one failure a value this compiler cannot detect "
+        "on its own. An arm whose body is `pass`, `raise`, `continue` or "
+        "`break` still builds — nothing is lost by leaving it out. Otherwise: "
+        "move the work into the `try` body or after the statement (a `finally` "
+        "if it is cleanup for the success path), or end the arm with `raise` if "
+        "the program is meant to fail there.")
+    MODATTR = (
+        "main: sys.argv reads 'argv' out of the imported module `sys`, and a "
+        "module is not a value this path can place: there is no register, frame "
+        "slot or `__DATA` word for it because it is not one — it is the library "
+        "on this link line, and what a dylib publishes is its FUNCTIONS (as "
+        "symbols, so `sys.fn(...)` lowers) and its module-level names the build "
+        "FOLDED TO A LITERAL (as values, so `sys.K = 1` lowers — there is "
+        "exactly one value of a folded module-level name in a whole program, so "
+        "the importer materializes the same one). What it cannot publish is a "
+        "VARIABLE, and `argv` is one: a list, an object or a stream has no "
+        "representation as a word on the other side of the boundary, because "
+        "every value a formal program can name lives in a function's own stack "
+        "scratch, which is reclaimed when the function returns. What `sys` "
+        "publishes: api_version, byteorder, flush_output, … "
+        "`bugs/FORMAL_module_state_no_storage.md` records the design and what "
+        "would have to be true to close it, and §(2) is this shape")
+    EXPORTS = (
+        "formal dylib has no public functions: constants.mojo exports nothing "
+        "under doc/ABI.md's rules because it declares no function and no type at "
+        "all — only module-level constants, which are inlined at their use site "
+        "and cross no boundary. There is nothing an importer could bind, and "
+        "nothing this backend could add.")
+
+    #: fixture name -> (message, the cause label it must still classify to)
+    FIXTURES = (("FSTRING", "string composition: nothing to compose into"),
+                ("HANDLER",
+                 "a handler arm with a body (no unwinder to emit it into)"),
+                ("MODATTR", "a module's ATTRIBUTE read as a value, across a "
+                            "dylib boundary"),
+                ("EXPORTS", "module exports no public functions"))
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="fs_rounds_")
+        self.addCleanup(self._tmp.cleanup)
+
+    def _log(self, rows, files, arch="arm64", passed=None, name="old"):
+        """Write one sweep log and return its path.
+
+        `rows` is `[(rel, cls, detail)]`. The `PASS=` figure is derived from
+        what is left over unless a test asks for another one, so a fixture
+        cannot state a pass count its own rows do not support — which is the
+        arithmetic the tool checks and reports on.
+        """
+        passed = files - len(rows) if passed is None else passed
+        body = ["memcap: rounds -- ceiling 8.0 GB across the process tree",
+                f"Sweeping {files} files through build --formal [{arch}] "
+                f"(1 workers, 120s timeout, 4 GB per-file ceiling)..."]
+        for rel, cls, detail in rows:
+            body.append(f"{cls.upper()}: {rel}  ({detail})")
+        body.append(f"[{arch}] {files} files: PASS={passed} "
+                    f"not-pass={files - passed}")
+        path = os.path.join(self._tmp.name, f"{name}.txt")
+        with open(path, "w") as f:
+            f.write("\n".join(body) + "\n")
+        return path
+
+    def _printed(self, old_rows, new_rows, old_files=4, new_files=None,
+                 minimum=1):
+        """What the tool prints for two synthetic rounds."""
+        new_files = old_files if new_files is None else new_files
+        out = io.StringIO()
+        with redirect_stdout(out):
+            R.report(self._log(old_rows, old_files, name="old"),
+                     self._log(new_rows, new_files, name="new"),
+                     minimum, stream=out)
+        return out.getvalue()
+
+    # ── the fixtures, and the rot a hand-copy cannot catch ─────────────────
+    def test_each_fixture_is_still_a_live_message(self):
+        # `formal_sweep_causes.py`'s own module docstring: a marker is a contract
+        # with a message `formal/` owns, and reword that message and every cause
+        # keyed on the old wording silently drops to zero while the table still
+        # sums to the total. The four fixtures above are hand-quoted from
+        # `bugs/sweeps/sweep-arm-11.txt`, so this is what stops them going stale:
+        # each one must still classify to the row it is quoted for, and a
+        # fixture that has stopped doing so is named here rather than quietly
+        # filing the files behind it under `other refusal` in a matrix.
+        import formal_sweep_causes as C
+        for name, label in self.FIXTURES:
+            with self.subTest(fixture=name):
+                message = getattr(self, name)
+                self.assertEqual(C.classify_message(message), label,
+                                 f"{name} no longer classifies to {label!r}. "
+                                 f"If formal/ reworded the message, take the "
+                                 f"sentence from the current "
+                                 f"bugs/sweeps/sweep-arm-*.txt rather than "
+                                 f"relaxing this.")
+
+    # ── where the files went: the section the tool exists for ──────────────
+    def test_a_row_that_lost_its_files_says_where_each_one_went(self):
+        # The measured shape of `…_b11.md` §3.2: the handler-arm row fell 30 → 1
+        # and all 29 of the files that left it landed on one f-string refusal.
+        # Reported as a count change it reads as 29 fixes; the whole point is
+        # that the report names the destination instead.
+        old = [("cas.py", "codegen/dependency", self.HANDLER)]
+        new = [("cas.py", "codegen/dependency", self.FSTRING)]
+        out = self._printed(old, new)
+        self.assertIn("WHERE THE FILES WENT", out)
+        self.assertIn("a handler arm with a body", out)
+        self.assertIn("-> string composition: nothing to compose into", out)
+        # …and the inverse, because a wall going up reads as progress in the
+        # row it lands on and nowhere else.
+        self.assertIn("AND WHERE THEY CAME FROM", out)
+        self.assertIn("<- a handler arm with a body", out)
+
+    def test_a_file_that_really_was_fixed_is_a_pass_not_a_move(self):
+        # The other half, and the one a move table can get wrong by lumping: a
+        # file that stops being printed at all is a `to a pass`, and it is the
+        # ONLY move where the construct behind it stopped being refused. It must
+        # not appear in the from→to matrix, or a fix and a wall read alike.
+        out = self._printed(
+            [("cas.py", "codegen/dependency", self.HANDLER)], [],
+            old_files=1, new_files=1)
+        self.assertIn("to a pass    1", out)
+        self.assertIn("(no file changed cause)", out)
+
+    def test_the_move_kinds_partition_the_union_of_the_two_rounds(self):
+        # `unchanged` plus every move kind has to be the union of the two
+        # rounds' rows, or a file was dropped from the comparison and every
+        # "which row emptied" answer above is quietly short by it.
+        rows = [("a.py", "codegen", self.HANDLER),
+                ("b.py", "codegen", self.MODATTR),
+                ("c.py", "codegen", self.EXPORTS)]
+        out = self._printed(rows, rows)
+        for kind in ("to a pass", "from a pass", "cause", "class", "unchanged"):
+            self.assertRegex(out, rf"  {kind:<12} \d")
+        self.assertIn("unchanged    3", out)
+        self.assertIn("accounted for:", out)
+
+    # ── the accounting, which is what makes the rest trustworthy ───────────
+    def test_a_partial_log_is_reported_rather_than_read_as_passes(self):
+        # A log whose summary claims a pass its own rows do not support is
+        # partial, or two runs were appended to one file. Every missing file then
+        # looks exactly like a pass in the other round — the one class of
+        # difference this report must never invent — and it exits non-zero.
+        old = self._log([("a.py", "codegen", self.HANDLER)],
+                        4, passed=1, name="old")
+        new = self._log([], 4, name="new")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ok = R.report(old, new, 1, stream=buf)
+        self.assertFalse(ok)
+        self.assertIn("INCONSISTENT LOG", buf.getvalue())
+        self.assertIn("partial, or two runs in one file", buf.getvalue())
+
+    def test_a_grown_scope_is_stated_rather_than_refused(self):
+        # A sweep's scope grows every round, so refusing to compare logs of
+        # different sizes would refuse every comparison anybody wants. The files
+        # only one round swept are listed, and the pass counts are what tell a
+        # vanished row apart from a file that left the roots.
+        out = self._printed(
+            [("a.py", "codegen", self.HANDLER)], [],
+            old_files=1, new_files=2)
+        self.assertIn("SCOPE: 1 -> 2 files (+1)", out)
+        self.assertIn("1 file(s) printed a row in OLD and none in NEW", out)
+        self.assertIn("may have passed OR left the roots", out)
+
+    # ── what is not comparable at all ──────────────────────────────────────
+    def test_two_architectures_are_refused_and_name_the_other_tool(self):
+        arm = self._log([], 4, arch="arm64", name="arm")
+        x86 = self._log([], 4, arch="x86_64", name="x86")
+        with self.assertRaises(SystemExit) as caught:
+            R.report(arm, x86, 1)
+        message = str(caught.exception)
+        self.assertIn("different architectures", message)
+        self.assertIn("formal_sweep_parity.py", message)
+
+    def test_a_file_that_is_not_a_sweep_log_is_refused(self):
+        with tempfile.TemporaryDirectory() as td:
+            junk = os.path.join(td, "not-a-sweep.txt")
+            with open(junk, "w") as f:
+                f.write("hello\n")
+            with self.assertRaises(SystemExit) as caught:
+                R.report(junk, self._log([], 4))
+        self.assertIn("NOT A SWEEP LOG", str(caught.exception))
+
+    # ── the two real rounds this repository has ───────────────────────────
+    def test_the_committed_rounds_reproduce_the_map_they_were_derived_from(self):
+        # `bugs/FORMAL_sweep_work_map_2026-10-04_b11.md` §2.1/§2.3/§3 were
+        # computed by hand from these two logs with a scratch script. The
+        # numbers in the map are therefore a real expectation, and they are the
+        # only test of this tool that uses no fixture: if a peel, a class or a
+        # cause label drifts, this goes red instead of the next map quietly
+        # re-deriving a different answer from the same two logs.
+        old = os.path.join(S.REPO, "bugs/sweeps/sweep-arm-10.txt")
+        new = os.path.join(S.REPO, "bugs/sweeps/sweep-arm-11.txt")
+        for path in (old, new):
+            if not os.path.exists(path):
+                self.skipTest(f"{path} is not in this checkout")
+        data = R.to_json(old, new)
+        # §2.1's table, verbatim.
+        self.assertEqual((data["old"]["swept"], data["new"]["swept"]),
+                         (710, 722))
+        self.assertEqual((data["old"]["pass"], data["new"]["pass"]), (141, 145))
+        self.assertEqual(data["old"]["classes"]["codegen"], 80)
+        self.assertEqual(data["new"]["classes"]["codegen/dependency"], 270)
+        self.assertEqual(data["old"]["classes"]["not-answerable/host-import"],
+                         244)
+        self.assertEqual(data["new"]["classes"]["not-answerable/host-import"],
+                         203)
+        # §2.3's four paths that left the non-pass set, named.
+        became_a_pass = [f["path"] for f in data["files"]
+                         if f["move"] == "to a pass"]
+        self.assertEqual(became_a_pass,
+                         ["build_mojo_cli.py", "test_myinterpreter_simple.py",
+                          "test_phase2_parser.py", "test_phase2_parser_simple.py"])
+        # §3's headline: 146 of the common paths changed cause or class.
+        self.assertEqual(data["moves"]["cause"] + data["moves"]["class"], 146)
+        # §3.2's two emptied rows, with the destination that makes them honest.
+        went = data["where_the_files_went"]
+        self.assertEqual(went["a handler arm with a body (no unwinder to emit "
+                              "it into)"],
+                         {"string composition: nothing to compose into": 29})
+        self.assertEqual(
+            went["a module's ATTRIBUTE read as a value, across a dylib "
+                 "boundary"],
+            {"string composition: nothing to compose into": 25})
+        # §3.3's export-gate move, which is the round's biggest single number.
+        self.assertEqual(
+            went["a call to a name the defining module does not export"],
+            {"module exports no public functions": 21,
+             "string composition: nothing to compose into": 2,
+             "a call to a name the defining module does not export": 1})
+        # §3.1's "a refusal landed IN FRONT of them: 69" is the sum of the one
+        # destination's column, so the map's 69 and this tool's rows cannot
+        # disagree about which files those are.
+        self.assertEqual(
+            sum(data["where_they_came_from"]
+                ["string composition: nothing to compose into"].values()),
+            69)
 
 
 if __name__ == "__main__":
