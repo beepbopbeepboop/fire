@@ -2421,25 +2421,17 @@ def _attach_declared_census(struct_def, declaring_path: str) -> None:
                             M.unit_field_evidence(stmts))
 
 
-def declared_kinds(path: str) -> dict:
-    """{name: "function"|"type"} for what `path` declares at top level.
+#: How far `declared_kinds` follows a forwarding chain. A package `__init__`
+#: re-exporting a name its own submodule defines is ONE hop and is the shape
+#: this exists for; four covers `pkg/__init__` → `pkg/a.mojo` → `pkg/b.mojo`.
+#: A bound rather than "until it stops" because the walk also carries a `seen`
+#: set, and one of the two is a fact (a cycle cannot be followed) while the other
+#: is a policy about how far a claim is worth chasing.
+_KIND_HOPS = 4
 
-    Read from the module's OWN source — the same file the dylib is built from,
-    so the two cannot disagree about what the module contains. A name the
-    source does not declare at all is simply absent, which is how a re-export
-    of something that does not exist gets caught rather than forwarded.
 
-    **A `TraitDef` is filed as a TYPE.** It was not, and the omission refused
-    every package that re-exports a trait: `std/traits/__init__.mojo` is five
-    `from .sub import Name` statements over four submodules whose whole content
-    is traits, and an absent name reaches `compile_formal_dylib` with kind
-    `"unknown"` — which is not `"type"`, so it lands in the re-exported-FUNCTION
-    set that must be *provided as a symbol*. A trait has no symbol, so the
-    check refused `std/traits` with "re-exports AnyType from .anytype, but no
-    module it imports exports that name", which is the message for a missing
-    FUNCTION DEFINITION and is false about a name that is declared two files
-    away. Filing it as the kind it is also keeps it out of that set for the
-    same reason a re-exported struct is: a type is not a missing symbol."""
+def _own_declared_kinds(path: str) -> dict:
+    """{name: "function"|"type"} for what ONE file declares at top level."""
     out: dict = {}
     for st in module_statements(path):
         name = getattr(st, "name", None)
@@ -2449,6 +2441,100 @@ def declared_kinds(path: str) -> dict:
             out.setdefault(name, "function")
         elif isinstance(st, (F.StructDef, F.TraitDef)):
             out.setdefault(name, "type")
+    return out
+
+
+def _forwarded_kind(name: str, module: str, path: str, memo: dict, hops: int,
+                    seen: frozenset):
+    """The kind `name` has in the module spelled `module`, or None.
+
+    `path` is the file that wrote the import, so a RELATIVE spelling resolves
+    against the right directory — the build's own `resolve_module_path`, not a
+    second spelling rule here, for the reason
+    `formal_chain_probe.py::_resolve_module` states: one resolver, or two
+    answers to "where does `.sub` live".
+
+    `memo` holds each module's FULL table (its own declarations plus whatever it
+    forwards) so a package with thirty re-exports reads each submodule once
+    rather than thirty times, and `seen` is what stops `a` re-exporting from `b`
+    re-exporting from `a` being a recursion.
+    """
+    if not name or hops >= _KIND_HOPS:
+        return None
+    target = resolve_module_path(module, relative_to=path)
+    if not target:
+        return None
+    try:
+        real = os.path.realpath(target)
+    except OSError:
+        return None
+    if real in seen:
+        return None
+    table = memo.get(real)
+    if table is None:
+        table = _own_declared_kinds(target)
+        memo[real] = table
+        _fill_forwarded_kinds(target, table, memo, hops + 1,
+                              seen | {real})
+    return table.get(name)
+
+
+def _fill_forwarded_kinds(path: str, out: dict, memo: dict, hops: int,
+                          seen: frozenset) -> None:
+    for _bound, name, module in _from_import_bindings(module_statements(path)):
+        if (not name or name in out or name.startswith("_")
+                or _is_inert_module(name)):
+            continue
+        kind = _forwarded_kind(name, module, path, memo, hops, seen)
+        if kind:
+            out.setdefault(name, kind)
+
+
+def declared_kinds(path: str) -> dict:
+    """{name: "function"|"type"} for what `path` declares — or FORWARDS.
+
+    Read from the module's OWN source — the same file the dylib is built from,
+    so the two cannot disagree about what the module contains. A name the
+    source does not declare at all is simply absent, which is how a re-export
+    of something that does not exist gets caught rather than forwarded.
+
+    **A `TraitDef` is filed as a TYPE.** It was not, and the omission refused
+    every package that re-exporting a trait: `std/traits/__init__.mojo` is five
+    `from .sub import Name` statements over four submodules whose whole content
+    is traits, and an absent name reaches `compile_formal_dylib` with kind
+    `"unknown"` — which is not `"type"`, so it lands in the re-exported-FUNCTION
+    set that must be *provided as a symbol*. A trait has no symbol, so the
+    check refused `std/traits` with "re-exports AnyType from .anytype, but no
+    module it imports exports that name", which is the message for a missing
+    FUNCTION DEFINITION and is false about a name that is declared two files
+    away. Filing it as the kind it is also keeps it out of that set for the
+    same reason a re-exported struct is: a type is not a missing symbol.
+
+    **AND A FORWARDED NAME IS FILED BY WHAT DEFINES IT**, which is the same
+    refusal one hop further out and it took the same shape it took then:
+    `std/hashlib/hasher.mojo` writes `from std.collections import Span`, and
+    `Span` is declared in `std/collections/span.mojo` and re-exported by
+    `std/collections/__init__.mojo`. The only file read here is the `__init__`,
+    whose top-level statements are five `from .sub import …` lines and no
+    declaration at all — so `Span` was absent, `unknown` again, and
+    `formal/build.py::_namespace_library` demanded a SYMBOL for a struct
+    template, refusing the module with "re-exports Span from std.collections,
+    but no module it imports exports that name … This is a real gap in that
+    module's public API — a private, generic or overloaded definition". Every
+    clause of that is false: `Span` is public, and it is a TYPE, and a type has
+    no symbol to be missing. Reproduced on six lines in
+    `test_formal_dylib.py::TestAPackageForwardedTypeIsNotAMissingSymbol`.
+
+    So a name this file does not declare but FORWARDS is looked up in the module
+    its own `from … import …` names, resolved with the build's own resolver, and
+    filed with the kind it has THERE. The direction is load-bearing: this can
+    only turn `"unknown"` into a real kind, and the only kind that leaves the
+    "must be provided as a symbol" set is `"type"`, so it can remove a refusal
+    and cannot add one. A name nothing resolves, or that a cycle hides, stays
+    absent — which is the pre-existing behaviour and the one that still catches
+    a re-export of something that does not exist."""
+    out = _own_declared_kinds(path)
+    _fill_forwarded_kinds(path, out, {}, 0, frozenset({os.path.realpath(path)}))
     return out
 
 

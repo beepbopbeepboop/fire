@@ -3185,6 +3185,117 @@ def test_reexported_type_reaches_the_importer(tmpdir, _shared):
 
 
 
+# ── a name a package FORWARDS, filed by what DEFINES it ────────────────────
+#
+# The row above is the same defect one hop further out, and it is the
+# `declared_kinds` half rather than the `imported_struct_defs` half:
+# `test_reexported_type_reaches_the_importer` walks to the defining module so
+# the importer can CONSTRUCT the type, and nothing walked for the KIND. So a
+# name reached through the PACKAGE (`from pkg import Shape`, where `pkg/__init__`
+# forwards it from `pkg/sub.mojo`) had no kind at all — `"unknown"` — and
+# `"unknown"` is not `"type"`, so `formal/build.py::_namespace_library` put it in
+# the set that must be provided AS A SYMBOL and refused the module.
+#
+# Measured on the tree's own stdlib, where it is `std/hashlib/hasher.mojo`'s
+# `from std.collections import Span`: 221 import sites name a struct or trait
+# through a package that re-exports it, and every one of them reached the symbol
+# check as `"unknown"`. The message was false in every clause — "a real gap in
+# that module's public API — a private, generic or overloaded definition" — on a
+# name that is public, is not generic, and is not overloaded, and is a TYPE: a
+# type has no symbol to be missing.
+#
+# So `declared_kinds` now follows the forwarding edge, with the build's own
+# resolver and a hop bound. It can only turn `"unknown"` into a real kind, and
+# the only kind that leaves the symbol check is `"type"`, so it can remove a
+# refusal and cannot add one — which is what the negative beside it pins.
+
+FORWARDED_SUB = ("struct Shape:\n"
+                 "  var a: Int\n"
+                 "\n"
+                 "def keep() -> Int:\n"
+                 "  return 1\n")
+FORWARDED_PKG = "from .sub import Shape, keep\n"
+FORWARDED_MID = ("from pkg import Shape\n"
+                 "\n"
+                 "trait Sized:\n"
+                 "  fn area(self, s: Shape) -> Int:\n"
+                 "    ...\n")
+FORWARDED_PROG = "from pkg2.mid import Sized\n\ndef main():\n  return 1\n"
+
+
+def test_declared_kinds_files_a_forwarded_name_by_its_definition(
+        tmpdir, _shared):
+    """The table itself, with no build: a forwarded name carries its kind.
+
+    The cheapest possible statement of the rule, and the one that cannot rot
+    with a layout change: `pkg/__init__.mojo` declares nothing at all, so
+    before the fix every name it forwards was absent.
+    """
+    sys.path.insert(0, HERE)
+    from formal.imports import declared_kinds
+    root = os.path.join(tmpdir, "fwd")
+    os.makedirs(root)
+    write_tree(root, {"pkg/sub.mojo": FORWARDED_SUB,
+                      "pkg/__init__.mojo": FORWARDED_PKG,
+                      "pkg2/mid.mojo": FORWARDED_MID})
+    kinds = declared_kinds(os.path.join(root, "pkg", "__init__.mojo"))
+    check(kinds.get("Shape") == "type",
+          f"a struct the package forwards is not filed as a type: {kinds!r}")
+    check(kinds.get("keep") == "function",
+          f"a function the package forwards must keep being filed as one, or "
+          f"the missing-symbol check stops protecting a real gap: {kinds!r}")
+    check("Ghost" not in kinds,
+          f"a name nothing declares must stay absent: {kinds!r}")
+
+
+def test_a_forwarded_type_is_not_demanded_as_a_symbol(tmpdir, _shared):
+    """A module that imports a TYPE through a package builds, both arches.
+
+    `pkg2/mid.mojo` is `hasher.mojo`'s shape: no free function, so it is built
+    as a NAMESPACE library, and its API names a struct it reached through the
+    package. Before the fix the build refused it with the missing-symbol message
+    and every clause of that message was false. Both architectures, because the
+    kind table is shared and the two emitters consult it separately — the same
+    reason `test_aliased_reexport_runs_on_both_architectures` gives.
+    """
+    for arch in ("arm64", "x86_64"):
+        root = os.path.join(tmpdir, f"fwd_{arch}")
+        os.makedirs(root)
+        write_tree(root, {"pkg/sub.mojo": FORWARDED_SUB,
+                          "pkg/__init__.mojo": FORWARDED_PKG,
+                          "pkg2/mid.mojo": FORWARDED_MID,
+                          "prog.mojo": FORWARDED_PROG})
+        fresh_cas()
+        build(root, "prog.aout", arch=arch)
+
+
+def test_a_forwarded_name_nothing_defines_is_still_refused(tmpdir, _shared):
+    """The guard on the guard: following an edge must not forgive a real gap.
+
+    `Ghost` is declared nowhere, so it stays absent, so it is still demanded as a
+    symbol and still refused BY NAME. A change that resolved kinds more
+    liberally — or that swallowed an unresolvable one as `"type"` — would let a
+    package publish a name nothing defines, and the consumer's call would reach
+    dyld unbound, which is the outcome `formal/build.py`'s message exists to
+    prevent.
+    """
+    root = os.path.join(tmpdir, "fwdghost")
+    os.makedirs(root)
+    write_tree(root, {"pkg/sub.mojo": "def keep() -> Int:\n  return 1\n",
+                      "pkg/__init__.mojo": "from .sub import keep, Ghost\n",
+                      "prog.mojo": "from pkg import keep\n\n"
+                                   "def main():\n  return keep()\n"})
+    fresh_cas()
+    result, _out = build(root, "prog.aout", expect_ok=False)
+    check(result.returncode != 0,
+          "`Ghost` is declared nowhere and the package published it anyway; "
+          "the missing-symbol check has been widened past its evidence")
+    text = result.stderr or result.stdout
+    check("Ghost" in text,
+          f"the refusal does not name the gap: {text.strip()[-300:]}")
+
+
+
 # ── the "exports nothing" family: 33 of the sweep's 578 files ────────────────
 #
 # These five pin the LIMIT, and each one is a pin in the anti-rot direction: it
@@ -3814,6 +3925,12 @@ TESTS = [
      test_the_library_path_names_the_compiler_too),
     ("a re-exported type reaches the importer",
      test_reexported_type_reaches_the_importer),
+    ("a forwarded name is filed by what defines it",
+     test_declared_kinds_files_a_forwarded_name_by_its_definition),
+    ("a forwarded type is not demanded as a symbol, both arches",
+     test_a_forwarded_type_is_not_demanded_as_a_symbol),
+    ("a forwarded name nothing defines is still refused",
+     test_a_forwarded_name_nothing_defines_is_still_refused),
     ("a local Mojo module beats the host-module list",
      test_mojo_source_beats_host_module),
     ("a host-module refusal carries its measured next step",

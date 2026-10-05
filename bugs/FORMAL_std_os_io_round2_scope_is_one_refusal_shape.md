@@ -390,21 +390,107 @@ never given, measured on both architectures:
 | 4 | 1 | `std/bit/mask.mojo` | `is_negative` on a `SIMD[dtype, _]` — the bare-call row again, one link down | `FORMAL_a_bare_call_to_a_template_…` (`formal19-1`) |
 | 5 | 29 | `builtin_slice.mojo` | `Optional[Int]`, and this target has no word to spell `None` as | `FORMAL_stdlib_optional_needs_a_representation` (`formal16-7`) |
 | 6 | 10 | `std/base64/_fnv1a.mojo` | `data[…](…)` calls a name this unit does not compile, so the brackets cannot be bound | the bracketed-specialisation row; `formal19-1`'s neighbourhood |
-| 7 | 9 | `std/hashlib/hasher.mojo` | the dylib re-exports `Span` from `std.collections`, and no module it imports exports that name | a re-export gap in a stdlib module — the export rule, one level on from §2's row 2 |
+| 7 | 9 | `std/hashlib/hasher.mojo` | the dylib re-exports `Span` from `std.collections`, and no module it imports exports that name | **§0.3 — a TYPE demanded as a SYMBOL, and it is fixed** |
 | — | 32 | `std/memory/alloc.mojo` | `dealloc` — §2's second row, which **grows 12 → 13 → 32** as the two features in front of it clear | `formal19-1` |
 
 **What this does NOT do**, so the reading is the honest one: it does not move a
 single file to `pass`, and it was not expected to — §2 is unchanged and its two
 features are still `formal19-1`'s and `formal16-2`'s. It fixes an INSTRUMENT
 that was reporting its own damage as the end of the chain, and it hands over five
-links that had never been measured. The `hasher.mojo` row is the only one of the
-five with no claim behind it, and it is worth one line of a doc when someone
-wants it.
+links that had never been measured. The `hasher.mojo` row was the only one of the
+five with no claim behind it, and §0.3 is what happened to it.
 
 Verified: `python3 test_formal_chain_probe.py` **20/20**, seven of them new and
 all of them asked of `fire_compiler`'s parser rather than of a build — including
 the one that pins the DELETION still failing to parse (so the substitution cannot
 be judged unnecessary) and the one that pins the emptied-block correction above.
+
+## 0.3 The row §0.2 found with no owner was a TYPE demanded as a SYMBOL, and
+## that is fixed (`work/formal25-5`)
+
+`std/hashlib/hasher.mojo` line 21 is `from std.collections import Span`, and
+`Span` is declared in `std/collections/span.mojo` and re-exported by
+`std/collections/__init__.mojo`. The refusal the walk measured was:
+
+```
+build: __init__.mojo imports '.base64', which cannot be built either:
+hasher.mojo: std_hashlib_hasher.…arm64.dylib re-exports Span from
+std.collections, but no module it imports exports that name, so a caller of it
+would have nothing to bind. This is a real gap in that module's public API — a
+private, generic or overloaded definition, all of which doc/ABI.md keeps out of
+the boundary — and not something this backend can paper over …
+```
+
+**Every clause of that is false.** `Span` is public, it is not generic, it is not
+overloaded, and it is a TYPE — and a type has no symbol, so there is nothing to
+be missing. The check that fired is `formal/build.py::_namespace_library`'s, and
+its input is the KIND `formal/imports.py::declared_kinds` recorded for the
+imported name.
+
+**And that kind was `"unknown"`, because `declared_kinds` read ONE file.** The
+module the import statement names is the package `std.collections`, whose
+top-level statements are five `from .sub import …` lines and no declaration at
+all. `"unknown"` is not `"type"`, so the name landed in the set that must be
+provided as a symbol. This is the SAME defect `bugs/FORMAL_known_limits.md` §1
+records and fixed one hop in — there, `std/traits/__init__.mojo`'s names were
+absent because a `TraitDef` was filed as neither a function nor a type; here a
+name is absent because the file read is not the file that declares it.
+
+**Reproduced on six lines, with no stdlib involved** — a package that
+re-exports `struct Shape` from its submodule, and a module with no free function
+(a trait, so it is built as a NAMESPACE library) that imports the type through
+the PACKAGE:
+
+```console
+$ python3 fire.py build --formal --no-prove -o .tmp/pk3.aout \
+      .tmp/pkgtest/main3.mojo
+build: main3.mojo imports 'pkg2.mid', which cannot be built either: mid.mojo:
+pkg2_mid.…dylib re-exports Shape from pkg, but no module it imports exports
+that name, so a caller of it would have nothing to bind. This is a real gap in
+that module's public API — a private, generic or overloaded definition …
+```
+
+**The fix is in the KIND reader, not in a name list**: `declared_kinds` now
+follows the forwarding edge — a name the file does not declare but forwards is
+looked up in the module its own `from … import …` names, resolved with the
+build's own `resolve_module_path`, under a hop bound. The direction is
+load-bearing and it is the argument for safety: this can only turn `"unknown"`
+into a real kind, the only kind that leaves the symbol check is `"type"`, so it
+can remove a refusal and cannot add one. A name nothing declares stays absent,
+which is the pre-existing behaviour and the one that still catches a re-export of
+something that does not exist — pinned, because a fix that resolved kinds more
+liberally would let a package publish a name nothing defines.
+
+**Measured over the stdlib's 252 files** — every `from … import …` site in
+`../new-modular/Mojo/stdlib/std`, asked of the real resolver:
+
+| kind before → after | sites | what it means |
+|---|---|---|
+| `function` → `function` | 538 | unchanged |
+| `type` → `type` | 402 | unchanged |
+| `unknown` → **`type`** | **221** | **stop being demanded as a symbol** — a struct or trait reached through a package that re-exports it |
+| `unknown` → `function` | 354 | already demanded (only `"type"` leaves the set), and now RECORDED accurately in the manifest |
+| `unknown` → `unknown` | 362 | unresolvable, a host module, a `comptime` alias, or hidden by a cycle — unchanged |
+
+**And on this scope, measured, the row is gone**: the same 9 links deep walk
+puts those 9 files on `std/function.mojo`'s MLIR-attribute template at round 7 and
+`std/reflect.mojo`'s at round 8, where before this commit they stopped at
+`hasher.mojo`. Both of those are the modules the walk had just stubbed, so the
+honest reading is "with the walls in front of them stubbed, these 9 land on the
+MLIR attribute template in `std/reflect.mojo`" — a new link, not a fix, and it
+belongs to `FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops`
+(`formal19-4`).
+
+Verified: `test_formal_imports.py` **PASS=72 FAIL=3** (the three are pre-existing
+and measured identical with the fix disabled — `_KIND_HOPS = 0`, which is the
+one-file reader this replaces; see the bug doc filed beside this commit),
+`test_formal_link_accounting.py` 263/263, `test_refusal_taxonomy.py` 264/264,
+`test_formal_run.py` **PASS=1024 FAIL=0** (both architectures, every formal
+image in the suite), `test_formal_dylib.py` PASS=24 FAIL=0. The three new rows
+are `test_declared_kinds_files_a_forwarded_name_by_its_definition` (the table,
+no build), `test_a_forwarded_type_is_not_demanded_as_a_symbol` (the build, both
+arches) and `test_a_forwarded_name_nothing_defines_is_still_refused` (the guard
+on the guard).
 
 ## 6. What is left
 
@@ -432,11 +518,13 @@ be judged unnecessary) and the one that pins the emptied-block correction above.
    not only by direct call. It surfaced here because the probe now resolves the
    module a refusal names with that same function, and it put three files of one
    round under a group keyed on the IMPORTER.
-5. **One link of §0.2's new table has no claim and no doc**: `hasher.mojo`
-   re-exports `Span` from `std.collections` and no module it imports exports the
-   name, so 9 files of this scope sit behind it. That is an export-rule question
-   rather than a codegen one, and it is the only thing §0.2 found that nobody
-   holds.
+5. ~~**One link of §0.2's new table has no claim and no doc**:
+   `hasher.mojo` re-exports `Span` from `std.collections` and no module it
+   imports exports the name, so 9 files of this scope sit behind it. ~~
+   **CLOSED — §0.3.** It was not a gap in that module's public API at all: it is
+   a TYPE demanded as a SYMBOL because `declared_kinds` read the package rather
+   than the module that declares the name. 221 such sites over the stdlib, and
+   those 9 files now walk two links further.
 
 ## 7. Reproducing
 
