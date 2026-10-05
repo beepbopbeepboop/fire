@@ -186,7 +186,7 @@ FILE .../stdlib/std/base64/base64.mojo
 … 13 rows
 ```
 
-**13 files, matching the `b3` round of `bugs/FORMAL_sweep_work_map.md` §2's row
+**13 files, matching `bugs/FORMAL_sweep_work_map_2026-10-01_b3.md` §2's row
 exactly**, on the same tree (`e695183a`), with no build at all. Worth keeping as
 a tool: the sweep's own ledger records only path → class, so the CAUSE text is
 in the per-file `.result` entries and nowhere else.

@@ -105,7 +105,7 @@ this tree (`python3 tools/formal_sweep.py -j 3 -t 120 <the three files>`, arm64)
 
 The gate is the **dylib export rule** and it fires before any body is looked at,
 so none of the three rows can be reached without it moving — which is row 2 of
-the gate table in the `2026-09-30` round of `bugs/FORMAL_sweep_work_map.md` and not this
+the gate table in `bugs/FORMAL_sweep_work_map_2026-09-30.md` and not this
 document's subject. A reader planning against any of the three rows should
 measure that gate first; the refusals this document quotes are still the ones
 those files carry when they are built as images, and they are still true.

@@ -2157,19 +2157,10 @@ dylib_exports: list = None, globals_base: int = None,
                 if self._recv_ref_receiver is not None:
                     self._emit_receiver_writeback()
                 self.asm.emit(encode_movz_wd_imm(0, 0))
+            elif self._returns_frame is not None:
+                self._emit_frame_return(stmt.value)
             else:
-                # A double returned under an INTEGER annotation. Asked before the
-                # value is emitted, because the answer is about the FUNCTION's
-                # declaration rather than about the return instruction, and
-                # `func_kind` reads that declaration first — so a caller asking
-                # what this produces is right to believe it is an integer and
-                # wrong about what it is holding. `model.return_annotation_kind_
-                # refusal`, shared with x86-64, so the two cannot differ.
-                self._refuse_return_annotation_kind_mismatch(stmt.value)
-                if self._returns_frame is not None:
-                    self._emit_frame_return(stmt.value)
-                else:
-                    self._emit_expr(stmt.value)
+                self._emit_expr(stmt.value)
                 if self._recv_ref_receiver is not None:
                     self._emit_receiver_writeback()
             self._flush_pending_finally()
@@ -2644,7 +2635,7 @@ dylib_exports: list = None, globals_base: int = None,
                 self._emit_stmt(s)
         self.asm.emit(encode_ldp_sp_post(0, 31))
 
-    def _emit_exit(self, status, computed: bool = False) -> None:
+    def _emit_exit(self, status) -> None:
         """Leave the machine with `status`: flush every open stream, then the
         raw Darwin trap.  Never returns, and nothing is emitted after it.
 
@@ -2682,25 +2673,6 @@ dylib_exports: list = None, globals_base: int = None,
         of the trap is how twenty call sites come to differ, and the flush is
         the part that is easy to forget at the twenty-first.
 
-        **`computed` is the one caller that has no immediate to put in X0**, and
-        it is a flag rather than a second exit because the flush is the part
-        that must not be duplicated. With it, the status is ALREADY in X0 (an
-        expression was emitted for it) and the two extra instructions are what
-        carry it across the `fflush` call — which clobbers every caller-saved
-        register, X0 included, and would otherwise leave the exit status as
-        whatever `fflush` returned. `STP X0, XZR, [SP,#-16]!` /
-        `LDP X0, XZR, [SP],#16` is the pair `_flush_pending_finally` already
-        emits for exactly this reason, and 16 bytes is chosen because the stack
-        this model keeps is 16-byte aligned, so the push cannot unalign the
-        frame's own invariant.
-
-        The mask is HERE and not in `model.raise_exit_status` because a
-        computed value does not exist until this point: `exit(3)` truncates to
-        a byte, so a `raise SystemExit(code())` where `code()` returns -1 must
-        leave 255 and not 2^64-1. Measured both ways, both architectures; the
-        row is `systemexit_with_a_computed_status` in
-        `test_formal_exceptions.py`.
-
         **What it costs the proof layer, stated rather than left to be found.**
         `arm64_step` cannot step past a `BL` (it takes the call's target, which
         is outside the image, and returns `none`), so a program whose image
@@ -2712,22 +2684,13 @@ dylib_exports: list = None, globals_base: int = None,
         `formal/examples/` emits NO exit trap at all (measured, `svc` absent from
         each entry function's range), so no example's proof changed.
         """
-        if computed:
-            self.asm.emit(encode_stp_sp_pre(0, 31))
         self._emit_call(F.CallExpr(func=F.IdentExpr(name="fflush"),
                                    args=[F.IntLiteral(0)]))
-        if computed:
-            self.asm.emit(encode_ldp_sp_post(0, 31))
-            # `exit(3)`'s `status & 0xFF`, so a computed value out of byte range
-            # is the number the C library would deliver rather than the word the
-            # expression produced.
-            self.asm.emit(encode_and_xd_xn_imm(0, 0, 8))
-        else:
-            self.asm.emit(encode_movz_wd_imm(0, status))
+        self.asm.emit(encode_movz_wd_imm(0, status))
         self.asm.emit(encode_movz_wd_imm(16, 1))
         self.asm.emit(encode_svc(0x80))
 
-    def _emit_diverge(self, status=1, computed: bool = False) -> None:
+    def _emit_diverge(self, status: int = 1) -> None:
         """Leave the machine: run every enclosing finally, then `exit(status)`.
 
         The ONE way control stops on this path, and both of its callers share
@@ -2744,7 +2707,7 @@ dylib_exports: list = None, globals_base: int = None,
         passes nothing and gets the 1 the whole hierarchy leaves behind.
         """
         self._flush_pending_finally()
-        self._emit_exit(status, computed=computed)
+        self._emit_exit(status)
 
     def _emit_raise(self, stmt: F.RaiseStmt) -> None:
         """`raise <expr>` — run the expression's effects, then leave the process.
@@ -2794,47 +2757,9 @@ dylib_exports: list = None, globals_base: int = None,
                 self._emit_expr(value)
             self._emit_diverge()
             return
-        status = M.raise_exit_status(exc_name, value,
-                                 argument_is_int=self._sys_exit_status_is_int(
-                                     value))
-        if status is None:
-            # COMPUTED, and the only caller of `_emit_exit(computed=True)`: the
-            # status is not in the text, so it has to be a VALUE, and X0 is
-            # where an expression leaves one. The FIRST argument is emitted for
-            # its value here and the rest for their effects, rather than every
-            # argument being emitted twice — `raise SystemExit(code())` runs
-            # `code()` once, which is what the source says and what the
-            # `for arg in raise_arg_exprs(value)` loop below does for the
-            # non-computed case.
-            args = M.raise_arg_exprs(value)
-            self._emit_expr(args[0])
-            for arg in args[1:]:
-                self._emit_expr(arg)
-            self._flush_pending_finally()
-            self._emit_exit(None, computed=True)
-            return
         for arg in M.raise_arg_exprs(value):
             self._emit_expr(arg)
-        self._emit_diverge(status)
-
-    def _sys_exit_status_is_int(self, value) -> bool:
-        """Is `raise SystemExit(value)`'s argument an INTEGER this build can
-        compute — `model.raise_exit_status`'s gate, asked with this function in
-        hand.
-
-        The one reader of it in this backend, and the reason it is a method and
-        not a module function is that it needs `self._vkinds`: the answer is
-        about the kinds of THIS function's names and calls, which
-        `_scan_value_kinds` has already computed WITH this backend's
-        `func_kind` hook and which `model.py` cannot rebuild — see
-        `model.raise_status_argument_is_an_integer`'s measurement of what a
-        hookless `ValueKinds` gets wrong about a `-> str` callee.
-        """
-        args = M.raise_arg_exprs(value) if value is not None else []
-        if not args:
-            return False
-        return bool(M.raise_status_argument_is_an_integer(
-            args[0], getattr(self, "_vkinds", None)))
+        self._emit_diverge(M.raise_exit_status(exc_name, value))
 
     def _emit_try(self, stmt: F.TryStmt) -> None:
         """try/except/else/finally without an exception runtime.
@@ -5828,19 +5753,15 @@ ctor_field_value=self._ctor_field_value_for(name),
           which is the hand-off question and not this one, so `self._fd.write(s)`
           refuses with the receiver's SHAPE in the message rather than being
           lowered on the strength of a name it does not have.
-        * A CALL RESULT, and this arm was here for a long time as a stated
-  non-coverage — "so `open(p, "w").write(s)` refuses … because a method on a
-  call result never reaches this code at all". **It was not a refusal: the
-  method arm was not taken, so the chain reached the extern path as the C
-  library's `write(2)` on whatever the argument registers held, and the program
-  built, exited 0, printed its next line and wrote nothing.** `_is_value_receiver`
-  now answers True for a `CallExpr` (see its own docstring), so the method call
-  reaches here at all, and `model.is_open_call` — which already answers the
-  DESCRIPTOR question for this spelling — is what makes this arm fire rather
-  than refuse. The earlier note's other half still stands: the RECEIVER also has
-  to be lowered by whatever emits the call, which is `_emit_open`, and it is."""
-        if isinstance(expr, F.CallExpr):
-            return M.is_open_call(expr)
+        * A CALL RESULT, so `open(p, "w").write(s)` refuses. Not because a
+          descriptor there is unknowable — `model.is_open_call` answers it — but
+          because a method on a call result never reaches this code at all:
+          `_is_value_receiver` says a CallExpr is not a value receiver, so the
+          call is not a method call on this path. That is a real gap and a
+          separate bug (the receiver is also not lowered by `_emit_open`, so it
+          yields the descriptor with a mis-lowered open); it is recorded here
+          rather than papered over, because an arm of this function that can
+          never run would read as support for a shape that does not work."""
         if isinstance(expr, F.IdentExpr):
             return expr.name in self._fd_vars
         if isinstance(expr, F.MemberExpr):
@@ -5942,70 +5863,6 @@ ctor_field_value=self._ctor_field_value_for(name),
         return M.printf_arg_float_evidence(
             arg, self._vkinds,
             is_float=lambda e: self._expr_str_kind(e) == M.FLOAT_KIND)
-
-    def _refuse_word_position_kind_mismatch(self, name, e: F.CallExpr) -> None:
-        """Raise when an argument's kind contradicts the callee's OWN annotation.
-
-        A no-op for every callee this image does not declare (a C symbol has no
-        `params` to contradict), and for any argument position the callee's
-        parameter list cannot be lined up with — a receiver, a keyword, a
-        varargs. Both are the permissive direction and both are the reason this
-        is safe to add to a path with 664 stdlib files behind it: **it can only
-        fire where the source contradicts itself.**
-
-        **The receiver is dropped rather than counted**, because
-        `method_function_name` lifts `Box.put` to one flat name and its `params`
-        still carry `self` in position 0 while `b.put(1, 2)`'s `args` do not. A
-        misalignment there would compare 1.0 against `self` and 2.0 against the
-        first REAL parameter — which can refuse a correct program, so the
-        receiver is removed by name and only a name that is not there is
-        left misaligned (and then the check simply claims nothing).
-
-        Asked beside `_refuse_unusable_printf_format` rather than inside it
-        because it is a different rule about a different half of the call: that
-        one reads the FORMAT and this one reads the callee's DECLARATION, and
-        neither can answer for the other. The decision and the words are
-        `model.call_argument_kind_refusal`, read by x86-64 from the same one, so
-        the two architectures cannot disagree about what `g(d)` means.
-        """
-        callee = self._functions.get(name)
-        if callee is None:
-            return
-        params = list(getattr(callee, "params", None) or [])
-        if params and params[0][0] == "self":
-            params = params[1:]
-        if not params:
-            return
-        reason = M.call_argument_kind_refusal(
-            name, list(e.args or ()), [p[1] for p in params],
-            self._printf_arg_conversion_class, TYPE_NAMES)
-        if reason is not None:
-            raise CodegenError(reason)
-
-    def _refuse_return_annotation_kind_mismatch(self, value) -> None:
-        """Raise when this function returns a double under an integer annotation.
-
-        The SECOND consumer `POINTEES_REFUSED`'s `Float64` row names, and the one
-        that makes the kind hook load-bearing rather than cosmetic: `func_kind`
-        reads a callee's DECLARED return type first, so `def f() -> Int:
-        return h()` looks like an integer producer to every consumer of the
-        call and is holding a bit pattern. Measured on both architectures it
-        printed 3.9 as a decimal.
-
-        Asked at the `ReturnStmt` in `_emit_stmt`, where `self._cur_fn` is this
-        function and its annotation is one attribute read. **The annotation is
-        the only evidence** — an unannotated `return h()` may well be an integer
-        this build cannot see, so nothing is claimed without it — and the words
-        are `model.return_annotation_kind_refusal`, shared with x86-64.
-        """
-        fn = self._cur_fn
-        ann = getattr(fn, "return_type", None)
-        if not ann:
-            return
-        reason = M.return_annotation_kind_refusal(
-            fn.name, ann, value, self._printf_arg_conversion_class, TYPE_NAMES)
-        if reason is not None:
-            raise CodegenError(reason)
 
     def _refuse_unusable_printf_format(self, name, e: F.CallExpr) -> None:
         """Raise when `e`'s FORMAT cannot be used, for either of the two reasons.
@@ -6178,40 +6035,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         and then dies in the loader. A frame slot is explicitly NOT a
         register or spill home (`_collect_var_names` leaves it out for
         exactly that reason), so the membership test below has to be extended
-        rather than left to find it by accident.
-
-        **A CALL RESULT is a value too, and leaving it out was a SILENT WRONG
-        ANSWER rather than a refusal** — which is the worst of the three and is
-        why it is worth stating what happened. `open(path, "w").write(s)` is a
-        method call on the descriptor `open` returned; `_is_value_receiver`
-        answered False, so the method arm was never taken, `_callee_symbol`
-        flattened the chain to the bare name `write`, and the extern path called
-        the C library's `write(2)` with whatever was in the argument registers.
-        Measured on both architectures:
-
-            def main(n) -> Int:
-                open("/tmp/fw.txt", "w").write("hello\\n")
-                printf("done\\n")
-                return 0
-
-        builds green, exits 0, prints `done`, and **writes nothing** — no file
-        is created, because the inner `open` never ran in a way the outer call
-        could use. The identical program with the descriptor bound to a NAME
-        writes the file on both machines. So this was `write(2)` on a register
-        that held the address of the path string, which is the "program runs,
-        writes nothing and exits 0" outcome `VALUE_METHOD_RECEIVERS`'s own
-        comment describes for a descriptor this path cannot establish.
-
-        It is a value because a call returns one — `model.receiver_shape`'s own
-        table says so ("a call result is whatever that call was declared to
-        produce"), and the two backends share that reader, so the arm is a
-        shared decision rather than one emitter's. `model.is_open_call` already
-        answers the DESCRIPTOR question for `open`, so `_expr_is_fd` is asked
-        about this spelling too (its docstring records that it deliberately was
-        not, and why — that is the note this arm supersedes)."""
+        rather than left to find it by accident."""
         if isinstance(obj, F.StringLiteral):
-            return True
-        if isinstance(obj, F.CallExpr):
             return True
         if isinstance(obj, F.IdentExpr):
             return obj.name in self._var_regs or obj.name in self._var_spills
@@ -8210,196 +8035,6 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit_label_rel(false_label, here_offset=-4)
         return True
 
-    def _flag_test_pair(self, cond):
-        """`(left, right, negated)` for a TEST OF TWO WORDS, else None.
-
-        `x & y`, `y & x` and the `not` of either, with BOTH sides already a word
-        this backend can put in a register. The single-bit case above keeps its
-        own answer (TBZ/TBNZ), so this is the remainder: `x & 0xff` is not a bit
-        test and an immediate mask is not here either — `_emit_binop` has a
-        one-instruction AND-immediate for that, and putting the immediate in a
-        register to spend it on a TST would be three instructions either way.
-
-        `negated` flips the branch, and for the same reason the bit-test arm's
-        does: this function branches on the FALSE case, and `not (x & y)` holds
-        when the AND is zero, so the branch that leaves it is taken when the AND
-        is NONZERO.
-        """
-        negated = False
-        if isinstance(cond, F.UnaryOp) and cond.op == "not":
-            negated = True
-            cond = cond.operand
-        if not (isinstance(cond, F.BinaryOp) and cond.op == "&"):
-            return None
-        left, right = cond.left, cond.right
-        # A static mask on either side is the AND-immediate's shape and stays
-        # with it; a call is a call; and a name this function holds as a FRAME is
-        # an address, whose `&` is not a question about bits.
-        for operand in (left, right):
-            if self._static_int(operand) is not None:
-                return None
-            if not self._is_pure_expr(operand):
-                return None
-            if (isinstance(operand, F.IdentExpr)
-                    and operand.name in self._frame_holders):
-                return None
-        return left, right, negated
-
-    def _is_word_load(self, e) -> bool:
-        """True when `e` is a bare name, so evaluating it writes ONE register.
-
-        The gate `_emit_test_operands` needs, and it is narrow on purpose: X0 is
-        this backend's universal intermediate, so an operand evaluated second is
-        the one that survives and the first one has to be somewhere else already.
-        A bare name's evaluation is `_load_var` — one move, one load, or an
-        `ADRP`+`ADD`+load, all of which write their destination and at most the
-        X17 scratch — and arithmetic over two names is not, because the ALU
-        emitters use X1 for their own right operand.
-        """
-        return (isinstance(e, F.IdentExpr)
-                and e.name not in self._frame_holders)
-
-    def _emit_test_operands(self, l, r) -> None:
-        """`l` in X0 and `r` in X1 for a two-register flag-setting TEST.
-
-        `_emit_cmp_operands` without the stack round-trip when both sides are
-        bare names, which is the whole saving: `TST`/`CMN` read two REGISTERS, so
-        the pair has to be separated the way a compare separates it, and a
-        compare pays a `STP`/`LDP` pair to do it.
-
-        **The right operand goes first, and that is the whole of the subtlety.**
-        The first version evaluated `l` and then `r`, on the reasoning that
-        `_is_pure_expr` makes both harmless — and X0 is the universal
-        intermediate, so `_emit_expr_to(r, "X1")` overwrote `l` with `r` and the
-        test became `TST Xr, Xr`. It built, ran, and answered a question about
-        one word: `if x & y:` was true exactly when `y` was non-zero. Three
-        instructions were saved and the program was wrong, which is the shape of
-        every optimising bug this file records. `_is_word_load` is what makes the
-        order safe: a bare name's evaluation writes its destination and at most
-        X17, so evaluating `l` after `r` cannot disturb X1.
-
-        Anything else — a call, arithmetic, a subscript, a frame address — goes
-        through `_emit_cmp_operands`, which is two instructions more and correct.
-        """
-        if self._is_word_load(l) and self._is_word_load(r):
-            self._emit_expr_to(r, "X1")
-            self._emit_expr_to(l, "X0")
-            return
-        self._emit_cmp_operands(l, r)
-
-    def _emit_branch_unless_and_test(self, cond, false_label: str) -> bool:
-        """`if x & y:` as `TST Xn, Xm` + B.cond. True if it emitted.
-
-        `_emit_branch_unless`'s second arm, after the single-bit test and before
-        the comparison arm, because it is the same argument that orders the bit
-        test before the compare and it is the same two-instead-of-five: the
-        words the general path spends are `and`, `cmp #0`, `cbz`, and the
-        answer each of those three computes — "is `x & y` zero?" — is one
-        instruction's Z flag. `TST` is `ANDS XZR, Xn, Xm` with the result
-        discarded, so it IS the test rather than a cheaper way of computing
-        something the branch re-reads.
-
-        16,345 `TST` in the 200-binary instruction mix
-        `tools/arm64_insn_audit.py` disassembles — the largest gap in that
-        survey this target has a use for — and it was unreached because
-        `encode_tst_xn_xm` had no caller: the encoder was byte-exact, the model
-        arm (`lib/ProofLib.lean`'s `arm64_step` and `arm64_logic_flags`) and the
-        proof tables (`_STEP_CONDS` 67, `work_step_tst`, `_regs_written`,
-        `_step_rhs`) were all in place, and nothing emitted the word. All four
-        things an instruction needs, and the lowering was the missing one.
-
-        The fallthrough is `b.eq` and the negated form is `b.ne`, so
-        `if not (x & y):` and `if x & y:` branch opposite ways out of ONE
-        compare — the polarity argument `_emit_branch_unless_bit_test` makes,
-        and a program that got it backwards would build and answer the other way
-        round.
-        """
-        found = self._flag_test_pair(cond)
-        if found is None:
-            return False
-        left, right, negated = found
-        self._emit_test_operands(left, right)
-        self._signed = cmp_signed(common_type(self._ttype(left),
-                                              self._ttype(right)))
-        self._record_cond_branch()
-        self.asm.emit(encode_tst_xn_xm(0, 1))
-        self.asm.emit(encode_b_cond("ne" if negated else "eq", 0))
-        self.asm.emit_label_rel(false_label, here_offset=-4)
-        return True
-
-    def _sum_against_zero(self, cond):
-        """`(left, right)` for `(x + y) == 0` / `!= 0`, else None.
-
-        The `CMN` shape: `CMN Xn, Xm` is `ADDS XZR, Xn, Xm`, so the Z flag it
-        leaves is the answer to "is the SUM zero?" and the general path's
-        `add`, `mov #0`, `add`, `cmp`, `b.cond` computes the same thing in five
-        instructions. `x - y == 0` is deliberately NOT here: it is `CMP Xn, Xm`,
-        which is the comparison this path already emits, so there is nothing to
-        save.
-
-        **Only zero, and the reason is that only zero is a flag.** The flags of
-        `a + b` answer "is the sum zero"; they do not carry the sum, so
-        `a + b == 5` still has to compute the sum and compare it, and lowering
-        that to a `CMN` and a condition would be a program that builds and
-        answers something else.
-
-        Declined, rather than guessed at, for a STRING or a container operand —
-        `+` on those is concatenation, and the refusal that says so is raised
-        where the value path raises it. A `double` never reaches here: the
-        caller asks `_cmp_spec` first and only offers this when it answered with
-        no floating reading, so a floating sum keeps its `FADD`/`FCMP`.
-        """
-        if not (isinstance(cond, F.BinaryOp) and cond.op in ("==", "!=")):
-            return None
-        for operand, other in ((cond.left, cond.right),
-                               (cond.right, cond.left)):
-            if not (isinstance(operand, F.BinaryOp) and operand.op == "+"):
-                continue
-            if self._static_int(other) != 0:
-                continue
-            for side in (operand.left, operand.right):
-                if self._expr_str_kind(side) == "str" or self._is_container_expr(side):
-                    return None
-                if not self._is_pure_expr(side):
-                    return None
-                if (isinstance(side, F.IdentExpr)
-                        and side.name in self._frame_holders):
-                    return None
-            return operand.left, operand.right
-        return None
-
-    def _emit_branch_unless_sum_zero(self, cond, unsigned_cond: str,
-                                     signed_cond: str,
-                                     false_label: str) -> bool:
-        """`(x + y) == 0` as `CMN Xn, Xm` + B.cond. True if it emitted.
-
-        `_emit_branch_unless`'s third arm, on the comparison side and after the
-        refusal and `_cmp_spec` work the comparison needs, because this is a
-        comparison whose flags come from an instruction that computes nothing.
-
-        10,603 `CMN` in the same 200-binary mix, and the same state as `TST`
-        above: encoder byte-exact, `arm64_adds_flags` and `work_step_cmn` and
-        `_STEP_CONDS` 66 all in place, no caller. Both rows were described as
-        "modelled, unwired", and the wiring is the whole of what was missing.
-
-        The condition is the INVERTED one, because this branches on the false
-        case and `invert_cond` is what `_emit_branch_unless_cmp` applies for the
-        same reason: `(x + y) == 0` leaves through `b.ne`.
-        """
-        found = self._sum_against_zero(cond)
-        if found is None:
-            return False
-        left, right = found
-        self._emit_test_operands(left, right)
-        self._signed = cmp_signed(common_type(self._ttype(left),
-                                              self._ttype(right)))
-        self._record_cond_branch()
-        self.asm.emit(encode_cmn_xn_xm(0, 1))
-        chosen = signed_cond if self._signed else unsigned_cond
-        self.asm.emit(encode_b_cond(invert_cond(chosen), 0))
-        self.asm.emit_label_rel(false_label, here_offset=-4)
-        return True
-
     def _emit_branch_unless(self, cond, false_label: str) -> bool:
         """Branch to `false_label` unless `cond` holds. True if it emitted.
 
@@ -8414,8 +8049,6 @@ ctor_field_value=self._ctor_field_value_for(name),
         `_cond_branches` filter) already expects is unchanged.
         """
         if self._emit_branch_unless_bit_test(cond, false_label):
-            return True
-        if self._emit_branch_unless_and_test(cond, false_label):
             return True
         if not (isinstance(cond, F.BinaryOp) and cond.op in self._cmp_conds()):
             return False
@@ -8456,14 +8089,6 @@ ctor_field_value=self._ctor_field_value_for(name),
             return True
         left, right, u, s, reading = self._cmp_spec(
             cond.op, cond.left, cond.right)
-        # `reading is None` is the gate and it is `_cmp_spec`'s own answer: a
-        # floating comparison has a reading, and a `double` sum's flags are not
-        # `CMN`'s. Asked after the spec so the refusal above, the strcmp and the
-        # frame-order rows are all exactly where they were for every comparison
-        # this does not claim.
-        if reading is None and self._emit_branch_unless_sum_zero(
-                cond, u, s, false_label):
-            return True
         self._emit_branch_unless_cmp(left, right, u, s, false_label,
                                      float_reading=reading)
         return True
@@ -9149,25 +8774,8 @@ ctor_field_value=self._ctor_field_value_for(name),
                                                site[1]):
             self._emit_nested_frame_defaults(child, child_off)
 
-    def _emit_frame_bringup(self, st, offset: int) -> None:
-        """Bring ONE frame up: its slots at their class-level defaults, then its
-        own constructor's stores.
-
-        **Both halves are one method because a frame bring-up IS a construction,
-        and before this was one method the second half did not happen.** Mojo
-        `T(...)` calls `T.__init__`; the placement walk here wrote field DEFAULTS
-        and stopped, so a struct whose sole field holds a frame whose own struct
-        declares `__init__` came up at its class-level values. Measured, both
-        architectures, `Box()` over `struct Box: var inner: Opt` printing
-        `b=0` where CPython prints `b=41` — building, running, exiting 0, nothing
-        on stderr. The order is the language's: default-initialize, then run
-        `__init__`, and it is why the stores come after the loop rather than
-        being merged into it.
-
-        `nested_frame_constructor_stores` is `struct_construction_plan` asked
-        with a synthesized zero-argument call, so "which fields does this
-        `__init__` store" has ONE reader and this backend cannot answer it
-        differently from x86-64's."""
+    def _emit_frame_defaults(self, st, offset: int) -> None:
+        """One frame's own slots, at their class-level defaults."""
         for slot, (kind, payload) in enumerate(
                 M.struct_frame_defaults(st, self._structs)):
             if kind == M.DEFAULT_STRING:
@@ -9185,10 +8793,9 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self._emit_mov_imm("X0", int(payload or 0))
             self._emit_frame_base(offset)
             self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
-        self._emit_frame_constructor_stores(st, offset)
 
     def _emit_nested_frame_defaults(self, st, offset: int) -> None:
-        """`st`'s nested subtree, defaults first, deepest first, then its stores.
+        """`st`'s nested subtree, defaults first, deepest first.
 
         The same walk `model.struct_block_direct_children` describes, and it is
         the recursion that used to crash: it unpacked FOUR values out of
@@ -9208,44 +8815,11 @@ ctor_field_value=self._ctor_field_value_for(name),
         `Inner2`'s defaults at 16, on top of `Inner`'s own frame, and the read of
         `o.inner.inner2.x` then returned a DIFFERENT garbage number on each
         architecture.
-
-        **The constructor's stores come after this level's defaults and before
-        the level above's**, which is the language's order: default-initialize,
-        then run `__init__`. Before this, the stores were never emitted at all
-        for a frame brought up this way, so `Box()` whose `inner: Opt` has an
-        `__init__` wrote 0 where CPython writes 41 — on both architectures, with
-        nothing refused and nothing printed. The stores come from
-        `model.nested_frame_constructor_stores`, which is `struct_construction_
-        plan` asked with a synthesized zero-argument call, so "which fields does
-        this `__init__` store" is the ONE reader's answer and not a second walk
-        of the body here.
         """
         for _fname, _slot, child, child_off in \
                 M.struct_block_direct_children(st, self._structs, offset):
             self._emit_nested_frame_defaults(child, child_off)
-        self._emit_frame_bringup(st, offset)
-
-    def _emit_frame_constructor_stores(self, st, offset: int) -> None:
-        """This frame's own constructor's stores, at `offset + 8·slot`.
-
-        The register discipline is `_emit_frame_defaults`' and not
-        `_emit_block_store`'s, and the difference is the base: a construction
-        SITE's block is one fixed X29-relative address (`site[1]`) while a
-        nested frame's is `offset`, a distance INTO that block, so the two
-        cannot share a helper without the caller passing a site this walk does
-        not have. The store itself is the same three instructions.
-        """
-        stores, refusal = M.nested_frame_constructor_stores(
-            st, self._structs, self._frame_candidates, self._return_types)
-        if refusal is not None:
-            raise CodegenError(refusal)
-        for _field, slot, value in stores:
-            if isinstance(value, int):
-                self._emit_mov_imm("X0", value)
-            else:
-                self._emit_expr(value)
-            self._emit_frame_base(offset)
-            self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
+        self._emit_frame_defaults(st, offset)
 
     def _emit_frame_nested_addresses(self, site) -> None:
         """Store the ADDRESS of each frame `_emit_frame_nested` just brought up.
@@ -9559,7 +9133,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # out of the tuple it is handed, so passing the nested pair brings a
             # subtree up at the offset the layout chose.
             self._emit_frame_nested((nested, site[1], ()))
-            self._emit_frame_bringup(nested, site[1])
+            self._emit_frame_defaults(nested, site[1])
             # …and the nested struct's OWN nested frames' ADDRESSES, which is
             # the third step and the one whose absence was a NULL SLOT. The
             # frame-valued sole field used to stop after the two above, on the
@@ -9888,14 +9462,6 @@ ctor_field_value=self._ctor_field_value_for(name),
         # `external_call["printf", Int32](fmt, n)` — which reaches this same
         # line with `name == "printf"` — is asked the same question.
         self._refuse_unusable_printf_format(name, e)
-        # …and the same call's ARGUMENTS against the callee's own parameter
-        # types. Beside the line above and for the same reason — this is the last
-        # point where the resolved callee and its arguments are both in hand —
-        # and it is a different rule: that one reads the FORMAT, this one reads
-        # the DECLARATION. `g(3.9)` for `def g(x: Int)` printed 3.9's bit
-        # pattern plus one on both architectures where the interpreter answers
-        # 4.9; `model.call_argument_kind_refusal` says why in the words.
-        self._refuse_word_position_kind_mismatch(name, e)
         # A DEREFERENCE.  Intercepted HERE rather than left to the value-method
         # table below for two reasons, and both are about the RESULT rather than
         # about the receiver.  A dereference is an EXPRESSION: `return
@@ -12113,13 +11679,32 @@ ctor_field_value=self._ctor_field_value_for(name),
     def _is_pure_expr(self, e) -> bool:
         """True when evaluating `e` can be neither observed nor fatal.
 
-        The allow-list and every word of why it is that narrow are in
-        `formal/model.py::is_pure_expression`, which is where they now live:
-        `formal/build.py`'s `_lower_builtin_extremum` asks the same question for
-        the same reason — a `TernaryExpr` names its operands twice — so this is
-        a delegation rather than a second copy of the answer.
-        """
-        return M.is_pure_expression(e)
+        Deliberately narrow, because CSEL evaluates BOTH arms. An arm holding
+        a call may print, mutate a blob, or hit a cap, and running it when its
+        value is thrown away is a behaviour change, not an optimisation. So the
+        allow-list is literals, locals, field reads, and arithmetic over them.
+
+        Container literals are excluded even though a list display is
+        side-effect-free in principle: a list arm reserves frame space for its
+        blob, and reserving both arms' worth at once is a frame-pressure
+        change for no benefit. Calls are excluded even for known-pure builtins,
+        because the builtin set is exactly what grows over time and a stale
+        allow-list here would silently change semantics when it does."""
+        if isinstance(e, (F.IntLiteral, F.StringLiteral, F.BoolLiteral,
+                          F.IdentExpr)):
+            return True
+        if isinstance(e, F.MemberExpr):
+            return self._is_pure_expr(e.obj)
+        if isinstance(e, F.UnaryOp):
+            return self._is_pure_expr(e.operand)
+        if isinstance(e, F.BinaryOp):
+            return (self._is_pure_expr(e.left)
+                    and self._is_pure_expr(e.right))
+        if isinstance(e, F.TernaryExpr):
+            return (self._is_pure_expr(e.condition)
+                    and self._is_pure_expr(e.then_val)
+                    and self._is_pure_expr(e.else_val))
+        return False
 
     def _is_container_expr(self, e) -> bool:
         """True when `e` is known to lower to a list/set/tuple blob."""

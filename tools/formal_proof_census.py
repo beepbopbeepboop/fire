@@ -636,18 +636,8 @@ def measure_example(stem: str, arch: str = "arm64", test_input: int = 10) -> Rec
                 total = sum(sites.values())
                 n_sorries = _cached_hole_count(proof_path)
             else:
-                # A refusal with no proof beside it is the BUILD's or the
-                # GENERATOR's, and the phase says which. The generator's own
-                # refusal reaches this arm — `formal/build.py` re-wraps its
-                # `NotImplementedError` so `fire.py` prints one line instead of
-                # a traceback — so the phase is asked of the exception through
-                # `FB.proof_refused` rather than left reading `build` for a
-                # refusal that happened after codegen succeeded. One reader of
-                # that flag: `tools/formal_proof_breadth.py` and
-                # `tools/formal_proof_fuzz.py` classify the same shape through
-                # it.
                 status, reason, phase = "refused", first_diagnostic(message), \
-                    ("generate" if FB.proof_refused(e) else "build")
+                    "build"
         except NotImplementedError as e:
             # The proof generator's own refusal. Every raise site in
             # `formal/arm64_proof_gen.py` is deliberate and names its reason

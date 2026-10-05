@@ -23,10 +23,11 @@ instance field, `_value`:
 
 `Optional` is a ONE-word value whose receiver IS its field
 (`struct_is_one_field`), and this made it a two-field struct instead, so every
-`Optional` receiver became a FRAME ADDRESS.  That is what blocked the
-`builtin_slice.mojo` row: `Slice.start` is declared `Optional[Int]`, the
-backend believed that to be a frame, and it refused to let the ctor store one
-in a field.
+`Optional` receiver became a FRAME ADDRESS.  That is the refusal
+`bugs/FORMAL_builtin_slice_optional_field_is_a_frame_holder.md` records as
+blocking the 13-file `builtin_slice.mojo` row: `Slice.start` is declared
+`Optional[Int]`, the backend believed that to be a frame, and it refused to let
+the ctor store one in a field.
 
 This is one half of a pair of defects in this derivation.  The other half — a
 bare `self.helper` in VALUE position — IS ambiguous (an instance attribute

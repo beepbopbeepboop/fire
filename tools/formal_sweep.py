@@ -1008,41 +1008,6 @@ _REFUSAL_FAMILIES = (
     # cannot shadow each other.
     ("calls a name this unit does not compile, so the brackets cannot be bound",
      "specialization of a callee this unit does not compile"),
-    # A CALL to a name the DEFINING module does not export — 148 files on the
-    # 2026-10-05 b13 sweep, the largest codegen row in the corpus, and until this
-    # row it had a CAUSE and no FAMILY, so the sweep's own by-family breakdown
-    # reported all of it as `other refusal`: the bucket whose definition, in
-    # `tools/formal_sweep_causes.py`'s module docstring, is "nobody has looked".
-    # 136 of the b12 log's 472 codegen rows — 28.8 % — are this one shape. The
-    # two tables are keyed on different things and are MEANT to disagree
-    # (`_REFUSAL_FAMILIES` groups by the shape of the message for a tool that
-    # must classify one it has never seen; `CAUSES` by what a fix would have to
-    # change), so both need the row — and the pair of refusals that make this one
-    # a CALLEE question rather than a bind question are stated in the test.
-    #
-    # **THE MARKER IS THE FACT, NOT THE ADVICE, and it is the SAME clause
-    # `formal_sweep_causes.py` keys on.** Two clauses of
-    # `formal/model.py::imported_callee_refusal` are load-bearing and survive a
-    # reword: the call "has to bind a symbol `M` exports", and "That module does
-    # not export it". The sentence that USED to follow them — "spell it as
-    # `name[<a type>](…)`" — is ADVICE, and `work/formal19-1` deletes it because
-    # it is wrong about correct Mojo (a bare template call is the spelling the
-    # stdlib uses), so a marker keyed on it would have taken the row silently
-    # back to `other refusal` the day that branch landed.
-    #
-    # Placement is above `"would bind"` and above the two specialization rows
-    # because of the first-match rule, and it is safe in BOTH directions because
-    # the two sibling messages share no substring with this one: this message
-    # never says "would bind", never says "does not compile", and never says
-    # "which is a name with no definition in hand". `test_refusal_taxonomy.py`
-    # asserts all of that rather than leaving it to this comment — the cost of
-    # getting it wrong is a 148-file row counted as a neighbour's.
-    #
-    # The label names what a fix would have to CHANGE and is spelled once, here
-    # and in the test's own `EXPORT_RULE_FAMILY`: this module's neighbours are
-    # "value call: declared type cannot hold a function" and "dependency binds
-    # what nothing provides", so this is the third of that shape.
-    ("does not export it", "callee: the defining module does not export it"),
     ("has no representation on this path", "value with no representation"),
     ("has no public functions", "module exports nothing"),
     ("would bind", "dependency binds what nothing provides"),
@@ -1704,7 +1669,7 @@ def unclassified_report(pairs, total, say=print, other_classify=None,
     if loud:
         say("  (a shape over the bar is a HOLE IN THE RANKING TABLES rather "
             "than a row of work, and closing it is adding the row — the same "
-            "two-part job the `b12` round of `bugs/FORMAL_sweep_work_map.md` §5.2 "
+            "two-part job `bugs/FORMAL_sweep_work_map_2026-10-04_b12.md` §5.2 "
             "did for the refusal that hid 229 files behind one module)")
     return loud
 
@@ -2643,7 +2608,7 @@ def _bind_symbols(binary: bytes) -> list:
 # all, and until 2026-10-02 the tool answered that by refusing to answer —
 # which cost 7 correct images their verdict outright and made the x86-64 sweep's
 # pass count a floor rather than a number
-# (the `2026-10-01` round of `bugs/FORMAL_sweep_work_map.md` §4). Reading the trie answers the
+# (bugs/FORMAL_sweep_work_map_2026-10-01.md §4). Reading the trie answers the
 # same question from the same bytes, on any host. `formal/build.py`'s
 # `macho_dylib_exports` is already this project's independent reader of that
 # format (an independent one deliberately: `formal/macho_linker.py` writes these
@@ -2717,7 +2682,7 @@ def _host_cputype():
     derived entirely from a limitation of the instrument. Measured: it is the
     whole of the arm64-vs-x86-64 pass difference, all 7 files, every one of them
     an image that builds and links correctly for its architecture
-    (the `2026-10-01` round of `bugs/FORMAL_sweep_work_map.md` §4).
+    (bugs/FORMAL_sweep_work_map_2026-10-01.md §4).
 
     It then became a SECOND limitation, having stopped being the first: the same
     mismatch made the tool decline to look the names up at all, filing those 7
@@ -3672,7 +3637,7 @@ def report_history(prev, verdicts: dict) -> None:
 # that needs the second and could not use the first: 229 of 735 files stopped
 # building behind one module because six lines of em-dash prose were added to a
 # docstring, and the only record of it was a work map written afterwards from two
-# logs by hand (the `b12` round of `bugs/FORMAL_sweep_work_map.md` §1). Nobody ran
+# logs by hand (`bugs/FORMAL_sweep_work_map_2026-10-04_b12.md` §1). Nobody ran
 # the diff, because the diff needs the previous round's log, which is a file on
 # somebody's machine from three days ago.
 #
@@ -4148,7 +4113,7 @@ def report_baseline(path, prev, verdicts: dict, rows, total, unnamed_now=(),
     say("    (a class count that moved is not the finding; the file list is. "
         "A host model landing moves files in BOTH directions over one edit, so "
         "read the direction before reading the count — "
-        "the `b12` round of `bugs/FORMAL_sweep_work_map.md` §3.4 is the record)")
+        "`bugs/FORMAL_sweep_work_map_2026-10-04_b12.md` §3.4 is the record)")
     return True
 
 
@@ -4361,7 +4326,7 @@ def _drain_in_flight(futs, collect) -> None:
     pool had taken. Each of those publishes its verdict to the CAS before
     `run_one` returns, so a drain that ignored them would leave verdicts in the
     cache that the run's own output never mentions — which is what forced
-    the `b6` round of `bugs/FORMAL_sweep_work_map.md` §2.3 to reconstruct a run's
+    `bugs/FORMAL_sweep_work_map_2026-10-02_b6.md` §2.3 to reconstruct a run's
     numbers from the cache instead of reading its log.
 
     Waited for rather than killed, and the cost is bounded: each in-flight build

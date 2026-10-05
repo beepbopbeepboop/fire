@@ -2810,7 +2810,7 @@ class TestArmVsX86Parity(unittest.TestCase):
 
     # ── and the two logs this repository actually has ─────────────────────
     def test_the_committed_arms_classify_every_shared_file_identically(self):
-        # The claim in the `b7` round of `bugs/FORMAL_sweep_work_map.md` §2.5, read
+        # The claim in bugs/FORMAL_sweep_work_map_2026-10-02_b7.md §2.5, read
         # off the two committed logs rather than believed: 542 files classified
         # on both arms and NOT ONE of them with a different class. That is the
         # sentence which decided the x86-64 machine subset was not where the
@@ -3248,7 +3248,7 @@ class TestRoundOverRound(unittest.TestCase):
 
     # ── the two real rounds this repository has ───────────────────────────
     def test_the_committed_rounds_reproduce_the_map_they_were_derived_from(self):
-        # the `b11` round of `bugs/FORMAL_sweep_work_map.md` §2.1/§2.3/§3 were
+        # `bugs/FORMAL_sweep_work_map_2026-10-04_b11.md` §2.1/§2.3/§3 were
         # computed by hand from these two logs with a scratch script. The
         # numbers in the map are therefore a real expectation, and they are the
         # only test of this tool that uses no fixture: if a peel, a class or a

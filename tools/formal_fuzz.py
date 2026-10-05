@@ -4065,55 +4065,28 @@ class Gen:
         self.loop_depth -= 1
         self.emit(indent, f"print({acc})")
         # The INNER lists, read into locals so a later family can walk them.
-        # The inner list's own `len` used to be a REFUSAL on both backends ("a
-        # subscript of a list of lists has no element kind on this path — the
-        # outer list's elements are LISTS and the table does not say what a
-        # list's elements are"), so this family read the row through a second
-        # local and left the length unmeasured; a family that is a third
-        # refusals measures the refusal, which was the right trade while the
-        # construct was genuinely unanswerable two other ways. It is answered
-        # now (`formal/model.py::_list_literal_elem_kind`), so both spellings
-        # are emitted below and the length is measured rather than routed
-        # around.
+        # There is deliberately NO `len(inner)` here: a subscript of a list of
+        # lists has no element kind on this path — the outer list's elements are
+        # LISTS and the table does not say what a list's elements are — so
+        # `len(inner)` is REFUSED on both backends with "classified as 'int'"
+        # (filed as `FORMAL_len_of_a_subscript_of_a_list_of_lists_is_an_int`).
+        # A family that is a third refusals measures the refusal, so the inner
+        # read is here as an ALIAS for the nested-data question and the element
+        # read is the observable.
         #
         # The name holding the inner list does NOT join `words`: it holds a blob,
         # and the trailing observation prints every word in one `print` — a blob
         # there is either a refusal or an address, and the family is not about
         # either. It joins `lists`, so a later `star_splice` or `comp_walk` can
         # walk it, which is the nested-data question one step further.
-        #
-        # Each name is declared ONCE, with its real initialiser, and the reads
-        # are emitted at `indent`. The earlier spelling pre-declared `inner` to
-        # `[]` and then REBOUND it (`w = []` in the preamble, `w = R[i]` in the
-        # body), and a name bound two ways is a conflict in `ValueKinds` — so
-        # even with the element kind answerable the `len` below was refused,
-        # about the CORPUS's rebinding rather than about the rule under test.
         for i in range(min(2, nrows)):
-            inner = self.declare(self.fresh("w"), f"{name}[{i}]")
-            # `len` of the INNER list, which REFUSED on both backends until
-            # `formal/model.py::_list_literal_elem_kind` landed (2026-10-05) and
-            # is the row that family was written not to generate: the kind table
-            # flattened a blob layout it nests, so `R[0]`'s element kind was
-            # `list_elem_kind("list")` = None and the name was classified as "a
-            # word is an integer". With the element kind read off the literal it
-            # is a count-field read, and the answer is `ncols` — so this is
-            # emitted rather than avoided, which is what
-            # `bugs/FORMAL_fuzz_ledger.md` §5 listed as the next thing to
-            # generate and what no generator could measure until the rule
-            # existed.
-            self.emit(indent, f"print(len({inner}))")
-            elem = self.declare(self.fresh("w"), f"{inner}[{col}]")
+            inner = self.declare(self.fresh("w"), "[]")
+            self.emit(indent, f"{inner} = {name}[{i}]")
+            elem = self.declare(self.fresh("w"), "0")
+            self.emit(indent, f"{elem} = {inner}[{col}]")
             self.emit(indent, f"print({elem})")
-            # …and the NESTED subscript straight into `print`, the other of the
-            # two spellings measured as refused while the rule was missing
-            # ("cannot tell whether
-            # SubscriptExpr is a string or a number"). It is here because the
-            # same rule made it answerable and a family that keeps routing
-            # around a construct measures the routing rather than the construct.
-            self.emit(indent, f"print({name}[{i}][{col}])")
             self.words.append(elem)
             self.lists.append((inner, ncols))
-
 
     def star_splice_stmt(self, indent):
         """`[*xs]` and `[*d]` — the other one-thing-per-count walk.

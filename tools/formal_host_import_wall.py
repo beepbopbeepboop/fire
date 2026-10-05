@@ -10,7 +10,7 @@ name would TAKE rather than by how many files mention it.
 **Why this is a tool and not a fourth document.** Three bug docs have described
 this same measurement in prose — `bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md`
 §5, `bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md`'s own
-re-measurement, and the `b11` round of `bugs/FORMAL_sweep_work_map.md` §6's closing
+re-measurement, and `bugs/FORMAL_sweep_work_map_2026-10-04_b11.md` §6's closing
 judgement — and the last of them says the scratch "should have become a second
 tool rather than a fourth description of one". This is that tool.
 

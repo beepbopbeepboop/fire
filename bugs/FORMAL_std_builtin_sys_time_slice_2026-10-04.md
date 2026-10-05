@@ -117,16 +117,16 @@ fourteen are the bare-call row of §2**, and they are one feature, not six bugs:
 | 1 | `bit/bit.mojo` | `is_negative(value)` — bare call to a template | `FORMAL_a_bare_call_to_a_template_…`, `formal19-1` |
 | 2 | `builtin/_format_float.mojo` | `isnan(value)` | same |
 | 3 | `builtin/builtin_slice.mojo` | `FormatStruct(writer, "Allocation")` | same |
-| 4 | `math/uutils.mojo` | ~~`align_up(x)`~~ — **RE-MEASURED 2026-10-05: not this file's terminal construct any more.** It is now refused in a module it IMPORTS: `uutils.mojo imports 'std.builtin.dtype', which cannot be built either: FormatStruct … imported from std.format._utils`. So the bare-call row moved DOWN a layer, and this file belongs in §4's dependency table rather than in this one | the bare-call row again, one level down (`formal19-1`'s) |
+| 4 | `math/uutils.mojo` | `align_up(x)` | same |
 | 5 | `random/_rng.mojo` | `PhiloxRandom(seed)` | same |
 | 6 | `utils/variant.mojo` | `FormatStruct(writer, …)` | same |
 | 7 | `builtin/len.mojo` | a `...` body where instructions are needed | the body is `@unavailable`'d. Round 1 §4 measured that **giving it a body gains nothing**: the next refusal is `value.__len__()` on a string, `FORMAL_string_value_model` (`formal16-8`) |
 | 8 | `builtin/none.mojo` | `writer.write_string("None")` on a `Some[Writer]` | deliberate and correct: a multi-field struct's receiver is a frame address, and lowering it as `write` would pass that address as `fd(2)`. Needs a `Writer` value model — `FORMAL_wide_receiver_by_reference` (`formal16-8`) |
 | 9 | `builtin/type_aliases.mojo` | `comptime Never = __mlir_type.\`!kgen.never\`` | an MLIR TYPE bound to a module-level `comptime`. `FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops` (`formal19-4`) |
-| 10 | `format/repr.mojo` | `value.write_repr_to(string)` on a type parameter | a generic body is never specialized, and behind it `return string^` returns a 3-field `String`. Written up in `FORMAL_sweep_work_map_2026-10-02_std-b.md` §6 — **RE-MEASURED 2026-10-05: the sentence a reader gets is now the method-call one** (`value.write_repr_to()` is a method call on a value, and this backend lowers only append, clear, close, write … and the string methods …), which names the RECEIVER's kind rather than the specialization. Same file, same callee, different sentence, and the sentence is the one that says what to do |
-| 11 | `math/polynomial.mojo` | ~~`comptime num_coefficients = len(coefficients)`~~ — **RE-MEASURED 2026-10-05: the terminal construct is `reversed(...)`**, refused BY NAME by the pre-pass `formal/model.py::not_lowered_builtin_refusal` (added 2026-10-05, `27bd1f5d`), which quotes `NOT_LOWERED_BUILTINS`'s own sentence for the name. The comptime fold this row names is no longer what stops the file, so the row's attribution is stale — the monomorphisation limit is still real (`FORMAL_known_limits.md` §1.2) and still owned, it is just not this file's terminal |
+| 10 | `format/repr.mojo` | `value.write_repr_to(string)` on a type parameter | a generic body is never specialized, and behind it `return string^` returns a 3-field `String`. Written up in `FORMAL_sweep_work_map_2026-10-02_std-b.md` §6 |
+| 11 | `math/polynomial.mojo` | `comptime num_coefficients = len(coefficients)` | `coefficients` is a comptime parameter, and on this path a comptime parameter is an ordinary leading ARGUMENT — so there is nothing to fold. `FORMAL_known_limits.md` §1.2 (monomorphisation) |
 | 12 | `sys/arg.mojo` | `Span[StaticString, ImmStaticOrigin]()` — an explicit-parameter list naming a TYPE and a comptime VALUE | **the comptime one, and the attribution here was wrong**: `ImmStaticOrigin` is a `comptime` alias whose initializer is an MLIR attribute template (`std/origin/__init__.mojo:123`), and that module does not build, so there is no word to bind. Measured both architectures, with a near-identical program whose comptime argument folds BUILDING — which is what rules out the monomorphisation reading this row recorded. `FORMAL_a_comptime_origin_alias_is_an_mlir_attribute_template` (`work/formal25-5`) — **and its next step is LANDED, see §5.1** |
-| 13 | `utils/_serialize.mojo` | ~~`p.unsafe_load(off)` — a read at an OFFSET~~ — **RE-MEASURED 2026-10-05: the terminal construct is `max(...)`**, refused by the same pre-pass and for the same reason as row 11. Round 1 §2.2 fixed the NAME; what is left is the POINTE's width, and none of that is what stops the file today. Same wall as 11 behind it |
+| 13 | `utils/_serialize.mojo` | `p.unsafe_load(off)` — a read at an OFFSET | round 1 §2.2 fixed the name; what is left is the POINTE's width, and the pointee is `Scalar[dtype]` with `dtype` a comptime parameter, so no width is established. Same wall as 11 |
 | — | `builtin/float_literal.mojo` | `self.__int_literal__().__int__(…)` | **§5.** The receiver's type is in a `-> T` and the callee is in another module |
 
 **Every one of the thirteen is a feature someone else's claim is already
@@ -218,17 +218,10 @@ The construction-receiver doc (`formal13-4`'s, `Box().get()`) quoted the OLD
 sentence twice in its Status and said the advice it gives was the shape that
 crashes; both of those were right, and on 2026-10-04 the construct stopped being
 refused at all — the nested frame is now brought up at a construction site
-(`4af77b16`), so the lift runs. **The residual gap it named is closed as of
-2026-10-05** (`work/formal35-1`, commit 4086b233): a frame bring-up now RUNS the
-nested struct's constructor — `formal/model.py::nested_frame_constructor_stores`,
-asked by both backends' `_emit_frame_bringup` — so `Box().get()` over an `Opt`
-with an `__init__` answers 41 where it answered 0. `Box().get()` is an ORACLE
-row in `test_formal_receiver_position.py` now
-(`a_method_call_on_a_construction_receiver_whose_nested_constructor_runs`), and
-the refusal this paragraph warned about survives only for the shape a bring-up
-genuinely cannot account for: a nested constructor that REQUIRES parameters,
-since a bring-up is not a call and has no arguments to supply them. The message
-quoted below still does not exist, and the current one names the REPRESENTATION
+(`4af77b16`), so the lift runs and the residual gap is a nested struct's
+`__init__` not being run by that bring-up
+(`bugs/FORMAL_a_construction_does_not_run_a_nested_structs_constructor.md`). The
+message it quotes still does not exist, and the current one names the REPRESENTATION
 (`… because a CONSTRUCTION is not a value this path can pass as a receiver: the
 struct is named, and a one-word struct's fields live in a frame that the
 construction in an argument position never builds`) instead of asking the reader
@@ -320,56 +313,6 @@ So the two things worth doing here are both cheap and neither is a fix:
    (`sys/arg.mojo`, §3 row 12), and the rest behind `sys/_io.mojo` (8) and
    `time/time.mojo` (1). Round 1 said nothing about them because they were not
    in its scope; that is the whole of what §1 and §3 add.
-
-## 6.1 Status 2026-10-05 (`work/formal37-3`): the §3 table re-measured file by file, and FOUR of its fourteen rows had moved
-
-§2's own warning is the finding: *"the per-file cause table from round 1 is
-stale, and every number in it has to be re-measured before it is quoted."* This
-round's own table had the same property one day later. **All fourteen in-file
-rows re-measured on this tree, both architectures, byte-identical refusals on
-both** — not a re-sweep of the slice but `fire.py build --formal --no-prove` per
-file, which is the same question asked without the sweep's per-architecture
-lock:
-
-| | rows |
-|---|---|
-| **still the construct this table names** | **10 of 14** — `bit/bit.mojo` (`is_negative` from `std.bit.mask`), `builtin/_format_float.mojo` (`isnan`), `builtin/builtin_slice.mojo` and `utils/variant.mojo` (`FormatStruct`), `random/_rng.mojo` (`PhiloxRandom`), `builtin/len.mojo` (the `...` body), `builtin/none.mojo` (a `Writer` receiver), `builtin/type_aliases.mojo` (an MLIR type in a `comptime`), `sys/arg.mojo` (the explicit-parameter list), and §5's `builtin/float_literal.mojo` with §5's own new sentence |
-| **the construct has MOVED** | **4** — §3 rows 4, 10, 11 and 13, corrected in place above |
-
-**Two different things moved those four, and the difference matters for whoever
-picks them up.**
-
-* **`math/polynomial.mojo` and `utils/_serialize.mojo` are the SAME event**, and
-  it is a capability that arrived after this round was written:
-  `formal/model.py::not_lowered_builtin_refusal` was added on 2026-10-05
-  (`27bd1f5d`) and is asked from `_prepare_functions`, BEFORE any emitter, so a
-  call to a name in `NOT_LOWERED_BUILTINS` now stops the build with that table's
-  own sentence. `reversed` and `max` are in that table, and both files reach
-  one. The rows' own constructs are still real limits — a comptime parameter is
-  an ordinary leading ARGUMENT on this path, and `Scalar[dtype]`'s pointee width
-  is still unestablished — and neither is this file's terminal any more.
-* **`math/uutils.mojo` moved DOWN a layer**, into `std.builtin.dtype`, and
-  `format/repr.mojo`'s sentence changed to the method-call one. Neither is a
-  fix; both are the shape this document's §6 warns about, where a fix elsewhere
-  moves a file to its next refusal and the count does not move.
-
-**§5.1's sentence is in the message it claims to have changed**, measured on
-`sys/arg.mojo` on both architectures:
-
-    Of its 2 element(s): … None of its 2 element(s) names something this image can
-    resolve to a declaration (StaticString, ImmStaticOrigin), so there is no word
-    to bind for any of them.
-
-which is §5.1's `[StaticString, ImmStaticOrigin]` row (the "accusing one of two
-would be a guess" case) rather than its `[Int, ImmStaticOrigin]` row. Its other
-three rows are not exercised by this slice.
-
-**Not re-measured, and why:** §1's class table, §2's blockers and §4's 60
-dependency rows are 74 further builds over a slice whose CAS any edit under
-`formal/` invalidates, and every remaining row in them is attributed to a claim
-this document does not hold. The fourteen above are the rows a reader is most
-likely to act on — they are this document's own subject — and the other three
-sections are already marked as needing a re-measurement before they are quoted.
 
 ## 7. Reproducing
 

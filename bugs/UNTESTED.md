@@ -97,12 +97,10 @@ deleted with the fix). Four files were outside the inventory entirely before
 that, and one of them — `formal/x86_64_model_test.py`, the only check on
 `lib/X86.lean` that EXECUTES a machine model instead of typechecking it — ran
 by nothing. It is registered now (`formal-x86-machine-model`) and on its first
-run found a real model bug: `udivmod` disagreed with the hardware, real 4,
-model 7905747460161236410. Filed as its own doc with the emitted bytes, which
-rule out the obvious explanation; the defect was `idiv` writing its quotient
-through `UInt64.ofNat q.toNat`, which is zero for every negative quotient, and
-it was fixed on 2026-10-04 by `e54d2f4e` (one of nine model defects that commit
-found by fuzzing the model against the CPU).
+run found a real model bug: `udivmod` disagrees with the hardware, real 4,
+model 7905747460161236410. Filed as
+`bugs/CODEGEN_x86_model_udivmod_disagrees_with_hardware.md` with the emitted
+bytes, which rule out the obvious explanation.
 
 ### §5's other items are unchanged
 

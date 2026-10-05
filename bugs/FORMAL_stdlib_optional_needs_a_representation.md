@@ -10,12 +10,8 @@ question in somebody else's area (a one-word struct whose only field is a nested
 Read that section first if you are picking this up; the two below it are
 history and both name an arrow that is no longer the first one.
 
-This doc exists to say what the frame-holder document — deleted 2026-10-05,
-consolidated, because every arm of it was closed and the row it measured had
-moved three refusals deeper — left open, with the measurement that settles the
-question of which wall it is.  What it left behind is in
-`test_formal_method_param_field.py`'s "a struct-typed FIELD, initialised from a
-constructor ARGUMENT" case and in `formal/model.py::struct_field_names`.
+This doc exists to say what `bugs/FORMAL_builtin_slice_optional_field_is_a_frame_holder.md`
+left open, with the measurement that settles the question of which wall it is.
 
 ## What the frame-holder doc measured, and what was behind it
 

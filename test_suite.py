@@ -1208,15 +1208,8 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # they named were rewrites of an assertion that could no longer see the case
     # it was watching), so a census that still states them fails on the
     # registry's own state — which is the check working, not the entry being
-    # wrong. `formal-x86-machine-model` is a FIFTH drop and the only one of the
-    # five that was ever green: its marker said `1 of 45 WRONG: udivmod`, and
-    # `formal/x86_64_model_test.py` has reported `agree 52  WRONG 0  NO-RUN 0`
-    # since 2026-10-04, when `e54d2f4e` fixed the defect the marker named
-    # (`idiv` wrote its quotient through `UInt64.ofNat q.toNat`, zero for every
-    # negative quotient). Nobody re-measured it, so an `expect=` on a passing
-    # test was reporting itself as a FAILURE on every run — which is the
-    # anti-rot half of the marker mechanism firing on a marker nobody visited.
-    # `formal-receiver-position` is a FOURTH
+    # wrong. `formal-x86-machine-model` is theirs and is real: it is the count
+    # for the job they registered. `formal-receiver-position` is a FOURTH
     # drop, and it is the only one of the four that is interesting: the check
     # below was BUILT because that marker's count understated what its file
     # reported, and the marker then outlived even the correction — the three
@@ -1227,6 +1220,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # entry is gone here for the reason the two above name: a census that still
     # states a removed marker fails on the registry's own state.
                      'coro-future-await': 17,
+                     'formal-x86-machine-model': 1,
                      'gimple-async-runner': 36,
                      'gimplerunner': 3,
                      'mutable-async-capture': 2, 'nested-async-generic': 2,
@@ -3872,16 +3866,13 @@ UNREGISTERED = {
     # x86-64 code the row that matters most reports nothing, which is the shape
     # `formal-receiver-position` was moved out of `proofs` for.
     'test_x86_64_model_fuzz.py':
-        'The model-fuzz harness\'s two unread steps: its ENTRY register file, '
-        'read back through `--entry-probe` (if the stub\'s real `mov` loads did '
-        'not land, every field of every program the harness compares is a false '
-        'disagreement), and its VERDICT rules, which decide `WRONG` (a model '
-        'bug) against `HARNESS` (a disagreement no x86-64 CPU can produce) from '
-        'the program\'s bytes and the differing fields alone. The text cases are '
-        'Lean-free; one builds and runs the harness under `arch -x86_64` and '
-        'SKIPS where that is not available, which is why this is listed rather '
-        'than registered — a registered job that skips its only substantive '
-        'case is a green line that says nothing.',
+        'The model-fuzz harness\'s ENTRY register file, read back through '
+        '`--entry-probe`: if the stub\'s real `mov` loads did not land, every '
+        'field of every program the harness compares is a false disagreement. '
+        'Three text cases are Lean-free; the fourth builds and runs the harness '
+        'under `arch -x86_64` and SKIPS where that is not available, which is '
+        'why this is listed rather than registered \u2014 a registered job that '
+        'skips its only substantive case is a green line that says nothing.',
 
     # A DOCUMENT check, and the cheapest file in this list by a wide margin:
     # import-and-compare against `runtime_abi()`, `reflect` and three Markdown
@@ -4202,45 +4193,19 @@ UNREGISTERED = {
     # `main()` fell off its end, so `sys.exit(main())` exited 0 with six of
     # the seven groups printing `FAILED` -- nothing in the file could report
     # a failure. Measured 2026-10-05 on work/merge-formal27a-r2, `1 of 7
-    # groups ok; FAILED: posixpath, textwrap, struct, shlex, re, html`, all
-    # six reporting the SAME refusal -- the encoding guard asked of a byte
-    # buffer rather than of a character -- so it was six instances of ONE
-    # defect rather than six, and six is what made it worth a document rather
-    # than a line.
-    # **BOTH halves are now fixed, and that is why this entry is still
-    # unregistered rather than merely red.** `main()` returns 1, so a failing
-    # group is visible to anything that reads an exit status; and the encoding
-    # refusal no longer fires on a `bytes` receiver (commit `1abb8992`, "a
-    # `bytes` receiver is not a `str`": the element refusal asked only about
-    # the IMAGE and applied the answer to every subscript whose receiver's
-    # kind was `str`, when a `char *` here is EITHER a `str` or a `bytes` and
-    # those are different ANSWERS rather than different types --
-    # `formal/model.py::string_element_refusal`'s `receiver_is_declared_bytes`
-    # is what answers it now). The DOCSTRING half landed with it
-    # (`formal/model.py::is_docstring_statement`, skipped by
-    # `non_ascii_strings_in` without descending into it), which is why the two
-    # are one fix rather than two. Re-measured 2026-10-05 on this tree:
-    #     python3 tools/memslot.py --gb 8 --label t -- \
-    #       python3 test_formal_hostmods_conformance.py
-    #     -> host-module conformance: 7 of 7 groups ok
-    #        memcap: done, peak 0.2 GB, child exit 0
-    # So the excuse this entry carried ("registering it as it stands turns a
-    # hidden red into a gate red") is GONE -- that sentence is now FALSE, and
-    # a reader who finds it still there is reading a stale paragraph. What is
-    # left is the REGISTRATION itself, which is a cost question and not a red
-    # one. It is 59 s at a 0.1-0.2 GB peak measured, so by CLAUDE.md's own rule
-    # it is CHEAP and wants registering:
-    #     test('formal-hostmods-conformance', [PY,
-    #         'test_formal_hostmods_conformance.py'], mem='tiny',
-    #         deps=['preflight'],
-    #         extra=['test_formal_hostmods_conformance.py', 'formal'] +
-    #         FORMAL_BUILD_INPUTS, desc='every host module against CPython\'s
-    #         OWN regression tests, the case table generated from them')
-    # NOT done here: this is a REGISTRY edit, and a registration decides what
-    # every gate run costs, so it belongs with the line that owns
-    # `tools/suite.py` rather than with a merge of other people's branches.
-    # What is registered is not the point; that the entry's stated reason is
-    # no longer true is, and it is recorded here.
+    # groups ok; FAILED: posixpath, textwrap, struct, shlex, re, html`, and
+    # all six report the SAME refusal (the encoding guard asked of a byte
+    # buffer, `bugs/FORMAL_the_encoding_refusal_is_asked_of_a_byte_buffer.md`),
+    # so it is six instances of one defect rather than six. `main()` returns
+    # 1 now, which is what makes the six visible to anything that reads an
+    # exit status. Exact next step: `test(
+    # 'formal-hostmods-conformance', [PY,
+    # 'test_formal_hostmods_conformance.py'], mem='tiny', deps=['preflight'],
+    # extra=['test_formal_hostmods_conformance.py', 'formal'] +
+    # FORMAL_BUILD_INPUTS, desc='every host module against CPython\'s OWN
+    # regression tests, the case table generated from them')` -- and note
+    # that registering it as it stands turns a hidden red into a gate red,
+    # so the byte-buffer fix comes first.
     'test_formal_hostmods_conformance.py': 'The host-module CONFORMANCE '
         'table: every module in `formal/hostmods` whose CPython counterpart '
         'ships a regression suite, driven over the cases GENERATED from '
@@ -5280,277 +5245,6 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           f'the commit that fixed it — which is what '
           f'test_arm64_encoders.py says at its shift sweep.')
 
-    # The BARE walk's existence test, which was INVERTED for bug docs until
-    # 2026-10-05 and made the census it prints an over-count of 64 on this tree:
-    # it built "every `.md` basename MINUS the bug docs'" and then reported a
-    # citation when the name was not in that set, so a bare citation of a LIVE
-    # bug doc was reported as dangling. 14 of them were
-    # `FORMAL_known_limits.md`, which is the very document the check above uses
-    # as its positive control for the `bugs/`-prefixed class — so the tool
-    # reported its own control as broken and every figure quoted from it
-    # (`DOCS_merge_left_citations_of_the_docs_the_branches_deleted.md` quotes
-    # 289) was wrong by 64. The bare class is deliberately outside the ratchet,
-    # so nothing else would have caught it.
-    bare_by_doc, bare_by_file = dangling_doc_refs.bare_find()
-    live = {n.rsplit('/', 1)[-1]: v for n, v in bare_by_doc.items()
-            if f'bugs/{n}' in have}
-    check('dangling refs: the BARE walk does not report a citation of a bug '
-          'doc that EXISTS — the existence test it had inverted',
-          not live,
-          f'{sum(len(v) for v in live.values())} bare citation(s) of '
-          f'{len(live)} name(s) that are in bugs/ right now '
-          f'({sorted(live)[:5]}); `bare_find` must skip a name that resolves, '
-          f'and the census it prints is quoted in bugs/ documents')
-    # …and it must still find a corpus, or the fix is a walk that matches
-    # nothing. 200+ is the measured floor on this tree after the fix.
-    check('dangling refs: the BARE walk is still not vacuous after that fix',
-          sum(len(v) for v in bare_by_doc.values()) >= 200,
-          f'{sum(len(v) for v in bare_by_doc.values())} citations of '
-          f'{len(bare_by_doc)} names that are nowhere; a walk that skips every '
-          f'name because it skips too many is the same defect wearing the '
-          f'opposite sign')
-    # The ledger's floor is read by TWO mechanisms now — the ratchet below and
-    # the strict check above — so the readers that decide what it records are
-    # checked against a synthetic corpus rather than against this tree's, whose
-    # two entries happen to sit on either side of nothing in particular. The
-    # three cases are the three that can be got wrong independently: exactly at
-    # the ceiling (sanctioned, not a gain), one over it (a gain, and NOT
-    # sanctioned — the join must not become a hole), and one under it (not a
-    # gain, but a ledger entry the corpus has outgrown, which a ceiling cannot
-    # report and `stale_baseline_entries` exists to).
-    synth = {'a.py': [('X.md', 1)], 'b.py': [('Y.md', 1), ('Z.md', 2)],
-             'c.py': [], 'd.py': [('W.md', 3)]}
-    synth = {rel: cites for rel, cites in synth.items() if cites}
-    led = {'a.py': 1, 'b.py': 1, 'c.py': 2, 'd.py': 4}
-    check('dangling refs: the ledger floor is read by one implementation, and a '
-          'file with no entry is allowed zero',
-          dangling_doc_refs.ledger_verdicts(synth, led)
-          == {'a.py': (1, 1), 'b.py': (2, 1), 'd.py': (1, 4)}
-          and dangling_doc_refs.sanctioned(synth, led) == {'a.py', 'd.py'}
-          and dangling_doc_refs.ratchet_regressions(synth, led)
-          == [('b.py', 2, 1)],
-          f'verdicts {dangling_doc_refs.ledger_verdicts(synth, led)}, '
-          f'sanctioned {sorted(dangling_doc_refs.sanctioned(synth, led))}, '
-          f'gains {dangling_doc_refs.ratchet_regressions(synth, led)}; at or '
-          f'under the ceiling is sanctioned (so a worker who fixed a file is '
-          f'not asked for a ledger change), over it is a gain AND unsanctioned '
-          f'— one regime, not two — and an absent entry is zero, which is '
-          f'what catches a brand-new file citing a deleted doc')
-    check('dangling refs: a ledger entry the corpus has outgrown is visible, '
-          'which a ceiling cannot report',
-          dangling_doc_refs.stale_baseline_entries(synth, led) == {'d.py': (1, 4)},
-          f'stale {dangling_doc_refs.stale_baseline_entries(synth, led)}; the '
-          f'ledger is a CEILING, so a file that fixed its citations needs no '
-          f'entry change to stay green and an entry left behind by a fix is '
-          f'indistinguishable from one still needed — a worker who fixes a '
-          f'citation should drop the entry rather than leave it')
-
-
-def test_the_formal_doc_index_is_current():
-    """`bugs/OPEN_WORK.md`'s formal queue is GENERATED, and this is the check
-    that keeps it true.
-
-    The section it replaced was a hand-maintained table, and it was wrong in the
-    way a hand-maintained table is: it named documents that had been deleted,
-    it carried `*(deleted 2026-10-02)*` rows explaining a fix in three sentences
-    — a Status history inside an index, which is the one thing an index must not
-    be — and it had no way to notice either. `bugs/OPEN_WORK.md`'s own header
-    says it is generated by `tools/formal_doc_index.py`, from each document's
-    most-cited `formal/` file (the area) and from `tools/control.py`'s registry
-    (the claim), so adding a document, deleting one, or moving a file changes
-    the index and this file says so.
-
-    **The check deliberately excludes the CLAIM column**, and that is the
-    interesting half. Claim status is a fact about the MACHINE, not about the
-    tree: this repository is worked from a dozen worktrees at once and every one
-    of them starts or finishes a task while the others are mid-run, so two
-    workers' branches would disagree about it legitimately. CLAUDE.md's rule is
-    explicit that a check which goes red on branches that did nothing wrong is
-    worse than no check, because a red check is indistinguishable from a real
-    regression — so the tree's facts (the document list, the areas, the titles)
-    are compared and the machine's are reported as a number.
-
-    Three checks, each shown to fail on a planted defect:
-      - the block in OPEN_WORK.md is current;
-      - `--check` is not vacuous: adding a document makes it fail;
-      - it is not blind either: rewriting every claim in the file leaves it
-        green (and `--strict`, which is the full comparison, red).
-    """
-    import shutil
-    sys.path.insert(0, os.path.join(HERE, 'tools'))
-    try:
-        import formal_doc_index as F
-    except ImportError as e:
-        check('formal doc index: the generator is importable', False, repr(e))
-        return
-
-    def run_check(argv):
-        import io
-        import contextlib
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            argv = ['formal_doc_index.py'] + argv
-            old, sys.argv = sys.argv, argv
-            try:
-                rc = F.main()
-            finally:
-                sys.argv = old
-        return rc, buf.getvalue()
-
-    rc, out = run_check(['--check'])
-    check('formal doc index: OPEN_WORK.md\'s generated block is current',
-          rc == 0, out.strip() or f'--check exited {rc}')
-
-    path = os.path.join(HERE, 'bugs', 'OPEN_WORK.md')
-    backup = os.path.join(F.ROOT, '.tmp', 'OPEN_WORK.md.bak')
-    os.makedirs(os.path.dirname(backup), exist_ok=True)
-    shutil.copy(path, backup)
-    try:
-        # A NEW document is a fact about the tree and must be a failure.
-        ghost = os.path.join(HERE, 'bugs', 'FORMAL_zz_check_plant.md')
-        with open(ghost, 'w', encoding='utf-8') as f:
-            f.write('# FORMAL_zz_check_plant.md: a planted document\n\n'
-                    'This file exists so the index check can be shown to fail.\n')
-        rc_added, _ = run_check(['--check'])
-        os.remove(ghost)
-
-        # Every CLAIM rewritten is a fact about the MACHINE and must not be.
-        # **In memory, not on disk.** The first version of this check wrote the
-        # planted text into bugs/OPEN_WORK.md and restored it in a `finally` —
-        # which means a run killed between the write and the restore (a timeout,
-        # a SIGTERM from the suite's own drain, an interrupt) leaves the
-        # repository's triage index holding a fiction. A check on the tree that
-        # damages the tree when it dies is worse than one that damages nothing,
-        # and the comparison does not need the file: `without_claims` is the
-        # whole reduction, so the same question is answerable on a string.
-        text = open(path, encoding='utf-8').read()
-        block = F.block_in(text)
-        planted = block.replace('| **unclaimed** |', '| `nobody-at-all` |')
-        planted = planted.replace(', 0 claimed', ', 999 claimed')
-    finally:
-        shutil.copy(backup, path)
-        os.remove(backup)
-
-    check('formal doc index: a NEW document makes it fail — the check is not '
-          'vacuous',
-          rc_added == 1,
-          f'planting a document left --check at rc={rc_added}; an index that '
-          f'cannot notice a document appearing is a hand-maintained table with '
-          f'a generator in front of it')
-
-    rendered = F.render()
-    reduced = F.without_claims(rendered)
-    names = [r[0] + '.md' for r in F.rows()]
-    # The AREA tokens, not the whole heading lines: the "N claimed" tail of a
-    # heading is one of the things the reduction blanks, so comparing the line
-    # would fail for the right change.
-    areas = re.findall(r'^### `([^`]+)`', rendered, re.M)
-    check('formal doc index: --check compares the tree and ignores the machine '
-          '— a claim-only edit is invisible to it, and the document list, the '
-          'areas and the titles survive the reduction',
-          F.without_claims(planted).strip() == reduced.strip()
-          and planted.strip() != rendered.strip()
-          and len(areas) >= 5
-          and all(n in reduced for n in names)
-          and all(f'### `{a}`' in reduced for a in areas)
-          and all(r[5] in reduced for r in F.rows()),
-          'the reduction must blank the claim cell and the counts that are '
-          'functions of it, and NOTHING else. Two ways to get that wrong, both '
-          'seen: blanking every backticked cell in a row (which also drops the '
-          'document name, so a deleted document stops being noticed) and '
-          'comparing planted-against-planted, which is SYMMETRIC and so cannot '
-          'detect over-blanking at all — hence the two asymmetric assertions '
-          'about names and headings surviving')
-
-    rc_after, out_after = run_check(['--check'])
-    check('formal doc index: ...and the file is byte-identical afterwards',
-          rc_after == 0 and out_after == out,
-          'the planted-document probe must put the file back exactly, or this '
-          'check has a side effect on the tree it is checking')
-
-
-def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
-    """Twenty per-round work maps became one, and the two halves of that are
-    what can rot again.
-
-    `bugs/` held 143 `FORMAL_*.md` documents and GREW: every worker filed more
-    than it deleted. The formal sweep series was the worst of it — twenty
-    documents, 8 676 lines, one per round, each superseded by the next and each
-    carrying round-over-round tables whose only content was "this number
-    changed". A reader planning formal work had twenty documents to choose a
-    "current" one from and no way to tell which was current except the base
-    commit inside each.
-
-    They are now `bugs/FORMAL_sweep_work_map.md`: §1 is the latest census,
-    §2 is what the earlier rounds established and still holds, and §3 is an
-    INDEX of the twenty rounds with the base commit, the scope, and — because
-    seventy-odd files in this tree cite a round by its section number — what
-    each cited section carried. The citations were rewritten to "the `b9` round
-    of `bugs/FORMAL_sweep_work_map.md` §4.1", which resolves into §3.1.
-
-    So two properties, and both are checked here because the failure mode that
-    produced twenty documents is not a crash:
-
-    1. **There is ONE sweep work map.** A twenty-first round's author must add
-       to §1/§2 of this document or file a document that is not a per-round map
-       of this series; a file matching the pattern is either a mistake or the
-       cluster is regrowing.
-    2. **Every round tag any file cites is a row in the index.** That is what
-       makes the rewrite in (1) durable: a citation of "the `b14` round" with no
-       index row is a reference to a document nobody can find, and it is the
-       same dangling citation the check above exists for, in the one spelling
-       that check cannot see because the path it names DOES resolve.
-    """
-    import glob
-    maps = sorted(glob.glob(os.path.join(HERE, 'bugs',
-                                        'FORMAL_sweep_work_map*.md')))
-    canonical = 'FORMAL_sweep_work_map.md'
-    check('sweep maps: there is exactly ONE per-round map, and it is the '
-          'consolidated one',
-          [os.path.basename(m) for m in maps] == [canonical],
-          f'{[os.path.basename(m) for m in maps]}; every round of the formal '
-          f'sweep series is one document with an index of its rounds, and a '
-          f'second file matching this pattern is the cluster regrowing')
-
-    if not maps:
-        return
-    index = open(os.path.join(HERE, 'bugs', canonical), encoding='utf-8').read()
-    # The tags §3 declares, read out of the index's own first column rather than
-    # hand-listed here: a hand-maintained copy of an index is a second copy.
-    tags = set()
-    for line in index.splitlines():
-        m = re.match(r'\|\s*`([^`]+)`\s*\|', line)
-        if m:
-            tags.add(m.group(1))
-    # …and the ones the tree cites, in the rewritten spelling.
-    cited = {}
-    for rel in sorted(glob.glob(os.path.join(HERE, '**', '*.py'),
-                                recursive=True)) + \
-            sorted(glob.glob(os.path.join(HERE, '**', '*.md'),
-                             recursive=True)):
-        if not os.path.isfile(rel) or rel.endswith(os.path.join('bugs', canonical)):
-            continue
-        if 'build/' in rel or '__pycache__' in rel:
-            continue
-        try:
-            text = open(rel, encoding='utf-8', errors='replace').read()
-        except OSError:
-            continue
-        for tag in re.findall(r'the `([^`]+)` round of `[^`]*FORMAL_sweep_work_map'
-                              r'\.md`', text):
-            cited.setdefault(tag, []).append(
-                os.path.relpath(rel, HERE).replace(os.sep, '/'))
-    missing = {t: sorted(set(v)) for t, v in cited.items() if t not in tags}
-    check('sweep maps: every round tag the tree cites is a row in the index, '
-          'so "the `bN` round, §X.Y" resolves',
-          not missing and len(cited) >= 5,
-          f'{missing}; a citation of a round the index does not list sends the '
-          f'reader to a section number that exists nowhere. The index is '
-          f'{canonical} §3 / §3.1 and its tags are read out of that file; the '
-          f'walk found {len(cited)} distinct cited tag(s), and fewer than 5 '
-          f'means it is not seeing the rewritten spelling and would pass '
-          f'vacuously')
-
 
 def _module_const_paths(src, tree):
     """`<NAME> = os.path.join(..., 'build', '<name>')` -> {NAME: that source text}.
@@ -5774,7 +5468,6 @@ def main():
                test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
                test_a_deleted_bug_doc_is_not_still_cited,
-               test_the_formal_doc_index_is_current,
                test_no_test_preflights_on_an_unbuildable_artifact,
                # A missing DELEGATE is the same class of defect and the same
                # escape: `'GimpleGen' object has no attribute

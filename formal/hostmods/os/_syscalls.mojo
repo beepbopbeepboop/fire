@@ -1629,33 +1629,11 @@ def fs_unlink(p) -> int:
 
 
 def fs_free(p) -> int:
-    """`free(p)`: 0 on success, for a buffer this module allocated that the
-    caller is done with. Nothing above calls it: the strings `os` and `os.path`
-    return are the caller's to keep, and releasing one while a derived string
-    still points into it is the caller's decision, not this module's.
-
-    THE `0` IS NOT DECORATION; IT IS THE FIX.  This used to be
-    `return free(p)`, and `free` is `void`: the return register is whatever the
-    previous call left in it, so `print(fs_free(p))` printed an UNDEFINED value.
-    Measured 2026-10-05, both architectures, under `tools/formal_memcheck.py`'s
-    stack/register poison (0xA5A5... below sp and in every register the ABI
-    lets a function read before writing):
-
-        plain arm64   10485760        plain x86-64   2156285947
-        poison arm64   4194304        poison x86-64   2149996539
-
-    Four different answers to `did this free succeed`, changing with the
-    contents of a register nothing in the program wrote -- and invisible to
-    every oracle this tree has, because no CPython program has an `fs_free` to
-    compare against.  `platform_free` and `os_free` both `return fs_free(p)`,
-    so they inherited it and are fixed by this one change rather than three.
-
-    `free` cannot report failure, so 0 is the only thing here that can be
-    true, and it is what this module's other wrappers report for success --
-    `fs_unlink` above, `fs_close`, `fs_chdir`.
-    """
-    free(p)
-    return 0
+    """`free(p)`, for a buffer this module allocated that the caller is done
+    with. Nothing above calls it: the strings `os` and `os.path` return are
+    the caller's to keep, and releasing one while a derived string still points
+    into it is the caller's decision, not this module's."""
+    return free(p)
 
 
 # ── What the KERNEL says, rather than what the filesystem says ───────────────

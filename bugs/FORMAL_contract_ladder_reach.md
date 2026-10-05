@@ -62,14 +62,9 @@ re-diagnose it.
 
 `Lean.UInt64` is `Fin (2^64)`, and the clause is stated over the SIGN-FLIPPED
 words — `(i ^^^ 0x8000000000000000) ≤ (n ^^^ 0x8000000000000000)`, which is what
-makes a comparison signed and therefore what CPython means for an `Int`:
-`(n if n > 3 else 0) * 3` at `n = 2^63` answers 0, the signed reading. **The
-document that recorded that measurement,
-`FORMAL_contract_work_handoff.md`, was folded into
-`FORMAL_a_conditional_value_in_a_dylib_export.md` on 2026-10-05 and is gone**;
-the measurement stands here, and `FORMAL_a_conditions_operand_read_through_an_
-earlier_stores_slot.md` is the live document that carries the same sign-flip
-reading for the same reason.
+makes a comparison signed and therefore what CPython means for an `Int`
+(`bugs/FORMAL_contract_work_handoff.md` §3 records the measurement: `(n if
+n > 3 else 0) * 3` at `n = 2^63` answers 0, the signed reading).
 
 Closing `bounds_index` needs transitivity of `<` from `i < n`, through a
 sign-flip involution, into `≤` on `Fin`.  Every rung fails for its own reason:

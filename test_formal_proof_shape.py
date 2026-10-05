@@ -122,6 +122,33 @@ hpc_0 : st.pc = 4294967988
   | none => False
 """
 
+# A generated proof reduced to what the PREFIX reader has to survive, and the
+# three shapes that are the reason it is a reader rather than a line count: a
+# doc comment and an attribute that PRECEDE their declaration, a body whose
+# lines all sit at column 0 only inside a `where`-less block, and a multi-line
+# declaration header.
+DOC_COMMENTED = """import ProofLib
+
+set_option maxRecDepth 100000
+
+/-- The model the whole file refines. -/
+def mojo (n : UInt64) : UInt64 :=
+  n &&& 255
+
+@[simp] theorem arm64_reg_pc (j : Nat) (s : Arm64State) (p : Nat) :
+    arm64_reg j { s with pc := p } = arm64_reg j s := by
+  cases j <;> rfl
+
+theorem bitops_compiles_correctly_universal (n : UInt64)
+    (hn : 131184 * (n.toNat + 1) + 131184 ≤ 18446744073709551600)
+    :
+    (match runProg bitops_prog n with
+     | some s => s.x0 = mojo n
+     | none => False) := by
+  simp +decide only [h8, mojo, bitops_go]
+  all_goals (first | done | sorry)  -- arm64-cfg-leaf: walk-terminal
+"""
+
 
 class TestProfileParsing(unittest.TestCase):
     def test_milliseconds_and_seconds_are_both_seconds_out(self):
@@ -278,6 +305,101 @@ class TestGoalReading(unittest.TestCase):
     def test_no_goals_is_an_empty_list_not_a_crash(self):
         self.assertEqual(S.residual_goals(""), [])
         self.assertEqual(S.goal_size(""), (0, 1, 0))
+
+
+class TestPrefixReading(unittest.TestCase):
+    """`--mode prefix`: the file truncated at each top-level group.
+
+    The unit is a PREFIX and not a DELETION because a prefix is always a valid
+    Lean file and a deletion is not — delete a declaration and the file stops
+    elaborating, so the timing then measures Lean's error recovery and reads as
+    the cost of the group that was removed. Everything below is about the
+    boundary being where a reader thinks it is.
+    """
+
+    def test_a_group_is_named_so_the_report_is_a_table(self):
+        groups = S.declaration_starts(DOC_COMMENTED)
+        named = {n for _i, n in groups if n}
+        self.assertEqual(named, {"mojo", "arm64_reg_pc",
+                                 "bitops_compiles_correctly_universal"},
+                         "every declaration's own identifier is reported, "
+                         "because a reader asking 'how much is that "
+                         "declaration' has a NAME and not a line number")
+
+    def test_an_attribute_or_doc_comment_belongs_to_the_declaration_after_it(self):
+        """Truncating between them leaves Lean something it will not accept.
+
+        `@[simp] theorem …` with the attribute kept and the theorem cut is an
+        attribute with nothing to apply to, and a `/-- … -/` with nothing after
+        it is a doc comment documenting nothing. Both are the kind of prefix that
+        reports a parse error's cost as a group's cost, so the boundary moves up
+        to include them.
+        """
+        groups = S.declaration_starts(DOC_COMMENTED)
+        by_name = {n: i for i, n in groups}
+        self.assertLess(by_name["mojo"], by_name["arm64_reg_pc"])
+        head = S.prefix_text(DOC_COMMENTED, _index_of(groups, "mojo"))
+        self.assertIn("/-- The model the whole file refines. -/", head,
+                      "the doc comment must be inside the prefix that ends at "
+                      "the declaration it documents")
+        arm = S.prefix_text(DOC_COMMENTED, _index_of(groups, "arm64_reg_pc"))
+        self.assertIn("@[simp] theorem arm64_reg_pc", arm,
+                      "the attribute must travel with its declaration")
+        self.assertNotIn("bitops_compiles_correctly_universal", arm,
+                         "and the prefix must STOP there: a prefix that runs on "
+                         "reports the next group's cost as this one's")
+
+    def test_a_body_line_is_not_a_group(self):
+        """Only COLUMN-0 lines start a group; a body never does.
+
+        A generated proof's `simp +decide only [h8, mojo, …` is indented, and a
+        reader who counted every line would get one group per instruction —
+        which on `bitops` is 339 prefixes of 2-20 s for the five groups the
+        table actually has.
+        """
+        groups = S.declaration_starts(DOC_COMMENTED)
+        self.assertEqual(len(groups), 5,
+                         f"import + set_option + three declarations, got "
+                         f"{[n for _i, n in groups]}")
+
+    def test_consecutive_prefixes_differ_by_exactly_one_declaration(self):
+        groups = S.declaration_starts(DOC_COMMENTED)
+        a = S.prefix_text(DOC_COMMENTED, 3)
+        b = S.prefix_text(DOC_COMMENTED, 4)
+        self.assertTrue(a.startswith(b[:len(a)]) or b.startswith(a[:len(b)]),
+                        "a longer prefix must EXTEND a shorter one; if it does "
+                        "not, `delta_wall` is comparing two different files")
+        self.assertLess(len(a), len(b))
+        self.assertIn("arm64_reg_pc", b)
+        self.assertNotIn("arm64_reg_pc", a)
+
+    def test_a_multiline_declaration_header_is_one_group(self):
+        """`theorem name (n : UInt64)` then `(hn : …)` then `:= by` is ONE.
+
+        The header of the biggest declaration in the corpus is three lines long,
+        and a reader that split it would pay two `lean` runs to learn that the
+        first one is not a file.
+        """
+        full = S.prefix_text(DOC_COMMENTED, 5)
+        self.assertIn("(hn : 131184 * (n.toNat + 1)", full)
+        self.assertIn("| none => False) := by", full)
+
+    def test_out_of_range_and_empty_are_answered_not_crashed(self):
+        self.assertEqual(S.prefix_text("", 3), "")
+        groups = S.declaration_starts(DOC_COMMENTED)
+        self.assertEqual(S.prefix_text(DOC_COMMENTED, 99),
+                         S.prefix_text(DOC_COMMENTED, len(groups)),
+                         "asking past the end answers with the whole file")
+        self.assertEqual(S.prefix_text(DOC_COMMENTED, 0),
+                         S.prefix_text(DOC_COMMENTED, 1),
+                         "asking below the first answers with the first")
+
+
+def _index_of(groups, name):
+    for k, (_i, n) in enumerate(groups, 1):
+        if n == name:
+            return k
+    raise AssertionError(f"no group named {name!r} in {groups}")
 
 
 if __name__ == "__main__":
