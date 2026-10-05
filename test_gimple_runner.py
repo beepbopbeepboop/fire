@@ -4164,6 +4164,52 @@ main()
 """, "one none none\ntuple1 ints none one\nagain 3\nlit2 1\n1 none\n"
        "1 1\n1 1\n1 1\n")
 
+    # The VALUE side of a container-keyed store, and specifically the value
+    # KINDS whose setter had no `_kw` twin. `_KW_DICT_FNS` tests the setter's
+    # NAME, so `mojo_dict_set_bool` / `_none` / `_struct` /
+    # `_other_struct` were not "unsupported": they fell through to the
+    # "materialise the key as a decimal string now" arm, which writes the
+    # entry in the plain char* key DOMAIN while the matching `_kw` READ looks
+    # it up in the content-keyed one. So a bool (or None, or struct) under a
+    # container key produced TWO entries for one source-level assignment, and
+    # the read saw neither:
+    #
+    #     d = {}
+    #     d[("a",)] = True
+    #     print(d[("a",)], len(d))       ->  0 1, want True 1
+    #
+    # `len(d) == 1` is in the assertion because it is what makes the defect
+    # visible rather than invisible: the store "worked", so a check that only
+    # looked at the value's shape saw a dict with an entry in it.
+    #
+    # The 3.5 under a container key is the DOUBLE setter, which DID have a
+    # twin, and it is here to pin that the fix did not disturb the arm that was
+    # already right. `d[("a",)] = "R"` (a str value) is here for the same
+    # reason. What `d[("a",)] = True` still prints — `1` rather than `True` —
+    # is the READ side's value kind, which is the remaining half of
+    # CODEGEN_dict_slot_read_loses_its_value_kind and is not what this row is
+    # about; the row asserts the entry is REACHABLE from every spelling, which
+    # is what the missing twin cost. `("a",) in n` is the `None` row's
+    # assertion for the same reason: `in` asks the key domain and nothing else,
+    # so it is the one spelling of the read that cannot be answered by the
+    # value's own accessor (a kind-4 slot's word IS 0).
+    test_gimple_stdout("gimple_container_keyed_store_reaches_its_own_read", """\
+def main():
+    b = {}
+    b[("a",)] = True
+    print(b[("a",)], len(b))
+    n = {}
+    n[("a",)] = None
+    print(("a",) in n, len(n))
+    f = {}
+    f[(1, 2)] = 3.5
+    print(f[(1, 2)], len(f))
+    s = {}
+    s[(1, 2)] = "R"
+    print(s[(1, 2)], len(s))
+main()
+""", "1 1\nTrue 1\n3.5 1\nR 1\n")
+
     # The other half of that doc, and the expensive one: a MISSING tuple key
     # grew the dict by one entry per lookup, which is where ~16 GB of the live
     # set on `mojoc --dump-full fire.py` went (a cache keyed by
@@ -4775,6 +4821,67 @@ print(zip([0, 1], [2, 3]))
     test_gimple_stdout("gimple_dict_items_pairs_are_tuples", """\
 print({"a": 1}.items())
 """, "[('a', 1)]\n")
+
+    # A pair's VALUE slot kept no kind, so every reader of it guessed: the
+    # zero word printed `None` (the generic element repr's `val == 0` arm, right
+    # for a NULL pointer slot and wrong for a dict value, since `None` is stored
+    # as 0 with kind 4 and a plain `0` as 0 with kind 0), a bool printed 1, and
+    # a float's IEEE-754 bits are a POINTER-SHAPED word, so `print({'a': 1.5}
+    # .items())` SIGSEGVed in mojo_read_type_tag_safe — exit -11, no output.
+    # `mojo_dict_items` now records the slot's own value kind on each pair via
+    # `mojo_list_set_elem_repr`, the channel both pair walkers already ask for
+    # slot 1, and `mojo_dict_slot_repr` is the one implementation both they and
+    # the emitted `_mojo_repr_dict` render through. The MIXED dict is in the same
+    # program on purpose: the thunk is chosen per pair, so one repr function for
+    # the whole dict would get only half of these right.
+    # A closure value stored in a MODULE-SCOPE name, and then both printed and
+    # called. Two build failures used to meet here and neither was an answer,
+    # which is why it was survivable: `_root_globals` minted no field for `f`
+    # (the global's inferred type is `MojoBoundMethod *`, and the pre-scan that
+    # declares the struct's fields had no row for it), and the CALL read the
+    # bare `f` while every other read in the same block went through
+    # `_root_globals.f` — so even with the field declared it would have read an
+    # undeclared local. `print(f)` is a pointer decimal rather than CPython's
+    # `<function outer.<locals>.inner at 0x...>`; that is a FUNCTION-VALUE
+    # repr gap with no doc of its own, and the two lines below are here for the
+    # field and the call, not for it.
+    test_gimple_stdout("gimple_module_scope_closure_value_is_declared_and_callable", """\
+def outer(a):
+    def inner(x):
+        return x + a
+    return inner
+
+f = outer(3)
+print(f(10))
+print(f(4))
+""", "13\n7\n")
+
+    test_gimple_stdout("gimple_dict_items_value_kinds_survive", """\
+def c() -> dict:
+    return {"mid": 0}
+print(sorted(c().items()))
+print({"a": 1}.items())
+print({"a": None}.items())
+print({"a": True}.items())
+print({"a": False}.items())
+print({"a": 1.5}.items())
+print({"a": "x"}.items())
+print({"a": 0, "b": None, "c": True, "d": 1.5}.items())
+for k, v in {"a": 0}.items():
+    print(k, v)
+print(list({"a": 0}.values()))
+print(list({"a": 1.5}.values()))
+""", "[('mid', 0)]\n"
+       "[('a', 1)]\n"
+       "[('a', None)]\n"
+       "[('a', True)]\n"
+       "[('a', False)]\n"
+       "[('a', 1.5)]\n"
+       "[('a', 'x')]\n"
+       "[('a', 0), ('b', None), ('c', True), ('d', 1.5)]\n"
+       "a 0\n"
+       "[0]\n"
+       "[1.5]\n")
 
     # `for (v) in d.items():` binds ONE name to the whole [key, value] pair,
     # and the variable carried no evidence that it is a 2-element list, so
@@ -5458,6 +5565,47 @@ def main():
     except NotImplementedError as e:
         print("fell back")
 """, "fell back\n")
+
+    # The other end of the same marker: a member that IS a C library
+    # function. `math.floor(1.5)` used to print `0` and exit 0 (the generic
+    # scalar passthrough returning the module marker unchanged), then to raise
+    # `NotImplementedError` once the marker became loud — both wrong, because
+    # `<math.h>` is in every generated preamble and `_LIBC_SIGS` already pins
+    # the signatures. `math.<fn>` now lowers to the libm symbol, which is the
+    # same mechanism `os.environ` / `os.path.isdir` / `os.unlink` already use.
+    #
+    # `floor` / `ceil` / `trunc` are in the program for the one thing that is
+    # NOT a plain rename: Python's three return an `int` and C's three return
+    # a `double`, so without the truncation `math.floor(1.5)` prints `1.0`.
+    # `hypot` and `pow` are two-argument members, so the arity check in
+    # `module_member_libc`'s caller is exercised. `gcd` is the negative: an
+    # INTEGER member that is not libm at all, and the honest answer for it is
+    # still the named raise — which is why the table's absence is a decision
+    # rather than a gap.
+    test_gimple_stdout("gimple_math_module_members_lower_to_libm", """\
+import math
+
+def main():
+    print(math.floor(1.5))
+    print(math.ceil(1.2))
+    print(math.trunc(-1.7))
+    print(math.floor(-1.5))
+    print(math.sqrt(2))
+    print(math.fabs(-2.5))
+    print(math.pow(2, 10))
+    print(math.hypot(3, 4))
+    print(math.log10(1000), math.copysign(3, -1))
+main()
+""", "1\n2\n-1\n-2\n1.4142135623730951\n2.5\n1024.0\n5.0\n3.0 -3.0\n")
+
+    test_gimple_runtime_error("gimple_math_non_libm_member_still_raises", """\
+import math
+
+def main():
+    print(math.gcd(4, 6))
+main()
+""", "NotImplementedError: math.gcd: module 'math' is not compiled into this "
+       "binary")
 
     # `bytes` raises are the same mechanism reached a different way; keeping
     # this one next to the module-marker case is the point — an unavailable

@@ -908,7 +908,7 @@ a NUL-terminated `char *`, so the interned `""` is the answer and `len` of it is
 `model.gimple_runtime_callable(name, provided)` is the whole rule: every type
 crossing the call boundary is one 64-bit word, AND the symbol is on the link
 line. `GIMPLE_LIST_PREFIX` is **gone** — it was a hand-kept list of prefixes
-standing in for a shape, and the shape answers the same question for all 668
+standing in for a shape, and the shape answers the same question for all 680
 entry points instead of the 40-odd names one prefix covered.
 
 The two halves are independent and both are needed, which is what the prefix
@@ -919,17 +919,17 @@ because nothing provides it.
 
 | | measured over all 11 headers in `runtime/` |
 |---|---|
-| entry points declared | 668 |
-| every type crossing the boundary is one word | **262** |
-| a box in an argument or the return | 406 |
-| of the 262, refused only for want of a linked library | 262 |
+| entry points declared | 680 |
+| every type crossing the boundary is one word | **269** |
+| a box in an argument or the return | 411 |
+| of the 269, refused only for want of a linked library | 269 |
 
-**262 of 668 is what a link line converts into working code with no backend
+**269 of 680 is what a link line converts into working code with no backend
 change at all.** For `mojo_sqlite3_*` it is **16 of 22**.
 
 (Re-measured 2026-10-04 on this tree with `formal.model.runtime_abi()`, which
-is the authority and reads the headers rather than repeating this table: 668
-entry points, 262 word-shaped, 406 with a box. The figures above were right for
+is the authority and reads the headers rather than repeating this table: 680
+entry points, 269 word-shaped, 411 with a box. The figures above were right for
 the tree this section was written on and had been drifting since, which is what
 `test_runtime_header_scan.py`'s census check now prevents — it reads each of
 these numbers out of the file and compares it with the live table, so a comment

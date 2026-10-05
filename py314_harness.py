@@ -64,6 +64,13 @@ def _build_uncached(filepath, timeout=90):
     cmd = [sys.executable, MOJO_PY, "build", "-o", out_path, filepath]
     start = time.time()
     try:
+        # `cwd=HERE` is load-bearing twice over, and an old doc used to advise
+        # dropping it: a build's intermediates now follow `-o` (a
+        # `tempfile.mkstemp` path), so they are created and removed under
+        # TMPDIR whatever the CWD is — that is no longer a reason to drop it.
+        # And `fire.py build` resolves the compiler's own relative imports from
+        # the CWD, so dropping it would trade a stray `.cpp` for a build that
+        # cannot find `gimple_codegen`.
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=HERE)
     except subprocess.TimeoutExpired:
         return "TIMEOUT", "(timeout after %ds)" % timeout, "", -1, time.time() - start

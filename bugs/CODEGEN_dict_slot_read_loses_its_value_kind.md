@@ -1,11 +1,87 @@
 # A dict READ never carries the slot's kind, so `d['k']` cannot say `None`, `True` or `1.5`
 
+## Status: the `.items()` / `.values()` half is FIXED (`work/bugs6-1`); the
+## SUBSCRIPT read `d['k']` is what is left
+
 Found 2026-10-02 while fixing the dict store path (the six
 `emit_dict_int_value_store` call sites and the value-kind arms of the
 generated `_mojo_repr_dict`). **Not a key bug, and not a store bug**: the
 store now tags every slot correctly (kind 0 int, 1 double, 2 `char *`,
 3 bool, 4 `None`), and the dict's own repr reads those tags. The READ side is
 what throws the tag away.
+
+## What landed for the container-read half
+
+`mojo_dict_slot_repr(int64_t v, int64_t kind)` is now THE implementation of
+"what a dict slot's value looks like", in `runtime/fire_runtime.c`, and three
+consumers that each had their own go through it:
+
+- the emitted `_mojo_repr_dict` (`mojo/backend_gimple/module_gen.py`), whose
+  six-arm chain is deleted in favour of one call plus the two struct arms it
+  could not answer;
+- `mojo_dict_items` / `mojo_dict_items_int`, which now record **each slot's own
+  kind** on its pair through `mojo_list_set_elem_repr` — the channel both pair
+  walkers (`_mojo_repr_pairlist` here, the emitted `_mojo_repr_pair`) already
+  asked for slot 1 and only slot 1. One thunk per pair, chosen from that
+  slot's kind, so a dict mixing an int and a bool describes both;
+- `mojo_dict_values`, which records the dict's kind only when the slots AGREE
+  on one (`_dict_uniform_val_kind`), because a list-level repr function is one
+  function for every element.
+
+Measured, against CPython on the same text:
+
+| | before | after |
+|---|---|---|
+| `sorted({'mid': 0}.items())` | `[('mid', None)]` | `[('mid', 0)]` |
+| `{'a': None}.items()` | `[('a', None)]` | `[('a', None)]` |
+| `{'a': True}.items()` | `[('a', 1)]` | `[('a', True)]` |
+| `{'a': 1.5}.items()` | **SIGSEGV (exit -11)** | `[('a', 1.5)]` |
+| `{'a': 0, 'b': None, 'c': True, 'd': 1.5}.items()` | `[('a', None), ('b', None), ('c', 1), ('d', <segfault>]` | all four right |
+| `list({'a': 1.5}.values())` | `[4609434218613702656]` | `[1.5]` |
+
+Pinned by `test_gimple_runner.py`'s `gimple_dict_items_value_kinds_survive`,
+beside the other dict-items rows.
+
+## What is left, and it is the SUBSCRIPT read only
+
+`d['k']` is unchanged by all of the above, because the codegen picks the
+accessor (`mojo_dict_get_int` / `_str` / `_double`) from `gen._dict_val_of(ov)`
+at COMPILE time and the slot's runtime tag never reaches it:
+
+```
+d = {'n': None, 'b': False, 'f': 1.5}
+print(d)          ->  {'n': None, 'b': False, 'f': 1.5}     (the repr is right)
+print(d['n'], d['b'], d['f'])   ->  0 0 1.5                 (b is still 1/0)
+```
+
+`'f'` reads right by accident here (the literal's `_quick_type` says
+`double`); `d = {}; d['b'] = True` still gives `1`, and
+`read({'x': True})` on a dict PARAMETER still gives `1`.
+
+## Exact next step (the remaining half)
+
+The `mojo_dict_slot_repr` this commit added is the renderer; what a
+subscript READ needs is to remember, on the temp that `d[k]` produced, the
+`(dict, key)` pair it came from and ask
+
+```c
+char *mojo_dict_repr_slot(MojoDict *d, char *key);   /* the slot's value repr */
+int64_t mojo_dict_slot_kind(MojoDict *d, char *key); /* 0..6, or -1 if absent */
+```
+
+for a value with no better static type — the two chokepoints are `_repr_value`
+and `_stringify_value`, exactly as the original "codegen half" below says. The
+precedent for the bargain is `mojo_list_set_elem_repr`: known where the read
+happens, unrecoverable afterwards.
+
+Two things still to decide, both measured here and unchanged by the commit:
+
+1. **A temp is not a slot.** The same `int64_t` temp can be assigned from
+   several reads (`x = d['a'] if c else d['b']`), so the record has to be
+   cleared when a temp is re-assigned. `_actual_types` (the same shape of map)
+   is the precedent for where that invalidation lives.
+2. **A MISSING key must still print nothing useful rather than something
+   wrong.** `d['absent']` is 0 today and CPython raises `KeyError`.
 
 ## What I ran
 

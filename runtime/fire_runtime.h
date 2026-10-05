@@ -1253,6 +1253,14 @@ char       *mojo_dict_get_str_kw(MojoDict *d, int64_t kw);
 void        mojo_dict_set_int_kw(MojoDict *d, int64_t kw, int64_t v);
 void        mojo_dict_set_double_kw(MojoDict *d, int64_t kw, double v);
 void        mojo_dict_set_str_kw(MojoDict *d, int64_t kw, char *v);
+/* The bool / None / struct value kinds' twins. Their ABSENCE was not a
+ * refusal: `_KW_DICT_FNS` in the codegen tests the function NAME, so a setter
+ * with no twin fell through to the plain-char*-key arm and wrote the entry in
+ * a different key DOMAIN from the `_kw` read that looks it up. */
+void        mojo_dict_set_bool_kw(MojoDict *d, int64_t kw, int64_t v);
+void        mojo_dict_set_none_kw(MojoDict *d, int64_t kw);
+void        mojo_dict_set_struct_kw(MojoDict *d, int64_t kw, void *v);
+void        mojo_dict_set_other_struct_kw(MojoDict *d, int64_t kw, void *v);
 int         mojo_dict_contains_kw(MojoDict *d, int64_t kw);
 int64_t     mojo_dict_pop_int_kw(MojoDict *d, int64_t kw, int64_t dflt);
 char       *mojo_dict_pop_str_kw(MojoDict *d, int64_t kw, char *dflt);
@@ -1470,6 +1478,15 @@ char *mojo_dict_slot_key(MojoDict *d, int64_t i);
  * int64_t and handing it to the generic element reader SIGSEGV'd. See
  * mojo_dict_slot_double's own comment in fire_runtime.c. */
 double mojo_dict_slot_double(MojoDict *d, int64_t i);
+/* The one implementation of "what a dict slot's VALUE looks like", from the
+ * (word, kind) pair the store recorded — REPR semantics, always an owned heap
+ * string. NULL for the two struct kinds (whose rendering is a property of the
+ * dict's `val_repr`, not of the word) and for a kind-0 slot holding a non-zero
+ * word, which the caller's generic reader already handles. Consumers: the
+ * emitted `_mojo_repr_dict`, `mojo_dict_items`' per-pair value repr, and this
+ * file's `_mojo_repr_pairlist`; they all went their own way before, which is
+ * why `.items()` of a zero read back as `None` and of a float SIGSEGV'd. */
+char *mojo_dict_slot_repr(int64_t v, int64_t kind);
 int64_t mojo_dict_iter_key_int(MojoDictIter *it);
 int64_t        mojo_dict_iter_val_int(MojoDictIter *it);
 double         mojo_dict_iter_val_double(MojoDictIter *it);

@@ -409,22 +409,48 @@ def test_every_declaration_is_seen():
     # behaviour; a decimal address on this target). One name: the codegen half
     # is a `print` dispatch arm, which adds no runtime entry point. bugs4-8
     # counted from its own base's 543 and wrote `544`.
-    for header, want in (('fire_runtime.h', 566),
-    # 565 -> 566 (2026-10-04, `gatefix9`): `mojo_id`, the identity token. One
-    # name, and the codegen half of it is a change to the `id` STUB rather than
-    # a new entry point, so there is nothing else to account for. It is public
-    # because the stub `static int64_t id (int64_t x)` that every generated
-    # program emits calls it — the stub used to return its argument, which
-    # for a container is the live handle, and the container registries then
-    # read an `id()` token as that container (bugs/
-    # CODEGEN_bootstrap_stage2_dump_is_empty.md).
+    # 565 -> 577 (2026-10-04, the merge of `work/gatefix9` and `work/bugs6-1`).
+    # ONE row for TWELVE names, because the five this ledger had been short by
+    # were RECOVERED rather than rounded off. What each is for:
+    #   +4  `mojo_str_count_from`, `mojo_str_endswith_from`,
+    #       `mojo_str_rfind_from`, `mojo_str_startswith_from` — the
+    #       `[start[, end]]` WINDOW of `str.count`/`endswith`/`rfind`/
+    #       `startswith` (`a35765a0`). The codegen half is one argument
+    #       threaded through four `print`-dispatch arms, so nothing else in
+    #       the header answers to it.
+    #   +1  `mojo_regex_split` — a COMPILED pattern's `.split()` (`d8cdca63`).
+    #       Public because the compiled-pattern methods are a runtime table,
+    #       and a `split` with no entry was a refusal at compile time.
+    #       (These five are the gap `bugs4-9`'s row left behind, and they were
+    #       found by MEASURING rather than by arithmetic: walking
+    #       `git log master -- runtime/fire_runtime.h` and counting
+    #       `reflect.collect_runtime_exports_h` per commit gives 565 at
+    #       24f1e5e8, 569 at a35765a0 and 570 at d8cdca63, and those are the
+    #       two commits whose names are the difference.)
+    #   +1  `mojo_id` — the identity token (`gatefix9`). The codegen half is a
+    #       change to the `id` STUB rather than a new entry point: the stub
+    #       `static int64_t id (int64_t x)` that every generated program emits
+    #       used to return its argument, which for a container is the live
+    #       handle, so the container registries read an `id()` token as that
+    #       container (`bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md`).
+    #   +1  `mojo_dict_slot_repr` — the ONE implementation of "what a dict
+    #       slot's value looks like", from the (word, kind) pair the store
+    #       recorded (`work/bugs6-1`). The codegen's emitted `_mojo_repr_dict`
+    #       had its own six-arm chain and `mojo_dict_items`' pairs had NO
+    #       reader at all, so `.items()` of a zero printed `None` and of a
+    #       float SIGSEGV'd.
+    #   +4  `mojo_dict_set_bool_kw` / `_none_kw` / `_struct_kw` /
+    #       `_other_struct_kw`. `_KW_DICT_FNS` tests the setter's NAME, so a
+    #       setter with no `_kw` twin was not refused — it fell through to the
+    #       plain-char*-key arm and wrote the entry in a different key DOMAIN
+    #       from the `_kw` read that looks it up, so `d[("a",)] = True` was one
+    #       source-level assignment and two dict entries.
     #
-    # The header carries 571 declarations, so this ledger is 5 SHORT of the
-    # tree: five names arrived on branches merged after the last entry above
-    # and nobody added their ledger row. That is the check working — see
-    # bugs/TEST_runtime_header_scan_ledger_is_five_short.md — and this +1 is
-    # only this branch's own name, deliberately NOT rounded up to 571.
+    # The total is written as MEASURED (577) rather than as this merge's own
+    # arithmetic, because a count that reads as a formula when it is an
+    # observation is the failure this file exists to prevent.
     #
+    for header, want in (('fire_runtime.h', 577),
     # 561 -> 565 (2026-10-02, `bugs4-9`), FOUR names on the merged header
     # (its own ledger said five, from its base's 543 -> 548):
     #   +1  `mojo_str_cat_free`, the left-operand-releasing cat every repr

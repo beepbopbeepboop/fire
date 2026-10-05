@@ -9786,6 +9786,137 @@ relay('hi')
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_a_forwarded_container_argument_takes_the_callees_kind():
+        """An unannotated parameter whose ONLY use is to be FORWARDED must take
+        the container kind of the callee's corresponding parameter.
+
+        The container-axis twin of
+        `a_forwarded_string_argument_keeps_its_type` above (that one is the
+        scalar axis, fixed by `_gmi_apply_call_site_param_evidence`'s belief in
+        unanimous literal call sites; the struct-pointer axis is
+        `gimple_struct_ptr_param_forwarded_through_two_free_functions` in
+        test_gimple_runner.py). This is the axis neither of them covers:
+
+            def leaf(d): print(d["x"])
+            def middle(d): return leaf(d)
+            middle({"x": "1"})          ->  None, want 1
+
+        `middle`'s body mentions `d` exactly once, as an argument, so
+        `_infer_param_types` has nothing to read and falls to its name-based
+        container guess: `void middle(MojoList * d)`. That is a hard
+        wrong-pointer coercion, not a missing type — `MojoList *` where
+        `MojoDict *` is meant compiles clean and the callee reads whatever is
+        at that offset. `leaf`'s own inference already says `MojoDict *` (the
+        subscript is enough), so the evidence existed and nothing read it.
+
+        ORDER-DEPENDENT, and that is why it survived: `_infer_param_types` is
+        per-function and runs in source order, so with `middle` defined BEFORE
+        `leaf` the same program printed `1`, correctly and for no reason
+        anyone designed. Both orders are in the program below for that reason
+        alone, and `test_gimple_runner.py` pins the same pair.
+
+        The forward-as-a-statement (no `return`) shape is in there too,
+        because it is the same defect and not a return-type question. The list
+        and set chains and the two-hop chain are the transitive and
+        other-kind versions of the same observation, applied to a fixpoint
+        rather than once. Asserted against CPython's stdout, on BOTH
+        pipelines — the inference is whole-program, not per-function."""
+        global _PASS, _FAIL
+        name = "a_forwarded_container_argument_takes_the_callees_kind"
+        src = '''\
+def leaf(d):
+    print(d["x"])
+
+def middle(d):
+    return leaf(d)
+
+def middle_first(d):
+    return leaf_late(d)
+
+def leaf_late(d):
+    print(d["x"])
+
+def mid1(d):
+    return mid2(d)
+
+def mid2(d):
+    return leaf(d)
+
+def leaf_v(v):
+    print(len(v), v[0])
+
+def relay_v(v):
+    return leaf_v(v)
+
+def leaf_s(s):
+    print(len(s))
+
+def relay_s(s):
+    return leaf_s(s)
+
+def stmt_forward(d):
+    leaf(d)
+
+stmt_forward({"x": "s"})
+middle({"x": "1"})
+middle_first({"x": "2"})
+mid1({"x": "3"})
+relay_v([10, 20])
+relay_s({7})
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'forwarded_container.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'fwdc_{mode}.c')
+                exe = os.path.join(td, f'fwdc_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_list_sort_in_a_method_body_is_gimple_legal():
         """`self.<field>.sort()` inside a METHOD must compile.
 
@@ -10320,13 +10451,15 @@ print({'p': 1} | {'q': 2})
         what decides a key collision, so a merge that reorders is a wrong
         answer), a spread whose operand is a dict COMPREHENSION (the shape
         `_reset_func` uses), and a spread that overwrites a literal key.
-        Returns are inline for the same reason as the test above, and the
-        one literal value is `7` rather than `0` because a ZERO integer read
-        back out of a dict prints `None` on this backend — a separate,
-        pre-existing defect with no spread anywhere in it (verified against
-        `HEAD~4`), filed as
-        bugs/CODEGEN_dict_int_value_zero_reads_back_as_none.md, and pinning it
-        here would make this test red for the wrong reason."""
+        The `0` literals below are the load-bearing part of that list: a
+        ZERO integer read back out of a dict used to print `None` on this
+        backend — `.items()` discarded the slot's value kind, so the pair's
+        value slot was read by the generic element repr whose `val == 0`
+        arm answers `None` for a NULL pointer. Fixed by recording the slot
+        kind on each pair (`mojo_dict_items` -> `mojo_list_set_elem_repr`)
+        and rendering every value kind through the runtime's one
+        implementation, `mojo_dict_slot_repr`, so this row can no longer
+        sidestep the defect by avoiding a zero."""
         global _PASS, _FAIL
         name = "dict_literal_star_star_pair_merges_instead_of_storing"
         src = '''\
@@ -10337,7 +10470,7 @@ def b(x: dict) -> dict:
     return {**x, 'b': 2}
 
 def c(x: dict, y: dict) -> dict:
-    return {**x, 'mid': 7, **y}
+    return {**x, 'mid': 0, **y}
 
 def d(x: dict) -> dict:
     return {**{k: v for k, v in x.items() if k != 'skip'}}
@@ -11163,6 +11296,7 @@ print(run('x/y.txt'))
     test_walk_ast_dataclass_cache_is_transparent()
     test_scalar_arity_min_max_params_are_not_containers()
     test_a_forwarded_string_argument_keeps_its_type()
+    test_a_forwarded_container_argument_takes_the_callees_kind()
     test_list_sort_in_a_method_body_is_gimple_legal()
     test_dict_union_right_operand_is_converted_at_runtime()
     test_dict_literal_star_star_pair_merges_instead_of_storing()
