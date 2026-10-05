@@ -169,3 +169,120 @@ python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_os_backing.py
 
 Nothing here is a whole-closure compile, a self-host build or a Lean run: four
 single-file builds and three narrow suites.
+## 2026-10-05 (`work/formal19-3-r2`): the copy is ARM64-COMPLETE and x86-64 loses
+## its tail, and three of the four x86-64 faults are named
+
+**Status: the capability is IMPLEMENTED and MEASURED on arm64 and is NOT correct
+on x86-64, so nothing landed.** The refusal stands on both architectures, because
+a fix that is right on one machine and wrong on the other is the failure mode this
+whole repository exists to prevent, and shipping it would make `formal/x86_64_*`
+and `formal/arm64_*` answer one construct differently — which
+`bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md` §"What closing it
+would take" calls the worst outcome for a second recogniser and is equally the
+worst outcome here.
+
+**What "the copy" is, and it is smaller than §"The exact next step" makes it.**
+§"The exact next step" asks for three pieces: a size, a caller-side block, and a
+callee-side `memmove`. **The caller-side block is not needed**, and the measurement
+says why: `malloc` takes a run-time size, so the callee can allocate the copy
+itself and hand the caller a heap pointer — which is exactly what `os.listdir`
+and `formal/hostmods/glob.mojo` already do, and what makes their blobs outlive
+the frame. So the work is **two** pieces, both in the callee, and neither of them
+is a new ABI:
+
+| piece | what it is | where |
+|---|---|---|
+| the copy | at a `return` of a blob, `malloc((count+1)*8)` then `memmove` of the blob; **the length is word 0, a run-time count**, which is item 2 of `FORMAL_listdir_no_run_time_sequence.md` | `_emit_move_blob_to_the_heap`, one per backend |
+| the question | "is THIS `return` handing back a blob", asked per return site through the emitter's existing `_is_container_expr` — **not** through `functions_returning_containers`, which is a by-name fixpoint answering "on SOME path" and would copy the scalar return of a two-path function | `_returns_container_value`, one per backend |
+
+And the refusal goes: `formal/build.py::_refuse_returned_container_blobs` and
+`model.container_escape_sites` become unused, because there is no escape left to
+find. `model.functions_returning_containers` survives, published per definition
+the way `_image_returns_frame` is.
+
+**arm64: DONE and measured.** `.tmp/esc.mojo` is §"What it is" verbatim. Before:
+refused. With the copy:
+
+```
+$ python3 tools/memslot.py --gb 8 --label t -- python3 fire.py build --formal \
+      --no-prove --backend=arm64 -o .tmp/esc.arm64 .tmp/esc.mojo && .tmp/esc.arm64
+right after: 11 22 33
+after: 11 22 33
+```
+
+**`after` was `7 8 9` before the refusal existed.** The copy is six
+instructions, the length is a run-time word, and it is the whole of the fix on
+that machine.
+
+**x86-64: the sequence emits correctly and the copy loses its TAIL.** The
+emitted instruction stream was read back out of the assembler and disassembled
+by hand, and it is right: `mov r10,rax` · `mov r11,[rax]` · `add r11,1` ·
+`imul r11,r11` · `sub rsp,0x20` · `mov [rsp],r10` · `mov [rsp+8],r11` ·
+`mov rdi,r11` · `call malloc` · `mov rdi,rax` · `mov rsi,[rsp]` ·
+`mov rdx,[rsp+8]` · `add rsp,0x20` · `call memmove`. And the shortfall is
+measured across sizes, on `return [<k literals>]` read back in `main`:
+
+| elements | words the copy must move | words that arrive | printed |
+|---:|---:|---:|---|
+| 1 | 2 | 1 | `n=1 v0=0` |
+| 2 | 3 | 2 | `n=2 v0=11 v1=0` |
+| 3 | 4 | 2 | `n=3 v0=11 v1=0 v2=0` |
+| 4 | 5 | 4 | `n=4 v0=11 v1=22 v2=33 v3=0` |
+| 5 | 6 | 5 | `n=5 v0=11 v1=22 v2=33 v3=44 v4=0` |
+| **6** | **7** | **7** | `n=6 v0=11 v1=22 v2=33 v3=44 v4=55 v5=66` |
+| **8** | **9** | **9** | all correct |
+
+**Both the count and the first element always arrive and the shortfall is at the
+END**, which is what makes "the length register is wrong" and "the source is
+incomplete" the two candidates, and both were tested:
+
+* **the length**: raising the `add` from 1 to 2 and to 3 changes NOTHING
+  (same three rows), and raising it to 4 fixes every size — so the value reaching
+  `memmove` is not the one computed, and the non-monotonicity (2 and 3 identical,
+  4 correct) is not a length arithmetic problem.
+* **the source**: `def lit(): var q = [11,22,33]; printf("in lit: %d %d %d %d",
+  len(q), q[0], q[1], q[2]); return q` prints `n=3 a=11 b=22 c=33` **inside**
+  `lit` and `n=3 a=11 b=0 c=0` in `main` — so the blob is complete before the
+  copy and incomplete after it, on the same frame, with nothing between but the
+  copy.
+* **`memcpy` instead of `memmove`**: identical result, so it is not the symbol.
+* **storing the length into the destination before the call** (to read it back at
+  `[rax+32]`): the program exits 1 with nothing printed, which is its own
+  measurement — `malloc(32)` really does hand back exactly 32 usable bytes on this
+  target, so the copy of a 3-element blob fits exactly and the block is not the
+  thing being overrun.
+
+**Three x86-64 faults in the sequence are named and were each a segfault, not a
+wrong number**, which is worth more than the bug they are inside:
+
+1. **`encode_imul_r64_1op` is NOT a shift.** It is the one-operand form,
+   `RDX:RAX = RAX * reg`, and it leaves the register you meant to scale untouched
+   and hands `malloc` a length computed out of RAX. `encode_imul_r64_r64` is the
+   two-operand form. (arm64's twin trap is
+   `encode_ldr_xt_sp_imm`'s offset being in UNITS OF EIGHT, so `8` for "the
+   second word" reads 64 bytes up the frame.)
+2. **`encode_mov_r64_rm64(dst, src, 0)` is a LOAD, not a move.** `mov rdi, r11`
+   has to be `encode_mov_r64_r64`; the `_rm64` form reads `[r11]` and hands
+   `malloc` the blob's first ELEMENT as its length.
+3. **`RDI` must be re-loaded from RAX after `malloc`.** `memmove`'s destination
+   is argument 0 and `malloc`'s length is argument 0, and RDI is caller-saved, so
+   the version that does not reload writes the copy to the address
+   `(count+1)*8`.
+
+**So the next attempt does not start at the design.** It starts at "what does
+`memmove` receive as `rdx` on x86-64, in a binary whose `call` goes through a
+`__TEXT,__stubs` stub" — and the first thing to try is emitting the copy with the
+backend's OWN store loop instead of a library call, because `formal/arm64_codegen.py`
+already has `_emit_blob_store` and the x86-64 twin has `encode_mov_rm64_r64`, so a
+loop is a handful of instructions in a register set this emitter already owns. The
+doc's §"The exact next step" is right that a library call is the better answer
+(`formal/hostmods/os/_syscalls.mojo`'s `str_build` uses one for the same reason);
+it is simply not the answer that can be verified today, because on this backend it
+cannot be observed.
+
+**What this cost and what it bought, stated plainly:** the arm64 half is done and
+measured, the design question is answered (two pieces, not three, and no caller
+convention), the refusal's own text is now known to be removable, and four
+encoder-level traps in this file's copy sequence are named. The x86-64 half is
+one unresolved measurement, and it is the ONLY thing standing between this and
+`FORMAL_listdir_no_run_time_sequence.md` items 2 and 3 both closing.
