@@ -23,6 +23,8 @@ from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           STRING_TYPE_NAMES, DICT_TYPE_NAMES,
                           DTYPE_TYPE_NAMES, FLOAT_TYPE_NAMES)
 
+import collections
+
 import fire_compiler as F
 import mojo.middle.comptime as comptime_eval
 from formal import model as M
@@ -672,7 +674,12 @@ class ARM64Codegen:
                  comptime_hook=None, module_source: str = "",
 dylib_exports: list = None, globals_base: int = None,
                  import_aliases: dict = None, extern_decls: dict = None,
-                 entry_args: list = None):
+                 entry_args: list = None, opt: bool = False):
+        # The verified peephole pass (`formal/peephole.py`), off by default.
+        # `compile()` runs it AFTER `resolve()` — it reads the patched branch
+        # displacements — and refuses to run any rule whose Lean theorem
+        # `lib/Peephole.lean` does not declare.
+        self.opt = bool(opt)
         self.test_input = test_input
         # The startup stub's argument values, already NORMALISED by
         # `formal/build.py::_make_codegen` (the one place both backends are
@@ -1036,6 +1043,11 @@ dylib_exports: list = None, globals_base: int = None,
             self.asm.emit(data)
 
         self.asm.resolve()
+        self.peephole_stats = None
+        if self.opt:
+            from formal.peephole import peephole_arm64
+            self.peephole_stats = collections.Counter()
+            peephole_arm64(self.asm, self.peephole_stats)
         code = bytes(self.asm.sections["text"])
         external_syms = list({sym for sym, _, _, _ in self.asm.extern_refs})
         extern_calls = sorted(

@@ -862,7 +862,7 @@ def _extract_functions(stmts: list, synthetic: bool = True,
 def _make_codegen(arch: str, fmt: str, test_input,
                   dylib_syms: dict = None, comptime_hook=None,
                   dylib_exports: list = None, import_aliases: dict = None,
-                  extern_decls: dict = None):
+                  extern_decls: dict = None, opt: bool = False):
     """The codegen for `arch`, configured for the `fmt` binary it feeds.
 
     The only format-dependent choice made here is how an unbound symbol is
@@ -924,7 +924,8 @@ def _make_codegen(arch: str, fmt: str, test_input,
                             globals_base=gbase,
                             import_aliases=import_aliases,
                             extern_decls=extern_decls,
-                            entry_args=entry_args)
+                            entry_args=entry_args,
+                            opt=opt)
     if arch == "x86_64":
         from formal.x86_64_codegen import X86_64Codegen
         return X86_64Codegen(test_input=test_input,
@@ -936,7 +937,8 @@ def _make_codegen(arch: str, fmt: str, test_input,
                              target_fmt=fmt,
                              import_aliases=import_aliases,
                              extern_decls=extern_decls,
-                             entry_args=entry_args)
+                             entry_args=entry_args,
+                             opt=opt)
     raise FormalBuildError(
         f"unknown arch {arch!r} (expected one of {', '.join(ARCHES)})")
 
@@ -1274,7 +1276,8 @@ def _advertised_absent_report(source_path: str, missing: list) -> str:
 def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
                       dylibs: list = None, comptime_hook=None,
                       structs: list = None, source_path: str = None,
-                      import_aliases: dict = None, extern_decls: dict = None):
+                      import_aliases: dict = None, extern_decls: dict = None,
+                      opt: bool = False):
     """Compile `ordered` for `arch` and wrap it in its binary container.
 
     Returns (code, info, external_syms, binary). Mach-O needs two passes: the
@@ -1328,7 +1331,7 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
         needed = elf.elf_needed(elf_deps, True)
         codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
                                 comptime_hook, dylib_exports, import_aliases,
-                                extern_decls)
+                                extern_decls, opt)
         try:
             code, info = codegen.compile(ordered, base_addr=elf.DEFAULT_BASE,
                                          structs=structs)
@@ -1349,6 +1352,7 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
                 _unaccounted_report(source_path or "<program>", unaccounted,
                                     "image",
                                     _image_bare_callee_symbols(ordered)))
+        info["peephole"] = dict(getattr(codegen, "peephole_stats", None) or {})
         binary = elf.build_elf(code, entry=info["base_addr"],
                                vaddr=info["base_addr"],
                                external_syms=external_syms,
@@ -1374,7 +1378,7 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     base_noextern = TEXT_BASE + (NOEXTERN_GLOBALS_ENTRYOFF if has_globals
                                  else NOEXTERN_ENTRYOFF)
     codegen = _make_codegen(arch, fmt, test_input, dylib_syms, comptime_hook,
-                            dylib_exports, import_aliases, extern_decls)
+                            dylib_exports, import_aliases, extern_decls, opt)
     try:
         code, info = codegen.compile(ordered, base_addr=base_noextern,
                                      structs=structs)
@@ -1384,7 +1388,7 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
             # every address the code computed off its own base).
             codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
                                     comptime_hook, dylib_exports,
-                                    import_aliases, extern_decls)
+                                    import_aliases, extern_decls, opt)
             code, info = codegen.compile(ordered, base_addr=base_extern,
                                          structs=structs)
             external_syms = info.get("external_syms") or []
@@ -1406,6 +1410,7 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
             _unaccounted_report(source_path or "<program>", unaccounted,
                                 "image",
                                 _image_bare_callee_symbols(ordered)))
+    info["peephole"] = dict(getattr(codegen, "peephole_stats", None) or {})
     binary = build_macho(code, external_syms=external_syms, arch=arch,
                          dylibs=[{"install_name": d["install_name"],
                                   "symbols": set((d.get("map") or {}).values())}
@@ -1641,7 +1646,8 @@ def cas_dir() -> str:
 def compile_formal(source_path: str, output: str = None,
                    test_input: int = 10, prove: bool = True,
                    check: bool = True, arch: str = "arm64",
-                   fmt: str = None, link_dylibs: list = None) -> dict:
+                   fmt: str = None, link_dylibs: list = None,
+                   opt: bool = False) -> dict:
     """Compile `source_path` through the formal path for `arch`.
 
     arch: "arm64" (default) or "x86_64".
@@ -1666,6 +1672,11 @@ def compile_formal(source_path: str, output: str = None,
     prove: also emit <stem>_proof.lean next to the binary (Lean 4 static
     typecheck target; does not execute the binary). Supported for both
     architectures.
+    opt: run the verified peephole pass (`formal/peephole.py`) over the emitted
+    instruction list. OFF by default, and every rewrite it performs is
+    licensed by a theorem in `lib/Peephole.lean` saying the machine model is
+    unchanged; the flag exists so the corpus and the differential fuzzer can
+    be run both ways and the OUTPUT compared. See `--opt` in `fire.py`.
     """
     if arch not in ARCHES:
         raise FormalBuildError(
@@ -1920,7 +1931,8 @@ def compile_formal(source_path: str, output: str = None,
         comptime_hook=comptime_hook,
         structs=structs, source_path=source_path,
         import_aliases=_import_aliases(stmts),
-        extern_decls=_external_declarations(linked))
+        extern_decls=_external_declarations(linked),
+        opt=opt)
 
     if output is None:
         stem = os.path.splitext(os.path.basename(source_path))[0] or "a.out"
@@ -1965,6 +1977,11 @@ def compile_formal(source_path: str, output: str = None,
         # that appeared only when proofs were on would make the sweep's class and
         # the build's line disagree for the same file.
         "admitted": _admitted_summary(source_path),
+        # How many instructions the peephole pass removed, per rule, and empty
+        # when it was not asked to run. Published because the measurement is the
+        # pass's whole point and reading it out of a log line is worse than
+        # reading it out of the build's own result.
+        "peephole": dict(info.get("peephole") or {}),
     }
 
     if prove:
