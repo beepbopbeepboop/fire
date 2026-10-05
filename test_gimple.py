@@ -7343,6 +7343,69 @@ def main():
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_no_name_is_defined_twice_in_a_codegen_class():
+        """No class in the codegen tiers defines the same name twice.
+
+        `GimpleGen` is the aggregator every backend module's body hangs off as
+        a one-line delegation, so it is where a merge collision lands: the
+        conflict is resolved FILE BY FILE, one side keeps `gimple_codegen.py`
+        whole and the other keeps `mojo/backend_gimple/emit_stmts.py` whole,
+        and the two copies of the shared file end up contributing the SAME
+        delegation at two different places in the class body.
+
+        Python does not complain. The second definition silently replaces the
+        first, so the duplicate is invisible to every test that exercises the
+        method — and to a reader, because the two bodies are identical and
+        there is nothing to disagree about. What it costs is the ledger: a name
+        that appears twice cannot be counted, so the "one delegate per
+        extracted helper" rule stops being checkable, and the next edit to
+        either copy is a coin flip about which one it changed.
+
+        This parses the SOURCE with `ast` rather than reflecting on the class,
+        because the class object is exactly where the evidence is gone: one
+        name, one function, no trace of the loser. Reading it back off
+        `gimple_codegen.GimpleGen.__dict__` would pass on the tree that has the
+        bug.
+        """
+        global _PASS, _FAIL
+        name = "no_name_is_defined_twice_in_a_codegen_class"
+        import ast
+        import glob as _glob
+        import os as _os
+
+        here = _os.path.dirname(_os.path.abspath(__file__))
+        paths = [_os.path.join(here, 'gimple_codegen.py')]
+        for pat in ('mojo/middle/*.py', 'mojo/backend_gimple/*.py'):
+            paths += sorted(_glob.glob(_os.path.join(here, pat)))
+
+        problems = []
+        for p in paths:
+            with open(p, encoding='utf-8') as f:
+                tree = ast.parse(f.read(), filename=p)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                first = {}
+                for stmt in node.body:
+                    if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        continue
+                    if stmt.name in first:
+                        problems.append(
+                            f"{_os.path.relpath(p, here)}:{node.name}."
+                            f"{stmt.name} is defined twice, at lines "
+                            f"{first[stmt.name]} and {stmt.lineno} — the "
+                            f"second silently replaces the first")
+                    else:
+                        first[stmt.name] = stmt.lineno
+        if problems:
+            print(f"FAIL  {name}")
+            for pr in problems:
+                print(f"      {pr}")
+            _FAIL += 1
+        else:
+            print(f"PASS  {name}  ({len(paths)} modules)")
+            _PASS += 1
+
     def test_every_funcptr_initializer_has_a_definition():
         """Every `_funcptr_X = (void *)X` initializer in the output must have a
         matching `X` DEFINITION in the same file.
@@ -11108,6 +11171,7 @@ print(run('x/y.txt'))
     test_dotted_import_two_hop_attribute_call()
     test_dedup_variadic_externs_cache_is_a_faithful_parse()
     test_handwritten_selfhost_signature_tables_match_the_source()
+    test_no_name_is_defined_twice_in_a_codegen_class()
     test_every_funcptr_initializer_has_a_definition()
     test_ast_walk_reaches_every_name_in_a_lambda_body()
     test_callable_return_type_survives_its_carrier()
