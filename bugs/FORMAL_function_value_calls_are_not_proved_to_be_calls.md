@@ -1,7 +1,15 @@
 # A call through a VALUE is not proved to be a call: the word might not be an address
 
+**Status 2026-10-05 (`work/formal19-3-r2`): the PASSING end's caller-LOCAL half
+landed too, on both architectures, so what is left of that end is only the
+shapes a walk cannot SEE — `apply_arg(3, xs[0])` with `xs` a local list, which
+this round measured as still building and still trapping, is now refused by name.
+The doc stays because the CALLING end's undecidable half and the dylib boundary
+are still the subject.** See "What is still open" below, which is the current
+status of both halves.
+
 **Status 2026-10-04 (`work/formal19-3`): the DECIDABLE half of the analysis below
-landed, on both architectures, and the doc stays because the undecidable half is
+landed, on both architectures, and the doc stayed because the undecidable half was
 still the subject.** Measured before the change and repeated by the test it
 landed with:
 
@@ -47,14 +55,104 @@ architectures, before the syntactic conjunct was added; it is why
 `_binding_values` records an unpack target, a loop target, a `with … as` and an
 augmented assignment as UNDECIDED rather than as their value.
 
+**The PASSING end's caller-LOCAL half landed 2026-10-05 (`work/formal19-3-r2`),
+and what is left of the PASSING end is now only the shapes a walk cannot see:**
+
+```mojo
+def apply_arg(size: Int, f):
+    var t = 0
+    var i = 0
+    while i < size:
+        t += f(i)
+        i += 1
+    return t
+
+def main() -> Int32:
+    var xs = [10, 20, 30]
+    return apply_arg(3, xs[0])      # was: BUILT, and trapped at run time
+```
+
+`formal/model.py::caller_local_holds` and `::caller_local_element_holds` read the
+caller's own statements, and both architectures now refuse it with the one
+message, the same sentence:
+
+```
+main: `xs[0]` is called as a FUNCTION and the source says it holds an element
+read out of a container literal, passed to `apply_arg()` as parameter `f`, which
+`apply_arg()` calls through a value — …
+```
+
+**Why this half needed a different rule from the calling end's, and the reason
+is arithmetic rather than semantics.** `callee_word_is_not_an_address` needs TWO
+kinds of evidence — the value model's agreed kind plus every syntactic write
+site — because each backend already holds a `ValueKinds` and the model's own
+default ("a word is an integer") would otherwise refuse the correct
+`via_local` program. **`formal/build.py` holds no `ValueKinds`, so this reader
+takes the one leg that needs only the SOURCE**: unanimity over
+`_binding_values`' sites, with at least one site required so a name with no write
+here is silence rather than a vacuous agreement. A site `_binding_values`
+records as `None` — an augmented assignment, an unpack target, a loop target, a
+`with … as`, exactly the shapes its own docstring names — makes the answer
+silence, which is the conservative direction and the one that matters: this
+reader cannot claim a name is a number when a statement writes a word it does
+not understand.
+
+**The element case is narrower than the value case on purpose, and the
+narrowness is the finding.** An element of a container CAN be a function — a
+list of them is `stdlib/std/algorithm/backend/cpu/map.mojo`'s own shape — so
+`xs[i]` on a list is not an answer, which is why this doc's reader stopped at "a
+subscript of a NAME". `caller_local_element_holds` narrows it to the one case
+where the walk can see every element the subscript could ever hand back: **every
+syntactic write of the name is a container LITERAL, and every element of every
+such literal is itself something the module's own
+`value_argument_is_not_an_address` refuses as an address.** A name bound to `[]`
+and then appended to is silence, because `xs = []; xs.append(dbl)` is a list of
+functions. `test_formal_specialization.py`'s `…and a list of FUNCTIONS is still
+one, on both` is that boundary run rather than asserted: the same subscript with
+a function among the elements builds, runs and answers CPython on both
+architectures, which is what says the reader reads the ELEMENTS and not the
+spelling.
+
+**One ordering decision came with it, and it is in `formal/build.py` rather than
+in `model.py` because it is about which witness is BETTER.** The passing-end
+loop now skips a position whose own parameter DECLARATION refuses:
+`value_callee_can_hold_a_function` is asked first, because `call_container(xs,
+4)` against `f: List[Int]` is refused by `callee_value_refusal`, whose message
+names the type and the parameter, where this pass's reader would answer "an
+integer" or "a container". Measured: without the guard
+`test_formal_specialization.py`'s `the two remaining refusals of a value call`
+went red with the row's own `List[Int]` needle missing — the two readers are
+then not disagreeing, because only one of them fires.
+
+**Corpus, without a sweep** — the same cheap form the first half of this change
+used, and over-approximating: the two readers were driven over every `.py` and
+`.mojo` in this tree (482 files parsed) asking only "would any call site's
+argument shape reach them", with the `ValueKinds` conjunct dropped so every hit
+would be a file that MIGHT newly refuse: **0 hits**. That is a syntactic
+over-approximation and not a substitute for a sweep, which the machine's
+per-architecture lock was holding for another worker; what it proves is that the
+two new readers' triggers do not occur in the corpus at all.
+
+Measured, this tree, after the change:
+
+```
+python3 test_formal_specialization.py    PASS=19 FAIL=0   (three new rows)
+python3 test_refusal_taxonomy.py         PASS (271/271 checks, 47 families, 67 causes)
+python3 test_formal_run.py               PASS=1024 FAIL=0
+python3 test_formal_value_model.py       PASS=82 FAIL=0
+python3 test_formal_monomorph.py         PASS=24 FAIL=0
+python3 test_formal_dylib.py             PASS=24 FAIL=0
+```
+
 **What is still open, and each item says which of the two halves it belongs to:**
 
-* **the PASSING end, when the argument is a LOCAL of the caller** — `xs[0]`,
-  `g`, `len(xs)`, anything whose shape is decided by flow. Measured on this
-  tree: `apply_arg(3, xs[0])` with `xs` a local list still BUILDS and still
-  traps. The reader that would answer it is `ValueKinds`, which lives in the
-  emitters, and this pass has no table — so the answer is a local-flow reader
-  for `formal/build.py`, or the check stays where the two ends already are.
+* **the PASSING end, and it is now only what a walk cannot see** — a write from
+  a function this unit does not compile (`g = mk()`, where `mk` is in a linked
+  image and this module has no body), an `append` into the container whose
+  element is then subscripted, a `global` slot, and a subscript of a DICT name
+  (`d[k]`, which can hand back a function and which no spelling distinguishes
+  from a list). Each is silence rather than a wrong answer, and each is a shape
+  `_binding_values`' own residual paragraph names.
 * **the PASSING end across a dylib boundary** — a callee in another image is not
   in `callee_defs`, so its parameters are not in the table and nothing is
   checked. This is the half the doc's own §"What closing it would take" says
@@ -68,7 +166,9 @@ augmented assignment as UNDECIDED rather than as their value.
   comparisons per call, no coverage of another image, and a static property
   turned into a runtime one).
 
-**Measured, this tree:**
+**Measured, this tree, at the time the decidable half landed (the tables above
+are the current ones; this one is kept because it is what the decidable half was
+verified against):**
 
 ```
 python3 test_formal_specialization.py      PASS=18 FAIL=0   (17 rows unchanged)
@@ -208,7 +308,11 @@ pins the CHECKED side of it (a keyword, an unreadable bracket, a
 container-typed callee) on both architectures, its `a function read as a value
 is its code address` row pins the POSITIVE side (`call_it(plain, 5)` and
 `bare(add, 4)` / `var g = f; g(x, 100)`, which run and answer CPython on both),
-and its `a word the source says is not an address is refused` row pins the new
-one — the three shapes above, the oracle checked through `fire.py run` rather
-than assumed, and the two architectures required to produce the SAME sentence.
-This file is what the UNCHECKED side is.
+its `a word the source says is not an address is refused` row pins the five
+sources of evidence — the argument's own shape, the caller's parameter
+declaration, the caller's LOCAL's write sites, an element of a container literal,
+and the calling end — with the oracle checked through `fire.py run` rather than
+assumed and the two architectures required to produce the SAME sentence, and its
+`…and a list of FUNCTIONS is still one, on both` row pins the boundary the
+element reader draws (a subscript whose literal holds a function still reaches
+the function). This file is what the UNCHECKED side is.

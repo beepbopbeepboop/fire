@@ -198,16 +198,19 @@ GLOBAL_SHADOW_CPYTHON = "global-call-ok"
 # evidence the analysis reads, one per row, which is why they are three programs
 # and not one:
 #
-#   * `passing/literal`  — the argument's own SHAPE is an integer;
-#   * `passing/declared` — the argument is a parameter of the CALLER and the
-#     caller's own annotation says `Int`, which is `value_callee_can_hold_a_
-#     function` asked about the other end of the same call;
-#   * `calling/local`    — the callee name is a LOCAL the calling function
-#     bound to an integer, and there is no annotation anywhere to refuse on.
+#   * `passing/local`    — the argument is a LOCAL the calling function bound to
+#     an integer, decided by FLOW rather than by a declaration or a spelling
+#     (`model.caller_local_holds`);
+#   * `passing/element`  — the argument is `xs[0]` where `xs` is a local built
+#     only from container LITERALS, so every element the subscript could hand
+#     back is visible in the source (`model.caller_local_element_holds`).
 #
-# `passing/local` — a local list's element — is deliberately NOT here: nothing
-# about the spelling says whether `xs[0]` is a number or a function, so it is
-# the residual the doc names rather than a row this can hold.
+# The last one is deliberately this narrow and not `xs[i]` on any list: an
+# element of a container CAN be a function — a list of them is `map.mojo`'s own
+# shape — so a subscript of a name is only an answer where the walk can see every
+# element. `PASSING_ELEMENT_POSITIVE` is that boundary: the same spelling with a
+# function among the elements builds and runs, which is what says the reader
+# reads the elements rather than the spelling.
 NOT_AN_ADDRESS_PASSING_LITERAL = """\
 def apply_arg(size: Int, f):
     var t = 0
@@ -233,6 +236,59 @@ def apply_arg(size: Int, f):
 def main(n: Int) -> Int32:
     return apply_arg(3, n)
 """
+
+NOT_AN_ADDRESS_PASSING_LOCAL = """\
+def apply_arg(size: Int, f):
+    var t = 0
+    var i = 0
+    while i < size:
+        t += f(i)
+        i += 1
+    return t
+
+def main() -> Int32:
+    var g = 17
+    return apply_arg(3, g)
+"""
+
+NOT_AN_ADDRESS_PASSING_ELEMENT = """\
+def apply_arg(size: Int, f):
+    var t = 0
+    var i = 0
+    while i < size:
+        t += f(i)
+        i += 1
+    return t
+
+def main() -> Int32:
+    var xs = [10, 20, 30]
+    return apply_arg(3, xs[0])
+"""
+
+# The boundary case, and it BUILDS AND RUNS: the same subscript, with a function
+# among the literal's elements. A reader that classified `xs[0]` by its SPELLING
+# would refuse this, which is the ordinary program.
+PASSING_ELEMENT_POSITIVE = """\
+def apply_arg(size: Int, f):
+    var t = 0
+    var i = 0
+    while i < size:
+        t += f(i)
+        i += 1
+    return t
+
+def dbl(x: Int) -> Int:
+    return x * 2
+
+def main() -> Int32:
+    var fns = [dbl, dbl]
+    var acc = 0
+    acc = apply_arg(3, fns[0])
+    print(acc)
+    return 0
+"""
+
+PASSING_ELEMENT_POSITIVE_CPYTHON = "6"
 
 NOT_AN_ADDRESS_CALLING_LOCAL = """\
 def main(n: Int) -> Int32:
@@ -1149,7 +1205,10 @@ def test_a_word_the_source_says_is_not_an_address_is_refused(tmpdir):
         stops the model's own "a word is an integer" default from refusing the
         `via_local` row above, so both directions are pinned here;
       * the PASSING end is asked from `formal/build.py`'s name-placement walk,
-        which is the only pass holding the callee and the call site at once.
+        which is the only pass holding the callee and the call site at once. Its
+        last two rows are decided by the CALLER's own statements rather than by
+        a declaration or a spelling, so they are also the rows a change to the
+        value model cannot silently take with it.
 
     **The oracle is checked, not assumed.** CPython raises `TypeError` on all
     three programs, so "this path used to build and trap" is a measurement of a
@@ -1163,6 +1222,10 @@ def test_a_word_the_source_says_is_not_an_address_is_refused(tmpdir):
          "passed to `apply_arg()` as parameter `f`"),
         ("passing/declared", NOT_AN_ADDRESS_PASSING_DECLARED,
          "a value declared `Int`"),
+        ("passing/local", NOT_AN_ADDRESS_PASSING_LOCAL,
+         "holds an integer, passed to `apply_arg()` as parameter `f`"),
+        ("passing/element", NOT_AN_ADDRESS_PASSING_ELEMENT,
+         "holds an element read out of a container literal"),
         ("calling/local", NOT_AN_ADDRESS_CALLING_LOCAL,
          "and every statement of the function that binds it writes that"),
     )
@@ -1202,6 +1265,35 @@ def test_a_word_the_source_says_is_not_an_address_is_refused(tmpdir):
               f"  arm64:  {texts[0][:200]}\n  x86-64: {texts[1][:200]}")
 
 
+def test_a_list_of_functions_is_still_an_address_to_subscript(tmpdir):
+    """`xs[0]` where the literal holds FUNCTIONS: builds, runs, CPython's answer.
+
+    The control for `passing/element` in the row above, and it is here because
+    that reader's narrowness is the only thing worth claiming about it.
+    `model.caller_local_element_holds` refuses a subscript of a local **only**
+    where every syntactic write of the name is a container literal whose every
+    element is itself not an address; this program is the same spelling with a
+    function in the literal, so it is the case that narrowness is FOR, and a
+    reader that classified `xs[0]` by its spelling would refuse the ordinary
+    program `map.mojo` writes.
+
+    Run rather than refused-checked, because the shape's whole point is that a
+    value call through a subscripted list element reaches the function.
+    """
+    for arch in ARCHES:
+        root = os.path.join(tmpdir, f"fnlist_{arch}")
+        os.makedirs(root)
+        with open(os.path.join(root, "prog.mojo"), "w") as f:
+            f.write(PASSING_ELEMENT_POSITIVE)
+        build(root, arch=arch)
+        code, out = run_image(root, arch)
+        check(code == 0, f"[{arch}] the image exited {code}: {out[:300]}")
+        check(out == PASSING_ELEMENT_POSITIVE_CPYTHON,
+              f"[{arch}] printed {out!r}, not "
+              f"{PASSING_ELEMENT_POSITIVE_CPYTHON!r} — a subscript of a list "
+              f"OF FUNCTIONS stopped reaching the function")
+
+
 TESTS = [
     ("a specialization's root is a callee, not a read",
      test_a_specialization_root_is_a_callee_not_a_read),
@@ -1235,6 +1327,8 @@ TESTS = [
      test_two_brackets_through_a_value_pass_both_on_both),
     ("a word the source says is not an address is refused, on both",
      test_a_word_the_source_says_is_not_an_address_is_refused),
+    ("…and a list of FUNCTIONS is still one, on both",
+     test_a_list_of_functions_is_still_an_address_to_subscript),
     ("the two remaining refusals of a value call",
      test_the_two_remaining_refusals_of_a_value_call),
     ("a `global`-shadowed name is still a call to the C library",

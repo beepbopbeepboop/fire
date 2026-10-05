@@ -12877,6 +12877,17 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             for pname, value in zip(shape.positional, slots):
                 if pname not in called_words or value is None:
                     continue
+                # The callee's own DECLARATION is the better witness when it
+                # refuses, and it is the witness that NAMES the type: this row
+                # would answer "a container" for `call_container(xs, 4)` while
+                # `f: List[Int]` says exactly what the word is and which
+                # parameter it is (`callee_value_refusal`, raised from the
+                # emitter's own line). So this pass defers to it, which is also
+                # why the two cannot disagree — one of them fires and the other
+                # is silent, by construction rather than by luck.
+                if not M.value_callee_can_hold_a_function(
+                        M.param_annotation(fdef, pname)):
+                    continue
                 holds = M.value_argument_is_not_an_address(value, fn)
                 if holds is not None:
                     raise CodegenError(M.not_a_code_address_refusal(

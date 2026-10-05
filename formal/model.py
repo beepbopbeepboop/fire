@@ -26363,19 +26363,27 @@ def value_argument_is_not_an_address(arg, caller=None) -> str | None:
       * a TYPE read as a value — one 64-bit tag, and `type_value_name` is the
         one reader of that, so this asks the same function both backends' member
         arms ask;
-      * a PARAMETER of the CALLER whose own declaration cannot hold a function,
+* a PARAMETER of the CALLER whose own declaration cannot hold a function,
         which is `value_callee_can_hold_a_function` again — the same reader the
         calling end asks about the callee, so the two ends of one call cannot
         disagree about what its declaration means. The same declaration decides
         a subscript of that parameter, whose element is a word the container was
-        holding.
+        holding;
+      * a LOCAL of the CALLER whose every syntactic write site states something
+        this same function refuses as an address, which is `caller_local_holds`
+        — the two ends of one call then read the SAME reader and the SAME
+        unanimity rule, and the calling end's own two-legged structure (the
+        value model plus every write site) has its counterpart here in one leg
+        because `formal/build.py` has no `ValueKinds`.
 
     What is deliberately NOT here, because each would be a guess rather than a
-    contradiction: a LOCAL of the caller (`f = dbl; apply(3, f)` is correct and
-    the shape is decided by flow this reader has no table for — that is the
-    calling end's `ValueKinds`, asked in the other function); a subscript of a
-    NAME; and anything whose kind is undecided.  Silence claims nothing, so a
-    missed case is the residual the bug doc names and never a false refusal.
+    contradiction: a subscript of a NAME whose container the walk cannot see
+    (`d[k]` on a dict can hand back a function and `xs[i]` on a list cannot, and
+    nothing about the spelling says which — `caller_local_holds` narrows that to
+    a name whose every binding is a container LITERAL, which is the one case
+    where the element is decidable); and anything whose kind is undecided.
+    Silence claims nothing, so a missed case is the residual the bug doc names
+    and never a false refusal.
     """
     if arg is None:
         return None
@@ -26412,11 +26420,137 @@ def value_argument_is_not_an_address(arg, caller=None) -> str | None:
             ann = param_annotation(caller, base.name)
             if ann and not value_callee_can_hold_a_function(ann):
                 return f"an element read out of `{ann.strip()}`"
+            element = caller_local_element_holds(caller, base.name)
+            if element is not None:
+                return element
     if isinstance(arg, F.IdentExpr) and caller is not None:
         ann = param_annotation(caller, arg.name)
         if ann and not value_callee_can_hold_a_function(ann):
             return f"a value declared `{ann.strip()}`"
+        holds = caller_local_holds(caller, arg.name)
+        if holds is not None:
+            return holds
     return None
+
+
+def _syntactic_write_values(fn, name: str) -> list:
+    """Every value a statement of `fn` writes into `name`, UNDECIDED sites kept.
+
+    `_binding_values`, which is the one walk of these shapes, with the
+    distinction its sites already make preserved: an `AugAssignStmt`, an
+    unpack target, a loop target and a `with … as` write a word nothing in the
+    source states, and `_binding_values` records `None` for exactly those. A
+    `None` here is therefore "this walk cannot say", which is the answer that
+    makes a reader below stay silent — the permissive direction, and the same
+    one `callee_word_is_not_an_address`'s own paragraph describes for the CALLING
+    end's syntactic leg.
+
+    Named separately so both readers of it (the value's own reader and the
+    element's) ask the same walk: two walks over the same shapes is how a name
+    two statements disagree about becomes a refusal in one reader and a pass in
+    the other.
+    """
+    if not name:
+        return []
+    return _binding_values(fn, name)
+
+
+def caller_local_holds(fn, name: str) -> str | None:
+    """What a LOCAL of `fn` holds, when every site that writes it says so.
+
+    The PASSING end's half for an argument the caller BOUND rather than spelled,
+    which is the residual
+    `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md` names as
+    `apply_arg(3, xs[0])` — measured on that tree as still building and still
+    trapping, with `xs` a local list.
+
+    **It asks UNANIMITY over the write sites and needs no value-model table**,
+    which is what makes it usable from `formal/build.py`: the CALLING end can
+    afford to want two kinds of evidence because each backend already holds a
+    `ValueKinds`, and this pass holds none. So the rule is the one that needs
+    only the SOURCE:
+
+      * every syntactic write site of the name must state a value this module's
+        own `value_argument_is_not_an_address` refuses as an address, and
+      * there must be at least one such site, so a name with no write here (a
+        parameter, a module global, a name this walk does not see) is silence
+        rather than a vacuous agreement.
+
+    A `None` site — an augmented assignment, an unpack target, a loop target, a
+    `with … as`, exactly the shapes `_binding_values` documents — is a site this
+    walk cannot state, and one of them makes the answer silence. That is the
+    conservative direction and it is the one the doc's own list of residual site
+    shapes gives as the reason a MISSED write is worse than a missed warning:
+    this reader cannot claim a name is a number when a statement writes a word
+    it does not understand.
+
+    **What this deliberately cannot see**, and it is the same limit
+    `_binding_values` states rather than a new one: a write from a function this
+    unit does not compile (`helper()` returns nothing in particular — a caller
+    that binds `g = mk()` has no answer here), and a name the walk does not bind
+    at all. Both are silence.
+    """
+    sites = _syntactic_write_values(fn, name)
+    if not sites or any(v is None for v in sites):
+        return None
+    phrases = {value_argument_is_not_an_address(v, fn) for v in sites}
+    if None in phrases:
+        # A site whose value is an ordinary local or a call states nothing this
+        # reader can use, which is silence and not agreement.
+        return None
+    if len(phrases) != 1:
+        # Two sites that state DIFFERENT non-address kinds (`g = 1` and
+        # `g = "s"`) are still not an address, so this names the one thing they
+        # agree on rather than picking a kind.
+        return "a local of this function that no statement writes an address into"
+    # The phrase is the KIND, not a sentence about how it was established: the
+    # message already says which end of the call the build stopped at, and it
+    # quotes `holds` twice, so a clause about unanimity would be read twice too.
+    # The unanimity is this reader's own precondition and belongs in its
+    # docstring rather than in the reader's output.
+    return phrases.pop()
+
+
+def caller_local_element_holds(fn, name: str) -> str | None:
+    """What `name[i]` holds, when `name` is a local built only from LITERALS.
+
+    The element case, and it is narrower than the value case on purpose. An
+    element of a container can be a function — a list of them is
+    `std/collections/map.mojo`'s own shape — so `xs[i]` on a list is not an
+    answer, which is why the doc's own reader stops at "a subscript of a NAME".
+    What IS an answer is the one case where the walk can see every element the
+    subscript could ever hand back: **every syntactic write of the name is a
+    container LITERAL, and every element of every such literal is itself
+    something `value_argument_is_not_an_address` refuses as an address.** Then
+    the element is one of those values and the answer follows.
+
+    A name bound to `[]` and then appended to is refused here, because an
+    `append` is not a literal and its argument is a value this reader would have
+    to trace; `xs = []; xs.append(dbl)` is a list of functions, and the walk that
+    cannot see it is silent, not wrong.
+    """
+    sites = _syntactic_write_values(fn, name)
+    if not sites:
+        return None
+    elements: list = []
+    for site in sites:
+        if not isinstance(site, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+            # An `append` target, a loop target, a subscript store — every shape
+            # whose elements the source does not state in one place.
+            return None
+        elements += list(site.elements or ())
+    if not elements:
+        # `xs = []` states no element, so there is nothing to have read one out
+        # of and nothing to answer.
+        return None
+    phrases = {value_argument_is_not_an_address(e, fn) for e in elements}
+    phrases.discard(None)
+    if len(phrases) != 1:
+        # A function name among the elements is the case this whole reader
+        # exists to be right about: `[dbl, add]` is a list of ADDRESSES, and
+        # `xs[0]` is one.
+        return None
+    return "an element read out of a container literal"
 
 
 def callee_word_is_not_an_address(fn, name: str, vkinds=None) -> str | None:
