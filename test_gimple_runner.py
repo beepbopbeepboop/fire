@@ -4303,15 +4303,17 @@ main()
     # bugs/CODEGEN_bool_annotated_struct_field_prints_as_int.md's open item,
     # not this fix, and pinning the wrong text here would make it look settled.
     # `[True, False]` (all-bool, so it routes to `mojo_repr_list_bools`) is
-    # here. A bool DICT value is not, for a different reason:
-    # `{"d": True}` still emits a call to the deleted
-    # `mojo_mark_dict_bool_values`, so the program does not compile at all
-    # (bugs/COMPILE_FAIL_dict_literal_with_a_bool_value_emits_a_deleted_
-    # runtime_entry_point.md) — so this case would be red for a bug that is
-    # not this one. That doc's "coverage to add with the fix" names this case
-    # as the place to put the bool dict back; the `_mojo_repr_dict` `kind == 3`
-    # branch it would exercise is already marked non-owned in the comment
-    # above that branch in `mojo/backend_gimple/module_gen.py`.
+    # here, and so is a bool DICT VALUE (`"f": True` in the dict below): that
+    # one is the `kind == 3` branch of `_mojo_repr_dict`, whose only non-owned
+    # value in the walker is the `"True"`/`"False"` LITERAL (see the comment
+    # above that branch in `mojo/backend_gimple/module_gen.py`). It was absent
+    # because `{"d": True}` used to emit a call to a runtime entry point the
+    # runtime had deleted, so the program did not compile at all; every store
+    # shape now goes through `emit_dict_int_value_store`, and
+    # `gimple_dict_of_bool_values` / `gimple_dict_store_shapes_share_one_
+    # bool_slot` below pin the tag on all of them. This line pins the TEXT, and
+    # the plain `"e"`/`"a"` slots beside it are what a whole-DICT tag would
+    # have turned into `True`/`False`.
     test_gimple_stdout("gimple_container_repr_text_is_unchanged", """\
 def main():
     print([1, 2, 3, 4, 5, 6, 7, 8])
@@ -4321,7 +4323,7 @@ def main():
     print([(5, 6), (7, 8)])
     print([(1, "a"), (2, "b")])
     print([(1.5, 2)])
-    print({"a": 1, "b": "two", "c": 3.5, "e": None})
+    print({"a": 1, "b": "two", "c": 3.5, "e": None, "f": True})
     print({1, 2, 3})
     print({"x", "y"})
     print((1, 2, 3))
@@ -4339,7 +4341,7 @@ main()
        "[(5, 6), (7, 8)]\n"
        "[(1, 'a'), (2, 'b')]\n"
        "[(1.5, 2)]\n"
-       "{'a': 1, 'b': 'two', 'c': 3.5, 'e': None}\n"
+       "{'a': 1, 'b': 'two', 'c': 3.5, 'e': None, 'f': True}\n"
        "{1, 2, 3}\n"
        "{'x', 'y'}\n"
        "(1, 2, 3)\n"
@@ -4775,6 +4777,8 @@ print(zip([0, 1], [2, 3]))
     test_gimple_stdout("gimple_dict_items_pairs_are_tuples", """\
 print({"a": 1}.items())
 """, "[('a', 1)]\n")
+
+
 
     # `for (v) in d.items():` binds ONE name to the whole [key, value] pair,
     # and the variable carried no evidence that it is a 2-element list, so

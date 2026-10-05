@@ -247,6 +247,28 @@ class StringLiteral:
     # every literal this parser does not build (a fold, a manifest value, a
     # synthesized format), all of which are already-decoded text.
     is_raw: bool = False
+    # `f"..."` / `F"..."` / `t"..."` / `T"..."`: this literal's `value` is the
+    # WHOLE SOURCE TOKEN — `f"n={n}"`, prefix, quotes and braces included —
+    # because the interpolations inside it are still raw TEXT at parse time.
+    # They are not AST nodes and are not parsed here; whichever engine consumes
+    # the value parses the `{...}` fields itself, which is why
+    # `_strip_string_prefix_and_quotes` deliberately leaves an f/t token intact.
+    # That is a real shape, and it is why the answer has to be RECORDED rather
+    # than recovered from the value: an ordinary literal's `value` is its BODY,
+    # and a body may begin with any two characters at all. `s = 'f"n"'` has the
+    # value `f"n"` and is a three-character string, so every reader that used to
+    # decide "is this interpolated?" by asking whether the value started with
+    # `f"` read that one as an f-string — printing `n` on the interpreter and
+    # the compiled path, and REFUSING correct code on the formal path. Same
+    # shape of problem as `is_raw` above, same answer, and the three readers are
+    # `myinterpreter.eval_StringLiteral`,
+    # `mojo/middle/resolve_shared._decode_str_literal_text` (via this flag, so
+    # every compiled-path f-string site inherits it) and
+    # `formal/model.py:is_interpolated_literal`.
+    # `False` for every literal with no f/t prefix, and for every literal this
+    # parser does not build (a fold, a manifest value, a synthesized format),
+    # which are all already-decoded text.
+    is_interpolated: bool = False
 
 @dataclass
 class TstringLiteral:
@@ -5223,14 +5245,23 @@ class Parser:
             _merged += self._string_literal_inner(_r)
         _dq3 = '"' * 3
         _sq3 = "'" * 3
+        # `is_interpolated=True` on all three returns, and the evidence is the
+        # `_any_ft` this branch is reached under: one of the run's TOKENS
+        # carried an f/t prefix. The re-wrapped value still starts with an `f`
+        # (the consumers strip it), so a reader that sniffed it would agree —
+        # which is exactly why the flag is set here rather than left to be
+        # sniffed, so that a value whose OWN TEXT begins with `f"` cannot be
+        # confused with one.
         if _dq3 not in _merged:
-            return StringLiteral('f' + _dq3 + _merged + _dq3, line=line, col=col)
+            return StringLiteral('f' + _dq3 + _merged + _dq3, line=line, col=col,
+                                 is_interpolated=True)
         if _sq3 not in _merged:
-            return StringLiteral('f' + _sq3 + _merged + _sq3, line=line, col=col)
+            return StringLiteral('f' + _sq3 + _merged + _sq3, line=line, col=col,
+                                 is_interpolated=True)
         # Both triple-quote runs present in the content (extraordinarily
         # rare) — fall back to a double-quoted wrap with `"` escaped.
         return StringLiteral('f"' + _merged.replace('"', '\\"') + '"',
-                             line=line, col=col)
+                             line=line, col=col, is_interpolated=True)
 
     def _parse_primary(self):
         t = self._peek()
@@ -5281,7 +5312,8 @@ class Parser:
                                      line=line, col=col, is_bytes=True)
             return StringLiteral(self._strip_string_prefix_and_quotes(_raw0),
                                  line=line, col=col,
-                                 is_raw=self._raw_string_is_raw(_raw0))
+                                 is_raw=self._raw_string_is_raw(_raw0),
+                                 is_interpolated=self._raw_string_is_ftstring(_raw0))
         if t.kind == "LBRACKET": return self._parse_list_or_compr()
         if t.kind == "LBRACE": return self._parse_dict_or_set()
         if t.kind == "LPAREN":

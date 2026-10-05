@@ -260,6 +260,23 @@ BUILTIN_PROGRAMS = {
             var s = f"value={x}"
             print(s)
     """),
+    # An ordinary string whose own TEXT begins with an f/t prefix and a quote.
+    # Both engines printed the STRIPPED body (`n`, `x`) and exited 0, so the
+    # diff between them was clean — which is why this program is also in
+    # CPYTHON_COMPARABLE: engine-vs-engine is the comparison that cannot see a
+    # bug the two share, and CPython prints `f"n"` and `t'x'`. The escaped row
+    # is the control: with the inner and the outer quote the same kind, `\"`
+    # survives into the value, so it starts `f\` and the prefix sniff every
+    # engine used to do was accidentally right about it.
+    "string_body_that_starts_with_a_prefix": textwrap.dedent("""\
+        def main():
+            a = 'f"n"'
+            b = "t'x'"
+            c = "f\\"n\\""
+            print(a)
+            print(b)
+            print(c)
+    """),
     # A method call is the only `return` EXPRESSION KIND whose type the
     # enclosing function's inference had no case for: `_quick_type`'s
     # method-call branch is gated on the RECEIVER's type naming a registered
@@ -485,11 +502,15 @@ BUILTIN_PROGRAMS = {
             # enumerate and zip yield a PAIR per iteration, so the starred
             # remainder is a ONE-ELEMENT list there — a different lowering
             # again (`_emit_starred_slot_from_value`, not a slice of a row).
-            # Distinct target names per loop: a loop TARGET is a rebinding,
-            # and `_declare_var` is first-decl-wins per function (see
-            # `_gen_for_list`'s note), so reusing `i` across an int and a
-            # double sequence is a separate pre-existing bug
-            # (bugs/CODEGEN_zip_loop_target_keeps_the_first_loops_type.md).
+            # Distinct target names per loop, because a loop TARGET rebinds
+            # its name and this compiler still keeps the FIRST loop's declared
+            # type for the rest of the function: reusing `i` across an int and
+            # a double sequence prints the wrong number (and killed the image
+            # on the read side), which is
+            # bugs/CODEGEN_zip_loop_target_keeps_the_first_loops_type.md —
+            # fixed for the generator consumers, still open for the
+            # zip/enumerate/str/bytes/list/dict/set families, where the fix's
+            # cost is measured and its blocker is named.
             for ei, *erest in enumerate([7, 8]):
                 print(ei, erest)
             for zi, *zrest in zip([1, 2], ["u", "v"]):
@@ -1337,6 +1358,7 @@ CPYTHON_COMPARABLE = {
     "dict_repr_zero_value_is_not_the_none_sentinel",
     "getattr_default_on_a_miss",
     "dict_update_preserves_insertion_order",
+    "string_body_that_starts_with_a_prefix",
 }
 
 

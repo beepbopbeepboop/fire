@@ -44,7 +44,8 @@ import mojo.backend_gimple.emit_calls as ggc
 # weak stub returning NULL — see runtime/fire_runtime.c _globals.)
 from mojo.middle.loops_shared import *  # noqa: F401,F403
 from mojo.middle.loops_shared import (
-    _as_str, _gfl_declare_target_name, _pair_key, _try_const_fold_int, _tuple_elem_value, _tuple_unpack_slot_elems,
+    _as_str, _gfl_declare_target_name, _pair_key, _single_loop_target_name,
+    _try_const_fold_int, _tuple_elem_value, _tuple_unpack_slot_elems,
     _emit_starred_slot_from_value, _emit_starred_slot_list, starred_slot_index, starred_slot_name,
 )
 
@@ -3035,8 +3036,22 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
                        and tuple_slot_ctypes is not None)
     if is_tuple_target:
         var_names = gen._split_top_level_comma(var[1:-1])
+        # The per-slot names are declared by `_emit_generator_tuple_unpack`
+        # below, from the generator's OWN per-slot types. Declaring `var` here
+        # as well is what emitted `MojoList * (text, name, spec);` — not a C
+        # declaration, and the reason EVERY tuple-target generator consumer
+        # failed to compile (gcc: "expected ')' before ',' token"), both in
+        # `Tools/c-analyzer/c_parser/preprocessor/__init__.py` and in
+        # `test_gimple_generator_runner.py`'s four `gen_tuple_slot_*` cases.
     else:
         var_names = None
+        # `for x, in gen():` binds ONE name and `var` is the literal string
+        # `'(x,)'`. A multi-slot target over a generator whose yield arity was
+        # never recorded is a different mismatch — filed as
+        # bugs/CODEGEN_generator_multi_slot_target_needs_the_yield_arity.md.
+        _one = _single_loop_target_name(var)
+        if _one is not None:
+            var = _one
         gen._declare_var(var, vct)
 
     bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
@@ -3127,6 +3142,12 @@ def _gen_for_iter_cursor(gen, node, var: str) -> None:
     rec = itc.cursor_for(gen, gen._cname(node.iterable.name))
     cur = rec['cursor']
     vct = itc.element_ctype(rec)
+    # One value per step, so `for x, in it:` is ONE name — see
+    # `_gen_for_generator_iter`'s identical handling for why the target's own
+    # spelling cannot answer this.
+    _one = _single_loop_target_name(var)
+    if _one is not None:
+        var = _one
     gen._declare_var(var, vct)
     n = gen._new_val('int64_t', rec['full'])
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()

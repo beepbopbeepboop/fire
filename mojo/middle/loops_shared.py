@@ -308,6 +308,35 @@ def _emit_starred_slot_from_value(gen, name: str, value_ctype: str,
                        [('MojoList *', _dst), ('int64_t', _iv)])
 
 
+def _single_loop_target_name(target):
+    """The ONE name a loop target binds, or None when it binds more than one.
+
+    A `for` target arrives as a source string, and `(x,)` is how a ONE-slot
+    unpacking target is spelled: `for x, in seq:` binds `x` and nothing else,
+    because the trailing comma is a spelling rather than a second slot (see
+    `fire_compiler.target_slots`, which is where that comma is paid for once).
+    A lowering that reads ONE value per iteration has to see through it,
+    because `int64_t (x,);` is not a C declaration at all — gcc answers
+    "expected ')' before ',' token" — and emitting one is how a program
+    compiled: `Tools/c-analyzer/c_parser/preprocessor/__init__.py` writes
+    `for patterns, in _resolve_file_values(...)` and
+    `[i for i, in _resolve_file_values(...)]`, and both reached the generator
+    consumer below with the literal string `'(patterns,)'`, which it declared
+    as a variable name.
+
+    `None` for a target that binds two or more names: the caller then knows the
+    mismatch is not a spelling and has to decide what to do about it (a
+    consumer that reads one value per iteration cannot answer it, and the
+    generator path's own answer to that is filed rather than guessed).
+    """
+    if not gimple_ctypes.for_target_is_tuple(target):
+        return target
+    leaves = gimple_ctypes.for_target_names(target)
+    if len(leaves) == 1:
+        return leaves[0]
+    return None
+
+
 def _gfl_declare_target_name(gen, shadow_name, vn: str, se: str) -> None:
     """Hoisted out of `_gen_for_list` (recursive nested closure) — the
     lifted-closure-env determinism fix; `gen`/`shadow_name` threaded."""

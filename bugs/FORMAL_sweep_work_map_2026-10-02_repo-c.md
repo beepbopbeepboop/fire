@@ -389,9 +389,12 @@ lives only in the function's docstring.
   `test_pack_omitted_value_slots_are_filled` was written, and `test_struct_formal.py`
   still reported 148/148 — because `main()` runs a hand-maintained list of test
   functions and the new one was not in it. It is in it now, and the count is
-  168/168. This is the same class as
-  `bugs/COMPILE_FAIL_estate_check_red_for_eleven_formal_suites.md`: a test file
-  that is green because half of it never ran.
+  168/168. This is the same class as the estate check's own finding — every
+  `test_*.py` on disk has to be either run by a registered spec or declared in
+  `test_suite.py`'s `UNREGISTERED`, and a file in neither is a test nobody
+  reports on (that check went red for eleven such suites at once, then five
+  more, then one at a time; it is now a declared FAMILY rather than a
+  hand-kept per-file list, so the next member costs nobody an edit).
 * **`test_struct_formal.py` and `test_formal_read_before_store.py` time out at
   `-t 60` and both pass when run directly** (168/168 and 66/66). A `tool` row for
   either is a statement about `-t`, and reading it as a source finding costs a

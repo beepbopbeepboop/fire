@@ -471,6 +471,90 @@ def our_verdict(literal):
     return ("ok", strings)
 
 
+def our_literal_flag(text):
+    """(the literal's `value`, its `is_interpolated`) as this front end reads it."""
+    src = "def main():\n    " + text + "\n    return a\n"
+    stmts = F.Parser(F.py_tokenize_named(src, "<t>")).with_filename("<t>").parse_module()
+    lit = stmts[0].body[0].value
+    return lit.value, lit.is_interpolated
+
+
+# (name, the assignment's right-hand side, expected value, expected
+# is_interpolated). CPython is not the oracle for the flag — it has no such
+# notion, and this compiler's f-strings are its own — but `check_literal` above
+# already pins each spelling's VALUE against CPython, and the value is half of
+# what makes these rows bite: the two halves are only separable if the value is
+# the thing being asked about, and it is.
+FLAG_ROWS = [
+    # The row the whole flag exists for, and the control for it. Both values
+    # start with `f"`. `'f"n"'` is a four-character string that CPython prints
+    # as `f"n"`; `f"n={n}"` interpolates. Asked of the value they are the same
+    # question, and the prefix test answered `n` for both — on the interpreter
+    # and the compiled path, silently, and as a REFUSAL on the formal ones.
+    ("body_that_starts_with_f_quote", 'a = \'f"n"\'', 'f"n"', False),
+    ("interpolated_f_string", 'a = f"n={n}"', 'f"n={n}"', True),
+    ("body_that_starts_with_t_quote", 'a = "t\'x\'"', "t'x'", False),
+    ("interpolated_t_string", 'a = t"v={v}"', 't"v={v}"', True),
+    # The UPPERCASE spellings, which are the other half of the same question:
+    # `_raw_string_is_ftstring` accepts `F`/`T` and the compiled path always
+    # did, while the interpreter's own prefix test listed only `f"`/`t"` — so
+    # `F"q={q}"` interpolated on one engine and printed its own source text on
+    # the other. The flag agrees with CPython on both.
+    ("body_that_starts_with_capital_f", "a = 'F\"q\"'", 'F"q"', False),
+    ("interpolated_capital_f", 'a = F"q={q}"', 'F"q={q}"', True),
+    # The escape is what makes the middle row work: with the inner and outer
+    # quote THE SAME the `\"` survives into the value, so it starts `f\` and
+    # every reader was right by accident. These two pin that the flag does not
+    # depend on that accident.
+    ("escaped_inner_quote_same_kind", 'a = "f\\"n\\""', 'f\\"n\\"', False),
+    # A run that merges into an f-string (`f"a" "b"` is `f"""ab"""`) and a
+    # `r`-looking body, which the prefix walk used to take the `r` off and the
+    # quotes with it.
+    ("merged_run_with_one_f_part", 'a = f"a" "b"', 'f"""ab"""', True),
+    ("body_that_starts_with_r_quote", "a = 'r\"x\"'", 'r"x"', False),
+    # Triple-quoted, both ways: the `f` one keeps its token (and interpolates),
+    # the plain one arrives from the placeholder cache already stripped to its
+    # body — so the two cannot be told apart from the value either.
+    ("triple_quoted_interpolated", 'a = f"""a={n}"""', 'f"""a={n}"""', True),
+    ("triple_quoted_ordinary", 'a = """doc"""', 'doc', False),
+]
+
+
+def check_interpolated_flag(verbose):
+    """`StringLiteral.is_interpolated` has to answer for the VALUE as well.
+
+    An interpolated literal's value is its whole source token and an ordinary
+    one's is its body, so a body may begin with `f"` or `t'` or `F"` all by
+    itself. Every engine used to decide "interpolated?" by sniffing the value's
+    first two characters, which cannot tell those apart: the interpreter and the
+    compiled path printed `n` for `'f"n"'`, and the formal backends refused
+    correct code for it. The parser decides from the source token
+    (`_raw_string_is_ftstring`) and the node carries the answer, so these rows
+    are the two halves of one question side by side — and both are checked
+    against the value the parser produced, because a flag that disagreed with
+    its own node would be a worse bug than the one it replaced.
+    """
+    failures = []
+    for name, text, expected_value, expected_flag in FLAG_ROWS:
+        try:
+            value, flag = our_literal_flag(text)
+        except SyntaxError as e:
+            failures.append(f"interpolated flag {name}: refused a literal CPython "
+                            f"accepts ({text!r}): {e}")
+            continue
+        if value != expected_value or flag != expected_flag:
+            failures.append(
+                f"interpolated flag {name}: {text!r} parsed to value {value!r} "
+                f"is_interpolated={flag}, expected {expected_value!r} / "
+                f"{expected_flag} — the value and the flag are one answer, and a "
+                f"reader that asked the value instead of the flag is what this "
+                f"row exists to catch")
+        elif verbose:
+            print(f"  flag         {name:34s} {text!r} -> {value!r} "
+                  f"interpolated={flag}")
+    return (not failures), "; ".join(failures)
+
+
 def check_literal(name, literal, expected_ours, verbose):
     cp = cpython_verdict(literal)
     ours = our_verdict(literal)
@@ -664,6 +748,29 @@ def run_end_to_end(verbose):
                    '    print(a)\n'
                    '    print(b)\n'
                    '    return 0\n')
+    # An ordinary string whose own TEXT begins with an f/t prefix and a quote.
+    # CPython is the oracle and there is nothing to disagree about: the source
+    # asks for no interpolation, so every engine must print the spelling back.
+    # Before `StringLiteral.is_interpolated` this printed `n` and `x` on the
+    # interpreter and the compiled path, and REFUSED to build here — three
+    # wrong answers to one question that had to be answered somewhere other than
+    # the value. The lengths are asserted with the text because a value printed
+    # as its own spelling and a value counted as something else are different
+    # failures; 4 + 4 is all this program claims (four characters each — the
+    # letter, the quote, the letter, the quote).
+    #
+    # The escaped spelling of the same shape (`c = "f\\"n\\""`, whose value
+    # starts `f\` and so was accidentally right for every prefix sniff) is in
+    # FLAG_ROWS above rather than here: on this path a plain literal's `\"` is
+    # still two characters at run time, so a `len` of it is a fact about escape
+    # decoding and not about this bug.
+    prefix_looking = ('def main():\n'
+                      '    a = \'f"n"\'\n'
+                      '    b = "t\'x\'"\n'
+                      '    print(a)\n'
+                      '    print(b)\n'
+                      '    print(len(a) + len(b))\n'
+                      '    return 0\n')
     cases = [
         # (name, mojo text, python text or None, expected stdout, expected exit)
         ("agree", agree, agree + "main()\n", 'p"q\nx\ny\nsay "hi"\n14\n', 0),
@@ -675,6 +782,8 @@ def run_end_to_end(verbose):
          '9\nx\vy\np\fy\nm\x1cy\n', 0),
         ("literal_tab", literal_tab, literal_tab + "main()\n",
          '6\nx\ty\np\tq\n', 0),
+        ("prefix_looking", prefix_looking, prefix_looking + "main()\n",
+         'f"n"\nt\'x\'\n8\n', 0),
     ]
     failures = []
     with tempfile.TemporaryDirectory() as tmp:
@@ -740,11 +849,14 @@ def main(argv):
     ok, why = check_refusal_message(verbose)
     if not ok:
         failures.append(why)
+    ok, why = check_interpolated_flag(verbose)
+    if not ok:
+        failures.append(why)
     ok, why = run_end_to_end(verbose)
     if not ok:
         failures.append(why)
 
-    total = len(LITERALS) + len(PROGRAMS) + len(CONTINUATIONS) + 4
+    total = len(LITERALS) + len(PROGRAMS) + len(CONTINUATIONS) + 5
     print()
     if failures:
         for f in failures:

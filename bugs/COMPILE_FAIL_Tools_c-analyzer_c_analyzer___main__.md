@@ -4,6 +4,40 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__main__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-10-04 — the two blockers are still the two, but the refusal LIST behind them is longer than this entry records, and one shape in it is new
+
+Re-measured on this tree (`python3 fire.py build -o .tmp/out .tmp/ca/c_analyzer/__main__.py`,
+sources from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/`, arm64, ~8 s).
+
+`render`'s mixed yields are STILL refused, and the diagnosis in
+`bugs/CODEGEN_nested_generator_yield_type_and_delegation.md` (which this entry points at,
+and which is the right place for the mechanism) has not been acted on: the `for`-loop
+TARGET's type is still not looked up, so `yield ''` types `char *` while the loop over
+`_render_table(...)` leaves `line` at the `int64_t` default and the same-type check refuses.
+Nothing from that entry's two measured steps has landed, deliberately — it explains why
+landing them without the capture work is a net loss in diagnosis, and that still holds.
+
+**Two measurements that are new.** First, `MOJO_DEBUG=1` shows this file's generator refusal
+list is LONGER than the two this entry names, and one shape in it is not in this file's text
+at all:
+
+    _fix_write_default:        yields ['empty'], whose call sites do not all pass the same
+                               statically-known type
+    _parse_next_local_static:  the same shape, `yields ['srcinfo']`
+    _parse_struct_next:        the same shape, `yields ['parent', 'srcinfo']`
+    _iter_filenames:           a call to unresolved callee 'process(...)'  (shared with
+                               bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md)
+
+`yields [...], whose call sites do not all pass the same statically-known type` is a THIRD
+yield-typing answer, distinct from both this entry's `render` case ("the yields disagree")
+and the "a `for` target was never typed" case: here each yield site agrees INTERNALLY and
+the SITES disagree. So a next session gets three distinct yield-typing failures to tell
+apart before touching any of them, and the third is the one this entry never mentions.
+
+Second, `section`'s `for ... in render(...)` is still downstream of `render`, exactly as the
+2026-10-01 entry says — and the ordering loop still runs to a fixed point, so the message is
+still whatever the LAST attempt was. Do not read it as an ordering bug.
+
 ## Status 2026-10-01 — unchanged; both blockers re-measured, and the diagnosis below is CONFIRMED and sharpened
 
 Re-measured on the current tree (`python3 fire.py build`, sources copied from

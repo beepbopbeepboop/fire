@@ -390,7 +390,7 @@ from mojo.middle.types import (
     _PSEUDO_DUNDER_ATTRS, _safe_field, _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED,
     _LIBM_FN_RETVALS,
     _safe_name, _stub_guard_name, _c_field_name, _import_targets, _c_escape,
-    _str_literal_value_is_fstring, _extract_init_expr, _module_toplevel_name,
+    _str_literal_interp_flag, _extract_init_expr, _module_toplevel_name,
     _module_init_name, _used_idents_node, _CPP_CALLABLE_CTYPE,
     _CPP_CALLABLE_CTYPE_1ARG,
     _compute_exc_descendants, _unpack_target_leaf_names, _declared_vars_body,
@@ -5216,8 +5216,8 @@ class GimpleGen:
         return grsl._parse_fstring_parts(self, inner)
     def _repr_value(self, rat: str, rav: str, enode=None) -> str:
         return grsl._repr_value(self, rat, rav, enode)
-    def _decode_str_literal_text(self, val: str) -> tuple[str, str]:
-        return grsl._decode_str_literal_text(self, val)
+    def _decode_str_literal_text(self, val: str, is_interp: str) -> tuple[str, str]:
+        return grsl._decode_str_literal_text(self, val, is_interp)
     def _stub_result(self, ctype: str, value: str, note: str) -> tuple[str, str]:
         return grsl._stub_result(self, ctype, value, note)
     def _intern_string(self, escaped: str) -> str:

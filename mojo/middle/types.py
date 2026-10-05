@@ -1609,29 +1609,25 @@ def _c_escape(s: str) -> str:
         i += 1
     return ''.join(out)
 
-def _str_literal_value_is_fstring(val: str) -> bool:
-    """Does a raw StringLiteral.value (as the parser leaves it -- an
-    f/t-string keeps its prefix+quotes, unlike a plain string, whose
-    quotes the parser already strips at tokenize time -- see
-    GimpleGen._decode_str_literal_text's own comment) look like an f- or
-    t-string? Pure prefix-sniffing, factored out as its own free
-    function (rather than inlined at its one call site) so any FUTURE
-    caller that only needs the yes/no answer (not the fully decoded
-    text GimpleGen._decode_str_literal_text also strips out) has
-    somewhere to reuse it instead of re-deriving the same prefix-walk.
-    Deliberately mirrors (but, for now, does not share code with)
-    _decode_str_literal_text's identical prefix-walk -- that method is
-    a hot, widely-used (4 call sites) instance method deep in the
-    f-string/`%`-formatting lowering path; refactoring it to delegate
-    here is out of scope for this fix (unrelated risk, see this
-    codebase's "one careful step at a time" convention for exactly this
-    kind of prescan/global-inference change)."""
-    prefix = ''
-    rest = val
-    while rest and rest[0] in 'fFrRbBuUtT':
-        prefix += rest[0]
-        rest = rest[1:]
-    return bool(rest) and rest[0] in ('"', "'") and any((c in 'fFtT' for c in prefix))
+def _str_literal_interp_flag(lit) -> str:
+    """`'1'` when `lit` is an interpolated (f/t) `StringLiteral`, `''` when it is
+    not — the string shape `resolve_shared._decode_str_literal_text` returns its
+    second slot in, and the same shape because that function's callers have to
+    hand the two back to the same tuple-unpacking helpers.
+
+    The answer is the AST's own `is_interpolated` field, never a sniff of
+    `lit.value`: an ordinary literal's value is its BODY and a body can start
+    with `f"` all by itself (`s = 'f"n"'`), which is how
+    `f"n"`/`t'x'`/`r"x"` were each read as a prefix token. The parser decides
+    from the source token and the node carries the decision, so every reader
+    asks the node.
+
+    `''` for anything that is not a `StringLiteral` and for a node the
+    self-hosted path hands over without the field, which is the same
+    `getattr(..., False)` convention `is_bytes` is read with."""
+    if getattr(lit, 'is_interpolated', False):
+        return '1'
+    return ''
 
 def _extract_init_expr(stmt_value) -> str:
     """Generate C initialization code for a module-level assignment RHS."""
@@ -1661,7 +1657,7 @@ def _extract_init_expr(stmt_value) -> str:
             return 'mojo_set_new()'
         return '0'
     elif isinstance(stmt_value, StringLiteral):
-        if _str_literal_value_is_fstring(stmt_value.value):
+        if _str_literal_interp_flag(stmt_value) == '1':
             return '0'
         return f'"{_c_escape(stmt_value.value)}"'
     elif isinstance(stmt_value, (CallExpr, IdentExpr)):

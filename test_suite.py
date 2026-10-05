@@ -3759,15 +3759,15 @@ UNREGISTERED = {
     # so a per-file sentence would be fifteen copies of one sentence, and the
     # table's own comment is where a reader looks for what these have in
     # common.
-    'test_formal_returned_frame.py': _FORMAL_SUITE_REASON,
-    'test_formal_bracketed_method_field_set.py': _FORMAL_SUITE_REASON,
-    'test_formal_cross_module.py': _FORMAL_SUITE_REASON,
-    'test_formal_debug_assert.py': _FORMAL_SUITE_REASON,
-    'test_formal_eval_eq_mojo_bridge.py': _FORMAL_SUITE_REASON,
-    'test_formal_fnmatch.py': _FORMAL_SUITE_REASON,
-    'test_formal_frame_return_overloads.py': _FORMAL_SUITE_REASON,
-    'test_formal_libc_symbol.py': _FORMAL_SUITE_REASON,
-    # CHEAP and wants a REGISTRATION rather than an excuse, by CLAUDE.md's cost
+    #
+    # Since 2026-10-04 even the KEYS are gone for the members that had nothing
+    # of their own to say: the family is `_DECLARED_BY_RULE` below, which
+    # carries every `test_formal_*.py` and so makes the next member of it cost
+    # nobody an edit here. The three formal suites still listed in this block
+    # are listed because each says something the family's sentence cannot (and
+    # two of them say the family reason is the WRONG one for them), which is
+    # the rule's own rule: an entry beats a rule.
+                                    # CHEAP and wants a REGISTRATION rather than an excuse, by CLAUDE.md's cost
     # rule: `python3 test_formal_chain_probe.py` is 12 cases, no builds and no
     # Lean, and 0.29 s measured 2026-10-04 (its only cost is two `copytree` calls
     # of the stdlib, one per class, and it asserts on the list of paths
@@ -3845,9 +3845,9 @@ UNREGISTERED = {
         'construct. Measured 2026-10-03: ~29 s wall, 0.1 GB peak, both '
         'architectures. Declared rather than registered because its heavier '
         'settings (a few thousand seeds) are a sweep, and CLAUDE.md\'s rule '
-        'for a job no gate can afford is to declare it. '
-        'bugs/COMPILE_FAIL_estate_check_red_for_eleven_formal_suites.md records '
-        'the same gap for the eleven suites above.',
+        'for a job no gate can afford is to declare it. The estate check this '
+        'table feeds records the same gap for the per-construct suites below, '
+        'which is why they carry one family reason between them.',
     # The same shape as `test_formal_fuzz.py` above, and for the same reason: it
     # is a differential FUZZER's own regression suite, and what it protects is
     # the measurement. It is cheaper than that one (its Lean half is declared
@@ -3894,8 +3894,7 @@ UNREGISTERED = {
     # per-byte answers (every byte 1..255 x both values), on both backends,
     # ~0.1 GB peak.
     'test_formal_html.py': _FORMAL_SUITE_REASON,
-    'test_formal_posixpath.py': _FORMAL_SUITE_REASON,
-    # …and this one is in the group for a different reason, because it is the
+        # …and this one is in the group for a different reason, because it is the
     # CHEAPEST file here by an order of magnitude and its absence from a gate is
     # a hole rather than a cost: `test_formal_x86_64_call_tree.py` builds NO
     # image and runs no Lean. It is a unit test of
@@ -3926,12 +3925,7 @@ UNREGISTERED = {
         'can run is not a pin. Exact next step: '
         '`test(\'formal-x86-call-tree\', [PY, '
         '\'test_formal_x86_64_call_tree.py\'], ...)` in the `x86` bucket.',
-    'test_formal_platform.py': _FORMAL_SUITE_REASON,
-    'test_formal_recursion_contract.py': _FORMAL_SUITE_REASON,
-    'test_formal_short_circuit_cond.py': _FORMAL_SUITE_REASON,
-    'test_formal_specialized_method_call.py': _FORMAL_SUITE_REASON,
-    'test_formal_sweep_cache_key.py': _FORMAL_SUITE_REASON,
-    # `test_formal_tempfile.py` and `test_formal_textwrap.py` were listed here
+                        # `test_formal_tempfile.py` and `test_formal_textwrap.py` were listed here
     # when they landed on 2026-10-03, and are REGISTERED now (`formal-tempfile`
     # and `formal-textwrap` in the `proofs` bucket) — which is what this
     # branch's own note said the registering commit would do. 0.051 GB / 35.8 s
@@ -3939,10 +3933,7 @@ UNREGISTERED = {
     # `formal-core-hostmods` and `formal-pathlib`: cheap enough that an excuse
     # for them was a permanent one, and they are the only coverage that diffs
     # those two modules' answers against CPython on both backends.
-    'test_formal_trait_module.py': _FORMAL_SUITE_REASON,
-    'test_formal_type_application.py': _FORMAL_SUITE_REASON,
-    'test_formal_x86_64_parity.py': _FORMAL_SUITE_REASON,
-
+            
     # ── STRINGS AND UNICODE against CPython, both machines ──
     #
     # NOT the reason above, and it is cheap: measured 2026-10-04 on
@@ -4276,6 +4267,91 @@ def _unregistered_reason_table():
     return out
 
 
+# The families a RULE accounts for, as (matcher, the family's reason).
+#
+# This is the instrument the per-file list could not be. The estate check's
+# inventory is the set of `test_*.py` ON DISK, so a list keyed by filename makes
+# every new suite an obligation for whoever adds it — and that obligation was
+# paid five times over: eleven formal suites, then five more, then one, then
+# one again, each arrival turning `python3 test_suite.py` red for a reason that
+# had nothing to do with whatever anyone had just changed. It is the most
+# expensive kind of red to read, because the file it names is the one that
+# checks the tree is honest.
+#
+# A rule answers the same question for a whole family, so a family's next
+# member costs nobody an edit. What it must not do is swallow a file that has
+# something SPECIFIC to say, so:
+#
+#   * an entry in `UNREGISTERED` always wins over a rule — the sixteen formal
+#     suites that are cheap, or that are a unit test of something else, or that
+#     are cheap because they build nothing, each say what theirs is for and a
+#     family's sentence would be strictly less true;
+#   * a rule is a statement about a family, not an excuse for one file, so
+#     registering one of its files does NOT make the rule stale and the
+#     "no excuse for a file that is now registered" assertion deliberately does
+#     not look at rules;
+#   * the check prints how many files each rule is carrying, so a family that
+#     starts absorbing cheap suites is visible in the output rather than
+#     invisible in the source.
+#
+# The cost rule still applies to a NEW member: a cheap suite in a covered
+# family wants registering, and the registration supersedes the rule for that
+# file without any edit here.
+_DECLARED_BY_RULE = (
+    # The per-construct formal suites: one table entry per construct, building
+    # and RUNNING real Mach-O images on both architectures against CPython. A
+    # run of one is minutes of real compilation, which is why they are run by
+    # hand and said so — see `_FORMAL_SUITE_REASON`, which twenty of them used
+    # to repeat key by key.
+    (re.compile(r'^test_formal_[A-Za-z0-9_]+\.py$'), _FORMAL_SUITE_REASON),
+)
+
+
+def _unregistered_keys_as_written():
+    """`UNREGISTERED`'s keys as they appear IN THE SOURCE, duplicates and all.
+
+    A repeated key in a dict literal is not a second row: the later assignment
+    wins and the earlier reason is dead text that still reads as though it were
+    saying something. `_unregistered_reason_table()` cannot see this — by the
+    time it runs, the information is gone — which is the same shape as
+    `test_no_test_name_is_registered_twice` one function below, and the reason
+    the check is written here rather than left implicit.
+
+    Measured while this was being fixed: `test_formal_returned_frame.py` was in
+    the table twice, once with the family's reason and once with its own
+    ("the returned-frame convention: builds, runs and compares with CPython on
+    arm64 AND x86-64"), and only the second was ever in the dict.
+    """
+    with open(os.path.join(HERE, 'test_suite.py')) as f:
+        src = f.read()
+    start = src.index('UNREGISTERED = {')
+    end = src.index('\ndef _unregistered_reason_table', start)
+    body = src[start:end]
+    keys = re.findall(r"^    '([^']+)'\s*:", body, re.M)
+    counts = {}
+    for k in keys:
+        counts[k] = counts.get(k, 0) + 1
+    return keys, sorted(k for k, n in counts.items() if n > 1)
+
+
+def _rule_reason_for(basename):
+    """The family's reason for `basename`, or None if no rule covers it."""
+    for matcher, why in _DECLARED_BY_RULE:
+        if matcher.match(basename):
+            return why
+    return None
+
+
+def _declared_by_rule(basenames):
+    """`{file: reason}` for the inventory a rule already accounts for."""
+    out = {}
+    for name in basenames:
+        why = _rule_reason_for(name)
+        if why is not None:
+            out[name] = why
+    return out
+
+
 def is_test_file_name(fn: str) -> bool:
     """ONE predicate for "is this a test file", both spellings.
 
@@ -4416,10 +4492,14 @@ def test_every_test_file_is_registered():
           len(named) > 10, f'only {len(named)} test files are named by a spec')
 
     orphans = {f for f in on_disk if os.path.basename(f) not in named}
-    undeclared = sorted(orphans - set(excused))
+    # An ENTRY beats a rule, and a rule beats nothing: a file in neither is the
+    # undeclared set the check is about.
+    ruled = _declared_by_rule(os.path.basename(f) for f in orphans)
+    undeclared = sorted(orphans - set(excused) - set(ruled))
     check('the estate: every test file is run by something, or says why not',
           not undeclared,
-          'not run by any registered spec and not in UNREGISTERED: '
+          'not run by any registered spec, not in UNREGISTERED, and in no '
+          'declared family: '
           + ', '.join(undeclared))
 
     # The other two directions, which is what stops the list becoming a
@@ -4435,6 +4515,53 @@ def test_every_test_file_is_registered():
     thin = sorted(p for p, why in excused.items() if len(why) < 40)
     check('the estate: every excuse is a reason, not a shrug', not thin,
           f'too short to be a reason: {thin}')
+    # The same assertion for a rule's reason, because a rule excuses everything
+    # its family adds from then on: a shrug there is a shrug with a much wider
+    # blast radius than a shrug in the table.
+    thin_rules = sorted(why[:40] for _rx, why in _DECLARED_BY_RULE if len(why) < 40)
+    check('the estate: every family reason is a reason, not a shrug',
+          not thin_rules, f'too short to be a reason: {thin_rules}')
+    keys_as_written, dupes = _unregistered_keys_as_written()
+    check('the estate: no reason in UNREGISTERED is dead text', not dupes,
+          'these keys are in the table more than once, and the dict keeps only '
+          f'the last: {dupes} — the earlier reason is read by nobody')
+    # And the other way, which is what makes the count above worth printing: a
+    # key that no longer names a test file is a stale excuse, asserted above,
+    # and a key that is now REGISTERED is a wrong one, also asserted above. So
+    # the two numbers together account for every line in the table.
+    check('the estate: the table has no key the walk cannot see',
+          len(keys_as_written) >= len(excused),
+          f'{len(keys_as_written)} keys in the source, {len(excused)} in the '
+          f'table — the difference is the None placeholders, and there are '
+          f'more of them than expected')
+
+    # The rule's own two edges, which the check above cannot show on its own: a
+    # rule that matched nothing would leave the estate exactly as red as it was,
+    # and a rule that matched EVERYTHING would be a hole wearing a reason's
+    # clothes. Both are one line each, and they are what a future edit to
+    # `_DECLARED_BY_RULE` would break.
+    check('the estate: a declared family reaches its own next member',
+          _rule_reason_for('test_formal_a_suite_that_does_not_exist_yet.py')
+          == _FORMAL_SUITE_REASON,
+          'the rule does not match a file of the family it claims — every '
+          'future member of it is an obligation again')
+    check('the estate: and reaches nothing else',
+          _rule_reason_for('test_a_nonformal_suite.py') is None,
+          'a rule is covering a file outside its family, so a new non-formal '
+          'suite would be excused without anyone deciding that')
+    # A rule is a statement about a FAMILY, so registering one of its files
+    # must not turn the family reason into a stale per-file excuse — or every
+    # registration in the family would demand a source edit that says nothing.
+    # `test_formal_run.py` is the worked example: registered (`formal-run` in
+    # the `proofs` bucket) AND covered by the rule, and the `resolved`
+    # assertion above deliberately does not look at rules.
+    check('the estate: a rule keeps covering a file that later gets registered',
+          'test_formal_run.py' in named
+          and _rule_reason_for('test_formal_run.py') == _FORMAL_SUITE_REASON,
+          'this is the case that decides whether a rule is a family statement '
+          'or a per-file excuse in disguise: a file that is both registered '
+          'and rule-covered is what every future registration in the family '
+          'will look like')
 
     # The direction nothing computed, and the one that has a live consequence.
     # `named` counts basenames, so it cannot distinguish "a spec runs this
@@ -4462,8 +4589,14 @@ def test_every_test_file_is_registered():
           f'the repo under either spelling — a renamed or deleted file leaves '
           f'the registration pointing at nothing: {dangling}')
     print(f'      the estate: {len(on_disk)} test files, {len(named - orphans)} '
-          f'of them run by a registered spec, {len(excused)} declared with a '
-          f'reason, {len(undeclared)} undeclared, {len(dangling)} dangling')
+          f'of them run by a registered spec, {len(excused)} declared one by '
+          f'one, {len(ruled)} by a declared family, {len(undeclared)} '
+          f'undeclared, {len(dangling)} dangling')
+    for matcher, why in _DECLARED_BY_RULE:
+        carried = sorted(n for n in ruled if matcher.match(n))
+        if carried:
+            print(f'        family {matcher.pattern} carries {len(carried)}: '
+                  f'{carried[0]}, ...')
 
 
 def test_no_test_name_is_registered_twice():

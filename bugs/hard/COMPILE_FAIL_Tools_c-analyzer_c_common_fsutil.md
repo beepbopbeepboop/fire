@@ -1,5 +1,41 @@
 # COMPILE_FAIL (hard): Tools/c-analyzer/c_common/fsutil.py
 
+## Status 2026-10-04 — THREE blockers, not four: `process_filenames` has cleared, and `onempty(...)` is the same shape reached from another module
+
+Re-measured on this tree (`python3 fire.py build -o .tmp/out .tmp/ca/c_common/fsutil.py`,
+sources from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/`, arm64, ~8 s). The complete
+module-level refusal list is:
+
+    Error building: cannot compile module: function(s) _walk_tree, glob_tree, iter_files
+      (generator function(s), contain a `yield`/`yield from`)
+
+Three, and the entry below's four-item list is one shorter: **`process_filenames` is no
+longer refused**, so the `onempty = Exception('no filenames provided')` value (item 4 there,
+and the entry below's own "an exception constructor as a value" question) is answered —
+`Exception(...)` as an ASSIGNMENT is an emission site now, and
+`test_gimple_generator_runner.py`'s `cpp_coroutine_exception_ctor_as_value` is the pin. That
+leaves the entry below's items 1-3, unchanged:
+
+1. `_walk_tree` / `glob_tree`: `for … in _walk(root)` / `_glob(…)` with `_walk=os.walk` /
+   `_glob=glob.iglob` as kw-only defaults — a `module.attr` default, which the A3
+   eligibility gate cannot resolve because it runs before any `GimpleGen` exists;
+2. the NULL-pointer crash behind (1), still open, and still the reason (1) must not simply
+   be relaxed (`bugs/CODEGEN_imported_callable_default_answers_zero.md`);
+3. `iter_files`' `lambda *a, **k: _walk(*a, walk=_files, **k)` — another worker's claim.
+
+**One new measurement, and it is the useful one for whoever picks this up:** building
+`c_common/tables.py` prints THIS file's shapes in the same run, and there is a fourth
+refusal that does not appear when fsutil is built alone — `iter_many`, refused on `a call to
+unresolved callee 'onempty(...)'`, which is the same callable-valued-parameter call as
+`_iter_filenames` in `bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md`. So the
+callable-parameter family in this closure is `_walk`, `_glob`, `onempty`, `process` and
+`_get_reader` — five sites, one missing capability — and the entry below's "the honest fix is
+one thing" is stronger than it was when only three were counted.
+
+The entry below's step 1 (make the decision AFTER the closure is known) is still the right
+first move and is still small: `module_gen`'s per-generator eligibility loop at
+`_generator_quick_eligible` runs after imports are compiled and is the natural home.
+
 ## Status (2026-10-02 — re-measured against the current tree: same four refusals, one diagnosis corrected, and the remaining work is three features rather than a puzzle)
 
 ### What it says now

@@ -8933,41 +8933,24 @@ STRING_TWO_STRING_ARITHMETIC_OPS = ("+", "+=", "-", "-=")
 # should be declined by name rather than answered by whichever reader happened
 # to see it first.
 #
-# Spelled as a SET of prefixes rather than as "starts with f" so a `t`-string,
-# an uppercase spelling and a triple-quoted body are all covered by the same
-# test and adding a spelling is one tuple entry.
-INTERPOLATED_LITERAL_PREFIXES = ('f"', "f'", 'F"', "F'", 't"', "t'", 'T"', "T'")
-
-
+# Spelled as the parser's own flag rather than as a set of prefixes: the
+# question is decided where the source token is, and an ordinary literal's
+# `value` is its BODY — so a prefix test cannot tell `f"n={n}"` from `'f"n"'`,
+# which is a four-character string.
 def is_interpolated_literal(node) -> bool:
-    """Whether `node` is a `StringLiteral` whose text is an f-string/t-string.
+    """Whether `node` is a `StringLiteral` that was WRITTEN as an f-string or a
+    t-string.
 
     False for anything that is not a literal, and false for an ordinary string
-    however it is spelled — the test is the PREFIX, because that is the whole of
-    what the parser preserved: an ordinary literal's `value` is its body and an
-    interpolated one's is its source token, and nothing else in the node
-    distinguishes them.
-
-    **And the prefix test cannot see an ordinary string whose TEXT begins with
-    one**, which is a property of the AST rather than of this function. It
-    takes exactly one spelling — the inner quote DIFFERENT from the outer one,
-    so nothing is escaped:
-
-        s = 'f"n"'      # value is f"n"  — read as an f-string
-        s = "f\\"n\\""  # value is f\"n\" — read as an ordinary string
-
-    and on that one spelling every engine in this tree is wrong or refuses:
-    `myinterpreter.eval_StringLiteral` and `gimple_codegen` print `n`, CPython
-    prints `f"n"`, and this predicate refuses. Filed with the three-way
-    measurement and the exact next step:
-    `bugs/PARSE_FAIL_an_ordinary_string_whose_text_starts_with_an_f_prefix.md`.
-    The fix belongs in the parser (a flag beside `is_raw`, set where the
-    t/f-string placeholder is built from the RAW token) and not in a reader of
-    the value.
+    however it is spelled — the answer is `StringLiteral.is_interpolated`, which
+    the parser sets from the source token and the node carries from there on. An
+    interpolated literal's `value` is its source token (`f"n={n}"`) and an
+    ordinary one's is its body, but nothing about the BODY says which it is, so
+    a reader that asks the value sees `f"n"` in both cases: `s = 'f"n"'` was
+    refused here as an f-string, and printed `n` on the other two engines.
     """
-    return (isinstance(node, F.StringLiteral)
-            and isinstance(node.value, str)
-            and node.value.startswith(INTERPOLATED_LITERAL_PREFIXES))
+    return isinstance(node, F.StringLiteral) and bool(
+        getattr(node, "is_interpolated", False))
 
 
 def interpolated_literal_refusal(node, where: str = "") -> str:

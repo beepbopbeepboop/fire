@@ -1627,16 +1627,29 @@ def _parse_fstring_parts(gen, inner: str) -> list[tuple[str, str, str, str]]:
         parts.append(('lit', ''.join(buf), '', ''))
     return parts
 
-def _decode_str_literal_text(gen, val: str) -> tuple[str, str]:
+def _decode_str_literal_text(gen, val: str, is_interp: str) -> tuple[str, str]:
     """Strip a raw StringLiteral.value's f/r/b/u/t prefix and outer quotes,
     returning (text, is_fstring). Shared by plain-string lowering, f-string
     interpolation, and `%`-style string-formatting (which needs the format
-    string's literal text at codegen time, before any quoting/escaping)."""
+    string's literal text at codegen time, before any quoting/escaping).
+
+    `is_interp` is the AST's OWN `StringLiteral.is_interpolated` answer as
+    `'1'`/`''`, and it is the only thing that decides whether an f/t prefix is
+    on the front to be taken off. It cannot be recovered from `val`: an
+    ordinary literal's value is its BODY, so `s = 'f"n"'` arrives here as the
+    three characters `f"n"` and a prefix-sniffing walk read them as an f-string
+    token — emitting `n` where the source says `f"n"`, on every one of this
+    function's eight call sites at once. The parser answers it from the source
+    token (`Parser._raw_string_is_ftstring`) and the node carries it, so it is
+    passed in rather than re-derived. A plain `str` argument (`''`) is for a
+    value that is not a literal at all — a `builtin_module_constant`, a
+    synthesized format — and those are already text."""
     # Detect and strip f/r/b/u/t prefix — only if followed by a quote character
     # Regular strings have their quotes already stripped by the parser; f-strings
     # and t-strings (template strings — same `{expr}` interpolation syntax,
     # treated identically here) keep prefix+quotes.
     is_fstring = False
+    prefix = ''
     # Index-based prefix walk (was `while val: ... val = val[1:]`). Once
     # self-hosted, a `while` loop that reslices `val = val[1:]` every
     # iteration to shrink it never terminated for an f/r/b-prefixed string
@@ -1644,19 +1657,21 @@ def _decode_str_literal_text(gen, val: str) -> tuple[str, str]:
     # progress, `val[0]` stayed `'f'`, and `_parse_fstring_parts` then spun
     # on a mangled `inner` allocating forever. A single positive slice at
     # the end has no such issue.
-    _pfx_end = 0
-    while _pfx_end < len(val) and val[_pfx_end] in 'fFrRbBuUtT':
-        _pfx_end += 1
-    prefix = val[:_pfx_end]
-    val = val[_pfx_end:]
+    if is_interp == '1':
+        is_fstring = True
+        _pfx_end = 0
+        while _pfx_end < len(val) and val[_pfx_end] in 'fFrRbBuUtT':
+            _pfx_end += 1
+        prefix = val[:_pfx_end]
+        val = val[_pfx_end:]
     # fire_compiler.py's Parser already strips the outer quotes from a plain
     # (non-f/t-string) StringLiteral's value at tokenize time. So if what's
-    # left after the prefix walk does NOT start with a quote, it is a plain
-    # string whose content is final — return it verbatim (plus any
-    # prefix-like leading chars that turned out to be content, not a
-    # prefix). Do NOT re-run the quote strip below: a plain string whose
-    # CONTENT happens to start and end with a quote — this file's own
-    # `'"'` / `"'"` / `'"""'` / `"'''"` literals, and every user string
+    # left does NOT start with a quote, it is a plain string whose content is
+    # final — return it verbatim, INCLUDING any leading characters that look
+    # like a prefix (`f"n"`, `r"x"`, `b'x'` are three- and four-character
+    # strings, not tokens). Do NOT re-run the quote strip below: a plain
+    # string whose CONTENT happens to start and end with a quote — this file's
+    # own `'"'` / `"'"` / `'"""'` / `"'''"` literals, and every user string
     # like `"a "` — would otherwise be mangled ( `'"""'` → `''`, so once
     # self-hosted `"anything".startswith(<that literal>)` matched and every
     # user StringLiteral's text was stripped to "" in the emitted pool ).
@@ -1677,10 +1692,13 @@ def _decode_str_literal_text(gen, val: str) -> tuple[str, str]:
             _all_quote = False
             break
     if _all_quote:
-        return prefix + val, ('1' if any(c in 'fFtT' for c in prefix) else '')
-    # val still carries quotes: an f/t-string (prefix has f/F/t/T) or a
-    # triple-quoted value handed back from the placeholder cache.
-    is_fstring = any(c in 'fFtT' for c in prefix)
+        return prefix + val, ('1' if is_fstring else '')
+    # val still carries quotes: an f/t-string, or a triple-quoted value handed
+    # back from the placeholder cache (`replace_multiline_strings` caches the
+    # literal source, quotes and all, under a `__MOJO_STR_n__` name — for an
+    # ordinary triple-quoted docstring that is the whole body with nothing else
+    # to tell it apart from a delimiter, which is why this arm is reachable
+    # without `is_interp`).
     # `len(val) >= 6` / `>= 2`: a value that IS just quote characters (`"""`,
     # `"`, this file's own such literals) starts and ends with the quote but
     # carries no delimited content — a real `"""x"""` is >= 7 chars (>= 6
