@@ -293,10 +293,15 @@ module global. Its own docstring called that "a known minor fidelity gap" — a
 shape `_generator_expression` already used); pinned by
 `test_interp_oracle.py`'s
 `a_comprehension_does_not_shadow_a_module_constant`, and this file's own case
-below got its third engine back when it did. The compiled path has the same
-defect by a different mechanism — the comprehension's target becomes a plain
-local of the enclosing function — and that half is
-`bugs/CODEGEN_a_comprehension_target_is_a_local_of_the_enclosing_function.md`.
+below got its third engine back when it did. The compiled path had the same
+defect by a different mechanism — the comprehension's target became a plain
+local of the enclosing function, shadowing the module global for the rest of
+the body — and that half is fixed: `_compr_bind_target` takes its shadow
+predicate from `module_shared.bare_global_read_plan`, the same decision
+`_lower_IdentExpr` makes, so a comprehension target can no longer take over a
+name a bare read resolves to a module constant. The compiled spelling is
+`test_runtime_diff.py`'s
+`comprehension_target_does_not_shadow_a_module_constant`.
 
 ### The two candidates this section named, measured
 

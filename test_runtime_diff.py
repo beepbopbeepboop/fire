@@ -555,6 +555,42 @@ BUILTIN_PROGRAMS = {
             print(struct_pointer_live())
             print(char_star_live())
     """),
+    # The SAME fresh-binding rule, against a binding that is not a local at
+    # all: a MODULE constant. `_declare_var` writes `var_types[name]`, and
+    # `_lower_IdentExpr`\'s module-global branch is gated on
+    # `(name in _func_declared_globals or name not in var_types)`, so a target
+    # named like a module global silently REBOUND that global for the rest of
+    # the enclosing function \u2014 `var_types` was the only thing routing the
+    # later read away from `root__mojo_global_get_G()`. The compiled path
+    # answered 3 (the iterable\'s last element) where CPython answers 6.
+    # Both engines and CPython agree on `6` now; see
+    # `module_shared.bare_global_read_plan`, which is the one decision both the
+    # read and the comprehension lowering ask.
+    "comprehension_target_does_not_shadow_a_module_constant": textwrap.dedent("""\
+        G = 5
+
+        def f(rows):
+            out = [G for G in rows]
+            return G + out[0]
+
+        def main():
+            print(f([1, 2]))
+    """),
+    # And the OTHER half of the same pair, which the module-constant case
+    # cannot reach: an arm that DID take the shadow (`_declare_var(\'',
+    # force=True)`) but never undid it, so the shadow outlived the
+    # comprehension and the enclosing function\'s own `x` read back as the
+    # loop\'s last value. The list/set/cursor arms already restored; the range
+    # arm did not. `3` vs CPython\'s `5` before, `5` now.
+    "comprehension_target_does_not_outlive_its_own_loop": textwrap.dedent("""\
+        def f(n):
+            x = 5
+            out = [x for x in range(n)]
+            return x
+
+        def main():
+            print(f(3))
+    """),
     # A dict value slot the runtime TAGGED as a plain int went through the
     # generic element repr, whose 0-is-the-None-sentinel rule turned a real
     # int 0 into `None` (`{i: i for i in range(2)}` printed `{'0': None, '1': 1}`).
@@ -1333,6 +1369,8 @@ CPYTHON_COMPARABLE = {
     "for_target_starred_rest",
     "comprehension_starred_rest",
     "comprehension_target_shadows_an_enclosing_local",
+    "comprehension_target_does_not_shadow_a_module_constant",
+    "comprehension_target_does_not_outlive_its_own_loop",
     "comprehension_result_elem_type_across_a_branch",
     "dict_repr_zero_value_is_not_the_none_sentinel",
     "getattr_default_on_a_miss",

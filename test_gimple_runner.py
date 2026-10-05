@@ -874,6 +874,88 @@ def main():
 main()
 """, expected_return=0)
 
+    # A comprehension's `for` target is a fresh binding in the comprehension's
+    # OWN scope, so it must not take over an existing binding of that source
+    # name -- for the rest of the enclosing function, either. Two shapes, and
+    # they were two different defects, which is why both are here:
+    #
+    #  * against a MODULE CONSTANT. `_declare_var` writes `var_types[name]`,
+    #    and `_lower_IdentExpr`'s module-global branch is gated on
+    #    `(name in _func_declared_globals or name not in var_types)` — so the
+    #    target's declaration was all it took to route every later read of `G`
+    #    away from `root__mojo_global_get_G()` and onto the comprehension's
+    #    last element: 3, where CPython answers 6. The one decision both sides
+    #    now ask is `module_shared.bare_global_read_plan`.
+    #  * against an enclosing LOCAL, through an arm that DID take the shadow
+    #    (`force=True`) but never undid it. The list/set/cursor arms already
+    #    restored; the range arm did not, so `return x` read the loop's last
+    #    value: 3, where CPython answers 5.
+    #
+    # Every iterable shape is a separate `_compr_*_loop` arm with its own bind
+    # site, so one program per family: list (also the module-constant case),
+    # range, set, dict-key, enumerate, char* string, two nested clauses.
+    test_gimple_matches_cpython("gimple_comprehension_target_binds_its_own_scope", """\
+G = 5
+S = 'zz'
+D = {'k': 2}
+
+def a(rows):
+    x = 100
+    o1 = [x for x in rows]
+    return x + len(o1)
+
+def b(rows):
+    o2 = [G for G in rows]
+    return G + len(o2)
+
+def c():
+    S = 'local'
+    o3 = {S for S in ['p', 'q']}
+    return S + str(len(o3))
+
+def d():
+    o4 = [D for D in [7, 8, 9]]
+    return D['k'] + len(o4)
+
+def e(words):
+    i = 'pre'
+    w = 'W'
+    o5 = [q for q, w in enumerate(words)]
+    return i + w + str(len(o5))
+
+def f(names):
+    n = 'N'
+    o6 = [n for n in names]
+    return n + '/' + str(len(o6))
+
+def g(s):
+    c = 'C'
+    o7 = [c for c in s]
+    return c + '/' + str(len(o7))
+
+def h(n):
+    x = 5
+    o8 = [x for x in range(n)]
+    return x
+
+def i(rows):
+    o9 = [G for G in rows for G in G]
+    return str(G) + str(len(o9))
+
+def main():
+    print(a([1, 2, 3]))
+    print(b([1, 2]))
+    print(c())
+    print(d())
+    print(e(['x', 'y']))
+    print(f(['p', 'q']))
+    print(g('abc'))
+    print(h(3))
+    print(i([[1, 2], [3]]))
+    return 0
+main()
+""")
+
     # The same three capture kinds with the factory DEFINED INSIDE a function,
     # which is where the env was already right and the callable's RETURN TYPE
     # was not: `_return_callable_ret_types` is recorded by the return site

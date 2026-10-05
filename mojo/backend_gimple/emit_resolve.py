@@ -3214,7 +3214,16 @@ def _compr_enumerate_loop(gen, node, gen0, res, res_type, it_val, start_val):
     val_var = parts[1] if len(parts) >= 2 and parts[1] else '_enum_val'
 
     elem = gen._elem_of(it_val)
-    gen._declare_var(idx_var, 'int64_t')
+    # `gi` collects `(source name, saved token)` for every binding this arm
+    # makes, restored together at the loop's end. Both slots are a
+    # comprehension's OWN bindings, so neither may take over the enclosing
+    # function's variable -- or a module constant's -- for that source name;
+    # `gi` is what makes the shadow last exactly as long as the comprehension
+    # (`_compr_list_loop`'s single-target arm gives the reasoning at length,
+    # and the failure it describes was real: a comprehension target named like
+    # a module global rebound that global for the rest of the function).
+    gi = []
+    gi.append((idx_var, ginf._compr_bind_target(gen, _as_str(idx_var), 'int64_t')))
     # A nested tuple value slot (`for i, (a, b) in enumerate(pairs)`) is not
     # itself a variable: bind the element into a fresh temp and unpack its
     # own slots from that below, mirroring _gen_for_enumerate's val_is_tuple
@@ -3226,7 +3235,8 @@ def _compr_enumerate_loop(gen, node, gen0, res, res_type, it_val, start_val):
         val_var = gen._new_temp('int64_t')
         gen.var_types[val_var] = 'int64_t'
     else:
-        gen._declare_var(val_var, elem if elem else 'int64_t')
+        gi.append((val_var, ginf._compr_bind_target(gen, _as_str(val_var),
+                                               elem if elem else 'int64_t')))
     # Emitted references go through _cname: _declare_var renames targets
     # colliding with C reserved identifiers (`index` is a POSIX function →
     # `_var_index`), and emitting the raw Python name wrote an UNDECLARED
@@ -3280,7 +3290,7 @@ def _compr_enumerate_loop(gen, node, gen0, res, res_type, it_val, start_val):
             _vn = val_names[_vi]
             if _vn == '_':
                 continue
-            gen._declare_var(_vn, _pair_elem)
+            gi.append((_vn, ginf._compr_bind_target(gen, _vn, _pair_elem)))
             _vc = gen._cname(_vn)
             _vt = gen.var_types.get(_vn, _pair_elem)
             if _pair_suf == 'str':
@@ -3305,11 +3315,15 @@ def _compr_enumerate_loop(gen, node, gen0, res, res_type, it_val, start_val):
     gen._emit(f"  {idx64} = {st};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
+    # The comprehension is over: every name it bound is the enclosing
+    # function's own binding again (see `ginf._compr_restore_target`).
+    for _gn in gi:
+        ginf._compr_restore_target(gen, _gn[0], _gn[1])
 
 
 def _compr_str_loop(gen, node, gen0, res, res_type, it_val):
     _iv = _as_str(it_val)   # see _compr_list_loop: keep the ptr a char* in the f-string
-    gen._declare_var(gen0.target, 'char')
+    saved_target = ginf._compr_bind_target(gen, _as_str(gen0.target), 'char')
     len64 = gen._new_val('int64_t', f'mojo_str_len ({_iv})')
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
@@ -3328,6 +3342,7 @@ def _compr_str_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  {idx64} = {st};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
+    ginf._compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
 def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
@@ -3351,7 +3366,7 @@ def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
     # so with the target typed `char` they produced a set of character
     # CODES, and `sorted(set("hello world"))` came back as
     # [32, 100, 101, ...] instead of [' ', 'd', 'e', ...].
-    gen._declare_var(gen0.target, 'char *')
+    saved_target = ginf._compr_bind_target(gen, _as_str(gen0.target), 'char *')
     len64 = gen._new_val('int64_t', f'mojo_strlen ({_iv})')
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
@@ -3381,6 +3396,7 @@ def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  {idx64} = {st};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
+    ginf._compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
 def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
