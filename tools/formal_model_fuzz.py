@@ -444,8 +444,8 @@ def gen_flagged_alu(rng, free):
     the census's LEAN column already reads `yes` for it. `SMULH` is the other
     half of the overflow question and the model has NO arm for it, so a case
     that draws it is a `NOSTEP`: that is the finding, not a pool bug, and
-    `bugs/FORMAL_the_arm64_model_has_no_arm_for_the_high_half_of_a_multiply.md`
-    is where the model side is written down.
+    `bugs/FORMAL_arm64_smulh_has_no_model_arm.md` is where the model side
+    is written down.
     """
     d, n, m = _dst(rng, free), _r(rng, free), _r(rng, free)
     imm = rng.randrange(0x1000)
