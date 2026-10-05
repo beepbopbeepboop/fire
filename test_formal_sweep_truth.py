@@ -565,11 +565,29 @@ class TestCensusReport(unittest.TestCase):
 # wave and its measurement are written down.
 _DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig")
 # Modules with no readable names that STILL have users, so their rows are real:
-# `itertools` (>=3 files spell it), `builtins` (>=2), `atexit` (1, through
-# `test_ab_native.py`'s `atexit.register`). Asserted to still have users, so a
-# future reader cannot extend this section to "every module with no readable
-# names" by accident.
-_ROWS_WITH_REAL_USERS = ("itertools", "builtins", "atexit")
+# `builtins` (>=2 files spell it) and `atexit` (1, through `test_ab_native.py`'s
+# `atexit.register`). Asserted to still have users, so a future reader cannot
+# extend this section to "every module with no readable names" by accident.
+#
+# **`itertools` LEFT this tuple on 2026-10-05 (`formal37-2`), and the check below
+# is what said so.** It was here because `test_formal_run.py` imported it and
+# nothing else did — the `itertools.combinations(part, 2)` over a 26-element
+# slice became a double index loop over pairs whose length the generator already
+# knows, so the import left the file
+# (`bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md` §4's
+# `itertools` row, the same "closed by the corpus" answer `copy` and `functools`
+# got). That left `itertools` with NO reader anywhere in this tree, which is the
+# definition of a dead row: `test_the_other_rows_still_have_users` failed on it,
+# and **the failure is the mechanism working** — a row nobody reads is a row of
+# work that is not work, which is what `_DEAD_ROW_MODULES` above exists to name.
+#
+# Note what the remaining `itertools` hits are, because it is the trap this test
+# exists to catch: every one is a COMMENT or a docstring
+# (`tools/formal_host_import_shapes.py`, `tools/linkcheck.py`'s
+# `test/itertools/test_count.mojo` example, `version.py`'s own note about the row
+# closing). `_host_mentions_module` answers by AST precisely so that text about a
+# module does not count as a use of it, and on this tree that answer is right.
+_ROWS_WITH_REAL_USERS = ("builtins", "atexit")
 _SKIP_DIRS = {".git", "build", "bugs", "cas", ".tmp", "stage1", "stage2",
               "stage3", "formal_sweep_cache", "__pycache__"}
 

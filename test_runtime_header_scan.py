@@ -664,12 +664,18 @@ CENSUS_QUOTES = (
      r'it is the only thing between the (\d+) and working code',
      ('word',)),
     # `FORMAL.md` §2.2's census table and its `N of M` sentence. **This is the
-    # gap that produced `bugs/FORMAL_phase2_export_ceiling_is_four_behind.md`**,
-    # and the reason it went unnoticed is worth recording: §6's phase-2 table
-    # IS checked, by `test_formal_runtime_link.py` — but that job is in the
-    # `proofs` bucket only, so the gate never ran it, and §2.2's copy of the same
-    # census was in no table at all. Ten entry points landed, `fire_runtime.h`
-    # grew 565 → 580, and every published figure stayed where it was.
+    # gap whose bug doc was `FORMAL_phase2_export_ceiling_is_four_behind.md`**,
+    # deleted with its fix on 2026-10-05 (fixed at commit 9e79c79e: the ten entry
+    # points this describes are now in `FORMAL.md`, the `word` row is checked by
+    # `test_formal_runtime_link.py` as well as here, and `test_runtime_header_scan.py
+    # --fix` keeps `FORMAL.md` §2.2 and `formal/build.py`'s docstring in step —
+    # so the doc's name is no longer citable and this comment carries the
+    # history instead), and the reason it went unnoticed is worth recording: §6's
+    # phase-2 table IS checked, by `test_formal_runtime_link.py` — but that job is
+    # in the `proofs` bucket only, so the gate never ran it, and §2.2's copy of
+    # the same census was in no table at all. Ten entry points landed,
+    # `fire_runtime.h` grew 565 → 580, and every published figure stayed where it
+    # was.
     #
     # §6's phase-2 `exported`/`reachable` rows are deliberately NOT here: they
     # are `runtime_abi() ∩ (the dylib's own export table)`, which needs a built

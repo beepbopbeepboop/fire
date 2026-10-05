@@ -4624,7 +4624,7 @@ def test_a_memo_replaces_the_decorator_the_corpus_cannot_climb(tmpdir, _shared):
     def _reference():
         def _git(*a):
             return _sp.run(['git', '-C', here, *a], capture_output=True,
-                           text=True, timeout=5)
+                           text=True, timeout=RUN_TIMEOUT_S)
         if mod.RELEASE:
             return mod.RELEASE
         try:
