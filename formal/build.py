@@ -5882,19 +5882,19 @@ def _shadowing_attribute_read_names(stmts) -> set:
     this point in the pipeline (`_prepare_functions` runs before
     `_resolve_imports`), so both are read off the AST. An `import getattr` is
     not a thing that can bind a bare name, so it is not here.
+
+    `imported_bound_names` is called UNGUARDED, and deliberately: this function
+    runs in the middle of `_prepare_functions`, which already calls the same
+    reader unguarded a few hundred lines below it, so a raise here is a raise
+    there and wrapping this one in a `try` would only buy a traceback in one
+    place instead of two.
     """
-    from formal import imports as _I
+    from formal.imports import imported_bound_names
     names = {getattr(st, "name", None)
              for st in (stmts or [])
              if isinstance(st, (F.FunctionDef, F.StructDef))}
     names.discard(None)
-    try:
-        names |= set(_I.imported_bound_names(stmts))
-    except Exception:
-        # A malformed import must not take the rewrite down with it: the
-        # rewrite only ever REMOVES work, and the refusal it prevents is the
-        # one thing a reader has to see.
-        pass
+    names |= set(imported_bound_names(stmts))
     return names & M.LITERAL_ATTRIBUTE_READ_CALLS
 
 
