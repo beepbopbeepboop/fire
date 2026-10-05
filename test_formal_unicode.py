@@ -530,17 +530,16 @@ ORACLE_CASES = [
     ("byte_pointer_over_text_is_the_residual_and_reads_its_byte",
      'def first(e: Pointer[UInt8]) -> Int:\n'
      '    return e[1]\n'
-     'def em():\n'
-     '    """A — em-dash."""\n'
-     '    return 0\n'
      'def main(n):\n'
+     '    var table = ["unused"]\n'
      '    var s = "héllo"\n'
-     '    printf("b=%d e=%d\\n", first(s), em())\n'
+     '    printf("b=%d t=%d\\n", first(s), len(table))\n'
      '    return 0\n',
      'def main():\n'
+     '    table = [b"unused"]\n'
      '    s = b"h\\xc3\\xa9llo"\n'
      '    first = lambda e: e[1]\n'
-     '    print("b=%d e=0" % first(s), end="\\n")\n'),
+     '    print("b=%d t=%d" % (first(s), len(table)), end="\\n")\n'),
 
     # ── `bytes`: the receiver's DECLARED type, and CPython's own answer ──
 
@@ -551,6 +550,16 @@ ORACLE_CASES = [
     # declares `Pointer[UInt8]` holds a `bytes`, its subscript is a byte load,
     # and the byte is the right answer — no refusal, and no fold either.
     #
+    # **Every row in this group puts its non-ASCII text in a VALUE, never in a
+    # DOCSTRING**, and that is not a style choice. `is_docstring_statement`
+    # (`a1d56f97`) excludes a bare string statement from the published set on
+    # the measured ground that nothing can NAME it, so a docstring would make
+    # these rows vacuous the day that landed: the image would be ASCII and every
+    # one of them would pass without testing the condition it exists for. A list
+    # literal is a value, is reachable by construction, and is the shape
+    # `refuse_printf_width_on_an_unseen_operand_in_a_non_ascii_image` above
+    # already uses for exactly this reason.
+    #
     # **Both rows are in an image that holds a non-ASCII literal**, which is the
     # whole of what they measure: the refusal keys on the image AND on the
     # receiver, and the receiver here is a byte buffer. Before the byte
@@ -559,37 +568,35 @@ ORACLE_CASES = [
     # `model.string_element_refusal` for that measurement. So the two rows are
     # also the pair that says the two spellings of one declaration agree.
     ("bytes_element_of_a_declared_byte_local_reads_its_byte",
-     'def em():\n'
-     '    """A — em-dash, so this image holds a non-ASCII literal."""\n'
-     '    return 0\n'
      'fn buf(n) -> str:\n'
      '    return malloc(n + 1)\n'
      'def main(n):\n'
+     '    var table = ["héllo"]\n'
      '    var d: Pointer[UInt8] = buf(8)\n'
      '    d[0] = 97\n'
      '    d[1] = 98\n'
-     '    printf("b0=%d b1=%d e=%d\\n", d[0], d[1], em())\n'
+     '    printf("b0=%d b1=%d t=%d\\n", d[0], d[1], len(table))\n'
      '    return 0\n',
      'def main():\n'
+     '    table = ["héllo"]\n'
      '    d = bytearray(8)\n'
      '    d[0] = 97\n'
      '    d[1] = 98\n'
-     '    print("b0=%d b1=%d e=0" % (d[0], d[1]), end="\\n")\n'),
+     '    print("b0=%d b1=%d t=%d" % (d[0], d[1], len(table)), end="\\n")\n'),
 
     ("bytes_element_of_a_declared_byte_parameter_reads_its_byte",
-     'def em():\n'
-     '    """A — em-dash, so this image holds a non-ASCII literal."""\n'
-     '    return 0\n'
      'def at(e: Pointer[UInt8], i):\n'
      '    return e[i]\n'
      'def main(n):\n'
+     '    var table = ["héllo"]\n'
      '    var s = "abc"\n'
-     '    printf("b0=%d b1=%d e=%d\\n", at(s, 0), at(s, 1), em())\n'
+     '    printf("b0=%d b1=%d t=%d\\n", at(s, 0), at(s, 1), len(table))\n'
      '    return 0\n',
      'def main():\n'
+     '    table = ["héllo"]\n'
      '    s = b"abc"\n'
      '    at = lambda e, i: e[i]\n'
-     '    print("b0=%d b1=%d e=0" % (at(s, 0), at(s, 1)), end="\\n")\n'),
+     '    print("b0=%d b1=%d t=%d" % (at(s, 0), at(s, 1), len(table)), end="\\n")\n'),
 
     # A QUANTIFIER on a conversion that is not a `%s`, in an image that holds a
     # non-ASCII literal.  This is the row the width refusal used to fail: it
@@ -600,15 +607,18 @@ ORACLE_CASES = [
     # found it, and it is a `%f`; this is a `%d`, so the expectation is a number
     # CPython can print and the row needs no float.  The quantifier's meaning
     # does not change: six DIGITS, of a number, which has no encoding at all.
+    # The `len(table)` is what makes the image non-ASCII without a docstring,
+    # for the reason the group comment gives.
     ("quantifier_on_an_integer_conversion_beside_a_non_ascii_literal",
-     'def em():\n'
-     '    """A — em-dash, so this image holds a non-ASCII literal."""\n'
-     '    return 0\n'
      'def main(n):\n'
-     '    printf("q=[%.6d][%06d][%6.3d][%d] e=%d\\n", 42, 7, 5, 42, em())\n'
+     '    var table = ["héllo"]\n'
+     '    printf("q=[%.6d][%06d][%6.3d][%d] t=%d\\n",\n'
+     '           42, 7, 5, 42, len(table))\n'
      '    return 0\n',
      'def main():\n'
-     '    print("q=[%.6d][%06d][%6.3d][%d] e=0" % (42, 7, 5, 42), end="\\n")\n'),
+     '    table = ["héllo"]\n'
+     '    print("q=[%.6d][%06d][%6.3d][%d] t=%d"\n'
+     '          % (42, 7, 5, 42, len(table)), end="\\n")\n'),
 ]
 
 
