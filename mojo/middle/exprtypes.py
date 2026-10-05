@@ -1351,6 +1351,30 @@ def dict_literal_val_ctype(gen, pairs) -> str:
             return 'double'
         if _vt == 'char *':
             return 'char *'
+        # A STRUCT value is nameable, and naming it is what the container half
+        # of the repr machinery needs: the store (`emit_dict_int_value_store`)
+        # already records the struct's repr shim on the dict and hands it to
+        # every list the dict goes on to build (`mojo_dict_values`,
+        # `mojo_dict_items`), but a reader chooses a WALKER from this table,
+        # and `int64_t` picks `mojo_repr_list_ints` — so the struct's own
+        # `__repr__` was asked for at the store and then not consulted, and
+        # the value printed as its own pointer decimal.
+        #
+        # Measured on the shape that isolates it, because the dict's OWN repr
+        # was already right in both halves and only the derived list differed:
+        #
+        #     p = P("a"); d = {}; d['k'] = p; print(d.values())   # [R<a>]
+        #     e = {"k": p};                          print(e.values())  # pointer
+        #
+        # `dict_literal_val_ctype` is the only difference: the subscript store
+        # records the value type itself, and the literal's sample could not
+        # name a struct at all. Restricted to a REGISTERED struct (the same
+        # `struct_field_types` test `struct_elem_repr_shim` makes, and for the
+        # same reason: a ctype that merely ends in ` *` is a container or a
+        # runtime type whose accessor rules are a separate question), so no
+        # scalar, `char *`, bytes or container answer changes.
+        if _vt.endswith(' *') and gen.struct_field_types.get(_vt[:-2].strip()):
+            return _vt
         return 'int64_t'
     return 'int64_t'
 

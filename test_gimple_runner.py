@@ -8770,6 +8770,73 @@ def shapes():
 shapes()
 """, "[('k', R<a>)]\n{'p': R<a>, 'q': Q(y='b')}\n")
 
+    # The three DERIVED containers, which is where a struct value stopped
+    # being its own `__repr__` even though the dict's own repr was already
+    # right. The dict's repr consults `d->val_repr`, which
+    # `emit_dict_int_value_store` records from the value's static type — so
+    # `print(d)` always worked. Everything the dict goes on to BUILD consults
+    # a WALKER chosen at compile time from `gen._elem_types`, and that table
+    # said `int64_t`:
+    #
+    #   * `dict_literal_val_ctype` could not name a struct at all (its three
+    #     answers were double / char * / int64_t), so the dict LITERAL
+    #     `{"k": p}` recorded `int64_t` where the SUBSCRIPT store `d['k'] = p`
+    #     recorded `P *`. Two spellings of one dictionary, two answers;
+    #   *   `mojo_dict_values` does hand the recorded function to the list it
+    #     builds, so the generic walker was already the right one — the int
+    #     walker was chosen over it and rendered each slot with
+    #     `mojo_repr_int`, i.e. the struct's own address as a decimal;
+    #   * `dict(d)` / `d.copy()` produced a dict with no entry in either table
+    #     at all, for the same reason and one derivation further out.
+    #
+    # Asserted through `list(...)`, which is the wrapper-free spelling on both
+    # sides: CPython's `d.values()` prints as `dict_values([R<a>])` and this
+    # codegen has no view wrapper, which is the OTHER open row of this doc's
+    # subject and is pinned by `gimple_dict_value_repr_remaining_two_shapes`
+    # above. Pinning it here too would make this case about the wrapper rather
+    # than about the repr. The bare `.values()` rows are the next case.
+    test_gimple_matches_cpython("gimple_dict_derived_containers_use_the_struct_dunder", """\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+
+def main():
+    p = P("a")
+    stored = {}
+    stored['k'] = p
+    literal = {"k": p}
+    vs = literal.values()
+    print(list(stored.values()))
+    print(list(literal.values()))
+    print(list(vs))
+    print(list(dict(stored).values()))
+    print(list(stored.copy().values()))
+main()
+""")
+
+    # The bare `.values()` rows, pinned as they are for the reason the case
+    # above gives: CPython wraps them in `dict_values(...)` and this codegen
+    # does not, so there is no CPython stdout to agree with byte for byte. The
+    # CONTENT is the user's `__repr__` and not a pointer decimal, which is what
+    # this fix is about, and that is what these expectations say.
+    test_gimple_stdout("gimple_dict_values_view_prints_the_dunder_without_a_wrapper", """\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+
+def main():
+    p = P("a")
+    literal = {"k": p}
+    print(literal.values())
+    print(dict(literal).values())
+
+main()
+""", "[R<a>]\n[R<a>]\n")
+
     # §4.2a: print([True, False]) printed [1, None] -- the generic list repr
     # both formats a bool slot with %d instead of True/False AND treats a
     # False (0) slot as the None sentinel.

@@ -4099,7 +4099,26 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         # int list is an int list, and saying so is what every other
         # container lowering here does.
         _vt = gen._dict_val_of(ov)
-        if _vt:
+        # A dict that RECORDED a struct repr shim is proof that its values are
+        # not plain ints, so an `int64_t` answer here is the "cannot name this
+        # value" default rather than a fact -- and recording it picks the INT
+        # repr walker for a list whose elements the runtime is about to hand to
+        # that struct's own shim (`mojo_dict_values` copies `d->val_repr` onto
+        # the list it builds, the same bargain `mojo_list_inherit_kinds`
+        # makes). Leaving the element type unrecorded instead is what routes
+        # the read through `_list_repr_fn`'s generic walker, the one that asks
+        # `mojo_list_repr_elem` per slot.
+        #
+        # Reachable, and measured both ways: `emit_dict_int_value_store`
+        # records the shim from the value's own ctype, and a dict whose values
+        # arrive through a comprehension append has no `_dict_val_types` entry
+        # to name them. The literal case now names its struct values
+        # (`dict_literal_val_ctype`), so `e = {"k": p}` records `P *` and this
+        # guard does not fire for it -- but it is the same guard for the
+        # comprehension-built dict, and without it `print(d.values())` renders
+        # each element with `mojo_repr_int`, i.e. the struct's own pointer as a
+        # decimal.
+        if not (_vt == 'int64_t' and gen._dict_val_repr.get(ov)) and _vt:
             gen._elem_types[t] = _vt
         return 'MojoList *', t
     if method == 'items':
@@ -4409,7 +4428,9 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             _rt[1], f'mojo_dict_pop{_sfx}_{_rt[0]}',
             [('MojoDict *', ov), (key_type, key_val), (dflt_ct, dflt_expr)])
     if method in ('copy',):
-        return 'MojoDict *', gen._new_val('MojoDict *', f"mojo_dict_copy ({ov})")
+        t = gen._new_val('MojoDict *', f"mojo_dict_copy ({ov})")
+        ginf._copy_dict_metadata(gen, t, ov)
+        return 'MojoDict *', t
     if method == 'clear':
         gen._emit(f"  mojo_dict_clear ({ov});")
         return 'int', gen._new_val('int', '0')

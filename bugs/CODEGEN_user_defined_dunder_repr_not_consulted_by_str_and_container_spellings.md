@@ -1,8 +1,89 @@
 # a user-defined `__str__` is never called, and a struct inside a list/tuple/dict reprs as a raw pointer decimal — on both pipelines, exit 0
 
-**State (2026-09-30): rows 1 and 2 of the table below are FIXED; rows 3,
-4 and 5 (`repr([p])`, `repr((p,))`, a dict's value) are still open. See
-"Status (2026-09-30)" at the bottom for what landed and what did not.**
+**State (2026-10-05): every row of the table below is FIXED, and so are the
+three DERIVED containers that were not in it — `d.values()`,
+`list(d.values())` and `dict(d).values()`. Two rows remain open and are named
+in the Status block below; neither is a repr.**
+
+**Earlier state (2026-09-30): rows 1 and 2 of the table below were FIXED; rows
+3, 4 and 5 (`repr([p])`, `repr((p,))`, a dict's value) were still open. See the
+Status block at the bottom for what landed, what did not, and — in this row's
+case — which fix did which, since the entries are newest-last.**
+
+## Status (2026-10-05) — the DERIVED containers, which the 2026-10-02 fix's own table did not cover
+
+Re-measured the doc's table and then the three shapes derived from the dict it
+fixes, through `test_gimple_runner.py`'s own `compile_mojo_to_gimple_exe`
+against CPython on the same text. Every row of the original table was already
+right. These were not:
+
+```
+    p = P("a"); d = {}; d['k'] = p; print(d.values())    # compiled [R<a>]     (already right)
+    e = {"k": p};                         print(e.values())    # [4353563056]
+    print(list(e.values()))                                            # [4353563056]
+    f = dict(d);                          print(f.values())    # [4353563056]
+```
+
+**Fixed, in three places, and the mechanism is the same in all three: the
+struct's `__repr__` was asked for at the STORE and then not consulted, because
+every read picks a WALKER at compile time out of `gen._elem_types`, and that
+table said `int64_t`.** `mojo_dict_values` does hand the recorded function to
+the list it builds (the `mojo_list_inherit_kinds` bargain the 2026-10-01 entry
+established), so the runtime was already rendering these correctly — into a
+buffer the int walker then threw away.
+
+1. **`dict_literal_val_ctype` could not name a struct.** Its three answers were
+   `double` / `char *` / `int64_t`, so the dict LITERAL `{"k": p}` recorded
+   `int64_t` where the SUBSCRIPT store `d['k'] = p` recorded `P *` — two
+   spellings of one dictionary, two answers, which is what the pair of rows
+   above isolates. It now returns the sampled type when it is a REGISTERED
+   struct pointer (the same `struct_field_types` test `struct_elem_repr_shim`
+   makes, so no scalar, `char *`, bytes or container answer moves).
+2. **`_lower_dict_method`'s `values` arm.** An `int64_t` answer there is the
+   "cannot name this value" default as often as it is a fact, and a dict that
+   RECORDED a struct repr shim is proof it is not a plain int — so that case
+   leaves the element type unrecorded, which is what routes the read through
+   `_list_repr_fn`'s generic walker, the one that asks `mojo_list_repr_elem` per
+   slot. This is the arm that covers a dict whose values arrive through a
+   comprehension append, where there is no value-type entry to consult at all.
+3. **`_copy_dict_metadata` (`emit_infra.py`), called by `dict(<a dict>)` and by
+   `d.copy()`.** One helper for both, because a per-caller copy is how a third
+   derivation would end up not asking: `mojo_dict_copy` goes through
+   `mojo_dict_update`, which already copies `src->val_repr`, so the copy's dict
+   repr was right and only its derived list was not — the same "the runtime
+   knows, the codegen's table does not" gap, one derivation further out.
+
+Also fixed in passing, and worth naming because it is the same omission: a
+**local alias** of a dict never inherited its recorded repr
+(`_track_pointer_actual_type` carried `_elem_types` and `_dict_val_types` and
+not `_dict_val_repr`), so `e = {"k": p}` asked the question under a key nothing
+had ever written.
+
+Regressions, both in `test_gimple_runner.py`:
+`gimple_dict_derived_containers_use_the_struct_dunder` (against CPython, through
+the wrapper-free `list(...)` spelling) and
+`gimple_dict_values_view_prints_the_dunder_without_a_wrapper` (the bare
+`.values()` rows, pinned as they are — CPython wraps them in `dict_values(...)`
+and this codegen does not, which is residual 2 below).
+
+Verified: `test_gimple.py` 385 passed / 0 failed; `test_gimple_runner.py` 409
+passed with the same four pre-existing failures as the unpatched tree
+(`bugs/MERGE_bugs4_gimplerunner_four_remaining.md`'s four).
+
+**The two rows still open, unchanged:**
+
+1. **`{'p': p, 'q': q}` — the second struct type** prints `'p': R<a>` (the
+   recorded function) and `'q': Q(y='b')` (the field dump, via `kind == 6`).
+   CPython prints both dunders. One function per dict cannot describe two
+   types, and the alternatives are a per-slot function pointer (8 bytes on
+   every `_DictSlot`) or a per-dict TABLE of shims; both are real designs with
+   real costs, and neither is this doc's row.
+2. **`print(d.values())` / `print(d.items())` print the bare list**, without
+   CPython's `dict_values(...)` / `dict_items(...)` view wrapper. The VALUES
+   inside are right, which is what the fix above is about; the view type is a
+   separate display gap. **Both residuals owe a change to
+   `runtime/fire_runtime.c`**, so both owe the `mojoc`/bootstrap half of
+   `make gate` rather than a `test_gimple.py` run.
 
 **Earlier state: OPEN. The residue of the `repr()` fix landed with
 cross-module-import series (see the 2026-09-29 section of

@@ -718,6 +718,21 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str) ->
             gen._dict_val_types[tname] = gen._dict_val_types[v]
             if v in gen._dict_nested_val_types:
                 gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
+        # ...and the dict's RECORDED struct repr, which is the one piece of
+        # per-dict metadata that is not a TYPE and so was left behind by every
+        # arm above. It matters because it is not recoverable at the read:
+        # `mojo_dict_values` hands the recorded function to the list it builds
+        # (and `mojo_dict_items` to each pair), so the value list's repr
+        # walker is decided by it, and a local alias of the dict asked that
+        # question under a key nothing had ever written. Measured:
+        # `e = {"k": p}; print(e.values())` printed a pointer decimal where
+        # `p = P("a"); d = {}; d['k'] = p; print(d.values())` printed `[R<a>]`
+        # -- the literal's `_dict_val_types` entry is `int64_t` (the
+        # dict-value rule cannot name a struct), so the alias reached the INT
+        # repr walker for a list the runtime was about to hand to the struct's
+        # own shim.
+        if v in gen._dict_val_repr:
+            gen._dict_val_repr[tname] = gen._dict_val_repr[v]
         return
     if v in gen._actual_types:
         gen._actual_types[tname] = gen._actual_types[v]
