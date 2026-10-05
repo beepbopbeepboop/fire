@@ -225,9 +225,8 @@ forward in a scratch tree, not committed:
 > **See also [2]'s §5.7**, which measures the same walk breakage from the
 > other side. Its problem statement is **resolved by `e0af987`**, which landed
 > the arithmetic-form fuel this section calls for. Two accounts of one bug; fold
-> them when convenient. §4.1's remaining fuel obligation is `OPUS-4` below and in
-> `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md`; §3's `hreg` landed with
-> `lib/Contracts.lean`, which compiles clean with 0 holes.
+> them when convenient. The full consolidated state of both is
+> `bugs/FORMAL_contract_work_handoff.md`.
 
 #### 4.1a RESOLVED as a diagnosis: the `sorry` is on a false statement, and that is now CHECKED
 

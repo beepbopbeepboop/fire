@@ -12,13 +12,7 @@ This post-processes the output to:
 
 import re
 import sys
-# `collections` was imported here and read NOTHING through it, so it was
-# one of the `collections` row's blocked files for the reason an absent
-# module would be — a dead import blocks a file exactly as hard as a
-# missing one and costs the same. `tools/formal_host_import_shapes.py`
-# reads it as `DEAD` and `formal_sweep_causes.py`'s `mentions` column is
-# the older measure of the same thing; see
-# `bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §3.
+from collections import OrderedDict
 
 def consolidate_string_pool(ci_file):
     with open(ci_file, 'r') as f:

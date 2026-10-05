@@ -16,22 +16,6 @@ import tempfile
 import time
 
 from build_config import find_gcc, find_gxx
-
-# This file's eleven per-child budgets were 30 s and 10 s, spelled at the call
-# site. The classification is by ARGV, not by the number: four of them are a
-# `gcc`/`gxx -c` of one translation unit (including `fire_runtime.c` and the
-# async runtime, which this file compiles itself) and are a COMPILE; the other
-# seven are a `Popen`ed executable bounded by `communicate`, which is a RUN.
-#
-# The `communicate` three are worth naming rather than replacing mechanically,
-# because their 10 s was doing something the other four do not: they are the
-# rows that assert an ELAPSED window (`max_seconds = max(1.0, delay * 5)`), so
-# a 10 s ceiling on a loaded machine fired `TimeoutExpired` and took the row
-# down with a traceback instead of reporting the thing it exists to measure.
-# `RUN_TIMEOUT_S` is the right shape for it — "the child must finish" — and the
-# row's own elapsed assertion is what bounds the timing, so nothing is lost and
-# a slow machine stops being a crash.
-from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 import gimple_codegen
 import fire
 
@@ -78,22 +62,22 @@ def _build_async_program(mojo_src: str) -> str:
     gxx = find_gxx()
 
     r = subprocess.run([gcc, '-fgimple', f'-I{RUNTIME_DIR}', '-c', '-o', c_o, c_path],
-                        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+                        capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"gcc -fgimple compile of .c failed: {r.stderr}")
 
     r = subprocess.run([gxx, '-std=c++20', f'-I{RUNTIME_DIR}', '-c', '-o', async_o, cpp_path],
-                        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+                        capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"g++ compile of .cpp failed: {r.stderr}")
 
     r = subprocess.run([gcc, f'-I{RUNTIME_DIR}', '-c', '-o', runtime_o, RUNTIME_C],
-                        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+                        capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"gcc compile of fire_runtime.c failed: {r.stderr}")
 
     r = subprocess.run([gxx, '-std=c++20', f'-I{RUNTIME_DIR}', '-c', '-o', async_runtime_o, ASYNC_RUNTIME_CPP],
-                        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+                        capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"g++ compile of mojo_async_runtime.cpp failed: {r.stderr}")
 
@@ -109,7 +93,7 @@ def test_async_stdout(name: str, mojo_src: str, expected_stdout: str):
     global _PASS, _FAIL
     try:
         exe = _build_async_program(mojo_src)
-        out = subprocess.run([exe], capture_output=True, timeout=RUN_TIMEOUT_S).stdout.decode()
+        out = subprocess.run([exe], capture_output=True, timeout=10).stdout.decode()
         if out == expected_stdout:
             print(f"PASS  {name}")
             _PASS += 1
@@ -174,7 +158,7 @@ def test_async_value_consumption_is_lazy(name: str, mojo_src: str, forbidden_mar
     global _PASS, _FAIL
     try:
         exe = _build_async_program(mojo_src)
-        out = subprocess.run([exe], capture_output=True, timeout=RUN_TIMEOUT_S).stdout.decode()
+        out = subprocess.run([exe], capture_output=True, timeout=10).stdout.decode()
         if forbidden_marker_line in out:
             print(f"FAIL  {name}: async function body ran (found {forbidden_marker_line!r} "
                   f"in stdout {out!r}) -- value-consuming call must stay lazy")
@@ -205,7 +189,7 @@ def test_async_stdout_timed(name: str, mojo_src: str, expected_stdout: str,
     try:
         exe = _build_async_program(mojo_src)
         t0 = time.monotonic()
-        run = subprocess.run([exe], capture_output=True, timeout=RUN_TIMEOUT_S)
+        run = subprocess.run([exe], capture_output=True, timeout=10)
         dt = time.monotonic() - t0
         out = run.stdout.decode()
         if out != expected_stdout:
@@ -289,7 +273,7 @@ def test_sock_recv_delayed_write(name: str, delay_seconds: float):
         time.sleep(delay_seconds)
         write_sock.send(bytes([byte_value]))
         try:
-            out, _ = proc.communicate(timeout=RUN_TIMEOUT_S)
+            out, _ = proc.communicate(timeout=10)
         finally:
             dt = time.monotonic() - t0
         expected = f"{byte_value}\n"
@@ -348,7 +332,7 @@ def test_sock_recv_already_readable_before_await(name: str):
         t0 = time.monotonic()
         proc = subprocess.Popen([exe], stdout=subprocess.PIPE,
                                  pass_fds=(read_fd,))
-        out, _ = proc.communicate(timeout=RUN_TIMEOUT_S)
+        out, _ = proc.communicate(timeout=10)
         dt = time.monotonic() - t0
         expected = f"{byte_value}\n"
         if out.decode() != expected:
@@ -390,7 +374,7 @@ def test_sock_recv_eof(name: str):
                                  pass_fds=(read_fd,))
         time.sleep(0.05)
         write_sock.close()  # close with nothing ever sent -> peer sees EOF
-        out, _ = proc.communicate(timeout=RUN_TIMEOUT_S)
+        out, _ = proc.communicate(timeout=10)
         expected = "-1\n"
         if out.decode() != expected:
             print(f"FAIL  {name}: expected stdout {expected!r}, got {out.decode()!r}")
@@ -729,7 +713,7 @@ def main():
         try:
             exe = _build_async_program(src)
             for _ in range(3):
-                out = subprocess.run([exe], capture_output=True, timeout=RUN_TIMEOUT_S).stdout.decode()
+                out = subprocess.run([exe], capture_output=True, timeout=10).stdout.decode()
                 if out != "10\n":
                     print(f"FAIL  {name}: expected '10\\n' every run, got {out!r}")
                     _FAIL += 1

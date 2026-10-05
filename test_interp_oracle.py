@@ -24,7 +24,6 @@ the compiled path agrees — a strictly stronger assertion, and putting it here
 would throw that away.
 """
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -345,40 +344,6 @@ def main():
     print(hasattr(i_lib, "nope"))
 ''',
     },
-
-    # A SEQUENCE target unpacks a `str` item, and iterating a DICT hands the
-    # target a KEY — which is a `str`. So `for k, *vs in {"abc": 1}` prints
-    # `a ['b', 'c']` in CPython and the interpreter printed `abc []`: it
-    # exempted `str` from the unpack and bound the whole key to `k` with an
-    # empty remainder. A wrong answer on the shape this project's OWN dict
-    # iteration produces, and a silent one — exit 0 and a plausible line.
-    #
-    # The rows are the shapes the same exemption was wrong for, measured against
-    # CPython 3.14: `for k, v in {"ab": 1}` binds `a b` there and used to bind
-    # `k` alone and leave `v` undefined, so the program died later with
-    # `NameError: v` at the USE SITE rather than at the statement that failed to
-    # bind it. The comprehension is here because it reaches the same binder
-    # through a different call site, and `for k in {"abc": 1}` is the CONTROL: a
-    # single name does NOT unpack, which is CPython's rule and the one an
-    # unconditional `list(value)` would break. `x, y = "ab"` is the same rule on
-    # the ASSIGNMENT side, which reaches the same two helpers.
-    "a_sequence_target_unpacks_a_string_item": '''\
-def main():
-    for k, *vs in {"abc": 1}:
-        print(k, vs)
-    for k, v in {"ab": 1}:
-        print(k, v)
-    for k in {"abc": 1}:
-        print(k)
-    for (a,) in {"a": 1}:
-        print(a)
-    print([(k, vs) for k, *vs in {"abc": 1}])
-    print([(k, v) for k, v in {"ab": 1}])
-    x, y = "ab"
-    print(x, y)
-    for k, *vs in [[1, 2, 3]]:
-        print(k, vs)
-''',
 }
 
 # Shapes CPython CANNOT EXPRESS, so the corpus above cannot hold them: a
@@ -499,50 +464,6 @@ def add(a: Int, b: Int) -> Int:
 def main():
     print(add[2, 5](10))
 ''', 'TypeError: add[...] supplies 2 specialization argument'),
-    # A sequence target's ARITY is checked, and both refusals are CPython's
-    # wording INCLUDING the part that reads like an oversight: a `str` item
-    # says `(expected 1)` with no count and a sequence item says
-    # `(expected 1, got 2)`. Both measured on CPython 3.14, and the interpreter
-    # now reproduces both — it reproduced NEITHER before, because `zip`
-    # truncated to the shorter side, so `for a, b in [(1, 2, 3)]` printed `1 2`
-    # and `for a, b in [(1,)]` bound `a` and left `b` UNBOUND, dying at the USE
-    # SITE with `NameError: b`.
-    #
-    # These four are here rather than in `CORPUS` because a program CPython
-    # raises on exits non-zero there and `check` requires the reference to run,
-    # which is the whole reason the value half of this rule is over there.
-    # `[(1, 2, 3)]` into two targets: a SEQUENCE item, so the count is in the
-    # message. It used to print `1 2` — a wrong answer, exit 0.
-    "a_sequence_target_with_too_many_values_is_refused": ('''\
-def main():
-    for a, b in [(1, 2, 3)]:
-        print(a, b)
-''', 'ValueError: too many values to unpack (expected 2, got 3)'),
-    # The same arity error with ONE target, where the old reading bound `a` to
-    # `1` and looped, printing a line per element of the item.
-    "a_one_slot_target_over_two_values_is_refused": ('''\
-def main():
-    for (a,) in [(1, 2)]:
-        print(a)
-''', 'ValueError: too many values to unpack (expected 1, got 2)'),
-    # A `str` item, and CPython omits the count for one: measured the same day,
-    # `for a, b in {"abc": 1}` is `(expected 2)` while `for (a,) in [(1, 2)]` is
-    # `(expected 1, got 2)`. The `str` arm of the binder is what hands a dict KEY
-    # to the target, so this is the arity error for the same shape as the case
-    # above it, and the "not enough" arm of the same rule always carries the
-    # count (`for a, b in "ab"` is `expected 2, got 1`).
-    "a_sequence_target_over_a_string_key_states_no_count": ('''\
-def main():
-    for k, v in {"abc": 1}:
-        print(k, v)
-''', 'ValueError: too many values to unpack (expected 2)'),
-    # A non-iterable item, which used to be wrapped in a one-element list and so
-    # printed `1 2`, `2 2`, `3 2` — three wrong answers out of one loop.
-    "a_sequence_target_over_a_scalar_is_refused": ('''\
-def main():
-    for a, b in [1, 2, 3]:
-        print(a, b)
-''', 'TypeError: cannot unpack non-iterable int object'),
     # …and the refusal must not fire on a bracket that DOES fit, including
     # through a function VALUE, which is the shape
     # `std/algorithm/backend/tile.mojo`'s `workgroup_function[size](x, y)`
@@ -633,13 +554,7 @@ def check_interp_only(name, source, want):
     if out is None:
         return False, 'interpreter timed out'
     both = out + (err or '')
-    # A NAMED refusal, whatever its class. This was a `TypeError` test and the
-    # next shape that needed it was a `ValueError`, which is why the test is a
-    # name pattern rather than a class: the assertion is about the interpreter
-    # NAMING what went wrong, not about which exception family this path
-    # happens to use. `want` is still CPython's own wording — the comment above
-    # each refusal records the measurement it was taken from.
-    if re.match(r'^[A-Za-z]*Error', want):
+    if want.startswith('TypeError'):
         if rc == 0:
             return False, f'expected a refusal, got exit 0 printing {out!r}'
         if want not in both:

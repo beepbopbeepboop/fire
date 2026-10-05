@@ -22,9 +22,7 @@ it — the full sweep is a heavy run and belongs to the integrator):**
 | `pow2` | one of the five UNEXPECTED | **KNOWN-GAP** for the same reason (measured in `EXPECTED_FAILURES`; not re-run) | same |
 | `fact`, `sqsum`, `sum` | the other three of the five | **FAIL** — one at a time, all three with the identical obligation, a read of the stack-floor word at `4294968008` | same |
 | `sum_range` | "2 sorries in a PASSING proof" | **FAIL** — `⊢ match arm64_go_exit … with | some s => s.x0 = mojo n | none => False`, and **it fails identically on `master`** (measured in a clean `git archive master` export with its own `ProofLib.olean`) | `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` — `loop_cond_flag`'s unsigned order |
-| `sgt8`, `sle8` | not mentioned at all | **PASS** (2026-10-05) — were **FAIL** on `⊢ t32s (t32u (t8s n)) = n`, an obligation FALSE over the theorem's unconstrained `n`; the range hypothesis the obligation needs is now on the theorem | **FIXED**, with its doc deleted |
-| `ug8` | not mentioned at all | **PASS** (2026-10-05) — was **FAIL** on `⊢ t8u n = n`, the same defect on the UNSIGNED spelling | **FIXED**, with its doc deleted |
-| `floordiv`, `udivmod` | not mentioned at all | **FAIL** — reproduced identically on `master`'s `formal/arm64_proof_gen.py` (measured one at a time), so pre-existing and not this file's | `bugs/FORMAL_floordiv_and_udivmod_are_red.md` |
+| `sgt8`, `sle8` | not mentioned at all | **FAIL** — `⊢ t32s (t8s n) = n`, an obligation that is FALSE as stated | `FORMAL_arm64_a_narrow_typed_parameter_makes_the_universal_contract_false.md` |
 
 **The three corrections, so a reader does not have to diff the table:**
 
@@ -45,29 +43,19 @@ it — the full sweep is a heavy run and belongs to the integrator):**
    branch. The row in the table below that says "sorries in passing proofs: 2,
    both in `sum_range`" should be read as "an obligation `sum_range` cannot
    discharge", and its owner is the same document as `countdown`'s.
-3. ~~**Two examples are missing from this file entirely.** `sgt8` and `sle8`
-   are a TYPED narrow parameter making the universal contract false, they are
-   red, and they have their own document (the narrow-typed one).~~ **RESOLVED
-   2026-10-05: both PASS, and `ug8` with them.**  A narrow typed parameter's
-   universal theorem now carries the RANGE the truncation needs, and the
-   truncation discharges against it — three examples green where three were
-   red, with no `sorry` introduced (`test_formal_call_proof_gen.py`'s
-   `TestANarrowTypedParameterGetsItsRange` asserts the sorries count is 0
-   precisely because "the obligation became admissible" is the failure mode a
-   bound can hide).  The document that owned them is deleted with the fix.
-
-   **Two more examples were missing here too and are now recorded rather than
-   found later**: `floordiv` and `udivmod` are red, were red on `master` before
-   anything of mine, and are not in `EXPECTED_FAILURES` — so they are FAILURES
-   by this file's own argument, and
-   `bugs/FORMAL_floordiv_and_udivmod_are_red.md` is where they are worked from.
+3. **Two examples are missing from this file entirely.** `sgt8` and `sle8` are a
+   TYPED narrow parameter making the universal contract false, they are red, and
+   they have their own document (the narrow-typed one). This file's own argument
+   is that a gap which is not in `EXPECTED_FAILURES` is a FAILURE and that a
+   closed list "cannot be a closed list" — so the omission is this file's, and it
+   is recorded here rather than only in the other document.
 
 **What is still true of everything below, and is why the rest of the file is
 kept as it is:** the four declared gaps are each owned by another document or by
-this one, and the three undeclared `dec1` failures are one fact owned by
-`FORMAL_arm64_x30_is_reloaded_from_the_frame.md`. The narrow-typed failures are
-no longer among them. Nothing in this file is a fix and nothing in it should be
-worked from as one.
+this one, the three undeclared `dec1` failures are one fact owned by
+`FORMAL_arm64_x30_is_reloaded_from_the_frame.md`, and the two narrow-typed
+failures are another fact owned by the narrow-typed document. Nothing in this file
+is a fix and nothing in it should be worked from as one.
 
 
 ## The count, corrected (2026-10-03)
@@ -203,7 +191,7 @@ distinct problems, and the counts should not be conflated:
 |---|---|---|
 | declared in `EXPECTED_FAILURES` | **7** | read on this tree 2026-10-04: `fib`, `countdown`, `wge`, `subscript_var`, `wide_recv`, `count`, `pow2` |
 | **UNEXPECTED failures among the 13 stems measured here** | **5** | `fact`, `sqsum`, `sum` are one fact (`FORMAL_arm64_x30_is_reloaded_from_the_frame.md`); `sum_range` is another (`CODEGEN_arm64_cmp_flags_and_loop_signedness.md`, the range loop's `loop_cond_flag` stating an UNSIGNED order) |
-| **UNDECLARED and not listed anywhere in this file before 2026-10-04** | **0** | was `2` (`sgt8`, `sle8`); both PASS as of 2026-10-05 and `ug8` with them, so the row is empty rather than moved |
+| **UNDECLARED and not listed anywhere in this file before 2026-10-04** | **2** | `sgt8`, `sle8` — a TYPED narrow parameter making the universal contract false, `FORMAL_arm64_a_narrow_typed_parameter_makes_the_universal_contract_false.md` |
 | sorries in passing proofs | **0 measured**, and the "2 in `sum_range`" row is superseded — `sum_range` does not pass at all, on this tree or on master | — |
 
 **The second row is the one this file was missing, and it is why the "0 fail"

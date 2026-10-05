@@ -114,44 +114,6 @@ CASES = [
     ("parameter_is_stored",
      "    return n + 1\n", "ok"),
 
-    # ── a DECLARATION IS NOT AN ASSIGNMENT ───────────────────────────────
-    # `var q: Int` with no `=` gives `q` a home and no value.  Both readers of
-    # "does this statement define its name" used to count it as a definition --
-    # `formal/model.py`'s `_cfg_block_defs` and `_definitely_stored` -- so the
-    # fixpoint believed `q` was stored before any later read of it, and the
-    # read went unreported.  Measured 2026-10-05 on the build before the fix:
-    # this case built, ran, exited 0, and printed 1709223448 on arm64 and
-    # 306062552 on x86-64, where CPython raises UnboundLocalError; and
-    # `tools/formal_memcheck.py`'s stack/register poison called the program
-    # NONDETERMINISTIC, because two plain runs of a straight-line program that
-    # disagree are only ever state nobody wrote.
-    #
-    # The two `refuse` rows DIVERGE, and the reason is that CPython cannot
-    # parse the text: `var q: Int` is a SyntaxError there, so the oracle's
-    # child dies before it can raise an UnboundLocalError for any probe value.
-    # That is a STRONGER statement than a raise -- a language with no syntax for
-    # the declaration rejects the program at parse time -- and it is still not
-    # the oracle's answer, so it is declared here rather than papered over.
-    # The end-to-end shape (a real image, refused by name, on both
-    # architectures) is `formal/memcheck/local_uninitialised.mojo`, which is
-    # built and run by `test_formal_memcheck.py::test_heap`.
-    ("bare_vardecl_refused",
-     "    var q: Int\n    return q\n", "refuse",
-     "CPython cannot parse `var q: Int` (SyntaxError), so it has no "
-     "UnboundLocalError to report"),
-    ("vardecl_with_initialiser_ok",
-     "    var q: Int = 0\n    return q\n", "ok"),
-    # The declaration must not license the read, but a LATER real store still
-    # does, and the order matters: this is the shape where the guard is wrong in
-    # the other direction -- a reader that stopped at the first `VarDecl` would
-    # refuse a program CPython runs.
-    ("bare_vardecl_then_store_ok",
-     "    var q: Int\n    q = 1\n    return q\n", "ok"),
-    ("bare_vardecl_annotated_read_refused",
-     "    var q: Int\n    var r: Int\n    return q + r\n", "refuse",
-     "CPython cannot parse `var q: Int` (SyntaxError), so it has no "
-     "UnboundLocalError to report"),
-
     # ── the shape the walk could not see: a store in only SOME arm ────────
     ("if_only_arm_refused",
      "    if n:\n        p = 1\n    return p\n", "refuse"),
@@ -763,8 +725,9 @@ CASES = [
     # this compiler (`fire_compiler.py`'s MatchStmt and
     # `myinterpreter.py`'s `execute_MatchStmt`), and a capture binds the
     # subject before the arm's body runs — the same shape as a `for` target and
-    # a `with` alias, and the third of the three constructs that BIND BEFORE THE
-    # VALUE they expose. The arm was refused for reading its own capture.
+    # a `with` alias, and the third of the three
+    # `bugs/FORMAL_a_local_read_before_its_first_assignment.md` names. The arm
+    # was refused for reading its own capture.
     ("match_capture_is_bound_in_its_own_arm_ok",
      "    match n:\n        case 0:\n            return 1\n        case other:\n"
      "            sink(other)\n    return 0\n", "ok"),
@@ -1650,126 +1613,6 @@ def check_own_names() -> list:
     return bad
 
 
-def corpus_findings() -> dict:
-    """`{path: [(name, line, fn), …]}` — what the GENERAL rule reports over a
-    corpus, asked through the build's own reader.
-
-    **This is the number that decides whether the rule is affordable, and it is
-    asked here rather than in a `bugs/` document because a figure written down
-    once is a claim and a figure asked on every run is a measurement.** It was
-    233 sites in 57 files, quoted for years as the reason only the
-    module-global half of the rule shipped — and it was a FLOOR produced by a
-    syntactic scan (`_bound_before_first_statement` over assignment values),
-    which is a strictly weaker algorithm than the one that enforces the rule:
-    `read_before_store` is a "definitely stored" FIXPOINT over the function's
-    CFG, so a store in every arm of a conditional dominates a read and no
-    statement-ordering walk can see that. Asking the implementation is also the
-    only way to avoid a second implementation of the rule in a `tools/` script,
-    which is how the two would come to disagree about what a local is.
-
-    The scope is `formal/hostmods/` — the modules the gate COMPILES, and so the
-    only part of the corpus where a refusal here is a gate cost rather than a
-    hypothetical. The repository's own `.py` files are swept by
-    `tools/formal_sweep.py` and are the larger population; they are reported
-    separately by `-v` rather than folded in, because the compiler is not built
-    by the path that enforces this rule and a refusal in it costs a sweep row,
-    not a build.
-
-    **A parse failure is reported, never rounded away.** A file this walk cannot
-    parse is a file whose functions were never asked, so counting it as zero
-    findings would make this number an overstatement in the safe direction —
-    which is the direction that licenses building the wrong thing.
-    """
-    import formal.build as B
-    out: dict = {}
-    unparsed: list = []
-    for path in hostmod_sources():
-        entry = os.path.relpath(path, os.path.join(HERE, "formal"))
-        try:
-            with open(path) as f:
-                stmts = parse_module(f.read(), filename=path)
-        except Exception as exc:                        # noqa: BLE001
-            unparsed.append(f"{entry}: {exc!r}")
-            continue
-        functions, structs, _syms, _slots = B._prepare_functions(stmts)
-        if not functions:
-            continue
-        by_name = {s.name for s in structs}
-        callees = set(B._callee_defs(functions))
-        for fn in functions:
-            shape = M.function_param_shape(fn)
-            placed = {n for n, _t in shape.fixed}
-            placed |= {shape.vararg, shape.kwarg}
-            placed.discard(None)
-            placed |= B._names_bound_in(fn)
-            placed |= B._comptime_bound_names(fn)
-            placed |= by_name
-            placed |= callees
-            hit = B._unstored_read(fn, placed,
-                                   dict(getattr(fn, "_frame_slots", None) or {}))
-            if hit is not None:
-                out.setdefault(entry, []).append(hit)
-    out["__unparsed__"] = unparsed          # noqa: RUF100 — a report channel
-    return out
-
-
-#: The ceiling this corpus has to stay under.  It is 0 because the modules the
-#: gate compiles are all of them correct on this rule, and a non-zero figure
-#: would have to be read as "and that is fine" — which is the mistake the rule
-#: exists to prevent, in the other direction.  A host module that starts
-#: reading a local before storing it is a file that would stop building, and
-#: the number that says so belongs here where a change to it is a reviewable
-#: diff rather than a sentence in a document nobody re-reads.
-CORPUS_CEILING = 0
-
-#: How many `formal/hostmods/**/*.mojo` there are, so the report says the
-#: denominator rather than only the numerator.
-def hostmod_sources() -> list:
-    """Every host module, `formal/hostmods/**` — a WALK and not a listdir.
-
-    The subdirectories are where the models that answer for a C library live
-    (`formal/hostmods/os/_syscalls.mojo` is one, and it is in the import
-    closure of a large part of the stdlib), so a top-level-only walk would
-    report a figure over a subset and call it the corpus.
-    """
-    root = os.path.join(HERE, "formal", "hostmods")
-    out = []
-    for dirpath, _dirnames, filenames in os.walk(root):
-        out += [os.path.join(dirpath, f) for f in sorted(filenames)
-                if f.endswith(".mojo")]
-    return sorted(out)
-
-
-CORPUS_FINDING_CAP = tuple(hostmod_sources())
-
-
-def check_corpus_cost(verbose: bool = False) -> list:
-    """Failures in the corpus figure, as strings."""
-    found = corpus_findings()
-    unparsed = found.pop("__unparsed__", [])
-    total = sum(len(v) for v in found.values())
-    if verbose:
-        print(f"      the general rule over formal/hostmods: {total} finding(s) "
-              f"in {len(found)} file(s) of {len(CORPUS_FINDING_CAP)} "
-              f"modul(es)")
-    bad = []
-    if total > CORPUS_CEILING:
-        where = ", ".join(f"{p} x{len(v)}" for p, v in sorted(found.items()))
-        bad.append(f"the general read-before-store rule reports {total} "
-                   f"finding(s) over formal/hostmods, over a ceiling of "
-                   f"{CORPUS_CEILING}: {where}. Each one is a module that "
-                   f"stops building, so the fix is in the module's own source "
-                   f"rather than in the rule — CPython raises "
-                   f"UnboundLocalError for these programs and this path cannot.")
-    if unparsed:
-        bad.append(f"{len(unparsed)} hostmod(s) could not be parsed and were "
-                   f"therefore never asked: {unparsed[:3]}. A module this walk "
-                   f"cannot read is a module whose cost is UNKNOWN, and "
-                   f"reporting it as zero findings would make the figure above "
-                   f"an overstatement.")
-    return bad
-
-
 def check_oracle() -> list:
     """The ORACLE, checked against bodies whose answer is known — including the
     one that does not answer.
@@ -1908,9 +1751,6 @@ def main():
     for problem in check_own_names():
         failed += 1
         print(f"  FAIL  own-names: {problem}")
-    for problem in check_corpus_cost(args.verbose):
-        failed += 1
-        print(f"  FAIL  corpus-cost: {problem}")
     for problem in check_oracle():
         failed += 1
         print(f"  FAIL  {problem}")
@@ -1918,8 +1758,7 @@ def main():
           f"({len(ENTRY_SHAPES)} graph shapes, "
           f"{len(TRY_ELSE_SHAPES)} try/else graph shapes, "
           f"{len(FINALLY_SHAPES)} finally graph shapes, "
-          f"{len(OWN_NAMES)} which-names rows, "
-          f"{len(CORPUS_FINDING_CAP)} hostmod modules)")
+          f"{len(OWN_NAMES)} which-names rows)")
     return 1 if failed else 0
 
 

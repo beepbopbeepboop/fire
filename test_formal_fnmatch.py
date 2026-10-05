@@ -42,11 +42,7 @@ import argparse
 import fnmatch
 import os
 import pathlib
-# `subprocess` was imported here and read NOTHING through it. A dead import
-# blocks a file on the formal path for exactly the reason an absent module
-# does, which is why `tools/formal_host_import_shapes.py` gives it a shape
-# (`DEAD`) rather than counting it as a use; see
-# `bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §3.
+import subprocess
 import sys
 import tempfile
 

@@ -48,7 +48,6 @@ from mojo.middle.loops_shared import (
     _try_const_fold_int, _tuple_elem_value, _tuple_unpack_slot_elems,
     _emit_starred_slot_from_cstr, _emit_starred_slot_from_value,
     _emit_starred_slot_list, starred_slot_index, starred_slot_name,
-    ZipLongestFillRefusal,
 )
 def _gen_for_range(gen, node: gimple_ctypes.ForStmt):
     args = node.iterable.args
@@ -1131,69 +1130,111 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             gen._dataclass_fields_vars.discard(var)
 
 
-#: The ABSENT fill each slot type selects, keyed by `TypeLattice.list_suffix`.
-#: `None` is the `double` arm's marker for "patched to `(double)0` below", which
-#: is the pre-existing spelling for it; the two integer-ish arms share the
-#: `(int64_t)0` the select is typed in, and a string slot's 0 is the NULL that
-#: `mojo_print` already renders as `None`. It is ONE table rather than three
-#: literals in three arms because a slot that the fill cannot reach uses it too
-#: (see `_gen_for_zip_longest`), and two copies of "what absent means here" is
-#: how the two would come to disagree.
-_ZIP_LONGEST_ABSENT = {'double': None, 'str': '(int64_t)0', 'int': '(int64_t)0'}
+def _zip_longest_slot_domain(elem):
+    """Which of this model's value domains a `zip_longest` slot holds.
 
-
-def _zip_longest_fill_refusal(fill_ctype: str, slot_domain: str):
-    """The one message for a `fillvalue` whose type the slot cannot hold.
-
-    One builder for three call sites, because the three are the same fact: the
-    fill's C type and the slot's own C type are different, and this model gives
-    each slot its own type rather than a box. CPython hands every slot the value
-    as given, so there is no conversion to appeal to — the alternative answer is
-    a value of the wrong type read back through the right one.
+    The four answers are the four domains a list element can have on this
+    path (`TypeLattice.list_suffix` names the two scalar ones and everything
+    else is read through `mojo_list_get_int`), and they are what the absent
+    value and the `fillvalue` are both checked against.
     """
-    return ZipLongestFillRefusal(
-        f"zip_longest: `fillvalue` is {fill_ctype} and cannot fill "
-        f"{slot_domain} — CPython hands every slot the value as given, and "
-        f"this model gives each slot its own C type, so storing one in "
-        f"another is a wrong answer rather than a conversion (measured: a "
-        f"string fill in an `int64_t` slot prints the pointer's own decimal). "
-        f"Pass a `fillvalue` of that type.")
+    suf = gimple_ctypes.TypeLattice.list_suffix(elem)
+    if suf == 'double':
+        return 'float'
+    if suf == 'str':
+        return 'string'
+    if _as_str(elem).endswith(' *'):
+        return 'pointer'
+    return 'integer'
 
 
-def _zip_longest_reaches(args: list, slot: int) -> bool:
-    """Can `zip_longest`'s padded fill ever be SELECTED into `args[slot]`?
+def _zip_longest_fill_domain(ftype):
+    """The same four domains, named from a lowered `fillvalue`'s C type.
 
-    `zip_longest` iterates `max(len_a, len_b)` times and slot `i` is padded
-    exactly when that count is past `len(args[i])`, so the answer is a
-    comparison of two lengths — and both are compile-time facts when both
-    sequences are list LITERALS. When either is not (a name, a call, a
-    comprehension) the lengths are `mojo_list_len` calls read at run time and
-    the honest answer is that any slot may be padded.
-
-    A `*seq` element makes a literal's length unknown TOO, and in the direction
-    that matters: `len([1, *xs])` is `1 + len(xs)` and this can only count the
-    one, so a literal carrying a spread answers "cannot be padded" for a slot
-    that can be. Under-counting a length here would decide a refusal NOT to
-    fire, which is the silent direction, so a spread makes the answer `True`.
-
-    The distinction is what keeps a refusal from costing correct code: with it,
-    `zip_longest([1, 2], ["p"], fillvalue="-")` keeps its integer slot's
-    unreachable `(int64_t)` coercion (the iteration count is 2 and that
-    sequence has 2 elements, so the fill is never selected) while the same
-    `fillvalue` into a slot that CAN be padded is a refusal, because
-    `(int64_t)(char *)"-"` in an integer slot prints `4364407504`.
+    `char *` is tested before the pointer test because a pointer test is
+    `'*' in t` and a string IS one; everything that is not a float, a string
+    or a pointer is an integer here, which is what `int64_t`, `_Bool` and a
+    literal's own type all are.
     """
-    lens = []
-    for a in args:
-        if not isinstance(a, gimple_ctypes.ListExpr):
-            lens.append(None)
-        elif any(gimple_ctypes.is_star_spread(el) for el in a.elements):
-            lens.append(None)
-        else:
-            lens.append(len(a.elements))
-    if any(n is None for n in lens):
-        return True
-    return max(lens) > lens[slot]
+    if gimple_ctypes.TypeLattice.is_float(ftype):
+        return 'float'
+    if ftype == 'char *':
+        return 'string'
+    if gimple_ctypes.TypeLattice.is_pointer(ftype):
+        return 'pointer'
+    return 'integer'
+
+
+def _zip_longest_padded_fill(gen, elem, fill_node, slot_name):
+    """The C expression that fills ONE padded `zip_longest` slot, and the
+    refusal when this path has no value to put there (`None` when it has).
+
+    A padded slot holds CPython's `fillvalue`, which DEFAULTS to `None`, and
+    this model's representation of `None` is a per-domain zero: `0` in an
+    integer slot (`_lower_IdentExpr` spells a `None` value `int64_t 0`, which
+    is why `print(None)` answers `0` here) and NULL in a string or
+    struct-pointer slot (`mojo_print`'s own rule — a NULL string prints
+    `None`, and a field read on one raises `AttributeError` rather than
+    dereferencing it). **A floating-point slot has neither**, and the old
+    `(double)0` fill answered `0.0` where CPython answers `None`: a number no
+    source wrote, indistinguishable from a real `0.0` the sequence really
+    held. So that shape is refused rather than emitted — see
+    `_gen_for_zip_longest` for why a raise and not a fallback.
+
+    An EXPLICIT `fillvalue` is a value rather than an absence, so its rule is
+    the ordinary one and it has to be in the SLOT's own domain: CPython hands
+    every slot the value as given, so `fillvalue=0.0` over an integer
+    sequence answers `0.0` there and `0` here, and `fillvalue="s"` over one
+    answers a string and here the string's address. Both are the same wrong
+    answer in two spellings, and both are decided HERE, once, rather than by
+    the three partial per-arm checks this replaces — which between them let
+    exactly this pair through (the integer arm cast anything) and refused a
+    pair that is right (`fillvalue=None`, which is the default spelled out,
+    and which a string slot used to refuse).
+
+    Returns `(expr, None)` or `(expr, reason)`, where `expr` is always a
+    well-formed C expression: on a refusal the caller has already raised and
+    the select that uses it is dead code, so the value is only there to keep
+    the emitted C well typed.
+    """
+    domain = _zip_longest_slot_domain(elem)
+    if fill_node is None:
+        if domain == 'float':
+            return ("(double)0",
+                    "itertools.zip_longest: a padded slot of a float sequence has "
+                    "no value to fill: this path spells None as 0 in an "
+                    "integer slot and NULL in a string slot, and a double is "
+                    "neither, so the slot would answer with a number no source "
+                    "wrote")
+        return ('(int64_t)0', None)
+
+    ftype, fval = gen.lower_expr(fill_node)
+    fdomain = _zip_longest_fill_domain(ftype)
+    if isinstance(fill_node, gimple_ctypes.StringLiteral) and fdomain != 'string':
+        # A string literal is a string whatever its own lowered type says
+        # (`char *` is the usual one; the test is here because the string arm
+        # below has always accepted the node itself, not only the ctype).
+        fdomain = 'string'
+    if fdomain != domain:
+        expr = {
+            'float': fval,
+            'string': f"(int64_t)(char *)({fval})",
+        }.get(domain, f"(int64_t)({fval})")
+        return (expr,
+                f"itertools.zip_longest: fillvalue ({fdomain}) cannot fill slot "
+                f"'{slot_name}' ({domain}) - CPython hands every slot the value "
+                f"as given, so this slot would answer "
+                f"{_ZIP_LONGEST_ANSWERS.get(fdomain, fdomain)} where CPython "
+                f"answers {_ZIP_LONGEST_ANSWERS.get(domain, domain)}")
+    return ({'float': fval,
+             'string': f"(int64_t)(char *)({fval})"}.get(domain, f"(int64_t)({fval})"),
+            None)
+
+
+# What each domain's zero READS as on this path, for a refusal message: the
+# point of the refusal is that the two differ, so the message shows both.
+_ZIP_LONGEST_ANSWERS = {'float': '0.0', 'string': 'None', 'pointer': 'None',
+                        'integer': '0'}
 
 
 def _gen_for_zip_longest(gen, node):
@@ -1204,31 +1245,20 @@ def _gen_for_zip_longest(gen, node):
     max(len_a, len_b) times; each tuple-target slot is assigned from its
     OWN sequence's element i (read with that sequence's own tracked
     element-type accessor), or the fill value once the index runs past
-    that sequence's length.
+    that sequence's length. The default fill is 0 — this scalar C model's
+    representation of None — so the common `if x is None:` guards after a
+    padded iteration test a genuine 0/NULL, exactly like real Python's
+    None sentinel.
 
-    **What a PADDED slot can hold is the whole constraint here**, because
-    CPython hands every slot the fill as given and each slot below is a C
-    local of its sequence's own element type — there is no box to put a value
-    of the wrong type into. So:
-
-      * `str` and `int` slots keep the model's long-standing 0/NULL sentinel
-        for an ABSENT fill, and a `char *` NULL is what `mojo_print` already
-        renders as `None`, so a padded string slot reads `None` as CPython
-        does. An `int64_t` has no such word, so a padded integer slot reads
-        `0` — a real, measured divergence from CPython's `None`, kept because
-        it is this model's documented representation and changing it is the
-        value-model work below, not this function's;
-      * a `double` slot has NO absent value at all — every double is a value
-        here, so `None` and `0.0` are one word — and a padded one is therefore
-        REFUSED (`ZipLongestFillRefusal`) rather than answered `0.0`;
-      * an EXPLICIT `fillvalue` is admitted only into a slot whose own read
-        type it matches, for the same reason.
-
-    Representing absence for a `double` — so the first refusal above becomes
-    an answer — is the value-model change this doc's bug names: the per-slot
-    kind byte (`mojo_list_set_kinds`' `MOJO_KIND_NONE`, which
-    `TypeLattice.slot_kind_byte` already names) is the precedent, and a loop
-    target would have to carry that kind alongside its value.
+    A padded slot the model cannot FILL faithfully raises instead, naming
+    the domain, rather than being handed a value: `_zip_longest_padded_fill`
+    is the whole of that decision and its docstring is why. In one line: a
+    float slot has no absent value (0.0 is a number, and CPython answers
+    None), and a fillvalue outside the slot's own domain is a value the slot
+    cannot carry. The raise is emitted here, before the index arithmetic,
+    and the loop after it is emitted as dead code so every name the body
+    declares is still declared — `mojo_raise_*` longjmps, so nothing
+    downstream of it runs, and C would not compile an undeclared name.
 
     Before this, `itertools.zip_longest(...)` hit _gen_for_iter's generic
     boxed-iterable fallback, where `itertools` is an opaque module global:
@@ -1247,9 +1277,7 @@ def _gen_for_zip_longest(gen, node):
     Any shape this narrow handler can't prove supported (non-2-arity call,
     non-tuple target, non-list sequence, non-literal fillvalue) raises;
     the caller (_gen_stmt_ForStmt) rolls back partial output transactionally
-    and falls through to the pre-existing generic path unchanged — EXCEPT for
-    `ZipLongestFillRefusal`, which is re-raised, because the generic path drops
-    the loop and answers nothing.
+    and falls through to the pre-existing generic path unchanged.
     """
     it = node.iterable
     args = list(it.args)
@@ -1259,6 +1287,14 @@ def _gen_for_zip_longest(gen, node):
             fill_node = kwv
         else:
             raise ValueError(f"unsupported zip_longest argument {kwn}=...")
+    if gen._is_none_literal(fill_node):
+        # `fillvalue=None` IS the default, spelled out — CPython's own
+        # signature says so — so it asks for the same absent value rather
+        # than for a fill, and not for one in the domain of `None`'s own
+        # lowered type (an int64_t 0), which a string slot used to refuse.
+        # `gen._is_none_literal` is the predicate the rest of the backend
+        # asks (`None` parses as a bare `IdentExpr`, not a literal node).
+        fill_node = None
     if len(args) != 2:
         raise ValueError("only the 2-sequence zip_longest shape is supported")
     target = node.target
@@ -1278,103 +1314,31 @@ def _gen_for_zip_longest(gen, node):
             ptr = gen._coerce_to_type('int64_t', 'MojoList *', sv)
         seqs.append((ptr, gen._elem_of(sv)))
 
-    # The fillvalue, LOWERED ONCE.  It used to be lowered inside the per-slot
-    # loop below, so `zip_longest(a, b, fillvalue=f())` called `f()` once per
-    # slot — CPython evaluates the default exactly once, and a fillvalue with a
-    # side effect is the shape that notices.  It is lowered here, before the
-    # loop is emitted, which is also where its value has to be computed: it is
-    # loop-invariant.
-    fill_ctype = None
-    fill_value = None
-    if fill_node is not None:
-        fill_ctype, fill_value = gen.lower_expr(fill_node)
-
     # Per-slot read + fill expressions, all selected through ONE int64_t
     # (or double) select so the fill/element type mismatch never reaches
     # GIMPLE as differing ternary operand types. The final assignment to
     # the declared target coerces back to its real declared ctype (the
     # same box/unbox dance _gen_for_list's tuple branch uses).
-    #
-    # The fill is admitted into a slot ONLY when the slot's own read type can
-    # hold it, and the reason is CPython's: `zip_longest` hands every slot the
-    # value as given, so a `fillvalue` of one type landing in a slot of another
-    # is not a conversion but a wrong answer. It used to be coerced per slot,
-    # which produced three of them and each was measured:
-    #
-    #   fillvalue="-" into an int slot  → `(int64_t)(char *)"-"`, and
-    #     `zip_longest([1], ["p", "q"], fillvalue="-")` printed `4364407504 q`
-    #     where CPython prints `- q` (the pointer, as a decimal)
-    #   fillvalue=0.0 into an int slot  → `(int64_t)0.0`, and
-    #     `zip_longest([1, 2.5], [7], fillvalue=0.0)` printed `2.5 0` where
-    #     CPython prints `2.5 0.0`
-    #   fillvalue="-" into a float slot → already a refusal here, and it stays
-    #     one (it was the only direction the old per-slot check covered)
-    #
-    # A fill that cannot REACH its slot is not this question: see
-    # `_zip_longest_reaches`, which is what keeps the doc's own first program
-    # (`zip_longest([1, 2], ["p"], fillvalue="-")`) building.
     fills = []
+    refusals = []
     slot_reads = []  # (raw_ctype, expr_with_{i} placeholder fn)
     for si, (ptr, elem) in enumerate(seqs):
         suf = gimple_ctypes.TypeLattice.list_suffix(elem)
-        reaches = _zip_longest_reaches(args, si)
         if suf == 'double':
             slot_reads.append(('double', lambda p=ptr: f"mojo_list_get_double ({p}, {gen._ziptmp})"))
+            fills.append("(double)0")
         elif suf == 'str':
             slot_reads.append(('str', lambda p=ptr: f"mojo_list_get_str ({p}, {gen._ziptmp})"))
+            fills.append('(int64_t)0')
         else:
             slot_reads.append(('int', lambda p=ptr: f"mojo_list_get_int ({p}, {gen._ziptmp})"))
-        # The expression this slot's select takes when the index is past its
-        # own sequence's end. `None` means "the arm's `(double)0`", patched
-        # below, and it is the DEFAULT the absent fill has always been.
-        #
-        # A slot the fill can never reach gets that default rather than the
-        # fillvalue, and the reason is not tidiness: an unreachable slot's
-        # expression still has to COMPILE. `(int64_t)(char *)(9.0)` for a
-        # string slot in `zip_longest([1.5], ["q", "r"], fillvalue=9.0)` is not
-        # dead code to gcc, it is "cannot convert to a pointer type" — the
-        # second sequence has two elements and the loop runs twice, so slot `b`
-        # is never padded, and the program still did not build until the
-        # unreachable slot stopped naming the fillvalue at all.
-        if not reaches:
-            fills.append(_ZIP_LONGEST_ABSENT[suf])
-            continue
-        if fill_node is None:
-            if suf == 'double':
-                # The default fill is `absent`, and this is the one slot type
-                # that cannot carry it: the loop target is a C `double` and
-                # every double is a value here, so `None` and `0.0` are the
-                # same word and `zip_longest([1.5], ["q", "r"])` printed
-                # `0.0 r` where CPython prints `None r`. The `int` and `str`
-                # arms keep their 0/NULL sentinel because a C `int64_t` and a
-                # C `char *` each have one word that is not a value of their
-                # own domain. Representing absence for a `double` is a
-                # value-model change — the per-slot kind byte
-                # (`mojo_list_set_kinds`' `MOJO_KIND_NONE`, which
-                # `TypeLattice.slot_kind_byte` names) is the precedent, and a
-                # loop target would have to carry that kind with it — and not
-                # a tweak to this lowering.
-                raise ZipLongestFillRefusal(
-                    "zip_longest: a padded `double` slot has no value that "
-                    "means `absent` on this model — the loop target is a C "
-                    "`double`, every double is a value here, so `None` and "
-                    "`0.0` are the same word and the padded row reads `0.0`. "
-                    "Pass an explicit float `fillvalue`, or zip two float "
-                    "sequences of the same length.")
-            fills.append(_ZIP_LONGEST_ABSENT[suf])
-        elif suf == 'double':
-            if not gimple_ctypes.TypeLattice.is_float(fill_ctype):
-                raise _zip_longest_fill_refusal(fill_ctype, "a float sequence")
-            fills.append(fill_value)
-        elif suf == 'str':
-            if (fill_ctype != 'char *'
-                    and not isinstance(fill_node, gimple_ctypes.StringLiteral)):
-                raise _zip_longest_fill_refusal(fill_ctype, "a string sequence")
-            fills.append(f"(int64_t)(char *)({fill_value})")
-        else:
-            if not gimple_ctypes.TypeLattice.is_int(fill_ctype):
-                raise _zip_longest_fill_refusal(fill_ctype, "an integer sequence")
-            fills.append(f"(int64_t)({fill_value})")
+            fills.append('(int64_t)0')
+        # The fill is the one thing a padded slot is given that the loop's own
+        # element read cannot supply, so it is asked for HERE, once per slot,
+        # and both answers travel together.
+        fills[-1], refusal = _zip_longest_padded_fill(gen, elem, fill_node,
+                                                     tgt_names[si])
+        refusals.append(refusal)
 
     # Declare each target by its own slot's element type BEFORE the loop
     # (mirrors _gen_for_enumerate's declare-then-assign order; first-decl-
@@ -1383,6 +1347,15 @@ def _gen_for_zip_longest(gen, node):
     for vn, (_ptr, elem) in zip(tgt_names, seqs):
         gen._declare_var(vn, elem)
 
+    # A slot this path cannot fill faithfully raises ON THE PADDED ROW, from
+    # inside the loop, where the `in_t` this function already computes says
+    # the row is one: a shape refused up front would also refuse the rows
+    # that are perfectly representable (`zip_longest([1.5], [9.0])` pads
+    # nothing), and this path knows the lengths as runtime values, not as
+    # constants. Same decision as the `mojo_raise_value_error` a few hundred
+    # lines up for a starred target whose slots outnumber the item's
+    # elements — there the body would run against a binding that does not
+    # exist, here it would run against a value no source wrote.
     len_ts = []
     for ptr, _elem in seqs:
         lt = gen._new_temp('int64_t')
@@ -1410,12 +1383,20 @@ def _gen_for_zip_longest(gen, node):
             elem = seqs[si][1]
             cvn = gen._cname(vn)
             in_t = gen._new_val('_Bool', f"{idx_t} < {len_ts[si]}")
+            if refusals[si] is not None:
+                bb_refuse = gen._new_bb(); bb_filled = gen._new_bb()
+                gen._emit(f'  if ({in_t}) goto {bb_filled}; else goto {bb_refuse};')
+                gen._emit_label(bb_refuse)
+                gen._emit_call('void', '', 'mojo_raise_not_implemented',
+                               [('char *', gen._intern_string(
+                                   gimple_ctypes._c_escape(refusals[si])))])
+                gen._emit(f'  goto {bb_filled};')
+                gen._emit_label(bb_filled)
             raw = gen._new_val(
                 'double' if raw_ct == 'double' else ('char *' if raw_ct == 'str' else 'int64_t'),
                 read_fn())
             if raw_ct == 'double':
-                fill_v = fills[si] if fills[si] is not None else "(double)0"
-                sel = gen._new_val('double', f"{in_t} ? {raw} : {fill_v}")
+                sel = gen._new_val('double', f"{in_t} ? {raw} : {fills[si]}")
             elif raw_ct == 'str':
                 sel = gen._new_val('int64_t', f"{in_t} ? (int64_t){raw} : {fills[si]}")
             else:
@@ -2615,9 +2596,9 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # interpreter bound the whole key (`for k, *vs in d` printed `abc []`
         # where CPython prints `a ['b', 'c']`) and only one of the two engines
         # could be moved inside a merge. Both are fixed now — the interpreter
-        # splits a `str` item in `_unpack_source`, this is the lowering — and a
-        # refusal here is what kept the comparison that checks them from
-        # existing at all.
+        # splits a `str` item in `_bind_comprehension_target`, this is the
+        # lowering — and a refusal here is what kept the comparison that checks
+        # them from existing at all.
         #
         # An INT-keyed dict still refuses, and that is not the same shape being
         # put off: CPython's answer there is a `TypeError` ("cannot unpack

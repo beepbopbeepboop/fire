@@ -719,11 +719,7 @@ CASES = [
 
     # ── a struct-typed FIELD, initialised from a constructor ARGUMENT ─────────
     #
-    # The shape a stdlib struct's field list could not express: a struct-typed
-    # FIELD initialised from a constructor ARGUMENT.  It is the field-list half
-    # of `formal/model.py::struct_field_names` / `struct_is_framed`, and the row
-    # it blocked (`builtin_slice.mojo`) has since moved three refusals deeper,
-    # so nothing here depends on where that row is.
+    # `bugs/FORMAL_builtin_slice_optional_field_is_a_frame_holder.md`, shape 1.
     # The refusal and the workaround its own message names, as ONE pair, because
     # the message makes a promise to the reader — "Assign the field after
     # `Box(…)`, which is the same program" — and a promise nobody checks is how a

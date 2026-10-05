@@ -46,18 +46,15 @@ audit tooling in the toy project counts exactly these.
 from formal.types import (DEFAULT_INT_TYPE, function_var_types,
                           parse_type_name, resolve, uses_typed_model)
 from formal.x86_64 import ARG_REGS  # noqa: F401 — read by `_x86_entry`
-# `specs` for the `@refines(...)` annotation — the ONE reader of it, shared with
-# `formal/arm64_proof_gen.py`.  A second reader here would be a second place for
-# the two backends to disagree about what an annotation means, which is the same
-# defect `formal/model.py::unapplied_decorator_refusal` exists to prevent for the
-# decorators it classifies.
-from formal import specs as SPECS
 
 # The file's own preamble, matching formal/arm64_proof_gen.py's: the deep
 # recursion is the model equations and `native_decide` runs, and the linter
 # options are off because a generated file legitimately has unused binders in
 # the parts that are `sorry`.
-_PREAMBLE = """{imports}
+_PREAMBLE = """import ProofLib
+import work
+import Refine
+
 set_option maxRecDepth 100000
 set_option maxHeartbeats 20000000
 set_option linter.unusedSimpArgs false
@@ -758,15 +755,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
     _vscope = _AP._Scope()
     _vscope.str_addrs = tc["str_addrs"]
 
-    # The INDEPENDENT specification this program asks to be checked against, or
-    # None.  Read for the same reason and with the same reader as on arm64: it
-    # decides the header, and a header decided at the bottom of the emitter is a
-    # header that is easy to forget.  `SPECS.RefinesRefusal` is a
-    # `NotImplementedError`, which is the refusal signal both generators use.
-    refines = SPECS.spec_refinement(fn, where=func_name)
-
-    parts = [_PREAMBLE.format(imports=SPECS.header_imports(bool(refines))),
-             _TRUST_HEADER]
+    parts = [_PREAMBLE, _TRUST_HEADER]
 
     # The ADMITTED HOST CONTRACTS this program rests on.  Rendered by
     # `formal/arm64_proof_gen.py`'s `_admitted_lean` and not here, because there
@@ -957,21 +946,5 @@ def generate_x86_64_proof(prog, code, info) -> str:
         f"  | some s => s.rax = {AP._apply_args('mojo', enames)}\n"
         f"  | none => False := by\n"
         f"  sorry\n")
-
-    # SPECIFICATION REFINEMENT, when the source asked for one.  **Only the model
-    # half**, and that is the whole reason this backend is not the arm64
-    # sentence: the end-to-end theorem above is a `sorry`, so composing with it
-    # would give `main_refines_spec` an admitted premise and call the result a
-    # proof.  The model half is a real check — it evaluates the generator's `mojo`
-    # against the hand-written specification for every input in the range — and
-    # it is the half that does not depend on the `sorry`.
-    if refines is not None:
-        parts.append(SPECS.refines_section(
-            func_name, f"{func_name}_prog", refines, machine_half=False,
-            missing_reason=(
-                "the end-to-end theorem above is a `sorry` on this backend, so "
-                "`main_refines_spec` would be a composition with an ADMITTED "
-                "premise — Lean would accept it and it would say nothing about "
-                "the machine.")))
 
     return "\n".join(parts)
