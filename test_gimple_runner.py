@@ -9151,6 +9151,66 @@ def main():
 main()
 """)
 
+    # The same contract one hop further out: the argument is not a literal at
+    # the call site and not a caller-scanned local, it is ANOTHER FUNCTION'S
+    # RETURN VALUE. That is the third shape of the same question, and it was
+    # the one left out, so a parameter whose every call site is handed a call
+    # result recorded no element evidence at all, fell to `int64_t`, and every
+    # read of its elements used `mojo_list_get_int` -- so `t.numel()`
+    # degraded to the generic no-op stub and `total(build(10))` accumulated a
+    # `T *`'s own bits. Exit 0, no diagnostic, and BOTH one-hop neighbours
+    # (a container literal at the call site, a local holding one) were already
+    # right, which is what made this a gap rather than a known limit.
+    #
+    # Asserted with the two already-correct spellings side by side, because a
+    # test of only the broken one would not say which of the three the fix is
+    # responsible for, and with an `int` and a `str` producer as well as the
+    # struct one, because an `int64_t` element type is this codegen's "cannot
+    # tell" default rather than positive evidence and must stay silent.
+    test_gimple_matches_cpython("gimple_param_elem_from_a_call_result", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+def total(xs):
+    s = 0
+    for t in xs:
+        s = s + t.numel()
+    return s
+
+def build(n):
+    return [T(n), T(n + 1)]
+
+def sum_ints(xs):
+    t = 0
+    for x in xs:
+        t = t + x
+    return t
+
+def build_ints():
+    return [1, 2, 3]
+
+def cat(xs):
+    r = ''
+    for x in xs:
+        r = r + x
+    return r
+
+def build_strs():
+    return ['aa', 'bb']
+
+print(total(build(10)))
+print(total([T(1), T(2)]))
+def total_local(n):
+    xs = [T(n), T(n + 1)]
+    return total(xs)
+print(total_local(10))
+print(sum_ints(build_ints()))
+print(cat(build_strs()))
+""")
+
     # A dict's VALUE type is a compile-time fact at the call site, and there is
     # no binding site inside the callee to record it -- so before the cross-call
     # dict-value contract (`_param_dict_val_types`, seeded at the same
