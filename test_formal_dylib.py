@@ -1172,6 +1172,106 @@ def test_same_name_in_two_modules(tmpdir, shared):
           f"the export table repeats a name: {names}")
 
 
+def test_a_library_source_can_use_a_sibling_sources_struct(tmpdir, shared):
+    """A struct declared in one source of a LIBRARY is usable from another.
+
+    A library is ONE image compiled from SEVERAL sources, so "which structs does
+    this image declare" is a question about all of them — and
+    `_prepare_functions` is run once per source, with that source's own
+    declarations. Every fact that is a property of the image rather than of the
+    file was therefore answered from a SUBSET: the frame-holder analysis (which
+    writes `fn._frame_slots`, the table an emitter lays a field out with) and
+    the method dispatch table. The emitter was meanwhile handed the MERGED
+    `library_structs`, so the two halves of one build disagreed about one image.
+
+    The refusal that came out named the construct and not the cause:
+
+        build: liby.mojo: use_it: 't.v' is a field access through 't', and this
+        path has no way to say what 't' holds … Bind the base from a constructor
+        whose declaration THIS IMAGE can see
+
+    — and `libx.mojo`, one file above it on the same command line, declares it.
+    Measured before the fix, both architectures, one field or two, field store
+    or method call; the second row here is the framed one, where the receiver is
+    a frame ADDRESS rather than the field itself.
+
+    **Both architectures**, because the merge is in `formal/build.py` and the
+    thing it feeds is a table both emitters read — a fix that worked on one and
+    not the other would be a rewrite that reached one backend's pipeline.
+
+    **AND the export qualifier**, which is the half that could have gone wrong
+    in the other direction. `_method_exports` derives a method's module
+    qualifier from the FILE its struct was declared in, so letting each source's
+    table carry its siblings' declarations publishes `Wide.total` under the
+    prefix of the file that USES it: a library that builds, links, and then
+    fails to load with "Symbol not found" for a method it does export. So the
+    merge is dropped again the moment the analysis has had it, and the assertion
+    is that `Wide_total` is qualified by the DECLARING file.
+    """
+    lib_a = ("struct Wide:\n"
+             "  var a: Int\n"
+             "  var b: Int\n"
+             "\n"
+             "  def total(self) -> Int:\n"
+             "    return self.a + self.b\n")
+    lib_b = ("def use_wide() -> Int:\n"
+             "  var w = Wide()\n"
+             "  w.a = 20\n"
+             "  w.b = 22\n"
+             "  return w.total()\n")
+    prog = "def main():\n  return use_wide() - 1\n"      # 42 - 1 = 41
+    sys.path.insert(0, HERE)
+    from formal.build import compile_formal_dylib
+    for arch in ("arm64", "x86_64"):
+        src_a = os.path.join(tmpdir, f"sib_a_{arch}.mojo")
+        src_b = os.path.join(tmpdir, f"sib_b_{arch}.mojo")
+        with open(src_a, "w") as f:
+            f.write(lib_a)
+        with open(src_b, "w") as f:
+            f.write(lib_b)
+        out = os.path.join(tmpdir, f"siblib_{arch}.dylib")
+        # In-process rather than through `fire.py dylib`, because that CLI
+        # refuses an x86-64 library outright (there is no `DylibExport` model
+        # for the other machine — `test_a_proved_dylib_is_an_arm64_artifact_and
+        # _says_so` is that refusal) while the function behind it honours `arch`,
+        # which is how every x86-64 module dylib in the tree is built
+        # (`formal/imports.py::build_module_dylib`).
+        try:
+            compile_formal_dylib([src_a, src_b], output=out, prove=False,
+                                 check=False, arch=arch)
+        except Exception as e:                     # noqa: BLE001 — reported
+            raise TestFailure(
+                f"[{arch}] a library using its own second source's struct did "
+                f"not build: {str(e)[-400:]}") from None
+        with open(out + ".manifest.json") as f:
+            exports = {e["name"]: e["symbol"]
+                       for e in json.load(f)["exports"]}
+        check(exports.get("Wide_total") == "sib_a_%s_Wide_total" % arch,
+              f"[{arch}] Wide.total is published as "
+              f"{exports.get('Wide_total')!r}, which is not qualified by the "
+              f"file that DECLARES the struct: {exports}")
+        check(exports.get("use_wide") == "sib_b_%s_use_wide" % arch,
+              f"[{arch}] use_wide is published as {exports.get('use_wide')!r}, "
+              f"which is not qualified by the file that declares it: {exports}")
+
+        # …and it computes the right answer across the boundary, not merely
+        # builds: 20 + 22, less the 1 the program takes off.
+        src = os.path.join(tmpdir, f"sib_prog_{arch}.mojo")
+        with open(src, "w") as f:
+            f.write(prog)
+        exe = os.path.join(tmpdir, f"sib_prog_{arch}.aout")
+        result = run_fire(["build", "--formal", "--no-prove", f"--backend={arch}",
+                           "-o", exe, "--link-dylib", out, src])
+        check(result.returncode == 0,
+              f"[{arch}] the program did not link: "
+              f"{(result.stderr or result.stdout).strip()[-300:]}")
+        run = subprocess.run([exe], capture_output=True, text=True)
+        check(run.returncode == 41,
+              f"[{arch}] the linked program returned {run.returncode}, expected "
+              f"41 — the struct's method and its field stores have to compute "
+              f"the source's own arithmetic")
+
+
 def test_private_only_module_rejected(tmpdir, shared):
     src = os.path.join(tmpdir, "private.mojo")
     with open(src, "w") as f:
@@ -1941,6 +2041,8 @@ TESTS = [
      test_a_wrong_spec_on_a_multi_export_image_is_rejected),
     ("overloads build and export once", test_overloads_do_not_collide),
     ("same name in two modules", test_same_name_in_two_modules),
+    ("a library source can use a sibling source's struct",
+     test_a_library_source_can_use_a_sibling_sources_struct),
     ("module with no public functions rejected", test_private_only_module_rejected),
     ("the refusal names the real reason", test_refusal_names_the_real_reason),
     ("a dylib is built for the requested arch",

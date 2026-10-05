@@ -328,6 +328,115 @@ def test_a_struct_template_the_module_declares_can_itself_apply(tmpdir):
               f"anything this case wrote down")
 
 
+def test_a_module_that_applies_its_own_template_publishes_it(tmpdir):
+    """§9a: the OWN demand set is a library's too, not only an executable's.
+
+    The case above is the one-file shape — this module is both the library and
+    the consumer, and `compile_formal`'s own `stmts` are the ones `_own_
+    instantiations` rewrites. The LIBRARY path never had it: `build_module_
+    dylib` compiled the module's own source and whatever an IMPORTER asked for,
+    and `compile_formal_dylib` re-parses each source itself, so neither
+    `instantiation_demands` (which is asked with `own_templates=`, which empties
+    the own set on purpose) nor the rewrite was on it. The refusal was a
+    question about an importer asked of a file with no importer in it:
+
+        build: main.mojo imports 'pairlib', which cannot be built either:
+        pairlib.mojo: `Pair[…](…) calls a name this unit does not compile, so
+        the brackets cannot be bound … so a call arriving here asked for none
+
+    Three halves, and each is a different function, which is why it took all
+    three:
+
+      * `monomorph.own_demands` is the own demand set as a NAME, so the artifact
+        identity (`demands_key`) and the rewrite read one table;
+      * `compile_formal_dylib` takes the statements to compile, because the
+        rewrite is on the AST and a generated copy of the module would have to
+        reproduce its prefix and its line numbers;
+      * a library's own sources are now a MERGED struct table for every source's
+        preparation, because the instantiated declaration arrives as a SECOND
+        source file of the library and a frame-holder analysis that cannot see a
+        sibling's struct refuses the field store (`test_formal_dylib.py`'s
+        sibling-source case, which is that half on its own).
+
+    **Two instantiations in one library**, because the failure this must not
+    have is the two collapsing onto one symbol: `Pair[Int]` and `Pair[Bool]` are
+    two concrete structs with two sets of methods, and a library that publishes
+    7 and 1 has bound both. **And the library's own exports carry the
+    instantiation**, which is what makes this a boundary case rather than an
+    inlining one: `pairlib_Pair_1_T_3_Int_get_first` has to be in the manifest
+    for the program to have anything to bind.
+    """
+    lib = ("struct Pair[T]:\n"
+           "    var first: T\n"
+           "\n"
+           "    def get_first(self) -> T:\n"
+           "        return self.first\n"
+           "\n"
+           "def int_pair() -> Int:\n"
+           "    var a = Pair[Int]()\n"
+           "    a.first = 7\n"
+           "    return a.get_first()\n"
+           "\n"
+           "def bool_pair() -> Int:\n"
+           "    var b = Pair[Bool]()\n"
+           "    b.first = True\n"
+           "    return b.get_first()\n")
+    prog = ("from pairlib import int_pair, bool_pair\n"
+            "\n"
+            "def main():\n"
+            "    print(int_pair())\n"
+            "    print(bool_pair())\n")
+    cpython = ("class Pair:\n"
+               "    def __init__(self):\n"
+               "        self.first = 0\n"
+               "\n"
+               "    def get_first(self):\n"
+               "        return self.first\n"
+               "\n"
+               "def int_pair():\n"
+               "    a = Pair()\n"
+               "    a.first = 7\n"
+               "    return a.get_first()\n"
+               "\n"
+               "def bool_pair():\n"
+               "    b = Pair()\n"
+               "    b.first = True\n"
+               "    # A formal Bool is ONE WORD and prints as 1, where Python's is "
+               "its\n"
+               "    # own object — the same spelling the file's headline case "
+               "makes\n"
+               "    # and for the same reason: a reference that quietly accepted "
+               "`True`\n"
+               "    # and `1` would stop being a differential for every other "
+               "line.\n"
+               "    return int(b.get_first())\n"
+               "\n"
+               "def main():\n"
+               "    print(int_pair())\n"
+               "    print(bool_pair())\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_ownlib", lib, prog, cpython)
+        check(got == "7\n1\n",
+              f"[{arch}] printed {got!r}, which is neither CPython's answer nor "
+              f"anything this case wrote down")
+    # The instantiation is a BOUNDARY symbol, so the manifest has to carry it —
+    # with the module's OWN prefix, because that is the library it was compiled
+    # into. A program that answers 7 can in principle have inlined the body, so
+    # the manifest is the half that says the mechanism ran.
+    found = []
+    for _base, _dirs, files in os.walk(FI.CAS_IMPORTS_ROOT):
+        for name in files:
+            if name.startswith("pairlib.") and name.endswith(".manifest.json"):
+                with open(os.path.join(_base, name)) as f:
+                    found += [e["symbol"] for e in json.load(f)["exports"]]
+    check(any(s.startswith("pairlib_Pair_1_T_3_Int_get_first")
+              for s in found),
+          f"no `pairlib_Pair_1_T_3_Int_get_first` in any pairlib dylib "
+          f"({found}) — the instantiation was computed but not published, which "
+          f"is the `declares only the template(s)` refusal's other half")
+
+
 def test_a_package_reexport_attributes_the_demand_to_the_defining_module(
         tmpdir):
     """`from pkg import Pair` must instantiate in `pairlib`, not in `pkg`.
@@ -1817,6 +1926,8 @@ TESTS = [
      test_a_generic_function_template_is_instantiated_too),
     ("a struct template the module declares can itself apply",
      test_a_struct_template_the_module_declares_can_itself_apply),
+    ("a module that applies its own template publishes it",
+     test_a_module_that_applies_its_own_template_publishes_it),
     ("a package re-export attributes the demand to the defining module",
      test_a_package_reexport_attributes_the_demand_to_the_defining_module),
     ("an instantiation agrees with the concrete struct of the same shape",

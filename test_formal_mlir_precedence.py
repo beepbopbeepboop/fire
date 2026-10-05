@@ -278,6 +278,31 @@ CLASSIFIED = [
      "def addit(a: Int, b: Int) -> Int:\n"
      "    return __mlir_op.`index.add`(a, b)\n",
      "`index.add` is a dialect OPERATION applied ELEMENTWISE", None),
+    # The one branch that names the OPERATION rather than the type, because the
+    # operand IS a declared word and the type is not what is missing. It is here
+    # because it carried a FALSE sentence until 2026-10-04, in the file whose
+    # whole subject is diagnostics that are false about the name they name:
+    #
+    #     `pop.floordiv` is the clearest omission, because FLOOR division is
+    #     the other semantics from this path's `//`, which truncates
+    #     (measured).
+    #
+    # This path's `//` FLOORS — `model.division_floors`, the one decision both
+    # emitters ask — so the claim was backwards twice over, and a reader sent
+    # after "the other semantics" would have found that they are the SAME
+    # semantics. `pop.floordiv` is now absent for the weaker reason that no
+    # corpus site reaches it. The `absent` half is the false clause itself: a
+    # reword that fixed the tail and left "which truncates" would satisfy the
+    # needle.
+    ("an_elementwise_operation_over_a_word_names_the_missing_operation",
+     "struct Idx:\n"
+     "    var tag: Int\n"
+     "    var v: __mlir_type.index\n"
+     "\n"
+     "def biggest(self: Idx, rhs: Idx) -> Idx:\n"
+     "    return Idx(tag=0, v=__mlir_op.`pop.max`(self.v, rhs.v))\n",
+     "What is missing is therefore the OPERATION rather than the type",
+     "which truncates"),
     # Needs a PREDICATE. `std/simd.mojo:1546` verbatim. The needle names the
     # missing thing rather than saying "no representation", because the missing
     # thing is a bracket this path cannot read — six distinct
@@ -511,13 +536,21 @@ GUARDED = [
     # operand stops being a declared `__mlir_type.index` at all.
     #
     # The expected values are STATED rather than taken from an oracle, because
-    # CPython cannot parse `__mlir_op.`index.add`` — and because two of them are
-    # not CPython's. `-7 // 2` is -4 in CPython and this path's `//` TRUNCATES,
-    # which is `index.divs` and not `pop.floordiv`; `-7 >> 2` is -2 in both
-    # because the shift is arithmetic. Those two are measured
-    # (`bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md`'s
-    # arithmetic table carries the measurement) and the row is what stops a
-    # future edit to that table from quietly choosing floor division.
+    # CPython cannot parse `__mlir_op.`index.add``. Two of them are the whole
+    # point of the row and NEITHER is CPython's:
+    #
+    #   * `divs(-7, 2)` is -3 here, where `index.divs` — a TRUNCATING signed
+    #     division — is -3 and CPython's `/` is -3.5. This path's `//` FLOORS
+    #     since `model.division_floors` landed, so `index.divs` cannot be `//`
+    #     any more; it is `/`, which is the int-only truncation. The row was
+    #     RED on master, and in the informative direction: the table said `//`
+    #     and the image printed -4 for `divs`, which is a wrong answer in
+    #     exactly the shape this suite exists to catch, caused by a table entry
+    #     decided by a measurement that has since been INVERTED.
+    #   * `-7 >> 2` is -2 in CPython too, because the shift is arithmetic.
+    #
+    # `a_dialect_slash_truncates_and_this_path_floors` below is the row that
+    # MEASURES the property this one depends on, on both architectures.
     ("a_dialect_arithmetic_lowers_when_its_operand_declares_a_word",
      "struct Idx:\n"
      "    var tag: Int\n"
@@ -553,6 +586,65 @@ GUARDED = [
      "    printf(\"%d %d %d\\n\", eqv(a, a), eqv(a, b), lt(a, b))\n"
      "    return 0\n",
      "-5 -3 0 -2\n1 0 1\n"),
+    # THE PROPERTY THE ROW ABOVE RESTS ON, measured rather than believed.
+    # `formal/model.py::division_floors` is the one decision both emitters ask
+    # about `/`, `//` and `%`, and `MLIR_WORD_ARITH_OPS`'s `index.divs` and
+    # `pop.rem` rows are only correct while it says what this row says:
+    #
+    #     f(-7, 2)   this path   truncating (C / MLIR divs)   CPython
+    #       a /  b        -3                 -3                 -3.5
+    #       a // b        -4                 -3                 -4
+    #       a %  b         1                 -1                  1
+    #
+    # `/` is the int-only truncation `FORMAL.md` §6 Phase 7 puts there, `//`
+    # floors and `%` takes the sign of the DIVISOR. So `index.divs` is `/` and
+    # `pop.rem` is `a - (a / b) * b`; both were the OTHER operator before the
+    # floor correction landed, and both were a wrong answer for as long as it
+    # took. A row that measures `/` is what turns that from a comment into
+    # something that goes red on the day Phase 7 arrives.
+    #
+    # The three DIVISOR signs are all here on purpose: truncating signed
+    # division is `-3` for `(-7, 2)`, `-3` for `(7, -2)` and `3` for
+    # `(-7, -2)`, so a lowering that got the negation wrong on one of them
+    # would still pass on the other two.
+    ("a_dialect_slash_truncates_and_this_path_floors",
+     "def show(a: Int, b: Int) -> Int:\n"
+     "    printf(\"%d/%d %d//%d %d%%%d\\n\", a, b, a, b, a, b)\n"
+     "    return 0\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    show(-7, 2)\n"
+     "    show(7, -2)\n"
+     "    show(-7, -2)\n"
+     "    show(7, 2)\n"
+     "    return 0\n",
+     "-7/2 -7//2 -7%2\n7/-2 7//-2 7%-2\n-7/-2 -7//-2 -7%-2\n7/2 7//2 7%2\n"),
+    # `pop.rem` is the OTHER row that was a wrong answer, and it has no
+    # single-operator spelling: LLVM's `srem` carries the DIVIDEND's sign and
+    # this path's `%` carries the DIVISOR's, so the table carries the identity
+    # `a - (a / b) * b` and the rewrite builds it. The expected values are the
+    # `srem` ones for all four sign combinations — -1, 1, -1, 1 — and the
+    # MIDDLE one is the row: `7 % -2` is -2 on this path and `srem(7, -2)` is 1,
+    # so a lowering that fell back to `%` would differ on `show(7, -2)` alone.
+    ("a_dialect_signed_remainder_lowers_to_the_dividend_sign",
+     "struct Idx:\n"
+     "    var tag: Int\n"
+     "    var v: __mlir_type.index\n"
+     "\n"
+     "def rem(self: Idx, rhs: Idx) -> Idx:\n"
+     "    return Idx(tag=0, v=__mlir_op.`pop.rem`(self.v, rhs.v))\n"
+     "\n"
+     "def show(a: Int, b: Int) -> Int:\n"
+     "    printf(\"%d\\n\", rem(Idx(tag=0, v=a), Idx(tag=0, v=b)).v)\n"
+     "    return 0\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    show(-7, 2)\n"
+     "    show(7, -2)\n"
+     "    show(-7, -2)\n"
+     "    show(7, 2)\n"
+     "    return 0\n",
+     "-1\n1\n-1\n1\n"),
     # The same arithmetic in a KEYWORD ARGUMENT, and the row that is really a
     # regression pin for the shared walk: `CallExpr.kwargs` is a list of
     # `(name, value)` pairs, so a replacement that lands in one of them is in a

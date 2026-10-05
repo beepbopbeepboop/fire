@@ -18431,12 +18431,32 @@ TYPE_ARGUMENT_LIST_CASES = [
     # two things: a lookup keyed by the tuple … or a two-dimensional index",
     # which is about a container lookup that cannot happen when the base is a
     # type.
-    ("type_argument_list_without_any_frame",
+    #
+    # …and it is now an ANSWER rather than a refusal, which is what the rows
+    # above are still refusals for. `struct Box[T: AnyType, U: AnyType]` is a
+    # template the module DECLARES and APPLIES, which
+    # `bugs/FORMAL_generic_monomorph_scope.md` §9 made a thing this path
+    # instantiates rather than refusing by name ("`Box[…](…) calls a name this
+    # unit does not compile"). So `Box[Int, Int]` is two concrete type
+    # arguments, the instantiation is emitted, and the program computes 7 —
+    # on arm64 and on x86-64, exit 0 either way.
+    #
+    # The rows above it did NOT go with it, and why is the point of keeping
+    # them: `Pointer[Int, s]`, `Triple[Int, s, False]` and `h.tag[Int, s]` all
+    # put a VALUE in the bracket, so no demand is recorded, the call site keeps
+    # its brackets, and the refusal is still the true one. A bracket whose items
+    # are types and a bracket whose items are values are one construct read two
+    # ways, and this group is where that difference is visible.
+    #
+    # The name changed with the expectation, because a row called
+    # `…_without_any_frame` asserting an exit status reads as a claim about the
+    # frame check, which is not what it pins any more.
+    ("type_argument_list_of_two_type_arguments_answers",
      "struct Box[T: AnyType, U: AnyType]:\n"
      "    var v: Int\n\n"
      "def main(n: Int) -> Int:\n"
      "    var m = Box[Int, Int](7)\n"
-     "    return m.v\n", "refuse:compile-time explicit-parameter list", None),
+     "    return m.v\n", 7, ""),
     # THE COUNTER-CASES, and they are the whole reason the change is a narrow
     # skip rather than a deletion of the container branch. Every escape the
     # branch exists for has a base that is a DICT or a LIST, and no type name is
@@ -18497,7 +18517,18 @@ TYPE_ARGUMENT_LIST_CASES = [
 # incorrect one leaves every `refuse:` above green while the reader is still
 # sent to a non-bug, and that is how "a formal value is one 64-bit word, and
 # DType is not one thing" survived beside a corrected first clause. Two
-# sentences are pinned here because two were false about the same construct.
+# sentences were pinned here; there is ONE now, and the other is not a gap.
+#
+# `no_tuple_index_sentence_about_a_type_argument_list` asserted that
+# `Box[Int, Int]` was refused WITHOUT "whose index is a tuple" — the sentence
+# that describes a container lookup, which cannot happen when the base is a
+# TYPE. The program no longer refuses at all (§9 of
+# `bugs/FORMAL_generic_monomorph_scope.md`: the module both declares and
+# applies the template, so the instantiation is emitted and `Box[Int, Int](7)`
+# computes 7), so there is no sentence to be right or wrong about. Its twin
+# assertion is not lost with it: the row above it is the same bracket over the
+# same `Box`-shaped declaration with a VALUE in the bracket, it still refuses,
+# and it still asserts the absence of the same two sentences.
 TYPE_ARGUMENT_LIST_ABSENT_CASES = [
     ("no_container_store_sentence_about_a_type_argument_list",
      "struct S:\n"
@@ -18510,14 +18541,6 @@ TYPE_ARGUMENT_LIST_ABSENT_CASES = [
      "    var m = Pointer[Int, s]\n"
      "    return s.a\n",
      "refuse_without:compile-time explicit-parameter list:is stored in a container",
-     None),
-    ("no_tuple_index_sentence_about_a_type_argument_list",
-     "struct Box[T: AnyType, U: AnyType]:\n"
-     "    var v: Int\n\n"
-     "def main(n: Int) -> Int:\n"
-     "    var m = Box[Int, Int](7)\n"
-     "    return m.v\n",
-     "refuse_without:compile-time explicit-parameter list:whose index is a tuple",
      None),
 ]
 

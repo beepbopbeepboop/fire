@@ -1,5 +1,98 @@
 # `__mlir_op`: 259 sites over 104 dialect operations were refused as "there is no MLIR on this path", and for a quarter of the arithmetic ones that is false
 
+**Status (2026-10-04, `formal18-4`): the ARITHMETIC TABLE had two rows that were
+a SILENT WRONG ANSWER, and they were wrong for as long as the floor correction
+had been in the tree — this document's own measurement of them had been
+INVERTED under it.** Fixed at the root (both rows re-derived from
+`model.division_floors`, which is the one decision both emitters ask), with a
+test that MEASURES `/` on both architectures so the dependency is checked rather
+than believed. Read this before "The next step", and before the §"Correction"
+below, whose arithmetic table is what the fix corrects.
+
+**Two rows, one cause, and the cause is the shape of hazard this document
+exists to prevent.** `MLIR_WORD_ARITH_OPS` was decided by measuring this path's
+`//` and `%` against CPython's, and the measurement is what justified two
+entries:
+
+```
+f(-7, 2)                this path THEN   CPython      this path NOW
+  a // b                    -3  truncating   -4          -4  floor
+  a %  b                    -1  dividend      1           1  divisor
+  a /  b                    -3               -3.5        -3  truncating
+```
+
+`//` truncating and `%` carrying the DIVIDEND's sign is exactly `index.divs` and
+exactly LLVM's `pop.rem`, which is why the table said `index.divs` → `//` and
+`pop.rem` → `%` and why both were RIGHT. `formal/model.py::division_floors` and
+`lib/ProofLib.lean`'s `fdiv64`/`frem64` then made `//` floor and `%` take the
+divisor's sign (`bugs/FORMAL_fuzz_ledger.md` §2.1a is the record of that fix),
+and **nothing re-derived the table**. Measured on master, both architectures,
+through the dialect rewrite and at exit 0:
+
+| what the source wrote | what it denotes | this path answered |
+|---|---|---|
+| `__mlir_op.\`index.divs\`(-7, 2)` | `-3` (truncating signed division) | **`-4`** — its `//` |
+| `__mlir_op.\`pop.rem\`(-7, 2)` | `-1` (LLVM `srem`, dividend's sign) | **`1`** — its `%` |
+
+and the suite was RED over the first of them, which is how it was found:
+`test_formal_mlir_precedence.py`'s
+`a_dialect_arithmetic_lowers_when_its_operand_declares_a_word` stated `-3` —
+correct for `index.divs`, and the value the image printed after the floor fix
+was `-4`. **A stale expectation was the oracle that caught a wrong answer**,
+which is worth recording: the row was written to stop a future edit choosing the
+other division, and it did exactly that job two edits later, in the other
+direction.
+
+**What landed, and it is two re-derived rows rather than a new mechanism:**
+
+  * **`index.divs` → `/`.** `index.divs` is a truncating signed division and
+    `division_floors("/", signed)` is False, so this path's `/` IS that — the
+    int-only truncation `FORMAL.md` §6 Phase 7 puts there, which is a documented
+    stand-in rather than a promise.
+  * **`pop.rem` → a new `"srem"` shape, `a - (a / b) * b`.** `srem` carries the
+    dividend's sign and this path's `%` carries the divisor's, so there is no
+    single-operator spelling; the identity is exact precisely because `/`
+    truncates. `formal/build.py::_dialect_arith_replacement` builds it and
+    `_srem_expression` is its own function, so the table's shape and the
+    rewrite cannot come to disagree about which is which.
+
+**Both rows therefore depend on `/` meaning INTEGER truncation, and that is
+CHECKED rather than trusted**: `a_dialect_slash_truncates_and_this_path_floors`
+measures `a / b`, `a // b` and `a % b` for all four sign combinations on BOTH
+architectures, so the day Phase 7 arrives the row goes red in the same commit as
+the change rather than leaving a wrong answer behind a true comment. That is
+the whole difference between this fix and the comment it replaces.
+
+**Two FALSE SENTENCES this found and removed, both of them this document's own
+subject** (a diagnostic that is false about the path it describes):
+
+  * the elementwise refusal's word branch said *"`pop.floordiv` is the clearest
+    omission, because FLOOR division is the other semantics from this path's
+    `//`, which truncates (measured)"* — backwards twice over now, and a reader
+    sent after "the other semantics" would have found they are the SAME
+    semantics. It now names the omissions that are real (`pop.max`'s saturating
+    NaN-aware selection, `pop.abs`, `pop.div`'s unstated division) and says
+    `pop.floordiv` is absent because no corpus site reaches it — a deliberate
+    non-widening, not a gap;
+  * `MLIR_WORD_TYPE_NAMES`'s comment listed "a truncating division" among the
+    properties `__mlir_type.index` gives the arithmetic, without saying which
+    operator.
+
+**Tests: `test_formal_mlir_precedence.py` is 35/35** (was 32), of which two are
+new `GUARDED` rows that BUILD AND RUN both fixed operations on both
+architectures — `index.divs` through the arithmetic row it already had and
+`pop.rem` through a new one whose middle case (`7 rem -2` is 1; `7 % -2` is -2)
+fails the moment the table falls back to `%` — and one new `CLASSIFIED` row
+that pins the reworded diagnostic AND the absence of "which truncates".
+`test_refusal_taxonomy.py` is 261/261 and `test_formal_specialization.py` 17/17.
+
+**Nothing moved in the census and nothing moved a file**, which is the honest
+reading and this document's usual one: still 259 sites over 104 operations, and
+`std/builtin/simd_length.mojo` still stops at `_select.mojo`'s export rule
+(`FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`, claimed by
+`formal16-2`). **The value is that the two rows are no longer wrong**, and that
+`pop.rem`'s one corpus-unreachable row now computes what it says.
+
 **Status (2026-10-04, `work/formal21-5`): the last false sentence in this
 document's own subject is fixed, and the item it leaves behind is named — and it
 is NOT reachable from the corpus today, which is a measurement rather than an
@@ -46,8 +139,10 @@ statement about ONE code path and not about two implementations agreeing:
     type alone. `index.divs` → `//`, `index.shrs` → `>>`, `index.cmp[pred=eq]`
     → `==`.
 
-**The two rows that were MEASURED rather than read**, because this path's `//`
-and `%` are not Python's and the table would otherwise be a guess:
+**The two rows that were MEASURED rather than read** — and **the measurement is
+SUPERSEDED, see the Status at the head of this file**: this path's `//` and `%`
+ARE Python's now, so both of the conclusions below are inverted, and the table
+was re-derived rather than left to disagree with the path it lowers for.
 
 ```
 f(-7, 2) on `__mlir_type.index` parameters     this path    CPython
@@ -61,7 +156,10 @@ which is the clearest entry that is missing on purpose: floor division is the
 other semantics and rewriting it to this path's `//` would be wrong for every
 negative operand. `pop.div` is absent for the other half of the same question —
 the name does not say which division it is, and a table that picked one is the
-name-keyed table § Correction is about.
+name-keyed table § Correction is about. **BOTH of those sentences are now false
+and the table has been re-derived** — see the Status at the head; the paragraph
+is kept as the statement of what was believed when the table was written, which
+is what made the two rows wrong answers.
 
 **What it is worth, in this document's units — and it is NOT a coverage
 number.** The 12 sites in `std/builtin/simd_length.mojo` (`index.{add, sub,
@@ -765,10 +863,14 @@ of this file is the current reading and this is the plan it was planned against.
      operations whose operand is declared a word and for the ten bracketed
      predicates** (`MLIR_WORD_ARITH_OPS`, `MLIR_CMP_OPS`, `MLIR_CMP_PRED_OPS`),
      by rewriting to the ordinary spelling so both emitters' existing decisions
-     apply rather than being re-decided. **Measured, and the measurement changed
-     the table**: this path's `//` TRUNCATES and its `%` takes the dividend's
-     sign, so `index.divs` → `//` and `pop.rem` → `%` are right and
-     `pop.floordiv` is not in it. Not done and deliberately not planned:
+     apply rather than being re-decided. **Measured, and the measurement has
+     since been INVERTED — see the Status at the head of this file.** As written
+     here: this path's `//` TRUNCATES and its `%` takes the dividend's
+     sign, so `index.divs` → `//` and `pop.rem` → `%` were right and
+     `pop.floordiv` was not in it. Now: `//` floors and `%` takes the divisor's
+     sign, so `index.divs` → `/` and `pop.rem` → `a - (a / b) * b` are right and
+     `pop.floordiv` is absent because no corpus site reaches it. Not done and
+     deliberately not planned:
      `pop.floordiv`, `pop.div` (the name does not say which division it is),
      `pop.abs`/`max`/`min`/`floor`/`ceil`/`trunc`/`round`/`fma`, every
      `pop.simd.*`, every UNSIGNED predicate (this path's `<` is signed and there
