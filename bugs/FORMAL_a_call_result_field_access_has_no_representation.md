@@ -174,6 +174,37 @@ wave to measure that
 (`bugs/FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell.md`
 §2 said it and had no column to say it with; §0 is the column).
 
+### 4.1 Nine of those files want CPython ON PURPOSE, and that is a third answer
+
+Nine sweep files across four rows use their host module as an **oracle** rather
+than as a capability — they are differential tests whose whole job is to compare
+a compiled image against this process's CPython, so a program that builds without
+CPython is a program that has stopped testing anything:
+
+| file | the oracle |
+|---|---|
+| `test_formal_link_accounting.py`, `test_formal_monomorph.py`, `test_formal_receiver_position.py`, `test_formal_type_application.py`, `test_runtime_dylib.py` | `inspect.getsource(fn)` / `signature(fn)`, then `src.count(…)` — the source TEXT is the assertion |
+| `test_ast_formal.py`, `test_no_new_container_casts.py` | `tokenize.generate_tokens(readline)`, the token stream CPython's tokenizer produces |
+| `test_formal_time.py` | `fractions.Fraction` with the IEEE-754 rounding rule written out; the file's own docstring says asserting against `ns / 1e9` would fail a CORRECT module |
+| `test_formal_os.py` | `pwd.getpwnam('root').pw_dir`, to build the expected value for `posixpath.expanduser("~name")` |
+
+So these nine are not "a module to write" and not "a caller to re-spell": they
+are programs that must keep importing CPython to be worth running, and the sweep
+files them under `not-answerable/host-import` because it asks "can this file
+become a formal image", which is the wrong question for a differential test.
+**That is a property of the sweep's SCOPE, not a defect in the backend**, and
+the fix is in the report rather than in a `.mojo` file: a file whose only use of
+a host module is to be compared against it belongs in neither the numerator nor
+the denominator of a codegen-coverage rate, for the same reason a test's
+fixture does not count as untested code.
+
+`tools/formal_host_import_shapes.py` does not have an oracle column and cannot
+grow one honestly — "this use is the file's oracle" is not a syntactic fact, it
+is a fact about why the file exists, and the four rows above were read by hand.
+It is recorded here so the next reader does not re-derive it, and so that a
+future wave measuring "how many files moved" does not count these nine as
+outstanding.
+
 ## 5. The next step, and it is a value-model question
 
 The 13 rows that are not facts about the target are all waiting on ONE thing,
