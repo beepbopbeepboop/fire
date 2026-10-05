@@ -4,6 +4,132 @@
 per-path entry statement they needed is in `formal/arm64_proof_gen.py`).
 A chain NESTED inside a chain is not, and this says why and what closes it.
 
+**Status 2026-10-05 (`work/formal23-4`): the MODEL half is FIXED on both
+architectures, and the doc's premise that the whole failure is the machine half
+is only HALF of what a run reports. `eval_eq_mojo` — the AST evaluator against
+the semantic model — was ALSO left open for this shape, on both architectures,
+and is now proved. What remains is the machine half: 16 `counterexample`s on the
+`hcond` statements in the universal theorem, plus the kernel's memory ceiling on
+the same file.** Read this before every section below; §"Status 2026-10-04"
+describes a tree on which the model half had not been looked at separately, and
+its "NO FIX ATTEMPTED, and the reason is that this area is not VERIFIABLE today"
+is right about the machine half and wrong as a statement about the file.
+
+## What landed, and what it was
+
+`formal/arm64_proof_gen.py::eval_split_conds`, asked by BOTH generators (the
+x86-64 one imports the arm64 module as `AP`, so the two architectures cannot
+split on different propositions). It walks the same `_cond_nodes`
+`_collect_conds` walks, emits each source condition exactly as before, and
+appends the LEAVES of any chain that is genuinely nested, rendered the way
+`_truth_go` renders an operand of a chain.
+
+The reason it was needed is `lib/ProofLib`'s own spelling of a binary `or`:
+`evalExpr` renders it `¬x → y` (which is `x ∨ y`), so `((a or b) or c)` nests
+that to `¬(a ∨ b) → c`, which curries to `¬a → ¬b → c` — **not** the
+disjunction the emitted `by_cases` hypothesis carries. From `h0 : (A ∨ B) ∨ C`
+the goal needs `¬B → C`, so it has to know whether `B` holds, and one split on
+the whole condition cannot say so. The generated goal, verbatim:
+
+    case pos
+    n : UInt64
+    h0 : (10 ^^^ 9223372036854775808 < n ^^^ 9223372036854775808 ∨ n = 0) ∨
+         n ^^^ 9223372036854775808 < -4 ^^^ 9223372036854775808
+    ⊢ (match (if n ^^^ 9223372036854775808 ≤ 10 ^^^ 9223372036854775808 →
+                    ¬n = 0 → n ^^^ 9223372036854775808 < -4 ^^^ 9223372036854775808
+              then (some 1, fun name => if name = "n" then n else 0)
+              else (some 0, fun name => if name = "n" then n else 0)).fst with
+        | some v => v
+        | none => 0) = 1
+
+Measured, through `formal/lean.py::run_lean`, on the generated file truncated to
+just that theorem — the honest way to check a statement the machine half's
+ceiling makes unreachable, and a real check rather than a weakened one because
+a truncation that cuts a theorem in half is a syntax error and Lean says so:
+
+| | before | after |
+|---|---|---|
+| arm64 `eval_eq_mojo` | `rc 1`, the goal above | **`rc 0`** |
+| x86-64 `eval_eq_mojo` | `rc 1`, the same goal | **`rc 0`** |
+
+This doc's §"No claim about x86-64" is therefore no longer true of the model
+half; it was measured on both architectures, and the x86-64 generator needed the
+same one-line change for the same reason.
+
+**It costs nothing, measured the way `CLAUDE.md` asks for a change that is
+supposed to be behaviour-preserving: byte-identical generated C/proof.** A flat
+chain has no `and`/`or` descendant, so no extra proposition exists. All 52
+`formal/examples/` stems on both architectures — 101 generated proofs, `cmp`
+against the same 101 built with this generator reverted: **101 identical**, and
+the 4 stems that raise the same `FormalBuildError` before and after.
+
+`test_formal_short_circuit_cond.py` grows `TestLeanModelBridge` for it (the
+truncated theorem, both architectures, asserting zero `sorry`), two generator
+tests (`a_nested_chain_splits_on_its_leaves`, and
+`a_flat_chain_still_splits_on_nothing_extra` as the guard), and its
+`KNOWN_GAP["nested_or"]` entry now says which half is proved.
+
+## What is left, and it is only the machine half
+
+Re-measured on this tree, the full generated file still fails, and the failures
+are the ones the sections below name plus the ceiling:
+
+```
+nested_or_proof.lean:25:56:   error: unsolved goals                  -- was this one; FIXED
+nested_or_proof.lean:3362:263: error: counterexample                x16, on the `hcond`s
+nested_or_proof.lean:3216:8:   error: (kernel) excessive memory consumption detected
+```
+
+and the canary is still red for the memory reason alone:
+
+```
+$ python3 tools/memslot.py --gb 32 --label either -- … check_proof_cached(…)
+either_proof.lean:2684:8: error: (kernel) excessive memory consumption detected
+memcap: done, peak 13.6 GB across up to 2 procs (ceiling 32.0 GB), child exit 0
+```
+
+So §"Status 2026-10-04"'s blocker is confirmed rather than removed: with the
+library current, `either` — one conditional branch, two operands — needs 13.6 GB
+and Lean's kernel refuses it. `bugs/FORMAL_a_generated_proof_over_leans_memory_
+ceiling_is_rejected.md` owns that, its §2 bisection is still the best account of
+it (the cost is `bv_decide`/`native_decide` in the per-block branch-condition
+facts, and with those 44 sites removed the file elaborates in 2.82 GB), and its
+§3 fix direction is the one this doc's machine half needs. **Until that lands,
+no change to `_hcond_mem_rws`, to the `simp only` set or to the `hcond`
+statement's right-hand side can be checked** — which is what §"Status 2026-10-03"
+measured from the other end and what this session's re-measurement confirms.
+
+**So the next step for THIS document is unchanged and it is not in this file.**
+The generator-level recording question §"Where the machinery actually stops"
+raises — `_cond_pairs` recording a pair per CHAIN and `_cond_nodes` yielding one
+entry per chain, so the inner chain's merge becomes a block the generator knows
+about — is still the right diagnosis of the machine half, and it cannot be
+landed or refuted until the memory ceiling is down. What §"Status 2026-10-04"
+misses is only that the MODEL side was a separate, separable failure: it is not
+evidence about the machine half either way, and it is now closed.
+
+## The next step for the model half, and what it did NOT need
+
+Nothing: the fix is the split list, and the "decompose per operand and
+recombine" machinery §"The next step, now that the discriminator is known"
+proposes is for the `hcond` STATEMENTS, not for this theorem. Recording that
+here because the doc below proposes it in a place where a simpler thing was
+enough, and a reader who follows that paragraph will build machinery that is not
+what the failing goal wanted.
+
+## The instrument defect is FIXED
+
+§"One instrument defect found while measuring this" recorded that
+`formal/lean.py::proof_verdict_key` does not cover the proof's DIRECTORY, so a
+run with a relative `repo_root` publishes a verdict `unknown module prefix
+'ProofLib'` that is then served for the same bytes from anywhere else. The
+workaround is still to pass an ABSOLUTE `repo_root` (`os.path.abspath(".")`),
+and the poisoned CAS entry under the relative key had to be deleted by hand once
+more here. The doc is still right that the cache cannot see the directory; it is
+still an open defect, and
+`bugs/FORMAL_the_proof_verdict_cache_key_cannot_see_the_proof_directory.md`
+still owns it.
+
 **Status 2026-10-04 (`work/formal29-3`): NO FIX ATTEMPTED, and the reason is
 that this area is not VERIFIABLE today — on this tree `formal/examples/either.mojo`
 and `both.mojo` do NOT typecheck**, which is the premise every earlier Status
