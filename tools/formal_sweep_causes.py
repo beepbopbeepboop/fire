@@ -482,6 +482,22 @@ CAUSES = (
     # landed, which is the failure the comments above this table warn about twice.
     ("a call to a name the defining module does not export",
      (("does not export it",),)),
+    # A symbol this image BINDS and nothing provides, where the symbol is a
+    # method of a struct IN THE FILE THAT REFUSED. Its own row because the
+    # underlying build message is the ordinary link-audit refusal and the
+    # DISTINCTION lives in the sweep's own classification
+    # (`formal_sweep._own_unprovided_methods`): the definition was never emitted
+    # into the image, so no link line could have provided it. Without this row
+    # such a file lands in `other refusal` — the bucket this module's docstring
+    # defines as "nobody has looked" — which is how a real 55-file codegen gap
+    # once sat under a class that said the opposite
+    # (`bugs/FORMAL_env_family_next_terminal.md`). It sits ABOVE every row keyed
+    # on the ordinary refusal text, because those texts do not appear in this
+    # message at all: what is printed for a file in this row is the sweep's own
+    # sentence.
+    ("a method of this file's own struct was never emitted into the image",
+     (("are METHODS OF A STRUCT IN THIS FILE",),
+      ("a method call here was not",))),
     # ── a call through a VALUE: three shapes, three rows, and the distinction
     #    is which DECLARATION is missing. They used to be one refusal, so all
     #    three sat in `other refusal`, which is the bucket that means nobody has

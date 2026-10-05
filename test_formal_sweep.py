@@ -114,6 +114,72 @@ EXTERN_BUILD_MSG = (
     "library that provides it. Every name in this list is one of the calls "
     "named above, so nothing about the link line is left to explain. (Provider "
     "check: asked the C library (dlsym).)")
+# The SAME message with a symbol that is a METHOD OF A STRUCT IN THE FILE, which
+# is the case the marker above gets backwards. `formal/build.py` cannot tell the
+# two apart — the bind audit sees one unaccounted name either way — so the
+# distinction has to be made here, from the file's own declarations. The message
+# is assembled by `_own_unprovided_methods_msg` below rather than pasted, because
+# the clause the classifier keys on is written by THIS tool and a hand-copy
+# would drift from it silently, which is the failure this file's two marker
+# tables exist to catch.
+#
+# A struct with TWO fields, deliberately: a one-field struct and a method is a
+# different lowering (`_struct_methods`' own docstring says so), so a fixture
+# with one field would be testing the other case, and the reason the rule is
+# wrong is precisely that `formal/` had rewritten neither.
+_OWN_METHOD_SRC = (
+    "struct Bag:\n"
+    "    var x: Int\n"
+    "    var y: Int\n"
+    "\n"
+    "    def get(self, k: Int) -> Int:\n"
+    "        return self.x + self.y\n"
+    "\n"
+    "def main(n):\n"
+    "    var b = Bag()\n"
+    "    b.x = 1\n"
+    "    b.y = 2\n"
+    "    return b.get(0)\n"
+)
+
+# Kept for the life of the process rather than per-test, because the file is
+# re-read by the classifier (`_declared_method_symbols` parses it) and a
+# TemporaryDirectory per test would make the fixture's path part of what the
+# tests assert. `TemporaryDirectory` cleans up on interpreter exit.
+_OWN_METHOD_TMP = tempfile.TemporaryDirectory(prefix="fs_own_method_")
+
+
+def _own_method_source_path() -> str:
+    """A real file whose own struct declares the `Bag_get` symbol."""
+    path = os.path.join(_OWN_METHOD_TMP.name, "bag.mojo")
+    if not os.path.exists(path):
+        with open(path, "w") as f:
+            f.write(_OWN_METHOD_SRC)
+    return path
+
+
+def _own_unprovided_methods_msg() -> tuple:
+    """`(the build's own bind-audit message, the file's source)`, built not copied.
+
+    **`formal/build.py::_unaccounted_report` is the writer and it is asked
+    directly**, because the point of the test is that the sweep's narrower
+    marker reads a message `formal/` really produces — including its
+    comma-joined symbol list, which is what `_UNPROVIDED_NAMES_RE` parses and
+    what a hand-written message here would keep in step by luck.
+
+    Two unprovided symbols, and the second is not a method of anything in the
+    file: the two causes coexist in one image (a dangling call to an unlowered
+    builtin AND a method this file never emitted) and the rule is per NAME, so a
+    fixture with only the method would pass a rule that classified whole
+    messages.
+    """
+    import formal.build as FB
+    path = _own_method_source_path()
+    return ("build: " + FB._unaccounted_report(
+        path, ["Bag_get", "mojo_no_such_call_9f3a"], "image"),
+        _OWN_METHOD_SRC)
+
+
 # fire.py prints `build: {e}` for a FormalBuildError AND for any other
 # exception, so a crash is only distinguishable by its traceback. These two are
 # the shapes that decides, taken from how fire.py's handler and CPython's
@@ -192,6 +258,40 @@ class TestClassify(unittest.TestCase):
         self.assertIn(cls, S.ANSWERABLE)
         self.assertIn(cls, S.DIRTY)
         self.assertIn("cannot be lowered", reason)
+
+    def test_a_method_of_this_files_own_struct_is_a_codegen_finding(self):
+        # The misclassification `bugs/FORMAL_env_family_next_terminal.md`
+        # measured: "nothing on the link line provides this symbol" is a fact
+        # about the TARGET only when the definition is somewhere else. A missing
+        # symbol that is a method of a struct in the file itself was never
+        # supposed to be on any link line — it was supposed to be EMITTED into
+        # this image — so filing it as `not-answerable` puts a backend defect
+        # under a class that says the opposite, and takes it out of the coverage
+        # denominator entirely.
+        detail, _src = _own_unprovided_methods_msg()
+        cls, reason = S.classify(False, detail, source=_src,
+                                 path=_own_method_source_path())
+        self.assertEqual(cls, S.CLASS_CODEGEN)
+        self.assertIn(cls, S.ANSWERABLE)
+        self.assertIn(cls, S.DIRTY)
+        self.assertIn("Bag_get", reason)
+        self.assertIn("METHODS OF A STRUCT IN THIS FILE", reason)
+        # The other name in the same message really IS the link line's business,
+        # so it must still be counted: the rule is per NAME, not per message.
+        self.assertIn("1 of the 2 unprovided symbol(s)", reason)
+
+    def test_a_symbol_this_file_does_not_declare_stays_not_answerable(self):
+        # The control, and it is what keeps the rule above from swallowing
+        # CLASS_EXTERN: with no `path`, or with a file that declares no such
+        # struct, the message is classified exactly as it was.
+        detail, _src = _own_unprovided_methods_msg()
+        self.assertEqual(S.classify(False, detail)[0], S.CLASS_EXTERN)
+        with tempfile.TemporaryDirectory() as td:
+            other = os.path.join(td, "other.mojo")
+            with open(other, "w") as f:
+                f.write("def main(n):\n    return 0\n")
+            self.assertEqual(
+                S.classify(False, detail, path=other)[0], S.CLASS_EXTERN)
 
     def test_dyld_unresolvable_is_not_coverage(self):
         cls, reason = S.classify(False, EXTERN_MSG)
