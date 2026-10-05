@@ -243,41 +243,79 @@ $ python3 test_formal_admitted.py truth        # the two SITE rows above
 
 ---
 
-## Addendum 2026-10-05 (`work/merge-formal39`): two more arrivals, and a THIRD copy of the numbers
+## Addendum 2026-10-05 (`work/merge-formal39`): the re-derive is DONE, and the answer was two rows
 
 Found while merging `work/formal36-verified-peephole`, which added
-`lib/Peephole.lean`. Neither item below is a new bug; both are this doc's subject
-arriving again, and neither is visible to any assertion, which is why it is here.
+`lib/Peephole.lean`. Both items below were this doc's subject arriving again, and
+both were invisible to any assertion. **Both are now fixed in the same merge, from
+a measurement rather than a transcription — so this addendum is the record of the
+fix, not a new queue entry.** Step 2 of "The exact next step" above is answered;
+step 1 (the `IEEE754` swap) was already answered by the `gatefix12` re-derive and
+is not re-opened here, and step 3 (do not loosen the assertion) is honoured — the
+assertion is untouched.
 
-**1. `AXIOM_CLOSURE` has no `Peephole` row, so one library module's closure is
-unmeasured and silently so.** `lib/` now has EIGHT modules and the table has
-seven: `IEEE754`, `ProofLib`, `Refine`, `X86`, `work`, `Contracts`, `Specs`.
-`lib/Peephole.lean` (521 lines, three `peephole_arm64_*` rules) is missing. The
-assertion cannot notice — `test_formal_sweep_truth.py:2209` reads
-`for mod, want in AXIOM_CLOSURE.items()`, so it iterates the TABLE, not the
-library, and a module nobody measured is a module nobody is checking. The
-one-line fix is a row read out of
-`A.theorem_axiom_census(lean, lib, modules=['Peephole'])` on the pinned
-toolchain, and it must be a MEASUREMENT: `LIBRARY_TRUST["Peephole"]` is
-`(0, 0, 9, 9)` — zero `sorry`, zero `axiom`, nine `bv_decide` sites — which is the
-site census and says nothing about how many of those nine the kernel reaches.
+**What the tree said and what it measured, on one run of the same instrument**
+(`A.theorem_axiom_census` through `formal/lean.py::run_lean`, pinned
+`leanprover/lean4:v4.32.2`, after the library was built):
 
-**2. `FORMAL.md` §7 row 10 publishes a FOURTH set of figures, and it disagrees
-with the table it claims to summarise.** The row's closing clause reads "of
-`lib/`'s **520** askable declarations, **67** rest on one of these axioms and
-**442** are kernel-checked … 5.7 s over all **six** modules". `AXIOM_CLOSURE`
-sums to **589** asked, **81** reaching, **497** clean over **seven** modules —
-and 67 + 442 = 509 ≠ 520 even on its own terms, so the clause was already not a
-sum of its two halves before this merge. The row's `total`/`replaced`/`remaining`
-triple (1616 / 67 / 1549) IS checked, by
+| module | pinned before | measured | verdict |
+|---|---|---|---|
+| `Contracts` | (7, 0, 7, 0, 0, 0) | (7, 0, 7, 0, 0, 0) | unchanged |
+| `IEEE754` | (24, 19, 5, 0, 0, 0) | (24, 19, 5, 0, 0, 0) | unchanged |
+| `ProofLib` | (311, 60, 243, 0, 8, 0) | (311, 60, 243, 0, 8, 0) | unchanged |
+| `Refine` | (29, 0, 29, 0, 0, 0) | (29, 0, 29, 0, 0, 0) | unchanged |
+| `X86` | (144, 2, 141, 0, 1, 0) | (144, 2, 141, 0, 1, 0) | unchanged |
+| `work` | (19, 0, 17, 0, 2, 0) | (19, 0, 17, 0, 2, 0) | unchanged |
+| **`Specs`** | (55, 0, 55, 0, 0, 0) | **(66, 0, 66, 0, 0, 0)** | **stale — re-pinned** |
+| **`Peephole`** | *absent* | **(12, 1, 8, 0, 3, 0)** | **unmeasured — row added** |
+
+Six of the eight rows were already right, which is the answer to "is the table
+drifting or was it one arrival": it was arrivals, and two of them. `Specs` moved
+because the specification layer has grown since its row was pinned, and it moved
+in the shape that says the arrival is specifications and not new trusted
+evaluation — `asked` and `clean` rise together and `reaches` stays 0. `Peephole`
+had no row at all, and `test_formal_sweep_truth.py:2209` reads
+`for mod, want in AXIOM_CLOSURE.items()` — it iterates the TABLE, not the library,
+so a module nobody measured was a module nobody was checking, silently. Its row is
+the fourth number in the tree: `LIBRARY_TRUST["Peephole"]` is nine `bv_decide`
+SITES and this is 12 declarations of which 8 are kernel-checked and 1 reaches an
+axiom (3 more reach one only through another declaration — the only module in
+`lib/` besides `ProofLib` with a non-zero `closure_only`). Sites and declarations
+are correctly different numbers, and the module's value is that 8 of its 12
+declarations are checked by the kernel.
+
+**2. `FORMAL.md` §7 row 10 published a FOURTH copy of these numbers, and it
+disagreed with the table it summarises.** Its closing clause read "of `lib/`'s
+**520** askable declarations, **67** rest on one of these axioms and **442** are
+kernel-checked … 5.7 s over all **six** modules" — while the table summed to
+589/81/497 over seven, and 67 + 442 = 509 ≠ 520 even on its own terms, so the
+clause was never a sum of its two halves. It is now re-pinned from the run above
+(612 asked, 82 reaching, 516 clean, 6.9 s over all EIGHT modules), with the
+arrivals named in the clause rather than left for the next reader to subtract.
+
+**Why that clause had drifted while the row's `total`/`replaced`/`remaining` triple
+had not**, and it is the reusable finding here: the triple IS checked, by
 `test_formal_admitted.py::test_the_axiom_tactic_count_is_consistent`, which reads
-it by STRUCTURE out of the document; the closure clause has no such reader,
-which is why it drifted while the triple did not.
+it by STRUCTURE out of the document, so it cannot drift silently. The closure
+clause had no reader at all. A stated measurement with no test behind it is a
+fourth copy of a number, and this repository already knows what that costs — §0.3
+of `FORMAL_stdlib_module_names_are_not_classified.md` is the same failure in the
+classification tables, where the docstring said "six strings" over a seven-row
+table for two merges. **The open part of this, if anyone wants it, is a reader for
+row 10's closure clause**: either publish it from `AXIOM_CLOSURE` or say in the
+row that it is a narrative. That is a `FORMAL.md` change with a design decision in
+it, which is why this merge re-pinned the numbers and left the reader alone.
 
-**The next step is the same one this file already names, plus this:** re-derive
-the table (§"The exact next step" steps 1–2) and then publish the row's closure
-clause FROM the table rather than beside it — or, if the prose is meant to be a
-narrative, say so in it. A row of §7 that restates a measurement no test reads
-is a fourth copy, and this repository already knows what four copies of one
-number cost (§0.3 of the doc this one lives beside is the same failure in the
-classification tables).
+### Reproducing (the re-derive above)
+
+```console
+$ export PATH=/opt/homebrew/bin:$PATH
+$ python3 tools/memslot.py --gb 8 --label pb -- python3 tools/suite.py prooflib
+$ python3 - <<'PY'
+import sys; sys.path.insert(0, ".")
+from formal import admitted as A, lean as L
+lib = A.lean_dir(".")
+print(A.axiom_census_summary(A.theorem_axiom_census(L.find_lean("."), lib), lib))
+PY
+$ python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_sweep_truth.py
+```

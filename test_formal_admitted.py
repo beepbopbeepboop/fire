@@ -1371,12 +1371,37 @@ AXIOM_CLOSURE = {
     # the mirror defect, carrying its own declaration-head pattern with no `@[...]`
     # prefix, so 98 attributed declarations were never asked about at all.
     "IEEE754": (24, 19, 5, 0, 0, 0),
-    # All 55 declarations of `lib/Specs.lean` answered, none reaching a decide
+    # All 66 declarations of `lib/Specs.lean` answered, none reaching a decide
     # axiom, none dropped as `private`, and no `of_reduce_bool`.  Read out of
     # `formal/admitted.py::theorem_axiom_census(..., modules=['Specs'])` on the
     # pinned toolchain — which is the same instrument the five rows above were
-    # read out of, so the comparison is like for like.
-    "Specs": (55, 0, 55, 0, 0, 0),
+    # read out of, so the comparison is like for like.  **Re-pinned 2026-10-05
+    # from 55 to 66**: the row was pinned when `lib/Specs.lean` declared 55
+    # askable names and the layer has grown since, all of them specification
+    # theorems over the same closed `Nat`/`Int`/`List` vocabulary — so `asked`
+    # and `clean` rise together and `reaches` stays 0, which is the shape that
+    # says the ARRIVAL is specifications and not new trusted evaluation.
+    # Measured on the merged tree, and it was the only row of the eight that
+    # disagreed; the other seven were re-measured in the same run and are
+    # unchanged.  See `bugs/TEST_the_axiom_closure_table_is_stale_for_five_of_its_six_modules.md`.
+    "Specs": (66, 0, 66, 0, 0, 0),
+    # `lib/Peephole.lean` (added 2026-10-05 with `formal/peephole.py`), measured
+    # the same way on the same run.  Twelve askable declarations, of which EIGHT
+    # are kernel-checked and ONE reaches a decide axiom; the three
+    # `closure_only` are theorems that reach no axiom themselves but rest on one
+    # through another declaration in the module, which is the only module in
+    # `lib/` besides `ProofLib` where that column is non-zero.
+    #
+    # **The one `reaches` is the finding, not a rounding error**, and it is the
+    # honest counterpart of `LIBRARY_TRUST`'s nine `bv_decide` SITES for this
+    # module: nine sites spread over twelve declarations, so most declarations
+    # carry none, one carries the site's axiom and three inherit it.  The site
+    # census (`LIBRARY_TRUST`) and this one are correctly different numbers —
+    # sites versus declarations — and the module's value is that the rewrites it
+    # licenses are proved about `Arm64State` with `omega`, so 8 of 12 are checked
+    # by the kernel and the pass's soundness does not rest on a single decision
+    # procedure call.
+    "Peephole": (12, 1, 8, 0, 3, 0),
 }
 
 

@@ -2000,7 +2000,12 @@ def test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root():
 # 2026-10-04 with python3 3.14: 206 sites over 58 files, after this tree's
 # `test_formal_sweep.py` (7) and `test_formal_libc_symbol.py` (1) were converted
 # and `test_formal_call_proof_gen.py` (1) joined the census — a `subprocess.run`
-# of an image the div0-guard case builds, added by `work/formal27-1`.
+# of an image the div0-guard case builds, added by `work/formal27-1` — and
+# 2026-10-05 added three rows whose literals had already arrived without them
+# (`test_formal_sweep_truth.py` with `76143aaa`, `test_formal_specs.py` and
+# `test_formal_peephole.py` with the contracts-language and peephole branches),
+# which is the failure `budgets: the residue census is the residue` exists to
+# name: a census that is not the walk is a census of itself.
 # That is this predicate's census — a `timeout=` KEYWORD read off the AST, over
 # `is_test_file_name`, which is EITHER spelling and so also holds the two
 # `formal/*_test.py` and the one `scripts/*_test.py` — and it is smaller than
@@ -2034,10 +2039,17 @@ STALE_PER_CHILD_BUDGETS = {
     'test_formal_external_call.py': 1,
     'test_formal_frame_return_overloads.py': 1,
     'test_formal_link_accounting.py': 2,
+    'test_formal_peephole.py': 1,  # +1 on 2026-10-05: work/formal36-verified-peephole's
+                                   # image-run of an emitted artifact
     'test_formal_proof_breadth.py': 5,
     'test_formal_runtime_link.py': 1,
+    'test_formal_specs.py': 1,  # +1 on 2026-10-05: work/formal36-contracts-language's
+                                 # `lean` run of a generated spec proof
     'test_formal_specialization.py': 2,
     'test_formal_sweep_cache_key.py': 2,
+    'test_formal_sweep_truth.py': 1,  # +1 on 2026-10-04 (76143aaa), a row the
+                                      # census missed when that file's literal
+                                      # arrived with the derived host-import rows
     'test_formal_sys.py': 2,
     'test_formal_tempfile.py': 3,
     'test_formal_x86_64_dylib.py': 3,
