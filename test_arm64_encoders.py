@@ -105,6 +105,76 @@ def cases():
     for imm in (0, 8, -8, 255, -256, 7, -1):
         c.append((f"ldur x4, [x3, #{imm}]", A.encode_ldur_xt_xn_imm(4, 3, imm)))
         c.append((f"stur x4, [x3, #{imm}]", A.encode_stur_xt_xn_imm(4, 3, imm)))
+    # ── MOVZ / MOVN / MOVK, every width and every halfword ───────────────
+    #
+    # This file had no `movz`, `movn` or `movk` case at all while those three
+    # were among the most-called encoders in the backend (`movz` alone had 102
+    # call sites), and that absence is the whole of how the following went
+    # unnoticed:
+    #
+    #     encode_movz_xd_imm  base 0x52800000   ← 32-bit, named `_xd_`
+    #     encode_movz_xn_imm  base 0xd2800000   ← 64-bit, named for a PARAMETER
+    #     encode_movk_xd_imm  base 0xf2800000   ← 64-bit, and the name was right
+    #
+    # So the file named `_xd_` meant two different widths, and only the byte
+    # comparison against `as` distinguishes them: with `imm16` capped at
+    # `0xffff` the 32-bit and 64-bit forms leave the SAME value in the X
+    # register, so no value-level test and no run of a compiled program can see
+    # the difference. That is why both widths are swept here for every register
+    # and every immediate, rather than one of them being sampled.
+    #
+    # `MOVN` has only the 32-bit encoder, and the asymmetry is the point: the
+    # two `MOVZ` encoders are named for their widths now
+    # (`encode_movz_xd_imm` / `encode_movz_wd_imm`) where they were one width
+    # and one parameter name, and there is nothing to name a 64-bit `MOVN`
+    # because nothing encodes one. `lib/ProofLib.lean`'s `arm64_step` does have
+    # an arm for the 64-bit form (`0x92800000`) and that arm is unreachable
+    # from any image this backend builds, which is the survey's "no encoder"
+    # half rather than a hole in the model.
+    for (d, i) in ((0, 0), (0, 1), (0, 0xffff), (5, 0x1234), (16, 0x8000),
+                   (30, 0xffff)):
+        c.append((f"movz x{d}, #{i}", A.encode_movz_xd_imm(d, i)))
+        c.append((f"movz w{d}, #{i}", A.encode_movz_wd_imm(d, i)))
+        c.append((f"movn w{d}, #{i}", A.encode_movn_wd_imm(d, i)))
+        # Every `hw`, because MOVK's field is the halfword INDEX and a base
+        # carrying stray bits in `hw` corrupts the INSERT POSITION while
+        # leaving the register number right — the same failure mode as the
+        # shift-encoder sweep below, and the reason all four are here.
+        for pos in (0, 16, 32, 48):
+            c.append((f"movk x{d}, #{i}, lsl #{pos}",
+                      A.encode_movk_xd_imm(d, i, pos)))
+    # ── the three pair-load/store forms, and the SP spellings ───────────
+    # `ldp` was absent from this file entirely while the tree had an
+    # `encode_ldp_xn_xt_sp` that emitted `ldp x0, x1, [x1, #16]` for the
+    # arguments `(1, 0, 2)` — so both halves of that bug were invisible: no
+    # caller, and no case. Every offset here is a multiple of 8 inside the
+    # encodable range of a SIGNED 7-bit count of eighties (-512 .. 504), and
+    # the register triples include `XZR` in each of the three roles, which is
+    # what distinguishes `LDP`'s three fields from each other.
+    for (t1, t2, rn, imm) in ((0, 1, 31, 16), (0, 1, 31, 0), (0, 1, 31, -8),
+                              (0, 1, 31, 504), (0, 1, 31, -512), (3, 4, 31, 32),
+                              (31, 1, 31, 16), (0, 31, 31, 16), (0, 1, 3, 24),
+                              (5, 30, 30, 504)):
+        base = "sp" if rn == 31 else f"x{rn}"
+        c.append((f"ldp x{t1}, x{t2}, [{base}, #{imm}]",
+                  A.encode_ldp_xt1_xt2_rn(t1, t2, rn, imm)))
+    for (t1, t2, b) in ((0, 1, 16), (3, 4, 32), (30, 31, 8)):
+        c.append((f"ldp x{t1}, x{t2}, [sp], #{b}",
+                  A.encode_ldp_sp_post(t1, t2, b)))
+        c.append((f"stp x{t1}, x{t2}, [sp, #-{b}]!",
+                  A.encode_stp_sp_pre(t1, t2, b)))
+    # ── the ADD/SUB immediate, and the SP spellings ──────────────────────
+    # `x31` is not an assembly-language operand for ADD/SUB immediate (the
+    # assembler reads that field as SP), so the SP forms get their own two
+    # cases below rather than a register triple — and `sub sp, sp, #imm` is the
+    # prologue's own stack decrement, so it is the spelling a bug here would
+    # corrupt most visibly.
+    for (d, n, i) in ((0, 0, 0), (0, 5, 8), (30, 30, 0xfff), (17, 16, 4095)):
+        c.append((f"add x{d}, x{n}, #{i}", A.encode_add_xd_xn_imm(d, n, i)))
+        c.append((f"sub x{d}, x{n}, #{i}", A.encode_sub_xd_xn_imm(d, n, i)))
+    c.append(("add x16, sp, #0", A.encode_add_xd_xn_imm(16, 31, 0)))
+    c.append(("add sp, sp, #16", A.encode_add_xd_xn_imm(31, 31, 16)))
+    c.append(("sub sp, sp, #4032", A.encode_sub_xd_xn_imm(31, 31, 4032)))
     # ── other access widths ────────────────────────────────────────────
     for imm in (0, 2, 8, 40):
         c.append((f"ldrh w4, [x3, #{imm}]", A.encode_ldrh_wt_wn_imm(4, 3, imm)))

@@ -2216,17 +2216,42 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     -- `bugs/FORMAL_arm64_ldr_str_unsigned_offset_reads_register_31_as_zero.md`.
     let addr := arm64_reg rn s + UInt64.ofNat (imm12 * 8)
     some { s with mem := mem_write_u64 s.mem addr.toNat (arm64_reg rt s) }
-  -- LDP Xt, Xn, [SP, #imm]: 0xA9400000 (offset load pair, no writeback)
+  -- LDP Xt1, Xt2, [<Xn|SP>, #imm7*8] (signed offset, no writeback): 0xA9400000
+  --
+  -- Three field reads, and every one of them was wrong before this was
+  -- corrected, in the same direction: the body took `Rt1` from bits 9:5, which
+  -- is `Rn` — the BASE — and `Rt2` from bits 4:0, which is `Rt1` — so it
+  -- loaded two words into the base register and the first destination, and
+  -- never touched the second destination at all; and it took the displacement
+  -- from bits 10 and up, which is `imm7 << 15 | Rt2 << 10`, so the offset
+  -- carried the second destination's number in its low bits and the field was
+  -- treated as an unsigned 12-bit count of EIGHTIES rather than a SIGNED
+  -- 7-bit one, which is why no negative displacement was expressible.
+  --
+  -- The encoding is 101 0 100 1 01 imm7 Rt2 Rn Rt, so `Rt1` is bits 4:0, `Rn`
+  -- is 9:5, `Rt2` is 14:10 and `imm7` is 21:15 — signed, like the pre-index
+  -- STP arm two branches above, which is the idiom (`imm7 ≥ 64` means
+  -- negative).  `Rn` reads through `arm64_reg_or_sp`, because in THIS class
+  -- `Rn = 31` really is SP — measured, `ldp x0, x1, [sp, #16]` assembles to
+  -- `0xa94107e0`, whose bits 9:5 are 31.
+  --
+  -- `Rt1`/`Rt2` = 31 is `XZR` and discards, which `arm64_set_reg`'s identity
+  -- at 31 gives for free: the assembler accepts `ldp x31, x1, [sp, #16]`
+  -- (`0xa94107ff`), so the model has to be able to load nothing as well as
+  -- something.
   else if (insn &&& 0xffc00000) = 0xA9400000 then
-    let d1 := ((insn >>> 5) &&& 0x1f).toNat
-    let d2 := (insn &&& 0x1f).toNat
-    let imm12 := ((insn >>> 10) &&& 0xfff).toNat
-    let addr := s.sp + UInt64.ofNat (imm12 * 8)
+    let rt1 := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    let rt2 := ((insn >>> 10) &&& 0x1f).toNat
+    let imm7 := ((insn >>> 15) &&& 0x7f).toNat
+    let addr := if imm7 ≥ 64 then
+                  (arm64_reg_or_sp rn s) - UInt64.ofNat ((128 - imm7) * 8)
+                else
+                  (arm64_reg_or_sp rn s) + UInt64.ofNat (imm7 * 8)
     let val1 := mem_read_u64 s.mem addr.toNat
     let val2 := mem_read_u64 s.mem (addr + 8).toNat
-    let s' := arm64_set_reg d1 s val1
-    let s'' := arm64_set_reg d2 s' val2
-    some s''
+    let s' := arm64_set_reg rt1 s val1
+    some (arm64_set_reg rt2 s' val2)
   -- ORN Xd, Xn, Xm (shifted register, LSL #0): 0xAA200000
   --
   -- **The encoding this arm used to match, `0x0A200000`, is ORN (IMMEDIATE)** --
@@ -5422,7 +5447,7 @@ theorem work_step_str_off : ∀ (s : Arm64State) (code : Nat → UInt8) (pc : Na
 theorem work_step_ldp_off (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffc00000) = 0xa9400000) :
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) (arm64_set_reg (((w >>> 5) &&& 0x1f).toNat) s (mem_read_u64 s.mem (s.sp + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat)) (mem_read_u64 s.mem ((s.sp + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)) + 8).toNat)) := by
+    arm64_step s code = some (arm64_set_reg (((w >>> 10) &&& 0x1f).toNat) (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u64 s.mem (if (((w >>> 15) &&& 0x7f).toNat) ≥ 64 then (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat ((128 - (((w >>> 15) &&& 0x7f).toNat)) * 8) else (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 15) &&& 0x7f).toNat) * 8)).toNat)) (mem_read_u64 s.mem ((if (((w >>> 15) &&& 0x7f).toNat) ≥ 64 then (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat ((128 - (((w >>> 15) &&& 0x7f).toNat)) * 8) else (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 15) &&& 0x7f).toNat) * 8)) + 8).toNat)) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by

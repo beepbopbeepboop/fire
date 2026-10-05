@@ -109,16 +109,26 @@ was about the harness and would have been filed as a model bug.**
    by `as` ("invalid operand for instruction"), which took the whole 297-case
    batch down with it. The pool now spells the base `sp`.
 6. **Two `movz` encoders with the same idea and different widths.**
-   `encode_movz_xd_imm` emits the 32-bit word (`0x52800000`) and
+   `encode_movz_xd_imm` emitted the 32-bit word (`0x52800000`) and
    `encode_movz_xn_imm` the 64-bit one (`0xd2800000`); the pool had paired the
-   32-bit encoder with the text `movz xN`. See
-   `bugs/FORMAL_arm64_movz_encoder_is_named_xd_and_encodes_wd.md`.
+   32-bit encoder with the text `movz xN`. Both are now named for their WIDTH
+   (`encode_movz_xd_imm` 64-bit, `encode_movz_wd_imm` 32-bit), which is what
+   this row's pairing was reading off the wrong half of, and both are
+   byte-checked against `as` for every register and every immediate in
+   `test_arm64_encoders.py` — the check whose absence is why the name and the
+   base opcode disagreed for as long as they did.
 7. **`and xN, xM, #W` where `W` is a MASK WIDTH.** `encode_and_xd_xn_imm`'s
    third argument is the mask width (8/16/32 → `#0xff`/`#0xffff`/
    `#0xffffffff`), not an immediate, and the pool printed the width.
-8. **`LDP` with `Rt == Rt2` is UNPREDICTABLE**, and `encode_ldp_xn_xt_sp`'s
-   argument order and scale are both the other way round from its name — see
-   §4 and its bug doc.
+8. **`LDP` with `Rt == Rt2` is UNPREDICTABLE**, and the encoder that claimed to
+   be an SP pair load (`encode_ldp_xn_xt_sp`) had its argument order and scale
+   both the other way round from its name: it emitted `ldp x0, x1, [x1, #16]`
+   for `(1, 0, 2)`. It is now `encode_ldp_xt1_xt2_rn`, whose displacement is a
+   byte offset in the SIGNED seven-bit field at 21:15 (range -512 .. 504), and
+   `lib/ProofLib.lean`'s LDP-offset arm — which was wrong in all three of its
+   field reads, not only in the pair-load's spelling — is corrected beside it.
+   §4 still says no wired encoder emits the form, which remains true: the
+   encoder is byte-checked against `as` and unwired.
 9. **`MOV Xd, Xn` has two encodings.** `encode_mov_zr_xn` emits `ADD Xd, Xn,
    #0` where the assembler emits `ORR Xd, XZR, Xn`; 60 of 297 cases in one run
    were that single fact reported as an encoder defect. The encoder cross-check

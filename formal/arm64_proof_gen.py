@@ -3014,12 +3014,21 @@ def _step_rhs(w: int, idx: int):
         return (f"some {{ s with mem := mem_write_u64 s.mem "
                 f"(arm64_reg {rn} s + UInt64.ofNat {imm12 * 8}).toNat "
                 f"(arm64_reg {rt} s) }}")
-    if idx == 32:  # LDP [SP, #imm] (offset load pair)
-        d1 = (w >> 5) & 0x1f
-        d2 = w & 0x1f
-        imm12 = (w >> 10) & 0xfff
-        addr = f"(s.sp + UInt64.ofNat {imm12 * 8})"
-        return (f"some (arm64_set_reg {d2} (arm64_set_reg {d1} s "
+    if idx == 32:  # LDP [<Rn|SP>, #imm7*8] (signed-offset pair load)
+        # `Rt1` is bits 4:0, `Rn` is 9:5 (the BASE, read SP-aware), `Rt2` is
+        # 14:10 and `imm7` is 21:15 SIGNED. This arm read `Rt1` from 9:5 — the
+        # base register — and `Rt2` from 4:0, so it loaded into the base and the
+        # first destination and left the second one alone, and it read the
+        # displacement out of `imm7 | Rt2` as an unsigned 12-bit count of
+        # eighties, which also made every negative displacement inexpressible.
+        rt1 = w & 0x1f
+        rn = (w >> 5) & 0x1f
+        rt2 = (w >> 10) & 0x1f
+        imm7 = (w >> 15) & 0x7f
+        off = (imm7 * 8) if imm7 < 64 else -((128 - imm7) * 8)
+        addr = f"(arm64_reg_or_sp {rn} s + UInt64.ofNat {off})" if off >= 0 else \
+               f"(arm64_reg_or_sp {rn} s - UInt64.ofNat {-off})"
+        return (f"some (arm64_set_reg {rt2} (arm64_set_reg {rt1} s "
                 f"(mem_read_u64 s.mem {addr}.toNat)) "
                 f"(mem_read_u64 s.mem ({addr} + 8).toNat))")
     if idx == 33:  # ORN (shifted register): Rd = Rn OR (NOT Rm)
@@ -3204,10 +3213,17 @@ def _step_rhs_generic(idx: int):
     if idx == 31:  # STR [Xn, #imm] -- unsigned-offset STORE, base = Rn
         return (f"some {{ s with mem := mem_write_u64 s.mem "
                 f"({_BASE} + UInt64.ofNat ({_I12} * 8)).toNat (arm64_reg {_RD} s) }}")
-    if idx == 32:
-        addr = f"(s.sp + UInt64.ofNat ({_I12} * 8))"
-        return (f"some (arm64_set_reg {_RN} (arm64_set_reg {_RD} s "
-                f"(mem_read_u64 s.mem {addr}.toNat)) (mem_read_u64 s.mem ({addr} + 8).toNat))")
+    if idx == 32:  # LDP [<Rn|SP>, #imm7*8] — signed-offset pair load
+        # The same correction as the word-relative row above: `Rt1` is `_RD`,
+        # `Rt2` is `_RT2`, the base is SP-aware, and the displacement is the
+        # SIGNED `imm7` at 21:15 — which is `_ADDR7`, the same expression the
+        # pre-index STP row uses. That row had it right, which is the check
+        # that this one was wrong rather than differently-shaped: two arms of
+        # one pair-load family, one with a signed seven-bit displacement out of
+        # bits 21:15 and one reading twelve unsigned bits out of 10 and up.
+        return (f"some (arm64_set_reg {_RT2} (arm64_set_reg {_RD} s "
+                f"(mem_read_u64 s.mem {_ADDR7}.toNat)) "
+                f"(mem_read_u64 s.mem ({_ADDR7} + 8).toNat))")
     if idx == 33:  # ORN (shifted register): Rd = Rn OR (NOT Rm)
         return (f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s ||| "
                 f"((arm64_reg {_RM} s) ^^^ (0xffffffffffffffff : UInt64))))")
@@ -4053,7 +4069,12 @@ def _regs_written(w: int, idx: int):
     if idx == 31:
         return set()
     if idx == 32:
-        return {(w >> 5) & 0x1f, rd}
+        # LDP writes BOTH destinations: `Rt1` at bits 4:0 and `Rt2` at 14:10.
+        # This row said `{(w >> 5) & 0x1f, rd}` — the base register and `Rt1` —
+        # which is the same misreading the model's arm had, and it is the row
+        # that decides what a block's certificate is allowed to assert about
+        # the registers a step clobbered.
+        return {w & 0x1f, (w >> 10) & 0x1f}
     return None
 
 

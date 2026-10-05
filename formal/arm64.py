@@ -166,13 +166,30 @@ def encode_svc(imm8: int) -> bytes:
     return struct.pack('<I', insn)
 
 
-def encode_movz_xn_imm(xn: int, imm16: int) -> bytes:
-    """MOVZ Xn, #imm16. Move zeroing with 16-bit immediate.
-    Encoding: 110100 0 0 imm16(16) 00000 Rn
+def encode_movz_xd_imm(xd: int, imm16: int) -> bytes:
+    """MOVZ Xd, #imm16 — the 64-BIT move-zeroing. Base `0xd2800000` (`sf = 1`).
+
+    One encoder per WIDTH, named for it, because `sf` is a width and not an
+    ornament: `MOVZ Wd, #imm16` and `MOVZ Xd, #imm16` differ in bit 31 of the
+    word and nothing else. The two used to be `encode_movz_xd_imm` (32-bit,
+    `0x52800000`) and `encode_movz_xn_imm` (64-bit), so the name ending `_xd_`
+    said 64-bit and encoded 32-bit while the sibling ending `_xn_` — a
+    parameter name, not a width — was the one that was right. 102 call sites
+    read the `_xd_` name and none of them could tell, because `imm16` is capped
+    at `0xffff` and a zeroing move of a 16-bit immediate into a W register
+    leaves the same value in the X register; the two forms differ only for an
+    immediate with bit 31 set, which this encoder cannot express. See
+    `test_arm64_encoders.py`'s `movz`/`movn`/`movk` cases, which is the check
+    whose absence let the naming drift for as long as it did.
+
+    `Rd = 31` is refused rather than permitted: in this class `Rd` is a plain
+    destination register with no SP encoding, and `XZR` is architecturally
+    discarded, so an assert that allows 31 is an assert for a word that throws
+    the result away.
     """
-    assert 0 <= xn <= 31
+    assert 0 <= xd <= 30
     assert 0 <= imm16 <= 0xffff
-    insn = 0xd2800000 | (imm16 << 5) | xn
+    insn = 0xd2800000 | (imm16 << 5) | xd
     return struct.pack('<I', insn)
 
 
@@ -191,13 +208,21 @@ def encode_mov_zr_xn(xd: int, xn: int) -> bytes:
     return struct.pack('<I', insn)
 
 
-def encode_movz_xd_imm(xd: int, imm16: int) -> bytes:
-    """MOVZ Xd/Wd, #imm16. Sets lower 16 bits to imm16, clears upper bits.
-    Encoding: 100101 opec 00 00000 imm16 xd (sf/opc choose 32 vs 64-bit)
+def encode_movz_wd_imm(wd: int, imm16: int) -> bytes:
+    """MOVZ Wd, #imm16 — the 32-BIT move-zeroing. Base `0x52800000` (`sf = 0`).
+
+    The 32-bit half of `encode_movz_xd_imm`'s pair, and the two agree about
+    one thing that matters more than the width: because `imm16` is capped at
+    `0xffff`, `MOVZ Wd, #imm16` and `MOVZ Xd, #imm16` leave the SAME value in
+    `Xd`, so a call site that wanted the 64-bit form got the right answer from
+    the 32-bit one. That is why this class of mistake can sit in a file with 102
+    callers and a byte-exact encoder suite and miscompile nothing — and it is
+    also why the name has to say which form it is, since the value cannot be
+    what tells you.
     """
-    assert 0 <= xd <= 30
+    assert 0 <= wd <= 30
     assert 0 <= imm16 <= 0xffff
-    insn = 0x52800000 | (imm16 << 5) | xd
+    insn = 0x52800000 | (imm16 << 5) | wd
     return struct.pack('<I', insn)
 
 
@@ -214,19 +239,35 @@ def encode_movk_xd_imm(xd: int, imm16: int, pos: int) -> bytes:
     return struct.pack('<I', insn)
 
 
-def encode_movn_xd_imm(xd: int, imm16: int) -> bytes:
-    """MOVN Xd, #imm16. Sets lower 16 bits to ~imm16, clears upper 48 bits.
-    Encoding: 100101 0 00 00001 imm16 xd
+def encode_movn_wd_imm(wd: int, imm16: int) -> bytes:
+    """MOVN Wd, #imm16 — the 32-BIT move-negated. Base `0x12800000` (`sf = 0`).
+
+    `MOVN Wd, #imm16` sets `Wd` to `~imm16` and ZEROES bits 63:32, which is the
+    same argument `encode_movz_wd_imm`'s docstring makes: with `imm16` capped at
+    `0xffff` the 32-bit and 64-bit forms of MOVN write the same X register, so
+    this name is about the encoding and the previous `_xd_` one was about
+    neither. `lib/ProofLib.lean`'s `arm64_step` has an arm for each form
+    (`0x12800000` and `0x92800000`) and they agree, so the rename moves no
+    emitted byte.
     """
-    assert 0 <= xd <= 30
+    assert 0 <= wd <= 30
     assert 0 <= imm16 <= 0xffff
-    insn = 0x12800000 | (imm16 << 5) | xd
+    insn = 0x12800000 | (imm16 << 5) | wd
     return struct.pack('<I', insn)
 
 
 def encode_add_xd_xn_imm(xd: int, xn: int, imm12: int) -> bytes:
-    """ADD Rd, Rn, #imm12. Rd = Rn + imm12.
-    Verified: 0x81000000 | (imm12 << 10) | (xn << 5) | xd
+    """ADD Xd, Xn, #imm12 — the 64-BIT add. `0x91000000`, which is `sf = 1`.
+
+    The docstring here used to advertise `0x81000000`, the 32-bit form, over a
+    body that has always emitted the 64-bit one: the same name/docstring-versus-
+    encoding split as the `movz`/`movn` pair above, with the value on the
+    right side. Measured against the assembler, both widths, in
+    `test_arm64_encoders.py`.
+
+    `Rn = 31` is legal and is SP in THIS class (the add-immediate form does
+    have an SP encoding, unlike the shifted-register one `arm64_step` is
+    careful about), and `Rd = 31` is SP too.
     """
     assert 0 <= xd <= 31
     assert 0 <= xn <= 31
@@ -433,15 +474,41 @@ def encode_ldr_xt_sp_imm(xt: int, imm12: int) -> bytes:
     return struct.pack('<I', insn)
 
 
-def encode_ldp_xn_xt_sp(xn: int, xt: int, imm12: int) -> bytes:
-    """LDP Xt, Xn, [SP], #imm. Loads two 64-bit registers from the stack.
-    Encoding: 10110 1 1 00000 1 imm12 Rn Rt Rs
+def encode_ldp_xt1_xt2_rn(xt1: int, xt2: int, rn: int, imm_bytes: int) -> bytes:
+    """LDP Xt1, Xt2, [<Rn|SP>, #imm] — the 64-bit pair load, SIGNED offset.
+
+    Encoding: 101 0 100 1 01 imm7 Rt2 Rn Rt, i.e.
+
+        0xA9400000 | (imm7 << 15) | (Rt2 << 10) | (Rn << 5) | Rt
+
+    `imm_bytes` is a BYTE offset, a multiple of 8, and the field is
+    `imm_bytes / 8` — a SIGNED 7-bit count of EIGHTIES, so the encodable range
+    is -512 .. 504 and an assert over `0xfff` would accept a displacement the
+    architecture cannot encode.  Measured: `ldp x0, x1, [sp, #504]` assembles,
+    `#512` and `#1016` are both rejected by `as`.
+
+    `Rn = 31` is SP and every other register number is that register; `Xt1`/`Xt2`
+    = 31 is `XZR`, which LDP allows and which discards the loaded word (measured:
+    `ldp x31, x1, [sp, #16]` assembles to `0xa94107ff`, and `ldp x0, x31,
+    [sp, #16]` to `0xa9417fe0`).  `lib/ProofLib.lean`'s LDP-offset arm reads
+    both through `arm64_set_reg`, whose `31` case is the identity, so the model
+    discards rather than aliases — which is why an assert here permits 31.
+
+    This replaces `encode_ldp_xn_xt_sp`, whose docstring said `LDP Xt, Xn, [SP],
+    #imm` and whose body produced `ldp x0, x1, [x1, #16]` for the arguments
+    `(1, 0, 2)`: it never set `Rn`, it overwrote the base field with the first
+    argument, it packed `imm` into `Rt2`'s field rather than `imm7`'s, and it
+    took its arguments in the opposite order from the mnemonic. Nothing called
+    it, and `test_arm64_encoders.py` had no `ldp` case, which is the pair of
+    facts that let it sit there; the second is now false — this function is
+    byte-checked against the assembler on every register pair and offset.
     """
-    assert 0 <= xn <= 31
-    assert 0 <= xt <= 30
-    assert 0 <= imm12 <= 0xfff
-    # Encoding: 0xA9400000 | (imm12 << 10) | (xn << 5) | xt
-    insn = 0xA9400000 | (imm12 << 10) | (xn << 5) | xt
+    assert 0 <= xt1 <= 31 and 0 <= xt2 <= 31
+    assert 0 <= rn <= 31
+    assert imm_bytes % 8 == 0
+    assert -512 <= imm_bytes <= 504
+    imm7 = (imm_bytes // 8) & 0x7f
+    insn = 0xA9400000 | (imm7 << 15) | (xt2 << 10) | (rn << 5) | xt1
     return struct.pack('<I', insn)
 
 
