@@ -10903,9 +10903,11 @@ def frame_slot_field_is_dict(candidates, name, dict_names=(), decls=None):
     lifted the program BUILT on both architectures and died of SIGSEGV. The same
     hazard is real here, and the caller is what makes it decidable: a dict
     subscript is only a key scan when the INDEX is a string, and the emitter's
-    dict dispatch asks that first
-    (`bugs/FORMAL_a_dict_subscript_has_no_value_kind.md`'s per-key gate, which
-    this doc's taker is told to reuse rather than re-derive). So the shape that
+    dict dispatch asks that first — `dict_literal_key_value_kind`'s per-key gate,
+    which answers only when the literal HOLDS the key and refuses otherwise; the
+    four cases in `test_formal_value_model.py` around
+    `a_dict_subscript_is_the_kind_of_the_pair_under_that_key` are it, including
+    the field spelling a declared `Dict` field cannot reach. So the shape that
     is refused on the value axis is `len`, and the shape that is refused here is
     `d[0]` — an integer index against a field declared `Dict`, which is a blob
     element read and always was.

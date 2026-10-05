@@ -1261,6 +1261,43 @@ REFUSALS = [
      "    print(\"n:\", len(d[k]))\n"
      "    return 0\n",
      "the source does not say what this operand holds"),
+    # THE SAME GATE reached through a FIELD rather than a local, and the shape
+    # three sweep files were refused for: `len(self.sections["text"])` where
+    # `self.sections` is a DECLARED FIELD of a declared container type.
+    #
+    # The per-key reader answers a dict LITERAL, because a literal's pairs are
+    # the evidence that a word was written; a field's slot has no such writer on
+    # this path. `S()` does not run `__init__` (premise B2), so a fresh
+    # instance's slot holds the class-level default, and a container-annotated
+    # field with no default is a word of zeros — so `len` of that subscript is a
+    # count read from address 0, which is a SIGSEGV rather than a wrong number.
+    #
+    # **It stays refused, and this row is what says so.** The capability the
+    # local spelling earned is a per-key answer where the write is EVIDENCED, and
+    # widening it to the field spelling would extend a plausible-wrong-number
+    # into a plausible-wrong-number-that-is-also-a-null-dereference. The hook
+    # that would answer it soundly is the field's own default initializer, which
+    # no file in the corpus spells — and what is missing underneath is a dict
+    # FIELD with a value at all, which is the module-state question
+    # (`bugs/FORMAL_module_state_no_storage.md`), not this one.
+    #
+    # The needle is the unclassified-operand sentence because that is what the
+    # build produces: the slot has no kind to classify the subscript with, so the
+    # question never becomes a length question. `frame_slot_value_refusal`'s
+    # rows are `len_refusal`'s and are asked once a kind EXISTS; there is none
+    # here, so asking them would be a different program.
+    ("a_dict_subscript_of_a_declared_field_is_still_refused",
+     "struct Sections:\n"
+     "    var sections: Dict[String, List[Int]]\n"
+     "\n"
+     "    def total(self) -> Int:\n"
+     "        return len(self.sections[\"text\"])\n"
+     "\n"
+     "def main(n):\n"
+     "    var s = Sections()\n"
+     '    printf("t=%d", s.total())\n'
+     "    return 0\n",
+     "the source does not say what this operand holds"),
     ("one_name_two_candidate_structs_is_refused",
      "class A:\n"
      "    x: int\n"
