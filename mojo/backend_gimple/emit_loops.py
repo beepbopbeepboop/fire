@@ -2463,9 +2463,9 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # interpreter bound the whole key (`for k, *vs in d` printed `abc []`
         # where CPython prints `a ['b', 'c']`) and only one of the two engines
         # could be moved inside a merge. Both are fixed now — the interpreter
-        # splits a `str` item in `_bind_comprehension_target`, this is the
-        # lowering — and a refusal here is what kept the comparison that checks
-        # them from existing at all.
+        # splits a `str` item in `_unpack_source`, this is the lowering — and a
+        # refusal here is what kept the comparison that checks them from
+        # existing at all.
         #
         # An INT-keyed dict still refuses, and that is not the same shape being
         # put off: CPython's answer there is a `TypeError` ("cannot unpack

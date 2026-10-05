@@ -2018,7 +2018,6 @@ STALE_PER_CHILD_BUDGETS = {
     'test_async_with_lock_guard.py': 5,
     'test_closure_capture_comptime_func_params.py': 2,
     'test_comptime_bracket_params.py': 1,
-    'test_comptime_parity.py': 4,
     'test_container_equality.py': 3,
     'test_container_membership.py': 3,
     'test_container_ordering.py': 3,
@@ -2029,13 +2028,11 @@ STALE_PER_CHILD_BUDGETS = {
     'test_coro_scoreboard.py': 2,
     'test_dict_tuple_key.py': 3,
     'test_formal_admitted.py': 7,
-    'test_formal_argparse.py': 6,
     'test_formal_call_proof_gen.py': 1,
     'test_formal_cross_module.py': 2,
     'test_formal_dylib.py': 2,
     'test_formal_external_call.py': 1,
     'test_formal_frame_return_overloads.py': 1,
-    'test_formal_imports.py': 4,
     'test_formal_link_accounting.py': 2,
     'test_formal_proof_breadth.py': 5,
     'test_formal_runtime_link.py': 1,
@@ -2045,10 +2042,6 @@ STALE_PER_CHILD_BUDGETS = {
     'test_formal_tempfile.py': 3,
     'test_formal_x86_64_dylib.py': 3,
     'test_general_mutable_closure_capture.py': 2,
-    'test_gimple.py': 57,  # +6 on 2026-10-04: the merge of work/bugs6-1 and
-                                  # work/bugs6-2 (two-module build+run harnesses and a
-                                  # 120 s whole-closure compile)
-    'test_gimple_async_runner.py': 11,
     'test_import_integration.py': 4,
     'test_link_mode.py': 2,
     'test_metal_codegen.py': 9,
@@ -2058,13 +2051,11 @@ STALE_PER_CHILD_BUDGETS = {
     'test_nonlocal.py': 2,
     'test_ptr_registry.py': 2,
     'test_python_source_mut_capture.py': 1,
-    'test_re_formal.py': 1,
     'test_runtime_dylib.py': 1,
     'test_selfhost.py': 2,  # +1 on 2026-10-04: work/bugs6-1's
                                        # build_scratch_is_private_and_removed
     'test_selfhost_memory.py': 1,
     'test_stdlib.py': 1,
-    'test_struct_formal.py': 1,
     'test_taskgroup.py': 4,
     'test_transitive_closure_capture.py': 5,
     'test_x86_64_containers.py': 1,
@@ -5037,6 +5028,26 @@ def test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency():
           f'only {len(in_a_bucket)} of {len(suite.REGISTRY)} registered tests '
           f'are in any bucket, so a rule that reads buckets is reading almost '
           f'nothing and would pass on a registry of one')
+    # A name listed TWICE in one bucket is a second comment claiming the reader
+    # has been told something they have not, and the duplicate is invisible to
+    # every other check here: `expand_bucket` de-duplicates, so `in_a_bucket` is
+    # the same set either way, and nothing else reads the raw lists. Six such
+    # rows were live on this tree when this check was written — one in `check`
+    # and five in `proofs`, each added by a commit that did not see the one
+    # above it — and the cost of that is not a double run (expansion
+    # schedules a test once per run) but a reader who counts the entries in a
+    # bucket, which is exactly what a bucket list is for.
+    repeated = []
+    for bucket, names in suite.BUCKETS.items():
+        seen = set()
+        twice = sorted({n for n in names if n in seen or seen.add(n)})
+        if twice:
+            repeated.append(f'{bucket}: {", ".join(twice)}')
+    check('the buckets: no name is in one twice', not repeated,
+          'a test listed twice in the same bucket is a duplicate comment, not a '
+          'second run (expansion schedules each test once), and it makes the '
+          'entry count of a bucket a number nobody can read: '
+          + '; '.join(repeated))
     check('the buckets: every registered test is in one, or declares dep=True',
           not [n for n, s in sorted(suite.REGISTRY.items())
                if n not in in_a_bucket and not getattr(s, 'dep', False)],

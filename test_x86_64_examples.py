@@ -27,6 +27,7 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+from exec_budget import child_exit_reason   # noqa: E402
 
 EXAMPLES = os.path.join(HERE, "formal", "examples")
 DEFAULT_INPUT = 10
@@ -58,8 +59,12 @@ def build_and_run(path: str, arch: str, test_input: int, keep: str = None):
         # Rosetta 2, exactly as a clang `-arch x86_64` binary needs.
         argv = ["arch", "-x86_64", out]
     r = subprocess.run(argv, capture_output=True, text=True)
+    # The signal's NAME, not its number: `signal 11` does not say SIGSEGV, and a
+    # `SIGKILL` is a fact about the machine rather than about the example, which
+    # is the distinction this line used to throw away. `exec_budget`'s wording,
+    # shared with the three suites that had their own copy.
     if r.returncode < 0:
-        return None, f"signal {-r.returncode}"
+        return None, child_exit_reason(r.returncode, r.stderr)
     if "Bad CPU type" in (r.stderr or ""):
         return None, "Bad CPU type in executable"
     return r.returncode, ""

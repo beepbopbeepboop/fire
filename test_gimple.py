@@ -14,6 +14,29 @@ import fire_compiler
 import mojo.middle.infra_infer
 import platform
 from build_config import find_gcc
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
+
+# This file's 51 per-child budgets were 60, 120, 300 and 30 seconds, spelled at
+# the call site, and every one of them is now a named constant — a quarter of the
+# residue `bugs/TEST_stale_per_child_timeout_literals.md` measured, and the file
+# the doc names first. The classification is five shapes, and it was read off the
+# argv at each site rather than off the number:
+#
+#   | was | count | argv | constant |
+#   |---|---|---|---|
+#   | 300 | 17 | `[GCC, '-fgimple', …]` — a compile of the generated C plus `fire_runtime.c` | `COMPILE_TIMEOUT_S` |
+#   | 60 | 16 | `[sys.executable, entry]` — the CPython ORACLE, i.e. a reference run of the case's own source | `RUN_TIMEOUT_S` |
+#   | 30 | 17 | `[exe]` — the executable those two produced | `RUN_TIMEOUT_S` |
+#   | 120 | 1 | `[sys.executable, fire.py, 'run', entry]` — this project's own interpreter | `RUN_TIMEOUT_S` |
+#
+# Every substitution is a WIDENING (30/60/120 -> 120 and 300 -> 600), which is
+# the direction `exec_budget`'s docstring asks for: the old numbers were sized
+# for "much more than a tiny program needs" and were therefore firing on a loaded
+# machine, where a timeout inside a test file is reported as an ordinary FAIL —
+# that is, as a compiler bug. Nothing here needs an EXCEEDING pair (the outer and
+# inner budgets `test_gimple_runner.py`'s RSS probe has, where the outer wraps
+# CPython around a compiled child): the gcc and the `[exe]` run are sequential
+# siblings, and the `[sys.executable, …]` children are whole and alone.
 
 # Platform detection for cross-platform build support
 _IS_DARWIN = platform.system() == 'Darwin'
@@ -7620,7 +7643,7 @@ main()
                 fh.write(preamble)
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
         if py.returncode != 0:
             return None
         return py.stdout
@@ -7645,11 +7668,11 @@ main()
             cc = subprocess.run(
                 [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                  os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                capture_output=True, text=True, timeout=300)
+                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
             if cc.returncode != 0:
                 return ('BUILD-FAILED', cc.stderr)
             run = subprocess.run([exe], capture_output=True, text=True,
-                                 timeout=30)
+                                 timeout=RUN_TIMEOUT_S)
         return run.stdout
 
     def test_callable_return_type_survives_its_carrier():
@@ -8277,7 +8300,7 @@ print("%r" % p)
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -8299,14 +8322,14 @@ print("%r" % p)
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
                           f"{cc.stderr[:800]}")
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -8421,7 +8444,7 @@ print("%r" % p)
             # would report "the test program itself is wrong" for a
             # harness mistake.
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60,
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S,
                                 env=dict(os.environ, PYTHONPATH=td))
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
@@ -8443,14 +8466,14 @@ print("%r" % p)
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
                           f"{cc.stderr[:1200]}")
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 if run.stdout != want:
                     print(f"FAIL  {name} [{mode}]: printed {run.stdout!r}, "
                           f"CPython printed {want!r}")
@@ -8512,7 +8535,7 @@ print("%r" % p)
                     fh.write(body)
             entry = os.path.join(td, 'p', 'main.py')
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60,
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S,
                                 env=dict(os.environ, PYTHONPATH=td))
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
@@ -8534,14 +8557,14 @@ print("%r" % p)
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
                           f"{cc.stderr[:1200]}")
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 if run.stdout != want:
                     print(f"FAIL  {name} [{mode}]: printed {run.stdout!r}, "
                           f"CPython printed {want!r}")
@@ -8707,7 +8730,7 @@ print("%r" % p)
                     fh.write(body)
             entry = os.path.join(td, 'q', 'main.py')
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60,
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S,
                                 env=dict(os.environ, PYTHONPATH=td))
             if py.returncode != 0 or not py.stdout:
                 return (f"{label}: CPython on the same program exited "
@@ -8727,12 +8750,12 @@ print("%r" % p)
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     return (f"{label} [{mode}]: gcc -fgimple failed:\n"
                             f"{cc.stderr[:1200]}")
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 if run.stdout != want:
                     return (f"{label} [{mode}]: printed {run.stdout!r}, "
                             f"CPython printed {want!r}")
@@ -9294,6 +9317,228 @@ print("%r" % p)
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_no_walk_ast_caller_mutates_what_it_is_handed():
+        global _PASS, _FAIL
+        """Every call site of the shared `_walk_ast` only READS its result.
+
+        **The property that makes the memo in
+        `bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md` safe
+        to add, checked rather than believed.** `_walk_ast` returns a fresh
+        `list` today, so a memo keyed on the node would hand the SAME list to
+        every caller — and a caller that mutated it would corrupt every later
+        reader, which is a silent wrong answer from a performance change. The
+        doc's own census of the 69 call sites found 63 read-only by
+        construction, 5 bound to a name and then iterated, no others, and one
+        "mutation" that was a docstring describing `_walk_ast_into`'s
+        accumulator — so the objection has nothing to thread through, and this
+        is that census as an executable check so it keeps holding as call sites
+        are added.
+
+        One shape is the failure and everything else is safe, which is why this
+        is a short check rather than a classification of all 67: a call whose
+        result is bound, WHOLE, to a name and then MUTATED — `.append`,
+        `.extend`, `.sort`, an assignment to an index of it, `+=`, `del`. Every
+        other shape either reads the list or COPIES it:
+
+          * consumed as an iterable (`for x in _walk_ast(...)`, the `iter` of a
+            comprehension, `any`/`all`/`sorted`/`list`/`len`/`next`, a
+            `yield from`), which does not keep the object;
+          * spread into a display or another call's arguments, which copies; and
+          * bound to a name that is only read, until a later statement rebinds
+            that name to something else — which is where the scan stops, and is
+            the whole of the scoping rule.
+
+        Cheap because it is an `ast` walk over `mojo/` and `formal/` — no
+        compile, no gcc, no generated C.
+        """
+        import ast as _ast
+
+        case = "no_walk_ast_caller_mutates_what_it_is_handed"
+        problems = []
+        root = os.path.dirname(os.path.abspath(__file__))
+        # The ONE definition whose result is at stake, and it must still be
+        # there: a rename that left this check walking nothing would pass it.
+        et = os.path.join(root, "mojo", "middle", "exprtypes.py")
+        with open(et) as f:
+            if "def _walk_ast(" not in f.read():
+                problems.append(f"{et}: there is no `def _walk_ast` left, so "
+                                f"this check walks nothing and passes")
+        # The list methods that would corrupt a SHARED list, and nothing else:
+        # this is the set the doc's hazard is about, so a method outside it is
+        # either a read (`count`, `index`) or is not a list method at all.
+        mutators = {"append", "extend", "insert", "sort", "reverse", "pop",
+                    "clear", "update", "add", "discard", "remove"}
+
+        def is_walk_call(node):
+            f = node.func
+            if isinstance(f, _ast.Name) and f.id == "_walk_ast":
+                return True
+            return isinstance(f, _ast.Attribute) and f.attr == "_walk_ast"
+
+        def handed_to(fn, call):
+            """The name `call`'s result is handed to as the WHOLE object, or None.
+
+            `X = _walk_ast(b)` hands the object over; `X = [n for n in
+            _walk_ast(b)]`, `X = sorted(_walk_ast(b))` and `X = _walk_ast(b) + y`
+            all COPY, so they are not hazards no matter what happens to `X`
+            afterwards. Requiring the assignment's value to BE the call is what
+            separates the two, and it matters here rather than in theory: the
+            first version of this check matched any assignment that CONTAINED
+            the call and reported three sites that do not exist, two of them
+            because `_rets` is bound twice in one 6 000-line function — once
+            from a comprehension over the walk and once as a dict — and one
+            because `_inner = {id(x) for x in _walk_ast(...)}` is a set
+            literal.
+            """
+            for stmt in ast_walk(fn):
+                value = targets = None
+                if isinstance(stmt, _ast.Assign) and len(stmt.targets) == 1:
+                    value, targets = stmt.value, stmt.targets
+                elif isinstance(stmt, _ast.AnnAssign):
+                    value, targets = stmt.value, (stmt.target,)
+                if value is None or not targets:
+                    continue
+                if value is not call or not isinstance(targets[0], _ast.Name):
+                    continue
+                return targets[0].id, stmt
+            return None, None
+
+        def bindings_of(fn, name):
+            """Every statement in `fn` that REBINDS `name`, in source order.
+
+            This is what scopes the scan. Python's names are per-scope, so a
+            use of `X` anywhere in a function would look like a use of the
+            object handed to `X` — until a later statement rebinds `X` to
+            something else, after which it is a different object entirely.
+            The live region of a handed object is therefore from its binding to
+            the next binding of the same name, and nothing past that.
+            """
+            out = []
+            for stmt in ast_walk(fn):
+                names = []
+                if isinstance(stmt, _ast.Assign):
+                    names = [t for t in stmt.targets]
+                # `_ast.AugAssign` is DELIBERATELY absent: `ns += [1]` on a
+                # list is `list.__iadd__`, which mutates in place and returns
+                # the same object, so an augmented assignment is a HAZARD and
+                # not the rebinding that ends the region below. Listing it here
+                # made the check skip its own line and report `clean` for
+                # `ns = _walk_ast(b); ns += [1]`.
+                elif isinstance(stmt, _ast.AnnAssign):
+                    names = [stmt.target]
+                elif isinstance(stmt, _ast.For):
+                    names = [stmt.target]
+                elif isinstance(stmt, (_ast.With, _ast.AsyncWith)):
+                    names = [it.optional_vars for it in stmt.items
+                             if it.optional_vars is not None]
+                elif isinstance(stmt, _ast.ExceptHandler) and stmt.name:
+                    names = [_ast.Name(id=stmt.name)]
+                elif isinstance(stmt, _ast.NamedExpr):
+                    names = [stmt.target]
+                for t in names:
+                    if isinstance(t, _ast.Name) and t.id == name:
+                        out.append(stmt)
+            out.sort(key=lambda s: (s.lineno, s.col_offset))
+            return out
+
+        def ast_walk(node):
+            return sorted(_ast.walk(node),
+                          key=lambda s: (getattr(s, "lineno", 0),
+                                         getattr(s, "col_offset", 0)))
+
+        n_calls = 0
+        files = []
+        for sub in ("mojo", "formal"):
+            for dirpath, dirnames, names in os.walk(os.path.join(root, sub)):
+                dirnames[:] = sorted(d for d in dirnames
+                                     if d != "__pycache__")
+                for n in sorted(names):
+                    if n.endswith(".py"):
+                        files.append(os.path.join(dirpath, n))
+
+        for path in files:
+            rel = os.path.relpath(path, root)
+            if rel.endswith(os.path.join("mojo", "middle", "exprtypes.py")):
+                continue            # the definition, and its own recursion
+            with open(path, errors="replace") as f:
+                text = f.read()
+            try:
+                tree = _ast.parse(text, filename=rel)
+            except SyntaxError:
+                continue
+            # A parent map, so "is this subscript the TARGET of a store?" is a
+            # question about one node rather than a search.
+            parent = {}
+            for node in _ast.walk(tree):
+                for child in _ast.iter_child_nodes(node):
+                    parent[child] = node
+            for fn in _ast.walk(tree):
+                if not isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                    continue
+                if fn.name == "_walk_ast":
+                    continue            # a backend's OWN generator of the name
+                for node in _ast.walk(fn):
+                    if not isinstance(node, _ast.Call) or not is_walk_call(node):
+                        continue
+                    n_calls += 1
+                    name, binder = handed_to(fn, node)
+                    if name is None:
+                        continue        # consumed, or COPIED by a display
+                    # …and only from the binding to the next one, because past
+                    # that the name is a different object.
+                    rest = bindings_of(fn, name)
+                    stop = len(rest)
+                    for k, b in enumerate(rest):
+                        if b is binder:
+                            stop = k + 1
+                            break
+                    limit = (rest[stop].lineno if stop < len(rest)
+                             else 10 ** 9)
+                    for other in _ast.walk(fn):
+                        if other is node:
+                            continue
+                        # `_ast.arguments` and the operator nodes carry no
+                        # position, so the region's own line filter has to be
+                        # tolerant of the nodes that have none.
+                        at = getattr(other, "lineno", None)
+                        if at is not None and at >= limit:
+                            continue
+                        bad = None
+                        if (isinstance(other, _ast.Attribute)
+                                and isinstance(other.value, _ast.Name)
+                                and other.value.id == name
+                                and other.attr in mutators):
+                            bad = f"`.{other.attr}` on the handed list"
+                        elif (isinstance(other, _ast.Subscript)
+                              and isinstance(other.value, _ast.Name)
+                              and other.value.id == name
+                              and isinstance(parent.get(other), _ast.Assign)):
+                            bad = "a subscript store into it"
+                        elif (isinstance(other, _ast.AugAssign)
+                              and isinstance(other.target, _ast.Name)
+                              and other.target.id == name):
+                            # `ast.unparse` because `f"{other.op}"` renders
+                            # `Add()`, which reads like a call in a message
+                            # about an operator.
+                            bad = f"`{_ast.unparse(other.op)}` rebinding it"
+                        elif (isinstance(other, _ast.Delete)
+                              and any(isinstance(x, _ast.Name)
+                                      and x.id == name for x in other.targets)):
+                            bad = "`del` of it"
+                        if bad:
+                            problems.append(f"{rel}:{other.lineno} — {bad}")
+
+        if problems:
+            print(f"FAIL  {case}: {len(problems)} site(s) mutate what "
+                  f"_walk_ast handed them, so a memo over it would corrupt "
+                  f"every later reader:")
+            for q in problems[:12]:
+                print(f"  {q}")
+            _FAIL += 1
+            return
+        print(f"PASS  {case} ({n_calls} call sites, none mutating)")
+        _PASS += 1
+
     def test_struct_unpack_computed_format_compiles():
         """`struct.unpack(fmt, buf)` whose format is a VARIABLE must not
         crash the compiler.
@@ -9440,7 +9685,7 @@ outer([10, 20, 30])
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -9468,7 +9713,7 @@ outer([10, 20, 30])
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -9477,7 +9722,7 @@ outer([10, 20, 30])
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -9554,7 +9799,7 @@ print([y for y in [(1,), (2,)]])
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -9568,7 +9813,7 @@ print([y for y in [(1,), (2,)]])
             # comparison could not have caught the bug.
             it = subprocess.run([sys.executable, os.path.join(_PROJECT_DIR, 'fire.py'),
                                  'run', entry], capture_output=True, text=True,
-                                cwd=td, timeout=120)
+                                cwd=td, timeout=RUN_TIMEOUT_S)
             if it.returncode != 0 or it.stdout != want:
                 print(f"FAIL  {name} [interp]: exit {it.returncode}, printed "
                       f"{it.stdout!r}, CPython printed {want!r} "
@@ -9594,7 +9839,7 @@ print([y for y in [(1,), (2,)]])
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -9603,7 +9848,7 @@ print([y for y in [(1,), (2,)]])
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -9686,7 +9931,7 @@ print(resumes_after_next([7, 8, 9]))
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -9714,7 +9959,7 @@ print(resumes_after_next([7, 8, 9]))
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -9723,7 +9968,7 @@ print(resumes_after_next([7, 8, 9]))
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -9784,7 +10029,7 @@ print(one([3, 9, 2]), two(3, 9), three(1, 7, 4), R().read1(3))
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -9812,7 +10057,7 @@ print(one([3, 9, 2]), two(3, 9), three(1, 7, 4), R().read1(3))
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -9821,7 +10066,7 @@ print(one([3, 9, 2]), two(3, 9), three(1, 7, 4), R().read1(3))
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -9895,7 +10140,7 @@ relay('hi')
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -9923,7 +10168,7 @@ relay('hi')
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -9932,7 +10177,7 @@ relay('hi')
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -10026,7 +10271,7 @@ relay_s({7})
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -10054,7 +10299,7 @@ relay_s({7})
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -10063,7 +10308,7 @@ relay_s({7})
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -10116,7 +10361,7 @@ C().sort()
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -10144,7 +10389,7 @@ C().sort()
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -10153,7 +10398,7 @@ C().sort()
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -10403,7 +10648,7 @@ inside()
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -10431,7 +10676,7 @@ inside()
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -10440,7 +10685,7 @@ inside()
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -10527,7 +10772,7 @@ print({'p': 1} | {'q': 2})
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -10555,7 +10800,7 @@ print({'p': 1} | {'q': 2})
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -10564,7 +10809,7 @@ print({'p': 1} | {'q': 2})
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -10649,7 +10894,7 @@ print(sorted(e({'k': 1}).items()))
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -10677,7 +10922,7 @@ print(sorted(e({'k': 1}).items()))
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -10686,7 +10931,7 @@ print(sorted(e({'k': 1}).items()))
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout, run.stderr))
             bad = [m for m, out, _e in results if out != want]
             if bad:
@@ -10799,7 +11044,7 @@ strings(['a', 'b'])
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -10827,7 +11072,7 @@ strings(['a', 'b'])
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -10836,7 +11081,7 @@ strings(['a', 'b'])
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -10936,7 +11181,7 @@ report()
             with open(entry, 'w') as fh:
                 fh.write(cpython_src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -10967,7 +11212,7 @@ report()
                         [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe,
                          c_file,
                          os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                        capture_output=True, text=True, timeout=300)
+                        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                     if cc.returncode != 0:
                         errs = [ln for ln in cc.stderr.splitlines()
                                 if ' error:' in ln]
@@ -10976,7 +11221,7 @@ report()
                         _FAIL += 1
                         return
                     run = subprocess.run([exe], capture_output=True,
-                                         text=True, timeout=30)
+                                         text=True, timeout=RUN_TIMEOUT_S)
                     results.append((f'{tag}/{mode}', run.stdout, want))
             bad = [t for t, out, want in results if out != want]
             if bad:
@@ -11057,7 +11302,7 @@ walk_span()
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -11066,7 +11311,7 @@ walk_span()
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -11188,7 +11433,7 @@ walk_span()
             # sibling of it — see the same note in
             # `aliased_and_reexported_imports_resolve_to_the_defining_module`.
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60,
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S,
                                 env=dict(os.environ, PYTHONPATH=td))
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
@@ -11206,14 +11451,14 @@ walk_span()
             cc = subprocess.run(
                 [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                  os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                capture_output=True, text=True, timeout=300)
+                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
             if cc.returncode != 0:
                 print(f"FAIL  {name}: gcc -fgimple failed:\n"
                       f"{cc.stderr[:1200]}")
                 _FAIL += 1
                 return
             run = subprocess.run([exe], capture_output=True, text=True,
-                                 timeout=30)
+                                 timeout=RUN_TIMEOUT_S)
             if run.stdout != py.stdout:
                 print(f"FAIL  {name}: printed {run.stdout!r}, CPython "
                       f"printed {py.stdout!r}")
@@ -11454,6 +11699,7 @@ print(run('x/y.txt'))
     test_next_inside_for_over_same_iterator_advances_once()
     test_paren_name_vs_one_tuple_for_target_differ()
     test_walk_ast_dataclass_cache_is_transparent()
+    test_no_walk_ast_caller_mutates_what_it_is_handed()
     test_scalar_arity_min_max_params_are_not_containers()
     test_a_forwarded_string_argument_keeps_its_type()
     test_a_forwarded_container_argument_takes_the_callees_kind()

@@ -6,9 +6,20 @@ redundancies the 2026-10-02 per-struct census measured (that doc is deleted
 with its fix); the new check is `test_formal_per_struct_asks.py`, whose third case is
 this residue.
 
-**Status: measured, named, and PINNED as a number. Not fixed** — it is six call
-sites in a file that owes the full gate, and the fix is the same shape as the one
-that landed twice already.
+**Status: FIXED 2026-10-05 (`work/bugs7-4`).** `model.sole_field_names` is the
+third module-level table and `formal/build.py` threads it through the eight
+helpers that ask, exactly as the four steps below specify. `test_formal_per_
+struct_asks.py`'s third case is a STRICT EQUALITY now instead of a slope
+assertion, and the measured count went from 64-at-20-functions / 84-at-40 (one
+per added function) to **33 and 33**. Equivalence evidence: 208 artifacts —
+`compile_formal`'s emitter text for every `formal/examples/*.mojo` on BOTH
+backends — byte-identical before and after, and `test_formal_run.py` 1025/0.
+A sibling doc named the same residue from the `struct_is_one_field` side; both
+halves are closed now, so it is DELETED rather than left as a second copy of this
+paragraph.
+
+The rest of this doc is the original report, kept as the record of how the
+residue was found and measured.
 
 ## The measurement
 
@@ -58,27 +69,46 @@ the same about the fix that preceded this one ("the win is on the outlier and is
 wash elsewhere"). The ask count is the assertion that does not depend on the
 file's shape.
 
-## The fix, and why it is not in this commit
+## The fix, as landed
 
 Publish the field NAME per struct the way `one_field_struct_names` publishes the
-STRUCT, and read it:
+STRUCT, and read it — all four steps, with what each turned out to need:
 
-1. `formal/model.py`: a `sole_field_names(structs) -> {name: field}` beside
+1. `formal/model.py`: `sole_field_names(structs) -> {name: field}` beside
    `one_field_struct_names`, deriving each entry with the existing
    `struct_sole_field_name` — so the two tables cannot disagree about which
    structs have one field, which is the failure mode a second derivation of the
-   same predicate invites;
-2. `formal/build.py`: thread it beside `one_field` through `_sole_field_name`,
-   `_one_word_sole_field_chain`, and the three call sites above, plus the four
-   direct `M.struct_sole_field_name(...)` reads at `:4215`, `:4348`, `:4923` and
-   `:8241`;
-3. keep every helper's current behaviour as the `None` default, so a caller with
-   no module table keeps asking the model — the same contract
-   `model.one_field_answer` states, and the reason the three landed signatures
-   did not change an answer;
-4. `test_formal_per_struct_asks.py`'s third case becomes a strict equality (40
+   same predicate invites. `sole_field_answer(struct_def, sole_field=None)` is the
+   threaded read beside `one_field_answer`, and it is a FUNCTION rather than a
+   `.get()` for the reason `one_field_answer` is: `None` must mean "no table" and
+   not "the table has no entry", or a caller would silently stop refusing a
+   struct whose one field binds no name — which is what `_sole_field_name`'s own
+   refusal exists to catch.
+2. `formal/build.py`: threaded beside `one_field` through eight helpers, not
+   six — `_sole_field_name`, `_one_word_sole_field_chain`,
+   `_rewrite_self_fields`, `_lift_one_word_field_method`,
+   `_rewrite_one_word_field_method_calls`, `_collect_one_field_receiver_rebinds`
+   and its caller, `_collect_one_word_frame_receivers` /
+   `_park_one_word_frame_receivers` and `_frame_receivers` — plus the four
+   direct `M.struct_sole_field_name(...)` reads. The two extra hops are
+   `_rewrite_one_word_field_method_calls` and `_lift_one_word_field_method`, which
+   this doc did not list: they read the same chain the three listed sites do, one
+   pass earlier, so leaving them on the predicate would have kept a per-function
+   asker behind. Every helper keeps its current behaviour as the `None` default,
+   so a caller with no module table keeps asking the model — the same contract
+   `model.one_field_answer` states, and the reason none of the landed signatures
+   changed an answer.
+3. `test_formal_per_struct_asks.py`'s third case is a strict equality (40
    functions ask it as often as 20 do) and its docstring loses the residue
    paragraph.
+
+**Why 33 and not 1**, since that is the number the strict equality pins and it
+looks like a leftover: a struct's field set is still derived once per FUNCTION for
+the handful of readers that were never in any of the three tables. That is the
+same bargain `framed` and `one_field` made — the tables answer the predicates
+that the `_prepare_functions` loop asks per function, and not every reader of
+the field set is one of them. What the strict equality rules out is the thing
+that regressed: a count that MOVES when the function count does.
 
 **Soundness condition, settled by measurement rather than by argument** — the
 same one `one_field_struct_names`' own docstring records, and worth repeating
@@ -93,11 +123,29 @@ changing its answer between two asks inside one `_prepare_functions` call**, so 
 table read at the top of the loop is the table every ask returned — and the fix
 belongs at the same point `one_field` is derived, not somewhere new.
 
-## What to run
+## What was run
 
-`python3 tools/suite.py formal` is the honest gate for this (it is `formal/`,
-read by both backends and by the Lean struct model). Narrowly:
-`python3 test_formal_per_struct_asks.py`, then the byte-identical-C comparison
-over `formal/examples/*.mojo` on both architectures, which is the bar
+`python3 test_formal_per_struct_asks.py` (7/7, and the third case's message went
+from "grows by 1.00 per added function … 64 then 84" to "40 functions ask it as
+often as 20 do — 33 then 33"), then the byte-identical-C comparison over
+`formal/examples/*.mojo` on both architectures — the bar
 `formal/build_cost_2026-10-03.md` §6.1 used and the one that caught the
-`iter_statement_nodes` container tuple on its first run.
+`iter_statement_nodes` container tuple on its first run:
+
+    # 52 examples x 2 backends, one process, `compile_formal(..., prove=False)`
+    # and the result dict's own `code` — the emitter text, not a re-derivation.
+    $ python3 .tmp/bytecmp.py new && git apply -R <the diff> \
+        && python3 .tmp/bytecmp.py old
+    new: built=104 refused=0 other=0
+    old: built=104 refused=0 other=0
+    $ for f in .tmp/bc/old/*; do cmp -s "$f" ".tmp/bc/new/$(basename $f)" \
+        || echo DIFFERS; done
+    identical=208 differing=0
+
+plus `test_formal_run.py` 1025/0, `test_formal_x86_64_parity.py` 74/0,
+`test_formal_bracketed_method_field_set.py` 26/0, `test_formal_value_model.py`
+83/0, `test_formal_method_param_field.py` 32/0, `test_formal_field_walk.py` OK,
+`test_formal_monomorph.py` 23/0 and `test_suite.py` 329/0.
+
+`python3 tools/suite.py formal` is still the integrator's to run for the rest of
+`formal/` — this is `formal/build.py`, which owes the full gate.

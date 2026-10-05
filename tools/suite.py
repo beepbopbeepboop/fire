@@ -3016,6 +3016,16 @@ test('formal-read-before-store', [PY, 'test_formal_read_before_store.py'],
 # protects is a frame laid out one slot short: `struct_receiver_stores` missing an
 # assignment demotes a real field name, and every read of that slot returns
 # another field's word.
+#
+# It was also the one file in the estate that no gate ran at all while
+# `bugs/FORMAL_build_cost_2026-10-03.md` §3.1 rested on it, because
+# `test_suite.py`'s `test_formal_*` FAMILY rule excused it on the cost rule
+# ("minutes of real compilation") — a rule made about the file rather than about
+# its expensive part, since only two of the 26 rows build. The `module table`
+# group is what that document actually leans on: the same source parsed twice
+# with and without eight padding functions, asserting every per-struct ask COUNT
+# is unchanged, so a derivation that started being asked per function again
+# fails rather than merely getting slower.
 test('formal-bracketed-method-field-set',
      [PY, 'test_formal_bracketed_method_field_set.py'], mem='tiny',
      deps=['preflight'],
@@ -3478,10 +3488,6 @@ BUCKETS = {
               'sqliteruntime', 'formal-sweep-truth', 'formal-link-accounting',
               'formal-ast', 'silentnoop',
               'refusal-taxonomy', 'returned-frame-layout',
-              # Builds nothing and costs 0.05 s, so it belongs in the everyday
-              # loop; `formal-glob` is deliberately NOT here (31.8 s, two
-              # machines per group).
-              'formal-field-walk',
               # The host-import WALL's readers. 17 cases, 0.36 s, no build and
               # no Lean, so the `formal-field-walk` rule puts it in the everyday
               # loop; it arrived with `work/formal27-6` in NO bucket and NO
@@ -3593,7 +3599,9 @@ BUCKETS = {
               # missed assignment there is two real struct fields sharing one
               # slot, so this is a coverage hole and not a stale entry — which
               # is the distinction `test_suite.py` draws between registering a
-              # file and excusing one. Also in `proofs`, like the two above it.
+              # file and excusing one. Also in `proofs`, like the two above it,
+              # and `formal-glob` is deliberately NOT here (31.8 s, two machines
+              # per group).
               'formal-field-walk',
               # …and `formal-receiver-position`, 38 cases on both backends at
               # 16 s and 0.05 GB with no Lean. It is here because of what
@@ -3726,10 +3734,6 @@ BUCKETS = {
                 'formal-monomorph',
                 'formal-target-queries', 'formal-value-model',
                 'formal-x86-dylib',
-                # …and the two the estate check named on 2026-10-02, for the
-                # same reason and with the same cost measurement: cheap enough
-                # that `check` runs them and `proofs` is only naming them.
-'formal-read-before-store', 'formal-receiver-spelling',
                 # …and the one the estate check named on the merge of the
                 # formal5 batch: `test_formal_core_hostmods.py` came with
                 # `work/formal5-hostmods-core` and was named by no bucket.
@@ -3789,21 +3793,20 @@ BUCKETS = {
                 # in both buckets, argues for `check`. What a test costs and
                 # what it is ABOUT are different questions, and only the second
                 # one should decide where it lives.
+                # `formal-glob`, `formal-optional` and `formal-field-walk` are
+                # named HERE, in the estate-check block above, each with its own
+                # reason — this bucket is the whole formal picture in one place,
+                # and expansion schedules a test once per run, so being in
+                # `check` as well costs nothing. Spelled once per bucket rather
+                # than twice in one: a name listed twice is a second comment
+                # claiming the reader has been told something they have not,
+                # which is what `test_suite.py`'s "the buckets: no name is in
+                # one twice" checks.
                 'formal-admitted', 'formal-fcntl', 'formal-math',
-                'formal-shutil', 'formal-stat', 'formal-glob',
-                # …and `formal-optional`, named here for `formal-shutil`'s
-                # reason: it is in `check` (above) for the cost, and `proofs` is
-                # where the whole formal picture is.
-                'formal-optional',
-                # …and `formal-field-walk`, named in `check` above and here for
-                # `formal-read-before-store`'s reason: `proofs` is where the
-               # whole formal picture is, and expansion schedules a test once
-               # per run, so the second bucket costs nothing.
-                'formal-field-walk',
-                # …and `formal-bracketed-method-field-set`, the same shape and
-                # the same two reasons: in `check` above because 3.7 s is what
-                # that bucket costs for a field-set table, and here because
-                # `proofs` is the whole formal picture.
+                'formal-shutil', 'formal-stat',
+                # …and `formal-bracketed-method-field-set`, in `check` above
+                # because 3.7 s is what that bucket costs for a field-set table,
+                # and here because `proofs` is the whole formal picture.
                 'formal-bracketed-method-field-set'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model',
             'formal-x86-machine-model',

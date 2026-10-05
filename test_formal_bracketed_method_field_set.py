@@ -1077,14 +1077,32 @@ def run_census_case(case, tmpdir, verbose):
     # that is the ONE derivation.  `struct_field_names` answers from what that
     # published (`struct_merged_field_names`) and so asks nothing at all — measured,
     # and it is why an ask counter wrapped around a second `struct_field_names`
-    # sees zero rather than one.
+    # sees zero rather than one.  `myinterpreter.py` reads both
+    # `M._own_field_names` and `struct_field_names`, so the whole point of the
+    # per-function-asker work is that neither is O(methods).
     #
-    # So the two halves of the claim are asserted at the two places it can break:
-    # the number of derivations is 1 for a struct of ANY number of methods (a
-    # per-function asker reading this file back would make it n_methods, and a
-    # naive memo would make it 0), and every read after it is 0 (a regression
-    # that stopped publishing the merge, or stopped threading the table, would
-    # make this n_methods again).
+    # Asserting the ask COUNT rather than only the answer LISTS is the point of
+    # the group: a derivation that re-walked every method body once per method
+    # would answer identically and still be the pre-fix shape.  Three call sites
+    # and three costs, because there are three paths and each is a place a
+    # per-method asker could reappear:
+    #
+    #   * `parse_module`, which derives each struct's OWN field names once to
+    #     publish the merge — 1, for a struct of ANY number of methods;
+    #   * the READERS of what it published (`struct_field_names`,
+    #     `struct_field_count`, `struct_sole_field_name`, `struct_fits_one_word`)
+    #     — 0, because a regression that stopped publishing the merge or stopped
+    #     threading the table would make these n_methods again; and
+    #   * `_own_field_names`, which is what `struct_field_names` FALLS THROUGH to
+    #     for a struct nothing published a merge for — a struct read without
+    #     `formal.build`, which is how a module imported from another image is
+    #     asked.  1, and its ANSWER is asserted equal to what was published, so a
+    #     change that made the two disagree fails here rather than in whichever
+    #     reader happened to see it.
+    #
+    # Measured on `a_declared_name_that_is_also_a_method_stays_a_field` (a
+    # 2-method struct): 1 ask during the parse, 1 from `_own_field_names`, 0
+    # from a second `struct_field_names`.
     calls = []
     real = M.struct_receiver_stores
 
@@ -1126,24 +1144,35 @@ def run_census_case(case, tmpdir, verbose):
                            f"the old per-method formula "
                            f"{sorted(spelled - demoted)}")
 
+    # The two paths that are NOT the parse, counted with the same wrapper. The
+    # readers first: `del calls[:]` between them is what makes each count its
+    # own sites rather than the sum of the two.
     M.struct_receiver_stores = counted
     try:
         for _ in range(3):
             M.struct_field_names(st)
             M.struct_field_count(st)
-        del calls[:]
         n_methods = len(M.struct_methods(st))
         M.struct_field_names(st)
         M.struct_field_count(st)
-        M.struct_sole_field_name(st)
+        M.struct_field_sole_field_name(st)
         M.struct_fits_one_word(st)
         reads = list(calls)
+        del calls[:]
+        own = M._own_field_names(st)
     finally:
         M.struct_receiver_stores = real
     if reads:
         return False, (f"reading the field set of a {n_methods}-method struct "
                        f"asked struct_receiver_stores {len(reads)} times; the "
                        f"merge published by parse_module answers it")
+    if len(calls) != 1:
+        return False, (f"deriving {st.name}'s OWN field names asked "
+                       f"struct_receiver_stores {len(calls)} times; it is a "
+                       f"property of the STRUCT, so it is asked once")
+    if own != got:
+        return False, (f"{st.name}'s own field names {own} are not the list "
+                       f"struct_field_names published for it ({got})")
     if verbose:
         print(f"      field set {got}; {n_methods} methods, 1 census")
     return True, ""

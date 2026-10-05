@@ -489,20 +489,19 @@ class TestCensusReport(unittest.TestCase):
 # `formal/hostmods/zlib.mojo` — the "project to argue about" the queue's own
 # work map called it — would have moved ZERO of them.
 #
-# Same shape, three more rows: `resource` (2 files, both of which spell
+# Same shape, two more rows: `resource` (2 files, both of which spell
 # `resource.getrusage(resource.RUSAGE_CHILDREN)` inside the STRING of a child
-# program they write out, never in code), `sysconfig` (`fire.py`, which the work
-# map already recorded as "imports it and never uses it"), and — until
-# 2026-10-05 — `traceback` (1 file). `traceback` LEFT this list the way
-# `shutil` and `tempfile` left theirs: by being WRITTEN.
-# `formal/hostmods/traceback.mojo` answers CPython's own text for the one state
-# this target can be in — no exception in flight — and it BUILDS on both
-# architectures (`test_formal_hostmods_census.py`: 72/72 rows). So importing it
-# is no longer an unresolved host import, its row is no longer stopped at one,
-# and this section — whose subject is a row that is ENTIRELY dead imports — is
-# not about it. That is the event `test_the_premise_each_row_is_unbuildable`
-# was written to be told about, and it is why the list is three and the prose
-# above it still says four: the history is part of what a reader needs.
+# program they write out, never in code) and `sysconfig` (`fire.py`, which the
+# work map already recorded as "imports it and never uses it").
+#
+# **A FOURTH one left this table on 2026-10-05 rather than being worked off it:
+# `traceback`, which got a model** (`formal/hostmods/traceback.mojo`, with
+# `signal` beside it, in the same commit). A row whose module the compiler now
+# compiles is not a row of work at all — importing it builds — so this table is
+# about modules with NO model and a name that cannot be read. That is the
+# section's own `assertIsNone(_host_model_source(name))` asserting it, which is
+# why leaving the name in was a loud failure rather than a slow drift; the fix
+# was to say which of the two facts changed.
 #
 # What the three have in common is that the row is ENTIRELY dead imports, which
 # is what makes them this test's subject rather than a list: a dead import in a
@@ -514,10 +513,12 @@ class TestCensusReport(unittest.TestCase):
 # `traceback` was in this tuple and LEFT IT on 2026-10-05, by being WRITTEN:
 # `formal/hostmods/traceback.mojo` answers CPython's own text for the one state
 # this target can be in (no exception in flight), which `test_formal_traceback.py`
-# checks against CPython. Its own wave note records that it moved NO sweep row —
-# the 38 files an `ast`-based walk attributed to it were all `import traceback`
-# inside `if`/`try` blocks, which `imported_modules` does not descend into — so
-# the row it was here for is the one row the landing did not move.
+# checks against CPython, and it BUILDS on both architectures
+# (`test_formal_hostmods_census.py`: 72/72 rows). Its own wave note records that
+# it moved NO sweep row — the 38 files an `ast`-based walk attributed to it were
+# all `import traceback` inside `if`/`try` blocks, which `imported_modules` does
+# not descend into — so the row it was here for is the one row the landing did
+# not move.
 #
 # It is named rather than quietly dropped because this tuple is a PREMISE and the
 # test that reads it says so in its own failure message: a name that gains a
@@ -2115,7 +2116,7 @@ class TestOleanCurrency(unittest.TestCase):
     Every case here is pure file-content arithmetic, so none of it runs Lean.
     """
 
-# The real graph's SHAPE, which is the part that matters: TWO roots that
+    # The real graph's SHAPE, which is the part that matters: TWO roots that
     # import nothing from the set (`IEEE754` and `ProofLib` — `IEEE754` is
     # FIRST in `LIBRARY_MODULES` precisely because it imports nothing at all,
     # which is what `formal/lean.py`'s own comment says, and `ProofLib`'s
@@ -2131,6 +2132,14 @@ class TestOleanCurrency(unittest.TestCase):
     # check whose subject is that a fixture outside the set exercises nothing,
     # and the digest's walk is scoped to `LIBRARY_MODULES` so a name outside
     # that tuple is invisible. `d9269a0f` added the module and not the line.
+    #
+    # It is here, empty, because that is what `lib/IEEE754.lean` is: it spells
+    # no `import` at all, which is what `formal/lean.py`'s comment on
+    # `LIBRARY_MODULES` says ("`IEEE754` is FIRST and imports nothing"), and a
+    # fixture that spelled `import Lean` would be testing a graph the tree does
+    # not have. A second root that imports nothing is also a SECOND direction
+    # for the invalidation cases below: nothing imports it, so editing it must
+    # move nothing, which is the over-reach half with a witness of its own.
     SOURCES = {
         "IEEE754": "",
         "ProofLib": "import Lean\n",
