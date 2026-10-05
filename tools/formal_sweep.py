@@ -850,6 +850,33 @@ _REFUSAL_FAMILIES = (
     ("no buffer to compose one in", "string composition has no buffer"),
     ("on two strings is refused on this path",
      "string composition has no buffer"),
+    # The TEXT ENCODING block, in the two wordings `formal/model.py` emits it
+    # in, and it was the corpus's largest UNNAMED family on the 2026-10-04 b12
+    # sweep: 229 of the 236 `other refusal` codegen findings were this one
+    # refusal in one module (`formal/hostmods/os/_syscalls.mojo`), which is what
+    # "other refusal" means — nobody has looked. The row above is its SIBLING and
+    # the two are deliberately separate: composition is a missing buffer and
+    # fires on ASCII text too, this one is a `char *` to BYTES where CPython has
+    # CHARACTERS and its own docstring names the clearing condition ("no literal
+    # with a byte >= 0x80 anywhere means no string in the image can have one").
+    #
+    # The FIRST marker collects three of the four constructs in the block rather
+    # than there being three markers, because `codepoint_refusal`,
+    # `printf_text_width_refusal` and `printf_text_conversion_refusal` all quote
+    # that one clause; the second is `string_element_refusal`'s and shares none of
+    # it. Neither marker is a substring of a broader marker above, which is the
+    # placement rule every row in this tuple obeys.
+    #
+    # What made it 229 files was a defect in the SCAN, fixed on 2026-10-04
+    # (`formal/model.py::is_docstring_statement`): it published DOCSTRINGS as
+    # non-ASCII string values, and nothing can name a docstring, so six lines of
+    # em-dash prose in a hostmod refused the whole corpus behind it. The family
+    # STAYS, because the refusal is correct for a real non-ASCII value.
+    ("is refused: on this path it would answer in BYTES where CPython "
+     "answers in CHARACTERS",
+     "a non-ASCII string: BYTES where CPython has CHARACTERS"),
+    ("is refused on a string whose text is not ASCII",
+     "a non-ASCII string: BYTES where CPython has CHARACTERS"),
     ("multi-index subscript", "multi-index subscript"),
     # A call through a VALUE, in three shapes with three fixes: the callee's
     # declared type, the bracket, the keyword. Ahead of everything below

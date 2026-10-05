@@ -6949,6 +6949,40 @@ def _non_ascii_examples(texts) -> str:
     return ", ".join(shown) + tail
 
 
+def is_docstring_statement(node) -> bool:
+    """True for a bare string `ExprStmt` — a docstring, and not a VALUE.
+
+    **The one answer to "is a bare string statement a value on this path", and
+    it is asked from two places that would otherwise each decide it.**
+    `module_body` already acts on it (a bare string `ExprStmt` at file level is
+    not body: Python stores it in `__doc__` and runs nothing), and the TEXT
+    ENCODING scan below now acts on it too, because until it did the two
+    disagreed and the disagreement cost this repository 229 files.
+
+    The reason a docstring is not a value is not that it is dropped: measured,
+    a FUNCTION docstring's bytes DO reach the image (`ZZFNDOCPROBEZZ` appears
+    once in a built image whose module docstring's `ZZDOCSTRINGPROBEZZ` appears
+    zero times, on this tree). It is that **nothing can name it.** `__doc__` is
+    on `_UNRESOLVED_NAME_ALLOWED`, so a read of `f.__doc__` is materialised
+    from that table rather than read out of the literal, and there is no other
+    spelling: no name binds the statement, so no parameter, no return value and
+    no container can carry a pointer to it. A string VALUE in this image is
+    reachable by construction — `publish_non_ascii_strings`'s own argument is
+    that "a string one module interns is a value another module can hold" — and
+    a docstring is not one.
+
+    So the distinction that matters for the encoding block is reachability, and
+    this is the predicate for it. It is deliberately the WIDE test (any bare
+    string statement, not only a body's first) because it is the one that is
+    true: a bare string expression statement is discarded on every path, so
+    there is no spelling in which it holds a value, and a narrow "first
+    statement of a body" rule would be a second answer with a case the wide one
+    does not cover.
+    """
+    return (isinstance(node, F.ExprStmt)
+            and isinstance(getattr(node, "value", None), F.StringLiteral))
+
+
 def non_ascii_strings_in(stmts: list, limit: int = 32) -> list:
     """The decoded TEXT of every non-ASCII string literal under `stmts`.
 
@@ -6971,6 +7005,17 @@ def non_ascii_strings_in(stmts: list, limit: int = 32) -> list:
     element is ONE byte (`model.blob_elem_stride`, commit 37056734) — and a raw
     string's backslashes are content, so decoding it would invent the escapes it
     deliberately did not ask for.
+
+    **A DOCSTRING is not one of these either, and that is the third exclusion
+    with a measured reason rather than a typing one.** See
+    `is_docstring_statement`, which is the predicate and the argument: a
+    function docstring's bytes do reach the image, but no name binds them, so
+    they are not a string a subscript, a `strlen` or a `%<width>s` can be taken
+    of. Before this exclusion the scan counted them, and because the encoding
+    block's answers are conditioned on "does this IMAGE hold a non-ASCII
+    literal" rather than on the operand, one em-dash in a docstring refused
+    every string operation in the module — the conservative direction, taken on
+    a fact that is not there.
     """
     out: list = []
     stack = list(stmts or [])
@@ -6981,6 +7026,23 @@ def non_ascii_strings_in(stmts: list, limit: int = 32) -> list:
         if id(node) in visited:
             continue
         visited.add(id(node))
+        if is_docstring_statement(node):
+            # NOT descended into, and this is the whole fix. A docstring's bytes
+            # are in the image and nothing can name them
+            # (`is_docstring_statement`), so publishing them made the encoding
+            # block refuse every `s[i]`, `len(s)` and `printf("%<w>s", s)` in a
+            # module whose only non-ASCII text was PROSE. Measured on
+            # `formal/hostmods/os/_syscalls.mojo`, whose 31 non-ASCII literals
+            # are 31 docstrings and not one value: `d[i]` came back as "this
+            # image holds a string literal that is not ASCII", on both
+            # architectures, and the refusal was asked over a file that holds
+            # no non-ASCII string at all.
+            #
+            # `continue` rather than "skip the value and descend": an
+            # `ExprStmt`'s only field IS its value (`value`, `line`, `col`), so
+            # there is nothing else in it, and one branch here is one rule
+            # rather than a shape to keep in step with the dataclass.
+            continue
         if (isinstance(node, F.StringLiteral)
                 and not getattr(node, "is_raw", False)
                 and not getattr(node, "is_bytes", False)):
@@ -33822,7 +33884,11 @@ def collect_module_symbols(stmts: list, source_path: str = None) -> dict:
 #   * a module DOCSTRING — a bare string `ExprStmt` — is not body. Python
 #     stores it in `__doc__` and runs nothing; `model._UNRESOLVED_NAME_ALLOWED`
 #     already answers a read of `__doc__` from a Python-level value, so there
-#     is nothing to execute and nothing to lose.
+#     is nothing to execute and nothing to lose. The test is
+#     `is_docstring_statement`, and it is NAMED rather than inlined here because
+#     the TEXT ENCODING scan asks the same question — a docstring's bytes are not
+#     a string value — and two answers to "is a bare string statement a value"
+#     is how 229 files came to be refused over six lines of em-dash prose.
 #   * `pass` at file level is not body: it is the statement that does nothing.
 #   * a module-level BINDING whose value FOLDS to a literal, bound once, is not
 #     body either — and this is the exemption `collect_module_symbols` already
@@ -34067,9 +34133,8 @@ def module_body(stmts: list, symbols: dict = None) -> list:
         kind = type(stmt).__name__
         if kind in _MODULE_BODY_DECLARATIONS:
             continue
-        if kind == "ExprStmt" and isinstance(getattr(stmt, "value", None),
-                                             F.StringLiteral):
-            continue                    # the module docstring
+        if is_docstring_statement(stmt):
+            continue                    # a bare string statement is not body
         if kind == "PassStmt":
             continue                    # the statement that does nothing
         if kind in _MODULE_BODY_BINDINGS and not _is_real_store(stmt):

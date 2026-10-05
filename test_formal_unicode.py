@@ -1043,6 +1043,69 @@ def model_checks():
        M.non_ascii_strings_in(stmts(
            'def main(n):\n    printf("%s", "\\u00e9")\n')), [])
 
+    # ── a DOCSTRING, and the 229 files it was costing ──────────────────────
+    #
+    # The third exclusion, and the only one of the three with a MEASURED
+    # failure rather than a typing argument. A bare string `ExprStmt` is a
+    # docstring, and it is not a string VALUE: nothing binds it, and `__doc__`
+    # is on `model._UNRESOLVED_NAME_ALLOWED`, so a read of `f.__doc__` is
+    # materialised from that table rather than read out of the literal. The scan
+    # used to publish it anyway, and because every answer in the TEXT ENCODING
+    # block is conditioned on "does this IMAGE hold a non-ASCII literal" rather
+    # than on the operand, six lines of em-dash in
+    # `formal/hostmods/os/_syscalls.mojo`'s prose refused every `s[i]`, `len(s)`
+    # and `printf("%<w>s", s)` in that module — and in the 229 files whose
+    # import closure reaches it. 31 non-ASCII literals in that file, 31
+    # docstrings, 0 values.
+    ok("the scan skips a module docstring",
+       M.non_ascii_strings_in(stmts(
+           '"""A module docstring with an em-dash — and a section sign §."""\n'
+           'def main(n):\n    printf("%s", "abc")\n')), [])
+    ok("the scan skips a function docstring",
+       M.non_ascii_strings_in(stmts(
+           'def f(s):\n'
+           '    """A function docstring — with prose."""\n'
+           '    return s[0]\n')), [])
+    # NOT only a body's FIRST statement. A bare string expression statement is
+    # discarded on every path, so there is no spelling in which it holds a
+    # value, and a narrow "first statement of a body" rule would be a second
+    # answer with a case the wide one does not cover. This row is that case.
+    ok("the scan skips a bare string statement that is not first",
+       M.non_ascii_strings_in(stmts(
+           'def f(s):\n'
+           '    var t = 1\n'
+           '    "héllo"\n'
+           '    return s[0]\n')), [])
+    # …and the other direction, which is the one that matters: a docstring does
+    # not stop a REAL value from publishing. Without this row the fix above
+    # would also have silenced `printf("%s", "héllo")`, which is the opposite of
+    # what it is for.
+    ok("a docstring does not hide a real non-ASCII value",
+       M.non_ascii_strings_in(stmts(
+           '"""prose — with a dash."""\n'
+           'def f():\n'
+           '    """more prose — here too."""\n'
+           '    return "héllo"\n')),
+       ["héllo"])
+    ok("the scan still finds a non-ASCII value beside a docstring",
+       M.non_ascii_strings_in(stmts(
+           'def f():\n'
+           '    """prose."""\n'
+           '    printf("%s", "héllo")\n')), ["héllo"])
+    # The predicate itself, asked directly rather than through the walk, because
+    # it is the answer to a question TWO places now ask
+    # (`module_body` and the scan) and two answers would be the failure this
+    # file exists to catch.
+    ok("a bare string statement is a docstring",
+       M.is_docstring_statement(
+           stmts('"""prose."""\n')[0]), True)
+    ok("a bound string is not a docstring",
+       M.is_docstring_statement(
+           stmts('X = "prose"\n')[0]), False)
+    ok("a bare non-string statement is not a docstring",
+       M.is_docstring_statement(
+           stmts('pass\n')[0]), False)
+
     # ── the three answers of `string_codepoint_verdict` ──
     # Save/restore through `clear_*` + `publish_*` rather than by assigning:
     # `publish_non_ascii_strings` ACCUMULATES (it must — see its docstring for

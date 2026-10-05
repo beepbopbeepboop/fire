@@ -236,10 +236,11 @@ one sentence.
 | rank 1 | 148 `a call to a name the defining module does not export` | **236 `other refusal`** |
 | rank 2 | 115 `string composition: nothing to compose into` | 148 (same) |
 | rank 3 | 59 `module exports no public functions` | 59 (same) |
-| rank 4 | 1 a handler arm with a body | 6 `variadic call has no ABI` |
-| rank 5 | 6 `variadic call has no ABI` | 4 MLIR dialect construct |
+| rank 4 | 6 `variadic call has no ABI` | 115 `string composition: nothing to compose into` |
+| rank 5 | 4 MLIR dialect construct | 6 (same) |
+| rank 6 | 4 a module's ATTRIBUTE read as a value | 6 (same) |
 | **`other refusal`** | **6** | **236** |
-| causes that fire on this corpus (of 63 in the table) | 17 | **17** |
+| causes that fire on this corpus | 17 | **17** |
 
 Grouped by the module that refused (`uses:` is the tool's own column):
 
@@ -415,18 +416,186 @@ Six of them, one file's own source each, and each a distinct construct:
 a `comptime` class attribute read off a type PARAMETER, a `Span[…]` generic
 argument list read as a subscript, `p.unsafe_load()` (an ADD pointer read refused
 because the result is a bare address), `create_point` returning a frame address
-**as this image's ENTRY**, and — **new this round** — §5.2's parse error.
+**as this image's ENTRY**, and — **new this round, and filed not fixed** —
+`test_formal_libc_symbol.py`'s parse error, which is `fire_compiler.py`'s
+tokenizer refusing a PEP 701 f-string whose replacement field spans **lines**
+(measured over six shapes: a nested same-quote f-string parses, a multi-line
+replacement field and a comment inside the braces do not). It is one file, it is
+a parser change rather than a formal one, and it is
+`bugs/PARSE_FAIL_fire_compiler_cannot_lex_a_multiline_f_string.md`.
 
 ---
 
 ## 5. What this branch changed, measured
 
-Two commits on top of `master` at `77b24183`: this map and the two logs, and the
-fix + its tests below. **The change is in `formal/model.py`'s TEXT ENCODING scan
-and in the two instruments that RANK refusals, not in either backend**, and it is
-measured.
+Three commits on top of `master` at `77b24183`: this map and the two logs; the
+round-over-round tool; and the fix below. **The fix is in `formal/model.py`'s
+TEXT ENCODING scan and in the two instruments that RANK refusals, not in either
+backend**, and it is measured on both sides.
 
-*(§5.1–§5.4 are filled in by the fix commit; see `git log`.)*
+### 5.1 The fix, in the model
+
+`formal/model.py::non_ascii_strings_in` no longer descends into a bare string
+`ExprStmt`. The predicate is a new **named** function,
+`formal/model.py::is_docstring_statement`, and it is named rather than inlined
+because **`module_body` already asked the same question** — its own block comment
+says *"a module DOCSTRING — a bare string `ExprStmt` — is not body"* and its loop
+tested for it inline. Two answers to "is a bare string statement a value on this
+path" is how 229 files came to be refused over six lines of em-dash prose, so
+`module_body` now calls the same function and there is one answer.
+
+**THE ARGUMENT IS REACHABILITY, NOT "IT IS NOT EMITTED",** and the difference is
+measured: a FUNCTION docstring's bytes **do** reach the image (`ZZFNDOCPROBEZZ`
+appears once in a built image whose module docstring's `ZZDOCSTRINGPROBEZZ`
+appears zero times). What makes a docstring not a value is that nothing can name
+it — `__doc__` is on `_UNRESOLVED_NAME_ALLOWED`, so a read of `f.__doc__` is
+materialised from that table rather than read out of the literal — and
+`publish_non_ascii_strings`'s own docstring already argues the block in exactly
+those terms: *"a string one module interns is a value another module can hold."*
+
+The predicate is deliberately the **wide** test (any bare string statement, not
+only a body's first), because a bare string expression statement is discarded on
+every path, so there is no spelling in which it holds a value; a narrow
+"first statement of a body" rule would be a second answer with a case the wide one
+does not cover. And the exclusion is three lines rather than a flag, because
+`ExprStmt`'s only fields are `value`, `line` and `col` — there is nothing else in
+it to descend into.
+
+**IT IS NOT OVER-BROAD.** A real non-ASCII value still publishes and still
+refuses, on both architectures:
+
+```
+$ python3 fire.py build --formal --no-prove --backend=arm64 -o .tmp/ascii/t_real .tmp/ascii/t_real.mojo
+build: len(tagged(...)) is refused: on this path it would answer in BYTES where CPython answers in CHARACTERS. […]
+$ … --backend=x86_64 …
+build: len(tagged(...)) is refused: on this path it would answer in BYTES where CPython answers in CHARACTERS. […]
+```
+
+(CPython prints 5 there and the byte count is 6, so the refusal is right.) And an
+all-ASCII image builds and answers CPython: `s = "hi"; printf("[%c][%c]", s[0],
+s[1])` prints `[h][i]` on arm64, identically.
+
+### 5.2 The fix, in both ranking instruments
+
+The refusal that caused the regression had **no row in `CAUSES` and none in
+`_REFUSAL_FAMILIES`**, so 229 files read as `other refusal` — the bucket both
+tools define as *"nobody has looked"*. The two tables are keyed on different
+things (what a fix would have to CHANGE versus the shape of the message), so
+**both** needed the row, which is the same two-part argument `…_b11.md` §5.1 made
+for f-strings.
+
+The row is **`a non-ASCII string: BYTES where CPython has CHARACTERS`**, with
+**two alternatives**: `codepoint_refusal` and `printf_text_width_refusal` /
+`printf_text_conversion_refusal` all quote one clause (`is refused: on this path
+it would answer in BYTES where CPython answers in CHARACTERS`) and so are one
+alternative covering three constructs, and `string_element_refusal`'s wording
+(`is refused on a string whose text is not ASCII`) shares none of it.
+
+| | `-12` as swept | **`-12` with §5.2's row** |
+|---|---|---|
+| rank 1 | **236 `other refusal`** | **230 `a non-ASCII string: BYTES where CPython has CHARACTERS`** |
+| rank 2 | 148 `a call to a name the defining module does not export` | 148 (unchanged) |
+| rank 3 | 115 `string composition: nothing to compose into` | 59 `module exports no public functions` |
+| `other refusal` | 236 | **6** |
+| the log's own by-family breakdown, `other refusal` (both codegen classes) | **388** | **158** |
+| causes that fire on this corpus (of 66 in the table) | 17 | **17** |
+
+The row **stays**: the refusal is CORRECT for a real non-ASCII value, and a queue
+that emptied this row by deleting it would be reading a fix as a closure.
+
+### 5.3 The ceiling, measured — and it removes the wall rather than moving it
+
+**8 of the 229 files built, one command each**, sampled across the row rather
+than taken from one corner:
+
+| file | what it lands on with the fix |
+|---|---|
+| `formal/hostmods/os/_syscalls.mojo` | **`pass`** |
+| `formal/hostmods/ast.mojo` | **`pass`** |
+| `_ab.py` | `not-answerable/host-import` — `atexit`, a fact about the target |
+| `std/builtin/float_literal.mojo` | its own in-file refusal (`__int_literal__().__int__(…)`) |
+| `std/collections/type_dict.mojo` | its own in-file refusal (`comptime` off a type parameter) |
+| `std/algorithm/backend/tile.mojo` | the variadic-ABI row |
+| `std/_gpu/__init__.mojo` | the export-gate row |
+| `type_system.py` | the string-composition row — **back where `-11` had it** |
+
+**And the 106 files that went dark go back where they were.** Six sampled from
+the 106, all six landing on the f-string refusal `-11` measured them on:
+`cas.py` and `checked_run.py` and `comptime.py` on `cas.py:451`,
+`build_config.py` and `compile_stdlib.py` on `module_loader.py:108`,
+`build_stdlib_dylib.py` through `cas.py`. **Not one of the 12 sampled files lands
+on another encoding refusal**, which is the property that distinguishes removing
+a wall from moving it — and it is the check a reader should make before believing
+any row's count.
+
+### 5.4 It repairs a registered gate job, which is a second measurement
+
+`python3 test_formal_sweep.py` was **127 tests with 1 ERROR** before this branch
+and is **133 tests, 0 failures** after. The error was
+`TestLibSystemBindSpelling.setUpClass`, which builds
+`formal/hostmods/os/_syscalls.mojo` as its fixture and raised on the refusal —
+so its six tests were never running, in a job the gate runs every time. The fix
+is what makes them run again.
+
+### 5.5 The tests, and what they prove
+
+* **the model, at the scan** — `test_formal_unicode.py`'s image-scan section
+  gains **8 checks**: a module docstring, a function docstring, a bare string
+  statement that is *not* first, **a docstring beside a real non-ASCII value**
+  (which must still publish — without that row the fix would also have silenced
+  `printf("%s", "héllo")`, the opposite of what it is for), and the predicate
+  asked directly three ways. **104 behavioural + 46 model checks, all PASS**;
+  the 96 behavioural cases that were there before are unchanged, which is the
+  proof the exclusion is narrow.
+* **both tables' rows are reachable from a real message, and the samples are
+  BUILT not copied** — `test_refusal_taxonomy.py`'s `_non_ascii_messages()`
+  **calls** `model.string_element_refusal` (on a PARSED `s[0]`, because
+  `spelled()` and `string_literal_text()` both read real node shapes and
+  `SubscriptExpr`'s receiver is `obj`, not `base`) and
+  `model.codepoint_refusal`, and **raises** rather than outliving either — the
+  third built pair in that file and the third time that file's docstring's point
+  3 has been the reason. The pair is in **both** tables (`SAMPLES` for the
+  family, `CAUSE_SAMPLES` for the cause), because the two labels are spelled
+  independently in two files and their drifting apart is the disagreement a
+  reader of either has to be able to see. **269/269 checks, 45 families, 66
+  causes.**
+* **the round-over-round tool** — `test_formal_sweep.py::TestRoundOverRound`,
+  9 checks, and the one that uses no fixture is
+  `test_the_committed_rounds_reproduce_the_map_they_were_derived_from`, which
+  asserts `…_b11.md`'s hand-computed §2.1/§2.3/§3 numbers against the committed
+  logs.
+
+```console
+$ python3 test_refusal_taxonomy.py
+refusal taxonomy: PASS (269/269 checks, 45 families, 66 causes)
+$ python3 test_formal_sweep.py
+Ran 133 tests in 13.867s
+OK
+$ python3 test_formal_unicode.py
+formal unicode: model PASS=46 FAIL=0
+formal unicode: PASS=104 FAIL=0
+$ python3 tools/formal_sweep_causes.py --min 3 bugs/sweeps/sweep-arm-12.txt | head -3
+files in-file  cause
+    230       1  a non-ASCII string: BYTES where CPython has CHARACTERS
+    148      15  a call to a name the defining module does not export
+```
+
+### 5.6 What the fix does NOT claim
+
+**`FILES BLOCKED IS AN UPPER BOUND` and this is where that bites.** §5.3 measures
+8 files' worth of the 229, and says nothing about the other 221 — they move to
+whatever is behind the wall, which for most of them is a row this map already
+names. **The honest reading of §5.3 is "the wall is gone", not "229 files
+recovered"**: on the evidence, 8 build, 4 land on rows the map already lists, and
+the 106 that went dark go back to the row `-11` measured them on. **A re-sweep is
+the only way to price the rest**, and §6 gives the command.
+
+Also not claimed: the `s[i]` refusal's *other* half. `string_element_refusal`'s
+docstring is explicit that "an index a KNOWN TEXT makes answerable is still not
+answerable, because the obstacle is where the answer would live rather than what
+it is" — a one-CHARACTER `str` is a new object and this representation has
+nowhere to put one. That is the composition row's missing buffer, it fires for
+ASCII text too, and nothing here touches it.
 
 ---
 
