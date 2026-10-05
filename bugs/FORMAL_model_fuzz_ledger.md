@@ -214,9 +214,23 @@ will happily delete the guilty instruction and report a different bug.
 
 The full set of refusals is §2.1's table; `bugs/FORMAL_arm64_step_cannot_step_
 nine_wired_encodings.md` carries the count, the encoders and the order to add
-them in. The one surviving `WRONG` is
-`bugs/FORMAL_arm64_ldr_str_unsigned_offset_reads_register_31_as_zero.md`, whose
-§4 says why it is written down instead of landed: the fix is one identifier in
-three places, and the two `work_step_*` PROOFS it breaks need a `Rn == 31` /
-`Rn < 31` case split that a light worker cannot confirm without the
-generated-proof suite.
+them in.
+
+**There is no `WRONG` left in this sweep**, and the one that was here was the
+unsigned-offset `LDR`/`STR` pair reading register 31 as ZERO: `ldr x0, [sp,
+#32]` answered 0 where the hardware answered the word, and `str w25, [x9, #32]`
+clobbered the four bytes above the word it stored. Both are fixed in
+`lib/ProofLib.lean` — the three arms read `Rn` through `arm64_reg_or_sp`, and
+the 32-bit store writes through the new four-byte `mem_write_u32` — and both are
+pinned by hardware rather than by prose:
+`test_formal_call_proof_gen.py`'s `TestUnsignedOffsetAccess` runs those three
+instructions on the CPU and compares `arm64_step`'s final state against it. The
+count that moved, measured:
+
+| seed | before | after |
+|---|---|---|
+| `sweepC` | AGREE 208  WRONG 2  NOSTEP 86 | AGREE 210  WRONG 0  NOSTEP 86 |
+| `sweepB` | AGREE 197  WRONG 0  NOSTEP 99 | AGREE 197  WRONG 0  NOSTEP 99 |
+
+The 86/99 `NOSTEP`s are the nine encodings
+`bugs/FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` carries.

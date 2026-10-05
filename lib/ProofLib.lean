@@ -103,6 +103,32 @@ def mem_write_u64 (mem : Nat → UInt8) (addr : Nat) (val : UInt64) : Nat → UI
     else if i = addr + 7 then UInt8.ofNat ((val.toNat >>> 56) % 256)
     else mem i
 
+/-- Memory write: store FOUR bytes little-endian to address.
+
+    The 32-bit store's helper, and it exists because a `STR Wt` is four bytes
+    wide: writing it through `mem_write_u64` stores EIGHT, so the four bytes
+    above the word the program meant to write are clobbered in the model and
+    left alone by the hardware. Measured against the CPU by
+    `tools/formal_model_fuzz.py` (seed `sweepC`, case 123): after
+    `str w25, [x9, #32]` the model held `ff ff ff 7f` where the hardware held the
+    memory's own `49 ce fd 0a`.
+
+    It is a definition rather than a composition of `mem_write_u64` on purpose.
+    `mem_read_u64 (mem_write_u64 …)` is what the peel lemmas
+    (`mem_read_after_write_u64` and the `FrameOk` window family) rewrite with,
+    so a 32-bit store spelled as a 64-bit write would be *provable* and wrong —
+    the lemmas would discharge obligations about four bytes the store never
+    touched. The narrower widths this family needs (`mem_write_u8`,
+    `mem_write_u16`, and the matching reads) are the same shape; they are not
+    here because nothing in `arm64_step` reaches them yet. -/
+def mem_write_u32 (mem : Nat → UInt8) (addr : Nat) (val : UInt64) : Nat → UInt8 :=
+  fun i =>
+    if i = addr then UInt8.ofNat (val.toNat % 256)
+    else if i = addr + 1 then UInt8.ofNat ((val.toNat >>> 8) % 256)
+    else if i = addr + 2 then UInt8.ofNat ((val.toNat >>> 16) % 256)
+    else if i = addr + 3 then UInt8.ofNat ((val.toNat >>> 24) % 256)
+    else mem i
+
 /-- Read 4 bytes signed little-endian (sign-extended to UInt64) -/
 def read_i32_le (code : Nat → UInt8) (addr : Nat) : Int :=
   let b0 := (code addr).toNat
@@ -2071,18 +2097,22 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rt := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let imm12 := ((insn >>> 10) &&& 0xfff).toNat
-    -- BUG, measured and NOT yet fixed, and this arm is reachable:
-    -- `formal/arm64_codegen.py` emits `encode_ldr_xt_xn_imm(_, 31, off)` at ten
-    -- sites, and this base reads register 31 as the ZERO register, so every one
-    -- of them is modelled as a load from address `off` rather than `sp + off`.
-    -- `tools/formal_model_fuzz.py` measures it — `ldr x0, [sp, #32]` with those
-    -- bytes non-zero gives the model 0 and the hardware the word — and the fix
-    -- is `arm64_reg_or_sp` here, in `work_step_ldr_uoff`'s statement and in the
-    -- generator's `idx == 18` row. The last two need the `Rn == 31` / `Rn < 31`
-    -- case split that `simp` cannot do from `(w >>> 5) &&& 0x1f` alone, which is
-    -- why it is written down rather than landed:
-    -- `bugs/FORMAL_arm64_ldr_str_unsigned_offset_reads_register_31_as_zero.md`.
-    let addr := arm64_reg rn s + UInt64.ofNat (imm12 * 8)
+    -- `arm64_reg_or_sp`, and the reason is that THIS CLASS HAS AN SP ENCODING
+    -- for `Rn`: `encode_ldr_xt_xn_imm(_, 31, off)` is a stack read and
+    -- `formal/arm64_codegen.py` emits it at ten sites. The body used to read the
+    -- base with `arm64_reg`, which is 0 at 31, so every one of those was
+    -- modelled as a load from address `off` rather than `sp + off` —
+    -- `tools/formal_model_fuzz.py` measures it against the CPU, and one
+    -- instruction is enough to see it: `cmp x3, x20 ; ldr x11, [sp, #64]` gave
+    -- the model 0 and the hardware the word.
+    --
+    -- The arm it over-corrected FROM is worth reading too, because the mistake
+    -- is symmetric: the body once hardwired `s.sp` for every `Rn`, which is
+    -- right for stack traffic and wrong for every heap read, and the repair
+    -- over-corrected to the OTHER extreme. `arm64_reg_or_sp` is the helper that
+    -- exists for exactly this question and is what the shifted-register `SUB`
+    -- and `CMP` arms above deliberately do NOT use.
+    let addr := arm64_reg_or_sp rn s + UInt64.ofNat (imm12 * 8)
     some (arm64_set_reg rt s (mem_read_u64 s.mem addr.toNat))
   -- STR Wt, [Xn, #imm]: 0xB9000000 (unsigned-offset 32-bit STORE, no writeback)
   --
@@ -2099,8 +2129,13 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rt := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let imm12 := ((insn >>> 10) &&& 0xfff).toNat
-    let addr := arm64_reg rn s + UInt64.ofNat (imm12 * 4)
-    some { s with mem := mem_write_u64 s.mem addr.toNat (arm64_reg rt s) }
+    -- `mem_write_u32`, NOT `mem_write_u64`: `STR Wt` is four bytes wide, and a
+    -- store of eight here writes four bytes the program never wrote — measured
+    -- against the CPU (`tools/formal_model_fuzz.py`, seed `sweepC`, case 123:
+    -- `str w25, [x9, #32]`, and the three bytes ABOVE it came back `ff` where
+    -- the hardware kept the memory's own `49 ce fd`).
+    let addr := arm64_reg_or_sp rn s + UInt64.ofNat (imm12 * 4)
+    some { s with mem := mem_write_u32 s.mem addr.toNat (arm64_reg rt s) }
   -- ADRP Xd, #page: 0x90000000 (Xd = page(PC) + sign_extend(imm21) << 12)
   else if (insn &&& 0x9f000000) = 0x90000000 then
     let rd := (insn &&& 0x1f).toNat
@@ -2211,10 +2246,10 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rt := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let imm12 := ((insn >>> 10) &&& 0xfff).toNat
-    -- BUG, measured and NOT yet fixed: same defect as the LDR arm above, and
-    -- `encode_str_xt_xn_imm(_, 31, off)` is reachable in the same way. See
-    -- `bugs/FORMAL_arm64_ldr_str_unsigned_offset_reads_register_31_as_zero.md`.
-    let addr := arm64_reg rn s + UInt64.ofNat (imm12 * 8)
+    -- `arm64_reg_or_sp`, for the LDR arm's reason: `encode_str_xt_xn_imm(_, 31,
+    -- off)` is a stack WRITE and is reachable in the same ten sites, and reading
+    -- the base with `arm64_reg` modelled it as a write at `off`.
+    let addr := arm64_reg_or_sp rn s + UInt64.ofNat (imm12 * 8)
     some { s with mem := mem_write_u64 s.mem addr.toNat (arm64_reg rt s) }
   -- LDP Xt1, Xt2, [<Xn|SP>, #imm7*8] (signed offset, no writeback): 0xA9400000
   --
@@ -4858,7 +4893,7 @@ theorem work_step_ldr_uoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xf9400000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u64 s.mem
-      ((arm64_reg ((w >>> 5) &&& 0x1f).toNat) s
+      ((arm64_reg_or_sp ((w >>> 5) &&& 0x1f).toNat) s
         + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat)) := by
   unfold arm64_step
   rw [hpc, hread]
@@ -4901,7 +4936,7 @@ theorem work_step_ldr_pre : ∀ (s : Arm64State) (code : Nat → UInt8) (pc : Na
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xf9400000),
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u64 s.mem
-      ((arm64_reg ((w >>> 5) &&& 0x1f).toNat) s
+      ((arm64_reg_or_sp ((w >>> 5) &&& 0x1f).toNat) s
         + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat)) :=
   work_step_ldr_uoff
 
@@ -4916,8 +4951,8 @@ theorem work_step_str_uoff32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) 
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xb9000000) :
     arm64_step s code = some { s with
-      mem := mem_write_u64 s.mem
-        ((arm64_reg ((w >>> 5) &&& 0x1f).toNat) s
+      mem := mem_write_u32 s.mem
+        ((arm64_reg_or_sp ((w >>> 5) &&& 0x1f).toNat) s
           + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 4)).toNat
         (arm64_reg ((w &&& 0x1f).toNat) s) } := by
   unfold arm64_step
@@ -4955,8 +4990,8 @@ theorem work_step_ldr_post : ∀ (s : Arm64State) (code : Nat → UInt8) (pc : N
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xb9000000),
     arm64_step s code = some { s with
-      mem := mem_write_u64 s.mem
-        ((arm64_reg ((w >>> 5) &&& 0x1f).toNat) s
+      mem := mem_write_u32 s.mem
+        ((arm64_reg_or_sp ((w >>> 5) &&& 0x1f).toNat) s
           + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 4)).toNat
         (arm64_reg ((w &&& 0x1f).toNat) s) } :=
   work_step_str_uoff32
@@ -5387,7 +5422,7 @@ theorem work_step_str_uoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w
     (h : (w &&& 0xffe00000) = 0xf9000000) :
     arm64_step s code = some { s with
       mem := mem_write_u64 s.mem
-        ((arm64_reg ((w >>> 5) &&& 0x1f).toNat) s
+        ((arm64_reg_or_sp ((w >>> 5) &&& 0x1f).toNat) s
           + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat
         (arm64_reg ((w &&& 0x1f).toNat) s) } := by
   unfold arm64_step
@@ -5438,7 +5473,7 @@ theorem work_step_str_off : ∀ (s : Arm64State) (code : Nat → UInt8) (pc : Na
     (h : (w &&& 0xffe00000) = 0xf9000000),
     arm64_step s code = some { s with
       mem := mem_write_u64 s.mem
-        ((arm64_reg ((w >>> 5) &&& 0x1f).toNat) s
+        ((arm64_reg_or_sp ((w >>> 5) &&& 0x1f).toNat) s
           + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat
         (arm64_reg ((w &&& 0x1f).toNat) s) } :=
   work_step_str_uoff

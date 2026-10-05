@@ -2831,12 +2831,12 @@ def _step_rhs(w: int, idx: int):
     # n` for every register form, `s.sp` for the immediate ones — and that
     # asymmetry is deliberate: the step-result lemma is closed by `exact`-ing the
     # library lemma INSTANTIATED AT THIS WORD, so the two right-hand sides only
-    # have to be defeq, and on a literal index they are.  Emitting
-    # `arm64_reg_or_sp` here instead would make that `exact` trivial but put
-    # `arm64_reg_or_sp n s` into every downstream value-flow goal, and those are
-    # simplified with `simp only [..., arm64_reg, arm64_set_reg]` lists that do
-    # not carry the helper — measured: 8 examples typecheck with the spelling
-    # below and the helper is not in those lists.
+    # have to be defeq, and on a literal index they are.
+    #
+    # The unsigned-offset `LDR`/`STR` rows below use `_base_of`, which is this
+    # same rule applied to a base register: `s.sp` at 31 and `arm64_reg n`
+    # otherwise, because their model's arms read through `arm64_reg_or_sp` and
+    # `exact` needs the two sides to be defeq.
     # `test_formal_call_proof_gen.py`'s `TestRegister31` pins both halves of that
     # sentence, INCLUDING the reachability the NEG defect was hiding behind: the
     # table used to check the branch's source text, which the decoder cannot
@@ -2973,24 +2973,26 @@ def _step_rhs(w: int, idx: int):
         rt = w & 0x1f
         rn = (w >> 5) & 0x1f
         imm12 = (w >> 10) & 0xfff
-        # `arm64_reg 31 s`, not `s.sp`: the RHS has to be the SYNTACTIC mirror
-        # of `work_step_ldr_uoff`'s statement, because that is what `exact`
-        # unifies against, and a hand-simplified base is a different term even
-        # where it is equal.
-        #
-        # BUG, measured and not yet fixed: this form HAS an SP encoding, so
-        # `Rn = 31` is the stack pointer and both this row and
-        # `work_step_ldr_uoff` model `encode_ldr_xt_xn_imm(_, 31, off)` — ten
-        # sites in `formal/arm64_codegen.py` — as a load from address `off`.
-        # `bugs/FORMAL_arm64_ldr_str_unsigned_offset_reads_register_31_as_zero.md`.
+        # SP-aware through `_base_of`, which spells `s.sp` at `Rn = 31` — the
+        # form has an SP encoding, so `encode_ldr_xt_xn_imm(_, 31, off)` is what
+        # `formal/arm64_codegen.py` emits at ten sites for a stack read, and this
+        # row used to model every one of them as a read from address `off`
+        # (`arm64_reg 31 s` IS 0). Measured against the CPU by
+        # `tools/formal_model_fuzz.py`: `ldr x0, [sp, #32]` gave the model 0 and
+        # the hardware the word. The 32-bit store row below is the same fix.
         return (f"some (arm64_set_reg {rt} s (mem_read_u64 s.mem "
-                f"(arm64_reg {rn} s + UInt64.ofNat {imm12 * 8}).toNat))")
+                f"({_base_of(rn)} + UInt64.ofNat {imm12 * 8}).toNat))")
     if idx == 19:  # STR Wt, [Xn, #imm] (unsigned-offset 32-bit STORE)
         rt = w & 0x1f
         rn = (w >> 5) & 0x1f
         imm12 = (w >> 10) & 0xfff
-        return (f"some {{ s with mem := mem_write_u64 s.mem "
-                f"(arm64_reg {rn} s + UInt64.ofNat {imm12 * 4}).toNat "
+        # FOUR bytes, because the instruction is four bytes wide: this row wrote
+        # eight and clobbered the four above the word the program stored, which
+        # the hardware leaves alone (measured: `tools/formal_model_fuzz.py`,
+        # seed `sweepC`, case 123). The base is SP-aware for the reason the LDR
+        # row's is — this class has an SP encoding for `Rn` too.
+        return (f"some {{ s with mem := mem_write_u32 s.mem "
+                f"({_base_of(rn)} + UInt64.ofNat {imm12 * 4}).toNat "
                 f"(arm64_reg {rt} s) }}")
     if idx == 20:  # ADRP
         rd = w & 0x1f
@@ -3009,10 +3011,13 @@ def _step_rhs(w: int, idx: int):
         rt = w & 0x1f
         rn = (w >> 5) & 0x1f
         imm12 = (w >> 10) & 0xfff
-        # BUG, measured and not yet fixed: as for the LDR row above, `Rn = 31`
-        # is the stack pointer here too and this spells it as the zero register.
+        # SP-aware for the reason the LDR row above gives: this form has an SP
+        # encoding for `Rn`, so `encode_str_xt_xn_imm(_, 31, off)`'s ten call
+        # sites are stack writes and `arm64_reg 31 s` modelled every one of them
+        # as a write at `off`. `_base_of`'s docstring says why the answer is
+        # spelled rather than left to `arm64_reg_or_sp`.
         return (f"some {{ s with mem := mem_write_u64 s.mem "
-                f"(arm64_reg {rn} s + UInt64.ofNat {imm12 * 8}).toNat "
+                f"({_base_of(rn)} + UInt64.ofNat {imm12 * 8}).toNat "
                 f"(arm64_reg {rt} s) }}")
     if idx == 32:  # LDP [<Rn|SP>, #imm7*8] (signed-offset pair load)
         # `Rt1` is bits 4:0, `Rn` is 9:5 (the BASE, read SP-aware), `Rt2` is
@@ -3093,6 +3098,28 @@ def _step_rhs(w: int, idx: int):
         return (f"some (arm64_set_reg {rd} s (arm64_reg {rn} s <<< "
                 f"UInt64.ofNat {sh}))")
     return None
+
+
+def _base_of(rn: int) -> str:
+    """`Rn`'s value at this word, spelled CONCRETELY.
+
+    `s.sp` for 31 and `arm64_reg n` for every other register — the same choice
+    the add/subtract immediate rows above make, and for the same reason: the
+    step-result lemma is closed by `exact`-ing the library lemma instantiated at
+    this word, so the two right-hand sides only have to agree up to `defeq`, and
+    a concrete index makes that a computation rather than a search.
+
+    It is spelled concretely rather than as `arm64_reg_or_sp n` because the
+    helper would then survive into every downstream value-flow goal, and the
+    eighteen emitted `simp only` lists name `arm64_reg` and not the helper's two
+    lemmas — so `hx30_*` and the entry-state `FrameOk` conjuncts would arrive at
+    a goal with `arm64_reg_or_sp 17 s` still folded and fail to close. Measured
+    both ways on this tree: the helper spelling, with the two simp lemmas added
+    to every list, still left three programs of
+    `test_formal_call_proof_gen.py` red on an obligation that is otherwise
+    unchanged; spelling the answer, every list is untouched.
+    """
+    return "s.sp" if rn == 31 else f"arm64_reg {rn} s"
 
 
 _RD = "((w &&& 0x1f).toNat)"
@@ -3181,7 +3208,8 @@ def _step_rhs_generic(idx: int):
         return (f"some (arm64_set_reg {_RD} s (mem_read_u64 s.mem "
                 f"({_BASE} + UInt64.ofNat ({_I12} * 8)).toNat))")
     if idx == 19:  # STR Wt, [Xn, #imm] -- unsigned-offset 32-bit STORE, base = Rn
-        return (f"some {{ s with mem := mem_write_u64 s.mem "
+        # `mem_write_u32`, for the four-byte reason the word-relative row gives.
+        return (f"some {{ s with mem := mem_write_u32 s.mem "
                 f"({_BASE} + UInt64.ofNat ({_I12} * 4)).toNat (arm64_reg {_RD} s) }}")
     if idx == 20:
         off = (f"(if {_IMM21} ≥ 2^20 then (UInt64.ofNat {_IMM21}) - (UInt64.ofNat (2^21)) "

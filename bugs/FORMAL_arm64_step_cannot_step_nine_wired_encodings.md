@@ -8,6 +8,29 @@ compares the state. It is the **second** class of finding that tool produces
 (`WRONG` is the first), and it is the worse one: a wrong answer is a false
 theorem about the instruction, while a refusal is a proof about NOTHING.
 
+**Step 1's first half has LANDED (2026-10-04, `formal28-2`), with a measurement
+attached.** `lib/ProofLib.lean` has `mem_write_u32` — the four-byte write beside
+`mem_write_u64` — and the `STR Wt` arm (0xB9000000) uses it, because `STR Wt` is
+four bytes wide and the arm wrote eight: the four bytes above the stored word
+were clobbered in the model and left alone by the hardware (seed `sweepC`, case
+123). §3's last paragraph is therefore done: the `STR Wt` defect that was "already
+landed as well" is closed, and what remains of step 1 is the NARROWER widths
+(`mem_read_u8`/`mem_write_u8`, `mem_read_u16`/`mem_write_u16`, and
+`mem_read_u32` for the narrow-width loads) plus the two named in §4 step 1 that
+no arm uses yet. `mem_write_u32`'s docstring says why it is a definition and not
+a composition of `mem_write_u64`: the peel lemmas (`mem_read_after_write_u64`,
+the `FrameOk` window family) rewrite `mem_read_u64 ∘ mem_write_u64`, so a 32-bit
+store spelled as a 64-bit write would be *provable* and wrong.
+
+**The base-register half of the same family is also landed**, and it is not in
+this document because it was a separate bug
+(`ldr x0, [sp, #32]` modelled as a load from address 32): the three
+unsigned-offset arms now read `Rn` through `arm64_reg_or_sp`, and
+`test_formal_call_proof_gen.py::TestUnsignedOffsetAccess` runs those three
+instructions on the CPU. That is the shape of test this document's nine
+encodings want, and it is the reason step 3 below has a template rather than
+being open-ended.
+
 Every case below is `NOSTEP`: `arm64_step` answered `none`, the CPU ran the
 instruction, and the two disagreed in the only way a step function can disagree
 with a machine that has an instruction.
