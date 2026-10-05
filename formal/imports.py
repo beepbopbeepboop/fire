@@ -3656,8 +3656,18 @@ def imported_instantiations(source_path: str, stmts: list,
         if dep:
             paths.append(dep)
     paths.extend(linked_paths or ())
-    if not paths:
-        return {}
+    # NO `if not paths: return {}` here, and that is not an omission: this
+    # function's LAST act is `out.update(_own_instantiations(...))`, and a
+    # module that declares AND applies its own struct template imports
+    # NOTHING — `struct Box[T]` beside `Box[Int]()` in one file — so an early
+    # return here skips the one demand set no other caller can see and the
+    # build is refused by name again
+    # (`Box[…](…) calls a name this unit does not compile`). It is cheap with
+    # no paths, which is what the guard was for: `template_closure(())` walks
+    # nothing and returns two empty dicts, and the `for dep in paths` below is
+    # a no-op over an empty list. 43aba821 removed the guard for exactly this
+    # reason and it must not come back.
+    #
     # ONE re-export closure for every `dep` below, walked from the dep SET.
     # The loop asks `instantiation_demands` once per dep and that used to walk
     # the whole closure per ask, so the cost of this function was the product of
