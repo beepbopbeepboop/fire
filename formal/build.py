@@ -9876,8 +9876,9 @@ def _rewrite_self_fields(fn, one_word: dict, structs_by_name: dict,
         declaration THIS IMAGE can see
 
     with the `if`/`else` twin of the same program building and computing the
-    right answer. `self` is the field; the arm is the whole of it. See
-    `bugs/FORMAL_elif_arms_and_random_mojo_remainder.md`.
+    right answer. `self` is the field; the arm is the whole of it. The four
+    walks that had that shape are all on `model.rewrite_tree` now, which
+    descends the `(condition, body)` pair itself (`ffcd9542`).
 
     The replacement is handed back and not descended into, which is
     `rewrite_tree`'s rule rather than a decision here: it is `F.IdentExpr(root)`,
@@ -11583,9 +11584,14 @@ def _apply_imported_constant_sites(node, tables: dict, bound: set) -> int:
     runs EARLIER in the same pipeline and normalizes every `elif` pair into a
     LIST (`_fold_target_queries_in`'s own docstring says why: a tuple cannot be
     assigned into). So this walk reached the arms by an accident of ANOTHER
-    pass's traversal, with nothing recording the dependency — and `_rewrite_self_fields`
-    is still tuples by then and still misses every arm
-    (`bugs/FORMAL_elif_arms_and_random_mojo_remainder.md`).
+    pass's traversal, with nothing recording the dependency. **All four of the
+    walks that had that shape are now on `model.rewrite_tree`, which descends
+    the `(condition, body)` pair itself** — this one and
+    `_rewrite_self_fields` included, so neither misses an arm any more, and the
+    dependency this paragraph records is gone rather than merely described. The
+    measurement and the four pinned rows are in the commit that closed it
+    (`ffcd9542`; its document is deleted with its fix, which is why this names
+    the commit and the symptom rather than the path).
 
     A store's TARGET and a call's CALLEE are the two positions a name must not be
     rewritten in, and each is a node the walk HANDLES rather than descends:

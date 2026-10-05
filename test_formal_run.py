@@ -9709,9 +9709,9 @@ CONDITIONAL_ARM_CASES = [
      "    return pick[2](15, 5, 30)\n", 45, None),
     # ── the three remaining REWRITES that stopped at an `elif` ──
     #
-    # `bugs/FORMAL_elif_arms_and_random_mojo_remainder.md`, Part 1. Four walks
-    # recursed on `isinstance(node, list)` and therefore missed every `elif` arm;
-    # two of them had been moved onto `model.rewrite_tree` already, and these are
+    # The four walks that recursed on `isinstance(node, list)` and therefore
+    # missed every `elif` arm. All four are on `model.rewrite_tree` now, which
+    # descends the `(condition, body)` pair itself (`ffcd9542`), and these are
     # the other two. What the arm costs is DIFFERENT for each, which is why they
     # are four cases and not one:
     #
