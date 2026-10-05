@@ -1938,8 +1938,7 @@ def _host_rank_checks(failures):
     return n[0]
 
 
-# ── the two honesty instruments: the loud unclassified shape, and the
-#    committed baseline's regression alarm ─────────────────────────────────────
+# ── the two honesty instruments ─────────────────────────────────────────────
 #
 # Both exist because of the same round. On 2026-10-04 b12 the corpus's largest
 # row was `other refusal` at 236 files, with no row in EITHER ranking table, and

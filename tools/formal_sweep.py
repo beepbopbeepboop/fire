@@ -1381,7 +1381,7 @@ def _refusal_family(term: str) -> str:
     return _REFUSAL_OTHER
 
 
-# ── THE HONESTY FLOOR: a refusal shape NOBODY has classified ────────────────
+# ── THE HONESTY FLOOR: a refusal shape nobody has classified ────────────────
 #
 # `_REFUSAL_OTHER` is the bucket this file's own table calls "nobody has looked",
 # and on the 2026-10-04 b12 sweep it was the corpus's LARGEST row — 236 files,
@@ -1400,11 +1400,15 @@ def _refusal_family(term: str) -> str:
 # the same number for two facts a reader must not confuse.
 #
 # The threshold is a COUNT and a SHARE because the two catch different
-# mistakes. Ten files of one shape on a 735-file corpus is 1.4 % and a shape
-# worth a row; three files of one shape on a 30-file corpus is 10 % and is not.
-# A count alone misses the second and a share alone misses the first, and
-# `UNCLASSIFIED_MIN_FILES` is deliberately 10 rather than 5: a small shape is
-# usually one file behind one construct, which the per-file rows already name.
+# mistakes, and both are strict bounds — ten files does not fire, eleven does.
+# Ten files of one shape on the 735-file b12 corpus is 1.4 % and stays quiet: a
+# count of eleven is what the bound asks for, and a tenth of the corpus behind
+# one construct is not yet a thing a reader must act on today. Three files of one
+# shape on a 30-file corpus is 10 % and IS loud, and no file-count bound says so
+# — which is the half that matters, because the shapes that hide are the ones
+# that grow, and the corpus they grow in is the whole tree. `UNCLASSIFIED_MIN_
+# FILES` is 10 rather than 5 for the same reason: a small shape is usually one
+# file behind one construct, and the per-file rows already name those.
 UNCLASSIFIED_MIN_FILES = 10
 UNCLASSIFIED_MIN_FRACTION = 0.02
 
@@ -1509,7 +1513,8 @@ def unclassified_report(pairs, total, say=print, other_classify=None,
         say(f"      {_unclassified_label(texts, other_classify, other_name)}")
         say(f"      {wordings}" + (f"; {len(texts)} exact wording(s) in all"
                                   if len(texts) > 3 else ""))
-        say(f"      said by: {_first_sentence(max(texts, key=lambda m: len(texts[m])))}")
+        biggest = max(texts, key=lambda m: len(texts[m]))
+        say(f"      said by: {_first_sentence(biggest)}")
         say(f"      e.g. {sorted(entry['files'])[0]}"
             + (f", … and {n - 1} more" if n > 1 else ""))
         loud = loud or big
@@ -3724,6 +3729,23 @@ def _terminal_group(path, detail):
     return (_refusal_family(msg), _refuser(term) or (hops[-1] if hops else ""))
 
 
+def _example_files(paths, cap=12) -> str:
+    """The group's files, up to `cap`, and where the rest of them are.
+
+    Twelve, not all of them: a group of 229 printed in full is 229 lines of the
+    summary, which is not a finding, it is this run's own per-file output read
+    back. The twelve establish the pattern, the count above them is the number
+    to plan with, and the rest are locatable because the sweep ALREADY printed
+    every one of them — one line per file it did not pass, with the whole
+    refusal chain on it. So the tail says where they are rather than pretending
+    the list is complete.
+    """
+    paths = sorted(paths)
+    head = ", ".join(paths[:cap])
+    return head + (f", … and {len(paths) - cap} more, every one of them a "
+                   f"printed row of this run" if len(paths) > cap else "")
+
+
 def report_baseline(path, prev, verdicts: dict, rows, total, unnamed_now=(),
                     say=print) -> bool:
     """Name every file that moved to a WORSE class than the baseline records.
@@ -3894,8 +3916,7 @@ def report_baseline(path, prev, verdicts: dict, rows, total, unnamed_now=(),
                                        key=lambda kv: (-len(kv[1]), kv[0])):
         say(f"    {len(paths)} file(s)  {move}")
         say(f"        {cause}")
-        say(f"        e.g. {', '.join(sorted(paths)[:6])}"
-            + (f", … and {len(paths) - 6} more" if len(paths) > 6 else ""))
+        say(f"        {_example_files(paths)}")
     if darker:
         # A same-class move onto a nameless refusal is invisible to every class
         # count and to every cause table, because the cause table's own answer is
@@ -3912,8 +3933,7 @@ def report_baseline(path, prev, verdicts: dict, rows, total, unnamed_now=(),
                 []).append(path_)
         for shape, paths in sorted(by_shape.items(), key=lambda kv: -len(kv[1])):
             say(f"        {len(paths)} file(s) — shape: {shape}")
-            say(f"          e.g. {', '.join(sorted(paths)[:6])}"
-                + (f", … and {len(paths) - 6} more" if len(paths) > 6 else ""))
+            say(f"          {_example_files(paths)}")
     if silent:
         say(f"    {len(silent)} file(s) were `{BASELINE_UNNAMED_PASS}` here and "
             f"are now something else, which this baseline cannot put a "
@@ -3921,7 +3941,7 @@ def report_baseline(path, prev, verdicts: dict, rows, total, unnamed_now=(),
             f"CLASS they moved to is known:")
         for cls, paths in sorted(by_class.items(), key=lambda kv: -len(kv[1])):
             say(f"        now {cls}: {len(paths)} file(s)")
-            say(f"          e.g. {', '.join(sorted(paths)[:6])}")
+            say(f"          {_example_files(paths)}")
     say("    (a class count that moved is not the finding; the file list is. "
         "A host model landing moves files in BOTH directions over one edit, so "
         "read the direction before reading the count — "
@@ -4297,6 +4317,19 @@ def _report_partial(arch, files, results, timeouts=None, mem_gb=0.0) -> None:
             print(f"    {cls:<28} {counts[cls]:>4}", file=sys.stderr)
     _report_tool_causes(done, results, timeouts or Timeouts(), mem_gb, arch,
                         emit=lambda s: print(s, file=sys.stderr))
+    # The two honesty instruments did NOT run, and an interrupted summary that
+    # simply omits them reads as a run where they found nothing. Both are
+    # computed over the WHOLE scope: the loud unclassified shape's share half
+    # would be measured against the files this run never reached, and the
+    # baseline's comparison would see `swept - classified` files as missing
+    # rather than as not-yet-run. `--write-baseline` is refused here for the
+    # same reason — a baseline banked from a partial scope would report every
+    # unclassified file as a pass.
+    print("    the unclassified-refusal finding and the committed-baseline "
+          "regression check did NOT run: both are computed over the whole "
+          "scope, and this run classified "
+          f"{len(done)} of {len(files)} file(s). Nothing was banked.",
+          file=sys.stderr)
     sys.stderr.flush()
     # Publish the partial ledger under a key that says PARTIAL, so it can never
     # be read as a complete run's history by the next one. Same shape, so
@@ -4642,14 +4675,16 @@ def main():
               f"{write_baseline(baseline_file, arch, verdicts, unnamed=[p for p, _m in unclassified])}"
               f" ({len(verdicts)} file(s))")
     if regressed or loud:
-        why = [w for w in ("a regression against a committed record"
-                           if regressed else None,
-                           "a refusal shape with no row in either ranking "
-                           "table" if loud else None) if w]
-        print(f"  (this run's counts are not a census of causes: "
-              f"{' and '.join(why)}. Both are facts about the INSTRUMENT, and "
-              f"neither is cleared by changing a file under formal/ — one is "
-              f"adding a row, the other is the edit that moved those files)")
+        why = []
+        if regressed:
+            why.append("a regression against the committed baseline, whose fix "
+                       "is the edit that moved those files")
+        if loud:
+            why.append("a refusal shape no ranking table names, whose fix is "
+                       "adding the row and which no change under formal/ "
+                       "clears")
+        print("  (this run's counts are not a census of causes: "
+              + "; ".join(why) + ")")
 
     # WHY each unanswerable file is unanswerable. "170 files" is a number
     # without a cause; "170 files, 60 of them because of `os`" is the fact a
