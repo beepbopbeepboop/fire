@@ -2138,10 +2138,20 @@ def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
     for name in _sys.stdlib_module_names:
         answer, _detail = verdict(name)
         tally[answer] = tally.get(answer, 0) + 1
-        check(answer != "not-a-module",
-              f"CPython ships {name}, so no verdict can say nothing here "
-              "provides it — that answer is the TYPO sentence's, and it is "
-              "false of a standard-library module")
+        # `not-a-module` is unreachable for a CPython-shipped name AS AN
+        # ABSENCE, and `HOST_NOT_A_MODULE` is what makes that distinction
+        # checkable rather than a matter of taste: `this`, `antigravity` and
+        # `turtledemo` are shipped AND answer `not-a-module`, and the only thing
+        # separating them from the typo answer is a tier that says why. So the
+        # invariant is the pair — no shipped name gets the typo answer, and
+        # every shipped name that DOES get it is one a table claims.
+        check(answer != "not-a-module"
+              or I.host_module_tier(name) == "not-a-module",
+              f"CPython ships {name}, so no verdict can reach the TYPO "
+              "sentence's answer — nothing here provides it and CPython does "
+              "not ship it — as an absence; a tier that says the name is "
+              f"shipped-and-empty is the other half, and `host_module_tier"
+              f"({name!r})` is {I.host_module_tier(name)!r}")
         if answer in ("modelled", "unreachable"):
             # The rule `HOST_MODELLED` states and this file's other rows pin: a
             # name LEAVES a tier by being WRITTEN, because an entry left behind
@@ -2153,11 +2163,19 @@ def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
                                         project_root=probe) is None,
                   f"{name} is {answer!r} AND has a source, so it is in a tier "
                   "and answered at once — remove the stale entry or the source")
+    # SEVEN, and the seventh is `not-a-module` — the one answer that is a
+    # statement about THIS repository rather than about the target or about
+    # CPython's list. It is in `host_module_verdict`'s own table (which says
+    # "six strings" over a seven-row table, corrected here), and it became
+    # reachable for a name CPython ships when `HOST_NOT_A_MODULE` landed: a
+    # spec exists and what is behind it is not code. Listing it here rather than
+    # leaving the check to enumerate six is what stops the NEXT answer from
+    # arriving undocumented, which is the failure this row exists to catch.
     for answer in tally:
         check(answer in ("front-end", "written", "admitted", "modelled",
-                         "unreachable", "unclassified"),
-              f"the verdict {answer!r} is not one of the six answers, so a "
-              "report reading it has a seventh case nobody documented")
+                         "unreachable", "unclassified", "not-a-module"),
+              f"the verdict {answer!r} is not one of the seven answers, so a "
+              "report reading it has an eighth case nobody documented")
     check(tally.get("unclassified", 0) > 100,
           f"precondition: only {tally.get('unclassified', 0)} CPython "
           "standard-library names are unclassified, so this row is about the "
@@ -4269,6 +4287,7 @@ def _a_real_wall_name(W):
     """
     for name in sorted(I.HOST_MODULES):
         if name in sys.stdlib_module_names \
+                and I.host_module_tier(name) != "not-a-module" \
                 and I.resolve_module_path(name) is None:
             return name
     return None
@@ -4294,7 +4313,14 @@ def test_the_wall_instrument_separates_reach_from_alone(tmpdir, _shared):
     wall_a = _a_real_wall_name(W)
     wall_b = None
     for name in sorted(I.HOST_MODULES):
+        # …and a `HOST_NOT_A_MODULE` member is skipped for the same reason
+        # `_a_real_wall_name` skips it: the instrument's `alone` column asks
+        # "is this the only WALL on this file", and `antigravity` is not one —
+        # it is a name the table says has no content to compile. Counting it
+        # made `alone` wrong by one on the file that names both, which is the
+        # number the row exists to read.
         if name != wall_a and name in sys.stdlib_module_names \
+                and I.host_module_tier(name) != "not-a-module" \
                 and I.resolve_module_path(name) is None:
             wall_b = name
             break

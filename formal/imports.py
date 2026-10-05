@@ -1161,7 +1161,7 @@ def host_module_verdict(name: str, relative_to: str = None,
     """`(answer, detail)` — the ONE classification of a name, with every
     outcome NAMED rather than encoded as an absence.
 
-    `answer` is one of six strings and there is no other answer:
+    `answer` is one of SEVEN strings and there is no other answer:
 
     | answer | meaning | detail |
     |---|---|---|
@@ -1171,7 +1171,7 @@ def host_module_verdict(name: str, relative_to: str = None,
     | `'modelled'` | reachable in principle, not implemented — a gap with an owner | `''` |
     | `'unreachable'` | a permanent fact about the target | `''` |
     | `'unclassified'` | CPython ships it and no tier says which of the two it is | `''` |
-    | `'not-a-module'` | nothing here provides it and CPython does not ship it — a typo or a gap in this repository | `''` |
+    | `'not-a-module'` | CPython does not ship it, so nothing here provides it — a typo or a gap in this repository; OR `HOST_NOT_A_MODULE` claims it and CPython's own `find_spec` finds a real file with nothing computable behind it | `''` |
 
     **Why this exists, and what it is fixing.** `host_module_tier` answers a
     membership question — "is this name in a tier" — and its `''` is ambiguous

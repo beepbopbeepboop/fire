@@ -96,14 +96,18 @@ class TestTheReadersAreTheBackends(TempTree):
     def test_a_file_the_backend_cannot_read_is_none_and_not_empty(self):
         """The distinction the header prints a count for.
 
-        This is not a hypothetical shape: `test_formal_libc_symbol.py` is a file
-        in this repository whose own source this tokenizer refuses — an f-string
-        replacement field with a newline in it, which CPython has accepted since
-        PEP 701 and `fire_compiler.py`'s tokenizer does not. A `[]` here would
-        make that file contribute no walls and look like a file that imports
-        nothing.
+        The shape is a MALFORMED file and nothing subtler: an `if` with no colon
+        and no body, which no version of the grammar accepts. An earlier version
+        of this row used a multi-line f-string replacement field instead, which
+        was this project's own standing example at the time — `cca2a17f` made a
+        replacement field span lines (CPython has accepted that since PEP 701,
+        and `fire_compiler.py`'s tokenizer now does too), so the example stopped
+        being unreadable and the row began passing for the wrong reason, on a
+        file whose answer really is `[]`. A `[]` here must mean "this walk read
+        the file and it names no wall"; it must not be reachable by giving the
+        walk something it cannot parse.
         """
-        path = self.path("broken.py", "s = f\"a {1 +\n 2} b\"\n")
+        path = self.path("broken.py", "if True\n")
         self.assertIsNone(W.module_imports(path),
                           "an unreadable file must not read as 'imports "
                           "nothing' — that is the narrower answer wearing the "
