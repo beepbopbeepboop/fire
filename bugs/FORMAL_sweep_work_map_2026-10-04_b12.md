@@ -278,7 +278,7 @@ Grouped by the module that refused (`uses:` is the tool's own column):
 | refusing module | files | `uses:` | reading |
 |---|---|---|---|
 | **`_syscalls.mojo`** | **229** | **0 of 229** name anything it declares (`_put_le64`, `_put_time`) | **closure — see §3.2** |
-| `(this file)` | 7 | — | six distinct constructs, §4.2, plus `_syscalls.mojo`'s own |
+| `(this file)` | 7 | — | six distinct constructs, named at the end of §4.2, plus `_syscalls.mojo`'s own |
 
 **`other refusal` is the bucket `formal_sweep_causes.py`'s module docstring
 defines as *"nobody has looked"*.** It held 6 of `-11`'s 354 findings and holds
@@ -441,7 +441,7 @@ unchanged. §5 measures that bound for this round's largest row.
 | **236** | 6 | 7 | **`other refusal`** — §3.1's one sentence | **`_syscalls.mojo` x229**, (this file) x7 | **§5** — unclaimed, and this branch's |
 | **148** | 148 | 15 | a call to a name the defining module does not export | `std.format._utils` x105, `std.memory.alloc` x28, `std.bit.mask` x8, … | **claimed** (`formal23-1`); unmoved for a third round, and `uses:` is 39 of 105 / 6 of 28 / 1 of 8 |
 | **59** | 59 | 0 | a module that exports nothing cannot be a dylib | `constants.mojo` x33, `_io.mojo` x23, `_select.mojo`, `_unicode_lookups.mojo`, `stat.mojo` | **claimed** (`formal16-2`); `-11` §4 measured the constants-only family as permanent |
-| **6** | 6 | 1 | variadic call has no ABI | `tile.mojo` x5, (this file) x1 | `FORMAL_a_variadic_parameter_read_has_no_abi.md`, claimed (`formal28-2`). `-11` §4.4 measured that a variadic parameter's value is **not knowable** |
+| **6** | 6 | 1 | variadic call has no ABI | `tile.mojo` x5, (this file) x1 | `FORMAL_a_variadic_parameter_read_has_no_abi.md`, claimed (`formal28-2`). `-11` §4.4 measured that a variadic parameter's value is **not knowable**, and that the cheap lowering answers wrong-but-exit-0 |
 | **6** | 115 | 5 | string composition: nothing to compose into | (this file) x5, `cas.py`, `module_loader.py`, … | **claimed** (`formal25-5`); §3.3 is what happened to its other 109 |
 | **4** | 4 | 3 | MLIR dialect construct | (this file) x3, `function.mojo` x1 | `FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md`, claimed (`formal29-2`) |
 | **2** | 4 | 2 | a module's ATTRIBUTE read as a value, across a dylib boundary | (this file) x2 — `t_argv.mojo`, `unescape_c.py` | `FORMAL_module_state_no_storage.md`, claimed (`formal29-3`) — an ABI project (§(2)) |
