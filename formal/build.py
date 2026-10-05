@@ -1933,7 +1933,7 @@ def compile_formal(source_path: str, output: str = None,
     #     reads the body's own statements and an instrumented body is not the
     #     source.
     contract_verdicts = []
-    _verdicts, _why = _search_contracts(source_path, source, ordered,
+    _verdicts, _why = _search_contracts({source_path: source}, ordered,
                                         enforce=check_contracts)
     if _why is not None:
         raise FormalBuildError(_why)
@@ -1946,7 +1946,7 @@ def compile_formal(source_path: str, output: str = None,
         # flag for "also check at run time" should do — and it is what a first
         # version of this did, so `--check-contracts` on a program whose
         # contract is false BUILT.
-        _why = _instrument_contracts(source_path, source, ordered)
+        _why = _instrument_contracts({source_path: source}, ordered)
         if _why is not None:
             raise FormalBuildError(_why)
     # The entry function's ARGUMENT values, widened to its arity HERE rather
@@ -2082,7 +2082,7 @@ def compile_formal(source_path: str, output: str = None,
         #      emitted file byte-identical when `check_contracts` is off, which
         #      is what `formal/lean.py`'s verdict cache is keyed on.
         if check_contracts:
-            proof += "\n\n" + _contract_section(source_path, source, ordered)
+            proof += "\n\n" + _contract_section({source_path: source}, ordered)
         proof_path = os.path.splitext(output)[0] + "_proof.lean"
         if os.path.exists(proof_path):
             os.chmod(proof_path, 0o644)  # u+w so overwrite works
@@ -2104,8 +2104,35 @@ def compile_formal(source_path: str, output: str = None,
     return result
 
 
-def _contract_functions(ordered) -> list:
-    """The functions of `ordered` that carry a `@requires` / `@ensures`.
+def _source_texts(paths) -> dict:
+    """`{path: source}` for a build's inputs, read once.
+
+    The contract reader needs the TEXT as well as the AST -- the `# requires:`
+    pragma is a comment and comments do not survive `py_tokenize` -- and a
+    caller that read it inline would read it once per function, which for a
+    multi-file library is N×M reads of the same bytes.
+    """
+    out = {}
+    for path in (paths or ()):
+        try:
+            with open(path) as fh:
+                out[path] = fh.read()
+        except OSError:
+            # A path the caller already read successfully once, or one it
+            # supplied as a per-source override rather than a file.  Not fatal:
+            # the AST is already parsed and only the pragma reader is missing.
+            continue
+    return out
+
+
+def _contract_functions(ordered, functions_by_source=None) -> list:
+    """The `(source_path, function)` pairs that carry a `@requires`/`@ensures`.
+
+    A LIST OF PAIRS rather than functions, because the pragma reader needs the
+    function's own source text and a library is built from SEVERAL sources: a
+    single `source_path` for a multi-file unit means every function after the
+    first is read against another file's text, so a `# requires:` in file two
+    is not found and one in file one is found twice.
 
     `formal/contracts.py::read_contracts` decides, not this function: a second
     place that decides "is this a contract clause" is a place the two can
@@ -2113,14 +2140,21 @@ def _contract_functions(ordered) -> list:
     function and skipped for another with the same decorator.
     """
     from formal import contracts as CT
-    return [fn for fn in (ordered or [])
+    if functions_by_source:
+        pairs = [(path, fn)
+                 for path, fns in functions_by_source.items()
+                 for fn in (fns or [])]
+    else:
+        pairs = [(None, fn) for fn in (ordered or [])]
+    return [(path, fn) for path, fn in pairs
             if type(fn).__name__ == "FunctionDef"
             and any(CT._decorator_name(d) in CT.REQUIRES_NAMES
                     or CT._decorator_name(d) in CT.ENSURES_NAMES
                     for d in (getattr(fn, "decorators", None) or []))]
 
 
-def _search_contracts(source_path: str, source: str, ordered, enforce=False):
+def _search_contracts(sources: dict, ordered, functions_by_source=None,
+                      enforce=False):
     """The contract verdicts for a build, as plain dicts, plus a refusal.
 
     Dicts rather than `formal/contracts.py`'s `Verdict` objects for the same
@@ -2150,9 +2184,10 @@ def _search_contracts(source_path: str, source: str, ordered, enforce=False):
     """
     from formal import contracts as CT
     out, refusals = [], []
-    for fn in _contract_functions(ordered):
+    for path, fn in _contract_functions(ordered, functions_by_source):
         try:
-            _emission, verdict = CT.check_source(fn, source_path, source)
+            _emission, verdict = CT.check_source(
+                fn, path or "<source>", (sources or {}).get(path))
         except CT.ContractError as exc:
             refusals.append((getattr(fn, "name", "?"), str(exc)))
             continue
@@ -2184,7 +2219,7 @@ def _search_contracts(source_path: str, source: str, ordered, enforce=False):
     return out, None
 
 
-def _instrument_contracts(source_path: str, source: str, ordered):
+def _instrument_contracts(sources: dict, ordered, functions_by_source=None):
     """Lower every contract into `ordered`'s bodies, or say why not.
 
     Called before `_codegen_and_link`, so the checks are part of the image.
@@ -2195,7 +2230,22 @@ def _instrument_contracts(source_path: str, source: str, ordered):
     "were the contracts checked" from that.
     """
     from formal import contracts as CT
-    instrumented, refusals = CT.instrument_source(source_path, ordered, source)
+    # Keyed by the REAL path when the caller passed one source's text, so the
+    # pragma reader looks in the file the functions came from rather than at a
+    # placeholder that is not a file.
+    if functions_by_source:
+        by_source = functions_by_source
+    else:
+        by_source = {(path or "<source>"): list(ordered or [])
+                     for path in (sources or {})}
+        if not by_source:
+            by_source = {"<source>": list(ordered or [])}
+    instrumented, refusals = [], []
+    for path, fns in by_source.items():
+        got, refused = CT.instrument_source(
+            path, fns, (sources or {}).get(path))
+        instrumented.extend(got)
+        refusals.extend(refused)
     if refusals:
         return ("this file's contracts cannot be lowered into run-time checks, "
                 "and half of them is worse than none: "
@@ -2203,7 +2253,8 @@ def _instrument_contracts(source_path: str, source: str, ordered):
     return None
 
 
-def _contract_section(source_path: str, source: str, ordered) -> str:
+def _contract_section(sources: dict, ordered,
+                      functions_by_source=None) -> str:
     """The `f_contract` theorems for every contracted function, as Lean source.
 
     Appended to a proof the generator already produced, so the theorem is
@@ -2227,9 +2278,10 @@ def _contract_section(source_path: str, source: str, ordered) -> str:
              "`formal/contracts.py::LADDER`. A goal the ladder does not close is",
              "a build failure with the theorem named — never a pass. -/",
              ""]
-    for fn in _contract_functions(ordered):
+    for path, fn in _contract_functions(ordered, functions_by_source):
         try:
-            contract = CT.read_contracts(fn, source_path, source)
+            contract = CT.read_contracts(fn, path or "<source>",
+                                         (sources or {}).get(path))
             emission = CT.contract_theorems(
                 contract, CT._param_names(fn), fn=fn)
         except CT.ContractError as exc:
@@ -20037,6 +20089,7 @@ def _record_namespace(manifest_path: str, reexports: dict,
 def compile_formal_dylib(source_paths: list, output: str = None,
                          test_input: int = 10, prove: bool = True,
                          check: bool = True, module_prefixes: dict = None,
+                         check_contracts: bool = False,
                          link_dylibs: list = None, arch: str = "arm64",
                          fmt: str = "macho", reexports: dict = None,
                          statements: dict = None,
@@ -20295,6 +20348,11 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                 s.name == st.name for s in library_extra):
             library_extra.append(st)
     library_structs: list = []
+    # Per-SOURCE function lists, for the contract pass below.  A library is
+    # built from several files and a contract's pragma lives in one of them, so
+    # attributing every function to one path would read file two against file
+    # one's text.
+    dylib_functions_by_source: dict = {}
     for source_path in source_paths:
         module, functions, module_source, file_structs, file_slots, \
             file_constants = \
@@ -20306,6 +20364,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             file_structs = [st for st in file_structs
                             if library_declared.get(st.name) == source_path]
         structs_by_file[source_path] = file_structs
+        dylib_functions_by_source[source_path] = list(functions)
         library_structs.extend(file_structs)
         for name, value in file_constants.items():
             constants.setdefault(name, value)
@@ -20581,6 +20640,30 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # finds the wrappers `_module_body_function` tagged), and the emitters report
     # the OFFSETS afterwards; `has_mod_init` is the pre-compile half of that fact
     # and the consistency check below is what keeps the two halves from drifting.
+    # CONTRACTS IN THE SOURCE, on the library path too.  Both halves, for the
+    # same reasons the executable path has them, and asked HERE because `ordered`
+    # is the last point at which the bodies are still the SOURCE: after
+    # `codegen.compile` the checks are in the image and the search would be
+    # reading code it produced.
+    #
+    # It was NOT wired here at all in a first version, and the consequence is
+    # the failure this project calls a silently-dropped statement with an
+    # observable effect: `fire.py dylib --formal --check-contracts` accepted the
+    # flag, checked nothing, and said nothing.  A flag that is accepted and
+    # ignored is worse than one that is refused.
+    dylib_sources = _source_texts(source_paths)
+    _verdicts, _why = _search_contracts(dylib_sources, ordered,
+                                        dylib_functions_by_source,
+                                        enforce=check_contracts)
+    if _why is not None:
+        raise FormalBuildError(_why)
+    dylib_contracts = _verdicts
+    if check_contracts:
+        _why = _instrument_contracts(dylib_sources, ordered,
+                                     dylib_functions_by_source)
+        if _why is not None:
+            raise FormalBuildError(_why)
+
     mod_init_addrs: list = []
     has_mod_init = bool(M.module_body_functions(ordered))
     if fmt == "elf":
@@ -20660,6 +20743,11 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             "code": code,
             "binary": binary,
             "info": info,
+            # What this library's SOURCE said about itself.  The same field
+            # and the same meaning as `compile_formal`'s, so a consumer that
+            # asks "what did this program promise" does not have to know which
+            # of the two front ends produced the artifact.
+            "contracts": dylib_contracts,
             "exports": exports,
             "backend": f"{arch}/elf-dylib",
             # Same field, same meaning, same shape as the program path's and the
@@ -20787,6 +20875,11 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         "code": code,
         "binary": binary,
         "info": info,
+        # Same field, same meaning, same shape as `compile_formal`'s: what this
+        # library's SOURCE said about itself, and what the bounded search found.
+        # It is absent from the NAMESPACE result above because that path emits
+        # no code at all and so has no body for a contract to constrain.
+        "contracts": dylib_contracts,
         "exports": exports,
         "backend": f"{arch}/macho-dylib",
         # Same field, same meaning, same shape as the program path's: a module

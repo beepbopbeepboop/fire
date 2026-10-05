@@ -603,6 +603,37 @@ def test_the_run_time_check_catches_what_the_search_cannot(tmpdir):
               f"exit {rg.returncode}, expected 1770 & 0xff")
 
 
+def test_the_library_path_reports_and_enforces_too(tmpdir):
+    """`fire.py dylib --formal --check-contracts` used to accept the flag,
+    check nothing and say nothing -- a silently-dropped statement with an
+    observable effect, which is the failure class
+    `formal/model.py::unapplied_decorator_refusal` was written for.  A flag
+    that is accepted and ignored is worse than one that is refused, so both
+    front ends answer here."""
+    good = os.path.join(EXAMPLES, "mini2.mojo")
+    bad = os.path.join(EXAMPLES, "wrong_clampv.mojo")
+    for path, name, want_refused in ((good, "mini2", False),
+                                     (bad, "wrong_clampv", True)):
+        out = os.path.join(tmpdir, f"lib_{name}.dylib")
+        base = [sys.executable, FIRE, "dylib", "--formal", "--no-prove",
+                "-o", out, path]
+        p = subprocess.run(base, capture_output=True, text=True,
+                           timeout=BUILD_TIMEOUT, cwd=HERE)
+        if not check(p.returncode == 0, f"dylib {name} builds",
+                     (p.stderr or p.stdout).strip()[:200]):
+            continue
+        check(f"dylib {name} REPORTS its contract",
+              "REFUTED" in p.stdout if want_refused else "contract mini2" in p.stdout,
+              p.stdout[:300])
+        q = subprocess.run(base + ["--check-contracts"],
+                           capture_output=True, text=True,
+                           timeout=BUILD_TIMEOUT, cwd=HERE)
+        check((q.returncode != 0) is want_refused,
+              f"dylib {name} --check-contracts "
+              f"{'refuses' if want_refused else 'accepts'}",
+              (q.stderr or q.stdout).strip()[:200])
+
+
 def test_a_refuted_contract_stops_a_checked_build(tmpdir):
     """`--check-contracts` is the request "hold this program to its contracts",
     and a request a false contract does not stop the build is not a request."""
@@ -758,6 +789,7 @@ ALL = [
     test_every_example_builds_and_agrees_with_cpython,
     test_the_run_time_check_leaves_a_satisfied_program_alone,
     test_the_run_time_check_catches_what_the_search_cannot,
+    test_the_library_path_reports_and_enforces_too,
     test_a_refuted_contract_stops_a_checked_build,
     test_the_check_does_not_write_to_stdout,
 ]

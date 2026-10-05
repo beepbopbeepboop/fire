@@ -1324,11 +1324,15 @@ def main():
             try:
                 result = _fb.compile_formal_dylib(
                     dylib_inputs, output=dylib_output, arch=dylib_arch,
-                    prove=prove, check=prove)
+                    prove=prove, check=prove,
+                    check_contracts=check_contracts)
             except Exception as e:
                 print(f"formal dylib: {e}", file=sys.stderr)
                 sys.exit(1)
             print(f"Built: {result['path']}")
+            contracts = _contract_note(result, check_contracts)
+            if contracts:
+                print(contracts)
             if result.get("proof_path"):
                 cached = " (verified from cache)" if result.get("proof_cached") else ""
                 print(f"Proof: {result['proof_path']}{cached}{_sorry_note(result)}")

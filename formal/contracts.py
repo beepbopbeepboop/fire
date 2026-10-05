@@ -1923,8 +1923,19 @@ def instrument_source(path, functions, text=None):
     partial result.
     """
     if text is None:
-        with open(path) as fh:
-            text = fh.read()
+        # The pragma reader needs TEXT and a comment does not survive
+        # `py_tokenize`, so this is the one place that reads the file.  A path
+        # that cannot be read is not fatal: the AST is already parsed and only
+        # the `# requires:` spelling is lost, so the caller's decorator clauses
+        # are still checked.  It used to raise, and the traceback came out of
+        # `fire.py build --formal --check-contracts` with forty frames of
+        # generator internals and the real sentence -- "a source that names no
+        # file" -- nowhere in it.
+        try:
+            with open(path) as fh:
+                text = fh.read()
+        except OSError:
+            text = None
     refusals = []
     instrumented = []
     for fn in functions:
