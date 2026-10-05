@@ -3811,6 +3811,60 @@ UNREGISTERED = {
     #               'formal/admitted.py', 'formal/lean.py', 'lib'],
     #        desc='every axiom lib/ reaches is Lean\'s foundation or one of '
     #             'its 688 counted tactic sites, measured by #print axioms')
+    # The PERF half of the same family as `test_formal_chain_probe.py` above,
+    # and the cheapest entry in the whole list: measured 2026-10-05,
+    # `python3 test_formal_per_struct_asks.py` is 0.96 s and 42 MB
+    # (`/usr/bin/time -l`) and its own header says what that buys -- "No Lean,
+    # no build, no sweep: a parse and `_prepare_functions`". It is GREEN on
+    # this tree (7/7), so nothing about it is a known failure.
+    #
+    # What it pins is a PROPERTY and not the two lines that fixed it:
+    # `formal/model.py`'s per-struct predicates derive a struct's whole field
+    # set by walking every method body of that struct twice, so an asker inside
+    # a per-FUNCTION loop pays `#functions x #methods x body` instead of
+    # `#structs x #methods x body`, and the fix for the 43,508 redundant
+    # derivations the 2026-10-02 census measured was the module-level tables
+    # `formal/build.py` now threads. Two askers survived that census and were
+    # fixed 2026-10-04; a regression that puts one back makes the counts grow
+    # with the function count, which is what this asserts (64 asks at 20
+    # functions, 84 at 40 -- +1.00 per function, not more).
+    #
+    # Listed rather than registered because this worker's task says not to
+    # register anything in the registry, and the cost argues against the
+    # excuse on its own: by CLAUDE.md's cost rule a 1-second, no-Lean,
+    # no-build check that is green wants a row, not a paragraph.
+    #
+    # Exact next step, in `check` beside the other `formal-*` cost regressions
+    # (`formal-sweep-truth`, `formal-build-cost`), NOT in `proofs` -- it needs
+    # no `prooflib`:
+    #
+    #   test('formal-per-struct-asks', [PY, 'test_formal_per_struct_asks.py'],
+    #        mem='tiny', cache=True,
+    #        extra=['test_formal_per_struct_asks.py', 'formal/build.py',
+    #               'formal/model.py', 'myinterpreter.py', 'fire_compiler.py'],
+    #        desc='a per-struct table is asked once per STRUCT, not once per '
+    #             'FUNCTION')
+    #
+    # The `extra` names the two modules whose tables are under test plus the
+    # parser, because the check counts asks made BY `formal/build.py` while it
+    # parses `myinterpreter.py`: an edit to either must not replay a recorded
+    # PASS. `cache=True` is right here and wrong for most of the formal suite
+    # -- this one has no build, no Lean and no artifact, so its inputs are its
+    # `extra` list and nothing else.
+    'test_formal_per_struct_asks.py': (
+        'Pins a property rather than a fix: formal/model.py\'s per-struct '
+        'predicates derive a struct\'s field set by walking every method body '
+        'twice, so an asker inside a per-FUNCTION loop pays #functions x #methods '
+        'x body instead of #structs x #methods x body -- 43,508 redundant '
+        'derivations and 33 s of a 97 s build when the 2026-10-02 census found '
+        'it. 0.96 s and 42 MB measured 2026-10-05, no Lean, no build, no sweep '
+        '("a parse and _prepare_functions"), and green on this tree (7/7). '
+        'Listed because this worker\'s task says not to register anything; the '
+        'cost does not justify the excuse (CLAUDE.md\'s cost rule wants a '
+        'registration). Next step: test(\'formal-per-struct-asks\', [PY, '
+        '\'test_formal_per_struct_asks.py\'], mem=\'tiny\', cache=True, '
+        'extra=[... formal/build.py, formal/model.py, myinterpreter.py]) in the '
+        '`check` bucket beside \'formal-sweep-truth\'.'),
     'test_formal_axioms.py': (
         'The axiom census `test_formal_admitted.py` cannot make: #print axioms '
         'over all 600 askable declarations of lib/, one Lean process, 0.8 s and '
