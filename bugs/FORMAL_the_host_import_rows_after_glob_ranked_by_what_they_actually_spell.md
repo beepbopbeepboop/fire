@@ -181,17 +181,12 @@ not a `.mojo` file's to fix. Four of the five also pass a STRING
 construction is not a value here at all. So the row's ceiling was 2 of 8 files
 when this doc was written and the ceiling is what landed.
 
-**A bug was found on the way, in another worker's area, and was filed here
-rather than fixed by this session:** on x86-64 a call with seven or more
-integer arguments evaluated its STACK-passed arguments first, so a corpus that
-printed six `randrange` calls in one `printf` answered a rotation of CPython's
-sequence on one architecture and the right one on the other. arm64 and the
-gimple path were both right. FIXED since: `formal/x86_64_codegen.py::_emit_call`
-stages every argument into the one reserved outgoing area in source order and
-loads the register half out of it afterwards, so no push can move `[RSP + 8k]`
-between two argument evaluations. `test_formal_x86_64_parity.py`'s
-`variadic_arguments_are_evaluated_in_source_order` is the differential that
-pins it.
+**A bug was found on the way, in another worker's area, and is filed rather
+than fixed:** `bugs/FORMAL_x86_64_seven_argument_call_evaluates_its_stack_arguments_first.md`
+— on x86-64 a call with seven or more integer arguments evaluates its
+STACK-passed arguments first, so a corpus that printed six `randrange` calls in
+one `printf` answered a rotation of CPython's sequence on one architecture and
+the right one on the other. arm64 and the gimple path are both right.
 
 ## 2. The ranking after `glob`, and why "the next 4-6 modules" is not there
 

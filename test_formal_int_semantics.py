@@ -30,16 +30,20 @@ computation cannot pass for a refusal:
   * `("trapped", status)` — the image runs and stops with `status`, which is
     `model.INT_OVERFLOW_TRAP_STATUS` / the divide-by-zero status.
 
-**Read integers through `print`, never `printf("%d", …)`.** Measured, both
-backends: `printf("%d", 2**62)` prints `0` because libc's `%d` reads a C `int`,
-while `%lld` and `print` are right —
-`bugs/FORMAL_printf_d_renders_32_bits.md`. Reading a 64-bit answer through
-`%d` would have measured that bug instead of the arithmetic, which is why every
-`print` below is `print`.
+**Read integers through `print` in the ARITHMETIC rows below, and through
+`printf` only in the `FORMAT_ROWS` group, which is the group that MEASURES the
+formatting.** libc's `%d` reads a C `int`, so before
+`model.printf_widened_format` landed `printf("%d", 2**62)` printed `0` on both
+backends where CPython prints `4611686018427387904`
+(`bugs/FORMAL_printf_d_renders_32_bits.md`, deleted with its fix). Reading an
+arithmetic answer through `%d` would have measured that defect instead of the
+arithmetic, which is why every arithmetic row here is a `print`.
 
 **The `print` spelling.** `print(x)` on this path builds its own format
 (`_print_call` chooses `%s` or `%lld` from the operand's kind), so it is the
-one output call in this file that is right for every value in every row.
+one output call in this file that is right for every value in every row — and
+`FORMAT_ROWS` asserts that it and `%d` now AGREE, which is the property that
+lets a corpus swap one for the other.
 
 Run:  python3 test_formal_int_semantics.py [-v] [-k SUBSTRING] [--only-row N]
 """
@@ -311,6 +315,109 @@ VARIABLE_ROWS = [
 STILL_UNTRAPPED_DOC = (
     "bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md")
 
+# ── `FORMAT_ROWS`: the OUTPUT spelling, with CPython as the oracle ──────────
+#
+# Every arithmetic row above reads its answer through `print`, which builds its
+# own `%lld`. These rows read the same values through a `printf` conversion the
+# SOURCE wrote, which is the other half of the output surface and the half that
+# was wrong: a formal value is one 64-bit word and libc's `%d` reads a C `int`
+# out of it, so `printf("%d", 2**62)` printed `0` on BOTH backends where CPython
+# prints `4611686018427387904`
+# (`bugs/FORMAL_printf_d_renders_32_bits.md`, deleted with its fix;
+# `model.printf_widened_format` is the rewrite and
+# `formal/build.py::_widen_printf_integer_conversions` is where it runs).
+#
+# **Each program prints every value TWICE — once through the conversion under
+# test and once through `print` — and the row's expectation is CPython's answer
+# for the WHOLE line.** That is what makes the row a claim about agreement
+# rather than about a number written down here:
+#
+#   * the expected string is computed in this process, so it is an oracle and
+#     not a transcription;
+#   * both halves must equal it, so the `%d` half is asserted against CPython
+#     AND against `print` — which is the property that lets a corpus swap one
+#     for the other, and which a row comparing only `%d` against a hand-written
+#     number would pass for a value the model gets wrong for an unrelated
+#     reason;
+#   * a program that fails to build, or a separator the model spells
+#     differently, fails the row for a reason no conversion rule can hide.
+#
+# `\n` prints literally through `printf` on this path
+# (`FORMAL_string_value_model.md`), so the separator is `|`; `print` ends its
+# line with a real newline, which is `print_format`'s `end` and not an escape.
+FORMAT_VALUES = [
+    4611686018427387904,      # 2**62 — the reproducer
+    9223372036854775807,      # INT64_MAX
+    0 - 9223372036854775808,  # INT64_MIN, whose magnitude does not fit in 32
+    4294967296,               # 2**32 — one past the low half
+    5000000000,
+    1099511627776,            # 2**40
+    2147483647,               # INT32_MAX: the last value `%d` got RIGHT
+    0 - 2147483648,           # INT32_MIN
+    12345,                    # what most of the corpus prints
+    0,
+    0 - 1,
+]
+
+#: The value word, for the conversions C reads UNSIGNED. `%u`/`%o`/`%x`/`%X`
+#: render a negative value as its unsigned 64-bit word, which is the word this
+#: path holds — and the expectation has to be computed through that word rather
+#: than through CPython's `%`-operator, which has no `%o`/`%x` for an arbitrary
+#: `int` at all.
+_U64 = 0xFFFFFFFFFFFFFFFF
+
+
+def format_rows():
+    """`(name, body, expected)` for each formatting row; CPython is the oracle.
+
+    The body is what `prog()` wraps in a `main`, so it is the same shape as
+    every arithmetic row in this file and goes through the same runner, the same
+    `judge` and the same both-backends loop. The expectation is a string, which
+    `judge` already supports (`want_s = str(want[1])`).
+
+    **The expectation is CPython's own `format(v, spec)`,** not a transcription
+    and not a decimal rendering of a value the conversion prints in another
+    base: `%o` of `2**62` is `4000000000000000` and `%X` of `INT64_MAX` is
+    `7FFFFFFFFFFFFFFF`, so an expectation computed as `"%d" % v` would fail a
+    row whose answer is right. `%u`/`%o`/`%x`/`%X` are UNSIGNED in C and render
+    a negative word as its unsigned 64-bit value, which is the word this path
+    holds, so the expectation masks to 64 bits first — the same masking
+    `test_formal_libc_symbol.py`'s `retvalue` group states for the same reason.
+
+    **The shape of the expectation is `|`.join + `|`, then immediately the
+    `print` block** — with NOTHING between them, because a `printf` format on
+    this path does not interpret `\n` (`FORMAL_string_value_model.md` §2, and
+    `model.print_literal`'s reason for doubling backslashes: the format is a
+    string-table entry, not C source). So the last `printf` value and the first
+    `print` value share a line, and the only newline in the whole expectation is
+    the one `print` puts at the END of its own line. `judge` compares
+    `out.strip()`, so even that trailing one is not in the expectation; a `|`
+    missing from the middle would fail a row whose every number is right.
+    """
+    rows = []
+    for conv, spec in (("%d", "d"), ("%i", "d"), ("%u", "d"),
+                       ("%o", "o"), ("%x", "x"), ("%X", "X")):
+        signed = conv in ("%d", "%i")
+        rendered = [format(v if signed else (v & _U64), spec)
+                    for v in FORMAT_VALUES]
+        want = ("|".join(rendered) + "|"
+                + "\n".join(str(v) for v in FORMAT_VALUES))
+        body = "\n".join(['printf("%s|", %d)' % (conv, v)
+                          for v in FORMAT_VALUES]
+                         + ["print(%d)" % v for v in FORMAT_VALUES])
+        rows.append(("fmt_%s_of_a_whole_word" % conv.strip("%"), body,
+                     ("value", want)))
+    # The CONTROL: `print` alone, with the same values. Its expectation is
+    # CPython's `print` output and nothing else, so a harness failure — a
+    # program that does not build, a separator this path spells differently — is
+    # separable from a failure of the conversion under test, and a rewrite that
+    # broke `print` would be caught by a row that does not mention `printf`.
+    rows.append((
+        "fmt_print_alone_is_the_control",
+        "\n".join("print(%d)" % v for v in FORMAT_VALUES),
+        ("value", "\n".join(str(v) for v in FORMAT_VALUES))))
+    return rows
+
 # ── the runner ──────────────────────────────────────────────────────────────
 
 RESULTS = []
@@ -408,12 +515,10 @@ def main():
     ap.add_argument("--only-row", type=int, default=None)
     args = ap.parse_args()
 
-    rows = list(ROWS)
-    if not args.substring:
-        rows += list(VARIABLE_ROWS)
-    elif args.substring in STILL_UNTRAPPED_DOC:
+    rows = list(ROWS) + list(VARIABLE_ROWS) + format_rows()
+    if args.substring and args.substring in STILL_UNTRAPPED_DOC:
         rows = list(VARIABLE_ROWS)
-    else:
+    elif args.substring:
         rows = [r for r in rows if args.substring in r[0]]
 
     # Under `build/` rather than the system temp: the images are ~100 KB each

@@ -370,14 +370,6 @@ FRAME_BLOB_REFUSAL_HEAD = "does not fit in the frame: it needs "
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIRE = os.path.join(HERE, "fire.py")
 
-#: Module-level `--opt`, read by `run_on`. A global rather than a parameter
-#: because `run_on` is called from four places in the reporting paths and every
-#: one of them is "build this program on this backend" — threading the flag
-#: through all four is four chances to pass it inconsistently, and a run where
-#: some programs went through the peephole and some did not would report
-#: differences that are not differences.
-OPT = False
-
 # The compiler's own frame budgets, so this corpus is sized by the tree rather
 # than by a number typed here: `formal/model.py::CONTAINER_BUDGET` is the
 # smaller of the two and the one a program has to fit to build on both machines.
@@ -602,8 +594,7 @@ PRELUDE = (
 
 # ── the harness ────────────────────────────────────────────────────────────
 
-def build(src, out, backend, timeout=BUILD_TIMEOUT, test_input=None,
-          opt=False):
+def build(src, out, backend, timeout=BUILD_TIMEOUT, test_input=None):
     """Compile `src` for `backend`; (rc, diagnostic).
 
     The diagnostic is stderr or stdout, whichever carries text — a refusal is
@@ -622,8 +613,6 @@ def build(src, out, backend, timeout=BUILD_TIMEOUT, test_input=None,
     """
     cmd = [sys.executable, FIRE, "build", "--formal", "--no-prove",
            f"--backend={backend}", "-o", out]
-    if opt:
-        cmd.append("--opt")
     if test_input is not None:
         cmd += ["-n", str(test_input)]
     cmd.append(src)
@@ -1064,7 +1053,7 @@ def run_on(backend, text, tmpdir, name):
     out = os.path.join(tmpdir, f"{name}.{backend}")
     with open(src, "w") as f:
         f.write(text)
-    rc, diag = build(src, out, backend, opt=OPT)
+    rc, diag = build(src, out, backend)
     if rc != 0:
         # THREE shapes of build failure, and only the first two are the same
         # thing.  A crash is a traceback or a signal; a refusal is a sentence;
@@ -4065,55 +4054,28 @@ class Gen:
         self.loop_depth -= 1
         self.emit(indent, f"print({acc})")
         # The INNER lists, read into locals so a later family can walk them.
-        # The inner list's own `len` used to be a REFUSAL on both backends ("a
-        # subscript of a list of lists has no element kind on this path — the
-        # outer list's elements are LISTS and the table does not say what a
-        # list's elements are"), so this family read the row through a second
-        # local and left the length unmeasured; a family that is a third
-        # refusals measures the refusal, which was the right trade while the
-        # construct was genuinely unanswerable two other ways. It is answered
-        # now (`formal/model.py::_list_literal_elem_kind`), so both spellings
-        # are emitted below and the length is measured rather than routed
-        # around.
+        # There is deliberately NO `len(inner)` here: a subscript of a list of
+        # lists has no element kind on this path — the outer list's elements are
+        # LISTS and the table does not say what a list's elements are — so
+        # `len(inner)` is REFUSED on both backends with "classified as 'int'"
+        # (filed as `FORMAL_len_of_a_subscript_of_a_list_of_lists_is_an_int`).
+        # A family that is a third refusals measures the refusal, so the inner
+        # read is here as an ALIAS for the nested-data question and the element
+        # read is the observable.
         #
         # The name holding the inner list does NOT join `words`: it holds a blob,
         # and the trailing observation prints every word in one `print` — a blob
         # there is either a refusal or an address, and the family is not about
         # either. It joins `lists`, so a later `star_splice` or `comp_walk` can
         # walk it, which is the nested-data question one step further.
-        #
-        # Each name is declared ONCE, with its real initialiser, and the reads
-        # are emitted at `indent`. The earlier spelling pre-declared `inner` to
-        # `[]` and then REBOUND it (`w = []` in the preamble, `w = R[i]` in the
-        # body), and a name bound two ways is a conflict in `ValueKinds` — so
-        # even with the element kind answerable the `len` below was refused,
-        # about the CORPUS's rebinding rather than about the rule under test.
         for i in range(min(2, nrows)):
-            inner = self.declare(self.fresh("w"), f"{name}[{i}]")
-            # `len` of the INNER list, which REFUSED on both backends until
-            # `formal/model.py::_list_literal_elem_kind` landed (2026-10-05) and
-            # is the row that family was written not to generate: the kind table
-            # flattened a blob layout it nests, so `R[0]`'s element kind was
-            # `list_elem_kind("list")` = None and the name was classified as "a
-            # word is an integer". With the element kind read off the literal it
-            # is a count-field read, and the answer is `ncols` — so this is
-            # emitted rather than avoided, which is what
-            # `bugs/FORMAL_fuzz_ledger.md` §5 listed as the next thing to
-            # generate and what no generator could measure until the rule
-            # existed.
-            self.emit(indent, f"print(len({inner}))")
-            elem = self.declare(self.fresh("w"), f"{inner}[{col}]")
+            inner = self.declare(self.fresh("w"), "[]")
+            self.emit(indent, f"{inner} = {name}[{i}]")
+            elem = self.declare(self.fresh("w"), "0")
+            self.emit(indent, f"{elem} = {inner}[{col}]")
             self.emit(indent, f"print({elem})")
-            # …and the NESTED subscript straight into `print`, the other of the
-            # two spellings measured as refused while the rule was missing
-            # ("cannot tell whether
-            # SubscriptExpr is a string or a number"). It is here because the
-            # same rule made it answerable and a family that keeps routing
-            # around a construct measures the routing rather than the construct.
-            self.emit(indent, f"print({name}[{i}][{col}])")
             self.words.append(elem)
             self.lists.append((inner, ncols))
-
 
     def star_splice_stmt(self, indent):
         """`[*xs]` and `[*d]` — the other one-thing-per-count walk.
@@ -5547,7 +5509,6 @@ def audit_program(text, args):
 
 
 def main():
-    global OPT
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-n", "--count", type=int, default=50,
@@ -5567,14 +5528,6 @@ def main():
     ap.add_argument("--print-program", type=int, default=None, metavar="INDEX",
                     help="print one generated program's source and exit")
     ap.add_argument("-j", "--jobs", type=int, default=4)
-    ap.add_argument("--opt", action="store_true",
-                    help="build through formal/peephole.py, so a run with it "
-                         "and a run without it are the SAME PROGRAMS and the "
-                         "difference is the pass and nothing else. Every "
-                         "rewrite the pass performs is licensed by a theorem "
-                         "in lib/Peephole.lean; this flag is how that claim is "
-                         "checked against generated programs rather than "
-                         "against formal/examples")
     ap.add_argument("--backends", default="x86_64,arm64",
                     help="comma list; both, to check the two images against "
                          "each other as well as against CPython")
@@ -5602,7 +5555,6 @@ def main():
     ap.add_argument("--max-min-steps", type=int, default=400)
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
-    OPT = args.opt
     if args.arch:
         # `--arch` is the one-backend statement of `--backends`, and it wins
         # over it rather than adding to it: the two say the same thing in

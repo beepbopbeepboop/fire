@@ -703,39 +703,6 @@ class TestClassifyShape(unittest.TestCase):
         got = C.measure_example("subscript_var")
         self.assertEqual((got.status, got.phase), ("refused", "generate"))
 
-    def test_a_REWRAPPED_generator_refusal_is_still_the_generators(self):
-        """The form `compile_formal` actually raises, and what it used to cost.
-
-        `formal/build.py` catches the generators' `NotImplementedError` and
-        re-raises it as a `FormalBuildError`, so `fire.py build --formal` prints
-        one line instead of a forty-frame traceback — which means the arm above
-        is unreachable for every generator this path calls, and the refusal came
-        out filed as `phase="build"`: a hole in the semantic model attributed to
-        the code generator, in a census whose whole job is saying which half of
-        the pipeline stopped. The phase is now asked of the exception through
-        `formal.build.proof_refused`, which is the one reader of that flag and is
-        shared with `tools/formal_proof_breadth.py` and `tools/formal_proof_fuzz.py`
-        so the three tools cannot answer it three ways.
-
-        The row above and this one are the pair: `NotImplementedError` is what a
-        direct generator call raises and this is what the build raises, and both
-        are the generator's.
-        """
-        import formal.build as FB
-        refusal = FB.FormalBuildError(
-            "no proof was generated: the semantic model has no value for "
-            "something in this program. The generator's own word for it: "
-            "model: a ListExpr has no value in the semantic model")
-        refusal.proof_refused = True
-        self._fake(side_effect=refusal)
-        got = C.measure_example("subscript_var")
-        self.assertEqual((got.status, got.phase), ("refused", "generate"))
-        # The diagnostic is still the generator's own, quoted inside the
-        # wrapper's sentence — re-attributing the PHASE must not cost the
-        # reader the sentence that names the missing domain.
-        self.assertIn("a ListExpr has no value in the semantic model",
-                      got.reason)
-
 
 class TestRunnerClassification(unittest.TestCase):
     """`test_formal.py::classify_stem` — the OTHER reader of the same question.

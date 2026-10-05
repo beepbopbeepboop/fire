@@ -466,40 +466,20 @@ def encode_bl(offset: int) -> bytes:
 def encode_cbz_xn(offset: int, xn: int) -> bytes:
     """CBZ Xn, #offset. Branch if Xn is zero.
     Verified: 0xb4000000 | ((offset // 4) << 5) | xn
-
-    `offset` is in BYTES (imm19 counts instructions, so it is divided by four),
-    and it is SIGNED: the field is masked with 0x7ffff the way every other
-    branch encoder here masks its displacement. **It was not**, and
-    `(offset // 4) << 5` on a negative offset is a negative Python int, so
-    `0xb4000000 | negative` is negative and `struct.pack('<I', …)` raised
-    `struct.error` — a backward conditional branch, which is what every loop
-    exit is, could not be encoded at all even though the assertion two lines
-    above it (`-2**18 <= offset < 2**18`) says it is in range. Every call site
-    in `formal/arm64_codegen.py` passes a placeholder that `Assembler.resolve`
-    patches afterwards, so no image carried it; the byte differential in
-    `test_arm64_encoders.py` found it instead, on the negative row of the CBZ
-    sweep. Found by `tools/formal_isa_census.py`'s encoder column.
-
-    The bound is also the FIELD's and not a byte count: imm19 reaches
-    2**18 instructions either way, so the assertion is over instructions and the
-    byte range is four times that. It is written in instructions to match.
     """
     assert 0 <= xn <= 31
-    assert -2**18 <= offset // 4 < 2**18, offset
-    insn = 0xb4000000 | (((offset // 4) & 0x7ffff) << 5) | xn
+    assert -2**18 <= offset < 2**18
+    insn = 0xb4000000 | ((offset // 4) << 5) | xn
     return struct.pack('<I', insn)
 
 
 def encode_cbnz_xn(offset: int, xn: int) -> bytes:
     """CBNZ Xn, #offset. Branch if Xn is non-zero.
     Verified: 0xb5000000 | ((offset // 4) << 5) | xn
-
-    The negative-offset mask and the byte/instruction bound are
-    `encode_cbz_xn`'s; see there for why the mask is there at all.
     """
     assert 0 <= xn <= 31
-    assert -2**18 <= offset // 4 < 2**18, offset
-    insn = 0xb5000000 | (((offset // 4) & 0x7ffff) << 5) | xn
+    assert -2**18 <= offset < 2**18
+    insn = 0xb5000000 | ((offset // 4) << 5) | xn
     return struct.pack('<I', insn)
 
 

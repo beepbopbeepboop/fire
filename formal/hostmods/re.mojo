@@ -59,19 +59,15 @@ WHAT IS NOT HERE, AND THE REASON IS THE SAME FOR ALL OF IT
     does not here. That is a real difference and it is a property of matching
     bytes rather than code points, which is what a `char *` IS on this path
     (`bugs/FORMAL_string_value_model.md`). Each of these has an INLINE spelling
-    too -- `(?i)`, `(?x)`, `(?s)`, `(?m)`, `(?a)`, `(?u)` -- and both forms of
-    that are implemented, by `_p_flaggroup`: the global `(?x) a` sets the flags
-    for the rest of the pattern, and CPython allows it only where nothing but
-    other flag groups precedes it; the scoped `(?x: a)` sets them for one group
-    and may appear anywhere. Neither was, which made this engine answer
-    `STATUS_UNSUPPORTED` for `(?x) a` while answering "matched" for the same
-    pattern with `re.VERBOSE()` as an argument. The scoped form is why every
-    node that consults a flag carries the word it was compiled under in its p1
-    (`_term`) instead of the matcher reading one word at entry -- the bug doc
-    that recorded the matcher-wide word as the reason this could not be done
-    is deleted with the fix, and what it recorded as the reason is what
-    changed. `test_re_formal.py` pins both spellings against CPython's own
-    answers and against CPython's own refusals.
+    too -- `(?i)`, `(?x)`, `(?s)`, `(?m)`, `(?a)`, `(?u)` -- and the global
+    form of that is implemented too, by `_p_inline`; it was not, which made this
+    engine answer `STATUS_UNSUPPORTED` for `(?x) a` while answering "matched"
+    for the same pattern with `re.VERBOSE()` as an argument. The SCOPED form
+    `(?x: ... )` is not implemented, and `_p_inline`'s own docstring says why:
+    flags are one word `_vm` reads once at entry, so a flag that changes inside
+    a compiled program needs the matcher to carry a mutable word through
+    `_step`. `test_re_formal.py` asserts that boundary rather than
+    leaving it implicit, in a test named for the SCOPED form's refusal.
   * **`re.escape` and `re.sub` return `malloc`'d buffers** the CALLER owns,
     exactly as `os/_syscalls.mojo`'s string functions do, and exactly for the
     same reason: a `str` here is a bare `char *` into read-only text, and
@@ -301,17 +297,6 @@ _P_USED = 24
 _P_W = 25
 
 # Opcodes. A node is 8 bytes: op, a, b, c, p0 (2 bytes), p1 (2 bytes).
-#
-# **p1 is the FLAGS WORD this node was compiled under, on the five opcodes that
-# consult a flag** — CHAR, ANY, CLASS, BOL and EOL — and it is the ONLY place
-# the matcher reads a flag from. It was the SPLIT's second branch and is still
-# that on a SPLIT, which is the one opcode that does not consult a flag and so
-# is the only one that uses p1 for anything else; the two never share a node.
-# `_p_at_head` explains why a flag cannot instead be a marker bit in the
-# pattern's word, and this is the other half of that answer: the word has to be
-# PER NODE, because `(?i: … )` changes it part-way through a compiled program
-# and a matcher that carried one word would have to make it mutable and restore
-# it — which a backtracker cannot do without putting it on its own stack.
 OP_CHAR = 1
 OP_ANY = 2
 OP_CLASS = 3
@@ -505,17 +490,9 @@ def _term(a, op: Int, x: Int, y: Int, z: Int, nxt: Int) -> Int:
     chain of fragments and each fragment ends where the NEXT one begins. So
     every fragment ends with a node whose p0 says where to go, and p0 == 0
     still means "the next node" for the nodes nothing chains.
-
-    p1 is stamped with the pattern's flags word HERE, where the node is
-    emitted, and nowhere else — so "the flags in force where this node was
-    written" is a fact about the node and survives backtracking, a re-parse of
-    a quantified atom's source, and the scoped form `(?i: … )` that changes
-    the word for one group only. `SPLIT` is emitted by `_nn` directly and is
-    the one node whose p1 is its second branch.
     """
     n = _nn(a, op, x, y, z)
     _sp0(a, n, nxt)
-    _sp1(a, n, _pa(a, _P_FLAGS))
     return n
 
 
@@ -756,9 +733,9 @@ def _p_atom(a, code, nxt: Int) -> Int:
     if c == 46:
         return _term(a, OP_ANY, 0, 0, 0, nxt)
     if c == 94:
-        return _term(a, OP_BOL, 0, 0, 0, nxt)
+        return _term(a, OP_BOL, _flg(a, F_MULTILINE), 0, 0, nxt)
     if c == 36:
-        return _term(a, OP_EOL, 0, 0, 0, nxt)
+        return _term(a, OP_EOL, _flg(a, F_MULTILINE), 0, 0, nxt)
     if c == 92:
         return _p_esc(a, code, nxt)
     if c == 41:
@@ -859,14 +836,13 @@ def _p_group(a, code, nxt: Int) -> Int:
                 _p_adv(a, code)
             _p_adv(a, code)
             return _p_group1(a, code, nxt)
-        # `(?letters)` and `(?letters: … )` -- CPython's INLINE FLAGS, global
-        # and scoped. This module implements every one of them as an ARGUMENT
-        # (`re.VERBOSE()`, `re.MULTILINE()`, `re.DOTALL()`,
-        # `re.IGNORECASE()`) and used to refuse the spelling inside the
-        # pattern, which is the same feature twice and made the engine answer
-        # `STATUS_UNSUPPORTED` for a pattern its own docstring says it
-        # supports. Found by generating CPython's own `test_re.py` as a
-        # conformance table (`test_formal_hostmods_conformance.py`), which is
+        # `(?letters)` -- CPython's INLINE GLOBAL FLAGS. This module implements
+        # every one of them as an ARGUMENT (`re.VERBOSE()`, `re.MULTILINE()`,
+        # `re.DOTALL()`, `re.IGNORECASE()`) and used to refuse the spelling
+        # inside the pattern, which is the same feature twice and made the
+        # engine answer `STATUS_UNSUPPORTED` for a pattern its own docstring
+        # says it supports. Found by generating CPython's own `test_re.py` as
+        # a conformance table (`test_formal_hostmods_conformance.py`), which is
         # where `(?x) a` and `(?m)^b` come from.
         #
         # "AT THE START" IS SCANNED, not counted, and the first two versions of
@@ -877,10 +853,20 @@ def _p_group(a, code, nxt: Int) -> Int:
         # a test against either number refuses one of the two spellings CPython
         # accepts. So the rule is CPython's own: **nothing but other
         # flag groups may precede this one**, which `_p_at_head` reads
-        # straight off the pattern source. It applies to the GLOBAL form only;
-        # a scoped group may appear anywhere, and `a(?i:b)c` is how that is
-        # spelled.
-        return _p_flaggroup(a, code, nxt, _p_at_head(a, code))
+        # straight off the pattern source.
+        #
+        # OR-ing into `_P_FLAGS` is the whole of the implementation, and it is
+        # enough because the three consumers read it at the right time:
+        # `_flg` during the parse (so VERBOSE starts skipping whitespace at the
+        # NEXT atom, and `^`/`$` capture MULTILINE), and `_vm` once at entry
+        # from the finished word (so DOTALL and IGNORECASE reach `_step`).
+        # Nothing in the MATCHER changes, which is why this is a parser change
+        # and not a VM change.
+        if _p_at_head(a, code) == 1:
+            if _p_inline(a, code) == 1:
+                return nxt
+        _spa(a, _P_ERR, 3)                  # lookahead, conditionals, scoped flags
+        return 0 - 1
     return _p_group1(a, code, nxt)
 
 
@@ -949,126 +935,47 @@ def _p_at_head(a, code) -> Int:
             if c == 41:
                 i = i + 1
                 break
-            if _p_flagok(c) == 1:
+            if c == 97 or c == 105 or c == 109 or c == 115 or c == 120:
                 i = i + 1
                 continue
             return 0                 # `L`, `-`, `:` and a `P` stop the scan
     return 1
 
 
-def _p_flaggroup(a, code, nxt: Int, at_head: Int) -> Int:
-    """`(?letters)` and `(?letters: … )`: the inline flags, global and scoped.
+def _p_inline(a, code) -> Int:
+    """`(?letters)` with the `?` already consumed: set the flags, eat the `)`.
 
-    The `?` is already consumed and `at_head` is `_p_at_head`'s answer, which
-    only the GLOBAL form is subject to. What follows the `?` is either
-    `(?:`, which `_p_group` has already taken, or a run of flag letters
-    optionally split by one `-`, and then either a `)` or a `:`. CPython's own
-    rules for the letters, all measured against it rather than read off its
-    source, because each one is a refusal this module has to reproduce:
-
-    | pattern | CPython |
-    |---|---|
-    | `(?i)a` at the head | compiles; sets i for the whole pattern |
-    | `(?i)a(?m)b` | `global flags not at the start of the expression` |
-    | `(?i-m)a` | `missing :` — a global group may SET only |
-    | `(?-i)a` | `missing :` — same |
-    | `(?i:a)`, `(?-i:a)`, `(?i-m:a)` | compiles; the letters apply to this group |
-    | `(?i-i:a)` | `flag turned on and off` |
-    | `(?-:a)` | `missing flag` |
-    | `(?L)a`, `(?L:a)` | cannot use 'L' with a str pattern |
-    | `(?z)a` | `unknown extension ?z)` |
-
-    **The scoped form is why the matcher reads a flag off a NODE and not out
-    of one word.** It used to be refused, and the recorded reason was that
-    `_vm` reads `_P_FLAGS` once at entry and `_step` reads that word, so a
-    flag that changes part-way through a compiled program would need the VM to
-    carry a MUTABLE word and restore it at the group's end. It does not: `_term`
-    stamps each node's p1 with the word in force where that node was written,
-    so the word is a property of the node and backtracking needs no stack entry
-    for it — `(?i:a)(?-i:b)` falls out of the emission order rather than out of
-    a save. What is left in `_P_FLAGS` is the PARSE-time word, which is what
-    `_skip` (VERBOSE) reads, and it is saved and restored around the body
-    because `_p_repeat` re-parses an atom's source and would otherwise carry
-    the group's flags out of the group.
+    1 when it consumed one. 0 when what follows is not this at all -- a `:` for
+    the SCOPED form `(?x: … )`, a `-` for `(?-x)`, a letter this engine refuses
+    -- and the caller refuses the whole group, which is what CPython does for
+    `(?z)`, for `(?-i)` without a `:` and for a `(?L)` on a `str` pattern.
 
     `a` and `u` are accepted and change nothing, which is this module's
     documented position rather than a shrug: the engine matches BYTES, so it is
     already what `(?a)` asks for, and `(?u)` cannot make the word class match U+00AA
     because there is no U+00AA here (`bugs/FORMAL_string_value_model.md`).
+
+    The SCOPED form `(?x: … )` is NOT here and cannot be added this way. Flags
+    are one word read by `_vm` at entry, so a flag that changes in the middle
+    of a compiled program would need the VM to carry a mutable word through
+    `_step` -- a different change, with its own proof cost, and it is the next
+    step rather than this one.
     """
-    set = 0
-    clr = 0
-    on = 0                      # letters before the `-`
-    off = 0                     # letters after it
-    dash = 0                    # and whether the `-` has been read at all
-    ty = 0                      # how many of `a`/`u` were asked for
+    f = 0
     while 1:
         c = _p_peek(a, code)
-        if c == 41 or c == 58:
-            break
-        if c == 45:                          # '-' -- what follows CLEARS
+        if c == 41:                          # ')'
             _p_adv(a, code)
-            if dash == 1 or _p_flagok(_p_peek(a, code)) == 0:
-                # A second `-`, and a `-` with no letter after it: CPython
-                # reads the byte after the `-` as a FLAG and a `-` is not one,
-                # so `(?i--m:a)` and `(?i-:a)` are both `missing flag`. And
-                # `(?i-a-:a)` is the same thing one letter later.
-                _spa(a, _P_ERR, 3)
-                return 0 - 1
-            dash = 1
-            continue
+            _spa(a, _P_FLAGS, _pa(a, _P_FLAGS) | f)
+            return 1
+        if c < 0:
+            return 0                         # end of pattern inside `(?`
         if _p_flagok(c) == 0:
             if c == 76:                      # L -- CPython refuses it for a str
                 _spa(a, _P_ERR, 3)
-            return 0 - 1                    # a `P`, an unknown letter, the end
+            return 0                         # a `-`, a `:`, a `P`, an unknown letter
         _p_adv(a, code)
-        b = _p_flagbit(c)
-        if dash == 0:
-            set = set | b
-            on = on + 1
-            if b == 0:
-                # `a` and `u` are the two halves of CPython's TYPE_FLAGS, and
-                # asking for both is `flags 'a', 'u' and 'L' are
-                # incompatible` — a refusal, not a spelling that means nothing.
-                # (`L` never gets here: `_p_flagok` does not accept it.)
-                ty = ty + 1
-                if ty > 1:
-                    _spa(a, _P_ERR, 3)
-                    return 0 - 1
-        else:
-            if b == 0:
-                # `a` and `u` carry no bit HERE — this engine already matches
-                # the bytes they ask for — and CPython refuses to turn them off
-                # (`bad inline flags: cannot turn off flags 'a', 'u' and 'L'`),
-                # because its bit is the thing that tells the three apart.
-                _spa(a, _P_ERR, 3)
-                return 0 - 1
-            clr = clr | b
-            off = off + 1
-    if (set & clr) != 0:
-        _spa(a, _P_ERR, 3)                  # turned on AND off
-        return 0 - 1
-    if _p_peek(a, code) == 58:               # ':' -- SCOPED
-        # At least one letter has been read: a `-` with nothing after it was
-        # refused above and `(?:` never reaches here, so `on == 0 and
-        # off == 0` cannot happen on this arm.
-        _p_adv(a, code)
-        outer = _pa(a, _P_FLAGS)
-        eff = outer - (outer & clr)
-        _spa(a, _P_FLAGS, eff | set)
-        b = _p_group0(a, code, nxt)          # the body is `(?: … )` exactly
-        _spa(a, _P_FLAGS, outer)            # and the group does not number
-        return b                            #   itself, which is CPython's too
-    # ')' -- GLOBAL, for the rest of the pattern.
-    if at_head == 0 or off != 0 or on == 0:
-        # CPython wants a `:` after any `-`, so `(?-i)a` and `(?i-m)a` are both
-        # `missing :`; the other two tests are its own rule that the group has
-        # to be at the head, and that it has to have said a letter.
-        _spa(a, _P_ERR, 3)
-        return 0 - 1
-    _p_adv(a, code)
-    _spa(a, _P_FLAGS, _pa(a, _P_FLAGS) | set)
-    return nxt
+        f = f | _p_flagbit(c)
 
 
 def _p_group0(a, code, nxt: Int) -> Int:
@@ -1674,10 +1581,8 @@ def _prepare(a, code, flags: Int) -> Int:
     _spa(a, _P_GREEDY, 1)
     # Node 0 is the anchor `match` and `fullmatch` enter at: a BOL that is only
     # true at position 0, with the program as its continuation. Without it
-    # `re.match("b", "abc")` finds the `b` at 1, which is `re.search`. It goes
-    # through `_term` so it carries the flags word like every other node the
-    # matcher reads a flag out of.
-    _term(a, OP_BOL, 0, 0, 0, 0)
+    # `re.match("b", "abc")` finds the `b` at 1, which is `re.search`.
+    _nn(a, OP_BOL, 0, 0, 0)
     _nn(a, OP_MATCH, 0, 0, 0)
     e = _p_alt(a, code, 1)
     if _pa(a, _P_ERR) != 0:
@@ -1948,30 +1853,22 @@ def _st_match(a, mode: Int, n: Int) -> Int:
     return 1
 
 
-def _step(a, subj, n: Int, mode: Int) -> Int:
-    """One opcode. 0 failed (backtrack), 1 matched, 2 advanced, 3 out of room.
-
-    The flags are NOT a parameter and are not read out of the arena either:
-    each of the five opcodes that consult one carries the word it was compiled
-    under in its p1, and a node with no flag in it has nothing to consult. So
-    there is no VM-wide flag state to save, restore or push -- which is what
-    makes `(?i: … )` work, and why a backtrack entry is still exactly
-    (pc, sp, slot, old).
-    """
+def _step(a, subj, n: Int, mode: Int, flags: Int) -> Int:
+    """One opcode. 0 failed (backtrack), 1 matched, 2 advanced, 3 out of room."""
     pc = _pa(a, _P_PC)
     op = _b(a, _PPROG + pc * 8)
     if op == 1:
-        if _st_char(a, subj, n, _np1(a, pc)) == 1:
+        if _st_char(a, subj, n, flags) == 1:
             _spa(a, _P_PC, _next(a, pc))
             return 2
         return 0
     if op == 3:
-        if _st_class(a, subj, n, _np1(a, pc)) == 1:
+        if _st_class(a, subj, n, flags) == 1:
             _spa(a, _P_PC, _next(a, pc))
             return 2
         return 0
     if op == 2:
-        if _st_any(a, subj, n, _np1(a, pc)) == 1:
+        if _st_any(a, subj, n, flags) == 1:
             _spa(a, _P_PC, _next(a, pc))
             return 2
         return 0
@@ -1983,12 +1880,12 @@ def _step(a, subj, n: Int, mode: Int) -> Int:
     if op == 6:
         return _st_save(a, pc)
     if op == 7:
-        if _bol(a, subj, _pa(a, _P_SP), _np1(a, pc)) == 1:
+        if _bol(a, subj, _pa(a, _P_SP), flags) == 1:
             _spa(a, _P_PC, _next(a, pc))
             return 2
         return 0
     if op == 8:
-        if _eol(a, subj, _pa(a, _P_SP), n, _np1(a, pc)) == 1:
+        if _eol(a, subj, _pa(a, _P_SP), n, flags) == 1:
             _spa(a, _P_PC, _next(a, pc))
             return 2
         return 0
@@ -2028,9 +1925,7 @@ def _run(a, subj, sp0: Int, n: Int, mode: Int, budget: Int) -> Int:
     `pc`, `sp` and the stack depth live in the arena rather than in locals.
     That is not a style choice: this function was the one shape the register
     allocator could not give a home to (see the module docstring), and moving
-    the three words out of the frame is what made it lowerable at all. The
-    flags are NOT among them: each node carries its own, so this loop holds no
-    flag word and none has to be unwound when it backtracks.
+    the three words out of the frame is what made it lowerable at all.
     """
     if mode == 1 or mode == 2:
         _spa(a, _P_PC, 0)
@@ -2040,12 +1935,13 @@ def _run(a, subj, sp0: Int, n: Int, mode: Int, budget: Int) -> Int:
     _spa(a, _P_TOP, 0)
     _spa(a, _P_MSTART, sp0)
     steps = 0
+    flags = _pa(a, _P_FLAGS)
     while 1:
         steps = steps + 1
         if steps > budget:
             _spa(a, _P_STEPS, steps)
             return 2
-        r = _step(a, subj, n, mode)
+        r = _step(a, subj, n, mode, flags)
         if r == 3:
             _spa(a, _P_STEPS, steps)
             return 2

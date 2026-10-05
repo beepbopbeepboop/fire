@@ -302,19 +302,11 @@ reinterpretation — which is why this is a contract row and not a caveat.
   `_callee_returns_nothing`), so it has to survive the rewrite.
 * **A METHOD's `signature` is a lookup key, not a declaration** — it is
   `Struct.method`, and `formal/imports.py::linked_struct_owners` reads the struct
-  name out of it, so it stays that string. **The declaration is a second,
-  additive manifest field, `declaration`** (`formal/model.py`'s
-  `method_boundary_declaration`, published by `formal/build.py`'s
-  `_formal_exports`), spelled with the receiver convention below applied to
-  argument 0 — `int64_t Point_sum (struct Point *)` for a frame receiver,
-  `int64_t Cell_get (int64_t)` for a one-field struct's plain `self`. A client
-  reads `declaration` when it is there and `signature` otherwise; the field is
-  absent for an export whose receiver convention cannot be resolved, which is
-  the honest absent answer rather than a wrong declaration. Checked by
-  `test_formal_interop.py`, which generates a C client's declaration from it and
-  requires the library to compute what CPython computes. The method ROW itself —
-  `R Struct_method (Struct *self, args…)` — is real for the compiled path and
-  needs the receiver convention below on a formal one.
+  name out of it. Writing a real C declaration there is a separate change with a
+  named next step; see
+  `bugs/FORMAL_a_method_export_publishes_no_c_declaration.md`. The method ROW
+  itself — `R Struct_method (Struct *self, args…)` — is real for the compiled
+  path and needs the receiver convention below on a formal one.
 
 **Why a narrow integer's word matters even though the low bits are all the
 callee reads.** `sxtw`/`and` means a `w`-bit argument can be passed in a `w`-bit

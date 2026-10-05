@@ -251,160 +251,6 @@ EXPECTED_FAILURES = {
             "materialised by adrp/add, so the read is at a literal rather than "
             "at sp - K and the slot peel cannot match it",
 
-    # ── The 19 examples added on 2026-10-05, by the gap each one hits ────────
-    #
-    # `formal/examples` grew from 52 programs to 96 and every one of these is a
-    # shape the corpus had NO example of, so each entry below is a gap the
-    # census can now see for the first time rather than a new kind of failure.
-    # `tools/formal_proof_census.py` records all of them, and the six FAMILIES
-    # below are six gaps, not nineteen.
-
-    # (1) The loop contract: seven programs, one cause. The model's loop state is
-    # ONE word -- `_stmts_go`'s helper takes a single argument -- so a `while`
-    # whose body changes anything else is a loop the model cannot state.
-    # `_dec_while_pattern` (a counter that IS the parameter: `wdiff`,
-    # `countdown`, `wge`) and `_range_loop_pattern` (a range loop with one
-    # accumulator: `sum_range`) are the only two shapes it can.
-    # `bugs/FORMAL_a_loop_that_is_neither_a_decrement_nor_a_range_loop_has_no_
-    # contract.md` has the measurement and the next step, and it also records
-    # the half that was FIXED in the same commit: this fold used to emit a
-    # `partial def` that DIVERGES for exactly these programs, which on x86-64
-    # reached a proof file as a false `result n = mojo n` obligation.
-    "accum_max": "the model's loop state is one word and this loop keeps a "
-                 "running maximum as well as a counter, so the fold refuses "
-                 "rather than emit a model that is not this program's "
-                 "arithmetic (the loop-contract doc above)",
-    "while_ne_zero": "the same loop contract, for the shape every accumulator "
-                     "loop is written in: `total += i` inside the body",
-    "var_typed_loop": "the same loop contract, on a `var` declared and read "
-                      "inside the body -- which is also how the fold's "
-                      "incomplete binder was found, since the refusal it used "
-                      "to give (\"`step` ... binds it to nothing\") was false "
-                      "about the source",
-    "ret_in_loop": "the same loop contract, with a `return` out of the body: "
-                   "the model's loop state cannot also carry an early exit",
-    "loop_break": "the same loop contract, with a `break` out of the body",
-    "nested_loop": "the same loop contract, with a second loop inside the "
-                   "first: two induction variables and one word",
-    "digits": "the same loop contract, on a divide-and-modify pair per "
-              "iteration",
-
-    # (2) The generic loop contract for a `for` loop, which is a refusal of its
-    # own: `ForStmt needs the generic loop contract`. `sum_range` is the one
-    # range loop in the corpus and it reaches a proof WITH A HOLE (the unsigned
-    # exit-side comparison its own entry above names); `for_two_bounds` is
-    # refused outright.
-    "for_two_bounds": "a `for i in range(1, n)` needs the generic loop "
-                      "contract the model does not have; the one range loop in "
-                      "the corpus (`sum_range`) only reaches a proof with an "
-                      "admitted hole",
-
-    # (3) The model has no domain for a container or a string. The model is
-    # `mojo : UInt64 -> UInt64` -- a function of the entry argument alone -- so
-    # a list literal, a string's length and a struct construction are not terms
-    # in it. This is `subscript_var`'s and `wide_recv`'s gap (their entries
-    # above) at three more spellings, and it is a representation project rather
-    # than a tactic.
-    "list_literal_index": "a list literal has no value in the semantic model "
-                          "(a `UInt64 -> UInt64` function over the source's "
-                          "arithmetic), the same domain gap as `subscript_var`",
-    "list_len": "`len` over a list is the same missing domain, reached through "
-                "the call rather than through a subscript",
-    "str_len": "`len` has no model in this image: a string is a bare "
-               "`char *` and its byte count is not an expression in the model "
-               "(`bugs/FORMAL_string_value_model.md`)",
-    "struct_point": "a struct CONSTRUCTION is a call, and the generator emits "
-                    "no `_go` for it, so `Point()` has no model in this image "
-                    "-- the same missing domain as `wide_recv`, one step before "
-                    "the field read it refuses",
-    "struct_method": "the same, for a struct's constructor, with the method's "
-                     "receiver behind it",
-
-    # (4) Calls. The universal theorem's CFG walk is per-function and cannot
-    # follow a call out of the ENTRY; `bugs/FORMAL_arm64_the_universal_theorem_
-    # cannot_follow_a_call_into_the_same_image.md` owns it. The corpus had NO
-    # program with a call at all, so this is the first measurement of it from
-    # the corpus: `call_helper` (the CALLEE is the entry) proves and
-    # `main_calls_helper` (the same image with the CALLER as the entry) is
-    # refused -- the pair is the sharpest statement of the frontier in the
-    # corpus.
-    "main_calls_helper": "the entry calls a second function in the same image, "
-                         "and the CFG walk cannot follow a call out of the "
-                         "entry; `call_helper` is the same image with the "
-                         "callee as the entry and it proves",
-    "multi_export": "three exports where the entry calls two of them, so two "
-                    "call SITES on one path -- more than the walk can follow, "
-                    "and the model refuses the inner callee first",
-
-    # (5) A division helper is an OPAQUE call, which is the same walk refusal
-    # seen from the other side and is the family `udivmod` and `floordiv` are
-    # already in (`bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_
-    # seven_are_declared.md` §#10, #11).
-    "augassign_floordiv": "`//=` and `%=` call the division helper, which is an "
-                          "opaque call site, and two of them on one path is "
-                          "more than the CFG walk's single halt address can "
-                          "discharge -- the same refusal as `udivmod`",
-
-    # (6) Two single gates, each its own sentence.
-    "printf_int": "`printf` with TWO arguments has no faithful AST: "
-                  "`MojoExpr.call` carries one `MojoExpr` and `callFunc` is "
-                  "`String -> UInt64 -> UInt64`, so the AST bridge refuses "
-                  "(`bugs/FORMAL_ast_bridge_carries_one_argument_per_call.md`)",
-    "dead_branch": "a branch on a CONSTANT condition emits no flag for the "
-                   "proof layer to read, so the branch-condition value flow is "
-                   "unavailable -- the generator refuses rather than state a "
-                   "flag value it does not have",
-
-    # (7) Linear recursion in its EARLY-RETURN spelling. `_dec1_pattern`
-    # matches `if n == 0: return 0 else: return f(n - 1) + 1` -- it requires
-    # an `else` arm -- and the corpus's three recursive programs (`count`,
-    # `pow2`, `fact`) all spell it that way. `if n == 0: return 0` followed by
-    # a top-level `return down(n - 1) + 1` is the same function and has no
-    # contract, so `eval_eq_mojo` falls through every arm of its dispatch and
-    # refuses. One `else:` is the whole difference.
-    "recursion_linear": "linear recursion spelled as an early return rather "
-                        "than an `else` arm: `_dec1_pattern` requires the "
-                        "`else`, so `eval_eq_mojo` has no proof for this shape "
-                        "and refuses it -- the same function as `count` with "
-                        "one line moved",
-
-    # ── Five that generate a proof and LEAN REJECTS it ──────────────────────
-    # `refused` is the generator declining; these five emit a file and the
-    # checker says no, which is a different and smaller claim each time. Every
-    # one of them runs correctly on BOTH backends and agrees with CPython
-    # (`test_x86_64_examples.py`), so none of these is a codegen bug.
-    "cmp_le_ge": "two order comparisons (`<=` then `>=`) against a VARIABLE in "
-                "one function: the `by_cases` split over both sign-flipped "
-                "terms leaves `decide` with a counterexample it cannot "
-                "discharge (cmp_le_ge_proof.lean:3217:156). The 64-bit member "
-                "of the family `sgt8`/`sle8`/`ug8` above already sit in",
-    "not_and": "a negation around a two-operand `and`: `not (n > 3 and n < 30)` "
-               "puts a `not` in the model's `if` and the `by_cases` split "
-               "finds a counterexample (not_and_proof.lean:2631:12) after 147 s "
-               "of Lean CPU. The same growth measured on a three-operand chain "
-               "is in the loop-contract doc's `bool_chain` section, where it "
-               "reached 4.2 GB",
-    "precedence": "the one expression with a `//` in it: the model spells the "
-                  "division `(UInt64.ofNat 4) / (UInt64.ofNat 2)` over UInt64, "
-                  "which `simp +decide` does not reduce, so `eval_eq_mojo`'s "
-                  "statement is left open (precedence_proof.lean:25:65). The "
-                  "IMAGE computes it -- both backends and CPython answer 19 -- "
-                  "and `floordiv`/`udivmod` are refused outright for the same "
-                  "division's helper call",
-    "mod_by_var": "`n % d` with a VARIABLE divisor calls the run-time division "
-                  "helper, which is outside the image, so the modelled run "
-                  "stops there and never reaches the exit the generated "
-                  "`mod_by_var_pre_reaches_0` asserts it reaches -- an "
-                  "obligation FALSE about the machine, in the generated file's "
-                  "own words (`bugs/FORMAL_arm64_an_extern_call_makes_the_run_"
-                  "never_reach_the_exit.md`). `floordiv`/`udivmod`, with two "
-                  "such calls, are refused instead",
-    # `unary_ops` was in this table until 2026-10-05 and is not any more: unary
-    # `+` was modelled as a LOGICAL NEGATION (a false model, which the run test
-    # caught), and both the model and the AST bridge now spell it as the
-    # identity. It is the corpus's proof that a false model is caught rather
-    # than banked.
-
 }
 
 
@@ -546,27 +392,13 @@ def run_one(stem, backend="arm64", outdir=None):
         return False, str(e)
 
 
-EXPECTED_FAILURES_X86_64 = {
-    # Not empty any more, and the first entry is the SAME gap arm64 has: the
-    # x86-64 generator shares the source model (`_go_defs_for`), so a model it
-    # cannot reduce fails `eval_eq_mojo` on both backends for one reason.
-    "precedence": "the model's `UInt64` division (`4 // 2`) is not reduced by "
-                  "the AST bridge's `simp`, so `eval_eq_mojo` is left open "
-                  "(precedence_proof.lean:41:65) -- the same goal arm64 leaves "
-                  "at 25:65, and the same reason as its entry in the arm64 "
-                  "table. Every other example's x86-64 proof still builds and "
-                  "typechecks, and its run tests are real `native_decide` "
-                  "evaluations of the model in lib/X86.lean",
-}
+EXPECTED_FAILURES_X86_64 = {}
 """x86-64 gaps, kept separate from arm64's because the two generators prove
-different things (see the module docstring).  It was EMPTY until 2026-10-05,
-when `formal/examples` grew by 42 programs and one of them (`precedence`) turned
-out to be a gap on this backend too: the x86-64 generator falls back to a
-PLACEHOLDER model for a shape it cannot state (`_placeholder_model`), which is
-why the 41 loop and container examples needed no entry here at all — they get
-an honest gap in the file instead of a hole.  An entry here means "known
-unproven, for the stated reason" — and, as with the arm64 table, a stem that
-starts passing is reported as stale."""
+different things (see the module docstring).  Empty today: every example's
+x86-64 proof builds and typechecks, and the run tests in them are real
+`native_decide` evaluations of the model in lib/X86.lean, not `sorry`.  An
+entry here would mean "known unproven, for the stated reason" — and, as with
+the arm64 table, a stem that starts passing is reported as stale."""
 
 
 def main():

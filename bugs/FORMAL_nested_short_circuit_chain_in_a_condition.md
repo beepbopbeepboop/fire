@@ -71,24 +71,19 @@ the passing case's") was already telling us, read from the other end.
 on — so it needs the memory problem above fixed first, or at least measured
 against it.
 
-### One instrument defect found while measuring this, filed, and since FIXED
+### One instrument defect found while measuring this, filed rather than fixed
 
-`formal/lean.py::proof_verdict_key` did not cover the proof's DIRECTORY, and
+`formal/lean.py::proof_verdict_key` does not cover the proof's DIRECTORY, and
 `_run_lean`'s `LEAN_PATH` puts that directory FIRST, so two byte-identical
-proofs in different directories were not the same proposition to Lean — while the
-cache could not tell them apart. Measured here: a run from `.tmp/sc` with
-`repo_root='.'` (which made `lib_dir` relative and therefore unresolvable from
+proofs in different directories are not the same proposition to Lean — while the
+cache cannot tell them apart. Measured here: a run from `.tmp/sc` with
+`repo_root='.'` (which makes `lib_dir` relative and therefore unresolvable from
 the proof's own directory) cached the failure `unknown module prefix 'ProofLib'`,
 and that verdict was then served for the same bytes from `.tmp/scroot` where the
-library resolves. Filed separately and **fixed in the branch that closed it**:
-`formal/lean.py::_proof_search_digest` now hashes what the proof's directory can
-supply (`_VERDICT_VERSION` v5), and the relative-`lib_dir` half of this
-measurement had already been fixed at that site by `os.path.abspath(lib_dir)`.
-The poisoned CAS entry still had to be deleted by hand to get a real run — the
-version bump is what makes every entry published under the old key unreachable
-from here on, and a CAS that is machine-wide and shared with every other
-checkout cannot be flushed from a worktree at all — which is the "a red that no
-fix can clear" shape this project keeps arguing against.
+library resolves. Filed as
+`bugs/FORMAL_the_proof_verdict_cache_key_cannot_see_the_proof_directory.md`; the
+poisoned CAS entry had to be deleted by hand to get a real run, which is the
+"a red that no fix can clear" shape this project keeps arguing against.
 
 ## Status 2026-10-03 (`work/formal13-4`): NOT FIXED, and BOTH of the 2026-10-03
 ## Status section's hypotheses are now MEASURED FALSE. The discriminator is

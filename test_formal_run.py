@@ -664,50 +664,6 @@ CASES = [
                             "            return 1\n"
                             "    return 0\n", 1, None),
 
-    # **THE TWO SPELLINGS THE OVERFLOW MESSAGE NAMES, computed and run.** The
-    # message's repair used to be a third spelling that does NOT work (moving
-    # the appends into a function of their own, which moves the loop with them
-    # and stops with the same capacity); `the_overflow_advice_names_spellings_
-    # that_work` pins what it says now, and this row is what says the sentence is
-    # TRUE. Both halves, because a message naming two repairs where one of them
-    # silently did not work is a promise a reader cannot check, and this is the
-    # check.
-    #
-    # They compute the SAME list as the overflowing program above — `[1, 2, 3]` —
-    # and the distinction is SITES versus EXECUTIONS on the first and a
-    # compile-time trip count on the second (`model.walk_stmt_trips` counts a
-    # `for … in range(3)` as three, where a `while i < 3` is one site run three
-    # times). Both exit 1 on every value, so a rewrite that fitted one and broke
-    # the other could not pass.
-    ("the_two_spellings_the_overflow_advice_names_both_compute",
-     "def sites() -> Int:\n"
-     "    var xs = []\n"
-     "    xs.append(1)\n"
-     "    xs.append(2)\n"
-     "    xs.append(3)\n"
-     "    if len(xs) != 3:\n"
-     "        return 0\n"
-     "    if xs[0] != 1 or xs[1] != 2 or xs[2] != 3:\n"
-     "        return 0\n"
-     "    return 1\n"
-     "\n"
-     "def counted() -> Int:\n"
-     "    var ys = []\n"
-     "    for i in range(3):\n"
-     "        ys.append(i + 1)\n"
-     "    if len(ys) != 3:\n"
-     "        return 0\n"
-     "    if ys[0] != 1 or ys[1] != 2 or ys[2] != 3:\n"
-     "        return 0\n"
-     "    return 1\n"
-     "\n"
-     "def main():\n"
-     "    var a = sites()\n"
-     "    var b = counted()\n"
-     "    printf(\"sites=%d counted=%d|\", a, b)\n"
-     "    return a + b\n",
-     2, "sites=1 counted=1|"),
-
     # ── the gimple backend's C runtime, refused by name ───────────────────
     #
     # `mojo_*` is the ABI of the OTHER backend's C runtime (runtime/
@@ -2898,63 +2854,6 @@ CASES = [
      "    printf(\"%d\\n\", r)\n"
      "    return 0\n",
      "refuse:'*' is refused when the left operand is a string", None),
-    # ── the BLOB half of the same class, and the one that was MISSING ────────
-    #
-    # `s < t` on two `char *` is an integer comparison of two ADDRESSES, and the
-    # section comment above measured it: the branch was taken by the order the
-    # two literals happen to be interned in the text section, and reversing the
-    # two lines of source reversed every answer. A list is the same word with a
-    # different meaning — a frame-allocated block — and it was NOT refused:
-    #
-    #     def main(n):
-    #         a = [9]
-    #         b = [1]
-    #         printf("%d\n", 1 if b > a else 0)
-    #         return 0
-    #
-    # answered **1 on BOTH backends**, where CPython answers 0 — and the number
-    # is the ALLOCATION ORDER, not the elements: the same program with
-    # `a = [1, 2]; b = [3, 4]` happens to agree, because `[3, 4]` is the later
-    # block and therefore the higher address. So it is not a divergence between
-    # the architectures (they lay the frame out the same way, which is why they
-    # agree on the wrong number) but a branch decided by the allocator, which is
-    # worse to debug and is the outcome the string rows above exist to end and
-    # which nothing ended for a blob.
-    # `model.container_relational_refusal` is the row that ends it, and it is
-    # asked from `string_binary_refusal` so both backends get it at every binary
-    # site they already consult.
-    #
-    # The two rows are the two SPELLINGS of which operand is the blob, because
-    # the message says "the left operand" or "the right operand" and a helper
-    # that always said the first would produce a diagnostic about a line the
-    # reader is not looking at.
-    ("list_relational_operator_refused_rather_than_comparing_addresses",
-     "def main(n):\n"
-     "    a = [1, 2]\n"
-     "    b = [3, 4]\n"
-     "    if b > a:\n"
-     "        printf(\"GT\\n\")\n"
-     "    return 0\n",
-     "refuse:'>' is refused when the left operand is a list", None),
-    ("a_blob_on_the_right_names_the_right_operand",
-     "def main(n):\n"
-     "    a = [1, 2]\n"
-     "    if 0 < a:\n"
-     "        printf(\"LT\\n\")\n"
-     "    return 0\n",
-     "refuse:'<' is refused when the right operand is a list", None),
-    # The direction that must NOT move, and it is the reason this row is a row
-    # about RELATIONAL operators only: `len(xs) > 2` is a comparison of two
-    # INTEGERS about a container, and CPython answers it. A gate that fired on
-    # "a blob is mentioned anywhere near this comparison" would put a
-    # diagnostic in front of correct code, and the needle here is empty because
-    # the assertion is that the build SUCCEEDS.
-    ("len_of_a_blob_compared_with_a_number_still_compiles",
-     "def main(n):\n"
-     "    xs = [1, 2, 3]\n"
-     "    printf(\"%d\\n\", 1 if len(xs) > 2 else 0)\n"
-     "    return 0\n",
-     0, "1\n"),
     # `%` is worth its own case because it is the one that looks like it might
     # work: `"%d" % k` is printf-style formatting, and on the pre-change tree
     # it returned 0 on arm64 and 2 on x86-64 for `k = 3` — the address modulo
@@ -3488,41 +3387,6 @@ FD_CASES = [
   "    f.close()\n"
   "    return 0\n",
    0, None),
- # **THE RECEIVER AS A CALL RESULT, and it was a SILENT WRONG ANSWER rather than
- # a refusal** — which is what makes it the most important row in this group.
- # Every refusal above asserts that a word which is not a descriptor is not
- # passed as one; this row asserts the other direction, that a descriptor
- # `open` RETURNED is recognised when it is not bound to a name first.
- #
- #     open("/tmp/fw.txt", "w").write("hello\n")
- #
- # built green on both architectures, exited 0, printed its next line, and
- # **wrote nothing** — no file was created. `_is_value_receiver` said a
- # `CallExpr` was not a value receiver, so the method arm was never taken,
- # `_callee_symbol` flattened `open(...).write` to the bare name `write`, and the
- # C library's `write(2)` was called with the argument registers holding what
- # the path string left there. Every "runs, writes nothing, exits 0" symptom
- # this group's own header describes, reached by the one shape its guard could
- # not see.
- #
- # `fd_write_close_roundtrip` above is the CONTROL and the reason this row is
- # needed at all: it is the same `open`, the same `write`, the same descriptor —
- # bound to a name. Both build and both exit 0, so the exit status cannot tell
- # them apart and only the FILE can.
- #
- # **And the row CHECKS THE FILE'S SIZE, because an exit status of 0 is exactly
- # what the broken build produced.** A program that opens a file for writing and
- # never writes to it exits 0, so asserting only the status asserts the bug.
- # `os.path.getsize` is the reader (`formal/hostmods/os/path`'s own `fs_stat`),
- # so the program measures its own effect: 5 bytes is `hello`, and the exit
- # status is the assertion rather than a constant the harness chose.
- ("fd_write_on_an_open_result_writes",
-  "from os.path import getsize\n"
-  "\n"
-  "def main(n):\n"
-  "    open(\"/tmp/fd_write_on_an_open_result.txt\", \"w\").write(\"hello\")\n"
-  "    return getsize(\"/tmp/fd_write_on_an_open_result.txt\")\n",
-   5, None),
  # A FRAME SLOT holding what is syntactically a descriptor. Refused, and the
  # message names the receiver's SHAPE as well as the requirement, because
  # proving a field holds a descriptor is cross-field flow and this path cannot
@@ -4438,72 +4302,6 @@ BYREF_REFUSALS = [
      "    print(r0, r1)\n"
      "    return 0\n",
      "refuse:the shapes do not agree on where 'v' lives", None),
-    # THE SAME DISAGREEMENT REACHED BY A DIFFERENT EDGE, and it is a separate
-    # case because the edge is. `byref_two_layouts_disagree` above is two
-    # CONSTRUCTOR bindings (`x = A()` and `x = B()`), which the seeding loop
-    # enumerates in one pass and hands the existing disagreement machinery.
-    # This one is a constructor binding plus a COPY from another holder —
-    # `q = o` where `o` is a declared `Two` parameter — and the copy edge in
-    # `_frame_receivers`' fixpoint SKIPPED a name that was already a holder, so
-    # `Two` never reached `q`'s candidate list and the second layout was the one
-    # that disappeared. The guard was there for a reason (a name already
-    # classified keeps its classification), but as written the outcome depended
-    # on which edge ran first, and the constructor seeding always runs first.
-    #
-    # **The measurement that makes it a case rather than a shrug**: the two
-    # architectures disagreed. Both builds SUCCEEDED and `q.c` read slot 2 of
-    # whatever `q` addressed — past the end of a two-slot `Two` frame, a word the
-    # program never writes — so arm64 exited 0 and x86-64 exited 208, and both
-    # were answers to a question the source does not ask. With two three-field
-    # structs the same program builds and returns a plausible number on both.
-    ("byref_a_rebind_from_another_holder_keeps_both_layouts",
-     "struct Three:\n"
-     "    var a: Int64\n"
-     "    var b: Int64\n"
-     "    var c: Int64\n"
-     "\n"
-     "struct Two:\n"
-     "    var x: Int64\n"
-     "    var y: Int64\n"
-     "\n"
-     "def pick(o: Two, which: Int) -> Int:\n"
-     "    var q = Three()\n"
-     "    if which > 0:\n"
-     "        q = o\n"
-     "    return Int(q.c)\n"
-     "\n"
-     "def main(n: Int) -> Int:\n"
-     "    var o = Two()\n"
-     "    return pick(o, n)\n",
-     "refuse:the shapes do not agree on where 'c' lives", None),
-    # …and the GUARD, because a merge is a widening and a widening needs its
-    # other direction measured: two layouts that AGREE must still build and
-    # answer CPython. `A` and `B` both put `v` at slot 0, so one candidate and two
-    # agreeing candidates answer the field read identically and the merge has
-    # nothing to refuse. Without this row a fix that refused every rebind would
-    # pass the case above.
-    ("byref_a_rebind_whose_two_layouts_agree_still_answers",
-     "struct A:\n"
-     "    var v: Int\n"
-     "    var pad: Int\n"
-     "\n"
-     "struct B:\n"
-     "    var v: Int\n"
-     "    var w: Int\n"
-     "\n"
-     "def touch(o: B, c: Int) -> Int:\n"
-     "    var x = A()\n"
-     "    x.v = 5\n"
-     "    if c > 0:\n"
-     "        x = o\n"
-     "    return x.v\n"
-     "\n"
-     "def main(n: Int) -> Int:\n"
-     "    var b = B()\n"
-     "    b.v = 7\n"
-     "    print(touch(b, 0), touch(b, 1))\n"
-     "    return 0\n",
-     0, "5 7"),
     # A METHOD DISPATCHED BY NAME ONTO THE WRONG RECEIVER. `_rewrite_method_calls`
     # turns `self.go(5)` into `Helper_go(self, 5)` from the method name alone,
     # because `recv.m(x)` carries no type — which is fine until the receiver is a
@@ -6351,38 +6149,6 @@ BOTH_ARCH_CASES = [
      "def main(n: Int) -> Int:\n"
      "    printf(\"eq=%d\", 1 if mk(1) == mk(2) else 0)\n"
      "    return 0\n", 0, "eq=1"),
-    # THE TWO WORKING SHAPES that bound the two `REFUSAL_CASES` rows reading a
-    # double's kind against a callee's own integer annotation, and they are here
-    # because the REFUSALS are in `bugs/FORMAL_float_pointer_pointee.md`'s
-    # remaining-work section as the two consumers that had to be refused by name
-    # before a `Pointer[Float64]` load could go through.  **What makes a check on
-    # a call boundary safe to add to a path with 664 stdlib files behind it is
-    # that it can only fire where the source contradicts itself**, and these two
-    # rows are what that sentence is measured on.
-    #
-    # An UNANNOTATED parameter. `def g(x) -> Int: return x + 1` called `g(d)`
-    # for `d: Float64 = 3.9` is 4.9 — it is 4.9 today, it was 4.9 before this
-    # check existed, and reading "the source does not say" as "is not a double"
-    # would refuse a correct program on both architectures. `Int(...)` around the
-    # call is the source's own conversion and is what the refusal's message
-    # points at.
-    ("a_double_through_an_unannotated_parameter_still_builds",
-     "def g(x) -> Int:\n"
-     "    return x + 1\n\n"
-     "def main(n: Int) -> Int:\n"
-     "    var d: Float64 = 3.9\n"
-     "    printf(\"%d\", Int(g(d)))\n"
-     "    return 0\n", 0, "4"),
-    # A `Float64` PARAMETER, which is the case a blanket "a double at a call
-    # boundary" rule would refuse and this one must not: the annotation is on the
-    # CALLEE and it says double, so there is no disagreement to report and `+ 1.0`
-    # is `FADD` rather than `ADD`.
-    ("a_double_through_a_float_parameter_still_builds",
-     "def g(x: Float64) -> Float64:\n"
-     "    return x + 1.0\n\n"
-     "def main(n: Int) -> Int:\n"
-     "    printf(\"%f\", g(3.9))\n"
-     "    return 0\n", 0, "4.900000"),
     # …and the shape that was the OTHER HALF of that construct and was refused
     # for a month afterwards, which is why the row above is not the whole of it.
     # `mk(1) == mk(2)` alone leaves the holder check nothing to disagree about;
@@ -6909,165 +6675,6 @@ BOTH_ARCH_CASES = [
      "    var b = Box()\n"
      "    return b.get()\n",
      0, None),
-    # ── …AND THE ROW THAT SAYS THE BRING-UP RUNS THE CONSTRUCTOR ────────────
-    #
-    # The row above is 0 because `Opt` declares NO `__init__`, so 0 is what its
-    # class-level defaults are. Add a constructor that writes 41 into `v` and the
-    # frame's bring-up has to RUN it: in Mojo `T(...)` calls `T.__init__`, and
-    # before this it did not — the placement walk wrote field DEFAULTS and
-    # stopped, so this exact program built, ran, exited 0, printed nothing on
-    # either stream, and answered 0 where CPython answers 411.
-    #
-    # Measured on both architectures before the fix: `b=0`, CPython `b=41`.
-    # Two walks over one declaration disagreed and neither said so: `var o =
-    # Opt()` in the same file runs the stores (`model.struct_construction_plan`
-    # → `CONSTRUCTION_INIT`) and `var b = Box()` did not, because the frame
-    # bring-up is the emitters' own placement walk and not a constructor call.
-    #
-    # 411 is `41 * 10 + 1` — the same shape as the 155 above, so a fix that got
-    # ONE of the two fields would print 401 and this row would catch it.
-    ("a_brought_up_frame_runs_its_own_structs_constructor",
-     "struct Opt:\n"
-     "    var v: Int\n"
-     "    var has: Int\n"
-     "\n"
-     "    def __init__(out self):\n"
-     "        self.v = 41\n"
-     "        self.has = 1\n"
-     "\n"
-     "struct Box:\n"
-     "    var inner: Opt\n"
-     "\n"
-     "    def get(self) -> Int:\n"
-     "        return self.inner.v * 10 + self.inner.has\n"
-     "\n"
-     "def main() -> int:\n"
-     "    var b = Box()\n"
-     "    printf(\"g=%d\", b.get())\n"
-     "    return 0\n",
-     0, "g=411"),
-    # The MULTI-FIELD holder, because the one-word shape is the one whose
-    # receiver IS the nested frame and therefore reaches the bring-up through a
-    # DIFFERENT emitter arm (`struct_default_word`'s `nested_frame` payload
-    # rather than `_emit_frame_nested`). Both are `model.struct_frame_defaults`
-    # followed by the constructor's stores now, and this row is what says the
-    # two-field arm got it too — before the fix the one-word arm was the one the
-    # doc's reproducer used and the two-field one was asserted from the same code
-    # path rather than measured.
-    ("a_two_field_holders_brought_up_frame_runs_the_nested_constructor",
-     "struct Opt:\n"
-     "    var v: Int\n"
-     "    var has: Int\n"
-     "\n"
-     "    def __init__(out self):\n"
-     "        self.v = 41\n"
-     "        self.has = 1\n"
-     "\n"
-     "struct Wide:\n"
-     "    var pad: Int\n"
-     "    var inner: Opt\n"
-     "\n"
-     "    def get(self) -> Int:\n"
-     "        return self.inner.v * 10 + self.inner.has\n"
-     "\n"
-     "def main() -> int:\n"
-     "    var w = Wide()\n"
-     "    printf(\"g=%d\", w.get())\n"
-     "    return 0\n",
-     0, "g=411"),
-    # AT DEPTH 2, where the bring-up writes the inner frame's ADDRESS and so
-    # leaves a whole subtree to initialize on its own. The doc named this shape
-    # and did not measure it; measured here on both architectures, and 7 is what
-    # only `Deep.__init__`'s store can produce (the class-level defaults are 0).
-    # `Outer`'s `n: Inner` has no constructor of its own, so what this exercises
-    # is the RECURSION reaching `Deep` two levels down rather than the
-    # intermediate frame.
-    ("a_depth_two_bracket_up_runs_the_deepest_constructor",
-     "struct Deep:\n"
-     "    var x: Int\n"
-     "    var y: Int\n"
-     "\n"
-     "    def __init__(out self):\n"
-     "        self.x = 7\n"
-     "        self.y = 8\n"
-     "\n"
-     "struct Inner:\n"
-     "    var a: Int\n"
-     "    var d: Deep\n"
-     "\n"
-     "    def read_x(self) -> Int:\n"
-     "        return self.d.x\n"
-     "\n"
-     "struct Outer:\n"
-     "    var n: Inner\n"
-     "\n"
-     "    def read_x(self) -> Int:\n"
-     "        return self.n.read_x()\n"
-     "\n"
-     "def main() -> int:\n"
-     "    var o = Outer()\n"
-     "    return o.read_x()\n",
-     7, None),
-    # **A constructor that REQUIRES parameters keeps the defaults, and this is
-    # the language's rule rather than a retreat.** A frame bring-up is not a
-    # call, so it has no arguments to supply and a required parameter cannot be
-    # filled; what the field holds is the default-initialized object. Asking
-    # `struct_construction_plan` with a synthesized zero-argument call instead —
-    # which is what this fix did first — took its ARITY refusal and turned
-    # `byref_three_level_chain_with_the_type_assigned_in_init` above into a
-    # BUILD FAILURE, for a program that overwrites the whole field on the next
-    # line and never reads what the bring-up wrote.
-    #
-    # 0 is the assertion: `Opt`'s defaults, not a fabricated store. A lowering
-    # that invented values here would answer something else, and one that ran a
-    # required-parameter constructor with zeros would be a different program.
-    ("a_required_parameter_constructor_leaves_the_brought_up_frame_at_its_defaults",
-     "struct Opt:\n"
-     "    var v: Int\n"
-     "    var has: Int\n"
-     "\n"
-     "    def __init__(out self, seed: Int):\n"
-     "        self.v = seed\n"
-     "        self.has = 1\n"
-     "\n"
-     "struct Box:\n"
-     "    var inner: Opt\n"
-     "\n"
-     "    def get(self) -> Int:\n"
-     "        return self.inner.v * 10 + self.inner.has\n"
-     "\n"
-     "def main() -> int:\n"
-     "    var b = Box()\n"
-     "    printf(\"g=%d\", b.get())\n"
-     "    return 0\n",
-     0, "g=0"),
-    # The DEFAULTED-parameter half of that rule, which is the other direction and
-    # the one that must NOT keep the defaults: `def __init__(out self, seed: Int
-    # = 41)` IS runnable with no arguments, so the bring-up fills it from the
-    # signature's default and `self.seed = seed` stores 41. This is what
-    # `struct_construction_plan`'s zero-argument branch already did for a
-    # construction of the struct ITSELF, and a bring-up that kept the defaults
-    # here would be a hole in the rule rather than an instance of it.
-    ("a_defaulted_parameter_constructor_runs_at_the_bring_up",
-     "struct Opt:\n"
-     "    var v: Int\n"
-     "    var has: Int\n"
-     "\n"
-     "    def __init__(out self, seed: Int = 41):\n"
-     "        self.v = seed\n"
-     "        self.has = 1\n"
-     "\n"
-     "struct Box:\n"
-     "    var inner: Opt\n"
-     "\n"
-     "    def get(self) -> Int:\n"
-     "        return self.inner.v * 10 + self.inner.has\n"
-     "\n"
-     "def main() -> int:\n"
-     "    var b = Box()\n"
-     "    printf(\"g=%d\", b.get())\n"
-     "    return 0\n",
-     0, "g=411"),
     # **TWO SITES IN ONE FUNCTION**, which is the half of the fix the row above
     # cannot reach: the frame is reserved in the PROLOGUE, one block per call
     # site, laid out in walk order by `model.struct_constructor_sites`, and the
@@ -7224,31 +6831,6 @@ BOTH_ARCH_CASES = [
     # store must survive the call.  With the register arguments spilled first,
     # the seventh argument reads as ZERO — indistinguishable from a caller who
     # passed zero, which is the answer the original refusal existed to prevent.
-    ("both_arch_printf_of_a_call_result_prints_the_value_and_exits_zero",
-     # The SIMPLEST shape of the property the row above measures in a harder
-     # one: a `printf` whose only `%d` argument is a CALL's result. It is here
-     # for the half the row above cannot see — the EXIT STATUS.
-     #
-     # **A `printf` that prints nothing and leaves the callee's return value in
-     # the process's exit status is a two-backend agreement on a wrong answer**,
-     # so no parity check could ever have found it: both machines printed
-     # nothing, and `main` returning 0 is the only thing that makes the status
-     # mean anything. Measured and filed on 2026-10-04 (`printf("v=%d", g(1))`
-     # printing nothing and exiting 7, on both architectures); fixed on master
-     # by the time this row was written, which is exactly why the row is here —
-     # the filing's own step 3 asked for it and no row was ever added, so the
-     # fix was pinned by nothing. Its reproducer command named a case that did
-     # not exist, so it could only ever print `unknown case(s)` and exit 2.
-     #
-     # Both halves are load-bearing and they fail differently: a `printf` that
-     # printed `v=7` and still exited 7 would have fixed the symptom and left
-     # the register handoff wrong, so the expected status is 0 and not "the
-     # callee's 7".
-     "def g(a: Int) -> Int:\n"
-     "    return 7\n\n"
-     "def main(n):\n"
-     "    printf(\"v=%d\", g(1))\n"
-     "    return 0\n", 0, "v=7"),
     ("both_arch_a_stack_argument_from_a_parameter_and_a_nested_call",
      "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
      "          a5: int, a6: int, a7: int, a8: int) -> int:\n"
@@ -13461,58 +13043,6 @@ PRINTF_TEXT_CASES = [
      "    printf(\"[%s]\", c)\n"
      "    return 0\n",
      "refuse:struct of ONE field has no frame at all", None),
-    # **A LOWERED STRING METHOD is the one shape with BETTER evidence than a
-    # name, and it was the only `%s` shape with no evidence at all.**
-    # `printf_arg_text_evidence`'s step 4 declines a CALL's kind outright — the
-    # right rule, because `kind_of` answers `INT_KIND` for a callee it does not
-    # know and reading that default as evidence would refuse every extern's
-    # result. But `POINTER_BOUNDED_METHODS` RECORDS what each string method
-    # yields, as its own table insists ("a method whose result is misclassified
-    # poisons every use site after it, and the symptom is a wrong answer rather
-    # than a diagnostic"), and `startswith` is recorded as `INT_KIND` for that
-    # reason. That is a declaration about the result, not the unclassified-callee
-    # default step 4 refuses.
-    #
-    # Measured, both architectures, from a GREEN build: `printf("%s|",
-    # s.startswith("q"))` printed nothing and died of SIGSEGV, exit 139 —
-    # `%s` walking bytes at address 0 or 1 looking for a NUL. The
-    # `printf("%s|", 1 > 0)` control IS refused (step 5 covers a comparison), so
-    # the machinery worked and the one shape it skipped was the one carrying the
-    # table's own answer.
-    ("printf_s_of_a_lowered_string_method_is_refused",
-     "def cat() -> String:\n"
-     "    return \"qq\"\n"
-     "def main(n):\n"
-     "    var s = cat()\n"
-     "    printf(\"[%s]\", s.startswith(\"q\"))\n"
-     "    return 0\n",
-     "refuse:conversion in printf's format string reads", None),
-    # …and the receiver is the GATE, so the same method on a receiver this build
-    # cannot call a `char *` still proves nothing and the refusal is a DIFFERENT
-    # one — the receiver, not the conversion. This is the control that keeps
-    # `_lowered_string_method_result` from being "any method call is a number":
-    # `xs` is `list:int`, so the message names the kind and says `'startswith' is
-    # only lowered on a char *`. A reader who got the `%s`-evidence answer here
-    # would be told the wrong thing about which of the two is the problem.
-    ("printf_s_of_a_method_on_a_container_is_refused_as_a_receiver",
-     "def main(n):\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"[%s]\", xs.startswith(\"q\"))\n"
-     "    return 0\n",
-     "refuse:is a method on a string, and its receiver is classified as "
-     "'list:int'", None),
-    # And `%d` of the same call PRINTS, which is the other half of a narrowing
-    # this shape needs: a refusal that also stopped the correct conversion would
-    # be an over-refusal, and the two rows above with it are what keep the
-    # evidence a claim about `%s` and nothing else.
-    ("printf_d_of_a_lowered_string_method_still_prints",
-     "def cat() -> String:\n"
-     "    return \"qq\"\n"
-     "def main(n):\n"
-     "    var s = cat()\n"
-     "    printf(\"[%d][%d]\", s.startswith(\"q\"), s.endswith(\"z\"))\n"
-     "    return 0\n",
-     0, "[1][0]"),
     # The GUARDS, and they are why the fix is not "a name in the one-word table
     # is False for a `%s` conversion".  A one-field struct whose field is a
     # STRING is text, and it worked before this change and works now: `w` IS
@@ -13793,7 +13323,7 @@ WAVE6_TRUTHY_CASES = [
     # parameter as a WORD (a word is an integer here, which is right for every
     # kind except a string), and the identity test then says the empty string is
     # non-empty. The fix is the call site's argument kind propagated into the
-    # callee — `model.parameter_kinds_by_call_site`, UNANIMOUS over every call
+    # callee — `model.string_parameters_by_call_site`, UNANIMOUS over every call
     # site of the name in the image.
     ("truthy_unannotated_parameter_from_a_string_literal",
      "def f(s):\n"
@@ -13852,73 +13382,6 @@ WAVE6_TRUTHY_CASES = [
      "def main(n):\n"
      "    printf(\"%d %d\", f(s=\"\"), f(s=\"x\"))\n"
      "    return 0\n", 0, "0 1"),
-
-    # ── the BLOB row of the same table ──
-    #
-    # `bugs/FORMAL_len_of_a_list_parameter_is_refused_though_the_same_parameter_
-    # subscripts.md`: `def total(xs): … len(xs) …` called `total([1, 2, 3, 4])`
-    # was REFUSED on both architectures with "len(xs) is len() of a value
-    # classified as 'int', and an integer has no length" — about a list the same
-    # function SUBSCRIPTS, and one whose count field a loop with a literal bound
-    # already read correctly (CPython's `10`). One parameter, two
-    # classifications, and the refused one was the only reader that insisted on
-    # a KIND. The fix is the same unanimity table the string row above uses,
-    # read for the container the argument's own shape is
-    # (`formal/model.py::_parameter_argument_shape`), so the parameter is
-    # `list:int` and `len` reads its count field.
-    #
-    # ONE call site per parameter, and that is the rule rather than a
-    # convenience: the evidence is unanimity over every call site of the NAME,
-    # so a parameter called with `[1, 2, 3, 4]` and with `[]` claims nothing (the
-    # two literals have different ELEMENT kinds) — which is what the last row
-    # here pins, from the other direction.
-    ("len_of_an_unannotated_list_parameter_is_its_count_field",
-     "def total(xs):\n"
-     "    var acc = 0\n"
-     "    var i = 0\n"
-     "    while i < len(xs):\n"
-     "        acc = acc + xs[i]\n"
-     "        i = i + 1\n"
-     "    return acc\n"
-     "def main(n):\n"
-     "    printf(\"t=%d\", total([1, 2, 3, 4]))\n"
-     "    return 0\n", 0, "t=10"),
-    # And an EMPTY one, which is the row that was a wrong ANSWER rather than a
-    # refusal: `if xs:` over an unannotated parameter was the word's own
-    # non-zeroness, and a list blob's address is never zero — so an empty list
-    # was truthy. Measured on this tree before the change, both architectures,
-    # `isempty([])` returned 0 where CPython returns 1, exit 0, nothing on
-    # stderr. With the parameter classified as the blob it is, truthiness is its
-    # COUNT (`truthy_lowering`'s container row) and the answer is CPython's.
-    ("an_empty_list_parameter_is_falsy",
-     "def isempty(xs):\n"
-     "    if xs:\n"
-     "        return 0\n"
-     "    return 1\n"
-     "def main(n):\n"
-     "    printf(\"e=%d\", isempty([]))\n"
-     "    return 0\n", 0, "e=1"),
-    # The direction the rule must NOT take, and the shape is an argument this
-    # build cannot READ rather than two arguments of different kinds: a call site
-    # whose argument is a NAME claims nothing (`_parameter_argument_shape`'s None
-    # is one of the claims), so the parameter claims nothing and `len` refuses
-    # exactly as it did before the change. A table that answered from the
-    # majority, or that read the caller's flow, would answer here — and the
-    # caller's flow is a per-caller fact this compilation does not have.
-    ("len_of_a_list_parameter_needs_every_site_to_agree",
-     "def total(xs):\n"
-     "    var acc = 0\n"
-     "    var i = 0\n"
-     "    while i < len(xs):\n"
-     "        acc = acc + xs[i]\n"
-     "        i = i + 1\n"
-     "    return acc\n"
-     "def main(n):\n"
-     "    var other = [9, 9]\n"
-     "    printf(\"t=%d\", total([1, 2, 3, 4]))\n"
-     "    printf(\"u=%d\", total(other))\n"
-     "    return 0\n",
-     "refuse:len(xs) is len() of a value classified as 'int'", None),
 
     # A list blob's truthiness is its COUNT, which is at offset 0. `if []:`
     # was TRUE before this — a fabricated truthiness in the same family, found
@@ -14601,36 +14064,6 @@ STDERR_CASES = [
      "    printf(\"n=%d\", len(xs))\n"
      "    return 0\n",
      1, ["list.append overflowed 'xs'", "its capacity is 1", "append SITES"]),
-    # **THE ADVICE IS A PROMISE, AND THIS ROW IS WHAT KEEPS IT.** The overflow
-    # message used to end "…or move the appends into a function of their own so
-    # the capacity each one sees is its own", and that repair does not work: the
-    # capacity is counted PER FUNCTION, so the appends and the loop move
-    # together and the overflow follows them. Measured on both architectures —
-    # `def fill(): var ys = []; while i < 3: ys.append(i)` stops with the same
-    # capacity of 1 and a different function's name on the message. A reader who
-    # followed the sentence arrived at the identical refusal, which is the
-    # outcome the message exists to prevent.
-    #
-    # So the message now names the two spellings that DO compute the same list,
-    # and this row asserts what it says rather than what it used to say:
-    #
-    #   * `append SITES outside any loop` — three sites run once each is capacity
-    #     3, where one site in a loop is capacity 1 however many times it runs.
-    #     `three append sites is capacity 3` is the needle because it is the
-    #     distinction the reader has to be able to make, and
-    #     `does NOT help` is asserted because a message that dropped the warning
-    #     while keeping the two repairs would invite the dead end again.
-    ("the_overflow_advice_names_spellings_that_work",
-     "def main(n):\n"
-     "    xs = []\n"
-     "    var i = 0\n"
-     "    while i < 3:\n"
-     "        xs.append(7)\n"
-     "        i = i + 1\n"
-     "    printf(\"n=%d\", len(xs))\n"
-     "    return 0\n",
-     1, ["SITES outside any loop", "for … in range(n)",
-         "Moving the appends into a function of their own does NOT help"]),
     # `d[k] = v` for a key the blob does NOT hold, which is CPython's INSERT and
     # used to be a key scan that missed and stopped the program having printed
     # nothing. The reservation is `formal/model.py`'s `dict_store_capacity` —
@@ -14669,46 +14102,6 @@ STDERR_CASES = [
      "    return 0\n",
      1, ["dict store of 'k' into 'd'", "cannot reserve",
          "not built by a dict LITERAL"]),
-    # `a + b` where the estimate of the element total is LOWER than what the
-    # operands' own count words say at run time — the reservation is a static
-    # estimate, and the count is read from the operands, so no pass over the
-    # source can reconcile them.  The loop here has NO compile-time trip count,
-    # which is what keeps the reservation at the one-per-site bound
-    # (`_blob_site_growth`'s own decision, pinned by the GUARD row in `CASES`
-    # above), and 5000 executions is comfortably past it.
-    #
-    # **arm64 had NO guard on this path at all** and wrote straight past its own
-    # reservation — measured before this case existed: the same program printed
-    # `len=5001` having written 5001 elements into 65 words of frame.  x86-64
-    # HAD one and it was a bare `exit(1)`, so this program stopped with nothing
-    # on either stream.  Three needles: the construct says which operator, the
-    # count says which number was exceeded, and "ESTIMATE" says the rule — a
-    # reader who cannot tell this from `list_append_overflow_is_loud` above
-    # (whose capacity is the number of append SITES, a different fact with a
-    # different remedy) would go and look at the wrong thing.
-    ("blob_growth_concat_past_its_reservation_is_loud",
-     "def main(n):\n"
-     "    var s = [0]\n"
-     "    var i = 0\n"
-     "    while i < 5000:\n"
-     "        s = s + [1]\n"
-     "        i = i + 1\n"
-     "    printf(\"len=%d\", len(s))\n"
-     "    return 0\n",
-     1, ["a list concatenation overflowed its reservation", "reserved room for",
-         "ESTIMATE"]),
-    # `xs * n` and `a | b` are NOT rows here, and the reason is a harness
-    # limitation worth stating rather than a gap. `run_stderr_case` requires the
-    # program to build on BOTH architectures, and x86-64 refuses `a | b` by name
-    # (`model.set_union_refusal` — lowering it as a concatenation answers
-    # `[1,2] | [2,3]` with four elements), so a two-architecture stderr
-    # comparison has nothing to compare. What is checkable for all three sites
-    # on both backends is the question this row's mechanism cannot ask — does
-    # the site have a guard at all — and that is
-    # `check_blob_growth_guards` / `_BLOB_GROWTH_PROBES`, which is where `*`
-    # and `|` are pinned. `*` builds on both, so the difference there is that
-    # its reservation is exact for a literal operand: the run-time total cannot
-    # exceed the estimate without a name in one of them.
 ]
 
 # `d[k] = v` INSERTS, and these are the answers CPython gives. They are in
@@ -15504,23 +14897,24 @@ POINTER_DEREF_REFUSALS = [
     # and it is pinned so it is a recorded limit rather than a surprise.  The
     # augmented-assignment arm works from a NAME (`_load_var`/`_store_var` on a
     # `_frame_slots` key), and a base that is an EXPRESSION has no name to key
-    # on, so both backends refuse it — but they refuse it with ONE sentence,
-    # `model.member_access_refusal`, because the real premise is the BINDING of
-    # the base and not the shape of the target.  The named spelling is answered:
+    # on, so the two backends refuse it from their own augmented arms.  Their
+    # WORDS differ, which is a pre-existing divergence in that diagnostic and not
+    # one of the pointer model's — hence `refuse_either:` with both needles
+    # rather than one, which is the honest encoding of "refused on both, and the
+    # two disagree about how they say so".  The named spelling is answered:
     # `deref_struct_pointee_augmented_through_a_name`.
     #
-    # **This row carried `refuse_either:` until arm64 caught up** (its augmented
-    # arm raised a literal of its own, "unsupported augmented assignment target
-    # on the formal arm64 path", while x86-64 raised `_refuse_member_target`).
-    # Both sentences were about the same construct and the arm64 one was FALSE
-    # about its own file — a `MemberExpr` target IS lowered on both machines
-    # when the member is a frame slot (`a.n += 1` builds and answers 5 on both).
-    # The `refuse_either:` is GONE rather than narrowed, which is the point of
-    # removing it: a two-needle row goes green either way, so it would have
-    # survived the fix and reported the divergence forever after it was over.
-    # The needle is the clause that names the BASE rather than the whole
-    # sentence, for the reason every other needle in this file is a clause: the
-    # sentence is one function's and the clause is the fact.
+    # **x86-64's half of `refuse_either:` is master's WORDS, not the ones this
+    # row was written against.**  It used to say "augmented assignment target
+    # must be a plain name on the formal x86-64 path", which is FALSE about the
+    # file: a `MemberExpr` target IS lowered when the member is a frame slot, so
+    # the real premise is the BINDING OF THE BASE — and that is what the shared
+    # `model.member_access_refusal` says, which is what the arm now raises
+    # (`_refuse_member_target`).  arm64 has not caught up and still refuses from
+    # its own augmented arm, which is the divergence this encoding records.  The
+    # needle is the clause that names the BASE rather than the whole sentence,
+    # for the reason every other needle in this file is a clause: the sentence
+    # is one function's and the clause is the fact.
     ("deref_refuse_augmented_through_a_pointer_frame",
      "struct P3:\n"
      "    var a: Int64\n"
@@ -15532,7 +14926,8 @@ POINTER_DEREF_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    var t = P3()\n"
      "    return bump(t)\n",
-     "refuse:is a field access through 'p.value(...)'", None),
+     "refuse_either:unsupported augmented assignment target on the formal arm64"
+     " path|is a field access through 'p.value(...)'", None),
     # A FLOAT pointee.  A formal value has no float kind distinct from an int
     # (the same absence that refuses `__mlir_bool__`), so a 4-byte float load
     # would put IEEE binary32 bits in a register the program then treats as an
@@ -15562,54 +14957,6 @@ POINTER_DEREF_REFUSALS = [
      "    var s = \"ABCDEFGH\"\n"
      "    return read_f(s)\n",
      "refuse:the LOAD is bit-exact", None),
-    # THE TWO CONSUMERS THAT ROW'S DOC NAMES as the reason the load cannot go
-    # through yet, and both are reachable WITHOUT the pointer, which is what
-    # makes them rows here rather than a note in that document.  They are the
-    # other end of the same rule `printf_kind_conversion_refusal` states about a
-    # format: a `%d` conversion says how C will READ the word it is handed, and
-    # a parameter annotation says how the CALLEE will, and there was only ever
-    # one of them enforced.
-    #
-    # Measured on BOTH architectures before these rows existed, each printing a
-    # number nobody wrote with a green build and exit 0 — and each in agreement
-    # with the OTHER architecture, which is what makes them easy to miss.
-    #
-    # A double in WORD position. `g(d)` for `d: Float64 = 3.9` and
-    # `def g(x: Int) -> Int: return x + 1` printed 4615964438073389876, which is
-    # 3.9's bit pattern with `+ 1` applied to it as a word, where the interpreter
-    # answers 4.9. The `+ 1` is the tell: the arithmetic inside the callee is
-    # exact, and it is exact on the wrong number.
-    ("a_double_in_word_position_is_refused_by_the_callees_own_annotation",
-     "def g(x: Int) -> Int:\n"
-     "    return x + 1\n\n"
-     "def main(n: Int) -> Int:\n"
-     "    var d: Float64 = 3.9\n"
-     "    printf(\"%d\", g(d))\n"
-     "    return 0\n",
-     "refuse:declares its parameter 0 an Int", None),
-    # …and the SAME rule at a RETURN, which is a separate function rather than a
-    # second argument to the one above because the disagreement is not at the
-    # point the value is produced: `func_kind` — which every backend builds to
-    # answer "what does a call to this produce" — reads a callee's DECLARED
-    # return type first, so the callee looks like an integer producer and every
-    # consumer of the result is right to believe it. Measured as 3.9 printed as
-    # a decimal, 4615964438073389875.
-    ("a_double_returned_under_an_integer_annotation_is_refused",
-     "def h() -> Float64:\n"
-     "    return 3.9\n\n"
-     "def f() -> Int:\n"
-     "    return h()\n\n"
-     "def main(n: Int) -> Int:\n"
-     "    printf(\"%d\", f())\n"
-     "    return 0\n",
-     "refuse:is declared to return Int and returns", None),
-    # …and the two WORKING shapes that must keep building, which are
-    # `BOTH_ARCH_CASES` rows below beside the two refusals they bound: an
-    # UNANNOTATED parameter claims nothing, and a `Float64` one says double.
-    # Both are answers rather than refusals, so both are checked against CPython
-    # — a `refuse:` row cannot say that a build succeeds and prints what the
-    # source means.
-    
     # A BLOB pointee.  A list is a frame whose FIRST word is its count, so a
     # load at the address would answer with the LENGTH — a plausible number the
     # source never wrote, which is the outcome this table exists to prevent.
@@ -21012,7 +20359,7 @@ REFUSAL_CASES = [
 #     answered on both, by the same two shared predicates rather than by a third
 #     private copy of the flattening.
 #
-# the `2026-09-30` round of `bugs/FORMAL_sweep_work_map.md` §3.1 is where the "worth 41 files
+# `bugs/FORMAL_sweep_work_map_2026-09-30.md` §3.1 is where the "worth 41 files
 # and 0 coverage" is measured: `binary_heap.mojo` is behind two further limits
 # (premise B2, and an `Optional` niche), so all 41 files stay refused and the
 # value of this fix is the diagnostic and the construct, not the count.
@@ -22909,9 +22256,9 @@ def check_comptime_alias_census(verbose=False):
 # else — and asked because three places used to have to agree about them and
 # did not have to.
 #
-# The consequence, measured while the model's set and an emitter's own
-# `if name == …` chain could disagree: a name the emitter lowers was one the
-# model did not know was a callee, so
+# `bugs/FORMAL_callee_no_def_ceiling_zero.md` §5 measured the consequence: with
+# the model's set and an emitter's own `if name == …` chain disagreeing, a name
+# the emitter lowers is one the model does not know is a callee, so
 # `print(p)` builds, runs, exits 0 and prints the frame's own ADDRESS as a
 # decimal — 6102330608 on arm64, 13027830976 on x86-64, a different number on
 # every run. `byref_refuse_print_of_a_frame` is the end-to-end half; this is the
@@ -23210,150 +22557,7 @@ def check_stack_floor_decision(verbose=False):
     return passed, failures
 
 
-# EVERY site that RESERVES a blob and then COPIES into it at run time, and the
-# smallest program that reaches it on each backend.
-#
-# This is the structural half of `STDERR_CASES`'s blob-growth row, and it exists
-# because the row cannot cover the set. A run-time stop is only observable on a
-# program whose estimate is wrong, and for two of the three sites there is no
-# such program that builds on BOTH machines: x86-64 refuses `a | b` outright
-# (`model.set_union_refusal`, and it is right — lowering it as a concatenation
-# answers `[1,2] | [2,3]` with four elements), so a two-architecture stderr
-# comparison has nothing to compare. What is left is the question the run cannot
-# ask: **does this site have a guard at all.** Before this, `*` had none on
-# either backend and `|` had none on either backend, and only `+` had one on
-# x86-64 — and that one was a bare `exit(1)`, which is why it is in
-# `STDERR_CASES` now.
-#
-# The check is BEHAVIOURAL and not a source grep: `_emit_blob_growth_guard` is
-# wrapped, a program is compiled through `formal/build.py`, and the sites that
-# actually emitted are recorded. A grep would pass on an emitter that calls the
-# helper from a branch nothing reaches, and would go red on a site that is
-# spelled differently — neither of which is the question.
-#
-# `(backend, tag, source)`, and `want` is the set of `what` strings the guard
-# must be called with — the operator's own noun phrase, which is also what
-# `frame_blob_refusal` is given for the compile-time half of the same bound, so
-# a reader is not told one thing by a refusal and another by the run-time stop.
-_BLOB_GROWTH_PROBES = [
-    # `+` on two blobs. Reachable on both, and the one site whose run-time stop
-    # is also pinned end-to-end by
-    # `blob_growth_concat_past_its_reservation_is_loud`.
-    ("arm64", "cat",
-     "def main(n):\n    var s = [0]\n    var i = 0\n"
-     "    while i < 3:\n        s = s + [1]\n        i = i + 1\n"
-     "    return len(s)\n", {"a list concatenation"}),
-    ("x86_64", "cat",
-     "def main(n):\n    var s = [0]\n    var i = 0\n"
-     "    while i < 3:\n        s = s + [1]\n        i = i + 1\n"
-     "    return len(s)\n", {"a list concatenation"}),
-    # `xs * n`, whose reservation is `blob_est(blob) * count` and whose run-time
-    # total is `len(blob) * count` read from the blob's own count word — the two
-    # disagree exactly when `blob_est` is the fallback, which is every bare name.
-    ("arm64", "rep",
-     "def main(n):\n    var t = [1, 2] * 3\n    return len(t)\n",
-     {"a list repetition"}),
-    ("x86_64", "rep",
-     "def main(n):\n    var t = [1, 2] * 3\n    return len(t)\n",
-     {"a list repetition"}),
-    # `a | b`. arm64-only, and that is the POINT of the row: this is a site that
-    # existed on one architecture only, with no guard on it, and the check is
-    # what stops a fourth blob-producing site appearing on one backend alone.
-    ("arm64", "uni",
-     "def main(n):\n    var a = [1, 2]\n    var b = [2, 3]\n"
-     "    var u = a | b\n    return len(u)\n",
-     {"a set union"}),
-]
-
-# The fewest instructions a guard can emit and still BE one. Both backends'
-# helpers are far above it — arm64's is a `movz`/`cmp`/`cset`/`cbnz` plus the
-# diagnostic's `adrp`/`add`/`movz`/`movz`/`movz`/`svc`, the `fflush` and the
-# exit trap, and x86-64's is the same shape with a libc `write` and `exit` — so
-# the bound is set by what a guard has to DO (compare a run-time count against a
-# literal, branch on it, and leave the machine) rather than by either
-# implementation, which is what lets one number check both.
-_BLOB_GROWTH_MIN_WORDS = 8
-
-
-def check_blob_growth_guards(verbose=False):
-    """Every blob-producing site emits the run-time capacity guard.
-
-    Returns `(passed, failures)`; one probe per `(backend, tag)`, and the
-    assertion is that the site reached while compiling that probe's program
-    emitted a guard for that `tag` — so a site that stopped being reachable is
-    as loud as one that lost its guard, which is the property that keeps this
-    from rotting into a check of nothing.
-    """
-    build = __import__("formal.build", fromlist=["build"])
-    passed, failures = 0, []
-    import tempfile
-    for arch, tag, source, want in _BLOB_GROWTH_PROBES:
-        mod = __import__(f"formal.{'arm64' if arch == 'arm64' else 'x86_64'}"
-                         f"_codegen", fromlist=["codegen"])
-        cls = getattr(mod, "ARM64Codegen" if arch == "arm64" else "X86_64Codegen")
-        real = cls._emit_blob_growth_guard
-        got = []
-
-        def spy(self, what, total_reg, capacity, site_tag, _real=real, _got=got):
-            before = len(self.asm.sections["text"])
-            _real(self, what, total_reg, capacity, site_tag)
-            # The WORDS the guard contributed, not merely that it was called:
-            # a helper whose body is stubbed out still gets called by every
-            # site, so counting calls alone would pass on a tree where the
-            # guard exists and emits nothing — which is the state this check
-            # exists to catch, and the state `*` and `|` were in.
-            _got.append((what, capacity, site_tag,
-                         (len(self.asm.sections["text"]) - before) // 4))
-
-        cls._emit_blob_growth_guard = spy
-        try:
-            with tempfile.TemporaryDirectory() as td:
-                src = os.path.join(td, f"blob_growth_{tag}.mojo")
-                with open(src, "w") as f:
-                    f.write(source)
-                build.compile_formal(src, output=os.path.join(td, "a.out"),
-                                     prove=False, check=False, arch=arch)
-        except Exception as e:                     # noqa: BLE001 - reported
-            failures.append(
-                f"{arch}/{tag}: the probe did not compile ({type(e).__name__}: "
-                f"{e}), so it cannot show whether the site has a guard. A probe "
-                f"that stops compiling is a hole in this check, not a pass")
-            continue
-        finally:
-            cls._emit_blob_growth_guard = real
-        mine = [g for g in got if g[2] == tag]
-
-        if not mine:
-            failures.append(
-                f"{arch}/{tag}: the site emitted NO capacity guard, so a "
-                f"reservation this path cannot keep is a silent frame overrun "
-                f"rather than a stop that says which bound was hit")
-            continue
-        said = {g[0] for g in mine}
-        if said != want:
-            failures.append(
-                f"{arch}/{tag}: guarded as {sorted(said)}, want {sorted(want)} "
-                f"— the run-time stop and the compile-time refusal "
-                f"(`frame_blob_refusal`) name one bound two ways")
-            continue
-        # A comparison, a conditional branch and a way out: the fewest words a
-        # guard can be and still be one are the two that TEST a bound and the
-        # one that LEAVES on it. Below that the site has a label and no check.
-        thinnest = min(g[3] for g in mine)
-        if thinnest < _BLOB_GROWTH_MIN_WORDS:
-            failures.append(
-                f"{arch}/{tag}: the guard emitted {thinnest} instruction(s), "
-                f"fewer than the {_BLOB_GROWTH_MIN_WORDS} a bound check needs "
-                f"— it is called and emits nothing, which is the state `*` and "
-                f"`|` were in and which counting call sites cannot see")
-            continue
-        passed += 1
-        if verbose:
-            print(f"  PASS  blob-growth-guard: {arch}/{tag} "
-                  f"{[(g[0], g[1], g[3]) for g in mine]}")
-    return passed, failures
-
-
+# HOW DEEP A CHAIN GETS, asked of `model.call_graph_depth` — the half of the
 # residual the guard cannot reach, and the number that decided
 # `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`'s widening.
 #
@@ -23994,13 +23198,6 @@ def main():
           f"FAIL={len(sf_failures)}")
     passed += sf_passed
     failed += len(sf_failures)
-    bg_passed, bg_failures = check_blob_growth_guards(args.verbose)
-    for detail in bg_failures:
-        print(f"  FAIL  blob-growth-guard: {detail}")
-    print(f"formal run: blob-growth-guard PASS={bg_passed} "
-          f"FAIL={len(bg_failures)}")
-    passed += bg_passed
-    failed += len(bg_failures)
     tg_passed, tg_failures = check_type_value_tag_generator(args.verbose)
     for detail in tg_failures:
         print(f"  FAIL  tag-generator: {detail}")

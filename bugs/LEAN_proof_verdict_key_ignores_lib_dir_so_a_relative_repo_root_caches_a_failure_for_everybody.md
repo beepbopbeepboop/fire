@@ -81,9 +81,7 @@ like the right thing to type.
 
 ## The exact next step
 
-Five changes, in order, and the first is the one that stops the bleeding. Steps
-1–3 were the original three; **4 and 5 are the two the duplicate this document
-replaced added**, and they are not the same fix — see the note under the list.
+Three changes, in order, and the first is the one that stops the bleeding:
 
 1. **`_run_lean` should not accept a relative `lib_dir`** — `os.path.abspath`
    it where `LEAN_PATH` is built, the way `library_census` already does
@@ -100,34 +98,10 @@ replaced added**, and they are not the same fix — see the note under the list.
    unreadable search path is the same class of thing: a fact about this machine
    at this moment, not a function of the proof's bytes. Publishing it is what
    turned a one-line mistake into a permanent red.
-4. **The key must also cover the PROOF'S OWN DIRECTORY**, not only the library
-   directory. `_run_lean` puts the proof's directory FIRST on `LEAN_PATH` and
-   runs with `cwd` there, so a proof and a byte-identical copy of it in another
-   directory are **two different propositions to Lean** — the first is what
-   `ProofLib` resolves against, and the second may resolve a different
-   `ProofLib`, or none. So the key material is
-   `os.path.dirname(os.path.abspath(proof_path))` **as well as** (2). This is the
-   half (2) alone does not close, and it is the half that survives step 1: with
-   `lib_dir` absolutised, a relative `repo_root` no longer breaks the search
-   path, but a proof moved to a directory holding a different library of the same
-   name still shares a key with the original.
-5. **Bump `_VERDICT_VERSION` with the key change.** It is the other half of the
-   fix and it is free: every entry published under the old key is simply not
-   looked up again, so **the poisoned entries already in the machine-wide CAS
-   become unreachable and no sweep of `~/.gmojo/cas/proof/` is needed.** Do it
-   in the same commit as (2)/(4), not later — a key change without the bump
-   leaves the 44 (and whatever accumulated since) exactly as permanent as they
-   were, which is the property this document is about.
 
-(1) alone fixes the next caller; (2), (4) and (5) are what stop the class from
-existing. All of them are small and none of them changes a verdict that is
+(1) alone fixes the next caller; (2) and (3) are what stop the class from
+existing. All three are small and none of them changes a verdict that is
 currently correct.
-
-**The test that goes with (2)/(4)**: two byte-identical proofs in two directories,
-with a `ProofLib.olean` in neither, must get two keys — or, more directly, one
-assertion that the key changes when only the directory changes. Asserting the key
-is stable across everything else matters as much, because a cache key that
-changes on every call is a cache that never hits and looks like a fix.
 
 ## What is NOT the cause
 
@@ -138,27 +112,3 @@ changes on every call is a cache that never hits and looks like a fix.
   `./lib` is second, which is right; the second entry is what is wrong.
 * **Not a stale `.olean`.** The same file typechecked uncached, immediately
   afterwards, with an absolute `repo_root`.
-
-## What is NOT currently observed
-
-**No committed caller passes a relative `repo_root`.** Every caller read here —
-`fire.py build`, `test_formal_short_circuit_cond.py` (`repo_root=HERE`),
-`formal/build.py` — passes an absolute one, and `_default_root()` is absolute
-too. So the failure needs a hand-written `repo_root='.'`, which in practice
-means an interactive `python3 -c`, a REPL, or an agent — the 44 poisoned entries
-are evidence that it happens, and not evidence that a gate is red.
-
-That is a statement about how the hole is reached, not about whether it is real,
-and it is the reason this document is filed rather than fixed: the next step is
-five small edits to `formal/lean.py` and a test, and no red to aim at.
-
-## The duplicate this replaced
-
-`FORMAL_the_proof_verdict_cache_key_cannot_see_the_proof_directory.md` —
-deleted 2026-10-05 — was filed on 2026-10-04 for the same root cause, found the same way (`repo_root='.'` by
-hand, `cached=True` with a `detail` naming a path the caller never used) and
-reached the same conclusion about the cause. It was **deleted and folded in here
-on 2026-10-05**; what it added is steps 4 and 5 above — the proof's own
-directory is a second missing key input beside `lib_dir`, and the version bump
-is what makes the poisoned entries unreachable without a sweep. Its one further
-observation is kept here as the "what is NOT currently observed" section above.

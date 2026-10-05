@@ -1388,6 +1388,64 @@ def model_checks():
     ok("widths: an unparsed format is None",
        M.printf_text_widths("%2$6s"), None)
 
+    # ── the INTEGER-conversion widening, which is a REWRITE of the format ──
+    #
+    # A formal value is one 64-bit word and libc's `%d` reads a C `int` out of
+    # it, so `printf("%d", 2**62)` printed `0` where CPython prints
+    # 4611686018427387904 (`bugs/FORMAL_printf_d_renders_32_bits.md`, measured
+    # on both architectures). The fix widens the CONVERSION, so these rows are
+    # about the text and `test_formal_int_semantics.py`'s are about the answer;
+    # between them they are what stops a rewrite from being "widen everything
+    # that looks like a number".
+    #
+    # Every row is a COMPARISON against the spelling the rewrite must produce,
+    # including the ones that must NOT move — a `%c`, a `%s`, an already-64-bit
+    # conversion, and the `%%` a `print_literal` doubles. A rule that widened
+    # `%c` would change the CHARACTER; one that doubled `ll` in front of an `l`
+    # would produce `%lllld`, which libc reads as something else entirely.
+    ok("widen: a bare %d", M.printf_widened_format("A=%d|"), "A=%lld|")
+    ok("widen: %u", M.printf_widened_format("%u"), "%llu")
+    ok("widen: %i and %o", M.printf_widened_format("%i/%o"), "%lli/%llo")
+    ok("widen: %x and %X", M.printf_widened_format("%x %X"), "%llx %llX")
+    ok("widen: flags, width and precision all survive",
+       M.printf_widened_format("%+08.3d %-5d %#x"), "%+08.3lld %-5lld %#llx")
+    ok("widen: a star width keeps its own argument",
+       M.printf_widened_format("%*d"), "%*lld")
+    ok("widen: several in one format",
+       M.printf_widened_format("%d %u %x"), "%lld %llu %llx")
+    ok("widen: a %% is left alone", M.printf_widened_format("a%%b%d"),
+       "a%%b%lld")
+    ok("widen: %c is not an integer rendering", M.printf_widened_format("%c"),
+       None)
+    ok("widen: %s is not an integer rendering",
+       M.printf_widened_format("%s"), None)
+    ok("widen: a floating conversion is untouched",
+       M.printf_widened_format("%f %.17g %e %a"), None)
+    ok("widen: %p renders an address", M.printf_widened_format("%p"), None)
+    # An EXPLICIT length modifier is the source stating a width. `%lld` is
+    # already what this rewrite produces; `%hd`/`%hhd` ask for a narrower type
+    # on purpose and there is no 16-bit value on this path to be narrower than.
+    ok("widen: %lld is already 64-bit", M.printf_widened_format("%lld"), None)
+    ok("widen: %ld is 64-bit under LP64", M.printf_widened_format("%ld"), None)
+    ok("widen: %zu/%jd/%td are 64-bit", M.printf_widened_format("%zu %jd %td"),
+       None)
+    ok("widen: %hd asks for 16 bits and is left alone",
+       M.printf_widened_format("%hd"), None)
+    ok("widen: %hhd asks for 8 bits and is left alone",
+       M.printf_widened_format("%hhd"), None)
+    ok("widen: %Lf is a long double", M.printf_widened_format("%Lf"), None)
+    ok("widen: nothing to widen is None", M.printf_widened_format("plain"),
+       None)
+    ok("widen: an unparsed format is None",
+       M.printf_widened_format("%2$6s"), None)
+    # The scan this rides on is the SAME one `printf_conversion_specifiers` and
+    # `printf_text_widths` read, so a rewrite that found a different end for a
+    # specification would show up here as a disagreement about what the format
+    # contains at all.
+    ok("widen: the widened format parses the same way",
+       M.printf_conversion_specifiers(M.printf_widened_format("%+08.3d %x")),
+       M.printf_conversion_specifiers("%+08.3d %x"))
+
     # ── the width refusal asks whether the conversion is a `%s` ────────────
     #
     # Three rows, and the first is the defect this rule change was written for:

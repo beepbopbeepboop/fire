@@ -1334,15 +1334,10 @@ INHERITED class (`class B(A)` — probed on both architectures and it DROPS the
 base's fields and methods: `b.m()` reads `1` where CPython reads the inherited
 value, exit 0 on both, filed as a separate doc rather than fixed here), a
 comprehension whose target is over a string-keyed dict (§5.1), and
-`len()` of a subscript of a list of lists (NOW GENERATED — `comps`' `comp_nested`,
-and it is the row this file's §1 anti-rot rule is about: the construct was not
-absent because the corpus could not produce it but because the backends REFUSED
-it, so the family read the row through a second local and left the length
-unmeasured; `formal/model.py::_list_literal_elem_kind` landed on 2026-10-05 and
-`inner = R[i]; print(len(inner))` plus the nested `print(R[i][j])` are both
-emitted now, `10/10` programs matching CPython on both backends at
-`--mix comps --seed nestedchk2 --seeds 0-9`). Each remaining item is a family
-whose absence from this table is a coverage hole rather than a decision.
+`len()` of a subscript of a list of lists (`inner = rows[0]; len(inner)` is
+REFUSED on both backends with "classified as 'int'", which is a kind rule and not
+a family). Each is a family whose absence from this table is a coverage hole
+rather than a decision.
 
 ### 5.1 What the fuzz-3 sweep closed in this list, and what is still open
 

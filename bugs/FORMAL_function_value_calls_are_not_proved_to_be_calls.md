@@ -226,48 +226,6 @@ x86-64. That is the loud end of this backend's range
 What it costs is a diagnostic: a program whose own bug it is used to be told
 about at build time is now told about by the kernel.
 
-### And the one function whose value is NOT its address: a lifted closure
-
-```mojo
-def make(n):
-    def add(x):
-        return x + n                # a CAPTURE, lifted as a leading parameter
-    return add                      # `add` is now `make_add`, with `n` prepended
-def main():
-    a = make(10)
-    print(a(5))                     # CPython: 15
-```
-
-is **refused**, and refused by a sentence that names the rename
-(`formal/model.py::lifted_closure_value_refusal`, reached from
-`check_module_symbols` through `model.pre_lift_def`). Two facts about it belong
-here rather than only in the diagnostic, because both bear on the open question
-above:
-
-- **A plain function's value IS its address on this path** — each backend's
-  `_load_var` materializes it and `_emit_call` branches through it — so
-  "a function is not a value" stopped being true in this project, and the
-  now-dead `function_value_refusal` would be the wrong sentence to reach for.
-  What is refused here is a narrower thing with a name: a **lifted** function.
-- **A lifted closure's value would have to be more than its address.** The lift
-  prepends captures as parameters (`make_add(n, x)`), so the word would carry an
-  environment as well as a code pointer, and the capture ABI this path
-  implements is a CALL-SITE rewrite in the scope that DEFINES the closure —
-  there is no call site at `return add` to pass them at. Materializing the bare
-  address would therefore print a number nobody wrote and, called back through,
-  drop the capture.
-
-So this shape needs no part of the analysis below to be closed before it can be
-*named*, and it is named. **Closing it is a feature and not a check**: it means
-giving a lifted function a value representation — an environment struct
-allocated at the `return`, passed through the word, and unpacked at the
-indirect call — and the compiled path already has both halves of that machinery
-under different names (`_gen_lifted_closure` allocates `_env`; see
-`bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md` for what the
-allocation costs today). It is not filed as its own FORMAL doc because nothing
-here is refused-by-accident and nothing traps: it is refused, and the sentence
-says what to write instead.
-
 ## What IS checked, and why each check is the honest one available
 
 Both are in `formal/model.py`, both asked from both backends, and both read the
