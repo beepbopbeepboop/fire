@@ -155,6 +155,35 @@ em-dash, the image-wide condition fires, and the build refuses before the import
 diagnosis each row is about is ever reached. That is a **fixture** problem on top
 of a **refusal** problem, and fixing the fixtures alone would hide the refusal.
 
+**And SIX MORE, in a file that could not report them** (measured 2026-10-05 on
+`work/merge-formal27a-r2`):
+
+```console
+$ python3 tools/memslot.py --gb 8 --label conf -- \
+      python3 test_formal_hostmods_conformance.py
+FAILED  posixpath: build failed on arm64: …
+FAILED  textwrap: build failed on arm64: …
+FAILED  struct:   build failed on arm64: …
+FAILED  shlex:    build failed on arm64: …
+FAILED  re:       build failed on arm64: …
+FAILED  html:     build failed on arm64: …
+ok      math: 2 of CPython's own cases agree on arm64, x86_64 …
+host-module conformance: 1 of 7 groups ok; FAILED: posixpath, textwrap, struct, shlex, re, html
+```
+
+All six report the same tail this doc is about — "a byte where a character
+belongs is a wrong value AND a wrong one that reads plausible: for `s =
+"héllo"`, `s[0]` is 104 and `s[2]` is 108" — so this is **six instances of one
+defect, and it is the largest single exposure of it in the tree**: six of the
+seven host modules with a CPython regression suite cannot be built at all. It was
+invisible because `main()` fell off its end, so `sys.exit(main())` exited 0 with
+every group red and `test_suite.py`'s `UNREGISTERED` entry could call the file
+"green" on the strength of that exit code. Both are fixed on that branch (the
+file returns 1 and prints the count; the entry says RED and why), so the six are
+now a red an exit status carries rather than six lines in a log nobody tallies.
+`bugs/FORMAL_re_the_scoped_inline_flag_form_is_refused.md` §? already names the
+`re` group as its own separate defect, so `re` is two problems wearing one group.
+
 ## The next step, and what NOT to do
 
 **Do not narrow the condition back to per-module.** `f9ffd4c0` measured exactly

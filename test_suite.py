@@ -4004,19 +4004,32 @@ UNREGISTERED = {
     # -- python3 test_formal_hostmods_conformance.py`: **59 s wall, 0.1 GB
     # peak, 7 modules x 2 backends, 348 cases** -- cheap by the cost rule in
     # CLAUDE.md, so it wants a REGISTRATION rather than this excuse, and
-    # the row belongs to whoever registers it. Exact next step: `test(
+    # the row belongs to whoever registers it. **AND RED: an earlier version
+    # of this entry called it green, which was a lie with a mechanism.**
+    # `main()` fell off its end, so `sys.exit(main())` exited 0 with six of
+    # the seven groups printing `FAILED` -- nothing in the file could report
+    # a failure. Measured 2026-10-05 on work/merge-formal27a-r2, `1 of 7
+    # groups ok; FAILED: posixpath, textwrap, struct, shlex, re, html`, and
+    # all six report the SAME refusal (the encoding guard asked of a byte
+    # buffer, `bugs/FORMAL_the_encoding_refusal_is_asked_of_a_byte_buffer.md`),
+    # so it is six instances of one defect rather than six. `main()` returns
+    # 1 now, which is what makes the six visible to anything that reads an
+    # exit status. Exact next step: `test(
     # 'formal-hostmods-conformance', [PY,
     # 'test_formal_hostmods_conformance.py'], mem='tiny', deps=['preflight'],
     # extra=['test_formal_hostmods_conformance.py', 'formal'] +
     # FORMAL_BUILD_INPUTS, desc='every host module against CPython\'s OWN
-    # regression tests, the case table generated from them')`.
+    # regression tests, the case table generated from them')` -- and note
+    # that registering it as it stands turns a hidden red into a gate red,
+    # so the byte-buffer fix comes first.
     'test_formal_hostmods_conformance.py': 'The host-module CONFORMANCE '
         'table: every module in `formal/hostmods` whose CPython counterpart '
         'ships a regression suite, driven over the cases GENERATED from '
         'that suite rather than a hand-picked corpus, with CPython in this '
         'process as the oracle and both backends compared against each '
-        'other first. Cheap (59 s, 0.1 GB measured) and green, so it wants '
-        'registering rather than listing; the row is spelled out above.',
+        'other first. Cheap (59 s, 0.1 GB measured) and RED — 1 of 7 groups '
+        'ok, all six failures the same byte-buffer encoding refusal — so it '
+        'wants the fix before the registration; the row is spelled out above.',
     'test_formal_hostmods_census.py': 'The host-module census: every '
         '`formal/hostmods` module built as a program on BOTH backends, asserting '
         'that x86-64 is a SUBSET of arm64 — the one divergence a per-backend '
