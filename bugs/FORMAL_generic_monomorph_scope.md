@@ -552,3 +552,93 @@ only source of one is a function that constructs it, which writes the bracket in
 the module that declares the template. **Anything that measures §1 has to fix
 §9 first**, and a planner reading this document in the other order will measure
 zero and conclude the item is worth nothing.
+
+## 2026-10-05 (`work/formal19-3-r2`): §2's ALIASED half is three places, not one,
+## and the third is a name-resolution DECISION — measured, and not taken
+
+**§2's remaining item is the aliased import** — `from pairlib import Pair as P`
+then `P[Int]()` — and §2's own Status says it is refused, with the message
+recommending the module's own name and saying the aliased form was measured not
+to work. That message is TRUE today. **This round implemented the aliased half and
+it does not close, for a reason that is a decision rather than a patch, so nothing
+landed.** What follows is the measurement, because the doc currently says "a
+STRUCT template's bracket is not such a name" and the truth is that it is three
+places and the third is not a lookup.
+
+**Place 1 — the demand walk. FIXED and measured.** `formal/monomorph.py::
+all_instantiation_calls` keys each demand on the name AS SPELLED and
+`demands_from_calls` filters by the DEFINING name, so for an aliased import the
+two never met and the demand was silently dropped. Mapping the base through
+`formal/imports.py::import_bindings` — the reader both emitters already hold as
+`_import_aliases` — makes it:
+
+```python
+>>> formal.monomorph.all_instantiation_calls("from pairlib import Pair as P\n"
+...                                          "def main():\n    var a = P[Int]()\n")
+{'Pair': [('Int',)]}          # was {'P': [('Int',)]}
+>>> formal.monomorph.demands(src, templates=['Pair'])
+{'Pair': [('Int',)]}          # was {}
+```
+
+**Place 2 — the call site. FIXED and measured.** Both backends' `_specialization_of`
+forwards to `comptime.specialization_name`, which answers the bare name, and
+`specialization_name`'s own docstring gives the reason not to teach it about
+aliases: a second place deciding what a bracketed callee's base NAME is is a
+second recogniser, and two disagree by binding the call to the wrong module's
+instantiation. So this is a TREE rewrite rather than a second rule —
+`formal/build.py::_rewrite_aliased_specialization_base`, beside
+`_substitute_module_constants` and for its reason: every reader downstream (the
+demand walk, the bracketed-callee scan, both `_specialization_of`s) then sees ONE
+spelling. Only a bracket's base is touched, and only an imported alias, so a bare
+read of the same name and a local that shadows the alias are unaffected.
+
+**Place 3 — the imported-symbol table. NOT FIXED, and this is the finding.**
+
+With 1 and 2 in place the call arrives as `Pair[Int]()` and is STILL refused, and
+the message has moved from naming `P` to naming `Pair`:
+
+```
+build: … the library will carry the instantiation; the ways this can still be
+reached are in bugs/FORMAL_generic_monomorph_scope.md. If `Pair` is instead an
+ordinary value then the brackets are a subscript, which is not a call this path
+can name at all.
+```
+
+**So the third place is `formal/model.py::collect_module_symbols`, and it is not
+a lookup.** `_imported_names` yields the BOUND name, so `from pairlib import Pair
+as P` publishes `P` and **not** `Pair` — which is why the non-aliased spelling
+works (its bound name IS the defining name) and the aliased one does not, and it
+is why rewriting the tree alone is not enough. Publishing `Pair` as well would
+close the case, and it is exactly the kind of change this repository refuses by
+default: `module_symbol` is consulted by name resolution for BARE reads, so a
+module that imports `Pair` under the name `P` and then reads a bare `Pair` — a
+name its source never bound — would resolve. **That is a wrong answer waiting to
+happen, and "an undeclared bare read resolves to an import that is present under
+another spelling" is not a change to make from a bug doc.** The decision is
+whether the imported-symbol table should carry the DEFINING name at all, and if
+so what stops the bare read; a narrower answer (publish the defining name only
+for a name a bracketed callee actually uses, which is decidable here because the
+rewrite knows the site) trades a global fact for a local one and belongs to
+whoever owns the name-resolution table rather than to this row.
+
+**The message got WORSE with place 1 alone, which is why nothing landed.** The
+aliased case's text now says "Spelling it `Pair[<a type>](…)` will carry the
+instantiation" about a program that already spells it that way — the same class of
+defect §2's own Status records for the dotted spelling ("the refusal named the
+MODULE as the template"). Shipping place 1 alone would trade a refusal whose text
+is true for one whose text is false, which is the direction
+`bugs/FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`'s `refuse_without:`
+class of defect names and which this repository deletes sentences out of rather
+than ships. The tree was left at `HEAD` and `test_formal_monomorph.py` is 24/24.
+
+**So §2's next step, stated as the measurement gives it**, is not "a
+`specialization_name` that answers the TEMPLATE for a dotted base" — that half is
+unchanged and remains the recogniser question §2 opens with. It is:
+
+1. decide whether `collect_module_symbols` publishes an import's DEFINING name as
+   well as its bound name, and what stops a bare read of that name in a module
+   that only imported it under another spelling (the decision this round declined);
+2. then places 1 and 2 above, which are each a few lines and each measured to be
+   necessary and sufficient for everything except that table;
+3. §2's dotted half (`L.Pair[Int]()`) is a SEPARATE piece and is untouched by all
+   of the above — a dotted base's recogniser question, not an alias one.
