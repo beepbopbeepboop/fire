@@ -1263,8 +1263,8 @@ LIBRARY_TRUST = {
 #: exactly, which is asserted rather than hoped for: an unanswered theorem is
 #: counted in none of them.
 #:
-#: `reaches` is the honest fact: of the 520 theorems in `lib/`, **67** rest on a
-#: decide axiom and **442** are kernel-checked. `text_only` are theorems whose
+#: `reaches` is the honest fact: of the theorems in `lib/`, **81** rest on a
+#: decide axiom and the rest are kernel-checked. `text_only` are theorems whose
 #: source names one of the tactics and whose closure has none — a losing tactic
 #: alternative is still text, so the site census overcounts, and each row is a
 #: place where a replacement would have changed nothing. `closure_only` are
@@ -1311,7 +1311,14 @@ LIBRARY_TRUST = {
 AXIOM_CLOSURE = {
     #            asked  reaches  clean  text_only  closure_only  ofReduceBool
     "Contracts": (7, 0, 7, 0, 0, 0),
-    "ProofLib": (297, 46, 243, 0, 8, 0),
+    # +14 asked and +14 reaching, and it is the SAME arrival `LIBRARY_TRUST`'s
+    # ceiling above records: arm64's twelve narrower/unscaled memory forms and
+    # its two flag-setting compares each add a `work_step_*` lemma proved by
+    # `bv_decide`, so 14 new declarations reach an axiom and `clean` does not
+    # move at all. The partition still closes exactly (311 = 60 + 243 + 0 + 8),
+    # which is the assertion that makes this a measurement rather than a number
+    # somebody typed.
+    "ProofLib": (311, 60, 243, 0, 8, 0),
     "Refine": (29, 0, 29, 0, 0, 0),
     "X86": (144, 2, 141, 0, 1, 0),
     "work": (19, 0, 17, 0, 2, 0),
