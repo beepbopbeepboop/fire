@@ -23508,6 +23508,44 @@ def raise_arg_exprs(value) -> list:
     return args
 
 
+def integer_literal_value(e) -> int | None:
+    """The `int` a SIGNED integer LITERAL node holds, or None.
+
+    One reader for the question "is this whole expression a constant the build
+    can see, and what is it", asked by three callers that each used to spell it:
+
+      * `formal/arm64_codegen.py::_static_int` and x86-64's copy of it, which
+        decide a shift amount and a `**` exponent;
+      * `raise_exit_status` below, which reads a `SystemExit` status;
+      * `_cfg_int_value`'s negated-literal arm.
+
+    **A negated literal is a literal.** `-1` parses as `UnaryOp('-', IntLiteral
+    1)` and not as an `IntLiteral`, so a reader that stops at `IntLiteral` calls
+    it computed — which is how `raise SystemExit(-1)` came to leave status 1
+    where CPython leaves 255. A unary minus applied to a literal is the one
+    negation a build can fold, because the value is in the text.
+
+    `None` for everything else, and that is a refusal and never a zero: `n - 1`
+    is not a literal even when `n` is a constant the caller knows, because the
+    caller knows it about a DIFFERENT program (a concrete run) and this reader
+    is asked about the one being emitted.
+
+    `bool` is read as the integer it is, deliberately. `True` reaches
+    arithmetic as an `IntLiteral` in this parser, and for every question this
+    reader is asked — a shift amount, a `**` exponent, a `SystemExit` status —
+    CPython's answer is the integer, so `raise SystemExit(True)` is 1 here and 1
+    in CPython and the distinction has nothing to decide. A caller that needs
+    "a bool is not an int here" asks `isinstance(e, F.IntLiteral) and
+    isinstance(e.value, bool)` itself, because that is a fact about ITS
+    question."""
+    if isinstance(e, F.IntLiteral):
+        return int(e.value)
+    if isinstance(e, F.UnaryOp) and e.op == "-":
+        inner = integer_literal_value(getattr(e, "operand", None))
+        return None if inner is None else -inner
+    return None
+
+
 def raise_exit_status(exc_name: str, value=None) -> int:
     """The status an uncaught `raise` of `exc_name` leaves behind.
 
@@ -23534,23 +23572,23 @@ def raise_exit_status(exc_name: str, value=None) -> int:
     than about this backend — so it is reproduced rather than refused, because
     a program's own exit status is the one thing a caller can observe.
 
-    Only an integer LITERAL is read. `raise SystemExit(n)` for a computed `n`
-    is not a different program, so it must not be a different answer, and the
-    honest way to keep the two apart is to leave the computed case at 1 rather
-    than to claim a status the build cannot see — which is what a caller
-    reading a wrong number cannot detect. That case is written down in
+    Only an integer LITERAL is read, a NEGATED one included: `raise
+    SystemExit(-1)` is 255 and not "computed", because `-1` is in the text (see
+    `integer_literal_value`). `raise SystemExit(n)` for a value the build cannot
+    see is not a different program, so it must not be a different answer, and the
+    honest way to keep the two apart is to leave that case at 1 rather than to
+    claim a status the build cannot see — which is what a caller reading a wrong
+    number cannot detect. That case is written down in
     `bugs/FORMAL_a_computed_systemexit_status_is_not_the_programs_own.md`."""
     if exc_name != "SystemExit":
         return 1
     args = raise_arg_exprs(value) if value is not None else []
     if not args:
         return 0
-    first = args[0]
-    if isinstance(first, F.IntLiteral) and not isinstance(first.value, bool):
-        return first.value & 0xFF
+    status = integer_literal_value(args[0])
     # A non-integer argument is CPython's "print the object and exit 1" form.
     # The exit status is 1 either way, so this needs no further reading.
-    return 1
+    return 1 if status is None else status & 0xFF
 
 
 def raise_declared_class_name(value, structs: dict | None = None) -> str | None:

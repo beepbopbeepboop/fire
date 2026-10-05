@@ -2145,9 +2145,30 @@ dylib_exports: list = None, globals_base: int = None,
 
 
         if isinstance(stmt, F.AssertStmt):
-            # assert cond [, msg] — evaluate cond; on falsy, _exit(1).
-            # msg is not formatted into the diagnostic (no printf on this
-            # path); the nonzero exit status is the signal.
+            # `assert cond [, msg]` — evaluate `cond`; on falsy, run `msg` and
+            # leave with status 1.
+            #
+            # **Both halves of the failing path are observable, and both used to
+            # be dropped.** `msg` is not formatted into a diagnostic on this
+            # path (there is no printf for it), but CPython EVALUATES it before
+            # it raises, so `assert n > 0, why()` calls `why()` — and a message
+            # that logs, that frees, that closes, or that prints is a program
+            # whose output and whose effects are missing. Measured on both
+            # backends: `assert n > 0, why()` printed nothing where CPython
+            # printed `why`. `debug_assert` already emitted its messages "for
+            # their effects, and only on the path that exits"; a plain `assert`
+            # is the same construct and was not.
+            #
+            # And the exit goes through `_emit_diverge` rather than
+            # `_emit_exit` directly, which is what makes an enclosing `finally`
+            # run on the way out — the same flush a `raise` gets, and the reason
+            # it lives with the exit rather than at each call site. Measured on
+            # both backends: `try: assert n > 0 finally: print('fin')` printed
+            # `body` where CPython prints `body` then `fin`.
+            #
+            # ORDER matters and is CPython's: the message runs first, then the
+            # `finally`, because the assert raises and the `finally` runs during
+            # the unwinding that follows it.
             self._emit_truthy_word(stmt.value)
             self.asm.emit(encode_cmp_xn_imm(0, 0))
             self._assert_counter += 1
@@ -2158,9 +2179,10 @@ dylib_exports: list = None, globals_base: int = None,
             self.asm.emit_label_rel(fail_label, here_offset=-4)
             self._emit_b_to(ok_label)
             self.asm.label(fail_label)
-            # The one exit on this backend (`_emit_exit`), so a failed assert
-            # leaves what the program printed behind it and leaves status 1.
-            self._emit_exit(1)
+            msg = getattr(stmt, "msg", None)
+            if msg is not None:
+                self._emit_expr(msg)
+            self._emit_diverge()
             self.asm.label(ok_label)
             return
 
@@ -10974,12 +10996,15 @@ ctor_field_value=self._ctor_field_value_for(name),
         return 64
 
     def _static_int(self, e):
-        if isinstance(e, F.IntLiteral):
-            return e.value
-        if isinstance(e, F.UnaryOp) and e.op == "-" \
-                and isinstance(e.operand, F.IntLiteral):
-            return -e.operand.value
-        return None
+        """A literal integer value for `e`, else None.
+
+        A ONE-LINE wrapper over `model.integer_literal_value` and kept only so
+        the call sites below read as before. The rule is the shared reader's
+        because x86-64's copy of this method, `raise_exit_status` and
+        `_cfg_int_value` all ask the same question, and three private copies is
+        how they come to disagree about a NEGATED literal — which is how
+        `raise SystemExit(-1)` came to leave status 1 where CPython leaves 255."""
+        return M.integer_literal_value(e)
 
     def _emit_list_concat(self, left, right) -> None:
         """`a + b` as list-blob concat → base pointer in X0."""

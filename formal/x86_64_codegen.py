@@ -1972,9 +1972,24 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             return
 
         if isinstance(stmt, F.AssertStmt):
-            # assert cond [, msg]: evaluate cond, exit(1) when falsy. The
-            # message is not formatted — there is no printf on this path — and
-            # the nonzero status is the signal.
+            # `assert cond [, msg]`: evaluate `cond`, run `msg` and leave with
+            # status 1 when it is falsy.
+            #
+            # **Both halves of the failing path are observable, and both used to
+            # be dropped.** `msg` is not formatted into a diagnostic on this
+            # path (there is no printf for it), but CPython EVALUATES it before
+            # it raises, so `assert n > 0, why()` calls `why()` — and a message
+            # that logs, that frees, that closes, or that prints is a program
+            # whose output and whose effects are missing. Measured on both
+            # backends: `assert n > 0, why()` printed nothing where CPython
+            # printed `why`. And the exit goes through the flush a `raise` gets,
+            # so an enclosing `finally` runs on the way out: measured on both
+            # backends, `try: assert n > 0 finally: print('fin')` printed
+            # `body` where CPython prints `body` then `fin`.
+            #
+            # ORDER is CPython's: the message runs first, then the `finally`,
+            # because the assert raises and the `finally` runs during the
+            # unwinding that follows it.
             #
             # The JMP over the exit is not an optimisation, it is the whole
             # statement. There was none here: `jcc fail` was immediately
@@ -1996,6 +2011,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_jcc(COND_E, fail_label)
             self._emit_jmp(ok_label)
             self.asm.label(fail_label)
+            msg = getattr(stmt, "msg", None)
+            if msg is not None:
+                self._emit_expr(msg)
+            self._flush_pending_finally()
             self._emit_call_exit(1)
             self.asm.label(ok_label)
             return
@@ -10354,15 +10373,15 @@ ctor_field_value=self._ctor_field_value_for(name),
     def _static_int(self, e):
         """A literal integer value for `e`, else None.
 
-        UnaryOp('-', IntLiteral(n)) counts as -n, so `range(a, b, -1)` is
-        recognized as a descending range even though the parser keeps the
-        minus as a node."""
-        if isinstance(e, F.IntLiteral):
-            return e.value
-        if isinstance(e, F.UnaryOp) and e.op == "-" \
-                and isinstance(e.operand, F.IntLiteral):
-            return -e.operand.value
-        return None
+        A ONE-LINE wrapper over `model.integer_literal_value` and kept only so
+        the ~10 call sites below read as before: `UnaryOp('-', IntLiteral(n))`
+        counts as -n, so `range(a, b, -1)` is recognised as a descending range
+        even though the parser keeps the minus as a node. The rule is the
+        shared reader's because arm64's copy of this method is the same question
+        — a shift amount, a `**` exponent and a `SystemExit` status all ask it,
+        and three private copies of it is how they come to disagree about a
+        NEGATED literal, which is how `raise SystemExit(-1)` left status 1."""
+        return M.integer_literal_value(e)
 
 
 def _align16(value: int) -> int:
