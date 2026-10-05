@@ -436,37 +436,50 @@ what landed here.
 single answer to "where does this literal end", and it stops a single-quoted
 literal at the first bare line end. That is CPython's rule for an ordinary
 literal and **not** its rule for an interpolated one, where a `{...}` opens a
-replacement field that is *code*, and code may span lines. Two things were
-missing and both were in the tokenizer:
+replacement field that is *code*, and code may span lines. **Three** things were
+missing and all three were in the tokenizer, which is why the first two attempts
+at this fix each regressed something else and each regression is now a row:
 
-1. **The scan is not brace-aware.** `_scan_string_end` now takes whether the
-   literal is interpolated, and for an interpolated single-quoted literal it
-   tracks `{`/`}` depth — honouring `{{`/`}}`, which are escaped braces and open
-   nothing — and skips a `#` comment to the end of its line inside a field. A
-   line end at depth 0 is still `-1`, so a genuinely unterminated `f"a{b` is
-   still a parse error.
-2. **A literal that crosses a line cannot reach the token stream as text.**
-   `py_tokenize_named` splits the source into physical lines
-   (`_source_lines`) before lexing line by line, so a multi-line literal has to
-   be collapsed to the `__MOJO_STR_N__` placeholder plus the `pending_pad`
-   newline count that a triple-quoted one already uses. The non-triple arm of
-   `replace_multiline_strings` now does that **when, and only when, the literal
-   actually crosses a line**, so the single-line case is byte-identical to what
-   it was.
+1. **The scan was not brace-aware.** `_scan_string_end` takes whether the literal
+   is interpolated and, for an interpolated single-quoted literal, tracks `{`/`}`
+   depth — honouring `{{`/`}}`, which are escaped braces and open nothing — and
+   skips a line break at depth > 0. **A `#` needed no arm at all**: this function
+   answers where a literal *ends*, and to that question every character inside a
+   field is equally content. An arm for it would have to decide when a `#` starts
+   a comment, which is a property of the *expression* — `:#x` is a format spec,
+   `'a#b'` is inside a nested literal — and the first version of it broke both,
+   in **ten files** on this tree.
+2. **The delimiter inside a field is a NESTED LITERAL.** Since PEP 701
+   `f"{d["k"]}"` is valid, so the scan now **asks itself** (`_scan_string_end`,
+   recursively, triple run included) rather than deciding: a nested literal that
+   closes is stepped over, one that does not is this literal's own closing quote
+   after all — and then an unclosed field is a refusal, because accepting
+   `f"a{b<nl>"` would be a malformed f-string newly accepted.
+3. **A literal that crosses a line cannot reach the token stream as text.**
+   `py_tokenize_named` splits the source into physical lines (`_source_lines`)
+   before lexing line by line, so such a literal has to be collapsed to the
+   `__MOJO_STR_N__` placeholder plus the `pending_pad` newline count a
+   triple-quoted one already uses — and the condition is a **replacement-field**
+   line break, not a line break, because a **backslash-continued** literal must
+   stay text on its physical line for the pass that decides whether the pair is
+   deleted or kept. Line ends are counted with `_LINE_TERMINATORS` and not with
+   `count('\n')`, or a field crossing a bare **CR** produces no STRING token at
+   all. And a **raw** f-string's `\{` does not escape, so the backslash must not
+   swallow the brace — this repository's own `test_gimple_runner.py:223` writes
+   `rf'...\{{'` and the first version REFUSED that file.
 
 **Two answers to "is this literal interpolated?" was the shape of the bug, so
 there is now one.** `replace_multiline_strings` already computed a prefix
 boundary (`_string_prefix_start`) and `_process_nested_tstrings` already asked
-the interpolated question with its own inline predicate. Both now call one
-named function.
+the interpolated question with its own inline predicate. Both now call
+`_prefix_is_interpolated`.
 
 **What it does NOT claim, and these are the measurements a reader should make:**
 
-* **`FILES BLOCKED IS AN UPPER BOUND.** The file's true verdict behind the parse
-  error is measured, not assumed: `test_formal_libc_symbol.py` imports
-  `argparse`, `struct`, `subprocess`, `tempfile` and `exec_budget`, so it is
-  **`not-answerable/host-import`**, which is what `-11` measured it to be. One
-  file, one class, measured.
+* **`FILES BLOCKED IS AN UPPER BOUND**, and this file's own ceiling is
+  measured: the parse error was hiding a second finding, so removing it does not
+  make the file build — §5.3. One file, one class change, and a NAMED row
+  behind it.
 * **This is a `fire_compiler.py` change and CLAUDE.md is explicit that such a
   change owes a full `make gate`** — `gimple_codegen.py`'s lowering is a
   separate implementation and almost every step drives codegen through the
@@ -484,36 +497,98 @@ named function.
 
 `test_string_literal_lexing.py` is the natural home — its `LITERALS` table is
 **compared against CPython literal by literal**, so a new row is a comparison
-rather than a pinned expectation and a future rule change has to be argued. The
-new rows are:
+rather than a pinned expectation and a future rule change has to be argued. Its
+own count goes **76 → 101 checks**, and the new ones are:
 
-* **six literal rows** for the interpolated shapes: a replacement field spanning
-  a line, a comment inside the field, a closing brace on a later line, the
-  uppercase `F`/`T` spellings, and the two controls that must keep refusing
-  (`f"a{b` and `f"a{{b`). **CPython is the oracle on every one of them**, and
+* **21 `LITERALS` rows** for the interpolated shapes: a field spanning a line, a
+  brace closing on a later line, the uppercase `F` and `t` spellings, a comment
+  inside a field, `{v:#x}` and `{d['a#b']}` (the two the `#` arm broke), a
+  nested field, CR and CRLF, PEP 701 same-quote reuse across a line, a nested
+  triple and a nested f-string inside a field, a raw `rf'…\{{'` — **and five
+  controls that must keep REFUSING**, because the depth rule must not have
+  turned "unterminated is a refusal" into "a line break inside braces is a
+  refusal somewhere else". **CPython is the oracle on every one of them**, and
   the byte-exact value contract is asserted separately from the boundary, which
-  is the same split the file already makes.
-* **two program rows** asserting the SHAPE after such a literal — a comprehension
-  inside an f-string followed by more source — because the reported failure class
-  in this area has always been *"the rest of the file went into the literal"* and
-  the assertion belongs on the statements that come after it.
-* **one `check_multiline_fstring_line_numbers`** for the `pending_pad` half: a
-  diagnostic raised **after** a multi-line f-string must name the line the source
-  wrote, not the line the collapse moved it to. That is the half of this fix a
-  reader cannot see from "it parses", and it is the half triple-quoted strings
-  got a bug for.
+  is the same split the file already makes. Every field expression is written so
+  that `eval` succeeds, because this file's CPython oracle *is* `eval` — a field
+  naming an undefined variable would raise `NameError` instead of answering the
+  question.
+* **3 `PROGRAMS` rows** asserting the SHAPE after such a literal — the shape
+  verbatim from `test_formal_libc_symbol.py:482-484`, plus the brace-closes-on-
+  its-own-line case and one where a postfix follows the closing delimiter on the
+  same physical line (the shape `pending_pad`'s flush rule exists for). The
+  failure mode in this area has always been *"the rest of the file went into the
+  literal"*, so the assertion belongs on the statements that come after it.
+* **one `check_multiline_fstring_line_numbers`**, which is the half no value
+  assertion can see: a diagnostic **below** a multi-line f-string must name the
+  line the source wrote. Two sources differing **only** in whether the f-string
+  spans a line, with the expected line differing by exactly one — so a pad that
+  fires unconditionally, or not at all, is visible here as a wrong LINE even when
+  every VALUE in the file is right. That is the bug `fire.py`'s own docstring
+  produced for triple-quoted literals, and it is why this is a check and not
+  another row.
 
 ### 5.3 What this fix is worth, in the sweep's own units
 
-**One file moves from `codegen` to `not-answerable/host-import`, and the
-coverage rate does not move at all** — the file was already in the 503-file
-denominator, because `codegen` is. That is the honest reading and it is worth
-stating plainly: **the coverage number in §2.1 is entirely the wall's
-disappearance, and none of it is this.** What §5 buys is that the corpus's only
-CPython disagreement is gone, that a lexer rule now matches the language instead
-of an earlier version of it, and that the sweep's `codegen` class no longer
-contains a construct that is not a gap in the backend — which is the
-classification error §5.1's first paragraph is about.
+**One file moves from `codegen` to `codegen/dependency`, and the coverage rate
+does not move at all** — the file was already in the 503-file denominator,
+because `codegen` is. **And the file does not become a pass: it lands on a
+NAMED row.** Measured, both architectures:
+
+```
+$ python3 fire.py build --formal --no-prove --backend=arm64  -o .tmp/out test_formal_libc_symbol.py
+build: test_formal_libc_symbol.py imports 'exec_budget', which cannot be built
+       either: exec_budget.py: formal dylib has no public functions: …
+$ … --backend=x86_64 …
+   (identical)
+```
+
+`exec_budget.py` declares no function and no type at all, only module-level
+constants, so it is the **module-exports-nothing row at rank 3** (§4). So the
+parse error was **hiding a second, real finding**, and this branch's honest
+reading is: **the file stopped being a lexer's newline rule and became the
+thing actually in the way.** That is a better outcome than a pass and a smaller
+one than a repair — and it is why §5.1's first paragraph, not this section, is
+where the value of the fix is argued.
+
+**What the fix is therefore NOT worth, stated plainly: 0.0 pp of coverage, 1
+file out of 503, and no row count moves.** The 8.0 pp in §2.1 is entirely the
+wall's disappearance.
+
+### 5.4 The strongest check available without the gate, and its number
+
+A parser change is not behaviour-preserving by default, and CLAUDE.md's standard
+for a change that is supposed to be is *byte-identical output on a large
+succeeding case*. The right level for a lexer is the token stream, so:
+
+> **Every file in the sweep's 738-file scope tokenized with the committed
+> `fire_compiler.py` and with this one, and the token streams compared as
+> `(kind, value, line, col)` per token: 737 IDENTICAL, 1 different — and the one
+> that differs is `test_formal_libc_symbol.py`, which went from a refusal to a
+> token stream.**
+
+Not "the tests pass": not one token of not one other file moved. That is the
+measurement that says this change is the lexer learning one rule rather than
+perturbing 738 programs, and it is reproducible in one command (§6).
+
+**And the two self-host invariants this file's own comments call out are
+re-checked rather than assumed**, because both are ways a change here has broken
+the build before:
+
+* `py_tokenize` is a **pinned C ABI symbol** (`GimpleGen._NO_OVERLOAD_MANGLE`,
+  declared in `runtime/fire_runtime.h`, in `GimpleGen._KNOWN_SIGS`) — still
+  **one parameter**, with `py_tokenize_named` the two-parameter variant. The new
+  `interpolated` parameter went on `_scan_string_end`, which is an internal
+  helper with **no** entry in either table, and it has a **default**, so a
+  caller with no prefix in hand gets the ordinary-literal rule — the safe
+  direction, since the wrong answer is a refusal and never a different boundary.
+* **No nested closure was introduced.** The owed-newline flush was inlined at
+  three places and is now `_flush_line_pad`, a module-level function, for the
+  reason `pending_pad`'s own comment gives: a closure-based version of that same
+  flush was behaviourally identical and broke `make check-selfhost`. Three call
+  sites, one copy, no closure.
+
+**This is still not a substitute for the gate**, and §6 says which jobs owe one.
 
 ---
 
