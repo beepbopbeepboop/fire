@@ -1178,12 +1178,34 @@ def _exit_status_claims():
 # `decide` discharges in microseconds and the KERNEL checks; `native_decide` was
 # compiling a decision procedure to C and asserting the result, which on this
 # toolchain means a generated axiom per use rather than `Lean.ofReduceBool`.
-# **What is left is 682 `bv_decide` in `ProofLib`, 3 `bv_decide` in `X86` (the
-# `∀ w, …` bit-pattern lemmas, which is the right tool), and 19 `native_decide`
-# in `IEEE754` that evaluate a ground binary64 value.**  **751, not the 749 this
-# table pinned until 2026-10-04**: the census's own scanner mis-read an
-# identifier's apostrophe as a character literal and hid two sites — see
-# `lean_code_regions`.
+# **What is left is 1518 `bv_decide` in `ProofLib`, 10 in `X86` (the `∀ w, …`
+# bit-pattern lemmas, which is the right tool), 9 in `IEEE754` and one each in
+# `Contracts`/`Refine`/`work`, and 22 `native_decide` that evaluate a ground
+# binary64 value** — **1540, not the 749 this table pinned until 2026-10-04.**
+#
+# Two upward movements, and they are not the same kind of movement, which is the
+# reason both are written down rather than just the total:
+#
+#   * **+2, the instrument got better** (2026-10-04). The census's own scanner
+#     mis-read an identifier's apostrophe as a character literal and hid two
+#     sites — see `lean_code_regions`. A ceiling going UP because the instrument
+#     can see more is not a regression.
+#   * **+833, real debt ARRIVED** (2026-10-05, this merge). `work/formal28-2`
+#     modelled arm64's twelve narrower/unscaled memory forms and its two
+#     flag-setting compares, and each new `arm64_step` arm carries its own
+#     `work_step_*` lemma proved by `bv_decide` over a quantified word — which
+#     is the right tool for that shape and still an axiom in the closure of
+#     every theorem proved with it. `lib/ProofLib.lean` went from 697 lines
+#     mentioning a decide tactic to 1545.
+#
+# The second is the one this ledger exists to make visible, and the branch that
+# landed it did not move the total: the pay-down identity
+# `total - remaining == replaced` still holds (1540 - 67 = 1473), but only
+# because the arrivals are counted in `total`. A ledger that recorded the
+# arrivals as new debt is what makes the number trustworthy; one that let the
+# ceiling sit at 685 while the tree carried 1518 is what this row is. The
+# pay-down itself has moved in NOBODY's favour: `NATIVE_DECIDE_REPLACED` is
+# still 67 and `REPLACEABLE_THEOREMS` is still 0.
 LIBRARY_TRUST = {
     # module    axiom  sorry  axiom_tactic ceiling (see the note above)
     "Contracts": (0, 0, 0, 0),
@@ -1200,7 +1222,7 @@ LIBRARY_TRUST = {
     # What is pinned here is the figure AFTER the 63 replacements, so `Contracts`
     # is 0 rather than the 1 this table held while its single site was still a
     # `native_decide`.
-    "ProofLib": (0, 0, 685, 685),
+    "ProofLib": (0, 0, 1518, 1518),
     "Refine": (0, 0, 0, 0),
     # **3, and it was 3 before this commit read 7**: four `native_decide` sites
     # landed here (`@[simp] theorem x86_mask_{one,two,four,eight}`, all four on
@@ -1241,8 +1263,8 @@ LIBRARY_TRUST = {
 #: exactly, which is asserted rather than hoped for: an unanswered theorem is
 #: counted in none of them.
 #:
-#: `reaches` is the honest fact: of the 520 theorems in `lib/`, **67** rest on a
-#: decide axiom and **442** are kernel-checked. `text_only` are theorems whose
+#: `reaches` is the honest fact: of the theorems in `lib/`, **81** rest on a
+#: decide axiom and the rest are kernel-checked. `text_only` are theorems whose
 #: source names one of the tactics and whose closure has none — a losing tactic
 #: alternative is still text, so the site census overcounts, and each row is a
 #: place where a replacement would have changed nothing. `closure_only` are
@@ -1289,7 +1311,14 @@ LIBRARY_TRUST = {
 AXIOM_CLOSURE = {
     #            asked  reaches  clean  text_only  closure_only  ofReduceBool
     "Contracts": (7, 0, 7, 0, 0, 0),
-    "ProofLib": (297, 46, 243, 0, 8, 0),
+    # +14 asked and +14 reaching, and it is the SAME arrival `LIBRARY_TRUST`'s
+    # ceiling above records: arm64's twelve narrower/unscaled memory forms and
+    # its two flag-setting compares each add a `work_step_*` lemma proved by
+    # `bv_decide`, so 14 new declarations reach an axiom and `clean` does not
+    # move at all. The partition still closes exactly (311 = 60 + 243 + 0 + 8),
+    # which is the assertion that makes this a measurement rather than a number
+    # somebody typed.
+    "ProofLib": (311, 60, 243, 0, 8, 0),
     "Refine": (29, 0, 29, 0, 0, 0),
     "X86": (144, 2, 141, 0, 1, 0),
     "work": (19, 0, 17, 0, 2, 0),

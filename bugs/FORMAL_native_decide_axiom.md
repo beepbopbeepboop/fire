@@ -125,7 +125,16 @@ four and why they were worth five theorems.
 
 ### What is still open, unchanged
 
-* **The 685 `bv_decide`** — `∀ w, w &&& mask ≠ value` over a free 32-bit word.
+* **The 1540 remaining sites, 1518 of them `bv_decide`** — `∀ w, w &&& mask ≠ value` over a
+  free 32-bit word, plus each new `arm64_step` arm's own `work_step_*`
+  lemma. **The figure rose from 685 to 1518 on 2026-10-05 and no pay-down
+  happened:** `work/formal28-2` modelled arm64's twelve narrower/unscaled
+  memory forms and its two flag-setting compares, and every new arm carries
+  a `bv_decide` over a quantified word — the right tool for that shape, and
+  still an axiom in the closure of every theorem proved with it. `REPLACEABLE_THEOREMS`
+  is still 0 and `NATIVE_DECIDE_REPLACED` is still 67, so nothing was traded
+  away; the ledger moved because the debt did. See `FORMAL.md` §7 row 10 for
+  the arrival arithmetic.
   §5's argument is a MEASUREMENT and it stands: `decide` would enumerate 2^32.
 * **The 19 `IEEE754` `native_decide`** — ground binary64 facts over
   `Float.ofBits`/`toBits`, which are compiled primitives, so `decide` gets stuck
