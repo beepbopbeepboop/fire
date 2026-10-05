@@ -57,9 +57,9 @@ formal x86-64 path (got MemberExpr)"*, is false about the file, because a
 `MemberExpr` target **is** lowered here whenever the member is a frame slot
 (`self.count += 1` on a by-reference receiver goes through exactly this arm). The
 real premise is the BINDING OF THE BASE, which is what the shared sentence says,
-and master is the commit that made the arm say it
-(`bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_function.md`,
-deleted with its fix).
+and master is the commit that made the arm say it — the
+two-backends-refuse-different-constructs fix, whose own doc is deleted with its
+fix, so master's state IS the record here.
 
 arm64's `AugAssignStmt` arm still raises a literal of its own for the same shape:
 
