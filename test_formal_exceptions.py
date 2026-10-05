@@ -35,6 +35,15 @@ name with no home while x86-64 refused it as an unsupported call target, from
 two private copies of one rule.  A one-sided assertion would have been green
 throughout.
 
+**What is here and what is not.**  The uncaught half of the exception contract
+is answered and asserted below.  The CAUGHT half is not: a `try`/`except` arm
+with a body is still refused by name, and `bugs/FORMAL_a_try_handler_arm_is_
+still_never_emitted.md` is that subject — it carries the measured table for both
+halves, the status-word design, and the measurement that says the same-function
+slice is worth zero files in this repository.  The three REFUSED rows below keep
+that refusal honest and specific, so the boundary is a checked claim rather than
+a gap somebody has to rediscover.
+
 Run:  python3 test_formal_exceptions.py [-v] [case ...]
 """
 import argparse
@@ -345,10 +354,14 @@ CASES = [
     # **The float divide, which used to compute `+inf` and carry on.**  IEEE-754
     # does not trap, so an emitted `FDIV` answers a NUMBER for a program CPython
     # refuses; measured before the guard, this printed `after` and exited 0.
-    # `bugs/FORMAL_float_zero_division.md` recorded that divergence and is gone
-    # with its fix — and it is fixed by an EMITTED GUARD, not by asking the
-    # compiler to fold the divisor, which is why the variable row below is here
-    # too.
+    # The guard is `formal/model.py::raise_float_divides_by_zero_is_an_exception`,
+    # read by both backends — commit 2a1b901a, which deleted the bug doc that
+    # recorded this divergence (its "the exact next step" asked for the zero
+    # test to be a model-level predicate for exactly this reason) together with
+    # its fix. The variable rows below are here because the fix is an EMITTED
+    # GUARD and not a compile-time fold: a folding fix would answer only the
+    # literal, and `formal/imports.py`'s whole reader family depends on the
+    # answer not depending on whether the compiler saw the zero.
     ("float_divide_by_a_zero_divisor_leaves",
      "def main(n):\n"
      "    print('before')\n"

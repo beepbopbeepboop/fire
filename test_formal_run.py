@@ -15703,8 +15703,8 @@ FLOAT_CASES = [
     # which is where every row with a CPython oracle for the exit status of a
     # failing check lives — the rows here are about the ARITHMETIC, and they
     # reach the special values the way CPython itself reaches them.
-    # `bugs/FORMAL_float_zero_division.md` recorded the old divergence and is
-    # gone with its fix.
+    # the bug doc that recorded that divergence was deleted with its fix
+    # (commit 2a1b901a).
     ("float_multiply_overflows_to_an_infinity",
      "def is_inf() -> Int:\n"
      "    var big = 1e308\n"
@@ -15778,9 +15778,9 @@ FLOAT_CASES = [
     # that is `1.0 / 0.0`, which CPython answers with a `ZeroDivisionError` and
     # which this path answers the same way (`formal/model.py`'s
     # `raise_float_divides_by_zero_is_an_exception` — the IEEE infinity this
-    # backend used to produce there is what `bugs/FORMAL_float_zero_division.md`
-    # recorded, and the doc is gone with its fix). A case whose oracle raises is
-    # not a case either way, so the rendering is the observable and always was.
+    # backend used to produce there was a divergence the bug doc that recorded
+    # it was deleted with, commit 2a1b901a). A case whose oracle raises is not a
+    # case either way, so the rendering is the observable and always was.
     # The `-0.5` in the same program is the guard on the defect: a `NEG` on the
     # BIT PATTERN — which is what unary minus used to emit — answers a denormal
     # here, and `int(-0.5)` answered -8 where CPython answers 0.
@@ -15827,9 +15827,9 @@ FLOAT_CASES = [
     # `inf_of` reaches `+inf` by OVERFLOW (`1e308 * 1e308`), not by
     # `1.0 / 0.0`. CPython raises `ZeroDivisionError` for a zero divisor on
     # doubles, so the old spelling was a program CPython refuses and this
-    # path used to answer anyway — the divergence
-    # `bugs/FORMAL_float_zero_division.md` recorded, which is gone with its
-    # fix (`formal/model.py::raise_float_divides_by_zero_is_an_exception`).
+    # path used to answer anyway, which was a divergence the bug doc recording
+    # it was deleted with (commit 2a1b901a; the rule is
+    # `formal/model.py::raise_float_divides_by_zero_is_an_exception`).
     # Overflow is the route CPython itself takes, so the oracle below can
     # spell the same values without the two halves disagreeing about what the
     # program means.

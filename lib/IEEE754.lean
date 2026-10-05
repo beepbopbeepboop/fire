@@ -159,8 +159,8 @@ agrees with it: `formal/model.py::raise_float_divides_by_zero_is_an_exception`
 is the predicate both backends read, and each emits the same zero-divisor guard
 the integer divide already had, so a program that divides a double by zero
 leaves with status 1 instead of carrying on with an infinity.  The divergence
-this docstring used to name was `bugs/FORMAL_float_zero_division.md`; that doc
-is gone with the fix.
+this docstring used to name was a bug document, which was deleted with the fix
+(commit 2a1b901a, `formal/arm64_codegen.py::_emit_float_divide_by_zero_guard`).
 
 So these two functions are the ARITHMETIC and not a description of what the
 image does on a zero divisor — a statement about the shape that reaches them is
