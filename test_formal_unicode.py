@@ -778,6 +778,50 @@ CROSS_MODULE_CASES = [
                    '    printf("len=%d n=%d\\n", len(s), plain())\n'
                    '    return 0\n'},
      None),
+
+    # A DOCSTRING carrying an em-dash is not a byte an ASCII string can be
+    # refused over.  This is the row for the one refinement in the rule: the
+    # encoding block's condition is "no READABLE string literal in this image is
+    # non-ASCII", and a docstring is a literal in the one position no program can
+    # read it from — `f.__doc__` and `__doc__` are both refused on this path
+    # (`formal/model.py::docstring_literal_ids` quotes both).  75 of the 339
+    # units in this repository and the stdlib carried a non-ASCII literal in
+    # NOTHING BUT documentation position, and every one of them refused an
+    # ordinary ASCII string operation because of its own prose —
+    # `formal/hostmods/os/_syscalls.mojo` among them, which is in the closure of
+    # every image that imports `os`, and which is what made `import shlex` red
+    # in three rows of `test_formal_imports.py`.
+    # ANSWERED against CPython rather than REFUSED, because that is the whole
+    # claim: the build must now answer, and match.
+    ("a_function_docstring_with_an_em_dash_leaves_an_ascii_image_ascii",
+     {"h2.mojo": 'def plain() -> Int:\n'
+                 '    """Wide prose — with an em-dash, an ellipsis … and a\n'
+                 '    section sign § that no program can read."""\n'
+                 '    return 3\n',
+      "main.mojo": 'from h2 import plain\n'
+                   '\n'
+                   'def main(n):\n'
+                   '    s = "hello"\n'
+                   '    printf("c=%c len=%d n=%d\\n", s[0], len(s), plain())\n'
+                   '    return 0\n'},
+     None),
+
+    # The MODULE's own docstring, which is a different AST position: the string
+    # IS the statement rather than the first statement of a body.  Pinning both
+    # is what keeps the refinement from being read as "skip a function's first
+    # string" and leaving a module's prose in the pool.
+    ("a_module_docstring_with_an_em_dash_leaves_an_ascii_image_ascii",
+     {"h2.mojo": '"""Module prose — with an em-dash and an ellipsis …."""\n'
+                 '\n'
+                 'def plain() -> Int:\n'
+                 '    return 3\n',
+      "main.mojo": 'from h2 import plain\n'
+                   '\n'
+                   'def main(n):\n'
+                   '    s = "hello"\n'
+                   '    printf("c=%c len=%d n=%d\\n", s[0], len(s), plain())\n'
+                   '    return 0\n'},
+     None),
 ]
 
 

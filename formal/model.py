@@ -6949,6 +6949,72 @@ def _non_ascii_examples(texts) -> str:
     return ", ".join(shown) + tail
 
 
+def docstring_literal_ids(stmts: list) -> set:
+    """`id()` of every string literal that is a DOCSTRING under `stmts`.
+
+    Two positions, and they are the two this dialect writes:
+
+    * the FIRST statement of a function, a method, a struct or a trait body —
+      the position Python stores in `__doc__` and runs nothing;
+    * a module-level bare string `ExprStmt` WHEREVER it appears, because that is
+      how this stdlib documents a `comptime` constant (`std/math/constants.mojo`
+      is nine binding/string pairs) and `module_body`'s own classifier already
+      skips every one of them, not only the first: "a module DOCSTRING — a bare
+      string `ExprStmt` — is not body … there is nothing to execute and nothing
+      to lose".
+
+    **Why the encoding block needs this, measured on this tree.** A docstring's
+    bytes ARE interned into the image — `grep` finds a marker string from a
+    function docstring in the emitted Mach-O — so the pool argument alone does
+    not exclude them. What excludes them is that a docstring is not REACHABLE as
+    a string value on this path, and both spellings of a read are refused:
+
+        f.__doc__   'f.__doc__' is a field access through 'f', and this path has
+                    no way to say what 'f' holds
+        __doc__     '__doc__' has no home: the register allocator collected no
+                    home for it
+
+    So a program cannot name the address of a docstring, cannot copy its bytes,
+    and cannot subscript it — which is the only way a non-ASCII character gets
+    into a string this path would then read a position out of. Without this,
+    `formal/hostmods/os/_syscalls.mojo`'s 82 docstrings (every one carrying an
+    em-dash, an ellipsis or a section sign) refuse a `Pointer[UInt8]` subscript
+    in every image that includes the module — which is every image that imports
+    `os`, and therefore `shlex`, and three rows of `test_formal_imports.py`.
+    Over this repository and the stdlib the pool argument was **65 units too
+    strong**: 75 of 339 units held a non-ASCII literal in nothing but
+    documentation position, and 4 hold one a program can really print.
+
+    **What it does not do**, because the direction matters more than the size:
+    a literal in any other position is still counted, so a program that really
+    does hold a non-ASCII string is still refused by name.
+    """
+    out: set = set()
+
+    def _add(body) -> None:
+        if (isinstance(body, (list, tuple)) and body
+                and isinstance(body[0], F.ExprStmt)
+                and isinstance(getattr(body[0], "value", None),
+                               F.StringLiteral)):
+            out.add(id(body[0].value))
+
+    # A module-level bare string `ExprStmt` is DOCUMENTATION wherever it appears,
+    # and this tree's own module-body classifier already decided that: it skips
+    # every `ExprStmt` whose value is a `StringLiteral`, not only the first one,
+    # because `std/math/constants.mojo` documents each of its `comptime`
+    # constants that way — the binding, then a string under it. Python's own
+    # "first statement only" rule would leave every constant's prose in the pool.
+    for st in (stmts or []):
+        if (isinstance(st, F.ExprStmt)
+                and isinstance(getattr(st, "value", None), F.StringLiteral)):
+            out.add(id(st.value))
+        _add(getattr(st, "body", None))
+        for attr in ("methods", "fields"):
+            for member in (getattr(st, attr, None) or []):
+                _add(getattr(member, "body", None))
+    return out
+
+
 def non_ascii_strings_in(stmts: list, limit: int = 32) -> list:
     """The decoded TEXT of every non-ASCII string literal under `stmts`.
 
@@ -6959,6 +7025,20 @@ def non_ascii_strings_in(stmts: list, limit: int = 32) -> list:
     body, every function, every nested def — and it is the WHOLE unit, which is
     the soundness argument in the block comment above: interning is by content
     from these statements and nothing else can put a byte in the string pool.
+
+    **A DOCSTRING IS NOT ONE OF THE BYTES A STRING CAN HOLD**, and that is the
+    one refinement: the pool argument counts interned bytes, and a docstring's
+    bytes ARE interned, but no program can reach them (`docstring_literal_ids`
+    quotes the two refusals that make that measured), so they cannot reach a
+    string this path would read a character position out of. **75 of the 339
+    units in this repository and the stdlib carried a non-ASCII literal in
+    NOTHING but documentation position, and every one of them refused an
+    ordinary ASCII string operation because of its own prose** — 71 of the 75
+    after this, the four that remain holding a glyph a program can really print
+    (`benchmark/_progress.mojo`'s `▇`, `collections/interval.mojo`'s `└─ `,
+    `collections/string/string.mojo`'s U+FFFD, and a sentence in
+    `python/numpy.mojo`). `formal/hostmods/os/_syscalls.mojo` was one of the 71,
+    and it is in the closure of every image that imports `os`.
 
     **The DECODED TEXT and not the node**, because this list exists to be quoted
     in a diagnostic: `repr()` of the dataclass is a line and a half of field
@@ -6976,12 +7056,20 @@ def non_ascii_strings_in(stmts: list, limit: int = 32) -> list:
     stack = list(stmts or [])
     visited = set()
     texts = set()
+    # A DOCSTRING is a string literal in the one position no program can read it
+    # from, so it is not a byte any string in this image can hold — see
+    # `docstring_literal_ids` for the two measured refusals that make that a
+    # fact about this path rather than an assumption.  Computed from the SAME
+    # `stmts` the walk starts from, so a caller that walks one unit cannot get
+    # the other's answer.
+    skip = docstring_literal_ids(stmts)
     while stack:
         node = stack.pop()
         if id(node) in visited:
             continue
         visited.add(id(node))
         if (isinstance(node, F.StringLiteral)
+                and id(node) not in skip
                 and not getattr(node, "is_raw", False)
                 and not getattr(node, "is_bytes", False)):
             text = F.decoded_literal(node)
