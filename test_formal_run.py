@@ -11370,12 +11370,19 @@ CONSTRUCTION_REFUSALS = [
      "    var p = P3(1, x=2)\n"
      "    return 0\n",
      "refuse:gives field 'x' more than one value", None),
-    # A keyword against a struct that DECLARES an `__init__`, and this is the
-    # one the resolution cannot fix rather than a rule it is leaving out:
-    # `CONSTRUCTION_INIT` selects the overload by ARGUMENT COUNT, so a keyword
-    # call has nothing to select on.  Picking the widest, or the first, would
-    # be running a constructor the program did not choose.
-    ("constr_refuse_keyword_against_a_declared_init",
+    # A keyword against a struct that DECLARES an `__init__`.  **This case used
+    # to be a blanket refusal of the SHAPE**, with the reason "nothing here
+    # resolves by type or by parameter name, so a keyword call cannot say which
+    # overload it means" — and the second clause was false, which is why it is
+    # gone: a keyword DOES name a parameter, and `model.init_overload_for_call`
+    # selects on the parameter names plus the positional order.
+    #
+    # `S3(end=7)` is still a refusal, and it is the one CPython raises:
+    # `TypeError: __init__() missing 1 required positional argument: 'start'`.
+    # The needle is the missing parameter's NAME, not the old text about
+    # overload selection, because the name is what the caller has to fix and the
+    # selection story is a fact about this path rather than about the program.
+    ("constr_refuse_keyword_against_a_declared_init_leaves_a_parameter_unfilled",
      "struct S3:\n"
      "    var start: Int\n"
      "    var end: Int\n"
@@ -11385,8 +11392,99 @@ CONSTRUCTION_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    var s = S3(end=7)\n"
      "    return 0\n",
-     "refuse:is a call to a user-defined `__init__` (S3 declares 1 of them)",
-     None),
+     "refuse:missing 1 required positional argument: 'start'", None),
+    # ── a keyword against a DECLARED `__init__`, which is now a PROGRAM ──
+    # The filing's reproducer, and the construct `std/testing/prop/random.mojo`
+    # is written with: a KEYWORD-ONLY parameter, so there is no positional
+    # arity at all for the count-only rule to select on, and the keyword is the
+    # ONLY thing that names the overload.  Measured before the fix, both
+    # architectures: "constructing Rng with 'seed' — 'seed' is not a field of
+    # Rng (n) …", every clause of which is wrong — `seed` IS a parameter of the
+    # declared `__init__` and `Rng` HAS one.
+    #
+    # The `printf` is the oracle: `seed=7` is the only way 7 can be in `r.n`,
+    # so a binding that answered the default, the first parameter or the field
+    # list could not produce this pair.
+    ("constr_keyword_names_a_keyword_only_init_parameter",
+     "struct Rng:\n"
+     "    var n: Int\n"
+     "\n"
+     "    def __init__(out self, *, seed: Int):\n"
+     "        self.n = seed\n\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = Rng(seed=7)\n"
+     "    printf(\"n=%d\", r.n)\n"
+     "    return r.n\n", 7, "n=7"),
+    # The same selection with a keyword in the SECOND position, which is the
+    # case an implementation that binds keywords by APPENDING them to the
+    # positionals gets wrong: `pair(10, y=20)` must leave `x` at 10, and
+    # `pair(y=20, x=10)` must give the same object.  Two rows rather than one
+    # because "the keywords are read in the order they are written" is the
+    # reading the old refusal's reason (`"the program's meaning would depend on
+    # the order the keywords appear in"`) warned about, and it is false for a
+    # binding that matches by NAME.
+    ("constr_keyword_binds_by_name_not_by_position",
+     "struct Pair2:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "    def __init__(out self, x: Int, y: Int):\n"
+     "        self.x = x\n"
+     "        self.y = y\n\n"
+     "def main(k: Int) -> Int:\n"
+     "    var a = Pair2(10, y=20)\n"
+     "    var b = Pair2(y=20, x=10)\n"
+     "    printf(\"a=%d,%d b=%d,%d\", a.x, a.y, b.x, b.y)\n"
+     "    return a.x + a.y + b.x + b.y\n", 60, "a=10,20 b=10,20"),
+    # A parameter given twice — `Pair2(10, x=20)` is CPython's `got multiple
+    # values for argument 'x'`, and it is a refusal rather than a pick, because
+    # either store is a program the source did not write.
+    ("constr_refuse_a_parameter_given_twice",
+     "struct Pair2:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "    def __init__(out self, x: Int, y: Int):\n"
+     "        self.x = x\n"
+     "        self.y = y\n\n"
+     "def main(k: Int) -> Int:\n"
+     "    var a = Pair2(10, x=20)\n"
+     "    return a.x\n",
+     "refuse:got multiple values for argument 'x'", None),
+    # A keyword naming no PARAMETER of the declared constructor — the case the
+    # old blanket refusal could not tell from the one above, because both were
+    # "a keyword against a declared `__init__`".  CPython's `unexpected keyword
+    # argument`, and the needle is the NAME rather than a count.
+    ("constr_refuse_keyword_naming_no_init_parameter",
+     "struct Pair2:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "    def __init__(out self, x: Int, y: Int):\n"
+     "        self.x = x\n"
+     "        self.y = y\n\n"
+     "def main(k: Int) -> Int:\n"
+     "    var a = Pair2(10, z=20)\n"
+     "    return a.x\n",
+     "refuse:is not a parameter of any of them", None),
+    # ── a no-field struct WITH a constructor: the message that denied it ──
+    # `construction_arity_refusal` used to answer this one with "with no
+    # user-defined constructor … and Rng declares no `__init__` for it to call
+    # instead", which is false twice over: `Rng` declares one, and the arity
+    # check was reached before the constructor branch.  It is still a refusal —
+    # the body makes a CALL, which is not a `self.<field> = …` store — and the
+    # needle is the offending STATEMENT, which is the fact the reader can act
+    # on.
+    ("constr_refuse_a_no_field_struct_with_an_init_whose_body_is_not_stores",
+     "def sink(v: Int) -> Int:\n"
+     "    return v\n\n"
+     "struct Rng4:\n"
+     "    def __init__(out self, seed: Int):\n"
+     "        sink(seed)\n\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = Rng4(7)\n"
+     "    return 0\n",
+     "refuse:whose body this path does not inline: `sink(...)`", None),
     # ── a COPY of the wrong thing ──
     # A copy of a DIFFERENT struct. A copy here is a slot-for-slot copy, so it
     # is only defined between two objects of the SAME layout, and `B` is a
