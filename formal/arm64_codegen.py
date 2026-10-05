@@ -2319,6 +2319,23 @@ dylib_exports: list = None, globals_base: int = None,
             if isinstance(stmt.target, F.MemberExpr):
                 name = _member_slot_key(stmt.target)
                 if name is None:
+                    # A store into a frame a POINTER names: the store half of
+                    # the member-read arm's `p.value().field`, and refused below
+                    # with a sentence about the BASE that the read arm would
+                    # make false.  `model.pointer_frame_expression` is the same
+                    # decision the read made, so the two cannot disagree about
+                    # what the base holds.
+                    st, _why = M.pointer_frame_expression(
+                        self._cur_fn, M.member_base_node(stmt.target),
+                        self._structs, self._structs)
+                    if st is not None:
+                        slot = M.struct_frame_slot(st, stmt.target.member)
+                        if slot is None:
+                            raise CodegenError(M.pointer_frame_store_refusal(
+                                stmt.target, st))
+                        self._emit_frame_store_through(
+                            stmt.value, M.member_base_node(stmt.target), slot)
+                        return
                     # REFUSED, not dropped. This used to evaluate both sides and
                     # return, which is a SILENTLY DISCARDED STORE: the program
                     # built, ran, and the write was simply not there
@@ -3641,6 +3658,28 @@ dylib_exports: list = None, globals_base: int = None,
                             f"this path has no way to know which word that is, "
                             f"and reading the wrong one is a wrong answer "
                             f"rather than a failure")
+                    self._emit_expr(expr.obj)
+                    self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 8 * slot))
+                    return
+                # …and the same read off a POINTER's `.value()`, which is the
+                # other way a frame arrives without a block to copy it into: the
+                # address is the pointer's own word, so the field is one load at
+                # `[X0, #8*slot]` straight after the receiver is evaluated.  The
+                # arm above cannot serve this shape — it reserves and copies,
+                # and there is nothing to copy, because the frame belongs to
+                # whoever owns the memory the pointer names.
+                #
+                # `model.pointer_frame_expression`, which is the same decision
+                # the holder tables and `_frame_return_status` are built from,
+                # so the two spellings of `q.b` cannot disagree about what `q`
+                # is.
+                st, _why = M.pointer_frame_expression(
+                    self._cur_fn, expr.obj, self._structs, self._structs)
+                if st is not None:
+                    slot = M.struct_frame_slot(st, expr.member)
+                    if slot is None:
+                        raise CodegenError(M.pointer_frame_member_refusal(
+                            expr, st))
                     self._emit_expr(expr.obj)
                     self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 8 * slot))
                     return
@@ -5893,13 +5932,15 @@ ctor_field_value=self._ctor_field_value_for(name),
     #   ("load", 8, signed)    LDR   Xt, [Xn]          — `Int64`/`c_long`
     #   ("load", 8, unsigned)  LDR   Xt, [Xn]          — `Int`/UInt64/a pointer
     #
-    # A STRUCT pointee has no instruction here and that is a decision, not an
-    # omission: the derivation says the answer is the receiver — a struct's
-    # value on this path IS its frame address, the same identity `Pointer()`
-    # gives — and emitting it today returns 0 where the source says 22 on BOTH
-    # architectures, because nothing recognises a name bound through a pointer
-    # as a frame holder.  `model.dereference_lowering` says so at length; the
-    # next step is one line in `formal/build.py`'s holder fixpoint.
+    # A STRUCT pointee has no load and that is the derivation rather than an
+    # omission: a struct's value on this path IS its frame address, so the word
+    # in the receiver IS the pointee and nothing is loaded — the same identity
+    # `Pointer()` gives.  It is emitted as the receiver and nothing else, and
+    # the fields are read off that word through the holder tables
+    # (`model.pointer_frame_bindings` seeds them; `_emit_frame_load` reads
+    # them), so the field read is one `LDR` at `+8*slot` whichever of the two
+    # spellings the source used.  `model.dereference_lowering` says why the
+    # answer was refused until the holder analysis could see the name.
     #
     # A 1-byte and a 2-byte load are sign- or zero-EXTENDED into the 64-bit X
     # register, because a formal value is one 64-bit word and the program will
@@ -5931,6 +5972,12 @@ ctor_field_value=self._ctor_field_value_for(name),
             # Nothing is emitted after the receiver: the answer is the word that
             # is already in X0. The load below would read the FIRST BYTE of the
             # pointee instead, which is what this used to do — measured, SIGSEGV.
+            return
+        if _load == "frame":
+            # A POINTER TO A STRUCT: the receiver word IS the frame's address
+            # (`model.pointer_frame_pointee`), so X0 already holds the answer
+            # and a load would read the frame's FIRST SLOT as though it were a
+            # pointee — `p.value().b` would answer `a`, not `b`.
             return
         if width == 1:
             self.asm.emit(encode_ldrsb_xt_xn_imm(0, 0, 0) if signed
@@ -5995,6 +6042,28 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_str_wt_wn_imm(5, 9, 0))
         else:
             self.asm.emit(encode_str_xt_xn_imm(5, 9, 0))
+        self.asm.emit(encode_ldp_sp_post(0, 31))  # pop the value back into X0
+
+    # A STORE into a frame a POINTER names — `p.value().field = v`, the store
+    # half of the member-read arm's `p.value().field`.  It exists because the
+    # read being answerable makes the store's refusal FALSE: that refusal says
+    # "this path has no way to say what 'p.value(...)' holds", and after the
+    # read arm it plainly can.  A diagnostic that is false about the program is
+    # worse than a missing one.
+    #
+    # The register discipline is `_emit_pointer_store`'s above, for its reason:
+    # the address is computed out of X0..X4 and X9, so the VALUE has to be
+    # across the stack before the base is computed or the address is what gets
+    # stored (measured on the subscript path: `xs[2] = 9` left a frame pointer
+    # at element 2).  A whole slot, always — a frame slot is 8 bytes whatever
+    # its field's declared width, and `_emit_frame_store` is the same store.
+    def _emit_frame_store_through(self, value, base, slot: int) -> None:
+        self._emit_expr(value)                    # X0 = value
+        self.asm.emit(encode_stp_sp_pre(0, 31))   # push the value
+        self._emit_expr(base)                     # X0 = the frame's address
+        self.asm.emit(encode_mov_zr_xn(9, 0))     # X9 = addr, out of the way
+        self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 0))   # X5 = the value
+        self.asm.emit(encode_str_xt_xn_imm(5, 9, 8 * slot))
         self.asm.emit(encode_ldp_sp_post(0, 31))  # pop the value back into X0
 
     # ── methods on a string ───────────────────────────────────────────────

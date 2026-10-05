@@ -3539,6 +3539,13 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # "no call site agrees", which is a refusal the pre-existing rule does not
     # make.
     declared_holders = {_fn_key(fn): {} for fn in functions}
+    # `{_fn_key(fn): {name: [struct, …]}}` — the pointer-frame bindings of each
+    # function, COLLECTED in the seeding loop above and APPLIED as a fixpoint
+    # edge below.  Collected there because that loop already walks every
+    # function once, and applied there because a name this binds can also be
+    # bound from a callee's holder on another path, which is a disagreement
+    # rather than a second opinion to discard.
+    pointer_binds: dict = {}
     # `{_fn_key(fn): struct}` — the functions that RETURN a frame address, and
     # the struct whose layout that frame has.  It is the other half of the
     # holder fixpoint below and is computed inside the same loop, because the
@@ -3639,6 +3646,39 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                 fn, framed, [f.name for f in functions]).items():
             holders[_fn_key(fn)].add(name)
             hstruct[_fn_key(fn)].setdefault(name, []).extend(sts)
+        # A name bound from a POINTER to a frame — `q = p.value()` where `p` is
+        # declared `Pointer[SomeStruct]` of this image.  The fourth way a name
+        # comes to hold a frame address, beside a constructor binding, a
+        # declared parameter and a call to a frame-returning callee, and it is
+        # the one the holder analysis could not see: `Pointer[SomeStruct]`'s
+        # value on this path IS the frame address (a struct's value is its
+        # address), so `q.b` is one load at `q + 8k` exactly as a constructed
+        # `P3()`'s is — but nothing about `q`'s BINDING says "frame", so the
+        # name fell to the value-member path and read a word of nothing.
+        # Measured before the recognition, both architectures:
+        # `def f(p: Pointer[P3]) -> Int: return Int(p.value().b)` with `t.b = 22`
+        # printed **0**, and `model.dereference_lowering` REFUSED the whole
+        # dereference rather than emit that.
+        #
+        # COLLECTED here and APPLIED as a fixpoint edge below, rather than
+        # seeded here, and the reason is the shape this sits next to: a name
+        # bound this way can also be bound from a CALLEE'S holder on another
+        # path (`q = p.value()` in one branch, `q = o` in another), and a name
+        # with two layouts is a refusal (`struct_frame_slot_candidates`) rather
+        # than whichever binding the seeding happened to see.  A pre-seed would
+        # put the name in the holder set, and the copy edge below skips a name
+        # that is already a holder — so the second layout would have been the
+        # one that disappeared.
+        #
+        # `model.pointer_frame_bindings`, which is `model.dereference_lowering`'s
+        # `("frame", …)` answer asked of a binding's VALUE — one derivation for
+        # the recognition, the emission and the returned-frame decision rather
+        # than a fourth walk that could disagree with the other three.  Collected
+        # ONCE and asked every round, because what it reads is a DECLARED
+        # pointee and a binding, neither of which the fixpoint moves; the round
+        # that matters is the one where another edge has already spoken.
+        pointer_binds[_fn_key(fn)] = M.pointer_frame_bindings(
+            fn, structs_by_name)
         # A module global whose `__DATA` slot holds the ADDRESS of a struct
         # FRAME built in the image (`model.prepare_module_frame_slots`), read in
         # this function: the word the slot carries is a frame address, so
@@ -3684,6 +3724,34 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                 _name_defs, returns_frame)
             for fn in functions:
                 hs = holders[_fn_key(fn)]
+                # `q = p.value()` where `p` is declared `Pointer[SomeStruct]` of
+                # this image.  The edge is HERE and not in the seeding above
+                # because it MERGES rather than decides: `q = p.value()` in one
+                # branch and `q = o` — a callee's holder — in another is one
+                # name with two layouts, and `struct_frame_slot_candidates`
+                # refuses that where a seeding would have kept the first answer
+                # and dropped the second (the copy edge skips a name that is
+                # already a holder, so a pre-seeded `q` would never have seen
+                # `o`).  A struct already in the candidate list is the same
+                # answer twice and adds nothing, which is what keeps this
+                # monotone and the loop finite.
+                #
+                # The lifetime is the FRAME's own rather than this function's,
+                # and that is sound for the reason a framed PARAMETER is: the
+                # pointer was handed to this function by a caller whose storage
+                # the caller's own escape rules govern.  Every channel that
+                # would carry the address back out is already refused for a
+                # holder — a `return` goes through `_frame_return_status`, which
+                # COPIES into a block in the caller's scratch, and a field or
+                # container store is `_check_frame_escapes`'s refusal.
+                for _name, _sts in (pointer_binds.get(_fn_key(fn))
+                                    or {}).items():
+                    for _st in _sts:
+                        if _st in hstruct[_fn_key(fn)].get(_name, ()):
+                            continue
+                        hs.add(_name)
+                        hstruct[_fn_key(fn)].setdefault(_name, []).append(_st)
+                        changed = grew = True
                 for node in M.iter_nodes(fn.body):
                     target = value = None
                     if isinstance(node, F.VarDecl):
@@ -7476,6 +7544,29 @@ A value is frame-valued in three ways, and they are the three the holder
                 frames.append((cands, value.name))
                 continue
         if isinstance(value, F.CallExpr):
+            # `return p.value()` where `p` is declared `Pointer[SomeStruct]` of
+            # this image: the value IS a frame address, and it is the THIRD
+            # shape here rather than a word.  Without this arm it fell through
+            # to `words.append(...)` and the function was classified
+            # `_RETURN_WORD`, which is the silently-wrong direction twice over:
+            # no caller reserves a block for the result (so the callee copies
+            # into a register it was handed by accident) and `_emit_frame_return`
+            # is not reached, so the address of the CALLER's frame goes back as
+            # a plain word and outlives nothing.  The convention is the fix
+            # rather than a refusal: the block is in the CALLER's scratch and the
+            # callee copies into it, which is exactly what makes handing a
+            # frame back safe here.
+            #
+            # Asked BEFORE the callee arm, and for the same reason the
+            # IdentExpr arm is first: `M.call_callee_name` of a `p.value()` is
+            # None, so the two cannot both answer — but the ORDER is what makes
+            # it obvious that a name with two spellings is one question.
+            st, _why = M.pointer_frame_expression(fn, value,
+                                                  structs_by_name)
+            if st is not None:
+                frames.append(([st],
+                               f"the frame in `{M.spelled(value)}`"))
+                continue
             # `M.call_callee_name`, and NOT `value.func.name`: a comptime
             # specialization `f[T](r)` names the same function `f` does,
             # contributes no call-time argument of its own, and so lands the

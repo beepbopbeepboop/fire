@@ -19,6 +19,11 @@ comparable across runs:
     module carries the definitions that call needs. An item that read a name it
     does not define would be refused for a reason that has nothing to do with the
     proof layer — the refusal the census exists to avoid;
+  * **every item is measured in its OWN PROCESS.** `formal/model.py` keeps the
+    current unit's module-level symbol table in a process global, so two items
+    compiled in one interpreter read each other's tables — measured, 1 of 78
+    arm64 verdicts with only `-j` changed, and the class counts identical, which
+    is what let it survive. `TestWorkerIsolation` pins the decision;
   * **the classifier says what it means.** Two programs with known verdicts, one
     per class that is a decision rather than a pass, checked without Lean so the
     test costs a codegen run and not a proof.
@@ -29,7 +34,9 @@ Lean-dependent numbers are its ledger's business
 (`$TMPDIR/formal_proof_breadth.ledger.jsonl`).
 """
 import ast
+import concurrent.futures
 import os
+import pickle
 import sys
 import tempfile
 import unittest
@@ -216,6 +223,65 @@ class TestWorkload(unittest.TestCase):
                 self.assertEqual(free, set(),
                                  f"{w.ident}: reads names the module does not "
                                  f"define: {sorted(free)}")
+
+
+class TestWorkerIsolation(unittest.TestCase):
+    """One PROCESS per item, because the compiler's tables are process globals.
+
+    The property is worth a test because the damage it prevents is invisible in
+    the census's headline numbers: measured on this tree, phase A, arm64, 78
+    items, same tree and same flags with only `-j` changed, **1 of 78 verdicts
+    differed** and the class counts were identical (17 / 21 / 40 either way).
+    The one that moved was a module-global verdict, and the two sentences it
+    picks between are chosen by `formal/model.py`'s `_MODULE_SYMBOLS` — a
+    process global that `publish_module_symbols` REPLACES on every
+    `compile_formal`. Under a thread pool, an item that ran beside another
+    unit's compile reads that unit's table, and `_declared_module_names` then
+    reports the wrong one of "this module declares no module-level name by that
+    spelling" and "the module-level symbol table is empty for this unit".
+
+    And one of those two answers is what the report compares ACROSS
+    ARCHITECTURES, so a thread artifact is published as a two-backend
+    disagreement — which is the most alarming thing this tool can print.
+
+    **This is a structural test and that is deliberate.** A symptom test would
+    have to put two interfering items in flight and assert they disagree, which
+    is a RACE: it passes most of the time on the broken version, and a test that
+    mostly passes is worse than none. The decision is what has to hold.
+    """
+
+    def test_the_pool_is_processes_and_not_threads(self):
+        pool = B._worker_pool(2)
+        try:
+            self.assertIsInstance(pool, concurrent.futures.ProcessPoolExecutor,
+                                  "a thread pool shares the compiler's process "
+                                  "globals between items, and those globals "
+                                  "are the current unit's symbol table")
+            self.assertEqual(pool._mp_context.get_start_method(), "spawn",
+                             "fork copies whatever the parent already "
+                             "published, which is the same hazard with an "
+                             "extra step")
+        finally:
+            pool.shutdown(wait=True)
+
+    def test_the_item_runner_is_a_module_level_function(self):
+        # A process pool PICKLES the callable it submits. The worker used to be
+        # a closure over `args`, which a thread pool accepts and a process pool
+        # cannot pickle at all — so this is not tidiness, it is the other half
+        # of the isolation.
+        self.assertTrue(callable(B._run_one))
+        self.assertEqual(B._run_one.__module__, B.__name__)
+        self.assertEqual(pickle.loads(pickle.dumps(B._run_one)), B._run_one)
+
+    def test_no_thread_pool_is_left_in_the_runner(self):
+        # The structural statement of the same property, so a later edit that
+        # reaches for `concurrent.futures.ThreadPoolExecutor` again fails HERE
+        # rather than in a ledger nobody diffs.
+        src = open(os.path.join(HERE, "tools",
+                                "formal_proof_breadth.py")).read()
+        self.assertNotIn("ThreadPoolExecutor", src,
+                         "the census measures items in threads again; "
+                         "`_worker_pool` is the measurement for why not")
 
 
 class TestClassifier(unittest.TestCase):

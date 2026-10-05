@@ -13215,6 +13215,16 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
     taught to look at it.  A second arity for the new answer would make every
     reader a two-tuple branch, and the whole reason this function is shared is
     that the two architectures cannot come to different answers about a load.
+
+    **The fourth answer, `("frame", struct, False)`, is the STRUCT pointee, and
+    it is emitted rather than refused** (`pointer_frame_pointee` is its decision
+    and the three places that consume it are the two backends'
+    `_emit_dereference` and `pointer_frame_bindings`).  Nothing is loaded: the
+    word in the receiver already IS the pointee, and the answer is that word —
+    the same identity `Pointer()` gives and the same shape as a string's length
+    being a computation rather than a field.  It is a load-width answer with no
+    width in it, and the third element stays `False` so the two readers that
+    ignore the shape are not handed a `struct` where they expect a bool.
     """
     unwrapped, unwrap_why = nullable_pointer_unwrap(fn, expr, decls,
                                                     functions)
@@ -13247,23 +13257,23 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
                       f"direction")
     st = (structs_by_name or {}).get(inner)
     if st is not None:
-        # A STRUCT pointee is REFUSED, and this is the load-bearing decision of
-        # the whole section, so the reasoning is long and it is worth reading.
+        # A STRUCT pointee is the IDENTITY, and this is the load-bearing
+        # decision of the whole section, so the reasoning is long and it is
+        # worth reading.
         #
-        # The DERIVATION is right and it is not the problem: a struct's value on
-        # this path is a frame ADDRESS, so the word in the receiver already IS
-        # the pointee, exactly as `Pointer()` is (wave 4's D4) and exactly as a
-        # string's length is a computation rather than a field.  Emitting the
-        # identity and reading the fields off it is what the model says.
+        # The DERIVATION is right and it is the only thing that was ever in
+        # doubt: a struct's value on this path is a frame ADDRESS, so the word
+        # in the receiver already IS the pointee, exactly as `Pointer()` is
+        # (wave 4's D4) and exactly as a string's length is a computation
+        # rather than a field.  Nothing is loaded; the answer is the receiver.
         #
-        # What is missing is the HOLDER ANALYSIS, and without it the answer is a
-        # use-after-free wearing a pointer's clothes.  Reading fields off a
-        # frame address on this path is `_frame_receivers`' job: it decides
-        # which names hold frame addresses, and it recognises them from a
-        # CONSTRUCTOR BINDING (`x = A()`) or from being a callee's first
-        # parameter.  A name bound from `p.value()` is neither, so the analysis
-        # does not see it, and `q.b` then falls to the value-member path and
-        # reads a word of nothing.  Measured, on both architectures, with the
+        # It WAS refused, and the refusal named its own reason honestly: the
+        # machinery that reads fields off a frame address is `_frame_receivers`'
+        # job, it decides which names hold frame addresses, and it recognised
+        # them from a CONSTRUCTOR BINDING (`x = A()`) or from being a callee's
+        # first parameter.  A name bound from `p.value()` was neither, so the
+        # analysis did not see it and `q.b` fell to the value-member path and
+        # read a word of nothing.  Measured, on both architectures, with the
         # identity lowering in place:
         #
         #     struct P3:  var a: Int64 / var b: Int64 / var c: Int64
@@ -13271,57 +13281,51 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
         #     main:  t = P3(); t.b = 22;  printf(..., f(t))
         #
         # printed **0** on arm64 and on x86-64, where the source says 22.  So
-        # the identity is not refused for being unprovable — it is refused
-        # because emitting it produces a wrong answer today, and a wrong answer
-        # is the outcome this model exists to prevent.
+        # the identity was refused for producing a wrong answer, not for being
+        # unprovable — and a wrong answer is the outcome this model exists to
+        # prevent, which is the right reason to refuse and not a reason to leave
+        # it refused.
         #
-        # It is also the frame-lifetime trap this whole section is arranged
-        # around, and naming it is the point: a `Pointer[SomeStruct]` IS a
-        # frame address, so storing one in a field or returning it hands the
-        # caller a pointer into a frame whose lifetime this pass cannot follow
-        # — the same use-after-free `formal/build.py` refuses for a struct
-        # receiver returned from the function that created it, and the same one
-        # D2 made an enforced invariant for a blob in a field.  A pointer to a
-        # SCALAR has no such problem, which is why exactly the scalar branch
-        # above is answerable and this one is not.
+        # What made it answerable is `pointer_frame_pointee`'s three consumers,
+        # and they are the same three for both machines: `_frame_receivers`
+        # seeds a name bound here into the holder tables
+        # (`pointer_frame_bindings`), `_frame_return_status` counts a `return`
+        # of one as returning a FRAME so the caller's block is reserved and the
+        # callee copies into it, and both `_emit_dereference`s emit the
+        # receiver and nothing else.  A frame reaching a caller is then a COPY
+        # in the caller's own scratch — the returned-frame convention — rather
+        # than an address of somebody else's, which is what the frame-lifetime
+        # half of the old refusal was about and is why the answer is safe rather
+        # than merely reachable.
         #
-        # THE NEXT STEP, and it is one line of recognition rather than a model
-        # change: teach `_frame_receivers`' fixpoint that a name bound from
-        # `p.value()` where `p` is declared `Pointer[SomeStruct]` of this unit
-        # is a holder, with the pointee's struct as its candidate.  Everything
-        # downstream of that — the frame layout, the escape analysis, the field
-        # reads — already exists and already works for a directly constructed
-        # struct, which is `c1.mojo`/`c3.mojo` in the reproducer set.  This is
-        # `formal/build.py`, which is not this change's lane.
+        # **A ONE-FIELD pointee is still refused**, and it is a different fact
+        # rather than a half-answer: such a struct's value is the word ITSELF,
+        # not an address of one, so there is nothing at the address and the
+        # identity would be wrong rather than right.  `struct_is_framed` is the
+        # one test for the two, as it is everywhere else on this path.
         if not struct_is_framed(st):
             return (None, f"the pointee is {inner}, a one-field struct whose "
                           f"value on this path is the word itself rather than "
                           f"memory, so there is nothing at the address to load "
                           f"and the honest reading is not a dereference at all")
-        return (None, f"the pointee is {inner}, a STRUCT, and a struct's value "
-                      f"on this path is a frame ADDRESS rather than memory "
-                      f"contents — so this is not a load at all: the word in the "
-                      f"receiver already is the pointee, and the answer is the "
-                      f"identity, the same one `Pointer()` gives. It is refused "
-                      f"anyway because the machinery that reads fields off a "
-                      f"frame address recognises a frame by its CONSTRUCTOR "
-                      f"BINDING or by being a callee's first parameter, and a "
-                      f"name bound from `p.value()` is neither — so `q.b` off "
-                      f"the result falls to the value-member path and reads a "
-                      f"word of nothing. Measured with the identity in place: "
-                      f"`p.value().b` returns 0 on both architectures where the "
-                      f"source says 22. This is also the frame-lifetime trap: a "
-                      f"`Pointer[{inner}]` is a frame address, so storing one in "
-                      f"a field or returning it hands the caller a pointer into "
-                      f"a frame whose lifetime this pass cannot follow — the "
-                      f"use-after-free `formal/build.py` already refuses for a "
-                      f"struct receiver returned from the function that created "
-                      f"it. The next step is one line of recognition, not a "
-                      f"value-model change: teach the holder fixpoint that a "
-                      f"name bound from `p.value()` on a `Pointer[{inner}]` is "
-                      f"a holder, and every field read, layout and escape check "
-                      f"below that already works for a constructed struct starts "
-                      f"working through the pointer too")
+        return (("frame", st, False),
+                f"the pointee is {inner}, a STRUCT, and a struct's value on this "
+                f"path is a frame ADDRESS rather than memory contents — so this "
+                f"is not a load at all: the word in the receiver already is the "
+                f"pointee, and the answer is the identity, the same one "
+                f"`Pointer()` gives. It is emitted as that word and nothing else, "
+                f"and the {inner} frame's fields are read off it through the "
+                f"holder tables `_frame_receivers` publishes for it "
+                f"(`pointer_frame_bindings`) — which is the one piece of "
+                f"recognition the refusal above said was missing. A "
+                f"`Pointer[{inner}]` is a frame address, so the channels that "
+                f"would hand the CALLER an address of somebody else's frame are "
+                f"still refused where they are for any holder: a `return` of one "
+                f"goes through the returned-frame convention, which copies into "
+                f"a block in the caller's own scratch, and a store of one into "
+                f"a field or a container is `formal/build.py`'s frame-escape "
+                f"refusal, exactly as it is for a constructed "
+                f"{inner}")
     return (None, f"the pointee is {inner}, which is not a width this model "
                   f"establishes and not a struct this image declares, so no "
                   f"load at that address has a known width — and a load whose "
@@ -13333,6 +13337,150 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
 
 def _declared_note(why) -> str:
     return f"It was declared as {why!r}." if why and " " not in why else ""
+
+
+def pointer_frame_pointee(fn, expr, decls: dict, structs_by_name: dict = None):
+    """`(StructDef, why)` when this POINTER receiver points at a FRAME of a
+    struct THIS IMAGE declares, else `(None, why)`.
+
+    The decision `dereference_lowering`'s `("frame", …)` answer is made of, and
+    the reason it is a function rather than three call sites: a pointer to a
+    frame has to be recognised by the build pass (which seeds the holder
+    tables), by the returned-frame fixpoint (which decides whether to reserve a
+    block for it) and by both backends (which emit it), and four
+    recognitions of one fact is four things that agree until the day they do
+    not.  `pointer_pointee` is the ONE reader of what a pointer points at and
+    this adds nothing to it but the two questions that follow from the answer:
+    is the pointee a struct of this unit, and is that struct framed.
+
+    **No image-wide call-site table is asked here, deliberately.**  `functions`
+    is not a parameter, so a receiver whose pointee only the CALL SITES could
+    establish — an unannotated parameter — has no pointee here and is refused,
+    which is the safe direction and the one `dereference_lowering`'s own
+    `parameter_call_site_pointees` hook widens elsewhere.  The alternative was a
+    fourth recognitions problem of a sharper kind: the two backends have a
+    `{name: FunctionDef}` table and the build pass has a LIST, so passing each
+    what it has would make the two answer differently about an overloaded
+    name's second definition.  One spelling of the rule, asked with what every
+    caller has.
+
+    A STRUCT OF ANOTHER MODULE is not a frame this pass can lay out: its field
+    list is in that module's own compilation, not here, and a slot index read
+    from a dylib's manifest would be a second source of layout truth.  So a
+    pointee base name this image does not declare is not a frame, and the
+    refusal says which of the three it is not.
+    """
+    inner, why = pointer_pointee(fn, expr, decls)
+    if inner is None:
+        return (None, why)
+    st = (structs_by_name or decls or {}).get(inner)
+    if st is None:
+        return (None, f"the pointee is {inner}, which is not a struct this "
+                      f"image declares: its field list lives in the module that "
+                      f"declares it, so there is no layout here to read the "
+                      f"pointee's fields through")
+    if not struct_is_framed(st):
+        return (None, f"the pointee is {inner}, a one-field struct whose value "
+                      f"on this path is the word itself rather than a frame, so "
+                      f"there is no frame at that address for a name to hold")
+    return (st, why)
+
+
+def pointer_frame_expression(fn, expr, decls: dict,
+                             structs_by_name: dict = None):
+    """`(StructDef, why)` when `expr` is a `p.value()` / `p.unsafe_value()`
+    whose answer is a FRAME, else `(None, why)`.
+
+    `pointer_frame_pointee` asked of the whole DEREFERENCE CALL rather than of
+    its receiver, and it exists so that the three consumers can each hand it the
+    expression they happen to have:
+
+      * `pointer_frame_bindings` has a binding's VALUE;
+      * `_frame_return_status` has a `return`'s value;
+      * both backends' member-read arm has `expr.obj`.
+
+    Each of those reaches the same fact by spelling the dereference differently,
+    and `DEREFERENCE_TRY_NAMES` is the ONE spelling of "the two names this path
+    cannot tell apart" — so a third spelling of the dereference is a third
+    construct.
+    """
+    if not isinstance(expr, F.CallExpr) \
+            or not isinstance(expr.func, F.MemberExpr) \
+            or expr.func.member not in DEREFERENCE_TRY_NAMES:
+        return (None, f"`{spelled(expr)}` is not a dereference on this path, so "
+                      f"it is not the place a frame comes from")
+    return pointer_frame_pointee(fn, expr.func.obj, decls, structs_by_name)
+
+
+def pointer_frame_member_refusal(expr, st) -> str:
+    """`p.value().f` where `f` is not a field of the struct the pointer names.
+
+    The sibling of `member_access_refusal`, and it exists for the same reason
+    that one does: **both backends raise it, and they must raise the SAME
+    WORDS.** The emitters' fall-through for a field access whose base this path
+    cannot classify is one message in this module for exactly that reason, and a
+    construct that newly became answerable — a pointer to a frame of this image —
+    would otherwise have had its "no such field" sentence written out four
+    times (two machines × read and store), which is four texts that agree until
+    the day one of them is edited.
+
+    The frame is known here, which is what makes the sentence specific: the
+    struct's own field summary is the evidence, and "which word is this" is a
+    question about THAT struct's layout rather than about the path's ignorance.
+    """
+    return (f"{spelled(expr)} reads {expr.member!r} out of a {st.name} this "
+            f"pointer points at, and that struct's "
+            f"{struct_field_summary(st)} has no such field: this path has no "
+            f"way to know which word that is, and reading the wrong one is a "
+            f"wrong answer rather than a failure")
+
+
+def pointer_frame_store_refusal(expr, st) -> str:
+    """`p.value().f = v` where `f` is not a field of the struct the pointer
+    names — `pointer_frame_member_refusal`'s store half, and a separate function
+    for the same reason it is a separate sentence: storing to the wrong word is
+    not the same failure as reading it, and a reader who is told "reading the
+    wrong one is a wrong answer" is being sent to look at a read that is not
+    what their program does."""
+    return (f"{spelled(expr)} stores into {expr.member!r} of a {st.name} this "
+            f"pointer points at, and that struct's "
+            f"{struct_field_summary(st)} has no such field: this path has no "
+            f"way to know which word that is, and storing to the wrong one is a "
+            f"wrong answer rather than a failure")
+
+
+def pointer_frame_bindings(fn, decls: dict, structs_by_name: dict = None):
+    """`{name: [struct, …]}` for the locals in `fn` bound from a POINTER to a
+    frame of a struct this image declares.
+
+    A LIST per name, for `struct_constructor_bindings`' reason and not by
+    imitation of it: `q = p.value()` on one path and `q = make()` on another is
+    one name with two layouts, and the candidate list is what makes that a
+    refusal (`struct_frame_slot_candidates`) instead of whichever binding
+    happened to be walked last.  A second binding that agrees is deduped.
+
+    This is the reader `_frame_receivers`' fixpoint seeds from, and it is
+    enumerated rather than inferred for the reason its docstring gives: a name
+    wrongly added becomes a name whose field accesses are memory accesses, and a
+    name wrongly missing is the silent one.  The shapes it covers are the two
+    `frame_binding_target` recognises (`var q = p.value()` and `q = p.value()`)
+    and nothing else — a tuple target binds a frame in a position that is a
+    different question, and `frame_binding_target` is already the one reader of
+    which statements are bindings.
+    """
+    out: dict = {}
+    for node in iter_nodes(getattr(fn, "body", None)):
+        name = frame_binding_target(node)
+        if not name:
+            continue
+        st, _why = pointer_frame_expression(fn, frame_binding_value(node),
+                                            decls, structs_by_name)
+        if st is None:
+            continue
+        got = out.setdefault(name, [])
+        if st not in got:
+            got.append(st)
+    return out
 
 
 def _rhs_declared_text(fn, expr, decls, functions):
