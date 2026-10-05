@@ -139,7 +139,14 @@ import time
 # is INFRASTRUCTURE, and it is in this tuple rather than unbuilt because the
 # hole census and the `.olean` currency check read the tuple — a module outside
 # it is a module nothing checks.
-LIBRARY_MODULES = ("IEEE754", "ProofLib", "X86", "work", "Refine", "Contracts")
+# `Specs` is LAST and imports only `ProofLib`: it is the INDEPENDENT
+# specification layer — reference definitions for the classic example programs,
+# written by hand in Lean's own `Nat`/`Int`/`List` rather than derived from a
+# source file the same way `mojo` is.  It is last because it is the only module
+# no other library module imports, and a generated proof imports it only when
+# its source carries an `@refines(...)` annotation.
+LIBRARY_MODULES = ("IEEE754", "ProofLib", "X86", "work", "Refine", "Contracts",
+                   "Specs")
 VERDICT_EXT = ".leanverdict"
 # Where a library module's own hole census is stored, beside the .olean it was
 # measured from and under the same key — so a cas HIT on the .olean is a hit on
