@@ -7945,6 +7945,69 @@ _PRINTF_CONVERSION_RE = re.compile(
     r"%(?:%|[-+ #0\']*(?:[0-9]+|\*)?(?:\.(?:[0-9]+|\*)?)?"
     r"(?:hh|h|ll|l|L|z|j|t|q)?[a-zA-Z])")
 
+# The QUANTIFIER of one conversion specification — the flags, the width and
+# the precision — or None when it carries neither.
+#
+# A PRECISION is here with the width because it is the same defect: `%.3s` of
+# `"héllo"` emits three BYTES on this path (half a character, and invalid UTF-8)
+# where CPython emits three characters. `-` is a flag rather than a width, but
+# it is in the capture because the whole quantifier is what the message quotes.
+_PRINTF_QUANTIFIER_RE = re.compile(
+    r"^%([-+ #0\']*)((?:[0-9]+|\*)?)(?:\.([0-9]+|\*))?")
+
+
+def _printf_specs(fmt_text) -> list | None:
+    """One record per CONVERSION SPECIFICATION in `fmt_text`, or None if unparsed.
+
+    **`{quant, conv, stars}` per specification — one row each for a quantifier,
+    a conversion character and a `*` count, and NOT one row per argument.** The
+    two public readers below answer different questions and index different
+    things, which is why there are two of them: `printf_conversion_specifiers`
+    is an ARGUMENT-indexed classification (a `*` consumes one and is INTEGER),
+    and `printf_text_widths` is a SPECIFICATION-indexed quantifier. A third
+    reader that needs both the quantifier and the character — the width refusal,
+    which must ask "is this a `%s`" before it asks "is there a width" — was
+    reading the quantifier out of one and about to read the character out of the
+    other, and the two do not have the same LENGTH:
+
+        %*s        letters ['*', 's']   widths ['*']
+
+    so a positional pairing of the two lists puts the `%s`'s character on the
+    `*`'s argument. One scan is the alternative to that and it is why this
+    function exists.
+
+    `%%` matches and contributes nothing, which is the only skipping rule and is
+    the one `printf_conversion_specifiers` documents.
+
+    None for text this does not parse, and that is the permissive direction both
+    public readers already take — see their own docstrings.
+    """
+    if not isinstance(fmt_text, str):
+        return None
+    out = []
+    pos = 0
+    while True:
+        at = fmt_text.find("%", pos)
+        if at < 0:
+            return out
+        m = _PRINTF_CONVERSION_RE.match(fmt_text, at)
+        if m is None:
+            return None
+        spec = m.group(0)
+        conv = spec[-1]
+        if conv != "%":
+            qm = _PRINTF_QUANTIFIER_RE.match(spec)
+            flags, width, prec = qm.groups() if qm else ("", None, None)
+            if width == "*" or prec == "*":
+                quant = "*"
+            elif width or prec:
+                quant = flags + (width or "") + ("." + prec if prec else "")
+            else:
+                quant = None
+            out.append({"quant": quant, "conv": conv,
+                        "stars": spec.count("*")})
+        pos = m.end()
+
 
 def printf_conversion_specifiers(fmt_text) -> list | None:
     """The conversion characters of `fmt_text`, in order, or None if unparsed.
@@ -7960,40 +8023,19 @@ def printf_conversion_specifiers(fmt_text) -> list | None:
     format whose conversions cannot be enumerated is one the callers below say
     nothing about, so an unusual `%` in a corpus format string cannot become a
     new refusal.
+
+    **`_printf_specs` is the scan and this is its projection** — see that
+    function for why there is one scan rather than two readers of one regular
+    expression.
     """
-    if not isinstance(fmt_text, str):
+    specs = _printf_specs(fmt_text)
+    if specs is None:
         return None
     out = []
-    pos = 0
-    while True:
-        at = fmt_text.find("%", pos)
-        if at < 0:
-            return out
-        m = _PRINTF_CONVERSION_RE.match(fmt_text, at)
-        if m is None:
-            return None
-        conv = m.group(0)[-1]
-        if conv != "%":
-            out.extend(["*"] * m.group(0).count("*"))
-            out.append(conv)
-        pos = m.end()
-
-
-# The QUANTIFIER of one conversion specification — the flags, the width and
-# the precision — or None when it carries neither. A separate scanner rather
-# than a column of `printf_conversion_specifiers` because that function's output
-# is deliberately COUNT-based — it yields one entry per consumed argument, `*`
-# for a `*` width — and a quantifier is a property of the specification text,
-# not of the argument list. Two readers of one regular expression, which is the
-# alternative and is worse: the two would have to agree about where a
-# specification starts.
-#
-# A PRECISION is here with the width because it is the same defect: `%.3s` of
-# `"héllo"` emits three BYTES on this path (half a character, and invalid UTF-8)
-# where CPython emits three characters. `-` is a flag rather than a width, but
-# it is in the capture because the whole quantifier is what the message quotes.
-_PRINTF_QUANTIFIER_RE = re.compile(
-    r"^%([-+ #0\']*)((?:[0-9]+|\*)?)(?:\.([0-9]+|\*))?")
+    for s in specs:
+        out.extend(["*"] * s["stars"])
+        out.append(s["conv"])
+    return out
 
 
 def printf_text_widths(fmt_text) -> list | None:
@@ -8006,32 +8048,23 @@ def printf_text_widths(fmt_text) -> list | None:
     (which this build cannot see), and the quantifier's own TEXT otherwise —
     flags included, because `%-6s` and `%6s` pad on opposite sides and a
     message that quoted only the digits would not say which one is meant.
+
+    **`_printf_specs` is the scan, and this is its projection** — kept as its
+    own function because the trailing entries for extra `*`s are this reader's
+    own arithmetic and not a property of any specification. The extra entries
+    are what make the length disagree with `printf_conversion_specifiers` for
+    `%*s`, and that disagreement is load-bearing rather than a defect: a `*`
+    width IS the quantifier of the conversion that carries it, so the conversion
+    itself contributes no second row here.
     """
-    if not isinstance(fmt_text, str):
+    specs = _printf_specs(fmt_text)
+    if specs is None:
         return None
     out = []
-    pos = 0
-    while True:
-        at = fmt_text.find("%", pos)
-        if at < 0:
-            return out
-        m = _PRINTF_CONVERSION_RE.match(fmt_text, at)
-        if m is None:
-            return None
-        spec = m.group(0)
-        if spec[-1] != "%":
-            qm = _PRINTF_QUANTIFIER_RE.match(spec)
-            flags, width, prec = qm.groups() if qm else ("", None, None)
-            stars = spec.count("*")
-            if width == "*" or prec == "*":
-                out.append("*")
-            elif width or prec:
-                out.append(flags + (width or "")
-                           + ("." + prec if prec else ""))
-            else:
-                out.append(None)
-            out.extend([None] * (stars - (1 if "*" in (width, prec) else 0)))
-        pos = m.end()
+    for s in specs:
+        out.append(s["quant"])
+        out.extend([None] * (s["stars"] - (1 if s["quant"] == "*" else 0)))
+    return out
 
 
 def printf_text_width_refusal(callee: str, fmt_text, args: list,
@@ -8066,23 +8099,62 @@ def printf_text_width_refusal(callee: str, fmt_text, args: list,
     width and hope. So an image of pure ASCII never sees this refusal, which is
     every program in the corpus, and an image with a non-ASCII table in it gets
     it for the one conversion it can be wrong about.
+
+    ## ONLY a `%s`, and that test used to be missing — the refusal named `%s`
+    ## for a conversion that was not one
+
+    `printf_text_widths` returns the quantifier of EVERY conversion, so the loop
+    below was reached by a `%f`, a `%d` and a `%c` as readily as by a `%s`, and
+    the refusal it returned named a conversion the format string does not
+    contain. Measured on the tree this landed in, on `test_formal_time.py`'s
+    `clocks` group, whose program prints six decimal places of a float:
+
+        printf("wall_bits=%.6f@@", time.time_seconds_bits())
+
+        build: the `%.6s` conversion in printf's format string is refused: …
+        This image holds a string literal that is not ASCII — "`round-half-even
+        (a * 2^k / den)`, for `a < 2^30` and `k >= 0`. …"
+
+    Two wrongnesses in one message: the format string says `%f` and the
+    refusal says `%.6s`, and a `%<precision>f` is six DECIMAL PLACES of a
+    number — there is no text in it, no character in it, and no encoding
+    question anywhere near it. The refusal was refusing a number because a
+    docstring in `IEEE754.mojo` holds an em-dash.
+
+    So the character is read here, from `_printf_specs`, rather than assumed —
+    and it is the scan's OWN row rather than `printf_conversion_specifiers`'
+    because the two lists do not have the same length (`%*s` is `['*','s']` and
+    `['*']`), so pairing them by position would ask about the `*`'s argument.
+    The `*` rows are skipped exactly as before: a `*` width is an argument this
+    build cannot see and there is nothing to quote.
     """
     if text_of_arg is None or callee not in PRINTF_TEXT_CONVERSIONS_CALLEES:
         return None
-    widths = printf_text_widths(fmt_text)
-    if widths is None:
+    specs = _printf_specs(fmt_text)
+    if specs is None:
         return None
-    for j, width in enumerate(widths):
-        if width is None or width == "*" or j >= len(args):
+    # `arg` is the vararg the NEXT specification reads. A `*` width or precision
+    # is itself a vararg and comes before the conversion's operand, so a
+    # specification consumes `stars + 1` of them — which is also the arithmetic
+    # `printf_text_widths`'s trailing entries approximate, and the reason this
+    # walk is over the specifications and not over that list.
+    arg = 0
+    for s in specs:
+        operand = arg + s["stars"]
+        arg = operand + 1
+        if s["conv"] != "s":
             continue
-        text = text_of_arg(args[j])
+        width = s["quant"]
+        if width is None or width == "*" or operand >= len(args):
+            continue
+        text = text_of_arg(args[operand])
         if text_is_ascii(text):
             continue
         if text is None and not non_ascii_strings():
             continue
         return codepoint_refusal(
             f"the `%{width}s` conversion in {callee}'s format string",
-            spelled(args[j]))
+            spelled(args[operand]))
     return None
 
 

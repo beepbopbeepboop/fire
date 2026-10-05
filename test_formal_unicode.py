@@ -590,6 +590,25 @@ ORACLE_CASES = [
      '    s = b"abc"\n'
      '    at = lambda e, i: e[i]\n'
      '    print("b0=%d b1=%d e=0" % (at(s, 0), at(s, 1)), end="\\n")\n'),
+
+    # A QUANTIFIER on a conversion that is not a `%s`, in an image that holds a
+    # non-ASCII literal.  This is the row the width refusal used to fail: it
+    # answered for every conversion the format string names and then said `%s`
+    # in the message, so `printf("%.6f", …)` was refused as "the `%.6s`
+    # conversion" — a number refused because a docstring in `IEEE754.mojo` holds
+    # an em-dash.  `test_formal_time.py`'s `clocks` group is the program that
+    # found it, and it is a `%f`; this is a `%d`, so the expectation is a number
+    # CPython can print and the row needs no float.  The quantifier's meaning
+    # does not change: six DIGITS, of a number, which has no encoding at all.
+    ("quantifier_on_an_integer_conversion_beside_a_non_ascii_literal",
+     'def em():\n'
+     '    """A — em-dash, so this image holds a non-ASCII literal."""\n'
+     '    return 0\n'
+     'def main(n):\n'
+     '    printf("q=[%.6d][%06d][%6.3d][%d] e=%d\\n", 42, 7, 5, 42, em())\n'
+     '    return 0\n',
+     'def main():\n'
+     '    print("q=[%.6d][%06d][%6.3d][%d] e=0" % (42, 7, 5, 42), end="\\n")\n'),
 ]
 
 
@@ -1242,6 +1261,37 @@ def model_checks():
        M.printf_text_widths("%s%%%d"), [None, None])
     ok("widths: an unparsed format is None",
        M.printf_text_widths("%2$6s"), None)
+
+    # ── the width refusal asks whether the conversion is a `%s` ────────────
+    #
+    # Three rows, and the first is the defect this rule change was written for:
+    # `printf_text_widths` answers for EVERY conversion, so a refusal built on it
+    # alone names a `%s` the format string does not contain. `%.6f` is the
+    # measured one — `test_formal_time.py`'s `clocks` group, refused in an image
+    # whose `IEEE754.mojo` holds an em-dash — and the other two are here so a
+    # narrower fix ("only a float is fine") would fail.
+    unseen = lambda arg: None
+    ok("width refusal: a %.6f is not a text conversion",
+       M.printf_text_width_refusal("printf", "%.6f", [None], unseen), None)
+    ok("width refusal: a %6d is not a text conversion either",
+       M.printf_text_width_refusal("printf", "%6d", [None], unseen), None)
+    # The image has to hold a non-ASCII literal for the last one, which is the
+    # same condition the refusal has always had and the reason the two rows
+    # above would pass even with the `s` test missing.  Published and restored
+    # through `clear_*` + `publish_*` for the reason the block above gives.
+    saved_width = M.non_ascii_strings()
+    try:
+        M.clear_non_ascii_strings()
+        M.publish_non_ascii_strings(["héllo"])
+        ok("width refusal: a %.6s beside that %6d still is",
+           M.printf_text_width_refusal("printf", "%6d %.3s", [None, None],
+                                       unseen) is not None, True)
+        ok("width refusal: the %.6f is still not, in the same image",
+           M.printf_text_width_refusal("printf", "%6d %.6f", [None, None],
+                                       unseen), None)
+    finally:
+        M.clear_non_ascii_strings()
+        M.publish_non_ascii_strings(saved_width)
 
     # ── the two refusals are INDEPENDENT of each other ────────────────────
     #
